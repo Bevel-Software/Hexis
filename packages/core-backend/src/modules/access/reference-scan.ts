@@ -7,9 +7,11 @@
  *     parse of each file, so the reports name every enforced rule.
  *   - `findRoleRefsInText` / `rewriteRoleTokensInText`: the line-level walk
  *     the rename edits text with. It handles block lists and `key: value`
- *     entries; the rewrite re-checks its result with `resolverRoleRefs` and
- *     refuses when a reference survives (a quoted or flow-YAML entry), so
- *     the warning and the rename can never disagree.
+ *     entries; quoted and flow-YAML own frontmatter is rewritten by the
+ *     full parser's own tree (`rewriteOwnFrontmatterStructurally`). The
+ *     rewrite re-checks its result with `resolverRoleRefs` and refuses
+ *     when a reference survives, so the warning and the rename can never
+ *     disagree.
  *   - `KbReferenceScanner`: candidate collection (every KB file with an
  *     access-frontmatter extension — `.md` and `.tool`, the resolver's own
  *     set), the advisory reference scan (cached — roster mutations must not
@@ -28,6 +30,7 @@
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
 
+import { Scalar, isAlias, isMap, isScalar, isSeq, parseDocument, type Document } from 'yaml';
 import { isFrontmatterFence, type IWorkspaceService } from '@bevel-software/platform-shared';
 import type { ITreeWalker } from '../../shared/fs.contract.js';
 import { logger } from '../../shared/logging.js';
@@ -307,6 +310,63 @@ export function rewriteRoleTokensInText(
 }
 
 /**
+ * The structural rewrite, for the references the line walk cannot edit:
+ * a file's OWN frontmatter is read by the full YAML parser whenever it holds
+ * flow sequences, quoted scalars or other real YAML (`ownEntriesRoot` in the
+ * grammar), and the line walk only knows block lists and `key: value`. So
+ * this edits the same document the resolver reads — the frontmatter's
+ * top-level verb keys, by the full parser's own node tree with the same
+ * FAILSAFE schema — and replaces each scalar entry whose token is in
+ * `oldTokens`, keeping its quoting, its comments and every other node. An
+ * alias under a verb key is replaced by a plain scalar, so the anchor it
+ * points at (which may sit under any other key) is left alone.
+ *
+ * The other rule sources — a legacy `access.md`'s frontmatter and a
+ * body-governed one's body — are read by the YAML-subset parser only, which
+ * the line walk mirrors, so they never need this.
+ */
+function rewriteOwnFrontmatterStructurally(
+  text: string,
+  oldTokens: ReadonlySet<string>,
+  newDisplayName: string,
+): string {
+  const lines = text.split('\n');
+  const { start, end } = configLineRange(lines, true);
+  if (start >= end) return text;
+  // Typed as an editable document: the rewrite puts new, unparsed scalars in it.
+  const doc: Document = parseDocument(lines.slice(start, end).join('\n'), { schema: 'failsafe' });
+  // A document the full parser rejects is not what the resolver read: it fell
+  // back to the subset parser, whose reading the line walk already covers.
+  if (doc.errors.length > 0 || !isMap(doc.contents)) return text;
+  let changed = false;
+  const rewritten = (node: unknown): Scalar | null => {
+    const target = isAlias(node) ? node.resolve(doc) : node;
+    if (!isScalar(target) || typeof target.value !== 'string') return null;
+    const parsed = parseAccessEntry(target.value);
+    if (!parsed.ok || parsed.entry.kind !== 'role' || !oldTokens.has(parsed.entry.role)) return null;
+    const value = `${parsed.entry.deny ? 'deny ' : ''}${newDisplayName}`;
+    changed = true;
+    if (isAlias(node)) return new Scalar(value);
+    target.value = value;
+    return target;
+  };
+  for (const pair of doc.contents.items) {
+    const key = isScalar(pair.key) ? pair.key.value : pair.key;
+    if (typeof key !== 'string' || !VERB_KEYS.has(key)) continue;
+    if (isSeq(pair.value)) {
+      pair.value.items = pair.value.items.map((item) => rewritten(item) ?? item);
+    } else {
+      const scalar = rewritten(pair.value);
+      if (scalar) pair.value = scalar;
+    }
+  }
+  if (!changed) return text;
+  // Never fold a long value onto a second line, nor pad a flow list.
+  const frontmatter = doc.toString({ lineWidth: 0, flowCollectionPadding: false }).replace(/\n$/, '');
+  return [...lines.slice(0, start), frontmatter, ...lines.slice(end)].join('\n');
+}
+
+/**
  * The principal references the RESOLVER reads from one candidate file, by
  * the resolver's own parsers: an `access.md`'s folder rules
  * (`parseAccessFile`) and its self-rules (`accessMdSelfEntries`), any other
@@ -355,15 +415,16 @@ export interface ReferenceRewrite {
 export type PathVisibility = (repoRelPaths: string[]) => Promise<ReadonlyMap<string, boolean>>;
 
 /**
- * The one refusal for a rename that would reach content the renaming person
- * may not be shown — a folder the walk cannot list, a file it cannot read, or
- * a file the person may not read. The same words whatever the cause, and
- * never depending on what such a file holds: no path, no count, no hint of a
- * reference, since Admin status does not grant read and each of those is a
- * disclosure. The log names the place.
+ * The one refusal for a rename blocked by a place the renaming person may
+ * not be shown — a folder the walk cannot list, a file it cannot read, or a
+ * file the person may not read that still names the old principal after the
+ * rewrite (a backstop: every form the resolver reads is rewritten). The same
+ * words whatever the cause: no path, no count, no hint of a reference, since
+ * Admin status does not grant read and each of those is a disclosure. The
+ * log names the place.
  */
 export const UNSHOWN_REFERENCE_REFUSAL =
-  'This rename rewrites access rules across the knowledge base, and part of it is closed to you, so it may reference the old principal; rename aborted with no changes. The server log names where.';
+  'This rename rewrites access rules across the knowledge base, and part of the knowledge base could not be rewritten, so it may still reference the old principal; rename aborted with no changes. The server log names where.';
 
 /**
  * The rows of `refs` whose file `readable` allows. The rest are dropped
@@ -555,14 +616,21 @@ export class KbReferenceScanner {
    * drop) — so any read failure aborts via `makeError` with nothing written.
    * Returns the writes WITH each file's original text (rollback snapshots).
    *
-   * READ-GATED before any content is looked at: the rename rewrites rules
-   * across the whole KB, and nothing is changed where its person cannot read
-   * — so a candidate `visible` refuses aborts it with
-   * `UNSHOWN_REFERENCE_REFUSAL` whatever that file holds. Asking about
-   * content first would make the outcome a read of it: refusing only when a
-   * hidden file held a reference the rewrite cannot make would tell an Admin,
-   * one rename at a time, what is in a file they may not read. Past the gate
-   * every candidate is readable, so a refusal names its paths.
+   * The rename keeps the KB's references to a principal whole, so it rewrites
+   * every candidate, files its person may not read included: a rename stays
+   * possible for an Admin however much of the KB is private to others. No
+   * outcome depends on what such a file holds. Every form the resolver reads
+   * is rewritten — block lists and `key: value` by the line walk, quoted and
+   * flow-YAML own frontmatter by the structural rewrite — so there is no
+   * "cannot rewrite" answer for hidden content to give. The writes reach a
+   * caller only through surfaces gated on read (the roster, the event
+   * delivery), never through this method's answer.
+   *
+   * A reference the resolver still sees after both rewrites is refused: named
+   * with how to fix it when `visible` says its person may read the file, with
+   * `UNSHOWN_REFERENCE_REFUSAL` otherwise (no path, no count). Nothing the
+   * resolver reads should reach that, so the refusal is a backstop, not an
+   * answer the content of a hidden file can choose.
    */
   async rewriteReferences(
     workspaceId: string,
@@ -581,19 +649,6 @@ export class KbReferenceScanner {
     // unreadable, so `visible` could not see the rules that close it.
     if (holes.length > 0) {
       log.warn(`reference rewrite: cannot list ${holes.map((h) => printable(h || '.')).join(', ')}`);
-      throw makeError(UNSHOWN_REFERENCE_REFUSAL);
-    }
-    // The gate rides on the read model alone, never on what a file holds: the
-    // same answer whether a hidden file names the old principal or not.
-    const verdicts = await visible(candidates);
-    const hidden = candidates.filter((p) => verdicts.get(p) !== true);
-    if (hidden.length > 0) {
-      log.warn(
-        `reference rewrite: ${hidden.length} candidate file(s) the renaming person cannot read, e.g. ${hidden
-          .slice(0, 5)
-          .map((p) => printable(p || '.'))
-          .join(', ')}`,
-      );
       throw makeError(UNSHOWN_REFERENCE_REFUSAL);
     }
     const texts = await Promise.all(
@@ -628,9 +683,14 @@ export class KbReferenceScanner {
         rewritten = rewriteRoleTokensInText(rewritten, token, newDisplayName, true, isAccessMdPath(repoRel));
       }
       // The line rewrite edits block-list and `key: value` entries; the
-      // resolver also reads quoted and flow-YAML ones. A reference it still
-      // sees after the rewrite would be stranded by the rename — refuse.
-      if (resolverRoleRefs(rewritten, repoRel).some((r) => gone.has(r.role))) {
+      // resolver also reads quoted and flow-YAML own frontmatter, which the
+      // structural rewrite edits by the full parser's own tree.
+      const stillNamed = (t: string) => resolverRoleRefs(t, repoRel).some((r) => gone.has(r.role));
+      if (stillNamed(rewritten)) {
+        rewritten = rewriteOwnFrontmatterStructurally(rewritten, new Set(oldTokens), newDisplayName);
+      }
+      // A reference the resolver still sees would be stranded by the rename.
+      if (stillNamed(rewritten)) {
         stranded.push(repoRel);
         return;
       }
@@ -639,10 +699,16 @@ export class KbReferenceScanner {
       }
     });
     if (stranded.length > 0) {
-      // Every candidate passed the read gate above, so each is named with how
-      // to fix it.
+      const verdicts = await visible(stranded);
+      const shown = stranded.filter((p) => verdicts.get(p) === true);
+      if (shown.length < stranded.length) {
+        log.warn(
+          `reference rewrite: cannot rewrite ${stranded.map((p) => printable(p || '.')).join(', ')}`,
+        );
+        throw makeError(UNSHOWN_REFERENCE_REFUSAL);
+      }
       throw makeError(
-        `${stranded.map((p) => sanitizedPath(p || '.')).join(', ')} name the old principal in a form the rename cannot rewrite (a quoted or flow-style YAML entry); rewrite it as a \`- Name\` list item, then rename again. Rename aborted with no changes`,
+        `${shown.map((p) => sanitizedPath(p || '.')).join(', ')} name the old principal in a form the rename cannot rewrite; rewrite it as a \`- Name\` list item, then rename again. Rename aborted with no changes`,
       );
     }
     return writes;

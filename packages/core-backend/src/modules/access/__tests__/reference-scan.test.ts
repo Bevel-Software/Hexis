@@ -270,57 +270,70 @@ describe('KbReferenceScanner — references are what the resolver parses', () =>
     }
   });
 
-  it('a rename refuses with nothing written when a reference is in a form it cannot rewrite', async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-refscan-strand-'));
+  it('a rename rewrites quoted and flow-YAML references in place, quoting and comments kept', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-refscan-structural-'));
     try {
       const repo = path.join(root, KB);
       await write(repo, 'Team/access.md', FLOW_ACCESS_MD);
+      await write(repo, 'Team/Doc.md', "---\nnodeType: Doc # kept\nowner: 'Admin'\nread: [Sales, \"deny Admin\"]\n---\n# Doc\n");
       const scanner = new KbReferenceScanner(stubWorkspace(root), new NodeFs(), KB);
-      await expect(
-        scanner.rewriteReferences('ws-1', 'admin', 'Admins', (m) => new Error(m), ALL_VISIBLE),
-      ).rejects.toThrow(/Team\/access\.md name the old principal in a form the rename cannot rewrite/);
-      // Nothing was written: the file is byte-for-byte as before.
-      expect(await fs.readFile(path.join(repo, 'Team/access.md'), 'utf-8')).toBe(FLOW_ACCESS_MD);
+      const writes = await scanner.rewriteReferences('ws-1', 'admin', 'Admins', (m) => new Error(m), ALL_VISIBLE);
+      const byPath = new Map(writes.map((w) => [w.repoRelativePath, w.content]));
+      expect(byPath.get('Team/access.md')).toBe('---\nread: ["Admins"]\n---\nwrite:\n  - Admins\n');
+      expect(byPath.get('Team/Doc.md')).toBe(
+        "---\nnodeType: Doc # kept\nowner: 'Admins'\nread: [Sales, \"deny Admins\"]\n---\n# Doc\n",
+      );
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }
   });
 
-  it('a file the renaming person cannot read gets the one refusal: no path, no count, no YAML form', async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-refscan-strand-hidden-'));
+  it('an alias under a verb key is rewritten without touching the anchor it points at', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-refscan-alias-'));
     try {
-      await write(path.join(root, KB), 'Team/access.md', FLOW_ACCESS_MD);
+      const repo = path.join(root, KB);
+      await write(repo, 'Team/Doc.md', '---\nteam: &t Admin\nread: [*t]\n---\n');
       const scanner = new KbReferenceScanner(stubWorkspace(root), new NodeFs(), KB);
-      const err = await scanner
-        .rewriteReferences('ws-1', 'admin', 'Admins', (m) => new Error(m), NONE_VISIBLE)
-        .catch((e: Error) => e);
-      expect((err as Error).message).toBe(UNSHOWN_REFERENCE_REFUSAL);
+      const [w] = await scanner.rewriteReferences('ws-1', 'admin', 'Admins', (m) => new Error(m), ALL_VISIBLE);
+      expect(w.content).toBe('---\nteam: &t Admin\nread: [Admins]\n---\n');
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }
   });
 
-  // A Guard's Answer Is a Disclosure: the outcome must not vary with what a
-  // file the renaming person cannot read holds — no reference, a rewritable
-  // one, or one the rewrite cannot make all get the same refusal, and none of
-  // them is written.
+  // A Guard's Answer Is a Disclosure, and Widening a Primitive Traces Its
+  // Consequences: a file the renaming person cannot read (another person's
+  // private plugin) neither blocks the rename nor changes its answer —
+  // whatever it holds, the rename completes and the file is rewritten like
+  // any other, so no reference to the old name is stranded there.
   it.each([
-    ['no reference', '---\nread:\n  - Sales\n---\n'],
-    ['a rewritable reference', '---\nread:\n  - Admin\n---\n'],
-    ['a reference the rewrite cannot make', FLOW_ACCESS_MD],
-  ])('a file the renaming person cannot read refuses the rename whatever it holds (%s)', async (_label, secret) => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-refscan-hidden-gate-'));
+    ['no reference', '---\nread:\n  - Sales\n---\n', null],
+    ['a block-list reference', '---\nread:\n  - Admin\n---\n', '---\nread:\n  - Admins\n---\n'],
+    ['a flow-YAML reference', FLOW_ACCESS_MD, '---\nread: ["Admins"]\n---\nwrite:\n  - Admins\n'],
+  ])('a file the renaming person cannot read never blocks the rename (%s)', async (_label, secret, expected) => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-refscan-hidden-'));
     try {
       const repo = path.join(root, KB);
       await write(repo, 'Team/access.md', '---\nread:\n  - Admin\n---\n');
       await write(repo, 'Secret/access.md', secret);
       const scanner = new KbReferenceScanner(stubWorkspace(root), new NodeFs(), KB);
       const onlyTeam: PathVisibility = async (paths) => new Map(paths.map((p) => [p, p.startsWith('Team/')]));
-      const err = await scanner
-        .rewriteReferences('ws-1', 'admin', 'Admins', (m) => new Error(m), onlyTeam)
-        .catch((e: Error) => e);
-      expect((err as Error).message).toBe(UNSHOWN_REFERENCE_REFUSAL);
-      expect(await fs.readFile(path.join(repo, 'Secret/access.md'), 'utf-8')).toBe(secret);
+      const writes = await scanner.rewriteReferences('ws-1', 'admin', 'Admins', (m) => new Error(m), onlyTeam);
+      const byPath = new Map(writes.map((w) => [w.repoRelativePath, w.content]));
+      expect(byPath.get('Team/access.md')).toBe('---\nread:\n  - Admins\n---\n');
+      expect(byPath.get('Secret/access.md') ?? null).toBe(expected);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('a rename by someone who can read nothing still completes', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-refscan-none-visible-'));
+    try {
+      await write(path.join(root, KB), 'Team/access.md', FLOW_ACCESS_MD);
+      const scanner = new KbReferenceScanner(stubWorkspace(root), new NodeFs(), KB);
+      const writes = await scanner.rewriteReferences('ws-1', 'admin', 'Admins', (m) => new Error(m), NONE_VISIBLE);
+      expect(writes.map((w) => w.repoRelativePath)).toEqual(['Team/access.md']);
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }

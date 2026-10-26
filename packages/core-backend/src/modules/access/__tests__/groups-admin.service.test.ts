@@ -260,6 +260,26 @@ describe('GroupsAdminService', () => {
     expect(commits[0].summary).toContain('gtm team → Go To Market');
   });
 
+  // Another person's private plugin is closed to the Admin, and must neither
+  // block the rename nor keep a reference to the old name.
+  it('rename completes and rewrites a file the Admin cannot read', async () => {
+    await write(
+      repo,
+      'Plugins/Sara/access.md',
+      '---\nread:\n  - deny everyone\n  - Sara <sara@x.io>\nwrite:\n  - Sara <sara@x.io>\n---\n',
+    );
+    await write(repo, 'Plugins/Sara/Notes.md', "---\nread: ['group/GTM Team']\n---\n# Notes\n");
+    const access = new AccessControlService(stubWorkspace(root) as never, KB, new NodeFs());
+    expect(await access.canRead(workspaceIdForBranch(DEFAULT_BRANCH), ADMIN.email, 'Plugins/Sara/Notes.md')).toBe(false);
+
+    await service.renameGroup(ADMIN, 'gtm team', 'Go To Market');
+
+    expect(await fs.readFile(path.join(repo, 'Plugins/Sara/Notes.md'), 'utf-8')).toBe(
+      "---\nread: ['group/Go To Market']\n---\n# Notes\n",
+    );
+    expect(commits).toHaveLength(1);
+  });
+
   it('rename rewrites a BODY-GOVERNED access.md (rules live below the frontmatter)', async () => {
     // New-format file: frontmatter governs access.md itself, the body is the
     // folder's rules — exactly what the resolver enforces.
