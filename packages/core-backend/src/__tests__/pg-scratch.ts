@@ -58,7 +58,14 @@ export async function openMigratedScratchDb(
 ): Promise<{ db: Database; close: () => Promise<void> }> {
   const piiKey = opts.piiKey ?? randomBytes(32).toString('base64');
   const db = createDb(await scratchDatabaseUrl(prefix), { piiKey });
-  await runCoreMigrations(db, coreMigrationsDir());
+  try {
+    await runCoreMigrations(db, coreMigrationsDir());
+  } catch (err) {
+    // The caller never receives the handle on this path, so the pool is
+    // closed here; the database itself is dropped with the others.
+    await closeDb(db);
+    throw err;
+  }
   return { db, close: () => closeDb(db) };
 }
 

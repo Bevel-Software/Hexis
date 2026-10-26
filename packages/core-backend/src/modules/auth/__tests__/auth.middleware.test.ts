@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import type { Request, Response, NextFunction } from 'express';
-import { createAuthMiddleware, AUTH_COOKIE_NAME } from '../auth.middleware.js';
+import { authCookieSecure, createAuthMiddleware, AUTH_COOKIE_NAME } from '../auth.middleware.js';
 import { AccountDeactivatedError, AuthBackendError, SessionEndedError } from '../account-admission.js';
 import type { AuthService } from '../auth.service.js';
 
@@ -90,6 +90,23 @@ describe('createAuthMiddleware — a switched-off account', () => {
     expect(next).not.toHaveBeenCalled();
     expect(status).toHaveBeenCalledWith(401);
     expect(json.mock.calls[0][0].error).toContain('switched off');
+  });
+});
+
+describe('authCookieSecure', () => {
+  it('marks the cookie Secure for an https deployment, whatever the case of the scheme', () => {
+    expect(authCookieSecure('https://kb.example.com')).toBe(true);
+    expect(authCookieSecure('HTTPS://kb.example.com/')).toBe(true);
+    expect(authCookieSecure('Https://kb.example.com:8443/base')).toBe(true);
+  });
+
+  it('leaves it off for a deployment reached over plain http', () => {
+    expect(authCookieSecure('http://localhost:3001')).toBe(false);
+    expect(authCookieSecure('HTTP://10.0.0.5')).toBe(false);
+  });
+
+  it('refuses a public URL that is not one, as the rest of the boot does', () => {
+    expect(() => authCookieSecure('kb.example.com')).toThrow();
   });
 });
 

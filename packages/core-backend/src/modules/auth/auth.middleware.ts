@@ -39,10 +39,11 @@ export const AUTH_COOKIE_MAX_AGE_S = 7 * 24 * 60 * 60;
  * deriving it from `NODE_ENV` left a production deployment served over http
  * (a private network, a proxy that terminates nothing) without SSE and
  * images. One rule, asked by the composition root for every path that sets
- * the cookie.
+ * the cookie. Read by the URL parser, as the deployment's URL is everywhere
+ * else: a scheme is case-insensitive, and `HTTPS://` is https.
  */
 export function authCookieSecure(publicUrl: string): boolean {
-  return publicUrl.startsWith('https');
+  return new URL(publicUrl).protocol === 'https:';
 }
 
 /**
