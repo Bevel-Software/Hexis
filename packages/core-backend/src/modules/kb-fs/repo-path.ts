@@ -313,6 +313,16 @@ export function assertKbDirNameFree(
   );
 }
 
+/** How {@link normalizePathArgs} treats one tool's call. */
+export interface NormalizePathArgsOptions {
+  /** The tool the call is to, named in a tmp-ref refusal. */
+  tool: string;
+  /** The inputs of `tool` that take a tmp ref (`__tmp__/…`); every other refuses one. */
+  tmpRefInputs?: readonly string[];
+  /** A value that is no workspace path at all, passed to the handler as written. */
+  skip?: (value: string) => boolean;
+}
+
 /** The tool inputs that carry a workspace path. */
 const PATH_ARG_KEYS = ['path', 'src', 'dest', 'destination'] as const;
 
@@ -333,13 +343,19 @@ const PATH_ARG_KEYS = ['path', 'src', 'dest', 'destination'] as const;
  * workspace and must reach the handler as written. An absent or non-string
  * value is left alone too — the handler's own required-argument message is
  * better than a path refusal about `undefined`.
+ *
+ * The earlier call form — a `skip` predicate (or nothing) as the third
+ * argument — is still taken, for a distribution's own tool written against
+ * it: such a call names no tool and takes a tmp ref in no input, so the ref is
+ * refused there as read-only, under the name "this tool".
  */
 export function normalizePathArgs(
   args: Record<string, unknown>,
   kbDirName: string,
-  options: { tool: string; tmpRefInputs?: readonly string[]; skip?: (value: string) => boolean },
+  options?: NormalizePathArgsOptions | ((value: string) => boolean),
 ): Record<string, unknown> {
-  const { tool, tmpRefInputs, skip } = options;
+  const { tool, tmpRefInputs, skip } =
+    typeof options === 'object' ? options : { tool: 'this tool', tmpRefInputs: undefined, skip: options };
   assertTmpRefsTaken(tool, args, tmpRefInputs);
   // Every tmp ref still here is in an input that takes one.
   const one = (value: unknown): unknown =>

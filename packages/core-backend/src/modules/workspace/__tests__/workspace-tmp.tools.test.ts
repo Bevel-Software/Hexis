@@ -148,8 +148,15 @@ const access = {
   canWriteBatchAtRef: async (_w: string, _r: string, _u: string, paths: string[]) =>
     new Map(paths.map((p) => [p, !p.startsWith('Locked/')])),
   eligibleWritersAtRef: async () => ({ roles: [], users: [] }),
-  previewAccessAfterRelocation: async () => ({ read: true, write: true, download: true, owner: true }),
+  // Records what each preview was asked, so a dry run can be checked for the
+  // staged text it hands over; the real reading is the access service's own
+  // test (`access-control.preview-relocation.test.ts`).
+  previewAccessAfterRelocation: async (...asked: unknown[]) => {
+    previews.push(asked);
+    return { read: true, write: true, download: true, owner: true };
+  },
 } as unknown as IAccessControl;
+const previews: unknown[][] = [];
 
 let httpServer: HttpServer | undefined;
 let root = '';
@@ -525,6 +532,23 @@ describe('copy_file from a tmp ref to a repository path', () => {
     expect(repoRead.canWrite).toBe(true);
     expect((await call(base, 'file_stat', { path: dest })).body).toMatchObject({ managed: false, movable: true, deletable: true, textEditable: false });
     expect(await readFile(join(workspaceDir(DRAFT), 'tmp', 'chat-uploads/plan-a1b2c3d4e5f6.xlsx'))).toEqual(SPREADSHEET);
+  });
+
+  it('the dry run previews the access the staged file carries in, as a repository copy does', async () => {
+    const base = await start();
+    const staged = '---\nread:\n  - deny everyone\n---\n# Staged\n';
+    await stage('a.md', staged);
+    previews.length = 0;
+
+    const dry = await call(base, 'copy_file', { src: '__tmp__/a.md', dest: 'KnowledgeBase/a.md', dryRun: true });
+
+    expect(dry.status).toBe(200);
+    // The ref as the source, its text as what travels: the same relocation
+    // reading a repository source gets, never "nothing travels".
+    expect(previews).toEqual([
+      [expect.any(String), 'e@x', '__tmp__/a.md', 'KnowledgeBase/a.md', { sourceRemains: true, sourceContent: staged }],
+    ]);
+    expect(dry.body.access.after).toEqual({ read: true, write: true, download: true, owner: true });
   });
 
   it('never replaces what is at the destination', async () => {

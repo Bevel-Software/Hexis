@@ -1946,11 +1946,11 @@ export class AccessControlService implements IAccessControl {
     userEmail: string,
     fromPath: string,
     toPath: string,
-    opts?: { sourceRemains?: boolean },
+    opts?: { sourceRemains?: boolean; sourceContent?: string },
   ): Promise<PathVerbs> {
     const repoDir = await this.repoDir(workspaceId);
     const { isFolder, ownThere: own, landing } =
-      await this.relocationSubject(repoDir, fromPath, toPath);
+      await this.relocationSubject(repoDir, fromPath, toPath, opts?.sourceContent);
     const model = withRelocatedAccessFiles(
       await this.loadModel(workspaceId),
       fromPath,
@@ -2627,11 +2627,18 @@ export class AccessControlService implements IAccessControl {
    * Only absence is an answer (see `isAbsence`): a probe that failed on
    * permissions or I/O does not say "this is a file", and reading a folder as
    * one would resolve it through frontmatter it does not have.
+   *
+   * `sourceContent` is the text of a source that is NO repository path — a
+   * file staged in the workspace's `tmp/` folder, which `copy_file` lands in
+   * the repository. Nothing is probed on disk for it: it is one file by the
+   * ref's own rule, and its text is read exactly as a repository file's is,
+   * so the copy previews the rules it carries in.
    */
   private async relocationSubject(
     repoDir: string,
     fromPath: string,
     toPath: string,
+    sourceContent?: string,
   ): Promise<{
     isFolder: boolean;
     ownHere: OwnEntries | null;
@@ -2639,19 +2646,21 @@ export class AccessControlService implements IAccessControl {
     landing: AccessFile | null;
   }> {
     const nothing = { isFolder: false, ownHere: null, ownThere: null, landing: null };
-    const fromStat = await fs.lstat(path.join(repoDir, fromPath)).catch((err: unknown) => {
-      if (isAbsence(err)) return null;
-      throw err;
-    });
-    if (fromStat?.isSymbolicLink() === true) return nothing;
-    if (fromStat?.isDirectory() === true) return { ...nothing, isFolder: true };
+    if (sourceContent === undefined) {
+      const fromStat = await fs.lstat(path.join(repoDir, fromPath)).catch((err: unknown) => {
+        if (isAbsence(err)) return null;
+        throw err;
+      });
+      if (fromStat?.isSymbolicLink() === true) return nothing;
+      if (fromStat?.isDirectory() === true) return { ...nothing, isFolder: true };
+    }
     // `roles.yaml` carries no own-entries wherever it sits, exactly as
     // `readOwnEntries` has it; a read that fails for any reason is no rules,
     // which is what the gates would say about the same file.
     if (fromPath === 'roles.yaml' || toPath === 'roles.yaml') return nothing;
     let text: string;
     try {
-      text = await fs.readFile(path.join(repoDir, fromPath), 'utf-8');
+      text = sourceContent ?? (await fs.readFile(path.join(repoDir, fromPath), 'utf-8'));
     } catch {
       return nothing;
     }

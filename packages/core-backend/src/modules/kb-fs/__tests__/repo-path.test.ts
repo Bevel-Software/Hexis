@@ -392,6 +392,15 @@ describe('normalizePathArgs', () => {
     ).toEqual({ path: '__tool_chain_spill__/abc.json' });
   });
 
+  it('still takes the earlier call form, a skip predicate or nothing, and refuses a tmp ref in every input there', () => {
+    const spill = (v: string) => v.startsWith('__tool_chain_spill__/');
+    expect(normalizePathArgs({ path: '__tool_chain_spill__/abc.json' }, KB, spill)).toEqual({ path: '__tool_chain_spill__/abc.json' });
+    expect(normalizePathArgs({ path: 'a.md' }, KB)).toEqual({ path: 'knowledge-base/a.md' });
+    for (const legacy of [undefined, spill]) {
+      expect(() => normalizePathArgs({ path: '__tmp__/x.md' }, KB, legacy)).toThrow(/this tool does not take one there/);
+    }
+  });
+
   it('leaves an absent or empty path to the handler\'s own required-argument message', () => {
     expect(normalizePathArgs({ path: undefined }, KB, T)).toEqual({ path: undefined });
     expect(normalizePathArgs({ path: '' }, KB, T)).toEqual({ path: '' });

@@ -1355,15 +1355,20 @@ export function registerWorkspaceTools(
    * caller WILL have, never whether they may do it. The write verdicts that
    * gate the move are `writeBlocked` and the lock gate, both of which read
    * the tree as it is.
+   *
+   * `sourceContent` is the text of a source that is no repository path (a
+   * tmp ref): it carries rules in exactly as a repository file would, so it
+   * is previewed through the same relocation reading, never as "nothing
+   * travels".
    */
   const accessAfter = async (
     branch: string,
     ctx: ToolContext,
     src: string,
     dest: string,
-    opts?: { sourceRemains?: boolean },
+    opts?: { sourceRemains?: boolean; sourceContent?: string },
   ): Promise<AccessVerbs> => {
-    const from = toKbRelative(src, kbDirName);
+    const from = opts?.sourceContent !== undefined ? src : toKbRelative(src, kbDirName);
     const to = toKbRelative(dest, kbDirName);
     // Outside the repository there are no rules to carry, and none to land
     // among — the same answer `accessAt` gives for such a path.
@@ -1376,6 +1381,18 @@ export function registerWorkspaceTools(
       opts,
     );
   };
+
+  /**
+   * The text a tmp source carries into the repository, for the preview only:
+   * read as a repository source is read there — a file that cannot be read
+   * carries no rules — so the preview never answers before the write
+   * verdict. Whether the file is there at all is `statTmpFile`'s to say.
+   */
+  const tmpSourceText = (branch: string, ctx: ToolContext, ref: string): Promise<string> =>
+    ctx.workspaceService
+      .readFileBinary(workspaceIdForBranch(branch), ref)
+      .then((bytes) => bytes.toString('utf-8'))
+      .catch(() => '');
 
   /**
    * What `copy_file`'s dry run answers: the same impact shape `move_file`
@@ -1405,9 +1422,10 @@ export function registerWorkspaceTools(
    */
   const copyImpact = async (branch: string, ctx: ToolContext, src: string, dest: string) => {
     const fromTmp = isTmpRef(src);
+    const sourceContent = fromTmp ? await tmpSourceText(branch, ctx, src) : undefined;
     const [before, after, blocked] = await Promise.all([
       fromTmp ? TMP_ACCESS : accessAt(branch, ctx, src),
-      accessAfter(branch, ctx, src, dest, { sourceRemains: true }),
+      accessAfter(branch, ctx, src, dest, { sourceRemains: true, sourceContent }),
       writeBlocked(branch, ctx, [dest]),
     ]);
     const access = { before, after };
@@ -1474,8 +1492,13 @@ export function registerWorkspaceTools(
       'Nothing to copy',
     );
     try {
-      await fs.writeFile(dest, bytes, { overwrite: false });
+      // Exclusive, under the destination's lock: a name taken since the look
+      // is refused there as `DestinationTakenError` — releasing the lock
+      // untouched, so the winner's queued file stays — and answered as a
+      // repository copy's lost race is (`asEntryExists`).
+      await asEntryExists(() => fs.writeFile(dest, bytes, { overwrite: false }));
     } catch (err) {
+      if (err instanceof ToolError) throw err;
       const occupiedBy = await existingAt(await workspaceRoot(branch, ctx), dest);
       if (occupiedBy !== null) throw new ToolError(entryExistsMessage(occupiedBy, dest), 409);
       if (isAbsence(err)) throw notFound(dest, 'Nowhere to copy to');

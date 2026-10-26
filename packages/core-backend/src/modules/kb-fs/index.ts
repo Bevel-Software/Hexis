@@ -19,3 +19,4 @@ export { LockingFilesystem, MoveLockedError, MoveRacedError } from './locking-fi
 export { ReadOnlyFilesystem } from './read-only-filesystem.js';
 export { normalizeRepositoryAddress, sameRepository } from './remote-url.js';
 export { assertInsideRepo, assertKbDirNameFree, assertRepoRootNameFree, assertRepoRootNameFreeArgs, hasControlCharacter, isInsideRepo, normalizePathArgs } from './repo-path.js';
+export type { NormalizePathArgsOptions } from './repo-path.js';
