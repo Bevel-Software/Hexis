@@ -60,6 +60,11 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
+      # The grep tool searches with ripgrep, and its suites (and the boot
+      # check's) run the real binary. Installed only when the runner image
+      # does not already carry it.
+      - run: command -v rg || (sudo apt-get update && sudo apt-get install -y --no-install-recommends ripgrep)
+
       # Licence policy gate. Fails on any dependency that offers no permissive
       # licence (GPL/AGPL/SSPL/…) or declares one we have not classified, so a
       # new dep can't quietly put copyleft into a shipped artifact. `pnpm build`

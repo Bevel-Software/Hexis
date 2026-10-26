@@ -20,7 +20,7 @@ import { sharedFileRules, sharedFileRulesSection } from '../../agent-instruction
 import { agentGuideSections, WORKING_WITH_FILES_SECTION_ID } from '../../agent-guide/agent-guide.js';
 import { PathNotFoundError } from '../../../shared/domain-errors.js';
 import { registerWorkspaceTools } from '../workspace.tools.js';
-import { WorkerPatternMatcher } from '../bounded-matcher.js';
+import { RipgrepPatternMatcher } from '../ripgrep-search.js';
 import { RoutineWritePolicyService } from '../routine-write-policy.js';
 import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
 import { ToolDescriptionNotes } from '../agent-access.gate.js';
@@ -154,7 +154,7 @@ const access = {
 let httpServer: HttpServer | undefined;
 let root = '';
 let docCacheDir = '';
-let matcher: WorkerPatternMatcher | undefined;
+let matcher: RipgrepPatternMatcher | undefined;
 let extractor: WorkerDocumentExtractor | undefined;
 let service: WorkspaceService;
 
@@ -179,7 +179,7 @@ async function start(): Promise<string> {
   docCacheDir = await mkdtemp(join(tmpdir(), 'ws-tmp-ref-cache-'));
   for (const branch of [DRAFT, PROTECTED]) await mkdir(join(workspaceDir(branch), KB_DIR), { recursive: true });
   service = newWorkspaceService(root, 'https://example.invalid/kb.git', testKbContext(), new NodeFs());
-  matcher = new WorkerPatternMatcher();
+  matcher = new RipgrepPatternMatcher();
   extractor = new WorkerDocumentExtractor();
   const filesystems = new Map<string, LocalFilesystem>();
   const resolve = async (auth: ToolAuth, signal: AbortSignal, sessionId?: string): Promise<ToolContext> => ({

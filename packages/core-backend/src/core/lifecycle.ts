@@ -614,9 +614,9 @@ async function releaseCore(deps: CoreStopDeps, remaining: () => number, log: (m:
   if (deps.workflowService) {
     await bounded(deps.workflowService.drainTidy(), remaining(), 'finishing the branch tidy-up', log);
   }
-  // Its workers end with the graph; a search still running is answered busy.
+  // Its ripgrep runs end with the graph; a search still running is answered busy or stopped.
   if (deps.patternMatcher) {
-    await bounded(deps.patternMatcher.close(), remaining(), 'ending the search workers', log);
+    await bounded(deps.patternMatcher.close(), remaining(), 'ending the running searches', log);
   }
   // Likewise: an extraction still running is answered busy, and nothing about its file is remembered.
   if (deps.documentExtractor) {

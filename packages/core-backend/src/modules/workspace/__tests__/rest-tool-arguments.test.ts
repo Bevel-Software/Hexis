@@ -22,10 +22,10 @@ import { AccessControlService } from '../../access/access-control.service.js';
 import { NodeFs } from '../../kb-fs/node-fs.js';
 import { BRANCH_REQUIRED_MESSAGE } from '../../../shared/domain-errors.js';
 import { callLine, compileCheck, exampleArguments } from '@bevel-software/platform-mcp-core';
-import { WorkerPatternMatcher } from '../bounded-matcher.js';
+import { RipgrepPatternMatcher } from '../index.js';
 
 /** The grep matcher this file's harness wires, closed once the file is done. */
-const patternMatcher = new WorkerPatternMatcher();
+const patternMatcher = new RipgrepPatternMatcher();
 afterAll(() => patternMatcher.close());
 
 /**
@@ -179,7 +179,7 @@ describe('POST /api/agent/tools/<name> checks the arguments against the tool', (
     expect(status).toBe(400);
     expect(body.kind).toBe('arguments-do-not-match');
     expect(body.error).toContain('"pattern" is required, and was not given.');
-    expect(body.error).toContain('pattern (string, required) — JavaScript regular expression.');
+    expect(body.error).toContain('pattern (string, required) — Regular expression, RE2-style (ripgrep): no look-around, no backreferences.');
     // Not a 200 that matched every file, which is what this surface answered
     // before the check lived in the route.
     expect(body.matches).toBeUndefined();
