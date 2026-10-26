@@ -4,8 +4,7 @@ import { logger } from '../../shared/logging.js';
 const log = logger('oidc');
 import type express from 'express';
 import type { AuthProviderPlugin } from './auth.routes.js';
-import { AUTH_COOKIE_MAX_AGE_S } from './auth.routes.js';
-import { AUTH_COOKIE_NAME } from './auth.middleware.js';
+import { setAuthCookie } from './auth.middleware.js';
 import type { AuthService } from './auth.service.js';
 import { AccountAdmissionRefusedError, AccountDeactivatedError } from './account-admission.js';
 import { normalizeIssuerUrl } from '../settings/index.js';
@@ -311,13 +310,7 @@ export class OidcAuthProvider implements AuthProviderPlugin {
         } catch (error) {
           log.error('OIDC sign-in record failed:', { err: error });
         }
-        res.cookie(AUTH_COOKIE_NAME, token, {
-          httpOnly: true,
-          sameSite: 'lax',
-          secure: cookieSecure,
-          maxAge: AUTH_COOKIE_MAX_AGE_S * 1000,
-          path: '/',
-        });
+        setAuthCookie(res, token, cookieSecure);
         res.redirect(`${publicFrontendUrl}/auth/oidc/callback#token=${encodeURIComponent(token)}`);
       } catch (error) {
         // A refused provisioning is not a failed sign-in: the identity was
