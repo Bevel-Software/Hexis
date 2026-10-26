@@ -5,6 +5,7 @@ import { eq } from 'drizzle-orm';
 import { users, type Database } from '../../database/index.js';
 import { PG_ADMIN_URL, PG_TEST_TIMEOUT, dropScratchDatabases, openMigratedScratchDb } from '../../../__tests__/pg-scratch.js';
 import { AuthService } from '../auth.service.js';
+import { SessionEndedError } from '../account-admission.js';
 import { createAuthRoutes } from '../auth.routes.js';
 import { AUTH_COOKIE_NAME, createAuthMiddleware } from '../auth.middleware.js';
 import { verifyPassword } from '../password-hash.js';
@@ -232,7 +233,9 @@ describe.skipIf(!PG_ADMIN_URL)('a password change and the sessions opened before
       expect(res.status).toBe(200);
       const { token } = (await res.json()) as { token: string };
 
-      await expect(replica.resolveSession(laptop.token)).rejects.toThrow(/Session ended/);
+      const ended = replica.resolveSession(laptop.token);
+      await expect(ended).rejects.toBeInstanceOf(SessionEndedError);
+      await expect(ended).rejects.toThrow(/password was changed after this session was opened/);
       await expect(replica.resolveSession(token)).resolves.toMatchObject({ email: 'omar@acme.test' });
     },
     PG_TEST_TIMEOUT,
