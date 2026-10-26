@@ -48,7 +48,7 @@ const TASKS: Task[] = [
       ['paths sit under the checkout folder', /Paths sit under `knowledge-base\/`/],
       ['sessionId only where listed', /Pass `sessionId` only where a tool lists it/],
       ['copy the Call: line', /Copy each tool's `Call:` line/],
-      ['grep is a JavaScript regex', /`grep` takes a JavaScript regular expression\. For a search that ignores case pass `ignore_case: true`; `\(\?i\)` is refused/],
+      ['grep takes RE2-style patterns', /`grep` takes RE2-style regular expressions \(ripgrep\): no look-around and no backreferences/],
     ],
   },
   {

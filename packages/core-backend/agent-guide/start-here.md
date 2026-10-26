@@ -24,8 +24,8 @@ its task needs.
 - **Pass `sessionId` only where a tool lists it.** Over MCP, call
   `start_session` once and pass its id to the tools whose arguments include
   `sessionId`. Other tools refuse it.
-- **`grep` takes a JavaScript regular expression.** For a search that ignores
-  case pass `ignore_case: true`; `(?i)` is refused.
+- **`grep` takes RE2-style regular expressions** (ripgrep): no look-around
+  and no backreferences.
 - **Paths sit under `{{kbDirName}}/`**, as in
   `{{kbDirName}}/{{knowledgeBaseDir}}/Overview.md`. A path without that prefix
   is placed under it.

@@ -7,7 +7,7 @@ import type { UtcpTool } from '../modules/tool-registry/tool.contract.js';
 import { createToolHandlerFactory } from '../modules/tool-helpers/tool-handler.js';
 import type { ToolAuth } from '../modules/tool-auth/tool-auth.middleware.js';
 import { registerWorkspaceTools } from '../modules/workspace/workspace.tools.js';
-import { WorkerPatternMatcher } from '../modules/workspace/bounded-matcher.js';
+import { RipgrepPatternMatcher } from '../modules/workspace/index.js';
 import { registerWorkflowTools } from '../modules/workflow/agent-tools/workflow.tools.js';
 import { registerPluginsTools } from '../modules/plugins/plugins.tools.js';
 import { registerSkillsTools } from '../modules/skills/skills.tools.js';
@@ -101,7 +101,7 @@ export async function hexisCatalog(
     // mounted on the same terms (it spawns no worker until a search runs).
     undefined,
     undefined,
-    new WorkerPatternMatcher(),
+    new RipgrepPatternMatcher(),
   );
   registerWorkflowTools(registry, router, toolAuth, toolHandler, kb, async () => true, { canRead: async () => true, canReadAtRef: async () => true, canReadBatch: async () => new Map(), canReadBatchAtRef: async () => new Map(), canWrite: async () => true } as never, { recoveryBotEmail: 'recovery@x', hooks: { runAgentRead: async () => undefined }, notes: { onChange: () => undefined } } as never);
   registerPluginsTools(registry, kb);

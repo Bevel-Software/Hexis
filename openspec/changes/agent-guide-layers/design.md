@@ -77,7 +77,7 @@ Ten tasks from the customer's day. For each, the facts the guide must let an age
 | # | Task (time on 2026-10-19) | Facts | Today (y/p/n) | Where today |
 |---|---|---|---|---|
 | 1 | What is this knowledge base, and how does my agent get its context? (09:05, 10:20, 14:52) | It is the organisation's knowledge base plus its approved skills and tools, reached over MCP, not "a Git repo" · on connect the agent has the instructions (platform note and the admin's `mcp-description.md`), the tool list, and skill names and descriptions · everything else is fetched when a task needs it, never the whole repository · skill descriptions and links decide which context arrives · a line in the user's own `AGENTS.md` or `CLAUDE.md` is the one text always present, with a snippet | 0 / 3 / 2 | introduction, finding-things |
-| 2 | Read a page, list a folder (first calls, 09:05) | Every file tool needs `branch`, and which branch holds what is live · paths sit under `knowledge-base/` · `sessionId` only where a tool lists it · copy the tool's `Call:` line · `grep` takes a JavaScript regex (`ignore_case`, not `(?i)`) | 2 / 1 / 2 | directory-structure, tool-manuals, the tool schemas |
+| 2 | Read a page, list a folder (first calls, 09:05) | Every file tool needs `branch`, and which branch holds what is live · paths sit under `knowledge-base/` · `sessionId` only where a tool lists it · copy the tool's `Call:` line · `grep`'s pattern dialect (RE2-style since #462; before it, a JavaScript regex that refused `(?i)`) | 2 / 1 / 2 | directory-structure, tool-manuals, the tool schemas |
 | 3 | Make a skill on my branch and see it (11:26 to 13:13) | Where a skill lives · frontmatter is YAML: quote a value that contains `: ` · on a draft the files are there, shown in Knowledge when that branch is selected · the skill catalog (app, `list_skills`, prompts) shows only what is merged · tools likewise | 2 / 1 / 2 | directory-structure, skills, tool-manuals |
 | 4 | Why can't I delete this? (15:11) | On a draft you may change or delete anything you can read, and nobody else sees it until it is merged · on a protected branch you need write on every file a change touches, otherwise propose · some platform files are never deleted · `file_stat` says `deletable` and why · what you cannot read you cannot change | 4 / 1 / 0 | access-control, working-with-files |
 | 5 | Is this like Git? Who merges? (10:20) | Branches are drafts, the default branch is protected · the agent opens a change request, a person approves and merges it in the app · access is per folder, with an example · on your draft anything goes, merge is where owners approve · saving commits and shares at once, the agent has no git · do not explain it as "a Git repo" | 2 / 3 / 1 | access-control, introduction |
@@ -98,15 +98,15 @@ Measured the same way, on this change's last commit:
 | Layer | Before | After | Budget |
 |---|---|---|---|
 | Server instructions (platform part) | 1,852 | 1,848 | 2,000 |
-| Tool list as served (41 tools) | 15,829 | 15,598 | 16,000 |
-| First contact (`get_agent_guide` with no section) | 19,342 (the whole guide) | 1,004 (`start-here`) | 1,200 |
-| The whole guide (`section: "all"`) | 19,342 | 18,330 | 19,000 |
-| One evaluation task | 19,342 | 1,004 to 3,329 | 6,000 |
+| Tool list as served (41 tools) | 15,829 | 15,580 | 16,000 |
+| First contact (`get_agent_guide` with no section) | 19,342 (the whole guide) | 995 (`start-here`) | 1,200 |
+| The whole guide (`section: "all"`) | 19,342 | 18,321 | 19,000 |
+| One evaluation task | 19,342 | 995 to 3,320 | 6,000 |
 | Evaluation facts stated | 27 of 53 | 53 of 53 | all |
 
 | Section | Tokens | | Section | Tokens |
 |---|---|---|---|---|
-| `start-here` | 1,004 | | `drafts-and-change-requests` | 1,502 |
+| `start-here` | 995 | | `drafts-and-change-requests` | 1,502 |
 | `how-agents-find-things` | 656 | | `skills` | 1,026 |
 | `for-git-users` | 641 | | `tools` | 952 |
 | `glossary` | 584 | | `tool-manuals` | 2,354 |
@@ -116,7 +116,7 @@ Measured the same way, on this change's last commit:
 | `access-control` | 2,360 | | | |
 
 The customer's fifteen guide loads would now cost about 15,000 tokens instead
-of about 420,000. On an enterprise deployment the whole guide is 26,995 tokens;
+of about 420,000. On an enterprise deployment the whole guide is 26,986 tokens;
 its five sections are unchanged and outside core's checks.
 
 ## Decisions
