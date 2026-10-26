@@ -70,6 +70,11 @@ function basename(path: string): string {
   return i >= 0 ? path.slice(i + 1) : path;
 }
 
+/** `path` is `entry` itself, or under it when `entry` is a folder. */
+function isWithin(path: string, entry: string): boolean {
+  return path === entry || path.startsWith(entry + '/');
+}
+
 /**
  * Which branch a workspace IS, read off the workspace itself rather than off
  * whatever we happened to ask for. `WorkspaceInfo.id` is
@@ -317,6 +322,25 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
    * events the delete caused to arrive after the request answered.
    */
   const ownDeletesRef = useRef<Map<string, number>>(new Map());
+  /**
+   * Paths found back after a delete of ours, with when the read that found
+   * them was sent (`forgetOwnDelete`). Per path: restoring Dir/b ends the
+   * marker of a deleted Dir for Dir/b alone, never for the rest of Dir.
+   */
+  const ownRestoresRef = useRef<Map<string, number>>(new Map());
+  /**
+   * Where each delete of ours was confirmed in `orderRef`'s sequence, for the
+   * whole workspace session: what `isOvertakenByOwnDelete` judges an opening
+   * read against. Kept apart from the markers, which a read of a restored
+   * path ends — a read sent before the delete found the old file whatever was
+   * restored since.
+   */
+  const deleteConfirmedOrderRef = useRef<Map<string, number>>(new Map());
+  /**
+   * One counter for a delete's confirmation and an opening read's send, so
+   * which came first never ties, as two clock readings in one millisecond do.
+   */
+  const orderRef = useRef(0);
   /**
    * Open tabs whose file someone else deleted (`OpenTab.deletedBy`), as a
    * ref so `saveFile` can refuse a write-back synchronously — the state that
@@ -595,12 +619,20 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
   const isOwnDelete = useCallback((path: string) => {
     if (isPendingDelete(path)) return true;
     const now = Date.now();
+    // A restore outlives every marker it could end: those are older still.
+    for (const [restored, at] of ownRestoresRef.current) {
+      if (now - at > OWN_DELETE_WINDOW_MS) ownRestoresRef.current.delete(restored);
+    }
     for (const [deleted, at] of ownDeletesRef.current) {
       if (now - at > OWN_DELETE_WINDOW_MS) {
         ownDeletesRef.current.delete(deleted);
         continue;
       }
-      if (path === deleted || path.startsWith(deleted + '/')) return true;
+      if (!isWithin(path, deleted)) continue;
+      // Found back by a read sent after this delete answered: not ours any more.
+      const restoredSince = [...ownRestoresRef.current].some(([restored, restoredAt]) =>
+        restoredAt > at && isWithin(path, restored));
+      if (!restoredSince) return true;
     }
     return false;
   }, [isPendingDelete]);
@@ -610,11 +642,13 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
    * by a delete of ours: the server confirmed that delete after the read was
    * sent, so what the read found is the file as it was before it. Its bytes
    * open no tab (`addTab`, `hydrateTabs`) and do not end the delete's marker
-   * (`forgetOwnDelete`).
+   * (`forgetOwnDelete`). `readSentOrder`: `orderRef` taken as the read was
+   * sent. Judged on `deleteConfirmedOrderRef`, which no read clears:
+   * restoring a sibling of a deleted folder's file overtakes nothing.
    */
-  const isOvertakenByOwnDelete = useCallback((path: string, readIssuedAt: number) => {
-    for (const [deleted, at] of ownDeletesRef.current) {
-      if (at >= readIssuedAt && (path === deleted || path.startsWith(deleted + '/'))) return true;
+  const isOvertakenByOwnDelete = useCallback((path: string, readSentOrder: number) => {
+    for (const [deleted, order] of deleteConfirmedOrderRef.current) {
+      if (order > readSentOrder && isWithin(path, deleted)) return true;
     }
     return false;
   }, []);
@@ -625,12 +659,15 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
    * `readIssuedAt`: when the read that found it was sent. A read sent before
    * the delete answered found the file as it was before it; that marker stays,
    * or a save still waiting would re-create the file (`awaitStillOnBranch`).
+   * Ends the marker for `path` (and what is under it) only: the rest of a
+   * deleted folder stays ours.
    */
   const forgetOwnDelete = useCallback((path: string, readIssuedAt?: number) => {
-    for (const [deleted, at] of ownDeletesRef.current) {
-      if (readIssuedAt !== undefined && at >= readIssuedAt) continue;
-      if (path === deleted || path.startsWith(deleted + '/')) ownDeletesRef.current.delete(deleted);
-    }
+    // Without a read (a create, a move), it follows every delete already
+    // confirmed, even one confirmed within the same millisecond.
+    const at = readIssuedAt ?? Date.now() + 1;
+    const known = ownRestoresRef.current.get(path);
+    if (known === undefined || at > known) ownRestoresRef.current.set(path, at);
   }, []);
 
   /**
@@ -798,6 +835,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     // read issued before it (for a tab since closed) lands on nothing.
     const seq = ++existenceReadSeqRef.current;
     const issuedAt = Date.now();
+    const sentOrder = ++orderRef.current;
     try {
       const content = await readFile(workspaceId, relativePath);
       // A read that outlived its workspace belongs to another branch's tab
@@ -810,7 +848,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       // the bytes of a file that is gone. Opening them would put the deleted
       // file back on screen; answer as the read would have, had it been sent
       // a moment later.
-      if (isOvertakenByOwnDelete(relativePath, issuedAt)) {
+      if (isOvertakenByOwnDelete(relativePath, sentOrder)) {
         traceFiles('add-tab:overtaken-by-own-delete', { path: relativePath });
         throw new WorkspaceApiError(404);
       }
@@ -986,6 +1024,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     // after the slowest read, and a save starting in between would find no
     // check to wait on and nothing marked yet.
     const issuedAt = Date.now();
+    const sentOrder = ++orderRef.current;
     const openAtStart = new Set(openTabsRef.current.map((t) => t.path));
     const reads = readPaths.map((p) => readFile(workspaceId, p));
     let releaseChecks!: () => void;
@@ -1036,7 +1075,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
             goneLive.push({ path, seq: seqs[i] });
           }
         } else if (res.status === 'fulfilled' && !openNow.has(path)
-          && workspaceIdRef.current === workspaceId && isOvertakenByOwnDelete(path, issuedAt)) {
+          && workspaceIdRef.current === workspaceId && isOvertakenByOwnDelete(path, sentOrder)) {
           // Found before a delete of ours that has since closed its tab (or
           // that it never had): the file is gone, as for a 404 read.
           dropped.push(path);
@@ -1742,6 +1781,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     if (!isCurrent()) return;
     pendingDeletePathsRef.current.delete(relativePath);
     ownDeletesRef.current.set(relativePath, Date.now());
+    deleteConfirmedOrderRef.current.set(relativePath, ++orderRef.current);
     // Before the tabs go: closing them unmounts the editor, whose lock
     // cleanup writes its buffer back through `saveFile` — which, unguarded,
     // re-created the file this delete just removed. The set drops each path
@@ -2185,6 +2225,8 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     pendingUploadsRef.current = new Map();
     pendingDeletePathsRef.current = new Set();
     ownDeletesRef.current = new Map();
+    ownRestoresRef.current = new Map();
+    deleteConfirmedOrderRef.current = new Map();
     deletedPathsRef.current = new Set();
     existenceChecksRef.current = new Map();
     treeAbsentCheckedAtRef.current = new Map();

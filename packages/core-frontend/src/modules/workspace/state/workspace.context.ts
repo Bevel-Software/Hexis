@@ -400,7 +400,8 @@ export interface WorkspaceContextValue {
   isOwnDelete?: (relativePath: string) => boolean;
   /**
    * `relativePath` was read back, so it exists again: `isOwnDelete` stops
-   * covering it, and a later delete of it is someone else's. `readIssuedAt`:
+   * covering it (it alone: the rest of a deleted folder stays covered), and a
+   * later delete of it is someone else's. `readIssuedAt`:
    * when the read that found it was sent — a delete that answered after that
    * stays, since the read saw the file as it was before it. Optional, as
    * `isOwnDelete` is.

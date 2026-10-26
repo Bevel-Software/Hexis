@@ -1769,6 +1769,68 @@ describe('the editor writing back after our own delete', () => {
     expect(disk.has('KB/Draft.md')).toBe(false);
   });
 
+  /** Hold the next read, answering with Dir/a.md's bytes from before the folder delete. */
+  function holdNextReadOfA() {
+    const held: { answer?: () => void } = {};
+    apiMocks.readFile.mockImplementationOnce(() => new Promise((resolve) => {
+      held.answer = () => resolve('a');
+    }));
+    return held;
+  }
+
+  // The folder is deleted, a sibling is created back in it, then a read of
+  // the other child sent before the delete answers: the child stays gone.
+  it('an open whose read a folder delete overtook opens nothing, though a sibling was created since', async () => {
+    const result = await mountReady();
+    await open(result, 'KB/Keep.md');
+    const held = holdNextReadOfA();
+    let opening!: Promise<boolean>;
+    act(() => { opening = result.current.addTab('KB/Dir/a.md'); });
+    await waitFor(() => expect(held.answer).toBeDefined());
+    await new Promise((r) => setTimeout(r, 2));
+    await act(async () => { await result.current.deleteEntry('KB/Dir'); });
+    await act(async () => { await result.current.createFile('KB/Dir/b.md', 'b'); });
+
+    await act(async () => {
+      held.answer!();
+      await expect(opening).rejects.toMatchObject({ status: 404 });
+    });
+
+    expect(tabAt(result, 'KB/Dir/a.md')).toBeUndefined();
+    expect(result.current.openFilePath).toBe('KB/Keep.md');
+    expect(result.current.isOwnDelete?.('KB/Dir/a.md')).toBe(true);
+    expect(result.current.isOwnDelete?.('KB/Dir/b.md')).toBe(false);
+    expect(disk.has('KB/Dir/a.md')).toBe(false);
+  });
+
+  it('a tab restore whose read a folder delete overtook does not reopen the child, though a sibling was restored since', async () => {
+    const result = await mountReady();
+    await act(async () => { await result.current.hydrateTabs(['KB/Keep.md', 'KB/Dir/a.md'], 'KB/Dir/a.md'); });
+    // The route mounts again while both tabs are open.
+    apiMocks.readFile.mockImplementationOnce(async () => 'keep');
+    const held = holdNextReadOfA();
+    let hydrating!: Promise<{ surviving: string[]; dropped: string[] }>;
+    act(() => { hydrating = result.current.hydrateTabs(['KB/Keep.md', 'KB/Dir/a.md'], 'KB/Dir/a.md'); });
+    await waitFor(() => expect(held.answer).toBeDefined());
+    await new Promise((r) => setTimeout(r, 2));
+    await act(async () => { await result.current.deleteEntry('KB/Dir'); });
+    // Someone restores the sibling, and a tab restore of ours finds it.
+    await new Promise((r) => setTimeout(r, 2));
+    disk.set('KB/Dir/b.md', 'b');
+    await act(async () => { await result.current.hydrateTabs(['KB/Keep.md', 'KB/Dir/b.md'], 'KB/Keep.md'); });
+    expect(tabAt(result, 'KB/Dir/b.md')?.content).toBe('b');
+
+    let restored!: { surviving: string[]; dropped: string[] };
+    await act(async () => { held.answer!(); restored = await hydrating; });
+
+    expect(restored.surviving).not.toContain('KB/Dir/a.md');
+    expect(tabAt(result, 'KB/Dir/a.md')).toBeUndefined();
+    expect(result.current.isOwnDelete?.('KB/Dir/a.md')).toBe(true);
+    // Nothing can write the child back: a late write-back is refused.
+    await expect(result.current.saveFile('KB/Dir/a.md', 'a')).rejects.toThrow('a.md was deleted from this branch');
+    expect(disk.has('KB/Dir/a.md')).toBe(false);
+  });
+
   it('a file created where our own delete was saves as any other', async () => {
     const result = await mountReady();
     await open(result, 'KB/Draft.md');
