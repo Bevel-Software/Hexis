@@ -328,6 +328,33 @@ describe('KbReferenceScanner — references are what the resolver parses', () =>
     }
   });
 
+  // Stated Contracts Are Checked, Not Trusted: the resolver reads `read: *team`
+  // as the anchored list's entries, so the rename rewrites them there — on a
+  // copy, leaving the anchor and its other uses as they were.
+  it.each([
+    [
+      'the whole verb value',
+      '---\nteam: &team\n  - Admin\n  - Sales\nread: *team\n---\n# Doc\n',
+      '---\nteam: &team\n  - Admin\n  - Sales\nread:\n  - Admins\n  - Sales\n---\n# Doc\n',
+    ],
+    [
+      'beside a quoted verb, an aliased item inside it',
+      "---\nlead: &lead Admin\nteam: &team\n  - *lead\n  - deny Admin\nread: *team\nowner: 'Sales'\n---\n",
+      "---\nlead: &lead Admin\nteam: &team\n  - *lead\n  - deny Admin\nread:\n  - Admins\n  - deny Admins\nowner: 'Sales'\n---\n",
+    ],
+  ])('an alias to an anchored list is rewritten as a copy (%s)', async (_label, before, after) => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-refscan-alias-list-'));
+    try {
+      const repo = path.join(root, KB);
+      await write(repo, 'Team/Doc.md', before);
+      const scanner = new KbReferenceScanner(stubWorkspace(root), new NodeFs(), KB);
+      const writes = await scanner.rewriteReferences('ws-1', 'admin', 'Admins', (m) => new Error(m), ALL_VISIBLE);
+      expect(writes.map((w) => [w.repoRelativePath, w.content])).toEqual([['Team/Doc.md', after]]);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
   // A Guard's Answer Is a Disclosure, and Widening a Primitive Traces Its
   // Consequences: a file the renaming person cannot read (another person's
   // private plugin) neither blocks the rename nor changes its answer —

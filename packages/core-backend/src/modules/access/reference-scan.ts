@@ -30,7 +30,7 @@
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
 
-import { Scalar, isAlias, isMap, isScalar, isSeq, parseDocument, type Document } from 'yaml';
+import { Scalar, YAMLSeq, isAlias, isMap, isNode, isScalar, isSeq, parseDocument, type Document } from 'yaml';
 import { isFrontmatterFence, type IWorkspaceService } from '@bevel-software/platform-shared';
 import type { ITreeWalker } from '../../shared/fs.contract.js';
 import { logger } from '../../shared/logging.js';
@@ -319,8 +319,11 @@ export function rewriteRoleTokensInText(
  * top-level verb keys, by the full parser's own node tree with the same
  * FAILSAFE schema — and replaces each scalar entry whose token is in
  * `oldTokens`, keeping its quoting, its comments and every other node. An
- * alias under a verb key is replaced by a plain scalar, so the anchor it
- * points at (which may sit under any other key) is left alone.
+ * alias the resolver reads as a verb's entries is never edited through: one
+ * that names an old token is replaced by a plain scalar, and one that is the
+ * verb's whole list (`read: *team`, `&team` a list) by a rewritten copy of
+ * that list, so the anchor it points at (which may sit under any other key)
+ * is left alone.
  *
  * The other rule sources — a legacy `access.md`'s frontmatter and a
  * body-governed one's body — are read by the YAML-subset parser only, which
@@ -351,10 +354,31 @@ function rewriteOwnFrontmatterStructurally(
     target.value = value;
     return target;
   };
+  // The anchored list an alias names, as a rewritten copy — or null when
+  // none of its entries changes, so the alias stays. Each item is cloned
+  // before it is rewritten (the anchor's own items stay as they are) and
+  // loses any anchor of its own (YAML allows one definition of a name).
+  const rewrittenCopy = (seq: YAMLSeq): YAMLSeq | null => {
+    let hit = false;
+    const copy = new YAMLSeq(doc.schema);
+    copy.flow = seq.flow;
+    copy.items = seq.items.map((item) => {
+      const clone = isNode(item) ? item.clone() : item;
+      if (isScalar(clone)) clone.anchor = undefined;
+      const r = rewritten(clone);
+      if (r) hit = true;
+      return r ?? clone;
+    });
+    return hit ? copy : null;
+  };
   for (const pair of doc.contents.items) {
     const key = isScalar(pair.key) ? pair.key.value : pair.key;
     if (typeof key !== 'string' || !VERB_KEYS.has(key)) continue;
-    if (isSeq(pair.value)) {
+    const aliased = isAlias(pair.value) ? pair.value.resolve(doc) : null;
+    if (isSeq(aliased)) {
+      const copy = rewrittenCopy(aliased);
+      if (copy) pair.value = copy;
+    } else if (isSeq(pair.value)) {
       pair.value.items = pair.value.items.map((item) => rewritten(item) ?? item);
     } else {
       const scalar = rewritten(pair.value);
