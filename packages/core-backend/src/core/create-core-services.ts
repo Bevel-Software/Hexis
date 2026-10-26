@@ -79,7 +79,7 @@ import { AuthService } from '../modules/auth/auth.service.js';
 import { AccountHooks, type IAccountHooks } from '../modules/auth/account-hooks.js';
 import { AccountErasureService } from '../modules/auth/account-erasure.service.js';
 import { OidcAuthProvider, oidcSettingsFrom } from '../modules/auth/oidc-auth-provider.js';
-import { createAuthMiddleware, readAuthCookie } from '../modules/auth/auth.middleware.js';
+import { authCookieSecure, createAuthMiddleware, readAuthCookie } from '../modules/auth/auth.middleware.js';
 import { AccessControlService, loadActiveGroups } from '../modules/access/access-control.service.js';
 import { AccessMutationService } from '../modules/access/access-mutation.service.js';
 import { CreatorAccessService } from '../modules/access/creator-access.js';
@@ -1575,7 +1575,7 @@ export async function createCoreServices(
       settings: () => oidcSettingsFrom(settings),
       publicBackendUrl: config.publicBackendUrl,
       publicFrontendUrl: config.publicFrontendUrl,
-      cookieSecure: config.publicBackendUrl.startsWith('https'),
+      cookieSecure: authCookieSecure(config.publicBackendUrl),
       // A real sign-in proves the values that sign-in used. Recorded against
       // those — under their own key — so it says nothing about any saved
       // since, and cannot overwrite what was recorded about them.

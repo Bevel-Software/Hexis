@@ -1,6 +1,6 @@
 import type { Request, Response, NextFunction } from 'express';
 import type { AuthService } from './auth.service.js';
-import { AccountDeactivatedError, AuthBackendError } from './account-admission.js';
+import { AccountDeactivatedError, AuthBackendError, SessionEndedError } from './account-admission.js';
 
 // Augment Express Request so userId/userEmail are available after auth middleware
 declare global {
@@ -20,9 +20,48 @@ declare global {
  * header, which the frontend stores in memory and attaches via `authFetch`.
  *
  * Same JWT value as the Bearer token. The cookie is `HttpOnly` + `SameSite=Lax`
- * + `Secure` (in prod) — see `auth.routes.ts` for the issue site.
+ * + `Secure` when the deployment is reached over https — {@link setAuthCookie}
+ * is its one issue site, for every sign-in path and the password change.
  */
 export const AUTH_COOKIE_NAME = 'bevel_token';
+
+/**
+ * Max age of the JWT cookie (seconds). Matches the JWT's own `expiresIn:
+ * '7d'` so the cookie expires when the token does — browsers stop
+ * sending it past expiry, sparing the auth middleware verifying tokens
+ * that are guaranteed to fail.
+ */
+export const AUTH_COOKIE_MAX_AGE_S = 7 * 24 * 60 * 60;
+
+/**
+ * Whether the auth cookie is marked `Secure`, from the scheme the deployment
+ * is reached on: a browser never sends a `Secure` cookie over plain http, so
+ * deriving it from `NODE_ENV` left a production deployment served over http
+ * (a private network, a proxy that terminates nothing) without SSE and
+ * images. One rule, asked by the composition root for every path that sets
+ * the cookie. Read by the URL parser, as the deployment's URL is everywhere
+ * else: a scheme is case-insensitive, and `HTTPS://` is https.
+ */
+export function authCookieSecure(publicUrl: string): boolean {
+  return new URL(publicUrl).protocol === 'https:';
+}
+
+/**
+ * Set the JWT as the HttpOnly auth cookie so transports that can't carry
+ * headers (EventSource for SSE, image tags) authenticate automatically. JSON
+ * callers continue to use the Bearer header returned in the body. The one
+ * place the cookie's attributes are spelled: password login, the password
+ * change and every SSO provider set it through here.
+ */
+export function setAuthCookie(res: Response, token: string, secure: boolean): void {
+  res.cookie(AUTH_COOKIE_NAME, token, {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure,
+    maxAge: AUTH_COOKIE_MAX_AGE_S * 1000,
+    path: '/',
+  });
+}
 
 /**
  * Read the auth cookie out of the raw `Cookie` header without pulling in
@@ -78,8 +117,10 @@ export function createAuthMiddleware(authService: Pick<AuthService, 'resolveSess
         return;
       }
       // A 401 otherwise, so the app drops the session and shows the login
-      // page; a switched-off account is told why there.
-      res.status(401).json({ error: err instanceof AccountDeactivatedError ? err.message : 'Invalid or expired token' });
+      // page; a switched-off account, and a session a password change
+      // ended, are told why there.
+      const worded = err instanceof AccountDeactivatedError || err instanceof SessionEndedError;
+      res.status(401).json({ error: worded ? err.message : 'Invalid or expired token' });
       return;
     }
     req.userId = session.userId;
