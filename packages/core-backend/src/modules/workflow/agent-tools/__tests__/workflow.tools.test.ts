@@ -1033,13 +1033,14 @@ describe('save_file and the repository folder', () => {
     expect(calls.some((c) => c[0] === 'acquireLock')).toBe(false);
   });
 
-  it('refuses a tmp ref in every path input, before any lock — save_file and the history tools alike', async () => {
+  it('refuses a tmp ref in every path input, before any lock — save_file, the history tools and update_branch\'s resolutions alike', async () => {
     const base = await start();
     const calls_: Array<[string, Record<string, unknown>]> = [
       ['save_file', { path: '__tmp__/chat-uploads/plan.xlsx' }],
       ['read_file_at', { path: '__tmp__/chat-uploads/plan.xlsx', at: 'HEAD' }],
       ['compare_file', { path: '__tmp__/chat-uploads/plan.xlsx' }],
       ['list_file_changes', { path: '__tmp__/chat-uploads/plan.xlsx' }],
+      ['update_branch', { resolutions: [{ path: '__tmp__/chat-uploads/plan.xlsx', choose: 'ours' }] }],
     ];
     for (const [tool, args] of calls_) {
       const res = await post(`${base}/api/agent/tools/${tool}`, writeTok(), { ...args, branch: WS });

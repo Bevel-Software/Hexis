@@ -1,11 +1,11 @@
 import type { Server as HttpServer } from 'node:http';
-import { mkdir, mkdtemp, readFile, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises';
+import fsp, { mkdir, mkdtemp, readFile, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import AdmZip from 'adm-zip';
 import express from 'express';
 import * as XLSX from 'xlsx';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { LocalFilesystem } from '@mastra/core/workspace';
 import { DEFAULT_KB_LAYOUT } from '@bevel-software/platform-shared';
 import { testKbContext, TEST_BRANCH_MODEL } from '../../../__tests__/kb-context.js';
@@ -28,7 +28,7 @@ import { SpillStore } from '../spill-store.js';
 import { DocExtractService } from '../file-readers/doc-extract.service.js';
 import { WorkerDocumentExtractor } from '../file-readers/extract-in-worker.js';
 import type { WorkspaceService } from '../workspace.service.js';
-import { TMP_MAX_AGE_MS, TmpSweeper } from '../workspace-tmp.js';
+import { sweepTmpFolder, TMP_MAX_AGE_MS, TmpSweeper } from '../workspace-tmp.js';
 
 /**
  * The reserved `__tmp__/` ref, end to end: the REAL tool routes, the REAL
@@ -391,6 +391,51 @@ describe('a tmp ref names one file inside the workspace\'s tmp folder', () => {
     expect(none.body.path).toBe('__tmp__/x.txt');
   });
 
+  it('a loop of links is refused by the link rule, naming the ref and never a disk path', async () => {
+    const base = await start();
+    await mkdir(join(workspaceDir(DRAFT), 'tmp'), { recursive: true });
+    await symlink(join(workspaceDir(DRAFT), 'tmp', 'loop'), join(workspaceDir(DRAFT), 'tmp', 'loop'));
+    const { status, body } = await call(base, 'read_file', { path: '__tmp__/loop' });
+    expect(status).toBe(400);
+    expect(body.kind).toBe('tmp-ref-invalid');
+    expect(body.error).toMatch(/link that cannot be followed/);
+    expect(JSON.stringify(body)).not.toContain(root);
+  });
+
+  it('a file the disk will not let it read answers a 500 naming the ref alone, in all four tools', async () => {
+    const base = await start();
+    await stage('chat-uploads/locked.txt', 'x');
+    const realpath = fsp.realpath.bind(fsp);
+    // A permission failure carries the path on disk in its message, as the
+    // filesystem raises it.
+    const spy = vi.spyOn(fsp, 'realpath').mockImplementation((async (p: string, ...rest: unknown[]) => {
+      if (String(p).endsWith('locked.txt')) {
+        throw Object.assign(new Error(`EACCES: permission denied, realpath '${String(p)}'`), { code: 'EACCES' });
+      }
+      return (realpath as (...a: unknown[]) => Promise<string>)(p, ...rest);
+    }) as typeof fsp.realpath);
+    try {
+      const ref = '__tmp__/chat-uploads/locked.txt';
+      const calls: Array<[string, Record<string, unknown>]> = [
+        ['read_file', { path: ref }],
+        ['file_stat', { path: ref }],
+        ['grep', { path: ref, pattern: 'x' }],
+        ['copy_file', { src: ref, dest: 'locked.txt' }],
+      ];
+      for (const [tool, args] of calls) {
+        const { status, body } = await call(base, tool, args);
+        expect(status, tool).toBe(500);
+        expect(body.kind, tool).toBe('tmp-ref-unreadable');
+        expect(body.path, tool).toBe(ref);
+        expect(body.error, tool).toContain(`"${ref}" could not be read`);
+        expect(JSON.stringify(body), tool).not.toContain(root);
+        expect(JSON.stringify(body), tool).not.toContain('EACCES');
+      }
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('a repository folder spelled like the ref stays a repository path', async () => {
     const base = await start();
     await commitFixture('__tmp__/kept.md', 'in the repository');
@@ -683,6 +728,29 @@ describe('the periodic sweep of every workspace\'s tmp folder', () => {
     // Not cancelled, the same sweep removes them all.
     await service.sweepTmp();
     for (const abs of files) await expect(stat(abs)).rejects.toThrow();
+  });
+
+  it('a stop that comes while an entry is being looked at removes nothing more, that entry included', async () => {
+    await start();
+    const abs = await stage('old.txt', 'x');
+    await age(abs, 8);
+    const stop = new AbortController();
+    const lstat = fsp.lstat.bind(fsp);
+    // The stop lands DURING the look at the old file, after the abort check
+    // that came before it.
+    const spy = vi.spyOn(fsp, 'lstat').mockImplementation((async (p: string, ...rest: unknown[]) => {
+      const stat = await (lstat as (...a: unknown[]) => Promise<unknown>)(p, ...rest);
+      if (String(p) === abs) stop.abort();
+      return stat;
+    }) as typeof fsp.lstat);
+    try {
+      const removed = await sweepTmpFolder(new NodeFs(), workspaceDir(DRAFT), TMP_MAX_AGE_MS, Date.now(), stop.signal);
+      expect(stop.signal.aborted).toBe(true);
+      expect(removed).toEqual([]);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(await readFile(abs, 'utf8')).toBe('x');
   });
 
   it('sweeps at seven days', () => {

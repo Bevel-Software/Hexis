@@ -1,10 +1,11 @@
 import { promises as fs, type Stats } from 'node:fs';
 import path from 'node:path';
-import { PathNotFoundError, WorkflowValidationError } from '../../shared/domain-errors.js';
+import { PathNotFoundError, WorkflowDomainError, WorkflowValidationError } from '../../shared/domain-errors.js';
 import { sanitizedPath } from '../../shared/printable.js';
 import { hasControlCharacter, TMP_REF_PREFIX } from '../kb-fs/index.js';
 import { isAbsence, type ITreeWalker } from '../../shared/fs.contract.js';
 import { logger } from '../../shared/logging.js';
+import { lstatOrNull } from '../../shared/rename-no-replace.js';
 
 const log = logger('workspace-tmp');
 
@@ -49,6 +50,27 @@ function invalidRef(ref: string, rule: string): WorkflowValidationError {
 }
 
 /**
+ * What a failed look at the folder answers, naming the REF and never the path
+ * on disk — the raw error (which carries that path) is the server log's, not
+ * the caller's: nothing there is the ordinary not-found; a loop of links is
+ * refused by the link rule; anything else (a permission, an I/O error) is a
+ * 500 that says the ref could not be read.
+ */
+function tmpRefFailure(ref: string, err: unknown): Error {
+  if (isAbsence(err)) return new PathNotFoundError(ref);
+  const shown = sanitizedPath(ref);
+  const code = (err as { code?: unknown } | null)?.code;
+  if (code === 'ELOOP') {
+    return invalidRef(ref, 'it goes through a link that cannot be followed (a link that leads back to itself).');
+  }
+  log.warn('could not read a tmp ref:', { err, ref: shown });
+  return new WorkflowDomainError(`"${shown}" could not be read from the workspace's tmp folder.`, 500, {
+    kind: 'tmp-ref-unreadable',
+    path: shown,
+  });
+}
+
+/**
  * The ref's path inside the `tmp/` folder, as segments — or the refusal that
  * names the rule it breaks. Lexical only: the folder and link rules need the
  * disk and are {@link resolveTmpRef}'s.
@@ -89,6 +111,7 @@ function tmpRefSegments(ref: string): string[] {
  *   asked anything.
  * - Nothing there is a {@link PathNotFoundError} naming the REF, never the
  *   path on disk — the answer every file tool turns into its ordinary 404.
+ *   Every other failure names the ref alone too ({@link tmpRefFailure}).
  * - The file's REAL path must lie inside the folder's real path, so a link —
  *   anywhere along the ref — that leads out of the folder is refused rather
  *   than followed. A link that stays inside is the file it points at.
@@ -98,12 +121,11 @@ export async function resolveTmpRef(workspaceDir: string, ref: string): Promise<
   const segments = tmpRefSegments(ref);
   const tmpDir = path.join(workspaceDir, WORKSPACE_TMP_DIR);
   const absent = (err: unknown): never => {
-    if (isAbsence(err)) throw new PathNotFoundError(ref);
-    throw err;
+    throw tmpRefFailure(ref, err);
   };
   // The folder itself must BE a folder of this workspace, not a link to one
   // somewhere else: the containment below is judged against it.
-  if (!(await fs.lstat(tmpDir).catch(absent)).isDirectory()) throw new PathNotFoundError(ref);
+  if ((await lstatOrNull(tmpDir).catch(absent))?.isDirectory() !== true) throw new PathNotFoundError(ref);
   const realTmp = await fs.realpath(tmpDir).catch(absent);
   const real = await fs.realpath(path.join(tmpDir, ...segments)).catch(absent);
   if (!real.startsWith(realTmp + path.sep)) {
@@ -125,8 +147,7 @@ export async function readTmpRef(workspaceDir: string, ref: string): Promise<Buf
   return fs.readFile(absolutePath).catch((err: unknown) => {
     // Swept or replaced between the resolve and the read: the same answer a
     // moment later would give, still naming the ref.
-    if (isAbsence(err)) throw new PathNotFoundError(ref);
-    throw err;
+    throw tmpRefFailure(ref, err);
   });
 }
 
@@ -166,7 +187,8 @@ export async function statTmpRef(workspaceDir: string, ref: string): Promise<Tmp
  * the sweep is judged after its contents.
  *
  * `signal` ends the sweep early: once it is aborted the walk stops listing
- * and nothing more is removed — what is already gone is returned.
+ * and nothing more is removed — it is asked again right before each removal,
+ * after every awaited look — and what is already gone is returned.
  */
 export async function sweepTmpFolder(
   walker: ITreeWalker,
@@ -176,24 +198,30 @@ export async function sweepTmpFolder(
   signal?: AbortSignal,
 ): Promise<string[]> {
   const tmpDir = path.join(workspaceDir, WORKSPACE_TMP_DIR);
-  try {
-    // `lstat` the folder itself: a `tmp` that is a link is not a folder of
-    // this workspace's to sweep (the walk would follow it).
-    if (!(await fs.lstat(tmpDir)).isDirectory()) return [];
-  } catch (err) {
-    if (isAbsence(err)) return [];
-    throw err;
-  }
+  // `lstat` the folder itself: a `tmp` that is a link is not a folder of
+  // this workspace's to sweep (the walk would follow it). Not there is
+  // nothing to sweep.
+  if ((await lstatOrNull(tmpDir))?.isDirectory() !== true) return [];
   const join = (dir: string, name: string): string => (dir === '' ? name : `${dir}/${name}`);
   const entries: string[] = [];
   const oldDirs: string[] = [];
   const stopped = (): boolean => signal?.aborted === true;
+  // The entry's own `lstat` (shared/rename-no-replace.ts), or null when it is
+  // gone; any other failure spoils that one entry: logged, and left alone.
+  const entryStat = async (rel: string): Promise<Stats | null> => {
+    try {
+      return await lstatOrNull(path.join(tmpDir, rel));
+    } catch (err) {
+      log.warn('could not stat a tmp entry:', { err, entry: sanitizedPath(rel) });
+      return null;
+    }
+  };
   await walker.walk(tmpDir, { until: stopped }, [
     {
       async onDir(rel) {
         if (rel === '') return;
         // Its age is read BEFORE its contents go: removing them moves it.
-        const stat = await lstatOrNull(path.join(tmpDir, rel));
+        const stat = await entryStat(rel);
         if (stat && now - stat.mtimeMs > maxAgeMs) oldDirs.push(rel);
       },
       onFile(dir, name) {
@@ -223,9 +251,13 @@ export async function sweepTmpFolder(
   };
   for (const rel of entries) {
     if (stopped()) return removed;
-    const stat = await lstatOrNull(path.join(tmpDir, rel));
+    const stat = await entryStat(rel);
+    if (!stat || now - stat.mtimeMs <= maxAgeMs) continue;
+    // Asked again AFTER the awaited look: a stop that came while it ran
+    // removes nothing more, this entry included.
+    if (stopped()) return removed;
     // A file, or a link removed as the link.
-    if (stat && now - stat.mtimeMs > maxAgeMs) await attempt(rel, (abs) => fs.unlink(abs));
+    await attempt(rel, (abs) => fs.unlink(abs));
   }
   // Walk order lists a folder before what is in it, so the reverse is deepest first.
   for (const rel of oldDirs.reverse()) {
@@ -233,16 +265,6 @@ export async function sweepTmpFolder(
     await attempt(rel, (abs) => fs.rmdir(abs));
   }
   return removed;
-}
-
-/** The entry's own `lstat`, or null when it is gone; any other failure is logged and the entry left alone. */
-async function lstatOrNull(abs: string): Promise<Stats | null> {
-  try {
-    return await fs.lstat(abs);
-  } catch (err) {
-    if (!isAbsence(err)) log.warn('could not stat a tmp entry:', { err });
-    return null;
-  }
 }
 
 /**

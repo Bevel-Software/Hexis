@@ -417,6 +417,7 @@ describe('normalizePathArgs', () => {
       { destination: '__tmp__' },
       { files: [{ path: 'ok.md' }, { path: '__tmp__/a.md' }] },
       { paths: ['ok.md', '__tmp__/a.md'] },
+      { resolutions: [{ path: 'ok.md', choose: 'ours' }, { path: '__tmp__/a.md', content: 'x' }] },
     ];
     for (const args of calls) {
       expect(() => normalizePathArgs(args, KB, { tool: 'save_file' })).toThrow(

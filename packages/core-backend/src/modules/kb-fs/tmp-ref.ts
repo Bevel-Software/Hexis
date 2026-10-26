@@ -48,18 +48,23 @@ const PATH_INPUTS = ['path', 'src', 'dest', 'destination'] as const;
 
 /**
  * Every path a tool call carries, with the input it came in: the string
- * inputs, `files` for each `files[].path` of a batch write, and `paths` for
- * each entry of a list of paths (`request_file_download`).
+ * inputs, and for EVERY list input, each entry that is a path itself
+ * (`paths` of `request_file_download`) or an object carrying one in `path`
+ * (`files[].path` of a batch write, `resolutions[].path` of
+ * `update_branch`). Read by shape rather than by a list of tool inputs, so a
+ * list a tool adds later is gated without anyone remembering to name it here.
  */
 function pathEntries(args: Record<string, unknown>): Array<[string, unknown]> {
   const entries: Array<[string, unknown]> = PATH_INPUTS.map((key) => [key, args[key]]);
-  if (Array.isArray(args.files)) {
-    for (const f of args.files as unknown[]) {
-      entries.push(['files', f && typeof f === 'object' ? (f as Record<string, unknown>).path : undefined]);
+  for (const [key, value] of Object.entries(args)) {
+    if (!Array.isArray(value)) continue;
+    for (const item of value as unknown[]) {
+      if (typeof item === 'string') {
+        if (key === 'paths') entries.push([key, item]);
+      } else if (item && typeof item === 'object') {
+        entries.push([key, (item as Record<string, unknown>).path]);
+      }
     }
-  }
-  if (Array.isArray(args.paths)) {
-    for (const p of args.paths as unknown[]) entries.push(['paths', p]);
   }
   return entries;
 }
