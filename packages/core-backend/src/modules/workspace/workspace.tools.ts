@@ -239,7 +239,11 @@ const str = (description: string): JsonSchema => ({ type: 'string', description 
  * (`agent-instructions/shared-file-rules.ts`): said in full on three
  * descriptions it took each of them past the length a client cuts at.
  */
-/** On every write tool: a write to the default branch is live at once, so the agent asks first. */
+/**
+ * A write to the default branch is live at once, so the agent asks first. Said on the four
+ * tools behind 87 of the 91 writes there in the agent-guide benchmark (2026-10-26); `start-here`
+ * says it for the other write tools.
+ */
 const ASK_BEFORE_DEFAULT_BRANCH =
   ' On the default branch a write is live for everyone at once: unless the person already said where, ask them first whether to write there or propose it on a draft.';
 

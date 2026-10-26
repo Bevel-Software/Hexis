@@ -839,7 +839,7 @@ export function registerWorkflowTools(
       'own history) or the name of another branch (its published tip). Answers `content` (null when the ' +
       'file was not there) and `sha`, the commit it was read at; for a commit, also `before`, the file ' +
       'just before that commit. To put an earlier version back, write it with `write_file`. Takes your ' +
-      'read of the file: on `branch` now for a commit, at the tip for a branch.',
+      'read of the file on `branch` now and, for a branch, also at its tip.',
     inputs: {
       type: 'object',
       properties: {

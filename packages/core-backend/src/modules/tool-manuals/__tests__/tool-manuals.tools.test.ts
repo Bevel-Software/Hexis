@@ -363,4 +363,26 @@ describe('list_tool_setup — a tool that needs the caller’s own value says so
     const body = (await (await callSetup(base, 'bevel_alice')).json()) as { note?: string };
     expect(body.note).toBeUndefined();
   });
+
+  const SIGN_IN = {
+    ...TICKETS,
+    variables: [{ name: 'TICKETDESK_OAUTH', scope: 'user' as const, label: null, oauth: { scopes: ['tickets'] } }],
+  };
+
+  it('tells a caller to sign in once the owner has set the sign-in up', async () => {
+    const base = await start();
+    vi.mocked(toolManualService.listAccessibleCatalog).mockResolvedValueOnce({ tools: [SIGN_IN], invalid: [] } as never);
+    const body = (await (await callSetup(base, 'bevel_bob')).json()) as { note?: string };
+    expect(body.note).toContain('`ticketdesk` needs your own value or sign-in');
+  });
+
+  it('does not send a caller to sign in before the owner has set the sign-in up', async () => {
+    const base = await start();
+    vi.mocked(toolManualService.listAccessibleCatalog).mockResolvedValueOnce({ tools: [SIGN_IN], invalid: [] } as never);
+    statusFor.mockImplementationOnce(async (_userId: string, keys: string[]) =>
+      keys.map((key) => ({ key, adminConfigured: false, userConfigured: false })),
+    );
+    const body = (await (await callSetup(base, 'bevel_bob')).json()) as { note?: string };
+    expect(body.note).toBeUndefined();
+  });
 });

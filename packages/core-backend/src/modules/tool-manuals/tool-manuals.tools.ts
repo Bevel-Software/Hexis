@@ -298,7 +298,10 @@ export function registerToolManualsTools(
       }
       // The person's own part, said where the agent is when a tool "does not work": the
       // reconnect step is the one agents leave out (the agent-guide benchmark, 2026-10-26).
-      const needYou = tools.filter((t) => t.variables.some((v) => v.scope === 'user' && !(v.oauth ? v.authorized : v.userConfigured)));
+      // A sign-in waits on the owner's provider setup (the OAuth var's admin row): until then there is nothing to sign in to.
+      const needYou = tools.filter((t) =>
+        t.variables.some((v) => v.scope === 'user' && (v.oauth ? v.adminConfigured && !v.authorized : !v.userConfigured)),
+      );
       if (needYou.length > 0) {
         notes.push(
           `${needYou.map((t) => `\`${t.name}\``).join(', ')} ${needYou.length === 1 ? 'needs' : 'need'} your own value or sign-in. ` +
