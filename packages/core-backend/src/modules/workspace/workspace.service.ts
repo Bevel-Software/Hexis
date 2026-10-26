@@ -15,7 +15,7 @@ import {
   type ExistingEntryKind,
 } from '@bevel-software/platform-shared';
 import { isAbsence, type IgnoreRules, type ITreeWalker, type TreeWalkOptions } from '../../shared/fs.contract.js';
-import { BevelIgnoreStack, assertRepoRootNameFree, normalizeWorkspacePath, assertValidBranchName, normalizeRepositoryAddress, sameRepository } from '../kb-fs/index.js';
+import { BevelIgnoreStack, assertRepoRootNameFree, isTmpRef, normalizeWorkspacePath, assertValidBranchName, normalizeRepositoryAddress, sameRepository } from '../kb-fs/index.js';
 import {
   DestinationTakenError,
   inspectDestination,
@@ -44,7 +44,7 @@ import {
 import { redactSecret, urlQuerySecrets } from '../../shared/redact-secret.js';
 import { setAsideClone, setAsideRepository, setAsideRootFor, setAsideStamp } from './set-aside-clone.js';
 import { workingCopyShape } from './kb-repository.js';
-import { isTmpRef, readTmpRef, statTmpRef, sweepTmpFolder, TMP_MAX_AGE_MS, type TmpFileStat } from './workspace-tmp.js';
+import { readTmpRef, statTmpRef, sweepTmpFolder, TMP_MAX_AGE_MS, type TmpFileStat } from './workspace-tmp.js';
 import type { IKbRepository } from './kb-repository.contract.js';
 import {
   cloneCredentialConfigArgs,
@@ -1822,14 +1822,6 @@ export class WorkspaceService implements IWorkspaceService {
   }
 
   /**
-   * Remove the workspace's `tmp/` directory — transient run artifacts (code-mode
-   * tool-chain spills, staged SharePoint docs) that live at the workspace root,
-   * outside the KB git repo, and are never committed. Computes the path directly
-   * from `workspacesRoot` (no bootstrapping) and force-removes, so it's safe to
-   * call after a run even if the workspace was already torn down — a missing
-   * directory is ignored.
-   */
-  /**
    * What `file_stat` reports for a tmp ref: the stat of the one file it names
    * in this workspace's `tmp/` folder, resolved exactly as
    * {@link readFileBinary} resolves it.
@@ -1843,8 +1835,13 @@ export class WorkspaceService implements IWorkspaceService {
    * `tmp/` folder last modified more than `olderThanMs` ago — the platform's
    * periodic cleanup (see `TmpSweeper`). Judged on the entry's own `lstat`,
    * never through a link. Returns how many entries went, per workspace.
+   * An aborted `signal` ends the sweep at the next entry (see `TmpSweeper`).
    */
-  async sweepTmp(olderThanMs: number = TMP_MAX_AGE_MS, now: number = Date.now()): Promise<{ removed: Record<string, number> }> {
+  async sweepTmp(
+    olderThanMs: number = TMP_MAX_AGE_MS,
+    now: number = Date.now(),
+    signal?: AbortSignal,
+  ): Promise<{ removed: Record<string, number> }> {
     let entries: Array<{ name: string; isDirectory: () => boolean }>;
     try {
       entries = await fs.readdir(this.workspacesRoot, { withFileTypes: true });
@@ -1854,9 +1851,10 @@ export class WorkspaceService implements IWorkspaceService {
     }
     const removed: Record<string, number> = {};
     for (const entry of entries) {
+      if (signal?.aborted) break;
       if (!entry.isDirectory()) continue;
       try {
-        const gone = await sweepTmpFolder(path.join(this.workspacesRoot, entry.name), olderThanMs, now);
+        const gone = await sweepTmpFolder(this.disk, path.join(this.workspacesRoot, entry.name), olderThanMs, now, signal);
         if (gone.length > 0) removed[entry.name] = gone.length;
       } catch (err) {
         // One unreadable workspace spoils its own sweep, not the others'.
@@ -1880,6 +1878,14 @@ export class WorkspaceService implements IWorkspaceService {
     return dir;
   }
 
+  /**
+   * Remove the workspace's `tmp/` directory — transient run artifacts (code-mode
+   * tool-chain spills, staged SharePoint docs) that live at the workspace root,
+   * outside the KB git repo, and are never committed. Computes the path directly
+   * from `workspacesRoot` (no bootstrapping) and force-removes, so it's safe to
+   * call after a run even if the workspace was already torn down — a missing
+   * directory is ignored.
+   */
   async clearTmp(workspaceId: string): Promise<void> {
     // Guard against a malicious/odd workspaceId (e.g. "..") escaping the root
     // and force-removing an unintended directory.

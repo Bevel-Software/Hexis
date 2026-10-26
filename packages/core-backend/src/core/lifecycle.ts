@@ -461,8 +461,11 @@ export interface CoreStopDeps {
   /**
    * The sweep of the workspaces' `tmp/` folders: stopped with this graph, so
    * an evicted tenant's graph leaves no timer behind, and its sweep in flight
-   * awaited, so the next graph over the same root never meets it still
-   * walking there. Optional: a caller that has not built one passes nothing.
+   * cancelled (it removes nothing more) and then awaited within the stop's
+   * deadline, so the next graph over the same root does not meet it still
+   * walking there — unless one filesystem call outlasts that deadline, after
+   * which the cancelled sweep still removes nothing. Optional: a caller that
+   * has not built one passes nothing.
    */
   tmpSweeper?: { stopSweeping(): void; drainSweep(): Promise<void> };
   /**

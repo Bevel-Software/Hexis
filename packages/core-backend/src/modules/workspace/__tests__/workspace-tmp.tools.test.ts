@@ -232,7 +232,9 @@ async function start(): Promise<string> {
     // their refusal of a ref is asserted rather than assumed.
     { maxBytes: 1, issue: async () => { throw new Error('not reached'); } } as never,
     undefined,
-    undefined,
+    // The download store, for the same reason: `request_file_download` is
+    // mounted, and its `paths` list is refused a ref like any other input.
+    { assertCanIssue: () => { throw new Error('not reached'); } } as never,
     undefined,
     undefined,
     matcher,
@@ -532,6 +534,7 @@ describe('every writing tool refuses a tmp ref', () => {
     ['unzip', { path: '__tmp__/archive.zip' }],
     ['apply_file_upload', { token: 'x', destination: '__tmp__/chat-uploads' }],
     ['list_files', { path: '__tmp__/chat-uploads' }],
+    ['request_file_download', { paths: ['KnowledgeBase/a.md', REF] }],
   ];
 
   it.each(CALLS)('%s %j', async (tool, args) => {
@@ -650,6 +653,36 @@ describe('the periodic sweep of every workspace\'s tmp folder', () => {
     expect(stopped).toBeGreaterThanOrEqual(2);
     await new Promise((r) => setTimeout(r, 60));
     expect(sweeps).toBe(stopped);
+  });
+
+  it('stopping cancels the sweep in flight: it removes nothing more, and the drain waits for it to end', async () => {
+    await start();
+    const files: string[] = [];
+    for (const ws of [DRAFT, PROTECTED]) {
+      for (let i = 0; i < 3; i += 1) {
+        const abs = await stage(`old-${i}.txt`, 'x', ws);
+        await age(abs, 8);
+        files.push(abs);
+      }
+    }
+    const signals: AbortSignal[] = [];
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    const sweeper = new TmpSweeper(async (signal) => {
+      signals.push(signal);
+      // Stopped before the sweep gets to look at anything.
+      await held;
+      return service.sweepTmp(undefined, undefined, signal);
+    });
+    sweeper.startSweeping(60_000);
+    sweeper.stopSweeping();
+    expect(signals[0]!.aborted).toBe(true);
+    release();
+    await sweeper.drainSweep();
+    for (const abs of files) expect(await readFile(abs, 'utf8')).toBe('x');
+    // Not cancelled, the same sweep removes them all.
+    await service.sweepTmp();
+    for (const abs of files) await expect(stat(abs)).rejects.toThrow();
   });
 
   it('sweeps at seven days', () => {

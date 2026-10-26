@@ -24,6 +24,7 @@ import {
   assertRepoRootNameFreeArgs,
   hasControlCharacter,
   isInsideRepo,
+  isTmpRef,
   normalizePathArgs,
   normalizeWorkspacePath,
 } from '../kb-fs/index.js';
@@ -35,7 +36,6 @@ import { isAbsence, type ITreeWalker } from '../../shared/fs.contract.js';
 import type { AccessDecisionSource, AccessTargetKind, IAccessControl } from '../access/index.js';
 import { accessRoster, resolveAccessView, accessMdPathForFolder, fileCarriesAccessRules, governingFolderOf } from '../access/index.js';
 import type { SpillStore } from './spill-store.js';
-import { isTmpRef, tmpRefReadOnlyRefusal } from './workspace-tmp.js';
 import type { DocExtractService } from './file-readers/doc-extract.service.js';
 import { displayPath, type FileKind, type FileReader, type FileReaderRegistry, type ReadOrigin, type ReadResult } from './file-readers/file-reader.js';
 import { fileTypeOf, needsContent } from './file-readers/content-mode.js';
@@ -312,9 +312,10 @@ const RESERVED_ROOT_NAME_TARGETS: Readonly<Record<string, readonly string[]>> = 
  * The inputs that take a tmp ref (`__tmp__/<path>`, see `workspace-tmp.ts`)
  * beside a repository path — the four reads of the one file it names. Every
  * other tool, and every other input of these four (`copy_file`'s `dest`
- * among them), refuses a ref with `tmpRefReadOnlyRefusal` before anything
- * else runs: the folder is read-only through the ref, and `copy_file` to a
- * repository path is how a file is kept.
+ * among them), refuses a ref before anything else runs — in
+ * `normalizePathArgs`, through the one admission gate (`kb-fs/tmp-ref.ts`):
+ * the folder is read-only through the ref, and `copy_file` to a repository
+ * path is how a file is kept.
  */
 const TMP_REF_INPUTS: Readonly<Record<string, readonly string[]>> = {
   read_file: ['path'],
@@ -1243,35 +1244,18 @@ export function registerWorkspaceTools(
    * not cloned yet (or that does not resolve) is left to the handler; the
    * filesystem refuses again underneath regardless.
    */
-  const toolPathArgs = (args: Record<string, unknown>): string[] => toolPathEntries(args).map(([, value]) => value);
-
-  /** {@link toolPathArgs} with the input each path came in (`files` for every `files[].path`). */
-  const toolPathEntries = (args: Record<string, unknown>): Array<[string, string]> => {
-    const paths: Array<[string, string]> = [];
+  const toolPathArgs = (args: Record<string, unknown>): string[] => {
+    const paths: string[] = [];
     for (const key of ['path', 'src', 'dest', 'destination'] as const) {
-      const value = args[key];
-      if (typeof value === 'string') paths.push([key, value]);
+      if (typeof args[key] === 'string') paths.push(args[key]);
     }
     if (Array.isArray(args.files)) {
       for (const f of args.files as unknown[]) {
         const fp = f && typeof f === 'object' ? (f as Record<string, unknown>).path : undefined;
-        if (typeof fp === 'string') paths.push(['files', fp]);
+        if (typeof fp === 'string') paths.push(fp);
       }
     }
     return paths;
-  };
-
-  /**
-   * Refuse a tmp ref in any input that does not take one (see
-   * `TMP_REF_INPUTS`) — before the normaliser, which would otherwise make it
-   * the repository path `<kbDirName>/__tmp__/…` and let a write land there
-   * as if the ref had been honoured.
-   */
-  const assertTmpRefsTaken = (tool: string, args: Record<string, unknown>): void => {
-    const takes = TMP_REF_INPUTS[tool] ?? [];
-    for (const [key, value] of toolPathEntries(args)) {
-      if (isTmpRef(value) && !takes.includes(key)) throw tmpRefReadOnlyRefusal(value, tool);
-    }
   };
 
   /**
@@ -1922,13 +1906,13 @@ export function registerWorkspaceTools(
         async (args, ctx) => {
           // BEFORE the normaliser: see `assertToolPathsNotGitInternals`.
           if (spec.fileTool !== false) await assertToolPathsNotGitInternals(args, ctx);
-          assertTmpRefsTaken(spec.name, args);
-          const takesTmpRef = TMP_REF_INPUTS[spec.name] !== undefined;
-          const normalized = normalizePathArgs(
-            args,
-            kbDirName,
-            (v) => (spec.name === 'read_file' && spillStore.isSpillRef(v)) || (takesTmpRef && isTmpRef(v)),
-          );
+          // The normaliser admits a tmp ref in exactly the inputs
+          // `TMP_REF_INPUTS` names and refuses it in every other one first.
+          const normalized = normalizePathArgs(args, kbDirName, {
+            tool: spec.name,
+            tmpRefInputs: TMP_REF_INPUTS[spec.name],
+            skip: spec.name === 'read_file' ? (v) => spillStore.isSpillRef(v) : undefined,
+          });
           // The checkout's own name is reserved at the repository root on this
           // surface too. The routes meet that rule inside `WorkspaceService`;
           // these tools write through the locking filesystem, which never

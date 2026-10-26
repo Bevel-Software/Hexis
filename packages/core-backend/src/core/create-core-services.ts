@@ -777,7 +777,7 @@ export async function createCoreServices(
   // What the chat, the SharePoint reader and tool chains stage in a
   // workspace's `tmp/` folder lives seven days past its last change; the file
   // tools read it through the `__tmp__/` ref meanwhile (see workspace-tmp.ts).
-  const tmpSweeper = new TmpSweeper(() => workspaceService.sweepTmp());
+  const tmpSweeper = new TmpSweeper((signal) => workspaceService.sweepTmp(undefined, undefined, signal));
   // The upload route an agent lands files by, so their content never passes
   // through the model. Bytes live BESIDE the workspaces root (never inside
   // one) until the apply commits them or the token expires — checked here

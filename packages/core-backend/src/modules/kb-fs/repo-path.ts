@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { WorkflowValidationError } from '../../shared/domain-errors.js';
 import { sanitizedPath } from '../../shared/printable.js';
+import { assertTmpRefsTaken, isTmpRef } from './tmp-ref.js';
 
 /**
  * Workspace-relative paths and the repository folder.
@@ -321,19 +322,28 @@ const PATH_ARG_KEYS = ['path', 'src', 'dest', 'destination'] as const;
  * copy. This is where the MCP surface meets the normaliser — one call, before
  * any handler runs, so no tool keeps a resolver of its own.
  *
- * `skip` is for the one input that is not a workspace path at all: `read_file`
- * also takes a `__tool_chain_spill__/…` ref, which belongs to no workspace and
- * must reach the handler as written. An absent or non-string value is left
- * alone too — the handler's own required-argument message is better than a
- * path refusal about `undefined`.
+ * It is also where a tmp ref (`__tmp__/…`) is admitted or refused, first:
+ * {@link assertTmpRefsTaken} refuses one in every input of `tool` that
+ * `tmpRefInputs` does not name, and a ref in an input that does name it
+ * reaches the handler as written — so no tool whose paths pass through here
+ * can read the ref as the repository path `<kbDirName>/__tmp__/…`.
+ *
+ * `skip` is for the other input that is not a workspace path at all:
+ * `read_file` also takes a `__tool_chain_spill__/…` ref, which belongs to no
+ * workspace and must reach the handler as written. An absent or non-string
+ * value is left alone too — the handler's own required-argument message is
+ * better than a path refusal about `undefined`.
  */
 export function normalizePathArgs(
   args: Record<string, unknown>,
   kbDirName: string,
-  skip?: (value: string) => boolean,
+  options: { tool: string; tmpRefInputs?: readonly string[]; skip?: (value: string) => boolean },
 ): Record<string, unknown> {
+  const { tool, tmpRefInputs, skip } = options;
+  assertTmpRefsTaken(tool, args, tmpRefInputs);
+  // Every tmp ref still here is in an input that takes one.
   const one = (value: unknown): unknown =>
-    typeof value !== 'string' || value.length === 0 || skip?.(value)
+    typeof value !== 'string' || value.length === 0 || isTmpRef(value) || skip?.(value)
       ? value
       : normalizeWorkspacePath(value, kbDirName);
   const out: Record<string, unknown> = { ...args };

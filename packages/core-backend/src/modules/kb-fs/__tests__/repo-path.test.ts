@@ -231,8 +231,8 @@ describe('a line break in a path — one name to the gates, two object names to 
   });
 
   it('refuses it through normalizePathArgs, which is where the MCP tools meet the rule', () => {
-    expect(() => normalizePathArgs({ path: INJECTED }, KB)).toThrow(/control character/);
-    expect(() => normalizePathArgs({ files: [{ path: INJECTED }] }, KB)).toThrow(/control character/);
+    expect(() => normalizePathArgs({ path: INJECTED }, KB, { tool: 'read_file' })).toThrow(/control character/);
+    expect(() => normalizePathArgs({ files: [{ path: INJECTED }] }, KB, { tool: 'read_file' })).toThrow(/control character/);
   });
 });
 
@@ -360,6 +360,8 @@ describe('assertRepoRootNameFree', () => {
 });
 
 describe('normalizePathArgs', () => {
+  const T = { tool: 'read_file' };
+
   it('normalizes every path-shaped tool argument, batch entries included', () => {
     expect(
       normalizePathArgs(
@@ -372,6 +374,7 @@ describe('normalizePathArgs', () => {
           files: [{ path: 'e.md', content: '/x' }],
         },
         KB,
+        T,
       ),
     ).toEqual({
       branch: '/main',
@@ -385,22 +388,54 @@ describe('normalizePathArgs', () => {
 
   it('leaves a spill ref alone — it belongs to no workspace', () => {
     expect(
-      normalizePathArgs({ path: '__tool_chain_spill__/abc.json' }, KB, (v) => v.startsWith('__tool_chain_spill__/')),
+      normalizePathArgs({ path: '__tool_chain_spill__/abc.json' }, KB, { tool: 'read_file', skip: (v) => v.startsWith('__tool_chain_spill__/') }),
     ).toEqual({ path: '__tool_chain_spill__/abc.json' });
   });
 
   it('leaves an absent or empty path to the handler\'s own required-argument message', () => {
-    expect(normalizePathArgs({ path: undefined }, KB)).toEqual({ path: undefined });
-    expect(normalizePathArgs({ path: '' }, KB)).toEqual({ path: '' });
-    expect(normalizePathArgs({ branch: 'main' }, KB)).toEqual({ branch: 'main' });
+    expect(normalizePathArgs({ path: undefined }, KB, T)).toEqual({ path: undefined });
+    expect(normalizePathArgs({ path: '' }, KB, T)).toEqual({ path: '' });
+    expect(normalizePathArgs({ branch: 'main' }, KB, T)).toEqual({ branch: 'main' });
   });
 
   it('collapses the spellings so two callers take one lock row', () => {
-    expect(normalizePathArgs({ path: './knowledge-base//a.md' }, KB)).toEqual({ path: 'knowledge-base/a.md' });
+    expect(normalizePathArgs({ path: './knowledge-base//a.md' }, KB, T)).toEqual({ path: 'knowledge-base/a.md' });
+  });
+
+  it('admits a tmp ref, as written, in exactly the inputs the tool names', () => {
+    expect(normalizePathArgs({ src: '__tmp__/a.pdf', dest: 'a.pdf' }, KB, { tool: 'copy_file', tmpRefInputs: ['src'] })).toEqual({
+      src: '__tmp__/a.pdf',
+      dest: 'knowledge-base/a.pdf',
+    });
+  });
+
+  it('refuses a tmp ref in every other input, lists included, naming the tool and copy_file', () => {
+    const calls: Array<Record<string, unknown>> = [
+      { path: '__tmp__/a.md' },
+      { src: '__tmp__/a.md' },
+      { dest: '__tmp__/a.md' },
+      { destination: '__tmp__' },
+      { files: [{ path: 'ok.md' }, { path: '__tmp__/a.md' }] },
+      { paths: ['ok.md', '__tmp__/a.md'] },
+    ];
+    for (const args of calls) {
+      expect(() => normalizePathArgs(args, KB, { tool: 'save_file' })).toThrow(
+        /is a tmp ref, and save_file does not take one there: the workspace's tmp folder is read-only through the ref\..*copy_file/,
+      );
+    }
+    // A tool that takes a ref in `src` still refuses one in `dest`.
+    expect(() => normalizePathArgs({ dest: '__tmp__/a.md' }, KB, { tool: 'copy_file', tmpRefInputs: ['src'] })).toThrow(
+      /copy_file does not take one there/,
+    );
+  });
+
+  it('reads a path that only contains the prefix as an ordinary repository path', () => {
+    expect(normalizePathArgs({ path: 'knowledge-base/__tmp__/a.md' }, KB, T)).toEqual({ path: 'knowledge-base/__tmp__/a.md' });
+    expect(normalizePathArgs({ path: '/knowledge-base/__tmp__/a.md' }, KB, T)).toEqual({ path: 'knowledge-base/__tmp__/a.md' });
   });
 
   it('refuses a traversing tool argument', () => {
-    expect(() => normalizePathArgs({ path: '../escape.md' }, KB)).toThrow(/outside the knowledge base repository/);
+    expect(() => normalizePathArgs({ path: '../escape.md' }, KB, T)).toThrow(/outside the knowledge base repository/);
   });
 });
 
