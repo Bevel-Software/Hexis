@@ -35,6 +35,18 @@ describe('changePassword and the token it hands back', () => {
     expect(getToken()).toBe('token-after-the-change');
   });
 
+  it('keeps a sign-in another tab made while the change was in flight, rather than overwriting it', async () => {
+    setToken('token-before-the-change');
+    vi.spyOn(globalThis, 'fetch').mockImplementationOnce(async () => {
+      // The other tab signs in as someone else before this response arrives.
+      setToken('other-account-token');
+      return new Response(JSON.stringify({ ok: true, token: 'token-after-the-change' }), { status: 200 });
+    });
+
+    await changePassword('old-password-1', 'new-password-1');
+    expect(getToken()).toBe('other-account-token');
+  });
+
   it('keeps the stored token when the change is refused', async () => {
     setToken('token-before-the-change');
     vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(

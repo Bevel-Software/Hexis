@@ -1,4 +1,4 @@
-import { authFetch, setToken } from '../../../lib/api';
+import { authFetch, getToken, setToken } from '../../../lib/api';
 
 /** One row of the admin Accounts list (`GET /api/admin/accounts`). */
 export interface AccountSummary {
@@ -51,12 +51,17 @@ async function readError(res: Response, fallback: string): Promise<string> {
 /**
  * Self-service password change. `currentPassword` is required once one is set.
  * The change ends every session opened before it, this one's included, so the
- * fresh token the server hands back replaces the stored one.
+ * fresh token the server hands back replaces the stored one — but only the
+ * one this request sent: the stored token is one key shared by every tab, and
+ * a tab that signed in as someone else while this request was in flight has
+ * replaced it already. That sign-in is kept; this change's token belongs to
+ * a session that tab no longer has.
  */
 export async function changePassword(
   currentPassword: string | undefined,
   newPassword: string,
 ): Promise<void> {
+  const sent = getToken();
   const res = await authFetch('/api/auth/change-password', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -64,7 +69,7 @@ export async function changePassword(
   });
   if (!res.ok) throw new Error(await readError(res, 'Could not change password'));
   const body = (await res.json()) as { token: string };
-  setToken(body.token);
+  if (getToken() === sent) setToken(body.token);
 }
 
 export async function listAccounts(): Promise<AccountSummary[]> {
