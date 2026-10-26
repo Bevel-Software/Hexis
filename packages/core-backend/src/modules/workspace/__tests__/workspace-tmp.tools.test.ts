@@ -28,7 +28,7 @@ import { SpillStore } from '../spill-store.js';
 import { DocExtractService } from '../file-readers/doc-extract.service.js';
 import { WorkerDocumentExtractor } from '../file-readers/extract-in-worker.js';
 import type { WorkspaceService } from '../workspace.service.js';
-import { sweepTmpFolder, TMP_MAX_AGE_MS, TmpSweeper } from '../workspace-tmp.js';
+import { TMP_MAX_AGE_MS, TmpSweeper } from '../workspace-tmp.js';
 
 /**
  * The reserved `__tmp__/` ref, end to end: the REAL tool routes, the REAL
@@ -577,6 +577,26 @@ describe('copy_file from a tmp ref to a repository path', () => {
     await expect(stat(join(workspaceDir(PROTECTED), KB_DIR, 'Locked/a.md'))).rejects.toThrow();
   });
 
+  it('a dry run to a path the caller may not write is refused before the staged bytes are read', async () => {
+    const base = await start();
+    await stage('a.md', '---\nread:\n  - deny everyone\n---\n# Staged\n', PROTECTED);
+    previews.length = 0;
+    const read = vi.spyOn(service, 'readFileBinary');
+    try {
+      const dry = await call(base, 'copy_file', { branch: PROTECTED, src: '__tmp__/a.md', dest: 'Locked/a.md', dryRun: true });
+      expect(dry.status).toBe(200);
+      expect(dry.body).toMatchObject({ allowed: false, dryRun: true, copied: false });
+      expect(dry.body.kind).toBeUndefined();
+      expect(read).not.toHaveBeenCalled();
+      // Nothing of the source travels into a denied preview.
+      expect(previews).toEqual([
+        [expect.any(String), 'e@x', '__tmp__/a.md', 'Locked/a.md', { sourceRemains: true, sourceContent: '' }],
+      ]);
+    } finally {
+      read.mockRestore();
+    }
+  });
+
   it('a missing staged file is not-found naming the ref', async () => {
     const base = await start();
     const { status, body } = await call(base, 'copy_file', { src: '__tmp__/gone.xlsx', dest: 'KnowledgeBase/x.xlsx' });
@@ -768,9 +788,9 @@ describe('the periodic sweep of every workspace\'s tmp folder', () => {
       return stat;
     }) as typeof fsp.lstat);
     try {
-      const removed = await sweepTmpFolder(new NodeFs(), workspaceDir(DRAFT), TMP_MAX_AGE_MS, Date.now(), stop.signal);
+      const { removed } = await service.sweepTmp(undefined, undefined, stop.signal);
       expect(stop.signal.aborted).toBe(true);
-      expect(removed).toEqual([]);
+      expect(removed).toEqual({});
     } finally {
       spy.mockRestore();
     }

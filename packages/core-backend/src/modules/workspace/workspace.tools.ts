@@ -1422,11 +1422,15 @@ export function registerWorkspaceTools(
    */
   const copyImpact = async (branch: string, ctx: ToolContext, src: string, dest: string) => {
     const fromTmp = isTmpRef(src);
-    const sourceContent = fromTmp ? await tmpSourceText(branch, ctx, src) : undefined;
-    const [before, after, blocked] = await Promise.all([
+    // The write verdict FIRST, and alone: a staged file's bytes are read only
+    // for a caller who may write the destination. A denied preview carries
+    // no rules from the source ('' — what an unreadable source carries), so
+    // its `access.after` is the destination's own rules for the caller.
+    const blocked = await writeBlocked(branch, ctx, [dest]);
+    const sourceContent = fromTmp ? (blocked.length > 0 ? '' : await tmpSourceText(branch, ctx, src)) : undefined;
+    const [before, after] = await Promise.all([
       fromTmp ? TMP_ACCESS : accessAt(branch, ctx, src),
       accessAfter(branch, ctx, src, dest, { sourceRemains: true, sourceContent }),
-      writeBlocked(branch, ctx, [dest]),
     ]);
     const access = { before, after };
     const accessChanges = verbsDiffer(before, after);

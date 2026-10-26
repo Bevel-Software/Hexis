@@ -1,6 +1,7 @@
 import { promises as fs, type Stats } from 'node:fs';
 import path from 'node:path';
 import { PathNotFoundError, WorkflowDomainError, WorkflowValidationError } from '../../shared/domain-errors.js';
+import { assertWithinDirectory } from '../../shared/path-containment.js';
 import { sanitizedPath } from '../../shared/printable.js';
 import { hasControlCharacter, TMP_REF_PREFIX } from '../kb-fs/index.js';
 import { isAbsence, type ITreeWalker } from '../../shared/fs.contract.js';
@@ -128,7 +129,12 @@ export async function resolveTmpRef(workspaceDir: string, ref: string): Promise<
   if ((await lstatOrNull(tmpDir).catch(absent))?.isDirectory() !== true) throw new PathNotFoundError(ref);
   const realTmp = await fs.realpath(tmpDir).catch(absent);
   const real = await fs.realpath(path.join(tmpDir, ...segments)).catch(absent);
-  if (!real.startsWith(realTmp + path.sep)) {
+  // THE containment check (shared/path-containment.ts), on the real paths;
+  // its refusal is answered as the link rule, naming the ref. The folder
+  // itself passes it, and is refused below as a folder.
+  try {
+    assertWithinDirectory(real, realTmp);
+  } catch {
     throw invalidRef(ref, 'it goes through a link that leads out of the workspace\'s tmp folder, and links out of it are never followed.');
   }
   const stat = await fs.stat(real).catch(absent);
