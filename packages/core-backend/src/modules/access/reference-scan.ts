@@ -457,7 +457,12 @@ export async function translateRewriteWriteRefusal(
   }
   if (shown) return err;
   log.warn(`reference rewrite: the acting person may not write ${printable(p)}`);
-  return makeError(UNSHOWN_REFERENCE_REFUSAL);
+  const translated = makeError(UNSHOWN_REFERENCE_REFUSAL);
+  // withFileLocks reads the paths whose restore failed off the error it
+  // catches, to discard their partial bytes; the translation must carry them.
+  const unrestored = (err as { unrestoredPaths?: Set<string> }).unrestoredPaths;
+  if (unrestored) (translated as { unrestoredPaths?: Set<string> }).unrestoredPaths = unrestored;
+  return translated;
 }
 
 /**

@@ -9,10 +9,12 @@ import {
   findRoleRefsInText,
   rewriteRoleTokensInText,
   UNSHOWN_REFERENCE_REFUSAL,
+  translateRewriteWriteRefusal,
   type PathVisibility,
 } from '../reference-scan.js';
 import type { ITreeWalker } from '../../../shared/fs.contract.js';
 import { NodeFs } from '../../kb-fs/node-fs.js';
+import { AccessDeniedError } from '../../access-model/access-errors.js';
 
 /** A renaming person who may read every path. */
 const ALL_VISIBLE: PathVisibility = async (paths) => new Map(paths.map((p) => [p, true]));
@@ -166,6 +168,31 @@ async function write(repo: string, rel: string, contents: string): Promise<void>
   await fs.mkdir(path.dirname(abs), { recursive: true });
   await fs.writeFile(abs, contents);
 }
+
+describe('translateRewriteWriteRefusal — the lock scope still sees what a failed restore left', () => {
+  function refusal(unrestored?: Set<string>): AccessDeniedError {
+    const err = new AccessDeniedError({ path: 'Hidden/secret.md', eligibleRoles: [], eligibleUsers: [] });
+    if (unrestored) (err as { unrestoredPaths?: Set<string> }).unrestoredPaths = unrestored;
+    return err;
+  }
+
+  it('a refusal on a hidden file carries unrestoredPaths onto the generic refusal', async () => {
+    const unrestored = new Set(['KnowledgeBase/Hidden/secret.md']);
+    const out = await translateRewriteWriteRefusal(refusal(unrestored), NONE_VISIBLE, (m) => new Error(m));
+    expect((out as Error).message).toBe(UNSHOWN_REFERENCE_REFUSAL);
+    expect((out as { unrestoredPaths?: Set<string> }).unrestoredPaths).toBe(unrestored);
+  });
+
+  it('a refusal with every file restored adds no unrestoredPaths', async () => {
+    const out = await translateRewriteWriteRefusal(refusal(), NONE_VISIBLE, (m) => new Error(m));
+    expect((out as { unrestoredPaths?: Set<string> }).unrestoredPaths).toBeUndefined();
+  });
+
+  it('a refusal on a readable file comes back as it was', async () => {
+    const err = refusal(new Set(['x']));
+    expect(await translateRewriteWriteRefusal(err, ALL_VISIBLE, (m) => new Error(m))).toBe(err);
+  });
+});
 
 describe('KbReferenceScanner — .tool frontmatter is scanned and rewritten like .md', () => {
   it('finds a .tool frontmatter grant and a rename rewrites it (body untouched)', async () => {
