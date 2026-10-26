@@ -642,7 +642,8 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
    * by a delete of ours: the server confirmed that delete after the read was
    * sent, so what the read found is the file as it was before it. Its bytes
    * open no tab (`addTab`, `hydrateTabs`) and do not end the delete's marker
-   * (`forgetOwnDelete`). `readSentOrder`: `orderRef` taken as the read was
+   * (`forgetOwnDelete`); a write waiting since before it writes nothing
+   * (`awaitStillOnBranch`). `readSentOrder`: `orderRef` taken as the read was
    * sent. Judged on `deleteConfirmedOrderRef`, which no read clears:
    * restoring a sibling of a deleted folder's file overtakes nothing.
    */
@@ -1870,11 +1871,16 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
    * This session's own delete refuses it too: a save waiting here (autosave,
    * idle release, unmount cleanup) can outlive the closed tab, whose
    * `deletedPathsRef` entry goes with it, and would re-create the file.
+   * A delete of ours confirmed while it waited refuses it however long the
+   * wait: judged on the delete's order, which never expires, not on
+   * `isOwnDelete`, which ends OWN_DELETE_WINDOW_MS after the delete.
    */
   const awaitStillOnBranch = useCallback(async (readFrom: string, relativePath: string) => {
     const refuse = () => new Error(`${basename(relativePath)} was deleted from this branch; it was not saved.`);
+    const waitOrder = ++orderRef.current;
     const deleted = () => deletedPathsRef.current.has(relativePath)
-      || (workspaceIdRef.current === readFrom && isOwnDelete(relativePath));
+      || (workspaceIdRef.current === readFrom
+        && (isOwnDelete(relativePath) || isOvertakenByOwnDelete(relativePath, waitOrder)));
     if (deleted()) throw refuse();
     // A read deciding whether the file still exists is in flight: its answer
     // first, so a 404 it is about to deliver refuses this write too.
@@ -1893,7 +1899,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     }
     if (deleted()) throw refuse();
     return found;
-  }, [isCheckGone, isOwnDelete]);
+  }, [isCheckGone, isOwnDelete, isOvertakenByOwnDelete]);
 
   const saveFile = useCallback(async (relativePath: string, content: string) => {
     if (!workspaceId) return;

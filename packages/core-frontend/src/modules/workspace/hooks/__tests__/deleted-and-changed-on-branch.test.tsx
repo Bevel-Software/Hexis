@@ -1650,6 +1650,61 @@ describe('the editor writing back after our own delete', () => {
     expect(disk.has('KB/Draft.md')).toBe(false);
   });
 
+  it('a save that was waiting when the tab closed cannot re-create the file however long the wait', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const result = await mountReady();
+      await open(result, 'KB/Draft.md', 'KB/Keep.md');
+      await act(async () => { result.current.activateTab(tabAt(result, 'KB/Draft.md')!); });
+      let answer!: () => void;
+      apiMocks.readFile.mockImplementationOnce(() => new Promise((resolve) => {
+        answer = () => resolve('# Draft\n\nA page to delete.');
+      }));
+      act(() => bus.emit(fileChanged('KB/Draft.md', GIT_SYNC)));
+      await waitFor(() => expect(answer).toBeDefined());
+      let saving!: Promise<void>;
+      act(() => { saving = result.current.saveFile('KB/Draft.md', 'edited'); });
+
+      await act(async () => { await result.current.deleteEntry('KB/Draft.md'); });
+      expect(tabAt(result, 'KB/Draft.md')).toBeUndefined();
+      // The read answers long after the delete, past the own-delete window,
+      // with the bytes from before it.
+      vi.advanceTimersByTime(61_000);
+      expect(result.current.isOwnDelete?.('KB/Draft.md')).toBe(false);
+      apiMocks.writeFile.mockClear();
+      await act(async () => {
+        answer();
+        await expect(saving).rejects.toThrow('Draft.md was deleted from this branch');
+      });
+
+      expect(apiMocks.writeFile).not.toHaveBeenCalled();
+      expect(disk.has('KB/Draft.md')).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a save started after our delete, of a file restored since, is not refused by that delete', async () => {
+    const result = await mountReady();
+    await open(result, 'KB/Draft.md');
+    await act(async () => { await result.current.deleteEntry('KB/Draft.md'); });
+    await new Promise((r) => setTimeout(r, 2));
+    disk.set('KB/Draft.md', 'restored');
+    await open(result, 'KB/Draft.md');
+    // A change read is out when the save starts; the save waits on it.
+    let answer!: () => void;
+    apiMocks.readFile.mockImplementationOnce(() => new Promise((resolve) => {
+      answer = () => resolve('restored');
+    }));
+    act(() => bus.emit(fileChanged('KB/Draft.md', GIT_SYNC)));
+    await waitFor(() => expect(answer).toBeDefined());
+    let saving!: Promise<void>;
+    act(() => { saving = result.current.saveFile('KB/Draft.md', 'restored, edited'); });
+    await act(async () => { answer(); await saving; });
+
+    expect(disk.get('KB/Draft.md')).toBe('restored, edited');
+  });
+
   it('a file restored on the branch and opened again saves at once', async () => {
     const result = await mountReady();
     await open(result, 'KB/Draft.md');
