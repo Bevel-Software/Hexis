@@ -106,19 +106,12 @@ export interface IPatternSearch {
 }
 
 /**
- * The order every search answers in: path segment by segment, each compared
- * by its UTF-8 bytes — the order a sorted walk of the tree visits files in, so
- * a folder's files come before a sibling file whose name extends the folder's.
+ * The order every search answers in: ripgrep's, path segment by segment, each
+ * compared by its UTF-8 bytes. Defined beside the platform's own walk order
+ * in `shared/path-order.ts`, which says how the two differ and why the search
+ * has one of its own; re-exported here because it is part of this contract.
  */
-export function compareSearchPaths(a: string, b: string): number {
-  const as = a.split('/');
-  const bs = b.split('/');
-  for (let i = 0; i < Math.min(as.length, bs.length); i++) {
-    const c = Buffer.compare(Buffer.from(as[i]!, 'utf8'), Buffer.from(bs[i]!, 'utf8'));
-    if (c !== 0) return c;
-  }
-  return as.length - bs.length;
-}
+export { compareSearchPaths } from '../../shared/path-order.js';
 
 /** A search stopped for taking too long — a 400, worded for the caller. */
 export class PatternTooExpensiveError extends ToolError {

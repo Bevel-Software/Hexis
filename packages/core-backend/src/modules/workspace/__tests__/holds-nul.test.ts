@@ -2,13 +2,18 @@ import { lstat, mkdtemp, rename, rm, symlink, writeFile } from 'node:fs/promises
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { holdsNul } from '../workspace.tools.js';
+import { holdsNul } from '../nul-scan.js';
 import { PatternTooExpensiveError, type IPatternSearch } from '../pattern-matcher.contract.js';
 
 /**
- * The check a named text file gets when ripgrep answers no line from it:
- * whether it holds a NUL (binary, so "no searchable text"). It reads only the
- * file that was judged, a chunk at a time, under the search's budget.
+ * The unit `grep` asks whether a named text file ripgrep answered no line from
+ * is binary (`nul-scan.ts`). What a caller observes — a NUL past the first
+ * chunk makes the answer "no searchable text" — is pinned through the grep
+ * tool itself in `workspace.tools.test.ts`. Two properties stay here because
+ * no caller can stage them: the file swapped for another, or for a link,
+ * between the stat that judged it and the open that reads it is a race a tool
+ * call cannot time; and a budget already spent is told apart from ripgrep's
+ * own spending only by handing the unit a search whose budget is gone.
  */
 let dir = '';
 const free: IPatternSearch = {

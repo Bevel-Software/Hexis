@@ -1517,6 +1517,25 @@ describe('grep runs ripgrep', () => {
     }
   }, 20_000);
 
+  it('a named file whose only NUL lies past the first 64 KB has no searchable text; the same length of text has no matches and no note', async () => {
+    matcherOptions = {};
+    const base = await start();
+    // ripgrep stops reading a file at the lines the answer can take, so a NUL
+    // far past the pattern's last chance is found by the read that follows,
+    // chunk by chunk — here in the fourth chunk.
+    const filler = Buffer.alloc(200 * 1024, 'x');
+    await fs.writeFile(`${KB_DIR}/late.md`, Buffer.concat([filler, Buffer.from([0])]));
+    await fs.writeFile(`${KB_DIR}/plain.md`, filler);
+    const binary = await grep(base, { pattern: 'needle', path: `${KB_DIR}/late.md` });
+    expect(binary.status).toBe(200);
+    expect(binary.body.matches).toEqual([]);
+    expect(binary.body.note).toContain('no searchable text');
+    const text = await grep(base, { pattern: 'needle', path: `${KB_DIR}/plain.md` });
+    expect(text.status).toBe(200);
+    expect(text.body.matches).toEqual([]);
+    expect(text.body.note).toBeUndefined();
+  });
+
   it('stops the search when its caller goes away, leaving no ripgrep running', async () => {
     const slow = await slowRipgrep();
     try {
