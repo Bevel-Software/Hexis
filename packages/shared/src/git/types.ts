@@ -4,11 +4,8 @@ import type { AppliedChangeRef, ChangedPathPair, PullRequestFile } from './pr.ty
 export interface BranchInfo {
   name: string;
   isProtected: boolean;
-  // Commits ahead/behind the branch's upstream (falls back to the nearest
-  // protected branch on origin). Null when neither can be resolved, e.g. a
-  // freshly-created local branch that has never been pushed.
-  ahead: number | null;
-  behind: number | null;
+  // No commit counts: a listing names the branches and spawns no git per
+  // branch. One branch's counts are `IGitService.branchCounts`.
   /**
    * True iff `refs/remotes/origin/<name>` exists after the last `fetch --prune`.
    * False means the branch is local-only — either never pushed, or its remote
@@ -20,6 +17,16 @@ export interface BranchInfo {
   // IS the current branch — every consumer can derive it as
   // `branch.name === decodeURIComponent(workspaceId)`. The server-side
   // `git rev-parse` that used to compute this is no longer needed.
+}
+
+/**
+ * Commits ahead of / behind a branch's upstream (falling back to the nearest
+ * protected branch on origin). Null when neither can be resolved, e.g. a
+ * freshly-created local branch that has never been pushed.
+ */
+export interface BranchCounts {
+  ahead: number | null;
+  behind: number | null;
 }
 
 /**
@@ -230,6 +237,12 @@ export interface IGitService {
     authorize?: (commits: string[]) => Promise<void>,
   ): Promise<{ sha: string; ref: string; content: string | null }>;
   listBranches(workspaceId: string, opts?: { freshFetch?: boolean; strictFetch?: boolean }): Promise<BranchInfo[]>;
+  /**
+   * How far the workspace's own branch is ahead of and behind its upstream,
+   * or — with none — of the protected branch on origin it is fewest commits
+   * ahead of: one `git rev-list` per base tried, for this one branch.
+   */
+  branchCounts(workspaceId: string): Promise<BranchCounts>;
   createBranch(
     workspaceId: string,
     name: string,

@@ -219,8 +219,6 @@ describe('BranchSwitcher: author-can-delete affordance', () => {
       {
         name: 'alice/my-draft',
         isProtected: false,
-        ahead: 0,
-        behind: 0,
         hasRemote: true,
       },
     ]));
@@ -239,8 +237,6 @@ describe('BranchSwitcher: author-can-delete affordance', () => {
       {
         name: 'bob/other-draft',
         isProtected: false,
-        ahead: 0,
-        behind: 0,
         hasRemote: true,
       },
     ]));
@@ -260,8 +256,6 @@ describe('BranchSwitcher: author-can-delete affordance', () => {
       {
         name: 'bob/merged-and-pruned',
         isProtected: false,
-        ahead: 0,
-        behind: 0,
         hasRemote: false,
       },
     ]));
@@ -307,8 +301,6 @@ describe('BranchSwitcher: admin-can-delete affordance', () => {
       {
         name: 'bob/other-draft',
         isProtected: false,
-        ahead: 0,
-        behind: 0,
         hasRemote: true,
       },
     ]));
@@ -326,8 +318,6 @@ describe('BranchSwitcher: admin-can-delete affordance', () => {
       {
         name: 'fix/some-cli-branch',
         isProtected: false,
-        ahead: 0,
-        behind: 0,
         hasRemote: true,
       },
     ]));
@@ -344,8 +334,6 @@ describe('BranchSwitcher: admin-can-delete affordance', () => {
       {
         name: 'current-company-state',
         isProtected: true,
-        ahead: 0,
-        behind: 0,
         hasRemote: true,
       },
     ]));
@@ -369,8 +357,6 @@ describe('BranchSwitcher: deleting a shared branch asks in the app', () => {
   const shared = (name: string): BranchInfo => ({
     name,
     isProtected: false,
-    ahead: 0,
-    behind: 0,
     hasRemote: true,
   });
 
