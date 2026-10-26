@@ -4306,6 +4306,19 @@ describe('FileExplorer: deleting the file on screen', () => {
     expect(screen.getByTestId('location-navigation-type')).toHaveTextContent('REPLACE');
   });
 
+  // The address names the file, but its tab never opened: the read opening it
+  // was still out when the delete landed, so no tab closed. The page was on
+  // its way to the deleted file; it lands on the tab that is left instead.
+  it('lands on the tab that is left when the deleted file was still opening', async () => {
+    const deleteEntry = vi.fn(async () => ({ closedActive: false, newActivePath: kbPath('Keep.md') }));
+    renderExplorer({ fileTree: TREE, deleteEntry, initialEntries: [urlOf('Gone.md')], openFilePath: 'Keep.md' });
+
+    await deleteFromMenu('Gone.md');
+
+    await waitFor(() => expect(screen.getByTestId('location-pathname')).toHaveTextContent(urlOf('Keep.md')));
+    expect(screen.getByTestId('location-navigation-type')).toHaveTextContent('REPLACE');
+  });
+
   it('leaves the file open and the address unchanged when the delete is called off', async () => {
     // `false`: the person kept their unsaved tabs at the "Unsaved changes" question.
     const deleteEntry = vi.fn(async () => false as const);

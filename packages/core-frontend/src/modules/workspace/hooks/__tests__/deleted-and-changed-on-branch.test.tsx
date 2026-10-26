@@ -1695,6 +1695,80 @@ describe('the editor writing back after our own delete', () => {
 
     expect(result.current.isOwnDelete?.('KB/Draft.md')).toBe(true);
   });
+  /** Hold the next read of the file, answering with its bytes from before the delete. */
+  function holdNextRead() {
+    const held: { answer?: () => void } = {};
+    apiMocks.readFile.mockImplementationOnce(() => new Promise((resolve) => {
+      held.answer = () => resolve('# Draft\n\nA page to delete.');
+    }));
+    return held;
+  }
+
+  it('an open whose read our delete overtook opens nothing, and answers as the file being gone', async () => {
+    const result = await mountReady();
+    await open(result, 'KB/Keep.md');
+    const held = holdNextRead();
+    let opening!: Promise<boolean>;
+    act(() => { opening = result.current.addTab('KB/Draft.md'); });
+    await waitFor(() => expect(held.answer).toBeDefined());
+    await new Promise((r) => setTimeout(r, 2));
+    await act(async () => { await result.current.deleteEntry('KB/Draft.md'); });
+
+    await act(async () => {
+      held.answer!();
+      await expect(opening).rejects.toMatchObject({ status: 404 });
+    });
+
+    expect(tabAt(result, 'KB/Draft.md')).toBeUndefined();
+    expect(result.current.openFilePath).toBe('KB/Keep.md');
+    expect(disk.has('KB/Draft.md')).toBe(false);
+  });
+
+  it('a tab restore whose read our delete overtook does not open the deleted file', async () => {
+    const result = await mountReady();
+    // Keep.md answers at once; Draft.md's read is held past our delete.
+    apiMocks.readFile.mockImplementationOnce(async () => 'keep');
+    const held = holdNextRead();
+    let hydrating!: Promise<{ surviving: string[]; dropped: string[] }>;
+    act(() => { hydrating = result.current.hydrateTabs(['KB/Keep.md', 'KB/Draft.md'], 'KB/Draft.md'); });
+    await waitFor(() => expect(held.answer).toBeDefined());
+    await new Promise((r) => setTimeout(r, 2));
+    await act(async () => { await result.current.deleteEntry('KB/Draft.md'); });
+
+    let restored!: { surviving: string[]; dropped: string[] };
+    await act(async () => { held.answer!(); restored = await hydrating; });
+
+    expect(restored.surviving).toEqual(['KB/Keep.md']);
+    expect(restored.dropped).toEqual(['KB/Draft.md']);
+    expect(tabAt(result, 'KB/Draft.md')).toBeUndefined();
+    expect(result.current.openFilePath).toBe('KB/Keep.md');
+    expect(disk.has('KB/Draft.md')).toBe(false);
+  });
+
+  it('a remount whose read our delete overtook does not reopen the tab the delete closed', async () => {
+    const result = await mountReady();
+    await act(async () => { await result.current.hydrateTabs(['KB/Keep.md', 'KB/Draft.md'], 'KB/Draft.md'); });
+    expect(tabAt(result, 'KB/Draft.md')).toBeDefined();
+    // The route mounts again: it restores the same tabs while they are open.
+    apiMocks.readFile.mockImplementationOnce(async () => 'keep');
+    const held = holdNextRead();
+    let hydrating!: Promise<{ surviving: string[]; dropped: string[] }>;
+    act(() => { hydrating = result.current.hydrateTabs(['KB/Keep.md', 'KB/Draft.md'], 'KB/Draft.md'); });
+    await waitFor(() => expect(held.answer).toBeDefined());
+    await new Promise((r) => setTimeout(r, 2));
+    let deleted!: unknown;
+    await act(async () => { deleted = await result.current.deleteEntry('KB/Draft.md'); });
+    expect(deleted).toEqual({ closedActive: true, newActivePath: 'KB/Keep.md' });
+
+    let restored!: { surviving: string[]; dropped: string[] };
+    await act(async () => { held.answer!(); restored = await hydrating; });
+
+    expect(restored.surviving).toEqual(['KB/Keep.md']);
+    expect(tabAt(result, 'KB/Draft.md')).toBeUndefined();
+    expect(result.current.openFilePath).toBe('KB/Keep.md');
+    expect(disk.has('KB/Draft.md')).toBe(false);
+  });
+
   it('a file created where our own delete was saves as any other', async () => {
     const result = await mountReady();
     await open(result, 'KB/Draft.md');

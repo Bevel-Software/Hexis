@@ -606,6 +606,20 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
   }, [isPendingDelete]);
 
   /**
+   * A read of `path` sent at `readIssuedAt` that found the file was overtaken
+   * by a delete of ours: the server confirmed that delete after the read was
+   * sent, so what the read found is the file as it was before it. Its bytes
+   * open no tab (`addTab`, `hydrateTabs`) and do not end the delete's marker
+   * (`forgetOwnDelete`).
+   */
+  const isOvertakenByOwnDelete = useCallback((path: string, readIssuedAt: number) => {
+    for (const [deleted, at] of ownDeletesRef.current) {
+      if (at >= readIssuedAt && (path === deleted || path.startsWith(deleted + '/'))) return true;
+    }
+    return false;
+  }, []);
+
+  /**
    * `path` was read back: it exists again, so a marker covering it no longer
    * describes the branch — a later 404 on it is a new delete, not ours.
    * `readIssuedAt`: when the read that found it was sent. A read sent before
@@ -792,6 +806,14 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
         traceFiles('add-tab:stale-workspace', { path: relativePath, readFrom: workspaceId, now: workspaceIdRef.current });
         return false;
       }
+      // Read before a delete of ours that has since been confirmed: these are
+      // the bytes of a file that is gone. Opening them would put the deleted
+      // file back on screen; answer as the read would have, had it been sent
+      // a moment later.
+      if (isOvertakenByOwnDelete(relativePath, issuedAt)) {
+        traceFiles('add-tab:overtaken-by-own-delete', { path: relativePath });
+        throw new WorkspaceApiError(404);
+      }
       // The file is there (restored since our delete): saving it is not
       // re-creating it. A read sent before the delete answered keeps it.
       forgetOwnDelete(relativePath, issuedAt);
@@ -833,7 +855,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       console.error('Failed to read file:', err);
       throw err;
     }
-  }, [workspaceId, activateTab, markLanded, forgetOwnDelete]);
+  }, [workspaceId, activateTab, markLanded, forgetOwnDelete, isOvertakenByOwnDelete]);
 
   const closeTab = useCallback(async (
     tab: OpenTab,
@@ -1013,6 +1035,11 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
           if (res.status === 'rejected' && res.reason instanceof WorkspaceApiError && res.reason.status === 404) {
             goneLive.push({ path, seq: seqs[i] });
           }
+        } else if (res.status === 'fulfilled' && !openNow.has(path)
+          && workspaceIdRef.current === workspaceId && isOvertakenByOwnDelete(path, issuedAt)) {
+          // Found before a delete of ours that has since closed its tab (or
+          // that it never had): the file is gone, as for a 404 read.
+          dropped.push(path);
         } else if (res.status === 'fulfilled' && openNow.has(path)
           && (isStaleLanding(workspaceId, path, seqs[i]) || isStaleFind(workspaceId, path, seqs[i]))) {
           survivors.push(openNow.get(path)!);
@@ -1096,7 +1123,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     } finally {
       releaseChecks();
     }
-  }, [workspaceId, workspaceBranch, markLanded, forgetOwnDelete, trackExistenceCheck, applyReadGone, isStaleLanding, isStaleFind]);
+  }, [workspaceId, workspaceBranch, markLanded, forgetOwnDelete, isOvertakenByOwnDelete, trackExistenceCheck, applyReadGone, isStaleLanding, isStaleFind]);
 
   // ── Renderer value bridge → active tab.content ────────────────────────────
 

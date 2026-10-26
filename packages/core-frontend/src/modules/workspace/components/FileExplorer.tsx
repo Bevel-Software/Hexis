@@ -666,12 +666,17 @@ function ContextMenu({
         // URL names its file through the id, and the active tab is the file
         // it opened, so a delete that closed that tab took it.
         const named = filePathFromPathname(pathname);
-        const onScreen = named !== null && (
-          NODE_ID_LINK_RE.test(named)
-          || named === entry.relativePath
+        const namesDeleted = named !== null && (
+          named === entry.relativePath
           || named.startsWith(`${entry.relativePath}/`)
         );
-        if (result?.closedActive && branchOnScreen !== null && onScreen) {
+        const onScreen = named !== null && (NODE_ID_LINK_RE.test(named) || namesDeleted);
+        // The address names the deleted file by path while its tab never
+        // opened — the read opening it was still out when the delete landed,
+        // and is refused now (`addTab`). Nothing closed, but the page was on
+        // its way to the deleted file: land on the tab that is left all the same.
+        const openingDeleted = result && !result.closedActive && namesDeleted;
+        if (result && (result.closedActive ? onScreen : openingDeleted) && branchOnScreen !== null) {
           navigate(landingAfterClose(pathname, branchOnScreen, result.newActivePath), { replace: true });
         } else if (result && branchOnScreen !== null && deleteTookLibraryItem(pathname, kbDirName, entry.relativePath)) {
           // A skill's or a tool's page holds no tab, so no tab closed — but
