@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { SQL } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import { PendingCommitsService } from '../pending-commits.service.js';
-import type { Database } from '../../database/connection.js';
+import type { Database } from '../../../index.js';
 
 /**
  * Commits still queued for a branch when the knowledge-base repository is

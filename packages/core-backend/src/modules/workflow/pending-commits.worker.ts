@@ -196,10 +196,13 @@ export class PendingCommitsWorker {
    */
   private stopped = false;
   /**
-   * Every drain pass in flight, the loop's and any a caller started with
-   * `drainOnce` alike: `stop()` resolves only once all of them have ended.
+   * The last drain pass asked for, the loop's or one a caller started with
+   * `drainOnce` alike. Each pass starts only once the one before it has
+   * ended, so two passes never drain one clone side by side, and `stop()`
+   * resolves only once this one — and so every one — has ended. Never
+   * rejects: a pass that failed already answered its own caller.
    */
-  private readonly passes = new Set<Promise<void>>();
+  private lastPass: Promise<void> = Promise.resolve();
   /**
    * Rows whose recovery run has ended and that are not back in `pending`
    * yet (`markRecoveryFinished` has not succeeded for them). A row stays
@@ -252,15 +255,15 @@ export class PendingCommitsWorker {
     // A pass started with `drainOnce` on a worker whose loop never ran is
     // still in flight: its commit or recovery run finishes before stop()
     // answers, as the loop's does.
-    // Settled, not all: a pass that failed already answered its own caller.
-    await Promise.allSettled([...this.passes]);
+    await this.lastPass;
   }
 
   /**
    * Run one drain pass: rotate through known workspaces, draining each
    * one's ready rows before moving on. Exposed publicly so tests can step
    * the loop deterministically without driving `setTimeout`: it runs on a
-   * worker whose loop was never started, and `stop()` ends it.
+   * worker whose loop was never started, and `stop()` ends it. A call made
+   * while another pass is in flight waits for that pass to end first.
    *
    * Draining a BURST rather than a single row per sweep is what keeps a
    * bulk change honest. One row per sweep, with a `POLL_INTERVAL_MS` sleep
@@ -274,13 +277,9 @@ export class PendingCommitsWorker {
    * hand the same row back within the same sweep.
    */
   async drainOnce(): Promise<void> {
-    const pass = this.drainPass();
-    this.passes.add(pass);
-    try {
-      await pass;
-    } finally {
-      this.passes.delete(pass);
-    }
+    const pass = this.lastPass.then(() => this.drainPass());
+    this.lastPass = pass.catch(() => undefined);
+    await pass;
   }
 
   private async drainPass(): Promise<void> {

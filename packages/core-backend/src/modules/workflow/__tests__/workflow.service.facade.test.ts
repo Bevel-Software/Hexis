@@ -11,8 +11,8 @@ import type {
 import type { GitService } from '../git/git.service.js';
 import type { PullRequestService } from '../git/pull-request.service.js';
 import type { IReviewWorkflowService } from '../review-workflow/review-workflow.interface.js';
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import type { IAccessControl } from '../../access/access-control.interface.js';
+import type { WorkspaceService } from '../../workspace/index.js';
+import type { IAccessControl } from '../../access/index.js';
 import { FileLockService } from '../file-lock.service.js';
 import { PendingCommitsService, type PendingCommit } from '../pending-commits.service.js';
 import { PendingCommitsWorker } from '../pending-commits.worker.js';
@@ -28,7 +28,7 @@ import {
 } from '../../../shared/domain-errors.js';
 import type { WorkflowEventBus } from '../event-bus.js';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
-import type { Database } from '../../database/connection.js';
+import type { Database } from '../../../index.js';
 import { openChangeGate } from '../../../__tests__/open-change-gate.js';
 import { ReadOnBranchDeniedError } from '../read-on-branch.js';
 import { hashEmail } from '../../../shared/email-identity.js';

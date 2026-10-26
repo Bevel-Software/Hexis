@@ -13,7 +13,7 @@ import type {
   PendingCommit,
   PendingCommitsService,
 } from '../pending-commits.service.js';
-import { assertInsideRepo } from '../../kb-fs/repo-path.js';
+import { assertInsideRepo } from '../../kb-fs/index.js';
 
 /**
  * Unit tests for the queue-draining worker. The service + workflow layers
@@ -331,6 +331,39 @@ describe('PendingCommitsWorker.drainOnce', () => {
     expect(stopped).toBe(true);
     expect(service.markSucceeded).toHaveBeenCalledWith('row-1');
     await pass;
+  });
+
+  it('a drainOnce made while another pass is in flight waits for that pass to end', async () => {
+    const first = makeRow();
+    const second = makeRow({ id: 'row-2', path: 'Bar.md' });
+    (service.claimNext as ReturnType<typeof vi.fn>).mockResolvedValueOnce(first).mockResolvedValueOnce(null);
+    let release!: () => void;
+    const committing = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    workflow.runPendingCommit.mockImplementationOnce(async () => {
+      entered();
+      await committing;
+    });
+
+    const one = worker.drainOnce();
+    await started;
+    (service.claimNext as ReturnType<typeof vi.fn>).mockResolvedValueOnce(second);
+    const two = worker.drainOnce();
+    // Several turns of the event loop: the second pass must not have claimed
+    // anything while the first is still committing in the same clone.
+    for (let i = 0; i < 10; i += 1) await Promise.resolve();
+    expect(service.claimNext).toHaveBeenCalledTimes(1);
+    expect(workflow.runPendingCommit).toHaveBeenCalledTimes(1);
+
+    release();
+    await Promise.all([one, two]);
+    expect(service.markSucceeded).toHaveBeenCalledWith('row-1');
+    expect(service.markSucceeded).toHaveBeenCalledWith('row-2');
   });
 
   it('exhausting both budgets marks needs_attention and emits a system feedback notice', async () => {

@@ -15,8 +15,8 @@ import { N_TRANSIENT, PendingCommitsWorker } from '../pending-commits.worker.js'
 import { WorkflowService } from '../workflow.service.js';
 import type { PullRequestService } from '../git/pull-request.service.js';
 import type { IReviewWorkflowService } from '../review-workflow/review-workflow.interface.js';
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import type { IAccessControl } from '../../access/access-control.interface.js';
+import type { WorkspaceService } from '../../workspace/index.js';
+import type { IAccessControl } from '../../access/index.js';
 import type { FileLockService } from '../file-lock.service.js';
 
 /**
