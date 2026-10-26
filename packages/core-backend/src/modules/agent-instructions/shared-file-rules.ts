@@ -61,8 +61,12 @@ const PRE_RENAME_AGENTS_FILE = 'CLAUDE.md';
  * of every call rather than of how to write one, and why large, escape-heavy
  * and binary content goes by upload, which three write tools each said in
  * full.
+ *
+ * 7,400 since the `__tmp__/` ref: four tools take it, so what it reaches and
+ * that it is read-only is said once here rather than in each description, and
+ * the section had no room left for it.
  */
-export const SHARED_FILE_RULES_CAP = 7_000;
+export const SHARED_FILE_RULES_CAP = 7_400;
 
 /** One shared rule: how the guide heads it, and the rule itself. */
 export interface SharedFileRule {
@@ -113,6 +117,18 @@ export function sharedFileRules(layout: KbLayout): readonly SharedFileRule[] {
         'text). Images come back only on a DIRECT read_file: inside `call_tool_chain` an image read yields an ' +
         '`{ image_omitted, note }` stub instead, so read an image outside a chain when you mean to look at it. Any other ' +
         'binary file reads as a one-line description rather than raw bytes.',
+    },
+    {
+      // What `__tmp__/` reaches and what it does not (see
+      // `workspace/workspace-tmp.ts`) — four tools take the ref, so it is a
+      // shared rule rather than a sentence in each description.
+      id: 'workspace-tmp',
+      heading: "Files staged in the workspace's tmp folder",
+      body:
+        "`__tmp__/<path>`, with a `branch`, names ONE file in that workspace's `tmp/` folder, where the platform " +
+        'stages files such as chat attachments. read_file, file_stat, grep (`path`) and copy_file (`src`) read it as ' +
+        'a repository file; it is read-only and never listed — copy_file it to a repository path to keep it. Entries ' +
+        'go seven days after their last change.',
     },
     {
       id: 'write-mode',

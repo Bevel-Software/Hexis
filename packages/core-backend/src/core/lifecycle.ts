@@ -6,6 +6,7 @@ import { noteBesideCheckout } from '../modules/workspace/startup/beside-checkout
 import { unregisterBevelSecretsVariableLoader } from '../modules/secrets-vault/secrets-variable-loader.js';
 import type { WorkflowService } from '../modules/workflow/workflow.service.js';
 import type { PluginJoinRequestJobs } from '../modules/plugins/join-request-jobs.service.js';
+import type { TmpSweeper } from '../modules/workspace/workspace-tmp.js';
 import { printable } from '../shared/printable.js';
 import { logger } from '../shared/logging.js';
 
@@ -293,6 +294,8 @@ export interface BootableCore {
   kbStartupRunner: Pick<KbStartupRunner, 'runAll' | 'retryUntilMaintained'>;
   workflowService: Pick<WorkflowService, 'closeChangeRequestsWithDeletedBranches' | 'tidyAfterSweep'>;
   pluginJoinRequestJobs: Pick<PluginJoinRequestJobs, 'startSweeping'>;
+  /** The periodic sweep of every workspace's `tmp/` folder, started here and stopped by {@link stopCore}. */
+  tmpSweeper: Pick<TmpSweeper, 'startSweeping'>;
   /**
    * The startup phase's retry, when the boot survived an unreachable remote
    * and is asking again on a timer; null otherwise. Set by {@link startCore},
@@ -335,6 +338,13 @@ export async function startCore<C extends BootableCore>(
       detail: printable(err instanceof Error ? err.message : String(err)),
     });
   }
+
+  // The seven-day sweep of every workspace's `tmp/` folder (see
+  // `workspace-tmp.ts`), now and hourly. Needs nothing the startup phase
+  // provides — it reads the workspaces root and nothing else — so it is not
+  // held behind it, and a remote that is down does not leave staged files to
+  // pile up. Stopped by `stopCore`.
+  core.tmpSweeper.startSweeping();
 
   // The KB startup phase — AFTER the distribution's onBoot, because a FATAL
   // template finding raised there must stop the boot before anything seeds
@@ -449,6 +459,13 @@ export interface CoreStopDeps {
   /** The agent download store, whose sweep deletes captured bytes nobody fetched — stopped for the same reason. */
   agentDownloadStore?: { stopSweeping(): void; drainSweep(): Promise<void> };
   /**
+   * The sweep of the workspaces' `tmp/` folders: stopped with this graph, so
+   * an evicted tenant's graph leaves no timer behind, and its sweep in flight
+   * awaited, so the next graph over the same root never meets it still
+   * walking there. Optional: a caller that has not built one passes nothing.
+   */
+  tmpSweeper?: { stopSweeping(): void; drainSweep(): Promise<void> };
+  /**
    * The grep pattern matcher, whose worker threads are this graph's own: ended
    * here so a graph a tenant host evicts leaves no worker behind. Optional: a
    * caller that has not built one passes nothing.
@@ -555,6 +572,7 @@ async function releaseCore(deps: CoreStopDeps, remaining: () => number, log: (m:
   // running to stop deleting.
   deps.agentUploadStore?.stopSweeping();
   deps.agentDownloadStore?.stopSweeping();
+  deps.tmpSweeper?.stopSweeping();
   // A startup phase still asking for an unreachable remote stops asking:
   // synchronous, and nothing after it must be able to clone into a
   // workspaces folder that is about to belong to nobody.
@@ -586,6 +604,9 @@ async function releaseCore(deps: CoreStopDeps, remaining: () => number, log: (m:
   }
   if (deps.agentDownloadStore) {
     await bounded(deps.agentDownloadStore.drainSweep(), remaining(), 'finishing the download sweep', log);
+  }
+  if (deps.tmpSweeper) {
+    await bounded(deps.tmpSweeper.drainSweep(), remaining(), "finishing the workspaces' tmp sweep", log);
   }
   // The tidy-up in flight fetches and deletes branches through the pool and
   // the default branch's checkout: awaited, so the next graph for this

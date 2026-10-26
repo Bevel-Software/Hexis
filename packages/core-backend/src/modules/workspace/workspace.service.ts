@@ -44,6 +44,7 @@ import {
 import { redactSecret, urlQuerySecrets } from '../../shared/redact-secret.js';
 import { setAsideClone, setAsideRepository, setAsideRootFor, setAsideStamp } from './set-aside-clone.js';
 import { workingCopyShape } from './kb-repository.js';
+import { isTmpRef, readTmpRef, statTmpRef, sweepTmpFolder, TMP_MAX_AGE_MS, type TmpFileStat } from './workspace-tmp.js';
 import type { IKbRepository } from './kb-repository.contract.js';
 import {
   cloneCredentialConfigArgs,
@@ -1420,7 +1421,19 @@ export class WorkspaceService implements IWorkspaceService {
     return fs.readFile(absolutePath, 'utf-8');
   }
 
+  /**
+   * The bytes at a repository path — or, for a tmp ref (`__tmp__/<path>`, see
+   * `workspace-tmp.ts`), the one file it names in this workspace's `tmp/`
+   * folder, under the ref's own rules: one file, nothing outside the folder,
+   * and a missing file a `PathNotFoundError` naming the ref. This is how a
+   * distribution's own tool reads a staged file without a reader of its own;
+   * the file tools read the folder through the same resolver.
+   *
+   * The service's other callers hand this a path they have already
+   * normalised, which starts with the checkout folder and so is never a ref.
+   */
   async readFileBinary(workspaceId: string, wsPath: string): Promise<Buffer> {
+    if (isTmpRef(wsPath)) return readTmpRef(this.workspaceDirForTmp(workspaceId), wsPath);
     const { workspaceDir, relativePath, absolutePath } = await this.resolveInsideRepo(workspaceId, wsPath);
     assertNoGitInternalsSegment(relativePath);
     await assertNotGitInternals(workspaceDir, relativePath, absolutePath);
@@ -1816,6 +1829,57 @@ export class WorkspaceService implements IWorkspaceService {
    * call after a run even if the workspace was already torn down — a missing
    * directory is ignored.
    */
+  /**
+   * What `file_stat` reports for a tmp ref: the stat of the one file it names
+   * in this workspace's `tmp/` folder, resolved exactly as
+   * {@link readFileBinary} resolves it.
+   */
+  async statTmpFile(workspaceId: string, ref: string): Promise<TmpFileStat> {
+    return statTmpRef(this.workspaceDirForTmp(workspaceId), ref);
+  }
+
+  /**
+   * Remove, in every workspace directory under the root, each entry of its
+   * `tmp/` folder last modified more than `olderThanMs` ago — the platform's
+   * periodic cleanup (see `TmpSweeper`). Judged on the entry's own `lstat`,
+   * never through a link. Returns how many entries went, per workspace.
+   */
+  async sweepTmp(olderThanMs: number = TMP_MAX_AGE_MS, now: number = Date.now()): Promise<{ removed: Record<string, number> }> {
+    let entries: Array<{ name: string; isDirectory: () => boolean }>;
+    try {
+      entries = await fs.readdir(this.workspacesRoot, { withFileTypes: true });
+    } catch (err) {
+      if (isAbsence(err)) return { removed: {} };
+      throw err;
+    }
+    const removed: Record<string, number> = {};
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      try {
+        const gone = await sweepTmpFolder(path.join(this.workspacesRoot, entry.name), olderThanMs, now);
+        if (gone.length > 0) removed[entry.name] = gone.length;
+      } catch (err) {
+        // One unreadable workspace spoils its own sweep, not the others'.
+        log.warn(`tmp sweep failed for ${entry.name}:`, { err });
+      }
+    }
+    return { removed };
+  }
+
+  /**
+   * The workspace directory a tmp ref resolves against, computed without
+   * bootstrapping (a branch never cloned has nothing staged): the root's own
+   * containment rule ({@link workspaceDirWithinRoot}), and not the root
+   * itself, which that rule allows — `<root>/tmp` is no workspace's folder.
+   */
+  private workspaceDirForTmp(workspaceId: string): string {
+    const dir = this.workspaceDirWithinRoot(workspaceId);
+    if (dir === path.resolve(this.workspacesRoot)) {
+      throw new Error(`Invalid workspace ID "${workspaceId}": a tmp ref resolves inside one workspace directory.`);
+    }
+    return dir;
+  }
+
   async clearTmp(workspaceId: string): Promise<void> {
     // Guard against a malicious/odd workspaceId (e.g. "..") escaping the root
     // and force-removing an unintended directory.

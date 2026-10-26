@@ -510,6 +510,24 @@ describe('stopCore', () => {
     expect(drained).toBeLessThan(g.order.indexOf('db.end'));
   });
 
+  it('stops the workspaces\' tmp sweep with the graph: the timer cleared, the sweep in flight awaited before the pool goes', async () => {
+    const g = graph();
+    const tmpSweeper = {
+      stopSweeping() {
+        g.order.push('tmpSweeper.stopSweeping');
+      },
+      async drainSweep() {
+        g.order.push('tmpSweeper.drainSweep');
+      },
+    };
+    await stopCore({ ...g.core, tmpSweeper } as never);
+    const stopped = g.order.indexOf('tmpSweeper.stopSweeping');
+    const drained = g.order.indexOf('tmpSweeper.drainSweep');
+    expect(stopped).toBeGreaterThanOrEqual(0);
+    expect(stopped).toBeLessThan(drained);
+    expect(drained).toBeLessThan(g.order.indexOf('db.end'));
+  });
+
   it('forgets the graph\'s secrets scope, so a descriptor that outlives it resolves nothing', async () => {
     const g = graph();
     registerBevelSecretsVariableLoader(

@@ -63,6 +63,7 @@ function parseDomainList(raw: string): string[] {
     .filter((d) => d.length > 0);
 }
 import { SpillStore } from '../modules/workspace/spill-store.js';
+import { TmpSweeper } from '../modules/workspace/workspace-tmp.js';
 import { AgentUploadStore, assertUploadsRootOutsideWorkspaces } from '../modules/workspace/agent-upload.store.js';
 import { AgentDownloadStore, type IAgentDownloadStore } from '../modules/workspace/agent-download.store.js';
 import { createDownloadFetcherIdentifier } from '../modules/workspace/agent-download.routes.js';
@@ -255,6 +256,8 @@ export interface CoreServices {
   agentUploadStore: AgentUploadStore;
   /** The bytes `request_file_download` captured, held until their one-time link is fetched or expires. */
   agentDownloadStore: IAgentDownloadStore;
+  /** Sweeps every workspace's `tmp/` folder of entries older than seven days, hourly; started and stopped with the graph. */
+  tmpSweeper: TmpSweeper;
   /** Runs a caller's `grep` pattern off the request thread under a budget; its workers end when the graph stops. */
   patternMatcher: IPatternMatcher;
   /**
@@ -767,6 +770,10 @@ export async function createCoreServices(
   // Shared, workspace-independent store for oversized `call_tool_chain` results,
   // read back via `read_file`. Sibling of `workspacesRoot`, never committed.
   const spillStore = new SpillStore(config.spillRoot);
+  // What the chat, the SharePoint reader and tool chains stage in a
+  // workspace's `tmp/` folder lives seven days past its last change; the file
+  // tools read it through the `__tmp__/` ref meanwhile (see workspace-tmp.ts).
+  const tmpSweeper = new TmpSweeper(() => workspaceService.sweepTmp());
   // The upload route an agent lands files by, so their content never passes
   // through the model. Bytes live BESIDE the workspaces root (never inside
   // one) until the apply commits them or the token expires — checked here
@@ -1673,6 +1680,7 @@ export async function createCoreServices(
     spillStore,
     agentUploadStore,
     agentDownloadStore,
+    tmpSweeper,
     patternMatcher,
     agentDownloadFetcher,
     documentExtractor,

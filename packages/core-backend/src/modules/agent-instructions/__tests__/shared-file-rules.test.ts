@@ -51,6 +51,7 @@ describe('the shared file rules are one text, in two places', () => {
     expect(rules.map((r) => r.id)).toEqual([
       'agent-guide',
       'content-kinds',
+      'workspace-tmp',
       'write-mode',
       'images-in-pages',
       'escape-sequences',
