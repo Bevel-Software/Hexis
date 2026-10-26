@@ -357,10 +357,11 @@ export const fileLocks = pgTable('file_locks', {
  *   - `attempts` + `last_error` drive the worker's transient-retry budget
  *     (1s/5s/30s backoff before handing off to the recovery agent) and
  *     the agent's own retry ceiling (3 runs before `status = needs_attention`).
- *   - `status` is a small enum (`pending` | `running` | `needs_attention`).
- *     Workers claim a row by flipping `pending → running` in a single
- *     UPDATE; terminal failure flips to `needs_attention` and the row
- *     stays for admin / feedback review.
+ *   - `status` is a small enum (`pending` | `running` | `recovering` |
+ *     `needs_attention`). Workers claim a row by flipping `pending → running`
+ *     in a single UPDATE; a row handed to the recovery agent is `recovering`
+ *     until the agent returns; terminal failure flips to `needs_attention`
+ *     and the row stays for admin / feedback review.
  *   - `last_attempted_at` gates backoff scheduling so the worker doesn't
  *     re-pop a row that just failed.
  */
@@ -399,7 +400,7 @@ export const pendingCommits = pgTable('pending_commits', {
   byStatusOnly: index('pending_commits_by_status_only').on(t.status),
   statusCheck: check(
     'pending_commits_status',
-    sql`${t.status} IN ('pending', 'running', 'needs_attention')`,
+    sql`${t.status} IN ('pending', 'running', 'recovering', 'needs_attention')`,
   ),
 }));
 

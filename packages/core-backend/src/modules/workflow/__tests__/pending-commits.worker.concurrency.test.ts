@@ -42,7 +42,7 @@ function queueWith(rows: PendingCommit[]) {
     hasReadyRow: vi.fn().mockResolvedValue(false),
     markSucceeded: vi.fn().mockResolvedValue(undefined),
     markTransientFailure: vi.fn().mockResolvedValue(undefined),
-    markRecoveryStarted: vi.fn().mockResolvedValue(undefined),
+    markRecoveryStarted: vi.fn().mockResolvedValue(true),
     markNeedsAttention: vi.fn().mockResolvedValue(undefined),
   } as unknown as PendingCommitsService & { markSucceeded: ReturnType<typeof vi.fn>; claimNext: ReturnType<typeof vi.fn> };
   return service;
@@ -93,8 +93,6 @@ function makeWorker(
     recoveryBot: RECOVERY_BOT,
     now: () => new Date('2026-01-01T00:01:00Z'),
   });
-  // Same seam the sibling suite uses: the single-pass drain without the loop.
-  (worker as unknown as { running: boolean }).running = true;
   return worker;
 }
 

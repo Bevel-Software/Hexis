@@ -4,13 +4,13 @@ import type { AuthUser, Change } from '@bevel-software/platform-shared';
 import type { GitService } from '../git/git.service.js';
 import type { PullRequestService } from '../git/pull-request.service.js';
 import type { IReviewWorkflowService } from '../review-workflow/review-workflow.interface.js';
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import type { IAccessControl } from '../../access/access-control.interface.js';
+import type { WorkspaceService } from '../../workspace/index.js';
+import type { IAccessControl } from '../../access/index.js';
 import { FileLockService } from '../file-lock.service.js';
 import { PendingCommitsService } from '../pending-commits.service.js';
 import { WorkflowEventBus } from '../event-bus.js';
 import { WorkflowService } from '../workflow.service.js';
-import type { Database } from '../../database/connection.js';
+import type { Database } from '../../../index.js';
 import { WorkflowValidationError } from '../../../shared/domain-errors.js';
 import { openChangeGate } from '../../../__tests__/open-change-gate.js';
 
@@ -99,7 +99,7 @@ function makeFacade(git: GitService, locks: FileLockService, events: WorkflowEve
     claimNext: vi.fn().mockResolvedValue(null),
     markSucceeded: vi.fn().mockResolvedValue(undefined),
     markTransientFailure: vi.fn().mockResolvedValue(undefined),
-    markRecoveryStarted: vi.fn().mockResolvedValue(undefined),
+    markRecoveryStarted: vi.fn().mockResolvedValue(true),
     markNeedsAttention: vi.fn().mockResolvedValue(undefined),
     listNeedsAttention: vi.fn().mockResolvedValue([]),
     countPending: vi.fn().mockResolvedValue(0),

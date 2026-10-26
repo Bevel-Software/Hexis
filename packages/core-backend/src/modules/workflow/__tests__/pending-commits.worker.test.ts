@@ -13,7 +13,7 @@ import type {
   PendingCommit,
   PendingCommitsService,
 } from '../pending-commits.service.js';
-import { assertInsideRepo } from '../../kb-fs/repo-path.js';
+import { assertInsideRepo } from '../../kb-fs/index.js';
 
 /**
  * Unit tests for the queue-draining worker. The service + workflow layers
@@ -58,7 +58,8 @@ function makeService(): PendingCommitsService {
     hasReadyRow: vi.fn().mockResolvedValue(false),
     markSucceeded: vi.fn().mockResolvedValue(undefined),
     markTransientFailure: vi.fn().mockResolvedValue(undefined),
-    markRecoveryStarted: vi.fn().mockResolvedValue(undefined),
+    markRecoveryStarted: vi.fn().mockResolvedValue(true),
+    markRecoveryFinished: vi.fn().mockResolvedValue(undefined),
     markNeedsAttention: vi.fn().mockResolvedValue(undefined),
     listNeedsAttention: vi.fn().mockResolvedValue([]),
     countPending: vi.fn().mockResolvedValue(0),
@@ -109,10 +110,6 @@ describe('PendingCommitsWorker.drainOnce', () => {
       recoveryBot: RECOVERY_BOT,
       now: () => new Date('2026-01-01T00:01:00Z'),
     });
-    // drainOnce checks `this.running` against the per-workspace iterator;
-    // start() sets it true. We don't want the polling loop, just the
-    // single-pass drain, so flip the flag manually.
-    (worker as unknown as { running: boolean }).running = true;
   });
 
   it('happy path: claims row, runs commit, marks succeeded — no other branches taken', async () => {
@@ -210,7 +207,7 @@ describe('PendingCommitsWorker.drainOnce', () => {
     expect(feedback.send).not.toHaveBeenCalled();
   });
 
-  it('a recovery-agent crash does not abort the worker — the row stays pending for the next pass', async () => {
+  it('a recovery-agent crash does not abort the worker — the row goes back to pending for the next pass', async () => {
     const row = makeRow({ attempts: N_TRANSIENT - 1, recoveryAgentRuns: 0 });
     (service.claimNext as ReturnType<typeof vi.fn>).mockResolvedValueOnce(row);
     workflow.runPendingCommit.mockRejectedValueOnce(new Error('cannot push'));
@@ -222,7 +219,151 @@ describe('PendingCommitsWorker.drainOnce', () => {
     // for this attempt), so the row will hit needs_attention naturally
     // after N_RECOVERY tries.
     expect(service.markRecoveryStarted).toHaveBeenCalled();
+    expect(service.markRecoveryFinished).toHaveBeenCalledWith('row-1');
     expect(service.markNeedsAttention).not.toHaveBeenCalled();
+  });
+
+  it('spawns no agent for a row escalated between its claim and the hand-off, and leaves the escalation alone', async () => {
+    // The repository was replaced while the commit ran: the row is
+    // `needs_attention` now, and `markRecoveryStarted` (guarded on `running`)
+    // refuses to move it.
+    const row = makeRow({ attempts: N_TRANSIENT - 1, recoveryAgentRuns: 0 });
+    (service.claimNext as ReturnType<typeof vi.fn>).mockResolvedValueOnce(row);
+    workflow.runPendingCommit.mockRejectedValueOnce(new Error('cannot push: conflict'));
+    vi.mocked(service.markRecoveryStarted).mockResolvedValueOnce(false);
+
+    await worker.drainOnce();
+
+    expect(service.markRecoveryStarted).toHaveBeenCalledWith('row-1');
+    expect(recoveryAgent.run).not.toHaveBeenCalled();
+    expect(service.markRecoveryFinished).not.toHaveBeenCalled();
+    expect(service.markNeedsAttention).not.toHaveBeenCalled();
+    expect(feedback.send).not.toHaveBeenCalled();
+  });
+
+  it('holds the row in recovery for exactly as long as the agent runs, however the run ends', async () => {
+    // The row leaves `recovering` only once the agent has returned: the
+    // agent's own merge must not wait on it while it runs, and the next pass
+    // must retry it after. A run that finishes, one that exits early (resolves
+    // having changed nothing) and one that throws all end the same way.
+    for (const ending of ['finished', 'threw'] as const) {
+      vi.mocked(service.markRecoveryFinished).mockClear();
+      const row = makeRow({ attempts: N_TRANSIENT - 1, recoveryAgentRuns: 0 });
+      (service.claimNext as ReturnType<typeof vi.fn>).mockResolvedValueOnce(row);
+      workflow.runPendingCommit.mockRejectedValueOnce(new Error('cannot push: conflict'));
+      let release!: () => void;
+      const ran = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let entered!: () => void;
+      const started = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      recoveryAgent.run.mockImplementationOnce(async () => {
+        entered();
+        await ran;
+        if (ending === 'threw') throw new Error('agent died');
+      });
+
+      const pass = worker.drainOnce();
+      await started;
+      expect(service.markRecoveryStarted).toHaveBeenCalledWith('row-1');
+      expect(service.markRecoveryFinished).not.toHaveBeenCalled();
+      release();
+      await pass;
+      expect(service.markRecoveryFinished).toHaveBeenCalledWith('row-1');
+      expect(service.markNeedsAttention).not.toHaveBeenCalled();
+    }
+  });
+
+  it('a failed hand-back to pending is retried on the next pass, without a restart', async () => {
+    const row = makeRow({ attempts: N_TRANSIENT - 1, recoveryAgentRuns: 0 });
+    (service.claimNext as ReturnType<typeof vi.fn>).mockResolvedValueOnce(row);
+    workflow.runPendingCommit.mockRejectedValueOnce(new Error('cannot push: conflict'));
+    recoveryAgent.run.mockResolvedValueOnce(undefined);
+    vi.mocked(service.markRecoveryFinished).mockRejectedValueOnce(new Error('connection terminated'));
+
+    // The refusal ends neither the pass nor the row.
+    await expect(worker.drainOnce()).resolves.toBeUndefined();
+    expect(service.markRecoveryFinished).toHaveBeenCalledTimes(1);
+
+    // The next pass hands it back before it claims anything…
+    await worker.drainOnce();
+    expect(service.markRecoveryFinished).toHaveBeenCalledTimes(2);
+    expect(service.markRecoveryFinished).toHaveBeenLastCalledWith('row-1');
+    expect(vi.mocked(service.markRecoveryFinished).mock.invocationCallOrder[1]).toBeLessThan(
+      vi.mocked(service.claimNext).mock.invocationCallOrder.at(-1)!,
+    );
+
+    // …and once it has landed, no later pass asks again.
+    await worker.drainOnce();
+    expect(service.markRecoveryFinished).toHaveBeenCalledTimes(2);
+  });
+
+  it('stop() waits for a drainOnce pass on a worker whose loop never started', async () => {
+    const row = makeRow();
+    (service.claimNext as ReturnType<typeof vi.fn>).mockResolvedValueOnce(row);
+    let release!: () => void;
+    const committing = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    workflow.runPendingCommit.mockImplementationOnce(async () => {
+      entered();
+      await committing;
+    });
+
+    const pass = worker.drainOnce();
+    await started;
+    let stopped = false;
+    const stopping = worker.stop().then(() => {
+      stopped = true;
+    });
+    // Several turns of the event loop: stop() must still be waiting on the commit.
+    for (let i = 0; i < 10; i += 1) await Promise.resolve();
+    expect(stopped).toBe(false);
+
+    release();
+    await stopping;
+    expect(stopped).toBe(true);
+    expect(service.markSucceeded).toHaveBeenCalledWith('row-1');
+    await pass;
+  });
+
+  it('a drainOnce made while another pass is in flight waits for that pass to end', async () => {
+    const first = makeRow();
+    const second = makeRow({ id: 'row-2', path: 'Bar.md' });
+    (service.claimNext as ReturnType<typeof vi.fn>).mockResolvedValueOnce(first).mockResolvedValueOnce(null);
+    let release!: () => void;
+    const committing = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    workflow.runPendingCommit.mockImplementationOnce(async () => {
+      entered();
+      await committing;
+    });
+
+    const one = worker.drainOnce();
+    await started;
+    (service.claimNext as ReturnType<typeof vi.fn>).mockResolvedValueOnce(second);
+    const two = worker.drainOnce();
+    // Several turns of the event loop: the second pass must not have claimed
+    // anything while the first is still committing in the same clone.
+    for (let i = 0; i < 10; i += 1) await Promise.resolve();
+    expect(service.claimNext).toHaveBeenCalledTimes(1);
+    expect(workflow.runPendingCommit).toHaveBeenCalledTimes(1);
+
+    release();
+    await Promise.all([one, two]);
+    expect(service.markSucceeded).toHaveBeenCalledWith('row-1');
+    expect(service.markSucceeded).toHaveBeenCalledWith('row-2');
   });
 
   it('exhausting both budgets marks needs_attention and emits a system feedback notice', async () => {
@@ -348,7 +489,7 @@ describe('PendingCommitsWorker.drainOnce', () => {
     it('gives up the pass the moment stop() lands mid-burst', async () => {
       queue(12);
       workflow.runPendingCommit.mockImplementation(async () => {
-        (worker as unknown as { running: boolean }).running = false;
+        void worker.stop();
       });
       await worker.drainOnce();
       expect(workflow.runPendingCommit).toHaveBeenCalledTimes(1);

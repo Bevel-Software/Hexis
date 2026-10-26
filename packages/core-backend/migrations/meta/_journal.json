@@ -162,6 +162,13 @@
       "when": 1792657514328,
       "tag": "0022_session_version",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1793037622136,
+      "tag": "0023_pending_commits_recovering",
+      "breakpoints": true
     }
   ]
 }
