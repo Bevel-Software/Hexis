@@ -250,7 +250,7 @@ function makeReviewWorkflow(): IReviewWorkflowService {
 describe('WorkflowService — branch delegation', () => {
   it('listBranches delegates to git.listBranches', async () => {
     const git = makeGit();
-    const branches = [{ name: 'main', isCurrent: true, isProtected: true, ahead: 0, behind: 0, hasRemote: true }];
+    const branches = [{ name: 'main', isCurrent: true, isProtected: true, hasRemote: true }];
     (git.listBranches as ReturnType<typeof vi.fn>).mockResolvedValue(branches);
 
     const svc = new WorkflowService(makeDb(), git, makePrs(), makeReviewWorkflow(), makeWorkspaceService(), makeAccessControl(), makeFileLockService(), makePendingCommits(), testKbContext(), openChangeGate());

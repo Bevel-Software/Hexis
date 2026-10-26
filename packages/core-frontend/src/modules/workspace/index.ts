@@ -29,11 +29,18 @@
  *  - `OpenPageInPlatformContext`: how an HTML page mounted there is taken
  *    to the file page when it needs tools and the viewer picks Open in the
  *    platform (a skill page provides it; without it the renderer opens the
- *    file's own address).
+ *    file's own address). `PageLinkHomeContext`: the file such a page's
+ *    links resolve against, where its `filePath` is not one (a skill page).
  *  - `useHtmlToolBridge`, `PageToolsContext` and their types: the page
  *    tool bridge a distribution's own HTML renderer calls to answer a page's
  *    `window.bevel.tools` exactly as the app's renderer does, and the
  *    file page's provider its tests mount it under.
+ *  - `useFileNav` and `useNodeIdNav` (with `KbLinkTarget`, `OpenLinkOptions`
+ *    and `stripJunkBeforeKbDir`): where a link inside rendered content leads
+ *    and how it is followed — the one rule for those links, which a surface
+ *    rendering a file of the knowledge base outside the file page (a skill
+ *    page, a review diff) follows too. `scrollToHeading`: how such a surface
+ *    goes to a section of its own markdown file.
  *
  * Its routing contract (the Knowledge URL prefix and the segment decode),
  * where the page lands once the file on screen has closed, the hook that
@@ -59,12 +66,24 @@ export {
 } from './components/renderers';
 export { RendererWorkspaceContext } from './components/renderers/rendererWorkspace';
 export { asksForFilePage, kbFilePageUrl, kbFileUrl, resolveKbHref } from './routing/kb-routes';
+export { PageLinkHomeContext } from './components/renderers/htmlToolBridge';
+export type { KbLinkTarget } from './components/renderers/KbAppLink';
+export { scrollToHeading } from './components/renderers/scrollToHeading';
 // Reached by other modules; exported here so they stop importing the files.
 export { useCreatePage } from './hooks/useCreatePage';
 export { useMergedWorkspaceTree } from './hooks/useMergedWorkspaceTree';
 export { useOpenChangeRequests } from './hooks/useOpenChangeRequests';
 export { useWorkspaceImageResolver } from './hooks/useWorkspaceImageResolver';
-export { KB_ROUTE_PREFIX, openExternalHref, safeDecode, stripJunkBeforeKbDir, useFileNav, useNodeIdNav } from './routing/kb-routes';
+export {
+  KB_ROUTE_PREFIX,
+  openExternalHref,
+  safeDecode,
+  stripJunkBeforeKbDir,
+  useFileNav,
+  useFileNodeId,
+  useNodeIdNav,
+  type OpenLinkOptions,
+} from './routing/kb-routes';
 export { WorkspaceApiError, deleteFile, getOrCreateWorkspace, listFiles, readFile, writeFile } from './services/workspace.api';
 export type { SkillToolWarning } from './services/workspace.api';
 export { useEditablePage } from './state/editable-page';

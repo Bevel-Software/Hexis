@@ -37,6 +37,7 @@ import type {
   AcquireLockResult,
   AuthUser,
   Branch,
+  BranchCounts,
   BranchSyncOutcome,
   BranchWorkspaceStatus,
   CancelChangeRequestResult,
@@ -930,6 +931,10 @@ export class WorkflowService implements IWorkflowService {
 
   branchStatus(workspaceId: string): Promise<BranchWorkspaceStatus> {
     return this.git.status(workspaceId);
+  }
+
+  branchCounts(workspaceId: string): Promise<BranchCounts> {
+    return this.git.branchCounts(workspaceId);
   }
 
   // `discardWorkingChanges` removed: under save=share there's nothing dirty

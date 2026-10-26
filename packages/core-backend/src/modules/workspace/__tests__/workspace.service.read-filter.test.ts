@@ -177,20 +177,32 @@ describe('WorkspaceService.listFiles — read filter', () => {
       expect(tree.withheld).toBe(1);
     });
 
-    it('does not count an entry the filter marks unlisted', async () => {
-      const filter: ReadTreeFilter = async (ps) =>
-        new Map(ps.map((p) => [p, p === 'top.md' ? 'unlisted' : true]));
-      const tree = await svc.listFiles(workspaceId, filter);
-      expect(paths(tree)).not.toContain('top.md');
-      expect(tree.withheld).toBeUndefined();
-    });
-
     it('counts every entry of a tree the caller may read none of', async () => {
       const filter: ReadTreeFilter = async () => new Map();
       const tree = await svc.listFiles(workspaceId, filter);
       expect(tree.children).toEqual([]);
       // Every entry below the root, exactly — the root itself is never withheld.
       expect(tree.withheld).toBe(paths(await svc.listFiles(workspaceId)).length - 1);
+    });
+
+    /**
+     * `.bevelignore` is a file like any other to the tree: listed where the
+     * caller may read it, counted as withheld where they may not. It used to
+     * be marked `'unlisted'` for non-admins — hidden and uncounted — until
+     * that listing decision was reversed on 2026-10-23.
+     */
+    it('lists a readable .bevelignore and counts a denied one as withheld, like any file', async () => {
+      await mkFile(workspaceDir, '.bevelignore', '');
+      await mkFile(workspaceDir, 'Mixed/.bevelignore', '');
+      // A reader kept out of Mixed/ is kept out of its ignore file too.
+      const filter: ReadTreeFilter = async (ps) => new Map(ps.map((p) => [p, !p.startsWith('Mixed/')]));
+      const tree = await svc.listFiles(workspaceId, filter);
+      expect(paths(tree)).toContain('.bevelignore');
+      expect(paths(tree)).not.toContain('Mixed/.bevelignore');
+      const mixed = tree.children!.find((c) => c.relativePath === 'Mixed');
+      // hidden.md and .bevelignore: two files kept out, both counted.
+      expect(mixed?.withheld).toBe(2);
+      expect(tree.withheld).toBe(2);
     });
   });
 

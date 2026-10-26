@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, type MockInstance } from 'vitest';
 import { useContext } from 'react';
 import { render, screen, fireEvent, waitFor, act, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
@@ -36,7 +36,9 @@ const apiMock = vi.hoisted(() => ({
  * callback the pane only reaches through an HTML page's frame (Open in the
  * platform). The pane itself renders as it always does.
  */
-const paneProps = vi.hoisted(() => ({ last: null as null | { onOpenInPlatform?: () => void } }));
+const paneProps = vi.hoisted(() => ({
+  last: null as null | { onOpenInPlatform?: () => void; linkHome?: { path: string; branch: string } },
+}));
 vi.mock('../components/skill-page/SkillFilePane', async (importOriginal) => {
   const real = await importOriginal<typeof import('../components/skill-page/SkillFilePane')>();
   return {
@@ -91,24 +93,53 @@ vi.mock('../../pr/services/pr-detail.api', () => ({ fetchPrDetail: apiMock.fetch
 vi.mock('../../pr/services/pr-approvals.api', () => ({ approvePrFile: apiMock.approvePrFile }));
 
 // Keep the markdown pipeline (mermaid etc.) out of this test — the stub renders
-// the raw source so assertions can see the body text, plus two probes for the
-// wiring the page hands the view: a click on a percent-encoded link, and what
+// the raw source so assertions can see the body text, plus probes for the
+// wiring the page hands the view: a click on a link (another file, and a
+// section of this one), where the page says such a link leads, and what
 // the image resolver answers for a picture beside the file.
 vi.mock('../../workspace/components/renderers/KbMarkdownView', () => ({
   KbMarkdownView: ({
     source,
     onOpenFile,
+    fileLinkTarget,
+    onOpenNodeId,
+    nodeIdLinkTarget,
     resolveImage,
   }: {
     source: string;
     onOpenFile: (href: string) => void;
+    fileLinkTarget?: (href: string) => unknown;
+    onOpenNodeId?: (id: string) => void;
+    nodeIdLinkTarget?: (id: string) => unknown;
     resolveImage?: (src: string) => unknown;
   }) => (
     <div data-testid="md-view">
       {source}
+      <h2 id="steps">Steps</h2>
       <button type="button" onClick={() => onOpenFile('Some%20File.md')}>
         link-probe
       </button>
+      <button type="button" onClick={() => onOpenFile('SKILL.md#steps')}>
+        section-probe
+      </button>
+      <button type="button" onClick={() => onOpenNodeId?.('newsletter#steps')}>
+        self-id-probe
+      </button>
+      <button type="button" onClick={() => onOpenNodeId?.('plan-node#goal')}>
+        other-id-probe
+      </button>
+      <span data-testid="other-id-target-probe">
+        {JSON.stringify(nodeIdLinkTarget ? nodeIdLinkTarget('plan-node#goal') : 'no-target')}
+      </span>
+      <span data-testid="self-id-target-probe">
+        {JSON.stringify(nodeIdLinkTarget ? nodeIdLinkTarget('newsletter#steps') : 'no-target')}
+      </span>
+      <span data-testid="link-target-probe">
+        {JSON.stringify(fileLinkTarget ? fileLinkTarget('Some%20File.md') : 'no-target')}
+      </span>
+      <span data-testid="section-target-probe">
+        {JSON.stringify(fileLinkTarget ? fileLinkTarget('SKILL.md#steps') : 'no-target')}
+      </span>
       <span data-testid="image-probe">
         {JSON.stringify(resolveImage ? resolveImage('./assets/shot.png') : 'no-resolver')}
       </span>
@@ -388,11 +419,13 @@ function harness(
   routerState?: Record<string, unknown>,
   pageProps?: { provisional?: boolean },
   workspaceValue: WorkspaceContextValue = workspace,
+  /** The fragment the page's address arrives with, e.g. `#steps`. */
+  hash = '',
 ) {
   return (
     <MemoryRouter
       initialEntries={[
-        { pathname: '/skills-and-tools/skills/newsletter', state: routerState ?? null },
+        { pathname: '/skills-and-tools/skills/newsletter', hash, state: routerState ?? null },
       ]}
     >
       <AuthContext.Provider value={auth}>
@@ -433,6 +466,27 @@ allowed-tools: [slack_post_message]
 # Newsletter drafter
 Collect the news and draft the letter.`;
 const RAW_BRANCH = RAW_MAIN.replace('draft the letter', 'ship the letter');
+
+/**
+ * The node id of the file in the pane, as the backend answers it for the
+ * default branch (`resolve-path`): SKILL.md is the node `newsletter`, and
+ * no other file of the skill is a node. Every other request goes to the real
+ * fetch, as it always has.
+ */
+let resolvePathSpy: MockInstance<typeof fetch>;
+beforeEach(() => {
+  const realFetch = globalThis.fetch;
+  resolvePathSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const url = String(input);
+    if (!url.includes('/resolve-path?')) return realFetch(input, init);
+    return url.includes(encodeURIComponent('knowledge-base/Skills/newsletter/SKILL.md'))
+      ? new Response(JSON.stringify({ id: 'newsletter' }), { status: 200 })
+      : new Response('{}', { status: 404 });
+  });
+});
+afterEach(() => {
+  resolvePathSpy.mockRestore();
+});
 
 beforeEach(() => {
   apiMock.getSkill.mockReset().mockResolvedValue(skillDetail);
@@ -482,15 +536,29 @@ describe('SkillPage', () => {
     expect(await screen.findByTestId('navigated-to')).toHaveTextContent(/^\/skills-and-tools\/connect$/);
   });
 
-  it("opens a page of the skill on the Knowledge file page, not back on this page, for Open in the platform", async () => {
-    renderPage(true);
-    await settled();
-    expect(paneProps.last?.onOpenInPlatform).toBeTypeOf('function');
-    act(() => paneProps.last!.onOpenInPlatform!());
-    // The file's own address, with the state that makes the item route show
-    // the file route rather than this skill page again.
-    expect(await screen.findByTestId('navigated-to')).toHaveTextContent(/^\/workspace\/[^/]+\/knowledge-base\/Skills\/newsletter\/SKILL\.md$/);
-    expect(screen.getByTestId('navigated-raw-file')).toHaveTextContent('true');
+  it("opens a page of the skill on the Knowledge file page in a new tab, not back on this page, for Open in the platform", async () => {
+    const open = vi
+      .spyOn(window, 'open')
+      .mockImplementation(() => ({ opener: window }) as unknown as Window);
+    try {
+      renderPage(true);
+      await settled();
+      expect(paneProps.last?.onOpenInPlatform).toBeTypeOf('function');
+      act(() => paneProps.last!.onOpenInPlatform!());
+      // The file page's own address on the default branch — the query is what
+      // makes the item route show the file route rather than this skill page
+      // again, since a new tab carries no router state.
+      expect(open).toHaveBeenCalledTimes(1);
+      expect(open).toHaveBeenCalledWith(
+        `/workspace/${encodeURIComponent(DEFAULT_BRANCH)}/knowledge-base/Skills/newsletter/SKILL.md?as=file`,
+        '_blank',
+      );
+      // And this tab stayed on the skill page.
+      expect(screen.queryByTestId('navigated-to')).toBeNull();
+      expect(screen.getByRole('heading', { name: 'newsletter' })).toBeInTheDocument();
+    } finally {
+      open.mockRestore();
+    }
   });
 
   /**
@@ -1580,18 +1648,155 @@ describe('SkillPage: deciding on a change', () => {
  * is under test is what the PAGE hands the view.
  */
 describe('SkillPage: links and images in the file', () => {
-  it('opens a percent-encoded link as the file it names, on the default branch', async () => {
-    // The drift this fixes: the page used to resolve the href undecoded, so a
-    // link written `Some File.md` opened `Some%20File.md`, a file that is not there.
+  const SOME_FILE_URL = `/workspace/${encodeURIComponent(DEFAULT_BRANCH)}/knowledge-base/Skills/newsletter/Some%20File.md`;
+
+  it('opens a link to another file in a new tab, as the file it names, on the default branch', async () => {
+    // Decoded: the page used to resolve the href undecoded, so a link written
+    // `Some File.md` opened `Some%20File.md`, a file that is not there. And a
+    // NEW TAB: a link inside a file never navigates away from it. The git
+    // status names another branch, so the default branch is the page's doing.
+    const open = vi
+      .spyOn(window, 'open')
+      .mockImplementation(() => ({ opener: window }) as unknown as Window);
+    try {
+      renderPage(false, [], [], makeFakeBus(), undefined, undefined, undefined, {
+        ...git,
+        status: { ...git.status!, branch: 'alice/draft' },
+      });
+      await settled();
+      fireEvent.click(screen.getByRole('button', { name: 'link-probe' }));
+      expect(open).toHaveBeenCalledTimes(1);
+      expect(open).toHaveBeenCalledWith(SOME_FILE_URL, '_blank');
+      expect(screen.queryByTestId('navigated-to')).toBeNull();
+      expect(screen.getByRole('heading', { name: 'newsletter' })).toBeInTheDocument();
+    } finally {
+      open.mockRestore();
+    }
+  });
+
+  it("hands the view each link's target: another file a new tab, this file's section this tab", async () => {
     renderPage(false);
     await settled();
-    fireEvent.click(screen.getByRole('button', { name: 'link-probe' }));
-    const target = await screen.findByTestId('navigated-to');
-    expect(target.textContent).toMatch(
-      new RegExp(
-        `^/workspace/${encodeURIComponent(DEFAULT_BRANCH)}/knowledge-base/Skills/newsletter/Some(%20| )File\\.md$`,
-      ),
-    );
+    // The same answer the click follows, so the anchor's href, target and rel
+    // agree with it (a middle-click goes where the click goes).
+    expect(JSON.parse(screen.getByTestId('link-target-probe').textContent ?? 'null')).toEqual({
+      href: SOME_FILE_URL,
+      newTab: true,
+    });
+    expect(JSON.parse(screen.getByTestId('section-target-probe').textContent ?? 'null')).toEqual({
+      href: '/skills-and-tools/skills/newsletter#steps',
+      newTab: false,
+    });
+  });
+
+  it('follows a link to a section of the file on screen by scrolling to its heading, in this tab', async () => {
+    const open = vi.spyOn(window, 'open');
+    // The page's address has no heading scroll of its own, so the click is
+    // what scrolls: the heading the fragment names comes into view, and the
+    // page neither opens a tab nor navigates.
+    const original = Element.prototype.scrollIntoView;
+    const scrolled: string[] = [];
+    Element.prototype.scrollIntoView = function (this: Element) {
+      scrolled.push(this.id);
+    };
+    try {
+      renderPage(false);
+      await settled();
+      fireEvent.click(screen.getByRole('button', { name: 'section-probe' }));
+      expect(scrolled).toEqual(['steps']);
+      expect(open).not.toHaveBeenCalled();
+      expect(screen.queryByTestId('navigated-to')).toBeNull();
+      expect(screen.getByRole('heading', { name: 'newsletter' })).toBeInTheDocument();
+    } finally {
+      open.mockRestore();
+      Element.prototype.scrollIntoView = original;
+    }
+  });
+
+  it("follows an id-link to this skill's own heading by scrolling the pane, in this tab", async () => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => ({ opener: window }) as unknown as Window);
+    const original = Element.prototype.scrollIntoView;
+    const scrolled: string[] = [];
+    Element.prototype.scrollIntoView = function (this: Element) {
+      scrolled.push(this.id);
+    };
+    try {
+      renderPage(false);
+      await settled();
+      // The anchor's own answer agrees: a section of this page, not a new tab.
+      await waitFor(() =>
+        expect(JSON.parse(screen.getByTestId('self-id-target-probe').textContent ?? 'null')).toEqual({
+          href: '/skills-and-tools/skills/newsletter#steps',
+          newTab: false,
+        }),
+      );
+      fireEvent.click(screen.getByRole('button', { name: 'self-id-probe' }));
+      expect(scrolled).toEqual(['steps']);
+      expect(open).not.toHaveBeenCalled();
+      expect(screen.queryByTestId('navigated-to')).toBeNull();
+      // Another node is still a new tab.
+      fireEvent.click(screen.getByRole('button', { name: 'other-id-probe' }));
+      expect(open).toHaveBeenCalledWith(`/workspace/${encodeURIComponent(DEFAULT_BRANCH)}/plan-node#goal`, '_blank');
+      expect(screen.getByRole('heading', { name: 'newsletter' })).toBeInTheDocument();
+    } finally {
+      open.mockRestore();
+      Element.prototype.scrollIntoView = original;
+    }
+  });
+
+  // The pane renders the default branch's file whatever is checked out, so
+  // an id in it names a node there: with a draft checked out, the click and
+  // the anchor both open the default branch's node, not the draft's.
+  it("opens another node on the default branch, where the file was read, while a draft is checked out", async () => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => ({ opener: window }) as unknown as Window);
+    try {
+      renderPage(false, [], [], makeFakeBus(), undefined, undefined, undefined, {
+        ...git,
+        status: { ...git.status!, branch: 'alice/draft' },
+      });
+      await settled();
+      fireEvent.click(screen.getByRole('button', { name: 'other-id-probe' }));
+      expect(open).toHaveBeenCalledTimes(1);
+      expect(open).toHaveBeenCalledWith(`/workspace/${encodeURIComponent(DEFAULT_BRANCH)}/plan-node#goal`, '_blank');
+      expect(JSON.parse(screen.getByTestId('other-id-target-probe').textContent ?? 'null')).toEqual({
+        href: `/workspace/${encodeURIComponent(DEFAULT_BRANCH)}/plan-node#goal`,
+        newTab: true,
+      });
+      expect(screen.queryByTestId('navigated-to')).toBeNull();
+    } finally {
+      open.mockRestore();
+    }
+  });
+
+  // A section link's own address — where a middle-click or a modified click
+  // on it goes — is this page plus the heading. Arriving there scrolls to it,
+  // so the new tab lands where the plain click does.
+  it('scrolls to the heading its address names when it arrives with a fragment', async () => {
+    const original = Element.prototype.scrollIntoView;
+    const scrolled: string[] = [];
+    Element.prototype.scrollIntoView = function (this: Element) {
+      scrolled.push(this.id);
+    };
+    try {
+      libraryMock.value = libraryValue(false, [], []);
+      render(harness(makeFakeBus(), git, undefined, undefined, workspace, '#steps'));
+      await settled();
+      await waitFor(() => expect(scrolled).toContain('steps'));
+    } finally {
+      Element.prototype.scrollIntoView = original;
+    }
+  });
+
+  it("names the file's real home for an HTML page's links: its workspace path, on the default branch", async () => {
+    renderPage(false, [], [], makeFakeBus(), undefined, undefined, undefined, {
+      ...git,
+      status: { ...git.status!, branch: 'alice/draft' },
+    });
+    await settled();
+    expect(paneProps.last?.linkHome).toEqual({
+      path: 'knowledge-base/Skills/newsletter/SKILL.md',
+      branch: DEFAULT_BRANCH,
+    });
   });
 
   it("serves a relative image from the default branch's workspace, under the skill folder", async () => {

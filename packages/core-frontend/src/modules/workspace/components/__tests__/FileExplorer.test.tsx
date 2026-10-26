@@ -971,6 +971,32 @@ describe('FileExplorer right-click: Download menu (per-path access)', () => {
   });
 });
 
+// A link INSIDE a file opens a new tab; the tree is the app's own navigation
+// and is not one. A click on a file row moves this tab to that file, as it
+// always has, whatever view the tab was in.
+describe('FileExplorer: a file click navigates this tab', () => {
+  beforeEach(() => {
+    cleanup();
+  });
+
+  it('opens the clicked file in place, with no new tab', async () => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    renderExplorer({
+      fileTree: {
+        name: '.',
+        relativePath: '.',
+        type: 'directory',
+        children: [{ name: 'Plan.md', relativePath: 'Plan.md', type: 'file' }],
+      },
+      initialEntries: [`/workspace/alice%2Fdraft/${kbPath('Other.md')}?fullscreen=1`],
+    });
+    await userEvent.setup().click(screen.getByText('Plan.md'));
+    expect(screen.getByTestId('location-pathname').textContent).toBe(`/workspace/alice%2Fdraft/${kbPath('Plan.md')}`);
+    expect(open).not.toHaveBeenCalled();
+    open.mockRestore();
+  });
+});
+
 // Regression coverage for the FileTreeNode collapse state machine. PR #113
 // derived `autoExpanded` reactively without an escape hatch, so clicking the
 // chevron on a folder that contained the open file did nothing — the user's
