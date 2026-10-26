@@ -3,7 +3,7 @@ import { chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } fro
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { promisify } from 'node:util';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   compareSearchPaths,
   RipgrepPatternMatcher,
@@ -403,6 +403,27 @@ describe('RipgrepPatternMatcher', () => {
     // A failure of the work itself is the caller's to hear.
     const t = await search('needle');
     await expect(t.charged(() => Promise.reject(new Error('verdict failed')))).rejects.toThrow('verdict failed');
+  });
+
+  it('spends the whole budget when its timer fires, however little time the clock measured', async () => {
+    // A clock that measures no time at all: only the timer's firing can spend the budget.
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now());
+    const slow = await slowRipgrep();
+    try {
+      const sleep = (ms: number) => () => new Promise<string>((r) => setTimeout(() => r('done'), ms));
+      const s = await search('needle', { budgetMs: 300 });
+      await expect(s.charged(sleep(5_000))).rejects.toMatchObject({ details: { code: 'pattern_too_expensive' } });
+      await expect(s.charged(sleep(1))).rejects.toMatchObject({ details: { code: 'pattern_too_expensive' } });
+      const t = await search('needle', { budgetMs: 300 });
+      await expect(all(t)).rejects.toMatchObject({ details: { code: 'pattern_too_expensive' } });
+      await expect(t.charged(sleep(1))).rejects.toMatchObject({ details: { code: 'pattern_too_expensive' } });
+      const refused = performance.now();
+      await expect(t.matchingLines(['needle'])).rejects.toMatchObject({ details: { code: 'pattern_too_expensive' } });
+      expect(performance.now() - refused).toBeLessThan(100);
+    } finally {
+      clock.mockRestore();
+      await slow.remove();
+    }
   });
 
   it('answers charged work as abandoned when the caller goes away', async () => {

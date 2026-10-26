@@ -309,6 +309,7 @@ class RipgrepSearch implements IPatternSearch {
     if (remaining <= 0) throw new PatternTooExpensiveError(this.pattern, this.budgetMs);
     const started = Date.now();
     let timer: NodeJS.Timeout | undefined;
+    let timedOut = false;
     let onAbort: (() => void) | undefined;
     // The work is not ours to stop; what it settles with after the budget is
     // gone goes nowhere.
@@ -318,7 +319,10 @@ class RipgrepSearch implements IPatternSearch {
       return await Promise.race([
         pending,
         new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(new PatternTooExpensiveError(this.pattern, this.budgetMs)), remaining);
+          timer = setTimeout(() => {
+            timedOut = true;
+            reject(new PatternTooExpensiveError(this.pattern, this.budgetMs));
+          }, remaining);
           onAbort = () => reject(new SearchAbandonedError());
           this.signal?.addEventListener('abort', onAbort, { once: true });
         }),
@@ -326,8 +330,18 @@ class RipgrepSearch implements IPatternSearch {
     } finally {
       if (timer) clearTimeout(timer);
       if (onAbort) this.signal?.removeEventListener('abort', onAbort);
-      this.spentMs += Date.now() - started;
+      this.spend(started, timedOut);
     }
+  }
+
+  /**
+   * Spend the wall time since `started`, or the whole budget when its timer
+   * fired: `Date.now()` counts whole milliseconds, so the time measured can
+   * fall a millisecond short of the timer's, and a search already answered
+   * too expensive must have nothing left for more work or another run.
+   */
+  private spend(started: number, timedOut: boolean): void {
+    this.spentMs = timedOut ? this.budgetMs : this.spentMs + (Date.now() - started);
   }
 
   /**
@@ -414,7 +428,7 @@ class RipgrepSearch implements IPatternSearch {
         child.kill('SIGKILL');
         await exit;
       }
-      this.spentMs += Date.now() - started;
+      this.spend(started, timedOut);
       release();
     }
   }
