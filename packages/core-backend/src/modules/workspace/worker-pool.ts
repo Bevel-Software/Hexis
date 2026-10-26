@@ -2,10 +2,9 @@ import type { Worker } from 'node:worker_threads';
 
 /**
  * The pooled worker threads that keep CPU-bound work off the request thread:
- * the mechanics every worker kind shares, whatever its worker runs. Two kinds
- * use it today, each with a pool of its own — the regex matcher `grep` runs a
- * caller's pattern in (`bounded-matcher.ts`) and the document extractor every
- * office, PDF and email extraction runs in (`file-readers/extract-in-worker.ts`).
+ * the mechanics every worker kind shares, whatever its worker runs. One kind
+ * uses it today, with a pool of its own — the document extractor every office,
+ * PDF and email extraction runs in (`file-readers/extract-in-worker.ts`).
  *
  * What a kind brings is how to start its worker; what the pool owns is the
  * rest: at most `poolMax` workers, a capped queue of jobs waiting for one,
