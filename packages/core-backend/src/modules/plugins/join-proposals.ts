@@ -5,8 +5,8 @@ import {
   parseOwnAccessEntries,
   type ParsedEntry,
   type Verb,
-} from '../access-model/access-grammar.js';
-import type { TargetKind } from '../access/access-mutation.service.js';
+} from '../access-model/index.js';
+import type { TargetKind } from '../access/index.js';
 
 /**
  * What a join branch is PROPOSING, relative to the default branch.

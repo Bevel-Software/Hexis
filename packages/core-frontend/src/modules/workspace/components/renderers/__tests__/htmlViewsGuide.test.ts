@@ -119,6 +119,20 @@ describe('the html-views guide section agrees with the renderer', () => {
     expect(bridge.posted).toEqual([]);
   });
 
+  it('says a modified or middle click opens a new tab, and the bridge asks the app for one', () => {
+    expect(flat).toContain(
+      'A click on a link with Ctrl, Cmd or Shift held, or with the middle button, opens its destination in a new tab, as a browser does with a link: a bare fragment opens the page\'s own file at that section in a new tab, and the page stays where it is.',
+    );
+    const bridge = runBridge({ ids: ['totals'] });
+    bridge.click('#totals', { ctrlKey: true });
+    bridge.click('../Knowledge/Alice.md', { button: 1 });
+    expect(bridge.scrolled).toEqual([]);
+    expect(bridge.posted).toEqual([
+      { type: 'bevel.navigate', href: '#totals', newTab: true },
+      { type: 'bevel.navigate', href: '../Knowledge/Alice.md', newTab: true },
+    ]);
+  });
+
   it('names the addresses only a script may open, and the app opens exactly those beyond the markup', () => {
     expect(flat).toContain(
       'A call from a script may also open `tel:`, `sms:`, `geo:` and a protocol-relative `//host/path` address in a new tab, though a link written in the markup cannot keep one.',
@@ -156,7 +170,10 @@ describe('the html-views guide section agrees with the renderer', () => {
 
     // Null everywhere else, and the guide tells a page to check before every use.
     expect(runBridge().bevel.tools).toBeNull();
-    expect(flat).toContain('`window.bevel.tools` is `null` wherever tools are not available: on the embed, on a skill page and in any preview that is not the app\'s file page.');
+    expect(flat).toContain('`window.bevel.tools` is `null` wherever tools are not available: on the embed (a page shown on another site, or in a chat\'s MCP App pane), and in a change request\'s or a file history\'s preview of a page.');
+    // Where it is answered: the hosts htmlToolBridge.ts lists, the skill page beside the file page.
+    expect(flat).toContain('On the app\'s file page, and on a skill\'s page in the Library');
+    expect(flat).toContain('resolves `true` at once, with nothing shown, on the app\'s file page and on a skill\'s page.');
     expect(flat).toContain('Check it before every use, and render the page without tools when it is `null`');
 
     // The consent rule and the two cards, in the app's words.

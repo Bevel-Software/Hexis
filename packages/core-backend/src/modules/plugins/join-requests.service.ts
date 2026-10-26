@@ -4,18 +4,18 @@ import {
   type ChangeRequest,
   type IWorkflowService,
 } from '@bevel-software/platform-shared';
-import { type WorkspaceService } from '../workspace/workspace.service.js';
+import { type WorkspaceService } from '../workspace/index.js';
 import { logger } from '../../shared/logging.js';
 
 const log = logger('plugins');
 import type { KbContext } from '../../shared/kb-context.js';
-import type { IAccessControl } from '../access/access-control.interface.js';
+import type { IAccessControl } from '../access/index.js';
 import {
   rulesFileFor,
   type AccessRequestTarget,
   type IAccessRequestLifecycle,
-} from '../access/access-requests.contract.js';
-import type { Verb } from '../access-model/access-grammar.js';
+} from '../access/index.js';
+import type { Verb } from '../access-model/index.js';
 import { pendingProposals, type JoinProposal } from './join-proposals.js';
 
 /** One open join change request, with what it still proposes. */

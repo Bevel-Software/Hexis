@@ -1,8 +1,8 @@
 import { sql } from 'drizzle-orm';
-import type { Database } from '../database/connection.js';
+import type { Database } from '../database/index.js';
 import { canonicalEmail } from '../../shared/email-identity.js';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
-import { pgErrorCode } from '../database/pg-error.js';
+import { pgErrorCode } from '../database/index.js';
 
 /** The handle `db.transaction` hands its callback. */
 type Tx = Parameters<Parameters<Database['transaction']>[0]>[0];

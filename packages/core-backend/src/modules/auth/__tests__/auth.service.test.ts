@@ -3,11 +3,12 @@ import { PgDialect } from 'drizzle-orm/pg-core';
 import type { SQL } from 'drizzle-orm';
 import type { Database } from '../../database/connection.js';
 import type { CoreConfig } from '../../../core-config.js';
-import { AuthService } from '../auth.service.js';
-import { AccountAdmissionRefusedError, type IAccountAdmission } from '../account-admission.js';
+import jwt from 'jsonwebtoken';
+import { AuthService, PasswordChangedMeanwhileError, PasswordRefusedError } from '../auth.service.js';
+import { AccountAdmissionRefusedError, SessionEndedError, type IAccountAdmission } from '../account-admission.js';
 import { hashPassword, verifyPassword } from '../password-hash.js';
-import { RECOVERY_BOT_EMAIL } from '../../workflow/recovery-bot.js';
-import { DIRECTORY_SYNC_BOT_EMAIL } from '../../access/directory-sync-bot.js';
+import { RECOVERY_BOT_EMAIL } from '../../workflow/index.js';
+import { DIRECTORY_SYNC_BOT_EMAIL } from '../../access/index.js';
 
 /**
  * Minimal drizzle chain stub (same idiom as the secrets-vault tests): each
@@ -78,7 +79,11 @@ const ROW = {
   // always has a boolean here, so the fixture carries one rather than letting
   // every asserted payload read `undefined`.
   onboardingDone: false,
+  sessionVersion: 0,
 };
+
+/** What a password change's conditional write hands back: the row, one session generation on. */
+const CHANGED = [{ ...ROW, sessionVersion: 1 }];
 
 describe('AuthService.loginWithPassword — env bootstrap admin', () => {
   const config = makeConfig({ adminEmail: 'root@example.com', adminPassword: 'sup3r-secret' });
@@ -283,14 +288,14 @@ describe('AuthService.createAccount / changePassword', () => {
       new AuthService(wrong.db, makeConfig()).changePassword('user-1', 'not-it', 'new-password-1'),
     ).rejects.toThrow('Current password is incorrect');
 
-    const right = makeFakeDb([[{ ...ROW, passwordHash }], undefined]);
+    const right = makeFakeDb([[{ ...ROW, passwordHash }], CHANGED]);
     await expect(
       new AuthService(right.db, makeConfig()).changePassword('user-1', 'old-password', 'new-password-1'),
-    ).resolves.toBeUndefined();
+    ).resolves.toMatchObject({ token: expect.any(String) });
   });
 
   it('changePassword lets an SSO-only account set its first password without one', async () => {
-    const { db, captured } = makeFakeDb([[{ ...ROW, passwordHash: null }], undefined]);
+    const { db, captured } = makeFakeDb([[{ ...ROW, passwordHash: null }], CHANGED]);
     await new AuthService(db, makeConfig()).changePassword('user-1', undefined, 'first-password');
     const set = captured.set[0] as { passwordHash: string };
     expect(set.passwordHash.startsWith('scrypt:')).toBe(true);
@@ -452,7 +457,7 @@ describe('AuthService.changePassword — the three account kinds', () => {
       });
 
       it('stores a new hash for the right current password', async () => {
-        const { db, captured } = makeFakeDb([[await row()], undefined]);
+        const { db, captured } = makeFakeDb([[await row()], CHANGED]);
         await new AuthService(db, makeConfig(ENV_ADMIN)).changePassword(
           kind.id,
           'old-password',
@@ -585,12 +590,88 @@ describe('AuthService.changePassword — the three account kinds', () => {
       ).getUserById('user-root');
       expect(flagged?.isEnvAdmin).toBe(false);
 
-      const { db, captured } = makeFakeDb([[{ ...rootRow, passwordHash }], undefined]);
+      const { db, captured } = makeFakeDb([[{ ...rootRow, passwordHash }], CHANGED]);
       await new AuthService(db, config).changePassword('user-root', 'old-password', 'new-password-1');
       expect((captured.set[0] as { passwordHash: string }).passwordHash.startsWith('scrypt:')).toBe(
         true,
       );
     });
+  });
+});
+
+/**
+ * A password change ends the sessions opened before it. The real-Postgres
+ * half (`password-change-sessions.pg.test.ts`) proves it end to end; these
+ * pin the service's side without a database.
+ */
+describe('AuthService.changePassword — the sessions opened before it', () => {
+  const ON = { deactivatedAt: null };
+
+  it('refuses a session issued before the change, and accepts the token the change hands back', async () => {
+    const passwordHash = await hashPassword('old-password');
+    const { db } = makeFakeDb([
+      [{ ...ROW, passwordHash }], // sign-in
+      [{ ...ROW, passwordHash }], // the change reads the row...
+      CHANGED, // ...and writes it one generation on
+      [{ ...ON, ...CHANGED[0] }], // the old token's lookup...
+      [{ ...ON, ...CHANGED[0] }], // ...and the new one's: a session is never answered from the cache
+    ]);
+    const svc = new AuthService(db, makeConfig());
+    const before = await svc.loginWithPassword('alice@example.com', 'old-password');
+    const { token } = await svc.changePassword('user-1', 'old-password', 'new-password-1');
+    // Named, and worded for the person: the middleware shows these words
+    // where a bare "invalid token" would leave them guessing.
+    const ended = svc.resolveSession(before.token);
+    await expect(ended).rejects.toBeInstanceOf(SessionEndedError);
+    await expect(ended).rejects.toThrow(/password was changed after this session was opened/);
+    await expect(svc.resolveSession(token)).resolves.toEqual({ userId: ROW.id, email: ROW.email });
+  });
+
+  it('refuses a wrong current password as a refusal the caller is told, not a fault', async () => {
+    const passwordHash = await hashPassword('old-password');
+    const { db } = makeFakeDb([[{ ...ROW, passwordHash }]]);
+    const refused = new AuthService(db, makeConfig()).changePassword('user-1', 'not-it', 'new-password-1');
+    await expect(refused).rejects.toBeInstanceOf(PasswordRefusedError);
+    await expect(refused).rejects.toThrow('Current password is incorrect');
+  });
+
+  it('reads the account row for every session it resolves, whatever the cache holds', async () => {
+    // Another replica's password change is only visible in the row, so a
+    // session answered from the cache would outlive it by up to 30 seconds.
+    const live = [{ ...ON, ...ROW }];
+    const { db } = makeFakeDb([live, live, live]);
+    const svc = new AuthService(db, makeConfig());
+    const token = jwt.sign({ userId: ROW.id, email: ROW.email, sv: 0 }, 'test-jwt-secret', { expiresIn: '7d' });
+    const select = vi.mocked(db.select);
+
+    await svc.resolveSession(token);
+    expect(select).toHaveBeenCalledTimes(1);
+    // The cache now holds the account; isActive may use it...
+    await expect(svc.isActive(ROW.id)).resolves.toBe(true);
+    expect(select).toHaveBeenCalledTimes(1);
+    // ...but a session never does.
+    await svc.resolveSession(token);
+    expect(select).toHaveBeenCalledTimes(2);
+    await svc.resolveSession(token);
+    expect(select).toHaveBeenCalledTimes(3);
+  });
+
+  it('keeps a token issued before sessions had generations while the password never changed', async () => {
+    const { db } = makeFakeDb([[{ ...ON, ...ROW }]]);
+    const legacy = jwt.sign({ userId: ROW.id, email: ROW.email }, 'test-jwt-secret', { expiresIn: '7d' });
+    await expect(new AuthService(db, makeConfig()).resolveSession(legacy)).resolves.toEqual({
+      userId: ROW.id,
+      email: ROW.email,
+    });
+  });
+
+  it('is refused, in words, when another session changed the password between the read and the write', async () => {
+    const passwordHash = await hashPassword('old-password');
+    // The conditional write finds the row no longer at the generation read.
+    const { db } = makeFakeDb([[{ ...ROW, passwordHash }], []]);
+    const refused = new AuthService(db, makeConfig()).changePassword('user-1', 'old-password', 'new-password-1');
+    await expect(refused).rejects.toBeInstanceOf(PasswordChangedMeanwhileError);
+    await expect(refused).rejects.toThrow(/changed from another session.*nothing was changed/);
   });
 });
 

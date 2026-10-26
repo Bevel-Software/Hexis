@@ -66,17 +66,23 @@ import { SpillStore } from '../modules/workspace/spill-store.js';
 import { AgentUploadStore, assertUploadsRootOutsideWorkspaces } from '../modules/workspace/agent-upload.store.js';
 import { AgentDownloadStore, type IAgentDownloadStore } from '../modules/workspace/agent-download.store.js';
 import { createDownloadFetcherIdentifier } from '../modules/workspace/agent-download.routes.js';
-import { WorkerPatternMatcher } from '../modules/workspace/bounded-matcher.js';
-import type { IPatternMatcher } from '../modules/workspace/pattern-matcher.contract.js';
 import type { Request } from 'express';
-import { DocExtractService } from '../modules/workspace/file-readers/doc-extract.service.js';
+import {
+  assertRipgrep,
+  DocExtractService,
+  RipgrepPatternMatcher,
+  WorkerDocumentExtractor,
+  type IDocumentExtractor,
+  type IPatternMatcher,
+} from '../modules/workspace/index.js';
 import { UuidSessionSink, type ISessionSink } from '../modules/workspace/session-sink.js';
 import { AuthService } from '../modules/auth/auth.service.js';
 import { AccountHooks, type IAccountHooks } from '../modules/auth/account-hooks.js';
 import { AccountErasureService } from '../modules/auth/account-erasure.service.js';
 import { OidcAuthProvider, oidcSettingsFrom } from '../modules/auth/oidc-auth-provider.js';
-import { createAuthMiddleware, readAuthCookie } from '../modules/auth/auth.middleware.js';
+import { authCookieSecure, createAuthMiddleware, readAuthCookie } from '../modules/auth/auth.middleware.js';
 import { AccessControlService, loadActiveGroups } from '../modules/access/access-control.service.js';
+import { AccessMutationService } from '../modules/access/access-mutation.service.js';
 import { CreatorAccessService } from '../modules/access/creator-access.js';
 import { ChangeReadGate } from '../modules/access/change-read-gate.js';
 import { GroupsAdminService } from '../modules/access/groups-admin.service.js';
@@ -250,7 +256,7 @@ export interface CoreServices {
   agentUploadStore: AgentUploadStore;
   /** The bytes `request_file_download` captured, held until their one-time link is fetched or expires. */
   agentDownloadStore: IAgentDownloadStore;
-  /** Runs a caller's `grep` pattern off the request thread under a budget; its workers end when the graph stops. */
+  /** Runs a caller's `grep` pattern in ripgrep under a budget; its running searches end when the graph stops. */
   patternMatcher: IPatternMatcher;
   /**
    * Every user a download fetch identifies itself as, by its bearer and its
@@ -258,6 +264,8 @@ export interface CoreServices {
    * download route can refuse a link presented by someone it was not issued to.
    */
   agentDownloadFetcher: (req: Request) => Promise<string[]>;
+  /** Runs every document extraction off the request thread under a budget; its workers end when the graph stops. */
+  documentExtractor: IDocumentExtractor;
   docExtractService: DocExtractService;
   accessControl: AccessControlService;
   creatorAccess: CreatorAccessService;
@@ -425,6 +433,9 @@ export async function createCoreServices(
   // (see `git-version.ts`): every clone, fetch and refresh below depends on it,
   // so an unsupported binary is better surfaced here than at the first merge.
   await assertGitVersion();
+  // The same for ripgrep, which the grep tool searches with and has no
+  // fallback for (see `ripgrep-version.ts`).
+  await assertRipgrep();
   // What tells this knowledge base's locks, migration ledger and secrets
   // loader apart from another's in the same process and database. Empty for
   // the default schema, so a single-tenant deployment keeps the lock ids and
@@ -788,16 +799,16 @@ export async function createCoreServices(
       'captured download bytes wait there for their one-time links, so a root inside a workspace would let the ' +
       'file tools read them. Point AGENT_UPLOADS_ROOT at a directory whose parent is outside WORKSPACES_ROOT.',
   });
-  const patternMatcher = new WorkerPatternMatcher();
+  const patternMatcher = new RipgrepPatternMatcher();
   const agentDownloadStore = new AgentDownloadStore({
     root: agentDownloadsRoot,
     publicBaseUrl: config.publicBackendUrl,
     // `<tenant>-down_`: recognisable by shape beside the upload token.
     tokenPrefix: config.uploadTokenPrefix.replace(/up_$/, 'down_'),
   });
-  // Office-document/PDF text extraction for `read_file`/`grep`, cached by
-  // content hash beside the workspaces root (see `DocExtractionCache`).
-  const docExtractService = new DocExtractService(config.docExtractCacheRoot);
+  // The worker threads every office/PDF/email extraction runs in, under a
+  // 10 s budget per file (see `WorkerDocumentExtractor`).
+  const documentExtractor = new WorkerDocumentExtractor();
   // The deployment owner counts as Admin for the two hardcoded `write`
   // rescues (`roles.yaml` and any `access.md`) — the SAME list
   // `AdminAccessService` below is given, so the admin surfaces and the write
@@ -956,6 +967,14 @@ export async function createCoreServices(
   // browser sessions. Single instance per Node process — survives across
   // requests, doesn't survive restarts (clients reconnect + resync).
   const eventBus = new WorkflowEventBus();
+  // Office-document/PDF/email text extraction for `read_file`/`grep`, cached
+  // by content hash beside the workspaces root (see `DocExtractionCache`),
+  // failures included. A fresh failure is told to the people looking at the
+  // file: the events route delivers it only to sessions that may read it.
+  const docExtractService = new DocExtractService(config.docExtractCacheRoot, documentExtractor, {
+    onUnreadable: ({ workspaceId, path, reason }) =>
+      eventBus.emit({ kind: 'document-unreadable', workspaceId, path, reason }),
+  });
   // In-process post-commit hook (distinct from the SSE bus): fires once per
   // committed change (batched paths) so catalogs refresh instantly and the
   // id-repair keeps the id namespace collision-free. Subscribers are registered
@@ -1042,6 +1061,7 @@ export async function createCoreServices(
     workspaceService,
     workflowService,
     accessControl,
+    new AccessMutationService(workspaceService, accessControl, kb.kbDirName),
     skillService,
     pluginLinkIndex,
     kb,
@@ -1559,7 +1579,7 @@ export async function createCoreServices(
       settings: () => oidcSettingsFrom(settings),
       publicBackendUrl: config.publicBackendUrl,
       publicFrontendUrl: config.publicFrontendUrl,
-      cookieSecure: config.publicBackendUrl.startsWith('https'),
+      cookieSecure: authCookieSecure(config.publicBackendUrl),
       // A real sign-in proves the values that sign-in used. Recorded against
       // those — under their own key — so it says nothing about any saved
       // since, and cannot overwrite what was recorded about them.
@@ -1659,6 +1679,7 @@ export async function createCoreServices(
     agentDownloadStore,
     patternMatcher,
     agentDownloadFetcher,
+    documentExtractor,
     docExtractService,
     accessControl,
     creatorAccess,

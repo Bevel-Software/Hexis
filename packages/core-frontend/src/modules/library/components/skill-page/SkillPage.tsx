@@ -17,45 +17,34 @@ import {
   Surface,
   useFocusHandoff,
 } from '../../../../shared/components';
-import { useAuth } from '../../../auth/state/auth.context';
-import { useWorkspace } from '../../../workspace/state/workspace.context';
-import { useGit } from '../../../git/state/git.context';
+import { useAuth } from '../../../auth';
+import { useWorkspace, kbFileUrl, useFileNav, useFileNodeId, useNodeIdNav, useWorkspaceImageResolver } from '../../../workspace';
+import { useGit } from '../../../git';
 import { FileHistoryPanel } from '../../../git/components/FileHistoryPanel';
-import {
-  kbFileUrl,
-  openExternalHref,
-  resolveKbHref,
-  useNodeIdNav,
-} from '../../../workspace/routing/kb-routes';
-import { useWorkspaceImageResolver } from '../../../workspace/hooks/useWorkspaceImageResolver';
-import { cancelPullRequest } from '../../../pr/services/pr-cancel.api';
-import { useFileAccess } from '../../../access/hooks/useFileAccess';
-import { proposeChange, suggestionBranchFor } from '../../services/library.api';
+import { cancelPullRequest } from '../../../pr';
+import { useFileAccess, offersManageAccess } from '../../../access';
+import { proposeChange, suggestionBranchFor, listSkillAccessRequests, reconcileSkillAccessRequest } from '../../services/library.api';
 import {
   getOrCreateWorkspace,
   writeFile,
   type SkillToolWarning,
-} from '../../../workspace/services/workspace.api';
+} from '../../../workspace';
 import { useSkillDetail } from '../../hooks/useSkillDetail';
 import {
   refusalLine,
   useApplyChangeRequest,
-} from '../../../change-requests/hooks/useApplyChangeRequest';
-import { useCrFileDiffs } from '../../../change-requests/hooks/useCrFileDiffs';
-import { useDefaultBranchFile, useFileOnBranch } from '../../../change-requests/hooks/useFileOnBranch';
+} from '../../../change-requests';
+import { useCrFileDiffs, useDefaultBranchFile, useFileOnBranch, changeAuthorName, formatWhen, conflictResolutionPrompt } from '../../../change-requests';
 import { useLibrary } from '../../state/library-data';
 import { useLibraryToast } from '../../state/toast.context';
 import { CONNECT_TOOLS_PATH, libraryHomeForItemPath, urlForSkillFile } from '../../routes/library-paths';
-import { changeAuthorName, formatWhen } from '../../../change-requests/utils/author';
 import { ownersTextOf, pluginLabel } from '../../utils/plugin-summary';
 import { neededToolsFor, toolStatus } from '../../utils/status';
 import { StatusDot } from '../StatusDot';
 import { SharedViaPlugins } from './SharedViaPlugins';
 import { AccessRequestsBanner } from '../../../access/components/AccessRequestsBanner';
 import { useJoinRequests, type JoinRequestsApi } from '../../hooks/useJoinRequests';
-import { listSkillAccessRequests, reconcileSkillAccessRequest } from '../../services/library.api';
 import { ManageAccessDialog } from '../../../access/components/ManageAccessDialog';
-import { offersManageAccess } from '../../../access/manage-access-affordance';
 import { ShareButton } from '../ShareButton';
 import { ChangeRequestDock } from '../ChangeRequestDock';
 import { ChangeRequestDialog } from '../../../change-requests/components/ChangeRequestDialog';
@@ -64,7 +53,6 @@ import { skillPanelId, skillTabId } from './tab-ids';
 import { SkillFilePane } from './SkillFilePane';
 import { SkillFileEditor } from './SkillFileEditor';
 import { ChangeBox } from '../../../change-requests/components/ChangeBox';
-import { conflictResolutionPrompt } from '../../../change-requests/utils/conflict';
 import { isBinaryFile } from '../../../workspace/components/renderers';
 
 /**
@@ -118,7 +106,8 @@ export function SkillPage({
   const detail = useSkillDetail(name);
   // The same id-link resolver the Knowledge renderer uses — a `[text](node-id)`
   // link inside a skill file navigates to that node, not to a dead span.
-  const { openNodeId } = useNodeIdNav();
+  const { openNodeId, nodeIdTarget } = useNodeIdNav();
+  const { openLink, linkTarget, openFilePage } = useFileNav();
 
   const [selectedState, setSelected] = useState('SKILL.md');
   const selected = activeFile ?? selectedState;
@@ -489,26 +478,59 @@ export function SkillPage({
   const editorBase = !canEditDirectly && ownCr ? ownBranchBase : rawOnMain;
 
   /**
-   * Follow a link out of the rendered file. The same grammar as the Knowledge
-   * view (`resolveKbHref`): the destination is decoded, so a link to
-   * `Some File.md` opens `Some File.md` and not `Some%20File.md`; an absolute
-   * app URL keeps its own branch; anything else opens on the default branch,
-   * where skills live.
+   * Follow a link out of the rendered file — the Knowledge view's rule, from
+   * the same hook (`useFileNav().openLink`): the destination is decoded, an
+   * absolute app URL keeps its own branch, an external one opens in a new
+   * tab, another file of the knowledge base opens in a NEW TAB and this page
+   * stays where it is, and a link to this file's own sections moves only the
+   * fragment. A relative link resolves on the default branch, where skills
+   * live, whatever is checked out. `fileLinkTarget` is the same answer for the
+   * anchor to carry, so a middle-click goes where the click does.
+   *
+   * A link to a section of this file scrolls the pane to that heading
+   * (`scrollToSection`, from the pane) and leaves this page's address alone:
+   * the skill page has no heading scroll on its address, so moving the
+   * fragment there would change the URL and nothing on screen.
    */
   const openLinkInEditor = useCallback(
-    (href: string) => {
-      if (!fileWorkspacePath) return;
-      const target = resolveKbHref(href, { basePath: fileWorkspacePath, kbDirName });
-      // Same rule as `openLink`: the anchor's default was cancelled to get
-      // here, so an external destination has nobody left to open it.
-      if (target?.kind === 'external') {
-        openExternalHref(href);
-        return;
+    (href: string, scrollToSection: (hash: string) => void) => {
+      if (fileWorkspacePath) {
+        openLink(href, fileWorkspacePath, { homeBranch: DEFAULT_BRANCH, onSection: scrollToSection });
       }
-      if (target?.kind !== 'workspace') return;
-      navigate(kbFileUrl(target.branch ?? DEFAULT_BRANCH, target.path) + target.hash);
     },
-    [fileWorkspacePath, kbDirName, navigate],
+    [fileWorkspacePath, openLink],
+  );
+  /**
+   * An HTML page's links resolve against its real home — the workspace path
+   * and the default branch — not `active`, which names the file relative to
+   * the skill.
+   */
+  const pageLinkHome = useMemo(
+    () => (fileWorkspacePath ? { path: fileWorkspacePath, branch: DEFAULT_BRANCH } : undefined),
+    [fileWorkspacePath],
+  );
+  const fileLinkTarget = useCallback(
+    (href: string) => (fileWorkspacePath ? linkTarget(href, fileWorkspacePath, DEFAULT_BRANCH) : null),
+    [fileWorkspacePath, linkTarget],
+  );
+  /**
+   * An id-link follows the same rule, told which node is on screen — the id
+   * of the file in the pane, on the default branch it was read from — so a
+   * link to this node's own heading (`[Steps](newsletter#steps)`) scrolls
+   * the pane like a section link, instead of opening this skill again in a
+   * new tab. This page's address is not the node's id URL, so the hook could
+   * not tell from the address. Any other id names a node on the default
+   * branch too, where this file was read from, whatever is checked out.
+   */
+  const ownNodeId = useFileNodeId(fileWorkspacePath, DEFAULT_BRANCH);
+  const openNodeIdInFile = useCallback(
+    (idOrLink: string, scrollToSection: (hash: string) => void) =>
+      openNodeId(idOrLink, ownNodeId, { homeBranch: DEFAULT_BRANCH, onSection: scrollToSection }),
+    [openNodeId, ownNodeId],
+  );
+  const nodeIdLinkTarget = useCallback(
+    (idOrLink: string) => nodeIdTarget(idOrLink, ownNodeId, DEFAULT_BRANCH),
+    [nodeIdTarget, ownNodeId],
   );
 
   /**
@@ -848,21 +870,32 @@ export function SkillPage({
           raw={raw}
           suggestion={null}
           onOpenLink={openLinkInEditor}
-          onOpenNodeId={openNodeId}
+          fileLinkTarget={fileLinkTarget}
+          onOpenNodeId={openNodeIdInFile}
+          nodeIdLinkTarget={nodeIdLinkTarget}
+          // A section link's own address (a modified click on it, a copied
+          // heading link) carries the heading as its fragment: arriving with
+          // one scrolls the pane to it.
+          sectionHash={location.hash}
           headingLink={headingLink}
           // No workspace yet means no base to resolve against: images render
           // as plain tags, exactly as before the resolver existed.
           resolveImage={fileWorkspacePath ? resolveImage : undefined}
-          // A page of the skill opens on the Knowledge file page, where its
-          // tools are. The URL alone would route straight back here (every
-          // file under a skill's folder IS the skill page); `rawFile` asks the
-          // item route for the file route itself, as the plugin page's file
-          // links do.
+          // The page's tools are answered here, as on its file page, under
+          // the path the file page uses for it (repo-relative, kbDirName
+          // stripped): one identity per page in the Audit log and the
+          // consent card, never the skill-relative tab name.
+          pagePath={fileWorkspacePath ? fileRepoPath : undefined}
+          // The renderer's own target for Open in the platform, which it
+          // offers only to a page mounted without tools: the Knowledge file
+          // page, in a new tab, as the page asked from inside itself
+          // (`openFilePage`, the Knowledge view's own). The plain URL would
+          // route straight back here (every file under a skill's folder IS
+          // the skill page); the file-page URL asks for the file route.
           onOpenInPlatform={
-            fileWorkspacePath
-              ? () => navigate(kbFileUrl(DEFAULT_BRANCH, fileWorkspacePath), { state: { rawFile: true } })
-              : undefined
+            fileWorkspacePath ? () => openFilePage(fileWorkspacePath, DEFAULT_BRANCH) : undefined
           }
+          linkHome={pageLinkHome}
           /*
            * ONE action, decided by the ACL. An `Edit` used to sit beside
            * `Propose changes` for EVERYONE and jump to the Knowledge editor —

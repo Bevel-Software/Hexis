@@ -1,20 +1,12 @@
 import { useEffect, useState } from 'react';
 import { ExternalLink } from 'lucide-react';
 import { Banner } from '../../../shared/components';
-import { fetchFileAccess } from '../../access/api';
+import { fetchFileAccess } from '../../access';
 import { FilePaneCard } from '../../workspace/components/FilePaneCard';
-import {
-  CanDownloadContext,
-  DownloadFileButton,
-} from '../../workspace/components/renderers/DownloadFileButton';
+import { CanDownloadContext, RendererWorkspaceContext, kbFileUrl, getOrCreateWorkspace } from '../../workspace';
+import { DownloadFileButton } from '../../workspace/components/renderers/DownloadFileButton';
 import { READ_PANE } from '../../workspace/components/renderers/readPane';
-import {
-  RendererWorkspaceContext,
-  getFileRenderer,
-  getRendererLayout,
-} from '../../workspace/components/renderers';
-import { kbFileUrl } from '../../workspace/routing/kb-routes';
-import { getOrCreateWorkspace } from '../../workspace/services/workspace.api';
+import { getFileRenderer, getRendererLayout } from '../../workspace/components/renderers';
 
 /**
  * A document or image shown with the FILE PAGE's viewer, read from a named

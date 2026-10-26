@@ -10,16 +10,17 @@ import { createToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
 import type { ToolAuth } from '../../tool-auth/tool-auth.middleware.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import { DocExtractService } from '../file-readers/doc-extract.service.js';
+import { WorkerDocumentExtractor } from '../file-readers/extract-in-worker.js';
 import { RoutineWritePolicyService } from '../routine-write-policy.js';
 import { SpillStore } from '../spill-store.js';
 import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
 import { ToolDescriptionNotes } from '../../workspace/agent-access.gate.js';
 import { registerWorkspaceTools } from '../workspace.tools.js';
 import { sharedFileRulesSection } from '../../agent-instructions/shared-file-rules.js';
-import { WorkerPatternMatcher } from '../bounded-matcher.js';
+import { RipgrepPatternMatcher } from '../index.js';
 
 /** The grep matcher this file's harness wires, closed once the file is done. */
-const patternMatcher = new WorkerPatternMatcher();
+const patternMatcher = new RipgrepPatternMatcher();
 afterAll(() => patternMatcher.close());
 
 /**
@@ -47,7 +48,7 @@ async function descriptions(registry: ToolRegistry = new ToolRegistry()): Promis
     auth,
     createToolHandlerFactory(() => ({ userEmail: 'a@x.io' })) as never,
     new SpillStore(join(tmpdir(), 'bevel-test-spills')),
-    new DocExtractService(join(tmpdir(), 'bevel-test-doc-extract')),
+    new DocExtractService(join(tmpdir(), 'bevel-test-doc-extract'), new WorkerDocumentExtractor()),
     {} as unknown as IAccessControl,
     kb,
     {

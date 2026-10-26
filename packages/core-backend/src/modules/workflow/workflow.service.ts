@@ -37,6 +37,7 @@ import type {
   AcquireLockResult,
   AuthUser,
   Branch,
+  BranchCounts,
   BranchSyncOutcome,
   BranchWorkspaceStatus,
   CancelChangeRequestResult,
@@ -73,30 +74,28 @@ import {
 import type { KbContext } from '../../shared/kb-context.js';
 import { readableAtCommits, ReadOnBranchDeniedError } from './read-on-branch.js';
 import { and, desc, eq, inArray, isNotNull, isNull, lt, ne, or, sql } from 'drizzle-orm';
-import type { Database } from '../database/connection.js';
-import { changeRequests } from '../database/schema.js';
-import { pgErrorCode } from '../database/pg-error.js';
+import type { Database } from '../database/index.js';
+import { changeRequests, pgErrorCode } from '../database/index.js';
 import type { GitService } from './git/git.service.js';
 import { redactSecret } from '../../shared/redact-secret.js';
 import type { PullRequestService } from './git/pull-request.service.js';
 import type { IReviewWorkflowService } from './review-workflow/review-workflow.interface.js';
-import type { WorkspaceService } from '../workspace/workspace.service.js';
+import type { WorkspaceService } from '../workspace/index.js';
 import { workspaceIdForBranch, branchForWorkspaceId } from '../../shared/workspace-id.js';
-import type { IAccessControl } from '../access/access-control.interface.js';
-import { FileLockService } from './file-lock.service.js';
+import type { IAccessControl } from '../access/index.js';
+import type { FileLockService } from './file-lock.service.js';
 import { canonicalFileIdentity } from '../../shared/canonical-file-identity.js';
-import { PendingCommitsService } from './pending-commits.service.js';
+import type { PendingCommitsService } from './pending-commits.service.js';
 import type { WorkflowEventBus } from './event-bus.js';
 import { describeSyncFailure, sanitizeError } from './sanitize-error.js';
-import type { FileChangeNotifier } from '../kb-fs/file-change-notifier.js';
+import type { FileChangeNotifier } from '../kb-fs/index.js';
 import { WorkflowHooks } from './workflow-hooks.js';
 import {
   ChangeRequestHooks,
   type ChangeRequestPerson,
   type IChangeRequestHooks,
 } from './change-request-hooks.js';
-import { WorkspaceMutex } from '../kb-fs/mutex.js';
-import { assertValidBranchName } from '../kb-fs/branch-name.js';
+import { WorkspaceMutex, assertValidBranchName } from '../kb-fs/index.js';
 import { canonicalEmail, hashEmail } from '../../shared/email-identity.js';
 import {
   BranchAuthorshipError,
@@ -932,6 +931,10 @@ export class WorkflowService implements IWorkflowService {
 
   branchStatus(workspaceId: string): Promise<BranchWorkspaceStatus> {
     return this.git.status(workspaceId);
+  }
+
+  branchCounts(workspaceId: string): Promise<BranchCounts> {
+    return this.git.branchCounts(workspaceId);
   }
 
   // `discardWorkingChanges` removed: under save=share there's nothing dirty

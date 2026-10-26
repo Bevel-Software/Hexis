@@ -114,7 +114,9 @@ export interface AuthFetchOptions {
 
 /**
  * Fetch wrapper that injects the Authorization header from localStorage.
- * On 401 responses, clears the stored token.
+ * On 401 responses, clears the stored token — but only if it is still the one
+ * this request carried: a password change stores a replacement while older
+ * requests are in flight, and their 401s must not sign the changer out.
  */
 export async function authFetch(
   input: RequestInfo | URL,
@@ -141,7 +143,7 @@ export async function authFetch(
     signalUnreachable();
   }
 
-  if (response.status === 401) {
+  if (response.status === 401 && getToken() === token) {
     clearToken();
   }
 

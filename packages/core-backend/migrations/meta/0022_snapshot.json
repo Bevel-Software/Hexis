@@ -1,5 +1,5 @@
 {
-  "id": "f749a9b0-76ca-475b-87f1-fbd089e6c9b0",
+  "id": "a33fb63c-faaf-46fe-8898-cac369ee92cd",
   "prevId": "22bc012f-a872-493a-a2d8-c5aaf2131d29",
   "version": "7",
   "dialect": "postgresql",
@@ -1706,7 +1706,7 @@
       "checkConstraints": {
         "pending_commits_status": {
           "name": "pending_commits_status",
-          "value": "\"pending_commits\".\"status\" IN ('pending', 'running', 'recovering', 'needs_attention')"
+          "value": "\"pending_commits\".\"status\" IN ('pending', 'running', 'needs_attention')"
         }
       },
       "isRLSEnabled": false
@@ -2285,6 +2285,13 @@
           "type": "text",
           "primaryKey": false,
           "notNull": false
+        },
+        "session_version": {
+          "name": "session_version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
         },
         "onboarding_done": {
           "name": "onboarding_done",

@@ -29,6 +29,13 @@
 /** The default column: an 880px measure, centred. */
 export const DOCUMENT_COLUMN = 'mx-auto w-full max-w-[880px]';
 
+/**
+ * What the default column leaves for its content: the 880px measure less the
+ * 40px side gutters `documentSideGutters(false)` puts inside it, centred. For
+ * a surface that holds the column's content without the column around it.
+ */
+export const DOCUMENT_COLUMN_CONTENT = 'mx-auto w-full max-w-[800px]';
+
 /** The opt-out, for a page that puts a second column (a rail) beside the article. */
 export const DOCUMENT_COLUMN_WIDE = 'mx-auto w-full max-w-[980px]';
 

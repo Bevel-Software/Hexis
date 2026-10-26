@@ -9,13 +9,11 @@ import {
   InvalidTokenLabelError,
   TokenNotFoundError,
   TokenStillActiveError,
-} from '../tool-auth/external-api-key.errors.js';
-import type { IExternalApiKeyService } from '../tool-auth/external-api-key.interface.js';
-import type { InternalTokenService } from '../tool-auth/internal-token.service.js';
+} from '../tool-auth/index.js';
+import type { IExternalApiKeyService, InternalTokenService, ILlmUsageMeter } from '../tool-auth/index.js';
 import { MCP_LOOPBACK_TOKEN_TTL_MS, type McpService } from './mcp.service.js';
 import type { BevelOAuthProvider } from './oauth/bevel-oauth-provider.js';
-import type { ILlmUsageMeter } from '../tool-auth/llm-usage-meter.js';
-import '../tool-auth/external-api-key.interface.js'; // req.externalApiKeyId augmentation
+import '../tool-auth/index.js'; // req.externalApiKeyId augmentation
 import './mcp-auth.middleware.js'; // req.mcpCallerKind augmentation
 import { isPagePath } from '../audit/index.js';
 

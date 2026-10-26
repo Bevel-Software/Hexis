@@ -3,6 +3,7 @@ import cors from 'cors';
 import path from 'node:path';
 import type { Router, RequestHandler } from 'express';
 import { createAuthRoutes } from '../modules/auth/auth.routes.js';
+import { authCookieSecure } from '../modules/auth/auth.middleware.js';
 import { createWorkspaceRoutes } from '../modules/workspace/workspace.routes.js';
 import {
   createAgentUploadRoutes,
@@ -16,6 +17,7 @@ import { createWorkflowRoutes } from '../modules/workflow/workflow.routes.js';
 import { createEventAccess, createEventsRoutes, EventDelivery } from '../modules/workflow/index.js';
 import { createAccessRoutes } from '../modules/access/access.routes.js';
 import { createAccessRequestRoutes } from '../modules/access/access-requests.routes.js';
+import { AccessRequestsService } from '../modules/access/access-requests.service.js';
 import { createMcpRoutes } from '../modules/mcp/mcp.routes.js';
 import { createOAuthConsentRoutes } from '../modules/mcp/oauth/oauth-consent.routes.js';
 import { mcpAuthRouter } from '@modelcontextprotocol/sdk/server/auth/router.js';
@@ -363,6 +365,9 @@ export async function createCoreServer(
       core.authMiddleware,
       core.authProviders,
       core.config.loginPasswordEnabled,
+      // The cookie's Secure flag follows the scheme the deployment is reached
+      // on, as the SSO providers' does: one rule for every sign-in path.
+      { cookieSecure: authCookieSecure(core.config.publicBackendUrl) },
     ),
   );
 
@@ -681,6 +686,7 @@ export async function createCoreServer(
   const eventDelivery = new EventDelivery(createEventAccess({
     accessControl: core.accessControl,
     kbDirName: core.kbDirName,
+    getChangeRequest: (number) => core.workflowService.getChangeRequest(number),
     workspaces: {
       hasWorkspace: (workspaceId) => core.workspaceService.hasBootstrappedWorkspace(workspaceId),
       anyWorkspaceId: async () => (await core.workspaceService.findAnyWorkspaceId()) ?? core.kb.defaultWorkspaceId(),
@@ -731,7 +737,12 @@ export async function createCoreServer(
       skillService: core.skillService,
       accessControl: core.accessControl,
       workflow: core.workflowService,
-      workspaceService: core.workspaceService,
+      requests: new AccessRequestsService({
+        workflow: core.workflowService,
+        workspaceService: core.workspaceService,
+        lifecycle: core.joinRequestsService,
+        kb: core.kb,
+      }),
       joinRequests: core.joinRequestsService,
       kb: core.kb,
       resolveUser: async (req) =>

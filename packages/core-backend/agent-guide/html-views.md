@@ -44,7 +44,8 @@ name.
 
 ### Calling tools: `window.bevel.tools`
 
-On the app's file page, a page calls the tools of the person viewing it —
+On the app's file page, and on a skill's page in the Library (Skills & Tools →
+the skill → its file), a page calls the tools of the person viewing it —
 exactly the tools that person's own agent gets from the hosted MCP server,
 with the same names, answers and refusals — through five functions, each
 returning a promise:
@@ -71,9 +72,10 @@ namespaced name a chain calls (`KNOWLEDGE_BASE.read_file`, `notion.search`);
 fails as an unknown tool — convert it, or call it from `callToolChain`.
 
 `window.bevel.tools` is `null` wherever tools are not available: on the
-embed, on a skill page and in any preview that is not the app's file page.
-Check it before every use, and render the page without tools when it is
-`null` — never assume it is there:
+embed (a page shown on another site, or in a chat's MCP App pane), and in a
+change request's or a file history's preview of a page. Check it before
+every use, and render the page without tools when it is `null` — never
+assume it is there:
 
 ```js
 const tools = window.bevel?.tools;
@@ -131,11 +133,12 @@ input.addEventListener('change', async () => {
 ```
 
 **A page that needs tools asks for them.** `window.bevel.requireTools()`
-resolves `true` at once, with nothing shown, on the app's file page. Anywhere
-else the app shows a card, "<page name> uses tools that are only available in
-the platform", with Continue without tools and Open in the platform; Open in
-the platform opens the page on the app's file page (in a new tab when the page
-is shown on another site). Either way the call resolves `false`, and the page
+resolves `true` at once, with nothing shown, on the app's file page and on a
+skill's page. Anywhere else the app shows a card,
+"<page name> uses tools that are only available in the platform", with
+Continue without tools and Open in the platform; Open in the platform opens
+the page on the app's file page (in a new tab when the page is shown on
+another site). Either way the call resolves `false`, and the page
 goes on rendering without tools:
 
 ```js
@@ -174,10 +177,13 @@ or `window.bevel.navigate(href)`:
   top" link. The page's own address does not change, so `hashchange` never
   fires: a page that routes by hash handles its own clicks.
 - **A relative path** resolves against the folder of the page's own file and
-  opens that file in the app: from `{{knowledgeBaseDir}}/Reports/Q3.html`,
-  `../Knowledge/Alice.md#goal` opens `{{knowledgeBaseDir}}/Knowledge/Alice.md`
-  at its `goal` heading.
-- **`/workspace/<branch>/<path>`** opens that file on that branch.
+  opens that file in the app, in a new tab, leaving the page where it is:
+  from `{{knowledgeBaseDir}}/Reports/Q3.html`, `../Knowledge/Alice.md#goal`
+  opens `{{knowledgeBaseDir}}/Knowledge/Alice.md` at its `goal` heading. A
+  path that names the page's own file with a fragment (`Q3.html#totals`
+  from `Q3.html`) scrolls the page, as `#totals` does.
+- **`/workspace/<branch>/<path>`** opens that file on that branch, in a new
+  tab.
 - **An external address** (`http:`, `https:`, `mailto:`) opens in a new tab.
   A call from a script may also open `tel:`, `sms:`, `geo:` and a
   protocol-relative `//host/path` address in a new tab, though a link
@@ -188,3 +194,8 @@ or `window.bevel.navigate(href)`:
 A click that a handler of the page has already cancelled with
 `event.preventDefault()` is left to that handler: the bridge neither scrolls
 nor opens anything for it.
+
+A click on a link with Ctrl, Cmd or Shift held, or with the middle button,
+opens its destination in a new tab, as a browser does with a link: a bare
+fragment opens the page's own file at that section in a new tab, and the
+page stays where it is.

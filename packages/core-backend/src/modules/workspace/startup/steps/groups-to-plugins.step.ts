@@ -11,9 +11,9 @@ import {
   PLUGIN_SKILLS_DIR,
   renderPluginManifest,
 } from '@bevel-software/platform-shared';
-import type { ToolManualDescriptor } from '../../../tool-manuals/tool-manuals.contract.js';
-import { normalizeToolManual } from '../../../tool-manuals/tool-manuals.service.js';
-import { parseOwnAccessEntries } from '../../../access-model/access-grammar.js';
+import type { ToolManualDescriptor } from '../../../tool-manuals/index.js';
+import { normalizeToolManual } from '../../../tool-manuals/index.js';
+import { parseOwnAccessEntries } from '../../../access-model/index.js';
 import { containsVariableReference } from '../../../../shared/variable-refs.js';
 import { IGNORE_FILENAME, isAbsence, isSkippedEntry, type IFsProbe, type ITreeWalker } from '../../../../shared/fs.contract.js';
 import type { KbBranch, OnServerStart, ServerStartContext, StepResult } from '../on-server-start.js';

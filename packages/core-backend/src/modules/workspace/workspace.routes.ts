@@ -3,9 +3,9 @@ import { logger } from '../../shared/logging.js';
 
 const log = logger('workspace.routes');
 import path from 'node:path';
-import { IGNORE_FILENAME, isAbsence, type ITreeWalker } from '../../shared/fs.contract.js';
+import { isAbsence, type ITreeWalker } from '../../shared/fs.contract.js';
 import { printable } from '../../shared/printable.js';
-import type { IAdminAccessService } from '../admin/admin.interface.js';
+import type { IAdminAccessService } from '../admin/index.js';
 import express from 'express';
 import type { AuthUser, IWorkflowService } from '@bevel-software/platform-shared';
 import {
@@ -22,25 +22,22 @@ import {
   platformFolderRefusal,
   reservedRootDirNames,
 } from '@bevel-software/platform-shared';
-import { FolderTooLargeError, type ReadTreeFilter } from './workspace.service.js';
+import { FolderTooLargeError, type ReadTreeFilter, EntryExistsError, type WorkspaceService } from './workspace.service.js';
 import { branchForWorkspaceId } from '../../shared/workspace-id.js';
 import type { KbContext } from '../../shared/kb-context.js';
-import { EntryExistsError, type WorkspaceService } from './workspace.service.js';
-import type { AuthService } from '../auth/auth.service.js';
-import type { IAccessControl } from '../access/access-control.interface.js';
-import { canReadWorkspacePath, resolveReadableMap, toKbRelative } from '../access-model/kb-read-filter.js';
-import type { ICreatorAccess } from '../access-model/creator.js';
-import type { IChangeReadGate } from '../access-model/change-gate.js';
-import { isRolesYamlPath, assertRolesYamlParsable } from '../access-model/roles-yaml-guard.js';
-import type { WorkflowEventBus } from '../workflow/event-bus.js';
+import type { AuthService } from '../auth/index.js';
+import type { IAccessControl } from '../access/index.js';
+import { canReadWorkspacePath, resolveReadableMap, toKbRelative, isRolesYamlPath, assertRolesYamlParsable } from '../access-model/index.js';
+import type { ICreatorAccess, IChangeReadGate } from '../access-model/index.js';
+import type { WorkflowEventBus } from '../workflow/index.js';
 import { PathTraversalError, WorkflowDomainError } from '../../shared/domain-errors.js';
 import { domainErrorBody } from '../../shared/http-errors.js';
 import { assertWithinDirectory } from '../../shared/path-containment.js';
-import { normalizeWorkspacePath } from '../kb-fs/repo-path.js';
+import { normalizeWorkspacePath } from '../kb-fs/index.js';
 import { hasGitInternalsSegment } from '../../shared/git-internals.js';
 import { createGitInternalsRouteGuard } from './git-internals.middleware.js';
 import { removeEmptyDirs } from './empty-dirs.js';
-import '../auth/auth.middleware.js'; // Express Request augmentation
+import '../auth/index.js'; // Express Request augmentation
 import type { SkillSaveCheck } from './workspace.tools.js';
 import { MAX_UPLOAD_BYTES } from './upload-limits.js';
 import { OCTET_STREAM, rawExtensionOf, rawMimeFor } from './file-readers/raw-mime.js';
@@ -655,7 +652,7 @@ export function createWorkspaceRoutes(
    */
   function buildTreeReadFilter(workspaceId: string, userEmail: string): ReadTreeFilter {
     return async (wsRelPaths) => {
-      const verdict: Map<string, boolean | 'unlisted'> = await resolveReadableMap(
+      const verdict: Map<string, boolean> = await resolveReadableMap(
         (w, e, rels) => accessControl.canReadBatch(w, e, rels),
         workspaceId,
         userEmail,
@@ -676,31 +673,10 @@ export function createWorkspaceRoutes(
         const rel = toKbRelative(wp, kbDirName);
         if (rel !== null && structuralRoots.has(rel)) verdict.set(wp, true);
       }
-
-      // `.bevelignore` is ADMIN-ONLY. It is the file that decides what the file
-      // tree and the agent view show at all, so it is deployment configuration
-      // rather than knowledge — and it sits alone in being visible: its
-      // siblings (`.gitignore`, `roles.yaml`, `access.md`, the agent guide) are
-      // already hidden from every reader by the shipped ignore rules. Somebody
-      // who cannot act on it gains a puzzle; somebody who can needs to reach it.
-      //
-      // Read permission is deliberately NOT the lever. Everyone can read it —
-      // it has to be readable to be applied — so hiding it is a listing
-      // decision, made here, rather than an ACL fiction maintained in a file.
-      //
-      // Resolved through `AdminAccessService` rather than by asking whether
-      // this caller can write `roles.yaml` in THIS workspace: admin is settled
-      // on the default branch precisely so that editing `roles.yaml` on your
-      // own branch cannot promote you, and the same reasoning applies to
-      // anything gated on being an admin.
-      //
-      // `'unlisted'`, not `false`: hiding it withholds no content, so a
-      // non-admin in an empty knowledge base (every one ships this file) is
-      // told it is empty, not that something is being kept from them.
-      const ignoreFiles = wsRelPaths.filter((wp) => path.basename(wp) === IGNORE_FILENAME);
-      if (ignoreFiles.length > 0 && !(await adminAccess.isAdmin(userEmail))) {
-        for (const wp of ignoreFiles) verdict.set(wp, 'unlisted');
-      }
+      // `.bevelignore` is listed like any other file: whoever may read it sees
+      // it. It used to be admins only (a listing decision, since everyone can
+      // read it) — Razvan reversed that on 2026-10-23: a reader who can open
+      // the file may find it in the tree.
       return verdict;
     };
   }

@@ -344,7 +344,7 @@ describe('WorkflowService.retireRemoteGoneClone — what can bring the branch ba
       }),
       createBranch: vi.fn(async (_ws: string, name: string) => {
         order.push('create');
-        return { name, isProtected: false, ahead: 0, behind: 0, hasRemote: true };
+        return { name, isProtected: false, hasRemote: true };
       }),
     } as unknown as GitService;
     const workspaceService = {

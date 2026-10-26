@@ -6,7 +6,7 @@ import { validateHttpsRemote } from './deployment-settings.service.js';
 import { classifyGitFailure } from '../../shared/git-failure.js';
 import { redactSecret, urlQuerySecrets } from '../../shared/redact-secret.js';
 import { GitRunError, type IGitRunner } from '../../shared/git.contract.js';
-import { NodeGitRunner } from '../workflow/git/node-git-runner.js';
+import { NodeGitRunner } from '../workflow/index.js';
 
 /** The repository connection a deployment reads and writes its knowledge base with. */
 export interface RepositoryConnection {

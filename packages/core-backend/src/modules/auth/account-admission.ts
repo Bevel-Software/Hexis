@@ -83,6 +83,25 @@ export class AccountDeactivatedError extends Error {
 }
 
 /**
+ * A session token that verifies but is no longer honoured: the account's
+ * password was changed after the token was issued, which ends every session
+ * opened before it. A 401 with these words, so the person knows why they are
+ * back at the sign-in form rather than reading "invalid token".
+ */
+export class SessionEndedError extends Error {
+  readonly status = 401;
+
+  constructor(message = SESSION_ENDED_MESSAGE) {
+    super(message);
+    this.name = 'SessionEndedError';
+  }
+}
+
+/** What a person whose session a password change ended is told. */
+export const SESSION_ENDED_MESSAGE =
+  'Your password was changed after this session was opened. Sign in again with the new password.';
+
+/**
  * Whether the account behind a credential is on could not be asked — the
  * database failed. Not the caller's fault and not a verdict on them: a
  * route answers it with a 500, never with the 401 that would sign a valid

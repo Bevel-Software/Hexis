@@ -8,7 +8,7 @@ import { GitHubRepositoryPanel } from './GitHubRepositoryPanel';
 import { forgetDraft } from '../utils/kept-draft';
 import { tokenUsernameForHost } from '../utils/git-host';
 import { suggestedBranch } from '../utils/suggested-branch';
-import { KB_ROUTE_PREFIX } from '../../workspace/routing/kb-routes';
+import { KB_ROUTE_PREFIX } from '../../workspace';
 import { ConnectionProbeFailed, useConnectionProbe } from '../hooks/useConnectionProbe';
 import {
   saveSettings,

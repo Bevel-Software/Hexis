@@ -5,7 +5,7 @@ import { useNavigate } from 'react-router-dom';
 import { useLibrary, type LibraryItem } from '../state/library-data';
 import { useLibraryToast } from '../state/toast.context';
 import { urlForLibraryItem } from '../routes/library-paths';
-import { useWorkspace } from '../../workspace/state/workspace.context';
+import { useWorkspace } from '../../workspace';
 import { personalPluginName } from '../utils/personal-plugin';
 import { EmptySkillsNudge, PluginBreadcrumb, PluginItemSections, PageNote,
   RemoveLibraryItemDialog,

@@ -5,6 +5,7 @@ import type {
   AppliedChangeRef,
   AppliedMergeResult,
   AuthUser,
+  BranchCounts,
   BranchInfo,
   ChangedPathPair,
   CommitAttribution,
@@ -21,15 +22,12 @@ import type {
 } from '@bevel-software/platform-shared';
 import { isFolderPlaceholder } from '@bevel-software/platform-shared';
 import { mergeCommitMessageNames } from './merge-commit.js';
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
+import type { WorkspaceService } from '../../workspace/index.js';
 import type { WorkflowHooks, CommitValidationContext } from '../workflow-hooks.js';
-import type { IAccessControl } from '../../access/access-control.interface.js';
-import { AccessDeniedError } from '../../access-model/access-errors.js';
-import { WorkspaceIdMutex, type WorkspaceMutex } from '../../kb-fs/index.js';
+import type { IAccessControl } from '../../access/index.js';
+import { AccessDeniedError } from '../../access-model/index.js';
+import { WorkspaceIdMutex, type WorkspaceMutex, assertInsideRepo, cloneTrackingConfigArgs, SAFE_IMPLICIT_FETCH_ARGS, readRefSha } from '../../kb-fs/index.js';
 import { isAbsence } from '../../../shared/fs.contract.js';
-import { assertInsideRepo } from '../../kb-fs/repo-path.js';
-import { cloneTrackingConfigArgs, SAFE_IMPLICIT_FETCH_ARGS } from '../../kb-fs/clone-config.js';
-import { readRefSha } from '../../kb-fs/index.js';
 import { utf8Text } from '../../../shared/utf8-text.js';
 import { lstatOrNull } from '../../../shared/rename-no-replace.js';
 import { linkedAncestor } from '../../../shared/no-link-below.js';
@@ -38,7 +36,7 @@ import {
   assertValidRelativePath,
   isBranchAuthoredBy,
   isOwnSuggestionsBranch,
-} from '../../kb-fs/branch-name.js';
+} from '../../kb-fs/index.js';
 import type { KbContext } from '../../../shared/kb-context.js';
 import {
   AppliedChangeMismatchError,
@@ -63,6 +61,7 @@ import {
 } from '../../../shared/git.contract.js';
 import { NodeGitRunner } from './node-git-runner.js';
 import { printable } from '../../../shared/printable.js';
+import { branchForWorkspaceId } from '../../../shared/workspace-id.js';
 import { sanitizeError } from '../sanitize-error.js';
 
 const log = logger('git');
@@ -295,11 +294,6 @@ export class GitService implements IGitService {
   /** Whether the last implicit fetch per workspace SUCCEEDED — see `fetchOriginIfStale`. */
   private readonly lastImplicitFetchOk = new Map<string, boolean>();
   private static readonly IMPLICIT_FETCH_TTL_MS = 5_000;
-  // Cap on concurrent `aheadBehindForBranch` calls inside `listBranches`. Each
-  // call serializes up to 3 `git rev-list` spawns, so 8 workers ≈ ≤24
-  // concurrent processes worst case — fast for typical (<8) feature-branch
-  // counts, calm under large branch lists.
-  private static readonly MAX_AHEAD_BEHIND_CONCURRENCY = 8;
 
   /**
    * A change request's changed entries, keyed by the two commits its diff
@@ -548,7 +542,7 @@ export class GitService implements IGitService {
         )
       ).trim();
 
-      type Row = { shortName: string; ref: string; hasLocal: boolean; hasRemote: boolean };
+      type Row = { shortName: string; hasLocal: boolean; hasRemote: boolean };
       const buckets = new Map<string, Row>();
       for (const line of stdout.split('\n')) {
         const trimmed = line.trim();
@@ -576,16 +570,12 @@ export class GitService implements IGitService {
         if (!existing) {
           buckets.set(shortName, {
             shortName,
-            ref,
             hasLocal: isLocal,
             hasRemote: !isLocal,
           });
           continue;
         }
-        // Prefer the local entry's ref when both exist — ahead/behind against the
-        // configured upstream is more meaningful than against origin directly.
         if (isLocal && !existing.hasLocal) {
-          existing.ref = ref;
           existing.hasLocal = true;
         } else if (!isLocal) {
           existing.hasRemote = true;
@@ -597,36 +587,14 @@ export class GitService implements IGitService {
         return a.shortName.localeCompare(b.shortName);
       });
 
-      // Compute ahead/behind for every branch with bounded concurrency — each
-      // branch is 1–3 `git rev-list` spawns, and the unbounded `Promise.all`
-      // we used before could put N×3 processes in flight on repos with many
-      // branches. Workers pull indices off a shared counter and write into a
-      // pre-sized array, so input order (and the sort above) is preserved.
-      const infos: BranchInfo[] = new Array(rows.length);
-      let nextIndex = 0;
-      const workerCount = Math.min(GitService.MAX_AHEAD_BEHIND_CONCURRENCY, rows.length);
-      await Promise.all(
-        Array.from({ length: workerCount }, async () => {
-          while (true) {
-            const i = nextIndex++;
-            if (i >= rows.length) return;
-            const row = rows[i];
-            const { ahead, behind } = await this.aheadBehindForBranch(
-              cwd,
-              row.shortName,
-              row.ref,
-              row.hasLocal,
-            );
-            infos[i] = {
-              name: row.shortName,
-              isProtected: this.kb.isProtectedBranch(row.shortName),
-              ahead,
-              behind,
-              hasRemote: row.hasRemote,
-            };
-          }
-        }),
-      );
+      // No git per branch: commit counts are not part of a listing (they cost
+      // one to three `rev-list` spawns a branch, over every branch the
+      // repository has). The one branch that wants them asks `branchCounts`.
+      const infos: BranchInfo[] = rows.map((row) => ({
+        name: row.shortName,
+        isProtected: this.kb.isProtectedBranch(row.shortName),
+        hasRemote: row.hasRemote,
+      }));
       // Every name this listing showed — origin's refs and the local heads
       // alike, since a branch checked out here is one the platform has
       // plainly heard of. A listener that misbehaves must not turn a good
@@ -639,6 +607,24 @@ export class GitService implements IGitService {
         });
       }
       return infos;
+    });
+  }
+
+  async branchCounts(workspaceId: string): Promise<BranchCounts> {
+    return this.mutex.run(workspaceId, async () => {
+      const cwd = await this.repoDir(workspaceId);
+      const branch = branchForWorkspaceId(workspaceId);
+      // The workspace's own branch is its local head while it is checked out;
+      // otherwise only origin's ref names it — as a listing would read it.
+      const ownBranch = (
+        await this.git(cwd, ['symbolic-ref', '--quiet', '--short', 'HEAD']).then(
+          (r) => r.stdout,
+          () => '',
+        )
+      ).trim();
+      return ownBranch === branch
+        ? this.aheadBehindForBranch(cwd, branch, `refs/heads/${branch}`, true)
+        : this.aheadBehindForBranch(cwd, branch, `refs/remotes/origin/${branch}`, false);
     });
   }
 
@@ -760,12 +746,6 @@ export class GitService implements IGitService {
         await this.git(cwd, ['branch', '-D', name]).catch(() => undefined);
         throw err;
       }
-      const { ahead, behind } = await this.aheadBehindForBranch(
-        cwd,
-        name,
-        `refs/heads/${name}`,
-        true,
-      );
       // Drop the now-vestigial local head. Under the per-branch workspace model
       // this clone's identity is its OWN branch; the new draft lives in its own
       // workspace (cloned from origin on first navigation), so this clone never
@@ -785,8 +765,6 @@ export class GitService implements IGitService {
       return {
         name,
         isProtected: false,
-        ahead,
-        behind,
         hasRemote: true,
       };
     });

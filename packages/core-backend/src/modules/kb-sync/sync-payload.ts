@@ -1,4 +1,4 @@
-import { assertValidBranchName } from '../kb-fs/branch-name.js';
+import { assertValidBranchName } from '../kb-fs/index.js';
 
 /**
  * Turn whatever a caller POSTed to `/api/sync` into the branches to sync.

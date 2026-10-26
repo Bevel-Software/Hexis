@@ -13,8 +13,8 @@
 
 import { callLine, splitCallLine } from '@bevel-software/platform-mcp-core';
 import { TOOL_PREFIX_CAP } from '@bevel-software/platform-shared';
-import { PREFIXED_TOOLS } from '../agent-instructions/compose.js';
-import { EXTERNAL_KB_MANUAL_NAME } from '../tool-manuals/tool-manuals.contract.js';
+import { PREFIXED_TOOLS } from '../agent-instructions/index.js';
+import { EXTERNAL_KB_MANUAL_NAME } from '../tool-manuals/index.js';
 import { GUIDE_FIRST_SENTENCE } from './guide-first.js';
 import type { UtcpTool } from './tool.contract.js';
 

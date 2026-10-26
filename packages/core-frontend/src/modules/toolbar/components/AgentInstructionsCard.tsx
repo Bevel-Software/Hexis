@@ -1,7 +1,7 @@
 import { useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { Pencil } from 'lucide-react';
-import { AdminContext } from '../../admin/state/admin.context';
-import { WorkspaceContext } from '../../workspace/state/workspace.context';
+import { AdminContext } from '../../admin';
+import { WorkspaceContext } from '../../workspace';
 import { Button } from '../../../shared/components';
 import { Markdown } from '../../../shared/markdown/Markdown';
 import {

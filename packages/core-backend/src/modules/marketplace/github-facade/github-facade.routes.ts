@@ -3,8 +3,8 @@ import { logger } from '../../../shared/logging.js';
 
 const log = logger('github-facade');
 import type { AuthUser } from '@bevel-software/platform-shared';
-import '../../auth/auth.middleware.js'; // Express Request.userId / userEmail augmentation
-import '../../tool-auth/external-api-key.interface.js'; // Express Request augmentation (req.externalApiKeyId)
+import '../../auth/index.js'; // Express Request.userId / userEmail augmentation
+import '../../tool-auth/index.js'; // Express Request augmentation (req.externalApiKeyId)
 import type { MarketplaceRepoService } from '../marketplace-repo.service.js';
 import type { MarketplaceKeyResolver } from '../git-http.routes.js';
 import { GitHubFacadeRequestError, type GitHubFacade } from './github-facade.service.js';

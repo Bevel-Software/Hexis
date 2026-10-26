@@ -35,10 +35,10 @@
 
 import path from 'node:path';
 
-import type { WorkspaceService } from '../workspace/workspace.service.js';
+import type { WorkspaceService } from '../workspace/index.js';
 import type { IAccessControl } from './access-control.interface.js';
 import { isAbsence } from '../../shared/fs.contract.js';
-import { isTextBytes } from '../workspace/file-readers/text-reader.js';
+import { isTextBytes } from '../workspace/index.js';
 import {
   type Verb,
   ADMIN_CANONICAL,
@@ -46,7 +46,7 @@ import {
   ROLE_TOKEN_PREFIX,
   canonicalRoleName,
   accessFrontmatterExtensionList,
-} from '../access-model/access-grammar.js';
+} from '../access-model/index.js';
 import {
   spliceRevoke,
   spliceGrant,
@@ -54,7 +54,7 @@ import {
   AccessSpliceError,
   type Principal,
   type TokenMatch,
-} from '../access-model/access-splice.js';
+} from '../access-model/index.js';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
 import {
   canCarryFrontmatter,
@@ -610,3 +610,9 @@ export class AccessMutationService {
     return new AccessMutationError(err instanceof Error ? err.message : 'mutation failed', 500);
   }
 }
+
+/**
+ * What another module needs of the mutation service: to grant and to revoke.
+ * Injected by the composition root, which owns the implementation.
+ */
+export type IAccessMutation = Pick<AccessMutationService, 'grant' | 'revoke'>;

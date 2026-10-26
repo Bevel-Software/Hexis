@@ -5,14 +5,14 @@ import {
   isProtectedBranch,
   type FileTreeEntry,
 } from '@bevel-software/platform-shared';
-import { useEventBus, canonicalizeWorkspaceId } from '../../workflow/state/event-bus.context';
-import { AuthContext } from '../../auth/state/auth.context';
-import { fetchFileAccess } from '../../access/api';
+import { useEventBus, canonicalizeWorkspaceId } from '../../workflow';
+import { AuthContext } from '../../auth';
+import { fetchFileAccess } from '../../access';
 import {
   ensureKnowledgeSuggestionWorkspace,
   ensureKnowledgeChangeRequest,
   type KnowledgeSuggestionTarget,
-} from '../../change-requests/services/propose.api';
+} from '../../change-requests';
 import { PR_STALE_EVENT, SUGGESTIONS_OPTIMISTIC_EVENT } from '../../../core/events';
 import type {
   HydrateResult,

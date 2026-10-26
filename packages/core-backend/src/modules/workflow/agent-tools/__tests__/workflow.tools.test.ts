@@ -104,6 +104,9 @@ const workspaceService = {
 const workflowService = {
   listBranches: async (ws: string) => {
     calls.push(['listBranches', ws]);
+    // A real listing fetches first; mark when that fetch has landed.
+    await new Promise((r) => setTimeout(r, 0));
+    calls.push(['listBranches:fetched', ws]);
     return [{ name: 'main', isProtected: true }];
   },
   commitChange: async (ws: string, user: { id: string }, body: unknown) => {
@@ -117,7 +120,7 @@ const workflowService = {
   },
   createBranch: async (ws: string, name: string) => {
     calls.push(['createBranch', ws, name]);
-    return { name, isProtected: false, ahead: 0, behind: 0, hasRemote: true };
+    return { name, isProtected: false, hasRemote: true };
   },
   acquireLock: async (ws: string, branch: string, path: string) => {
     calls.push(['acquireLock', ws, branch, path]);
@@ -205,6 +208,10 @@ const workflowService = {
   branchStatus: async (ws: string) => {
     calls.push(['branchStatus', ws]);
     return { branch: ws, hasUpstream: true, unmergedFromUpstream: true };
+  },
+  branchCounts: async (ws: string) => {
+    calls.push(['branchCounts', ws]);
+    return { ahead: 3, behind: 1 };
   },
   listPendingChangePaths: async (ws: string) => {
     calls.push(['listPendingChangePaths', ws]);
@@ -518,6 +525,24 @@ describe('registerWorkflowTools', () => {
     expect(calls).toContainEqual(['listBranches', 'existing-ws']);
   });
 
+  it('list_branches declares names, protection and remote presence, and no commit counts', async () => {
+    await start();
+    for (const tools of [await registryRef!.listInternal(), await registryRef!.listExternal()]) {
+      const listBranches = tools.find((t) => t.name === 'list_branches')!;
+      const branch = (listBranches.outputs as { properties: { branches: { items: { properties: object; required: string[] } } } })
+        .properties.branches.items;
+      expect(Object.keys(branch.properties).sort()).toEqual(['hasRemote', 'isProtected', 'name']);
+      expect([...branch.required].sort()).toEqual(['hasRemote', 'isProtected', 'name']);
+      expect(listBranches.description).toContain('{ name, isProtected, hasRemote }');
+      expect(listBranches.description).not.toMatch(/\bahead\b,|\bbehind\b,/);
+      // The counts are still `branch_status`'s answer, for its one branch.
+      const branchStatus = tools.find((t) => t.name === 'branch_status')!;
+      expect((branchStatus.outputs as { required: string[] }).required).toEqual(
+        expect.arrayContaining(['ahead', 'behind', 'behindRemote']),
+      );
+    }
+  });
+
   it('open_change_request acts on the SOURCE branch\'s workspace', async () => {
     const base = await start();
     const res = await post(`${base}/api/agent/tools/open_change_request`, writeTok(), {
@@ -689,6 +714,37 @@ describe('registerWorkflowTools', () => {
       expect((await open(base)).approvals).toEqual([
         { path: 'KnowledgeBase/Opaque.md', roles: [], users: [], approved: false, inMergeGate: false, approversUnknown: true },
       ]);
+    });
+
+    it('names each user owner by name, or by email when the name is empty — never a blank string', async () => {
+      const base = await start();
+      opened = detailOf([
+        { path: 'Skills/Owned/SKILL.md', status: 'modified', additions: 1, deletions: 1, isBinary: false, sha: 'b5', rawUrl: 'r5' },
+      ]);
+      // What the resolver hands back for owners `roles.yaml` lists by email:
+      // an empty name. QA saw `users: [""]` here while `mergeBlockedReasons`
+      // named qa-user2@example.com.
+      opened.approvals = [
+        {
+          path: 'Skills/Owned/SKILL.md',
+          eligibleApprovers: {
+            roles: [],
+            users: [
+              { name: '', email: 'qa-user2@example.com' },
+              { name: 'Razvan Radulescu', email: 'razvan.radulescu@bevel.software' },
+              { name: '  ', email: 'qa-user3@example.com' },
+              { name: '', email: '' },
+            ],
+          },
+          approvedBy: [],
+          eligibilityResolved: true,
+          isApproved: false,
+          inMergeGate: true,
+        },
+      ];
+      const [entry] = (await open(base)).approvals as { users: string[] }[];
+      expect(entry.users).toEqual(['qa-user2@example.com', 'Razvan Radulescu', 'qa-user3@example.com']);
+      expect(entry.users.every((u) => u.trim() !== '')).toBe(true);
     });
 
     it('surfaces the `change-request-conflicts` error as before', async () => {
@@ -1134,8 +1190,9 @@ describe('history and syncing tools', () => {
       // The listing double names only `main`, so the draft's own entry is unknown.
       isProtected: false,
       hasRemote: true,
-      ahead: null,
-      behind: null,
+      // Counted for the draft alone, by its own workspace — not read off a listing.
+      ahead: 3,
+      behind: 1,
       behindRemote: true,
       uncommittedPaths: ['KnowledgeBase/Pending.md'],
       forkBase: 'main',
@@ -1144,6 +1201,11 @@ describe('history and syncing tools', () => {
       withheldPaths: 0,
     });
     expect(calls).toContainEqual(['changedPathsBetweenBranches', DRAFT_WS, 'main', DRAFT]);
+    expect(calls).toContainEqual(['branchCounts', DRAFT_WS]);
+    // Counted only once the listing's fetch has refreshed the remote-tracking refs.
+    const fetched = calls.findIndex((c) => c[0] === 'listBranches:fetched' && c[1] === DRAFT_WS);
+    expect(fetched).toBeGreaterThanOrEqual(0);
+    expect(calls.findIndex((c) => c[0] === 'branchCounts')).toBeGreaterThan(fetched);
 
     calls = [];
     const named = await post(tool(base, 'branch_status'), writeTok(), { branch: DRAFT, base: 'release' });

@@ -1,15 +1,14 @@
 import { DEFAULT_BRANCH, PLUGINS_DIR, type PullRequestSummary } from '@bevel-software/platform-shared';
 import { authFetch } from '../../../lib/api';
-import { handleApiResponse } from '../../git/services/git.api';
-import { createBranch } from '../../git/services/git.api';
+import { handleApiResponse, createBranch } from '../../git';
 import {
   deleteFile,
   getOrCreateWorkspace,
   writeFile,
   type SkillToolWarning,
-} from '../../workspace/services/workspace.api';
+} from '../../workspace';
 import { openChangeRequest, updateChangeRequest } from '../../pr';
-import { branchSegment } from '../../change-requests/services/propose.api';
+import { branchSegment } from '../../change-requests';
 import { ensurePersonalPlugin, type JoinRequest } from './plugins.api';
 
 /**

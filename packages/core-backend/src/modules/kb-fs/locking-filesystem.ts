@@ -55,7 +55,7 @@ import { DestinationTakenError, lstatOrNull, renameNoReplace, takenError } from 
 import { linkedAncestor } from '../../shared/no-link-below.js';
 import { assertInsideRepo } from './repo-path.js';
 import { GitGuardedFilesystem } from './git-guarded-filesystem.js';
-import type { CreationGrantPlan, ICreatorAccess } from '../access-model/creator.js';
+import type { CreationGrantPlan, ICreatorAccess } from '../access-model/index.js';
 
 /** How many times to retry a contended acquire before giving up. */
 const ACQUIRE_RETRY_ATTEMPTS = 3;

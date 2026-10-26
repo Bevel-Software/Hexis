@@ -1,8 +1,8 @@
 import express from 'express';
 import { logger } from '../../shared/logging.js';
-import type { IAdminAccessService } from '../admin/admin.interface.js';
-import { TokenNotFoundError } from '../tool-auth/external-api-key.errors.js';
-import type { IExternalApiKeyService } from '../tool-auth/external-api-key.interface.js';
+import type { IAdminAccessService } from '../admin/index.js';
+import { TokenNotFoundError } from '../tool-auth/index.js';
+import type { IExternalApiKeyService } from '../tool-auth/index.js';
 import {
   AuditPrincipalNotFoundError,
   InvalidCursorError,
@@ -12,7 +12,7 @@ import {
   type IAgentAuditService,
 } from './audit.contract.js';
 import { MAX_EVENT_PAGE } from './agent-audit.service.js';
-import '../auth/auth.middleware.js'; // Express Request augmentation (req.userId / req.userEmail)
+import '../auth/index.js'; // Express Request augmentation (req.userId / req.userEmail)
 
 const log = logger('audit');
 

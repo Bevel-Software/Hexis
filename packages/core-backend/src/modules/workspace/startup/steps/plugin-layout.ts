@@ -4,7 +4,7 @@ import {
   PLUGIN_MCP_FILE,
   PLUGIN_SKILLS_DIR,
 } from '@bevel-software/platform-shared';
-import { BUNDLE_FILE } from '../../../plugins/discovery/bundle-dialect/bundle.source.js';
+import { BUNDLE_FILE } from '../../../plugins/index.js';
 import { isSkippedEntry, type ITreeWalker, type WalkedEntry } from '../../../../shared/fs.contract.js';
 
 /**
