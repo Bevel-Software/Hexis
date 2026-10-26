@@ -329,13 +329,22 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
    */
   const ownRestoresRef = useRef<Map<string, number>>(new Map());
   /**
-   * Where each delete of ours was confirmed in `orderRef`'s sequence, for the
-   * whole workspace session: what `isOvertakenByOwnDelete` judges an opening
-   * read against. Kept apart from the markers, which a read of a restored
-   * path ends — a read sent before the delete found the old file whatever was
-   * restored since.
+   * Where each delete of ours was confirmed in `orderRef`'s sequence, per
+   * workspace, for the whole session: what `isOvertakenByOwnDelete` judges an
+   * opening read or a waiting write against. Kept apart from the markers,
+   * which a read of a restored path ends — a read sent before the delete
+   * found the old file whatever was restored since. Not cleared on a
+   * workspace switch: a save or Reject still waiting on branch A's read when
+   * the person moved to B writes to A, and A's deletes must still refuse it.
    */
-  const deleteConfirmedOrderRef = useRef<Map<string, number>>(new Map());
+  const deleteConfirmedOrderRef = useRef<Map<string, Map<string, number>>>(new Map());
+  /**
+   * Our deletes still in flight, per workspace. `pendingDeletePathsRef` holds
+   * the same paths for the tree on screen and goes with a workspace switch;
+   * this one stays until each delete answers, so a write still waiting on the
+   * workspace just left is refused while its delete runs (`awaitStillOnBranch`).
+   */
+  const deletesInFlightRef = useRef<Map<string, Set<string>>>(new Map());
   /**
    * One counter for a delete's confirmation and an opening read's send, so
    * which came first never ties, as two clock readings in one millisecond do.
@@ -644,11 +653,14 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
    * open no tab (`addTab`, `hydrateTabs`) and do not end the delete's marker
    * (`forgetOwnDelete`); a write waiting since before it writes nothing
    * (`awaitStillOnBranch`). `readSentOrder`: `orderRef` taken as the read was
-   * sent. Judged on `deleteConfirmedOrderRef`, which no read clears:
+   * sent; `readFrom`: the workspace it was sent to. Judged on
+   * `deleteConfirmedOrderRef`, which no read and no workspace switch clears:
    * restoring a sibling of a deleted folder's file overtakes nothing.
    */
-  const isOvertakenByOwnDelete = useCallback((path: string, readSentOrder: number) => {
-    for (const [deleted, order] of deleteConfirmedOrderRef.current) {
+  const isOvertakenByOwnDelete = useCallback((readFrom: string, path: string, readSentOrder: number) => {
+    const confirmed = deleteConfirmedOrderRef.current.get(readFrom);
+    if (!confirmed) return false;
+    for (const [deleted, order] of confirmed) {
       if (order > readSentOrder && isWithin(path, deleted)) return true;
     }
     return false;
@@ -849,7 +861,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       // the bytes of a file that is gone. Opening them would put the deleted
       // file back on screen; answer as the read would have, had it been sent
       // a moment later.
-      if (isOvertakenByOwnDelete(relativePath, sentOrder)) {
+      if (isOvertakenByOwnDelete(workspaceId, relativePath, sentOrder)) {
         traceFiles('add-tab:overtaken-by-own-delete', { path: relativePath });
         throw new WorkspaceApiError(404);
       }
@@ -1076,7 +1088,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
             goneLive.push({ path, seq: seqs[i] });
           }
         } else if (res.status === 'fulfilled' && !openNow.has(path)
-          && workspaceIdRef.current === workspaceId && isOvertakenByOwnDelete(path, sentOrder)) {
+          && workspaceIdRef.current === workspaceId && isOvertakenByOwnDelete(workspaceId, path, sentOrder)) {
           // Found before a delete of ours that has since closed its tab (or
           // that it never had): the file is gone, as for a 404 read.
           dropped.push(path);
@@ -1764,11 +1776,15 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     // folder would reappear with a partial child list each refresh.
     const treeSnapshot = fileTreeRef.current;
     pendingDeletePathsRef.current.add(relativePath);
+    const inFlightHere = deletesInFlightRef.current.get(deleteWorkspaceId) ?? new Set<string>();
+    inFlightHere.add(relativePath);
+    deletesInFlightRef.current.set(deleteWorkspaceId, inFlightHere);
     setFileTree((prev) => pruneTreeAt(prev, relativePath));
     bumpFs();
     try {
       await deleteFileApi(workspaceId, relativePath);
     } catch (err) {
+      inFlightHere.delete(relativePath);
       if (!isCurrent()) throw err;
       pendingDeletePathsRef.current.delete(relativePath);
       // Roll back the optimistic prune, then reconcile with whatever
@@ -1779,10 +1795,16 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       await refreshFileTree();
       throw err;
     }
+    // Recorded for the workspace the delete ran on even once the person has
+    // switched away: a save or Reject still waiting on that workspace's read
+    // must not re-create the file (`awaitStillOnBranch`).
+    const confirmedHere = deleteConfirmedOrderRef.current.get(deleteWorkspaceId) ?? new Map<string, number>();
+    confirmedHere.set(relativePath, ++orderRef.current);
+    deleteConfirmedOrderRef.current.set(deleteWorkspaceId, confirmedHere);
+    inFlightHere.delete(relativePath);
     if (!isCurrent()) return;
     pendingDeletePathsRef.current.delete(relativePath);
     ownDeletesRef.current.set(relativePath, Date.now());
-    deleteConfirmedOrderRef.current.set(relativePath, ++orderRef.current);
     // Before the tabs go: closing them unmounts the editor, whose lock
     // cleanup writes its buffer back through `saveFile` — which, unguarded,
     // re-created the file this delete just removed. The set drops each path
@@ -1873,14 +1895,19 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
    * `deletedPathsRef` entry goes with it, and would re-create the file.
    * A delete of ours confirmed while it waited refuses it however long the
    * wait: judged on the delete's order, which never expires, not on
-   * `isOwnDelete`, which ends OWN_DELETE_WINDOW_MS after the delete.
+   * `isOwnDelete`, which ends OWN_DELETE_WINDOW_MS after the delete. Nor does
+   * it end when the person switches branch while it waits: the order is kept
+   * per workspace, and the write still goes to `readFrom`; so is a delete of
+   * ours still in flight there.
    */
   const awaitStillOnBranch = useCallback(async (readFrom: string, relativePath: string) => {
     const refuse = () => new Error(`${basename(relativePath)} was deleted from this branch; it was not saved.`);
     const waitOrder = ++orderRef.current;
-    const deleted = () => deletedPathsRef.current.has(relativePath)
+    const inFlight = () => [...deletesInFlightRef.current.get(readFrom) ?? []]
+      .some((pending) => isWithin(relativePath, pending));
+    const deleted = () => inFlight() || isOvertakenByOwnDelete(readFrom, relativePath, waitOrder)
       || (workspaceIdRef.current === readFrom
-        && (isOwnDelete(relativePath) || isOvertakenByOwnDelete(relativePath, waitOrder)));
+        && (deletedPathsRef.current.has(relativePath) || isOwnDelete(relativePath)));
     if (deleted()) throw refuse();
     // A read deciding whether the file still exists is in flight: its answer
     // first, so a 404 it is about to deliver refuses this write too.
@@ -2232,7 +2259,6 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     pendingDeletePathsRef.current = new Set();
     ownDeletesRef.current = new Map();
     ownRestoresRef.current = new Map();
-    deleteConfirmedOrderRef.current = new Map();
     deletedPathsRef.current = new Set();
     existenceChecksRef.current = new Map();
     treeAbsentCheckedAtRef.current = new Map();

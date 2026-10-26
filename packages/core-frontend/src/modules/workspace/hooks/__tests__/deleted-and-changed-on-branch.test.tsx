@@ -1604,6 +1604,99 @@ describe('a write that answers after a branch switch', () => {
     expect(tab.pendingFileContent).toBe('the agent, on feature');
   });
 
+  /**
+   * On main, a change read of Draft.md is held and `start` begins a write
+   * that waits on it; our delete of Draft.md is confirmed, then the person
+   * switches to feature and opens its Draft.md. Answers the held read with
+   * main's bytes from before the delete.
+   */
+  async function deleteThenSwitchWhileWriteWaits(result: Hook, start: () => Promise<void>) {
+    await open(result, 'KB/Draft.md', 'KB/Keep.md');
+    await act(async () => { result.current.activateTab(tabAt(result, 'KB/Draft.md')!); });
+    let answer!: () => void;
+    apiMocks.readFile.mockImplementationOnce(() => new Promise((resolve) => {
+      answer = () => resolve('# Draft\n\nA page to delete.');
+    }));
+    act(() => bus.emit(fileChanged('KB/Draft.md', GIT_SYNC)));
+    await waitFor(() => expect(answer).toBeDefined());
+    let writing!: Promise<void>;
+    act(() => { writing = start(); });
+
+    await act(async () => { await result.current.deleteEntry('KB/Draft.md'); });
+    expect(tabAt(result, 'KB/Draft.md')).toBeUndefined();
+    await switchToFeatureAndOpen(result, 'KB/Draft.md', 'as on feature');
+    apiMocks.writeFile.mockClear();
+    return { answer, writing };
+  }
+
+  it('a save waiting on the branch just left cannot re-create the file our delete removed there', async () => {
+    const result = await mountReady();
+    const { answer, writing } = await deleteThenSwitchWhileWriteWaits(
+      result, () => result.current.saveFile('KB/Draft.md', 'edited on main'));
+    await act(async () => {
+      answer();
+      await expect(writing).rejects.toThrow('Draft.md was deleted from this branch');
+    });
+
+    expect(apiMocks.writeFile).not.toHaveBeenCalled();
+    const tab = result.current.activeTab!;
+    expect(tab.content).toBe('as on feature');
+    expect(tab.savedContent).toBe('as on feature');
+    expect(tab.isDirty).toBe(false);
+  });
+
+  it("rejecting an agent's change, waiting on the branch just left, cannot re-create the file our delete removed there", async () => {
+    const result = await mountReady();
+    const { answer, writing } = await deleteThenSwitchWhileWriteWaits(result, () => {
+      result.current.setPendingContent('the agent, on main');
+      return result.current.rejectPendingContent();
+    });
+    await act(async () => { result.current.setPendingContent('the agent, on feature'); });
+    await act(async () => {
+      answer();
+      await expect(writing).rejects.toThrow('Draft.md was deleted from this branch');
+    });
+
+    expect(apiMocks.writeFile).not.toHaveBeenCalled();
+    const tab = result.current.activeTab!;
+    expect(tab.content).toBe('as on feature');
+    expect(tab.savedContent).toBe('as on feature');
+    expect(tab.pendingFileContent).toBe('the agent, on feature');
+  });
+
+  it('a save waiting on the branch just left is refused while our delete there is still running', async () => {
+    const result = await mountReady();
+    await open(result, 'KB/Draft.md', 'KB/Keep.md');
+    await act(async () => { result.current.activateTab(tabAt(result, 'KB/Draft.md')!); });
+    let answer!: () => void;
+    apiMocks.readFile.mockImplementationOnce(() => new Promise((resolve) => {
+      answer = () => resolve('# Draft\n\nA page to delete.');
+    }));
+    act(() => bus.emit(fileChanged('KB/Draft.md', GIT_SYNC)));
+    await waitFor(() => expect(answer).toBeDefined());
+    let saving!: Promise<void>;
+    act(() => { saving = result.current.saveFile('KB/Draft.md', 'edited on main'); });
+    // The delete is still running on main when the person switches.
+    let finishDelete!: () => void;
+    apiMocks.deleteFile.mockImplementationOnce((_ws: string, path: string) => new Promise<void>((resolve) => {
+      finishDelete = () => { disk.delete(path); resolve(); };
+    }));
+    let deleting!: Promise<unknown>;
+    act(() => { deleting = result.current.deleteEntry('KB/Draft.md'); });
+    await waitFor(() => expect(finishDelete).toBeDefined());
+    await switchToFeatureAndOpen(result, 'KB/Draft.md', 'as on feature');
+    apiMocks.writeFile.mockClear();
+
+    await act(async () => {
+      answer();
+      await expect(saving).rejects.toThrow('Draft.md was deleted from this branch');
+    });
+    await act(async () => { finishDelete(); await deleting; });
+
+    expect(apiMocks.writeFile).not.toHaveBeenCalled();
+    expect(result.current.activeTab?.content).toBe('as on feature');
+  });
+
   it("a move on the branch just left does not rename this branch's tab", async () => {
     const result = await mountReady();
     await open(result, 'KB/Draft.md');
