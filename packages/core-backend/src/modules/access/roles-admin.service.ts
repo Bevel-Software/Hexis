@@ -36,7 +36,7 @@ import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import { logger } from '../../shared/logging.js';
 
 const log = logger('roles.recover');
-import type { WorkflowEventBus } from '../workflow/event-bus.js';
+import type { WorkflowEventBus } from '../workflow/index.js';
 import type { AuthUser, IWorkspaceService, IWorkflowService } from '@bevel-software/platform-shared';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
 import type { IAccessControl } from './access-control.interface.js';
@@ -45,10 +45,9 @@ import {
   ROLE_TOKEN_PREFIX,
   canonicalRoleName,
   canonicalEmail,
-} from '../access-model/access-grammar.js';
+} from '../access-model/index.js';
 import { loadActiveGroups } from './access-control.service.js';
-import { makeRolesYamlWriteValidator } from '../access-model/roles-yaml-guard.js';
-import { renderRolesYaml } from '../access-model/render-roles-yaml.js';
+import { makeRolesYamlWriteValidator, renderRolesYaml, GROUPS_YAML, SYNCED_GROUPS_YAML, validateGroupsFile, GROUP_REF_PREFIX, RESERVED_ROLE_NAMES } from '../access-model/index.js';
 import {
   parseRolesModel,
   deleteRole as editDeleteRole,
@@ -60,7 +59,6 @@ import {
   RolesEditError,
   type EditResult,
 } from './roles-edit.js';
-import { GROUPS_YAML, SYNCED_GROUPS_YAML, validateGroupsFile } from '../access-model/group-files.js';
 import {
   GroupsEditError,
   assertSafeGroupDisplayName,
@@ -68,7 +66,6 @@ import {
   parseGroupsModel,
 } from './groups-edit.js';
 import { capabilityRoleFor, isLegacyPeopleSetRole } from './capability-registry.js';
-import { GROUP_REF_PREFIX, RESERVED_ROLE_NAMES } from '../access-model/access-grammar.js';
 import { AdminLockedCommits } from './admin-locked-commit.js';
 import { KbReferenceScanner } from './reference-scan.js';
 

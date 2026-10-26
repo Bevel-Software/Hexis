@@ -4,12 +4,10 @@ import { MIN_PASSWORD_LENGTH } from '@bevel-software/platform-shared';
 import { Badge, Banner, Button, Dialog, TextField, type BadgeTone } from '../../../shared/components';
 import { SlotBoundary } from '../../../shared/components/SlotBoundary';
 import { useAppRegistry } from '../../../core/registry';
-import { useAuth } from '../../auth/state/auth.context';
-import { useSignInMethods } from '../../auth/state/use-sign-in-methods';
-import type { LoginProviders } from '../../auth/services/sso';
-import { createAccount, listAccounts } from '../../auth/services/account.api';
-import { addMember, fetchRoles } from '../../admin/services/roles.api';
-import { copyToClipboard } from '../../library/utils/clipboard';
+import { useAuth, useSignInMethods, createAccount, listAccounts } from '../../auth';
+import type { LoginProviders } from '../../auth';
+import { addMember, fetchRoles } from '../../admin';
+import { copyToClipboard } from '../../library';
 import { initials } from '../../../lib/email';
 import { EmailChipsInput } from './EmailChipsInput';
 import {

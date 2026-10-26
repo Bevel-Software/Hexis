@@ -1,5 +1,5 @@
 import { sql } from 'drizzle-orm';
-import type { Database } from '../../database/connection.js';
+import type { Database } from '../../database/index.js';
 
 /**
  * The lock every writer of `pr_file_approvals` takes, and the one thing that

@@ -1,16 +1,12 @@
 import type { Router, RequestHandler } from 'express';
 import { callLine } from '@bevel-software/platform-mcp-core';
-import type { IToolRegistry, JsonSchema, UtcpTool } from '../tool-registry/tool.contract.js';
-import { TOOL_DESCRIPTION_CAP } from '../tool-registry/description-length.js';
-import { GUIDE_FIRST_SENTENCE } from '../tool-registry/guide-first.js';
-import { ToolError, type ToolContext } from '../tool-helpers/tool.contract.js';
-import { toolDef } from '../tool-helpers/tool-def.js';
-import { bodyEnvelope, declareRouteTool } from '../tool-helpers/route-tool-schemas.js';
-import type { ToolHandlerFactory } from '../tool-helpers/tool-handler.js';
+import type { IToolRegistry, JsonSchema, UtcpTool } from '../tool-registry/index.js';
+import { TOOL_DESCRIPTION_CAP, GUIDE_FIRST_SENTENCE } from '../tool-registry/index.js';
+import { ToolError, type ToolContext, toolDef, bodyEnvelope, declareRouteTool, CAN_WRITE_CLAUSE, defaultBranchWriteVerdicts, type DefaultBranchWriteDeps } from '../tool-helpers/index.js';
+import type { ToolHandlerFactory } from '../tool-helpers/index.js';
 import type { ISkillService } from './skills.contract.js';
-import { EXTERNAL_KB_MANUAL_NAME } from '../tool-manuals/tool-manuals.contract.js';
+import { EXTERNAL_KB_MANUAL_NAME } from '../tool-manuals/index.js';
 import type { IAllowedToolsChecker } from './allowed-tools-check.js';
-import { CAN_WRITE_CLAUSE, defaultBranchWriteVerdicts, type DefaultBranchWriteDeps } from '../tool-helpers/index.js';
 
 /**
  * The optional `branch` both skill tools declare. Optional on purpose, unlike

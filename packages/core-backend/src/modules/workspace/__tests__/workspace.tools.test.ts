@@ -25,6 +25,7 @@ import { WorkflowHooks, type AgentOperationContext } from '../../workflow/workfl
 import { SESSION_ID_DESCRIPTION, ToolDescriptionNotes } from '../agent-access.gate.js';
 import { SpillStore } from '../spill-store.js';
 import { DocExtractService } from '../file-readers/doc-extract.service.js';
+import { WorkerDocumentExtractor } from '../file-readers/extract-in-worker.js';
 import { OCTET_STREAM_FALLBACK_NOTE } from '../file-readers/content-mode.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import { AccessControlService } from '../../access/access-control.service.js';
@@ -144,6 +145,11 @@ let raceHook: (() => Promise<void>) | null = null;
  * defaults, unless a test narrows the pool) and closed after each test.
  */
 let patternMatcher: WorkerPatternMatcher | undefined;
+/**
+ * The document extractor `start()` wires, closed after each test: its workers
+ * are made lazily, and `unref()` lets the process exit but keeps them alive.
+ */
+let docExtractor: WorkerDocumentExtractor | undefined;
 let matcherOptions: WorkerPatternMatcherOptions = {};
 
 async function start(
@@ -155,6 +161,9 @@ async function start(
   raceHook = null;
   await patternMatcher?.close();
   patternMatcher = new WorkerPatternMatcher(matcherOptions);
+  await docExtractor?.close();
+  const extractor = new WorkerDocumentExtractor();
+  docExtractor = extractor;
   hooks = new WorkflowHooks();
   notes = new ToolDescriptionNotes();
   callerSource = 'internal';
@@ -309,7 +318,7 @@ async function start(
   const app = express();
   app.use(express.json());
   const router = express.Router();
-  registerWorkspaceTools(registry, router, fakeAuth, toolHandler, new SpillStore(join(tmpdir(), 'bevel-test-spills')), new DocExtractService(docCacheDir), access, testKbContext({ kbDirName: KB_DIR }), {
+  registerWorkspaceTools(registry, router, fakeAuth, toolHandler, new SpillStore(join(tmpdir(), 'bevel-test-spills')), new DocExtractService(docCacheDir, extractor), access, testKbContext({ kbDirName: KB_DIR }), {
     // The hooks and the notes a test registers against; with neither
     // registered (the default, and every Hexis-only deployment) the gate
     // refuses nothing and the descriptions say nothing extra.
@@ -354,6 +363,8 @@ afterEach(async () => {
   httpServer = undefined;
   await patternMatcher?.close();
   patternMatcher = undefined;
+  await docExtractor?.close();
+  docExtractor = undefined;
   if (tempDir) {
     await rm(tempDir, { recursive: true, force: true });
     tempDir = '';
@@ -2137,6 +2148,7 @@ describe('images', () => {
 describe('start_session', () => {
   // Minimal harness: own app + a fake ISessionSink that records createSession.
   let server: HttpServer | undefined;
+  let sessionExtractor: WorkerDocumentExtractor | undefined;
   let created: Array<{ userId: string; startedAt: Date }> = [];
 
   async function startSessionApp(
@@ -2189,9 +2201,12 @@ describe('start_session', () => {
     const app = express();
     app.use(express.json());
     const router = express.Router();
+    await sessionExtractor?.close();
+    const extractor = new WorkerDocumentExtractor();
+    sessionExtractor = extractor;
     registerWorkspaceTools(
       registry, router, auth, toolHandler,
-      new SpillStore(join(tmpdir(), 'bevel-test-spills')), new DocExtractService(join(tmpdir(), 'bevel-test-doc-extract')), access, testKbContext({ kbDirName: KB_DIR }),
+      new SpillStore(join(tmpdir(), 'bevel-test-spills')), new DocExtractService(join(tmpdir(), 'bevel-test-doc-extract'), extractor), access, testKbContext({ kbDirName: KB_DIR }),
       { recoveryBotEmail: RECOVERY_BOT, hooks: new WorkflowHooks(), notes: new ToolDescriptionNotes() },
       new RoutineWritePolicyService(),
       sink ?? fakeSessionSink,
@@ -2213,6 +2228,8 @@ describe('start_session', () => {
   afterEach(async () => {
     if (server) await new Promise<void>((r) => server!.close(() => r()));
     server = undefined;
+    await sessionExtractor?.close();
+    sessionExtractor = undefined;
   });
 
   it('returns the sink-minted id as sessionId', async () => {
@@ -2321,9 +2338,10 @@ describe('start_session', () => {
     const registry = new ToolRegistry();
     const router = express.Router();
     const noopAuth: express.RequestHandler = (_req, _res, next) => next();
+    const extractor = new WorkerDocumentExtractor();
     registerWorkspaceTools(
       registry, router, noopAuth, (() => () => {}) as never,
-      new SpillStore(join(tmpdir(), 'bevel-test-spills')), new DocExtractService(join(tmpdir(), 'bevel-test-doc-extract')), allowAll, testKbContext({ kbDirName: KB_DIR }),
+      new SpillStore(join(tmpdir(), 'bevel-test-spills')), new DocExtractService(join(tmpdir(), 'bevel-test-doc-extract'), extractor), allowAll, testKbContext({ kbDirName: KB_DIR }),
       { recoveryBotEmail: RECOVERY_BOT, hooks: new WorkflowHooks(), notes: new ToolDescriptionNotes() },
       new RoutineWritePolicyService(),
       {} as never,
@@ -2341,6 +2359,7 @@ describe('start_session', () => {
     // And that the answer may carry a note to act on, so an agent reading
     // only the catalog knows the field is not noise.
     expect(description).toContain('`firstRun`');
+    await extractor.close();
   });
 
   /**
@@ -2484,9 +2503,16 @@ describe('start_session', () => {
  * schema layer, complementing the handler-level guard exercised above.
  */
 describe('branch is a required parameter in the tool contract', () => {
+  /** Every extractor a registry was built with, closed after each test. */
+  const extractors: WorkerDocumentExtractor[] = [];
+  afterEach(async () => {
+    await Promise.all(extractors.splice(0).map((e) => e.close()));
+  });
   /** Register the workspace tools into a fresh registry (no server needed). */
   function buildRegistry(): ToolRegistry {
     const registry = new ToolRegistry();
+    const extractor = new WorkerDocumentExtractor();
+    extractors.push(extractor);
     const router = express.Router();
     const noopAuth: express.RequestHandler = (_req, _res, next) => next();
     // The handler factory is only invoked to build routes; its output is never
@@ -2498,7 +2524,7 @@ describe('branch is a required parameter in the tool contract', () => {
       noopAuth,
       toolHandler,
       new SpillStore(join(tmpdir(), 'bevel-test-spills')),
-      new DocExtractService(join(tmpdir(), 'bevel-test-doc-extract')),
+      new DocExtractService(join(tmpdir(), 'bevel-test-doc-extract'), extractor),
       allowAll,
       testKbContext({ kbDirName: KB_DIR }),
       { recoveryBotEmail: RECOVERY_BOT, hooks: new WorkflowHooks(), notes: new ToolDescriptionNotes() },

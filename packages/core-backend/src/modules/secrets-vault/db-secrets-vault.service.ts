@@ -3,8 +3,8 @@ import { logger } from '../../shared/logging.js';
 
 const log = logger('vault');
 import { and, desc, eq, inArray, isNull, like, or } from 'drizzle-orm';
-import type { Database } from '../database/connection.js';
-import { secrets } from '../database/schema.js';
+import type { Database } from '../database/index.js';
+import { secrets } from '../database/index.js';
 import { TokenCrypto } from '../../shared/token-crypto.js';
 import { assertSafeFetchUrl } from '../../shared/ssrf.js';
 import {

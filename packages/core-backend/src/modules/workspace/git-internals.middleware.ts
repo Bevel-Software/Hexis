@@ -2,7 +2,7 @@ import express from 'express';
 import { GitInternalsError } from '../../shared/domain-errors.js';
 import { domainErrorBody } from '../../shared/http-errors.js';
 import { assertNotGitInternals, hasGitInternalsSegment } from '../../shared/git-internals.js';
-import '../auth/auth.middleware.js'; // Express Request augmentation
+import '../auth/index.js'; // Express Request augmentation
 
 /** The query and body fields through which a workspace route names a path. */
 const GIT_GUARDED_QUERY_KEYS = ['path', 'toDir'] as const;

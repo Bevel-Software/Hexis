@@ -14,11 +14,11 @@ import type {
   IGitService,
 } from '@bevel-software/platform-shared';
 import { isFolderPlaceholder } from '@bevel-software/platform-shared';
-import type { Database } from '../../database/connection.js';
-import { changeRequests } from '../../database/schema.js';
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import type { IAccessControl } from '../../access/access-control.interface.js';
-import { AccessUnreadableError } from '../../access-model/access-errors.js';
+import type { Database } from '../../database/index.js';
+import { changeRequests } from '../../database/index.js';
+import type { WorkspaceService } from '../../workspace/index.js';
+import type { IAccessControl } from '../../access/index.js';
+import { AccessUnreadableError } from '../../access-model/index.js';
 import { AppliedChangeMismatchError, WorkflowValidationError } from '../../../shared/domain-errors.js';
 import { canonicalEmail, hashEmail } from '../../../shared/email-identity.js';
 import { changeRequestLink, changeRequestLinkBase } from './change-request-link.js';

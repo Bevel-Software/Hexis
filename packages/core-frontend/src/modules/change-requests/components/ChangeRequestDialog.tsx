@@ -11,8 +11,8 @@ import { Banner, Button, Surface, TextAreaField, TextField } from '../../../shar
 import { useModalLayer } from '../../../shared/components/useModalLayer';
 import { cn } from '../../../lib/utils';
 import { PR_STALE_EVENT } from '../../../core/events';
-import { AuthContext } from '../../auth/state/auth.context';
-import { useEventBus } from '../../workflow/state/event-bus.context';
+import { AuthContext } from '../../auth';
+import { useEventBus } from '../../workflow';
 import {
   approvePrFile,
   deleteChangeRequest,
@@ -22,12 +22,11 @@ import {
   unapprovePrFile,
   updateChangeRequest,
 } from '../../pr';
-import { GitApiError } from '../../git/services/git.api';
-import { friendlyGitError, friendlyGitMessage } from '../../git/services/error-messages';
+import { GitApiError, friendlyGitError, friendlyGitMessage } from '../../git';
 import { GitSyncFailedBanner } from '../../git/components/GitSyncFailedBanner';
 import { useApplyChangeRequest } from '../hooks/useApplyChangeRequest';
 import { readFileOnBranch } from '../services/change-requests.api';
-import { WorkspaceApiError } from '../../workspace/services/workspace.api';
+import { WorkspaceApiError } from '../../workspace';
 import { describeReadFailure } from '../services/denied-file.api';
 import { deniedSentence, readErrorLead, type ReadFailure } from '../utils/readFailure';
 import { changeAuthorName } from '../utils/author';

@@ -8,7 +8,7 @@ import {
   useState,
   type ReactNode,
 } from 'react';
-import { useAuth } from '../../auth/state/auth.context';
+import { useAuth } from '../../auth';
 import { fetchAdminAccess } from '../services/admin.api';
 import { useAppRegistry } from '../../../core/registry';
 import { getRolesHealth, recoverRoles } from '../services/roles.api';

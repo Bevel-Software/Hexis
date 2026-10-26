@@ -1,16 +1,15 @@
 import type { Router, RequestHandler } from 'express';
-import type { IToolRegistry, JsonSchema } from '../../tool-registry/tool.contract.js';
-import { ToolError, hasHttpStatus, type ToolContext, type ToolHandler } from '../../tool-helpers/tool.contract.js';
+import type { IToolRegistry, JsonSchema } from '../../tool-registry/index.js';
+import { ToolError, hasHttpStatus, type ToolContext, type ToolHandler, toolDef } from '../../tool-helpers/index.js';
 import { isCommitSha } from '../../../shared/git.contract.js';
-import { toolDef } from '../../tool-helpers/tool-def.js';
-import type { ToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
-import { requireInternalSource } from '../../tool-auth/tool-auth.middleware.js';
-import type { IAccessControl } from '../../access/access-control.interface.js';
+import type { ToolHandlerFactory } from '../../tool-helpers/index.js';
+import { requireInternalSource } from '../../tool-auth/index.js';
+import type { IAccessControl } from '../../access/index.js';
 import { assertAgentWriteAllowed, notifyAgentRead, SESSION_ID_INPUT, type AgentAccessGate } from '../../workspace/index.js';
 import { readablePathsAt, readableAtCommits, assertReadableAtCommits } from '../read-on-branch.js';
 import type { KbContext } from '../../../shared/kb-context.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
-import { assertInsideRepo, normalizePathArgs } from '../../kb-fs/repo-path.js';
+import { assertInsideRepo, normalizePathArgs } from '../../kb-fs/index.js';
 import { RETIRED_TOOL_MESSAGES } from '@bevel-software/platform-mcp-core';
 import {
   CHANGE_REQUEST_INCLUDES,
@@ -37,11 +36,9 @@ const branchSchema: JsonSchema = {
   properties: {
     name: { type: 'string' },
     isProtected: { type: 'boolean' },
-    ahead: { type: ['integer', 'null'], description: 'Commits ahead of upstream / nearest protected base; null if unresolved.' },
-    behind: { type: ['integer', 'null'], description: 'Commits behind; null if unresolved.' },
     hasRemote: { type: 'boolean', description: 'True iff `origin/<name>` exists after the last fetch.' },
   },
-  required: ['name', 'isProtected', 'ahead', 'behind', 'hasRemote'],
+  required: ['name', 'isProtected', 'hasRemote'],
 };
 
 const commitSchema: JsonSchema = {
@@ -75,7 +72,7 @@ const changeRequestApproversSchema: JsonSchema = {
   properties: {
     path: { type: 'string' },
     roles: { type: 'array', items: { type: 'string' }, description: 'Roles that confer approval here; `everyone` means any signed-in approver.' },
-    users: { type: 'array', items: { type: 'string' }, description: 'Approvers named directly, by display name.' },
+    users: { type: 'array', items: { type: 'string' }, description: 'Approvers named directly: each by display name, or by email when the access tree resolved no name. Never a blank string.' },
     approved: { type: 'boolean', description: 'True once an eligible approver has approved at the current head.' },
     inMergeGate: { type: 'boolean', description: 'False when the merge gate does not bind this path — then nobody has to approve it.' },
     approversUnknown: { type: 'boolean', description: 'Present when the access tree could not be resolved: empty `roles`/`users` means unknown, not nobody.' },
@@ -259,7 +256,8 @@ export function registerWorkflowTools(
     name: 'list_branches',
     description:
       'List every draft known to the repository (protected versions + unprotected drafts, ' +
-      'local and on the shared remote). Returns `{ branches: [{ name, isProtected, ahead, behind, hasRemote }] }`. ' +
+      'local and on the shared remote). Returns `{ branches: [{ name, isProtected, hasRemote }] }`; ' +
+      'how far one branch is ahead or behind is `branch_status`\'s answer. ' +
       'Takes no arguments — branch listing is repo-global, not scoped to any one draft.',
     // Repo-global: the branch set is the same from any clone, so don't require
     // (and risk cloning) a model-named branch — resolve any existing workspace.
@@ -979,9 +977,13 @@ export function registerWorkflowTools(
       // and a save or sync landing between two of them is tolerated — the
       // next call reports it. (The one answer that must be exact, what a
       // merge is of, is taken under one reservation by `update_branch`.)
-      const [status, branches, pending, forkBase] = await Promise.all([
+      // The counts alone wait for the listing: its fetch refreshes the
+      // remote-tracking refs they are measured against.
+      const [status, [branches, counts], pending, forkBase] = await Promise.all([
         ctx.workflowService.branchStatus(workspaceId),
-        ctx.workflowService.listBranches(workspaceId),
+        ctx.workflowService
+          .listBranches(workspaceId)
+          .then(async (listed) => [listed, await ctx.workflowService.branchCounts(workspaceId)] as const),
         ctx.workflowService.listPendingChangePaths(workspaceId),
         ctx.workflowService.resolveForkBase(workspaceId, branch),
       ]);
@@ -1001,8 +1003,8 @@ export function registerWorkflowTools(
         branch,
         isProtected: info?.isProtected ?? kb.protectedBranches.has(branch),
         hasRemote: info?.hasRemote ?? status.hasUpstream,
-        ahead: info?.ahead ?? null,
-        behind: info?.behind ?? null,
+        ahead: counts.ahead,
+        behind: counts.behind,
         behindRemote: status.unmergedFromUpstream,
         uncommittedPaths,
         forkBase,

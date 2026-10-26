@@ -50,18 +50,13 @@ import {
   type LoadedSkill,
 } from '@bevel-software/platform-mcp-core';
 import type { KbLayout } from '@bevel-software/platform-shared';
-import { bevelSecretsLoaderConfig } from '../secrets-vault/index.js';
-import {
-  scopesCovered,
-  type ForcedRefreshOutcome,
-  type ISecretsVaultService,
-} from '../secrets-vault/secrets-vault.contract.js';
-import { EXTERNAL_KB_MANUAL_NAME } from '../tool-manuals/tool-manuals.contract.js';
-import type { IToolManualService } from '../tool-manuals/tool-manuals.contract.js';
-import type { SpillStore } from '../workspace/spill-store.js';
+import { bevelSecretsLoaderConfig, type ForcedRefreshOutcome, type ISecretsVaultService, scopesCovered } from '../secrets-vault/index.js';
+import { EXTERNAL_KB_MANUAL_NAME } from '../tool-manuals/index.js';
+import type { IToolManualService } from '../tool-manuals/index.js';
+import type { SpillStore } from '../workspace/index.js';
 import type { HiddenToolSource } from '../../shared/hidden-tools.js';
 import { seedBevelHostedManualVars } from '../../shared/utcp-namespace.js';
-import type { InternalTokenService } from '../tool-auth/internal-token.service.js';
+import type { InternalTokenService } from '../tool-auth/index.js';
 import { RequestAudit, type IAgentEventRecorder, type RecordedPrincipal } from '../audit/index.js';
 import { ManualFailureMemo } from './manual-failure-memo.js';
 import { DownstreamPool, POOL_KEY_SEPARATOR, type DownstreamPoolOptions, type Lease } from './downstream-pool.js';
@@ -79,7 +74,7 @@ import {
   type AgentPreambleReader,
   type ComposedAgentInstructions,
 } from '../agent-instructions/index.js';
-import { guideFirstDescription } from '../tool-registry/guide-first.js';
+import { guideFirstDescription } from '../tool-registry/index.js';
 
 /**
  * Configuration for the loopback proxy. `loopbackBaseUrl` is the backend's own

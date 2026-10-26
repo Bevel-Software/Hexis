@@ -8,6 +8,7 @@ import { DEFAULT_BRANCH, withLinkedSkillRoots, type AuthUser } from '@bevel-soft
 
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import { AccessControlService } from '../../access/access-control.service.js';
+import { AccessMutationService } from '../../access/access-mutation.service.js';
 import { SkillService } from '../../skills/skills.service.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { PluginLinkIndex } from '../plugin-links.js';
@@ -98,7 +99,7 @@ describe('PluginLinksService', () => {
     const kb = testKbContext({ kbDirName: KB_DIR });
     skills = new SkillService(workspaceService, access, kb, disk);
     index = new PluginLinkIndex(workspaceService, skills, access, kb, new KbPluginSource(disk, kb));
-    svc = new PluginLinksService(workspaceService, driver, access, skills, index, kb);
+    svc = new PluginLinksService(workspaceService, driver, access, new AccessMutationService(workspaceService, access, kb.kbDirName), skills, index, kb);
   });
   afterEach(() => fs.rm(root, { recursive: true, force: true }));
 

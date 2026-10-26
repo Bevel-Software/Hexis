@@ -4,7 +4,7 @@ import {
   IDLE_AUTO_UPDATE,
   type AutoUpdateState,
 } from '../state/auto-update.context';
-import type { WorkspaceContextValue } from '../../workspace/state/workspace.context';
+import type { WorkspaceContextValue } from '../../workspace';
 import { sanitizeErrorText } from '../services/error-messages';
 import { pullFailureDetail } from '../services/pull-failure';
 import { PR_STALE_EVENT } from '../../../core/events';

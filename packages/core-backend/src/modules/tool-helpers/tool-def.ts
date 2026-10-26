@@ -1,7 +1,7 @@
 import '@utcp/http';
 import { HttpCallTemplateSerializer } from '@utcp/http';
 import { ToolSerializer } from '@utcp/sdk';
-import type { JsonSchema, UtcpTool } from '../tool-registry/tool.contract.js';
+import type { JsonSchema, UtcpTool } from '../tool-registry/index.js';
 import { declareRouteTool } from './route-tool-schemas.js';
 
 const httpTemplate = new HttpCallTemplateSerializer();

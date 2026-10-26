@@ -5,19 +5,19 @@ const log = logger('tool-manuals');
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import AdmZip from 'adm-zip';
-import type { WorkspaceService } from '../workspace/workspace.service.js';
+import type { WorkspaceService } from '../workspace/index.js';
 import type { KbContext } from '../../shared/kb-context.js';
 import { isAbsence, type IFsProbe, type ITreeWalker } from '../../shared/fs.contract.js';
-import type { IAccessControl } from '../access/access-control.interface.js';
-import type { IPluginIndexService } from '../plugins/plugins.contract.js';
+import type { IAccessControl } from '../access/index.js';
+import type { IPluginIndexService } from '../plugins/index.js';
 import '@utcp/http'; // side effect: register the 'http' call-template type
 import { CallTemplateSerializer, type CallTemplate } from '@utcp/sdk';
 import { type IPendingToolService, type IToolManualService, EXTERNAL_KB_MANUAL_NAME } from './tool-manuals.contract.js';
 import { McpServerEditError, type McpServerEditService, type McpServerWrite } from './mcp-server-edit.service.js';
 import { ToolDeleteError, type ToolDeleteService } from './tool-delete.service.js';
 import type { AuthUser } from '@bevel-software/platform-shared';
-import '../auth/auth.middleware.js'; // Express Request augmentation (req.userId / req.userEmail)
-import '../tool-auth/tool-auth.middleware.js'; // Express Request augmentation (req.toolAuth)
+import '../auth/index.js'; // Express Request augmentation (req.userId / req.userEmail)
+import '../tool-auth/index.js'; // Express Request augmentation (req.toolAuth)
 import { hasGitInternalsSegment } from '../../shared/git-internals.js';
 
 /** Resolve a connection-key/internal-token user id to its email (per-caller ACL). */

@@ -1,7 +1,7 @@
 import jwt from 'jsonwebtoken';
 import { and, eq, getTableColumns, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
-import type { Database } from '../database/connection.js';
-import { users } from '../database/schema.js';
+import type { Database } from '../database/index.js';
+import { users } from '../database/index.js';
 import type { AuthUser } from '@bevel-software/platform-shared';
 import { canonicalEmail } from '../../shared/email-identity.js';
 import {
@@ -19,8 +19,8 @@ import {
   timingSafeStringEqual,
   MIN_PASSWORD_LENGTH,
 } from './password-hash.js';
-import { RECOVERY_BOT_EMAIL } from '../workflow/recovery-bot.js';
-import { DIRECTORY_SYNC_BOT_EMAIL } from '../access/directory-sync-bot.js';
+import { RECOVERY_BOT_EMAIL } from '../workflow/index.js';
+import { DIRECTORY_SYNC_BOT_EMAIL } from '../access/index.js';
 import { takeAccountSwitchLock } from './account-switch-lock.js';
 import type { IAccountSwitchGuard } from './account-switch-guard.js';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';

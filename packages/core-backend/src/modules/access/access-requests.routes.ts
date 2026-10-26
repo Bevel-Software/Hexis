@@ -1,11 +1,10 @@
 import express from 'express';
-import type { AuthUser } from '@bevel-software/platform-shared';
-import type { IWorkflowService } from '@bevel-software/platform-shared';
+import type { AuthUser, IWorkflowService } from '@bevel-software/platform-shared';
 import { logger } from '../../shared/logging.js';
 import type { KbContext } from '../../shared/kb-context.js';
 import { branchForWorkspaceId } from '../../shared/workspace-id.js';
-import type { AuthService } from '../auth/auth.service.js';
-import type { WorkspaceService } from '../workspace/workspace.service.js';
+import type { AuthService } from '../auth/index.js';
+import type { WorkspaceService } from '../workspace/index.js';
 import type { IAccessControl } from './access-control.interface.js';
 import {
   AccessMutationError,
@@ -23,7 +22,7 @@ import {
   type IAccessRequestLifecycle,
 } from './access-requests.contract.js';
 import { AccessRequestsService, itemNameOf } from './access-requests.service.js';
-import '../auth/auth.middleware.js'; // Express Request.userId augmentation
+import '../auth/index.js'; // Express Request.userId augmentation
 
 const log = logger('access.request');
 

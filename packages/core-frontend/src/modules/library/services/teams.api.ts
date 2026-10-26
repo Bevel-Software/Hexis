@@ -1,5 +1,5 @@
 import { authFetch } from '../../../lib/api';
-import { handleApiResponse } from '../../git/services/git.api';
+import { handleApiResponse } from '../../git';
 import type { TeamAccess } from '../utils/status';
 
 export type { TeamAccess } from '../utils/status';
