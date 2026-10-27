@@ -44,6 +44,9 @@ import { TOOL_DESCRIPTION_CAP, clientVisibleLength } from '../../tool-registry/d
 
 const KB_DIR = 'knowledge-base';
 
+/** One side of a move's holders with nobody on it: a stand-in whose moves change nobody's access. */
+const NO_HOLDERS = { read: { roles: [], users: [] }, write: { roles: [], users: [] } };
+
 /** Allow-all access control — the default for tests not exercising read gating. */
 const allowAll = {
   canRead: async () => true,
@@ -67,6 +70,8 @@ const allowAll = {
   // a folder's `access.md` files actually does to it is exercised against
   // REAL rules in "a move preview judges the destination as it will be".
   previewAccessAfterRelocation: async () => ({ read: true, write: true, download: true, owner: true }),
+  // Who else holds access before and after a move: nobody's changes here.
+  prospectiveHolders: async () => ({ before: NO_HOLDERS, after: NO_HOLDERS }),
 } as unknown as IAccessControl;
 
 /** Access control that denies `canRead` for an explicit set of repo-relative paths. */
@@ -3273,6 +3278,7 @@ describe('preflight for moves and deletes', () => {
     // preview learned to relocate them, which keeps every ordering and
     // oracle test below about what it is about.
     previewAccessAfterRelocation: async (_w: string, _u: string, _from: string, to: string) => verbsFor(to),
+    prospectiveHolders: async () => ({ before: NO_HOLDERS, after: NO_HOLDERS }),
   } as unknown as IAccessControl;
 
   const call = async (base: string, tool: string, body: Record<string, unknown>) => {
@@ -3448,6 +3454,22 @@ describe('preflight for moves and deletes', () => {
       expect(run.body).toMatchObject({ moved: true });
       expect(await exists(args.dest)).toBe(true);
       expect(await exists(args.src)).toBe(false);
+    });
+
+    it('who else holds access is never named to a caller who cannot read what moves', async () => {
+      let asked = 0;
+      const board = { read: { roles: ['Board'], users: [] }, write: { roles: [], users: [] } };
+      const base = await start('write', {
+        ...rules,
+        prospectiveHolders: async () => {
+          asked++;
+          return { before: board, after: NO_HOLDERS };
+        },
+      } as unknown as IAccessControl);
+      await fs.writeFile(KB('Secret/plan.md'), 'plan');
+      const dry = await call(base, 'move_file', { src: KB('Secret/plan.md'), dest: KB('Sales/plan.md'), dryRun: true });
+      expect(dry.body.holderChanges).toBeUndefined();
+      expect(asked).toBe(0);
     });
 
     it('an access-changing move shows before/after and runs only with confirm: true', async () => {
@@ -4291,6 +4313,7 @@ describe('a write refused for permissions says whether and how to propose it', (
       canOwner: async () => true,
       canWriteBatchAtRef: async () => null,
       previewAccessAfterRelocation: async () => ({ read: true, write: true, download: true, owner: true }),
+      prospectiveHolders: async () => ({ before: NO_HOLDERS, after: NO_HOLDERS }),
       eligibleWritersAtRef: async () => ({ roles: ['Sales Lead'], users: [{ name: 'Owner', email: 'owner@x' }] }),
     } as unknown as IAccessControl;
     return { ac, calls };
@@ -5146,6 +5169,7 @@ describe('a move preview judges the destination as it will be', () => {
       previewAccessAfterRelocation: (
         w: string, u: string, from: string, to: string, opts?: { sourceRemains?: boolean },
       ) => fresh().previewAccessAfterRelocation(w, u, from, to, opts),
+      prospectiveHolders: (w: string, from: string, to: string) => fresh().prospectiveHolders(w, from, to),
     } as unknown as IAccessControl;
   };
 
@@ -5189,6 +5213,8 @@ describe('a move preview judges the destination as it will be', () => {
     expect(dry.body).toMatchObject({ kind: 'folder', accessChanges: false, allowed: true, moved: false });
     expect(dry.body.access.after).toEqual(dry.body.access.before);
     expect(dry.body.access.after.owner).toBe(true);
+    // A rename carries its own rules along: nobody else gains or loses either.
+    expect(dry.body.holderChanges).toBeUndefined();
     // Nothing moved and nothing was written to answer the question.
     expect(await fs.exists(args.dest)).toBe(false);
     expect(await fs.exists(KB('Sales/access.md'))).toBe(true);
@@ -5211,6 +5237,41 @@ describe('a move preview judges the destination as it will be', () => {
     expect((await call(base, 'move_file', args)).body).toMatchObject({ confirmationRequired: true, moved: false });
     expect((await call(base, 'move_file', { ...args, confirm: true })).body).toMatchObject({ moved: true });
     expect(await verbsAt(base, args.dest)).toEqual(dry.body.access.after);
+  });
+
+  it('a move that changes only who ELSE may edit it names them, and asks before it moves', async () => {
+    const base = await seeded();
+    // `Ops/` gives the caller what `Sales/` gives, and Ops Lead write as well.
+    await fs.writeFile(
+      KB('Ops/access.md'),
+      rules(`write:\n  - Mover <${MOVER}>\n  - Ops Lead <ops@x.io>\nowner:\n  - Mover <${MOVER}>\n`),
+    );
+    const args = { src: KB('Sales/deal.md'), dest: KB('Ops/deal.md') };
+
+    const dry = await call(base, 'move_file', { ...args, dryRun: true });
+    expect(dry.body).toMatchObject({ accessChanges: false, allowed: true });
+    // Everyone may read on both sides, so the only change is who may edit.
+    expect(dry.body.holderChanges).toEqual({
+      lose: [],
+      gain: [{ kind: 'person', name: 'ops@x.io', email: 'ops@x.io', verb: 'write' }],
+    });
+
+    const unconfirmed = await call(base, 'move_file', args);
+    expect(unconfirmed.body).toMatchObject({ confirmationRequired: true, moved: false });
+    expect(unconfirmed.body.message).toContain('`holderChanges`');
+    expect(await fs.exists(args.src)).toBe(true);
+    expect((await call(base, 'move_file', { ...args, confirm: true })).body).toMatchObject({ moved: true });
+  });
+
+  it('a move out of a folder names everyone it leaves behind', async () => {
+    const base = await seeded();
+    const args = { src: KB('Work/Notes'), dest: KB('Legal/Notes') };
+    const dry = await call(base, 'move_file', { ...args, dryRun: true });
+    // Everyone may still read it in Legal/: the caller loses editing, not opening.
+    expect(dry.body.holderChanges).toEqual({
+      lose: [{ kind: 'person', name: MOVER, email: MOVER, verb: 'write' }],
+      gain: [],
+    });
   });
 
   it('what the folder inherited is left behind; what its own access.md gives comes along', async () => {
