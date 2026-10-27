@@ -87,7 +87,7 @@ function refuseMismatchedArguments(req: express.Request, res: express.Response):
 
 /**
  * Answer the connection-scope refusal when the caller's connection was made
- * as an `.agent` file that does not list `toolName`; `true` when it answered.
+ * as an agent configuration that does not list `toolName`; `true` when it answered.
  * These routes ARE the `create_plugin` and `my_plugin` tools but are not
  * hosted by `toolHandler`, so the check it makes for every other platform
  * tool is made here, with its answer. A session, or a key made as
@@ -129,7 +129,7 @@ async function refuseOutsideConnectionScope(
 export function createPluginCreationRoutes(
   provision: Pick<PluginProvisionService, 'createPlugin' | 'ensurePersonalPlugin'>,
   resolveUser: (req: express.Request) => Promise<AuthUser | null>,
-  /** Resolves a connection's `.agent` choice to its scope; absent, a narrowed connection loads nothing. */
+  /** Resolves a connection's agent choice to its scope; absent, a narrowed connection loads nothing. */
   agentScope?: Pick<IAgentScopeResolver, 'resolve'>,
 ): express.Router {
   const router = express.Router();
@@ -143,7 +143,7 @@ export function createPluginCreationRoutes(
     // These two routes ARE the `create_plugin` and `my_plugin` tools, so an
     // agent's call is checked against what those tools declare, exactly as a
     // route-hosted tool's is in `toolHandler`: a call that does not match, or
-    // a connection whose `.agent` does not list the tool, is refused before
+    // a connection whose agent does not list the tool, is refused before
     // anything is provisioned.
     if (await refuseOutsideConnectionScope(req, res, user, 'create_plugin', agentScope)) return;
     if (refuseMismatchedArguments(req, res)) return;
@@ -183,7 +183,7 @@ export function createPluginCreationRoutes(
     // These two routes ARE the `create_plugin` and `my_plugin` tools, so an
     // agent's call is checked against what those tools declare, exactly as a
     // route-hosted tool's is in `toolHandler`: a call that does not match, or
-    // a connection whose `.agent` does not list the tool, is refused before
+    // a connection whose agent does not list the tool, is refused before
     // anything is provisioned.
     if (await refuseOutsideConnectionScope(req, res, user, 'my_plugin', agentScope)) return;
     if (refuseMismatchedArguments(req, res)) return;

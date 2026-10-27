@@ -63,7 +63,7 @@ export function registerToolManualsTools(
 
   // The local server's discovery read (`discovery`): it asks this route at
   // startup for the connectors it must materialize, whatever tools the
-  // connection is offered — a connection made as an `.agent` file that omits
+  // connection is offered — a connection made as an agent configuration that omits
   // the tool is answered its connectors, not refused, or the local server
   // could not start for that agent at all.
   router.post(

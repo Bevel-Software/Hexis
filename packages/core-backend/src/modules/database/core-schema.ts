@@ -288,7 +288,7 @@ export const externalApiKeys = pgTable('api_tokens', {
    */
   deletedAt: timestamp('deleted_at'),
   /**
-   * The `.agent` file the key connects as — a repo-relative knowledge-base
+   * The agent configuration the key connects as — a repo-relative knowledge-base
    * path, chosen when the key is minted. Null is Everything: the key sees
    * every tool, skill and plugin its owner may read, exactly as before the
    * column existed. The path is the whole record: the file is re-read on
@@ -551,7 +551,7 @@ export const agentConnections = pgTable('agent_connections', {
   /** `owner` | `admin` — who ended it; null while live. Same vocabulary as `api_tokens.revoked_by`. */
   revokedBy: text('revoked_by'),
   /**
-   * The `.agent` file the person chose to connect as on the consent step — a
+   * The agent configuration the person chose to connect as on the consent step — a
    * repo-relative knowledge-base path — or null for Everything. Set by every
    * consent that lands on the row, so re-authorising with another choice
    * changes what the agent sees from its next request. Same meaning as

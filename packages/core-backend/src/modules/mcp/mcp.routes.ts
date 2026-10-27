@@ -160,7 +160,7 @@ export function createMcpRoutes(
           // exchanged grant; undefined for keys/JWTs) — the Audit log's other
           // principal, resolved per request like the key id.
           connectionId: req.agentConnectionId ?? null,
-          // The `.agent` file the credential connects as (a key's, an agent
+          // The agent configuration the credential connects as (a key's, an agent
           // connection's, or the one an exchanged grant carries); null is
           // Everything. Resolved per request like the ids above.
           ...(req.mcpAgentPath ? { agentPath: req.mcpAgentPath } : {}),

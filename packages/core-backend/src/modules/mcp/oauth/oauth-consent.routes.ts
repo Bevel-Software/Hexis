@@ -23,7 +23,7 @@ export interface OAuthConsentRoutesDeps {
     completeConsent(userId: string, st: McpAuthRequestState): Promise<{ redirectTo: string }>;
   };
   /**
-   * The "Connect as" choices: the `.agent` files the person may connect an
+   * The "Connect as" choices: the agent configurations the person may connect an
    * MCP client as, offered below Everything. Absent, the consent offers
    * Everything alone and Finish refuses any other choice.
    */

@@ -200,7 +200,7 @@ export class BevelOAuthProvider implements OAuthServerProvider {
    * /connect step: bind a one-time code to (user, client, redirect_uri, PKCE
    * challenge) and hand back the client redirect the browser should follow.
    *
-   * @param agentPath The "Connect as" choice — an `.agent` file the consent
+   * @param agentPath The "Connect as" choice — an agent configuration the consent
    *   route has already checked the person may choose — or null for
    *   Everything. Carried on the code to the exchange, which records it on
    *   the agent connection.

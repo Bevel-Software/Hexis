@@ -30,7 +30,7 @@ export interface AuditPrincipal {
   eventCount: number;
   user: { id: string; email: string; name: string };
   /**
-   * For a key or an agent: the `.agent` file it connects as (a knowledge-base
+   * For a key or an agent: the agent configuration it connects as (a knowledge-base
    * path), or null for Everything. Absent for a page.
    */
   agentPath?: string | null;

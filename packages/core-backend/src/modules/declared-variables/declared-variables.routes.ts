@@ -50,7 +50,7 @@ export function createDeclaredVariableRoutes(
   manualAuth: RequestHandler,
   resolveUserEmail: ResolveUserEmail,
   /**
-   * Resolves the scope of a connection made as an `.agent` file: such a
+   * Resolves the scope of a connection made as an agent configuration: such a
    * connection is handed only the variables of a connector the file loads.
    * Absent, a narrowed connection is handed none.
    */
@@ -133,7 +133,7 @@ export function createDeclaredVariableRoutes(
       // unreadable manual is simply absent — same fail-closed read model the
       // catalog uses.
       const found = (await toolManualService.listAccessible(who.email)).find((m) => m.slug === slug);
-      // A connection made as an `.agent` file is handed only the variables of
+      // A connection made as an agent configuration is handed only the variables of
       // a connector it loads; another is as absent as an unreadable one.
       const scope = found ? await resolveConnectionScope(agentScope, who.email, req.toolAuth?.agentPath) : null;
       const manual = found && scope?.allowsConnector(found.path) ? found : undefined;

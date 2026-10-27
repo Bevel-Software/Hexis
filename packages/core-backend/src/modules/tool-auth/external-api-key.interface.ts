@@ -44,7 +44,7 @@ export interface ExternalApiKeySummary {
    */
   deletedAt: number | null;
   /**
-   * The `.agent` file the key connects as (a repo-relative knowledge-base
+   * The agent configuration the key connects as (a repo-relative knowledge-base
    * path), or null for Everything — chosen when the key was minted.
    */
   agentPath: string | null;
@@ -103,7 +103,7 @@ export interface KeyKindSpec {
 export interface MintOptions {
   kind?: string;
   /**
-   * The `.agent` file the key connects as, already checked to be one the
+   * The agent configuration the key connects as, already checked to be one the
    * owner may choose (`IAgentScopeResolver.choosable`). Absent: Everything.
    */
   agentPath?: string;
