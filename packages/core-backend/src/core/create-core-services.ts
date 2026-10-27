@@ -874,12 +874,16 @@ export async function createCoreServices(
   // plugin index counts through it (inline + linked), so it comes first.
   const pluginLinkIndex = new PluginLinkIndex(workspaceService, skillService, accessControl, kb, pluginSource);
   // What "Connect as" offers and what a connection made as an agent loads:
-  // the distribution's resolver (`CorePorts.agentScope`), which reads its own
-  // configurations through the person's read gate and may expand `plugins:`
-  // through the link index above — or core's default, which offers no agent
-  // and loads nothing for a path it cannot read. Core owns the mechanism and
-  // no configuration (see `modules/agent-scope`).
-  const agentScopeService: IAgentScopeResolver = ports.agentScope ?? noAgentConfigurations();
+  // the distribution's resolver (`CorePorts.agentScope`), made HERE with the
+  // core services it reads through — its configurations behind the person's
+  // read gate, `plugins:` expanded through the link index above — or core's
+  // default, which offers no agent and loads nothing for a path it cannot
+  // read. Made once, before anything consults it: the tool-context resolver
+  // below captures it, as the routes the server mounts do, so there is one
+  // resolver in effect and no later assignment to miss. Core owns the
+  // mechanism and no configuration (see `modules/agent-scope`).
+  const agentScopeService: IAgentScopeResolver =
+    ports.agentScope?.({ workspaceService, accessControl, kb, disk, pluginLinkIndex }) ?? noAgentConfigurations();
   const pluginIndexService = new PluginIndexService(
     workspaceService,
     accessControl,
