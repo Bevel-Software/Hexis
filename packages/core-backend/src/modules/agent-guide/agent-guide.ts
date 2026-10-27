@@ -66,6 +66,13 @@ export interface AgentGuideSection {
    * could only misread a folder name it STATES as a placeholder.
    */
   literal?: boolean;
+  /**
+   * The question this section answers, as a row of the start section's
+   * "which section answers what" table. Core's sections are in that table
+   * already; a distribution sets it on a section it adds, so an agent that
+   * reads only the start section is routed to it.
+   */
+  asks?: string;
 }
 
 /**
@@ -246,7 +253,7 @@ export async function agentGuideSections(
 ): Promise<RenderedGuideSection[]> {
   const resolved = resolveKbLayout(layout);
   const core = await coreAgentGuideSections(resolved);
-  const sections = hook ? await hook(core, resolved) : core;
+  const sections = withRoutes(hook ? await hook(core, resolved) : core);
   const kbDirName = context.kbDirName?.trim() || DEFAULT_KB_DIR_NAME;
   const defaultBranch = context.defaultBranch?.trim() || UNCONFIGURED_DEFAULT_BRANCH;
   const rendered = sections.map((section) => {
@@ -275,6 +282,28 @@ export async function agentGuideSections(
 }
 
 /**
+ * Adds a row to the start section's routing table for every section that
+ * says what it {@link AgentGuideSection.asks} and is not routed there yet.
+ * The rows go after the table's last row. A start section without the table
+ * (a distribution replaced it) is left as it is.
+ */
+function withRoutes(sections: readonly AgentGuideSection[]): readonly AgentGuideSection[] {
+  const start = sections.find((section) => section.id === START_HERE_SECTION_ID);
+  if (!start) return sections;
+  const routed = sections.filter((section) => section.asks?.trim() && !start.body.includes(`| \`${section.id}\` |`));
+  if (routed.length === 0) return sections;
+  const lines = start.body.split('\n');
+  const header = lines.findIndex((line) => /^\|\s*Question\s*\|\s*Section\s*\|/.test(line));
+  if (header < 0) return sections;
+  let last = header;
+  while (last + 1 < lines.length && lines[last + 1]!.startsWith('|')) last += 1;
+  const rows = routed.map((section) => `| ${section.asks!.trim().replaceAll('|', '\\|')} | \`${section.id}\` |`);
+  lines.splice(last + 1, 0, ...rows);
+  const body = lines.join('\n');
+  return sections.map((section) => (section === start ? { ...start, body } : section));
+}
+
+/**
  * The heading's text, or the id when the section opens with no heading. An
  * ATX heading may close with a run of `#` of its own (`## Custom ##`); that
  * is a delimiter, not part of the title.
@@ -297,6 +326,19 @@ export async function composeAgentGuide(
   return joinGuideSections(await agentGuideSections(layout, hook, context));
 }
 
+/**
+ * What a `read_file` of the guide's name answers: the start section and the
+ * list of every section, the same as `get_agent_guide` with no `section`, so
+ * no read hands an agent the whole guide unless it asks for it. A guide
+ * without a start section (a distribution dropped it) is answered whole.
+ */
+export function guideStartText(sections: readonly RenderedGuideSection[]): string {
+  const start = sections.find((section) => section.id === START_HERE_SECTION_ID);
+  if (!start) return joinGuideSections(sections);
+  const list = sections.map((section) => `- \`${section.id}\`: ${section.title}`).join('\n');
+  return `${start.body}\n\n### Every section\n\n${list}\n`;
+}
+
 /** The sections as one document, the way `composeAgentGuide` joins them. */
 export function joinGuideSections(sections: readonly RenderedGuideSection[]): string {
   return `${sections.map((section) => section.body).join('\n\n')}\n`;
@@ -305,12 +347,12 @@ export function joinGuideSections(sections: readonly RenderedGuideSection[]): st
 /**
  * What a `read_file` of the guide's name answers when the knowledge base has an
  * `AGENTS.md` of its own: their text first, whole, then a rule and one line
- * saying what follows, then the platform's guide. Theirs first because it is
+ * saying what follows, then the start of the platform's guide. Theirs first because it is
  * the more specific of the two, and the line between so neither is read as
  * part of the other.
  */
 export const PLATFORM_GUIDE_SEPARATOR =
-  "---\n\n_The text above is this knowledge base's own conventions file. The platform's guide follows; `get_agent_guide` returns it on its own._";
+  "---\n\n_The text above is this knowledge base's own conventions file. The start of the platform's guide follows; `get_agent_guide` with a `section` returns the rest._";
 
 export function withPlatformGuideAppended(ownText: string, guide: string): string {
   // Their text as they wrote it, line endings normalised and the trailing

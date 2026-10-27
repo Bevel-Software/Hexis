@@ -9,6 +9,7 @@ export {
   agentGuideSections,
   composeAgentGuide,
   coreAgentGuideSections,
+  guideStartText,
   isAgentGuidePath,
   isManagedGuide,
   joinGuideSections,

@@ -242,6 +242,14 @@ const int = (description: string): JsonSchema => ({ type: 'integer', description
 const str = (description: string): JsonSchema => ({ type: 'string', description });
 
 /**
+ * A write to the default branch is live at once, so the agent asks first. Said on the four
+ * tools behind 87 of the 91 writes there in the agent-guide benchmark (2026-10-26); `start-here`
+ * says it for the other write tools.
+ */
+const ASK_BEFORE_DEFAULT_BRANCH =
+  ' On the default branch a write is live for everyone at once: unless the person already said where, ask them first whether to write there or propose it on a draft.';
+
+/**
  * The upload route, named on every tool that takes content as a JSON string.
  *
  * ONE sentence, and the tools' own: it is what stops the three failures the
@@ -255,14 +263,6 @@ const str = (description: string): JsonSchema => ({ type: 'string', description 
  * (`agent-instructions/shared-file-rules.ts`): said in full on three
  * descriptions it took each of them past the length a client cuts at.
  */
-/**
- * A write to the default branch is live at once, so the agent asks first. Said on the four
- * tools behind 87 of the 91 writes there in the agent-guide benchmark (2026-10-26); `start-here`
- * says it for the other write tools.
- */
-const ASK_BEFORE_DEFAULT_BRANCH =
-  ' On the default branch a write is live for everyone at once: unless the person already said where, ask them first whether to write there or propose it on a draft.';
-
 const UPLOAD_ROUTE_NOTE =
   ' Large, escape-heavy or binary content does not go through here: use `request_file_upload` + `apply_file_upload`.';
 
@@ -1064,8 +1064,9 @@ export function registerWorkspaceTools(
    */
   uploads?: AgentUploadStore,
   /**
-   * The platform's agent guide (see `modules/agent-guide`), which `read_file`
-   * and `file_stat` answer at the guide's name in the repository root — after
+   * The start of the platform's agent guide and the list of its sections
+   * (`guideStartText` in `modules/agent-guide`), which `read_file` and
+   * `file_stat` answer at the guide's name in the repository root — after
    * the knowledge base's own file of that name, when it has one. Optional for
    * the harnesses that are about the file primitives; without it the two
    * tools read the disk and nothing else.
@@ -2061,7 +2062,7 @@ export function registerWorkspaceTools(
       'description. Also reads a `__tool_chain_spill__/…` ref back from a truncated `call_tool_chain`: it ' +
       'belongs to no workspace: any existing `branch` will do, and no `canWrite` comes back. `offset`/`limit` slice the ' +
       'content (characters; bytes for a spill ref; ignored for an image): page through large files and ' +
-      'spills. `canWrite`: may you change this file directly on the default branch. ' +
+      'spills, never read multi-MB whole. `canWrite`: may you change this file directly on the default branch. ' +
       CAN_WRITE_CLAUSE,
     inputs: {
       type: 'object',

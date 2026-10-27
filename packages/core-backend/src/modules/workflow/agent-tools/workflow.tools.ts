@@ -278,7 +278,7 @@ export function registerWorkflowTools(
     name: 'commit_change',
     description:
       'Commit, as you, the one file left uncommitted on `branch`, without sharing it. Writes commit and share ' +
-      'on their own, so this normally answers that nothing is pending; only `unzip` leaves files uncommitted. ' +
+      'on their own moments later (`branch_status` lists those still landing); `unzip` leaves its files uncommitted. ' +
       'If several files are uncommitted, returns a structured error listing them; commit them one at a time. ' +
       'Refused on protected branches without write permission.',
     inputs: {
@@ -381,7 +381,7 @@ export function registerWorkflowTools(
       'with each run of characters other than letters and digits as one `-` (`paul.brandt@` gives `paul-brandt/`). ' +
       'Only that prefix makes the draft theirs, to delete later. Does NOT switch the agent onto the new draft.',
     // `branch` here is the fork BASE — its own meaning — so skip the generic
-    // workspace-`branch` injection ("the branch you are currently working on"),
+    // workspace-`branch` injection ("the branch to work on: ... or your draft"),
     // whose wording invites filling in the draft being created instead.
     skipBranch: true,
     // The handler refuses a missing `name` with a message that says what the
@@ -560,7 +560,7 @@ export function registerWorkflowTools(
       'Returns `merged` with the merge commit; `nothing-to-merge` with `target`\'s tip when it already holds ' +
       'all of `source`; `pending-commits` (nothing merged) when writes are still committing — retry shortly — ' +
       'or one failed (`needsAttention`: tell the user); or `conflicts-need-resolution` with the conflicting ' +
-      'paths (nothing written: resolve them on `source`, then merge again).',
+      'paths (nothing is written; resolve them on `source` and merge again).',
     // Names both branches itself; the merge runs in `target`'s workspace.
     skipBranch: true,
     inputs: {
@@ -844,7 +844,7 @@ export function registerWorkflowTools(
       type: 'object',
       properties: {
         path: { type: 'string', minLength: 1, description: 'The file, workspace-relative.' },
-        at: { type: 'string', minLength: 1, description: 'A full commit sha (40 hex characters), or a branch name.' },
+        at: { type: 'string', minLength: 1, description: 'A full commit sha (40 or 64 hex characters), or a branch name.' },
         sessionId: SESSION_ID_INPUT,
       },
       required: ['path', 'at'],

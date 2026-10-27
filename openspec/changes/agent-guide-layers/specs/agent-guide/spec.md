@@ -9,7 +9,11 @@
 
 #### Scenario: The whole guide
 - **WHEN** an agent calls `get_agent_guide` with `section: "all"`
-- **THEN** `guide` is every section joined, the same text `read_file` on `AGENTS.md` serves after the organisation's own file
+- **THEN** `guide` is every section joined
+
+#### Scenario: A read of AGENTS.md
+- **WHEN** an agent reads `AGENTS.md` at the repository root
+- **THEN** it gets the organisation's own file when there is one, then the `start-here` section and every section by id and title, not the whole guide
 
 ### Requirement: The start section names the default branch and maps the sections
 `start-here` SHALL name the knowledge base's default branch as configured when the guide is composed, SHALL say that every file tool takes `branch`, and SHALL name every other core section with the question it answers.

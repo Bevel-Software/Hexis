@@ -9,6 +9,7 @@ import {
   agentGuideSections,
   composeAgentGuide,
   coreAgentGuideSections,
+  guideStartText,
   isAgentGuidePath,
   isManagedGuide,
   joinGuideSections,
@@ -74,7 +75,7 @@ describe('the guide is composed from the platform\'s sections', () => {
     expect(start).toContain('`get_agent_guide({ body: { section: "all" } })` returns the whole guide');
     // By id, not by heading: the section shows an AGENTS.md snippet whose own `##` heading sits in a code fence.
     const finding = (await agentGuideSections(DEFAULT_KB_LAYOUT)).find((s) => s.id === 'how-agents-find-things')!.body.replace(/\s+/g, ' ');
-    expect(finding).toContain('`read_file` on `AGENTS.md` returns that file first, then this guide');
+    expect(finding).toContain('`read_file` on `AGENTS.md` returns that file first, then the start of this guide');
     expect(finding).toContain('never copy this guide into either: the platform serves it');
     // The old header, which proved a file on disk was the platform's, is gone
     // from the served text — or every read would look like a stale copy.
@@ -134,6 +135,37 @@ describe('the guide is composed from the platform\'s sections', () => {
       return sections;
     });
     expect(seen).toEqual(['Docs', 'AGENTS.md']);
+  });
+
+  it('routes the start section to a section a distribution adds, when that section says what it answers', async () => {
+    const hook = (sections: readonly AgentGuideSection[]) => [
+      ...sections,
+      { id: 'graph-rules', body: '## Graph rules\n\nNodes carry an id.\n', asks: 'How is a graph node written? Which | fields?' },
+      { id: 'quiet', body: '## Quiet\n\nNot routed.\n' },
+      // Already in the table: no second row.
+      { id: 'tools', body: '## Tools again\n\nA second copy.\n', asks: 'When can I use a tool?' },
+    ];
+    const start = (await agentGuideSections(DEFAULT_KB_LAYOUT, hook)).find((s) => s.id === 'start-here')!.body;
+    const rows = start.split('\n').filter((line) => line.startsWith('|'));
+    // After the table's last row, with a `|` in the question escaped.
+    expect(rows.at(-1)).toBe('| How is a graph node written? Which \\| fields? | `graph-rules` |');
+    expect(start).not.toContain('`quiet`');
+    expect(rows.filter((line) => line.endsWith('| `tools` |'))).toHaveLength(1);
+    // Core's own guide is left as it was.
+    const core = (await agentGuideSections(DEFAULT_KB_LAYOUT)).find((s) => s.id === 'start-here')!.body;
+    expect(core).not.toContain('graph-rules');
+  });
+
+  it('answers a read of AGENTS.md with the start section and every section by id, not the whole guide', async () => {
+    const sections = await agentGuideSections(DEFAULT_KB_LAYOUT, undefined, { defaultBranch: 'main' });
+    const text = guideStartText(sections);
+    const start = sections.find((s) => s.id === 'start-here')!;
+    expect(text.startsWith(start.body)).toBe(true);
+    for (const s of sections) expect(text).toContain(`- \`${s.id}\`: ${s.title}`);
+    expect(text).not.toContain(sections.find((s) => s.id === 'access-control')!.body);
+    // A guide a distribution left without a start section is answered whole.
+    const without = sections.filter((s) => s.id !== 'start-here');
+    expect(guideStartText(without)).toBe(joinGuideSections(without));
   });
 
   it('refuses a hook that drops or empties the shared file rules, which every file tool points at', async () => {

@@ -46,7 +46,7 @@ The customer's agent called `get_agent_guide` 15 times across the session and it
 | **Always** | The platform's own tool list as served | Every conversation, every client, every sub-agent | 16,000, and 1,200 characters per description (unchanged) |
 | **First contact** | `start-here`: what `get_agent_guide` returns with no section | Once per conversation and per sub-agent | 1,200 |
 | **On demand** | Every other section, fetched by id | Only the tasks that need it | 2,500 per section; `html-views` 3,000 (open work in #451 grows it) |
-| **On demand** | The whole guide (`section: "all"`, `AGENTS.md`) | An agent that asks for everything; the in-app agent's prompt | 19,000, below today's 19,341 although content is added |
+| **On demand** | The whole guide (`section: "all"`) | An agent that asks for everything; the enterprise in-app agent's prompt | 19,000, below today's 19,341 although content is added |
 | Per task | `start-here` plus the sections it routes a task to | One task | 6,000 |
 
 The admin's preamble keeps its own cap (6,000 characters, `PREAMBLE_CAP`). Each budget is a number a reviewer may move, like the description cap: the point is that growing the guide is a decision, not a paragraph someone appends.
@@ -97,33 +97,34 @@ Measured the same way, on this change's last commit:
 
 | Layer | Before | After | Budget |
 |---|---|---|---|
-| Server instructions (platform part) | 1,852 | 1,848 | 2,000 |
-| Tool list as served (41 tools) | 15,829 | 15,580 | 16,000 |
+| Server instructions (platform part) | 1,852 | 1,875 | 2,000 |
+| Tool list as served (41 tools) | 15,829 | 15,595 | 16,000 |
 | First contact (`get_agent_guide` with no section) | 19,342 (the whole guide) | 995 (`start-here`) | 1,200 |
-| The whole guide (`section: "all"`) | 19,342 | 18,321 | 19,000 |
-| One evaluation task | 19,342 | 995 to 3,320 | 6,000 |
+| The whole guide (`section: "all"`) | 19,342 | 18,323 | 19,000 |
+| A `read_file` of `AGENTS.md` | 19,342 (the whole guide) | 1,202 (`start-here` and the list) | |
+| One evaluation task | 19,342 | 995 to 3,319 | 6,000 |
 | Evaluation facts stated | 27 of 53 | 53 of 53 | all |
 
 | Section | Tokens | | Section | Tokens |
 |---|---|---|---|---|
 | `start-here` | 995 | | `drafts-and-change-requests` | 1,502 |
-| `how-agents-find-things` | 656 | | `skills` | 1,026 |
+| `how-agents-find-things` | 659 | | `skills` | 1,026 |
 | `for-git-users` | 641 | | `tools` | 952 |
 | `glossary` | 584 | | `tool-manuals` | 2,354 |
 | `directory-structure` | 1,356 | | `html-views` | 2,683 |
 | `where-a-new-file-goes` | 702 | | `conventions` | 445 |
-| `working-with-files` (computed) | 1,684 | | `new-knowledge-base` | 379 |
+| `working-with-files` (computed) | 1,683 | | `new-knowledge-base` | 379 |
 | `access-control` | 2,360 | | | |
 
 The customer's fifteen guide loads would now cost about 15,000 tokens instead
-of about 420,000. On an enterprise deployment the whole guide is 26,986 tokens;
+of about 420,000. On an enterprise deployment the whole guide is about 27,000 tokens;
 its five sections are unchanged and outside core's checks.
 
 ## Decisions
 
 ### 1. `get_agent_guide` with no section returns `start-here`
 
-The first-contact layer only exists if the first call returns it. Every tool description opens with "Call `get_agent_guide` first", and agents (and their sub-agents) obey it on every start, so the default answer is the most-read text the platform has. It becomes the `start-here` section with the list of every section (`sections`, as today). `section: "all"` returns the whole guide, and `read_file` on `AGENTS.md` still does.
+The first-contact layer only exists if the first call returns it. Every tool description opens with "Call `get_agent_guide` first", and agents (and their sub-agents) obey it on every start, so the default answer is the most-read text the platform has. It becomes the `start-here` section with the list of every section (`sections`, as today). `section: "all"` returns the whole guide. A `read_file` of `AGENTS.md` answers with the same start and the list (after the organisation's own file), so no read hands an agent the whole guide unless it asks for it.
 
 Alternative: keep the whole guide as the default and put `start-here` first. Rejected: the agent still pays for the whole guide on each call, which is exactly the 15-load failure.
 
@@ -143,7 +144,15 @@ In the existing `Test` workflow, all as vitest tests in core-backend:
 - **Budgets.** Each layer and section measured with the tokenizer, failing with the section's name and count.
 - **Tool surface snapshot.** The platform's tools, their arguments, which are required, and their enum values, as a committed file. A change to tools or arguments fails until the snapshot is updated (`vitest -u`) in the same pull request, which is where the author either updates the guide or says no guide change is needed. A pull-request diff rule ("tool files changed, guide did not") was the alternative. It fires on every refactor of a tool file, needs the base branch and an escape label, and does not run on push. The snapshot fires only when what agents see changes.
 
-### 5. Out of scope
+### 5. A distribution routes its own sections
+
+`start-here`'s table routes core's sections. A distribution that adds a section sets `asks` on it, the question it answers, and the composition adds that row to the table. Without it, an agent that reads only the start section never learns the section is there except from the list of ids.
+
+### 6. Asking before writing to the default branch
+
+In the benchmark, agents wrote to the default branch without asking even where the guide said to ask. The rule is said where the agent is when it matters: on the four write tools behind almost all such writes, in `start-here`, and in the handshake header, which reaches an agent that never fetches the guide.
+
+### 7. Out of scope
 
 Rows of the learnings page that ask for product changes (draft skills in the app, split error messages, defaults for `branch`, `sessionId` tolerance, secret format checks) and for the human onboarding guide are listed in the pull request, not built here. The enterprise sections are bevel-platform's.
 

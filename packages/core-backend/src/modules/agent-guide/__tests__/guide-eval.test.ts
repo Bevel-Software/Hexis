@@ -9,8 +9,8 @@ import { TASK_TOKEN_BUDGET } from '../guide-budget.js';
  *
  * Ten first-contact tasks from a customer's first day on the platform
  * (2026-10-19), each with the facts the guide must let an agent get right.
- * For each task: the start section routes its question to the sections named
- * here (at most two), those sections and the start section state every fact,
+ * For each task: the start section routes its questions to every section
+ * named here (at most two), those sections and the start section state every fact,
  * and reading them costs at most one task's budget. Before the change, 27 of
  * these 53 facts were stated and every task cost the whole guide.
  *
@@ -21,8 +21,8 @@ import { TASK_TOKEN_BUDGET } from '../guide-budget.js';
 
 interface Task {
   task: string;
-  /** A phrase of the start section's question that routes this task, when it needs a section. */
-  asks?: string;
+  /** A phrase of each start-section question that routes this task: one per section it reads. */
+  asks?: string[];
   sections: string[];
   facts: Array<[fact: string, phrase: RegExp]>;
 }
@@ -30,7 +30,7 @@ interface Task {
 const TASKS: Task[] = [
   {
     task: '1. What is this knowledge base, and how does my agent get its context?',
-    asks: 'What does my agent see when it connects',
+    asks: ['What does my agent see when it connects'],
     sections: ['how-agents-find-things'],
     facts: [
       ['not explained as a Git repo', /do not explain it as "a Git repo"/],
@@ -53,7 +53,7 @@ const TASKS: Task[] = [
   },
   {
     task: '3. Make a skill on my branch and see it',
-    asks: 'How do I write a skill',
+    asks: ['How do I write a skill'],
     sections: ['skills'],
     facts: [
       ['where a skill lives', /A skill is a folder holding a `SKILL\.md`/],
@@ -65,7 +65,7 @@ const TASKS: Task[] = [
   },
   {
     task: "4. Why can't I delete this?",
-    asks: "Why can't I delete this?",
+    asks: ["Why can't I delete this?", 'moves, deletes'],
     sections: ['for-git-users', 'working-with-files'],
     facts: [
       ['on a draft, anything you can read, unseen until merged', /On your draft you can do anything to what you can read.*Nobody else sees it until the draft is merged/],
@@ -77,7 +77,7 @@ const TASKS: Task[] = [
   },
   {
     task: '5. Is this like Git? Who merges?',
-    asks: 'How is this like Git',
+    asks: ['How is this like Git'],
     sections: ['for-git-users'],
     facts: [
       ['drafts, and a protected default branch', /Work in progress goes on a draft branch/],
@@ -90,7 +90,7 @@ const TASKS: Task[] = [
   },
   {
     task: "6. Set up a team's first project",
-    asks: "lay out a team's first project",
+    asks: ["lay out a team's first project"],
     sections: ['where-a-new-file-goes'],
     facts: [
       ['where documents, skills and tools go', /A document goes under `KnowledgeBase\/`.*A shared skill goes under `Skills\/`.*Tool manuals, MCP servers and manifests go inside a plugin/],
@@ -102,7 +102,7 @@ const TASKS: Task[] = [
   },
   {
     task: '7. Plugin, MCP server, tool, skill, secret, OAuth, role, group, access.md: what is each?',
-    asks: 'What is a plugin, a skill, a tool',
+    asks: ['What is a plugin, a skill, a tool'],
     sections: ['glossary'],
     facts: [
       ['plugin', /- Plugin: a package/],
@@ -118,7 +118,7 @@ const TASKS: Task[] = [
   },
   {
     task: '8. I merged a tool: when can I, and Langdock, use it?',
-    asks: 'When can I use a tool',
+    asks: ['When can I use a tool'],
     sections: ['tools'],
     facts: [
       ['served from the default branch only', /Tools are served from the default branch only/],
@@ -130,7 +130,7 @@ const TASKS: Task[] = [
   },
   {
     task: '9. Make my skill check its tools first',
-    asks: 'When can I use a tool',
+    asks: ['When can I use a tool', 'How do I write a skill'],
     sections: ['skills', 'tools'],
     facts: [
       ['name the tools in allowed-tools', /`allowed-tools` names the tools the skill uses/],
@@ -140,7 +140,7 @@ const TASKS: Task[] = [
   },
   {
     task: '10. A guided skill for a colleague who is not technical',
-    asks: 'or one for people who are not technical',
+    asks: ['or one for people who are not technical'],
     sections: ['skills'],
     facts: [
       ['one question per message', /One question per message/],
@@ -165,12 +165,13 @@ describe('the evaluation tasks are answered by the start section and at most two
     const byId = new Map(sections.map((s) => [s.id, s.body]));
     const start = byId.get(START_HERE_SECTION_ID)!;
     expect(task.sections.length).toBeLessThanOrEqual(2);
-    if (task.asks) {
-      const row = start.split('\n').find((line) => line.startsWith('|') && line.includes(task.asks!));
-      expect(row, `the start section has no question with "${task.asks}"`).toBeDefined();
-      const routedTo = /`([a-z0-9-]+)`\s*\|$/.exec(row!)?.[1];
-      expect(task.sections, `the question routes to ${routedTo}`).toContain(routedTo);
-    }
+    // Every section the task reads is one the start section routes it to.
+    const routedTo = (task.asks ?? []).map((asks) => {
+      const row = start.split('\n').find((line) => line.startsWith('|') && line.includes(asks));
+      expect(row, `the start section has no question with "${asks}"`).toBeDefined();
+      return /`([a-z0-9-]+)`\s*\|$/.exec(row!)?.[1];
+    });
+    for (const id of task.sections) expect(routedTo, `no start-section question routes to ${id}`).toContain(id);
     const read = [start, ...task.sections.map((id) => byId.get(id)!)];
     const text = flat(read.join('\n\n'));
     const missing = task.facts.filter(([, phrase]) => !phrase.test(text)).map(([fact]) => fact);

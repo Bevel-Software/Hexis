@@ -45,6 +45,6 @@ Prefer it over memory, and say when it is silent.
 
 **This knowledge base's own conventions** go in an `AGENTS.md` at its root,
 written by its people: `read_file` on `AGENTS.md` returns that file first, then
-this guide. A `CLAUDE.md` at the root is theirs too. Follow both, and never
+the start of this guide. A `CLAUDE.md` at the root is theirs too. Follow both, and never
 copy this guide into either: the platform serves it. Only the root file is read
 this way: an `AGENTS.md` deeper in a folder is an ordinary page.

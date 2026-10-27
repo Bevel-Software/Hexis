@@ -108,7 +108,7 @@ export function sharedFileRules(layout: KbLayout): readonly SharedFileRule[] {
         'body (plain-text part preferred; an HTML-only body is stripped to text), and an `[attachments]` name list — ' +
         'attachments are listed, never extracted. grep searches inside all of those, through the same extractions.\n\n' +
         'Images (.png/.jpg/.jpeg/.gif/.webp) read as the IMAGE ITSELF, as native MCP image content with a one-line ' +
-        'text note naming the file, so you can look at the picture — up to 3.5 MiB of raw image data; a larger image ' +
+        'text note naming the file, so you can look at the picture — up to 3.5 MB of raw image data; a larger image ' +
         'gets an honest refusal asking for a locally downscaled copy or a smaller export (`.svg` is text and reads as ' +
         'text). Images come back only on a DIRECT read_file: inside `call_tool_chain` an image read yields an ' +
         '`{ image_omitted, note }` stub instead, so read an image outside a chain when you mean to look at it. Any other ' +
@@ -222,8 +222,9 @@ function platformFileList(layout: KbLayout): string {
  * The conventions reminder — where the platform's guide is, that the
  * organisation's own conventions file comes with it, and to read both first.
  *
- * The guide is read by name at the repository root, where coding agents look
- * for an `AGENTS.md` by convention, and `get_agent_guide` returns it alone.
+ * The guide's start is read by name at the repository root, where coding
+ * agents look for an `AGENTS.md` by convention, and `get_agent_guide` returns
+ * it or any one section.
  * One name on every deployment, so the rule takes no layout. `CLAUDE.md` is
  * named as a fallback because a knowledge base seeded before the rename may
  * still carry one its people edited.
@@ -233,7 +234,7 @@ function conventionsRule(): string {
     "Before your first read or change in a workspace, call `get_agent_guide`: it answers the guide's start, " +
     "which names the default branch and the section for each question. " +
     `read_file on \`${LEGACY_AGENTS_FILE}\` at the KB root answers with ` +
-    "the whole guide, after the organisation's own conventions file of that name when it has one: follow both. A " +
+    "the same start, after the organisation's own conventions file of that name when it has one: follow both. A " +
     `\`${PRE_RENAME_AGENTS_FILE}\` at the KB root is the organisation's own too; read it if it exists.`
   );
 }
