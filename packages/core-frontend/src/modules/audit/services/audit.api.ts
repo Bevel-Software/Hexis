@@ -29,6 +29,11 @@ export interface AuditPrincipal {
   /** Events on record for it. */
   eventCount: number;
   user: { id: string; email: string; name: string };
+  /**
+   * For a key or an agent: the `.agent` file it connects as (a knowledge-base
+   * path), or null for Everything. Absent for a page.
+   */
+  agentPath?: string | null;
 }
 
 export type AgentEventKind = 'capability' | 'tool' | 'skill';

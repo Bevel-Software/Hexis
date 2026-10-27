@@ -16,6 +16,8 @@ export interface ExternalApiKeySummary {
   revokedBy: 'owner' | 'admin' | null;
   /** Never set on a key the owner can see: a deleted key leaves their listings. */
   deletedAt?: number | null;
+  /** The `.agent` file the key connects as (a knowledge-base path), or null for Everything. */
+  agentPath?: string | null;
   /** Model-proxy usage for this key today + the daily cap (in tokens). */
   llmUsage?: { usedTodayTokens: number; dailyTokenCap: number };
 }
@@ -44,11 +46,12 @@ export async function listExternalApiKeys(): Promise<ExternalApiKeySummary[]> {
   return res.json() as Promise<ExternalApiKeySummary[]>;
 }
 
-export async function createExternalApiKey(label: string): Promise<MintedExternalApiKey> {
+/** Mint a key. `agentPath` is its "Connect as" choice; null (the default) is Everything. */
+export async function createExternalApiKey(label: string, agentPath: string | null = null): Promise<MintedExternalApiKey> {
   const res = await authFetch('/api/mcp/external-api-keys', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ label }),
+    body: JSON.stringify(agentPath ? { label, agentPath } : { label }),
   });
   if (!res.ok) await unwrap(res, "Couldn't create external API key.");
   return res.json() as Promise<MintedExternalApiKey>;

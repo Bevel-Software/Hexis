@@ -5,7 +5,7 @@ import type { ToolContext, ToolHandlerFactory } from '../tool-helpers/index.js';
 import { toolDef, declareRouteTool } from '../tool-helpers/index.js';
 import type { IAccessControl } from '../access/index.js';
 import { utcpNamespacedKey } from '../../shared/utcp-namespace.js';
-import type { IToolManualService } from './tool-manuals.contract.js';
+import type { ConnectorScope, IToolManualService } from './tool-manuals.contract.js';
 import type { HiddenToolSource } from '../../shared/hidden-tools.js';
 
 /**
@@ -51,7 +51,9 @@ export function registerToolManualsTools(
     hiddenTools?: HiddenToolSource;
   },
 ): void {
-  registry.registerExternalTool((ctx) => buildListLocalToolsDef(toolManualService, ctx.userEmail));
+  registry.registerExternalTool((ctx) =>
+    buildListLocalToolsDef(toolManualService, ctx.userEmail, ctx.connectionScope?.connectorFilter()),
+  );
   registry.registerInternalTool((ctx) => buildListLocalToolsDef(toolManualService, ctx.userEmail));
   // The def above is built per catalog listing (its description names the
   // tools configured for THIS caller), so declare the arguments here as well:
@@ -62,9 +64,14 @@ export function registerToolManualsTools(
   router.post(
     '/agent/tools/list_local_tools',
     toolAuth,
-    toolHandler(async (_args, ctx: ToolContext) => ({
-      tools: await toolManualService.listLocalOnly(ctx.user.email),
-    })),
+    toolHandler(async (_args, ctx: ToolContext) => {
+      const within = ctx.connectionScope?.connectorFilter();
+      return {
+        tools: await (within
+          ? toolManualService.listLocalOnly(ctx.user.email, within)
+          : toolManualService.listLocalOnly(ctx.user.email)),
+      };
+    }),
   );
 
   // A FUNCTION, not a constant — this factory runs at boot, and on a
@@ -243,12 +250,17 @@ export function registerToolManualsTools(
     toolHandler(async (args, ctx: ToolContext) => {
       // The in-app agent is focused on its own draft; an external caller names it.
       const branch = typeof args.branch === 'string' && args.branch ? args.branch : ctx.focusedBranch;
+      const within = ctx.connectionScope?.connectorFilter();
       // The catalog comes back whole — what parsed AND what was refused — from
       // ONE scan, so the refused files cost no second walk of the workspace and
       // the two halves cannot disagree about which files made it.
       const [{ tools: manuals, invalid }, pending] = await Promise.all([
-        toolManualService.listAccessibleCatalog(ctx.user.email),
-        branch ? toolManualService.listDeclaredOnlyOnBranch(ctx.user.email, branch) : Promise.resolve([]),
+        // Only the connectors the caller's connection loads: setup is counted
+        // for the tools this connection can call, not every one the person can.
+        within
+          ? toolManualService.listAccessibleCatalog(ctx.user.email, within)
+          : toolManualService.listAccessibleCatalog(ctx.user.email),
+        branch ? toolManualService.listDeclaredOnlyOnBranch(ctx.user.email, branch, within) : Promise.resolve([]),
       ]);
       const allKeys = manuals.flatMap((m) => (m.variables ?? []).map((v) => varKey(m.name, v.name)));
       const status = await deps.variableStatus.statusFor(ctx.user.id, allKeys);
@@ -301,9 +313,9 @@ export function registerToolManualsTools(
 }
 
 /** "Local-only tools configured for you: `a`, `b`." (or a none note), filtered to what the caller may read. */
-async function localToolsLine(svc: IToolManualService, userEmail?: string): Promise<string> {
+async function localToolsLine(svc: IToolManualService, userEmail?: string, within?: ConnectorScope): Promise<string> {
   if (!userEmail) return 'No local-only tools are currently configured.';
-  const tools = await svc.listLocalOnly(userEmail);
+  const tools = await (within ? svc.listLocalOnly(userEmail, within) : svc.listLocalOnly(userEmail));
   if (tools.length === 0) return 'No local-only tools are currently configured.';
   return `Local-only tools configured for you: ${tools.map((t) => `\`${t.name}\``).join(', ')}.`;
 }
@@ -311,7 +323,7 @@ async function localToolsLine(svc: IToolManualService, userEmail?: string): Prom
 /** `list_local_tools` takes nothing; a const so the route and the def share one declaration. */
 const LIST_LOCAL_TOOLS_INPUTS = { type: 'object' as const, properties: {}, additionalProperties: false };
 
-async function buildListLocalToolsDef(svc: IToolManualService, userEmail?: string): Promise<UtcpTool> {
+async function buildListLocalToolsDef(svc: IToolManualService, userEmail?: string, within?: ConnectorScope): Promise<UtcpTool> {
   return toolDef({
     name: 'list_local_tools',
     description:
@@ -324,7 +336,7 @@ async function buildListLocalToolsDef(svc: IToolManualService, userEmail?: strin
       'machine. Otherwise each entry gives the tool’s name and its `.tool` file ' +
       'path in the knowledge base — read that file with `read_file` and wire the tool into your local ' +
       'setup by hand. ' +
-      (await localToolsLine(svc, userEmail)),
+      (await localToolsLine(svc, userEmail, within)),
     path: '/api/agent/tools/list_local_tools',
     inputs: LIST_LOCAL_TOOLS_INPUTS,
     outputs: {

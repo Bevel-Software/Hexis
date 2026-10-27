@@ -63,6 +63,7 @@ function parseDomainList(raw: string): string[] {
     .filter((d) => d.length > 0);
 }
 import { SpillStore } from '../modules/workspace/spill-store.js';
+import { TmpSweeper } from '../modules/workspace/workspace-tmp.js';
 import { AgentUploadStore, assertUploadsRootOutsideWorkspaces } from '../modules/workspace/agent-upload.store.js';
 import { AgentDownloadStore, type IAgentDownloadStore } from '../modules/workspace/agent-download.store.js';
 import { createDownloadFetcherIdentifier } from '../modules/workspace/agent-download.routes.js';
@@ -88,8 +89,12 @@ import { ChangeReadGate } from '../modules/access/change-read-gate.js';
 import { GroupsAdminService } from '../modules/access/groups-admin.service.js';
 import { UserAccessRemovalService } from '../modules/access/user-access-removal.service.js';
 import { makeRolesYamlWriteValidator } from '../modules/access-model/index.js';
-import { PendingSkillsService, SkillService } from '../modules/skills/index.js';
-import { PendingToolsService, ToolManualService } from '../modules/tool-manuals/index.js';
+// The implementations, from their files: the module entries offer them as
+// types only, so nothing that imports an entry loads a service.
+import { SkillService } from '../modules/skills/skills.service.js';
+import { PendingSkillsService } from '../modules/skills/pending-skills.service.js';
+import { ToolManualService } from '../modules/tool-manuals/tool-manuals.service.js';
+import { PendingToolsService } from '../modules/tool-manuals/pending-tools.service.js';
 import { McpServerEditService } from '../modules/tool-manuals/mcp-server-edit.service.js';
 import { ToolDeleteService } from '../modules/tool-manuals/tool-delete.service.js';
 import {
@@ -106,6 +111,8 @@ import {
   MarketplaceCompilerService,
   KbPluginSource,
 } from '../modules/plugins/index.js';
+import { AgentScopeService } from '../modules/agent-scope/agent-scope.service.js';
+import type { IAgentScopeResolver } from '../modules/agent-scope/index.js';
 import { MarketplaceRepoService } from '../modules/marketplace/index.js';
 import {
   GitHubFacadeCredentialsService,
@@ -256,6 +263,8 @@ export interface CoreServices {
   agentUploadStore: AgentUploadStore;
   /** The bytes `request_file_download` captured, held until their one-time link is fetched or expires. */
   agentDownloadStore: IAgentDownloadStore;
+  /** Sweeps every workspace's `tmp/` folder of entries older than seven days, hourly; started and stopped with the graph. */
+  tmpSweeper: TmpSweeper;
   /** Runs a caller's `grep` pattern in ripgrep under a budget; its running searches end when the graph stops. */
   patternMatcher: IPatternMatcher;
   /**
@@ -310,6 +319,12 @@ export interface CoreServices {
   pluginJoinRequestJobs: PluginJoinRequestJobs;
   /** Which plugins hold which skills (inline or linked) — see `PluginLinkIndex`. */
   pluginLinkIndex: PluginLinkIndex;
+  /**
+   * Connecting as an `.agent` file: the choices offered at consent and key
+   * mint, and the scope every agent surface narrows a connection to — see
+   * `modules/agent-scope`.
+   */
+  agentScopeService: IAgentScopeResolver;
   /** Link / unlink / repair shared skills into plugins. */
   pluginLinksService: PluginLinksService;
   pluginRenameService: PluginRenameService;
@@ -771,6 +786,10 @@ export async function createCoreServices(
   // Shared, workspace-independent store for oversized `call_tool_chain` results,
   // read back via `read_file`. Sibling of `workspacesRoot`, never committed.
   const spillStore = new SpillStore(config.spillRoot);
+  // What the chat, the SharePoint reader and tool chains stage in a
+  // workspace's `tmp/` folder lives seven days past its last change; the file
+  // tools read it through the `__tmp__/` ref meanwhile (see workspace-tmp.ts).
+  const tmpSweeper = new TmpSweeper((signal) => workspaceService.sweepTmp(undefined, undefined, signal));
   // The upload route an agent lands files by, so their content never passes
   // through the model. Bytes live BESIDE the workspaces root (never inside
   // one) until the apply commits them or the token expires — checked here
@@ -855,6 +874,11 @@ export async function createCoreServices(
   // The link index resolves manifests against the released catalog, and the
   // plugin index counts through it (inline + linked), so it comes first.
   const pluginLinkIndex = new PluginLinkIndex(workspaceService, skillService, accessControl, kb, pluginSource);
+  // What a connection made as an `.agent` file may load: the file re-read on
+  // every resolve through the person's read gate, its `plugins:` resolved
+  // through the link index above (a plugin's own folder and the skills its
+  // manifest links).
+  const agentScopeService = new AgentScopeService(workspaceService, accessControl, kb, disk, pluginLinkIndex);
   const pluginIndexService = new PluginIndexService(
     workspaceService,
     accessControl,
@@ -1491,6 +1515,7 @@ export async function createCoreServices(
     kbDirName: kbDirName,
     creatorAccess,
     loadActiveGroups,
+    agentScope: agentScopeService,
   });
   const writeAccess = ports.writeAccess ?? alwaysWritable;
   // The branch every tool call runs on is resolved by the handler, before the
@@ -1500,8 +1525,8 @@ export async function createCoreServices(
     defaultBranch: () => kb.defaultBranch,
     isMissing: (branch) => workspaceService.isBranchMissing(branch),
   });
-  const toolAuthMiddleware = createToolAuthMiddleware(externalApiKeyService, internalTokenService, authService);
-  const verifyToolToken = createTokenVerifier(externalApiKeyService, internalTokenService, authService);
+  const toolAuthMiddleware = createToolAuthMiddleware(externalApiKeyService, internalTokenService, authService, mcpOAuthProvider);
+  const verifyToolToken = createTokenVerifier(externalApiKeyService, internalTokenService, authService, mcpOAuthProvider);
   // Every credential kind this server issues — connection keys, internal
   // tokens and app sessions (bearer or cookie) — so a fetch carrying another
   // user's identity of ANY kind is refused the link.
@@ -1512,7 +1537,7 @@ export async function createCoreServices(
   // Read-only manual endpoints accept the above PLUS a browser JWT, so a
   // logged-in user can browse the catalog with their session. Execution routes
   // keep `toolAuthMiddleware` (no JWT), so a session can read but not invoke.
-  const manualAuthMiddleware = createManualAuthMiddleware(externalApiKeyService, internalTokenService, authService);
+  const manualAuthMiddleware = createManualAuthMiddleware(externalApiKeyService, internalTokenService, authService, mcpOAuthProvider);
 
   // Recovery-bot identity: a synthetic `recovery-bot@bevel.local` user
   // backing (a) the recovery agent's commit authorship and (b) the
@@ -1678,6 +1703,7 @@ export async function createCoreServices(
     spillStore,
     agentUploadStore,
     agentDownloadStore,
+    tmpSweeper,
     patternMatcher,
     agentDownloadFetcher,
     documentExtractor,
@@ -1699,6 +1725,7 @@ export async function createCoreServices(
     joinRequestsService,
     pluginJoinRequestJobs,
     pluginLinkIndex,
+    agentScopeService,
     pluginLinksService,
     pluginRenameService,
     marketplaceCompiler,

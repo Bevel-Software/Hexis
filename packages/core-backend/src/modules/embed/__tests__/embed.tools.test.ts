@@ -281,6 +281,18 @@ describe('open_page: refusals', () => {
     expect(embedService.mintForUser).not.toHaveBeenCalled();
   });
 
+  it('refuses a tmp ref — no knowledge-base page — reading and minting nothing', async () => {
+    const read = vi.fn<ReadForTool>();
+    const { call, embedService } = await serve({ read });
+    const { status, body } = await call({ path: '__tmp__/chat-uploads/plan.xlsx' });
+    expect(status).toBe(400);
+    expect(body.kind).toBe('tmp-ref-read-only');
+    expect(body.error).toContain('open_page does not take one there');
+    expect(body.error).toContain('copy_file');
+    expect(read).not.toHaveBeenCalled();
+    expect(embedService.mintForUser).not.toHaveBeenCalled();
+  });
+
   it('refuses a path outside the knowledge base, and a missing one', async () => {
     const { call, embedService } = await serve();
     expect((await call({ path: '' })).status).toBe(400);

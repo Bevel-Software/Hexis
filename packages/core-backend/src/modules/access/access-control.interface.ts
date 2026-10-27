@@ -441,13 +441,19 @@ export interface IAccessControl {
    * tree that does. It writes nothing and moves nothing, and it answers the
    * caller's own verbs only — never the content of an `access.md` they may
    * not read.
+   *
+   * `sourceContent` previews a copy whose source is NO repository path — a
+   * file staged in the workspace's `tmp/` folder: its text, read exactly as a
+   * repository file's would be (frontmatter as the name it lands under, an
+   * `access.md` landing as that folder's rules). `fromPath` then only names
+   * the source; nothing is read at it.
    */
   previewAccessAfterRelocation(
     workspaceId: string,
     userEmail: string,
     fromPath: string,
     toPath: string,
-    opts?: { sourceRemains?: boolean },
+    opts?: { sourceRemains?: boolean; sourceContent?: string },
   ): Promise<PathVerbs>;
 
   /**

@@ -261,12 +261,16 @@ export function isAccessMdPath(p: string): boolean {
  * ontologies — but it is exactly the kind of file whose edits grant
  * capability, so it needs the same per-file governance as a node.
  *
+ * `.agent` is a `---` fenced definition with prose after it, like a node:
+ * a connection made as one loads what it lists, so who may change it is
+ * governed per file the same way.
+ *
  * This is the CORE set. An overlay that ships its own whole-document
  * configuration files adds their extensions through
  * {@link registerAccessFrontmatterExtensions} — the grammar is core's, the
  * file kinds are not necessarily.
  */
-const CORE_ACCESS_FRONTMATTER_EXTENSIONS = ['.md', '.tool'] as const;
+const CORE_ACCESS_FRONTMATTER_EXTENSIONS = ['.md', '.tool', '.agent'] as const;
 
 const accessFrontmatterExtensions = new Set<string>(CORE_ACCESS_FRONTMATTER_EXTENSIONS);
 

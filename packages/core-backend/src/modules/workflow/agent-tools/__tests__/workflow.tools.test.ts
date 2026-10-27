@@ -1033,6 +1033,26 @@ describe('save_file and the repository folder', () => {
     expect(calls.some((c) => c[0] === 'acquireLock')).toBe(false);
   });
 
+  it('refuses a tmp ref in every path input, before any lock — save_file, the history tools and update_branch\'s resolutions alike', async () => {
+    const base = await start();
+    const calls_: Array<[string, Record<string, unknown>]> = [
+      ['save_file', { path: '__tmp__/chat-uploads/plan.xlsx' }],
+      ['read_file_at', { path: '__tmp__/chat-uploads/plan.xlsx', at: 'HEAD' }],
+      ['compare_file', { path: '__tmp__/chat-uploads/plan.xlsx' }],
+      ['list_file_changes', { path: '__tmp__/chat-uploads/plan.xlsx' }],
+      ['update_branch', { resolutions: [{ path: '__tmp__/chat-uploads/plan.xlsx', choose: 'ours' }] }],
+    ];
+    for (const [tool, args] of calls_) {
+      const res = await post(`${base}/api/agent/tools/${tool}`, writeTok(), { ...args, branch: WS });
+      expect(res.status, tool).toBe(400);
+      const body = (await res.json()) as { error: string; kind: string };
+      expect(body.kind, tool).toBe('tmp-ref-read-only');
+      expect(body.error).toContain(`${tool} does not take one there`);
+      expect(body.error).toContain('copy_file');
+    }
+    expect(calls.some((c) => c[0] === 'acquireLock')).toBe(false);
+  });
+
   it('answers a missing path with a 400, not a crash', async () => {
     const base = await start();
     const res = await post(`${base}/api/agent/tools/save_file`, writeTok(), { branch: WS });

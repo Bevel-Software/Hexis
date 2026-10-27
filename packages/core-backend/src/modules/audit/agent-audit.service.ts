@@ -151,6 +151,7 @@ export class AgentAuditService implements IAgentAuditService, IAgentEventRecorde
         deletedAt: k.deletedAt,
         eventCount: counts.get(k.id) ?? 0,
         user: k.user,
+        agentPath: k.agentPath ?? null,
       })),
       ...connectionRows.map(({ connection: c, user }) => ({
         kind: 'agent' as const,
@@ -162,6 +163,7 @@ export class AgentAuditService implements IAgentAuditService, IAgentEventRecorde
         revokedBy: (c.revokedBy as 'owner' | 'admin' | null) ?? null,
         eventCount: counts.get(c.id) ?? 0,
         user,
+        agentPath: c.agentPath ?? null,
       })),
       ...pageRows.flatMap((r) =>
         r.pagePath

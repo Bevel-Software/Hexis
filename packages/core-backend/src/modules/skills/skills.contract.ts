@@ -119,7 +119,18 @@ export interface ListSkillsOptions {
    * carries `unmerged: true` and this branch name: nobody approved it.
    */
   branch?: string;
+  /** Narrow the listing to a connection's skills — see {@link SkillScope}. */
+  within?: SkillScope;
 }
+
+/**
+ * A connection's narrowing of the skills: whether the skill in `skillFolder`
+ * (repo-relative) is one the connection loads. Applied AFTER the caller's read
+ * gate, so it can only take skills away. The agent surfaces pass the
+ * connection scope's `allowsSkill` (`modules/agent-scope`); absent is every
+ * skill the caller may read.
+ */
+export type SkillScope = (skillFolder: string) => boolean;
 
 /** What `getSkill` may be asked beyond a name and a file. */
 export interface GetSkillOptions {
@@ -152,6 +163,12 @@ export interface GetSkillOptions {
    * combination has exactly one sensible meaning.
    */
   branch?: string;
+  /**
+   * Narrow to a connection's skills — see {@link SkillScope}. A skill outside
+   * it answers `not_found`, as a name nobody used does: to this connection it
+   * is not there.
+   */
+  within?: SkillScope;
 }
 
 /**
