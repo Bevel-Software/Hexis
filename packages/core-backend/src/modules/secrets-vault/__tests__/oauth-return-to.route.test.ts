@@ -7,6 +7,7 @@ import {
   createSecretsVaultPublicRoutes,
   isSafeReturnPath,
 } from '../secrets-vault.routes.js';
+import { SecretOAuthError } from '../secrets-vault.contract.js';
 
 /**
  * OAUTH `returnTo`: a sign-in started from a page other than /connect must land
@@ -254,9 +255,23 @@ describe('GET /api/secrets/oauth/callback — where the browser lands', () => {
     const state = signState({ u: 'u1', i: 'secret-1', n: 'nonce', r: RETURN_TO });
     const location = await callback(base, state);
     expect(location.startsWith(`${FRONTEND}${RETURN_TO}#error=`)).toBe(true);
-    // The user-facing message is generic — provider detail stays in the log.
+    // A failure that is not the provider's word stays generic: only the
+    // vault's own error carries a reason that was scrubbed for the page.
     expect(decodeURIComponent(location.split('#error=')[1])).toBe(
       'Authorization failed. Check the provider configuration and try again.',
+    );
+  });
+
+  it("carries the provider's scrubbed reason to the page when the exchange was refused", async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    completeOAuth.mockImplementation(async () => {
+      throw new SecretOAuthError('Token endpoint returned HTTP 400: invalid_grant — redirect_uri does not match', 400);
+    });
+    const base = await baseUrl();
+    const state = signState({ u: 'u1', i: 'secret-1', n: 'nonce', r: RETURN_TO });
+    const location = await callback(base, state);
+    expect(decodeURIComponent(location.split('#error=')[1])).toBe(
+      'Authorization failed. Token endpoint returned HTTP 400: invalid_grant — redirect_uri does not match. Check the provider configuration and try again.',
     );
   });
 
