@@ -1,4 +1,4 @@
-import type { IDocumentExtractor, IsolatedExtraction } from './document-extractor.contract.js';
+import type { IDocumentExtractor } from './document-extractor.contract.js';
 import { extractionMarker, fileExtension } from './doc-extract.types.js';
 import { DocExtractionCache, gitBlobSha } from './extraction-cache.js';
 import type { ReadOrigin } from './file-reader.js';
@@ -94,12 +94,17 @@ export class DocExtractService {
   private readonly now: () => number;
   private readonly onUnreadable: ((doc: UnreadableDocument) => void) | undefined;
   /**
-   * Cold extractions currently running, by cache key. Two reads of the same
-   * document arriving together would otherwise BOTH parse it — the expensive
-   * half of this service, run twice for one answer — because neither had
-   * written the cache entry yet when the other looked.
+   * Reads currently running, by cache key — the cache lookup included, from
+   * the moment `extract` is called. Two reads of the same document arriving
+   * together would otherwise BOTH parse it — the expensive half of this
+   * service, run twice for one answer — because neither had written the
+   * cache entry yet when the other looked. The entry is set before anything
+   * is awaited: were the lookup awaited first, a second read could miss the
+   * cache (its read of the file started before the first read's write) AND
+   * the map (the first read finished and left it in that window), and parse
+   * the document again, telling the people looking at it twice.
    */
-  private readonly inFlight = new Map<string, Promise<IsolatedExtraction>>();
+  private readonly inFlight = new Map<string, Promise<DocExtractOutcome>>();
 
   constructor(
     cacheRoot: string,
@@ -131,34 +136,39 @@ export class DocExtractService {
    * and remembered). `path` supplies the marker AND the key's format part;
    * `origin`, when given, is where a fresh failure is reported.
    */
-  async extract(path: string, bytes: Buffer, origin?: ReadOrigin): Promise<DocExtractOutcome> {
+  extract(path: string, bytes: Buffer, origin?: ReadOrigin): Promise<DocExtractOutcome> {
+    // The bytes are hashed BEFORE the extractor takes its copy of them.
     const key = this.cacheKey(path, bytes);
-    const remembered = await this.getCached(path, bytes);
-    if (remembered) return remembered;
-    const running = this.inFlight.get(key);
-    const result = await (running ??
-      (() => {
-        // The cache write stays INSIDE the shared promise: were the entry
-        // dropped as soon as parsing settled, a read arriving during the
-        // write would miss both the cache and the in-flight map — and parse
-        // the same document again. The bytes are hashed (above) BEFORE the
-        // extractor takes its copy of them.
-        const started = (async (): Promise<IsolatedExtraction> => {
-          const res = await this.extractor.extract(fileExtension(path), bytes);
-          if (res.ok) {
-            await this.cache.put(key, { summary: res.summary, text: res.text });
-          } else if (res.failure !== 'busy') {
-            const until = res.failure === 'parser' ? undefined : this.now() + TIMEOUT_MEMORY_MS;
-            await this.cache.put(key, { failed: true, message: res.message, ...(until === undefined ? {} : { until }) });
-            if (origin) this.notifyUnreadable({ workspaceId: origin.workspaceId, path, reason: reasonOf(res.message) });
-          }
-          return res;
-        })().finally(() => this.inFlight.delete(key));
-        this.inFlight.set(key, started);
-        return started;
-      })());
-    if (!result.ok) return { ok: false, message: result.message };
-    return { ok: true, marker: extractionMarker(path, result.summary), text: result.text };
+    return this.inFlight.get(key) ?? this.read(key, path, bytes, origin);
+  }
+
+  /**
+   * One read of `bytes`, shared by every `extract` of the same key that
+   * arrives before it settles (see `inFlight`): the cache lookup, then the
+   * extraction and its cache write. The write stays INSIDE the shared
+   * promise: were the entry dropped as soon as parsing settled, a read
+   * arriving during the write would miss both the cache and the map — and
+   * parse the same document again. A failure is reported to the FIRST
+   * read's origin, once.
+   */
+  private read(key: string, path: string, bytes: Buffer, origin: ReadOrigin | undefined): Promise<DocExtractOutcome> {
+    const started = (async (): Promise<DocExtractOutcome> => {
+      const remembered = await this.getCached(path, bytes);
+      if (remembered) return remembered;
+      const res = await this.extractor.extract(fileExtension(path), bytes);
+      if (res.ok) {
+        await this.cache.put(key, { summary: res.summary, text: res.text });
+        return { ok: true, marker: extractionMarker(path, res.summary), text: res.text };
+      }
+      if (res.failure !== 'busy') {
+        const until = res.failure === 'parser' ? undefined : this.now() + TIMEOUT_MEMORY_MS;
+        await this.cache.put(key, { failed: true, message: res.message, ...(until === undefined ? {} : { until }) });
+        if (origin) this.notifyUnreadable({ workspaceId: origin.workspaceId, path, reason: reasonOf(res.message) });
+      }
+      return { ok: false, message: res.message };
+    })().finally(() => this.inFlight.delete(key));
+    this.inFlight.set(key, started);
+    return started;
   }
 
   /** Best-effort, like every event: a listener that throws never fails the read. */
