@@ -209,8 +209,8 @@ export interface McpAuthDiscoveryPort {
   /**
    * The sign-in endpoints for an OWNER-REGISTERED client: the same metadata
    * walk as `statusFor`, stopping short of dynamic registration — the manual
-   * already names its `clientId`. Nothing is persisted; the owner's
-   * client-secret save pins the completed provider. Optional so a port that
+   * already names its `clientId`. Nothing is persisted; every sign-in start
+   * completes the declaration afresh (`liveDeclaration`). Optional so a port that
    * only knows the zero-config path still satisfies the interface.
    */
   providerForDeclaredClient?(manualName: string, mcpUrl: string, clientId: string): Promise<McpAuthDiscoveryResult>;
@@ -340,6 +340,30 @@ export class ToolManualService implements IToolManualService {
       capabilities: capabilitiesOf(found),
       hiddenTools: mayManage ? hidden : [],
     };
+  }
+
+  async liveDeclaration(
+    userEmail: string,
+    slug: string,
+    varName: string,
+  ): Promise<{ manual: ToolManualSummary; variable?: ToolVariable } | null> {
+    // The disk walk the catalog's scan is built from, run afresh and never
+    // cached: a sign-in must follow the file as it is, and the catalog's scan
+    // can be a refresh behind it. The whole walk rather than the one file, so
+    // the descriptor comes out of exactly the parse, plugin discovery and
+    // namespace dedup the catalog applies — a sign-in start is rare and
+    // interactive, and a second, single-file reading of the same files is a
+    // second place for those rules to drift.
+    const { manuals } = await this.readableBy(await this.scanDisk(), userEmail);
+    const m = manuals.find((x) => x.slug === slug);
+    if (!m) return null;
+    const variable = (m.variables ?? []).find((v) => v.name === varName);
+    // Completed by the catalog's own decoration, on this one fresh descriptor.
+    // Only when THIS variable is a sign-in: then the manual has a declared one,
+    // so the pass completes its endpoints from the server's metadata and never
+    // probes for (or registers) a zero-config client.
+    if (variable?.oauth) await this.decorateMcpOAuth([m]);
+    return { manual: toSummary(m), ...(variable ? { variable } : {}) };
   }
 
   async listLocalOnly(userEmail: string, within?: ConnectorScope): Promise<{ slug: string; name: string; path: string }[]> {
@@ -616,7 +640,12 @@ export class ToolManualService implements IToolManualService {
    * in. Absent, the answer is the caller's whole readable catalog.
    */
   private async accessibleScan(userEmail: string, within?: ConnectorScope): Promise<ScanResult> {
-    const { manuals, invalid } = await this.scan();
+    return this.readableBy(await this.scan(), userEmail, within);
+  }
+
+  /** A scan cut to what this caller may read — see {@link accessibleScan}. */
+  private async readableBy(scan: ScanResult, userEmail: string, within?: ConnectorScope): Promise<ScanResult> {
+    const { manuals, invalid } = scan;
     if (manuals.length === 0 && invalid.length === 0) return emptyScan();
     const wsId = this.kb.defaultWorkspaceId();
     const allowed = await this.accessControl.canReadBatch(wsId, userEmail, [
@@ -833,11 +862,12 @@ export class ToolManualService implements IToolManualService {
    * (the owner registered an app with a provider that offers no dynamic
    * registration — HubSpot, Google) gets its endpoints, PKCE and resource
    * indicator from the server's own OAuth metadata, exactly as the zero-config
-   * path would. The descriptor is completed IN MEMORY: the client-secret route
-   * reads the completed declaration and pins it with the secret, so nothing
-   * here persists. When the metadata can't be had, the declaration stays
-   * incomplete and `setup.reason` says so — the secret route then refuses
-   * with the same reason instead of pinning a provider with no endpoints.
+   * path would. The descriptor is completed IN MEMORY, for the catalog's scan
+   * and for every sign-in start (`liveDeclaration`) alike, so nothing here
+   * persists. When the metadata can't be had, the declaration stays
+   * incomplete and `setup.reason` says so — the client-secret save and the
+   * sign-in start then refuse with the same reason instead of running a
+   * provider with no endpoints.
    */
   private async completeDeclaredOAuth(
     discovery: McpAuthDiscoveryPort,

@@ -395,6 +395,24 @@ export interface IToolManualService {
    * confirm that a tool the caller can't see exists).
    */
   getDetail(userEmail: string, slug: string): Promise<ToolManualDetail | null>;
+  /**
+   * One manual's declaration as its file reads on the default branch NOW, for a
+   * sign-in about to start: the files are parsed afresh, never served from the
+   * catalog's cached scan, so an edit made seconds ago is already what this
+   * answers. A sign-in variable that names only its `clientId` is completed from
+   * the server's OAuth metadata by the same walk the catalog completes it with;
+   * when that fails, the endpoints stay absent and `manual.setup.reason` says why.
+   *
+   * `null` when no readable manual has this slug (fail-closed, like
+   * {@link getDetail}); `variable` absent when the file declares no variable of
+   * that name. Nothing the platform synthesises from discovery (the zero-config
+   * sign-in variable) is in the answer: it is not in any file.
+   */
+  liveDeclaration(
+    userEmail: string,
+    slug: string,
+    varName: string,
+  ): Promise<{ manual: ToolManualSummary; variable?: ToolVariable } | null>;
 
   /**
    * Wire where a hidden tool's schema finding comes from (the MCP proxy, which

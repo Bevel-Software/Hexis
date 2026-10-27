@@ -298,4 +298,102 @@ describe('ToolManualService — MCP OAuth auto-discovery decoration', () => {
     // The declaration is carried verbatim, opt-out included.
     expect(hubspot.variables?.[0].oauth).toMatchObject({ clientId: 'owner-app', pkce: false });
   });
+
+  describe('liveDeclaration — what a sign-in start reads', () => {
+    const HUBSPOT_ENDPOINTS = {
+      authorizationUrl: 'https://auth.hubspot.example/authorize',
+      tokenUrl: 'https://auth.hubspot.example/token',
+    };
+
+    test('reads the file as it is now, not the catalog the last scan cached', async () => {
+      await writeDeclaredServer({ clientId: 'client-A', ...HUBSPOT_ENDPOINTS });
+      const svc = svcWith({ statusFor: vi.fn(async () => ({ status: 'open' as const })) });
+      // The catalog is scanned and cached under client A…
+      const cached = (await svc.listAccessible('user@example.com')).find((m) => m.name === 'hubspot')!;
+      expect(cached.variables?.[0].oauth?.clientId).toBe('client-A');
+
+      // …the file is edited, and nothing invalidates the catalog.
+      await writeDeclaredServer({ clientId: 'client-B', ...HUBSPOT_ENDPOINTS, scopes: ['crm.read'] });
+      const stale = (await svc.listAccessible('user@example.com')).find((m) => m.name === 'hubspot')!;
+      expect(stale.variables?.[0].oauth?.clientId).toBe('client-A');
+
+      const live = await svc.liveDeclaration('user@example.com', 'hubspot', 'HUBSPOT_TOKEN');
+      expect(live?.manual.name).toBe('hubspot');
+      expect(live?.variable?.oauth).toEqual({ clientId: 'client-B', ...HUBSPOT_ENDPOINTS, scopes: ['crm.read'] });
+    });
+
+    test('a .tool file is read afresh the same way', async () => {
+      const toolsDir = join(root, wsId, KB_DIR, 'Plugins');
+      const write = (clientId: string) =>
+        writeFile(
+          join(toolsDir, 'crm.tool'),
+          JSON.stringify({
+            name: 'crm',
+            type: 'http',
+            url: 'https://api.crm.example/openapi.json',
+            variables: [{ name: 'SIGNIN', scope: 'user', oauth: { clientId, ...HUBSPOT_ENDPOINTS } }],
+          }),
+        );
+      await write('client-A');
+      const svc = svcWith({ statusFor: vi.fn(async () => ({ status: 'open' as const })) });
+      await svc.listAccessible('user@example.com');
+      await write('client-B');
+      const live = await svc.liveDeclaration('user@example.com', 'crm', 'SIGNIN');
+      expect(live?.variable?.oauth?.clientId).toBe('client-B');
+    });
+
+    test('completes a client-id-only declaration from the server metadata, or carries the discovery reason', async () => {
+      await writeDeclaredServer({ clientId: 'owner-app' });
+      const statusFor = vi.fn(async () => ({ status: 'open' as const }));
+      const providerForDeclaredClient = vi.fn(async () => ({
+        status: 'oauth' as const,
+        provider: { ...HUBSPOT_ENDPOINTS, clientId: 'owner-app', pkce: true, resource: 'https://mcp.hubspot.example/mcp' },
+      }));
+      const live = await svcWith({ statusFor, providerForDeclaredClient }).liveDeclaration(
+        'user@example.com',
+        'hubspot',
+        'HUBSPOT_TOKEN',
+      );
+      expect(live?.variable?.oauth).toEqual({
+        clientId: 'owner-app',
+        ...HUBSPOT_ENDPOINTS,
+        resource: 'https://mcp.hubspot.example/mcp',
+      });
+      // Never a zero-config probe or registration for a declared sign-in.
+      expect(statusFor).not.toHaveBeenCalled();
+
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const stuck = await svcWith({
+        statusFor,
+        providerForDeclaredClient: async () => ({ status: 'unsupported' as const, reason: 'no authorization-server metadata' }),
+      }).liveDeclaration('user@example.com', 'hubspot', 'HUBSPOT_TOKEN');
+      expect(stuck?.variable?.oauth).toEqual({ clientId: 'owner-app' });
+      expect(stuck?.manual.setup).toEqual({ kind: 'oauth-manual', reason: 'no authorization-server metadata' });
+      warn.mockRestore();
+    });
+
+    test('answers no variable when the file declares none of that name, and null for an unreadable manual', async () => {
+      await writeDeclaredServer({ clientId: 'owner-app', ...HUBSPOT_ENDPOINTS });
+      const statusFor = vi.fn(async () => ({ status: 'oauth' as const, provider: OAUTH_PROVIDER }));
+      const svc = svcWith({ statusFor });
+      // The zero-config variable is synthesised by the catalog, not declared in any file.
+      const bare = await svc.liveDeclaration('user@example.com', 'notion', 'MCP_OAUTH');
+      expect(bare?.manual.name).toBe('notion');
+      expect(bare?.variable).toBeUndefined();
+      expect(statusFor).not.toHaveBeenCalled();
+
+      const denyAll = {
+        canRead: async () => false,
+        canReadBatch: async (_w: string, _e: string, paths: string[]) => new Map(paths.map((p) => [p, false])),
+      } as unknown as IAccessControl;
+      const locked = new ToolManualService(
+        workspaceService,
+        denyAll,
+        testKbContext({ kbDirName: KB_DIR }),
+        disk,
+        new KbPluginSource(disk, testKbContext({ kbDirName: KB_DIR })),
+      );
+      await expect(locked.liveDeclaration('user@example.com', 'hubspot', 'HUBSPOT_TOKEN')).resolves.toBeNull();
+    });
+  });
 });

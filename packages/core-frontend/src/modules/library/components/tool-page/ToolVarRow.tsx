@@ -26,6 +26,10 @@ import { navigateExternal } from '../../utils/navigate-external';
  *  - `oauth-auto` NEVER gets a client-secret affordance. Its client was
  *    auto-registered by PKCE dynamic registration and has no secret; saving one
  *    would clobber the discovered provider row and break sign-in for everyone.
+ *  - Every OTHER sign-in offers its owner the client secret in every state of
+ *    the row: "Replace client secret" while one is stored, "Set client secret"
+ *    while none is. The secret belongs to the tool, not to the caller's own
+ *    sign-in, so whether the owner is signed in has no say in it.
  *  - Whose problem is it? A user-scope gap is the caller's to fix and always
  *    shows an action. An admin-scope gap is the OWNER's, so a non-writer sees a
  *    chip that explains the state and no button they can't act on.
@@ -147,13 +151,6 @@ export function ToolVarRow({
           Signed in
         </Badge>,
       );
-      if (mayEditClientSecret) {
-        meta.push(
-          <Button key="secret" size="sm" variant="quiet" onClick={() => open('client-secret')}>
-            Replace client secret
-          </Button>,
-        );
-      }
     } else if (variable.authorized) {
       description = 'Each person sets their own';
       meta.push(
@@ -172,19 +169,30 @@ export function ToolVarRow({
       // The owner hasn't declared the provider (or hasn't set its secret), so
       // there is nothing for anyone to sign in to yet.
       description = "The tool owner hasn't finished the sign-in setup yet.";
-      if (mayEditClientSecret) {
-        meta.push(
-          <Button key="secret" size="sm" onClick={() => open('client-secret')}>
-            Set client secret
-          </Button>,
-        );
-      } else {
+      if (!mayEditClientSecret) {
         meta.push(
           <Badge key="chip" tone="neutral">
             Not set
           </Badge>,
         );
       }
+    }
+    // The client secret is the owner's, not the sign-in's: whatever state the
+    // caller's own sign-in is in, an owner who may edit it can replace a stored
+    // secret (or set a missing one) from this row. Tying it to the caller being
+    // signed in left an owner replacing a connector with no way to do it here.
+    if (mayEditClientSecret) {
+      meta.push(
+        variable.adminConfigured ? (
+          <Button key="secret" size="sm" variant="quiet" onClick={() => open('client-secret')}>
+            Replace client secret
+          </Button>
+        ) : (
+          <Button key="secret" size="sm" onClick={() => open('client-secret')}>
+            Set client secret
+          </Button>
+        ),
+      );
     }
   } else if (variable.scope === 'admin') {
     if (variable.adminConfigured) {
