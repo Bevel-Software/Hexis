@@ -637,12 +637,16 @@ describe('DbSecretsVaultService — a refused token request says why', () => {
     expect(err.message).toBe('Token endpoint returned HTTP 400: BAD_CLIENT_SECRET — client secret does not match');
   });
 
-  it('keeps the first line of a body that is not an OAuth error, bounded', async () => {
+  it('keeps the first line of a body that is not an OAuth error, and cuts a long reason', async () => {
     const err = await exchangeFailure('<html>Bad Gateway</html>\nsecond line', 502);
     expect(err.message).toBe('Token endpoint returned HTTP 502: <html>Bad Gateway</html>');
-    const long = await exchangeFailure('x'.repeat(5000));
+    // Within the read cap, so the body parses; the reason itself is cut to length.
+    const long = await exchangeFailure(JSON.stringify({ error: 'server_error', error_description: 'x'.repeat(1500) }));
     expect(long.message.length).toBeLessThan(400);
     expect(long.message.endsWith('…')).toBe(true);
+    // A plain-text body longer than the read cap was cut there: nothing of it is quoted.
+    const cutPlain = await exchangeFailure('x'.repeat(5000));
+    expect(cutPlain.message).toBe('Token endpoint returned HTTP 400');
   });
 
   it('adds nothing for an empty body', async () => {
@@ -702,6 +706,38 @@ describe('DbSecretsVaultService — a refused token request says why', () => {
     expect(err.message).toBe('Token endpoint returned HTTP 400: refused: *** of it');
   });
 
+  it('redacts a secret the provider quotes back in its wire spelling', async () => {
+    // A provider that echoes the request echoes it as received: percent-encoded
+    // in a URL, form-encoded in a body (`+` for a space).
+    const encoded = await exchangeFailure(
+      JSON.stringify({ error: 'invalid_client', error_description: 'client_secret=a%2Bb%2Fc%3D rejected' }),
+      400,
+      { clientSecret: 'a+b/c=', pendingVerifier: 'the-verifier' },
+    );
+    expect(encoded.message).toBe('Token endpoint returned HTTP 400: invalid_client — client_secret=*** rejected');
+    const form = await exchangeFailure(
+      JSON.stringify({ error: 'invalid_client', error_description: 'client_secret=pass+word+here rejected' }),
+      400,
+      { clientSecret: 'pass word here', pendingVerifier: 'the-verifier' },
+    );
+    expect(form.message).toBe('Token endpoint returned HTTP 400: invalid_client — client_secret=*** rejected');
+  });
+
+  it('quotes no plain text from a body cut at the read cap, where the head of a secret could end it', async () => {
+    // 2045 spaces then the secret: the cap (2048 bytes) ends on its first three
+    // characters, too few for the redactor's echoed-prefix floor to catch.
+    const cut = await exchangeFailure(`${' '.repeat(2045)}abcXYZsecret and more`, 400, {
+      clientSecret: 'abcXYZsecret',
+      pendingVerifier: 'the-verifier',
+    });
+    expect(cut.message).toBe('Token endpoint returned HTTP 400');
+    // A plain-text body that merely FILLS the cap (2048 bytes exactly) is
+    // complete and is quoted, cut to the reason's own length.
+    const full = await exchangeFailure(`${'x'.repeat(2040)} refused`, 400);
+    expect(full.message.startsWith('Token endpoint returned HTTP 400: xxx')).toBe(true);
+    expect(full.message.endsWith('…')).toBe(true);
+  });
+
   it('keeps the status when the refusal body cannot be read, so a refused refresh still retires the grant', async () => {
     const failing = () =>
       new ReadableStream<Uint8Array>({
@@ -757,8 +793,8 @@ describe('DbSecretsVaultService — a refused token request says why', () => {
       },
     });
     const err = await exchangeFailure(endless, 502);
-    expect(err.message.length).toBeLessThan(400);
-    expect(err.message.endsWith('…')).toBe(true);
+    // Cut at the cap, so no plain text is quoted: the status alone.
+    expect(err.message).toBe('Token endpoint returned HTTP 502');
     expect(pulls).toBeLessThanOrEqual(4);
     expect(cancelled).toBe(true);
   });

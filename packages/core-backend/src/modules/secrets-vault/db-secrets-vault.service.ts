@@ -63,12 +63,22 @@ const TOKEN_REQUEST_SECRET_FIELDS = ['client_secret', 'code', 'code_verifier', '
  * still carry an escaped secret. Only a body that is not JSON at all is
  * quoted by its first line, where a secret can only be spelled plainly, and
  * that body is scrubbed whole BEFORE the first line is taken, so a secret
- * with a line break in it cannot leave its head on that line.
+ * with a line break in it cannot leave its head on that line — and only when
+ * the body ENDED within the read cap (`complete`): a body cut at the cap can
+ * end with the first few characters of a secret, too few for the redactor's
+ * echoed-prefix floor, so a cut plain-text body contributes nothing either.
+ *
+ * The redactor is given each secret as sent AND as the wire spells it — the
+ * percent-encoding and the form encoding of the request body — since a
+ * provider that quotes the request back quotes it as received.
  */
-export function describeTokenEndpointError(bodyText: string, request: URLSearchParams): string {
+export function describeTokenEndpointError(bodyText: string, request: URLSearchParams, complete = true): string {
   const text = bodyText.trim();
   if (!text) return '';
-  const scrub = (s: string) => redactSecret(s, TOKEN_REQUEST_SECRET_FIELDS.map((field) => request.get(field)));
+  const secrets = TOKEN_REQUEST_SECRET_FIELDS.map((field) => request.get(field)).flatMap((value) =>
+    value ? [value, encodeURIComponent(value), new URLSearchParams([['v', value]]).toString().slice(2)] : [],
+  );
+  const scrub = (s: string) => redactSecret(s, secrets);
   let reason: string;
   try {
     const json = JSON.parse(text) as unknown;
@@ -82,7 +92,7 @@ export function describeTokenEndpointError(bodyText: string, request: URLSearchP
       reason = strings([json]).join('');
     }
   } catch {
-    reason = /^["[{]/.test(text) ? '' : scrub(text).split(/\r?\n/)[0];
+    reason = !complete || /^["[{]/.test(text) ? '' : scrub(text).split(/\r?\n/)[0];
   }
   reason = scrub(reason).replace(/\s+/g, ' ').trim();
   return reason.length > TOKEN_ERROR_REASON_MAX ? `${reason.slice(0, TOKEN_ERROR_REASON_MAX)}…` : reason;
@@ -958,9 +968,14 @@ export class DbSecretsVaultService implements ISecretsVaultService {
       // Best effort: the STATUS is the contract (the refresh path reads 400/401
       // off it to retire a dead grant), and a body that fails to read must not
       // turn a definitive refusal into an unclassified error.
+      // One byte past the cap is read so a body that merely FILLS the cap can
+      // be told from one that was cut at it; only a body that ended within the
+      // cap may be quoted as plain text.
+      const bodyText = await readCapped(res, TOKEN_ERROR_BODY_MAX_BYTES + 1).catch(() => '');
       const reason = describeTokenEndpointError(
-        await readCapped(res, TOKEN_ERROR_BODY_MAX_BYTES).catch(() => ''),
+        bodyText,
         body,
+        Buffer.byteLength(bodyText, 'utf8') <= TOKEN_ERROR_BODY_MAX_BYTES,
       );
       throw new SecretOAuthError(`Token endpoint returned HTTP ${res.status}${reason ? `: ${reason}` : ''}`, res.status);
     }
