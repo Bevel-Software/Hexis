@@ -55,21 +55,30 @@ const TOKEN_REQUEST_SECRET_FIELDS = ['client_secret', 'code', 'code_verifier', '
  * after, because a JSON body carries a secret in its escaped spelling and
  * parsing is what spells it out again; before, because collapsing whitespace
  * or cutting would leave a whitespace-bearing secret, or a fragment, standing.
+ *
+ * For the same reason the message never carries JSON text as written: a JSON
+ * body with none of the known fields contributes its decoded string values,
+ * and a body that looks like JSON but does not parse (cut at the read cap)
+ * contributes nothing. Only a body that is not JSON at all is quoted by its
+ * first line, where a secret can only be spelled plainly.
  */
 export function describeTokenEndpointError(bodyText: string, request: URLSearchParams): string {
   const text = bodyText.trim();
   if (!text) return '';
-  let reason = text;
+  let reason: string;
   try {
-    const json = JSON.parse(text) as Record<string, unknown>;
-    const pick = (keys: string[]) =>
-      keys.map((k) => json[k]).find((v) => typeof v === 'string' && v !== '') as string | undefined;
-    const parts = [pick(['error', 'status']), pick(['error_description', 'message'])].filter(
-      (p): p is string => p !== undefined,
-    );
-    if (parts.length) reason = parts.join(' — ');
+    const json = JSON.parse(text) as unknown;
+    const strings = (values: unknown[]) => values.filter((v): v is string => typeof v === 'string' && v !== '');
+    if (json && typeof json === 'object' && !Array.isArray(json)) {
+      const record = json as Record<string, unknown>;
+      const pick = (keys: string[]) => strings(keys.map((k) => record[k]))[0];
+      const parts = strings([pick(['error', 'status']), pick(['error_description', 'message'])]);
+      reason = (parts.length ? parts : strings(Object.values(record))).join(' — ');
+    } else {
+      reason = strings([json]).join('');
+    }
   } catch {
-    reason = text.split(/\r?\n/)[0];
+    reason = /^[[{]/.test(text) ? '' : text.split(/\r?\n/)[0];
   }
   reason = redactSecret(
     reason,
@@ -947,7 +956,13 @@ export class DbSecretsVaultService implements ISecretsVaultService {
       // The provider's reason rides in the message: the callback route and the
       // refresh path log that message, and it is the one line that says WHY a
       // sign-in failed (redirect mismatch, wrong client secret, reused code…).
-      const reason = describeTokenEndpointError(await readCapped(res, TOKEN_ERROR_BODY_MAX_BYTES), body);
+      // Best effort: the STATUS is the contract (the refresh path reads 400/401
+      // off it to retire a dead grant), and a body that fails to read must not
+      // turn a definitive refusal into an unclassified error.
+      const reason = describeTokenEndpointError(
+        await readCapped(res, TOKEN_ERROR_BODY_MAX_BYTES).catch(() => ''),
+        body,
+      );
       throw new SecretOAuthError(`Token endpoint returned HTTP ${res.status}${reason ? `: ${reason}` : ''}`, res.status);
     }
     const json = (await res.json()) as Record<string, unknown>;

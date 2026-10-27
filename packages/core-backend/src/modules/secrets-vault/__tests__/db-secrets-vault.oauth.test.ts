@@ -673,6 +673,43 @@ describe('DbSecretsVaultService — a refused token request says why', () => {
     expect(err.message).toBe('Token endpoint returned HTTP 400: invalid_client — secret *** refused');
   });
 
+  it('never quotes JSON as written: an unknown shape contributes its decoded strings, a cut JSON body nothing', async () => {
+    const blob = { clientSecret: 'se"cr\\et', pendingVerifier: 'the-verifier' };
+    // No known field: the decoded string values, scrubbed — not the raw text
+    // where the secret reads `se\"cr\\et` and no plain-spelling scrub finds it.
+    const unknown = await exchangeFailure(JSON.stringify({ detail: 'se"cr\\et rejected', code: 17 }), 400, blob);
+    expect(unknown.message).toBe('Token endpoint returned HTTP 400: *** rejected');
+    // A JSON body cut short at the read cap does not parse; its first line is
+    // JSON as written, so it contributes nothing but the status.
+    const cut = JSON.stringify({ error: 'invalid_client', error_description: 'se"cr\\et rejected' }).slice(0, 40);
+    const truncated = await exchangeFailure(cut, 400, blob);
+    expect(truncated.message).toBe('Token endpoint returned HTTP 400');
+    // A plain-text body keeps its first line; a secret there is spelled plainly.
+    const plain = await exchangeFailure('se"cr\\et rejected\nmore', 400, blob);
+    expect(plain.message).toBe('Token endpoint returned HTTP 400: *** rejected');
+  });
+
+  it('keeps the status when the refusal body cannot be read, so a refused refresh still retires the grant', async () => {
+    const failing = () =>
+      new ReadableStream<Uint8Array>({
+        pull() {
+          throw new Error('connection reset');
+        },
+      });
+    const err = await exchangeFailure(failing(), 401);
+    expect(err.message).toBe('Token endpoint returned HTTP 401');
+    expect(err.providerStatus).toBe(401);
+
+    const { db, captured } = makeFakeDb([
+      [confidentialRow({ clientSecret: 'client-secret-1', tokens: { access_token: 'at', refresh_token: 'rt', expires_at: 1 } })],
+      undefined,
+    ]);
+    const svc = new DbSecretsVaultService(db, ENC_KEY);
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(failing(), { status: 400 })));
+    await expect(svc.forceRefresh('user-1', KEY)).resolves.toBe('rejected');
+    expect(JSON.parse(crypto.decrypt(captured.set[0].valueEncrypted))).toEqual({ clientSecret: 'client-secret-1' });
+  });
+
   it('redacts a secret with whitespace in it, and one the length cut would otherwise split', async () => {
     // Scrubbed on the body as received: collapsing whitespace or cutting to
     // length first would leave such a secret, or a fragment of it, in the log.
