@@ -382,11 +382,12 @@ or `window.bevel.navigate(href)`:
   path that names the page's own file with a fragment (`Q3.html#totals`
   from `Q3.html`) scrolls the page, as `#totals` does.
 - **A root-relative path**, `/{{kbDirName}}/<path>`, opens that file on the
-  page's own branch, in a new tab, from a page in any folder: the form for a
-  path a tool answered (`list_files`, `grep`), which is a path from the
-  checkout folder and knows nothing of where the page sits. A link the page's
-  script creates after load is kept as written, so `a.href = '/{{kbDirName}}/'
-  + path` is enough.
+  page's own branch, in a new tab, from a page in any folder. A path a tool
+  answered (`read_file`'s `path`, a listing's `path`) already starts with the
+  checkout folder, so it is linked as `'/' + path`, never with the folder put
+  in front of it again; a path the page composed itself, without that
+  prefix, gets `'/{{kbDirName}}/'` in front. A link the page's script
+  creates after load is kept as written.
 - **`/workspace/<branch>/<path>`** opens that file on that branch, in a new
   tab.
 - **An external address** (`http:`, `https:`, `mailto:`) opens in a new tab.
