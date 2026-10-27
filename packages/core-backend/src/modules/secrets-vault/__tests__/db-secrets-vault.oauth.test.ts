@@ -624,9 +624,9 @@ describe('DbSecretsVaultService — a refused token request says why', () => {
 
   it('carries the OAuth error and its description, and the status', async () => {
     const err = await exchangeFailure(
-      JSON.stringify({ error: 'invalid_grant', error_description: 'redirect_uri does not match' }),
+      JSON.stringify({ error: 'invalid_client', error_description: 'client authentication failed' }),
     );
-    expect(err.message).toBe('Token endpoint returned HTTP 400: invalid_grant — redirect_uri does not match');
+    expect(err.message).toBe('Token endpoint returned HTTP 400: invalid_client — client authentication failed');
     expect(err.providerStatus).toBe(400);
   });
 
