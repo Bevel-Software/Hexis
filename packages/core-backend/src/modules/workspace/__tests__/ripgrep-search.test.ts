@@ -511,19 +511,36 @@ describe('RipgrepPatternMatcher', () => {
   });
 
   it('charges the wait for a slot to the budget, and answers the 400 from the queue when the budget passes there', async () => {
-    const slow = await slowRipgrep();
+    // Every search of a matcher has the same budget, so a queued search can
+    // outwait its own only once it has spent part of it: one walk of 500 ms
+    // against a budget of 800, then a wait behind a fresh search's 500 ms
+    // walk, which outlasts the 300 ms the first has left.
+    const slow = await slowRipgrep({ walkMs: 500 });
     try {
-      const m = matcher({ maxRunning: 1, maxWaiting: 1, budgetMs: 400 });
+      await put('kb/a.md', 'needle\n');
+      const m = matcher({ maxRunning: 1, maxWaiting: 1, budgetMs: 800 });
+      const scope = { cwd: dir, root: 'kb' };
+      const s = await m.search('needle', { ignoreCase: false });
+      expect(await s.list(scope)).toEqual([]);
       const holder = await m.search('needle', { ignoreCase: false });
-      const running = all(holder);
+      const holding = holder.list(scope);
       while ((await slow.alive()).length === 0) await new Promise((r) => setTimeout(r, 20));
       const started = Date.now();
-      await expect(m.search('needle', { ignoreCase: false })).rejects.toMatchObject({ status: 400, details: { code: 'pattern_too_expensive' } });
-      expect(Date.now() - started).toBeLessThan(1_500);
-      // Nothing of it ran: the holder's run is still the only one.
-      expect((await slow.alive()).length).toBe(1);
-      await m.close();
-      await expect(running).rejects.toMatchObject({ status: 503 });
+      const queued = s.list(scope);
+      // Refused from the queue, before the holder's walk ends — so it never ran.
+      const first = await Promise.race([
+        queued.then(
+          () => 'ran',
+          () => 'refused',
+        ),
+        holding.then(() => 'the holder finished first'),
+      ]);
+      expect(first).toBe('refused');
+      await expect(queued).rejects.toMatchObject({ status: 400, details: { code: 'pattern_too_expensive' } });
+      expect(Date.now() - started).toBeLessThan(1_000);
+      // The wait spent the budget: a later run is refused at once.
+      await expect(s.matchingLines(['needle'])).rejects.toMatchObject({ details: { code: 'pattern_too_expensive' } });
+      expect(await holding).toEqual([]);
     } finally {
       await slow.remove();
     }
