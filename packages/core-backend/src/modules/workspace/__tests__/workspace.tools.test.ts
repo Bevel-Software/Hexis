@@ -5267,6 +5267,28 @@ describe('a move preview judges the destination as it will be', () => {
     expect((await call(base, 'move_file', { ...args, confirm: true })).body).toMatchObject({ moved: true });
   });
 
+  it('a source the read hook refuses gets no names, and the move still asks first', async () => {
+    const base = await seeded();
+    await fs.writeFile(
+      KB('Ops/access.md'),
+      rules(`write:\n  - Mover <${MOVER}>\n  - Ops Lead <ops@x.io>\nowner:\n  - Mover <${MOVER}>\n`),
+    );
+    const args = { src: KB('Sales/deal.md'), dest: KB('Ops/deal.md'), rewriteLinks: false };
+    // The rules let the caller read it; a deployment's read hook does not.
+    hooks.onAgentRead(async (op) => {
+      if (op.wsPath === args.src) throw new Error('not for agents');
+    });
+
+    const dry = await call(base, 'move_file', { ...args, dryRun: true });
+    expect(dry.body).toMatchObject({ accessChanges: false, allowed: true });
+    expect(dry.body.holderChanges).toBeUndefined();
+    const unconfirmed = await call(base, 'move_file', args);
+    expect(unconfirmed.body).toMatchObject({ confirmationRequired: true, moved: false });
+    expect(JSON.stringify(unconfirmed.body)).not.toContain('ops@x.io');
+    expect(unconfirmed.body.message).not.toContain('holderChanges');
+    expect(await fs.exists(args.src)).toBe(true);
+  });
+
   it('a move out of a folder names everyone it leaves behind', async () => {
     const base = await seeded();
     const args = { src: KB('Work/Notes'), dest: KB('Legal/Notes') };
