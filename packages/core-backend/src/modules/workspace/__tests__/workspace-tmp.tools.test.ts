@@ -741,6 +741,10 @@ describe("a tmp ref reaches the caller's own staged files and nobody else's", ()
     await symlink(join(workspaceDir(DRAFT), KB_DIR), join(ownerDir(DRAFT), 'kb'));
     await expect(service.stageTmpFile(id, ME, 'kb/planted.md', Buffer.from('x'))).rejects.toThrow(/link that leads out/);
     await expect(stat(join(workspaceDir(DRAFT), KB_DIR, 'planted.md'))).rejects.toThrow();
+    // Nor are folders made through it: the link is refused before anything
+    // beyond it is created, so nothing lands where the link leads.
+    await expect(service.stageTmpFile(id, ME, 'kb/deep/er/planted.md', Buffer.from('x'))).rejects.toThrow(/link that leads out/);
+    await expect(stat(join(workspaceDir(DRAFT), KB_DIR, 'deep'))).rejects.toThrow();
     // A link at the file's own name: a write would follow it into the repository.
     await symlink(join(workspaceDir(DRAFT), KB_DIR, 'secret.md'), join(ownerDir(DRAFT), 'secret.md'));
     await expect(service.stageTmpFile(id, ME, 'secret.md', Buffer.from('overwritten'))).rejects.toThrow(/not a file/);
