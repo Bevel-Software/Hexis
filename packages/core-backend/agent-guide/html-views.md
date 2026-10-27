@@ -147,11 +147,202 @@ if (await window.bevel?.requireTools?.()) {
 }
 ```
 
+### Live data: a page that stays still while it loads
+
+A page that reads its data through `window.bevel.tools` waits on several
+calls before it has anything to show. Write it so the reader never sees the
+page change shape, never sees a half-loaded board as if it were the answer,
+and never loses the board they were reading:
+
+- **Render the final page shell in the markup, before any data.** Headings,
+  columns, panels and the controls are in the HTML itself, with their size
+  reserved in CSS (a grid, a `min-height` per region). The loading treatment —
+  placeholder rows, `aria-busy="true"` — sits **inside** the data regions.
+  Never start with one "Loading…" line that the script later swaps for the
+  whole page: that swap is a full-page layout change, and the first thing the
+  reader sees looks broken.
+- **Publish one consistent dataset at a time.** Collect every read into local
+  variables first; when ALL of them have succeeded, update every data region
+  from that one dataset in one synchronous step. Until then show no counts,
+  no cards and no empty columns: "0" or "None" is an answer only a finished
+  dataset may give.
+- **Refresh keeps the current board.** A refresh leaves the last published
+  dataset on screen, shows a small refreshing state (a status line, the
+  Refresh button disabled) and publishes the replacement only when it is
+  complete. Never return to the loading placeholders.
+- **A failed read fails the whole load, visibly.** If any read the page needs
+  rejects, publish nothing from that load: keep the shell (first load) or the
+  last good dataset (refresh), say what failed — the rejection carries the
+  tool's own message — and offer a Retry button that runs the same load
+  again. Never show the reads that did succeed as if they were the whole
+  board.
+- **Read in bounded parallel once the paths are known.** List first
+  (`list_files`, `grep`), then read the files it named with a small fixed
+  number of `callTool` reads in flight at a time — four is plenty — rather
+  than one after another or all at once. Read tools run at once with no
+  prompt.
+- **Load with `callTool`, not `callToolChain`.** A chain may write, so the app
+  asks the viewer before it runs: a page that loads through `callToolChain`
+  shows its reader a "wants to write" card for a read.
+- **The reads are the viewer's own.** Every call answers with exactly what
+  the person viewing the page may read: `list_files` and `grep` leave out
+  what they may not, and `read_file` of such a file rejects. Build the board
+  from what the calls return; never try to widen it (another identity, a
+  copied dataset) — the same page shows each reader their own board.
+- **Link to what the tools named by its root-relative path.** A path a tool
+  answered is a path from the checkout folder, which does not know where the
+  page itself sits; `'/{{kbDirName}}/' + path` opens it from a page in any
+  folder (see *How a link resolves*).
+
+A complete page that follows these rules — plain HTML and one inline script,
+no build step and no framework:
+
+```html
+<!doctype html>
+<html>
+<head>
+<style>
+  body { font: 14px system-ui, sans-serif; margin: 16px; }
+  header { display: flex; align-items: center; gap: 12px; min-height: 40px; }
+  #status { color: #555; }
+  #status.error { color: #b00020; }
+  .board { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+  .column { min-height: 320px; border: 1px solid #ddd; border-radius: 6px; padding: 8px; }
+  .column ul { list-style: none; margin: 0; padding: 0; }
+  .column li { min-height: 20px; padding: 6px; margin-bottom: 6px; border-radius: 4px; background: #f4f4f4; }
+  .column li.placeholder { background: #ececec; }
+  .count { color: #777; font-weight: normal; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Tickets</h1>
+  <button id="refresh" type="button" disabled>Refresh</button>
+  <span id="status" role="status">Loading…</span>
+  <button id="retry" type="button" hidden>Retry</button>
+</header>
+<main id="board" class="board" aria-busy="true">
+  <section class="column" data-status="todo"><h2>To do <span class="count"></span></h2><ul><li class="placeholder"></li><li class="placeholder"></li></ul></section>
+  <section class="column" data-status="doing"><h2>Doing <span class="count"></span></h2><ul><li class="placeholder"></li><li class="placeholder"></li></ul></section>
+  <section class="column" data-status="done"><h2>Done <span class="count"></span></h2><ul><li class="placeholder"></li><li class="placeholder"></li></ul></section>
+</main>
+<script>
+  const BRANCH = 'main';
+  const FOLDER = 'Data/Tickets';
+  const READS_IN_FLIGHT = 4;
+  const tools = window.bevel?.tools;
+  const board = document.getElementById('board');
+  const statusLine = document.getElementById('status');
+  const refreshButton = document.getElementById('refresh');
+  const retryButton = document.getElementById('retry');
+  let published = false;
+
+  /** The text under `# <heading>` in a node's markdown, whatever its line endings. */
+  function field(markdown, heading) {
+    const lines = markdown.split(/\r?\n/);
+    const at = lines.indexOf('# ' + heading);
+    if (at < 0) return '';
+    const end = lines.findIndex((line, i) => i > at && line.startsWith('# '));
+    return lines.slice(at + 1, end < 0 ? undefined : end).join('\n').trim();
+  }
+
+  /**
+   * `fn` over `items`, at most `limit` at a time. After a failure no new item
+   * starts; it rejects with the first failure once the calls in flight have
+   * settled, so a Retry never overlaps the load that failed.
+   */
+  async function mapBounded(items, limit, fn) {
+    const results = new Array(items.length);
+    let next = 0;
+    let failure = null;
+    async function worker() {
+      while (!failure && next < items.length) {
+        const i = next++;
+        try {
+          results[i] = await fn(items[i]);
+        } catch (error) {
+          failure ??= { error };
+        }
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+    if (failure) throw failure.error;
+    return results;
+  }
+
+  /** The whole dataset, or a rejection. Touches no element. */
+  async function readTickets() {
+    const listing = await tools.callTool('list_files', { body: { branch: BRANCH, path: FOLDER } });
+    const paths = listing.entries
+      .filter((entry) => entry.type === 'file' && entry.name.endsWith('.md'))
+      .map((entry) => `${FOLDER}/${entry.name}`);
+    return mapBounded(paths, READS_IN_FLIGHT, async (path) => {
+      const file = await tools.callTool('read_file', { body: { branch: BRANCH, path } });
+      return { path, name: field(file.content, 'Name') || path, status: field(file.content, 'Status').toLowerCase() };
+    });
+  }
+
+  /** Every data region from one dataset, in one synchronous step. */
+  function publish(tickets) {
+    for (const column of board.querySelectorAll('.column')) {
+      const mine = tickets.filter((ticket) => ticket.status === column.dataset.status);
+      column.querySelector('.count').textContent = `(${mine.length})`;
+      const items = mine.map((ticket) => {
+        const link = document.createElement('a');
+        link.href = '/{{kbDirName}}/' + ticket.path;
+        link.textContent = ticket.name;
+        const item = document.createElement('li');
+        item.append(link);
+        return item;
+      });
+      if (items.length === 0) {
+        const none = document.createElement('li');
+        none.textContent = 'None';
+        items.push(none);
+      }
+      column.querySelector('ul').replaceChildren(...items);
+    }
+    published = true;
+  }
+
+  async function load() {
+    refreshButton.disabled = true;
+    retryButton.hidden = true;
+    board.setAttribute('aria-busy', 'true');
+    statusLine.className = '';
+    statusLine.textContent = published ? 'Refreshing…' : 'Loading…';
+    try {
+      publish(await readTickets());
+      statusLine.textContent = `Updated ${new Date().toLocaleTimeString()}`;
+    } catch (error) {
+      statusLine.className = 'error';
+      statusLine.textContent = (published ? 'Could not refresh; showing the last loaded board. ' : 'Could not load the tickets. ') + error.message;
+      retryButton.hidden = false;
+    } finally {
+      board.setAttribute('aria-busy', 'false');
+      refreshButton.disabled = false;
+    }
+  }
+
+  refreshButton.addEventListener('click', load);
+  retryButton.addEventListener('click', load);
+  if (tools) {
+    load();
+  } else {
+    board.setAttribute('aria-busy', 'false');
+    statusLine.textContent = 'Open this page in Bevel to load the tickets.';
+  }
+</script>
+</body>
+</html>
+```
+
 ### Links written in the markup
 
 An `<a href>` in the page keeps its address only when it is one of these:
 
 - a document of the knowledge base, `.md`, `.html` or `.htm`, with or without a heading — `../Knowledge/Alice.md#goal`, `Q3-Report.html`, `Notes.htm`
+- a root-relative path to such a document, from the checkout folder — `/{{kbDirName}}/Data/Tickets/A.md`
 - an absolute workspace URL — `/workspace/main/{{knowledgeBaseDir}}/Alice.md`
 - an external address — `https://example.com/docs`, `http://example.com`, `mailto:team@example.com`
 - a bare fragment, a place in this page — `#totals`, `#`
@@ -182,6 +373,12 @@ or `window.bevel.navigate(href)`:
   opens `{{knowledgeBaseDir}}/Knowledge/Alice.md` at its `goal` heading. A
   path that names the page's own file with a fragment (`Q3.html#totals`
   from `Q3.html`) scrolls the page, as `#totals` does.
+- **A root-relative path**, `/{{kbDirName}}/<path>`, opens that file on the
+  page's own branch, in a new tab, from a page in any folder: the form for a
+  path a tool answered (`list_files`, `grep`), which is a path from the
+  checkout folder and knows nothing of where the page sits. A link the page's
+  script creates after load is kept as written, so `a.href = '/{{kbDirName}}/'
+  + path` is enough.
 - **`/workspace/<branch>/<path>`** opens that file on that branch, in a new
   tab.
 - **An external address** (`http:`, `https:`, `mailto:`) opens in a new tab.
