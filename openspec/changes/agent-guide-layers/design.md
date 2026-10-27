@@ -93,16 +93,16 @@ Ten tasks from the customer's day. For each, the facts the guide must let an age
 
 ## After
 
-Measured the same way, on this change's last commit:
+Measured the same way, on this change's last commit (after merging `dev` at `39625e93`, whose tmp-folder rule adds about 95 tokens to the shared rules and 115 to the tool list):
 
 | Layer | Before | After | Budget |
 |---|---|---|---|
-| Server instructions (platform part) | 1,852 | 1,875 | 2,000 |
-| Tool list as served (41 tools) | 15,829 | 15,595 | 16,000 |
+| Server instructions (platform part) | 1,852 | 1,969 | 2,000 |
+| Tool list as served (41 tools) | 15,829 | 15,710 | 16,000 |
 | First contact (`get_agent_guide` with no section) | 19,342 (the whole guide) | 995 (`start-here`) | 1,200 |
-| The whole guide (`section: "all"`) | 19,342 | 18,323 | 19,000 |
+| The whole guide (`section: "all"`) | 19,342 | 18,417 | 19,000 |
 | A `read_file` of `AGENTS.md` | 19,342 (the whole guide) | 1,202 (`start-here` and the list) | |
-| One evaluation task | 19,342 | 995 to 3,319 | 6,000 |
+| One evaluation task | 19,342 | 995 to 3,413 | 6,000 |
 | Evaluation facts stated | 27 of 53 | 53 of 53 | all |
 
 | Section | Tokens | | Section | Tokens |
@@ -113,7 +113,7 @@ Measured the same way, on this change's last commit:
 | `glossary` | 584 | | `tool-manuals` | 2,354 |
 | `directory-structure` | 1,356 | | `html-views` | 2,683 |
 | `where-a-new-file-goes` | 702 | | `conventions` | 445 |
-| `working-with-files` (computed) | 1,683 | | `new-knowledge-base` | 379 |
+| `working-with-files` (computed) | 1,777 | | `new-knowledge-base` | 379 |
 | `access-control` | 2,360 | | | |
 
 The customer's fifteen guide loads would now cost about 15,000 tokens instead
