@@ -342,6 +342,23 @@ describe('a key whose .agent file names skills but offers no skill tool', () => 
     }
   });
 
+  it('answers the local server’s discovery read of its connectors, though it offers no such tool', async () => {
+    // `hexis-mcp` asks `list_local_tools` at startup for the connectors it
+    // must materialize, whatever the connection is offered: refused, the
+    // local server could not start for this agent. Answered with the
+    // connection's local connectors — none, for a file that names none.
+    const base = await start();
+    const res = await call(base, 'bevel_prompts', 'list_local_tools');
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ tools: [] });
+    const plugin = (await (await call(base, 'bevel_plugin', 'list_local_tools')).json()) as { tools: { name: string }[] };
+    expect(plugin.tools.map((t) => t.name)).toEqual(['localgit']);
+    // A connection that loads nothing is refused it like any other route.
+    const gone = await call(base, 'bevel_gone', 'list_local_tools');
+    expect(gone.status).toBe(403);
+    expect(((await gone.json()) as { error: string }).error).toMatch(/which no longer exists or which you can no longer read/);
+  });
+
   it('answers a direct call of the skill routes with its skills alone — exactly its prompts', async () => {
     const base = await start();
     const listed = (await (await call(base, 'bevel_prompts', 'list_skills')).json()) as { skills: SkillSummary[] };

@@ -43,16 +43,18 @@ export interface ToolHandlerOptions {
    */
   branch?: BranchHandling;
   /**
-   * The route is ALSO the read path of the MCP prompts surface (`list_skills`
-   * and `get_skill`: both the hosted proxy and the local server build
-   * `prompts/list` and `prompts/get` on them). A connection's
-   * `platformTools` decides which tools its agent is OFFERED — the MCP
-   * listing and `tools/call` refuse the rest by name — not which prompts it
-   * has, so such a route is not refused for want of a `platformTools` entry.
-   * Its answer is still narrowed to the connection's skills by the handler,
-   * and a connection that loads nothing is refused it like any other route.
+   * The route is ALSO a discovery read of the connection's surface, which
+   * both MCP servers make whatever tools the connection is offered:
+   * `list_skills` and `get_skill` are how `prompts/list` and `prompts/get`
+   * are built, and `list_local_tools` is how the local server learns which
+   * connectors it must materialize. A connection's `platformTools` decides
+   * which tools its agent is OFFERED — the MCP listing and `tools/call`
+   * refuse the rest by name — not what its surface holds, so such a route is
+   * not refused for want of a `platformTools` entry. Its answer is still
+   * narrowed to the connection's skills or connectors by the handler, and a
+   * connection that loads nothing is refused it like any other route.
    */
-  servesPrompts?: boolean;
+  discovery?: boolean;
 }
 
 /**
@@ -278,7 +280,7 @@ export function createToolHandlerFactory(
         // The handler narrows by the scope decided here, so a context built
         // without one cannot read as Everything inside the tool either.
         ctx.connectionScope = scope;
-        const allowed = scope.allowsPlatformTool(toolName) || (opts.servesPrompts === true && scope.allowsPrompts());
+        const allowed = scope.allowsPlatformTool(toolName) || (opts.discovery === true && scope.allowsDiscovery());
         if (!allowed) {
           res.status(403).json({ error: scope.refusal(toolName), code: NOT_AVAILABLE_TO_CONNECTION });
           return;

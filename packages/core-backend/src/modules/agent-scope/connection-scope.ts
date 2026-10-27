@@ -160,12 +160,14 @@ export class ConnectionScope {
   }
 
   /**
-   * Whether the connection's prompts may be read: its skills, served as MCP
-   * prompts. Not a platform tool, so `platformTools` has no say — an agent
-   * that names skills gets them as prompts whatever tools it is offered. False
-   * only for a file that cannot be used, which loads nothing at all.
+   * Whether the connection's surface may be discovered: its skills read as
+   * MCP prompts, and its local-only connectors read by the local server so
+   * it can materialize them. Neither is a platform tool, so `platformTools`
+   * has no say — an agent that names skills gets them as prompts, and one
+   * that names connectors gets them served, whatever tools it is offered.
+   * False only for a file that cannot be used, which loads nothing at all.
    */
-  allowsPrompts(): boolean {
+  allowsDiscovery(): boolean {
     return this.state.kind !== 'unavailable';
   }
 

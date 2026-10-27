@@ -96,10 +96,12 @@ connection and the key in the Audit log.
   `list_skills`, `get_skill`, `prompts/list`, `list_tool_setup` and
   `list_local_tools`. A call to a tool the agent does not load is answered
   that the tool is not available to this connection, naming the agent.
-  The one exception is a direct REST call to `list_skills` or `get_skill`:
-  those two routes are also how prompts are read, so they answer with the
-  agent's skills (exactly its prompts) even when `platformTools` does not
-  offer them as tools.
+  The one exception is a direct REST call to `list_skills`, `get_skill` or
+  `list_local_tools`: those routes are also how the surface is discovered
+  (the first two are how prompts are read; the third is how the local MCP
+  server learns the connectors it must set up), so they answer with the
+  agent's own skills and connectors even when `platformTools` does not offer
+  them as tools.
 - **The code-mode tools stay.** `call_tool_chain`, `tools_info` and their
   siblings are how a connection calls its tools, not tools of their own: they
   are offered to every connection that loads anything, and they reach only the
