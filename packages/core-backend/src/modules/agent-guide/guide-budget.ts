@@ -56,14 +56,15 @@ export const SECTION_TOKEN_BUDGETS: Readonly<Record<string, number>> = Object.fr
   tools: SECTION_TOKEN_BUDGET,
   'tool-manuals': SECTION_TOKEN_BUDGET,
   // The page contract is long by nature (the frame, the bridge, the link
-  // rules), and a rewrite of it was open when the budgets were set.
-  'html-views': 3_000,
+  // rules, pages that load live data), and an agent fetches it only to build
+  // a page.
+  'html-views': 5_500,
   conventions: SECTION_TOKEN_BUDGET,
   'new-knowledge-base': SECTION_TOKEN_BUDGET,
 });
 
-/** Every core section at once: what `section: "all"` and a read of `AGENTS.md` return. */
-export const WHOLE_GUIDE_TOKEN_BUDGET = 19_000;
+/** Every core section at once: what `section: "all"` returns. */
+export const WHOLE_GUIDE_TOKEN_BUDGET = 21_500;
 
 /** One task: the start section plus the sections it routes the task to. */
 export const TASK_TOKEN_BUDGET = 6_000;

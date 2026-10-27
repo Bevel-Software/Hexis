@@ -45,8 +45,8 @@ The customer's agent called `get_agent_guide` 15 times across the session and it
 | **Always** | Server instructions (platform part) | Every conversation on clients that honour them | 2,000 |
 | **Always** | The platform's own tool list as served | Every conversation, every client, every sub-agent | 16,000, and 1,200 characters per description (unchanged) |
 | **First contact** | `start-here`: what `get_agent_guide` returns with no section | Once per conversation and per sub-agent | 1,200 |
-| **On demand** | Every other section, fetched by id | Only the tasks that need it | 2,500 per section; `html-views` 3,000 (open work in #451 grows it) |
-| **On demand** | The whole guide (`section: "all"`) | An agent that asks for everything; the enterprise in-app agent's prompt | 19,000, below today's 19,341 although content is added |
+| **On demand** | Every other section, fetched by id | Only the tasks that need it | 2,500 per section; `html-views` 5,500 (the page contract, which `dev` grew with pages that load live data) |
+| **On demand** | The whole guide (`section: "all"`) | An agent that asks for everything; the enterprise in-app agent's prompt | 21,500: 19,000 until `html-views` grew by about 2,600 |
 | Per task | `start-here` plus the sections it routes a task to | One task | 6,000 |
 
 The admin's preamble keeps its own cap (6,000 characters, `PREAMBLE_CAP`). Each budget is a number a reviewer may move, like the description cap: the point is that growing the guide is a decision, not a paragraph someone appends.
@@ -93,14 +93,14 @@ Ten tasks from the customer's day. For each, the facts the guide must let an age
 
 ## After
 
-Measured the same way, on this change's last commit (after merging `dev` at `39625e93`, whose tmp-folder rule adds about 95 tokens to the shared rules and 115 to the tool list):
+Measured the same way, on this change's last commit (after merging `dev` at `75ff11fe`: its tmp-folder rule adds about 95 tokens to the shared rules and 115 to the tool list, and its live-data rules add about 2,600 to `html-views`):
 
 | Layer | Before | After | Budget |
 |---|---|---|---|
 | Server instructions (platform part) | 1,852 | 1,969 | 2,000 |
 | Tool list as served (41 tools) | 15,829 | 15,710 | 16,000 |
 | First contact (`get_agent_guide` with no section) | 19,342 (the whole guide) | 1,061 (`start-here`) | 1,200 |
-| The whole guide (`section: "all"`) | 19,342 | 18,620 | 19,000 |
+| The whole guide (`section: "all"`) | 19,342 | 21,265 | 21,500 |
 | A `read_file` of `AGENTS.md` | 19,342 (the whole guide) | 1,268 (`start-here` and the list) | |
 | One evaluation task | 19,342 | 1,061 to 3,479 | 6,000 |
 | Evaluation facts stated | 27 of 53 | 53 of 53 | all |
@@ -111,13 +111,13 @@ Measured the same way, on this change's last commit (after merging `dev` at `396
 | `how-agents-find-things` | 659 | | `skills` | 1,026 |
 | `for-git-users` | 641 | | `tools` | 952 |
 | `glossary` | 584 | | `tool-manuals` | 2,354 |
-| `directory-structure` | 1,356 | | `html-views` | 2,683 |
+| `directory-structure` | 1,356 | | `html-views` | 5,328 |
 | `where-a-new-file-goes` | 702 | | `conventions` | 445 |
 | `working-with-files` (computed) | 1,777 | | `new-knowledge-base` | 379 |
 | `access-control` | 2,496 | | | |
 
 The customer's fifteen guide loads would now cost about 16,000 tokens instead
-of about 420,000. On an enterprise deployment the whole guide is about 27,000 tokens;
+of about 420,000. On an enterprise deployment the whole guide is about 30,000 tokens;
 its five sections are unchanged and outside core's checks.
 
 ## Decisions
