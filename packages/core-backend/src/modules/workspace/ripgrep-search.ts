@@ -63,9 +63,22 @@ const STDERR_CAP = 4_096;
 
 type Released = () => void;
 
+/**
+ * How long a run may wait for its slot, and for whom: the search's own
+ * limits, so a caller gone or a budget spent while queued leaves the queue
+ * with that answer rather than taking a slot later for a run it no longer
+ * wants or may not afford.
+ */
+type SlotWait = {
+  signal?: AbortSignal;
+  /** What is left of the search's budget; the wait ends with `expired()` when it runs out. */
+  timeoutMs: number;
+  expired(): Error;
+};
+
 /** What a search borrows from its matcher: a slot to run in, and the one way to start `rg`. */
 type Runner = {
-  slot(): Promise<Released>;
+  slot(wait: SlotWait): Promise<Released>;
   start(args: string[], cwd: string | undefined, withInput: boolean): ChildProcess;
   /** Whether `close()` has run: a run it killed is answered busy. */
   isClosed(): boolean;
@@ -89,7 +102,7 @@ export class RipgrepPatternMatcher implements IPatternMatcher {
     this.maxWaiting = option('maxWaiting', opts.maxWaiting ?? 16, 0);
     this.maxPatternLength = option('maxPatternLength', opts.maxPatternLength ?? 1_000, 1);
     this.runner = {
-      slot: () => this.slot(),
+      slot: (wait) => this.slot(wait),
       start: (args, cwd, withInput) => this.start(args, cwd, withInput),
       isClosed: () => this.closed,
     };
@@ -120,15 +133,50 @@ export class RipgrepPatternMatcher implements IPatternMatcher {
     await Promise.all(exits);
   }
 
-  /** A run's slot: given at once while fewer than `maxRunning` run, else after a wait. */
-  private async slot(): Promise<Released> {
+  /**
+   * A run's slot: given at once while fewer than `maxRunning` run, else after
+   * a wait bounded by the search's own limits (see {@link SlotWait}). A waiter
+   * that leaves — its caller gone, its budget spent, the matcher closed —
+   * leaves the queue too, so the slot a run gives back passes to a waiter
+   * that still wants it.
+   */
+  private async slot(wait: SlotWait): Promise<Released> {
     if (this.closed) throw new SearchBusyError();
     if (this.running < this.maxRunning) {
       this.running++;
     } else {
       if (this.waiting.length >= this.maxWaiting) throw new SearchBusyError();
       // Resolved by a run that ends: its slot passes straight to this one.
-      await new Promise<void>((resolve, reject) => this.waiting.push({ resolve, reject }));
+      await new Promise<void>((resolve, reject) => {
+        let timer: NodeJS.Timeout | undefined;
+        const onAbort = (): void => leave(new SearchAbandonedError());
+        const settle = (): void => {
+          if (timer) clearTimeout(timer);
+          wait.signal?.removeEventListener('abort', onAbort);
+        };
+        const waiter = {
+          resolve: () => {
+            settle();
+            resolve();
+          },
+          reject: (err: Error) => {
+            settle();
+            reject(err);
+          },
+        };
+        const leave = (err: Error): void => {
+          const at = this.waiting.indexOf(waiter);
+          if (at >= 0) this.waiting.splice(at, 1);
+          waiter.reject(err);
+        };
+        this.waiting.push(waiter);
+        if (wait.signal?.aborted) {
+          leave(new SearchAbandonedError());
+          return;
+        }
+        wait.signal?.addEventListener('abort', onAbort, { once: true });
+        timer = setTimeout(() => leave(wait.expired()), wait.timeoutMs);
+      });
     }
     let released = false;
     return () => {
@@ -350,10 +398,12 @@ class RipgrepSearch implements IPatternSearch {
    * search's budget runs out (answered with {@link PatternTooExpensiveError}),
    * when the search's caller goes away (answered with
    * {@link SearchAbandonedError}), and on any error, and its slot is given
-   * back on every one of those.
+   * back on every one of those. The wait for the slot is the run's too: it
+   * counts against the budget, and a caller gone or a budget spent while
+   * queued is answered from the queue, without a run.
    */
   private async *run(args: string[], cwd: string | undefined, input: string | undefined, separator: string): AsyncGenerator<string> {
-    const release = await this.runner.slot();
+    let release: Released | undefined;
     let child: ChildProcess | undefined;
     let timer: NodeJS.Timeout | undefined;
     let timedOut = false;
@@ -364,10 +414,23 @@ class RipgrepSearch implements IPatternSearch {
     };
     const started = Date.now();
     try {
-      // A caller gone while this run waited for its slot gets no run at all.
       if (this.signal?.aborted) throw new SearchAbandonedError();
-      const remaining = this.budgetMs - this.spentMs;
-      if (remaining <= 0) throw new PatternTooExpensiveError(this.pattern, this.budgetMs);
+      const budgeted = this.budgetMs - this.spentMs;
+      if (budgeted <= 0) throw new PatternTooExpensiveError(this.pattern, this.budgetMs);
+      release = await this.runner.slot({
+        signal: this.signal,
+        timeoutMs: budgeted,
+        expired: () => {
+          timedOut = true;
+          return new PatternTooExpensiveError(this.pattern, this.budgetMs);
+        },
+      });
+      // What the wait left of the budget is this run's.
+      const remaining = budgeted - (Date.now() - started);
+      if (remaining <= 0) {
+        timedOut = true;
+        throw new PatternTooExpensiveError(this.pattern, this.budgetMs);
+      }
       child = this.runner.start(args, cwd, input !== undefined);
       this.signal?.addEventListener('abort', onAbort, { once: true });
       // Listening for a failed spawn first, so its error wins over the exit it also causes.
@@ -429,7 +492,7 @@ class RipgrepSearch implements IPatternSearch {
         await exit;
       }
       this.spend(started, timedOut);
-      release();
+      release?.();
     }
   }
 }
