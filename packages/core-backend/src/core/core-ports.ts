@@ -10,6 +10,7 @@ import type { IAccountAdmission } from '../modules/auth/account-admission.js';
 import type { IWriteAccess } from '../modules/write-access/write-access.js';
 import type { OnServerStart } from '../modules/workspace/startup/on-server-start.js';
 import type { AgentGuideHook } from '../modules/agent-guide/agent-guide.js';
+import type { IAgentScopeResolver } from '../modules/agent-scope/index.js';
 import type { EmbedNodeIdResolver } from '../modules/embed/embed.interface.js';
 
 /**
@@ -112,6 +113,19 @@ export interface CorePorts {
    * `modules/agent-guide`.
    */
   agentGuide?: AgentGuideHook;
+  /**
+   * THIS distribution's agent configurations: what "Connect as" offers beside
+   * Everything, and what a connection made as one of them loads (see
+   * `modules/agent-scope`). Core owns the mechanism and no configuration —
+   * the file kind, where it lives and what its definition says are the
+   * distribution's, as the file kinds registered for access verbs are. Core
+   * default: `noAgentConfigurations()` — nothing is offered, and a connection
+   * recorded as some path loads nothing, never Everything. A SERVER-TIME
+   * seam: read when the server mounts its routes and at request time, so an
+   * enterprise root may also assign `CoreServices.agentScopeService` after
+   * construction, with the core services its resolver needs.
+   */
+  agentScope?: IAgentScopeResolver;
   /**
    * Mirror this composition's branch model and knowledge-base layout onto the
    * shared package's PROCESS-WIDE live bindings (`DEFAULT_BRANCH`,

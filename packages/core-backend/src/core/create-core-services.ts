@@ -111,8 +111,7 @@ import {
   MarketplaceCompilerService,
   KbPluginSource,
 } from '../modules/plugins/index.js';
-import { AgentScopeService } from '../modules/agent-scope/agent-scope.service.js';
-import type { IAgentScopeResolver } from '../modules/agent-scope/index.js';
+import { noAgentConfigurations, type IAgentScopeResolver } from '../modules/agent-scope/index.js';
 import { MarketplaceRepoService } from '../modules/marketplace/index.js';
 import {
   GitHubFacadeCredentialsService,
@@ -320,7 +319,7 @@ export interface CoreServices {
   /** Which plugins hold which skills (inline or linked) — see `PluginLinkIndex`. */
   pluginLinkIndex: PluginLinkIndex;
   /**
-   * Connecting as an `.agent` file: the choices offered at consent and key
+   * Connecting as an agent configuration: the choices offered at consent and key
    * mint, and the scope every agent surface narrows a connection to — see
    * `modules/agent-scope`.
    */
@@ -874,11 +873,13 @@ export async function createCoreServices(
   // The link index resolves manifests against the released catalog, and the
   // plugin index counts through it (inline + linked), so it comes first.
   const pluginLinkIndex = new PluginLinkIndex(workspaceService, skillService, accessControl, kb, pluginSource);
-  // What a connection made as an `.agent` file may load: the file re-read on
-  // every resolve through the person's read gate, its `plugins:` resolved
-  // through the link index above (a plugin's own folder and the skills its
-  // manifest links).
-  const agentScopeService = new AgentScopeService(workspaceService, accessControl, kb, disk, pluginLinkIndex);
+  // What "Connect as" offers and what a connection made as an agent loads:
+  // the distribution's resolver (`CorePorts.agentScope`), which reads its own
+  // configurations through the person's read gate and may expand `plugins:`
+  // through the link index above — or core's default, which offers no agent
+  // and loads nothing for a path it cannot read. Core owns the mechanism and
+  // no configuration (see `modules/agent-scope`).
+  const agentScopeService: IAgentScopeResolver = ports.agentScope ?? noAgentConfigurations();
   const pluginIndexService = new PluginIndexService(
     workspaceService,
     accessControl,

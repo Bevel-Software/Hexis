@@ -21,7 +21,7 @@ export interface ConnectAsChoiceProps {
 }
 
 /**
- * "Connect as": Everything (selected by default) or one `.agent` file, by
+ * "Connect as": Everything (selected by default) or one agent configuration, by
  * name with its description. Used where a connection is made — the OAuth
  * consent step and the connection-key form — so both offer the same choice
  * the same way.
@@ -65,7 +65,7 @@ export function ConnectAsChoice({ agents, value, onChange, disabled, hint, unava
       </div>
       {unavailable && (
         <div role="alert" className="text-xs text-danger bg-danger-soft border border-danger rounded-md px-2 py-1.5 space-y-1">
-          <p>Your agent files couldn't be loaded, so only Everything can be chosen right now.</p>
+          <p>Your agents couldn't be loaded, so only Everything can be chosen right now.</p>
           <label className="flex items-center gap-1.5 cursor-pointer">
             <input
               type="checkbox"

@@ -153,7 +153,7 @@ export interface McpCaller {
    */
   connectionId?: string | null;
   /**
-   * The `.agent` file the caller's credential connects as (a connection
+   * The agent configuration the caller's credential connects as (a connection
    * key's, or an agent connection's), or null for Everything. It rides the
    * request's loopback identity, so every agent surface behind the loopback
    * narrows to that agent's scope (`modules/agent-scope`); here it only keys
@@ -244,7 +244,7 @@ interface RequestSurface {
    * The agent the catalog was narrowed to, as `all-tools` reported it —
    * absent for Everything. A call to a tool not on a narrowed surface is
    * refused by name and agent rather than as unknown, and a connection whose
-   * agent file cannot be used is served nothing, with the sentence that says
+   * agent configuration cannot be used is served nothing, with the sentence that says
    * why.
    */
   connection?: ConnectionScopeWire;
@@ -621,7 +621,7 @@ export class McpService {
           return undefined;
         }),
       ]);
-      // A connection whose agent file cannot be used is served NOTHING — not
+      // A connection whose agent configuration cannot be used is served NOTHING — not
       // Everything — and the one sentence saying why rides the listing's
       // `_meta` (the handshake carries it too).
       if (connection?.unavailable) {

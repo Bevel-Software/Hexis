@@ -389,7 +389,7 @@ export function ConnectToolsPage() {
                   agents={connectAs.agents}
                   value={connectAs.value}
                   disabled={finishing}
-                  hint="What this connection loads. An agent file narrows it to the tools, skills and plugins the file lists, and only those you may read."
+                  hint="What this connection loads. An agent narrows it to the tools, skills and plugins its configuration lists, and only those you may read."
                   onChange={(path) => {
                     connectAs.setValue(path);
                     if (path) sessionStorage.setItem(MCP_OAUTH_AGENT_KEY, path);
