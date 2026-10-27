@@ -595,3 +595,91 @@ describe('DbSecretsVaultService — forceRefresh (a downstream rejected the toke
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });
+
+describe('DbSecretsVaultService — a refused token request says why', () => {
+  const confidentialRow = (blob: Record<string, unknown>) =>
+    sharedRow({
+      id: 'user-row-1',
+      userId: 'user-1',
+      oauthMeta: { ...PUBLIC_META, publicClient: false },
+      valueEncrypted: crypto.encrypt(JSON.stringify(blob)),
+    });
+
+  async function exchangeFailure(body: string, status = 400): Promise<SecretOAuthError> {
+    const { db } = makeFakeDb([[confidentialRow({ clientSecret: 'client-secret-1', pendingVerifier: 'the-verifier' })]]);
+    const svc = new DbSecretsVaultService(db, ENC_KEY);
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(body, { status })));
+    try {
+      await svc.completeOAuth('user-1', 'user-row-1', 'the-code', 'https://bevel.example.com/cb');
+    } catch (err) {
+      expect(err).toBeInstanceOf(SecretOAuthError);
+      return err as SecretOAuthError;
+    }
+    throw new Error('the exchange was expected to fail');
+  }
+
+  it('carries the OAuth error and its description, and the status', async () => {
+    const err = await exchangeFailure(
+      JSON.stringify({ error: 'invalid_grant', error_description: 'redirect_uri does not match' }),
+    );
+    expect(err.message).toBe('Token endpoint returned HTTP 400: invalid_grant — redirect_uri does not match');
+    expect(err.providerStatus).toBe(400);
+  });
+
+  it("carries a provider's status and message pair (HubSpot's shape)", async () => {
+    const err = await exchangeFailure(
+      JSON.stringify({ status: 'BAD_CLIENT_SECRET', message: 'client secret does not match', correlationId: 'c1' }),
+    );
+    expect(err.message).toBe('Token endpoint returned HTTP 400: BAD_CLIENT_SECRET — client secret does not match');
+  });
+
+  it('keeps the first line of a body that is not an OAuth error, bounded', async () => {
+    const err = await exchangeFailure('<html>Bad Gateway</html>\nsecond line', 502);
+    expect(err.message).toBe('Token endpoint returned HTTP 502: <html>Bad Gateway</html>');
+    const long = await exchangeFailure('x'.repeat(5000));
+    expect(long.message.length).toBeLessThan(400);
+    expect(long.message.endsWith('…')).toBe(true);
+  });
+
+  it('adds nothing for an empty body', async () => {
+    const err = await exchangeFailure('');
+    expect(err.message).toBe('Token endpoint returned HTTP 400');
+  });
+
+  it('redacts every request secret a provider echoes', async () => {
+    const err = await exchangeFailure(
+      JSON.stringify({
+        error: 'invalid_client',
+        error_description: 'secret client-secret-1 rejected for code the-code (verifier the-verifier)',
+      }),
+    );
+    expect(err.message).toBe(
+      'Token endpoint returned HTTP 400: invalid_client — secret [redacted] rejected for code [redacted] (verifier [redacted])',
+    );
+  });
+
+  it('a refused refresh is logged with the key and the reason as the sign-in is wiped', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const row = confidentialRow({
+      clientSecret: 'client-secret-1',
+      tokens: { access_token: 'at-old', refresh_token: 'rt-old', expires_at: 1 },
+    });
+    const { db } = makeFakeDb([[row], undefined]);
+    const svc = new DbSecretsVaultService(db, ENC_KEY);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ error: 'invalid_grant', error_description: 'rt-old was revoked' }), {
+            status: 400,
+          }),
+      ),
+    );
+
+    await expect(svc.forceRefresh('user-1', KEY)).resolves.toBe('rejected');
+
+    const line = warn.mock.calls.map((c) => String(c[0])).find((m) => m.includes('refresh refused'));
+    expect(line).toContain(`refresh refused for "${KEY}", sign-in wiped: Token endpoint returned HTTP 400: invalid_grant — [redacted] was revoked`);
+    warn.mockRestore();
+  });
+});

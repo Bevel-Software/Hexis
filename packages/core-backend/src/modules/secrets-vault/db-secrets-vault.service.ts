@@ -32,6 +32,43 @@ const MAX_VALUE_LEN = 100_000;
 const REFRESH_SKEW_MS = 60_000;
 /** Upper bound on a token-endpoint round-trip, so a hung provider can't block callers. */
 const TOKEN_REQUEST_TIMEOUT_MS = 10_000;
+/** How much of a refusing token endpoint's body is read for its reason: an OAuth error object, never a whole error page. */
+const TOKEN_ERROR_BODY_MAX = 2048;
+/** How long the reason kept in the error message (and so the log) may be. */
+const TOKEN_ERROR_REASON_MAX = 300;
+/** Request fields a provider might echo back that must never reach a log. */
+const TOKEN_REQUEST_SECRET_FIELDS = ['client_secret', 'code', 'code_verifier', 'refresh_token'] as const;
+
+/**
+ * A refusing token endpoint's own reason, in one line, for the error message
+ * and so the log: `error` and `error_description` when the body is an OAuth
+ * error (RFC 6749 §5.2), `status` and `message` when it is HubSpot's shape,
+ * the body's first line otherwise, and nothing for an empty body. Without it
+ * a bare "HTTP 400" cannot tell a redirect mismatch from a wrong client secret
+ * or a reused code. Any secret the REQUEST carried (client secret, code,
+ * verifier, refresh token) is redacted should the provider echo it.
+ */
+export function describeTokenEndpointError(bodyText: string, request: URLSearchParams): string {
+  const text = bodyText.slice(0, TOKEN_ERROR_BODY_MAX).trim();
+  if (!text) return '';
+  let reason = text;
+  try {
+    const json = JSON.parse(text) as Record<string, unknown>;
+    const pick = (keys: string[]) => keys.map((k) => json[k]).find((v) => typeof v === 'string' && v !== '') as string | undefined;
+    const parts = [pick(['error', 'status']), pick(['error_description', 'message'])].filter(
+      (p): p is string => p !== undefined,
+    );
+    if (parts.length) reason = parts.join(' — ');
+  } catch {
+    reason = text.split(/\r?\n/)[0];
+  }
+  reason = reason.replace(/\s+/g, ' ').trim();
+  for (const field of TOKEN_REQUEST_SECRET_FIELDS) {
+    const value = request.get(field);
+    if (value) reason = reason.split(value).join('[redacted]');
+  }
+  return reason.length > TOKEN_ERROR_REASON_MAX ? `${reason.slice(0, TOKEN_ERROR_REASON_MAX)}…` : reason;
+}
 
 /**
  * How a row is stored, or `null` when there is no row — the column is a plain
@@ -732,6 +769,9 @@ export class DbSecretsVaultService implements ISecretsVaultService {
         err instanceof SecretOAuthError &&
         (err.providerStatus === 400 || err.providerStatus === 401)
       ) {
+        // The only trace of a sign-in that silently turns into "not connected":
+        // say which one, and the provider's reason.
+        log.warn(`refresh refused for "${row.key}", sign-in wiped: ${err.message}`);
         return this.wipeTokens(row, blob);
       }
       return { outcome: 'transient' };
@@ -887,7 +927,11 @@ export class DbSecretsVaultService implements ISecretsVaultService {
       throw new SecretOAuthError(msg);
     }
     if (!res.ok) {
-      throw new SecretOAuthError(`Token endpoint returned HTTP ${res.status}`, res.status);
+      // The provider's reason rides in the message: the callback route and the
+      // refresh path log that message, and it is the one line that says WHY a
+      // sign-in failed (redirect mismatch, wrong client secret, reused code…).
+      const reason = describeTokenEndpointError(await res.text().catch(() => ''), body);
+      throw new SecretOAuthError(`Token endpoint returned HTTP ${res.status}${reason ? `: ${reason}` : ''}`, res.status);
     }
     const json = (await res.json()) as Record<string, unknown>;
     const accessToken = typeof json.access_token === 'string' ? json.access_token : '';
