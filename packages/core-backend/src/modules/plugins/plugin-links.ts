@@ -63,6 +63,19 @@ export interface LinkMembership {
 }
 
 /**
+ * What a reader of the link index asks it — the contract a consumer outside
+ * this module (a distribution's agent-scope resolver, through
+ * `CorePorts.agentScope`) is written against. Dropping the cache is the
+ * index owner's affair, not a reader's, so it is not here.
+ */
+export interface IPluginLinkIndex {
+  /** Every plugin's links and every skill's memberships, from the released catalog. */
+  membership(): Promise<LinkMembership>;
+  /** The memberships of one skill (empty when it is in no plugin). */
+  pluginsOf(skillPath: string): Promise<PluginMembership[]>;
+}
+
+/**
  * The link index: which shared skills each plugin links, and — the other way
  * round — which plugins each skill belongs to, whether by sitting inside the
  * plugin folder or by being linked from its manifest.
@@ -88,7 +101,7 @@ export interface LinkMembership {
  * subscriber that drops the plugin index, so a link committed on the default
  * branch shows within one round-trip.
  */
-export class PluginLinkIndex {
+export class PluginLinkIndex implements IPluginLinkIndex {
   private readonly cache: TtlCache<LinkMembership>;
 
   constructor(

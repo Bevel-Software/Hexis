@@ -12,11 +12,11 @@ import type { OnServerStart } from '../modules/workspace/startup/on-server-start
 import type { AgentGuideHook } from '../modules/agent-guide/agent-guide.js';
 import type { IAgentScopeResolver } from '../modules/agent-scope/index.js';
 import type { EmbedNodeIdResolver } from '../modules/embed/embed.interface.js';
-import type { WorkspaceService } from '../modules/workspace/workspace.service.js';
-import type { AccessControlService } from '../modules/access/access-control.service.js';
+import type { IWorkspaceService } from '@bevel-software/platform-shared';
+import type { IAccessControl } from '../modules/access/index.js';
 import type { KbContext } from '../shared/kb-context.js';
 import type { ITreeWalker } from '../shared/fs.contract.js';
-import type { PluginLinkIndex } from '../modules/plugins/plugin-links.js';
+import type { IPluginLinkIndex } from '../modules/plugins/index.js';
 
 /**
  * The core services a distribution's agent-scope resolver reads through,
@@ -24,13 +24,19 @@ import type { PluginLinkIndex } from '../modules/plugins/plugin-links.js';
  * branches, the person's read gate, the branch model and knowledge-base
  * layout, the disk walk that finds its configurations, and the plugin link
  * index that says which plugins a `plugins:`-style entry stands for.
+ *
+ * Each is the service's CONTRACT, not its class: a resolver written against
+ * these runs on any implementation of them — core's own services in a
+ * deployment, a stand-in in a distribution's tests — and a resolver that
+ * needs more than a contract offers asks for the contract to grow, not for
+ * the class.
  */
 export interface AgentScopeCollaborators {
-  workspaceService: WorkspaceService;
-  accessControl: AccessControlService;
+  workspaceService: IWorkspaceService;
+  accessControl: IAccessControl;
   kb: KbContext;
   disk: ITreeWalker;
-  pluginLinkIndex: PluginLinkIndex;
+  pluginLinkIndex: IPluginLinkIndex;
 }
 
 /**
