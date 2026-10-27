@@ -10,7 +10,7 @@ import { createHexisMcpServer } from '../server.js';
 import type { HexisMcpConfig } from '../config.js';
 
 /**
- * INTEGRATION: a connection made as an `.agent` file, through the local
+ * INTEGRATION: a connection made as an agent configuration, through the local
  * server. The deployment says what the connection is narrowed to on its
  * manual list and its catalog revision (`connection`), and refuses the
  * local-only tool list to a connection that loads nothing; this server
@@ -22,7 +22,7 @@ import type { HexisMcpConfig } from '../config.js';
 const REMOTE_TOOL = 'ping_probe';
 const NARROW = { agent: { path: 'Agents/narrow.agent', name: 'narrow' } };
 const GONE_SENTENCE =
-  'This connection was made as the agent file `Agents/gone.agent`, which no longer exists or which you can no ' +
+  'This connection was made as the agent `Agents/gone.agent`, which no longer exists or which you can no ' +
   'longer read, so it loads no tools and no skills. Reconnect and choose another agent, or Everything.';
 const GONE = { agent: { path: 'Agents/gone.agent', name: 'Agents/gone.agent' }, unavailable: GONE_SENTENCE };
 
@@ -141,7 +141,7 @@ describe('a connection made as Everything', () => {
   });
 });
 
-describe('a connection made as an .agent file', () => {
+describe('a connection made as an agent configuration', () => {
   it('is told so at the handshake, and a tool off its surface is refused by name and agent', { timeout: 60_000 }, async () => {
     connection = NARROW;
     const { client, shutdown } = await start();
@@ -163,7 +163,7 @@ describe('a connection made as an .agent file', () => {
   });
 });
 
-describe('a connection whose .agent file is gone', () => {
+describe('a connection whose agent configuration is gone', () => {
   it('starts, loads nothing, and says why in the handshake, the listing and every call', { timeout: 60_000 }, async () => {
     connection = GONE;
     const { client, stderr, shutdown } = await start();
