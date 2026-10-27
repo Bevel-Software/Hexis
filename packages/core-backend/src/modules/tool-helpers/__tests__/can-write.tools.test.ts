@@ -24,7 +24,9 @@ import { NodeFs } from '../../kb-fs/node-fs.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { BranchNotFoundError } from '../../../shared/domain-errors.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import { SkillService, registerSkillsTools } from '../../skills/index.js';
+import { registerSkillsTools } from '../../skills/index.js';
+// The service itself, from its file: the module entry offers it as a type only.
+import { SkillService } from '../../skills/skills.service.js';
 import { defaultBranchWriteVerdicts } from '../index.js';
 
 /**
