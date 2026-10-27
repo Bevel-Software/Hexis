@@ -1,4 +1,4 @@
-import type { IExternalApiKeyService, InternalTokenService } from '../tool-auth/index.js';
+import type { IExternalApiKeyService, InternalTokenService, ConnectionChoices } from '../tool-auth/index.js';
 import { createTokenVerifier } from '../tool-auth/index.js';
 import { createToolContextResolver, type ToolContextDeps } from './tool-context.js';
 import { ToolError, type ToolContext } from './tool.contract.js';
@@ -6,6 +6,8 @@ import { ToolError, type ToolContext } from './tool.contract.js';
 export interface ToolValidatorDeps extends ToolContextDeps {
   externalApiKeyService: IExternalApiKeyService;
   internalTokenService: InternalTokenService;
+  /** Where an agent connection's current "Connect as" choice is read (see `createTokenVerifier`). */
+  connections?: ConnectionChoices;
 }
 
 /**
@@ -34,7 +36,7 @@ export type ValidateToken = (
 ) => Promise<ToolContext>;
 
 export function createToolValidator(deps: ToolValidatorDeps): ValidateToken {
-  const verify = createTokenVerifier(deps.externalApiKeyService, deps.internalTokenService, deps.authService);
+  const verify = createTokenVerifier(deps.externalApiKeyService, deps.internalTokenService, deps.authService, deps.connections);
   const resolve = createToolContextResolver(deps);
   return async (token, signal) => {
     let result;

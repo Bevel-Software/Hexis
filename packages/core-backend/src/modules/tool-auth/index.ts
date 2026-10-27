@@ -10,5 +10,5 @@ import './external-api-key.interface.js';
 export type { InternalTokenService } from './internal-token.service.js';
 export type { ILlmUsageMeter } from './llm-usage-meter.js';
 export { createTokenVerifier, requireExternalSource, requireInternalSource } from './tool-auth.middleware.js';
-export type { ToolAuth } from './tool-auth.middleware.js';
+export type { ConnectionChoices, ToolAuth } from './tool-auth.middleware.js';
 import './tool-auth.middleware.js';

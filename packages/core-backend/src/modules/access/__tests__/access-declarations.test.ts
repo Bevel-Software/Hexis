@@ -111,6 +111,21 @@ describe('listAccessDeclarationsUnder', () => {
     ]);
   });
 
+  it("reads verbs out of an .agent file's definition, governing the file itself", async () => {
+    const { overrides } = await scan({
+      [`${KB}/Agents/ops.agent`]: fm('name: ops\nplatformTools: [read_file]\nwrite:\n  - Developer') + '\nNotes for people.\n',
+    }, 'Agents');
+
+    expect(overrides).toEqual([
+      {
+        path: 'Agents/ops.agent',
+        governs: 'Agents/ops.agent',
+        source: 'frontmatter',
+        entries: [{ verb: 'write', deny: false, principal: { kind: 'role', role: 'Developer' } }],
+      },
+    ]);
+  });
+
   it('ignores nodes whose frontmatter declares no access verb', async () => {
     const { overrides } = await scan({
       [`${KB}/Plugins/GTM/outreach/SKILL.md`]: fm('nodeType: Skill\ndescription: Runs outreach'),

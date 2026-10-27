@@ -13,6 +13,8 @@ import { branchHandlingFor, type BranchHandling } from './tool-def.js';
 import { domainErrorBody } from '../../shared/http-errors.js';
 import type { ResolveToolContext } from './tool-context.js';
 import { argumentsRefusal } from './route-argument-check.js';
+import { routeToolName, routeToolSchemasForRequest } from './route-tool-schemas.js';
+import { ConnectionScope, NOT_AVAILABLE_TO_CONNECTION } from '../agent-scope/index.js';
 import { alwaysWritable, READ_ONLY_CODE, refuseWriteTool, type IWriteAccess } from '../write-access/index.js';
 import '../tool-auth/index.js'; // Express Request.toolAuth augmentation
 
@@ -40,6 +42,17 @@ export interface ToolHandlerOptions {
    * being refused).
    */
   branch?: BranchHandling;
+  /**
+   * The route is ALSO the read path of the MCP prompts surface (`list_skills`
+   * and `get_skill`: both the hosted proxy and the local server build
+   * `prompts/list` and `prompts/get` on them). A connection's
+   * `platformTools` decides which tools its agent is OFFERED — the MCP
+   * listing and `tools/call` refuse the rest by name — not which prompts it
+   * has, so such a route is not refused for want of a `platformTools` entry.
+   * Its answer is still narrowed to the connection's skills by the handler,
+   * and a connection that loads nothing is refused it like any other route.
+   */
+  servesPrompts?: boolean;
 }
 
 /**
@@ -255,6 +268,21 @@ export function createToolHandlerFactory(
             ? withoutBranch(args)
             : args;
         const ctx = await resolve(auth, abort.signal, sessionId);
+        // The connection's scope, at the one route every caller of a platform
+        // tool arrives through — MCP, a chain, the local server, a script with
+        // a key — and before the tool runs. A connection made as an `.agent`
+        // file that does not list this tool is refused it by name.
+        const toolName = routeToolSchemasForRequest(req.originalUrl)?.name ?? routeToolName(req.originalUrl);
+        const scope =
+          ctx.connectionScope ?? (auth.agentPath ? ConnectionScope.gone(auth.agentPath) : ConnectionScope.everything());
+        // The handler narrows by the scope decided here, so a context built
+        // without one cannot read as Everything inside the tool either.
+        ctx.connectionScope = scope;
+        const allowed = scope.allowsPlatformTool(toolName) || (opts.servesPrompts === true && scope.allowsPrompts());
+        if (!allowed) {
+          res.status(403).json({ error: scope.refusal(toolName), code: NOT_AVAILABLE_TO_CONNECTION });
+          return;
+        }
         if (resolved) ctx.branch = resolved.branch;
         let out = await handler(toolArgs, ctx);
         // A defaulted call's answer says which branch it ran on, so a caller
@@ -315,3 +343,5 @@ function withoutBranch(args: Record<string, unknown>): Record<string, unknown> {
 }
 
 export type ToolHandlerFactory = ReturnType<typeof createToolHandlerFactory>;
+
+export { NOT_AVAILABLE_TO_CONNECTION };

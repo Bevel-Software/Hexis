@@ -287,6 +287,15 @@ export const externalApiKeys = pgTable('api_tokens', {
    * deleted in one step.
    */
   deletedAt: timestamp('deleted_at'),
+  /**
+   * The `.agent` file the key connects as — a repo-relative knowledge-base
+   * path, chosen when the key is minted. Null is Everything: the key sees
+   * every tool, skill and plugin its owner may read, exactly as before the
+   * column existed. The path is the whole record: the file is re-read on
+   * every surface build, so editing it changes what the key sees without a
+   * new key (see `modules/agent-scope`).
+   */
+  agentPath: text('agent_path'),
 }, (t) => ({
   byUser: index('api_tokens_by_user').on(t.userId),
 }));
@@ -496,6 +505,12 @@ export const oauthAuthCodes = pgTable('oauth_auth_codes', {
   expiresAt: timestamp('expires_at').notNull(),
   consumedAt: timestamp('consumed_at'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
+  /**
+   * The "Connect as" choice made on the consent step, carried from Finish to
+   * the token exchange that makes (or finds) the agent connection — the code
+   * is the only thing that travels between the two. Null is Everything.
+   */
+  agentPath: text('agent_path'),
 }, (t) => ({
   // Sweep expired/spent rows without a full scan.
   byExpiry: index('oauth_auth_codes_by_expiry').on(t.expiresAt),
@@ -535,6 +550,14 @@ export const agentConnections = pgTable('agent_connections', {
   revokedAt: timestamp('revoked_at'),
   /** `owner` | `admin` — who ended it; null while live. Same vocabulary as `api_tokens.revoked_by`. */
   revokedBy: text('revoked_by'),
+  /**
+   * The `.agent` file the person chose to connect as on the consent step — a
+   * repo-relative knowledge-base path — or null for Everything. Set by every
+   * consent that lands on the row, so re-authorising with another choice
+   * changes what the agent sees from its next request. Same meaning as
+   * `api_tokens.agent_path`.
+   */
+  agentPath: text('agent_path'),
 }, (t) => ({
   byUser: index('agent_connections_by_user').on(t.userId),
   liveUnq: uniqueIndex('agent_connections_live_unq')

@@ -66,6 +66,14 @@ async function olderDeployment(withColumn: boolean): Promise<Database> {
   return db;
 }
 
+/** How many migrations the packaged history holds — what a fresh start records as applied. */
+function packagedHistoryLength(): number {
+  const journal = JSON.parse(readFileSync(path.join(coreMigrationsDir(), 'meta', '_journal.json'), 'utf8')) as {
+    entries: unknown[];
+  };
+  return journal.entries.length;
+}
+
 /** Each account's generation, in a fixed order. */
 const generations = async (db: Database) =>
   (await db.execute(sql`select session_version from users order by session_version`)).rows.map(
@@ -114,9 +122,11 @@ describe.skipIf(!PG_ADMIN_URL)('migration 0022 (users.session_version), on a rea
 
       expect(await columnShape(db)).toEqual(EXPECTED_SHAPE);
       expect(await generations(db)).toEqual([3, 7]);
-      // And 0022 is recorded as applied, so the next start does not try it again.
+      // And 0022 is recorded as applied, so the next start does not try it
+      // again — judged against the packaged history's own length, so a later
+      // migration does not make this count stale.
       const applied = await db.execute(sql`select count(*)::int as n from drizzle.__drizzle_migrations_core`);
-      expect((applied.rows[0] as { n: number }).n).toBe(23);
+      expect((applied.rows[0] as { n: number }).n).toBe(packagedHistoryLength());
     },
     PG_TEST_TIMEOUT,
   );
