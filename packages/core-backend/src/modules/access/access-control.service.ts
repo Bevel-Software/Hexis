@@ -1366,26 +1366,56 @@ function keysOfHolder(model: AccessModel, holder: ResolvedPrincipal): ReadonlySe
 }
 
 /**
- * The holders of `verb` on one side of a move that do not hold it on the
- * other. Each is put to the other side's resolver as the gates would put it,
- * not looked up in the other side's list: that list names grants, so it
- * misses a group still covered there by `everyone`, and it cannot show one a
- * rule there denies.
+ * Who loses and who gains `verb` between the two sides of a move. The
+ * candidates are every principal and person a rule on either side names for
+ * the verb, as a grant or as a denial, and every holder either side lists;
+ * each is put to both sides' resolvers as the gates would put it. The holder
+ * lists alone are not enough: they name grants, so they miss a group still
+ * covered by `everyone`, and they cannot show someone whose only access was
+ * `everyone` and whom a rule on the far side denies by name.
  */
-function holdersNotKept(verb: 'read' | 'write', from: MoveSide, to: MoveSide): HolderChange[] {
-  const held = eligibleHoldersResolved(from.model, verb, from.path, from.own);
-  const lost: HolderChange[] = [];
-  for (const holder of held.principals) {
-    if (!hasPermissionForKeys(to.model, verb, keysOfHolder(to.model, holder), to.path, to.own)) {
-      lost.push({ kind: holder.kind, name: holder.name, verb });
+function holderChangesFor(verb: 'read' | 'write', here: MoveSide, there: MoveSide): HolderChanges {
+  const collectives = new Map<string, { holder: ResolvedPrincipal; keys: ReadonlySet<string> }>();
+  const people = new Set<string>();
+  const addCollective = (holder: ResolvedPrincipal, keys: ReadonlySet<string>) => {
+    const id = `${holder.kind}\0${holder.name.toLowerCase()}`;
+    if (!collectives.has(id)) collectives.set(id, { holder, keys });
+  };
+  for (const side of [here, there]) {
+    const held = eligibleHoldersResolved(side.model, verb, side.path, side.own);
+    for (const holder of held.principals) addCollective(holder, keysOfHolder(side.model, holder));
+    for (const user of held.users) people.add(user.email);
+    const { byRole, byEmail } = resolveAtPath(side.model, verb, side.path, side.own);
+    for (const token of byRole.keys()) {
+      const record = side.model.roles.byCanonical.get(token);
+      addCollective(
+        { name: record ? record.displayName : token, kind: record?.kind ?? 'role' },
+        principalKeysOfToken(side.model, token),
+      );
     }
+    for (const email of byEmail.keys()) people.add(email);
   }
-  for (const user of held.users) {
-    if (!hasPermissionResolved(to.model, verb, user.email, to.path, to.own)) {
-      lost.push({ kind: 'person', name: user.name || user.email, email: user.email, verb });
-    }
+  const lose: HolderChange[] = [];
+  const gain: HolderChange[] = [];
+  const record = (had: boolean, has: boolean, change: HolderChange) => {
+    if (had && !has) lose.push(change);
+    if (!had && has) gain.push(change);
+  };
+  for (const { holder, keys } of collectives.values()) {
+    record(
+      hasPermissionForKeys(here.model, verb, keys, here.path, here.own),
+      hasPermissionForKeys(there.model, verb, keys, there.path, there.own),
+      { kind: holder.kind, name: holder.name, verb },
+    );
   }
-  return lost;
+  for (const email of [...people].sort()) {
+    record(
+      hasPermissionResolved(here.model, verb, email, here.path, here.own),
+      hasPermissionResolved(there.model, verb, email, there.path, there.own),
+      { kind: 'person', name: email, email, verb },
+    );
+  }
+  return { lose, gain };
 }
 
 /**
@@ -1978,8 +2008,9 @@ export class AccessControlService implements IAccessControl {
     const lose: HolderChange[] = [];
     const gain: HolderChange[] = [];
     for (const verb of ['read', 'write'] as const) {
-      lose.push(...holdersNotKept(verb, here, there));
-      gain.push(...holdersNotKept(verb, there, here));
+      const changes = holderChangesFor(verb, here, there);
+      lose.push(...changes.lose);
+      gain.push(...changes.gain);
     }
     return { lose, gain };
   }
