@@ -731,6 +731,13 @@ describe('DbSecretsVaultService — a refused token request says why', () => {
       pendingVerifier: 'the-verifier',
     });
     expect(cut.message).toBe('Token endpoint returned HTTP 400');
+    // The same with a two-byte character right after the cap: the decoded text
+    // is 2048 bytes long and would pass for complete; the raw read says cut.
+    const utf8 = await exchangeFailure(`${' '.repeat(2045)}abcéXYZsecret and more`, 400, {
+      clientSecret: 'abcéXYZsecret',
+      pendingVerifier: 'the-verifier',
+    });
+    expect(utf8.message).toBe('Token endpoint returned HTTP 400');
     // A plain-text body that merely FILLS the cap (2048 bytes exactly) is
     // complete and is quoted, cut to the reason's own length.
     const full = await exchangeFailure(`${'x'.repeat(2040)} refused`, 400);
@@ -844,9 +851,34 @@ describe('DbSecretsVaultService — a refused token request says why', () => {
     expect(updates).toEqual([]);
 
     const line = warn.mock.calls.map((c) => String(c[0])).find((m) => m.includes('refresh refused'));
-    expect(line).toContain(`refresh refused for "${KEY}" against a token a concurrent refresh had already rotated`);
+    expect(line).toContain(`refresh refused for "${KEY}", the row had been rotated by a concurrent refresh meanwhile`);
     expect(line).toContain('the rotated sign-in is kept: Token endpoint returned HTTP 400: invalid_grant');
-    expect(line).not.toContain('wiped');
+    expect(line).not.toContain('sign-in wiped');
+    warn.mockRestore();
+  });
+
+  it('a refused refresh whose wipe matched nothing because the row was replaced logs that nothing was wiped', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const row = confidentialRow({
+      clientSecret: 'client-secret-1',
+      tokens: { access_token: 'at-old', refresh_token: 'rt-old', expires_at: 1 },
+    });
+    // Read as the OAuth row it was; by the time the wipe writes, an edit has
+    // made it a static value, so the guarded wipe matches nothing and no grant
+    // is there to serve: `rejected`, yet nothing was wiped.
+    const { db, updates } = whereAwareDb(
+      { ...row, kind: 'static', valueEncrypted: crypto.encrypt(JSON.stringify({ value: 'x' })) },
+      { valueEncrypted: row.valueEncrypted, kind: 'oauth' },
+    );
+    const svc = new DbSecretsVaultService(db, ENC_KEY);
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ error: 'invalid_grant' }), { status: 400 })));
+
+    await expect(svc.forceRefresh('user-1', KEY)).resolves.toBe('rejected');
+    expect(updates).toEqual([]);
+
+    const line = warn.mock.calls.map((c) => String(c[0])).find((m) => m.includes('refresh refused'));
+    expect(line).toContain(`refresh refused for "${KEY}", the row had been removed or replaced meanwhile; nothing wiped:`);
+    expect(line).not.toContain('sign-in wiped');
     warn.mockRestore();
   });
 });

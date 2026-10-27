@@ -8,7 +8,7 @@ import { secrets } from '../database/index.js';
 import { TokenCrypto } from '../../shared/token-crypto.js';
 import { assertSafeFetchUrl } from '../../shared/ssrf.js';
 import { redactSecret } from '../../shared/redact-secret.js';
-import { readCapped } from '../../shared/read-capped.js';
+import { readCappedBytes } from '../../shared/read-capped.js';
 import {
   type ISecretsVaultService,
   type SecretSummary,
@@ -802,11 +802,12 @@ export class DbSecretsVaultService implements ISecretsVaultService {
         // a concurrent refresh may have rotated the tokens first, in which case
         // nothing was wiped and the rotated grant is served.
         const result = await this.wipeTokens(row, blob);
-        log.warn(
-          result.outcome === 'rejected'
-            ? `refresh refused for "${row.key}", sign-in wiped: ${err.message}`
-            : `refresh refused for "${row.key}" against a token a concurrent refresh had already rotated; the rotated sign-in is kept: ${err.message}`,
-        );
+        const did = result.wiped
+          ? 'sign-in wiped'
+          : result.outcome === 'refreshed'
+            ? 'the row had been rotated by a concurrent refresh meanwhile; the rotated sign-in is kept'
+            : 'the row had been removed or replaced meanwhile; nothing wiped';
+        log.warn(`refresh refused for "${row.key}", ${did}: ${err.message}`);
         return result;
       }
       return { outcome: 'transient' };
@@ -869,7 +870,10 @@ export class DbSecretsVaultService implements ISecretsVaultService {
   private async wipeTokens(
     row: typeof secrets.$inferSelect,
     blob: OAuthBlob,
-  ): Promise<{ outcome: 'refreshed'; accessToken: string } | { outcome: 'rejected'; accessToken: null }> {
+  ): Promise<
+    | { outcome: 'refreshed'; accessToken: string; wiped: false }
+    | { outcome: 'rejected'; accessToken: null; wiped: boolean }
+  > {
     const next: OAuthBlob = { clientSecret: blob.clientSecret };
     // Guarded on the ciphertext we read, so a concurrent refresh that
     // already persisted ROTATED tokens can't be wiped by our stale
@@ -882,13 +886,17 @@ export class DbSecretsVaultService implements ISecretsVaultService {
       .where(and(eq(secrets.id, row.id), eq(secrets.valueEncrypted, row.valueEncrypted)))
       .returning({ id: secrets.id });
     if (Array.isArray(wiped) && wiped.length === 0) {
+      // `wiped: false` either way: this write matched nothing, and the caller
+      // reports what it did, not what it set out to do.
       const fresh = await this.currentAccessToken(row.id);
-      return fresh ? { outcome: 'refreshed', accessToken: fresh } : { outcome: 'rejected', accessToken: null };
+      return fresh
+        ? { outcome: 'refreshed', accessToken: fresh, wiped: false }
+        : { outcome: 'rejected', accessToken: null, wiped: false };
     }
     // The sign-in just became not-connected — let credential-validity caches
     // (pooled downstream connections dialed with the dead token) drop it now.
     this.notifyMutation(row.userId);
-    return { outcome: 'rejected', accessToken: null };
+    return { outcome: 'rejected', accessToken: null, wiped: true };
   }
 
   async putSharedOAuthProvider(input: {
@@ -968,15 +976,14 @@ export class DbSecretsVaultService implements ISecretsVaultService {
       // Best effort: the STATUS is the contract (the refresh path reads 400/401
       // off it to retire a dead grant), and a body that fails to read must not
       // turn a definitive refusal into an unclassified error.
-      // One byte past the cap is read so a body that merely FILLS the cap can
-      // be told from one that was cut at it; only a body that ended within the
-      // cap may be quoted as plain text.
-      const bodyText = await readCapped(res, TOKEN_ERROR_BODY_MAX_BYTES + 1).catch(() => '');
-      const reason = describeTokenEndpointError(
-        bodyText,
-        body,
-        Buffer.byteLength(bodyText, 'utf8') <= TOKEN_ERROR_BODY_MAX_BYTES,
-      );
+      // Whether the body ended within the cap is the reader's raw-byte word,
+      // never inferred from the decoded text; only a body that did may be
+      // quoted as plain text.
+      const refusal = await readCappedBytes(res, TOKEN_ERROR_BODY_MAX_BYTES).catch(() => ({
+        text: '',
+        truncated: false,
+      }));
+      const reason = describeTokenEndpointError(refusal.text, body, !refusal.truncated);
       throw new SecretOAuthError(`Token endpoint returned HTTP ${res.status}${reason ? `: ${reason}` : ''}`, res.status);
     }
     const json = (await res.json()) as Record<string, unknown>;

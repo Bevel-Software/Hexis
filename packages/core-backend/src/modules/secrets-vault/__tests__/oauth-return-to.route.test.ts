@@ -275,6 +275,20 @@ describe('GET /api/secrets/oauth/callback — where the browser lands', () => {
     );
   });
 
+  it("keeps the generic message for the vault's own TRANSPORT errors, which quote what fetch said", async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    completeOAuth.mockImplementation(async () => {
+      // No provider status: not a provider's word, and never scrubbed.
+      throw new SecretOAuthError('Token endpoint request failed: fetch failed https://user:pw@provider.example/token');
+    });
+    const base = await baseUrl();
+    const state = signState({ u: 'u1', i: 'secret-1', n: 'nonce', r: RETURN_TO });
+    const location = await callback(base, state);
+    expect(decodeURIComponent(location.split('#error=')[1])).toBe(
+      'Authorization failed. Check the provider configuration and try again.',
+    );
+  });
+
   it('lands PRE-verification errors on /secrets, unchanged', async () => {
     const base = await baseUrl();
     // A tampered state can't be trusted for `r`, so its destination is the

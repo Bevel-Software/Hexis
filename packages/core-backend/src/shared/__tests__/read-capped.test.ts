@@ -1,5 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { readCapped } from '../read-capped.js';
+import { readCapped, readCappedBytes } from '../read-capped.js';
+
+function streamOf(...parts: string[]): ReadableStream<Uint8Array> {
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const part of parts) controller.enqueue(new TextEncoder().encode(part));
+      controller.close();
+    },
+  });
+}
 
 describe('readCapped', () => {
   /**
@@ -9,15 +18,7 @@ describe('readCapped', () => {
    * reader directly because a caller's short snippet is identical either way.
    */
   it('holds one oversized chunk to the byte budget, not just the loop', async () => {
-    const oneHugeChunk = new ReadableStream<Uint8Array>({
-      start(controller) {
-        controller.enqueue(new TextEncoder().encode('x'.repeat(5_000_000)));
-        controller.close();
-      },
-    });
-
-    const out = await readCapped(new Response(oneHugeChunk), 8 * 1024);
-
+    const out = await readCapped(new Response(streamOf('x'.repeat(5_000_000))), 8 * 1024);
     expect(out.length).toBe(8 * 1024);
   });
 
@@ -35,17 +36,28 @@ describe('readCapped', () => {
       },
     });
 
-    const out = await readCapped(new Response(endless), 2048);
+    const out = await readCappedBytes(new Response(endless), 2048);
 
-    expect(out).toBe('z'.repeat(2048));
+    expect(out).toEqual({ text: 'z'.repeat(2048), truncated: true });
     expect(pulls).toBeLessThanOrEqual(3);
     expect(cancelled).toBe(true);
+  });
+
+  it('tells a body that fills the limit from one cut at it, on raw bytes', async () => {
+    expect(await readCappedBytes(new Response(streamOf('a'.repeat(8))), 8)).toEqual({ text: 'a'.repeat(8), truncated: false });
+    expect(await readCappedBytes(new Response(streamOf('a'.repeat(8), 'b')), 8)).toEqual({ text: 'a'.repeat(8), truncated: true });
+    // A two-byte character straddling the limit: the decoded text is one byte
+    // short of the limit, yet the body went past it — `truncated` says so.
+    const straddle = await readCappedBytes(new Response(streamOf(`${'a'.repeat(7)}éX`)), 8);
+    expect(straddle.truncated).toBe(true);
+    expect(straddle.text.startsWith('a'.repeat(7))).toBe(true);
+    expect(straddle.text).not.toContain('X');
   });
 
   it('reads a stream-less response whole, cut to the budget', async () => {
     const res = new Response('abcdef');
     // Consume the stream so only `text()` is left, as a mocked response may be.
     Object.defineProperty(res, 'body', { value: null });
-    expect(await readCapped(res, 4)).toBe('abcd');
+    expect(await readCappedBytes(res, 4)).toEqual({ text: 'abcd', truncated: true });
   });
 });

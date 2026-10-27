@@ -637,12 +637,15 @@ export function createSecretsVaultPublicRoutes(deps: SecretsVaultRoutesDeps): ex
       back(`authorized=${encodeURIComponent(state.i)}`, dest);
     } catch (err) {
       log.error('oauth callback failed:', { err });
-      // The vault's own error carries the provider's reason, already scrubbed
-      // of every secret the request held and cut to one line — the one thing
-      // the person on the Connect page (or the agent they paste it to) can act
-      // on: a redirect mismatch, a wrong client secret, a reused code. Any
-      // other failure stays the generic line; it is not a provider's word.
-      const reason = err instanceof SecretOAuthError ? ` ${err.message}.` : '';
+      // A provider's REFUSAL (the vault's error carrying the provider's HTTP
+      // status) carries its reason, already scrubbed of every secret the
+      // request held and cut to one line — the one thing the person on the
+      // Connect page (or the agent they paste it to) can act on: a wrong
+      // client id or secret, a redirect mismatch, a reused code. Every other
+      // failure stays the generic line: a transport error quotes what fetch
+      // said, which is not a provider's word and was never scrubbed.
+      const reason =
+        err instanceof SecretOAuthError && err.providerStatus !== undefined ? ` ${err.message}.` : '';
       back(
         `error=${encodeURIComponent(`Authorization failed.${reason} Check the provider configuration and try again.`)}`,
         dest,
