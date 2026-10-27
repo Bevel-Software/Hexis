@@ -58,7 +58,11 @@ export const LINK_GRANT_VERBS = ['read', 'write'] as const;
 export interface LinkMembership {
   /** skill path → every plugin that holds it, inline or by link. */
   bySkill: Map<string, PluginMembership[]>;
-  /** plugin folder → its links. Every plugin folder appears, linked or not. */
+  /**
+   * plugin identity (`PluginLinks.name`) → its links. Every plugin appears,
+   * linked or not. A name and a folder may differ, so a repository path is
+   * read from the value's `folder`, never from the key.
+   */
   byPlugin: Map<string, PluginLinks>;
 }
 
