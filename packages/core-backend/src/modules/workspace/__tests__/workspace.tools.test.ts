@@ -3456,19 +3456,24 @@ describe('preflight for moves and deletes', () => {
       expect(await exists(args.src)).toBe(false);
     });
 
-    it('who else holds access is never named to a caller who cannot read what moves', async () => {
-      let asked = 0;
+    it('who else holds access is never named to a caller who cannot read what moves, and the move still asks first', async () => {
       const base = await start('write', {
         ...rules,
-        prospectiveHolderChanges: async () => {
-          asked++;
-          return { lose: [{ kind: 'group', name: 'Board', verb: 'read' }], gain: [] };
-        },
+        prospectiveHolderChanges: async () => ({ lose: [{ kind: 'group', name: 'Board', verb: 'read' }], gain: [] }),
       } as unknown as IAccessControl);
       await fs.writeFile(KB('Secret/plan.md'), 'plan');
-      const dry = await call(base, 'move_file', { src: KB('Secret/plan.md'), dest: KB('Sales/plan.md'), dryRun: true });
+      // A draft is not write-gated, so a caller who cannot read either end may
+      // still move it; their own access is the same at both, nobody else's is.
+      const args = { branch: 'someone/draft', src: KB('Secret/plan.md'), dest: KB('Secret/old/plan.md') };
+      const dry = await call(base, 'move_file', { ...args, dryRun: true });
+      expect(dry.body).toMatchObject({ allowed: true, accessChanges: false });
       expect(dry.body.holderChanges).toBeUndefined();
-      expect(asked).toBe(0);
+      const unconfirmed = await call(base, 'move_file', args);
+      expect(unconfirmed.body).toMatchObject({ confirmationRequired: true, moved: false });
+      expect(unconfirmed.body.holderChanges).toBeUndefined();
+      expect(JSON.stringify(unconfirmed.body)).not.toContain('Board');
+      expect(unconfirmed.body.message).not.toContain('holderChanges');
+      expect(await exists(args.src)).toBe(true);
     });
 
     it('an access-changing move shows before/after and runs only with confirm: true', async () => {

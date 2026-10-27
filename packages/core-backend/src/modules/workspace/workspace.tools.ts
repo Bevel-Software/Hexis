@@ -3584,14 +3584,16 @@ export function registerWorkspaceTools(
       ]);
       const accessChanges = verbsDiffer(before, after);
       // Who ELSE gains or loses opening or editing it: the lists the app's move
-      // confirmation shows people, under the rule its route keeps (the caller
-      // reads what moves). Outside the repository no rules travel.
+      // confirmation shows people. A change asks for `confirm` whoever calls,
+      // but the names go only to a caller who reads what moves, the rule the
+      // app's route keeps. Outside the repository no rules travel.
       const fromRel = toKbRelative(src, kbDirName);
       const toRel = toKbRelative(dest, kbDirName);
-      const changes = before.read && fromRel !== null && toRel !== null
+      const changes = fromRel !== null && toRel !== null
         ? await accessControl.prospectiveHolderChanges(workspaceIdForBranch(branch), fromRel, toRel)
         : undefined;
       const othersChange = changes !== undefined && (changes.lose.length > 0 || changes.gain.length > 0);
+      const namesOthers = othersChange && before.read;
       // The placeholder moves with its folder, but it is never content.
       const descendants = srcFiles.filter((f) => !isFolderPlaceholder(f)).length;
       // Neither end may be the platform's own: a move neither takes a platform
@@ -3699,7 +3701,7 @@ export function registerWorkspaceTools(
         descendants,
         access: { before, after },
         accessChanges,
-        ...(othersChange ? { holderChanges: changes } : {}),
+        ...(namesOthers ? { holderChanges: changes } : {}),
         allowed: moveReason === undefined,
         ...(moveReason !== undefined ? { reason: moveReason } : {}),
         ...(linkPlan ? { links: linkPlan.report } : {}),
@@ -3718,7 +3720,7 @@ export function registerWorkspaceTools(
       if ((accessChanges || othersChange) && a.confirm !== true) {
         const why = [
           ...(accessChanges ? [`your access at "${dest}" differs from "${src}"`] : []),
-          ...(othersChange ? ['it changes who else may open or edit it (`holderChanges`)'] : []),
+          ...(othersChange ? [`it changes who else may open or edit it${namesOthers ? ' (`holderChanges`)' : ''}`] : []),
         ];
         return {
           ...impact,
