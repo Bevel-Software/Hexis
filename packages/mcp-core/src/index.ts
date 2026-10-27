@@ -169,6 +169,19 @@ export {
 
 export { printable } from './printable.js';
 
+// A connection made as an `.agent` file, as the deployment says it on the
+// wire and as both MCP servers word it: one module, so the hosted proxy and
+// the local server cannot describe or refuse the same connection differently.
+export {
+  CONNECTION_META_KEY,
+  NOT_AVAILABLE_TO_CONNECTION,
+  connectionRefusal,
+  connectionWireOf,
+  describeConnection,
+  type ConnectionScopeWire,
+  type ScopeAgent,
+} from './connection-scope-wire.js';
+
 // Loading this package teaches UTCP `auth_type: google_service_account`, on
 // both surfaces alike: the auth type validates and the `http` protocol mints
 // the token. A side effect of the import, like the `@utcp/http` registration

@@ -39,6 +39,10 @@ import {
   skillPromptText,
   toListedResource,
   toReadResourceResult,
+  CONNECTION_META_KEY,
+  connectionRefusal,
+  describeConnection,
+  type ConnectionScopeWire,
   type McpAppManifest,
   type ProxiedTool,
   type SkillSummary,
@@ -49,9 +53,9 @@ import {
   callKbTool,
   ConnectionKeyRejectedError,
   fetchAllManuals,
+  fetchCatalogState,
   fetchMcpApps,
   fetchToolHints,
-  fetchCatalogRevision,
   fetchLocalOnlyManuals,
   resolveDeployment,
   fetchAgentInstructions,
@@ -489,6 +493,34 @@ export async function createHexisMcpServer(
         'sessions start without them.',
     );
   }
+  // The catalog's state, read once ahead of the handshake from a deployment
+  // that advertises the route (an older one would answer the unknown path
+  // through its JWT mounts with a 401, which reads as a dead credential):
+  // its revision is the catalog watch's baseline below, and what the
+  // connection is narrowed to goes into the `initialize` result — a
+  // connection made as an `.agent` file is told so, as the hosted endpoint
+  // tells it, and one that loads nothing is told why there. Never fatal: a
+  // deployment that cannot answer is one whose tools still work, frozen at
+  // what discovery finds, an unknown baseline costs exactly one refresh (see
+  // `createCatalogCheck`), and Everything is told nothing new, so its
+  // handshake is exactly what it was.
+  const catalogAtStart = catalogRevisionAdvertised
+    ? await fetchCatalogState(config).then(
+        (state) => state,
+        (err: unknown) => {
+          // A rejected key is the deployment's verdict on the whole run: said as such.
+          if (err instanceof ConnectionKeyRejectedError) throw err;
+          return null;
+        },
+      )
+    : null;
+  const connectionAtStart = catalogAtStart?.connection;
+  const connectionLine = describeConnection(connectionAtStart);
+  const handshakeInstructions = connectionLine
+    ? instructions
+      ? `${instructions}\n\n${connectionLine}`
+      : connectionLine
+    : instructions;
 
   /**
    * CREDENTIAL SWAP (OAuth mode). The remote manual's MCP session captured
@@ -546,6 +578,14 @@ export async function createHexisMcpServer(
   let tools: ProxiedTool[] = [];
   /** Why discovery failed, if it did: the sentence every handler answers with. */
   let discoveryError: string | null = null;
+  /**
+   * The agent this connection is narrowed to, as the deployment last said it
+   * (with the manual list, at discovery and at every refresh): words the
+   * refusal of a tool off the surface, and — for a file that cannot be used
+   * — the one sentence the listing and every call answer. Undefined for
+   * Everything, which lists and refuses exactly as before.
+   */
+  let connection: ConnectionScopeWire | undefined = connectionAtStart;
   /**
    * The deployment's MCP Apps: the `ui://` views its tools carry, which this
    * server forwards on `tools/list` and serves on `resources/read`.
@@ -755,10 +795,11 @@ export async function createHexisMcpServer(
       // them. `materializePlugin` refreshes a plugin from scratch on every
       // call, so a local server whose files were committed is spawned below
       // from the committed files, in a root its old child no longer holds.
-      const [allManuals, localOnlyNow] = await Promise.all([
+      const [{ manuals: allManuals, connection: connectionNow }, localOnlyNow] = await Promise.all([
         fetchAllManuals(config),
         fetchLocalOnlyManuals(config),
       ]);
+      connection = connectionNow;
       const local = await prepareLocalManuals(
         config,
         localManualTemplates(allManuals, new Set(localOnlyNow.keys())),
@@ -873,27 +914,19 @@ export async function createHexisMcpServer(
     // discovery registers: a commit landing between the two reads would then
     // be inside the baseline and outside the toolset, and the first poll —
     // seeing the revision it already holds — would report no change, leaving
-    // that commit's tool invisible until a restart. Read first, the error is
-    // the harmless one: a commit in the gap makes the baseline stale, the
-    // first poll calls it a change, and one refresh settles it.
-    //
-    // Only when the deployment ADVERTISES the route: an older one would answer
-    // the unknown path through its JWT mounts with a 401, which reads as a
-    // dead credential. Never fatal either way — a deployment that cannot
-    // answer it is one whose tools still work, frozen at what discovery found,
-    // and an unknown baseline costs exactly one refresh (see `createCatalogCheck`).
-    const baselineRevision = catalogRevisionAdvertised
-      ? await fetchCatalogRevision(config).then(
-          (r) => r,
-          () => null,
-        )
-      : null;
+    // that commit's tool invisible until a restart. Read first — at startup,
+    // ahead of the handshake, as the one read that also tells the handshake
+    // what the connection is narrowed to — the error is the harmless one: a
+    // commit in the gap makes the baseline stale, the first poll calls it a
+    // change, and one refresh settles it.
+    const baselineRevision = catalogAtStart?.revision ?? null;
     if (closed) return;
-    const [allManuals, localOnlyFound] = await Promise.all([
+    const [{ manuals: allManuals, connection: connectionFound }, localOnlyFound] = await Promise.all([
       fetchAllManuals(config),
       fetchLocalOnlyManuals(config),
     ]);
     if (closed) return;
+    connection = connectionFound;
     for (const [name, info] of localOnlyFound) localOnly.set(name, info);
     const local = await prepareLocalManuals(
       config,
@@ -1106,7 +1139,7 @@ export async function createHexisMcpServer(
           // which is what a client must tolerate from any resource server.
           resources: {},
         },
-        ...(instructions !== undefined ? { instructions } : {}),
+        ...(handshakeInstructions !== undefined ? { instructions: handshakeInstructions } : {}),
       },
     );
 
@@ -1126,6 +1159,10 @@ export async function createHexisMcpServer(
       // toolset is what a tool-less workspace looks like, and a client that
       // shows one gives its reader nothing to act on.
       if (discoveryError !== null) return { tools: [discoveryNoticeTool(discoveryError)] };
+      // A connection whose agent file cannot be used loads NOTHING — not
+      // Everything — and the one sentence saying why rides the listing's
+      // `_meta`, as it does on the hosted endpoint (the handshake carries it too).
+      if (connection?.unavailable) return { tools: [], _meta: { [CONNECTION_META_KEY]: connection.unavailable } };
       // Shutdown can land DURING discovery: every phase boundary then returns
       // early, which is a clean return — no error, and `tools` still empty.
       // Answering that with an empty listing would show the reader exactly
@@ -1180,6 +1217,9 @@ export async function createHexisMcpServer(
           `hexis-mcp could not load this workspace's tools: ${discoveryError}`,
         );
       }
+      // Nothing is callable on a connection that loads nothing, meta-tools
+      // included: every call is answered with the reason.
+      if (connection?.unavailable) return toolError(connection.unavailable);
       // Never start a call mid-re-registration — a swap or a recovery may have
       // the manual between its deregister and its register, where a repository
       // lookup finds nothing.
@@ -1205,7 +1245,10 @@ export async function createHexisMcpServer(
         const retired = retiredToolMessage(name);
         if (retired) return toolError(retired);
         const tool = tools.find((t) => t.mcpName === name);
-        if (!tool) return toolError(`Unknown tool "${name}".`);
+        // On a narrowed connection, a tool off the surface is one its agent
+        // does not load: refused by name and agent, never "unknown" — the tool
+        // may well exist, for this person, on another connection.
+        if (!tool) return toolError(connection ? connectionRefusal(name, connection) : `Unknown tool "${name}".`);
         const progressToken = request.params._meta?.progressToken;
         return await dispatchToolCall(
           live,

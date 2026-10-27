@@ -1,56 +1,16 @@
 import { pathUnderRoot } from '@bevel-software/platform-shared';
+import {
+  NOT_AVAILABLE_TO_CONNECTION,
+  connectionRefusal,
+  describeConnection,
+  type ConnectionScopeWire,
+  type ScopeAgent,
+} from '@bevel-software/platform-mcp-core';
 
-/** The `code` beside a refusal of what the caller's connection does not load. */
-export const NOT_AVAILABLE_TO_CONNECTION = 'not_available_to_connection';
-
-/** The agent a connection was made as, by the file that defines it. */
-export interface ScopeAgent {
-  /** Repo-relative path of the `.agent` file. */
-  path: string;
-  /** Its name — the frontmatter `name`, else the file's base name; the path when the file cannot be read. */
-  name: string;
-}
-
-/**
- * What a connection's scope says about itself on the wire — the `connection`
- * field of `GET /api/agent/all-tools` and `GET /api/agent/catalog-revision`,
- * which the MCP proxy (hosted and local) reads to word its listing, its
- * refusals and its handshake text. Absent for Everything.
- */
-export interface ConnectionScopeWire {
-  agent: ScopeAgent;
-  /** Set when the connection loads nothing because its file cannot be used: the one sentence saying why. */
-  unavailable?: string;
-}
-
-/**
- * The answer to a call of `toolName` that the connection described by
- * `wire` does not load: names the tool and the agent, so the caller knows
- * the tool was refused by the connection's choice and not missing from the
- * deployment; for a file that cannot be used, the sentence that says why.
- * The ONE wording — the tool route and the MCP proxy both answer with it.
- */
-export function connectionRefusal(toolName: string, wire: ConnectionScopeWire | undefined): string {
-  if (!wire) return `The tool "${toolName}" is not available to this connection.`;
-  if (wire.unavailable) return wire.unavailable;
-  return (
-    `The tool "${toolName}" is not available to this connection: it is connected as the agent ` +
-    `"${wire.agent.name}" (\`${wire.agent.path}\`), which does not load it.`
-  );
-}
-
-/**
- * The one line an agent is told about its connection (the MCP handshake, the
- * agent guide); null for Everything, which is told nothing new.
- */
-export function describeConnection(wire: ConnectionScopeWire | undefined): string | null {
-  if (!wire) return null;
-  if (wire.unavailable) return wire.unavailable;
-  return (
-    `This connection is connected as the agent "${wire.agent.name}" (\`${wire.agent.path}\`): it loads only the ` +
-    'platform tools, connectors, skills and plugins that file lists, and of those only what you may read.'
-  );
-}
+// The wire and its words are the MCP core's (`connection-scope-wire.ts`),
+// so the hosted proxy and the local server read and word a connection the
+// same way; offered here too, as this module's callers learnt them.
+export { NOT_AVAILABLE_TO_CONNECTION, connectionRefusal, describeConnection, type ConnectionScopeWire, type ScopeAgent };
 
 /**
  * The resolved roots a usable `.agent` file narrows a connection to — what

@@ -75,7 +75,16 @@ import {
   type ComposedAgentInstructions,
 } from '../agent-instructions/index.js';
 import { guideFirstDescription } from '../tool-registry/index.js';
-import { connectionRefusal, describeConnection, type ConnectionScopeWire } from '../agent-scope/index.js';
+import {
+  CONNECTION_META_KEY,
+  connectionRefusal,
+  connectionWireOf,
+  describeConnection,
+  type ConnectionScopeWire,
+} from '@bevel-software/platform-mcp-core';
+
+// Still offered from here, as this module's tests and callers learnt it.
+export { CONNECTION_META_KEY };
 
 /**
  * Configuration for the loopback proxy. `loopbackBaseUrl` is the backend's own
@@ -242,27 +251,13 @@ interface RequestSurface {
 }
 
 /**
- * Where the sentence saying why a connection loads nothing rides a
- * `tools/list` answer: the listing has no description of its own, and an
- * empty `tools` array alone would read as an outage.
- */
-export const CONNECTION_META_KEY = 'software.bevel.hexis/connection';
-
-/**
  * The `connection` a loopback answer (`all-tools`, `catalog-revision`)
- * carries, validated at the boundary: HTTP loses the type. A malformed one
- * is dropped, which serves the surface the loopback listed — itself already
- * narrowed by the agent surfaces.
+ * carries, as a field to spread: validated at the boundary by the MCP
+ * core's reader (HTTP loses the type), and absent for Everything.
  */
-function connectionOf(body: { connection?: unknown } | null): { connection?: ConnectionScopeWire } {
-  const raw = body?.connection as { agent?: { path?: unknown; name?: unknown }; unavailable?: unknown } | undefined;
-  if (!raw || typeof raw.agent?.path !== 'string' || typeof raw.agent.name !== 'string') return {};
-  return {
-    connection: {
-      agent: { path: raw.agent.path, name: raw.agent.name },
-      ...(typeof raw.unavailable === 'string' && raw.unavailable ? { unavailable: raw.unavailable } : {}),
-    },
-  };
+function connectionOf(body: unknown): { connection?: ConnectionScopeWire } {
+  const connection = connectionWireOf(body);
+  return connection ? { connection } : {};
 }
 
 /**
