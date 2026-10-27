@@ -596,7 +596,7 @@ describe('DbSecretsVaultService — forceRefresh (a downstream rejected the toke
   });
 });
 
-describe('DbSecretsVaultService — a refused token request says why', () => {
+describe("DbSecretsVaultService — a refused token request names the provider's error code, never its text", () => {
   const confidentialRow = (blob: Record<string, unknown>) =>
     sharedRow({
       id: 'user-row-1',
@@ -604,11 +604,15 @@ describe('DbSecretsVaultService — a refused token request says why', () => {
       oauthMeta: { ...PUBLIC_META, publicClient: false },
       valueEncrypted: crypto.encrypt(JSON.stringify(blob)),
     });
+  const SECRET = 'client-secret-1';
+  const BLOB = { clientSecret: SECRET, pendingVerifier: 'the-verifier' };
+  const INVALID_CLIENT =
+    'Token endpoint returned HTTP 400 (invalid_client). The client id or client secret this sign-in uses is not accepted by the provider. The tool owner should check the declared client id and set the client secret again.';
 
   async function exchangeFailure(
     body: string | ReadableStream<Uint8Array>,
     status = 400,
-    blob: Record<string, unknown> = { clientSecret: 'client-secret-1', pendingVerifier: 'the-verifier' },
+    blob: Record<string, unknown> = BLOB,
   ): Promise<SecretOAuthError> {
     const { db } = makeFakeDb([[confidentialRow(blob)]]);
     const svc = new DbSecretsVaultService(db, ENC_KEY);
@@ -622,130 +626,54 @@ describe('DbSecretsVaultService — a refused token request says why', () => {
     throw new Error('the exchange was expected to fail');
   }
 
-  it('carries the OAuth error and its description, and the status', async () => {
-    const err = await exchangeFailure(
-      JSON.stringify({ error: 'invalid_client', error_description: 'client authentication failed' }),
+  it('names an OAuth error code and says what to do about it, with the status', async () => {
+    const client = await exchangeFailure(
+      JSON.stringify({ error: 'invalid_client', error_description: 'Client authentication failed' }),
     );
-    expect(err.message).toBe('Token endpoint returned HTTP 400: invalid_client — client authentication failed');
-    expect(err.providerStatus).toBe(400);
+    expect(client.message).toBe(INVALID_CLIENT);
+    expect(client.providerStatus).toBe(400);
+    const grant = await exchangeFailure(JSON.stringify({ error: 'invalid_grant' }));
+    expect(grant.message).toBe(
+      'Token endpoint returned HTTP 400 (invalid_grant). The provider refused the authorization code: a redirect URL mismatch, or an expired or reused code. Try signing in again.',
+    );
   });
 
-  it("carries a provider's status and message pair (HubSpot's shape)", async () => {
+  it("names a provider's own status code (HubSpot's shape) with the generic sentence", async () => {
     const err = await exchangeFailure(
       JSON.stringify({ status: 'BAD_CLIENT_SECRET', message: 'client secret does not match', correlationId: 'c1' }),
     );
-    expect(err.message).toBe('Token endpoint returned HTTP 400: BAD_CLIENT_SECRET — client secret does not match');
-  });
-
-  it('keeps the first line of a body that is not an OAuth error, and cuts a long reason', async () => {
-    const err = await exchangeFailure('<html>Bad Gateway</html>\nsecond line', 502);
-    expect(err.message).toBe('Token endpoint returned HTTP 502: <html>Bad Gateway</html>');
-    // Within the read cap, so the body parses; the reason itself is cut to length.
-    const long = await exchangeFailure(JSON.stringify({ error: 'server_error', error_description: 'x'.repeat(1500) }));
-    expect(long.message.length).toBeLessThan(400);
-    expect(long.message.endsWith('…')).toBe(true);
-    // A plain-text body longer than the read cap was cut there: nothing of it is quoted.
-    const cutPlain = await exchangeFailure('x'.repeat(5000));
-    expect(cutPlain.message).toBe('Token endpoint returned HTTP 400');
-  });
-
-  it('adds nothing for an empty body', async () => {
-    const err = await exchangeFailure('');
-    expect(err.message).toBe('Token endpoint returned HTTP 400');
-  });
-
-  it('redacts every request secret a provider echoes', async () => {
-    const err = await exchangeFailure(
-      JSON.stringify({
-        error: 'invalid_client',
-        error_description: 'secret client-secret-1 rejected for code the-code (verifier the-verifier)',
-      }),
-    );
     expect(err.message).toBe(
-      'Token endpoint returned HTTP 400: invalid_client — secret *** rejected for code *** (verifier ***)',
+      'Token endpoint returned HTTP 400 (BAD_CLIENT_SECRET). The provider refused the token request with that code.',
     );
   });
 
-  it('redacts a secret a JSON body carries in its escaped spelling', async () => {
-    // In the body the secret reads `se\"cr\\et`; parsing spells it out again,
-    // so a scrub of the raw body would miss it and the log would carry it.
-    const err = await exchangeFailure(
-      JSON.stringify({ error: 'invalid_client', error_description: 'secret se"cr\\et refused' }),
-      400,
-      { clientSecret: 'se"cr\\et', pendingVerifier: 'the-verifier' },
-    );
-    expect(err.message).toBe('Token endpoint returned HTTP 400: invalid_client — secret *** refused');
+  it('takes nothing of the body but the code: descriptions, unknown shapes, plain text and cut bodies leave no trace', async () => {
+    const withDescription = JSON.stringify({ error: 'invalid_client', error_description: `secret ${SECRET} rejected` });
+    expect((await exchangeFailure(withDescription)).message).toBe(INVALID_CLIENT);
+    for (const body of [
+      JSON.stringify({ detail: `${SECRET} rejected` }),
+      `<html>${SECRET} rejected</html>`,
+      `${SECRET} rejected\nmore`,
+      JSON.stringify({ error: 'invalid_client', error_description: SECRET }).slice(0, 30),
+      JSON.stringify(`${SECRET} rejected`),
+      JSON.stringify([`${SECRET} rejected`]),
+      '{}',
+      '',
+    ]) {
+      expect((await exchangeFailure(body)).message).toBe('Token endpoint returned HTTP 400');
+    }
   });
 
-  it('never quotes JSON as written: an unknown shape contributes its decoded strings, a cut JSON body nothing', async () => {
-    const blob = { clientSecret: 'se"cr\\et', pendingVerifier: 'the-verifier' };
-    // No known field: the decoded string values, scrubbed — not the raw text
-    // where the secret reads `se\"cr\\et` and no plain-spelling scrub finds it.
-    const unknown = await exchangeFailure(JSON.stringify({ detail: 'se"cr\\et rejected', code: 17 }), 400, blob);
-    expect(unknown.message).toBe('Token endpoint returned HTTP 400: *** rejected');
-    // A JSON body cut short at the read cap does not parse; its first line is
-    // JSON as written, so it contributes nothing but the status.
-    const cut = JSON.stringify({ error: 'invalid_client', error_description: 'se"cr\\et rejected' }).slice(0, 40);
-    const truncated = await exchangeFailure(cut, 400, blob);
-    expect(truncated.message).toBe('Token endpoint returned HTTP 400');
-    // A plain-text body keeps its first line; a secret there is spelled plainly.
-    const plain = await exchangeFailure('se"cr\\et rejected\nmore', 400, blob);
-    expect(plain.message).toBe('Token endpoint returned HTTP 400: *** rejected');
-    // A cut JSON STRING does not parse and does not start with a brace, yet it
-    // is JSON as written all the same: nothing but the status.
-    const cutString = await exchangeFailure(JSON.stringify('refused se"cr\\et here').slice(0, 18), 400, blob);
-    expect(cutString.message).toBe('Token endpoint returned HTTP 400');
-  });
-
-  it('scrubs a plain-text body whole before taking its first line, so a secret with a line break leaves no head', async () => {
-    const err = await exchangeFailure('refused: first-half\nsecond-half of it\nmore', 400, {
-      clientSecret: 'first-half\nsecond-half',
+  it('takes a code only when it reads as one: words of one case with underscores, never a request secret', async () => {
+    for (const code of ['Invalid_Client', 'bad code', 'e1', 'x'.repeat(70), 'a', 'the-code']) {
+      expect((await exchangeFailure(JSON.stringify({ error: code }))).message).toBe('Token endpoint returned HTTP 400');
+    }
+    // A secret shaped like a code, put where the code goes: still no code.
+    const echoed = await exchangeFailure(JSON.stringify({ error: 'wordy_secret' }), 400, {
+      clientSecret: 'wordy_secret',
       pendingVerifier: 'the-verifier',
     });
-    // Split first, the line would read `refused: first-half`.
-    expect(err.message).toBe('Token endpoint returned HTTP 400: refused: *** of it');
-  });
-
-  it('redacts a secret the provider quotes back in its wire spelling', async () => {
-    // A provider that echoes the request echoes it as received: percent-encoded
-    // in a URL, form-encoded in a body (`+` for a space).
-    const encoded = await exchangeFailure(
-      JSON.stringify({ error: 'invalid_client', error_description: 'client_secret=a%2Bb%2Fc%3D rejected' }),
-      400,
-      { clientSecret: 'a+b/c=', pendingVerifier: 'the-verifier' },
-    );
-    expect(encoded.message).toBe('Token endpoint returned HTTP 400: invalid_client — client_secret=*** rejected');
-    const form = await exchangeFailure(
-      JSON.stringify({ error: 'invalid_client', error_description: 'client_secret=pass+word+here rejected' }),
-      400,
-      { clientSecret: 'pass word here', pendingVerifier: 'the-verifier' },
-    );
-    expect(form.message).toBe('Token endpoint returned HTTP 400: invalid_client — client_secret=*** rejected');
-  });
-
-  it('quotes no plain text from a body cut at the read cap, where the head of a secret could end it', async () => {
-    // 2045 spaces then the secret: the cap (2048 bytes) ends on its first three
-    // characters, too few for the redactor's echoed-prefix floor to catch.
-    const cut = await exchangeFailure(`${' '.repeat(2045)}abcXYZsecret and more`, 400, {
-      clientSecret: 'abcXYZsecret',
-      pendingVerifier: 'the-verifier',
-    });
-    expect(cut.message).toBe('Token endpoint returned HTTP 400');
-    // The same with a two-byte character right after the cap: the decoded text
-    // is 2048 bytes long and would pass for complete; the raw read says cut.
-    const utf8 = await exchangeFailure(`${' '.repeat(2045)}abcéXYZsecret and more`, 400, {
-      clientSecret: 'abcéXYZsecret',
-      pendingVerifier: 'the-verifier',
-    });
-    expect(utf8.message).toBe('Token endpoint returned HTTP 400');
-    // A plain-text body that exactly FILLS the cap (2048 bytes) is not seen to
-    // end — no byte past the cap is read, so it cannot be told from a longer
-    // one — and is not quoted either; one byte shorter, it is.
-    const full = await exchangeFailure(`${'x'.repeat(2040)} refused`, 400);
-    expect(full.message).toBe('Token endpoint returned HTTP 400');
-    const under = await exchangeFailure(`${'x'.repeat(2039)} refused`, 400);
-    expect(under.message.startsWith('Token endpoint returned HTTP 400: xxx')).toBe(true);
-    expect(under.message.endsWith('…')).toBe(true);
+    expect(echoed.message).toBe('Token endpoint returned HTTP 400');
   });
 
   it('keeps the status when the refusal body cannot be read, so a refused refresh still retires the grant', async () => {
@@ -760,33 +688,13 @@ describe('DbSecretsVaultService — a refused token request says why', () => {
     expect(err.providerStatus).toBe(401);
 
     const { db, captured } = makeFakeDb([
-      [confidentialRow({ clientSecret: 'client-secret-1', tokens: { access_token: 'at', refresh_token: 'rt', expires_at: 1 } })],
+      [confidentialRow({ clientSecret: SECRET, tokens: { access_token: 'at', refresh_token: 'rt', expires_at: 1 } })],
       undefined,
     ]);
     const svc = new DbSecretsVaultService(db, ENC_KEY);
     vi.stubGlobal('fetch', vi.fn(async () => new Response(failing(), { status: 400 })));
     await expect(svc.forceRefresh('user-1', KEY)).resolves.toBe('rejected');
-    expect(JSON.parse(crypto.decrypt(captured.set[0].valueEncrypted))).toEqual({ clientSecret: 'client-secret-1' });
-  });
-
-  it('redacts a secret with whitespace in it, and one the length cut would otherwise split', async () => {
-    // Scrubbed on the body as received: collapsing whitespace or cutting to
-    // length first would leave such a secret, or a fragment of it, in the log.
-    const spaced = await exchangeFailure(
-      JSON.stringify({ error: 'invalid_client', error_description: 'refused:  pass  word\n echoed' }),
-      400,
-      { clientSecret: 'pass  word\n', pendingVerifier: 'the-verifier' },
-    );
-    expect(spaced.message).toBe('Token endpoint returned HTTP 400: invalid_client — refused: *** echoed');
-
-    // "invalid_client — " + 275 x + a space puts the secret at character 293 of
-    // the reason, across the 300-character cut: cut first, "client-" survives.
-    const straddling = await exchangeFailure(
-      JSON.stringify({ error: 'invalid_client', error_description: `${'x'.repeat(275)} client-secret-1 ${'y'.repeat(50)}` }),
-    );
-    expect(straddling.message).not.toContain('client-');
-    expect(straddling.message).toContain('***');
-    expect(straddling.message.length).toBeLessThan(400);
+    expect(JSON.parse(crypto.decrypt(captured.set[0].valueEncrypted))).toEqual({ clientSecret: SECRET });
   });
 
   it('reads a refusal body only up to its cap and cancels the rest of the stream', async () => {
@@ -803,16 +711,15 @@ describe('DbSecretsVaultService — a refused token request says why', () => {
       },
     });
     const err = await exchangeFailure(endless, 502);
-    // Cut at the cap, so no plain text is quoted: the status alone.
     expect(err.message).toBe('Token endpoint returned HTTP 502');
-    expect(pulls).toBeLessThanOrEqual(4);
+    expect(pulls).toBeLessThanOrEqual(3);
     expect(cancelled).toBe(true);
   });
 
-  it('a refused refresh is logged with the key and the reason as the sign-in is wiped', async () => {
+  it('a refused refresh is logged with the key, the outcome and the code as the sign-in is wiped', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const row = confidentialRow({
-      clientSecret: 'client-secret-1',
+      clientSecret: SECRET,
       tokens: { access_token: 'at-old', refresh_token: 'rt-old', expires_at: 1 },
     });
     const { db } = makeFakeDb([[row], undefined]);
@@ -830,20 +737,19 @@ describe('DbSecretsVaultService — a refused token request says why', () => {
     await expect(svc.forceRefresh('user-1', KEY)).resolves.toBe('rejected');
 
     const line = warn.mock.calls.map((c) => String(c[0])).find((m) => m.includes('refresh refused'));
-    expect(line).toContain(
-      `refresh refused for "${KEY}", sign-in wiped: Token endpoint returned HTTP 400: invalid_grant — *** was revoked`,
-    );
+    expect(line).toContain(`refresh refused for "${KEY}", sign-in wiped: Token endpoint returned HTTP 400 (invalid_grant).`);
+    expect(line).not.toContain('rt-old');
     warn.mockRestore();
   });
 
   it('a refused refresh that lost to a concurrent rotation logs that the rotated sign-in was kept, not wiped', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const row = confidentialRow({
-      clientSecret: 'client-secret-1',
+      clientSecret: SECRET,
       tokens: { access_token: 'at-old', refresh_token: 'rt-old', expires_at: 1 },
     });
     const rotated = crypto.encrypt(
-      JSON.stringify({ clientSecret: 'client-secret-1', tokens: { access_token: 'rotated-at', refresh_token: 'rt-2' } }),
+      JSON.stringify({ clientSecret: SECRET, tokens: { access_token: 'rotated-at', refresh_token: 'rt-2' } }),
     );
     // The row moved on between our read and our guarded wipe: the wipe matches nothing.
     const { db, updates } = whereAwareDb({ ...row, valueEncrypted: rotated }, row.valueEncrypted);
@@ -855,7 +761,7 @@ describe('DbSecretsVaultService — a refused token request says why', () => {
 
     const line = warn.mock.calls.map((c) => String(c[0])).find((m) => m.includes('refresh refused'));
     expect(line).toContain(`refresh refused for "${KEY}", the row had been rotated by a concurrent refresh meanwhile`);
-    expect(line).toContain('the rotated sign-in is kept: Token endpoint returned HTTP 400: invalid_grant');
+    expect(line).toContain('the rotated sign-in is kept: Token endpoint returned HTTP 400 (invalid_grant)');
     expect(line).not.toContain('sign-in wiped');
     warn.mockRestore();
   });
@@ -863,7 +769,7 @@ describe('DbSecretsVaultService — a refused token request says why', () => {
   it('a refused refresh whose wipe matched nothing because the row was replaced logs that nothing was wiped', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const row = confidentialRow({
-      clientSecret: 'client-secret-1',
+      clientSecret: SECRET,
       tokens: { access_token: 'at-old', refresh_token: 'rt-old', expires_at: 1 },
     });
     // Read as the OAuth row it was; by the time the wipe writes, an edit has

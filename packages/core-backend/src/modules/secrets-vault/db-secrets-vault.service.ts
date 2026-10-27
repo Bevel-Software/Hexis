@@ -7,8 +7,7 @@ import type { Database } from '../database/index.js';
 import { secrets } from '../database/index.js';
 import { TokenCrypto } from '../../shared/token-crypto.js';
 import { assertSafeFetchUrl } from '../../shared/ssrf.js';
-import { redactSecret } from '../../shared/redact-secret.js';
-import { readCappedBytes } from '../../shared/read-capped.js';
+import { readCapped } from '../../shared/read-capped.js';
 import {
   type ISecretsVaultService,
   type SecretSummary,
@@ -34,68 +33,57 @@ const MAX_VALUE_LEN = 100_000;
 const REFRESH_SKEW_MS = 60_000;
 /** Upper bound on a token-endpoint round-trip, so a hung provider can't block callers. */
 const TOKEN_REQUEST_TIMEOUT_MS = 10_000;
-/** How much of a refusing token endpoint's body is read for its reason: an OAuth error object, never a whole error page. */
+/** How much of a refusing token endpoint's body is read for its error code: an OAuth error object, never a whole error page. */
 const TOKEN_ERROR_BODY_MAX_BYTES = 2048;
-/** How long the reason kept in the error message (and so the log) may be. */
-const TOKEN_ERROR_REASON_MAX = 300;
-/** Request fields a provider might echo back that must never reach a log. */
+/** Request fields a provider might echo back; a "code" equal to one of them is no code. */
 const TOKEN_REQUEST_SECRET_FIELDS = ['client_secret', 'code', 'code_verifier', 'refresh_token'] as const;
+/** What an error code looks like: words of one case joined by underscores (`invalid_client`, `BAD_CLIENT_SECRET`). */
+const TOKEN_ERROR_CODE = /^(?:[a-z][a-z_]{1,63}|[A-Z][A-Z_]{1,63})$/;
+/** Hexis's own sentence per OAuth error code (RFC 6749 §5.2): what to do, in our words, never the provider's. */
+const TOKEN_ERROR_HINTS: Record<string, string> = {
+  invalid_client:
+    'The client id or client secret this sign-in uses is not accepted by the provider. The tool owner should check the declared client id and set the client secret again.',
+  invalid_grant:
+    'The provider refused the authorization code: a redirect URL mismatch, or an expired or reused code. Try signing in again.',
+  invalid_scope:
+    "The provider refused the scopes this sign-in asks for. The tool owner should check the declared scopes against the provider's app.",
+  unauthorized_client:
+    "The provider does not allow this client to use the authorization-code flow. The tool owner should check the provider's app settings.",
+};
+const TOKEN_ERROR_HINT_DEFAULT = 'The provider refused the token request with that code.';
 
 /**
- * A refusing token endpoint's own reason, in one line, for the error message
- * and so the log: `error` and `error_description` when the body is an OAuth
- * error (RFC 6749 §5.2), `status` and `message` when it is HubSpot's shape,
- * the body's first line otherwise, and nothing for an empty body. Without it
- * a bare "HTTP 400" cannot tell a redirect mismatch from a wrong client secret
- * or a reused code.
- *
- * The reason is scrubbed by the shared redactor with every secret the REQUEST
- * carried (client secret, code, verifier, refresh token) AFTER it is taken
- * out of the body and BEFORE it is collapsed to one line and cut to length:
- * after, because a JSON body carries a secret in its escaped spelling and
- * parsing is what spells it out again; before, because collapsing whitespace
- * or cutting would leave a whitespace-bearing secret, or a fragment, standing.
- *
- * For the same reason the message never carries JSON text as written: a JSON
- * body with none of the known fields contributes its decoded string values,
- * and a body that starts like a JSON value (`{`, `[`, `"`) but does not parse
- * (cut at the read cap) contributes nothing, since a cut JSON string could
- * still carry an escaped secret. Only a body that is not JSON at all is
- * quoted by its first line, where a secret can only be spelled plainly, and
- * that body is scrubbed whole BEFORE the first line is taken, so a secret
- * with a line break in it cannot leave its head on that line — and only when
- * the body ENDED within the read cap (`complete`): a body cut at the cap can
- * end with the first few characters of a secret, too few for the redactor's
- * echoed-prefix floor, so a cut plain-text body contributes nothing either.
- *
- * The redactor is given each secret as sent AND as the wire spells it — the
- * percent-encoding and the form encoding of the request body — since a
- * provider that quotes the request back quotes it as received.
+ * The error CODE a refusing token endpoint answered, or null: `error` (RFC
+ * 6749 §5.2) or a provider's own `status` (HubSpot's shape), when it reads
+ * as a code — words of one case joined by underscores — and is not a secret
+ * the request held. Nothing else of the body is ever taken: no description,
+ * no message, no first line. A code is the one field whose vocabulary the
+ * provider fixes and whose shape a secret does not take, so a message built
+ * from it needs no scrubbing, cutting or decoding — the only way every
+ * spelling a secret could reach a log in (escaped, encoded, cut) stays
+ * inexpressible. Without even the code, a bare "HTTP 400" cannot tell a
+ * client the provider does not accept from a refused authorization code.
  */
-export function describeTokenEndpointError(bodyText: string, request: URLSearchParams, complete = true): string {
-  const text = bodyText.trim();
-  if (!text) return '';
-  const secrets = TOKEN_REQUEST_SECRET_FIELDS.map((field) => request.get(field)).flatMap((value) =>
-    value ? [value, encodeURIComponent(value), new URLSearchParams([['v', value]]).toString().slice(2)] : [],
-  );
-  const scrub = (s: string) => redactSecret(s, secrets);
-  let reason: string;
+export function tokenEndpointErrorCode(bodyText: string, request: URLSearchParams): string | null {
+  let json: unknown;
   try {
-    const json = JSON.parse(text) as unknown;
-    const strings = (values: unknown[]) => values.filter((v): v is string => typeof v === 'string' && v !== '');
-    if (json && typeof json === 'object' && !Array.isArray(json)) {
-      const record = json as Record<string, unknown>;
-      const pick = (keys: string[]) => strings(keys.map((k) => record[k]))[0];
-      const parts = strings([pick(['error', 'status']), pick(['error_description', 'message'])]);
-      reason = (parts.length ? parts : strings(Object.values(record))).join(' — ');
-    } else {
-      reason = strings([json]).join('');
-    }
+    json = JSON.parse(bodyText);
   } catch {
-    reason = !complete || /^["[{]/.test(text) ? '' : scrub(text).split(/\r?\n/)[0];
+    return null;
   }
-  reason = scrub(reason).replace(/\s+/g, ' ').trim();
-  return reason.length > TOKEN_ERROR_REASON_MAX ? `${reason.slice(0, TOKEN_ERROR_REASON_MAX)}…` : reason;
+  if (!json || typeof json !== 'object' || Array.isArray(json)) return null;
+  const record = json as Record<string, unknown>;
+  const code = [record.error, record.status].find((v): v is string => typeof v === 'string');
+  if (!code || !TOKEN_ERROR_CODE.test(code)) return null;
+  const secrets: (string | null)[] = TOKEN_REQUEST_SECRET_FIELDS.map((field) => request.get(field));
+  return secrets.includes(code) ? null : code;
+}
+
+/** The refusal in one message: the status, the code when there is one, and Hexis's sentence for it. */
+export function describeTokenEndpointRefusal(status: number, code: string | null): string {
+  const base = `Token endpoint returned HTTP ${status}`;
+  if (!code) return base;
+  return `${base} (${code}). ${TOKEN_ERROR_HINTS[code] ?? TOKEN_ERROR_HINT_DEFAULT}`;
 }
 
 /**
@@ -970,23 +958,15 @@ export class DbSecretsVaultService implements ISecretsVaultService {
       throw new SecretOAuthError(msg);
     }
     if (!res.ok) {
-      // The provider's reason rides in the message: the callback route and the
-      // refresh path log that message, and it is the one line that says WHY a
-      // sign-in failed (redirect mismatch, wrong client secret, reused code…).
-      // Best effort: the STATUS is the contract (the refresh path reads 400/401
-      // off it to retire a dead grant), and a body that fails to read must not
-      // turn a definitive refusal into an unclassified error.
-      // Whether the body ended within the cap is the reader's word on the raw
-      // stream, never inferred from the decoded text; only a body SEEN to end
-      // may be quoted as plain text (one that exactly fills the cap is not,
-      // since telling it from a longer one would mean waiting for a byte that
-      // may never come).
-      const refusal = await readCappedBytes(res, TOKEN_ERROR_BODY_MAX_BYTES).catch(() => ({
-        text: '',
-        ended: false,
-      }));
-      const reason = describeTokenEndpointError(refusal.text, body, refusal.ended);
-      throw new SecretOAuthError(`Token endpoint returned HTTP ${res.status}${reason ? `: ${reason}` : ''}`, res.status);
+      // The provider's error CODE rides in the message: the callback route and
+      // the refresh path log that message, and it is the one line that says
+      // WHY a sign-in failed (a client the provider does not accept, a refused
+      // authorization code). Best effort: the STATUS is the contract (the
+      // refresh path reads 400/401 off it to retire a dead grant), and a body
+      // that fails to read must not turn a definitive refusal into an
+      // unclassified error.
+      const code = tokenEndpointErrorCode(await readCapped(res, TOKEN_ERROR_BODY_MAX_BYTES).catch(() => ''), body);
+      throw new SecretOAuthError(describeTokenEndpointRefusal(res.status, code), res.status);
     }
     const json = (await res.json()) as Record<string, unknown>;
     const accessToken = typeof json.access_token === 'string' ? json.access_token : '';

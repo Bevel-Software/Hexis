@@ -262,17 +262,17 @@ describe('GET /api/secrets/oauth/callback — where the browser lands', () => {
     );
   });
 
-  it("carries the provider's scrubbed reason to the page when the exchange was refused", async () => {
+  it("carries the provider's error code and Hexis's sentence to the page when the exchange was refused", async () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
+    const refusal =
+      'Token endpoint returned HTTP 400 (invalid_client). The client id or client secret this sign-in uses is not accepted by the provider. The tool owner should check the declared client id and set the client secret again.';
     completeOAuth.mockImplementation(async () => {
-      throw new SecretOAuthError('Token endpoint returned HTTP 400: invalid_client — client authentication failed', 400);
+      throw new SecretOAuthError(refusal, 400);
     });
     const base = await baseUrl();
     const state = signState({ u: 'u1', i: 'secret-1', n: 'nonce', r: RETURN_TO });
     const location = await callback(base, state);
-    expect(decodeURIComponent(location.split('#error=')[1])).toBe(
-      'Authorization failed. Token endpoint returned HTTP 400: invalid_client — client authentication failed. Check the provider configuration and try again.',
-    );
+    expect(decodeURIComponent(location.split('#error=')[1])).toBe(`Authorization failed. ${refusal}`);
   });
 
   it("keeps the generic message for the vault's own TRANSPORT errors, which quote what fetch said", async () => {
