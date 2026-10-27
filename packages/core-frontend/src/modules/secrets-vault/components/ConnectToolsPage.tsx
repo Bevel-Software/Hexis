@@ -8,7 +8,7 @@ import { setUserVar, setAdminVar, deleteUserVar, setOAuthClientSecret } from '..
 import { SavedKeyProbeResult } from '../probe/SavedKeyProbeResult';
 import { useSavedKeyProbe, type SavedKeyProbe } from '../probe/useSavedKeyProbe';
 import { announceToolCredentialsChanged } from '../../../core/events';
-import { canConnectAs, type AgentChoice } from '../../agents';
+import { useConnectAsChoice } from '../../agents';
 import { ConnectAsChoice } from '../../agents/components/ConnectAsChoice';
 import {
   getConnectPending,
@@ -115,18 +115,12 @@ export function ConnectToolsPage() {
   // Agent-connect mode: the signed authorization state + who is asking.
   const [agentState, setAgentState] = useState<string | null>(null);
   const [agentName, setAgentName] = useState<string | null>(null);
-  // "Connect as": the agents on offer, and the choice — Everything (null)
-  // unless the person picks one, and kept across a tool sign-in's round-trip.
-  const [agentChoices, setAgentChoices] = useState<AgentChoice[]>([]);
-  const [connectAs, setConnectAs] = useState<string | null>(rememberedConnectAs);
-  // The agents failed to load: Finish then waits for Everything to be confirmed.
-  const [choicesFailed, setChoicesFailed] = useState(false);
-  // The request whose agents have answered. Until the CURRENT one has, Finish
-  // would approve Everything by default, before the person saw the choice.
-  const [choicesSettledFor, setChoicesSettledFor] = useState<string | null>(null);
-  const [everythingConfirmed, setEverythingConfirmed] = useState(false);
-  const unavailable = choicesFailed ? { confirmed: everythingConfirmed, onConfirm: setEverythingConfirmed } : undefined;
-  const mayFinish = canConnectAs({ settled: agentState != null && choicesSettledFor === agentState, unavailable });
+  // "Connect as": the agents on offer and the choice — Everything unless the
+  // person picks one — kept across a tool sign-in's round-trip
+  // (`rememberedConnectAs`). Finish waits until the CURRENT request's agents
+  // have answered (before that it would approve Everything unseen), and for
+  // Everything to be confirmed when they could not be loaded.
+  const connectAs = useConnectAsChoice({ initial: rememberedConnectAs, expect: agentState });
   const [finishing, setFinishing] = useState(false);
   // Entries the user took OUT. Everything the server sent is in by default —
   // it used to be the other way round, and an unconfigured tool the reader had
@@ -200,6 +194,7 @@ export function ConnectToolsPage() {
 
   // Resolve who is asking; a stale/expired state silently drops the mode (the
   // agent restarts the flow if the user takes too long).
+  const settleConnectAs = connectAs.settle;
   useEffect(() => {
     if (!agentState) return;
     let cancelled = false;
@@ -207,12 +202,7 @@ export function ConnectToolsPage() {
       .then((r) => {
         if (cancelled) return;
         setAgentName(r.clientName);
-        const offered = r.agents ?? [];
-        setAgentChoices(offered);
-        setChoicesFailed(r.agentsUnavailable === true);
-        // A remembered choice that is no longer on offer falls back to Everything.
-        setConnectAs((current) => (current && offered.some((a) => a.path === current) ? current : null));
-        setChoicesSettledFor(agentState);
+        settleConnectAs({ agents: r.agents ?? [], failed: r.agentsUnavailable === true }, agentState);
       })
       .catch(() => {
         if (cancelled) return;
@@ -224,7 +214,7 @@ export function ConnectToolsPage() {
     return () => {
       cancelled = true;
     };
-  }, [agentState]);
+  }, [agentState, settleConnectAs]);
 
   // A sign-in came back to this page (the callback lands on whichever page
   // started it): the fragment it carried is stripped, now that it has been
@@ -259,10 +249,10 @@ export function ConnectToolsPage() {
   };
 
   const onFinish = async () => {
-    if (!agentState || !mayFinish) return;
+    if (!agentState || !connectAs.mayConnect) return;
     setFinishing(true);
     try {
-      const redirectTo = await completeMcpOAuth(agentState, connectAs);
+      const redirectTo = await completeMcpOAuth(agentState, connectAs.value);
       sessionStorage.removeItem(MCP_OAUTH_STATE_KEY);
       sessionStorage.removeItem(MCP_OAUTH_AGENT_KEY);
       window.location.href = redirectTo;
@@ -388,7 +378,7 @@ export function ConnectToolsPage() {
                   variant="primary"
                   size="sm"
                   className="shrink-0"
-                  disabled={finishing || !mayFinish}
+                  disabled={finishing || !connectAs.mayConnect}
                   onClick={() => void onFinish()}
                 >
                   {finishing ? 'Finishing…' : 'Finish & return to your agent'}
@@ -396,16 +386,16 @@ export function ConnectToolsPage() {
               </div>
               <div className="mt-4">
                 <ConnectAsChoice
-                  agents={agentChoices}
-                  value={connectAs}
+                  agents={connectAs.agents}
+                  value={connectAs.value}
                   disabled={finishing}
                   hint="What this connection loads. An agent file narrows it to the tools, skills and plugins the file lists, and only those you may read."
                   onChange={(path) => {
-                    setConnectAs(path);
+                    connectAs.setValue(path);
                     if (path) sessionStorage.setItem(MCP_OAUTH_AGENT_KEY, path);
                     else sessionStorage.removeItem(MCP_OAUTH_AGENT_KEY);
                   }}
-                  unavailable={unavailable}
+                  unavailable={connectAs.unavailable}
                 />
               </div>
             </Surface>

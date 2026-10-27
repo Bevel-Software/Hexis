@@ -88,8 +88,12 @@ import { ChangeReadGate } from '../modules/access/change-read-gate.js';
 import { GroupsAdminService } from '../modules/access/groups-admin.service.js';
 import { UserAccessRemovalService } from '../modules/access/user-access-removal.service.js';
 import { makeRolesYamlWriteValidator } from '../modules/access-model/roles-yaml-guard.js';
-import { PendingSkillsService, SkillService } from '../modules/skills/index.js';
-import { PendingToolsService, ToolManualService } from '../modules/tool-manuals/index.js';
+// The implementations, from their files: the module entries offer them as
+// types only, so nothing that imports an entry loads a service.
+import { SkillService } from '../modules/skills/skills.service.js';
+import { PendingSkillsService } from '../modules/skills/pending-skills.service.js';
+import { ToolManualService } from '../modules/tool-manuals/tool-manuals.service.js';
+import { PendingToolsService } from '../modules/tool-manuals/pending-tools.service.js';
 import { McpServerEditService } from '../modules/tool-manuals/mcp-server-edit.service.js';
 import { ToolDeleteService } from '../modules/tool-manuals/tool-delete.service.js';
 import {

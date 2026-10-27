@@ -23,7 +23,7 @@ import { AgentInstructionsCard } from './AgentInstructionsCard';
 import { CONNECT_TOOLS_PATH } from '../../library';
 import { CoworkSetupSteps } from './CoworkSetupSteps';
 import { useAdmin } from '../../admin';
-import { canConnectAs, connectedAsLabel, listAgentChoices, type AgentChoice } from '../../agents';
+import { connectedAsLabel, listAgentChoices, useConnectAsChoice } from '../../agents';
 import { ConnectAsChoice } from '../../agents/components/ConnectAsChoice';
 import {
   type ExternalApiKeySummary,
@@ -98,17 +98,10 @@ export function ExternalAgentAccessPage() {
   const [loadError, setLoadError] = useState<string | null>(null);
 
   const [label, setLabel] = useState('');
-  // "Connect as" for a new key: Everything unless an agent is picked.
-  const [agentChoices, setAgentChoices] = useState<AgentChoice[]>([]);
-  const [connectAs, setConnectAs] = useState<string | null>(null);
-  // The agents failed to load: an empty list is then not "you have none",
-  // so an Everything key waits for the person to confirm it.
-  const [choicesFailed, setChoicesFailed] = useState(false);
-  // Until the agents answer, a key would be minted as Everything by default.
-  const [choicesSettled, setChoicesSettled] = useState(false);
-  const [everythingConfirmed, setEverythingConfirmed] = useState(false);
-  const unavailable = choicesFailed ? { confirmed: everythingConfirmed, onConfirm: setEverythingConfirmed } : undefined;
-  const mayConnect = canConnectAs({ settled: choicesSettled, unavailable });
+  // "Connect as" for a new key: Everything unless an agent is picked. Until
+  // the agents answer, a key would be minted as Everything by default; when
+  // they could not be loaded, an Everything key waits to be confirmed.
+  const connectAs = useConnectAsChoice();
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
 
@@ -143,35 +136,32 @@ export function ExternalAgentAccessPage() {
 
   // The agents a key may be minted as. A failure costs only the choice —
   // Everything is always on offer — and is shown, not passed off as none.
+  const settleConnectAs = connectAs.settle;
   useEffect(() => {
     let cancelled = false;
     listAgentChoices().then(
       (agents) => {
-        if (cancelled) return;
-        setAgentChoices(agents);
-        setChoicesSettled(true);
+        if (!cancelled) settleConnectAs({ agents });
       },
       () => {
-        if (cancelled) return;
-        setChoicesFailed(true);
-        setChoicesSettled(true);
+        if (!cancelled) settleConnectAs({ agents: [], failed: true });
       },
     );
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [settleConnectAs]);
 
   async function handleCreate() {
     const trimmed = label.trim();
-    if (trimmed.length === 0 || trimmed.length > MAX_LABEL_LEN || creating || !mayConnect) return;
+    if (trimmed.length === 0 || trimmed.length > MAX_LABEL_LEN || creating || !connectAs.mayConnect) return;
     setCreating(true);
     setCreateError(null);
     try {
-      const minted = await createExternalApiKey(trimmed, connectAs);
+      const minted = await createExternalApiKey(trimmed, connectAs.value);
       setReveal(minted);
       setLabel('');
-      setConnectAs(null);
+      connectAs.setValue(null);
       // Optimistic-ish: refresh the list so the new row shows up underneath
       // the reveal modal.
       void refresh();
@@ -207,7 +197,7 @@ export function ExternalAgentAccessPage() {
   }
 
   const trimmed = label.trim();
-  const canSubmit = trimmed.length > 0 && trimmed.length <= MAX_LABEL_LEN && !creating && mayConnect;
+  const canSubmit = trimmed.length > 0 && trimmed.length <= MAX_LABEL_LEN && !creating && connectAs.mayConnect;
 
   // Surface the keys that matter: active keys first (most-recently-used at the
   // top, never-used ones last among the active), with disconnected keys sunk
@@ -571,12 +561,12 @@ export function ExternalAgentAccessPage() {
                 </button>
               </div>
               <ConnectAsChoice
-                agents={agentChoices}
-                value={connectAs}
+                agents={connectAs.agents}
+                value={connectAs.value}
                 disabled={creating}
                 hint="What the key loads. An agent file narrows it to the tools, skills and plugins the file lists, and only those you may read."
-                onChange={setConnectAs}
-                unavailable={unavailable}
+                onChange={connectAs.setValue}
+                unavailable={connectAs.unavailable}
               />
               {createError && (
                 <div className="text-xs text-red-600 bg-red-50 border border-red-200 rounded px-2 py-1.5">
