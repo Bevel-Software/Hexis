@@ -843,7 +843,7 @@ describe('minting a key as an agent ("Connect as")', () => {
     const user = userEvent.setup();
     mount(PUBLIC_URL);
     await user.click(screen.getByRole('tab', { name: 'Autonomous agents' }));
-    expect(await screen.findByRole('alert')).toHaveTextContent(/agent files couldn't be loaded/);
+    expect(await screen.findByRole('alert')).toHaveTextContent(/agents couldn't be loaded/);
     await user.type(screen.getByRole('textbox', { name: /Create an external API key/ }), 'CI');
     const create = screen.getByRole('button', { name: 'Create key' });
     expect(create).toBeDisabled();

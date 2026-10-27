@@ -277,7 +277,7 @@ export function AuditLogPage() {
                                     {p.deletedAt != null && <Badge tone="outline">Deleted by owner</Badge>}
                                   </span>
                                   <span className="block text-meta text-ink-muted">
-                                    {/* What the connection loads: Everything, or the agent file it
+                                    {/* What the connection loads: Everything, or the agent configuration it
                                         was made as. A page acts as its viewer, so it has none. */}
                                     {p.kind !== 'page' && (
                                       <>

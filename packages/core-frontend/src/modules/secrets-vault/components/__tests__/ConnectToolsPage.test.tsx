@@ -564,7 +564,7 @@ describe('ConnectToolsPage: inside Skills & Tools', () => {
         agentsUnavailable: true,
       });
       renderPage();
-      expect(await screen.findByRole('alert')).toHaveTextContent(/agent files couldn't be loaded/);
+      expect(await screen.findByRole('alert')).toHaveTextContent(/agents couldn't be loaded/);
       expect(screen.getByRole('button', { name: 'Finish & return to your agent' })).toBeDisabled();
       fireEvent.click(screen.getByRole('checkbox', { name: 'Connect as Everything anyway' }));
       await finish();

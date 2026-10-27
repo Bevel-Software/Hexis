@@ -564,7 +564,7 @@ export function ExternalAgentAccessPage() {
                 agents={connectAs.agents}
                 value={connectAs.value}
                 disabled={creating}
-                hint="What the key loads. An agent file narrows it to the tools, skills and plugins the file lists, and only those you may read."
+                hint="What the key loads. An agent narrows it to the tools, skills and plugins its configuration lists, and only those you may read."
                 onChange={connectAs.setValue}
                 unavailable={connectAs.unavailable}
               />

@@ -48,7 +48,7 @@ export interface InternalTokenClaim {
    */
   connectionId?: string;
   /**
-   * The `.agent` file the external caller's connection was made as (a
+   * The agent configuration the external caller's connection was made as (a
    * repo-relative knowledge-base path), copied at mint from the verified
    * grant or connection — the hosted proxy's loopback token and the local
    * server's exchanged grant both carry it, so every agent surface narrows

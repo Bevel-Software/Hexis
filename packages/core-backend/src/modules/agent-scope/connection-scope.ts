@@ -13,7 +13,7 @@ import {
 export { NOT_AVAILABLE_TO_CONNECTION, connectionRefusal, describeConnection, type ConnectionScopeWire, type ScopeAgent };
 
 /**
- * The resolved roots a usable `.agent` file narrows a connection to — what
+ * The resolved roots a usable agent configuration narrows a connection to — what
  * {@link ConnectionScope.narrowed} is built from.
  */
 export interface ScopeRoots {
@@ -40,7 +40,7 @@ type State =
  *
  * A scope only ever NARROWS. It is applied to what the person may already
  * read — each surface asks it about items that passed the person's own read
- * gate — so no list in an `.agent` file can add an item to a connection.
+ * gate — so no list in an agent configuration can add an item to a connection.
  */
 export class ConnectionScope {
   private constructor(private readonly state: State) {}
@@ -65,7 +65,7 @@ export class ConnectionScope {
   static gone(agentPath: string): ConnectionScope {
     return ConnectionScope.unavailable(
       { path: agentPath, name: agentPath },
-      `This connection was made as the agent file \`${agentPath}\`, which no longer exists or which you can no ` +
+      `This connection was made as the agent \`${agentPath}\`, which no longer exists or which you can no ` +
         'longer read, so it loads no tools and no skills. Reconnect and choose another agent, or Everything.',
       `agent\u0000${agentPath}\u0000gone`,
     );

@@ -10,7 +10,28 @@ import type { IAccountAdmission } from '../modules/auth/account-admission.js';
 import type { IWriteAccess } from '../modules/write-access/write-access.js';
 import type { OnServerStart } from '../modules/workspace/startup/on-server-start.js';
 import type { AgentGuideHook } from '../modules/agent-guide/agent-guide.js';
+import type { IAgentScopeResolver } from '../modules/agent-scope/index.js';
 import type { EmbedNodeIdResolver } from '../modules/embed/embed.interface.js';
+import type { WorkspaceService } from '../modules/workspace/workspace.service.js';
+import type { AccessControlService } from '../modules/access/access-control.service.js';
+import type { KbContext } from '../shared/kb-context.js';
+import type { ITreeWalker } from '../shared/fs.contract.js';
+import type { PluginLinkIndex } from '../modules/plugins/plugin-links.js';
+
+/**
+ * The core services a distribution's agent-scope resolver reads through,
+ * handed to `CorePorts.agentScope` when core makes it: the clones of the
+ * branches, the person's read gate, the branch model and knowledge-base
+ * layout, the disk walk that finds its configurations, and the plugin link
+ * index that says which plugins a `plugins:`-style entry stands for.
+ */
+export interface AgentScopeCollaborators {
+  workspaceService: WorkspaceService;
+  accessControl: AccessControlService;
+  kb: KbContext;
+  disk: ITreeWalker;
+  pluginLinkIndex: PluginLinkIndex;
+}
 
 /**
  * Every seam the enterprise overlay can fill in the CORE composition
@@ -112,6 +133,21 @@ export interface CorePorts {
    * `modules/agent-guide`.
    */
   agentGuide?: AgentGuideHook;
+  /**
+   * THIS distribution's agent configurations: what "Connect as" offers beside
+   * Everything, and what a connection made as one of them loads (see
+   * `modules/agent-scope`). Core owns the mechanism and no configuration —
+   * the file kind, where it lives and what its definition says are the
+   * distribution's, as the file kinds registered for access verbs are. A
+   * factory, since a resolver reads through core services that exist only
+   * once core is built: called ONCE, during construction, with those
+   * services (`AgentScopeCollaborators`), and its answer is the one resolver
+   * every surface consults from then on — the tool contexts, which capture it
+   * at construction, as much as the routes the server mounts later. Core
+   * default: `noAgentConfigurations()` — nothing is offered, and a connection
+   * recorded as some path loads nothing, never Everything.
+   */
+  agentScope?: (core: AgentScopeCollaborators) => IAgentScopeResolver;
   /**
    * Mirror this composition's branch model and knowledge-base layout onto the
    * shared package's PROCESS-WIDE live bindings (`DEFAULT_BRANCH`,

@@ -148,7 +148,7 @@ export interface McpOAuthRequest {
   scope: string | null;
   resource: string | null;
   /**
-   * The `.agent` files the person may connect this client as, offered below
+   * The agent configurations the person may connect this client as, offered below
    * Everything. Empty when there are none (or for a request that cannot take
    * a choice).
    */

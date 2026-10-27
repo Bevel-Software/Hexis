@@ -25,7 +25,7 @@ declare global {
        */
       mcpCallerKind?: McpCallerKind;
       /**
-       * The `.agent` file the MCP caller's credential connects as — a key's
+       * The agent configuration the MCP caller's credential connects as — a key's
        * `api_tokens.agent_path`, an agent connection's
        * `agent_connections.agent_path`, or the one an exchanged grant
        * carries. Unset is Everything.

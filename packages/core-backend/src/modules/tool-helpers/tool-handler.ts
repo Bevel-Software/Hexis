@@ -272,7 +272,7 @@ export function createToolHandlerFactory(
         const ctx = await resolve(auth, abort.signal, sessionId);
         // The connection's scope, at the one route every caller of a platform
         // tool arrives through — MCP, a chain, the local server, a script with
-        // a key — and before the tool runs. A connection made as an `.agent`
+        // a key — and before the tool runs. A connection made as an agent configuration
         // file that does not list this tool is refused it by name.
         const toolName = routeToolSchemasForRequest(req.originalUrl)?.name ?? routeToolName(req.originalUrl);
         const scope =
