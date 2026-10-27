@@ -189,10 +189,15 @@ and never loses the board they were reading:
   what they may not, and `read_file` of such a file rejects. Build the board
   from what the calls return; never try to widen it (another identity, a
   copied dataset) — the same page shows each reader their own board.
-- **Link to what the tools named by its root-relative path.** A path a tool
-  answered is a path from the checkout folder, which does not know where the
-  page itself sits; `'/{{kbDirName}}/' + path` opens it from a page in any
-  folder (see *How a link resolves*).
+- **Link to what the tools named by the path they answered.** A path a tool
+  answers (`read_file`'s `path`, a listing's `path`) starts with the checkout
+  folder, `{{kbDirName}}/Data/Tickets/A.md`, and knows nothing of where the
+  page sits. Link to it on the branch the page read it from,
+  `'/workspace/' + encodeURIComponent(BRANCH) + '/' + path`, so a card and its
+  data come from one branch; a root-relative `'/' + path` opens it on the
+  branch the page is viewed on instead (see *How a link resolves*). Never
+  put the checkout folder in front of a path a tool answered: it is already
+  there.
 
 A complete page that follows these rules — plain HTML and one inline script,
 no build step and no framework:
@@ -227,6 +232,8 @@ no build step and no framework:
   <section class="column" data-status="done"><h2>Done <span class="count"></span></h2><ul><li class="placeholder"></li><li class="placeholder"></li></ul></section>
 </main>
 <script>
+  // The branch the page is published on: its data and its links both come
+  // from there. A copy published on another branch sets it to that branch.
   const BRANCH = 'main';
   const FOLDER = 'Data/Tickets';
   const READS_IN_FLIGHT = 4;
@@ -278,7 +285,8 @@ no build step and no framework:
       .map((entry) => `${FOLDER}/${entry.name}`);
     return mapBounded(paths, READS_IN_FLIGHT, async (path) => {
       const file = await tools.callTool('read_file', { body: { branch: BRANCH, path } });
-      return { path, name: field(file.content, 'Name') || path, status: field(file.content, 'Status').toLowerCase() };
+      // `file.path` is the path as the tool names it, checkout folder first.
+      return { path: file.path, name: field(file.content, 'Name') || path, status: field(file.content, 'Status').toLowerCase() };
     });
   }
 
@@ -289,7 +297,7 @@ no build step and no framework:
       column.querySelector('.count').textContent = `(${mine.length})`;
       const items = mine.map((ticket) => {
         const link = document.createElement('a');
-        link.href = '/{{kbDirName}}/' + ticket.path;
+        link.href = '/workspace/' + encodeURIComponent(BRANCH) + '/' + ticket.path;
         link.textContent = ticket.name;
         const item = document.createElement('li');
         item.append(link);

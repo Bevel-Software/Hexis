@@ -130,13 +130,16 @@ const FIRST: Files = {
 
 const SECOND: Files = { ...FIRST, 'A.md': ticket('Alpha', 'done'), 'G.md': ticket('Golf', 'doing') };
 
-/** Answer the page's pending `list_files` from `files`. */
+/** Answer the page's pending `list_files` from `files`, naming paths as the tool does: checkout folder first. */
 async function answerListing(page: Page, files: Files) {
   const listing = page.pending().find((c) => c.args[0] === 'list_files');
   expect(listing, 'the page lists its folder first').toBeDefined();
   page.respond(listing!, {
     ok: true,
-    result: { path: FOLDER, entries: Object.keys(files).map((name) => ({ name, type: 'file', canWrite: false })) },
+    result: {
+      path: `${KB_DIR_NAME}/${FOLDER}`,
+      entries: Object.keys(files).map((name) => ({ name, type: 'file', canWrite: false })),
+    },
   });
   await settle();
 }
@@ -152,7 +155,12 @@ async function answerReads(page: Page, files: Files, { count = Infinity, fail }:
     if (!read) break;
     const name = read.args[1].body.path.slice(FOLDER.length + 1);
     if (name === fail) page.respond(read, { ok: false, error: `You cannot read ${read.args[1].body.path}.` });
-    else page.respond(read, { ok: true, result: { path: read.args[1].body.path, content: files[name], canWrite: false } });
+    else
+      page.respond(read, {
+        ok: true,
+        // The tool answers the path checkout folder first, whatever spelling it was asked with.
+        result: { path: `${KB_DIR_NAME}/${read.args[1].body.path}`, content: files[name], canWrite: false },
+      });
     left -= 1;
     await settle();
   }
@@ -230,12 +238,13 @@ describe("the guide's live-data reference page", () => {
     shell.expectUnchanged();
   });
 
-  it('links each card by the root-relative path of the file the tools named, under the checkout folder', async () => {
+  it('links each card to the file on the branch it read it from, by the path the tool answered', async () => {
     const page = await mountReferencePage();
     await answerListing(page, FIRST);
     await answerReads(page, FIRST);
     const hrefs = Array.from(document.querySelectorAll('.column a')).map((a) => a.getAttribute('href'));
-    expect(hrefs).toEqual(Object.keys(FIRST).map((name) => `/${KB_DIR_NAME}/${FOLDER}/${name}`));
+    // The tool's path already carries the checkout folder; the page adds nothing in front of it.
+    expect(hrefs).toEqual(Object.keys(FIRST).map((name) => `/workspace/main/${KB_DIR_NAME}/${FOLDER}/${name}`));
   });
 
   it('reads a file saved with Windows line endings like any other', async () => {

@@ -391,11 +391,13 @@ describe('the HTML views section', () => {
     expect(text).toContain('**Read in bounded parallel once the paths are known.**');
     expect(text).toContain('**Load with `callTool`, not `callToolChain`.**');
     expect(text).toContain("**The reads are the viewer's own.**");
-    expect(text).toContain('**Link to what the tools named by its root-relative path.**');
+    expect(text).toContain('**Link to what the tools named by the path they answered.**');
+    expect(text).toContain('Never put the checkout folder in front of a path a tool answered: it is already there.');
     expect(text).toContain('plain HTML and one inline script, no build step and no framework');
-    // The reference page links by the deployment's own checkout folder name.
+    // The rule names the deployment's own checkout folder; the page links on its branch by the tool's path.
     const docs = section(await composeAgentGuide(DEFAULT_KB_LAYOUT, undefined, { kbDirName: 'kb' }), '## HTML views');
-    expect(docs).toContain("link.href = '/kb/' + ticket.path;");
+    expect(docs.replace(/\s+/g, ' ')).toContain('starts with the checkout folder, `kb/Data/Tickets/A.md`');
+    expect(docs).toContain("link.href = '/workspace/' + encodeURIComponent(BRANCH) + '/' + ticket.path;");
     expect(docs).not.toContain('{{');
   });
 
