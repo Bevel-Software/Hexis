@@ -251,6 +251,11 @@ export async function stageTmpRef(workspaceDir: string, ownerId: string, relativ
   };
   await assertOwnFolder(path.join(workspaceDir, WORKSPACE_TMP_DIR), ref, rethrow);
   await assertOwnFolder(ownerDir, ref, rethrow);
+  // The workspace directory itself may not exist yet: a staged file belongs
+  // beside the checkout whether or not the branch is cloned, and the
+  // directory's path is the root's own (`workspaceDirWithinRoot`), nothing
+  // the ref names — so it is simply made.
+  await fs.mkdir(workspaceDir, { recursive: true });
   // The folders on the way — `tmp/` and the owner's folder included, when a
   // first staging has yet to make them — made one at a time and each judged
   // before the next is entered: never through a link, which a recursive

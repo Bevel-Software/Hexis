@@ -715,6 +715,12 @@ describe("a tmp ref reaches the caller's own staged files and nobody else's", ()
     // Staging again replaces: a staged file is the stager's own scratch.
     await service.stageTmpFile(id, ME, 'chat-uploads/plan.xlsx', Buffer.from('v2'));
     expect((await service.readTmpFile(id, ME, ref)).toString()).toBe('v2');
+    // A branch never cloned has no workspace directory yet: a staged file
+    // belongs beside where its checkout would be, so staging makes the way.
+    const uncloned = encodeURIComponent('nobody/not-cloned');
+    await expect(stat(workspaceDir('nobody/not-cloned'))).rejects.toThrow();
+    const staged = await service.stageTmpFile(uncloned, ME, 'chat-uploads/first.txt', Buffer.from('first'));
+    expect((await service.readTmpFile(uncloned, ME, staged)).toString()).toBe('first');
     // The path obeys the ref's rules, and the refusal names the one it breaks.
     await expect(service.stageTmpFile(id, ME, '../escape.txt', Buffer.from('x'))).rejects.toThrow(/`\.\.` segment/);
     await expect(service.stageTmpFile(id, ME, '/abs.txt', Buffer.from('x'))).rejects.toThrow(/absolute/);
