@@ -662,6 +662,17 @@ describe('DbSecretsVaultService — a refused token request says why', () => {
     );
   });
 
+  it('redacts a secret a JSON body carries in its escaped spelling', async () => {
+    // In the body the secret reads `se\"cr\\et`; parsing spells it out again,
+    // so a scrub of the raw body would miss it and the log would carry it.
+    const err = await exchangeFailure(
+      JSON.stringify({ error: 'invalid_client', error_description: 'secret se"cr\\et refused' }),
+      400,
+      { clientSecret: 'se"cr\\et', pendingVerifier: 'the-verifier' },
+    );
+    expect(err.message).toBe('Token endpoint returned HTTP 400: invalid_client — secret *** refused');
+  });
+
   it('redacts a secret with whitespace in it, and one the length cut would otherwise split', async () => {
     // Scrubbed on the body as received: collapsing whitespace or cutting to
     // length first would leave such a secret, or a fragment of it, in the log.
