@@ -237,7 +237,9 @@ export function registerWorkflowTools(
         // `getFilesystem` — so the branch-less call the tool handler refuses
         // before this runs would otherwise commit to, or fork from, a
         // workspace literally named "undefined".
-        (args, ctx) => spec.handler(normalizePathArgs(args, kbDirName), ctx),
+        // The normaliser also refuses a tmp ref (`__tmp__/…`) in every path
+        // input: none of these tools takes one (see `kb-fs/tmp-ref.ts`).
+        (args, ctx) => spec.handler(normalizePathArgs(args, kbDirName, { tool: spec.name }), ctx),
         { write: spec.write },
       ),
     );

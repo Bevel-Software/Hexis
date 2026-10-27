@@ -2,6 +2,7 @@ import express, { type Request, type RequestHandler } from 'express';
 import { UtcpManualSerializer } from '@utcp/sdk';
 import { declaresWrite, type IToolRegistry, type ToolManualContext, type UtcpTool } from './tool.contract.js';
 import { requireInternalSource } from '../tool-auth/index.js';
+import { resolveConnectionScope, type IAgentScopeResolver } from '../agent-scope/index.js';
 import type { IToolReadOnlyHints } from './read-only-hints.contract.js';
 
 /** Resolve a connection-key/internal-token user id to its email (for per-caller provider defs). */
@@ -62,6 +63,12 @@ export function createManualRoutes(
    * Absent, the manual carries the tools' own tags only.
    */
   readOnlyHints?: Pick<IToolReadOnlyHints, 'apply'>,
+  /**
+   * Resolves the scope of a connection made as an agent configuration: the external
+   * manual then lists only the platform tools it loads, and the providers word
+   * their descriptions for it (`modules/agent-scope`).
+   */
+  agentScope?: Pick<IAgentScopeResolver, 'resolve'>,
 ): express.Router {
   const router = express.Router();
 
@@ -71,17 +78,31 @@ export function createManualRoutes(
   async function context(req: Request): Promise<ToolManualContext> {
     const userId = req.toolAuth?.userId;
     if (!userId) return {};
-    if (!resolveUserEmail) return { userId };
+    let userEmail: string | undefined;
     try {
-      return { userId, userEmail: await resolveUserEmail(userId) };
+      userEmail = resolveUserEmail ? await resolveUserEmail(userId) : undefined;
     } catch {
-      return { userId };
+      userEmail = undefined;
     }
+    // Everything adds nothing to the context, so its providers are asked
+    // exactly what they were asked before connections could be narrowed.
+    const agentPath = req.toolAuth?.agentPath;
+    const connectionScope = agentPath ? await resolveConnectionScope(agentScope, userEmail, agentPath) : undefined;
+    return {
+      userId,
+      ...(userEmail !== undefined ? { userEmail } : {}),
+      ...(connectionScope ? { connectionScope } : {}),
+    };
   }
 
   router.get('/agent/utcp', manualAuth, async (req, res) => {
-    const tools = await registry.listExternal(await context(req));
-    res.json(toManual(readOnlyHints ? readOnlyHints.apply(tools) : tools));
+    const ctx = await context(req);
+    const tools = await registry.listExternal(ctx);
+    // A connection made as an agent configuration is offered only the platform
+    // tools that file loads; a call to another is refused at its route.
+    const scope = ctx.connectionScope;
+    const offered = scope ? tools.filter((t) => scope.allowsPlatformTool(t.name)) : tools;
+    res.json(toManual(readOnlyHints ? readOnlyHints.apply(offered) : offered));
   });
   router.get('/agent/internal/utcp', manualAuth, requireInternalSource, async (req, res) => {
     const internal = await registry.listInternal(await context(req));

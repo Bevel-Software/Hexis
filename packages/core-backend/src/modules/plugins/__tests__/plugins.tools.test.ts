@@ -13,6 +13,8 @@ import { GUIDE_FIRST_SENTENCE } from '../../tool-registry/guide-first.js';
 import { registerPluginsTools, CREATE_PLUGIN, myPluginDef, myPluginDescription } from '../plugins.tools.js';
 import { createPluginCreationRoutes } from '../plugins.routes.js';
 import { PluginProvisionError } from '../plugin-provision.service.js';
+import type { IAgentScopeResolver } from '../../agent-scope/index.js';
+import { agentFile, agentScopeOver, inMemoryKb } from '../../agent-scope/__tests__/in-memory-kb.js';
 
 /**
  * The plugin tools are DESCRIPTIONS of the app's own creation endpoints.
@@ -200,7 +202,12 @@ describe('the creation endpoints behind the key-or-session gate', () => {
 
   const externalApiKeyService = {
     looksLikeExternalApiKey: (t: string) => typeof t === 'string' && t.startsWith('bevel_'),
-    verifyAndLoadToken: async (t: string) => (t === 'bevel_alice' ? { user: ALICE, tokenId: 'tok-a' } : null),
+    verifyAndLoadToken: async (t: string) =>
+      t === 'bevel_alice'
+        ? { user: ALICE, tokenId: 'tok-a' }
+        : t === 'bevel_alice_agent'
+          ? { user: ALICE, tokenId: 'tok-b', agentPath: 'Agents/plugin-maker.agent' }
+          : null,
   } as never;
   const authService = {
     getUserById: async (id: string) => (id === ALICE.id ? ALICE : null),
@@ -211,7 +218,7 @@ describe('the creation endpoints behind the key-or-session gate', () => {
     },
   } as never;
 
-  async function start(): Promise<string> {
+  async function start(agentScope?: Pick<IAgentScopeResolver, 'resolve'>): Promise<string> {
     const internalToken = new InternalTokenService({ secret: 'test-secret' });
     const app = express();
     app.use(express.json());
@@ -224,6 +231,7 @@ describe('the creation endpoints behind the key-or-session gate', () => {
       }),
       createPluginCreationRoutes({ ensurePersonalPlugin, createPlugin } as never, async (req) =>
         req.userId ? ((await (authService as { getUserById(id: string): Promise<unknown> }).getUserById(req.userId)) as never) : null,
+        agentScope,
       ),
     );
     httpServer = await new Promise<HttpServer>((r) => {
@@ -301,5 +309,33 @@ describe('the creation endpoints behind the key-or-session gate', () => {
       '"name" must be at least 1 character(s) long, but 0 was given.',
     );
     expect(createPlugin).not.toHaveBeenCalled();
+  });
+
+  it("refuses a connection made as an .agent that does not list the tool, by name, before anything is provisioned", async () => {
+    // The agent lists `my_plugin` only. These routes are not hosted by
+    // `toolHandler`, so they make its connection-scope check themselves.
+    const kb = inMemoryKb(
+      { 'Agents/plugin-maker.agent': agentFile('name: Plugin maker\nplatformTools: [my_plugin]') },
+      { reader: ALICE.email },
+    );
+    const base = await start(agentScopeOver(kb));
+    const refused = await post(base, '/api/plugins', { name: 'GTM' }, 'bevel_alice_agent');
+    expect(refused.status).toBe(403);
+    expect(await refused.json()).toEqual({
+      error: expect.stringContaining('The tool "create_plugin" is not available to this connection'),
+      code: 'not_available_to_connection',
+    });
+    expect(createPlugin).not.toHaveBeenCalled();
+
+    // The tool it lists is served; a key made as Everything and a session are untouched.
+    expect((await post(base, '/api/plugins/personal', {}, 'bevel_alice_agent')).status).toBe(200);
+    expect((await post(base, '/api/plugins', { name: 'Ops' }, 'bevel_alice')).status).toBe(201);
+    expect((await post(base, '/api/plugins', { name: 'Fin' }, 'session-alice')).status).toBe(201);
+  });
+
+  it('a narrowed connection with no scope resolver wired loads nothing, never Everything', async () => {
+    const base = await start();
+    expect((await post(base, '/api/plugins/personal', {}, 'bevel_alice_agent')).status).toBe(403);
+    expect(ensurePersonalPlugin).not.toHaveBeenCalled();
   });
 });

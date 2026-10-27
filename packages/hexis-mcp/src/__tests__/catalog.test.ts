@@ -571,7 +571,35 @@ describe('fetchAllManuals / fetchLocalOnlyManuals', () => {
       'fetch',
       vi.fn(async () => new Response(JSON.stringify({ manuals: [], tools: [] }), { status: 200 })),
     );
-    expect(await fetchAllManuals(config)).toEqual([]);
+    expect(await fetchAllManuals(config)).toEqual({ manuals: [] });
     expect((await fetchLocalOnlyManuals(config)).size).toBe(0);
+  });
+
+  it('carries the agent the connection is narrowed to, as the deployment says it, and drops a malformed one', async () => {
+    const agent = { path: 'Agents/narrow.agent', name: 'narrow' };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify({ manuals: [], connection: { agent } }), { status: 200 })),
+    );
+    expect(await fetchAllManuals(config)).toEqual({ manuals: [], connection: { agent } });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify({ manuals: [], connection: { agent: { path: 7 } } }), { status: 200 })),
+    );
+    expect(await fetchAllManuals(config)).toEqual({ manuals: [] });
+  });
+
+  it('reads a refused local-only list as a connection that loads nothing, not as a failed discovery', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ error: 'it loads no tools', code: 'not_available_to_connection' }), { status: 403 }),
+      ),
+    );
+    expect((await fetchLocalOnlyManuals(config)).size).toBe(0);
+    // Any other 403 is still the permission answer it always was.
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ error: 'no' }), { status: 403 })));
+    await expect(fetchLocalOnlyManuals(config)).rejects.toThrow(/denied access/);
   });
 });

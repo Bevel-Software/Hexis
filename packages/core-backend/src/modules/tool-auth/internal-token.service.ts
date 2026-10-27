@@ -47,6 +47,15 @@ export interface InternalTokenClaim {
    * internal token.
    */
   connectionId?: string;
+  /**
+   * The agent configuration the external caller's connection was made as (a
+   * repo-relative knowledge-base path), copied at mint from the verified
+   * grant or connection — the hosted proxy's loopback token and the local
+   * server's exchanged grant both carry it, so every agent surface narrows
+   * their calls to that agent's scope (`modules/agent-scope`). Absent is
+   * Everything. Carried, never decided, like `connectionId`.
+   */
+  agentPath?: string;
 }
 
 interface SignedPayload extends InternalTokenClaim {
@@ -148,6 +157,7 @@ export class InternalTokenService {
       ...(typeof payload.focusedBranch === 'string' ? { focusedBranch: payload.focusedBranch } : {}),
       ...(payload.externalProxy === true ? { externalProxy: true } : {}),
       ...(typeof payload.connectionId === 'string' ? { connectionId: payload.connectionId } : {}),
+      ...(typeof payload.agentPath === 'string' && payload.agentPath ? { agentPath: payload.agentPath } : {}),
     };
   }
 

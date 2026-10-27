@@ -94,8 +94,10 @@ export function platformInstructions(layout: KbLayout): string {
  * own cap, and the preamble under its cap plus the marker a cut appends. The
  * test is what makes it a ceiling rather than a hope: a shared rule that grew
  * past it fails before it reaches an agent.
+ *
+ * 14,400 since the shared rules' own cap rose by 400 (the `__tmp__/` ref).
  */
-export const INSTRUCTIONS_CAP = 14_000;
+export const INSTRUCTIONS_CAP = 14_400;
 
 /** The one-line marker that replaces everything past the preamble cap. */
 export const PREAMBLE_TRUNCATION_MARKER = `[preamble truncated at ${PREAMBLE_CAP.toLocaleString('en-US')} characters; shorten ${PREAMBLE_FILE}]`;

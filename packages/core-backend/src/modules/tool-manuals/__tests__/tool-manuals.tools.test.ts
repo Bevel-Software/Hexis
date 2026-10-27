@@ -273,7 +273,7 @@ describe('list_tool_setup — a declaration that lives on a draft says so', () =
       note?: string;
     };
     // Resolved for the caller, on the branch they named.
-    expect(toolManualService.listDeclaredOnlyOnBranch).toHaveBeenCalledWith(ALICE.email, 'alice/add-crm');
+    expect(toolManualService.listDeclaredOnlyOnBranch).toHaveBeenCalledWith(ALICE.email, 'alice/add-crm', undefined);
     // The released catalog is unchanged — the draft's server is not in it...
     expect(body.tools.map((t) => t.slug)).not.toContain('crm');
     // ...and the agent is told where it is and what makes it live.
@@ -294,7 +294,7 @@ describe('list_tool_setup — a declaration that lives on a draft says so', () =
     const res = await callSetup(base, agentToken);
     expect(res.status).toBe(200);
     const body = (await res.json()) as { onBranchOnly: { name: string; branch: string }[]; note?: string };
-    expect(toolManualService.listDeclaredOnlyOnBranch).toHaveBeenCalledWith(ALICE.email, 'alice/add-crm');
+    expect(toolManualService.listDeclaredOnlyOnBranch).toHaveBeenCalledWith(ALICE.email, 'alice/add-crm', undefined);
     expect(body.onBranchOnly).toEqual([
       { name: 'crm', path: 'Plugins/Sales/mcp.json', type: 'mcp', branch: 'alice/add-crm' },
     ]);
@@ -311,7 +311,7 @@ describe('list_tool_setup — a declaration that lives on a draft says so', () =
       onBranchOnly: { name: string }[];
     };
     expect(toolManualService.listDeclaredOnlyOnBranch).toHaveBeenCalledTimes(1);
-    expect(toolManualService.listDeclaredOnlyOnBranch).toHaveBeenCalledWith(ALICE.email, 'alice/add-crm');
+    expect(toolManualService.listDeclaredOnlyOnBranch).toHaveBeenCalledWith(ALICE.email, 'alice/add-crm', undefined);
     expect(body.onBranchOnly.map((p) => p.name)).toEqual(['crm']);
   });
 

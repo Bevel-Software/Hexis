@@ -4,6 +4,7 @@ import { logger } from '../shared/logging.js';
 import type { ISkillService, SkillSummary } from '../modules/skills/skills.contract.js';
 import type { IToolManualService } from '../modules/tool-manuals/tool-manuals.contract.js';
 import '../modules/tool-auth/tool-auth.middleware.js'; // Express Request augmentation (req.toolAuth)
+import { resolveConnectionScope, type IAgentScopeResolver } from '../modules/agent-scope/index.js';
 
 const log = logger('catalog-revision');
 
@@ -65,6 +66,14 @@ export function catalogRevision(
    * server already running keeps serving the view it read at startup.
    */
   views: readonly { uri: string; text: string }[] = [],
+  /**
+   * The connection's agent configuration — its path and the digest of its bytes, or
+   * why it cannot be used (`ConnectionScope.fingerprint`) — so an edit of
+   * the file is a new revision even when it changes nothing listed (a new
+   * skill entry that names nothing yet still moves it). Absent for
+   * Everything, whose revision is exactly what it was before agents existed.
+   */
+  agent: string | null = null,
 ): string {
   const lines = [
     ...[...manuals].sort(),
@@ -72,6 +81,7 @@ export function catalogRevision(
     ...skills.map(skillFingerprint).sort(),
     '\u0001',
     ...views.map((v) => `${v.uri}\u0000${createHash('sha256').update(v.text).digest('hex')}`).sort(),
+    ...(agent !== null ? ['\u0001', agent] : []),
   ];
   return createHash('sha256').update(lines.join('\n')).digest('hex').slice(0, 32);
 }
@@ -90,6 +100,8 @@ export function createCatalogRevisionRoutes(deps: {
   toolManuals: Pick<IToolManualService, 'catalogFingerprints'>;
   skills: Pick<ISkillService, 'listSkills'>;
   manualAuth: RequestHandler;
+  /** Resolves the scope of a connection made as an agent configuration (`modules/agent-scope`). */
+  agentScope?: Pick<IAgentScopeResolver, 'resolve'>;
   /** Connection-key/internal-token user id → email, for the per-caller ACL. */
   resolveUserEmail: (userId: string) => Promise<string | undefined>;
   /** The MCP App views served; absent on a deployment that serves none. */
@@ -104,16 +116,26 @@ export function createCatalogRevisionRoutes(deps: {
       // No resolvable caller is an EMPTY catalog, not a failure: that is what
       // both list surfaces answer such a caller, so the fingerprint agrees
       // with them rather than inventing a third verdict.
+      // A connection made as an agent configuration is fingerprinted over what IT
+      // loads, plus the file itself; Everything asks exactly what it always did.
+      const scope = await resolveConnectionScope(deps.agentScope, email, req.toolAuth?.agentPath);
+      const connectors = scope.connectorFilter();
+      const within = scope.skillFilter();
       const [manuals, skills] = email
-        ? await Promise.all([deps.toolManuals.catalogFingerprints(email), deps.skills.listSkills(email)])
+        ? await Promise.all([
+            connectors ? deps.toolManuals.catalogFingerprints(email, connectors) : deps.toolManuals.catalogFingerprints(email),
+            within ? deps.skills.listSkills(email, { within }) : deps.skills.listSkills(email),
+          ])
         : [[], []];
       // A manifest that cannot be read counts as no views, which is also what
       // the MCP endpoint serves in that state.
       const views = deps.mcpApps ? ((await deps.mcpApps.manifest().catch(() => null))?.resources ?? []) : [];
+      const connection = scope.toWire();
       res.json({
-        revision: catalogRevision(manuals, skills, views),
+        revision: catalogRevision(manuals, skills, views, scope.fingerprint()),
         tools: manuals.length,
         skills: skills.length,
+        ...(connection ? { connection } : {}),
       });
     } catch (err) {
       log.error('catalog-revision failed:', { err });

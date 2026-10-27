@@ -117,15 +117,24 @@ export function registerAgentGuideTool(
   router.post(
     `/agent/tools/${GET_AGENT_GUIDE_TOOL}`,
     toolAuth,
-    toolHandler(async (args) => {
+    toolHandler(async (args, ctx) => {
       const list = await sections();
       const index = list.map((s) => ({ id: s.id, title: s.title }));
       const wanted = typeof args.section === 'string' ? args.section.trim() : '';
       // A distribution that dropped the start section gets the whole guide by
       // default, as before there was one: never an answer with nothing in it.
       const start = list.find((s) => s.id === START_HERE_SECTION_ID);
-      if (wanted === WHOLE_GUIDE_SECTION || (!wanted && !start)) return { guide: joinGuideSections(list), sections: index };
-      if (!wanted) return { guide: start!.body, section: start!.id, title: start!.title, sections: index };
+      // A connection made as an agent configuration is told so at the top of
+      // the guide's first answer and of the whole guide: the catalog it
+      // describes is narrowed to that agent. Everything is told nothing new,
+      // so its guide is the same text.
+      const connection = ctx.connectionScope?.describe() ?? null;
+      const told = (guide: string) => ({
+        guide: connection ? `> ${connection}\n\n${guide}` : guide,
+        ...(connection ? { connection } : {}),
+      });
+      if (wanted === WHOLE_GUIDE_SECTION || (!wanted && !start)) return { ...told(joinGuideSections(list)), sections: index };
+      if (!wanted) return { ...told(start!.body), section: start!.id, title: start!.title, sections: index };
       const one = list.find((s) => s.id === wanted);
       if (!one) {
         throw new ToolError(

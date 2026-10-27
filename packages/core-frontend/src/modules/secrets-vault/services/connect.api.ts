@@ -1,4 +1,5 @@
 import { authFetch } from '../../../lib/api';
+import type { AgentChoice } from '../../agents';
 
 /**
  * The aggregated "connect your tools" surface: everything standing between the
@@ -141,6 +142,14 @@ export interface McpOAuthRequest {
   clientName: string | null;
   scope: string | null;
   resource: string | null;
+  /**
+   * The agent configurations the person may connect this client as, offered below
+   * Everything. Empty when there are none (or for a request that cannot take
+   * a choice).
+   */
+  agents?: AgentChoice[];
+  /** Set when the agents could not be listed: `agents` is then empty for that reason, not because there are none. */
+  agentsUnavailable?: boolean;
 }
 
 /** Describe the pending MCP authorization carried in the signed `state`. */
@@ -153,12 +162,13 @@ export async function getMcpOAuthRequest(state: string): Promise<McpOAuthRequest
 /**
  * Finish the MCP authorization: mint the one-time code for the signed-in user
  * and return the agent's redirect URL the browser should navigate to.
+ * `agentPath` is the "Connect as" choice; null (the default) is Everything.
  */
-export async function completeMcpOAuth(state: string): Promise<string> {
+export async function completeMcpOAuth(state: string, agentPath: string | null = null): Promise<string> {
   const res = await authFetch('/api/mcp/oauth/complete', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ state }),
+    body: JSON.stringify(agentPath ? { state, agentPath } : { state }),
   });
   if (!res.ok) await fail(res, "Couldn't finish connecting.");
   return ((await res.json()) as { redirectTo: string }).redirectTo;

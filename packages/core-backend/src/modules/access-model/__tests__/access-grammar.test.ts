@@ -103,6 +103,7 @@ describe('the access-frontmatter extension set', () => {
     expect(accessFrontmatterExtensionList()).toHaveLength(after);
     expect(accessFrontmatterExtensionList()).toContain('.md');
     expect(accessFrontmatterExtensionList()).toContain('.tool');
+    expect(accessFrontmatterExtensionList()).not.toContain('.agent');
   });
 
   it('throws on a malformed extension rather than skipping it', () => {

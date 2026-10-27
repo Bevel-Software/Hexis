@@ -1,4 +1,5 @@
 import type { AuthUser, IWorkflowService } from '@bevel-software/platform-shared';
+import type { ConnectionScope } from '../agent-scope/index.js';
 import type { LocalFilesystem } from '@mastra/core/workspace';
 import type { WorkspaceService } from '../workspace/index.js';
 import type { WorkflowEventBus } from '../workflow/index.js';
@@ -58,6 +59,15 @@ export interface ToolContext {
    * tool that takes no branch.
    */
   branch?: string;
+  /**
+   * What the caller's connection may load (`modules/agent-scope`): resolved
+   * once per call from the agent configuration its credential connects as. The
+   * tool handler refuses a platform tool outside it before the tool runs; the
+   * tools that list skills and connectors narrow by it. Absent is Everything
+   * — and a context built without it for a credential that names an agent is
+   * refused every tool by the handler, never served Everything.
+   */
+  connectionScope?: ConnectionScope;
   abortSignal: AbortSignal;
   workspaceService: WorkspaceService;
   workflowService: IWorkflowService;
