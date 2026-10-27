@@ -7,6 +7,7 @@ import type { Database } from '../database/index.js';
 import { secrets } from '../database/index.js';
 import { TokenCrypto } from '../../shared/token-crypto.js';
 import { assertSafeFetchUrl } from '../../shared/ssrf.js';
+import { redactSecret } from '../../shared/redact-secret.js';
 import {
   type ISecretsVaultService,
   type SecretSummary,
@@ -33,11 +34,45 @@ const REFRESH_SKEW_MS = 60_000;
 /** Upper bound on a token-endpoint round-trip, so a hung provider can't block callers. */
 const TOKEN_REQUEST_TIMEOUT_MS = 10_000;
 /** How much of a refusing token endpoint's body is read for its reason: an OAuth error object, never a whole error page. */
-const TOKEN_ERROR_BODY_MAX = 2048;
+const TOKEN_ERROR_BODY_MAX_BYTES = 2048;
 /** How long the reason kept in the error message (and so the log) may be. */
 const TOKEN_ERROR_REASON_MAX = 300;
 /** Request fields a provider might echo back that must never reach a log. */
 const TOKEN_REQUEST_SECRET_FIELDS = ['client_secret', 'code', 'code_verifier', 'refresh_token'] as const;
+
+/**
+ * At most `maxBytes` of a response body as text, the rest of the stream
+ * cancelled. A refusing provider's body is read for its reason, never for
+ * its size: `res.text()` would buffer an error page of any length first,
+ * and a cap applied after that read bounds nothing.
+ */
+async function readBoundedText(res: Response, maxBytes: number): Promise<string> {
+  const reader = res.body?.getReader();
+  if (!reader) return '';
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (total < maxBytes) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      total += value.byteLength;
+    }
+  } catch {
+    // A body that fails mid-read still leaves the status; the reason is what was read.
+  } finally {
+    reader.cancel().catch(() => {});
+  }
+  const bytes = new Uint8Array(Math.min(total, maxBytes));
+  let offset = 0;
+  for (const chunk of chunks) {
+    const take = Math.min(chunk.byteLength, bytes.byteLength - offset);
+    if (take <= 0) break;
+    bytes.set(chunk.subarray(0, take), offset);
+    offset += take;
+  }
+  return new TextDecoder().decode(bytes);
+}
 
 /**
  * A refusing token endpoint's own reason, in one line, for the error message
@@ -45,16 +80,25 @@ const TOKEN_REQUEST_SECRET_FIELDS = ['client_secret', 'code', 'code_verifier', '
  * error (RFC 6749 §5.2), `status` and `message` when it is HubSpot's shape,
  * the body's first line otherwise, and nothing for an empty body. Without it
  * a bare "HTTP 400" cannot tell a redirect mismatch from a wrong client secret
- * or a reused code. Any secret the REQUEST carried (client secret, code,
- * verifier, refresh token) is redacted should the provider echo it.
+ * or a reused code.
+ *
+ * Scrubbed FIRST, on the body as received, by the shared redactor with every
+ * secret the REQUEST carried (client secret, code, verifier, refresh token):
+ * whole values and echoed heads alike. Only then is it parsed, collapsed to
+ * one line and cut to length, so neither a secret with whitespace in it nor a
+ * fragment left by the cut can reach the message.
  */
 export function describeTokenEndpointError(bodyText: string, request: URLSearchParams): string {
-  const text = bodyText.slice(0, TOKEN_ERROR_BODY_MAX).trim();
+  const text = redactSecret(
+    bodyText,
+    TOKEN_REQUEST_SECRET_FIELDS.map((field) => request.get(field)),
+  ).trim();
   if (!text) return '';
   let reason = text;
   try {
     const json = JSON.parse(text) as Record<string, unknown>;
-    const pick = (keys: string[]) => keys.map((k) => json[k]).find((v) => typeof v === 'string' && v !== '') as string | undefined;
+    const pick = (keys: string[]) =>
+      keys.map((k) => json[k]).find((v) => typeof v === 'string' && v !== '') as string | undefined;
     const parts = [pick(['error', 'status']), pick(['error_description', 'message'])].filter(
       (p): p is string => p !== undefined,
     );
@@ -63,10 +107,6 @@ export function describeTokenEndpointError(bodyText: string, request: URLSearchP
     reason = text.split(/\r?\n/)[0];
   }
   reason = reason.replace(/\s+/g, ' ').trim();
-  for (const field of TOKEN_REQUEST_SECRET_FIELDS) {
-    const value = request.get(field);
-    if (value) reason = reason.split(value).join('[redacted]');
-  }
   return reason.length > TOKEN_ERROR_REASON_MAX ? `${reason.slice(0, TOKEN_ERROR_REASON_MAX)}…` : reason;
 }
 
@@ -770,9 +810,16 @@ export class DbSecretsVaultService implements ISecretsVaultService {
         (err.providerStatus === 400 || err.providerStatus === 401)
       ) {
         // The only trace of a sign-in that silently turns into "not connected":
-        // say which one, and the provider's reason.
-        log.warn(`refresh refused for "${row.key}", sign-in wiped: ${err.message}`);
-        return this.wipeTokens(row, blob);
+        // say which one, the provider's reason, and what the guarded wipe did —
+        // a concurrent refresh may have rotated the tokens first, in which case
+        // nothing was wiped and the rotated grant is served.
+        const result = await this.wipeTokens(row, blob);
+        log.warn(
+          result.outcome === 'rejected'
+            ? `refresh refused for "${row.key}", sign-in wiped: ${err.message}`
+            : `refresh refused for "${row.key}" against a token a concurrent refresh had already rotated; the rotated sign-in is kept: ${err.message}`,
+        );
+        return result;
       }
       return { outcome: 'transient' };
     }
@@ -930,7 +977,7 @@ export class DbSecretsVaultService implements ISecretsVaultService {
       // The provider's reason rides in the message: the callback route and the
       // refresh path log that message, and it is the one line that says WHY a
       // sign-in failed (redirect mismatch, wrong client secret, reused code…).
-      const reason = describeTokenEndpointError(await res.text().catch(() => ''), body);
+      const reason = describeTokenEndpointError(await readBoundedText(res, TOKEN_ERROR_BODY_MAX_BYTES), body);
       throw new SecretOAuthError(`Token endpoint returned HTTP ${res.status}${reason ? `: ${reason}` : ''}`, res.status);
     }
     const json = (await res.json()) as Record<string, unknown>;

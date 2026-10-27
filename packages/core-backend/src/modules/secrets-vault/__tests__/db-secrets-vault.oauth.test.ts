@@ -605,8 +605,12 @@ describe('DbSecretsVaultService — a refused token request says why', () => {
       valueEncrypted: crypto.encrypt(JSON.stringify(blob)),
     });
 
-  async function exchangeFailure(body: string, status = 400): Promise<SecretOAuthError> {
-    const { db } = makeFakeDb([[confidentialRow({ clientSecret: 'client-secret-1', pendingVerifier: 'the-verifier' })]]);
+  async function exchangeFailure(
+    body: string | ReadableStream<Uint8Array>,
+    status = 400,
+    blob: Record<string, unknown> = { clientSecret: 'client-secret-1', pendingVerifier: 'the-verifier' },
+  ): Promise<SecretOAuthError> {
+    const { db } = makeFakeDb([[confidentialRow(blob)]]);
     const svc = new DbSecretsVaultService(db, ENC_KEY);
     vi.stubGlobal('fetch', vi.fn(async () => new Response(body, { status })));
     try {
@@ -654,8 +658,48 @@ describe('DbSecretsVaultService — a refused token request says why', () => {
       }),
     );
     expect(err.message).toBe(
-      'Token endpoint returned HTTP 400: invalid_client — secret [redacted] rejected for code [redacted] (verifier [redacted])',
+      'Token endpoint returned HTTP 400: invalid_client — secret *** rejected for code *** (verifier ***)',
     );
+  });
+
+  it('redacts a secret with whitespace in it, and one the length cut would otherwise split', async () => {
+    // Scrubbed on the body as received: collapsing whitespace or cutting to
+    // length first would leave such a secret, or a fragment of it, in the log.
+    const spaced = await exchangeFailure(
+      JSON.stringify({ error: 'invalid_client', error_description: 'refused:  pass  word\n echoed' }),
+      400,
+      { clientSecret: 'pass  word\n', pendingVerifier: 'the-verifier' },
+    );
+    expect(spaced.message).toBe('Token endpoint returned HTTP 400: invalid_client — refused: *** echoed');
+
+    // "invalid_client — " + 275 x + a space puts the secret at character 293 of
+    // the reason, across the 300-character cut: cut first, "client-" survives.
+    const straddling = await exchangeFailure(
+      JSON.stringify({ error: 'invalid_client', error_description: `${'x'.repeat(275)} client-secret-1 ${'y'.repeat(50)}` }),
+    );
+    expect(straddling.message).not.toContain('client-');
+    expect(straddling.message).toContain('***');
+    expect(straddling.message.length).toBeLessThan(400);
+  });
+
+  it('reads a refusal body only up to its cap and cancels the rest of the stream', async () => {
+    // Without the cap this never returns: the stream has no end.
+    let pulls = 0;
+    let cancelled = false;
+    const endless = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulls += 1;
+        controller.enqueue(new TextEncoder().encode('z'.repeat(1024)));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const err = await exchangeFailure(endless, 502);
+    expect(err.message.length).toBeLessThan(400);
+    expect(err.message.endsWith('…')).toBe(true);
+    expect(pulls).toBeLessThanOrEqual(4);
+    expect(cancelled).toBe(true);
   });
 
   it('a refused refresh is logged with the key and the reason as the sign-in is wiped', async () => {
@@ -679,7 +723,33 @@ describe('DbSecretsVaultService — a refused token request says why', () => {
     await expect(svc.forceRefresh('user-1', KEY)).resolves.toBe('rejected');
 
     const line = warn.mock.calls.map((c) => String(c[0])).find((m) => m.includes('refresh refused'));
-    expect(line).toContain(`refresh refused for "${KEY}", sign-in wiped: Token endpoint returned HTTP 400: invalid_grant — [redacted] was revoked`);
+    expect(line).toContain(
+      `refresh refused for "${KEY}", sign-in wiped: Token endpoint returned HTTP 400: invalid_grant — *** was revoked`,
+    );
+    warn.mockRestore();
+  });
+
+  it('a refused refresh that lost to a concurrent rotation logs that the rotated sign-in was kept, not wiped', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const row = confidentialRow({
+      clientSecret: 'client-secret-1',
+      tokens: { access_token: 'at-old', refresh_token: 'rt-old', expires_at: 1 },
+    });
+    const rotated = crypto.encrypt(
+      JSON.stringify({ clientSecret: 'client-secret-1', tokens: { access_token: 'rotated-at', refresh_token: 'rt-2' } }),
+    );
+    // The row moved on between our read and our guarded wipe: the wipe matches nothing.
+    const { db, updates } = whereAwareDb({ ...row, valueEncrypted: rotated }, row.valueEncrypted);
+    const svc = new DbSecretsVaultService(db, ENC_KEY);
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ error: 'invalid_grant' }), { status: 400 })));
+
+    await expect(svc.forceRefresh('user-1', KEY)).resolves.toBe('refreshed');
+    expect(updates).toEqual([]);
+
+    const line = warn.mock.calls.map((c) => String(c[0])).find((m) => m.includes('refresh refused'));
+    expect(line).toContain(`refresh refused for "${KEY}" against a token a concurrent refresh had already rotated`);
+    expect(line).toContain('the rotated sign-in is kept: Token endpoint returned HTTP 400: invalid_grant');
+    expect(line).not.toContain('wiped');
     warn.mockRestore();
   });
 });
