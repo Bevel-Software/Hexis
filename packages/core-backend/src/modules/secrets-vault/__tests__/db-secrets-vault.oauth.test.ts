@@ -687,6 +687,19 @@ describe('DbSecretsVaultService — a refused token request says why', () => {
     // A plain-text body keeps its first line; a secret there is spelled plainly.
     const plain = await exchangeFailure('se"cr\\et rejected\nmore', 400, blob);
     expect(plain.message).toBe('Token endpoint returned HTTP 400: *** rejected');
+    // A cut JSON STRING does not parse and does not start with a brace, yet it
+    // is JSON as written all the same: nothing but the status.
+    const cutString = await exchangeFailure(JSON.stringify('refused se"cr\\et here').slice(0, 18), 400, blob);
+    expect(cutString.message).toBe('Token endpoint returned HTTP 400');
+  });
+
+  it('scrubs a plain-text body whole before taking its first line, so a secret with a line break leaves no head', async () => {
+    const err = await exchangeFailure('refused: first-half\nsecond-half of it\nmore', 400, {
+      clientSecret: 'first-half\nsecond-half',
+      pendingVerifier: 'the-verifier',
+    });
+    // Split first, the line would read `refused: first-half`.
+    expect(err.message).toBe('Token endpoint returned HTTP 400: refused: *** of it');
   });
 
   it('keeps the status when the refusal body cannot be read, so a refused refresh still retires the grant', async () => {

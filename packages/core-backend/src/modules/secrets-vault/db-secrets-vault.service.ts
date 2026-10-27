@@ -58,13 +58,17 @@ const TOKEN_REQUEST_SECRET_FIELDS = ['client_secret', 'code', 'code_verifier', '
  *
  * For the same reason the message never carries JSON text as written: a JSON
  * body with none of the known fields contributes its decoded string values,
- * and a body that looks like JSON but does not parse (cut at the read cap)
- * contributes nothing. Only a body that is not JSON at all is quoted by its
- * first line, where a secret can only be spelled plainly.
+ * and a body that starts like a JSON value (`{`, `[`, `"`) but does not parse
+ * (cut at the read cap) contributes nothing, since a cut JSON string could
+ * still carry an escaped secret. Only a body that is not JSON at all is
+ * quoted by its first line, where a secret can only be spelled plainly, and
+ * that body is scrubbed whole BEFORE the first line is taken, so a secret
+ * with a line break in it cannot leave its head on that line.
  */
 export function describeTokenEndpointError(bodyText: string, request: URLSearchParams): string {
   const text = bodyText.trim();
   if (!text) return '';
+  const scrub = (s: string) => redactSecret(s, TOKEN_REQUEST_SECRET_FIELDS.map((field) => request.get(field)));
   let reason: string;
   try {
     const json = JSON.parse(text) as unknown;
@@ -78,14 +82,9 @@ export function describeTokenEndpointError(bodyText: string, request: URLSearchP
       reason = strings([json]).join('');
     }
   } catch {
-    reason = /^[[{]/.test(text) ? '' : text.split(/\r?\n/)[0];
+    reason = /^["[{]/.test(text) ? '' : scrub(text).split(/\r?\n/)[0];
   }
-  reason = redactSecret(
-    reason,
-    TOKEN_REQUEST_SECRET_FIELDS.map((field) => request.get(field)),
-  )
-    .replace(/\s+/g, ' ')
-    .trim();
+  reason = scrub(reason).replace(/\s+/g, ' ').trim();
   return reason.length > TOKEN_ERROR_REASON_MAX ? `${reason.slice(0, TOKEN_ERROR_REASON_MAX)}…` : reason;
 }
 
