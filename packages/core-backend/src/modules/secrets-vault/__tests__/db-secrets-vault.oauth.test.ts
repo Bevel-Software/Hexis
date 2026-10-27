@@ -634,17 +634,23 @@ describe("DbSecretsVaultService — a refused token request names the provider's
     expect(client.providerStatus).toBe(400);
     const grant = await exchangeFailure(JSON.stringify({ error: 'invalid_grant' }));
     expect(grant.message).toBe(
-      'Token endpoint returned HTTP 400 (invalid_grant). The provider refused the authorization code: a redirect URL mismatch, or an expired or reused code. Try signing in again.',
+      'Token endpoint returned HTTP 400 (invalid_grant). The provider refused the grant: for a sign-in, a redirect URL mismatch or an expired or reused authorization code; for a refresh, a refresh token that has expired or been revoked. Sign in again.',
+    );
+    const scope = await exchangeFailure(JSON.stringify({ error: 'invalid_scope' }));
+    expect(scope.message).toBe(
+      "Token endpoint returned HTTP 400 (invalid_scope). The provider refused the scopes this sign-in asks for. The tool owner should check the declared scopes against the provider's app.",
+    );
+    const unauthorized = await exchangeFailure(JSON.stringify({ error: 'unauthorized_client' }));
+    expect(unauthorized.message).toBe(
+      "Token endpoint returned HTTP 400 (unauthorized_client). The provider does not allow this client to use this grant. The tool owner should check the provider's app settings.",
     );
   });
 
-  it("names a provider's own status code (HubSpot's shape) with the generic sentence", async () => {
+  it("names a provider's own status code (HubSpot's shape) with the sentence of its OAuth equivalent", async () => {
     const err = await exchangeFailure(
       JSON.stringify({ status: 'BAD_CLIENT_SECRET', message: 'client secret does not match', correlationId: 'c1' }),
     );
-    expect(err.message).toBe(
-      'Token endpoint returned HTTP 400 (BAD_CLIENT_SECRET). The provider refused the token request with that code.',
-    );
+    expect(err.message).toBe(INVALID_CLIENT.replace('(invalid_client)', '(BAD_CLIENT_SECRET)'));
   });
 
   it('takes nothing of the body but the code: descriptions, unknown shapes, plain text and cut bodies leave no trace', async () => {
@@ -664,16 +670,25 @@ describe("DbSecretsVaultService — a refused token request names the provider's
     }
   });
 
-  it('takes a code only when it reads as one: words of one case with underscores, never a request secret', async () => {
-    for (const code of ['Invalid_Client', 'bad code', 'e1', 'x'.repeat(70), 'a', 'the-code']) {
-      expect((await exchangeFailure(JSON.stringify({ error: code }))).message).toBe('Token endpoint returned HTTP 400');
+  it('takes a code only when it is exactly one Hexis knows: anything else in that field is not a code', async () => {
+    // A secret, a secret with a suffix, a near-miss of a known code, a
+    // prototype key, free text: none is on the list, none reaches a message.
+    for (const code of [
+      'wordy_secret',
+      'wordy_secret_rejected',
+      'Invalid_Client',
+      'invalid_client ',
+      'invalid_token',
+      'constructor',
+      'bad code',
+      '',
+    ]) {
+      const err = await exchangeFailure(JSON.stringify({ error: code }), 400, {
+        clientSecret: 'wordy_secret',
+        pendingVerifier: 'the-verifier',
+      });
+      expect(err.message).toBe('Token endpoint returned HTTP 400');
     }
-    // A secret shaped like a code, put where the code goes: still no code.
-    const echoed = await exchangeFailure(JSON.stringify({ error: 'wordy_secret' }), 400, {
-      clientSecret: 'wordy_secret',
-      pendingVerifier: 'the-verifier',
-    });
-    expect(echoed.message).toBe('Token endpoint returned HTTP 400');
   });
 
   it('keeps the status when the refusal body cannot be read, so a refused refresh still retires the grant', async () => {

@@ -35,36 +35,53 @@ const REFRESH_SKEW_MS = 60_000;
 const TOKEN_REQUEST_TIMEOUT_MS = 10_000;
 /** How much of a refusing token endpoint's body is read for its error code: an OAuth error object, never a whole error page. */
 const TOKEN_ERROR_BODY_MAX_BYTES = 2048;
-/** Request fields a provider might echo back; a "code" equal to one of them is no code. */
-const TOKEN_REQUEST_SECRET_FIELDS = ['client_secret', 'code', 'code_verifier', 'refresh_token'] as const;
-/** What an error code looks like: words of one case joined by underscores (`invalid_client`, `BAD_CLIENT_SECRET`). */
-const TOKEN_ERROR_CODE = /^(?:[a-z][a-z_]{1,63}|[A-Z][A-Z_]{1,63})$/;
-/** Hexis's own sentence per OAuth error code (RFC 6749 §5.2): what to do, in our words, never the provider's. */
-const TOKEN_ERROR_HINTS: Record<string, string> = {
-  invalid_client:
-    'The client id or client secret this sign-in uses is not accepted by the provider. The tool owner should check the declared client id and set the client secret again.',
-  invalid_grant:
-    'The provider refused the authorization code: a redirect URL mismatch, or an expired or reused code. Try signing in again.',
-  invalid_scope:
-    "The provider refused the scopes this sign-in asks for. The tool owner should check the declared scopes against the provider's app.",
-  unauthorized_client:
-    "The provider does not allow this client to use the authorization-code flow. The tool owner should check the provider's app settings.",
-};
-const TOKEN_ERROR_HINT_DEFAULT = 'The provider refused the token request with that code.';
+// Hexis's own sentences for a refused token request: what to change, in our
+// words, never the provider's.
+const HINT_CLIENT =
+  'The client id or client secret this sign-in uses is not accepted by the provider. The tool owner should check the declared client id and set the client secret again.';
+const HINT_GRANT =
+  'The provider refused the grant: for a sign-in, a redirect URL mismatch or an expired or reused authorization code; for a refresh, a refresh token that has expired or been revoked. Sign in again.';
+const HINT_SCOPE =
+  "The provider refused the scopes this sign-in asks for. The tool owner should check the declared scopes against the provider's app.";
+const HINT_UNAUTHORIZED =
+  "The provider does not allow this client to use this grant. The tool owner should check the provider's app settings.";
+const HINT_REQUEST =
+  'The provider found the token request malformed. The tool owner should check the declared endpoints and parameters.';
+const HINT_PROVIDER = 'The provider could not serve the token request. Try again later.';
 
 /**
- * The error CODE a refusing token endpoint answered, or null: `error` (RFC
- * 6749 §5.2) or a provider's own `status` (HubSpot's shape), when it reads
- * as a code — words of one case joined by underscores — and is not a secret
- * the request held. Nothing else of the body is ever taken: no description,
- * no message, no first line. A code is the one field whose vocabulary the
- * provider fixes and whose shape a secret does not take, so a message built
- * from it needs no scrubbing, cutting or decoding — the only way every
- * spelling a secret could reach a log in (escaped, encoded, cut) stays
- * inexpressible. Without even the code, a bare "HTTP 400" cannot tell a
- * client the provider does not accept from a refused authorization code.
+ * The error codes a refusing token endpoint may answer that Hexis KNOWS,
+ * each with its sentence: the OAuth ones (RFC 6749 §5.2) in `error`, and the
+ * ones HubSpot's token endpoint answers in its `status` field. A finite list,
+ * on purpose: a code is taken only when it is one of these, exactly, so no
+ * other string a provider puts in that field — a secret, a secret with a
+ * suffix, free text — can reach a message. Nothing else of the body is ever
+ * taken: no description, no message, no first line. That is why a message
+ * built here needs no scrubbing, cutting or decoding, and why every spelling
+ * a secret could reach a log in (escaped, encoded, cut) stays inexpressible.
  */
-export function tokenEndpointErrorCode(bodyText: string, request: URLSearchParams): string | null {
+const TOKEN_ERROR_CODES: ReadonlyMap<string, string> = new Map([
+  ['invalid_request', HINT_REQUEST],
+  ['invalid_client', HINT_CLIENT],
+  ['invalid_grant', HINT_GRANT],
+  ['unauthorized_client', HINT_UNAUTHORIZED],
+  ['unsupported_grant_type', HINT_UNAUTHORIZED],
+  ['invalid_scope', HINT_SCOPE],
+  ['server_error', HINT_PROVIDER],
+  ['temporarily_unavailable', HINT_PROVIDER],
+  ['BAD_CLIENT_ID', HINT_CLIENT],
+  ['BAD_CLIENT_SECRET', HINT_CLIENT],
+  ['BAD_AUTH_CODE', HINT_GRANT],
+  ['BAD_REDIRECT_URI', HINT_GRANT],
+]);
+
+/**
+ * The known error code a refusing token endpoint answered, or null: `error`
+ * (RFC 6749 §5.2) or a provider's own `status`, when it is exactly one of
+ * {@link TOKEN_ERROR_CODES}. Without even the code, a bare "HTTP 400" cannot
+ * tell a client the provider does not accept from a refused grant.
+ */
+export function tokenEndpointErrorCode(bodyText: string): string | null {
   let json: unknown;
   try {
     json = JSON.parse(bodyText);
@@ -74,16 +91,14 @@ export function tokenEndpointErrorCode(bodyText: string, request: URLSearchParam
   if (!json || typeof json !== 'object' || Array.isArray(json)) return null;
   const record = json as Record<string, unknown>;
   const code = [record.error, record.status].find((v): v is string => typeof v === 'string');
-  if (!code || !TOKEN_ERROR_CODE.test(code)) return null;
-  const secrets: (string | null)[] = TOKEN_REQUEST_SECRET_FIELDS.map((field) => request.get(field));
-  return secrets.includes(code) ? null : code;
+  return code !== undefined && TOKEN_ERROR_CODES.has(code) ? code : null;
 }
 
-/** The refusal in one message: the status, the code when there is one, and Hexis's sentence for it. */
+/** The refusal in one message: the status, the known code when there is one, and Hexis's sentence for it. */
 export function describeTokenEndpointRefusal(status: number, code: string | null): string {
   const base = `Token endpoint returned HTTP ${status}`;
-  if (!code) return base;
-  return `${base} (${code}). ${TOKEN_ERROR_HINTS[code] ?? TOKEN_ERROR_HINT_DEFAULT}`;
+  const hint = code === null ? undefined : TOKEN_ERROR_CODES.get(code);
+  return hint ? `${base} (${code}). ${hint}` : base;
 }
 
 /**
@@ -965,7 +980,7 @@ export class DbSecretsVaultService implements ISecretsVaultService {
       // refresh path reads 400/401 off it to retire a dead grant), and a body
       // that fails to read must not turn a definitive refusal into an
       // unclassified error.
-      const code = tokenEndpointErrorCode(await readCapped(res, TOKEN_ERROR_BODY_MAX_BYTES).catch(() => ''), body);
+      const code = tokenEndpointErrorCode(await readCapped(res, TOKEN_ERROR_BODY_MAX_BYTES).catch(() => ''));
       throw new SecretOAuthError(describeTokenEndpointRefusal(res.status, code), res.status);
     }
     const json = (await res.json()) as Record<string, unknown>;
