@@ -738,11 +738,14 @@ describe('DbSecretsVaultService — a refused token request says why', () => {
       pendingVerifier: 'the-verifier',
     });
     expect(utf8.message).toBe('Token endpoint returned HTTP 400');
-    // A plain-text body that merely FILLS the cap (2048 bytes exactly) is
-    // complete and is quoted, cut to the reason's own length.
+    // A plain-text body that exactly FILLS the cap (2048 bytes) is not seen to
+    // end — no byte past the cap is read, so it cannot be told from a longer
+    // one — and is not quoted either; one byte shorter, it is.
     const full = await exchangeFailure(`${'x'.repeat(2040)} refused`, 400);
-    expect(full.message.startsWith('Token endpoint returned HTTP 400: xxx')).toBe(true);
-    expect(full.message.endsWith('…')).toBe(true);
+    expect(full.message).toBe('Token endpoint returned HTTP 400');
+    const under = await exchangeFailure(`${'x'.repeat(2039)} refused`, 400);
+    expect(under.message.startsWith('Token endpoint returned HTTP 400: xxx')).toBe(true);
+    expect(under.message.endsWith('…')).toBe(true);
   });
 
   it('keeps the status when the refusal body cannot be read, so a refused refresh still retires the grant', async () => {

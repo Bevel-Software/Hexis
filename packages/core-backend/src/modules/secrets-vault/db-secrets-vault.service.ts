@@ -976,14 +976,16 @@ export class DbSecretsVaultService implements ISecretsVaultService {
       // Best effort: the STATUS is the contract (the refresh path reads 400/401
       // off it to retire a dead grant), and a body that fails to read must not
       // turn a definitive refusal into an unclassified error.
-      // Whether the body ended within the cap is the reader's raw-byte word,
-      // never inferred from the decoded text; only a body that did may be
-      // quoted as plain text.
+      // Whether the body ended within the cap is the reader's word on the raw
+      // stream, never inferred from the decoded text; only a body SEEN to end
+      // may be quoted as plain text (one that exactly fills the cap is not,
+      // since telling it from a longer one would mean waiting for a byte that
+      // may never come).
       const refusal = await readCappedBytes(res, TOKEN_ERROR_BODY_MAX_BYTES).catch(() => ({
         text: '',
-        truncated: false,
+        ended: false,
       }));
-      const reason = describeTokenEndpointError(refusal.text, body, !refusal.truncated);
+      const reason = describeTokenEndpointError(refusal.text, body, refusal.ended);
       throw new SecretOAuthError(`Token endpoint returned HTTP ${res.status}${reason ? `: ${reason}` : ''}`, res.status);
     }
     const json = (await res.json()) as Record<string, unknown>;
