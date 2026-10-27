@@ -732,13 +732,31 @@ describe("a tmp ref reaches the caller's own staged files and nobody else's", ()
     }
   });
 
-  it("never stages through a link that leads out of the owner's folder", async () => {
+  it("never stages through a link: not on the way, not at the file's own name, not where the owner's folder or tmp/ should be", async () => {
     await start();
     const id = encodeURIComponent(DRAFT);
+    await commitFixture('secret.md', 'repository secret');
     await mkdir(ownerDir(DRAFT), { recursive: true });
+    // A link on the way.
     await symlink(join(workspaceDir(DRAFT), KB_DIR), join(ownerDir(DRAFT), 'kb'));
     await expect(service.stageTmpFile(id, ME, 'kb/planted.md', Buffer.from('x'))).rejects.toThrow(/link that leads out/);
     await expect(stat(join(workspaceDir(DRAFT), KB_DIR, 'planted.md'))).rejects.toThrow();
+    // A link at the file's own name: a write would follow it into the repository.
+    await symlink(join(workspaceDir(DRAFT), KB_DIR, 'secret.md'), join(ownerDir(DRAFT), 'secret.md'));
+    await expect(service.stageTmpFile(id, ME, 'secret.md', Buffer.from('overwritten'))).rejects.toThrow(/not a file/);
+    expect(await readFile(join(workspaceDir(DRAFT), KB_DIR, 'secret.md'), 'utf8')).toBe('repository secret');
+    // A link standing where the owner's folder should be: both real paths
+    // would agree about the link's target, so it is refused before any of that.
+    await symlink(join(workspaceDir(DRAFT), KB_DIR), ownerDir(DRAFT, OTHER));
+    await expect(service.stageTmpFile(id, OTHER, 'planted.md', Buffer.from('x'))).rejects.toThrow(/not a folder of this workspace/);
+    await expect(service.readTmpFile(id, OTHER, '__tmp__/secret.md')).rejects.toThrow(/not a folder of this workspace/);
+    await expect(stat(join(workspaceDir(DRAFT), KB_DIR, 'planted.md'))).rejects.toThrow();
+    // A link standing where `tmp/` itself should be, in a workspace with none yet.
+    await symlink(join(workspaceDir(PROTECTED), KB_DIR), join(workspaceDir(PROTECTED), 'tmp'));
+    const other = encodeURIComponent(PROTECTED);
+    await expect(service.stageTmpFile(other, ME, 'planted.md', Buffer.from('x'))).rejects.toThrow(/not a folder of this workspace/);
+    await expect(service.readTmpFile(other, ME, '__tmp__/planted.md')).rejects.toThrow(/not a folder of this workspace/);
+    await expect(stat(join(workspaceDir(PROTECTED), KB_DIR, 'planted.md'))).rejects.toThrow();
   });
 });
 

@@ -136,6 +136,20 @@ function tmpRefSegments(ref: string): string[] {
 }
 
 /**
+ * `folder` is absent, or a real directory — never a link, never a file. The
+ * `tmp/` folder and an owner's folder are judged by this before anything
+ * resolves or lands under them: a link standing in either place would carry
+ * the whole folder somewhere else, and a real-path containment check judged
+ * against the link's target would not notice.
+ */
+async function assertOwnFolder(folder: string, ref: string, failed: (err: unknown) => never): Promise<void> {
+  const stat = await lstatOrNull(folder).catch(failed);
+  if (stat !== null && !stat.isDirectory()) {
+    throw invalidRef(ref, "its tmp folder is not a folder of this workspace's own (a link or a file stands where it should be).");
+  }
+}
+
+/**
  * THE resolution of a ref, against one owner's folder in one workspace
  * directory: the file's absolute path and its stat, or a refusal. Every read
  * of the folder starts here.
@@ -163,9 +177,12 @@ export async function resolveTmpRef(
   const absent = (err: unknown): never => {
     throw tmpRefFailure(ref, err);
   };
-  // The folder itself must BE a folder of this workspace, not a link to one
-  // somewhere else: the containment below is judged against it.
-  if ((await lstatOrNull(ownerDir).catch(absent))?.isDirectory() !== true) throw new PathNotFoundError(ref);
+  // `tmp/` and the owner's folder must BE folders of this workspace, not
+  // links to ones somewhere else: the containment below is judged against
+  // the owner's folder's real path, which a link would move along with it.
+  await assertOwnFolder(path.join(workspaceDir, WORKSPACE_TMP_DIR), ref, absent);
+  await assertOwnFolder(ownerDir, ref, absent);
+  if ((await lstatOrNull(ownerDir).catch(absent)) === null) throw new PathNotFoundError(ref);
   const realOwnerDir = await fs.realpath(ownerDir).catch(absent);
   const real = await fs.realpath(path.join(ownerDir, ...segments)).catch(absent);
   // THE containment check (shared/path-containment.ts), on the real paths;
@@ -218,14 +235,22 @@ export async function statTmpRef(workspaceDir: string, ownerId: string, ref: str
  * owner, the file's path inside it — is this function's and no stager's.
  * `relativePath` obeys a ref's own rules (one file, no `..`, no absolute
  * path, no backslash, no control character); the refusal names the rule.
- * Replaces what is at the path: a staged file is the stager's own scratch,
- * and the chat names uploads by their content. Never writes through a link
- * that leads out of the owner's folder.
+ * Replaces the FILE at the path: a staged file is the stager's own scratch,
+ * and the chat names uploads by their content. Never writes through a link:
+ * not one standing where `tmp/` or the owner's folder should be, not one on
+ * the way, and not one at the file's own name (judged by `lstat`, which is
+ * what every platform has; the check and the write are two steps, as they
+ * are everywhere else in this file).
  */
 export async function stageTmpRef(workspaceDir: string, ownerId: string, relativePath: string, bytes: Uint8Array): Promise<string> {
   const ref = TMP_REF_PREFIX + relativePath;
   const segments = tmpRefSegments(ref);
   const ownerDir = ownerFolder(workspaceDir, ownerId);
+  const rethrow = (err: unknown): never => {
+    throw err;
+  };
+  await assertOwnFolder(path.join(workspaceDir, WORKSPACE_TMP_DIR), ref, rethrow);
+  await assertOwnFolder(ownerDir, ref, rethrow);
   const absolutePath = path.join(ownerDir, ...segments);
   await fs.mkdir(path.dirname(absolutePath), { recursive: true });
   // The parent is real and inside the owner's folder, or a link somewhere in
@@ -238,7 +263,14 @@ export async function stageTmpRef(workspaceDir: string, ownerId: string, relativ
       throw invalidRef(ref, 'it goes through a link that leads out of your tmp folder, and links out of it are never followed.');
     }
   }
-  await fs.writeFile(path.join(realParent, segments[segments.length - 1]!), bytes);
+  const target = path.join(realParent, segments[segments.length - 1]!);
+  // The name itself: a file to replace, nothing yet, or something that is
+  // neither — a link (which a write would follow) or a folder — refused.
+  const standing = await lstatOrNull(target);
+  if (standing !== null && !standing.isFile()) {
+    throw invalidRef(ref, 'it names something that is not a file.');
+  }
+  await fs.writeFile(target, bytes);
   return ref;
 }
 
