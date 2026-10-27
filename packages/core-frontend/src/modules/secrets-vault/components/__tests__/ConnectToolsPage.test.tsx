@@ -588,6 +588,37 @@ describe('ConnectToolsPage: inside Skills & Tools', () => {
       expect(connectMock.completeMcpOAuth).toHaveBeenCalledWith('signed-state', 'Agents/ops.agent');
     });
 
+    it('lists the tools for the chosen agent: the list is fetched again for it, quietly, and once more for Everything', async () => {
+      renderPage();
+      // The first load, before any choice, is Everything's.
+      await screen.findByLabelText('API_KEY value');
+      expect(connectMock.getConnectPending).toHaveBeenLastCalledWith(null);
+      // The agent loads no tool that needs anything: the page says so, for that agent.
+      connectMock.getConnectPending.mockResolvedValue({ tools: [], oauth: [], toolOAuth: [] });
+      fireEvent.click(await screen.findByRole('radio', { name: /ops/ }));
+      await waitFor(() => expect(connectMock.getConnectPending).toHaveBeenLastCalledWith('Agents/ops.agent'));
+      expect(await screen.findByRole('status')).toHaveTextContent(/none of the tools the chosen agent loads/);
+      // Quietly: the page never dropped to "Loading…" over the list it had.
+      expect(screen.queryByText('Loading…')).not.toBeInTheDocument();
+      // Back to Everything: fetched again, as Everything.
+      connectMock.getConnectPending.mockResolvedValue(pending(false));
+      fireEvent.click(screen.getByRole('radio', { name: /Everything/ }));
+      await waitFor(() => expect(connectMock.getConnectPending).toHaveBeenLastCalledWith(null));
+      await screen.findByLabelText('API_KEY value');
+    });
+
+    it('fetches the remembered agent’s list straight away when the page comes back from a sign-in', async () => {
+      const first = renderPage();
+      fireEvent.click(await screen.findByRole('radio', { name: /ops/ }));
+      await waitFor(() => expect(connectMock.getConnectPending).toHaveBeenLastCalledWith('Agents/ops.agent'));
+      first.unmount();
+      connectMock.getConnectPending.mockClear();
+      window.history.replaceState(null, '', '/skills-and-tools/connect');
+      renderPage();
+      await screen.findByRole('radio', { name: /ops/ });
+      await waitFor(() => expect(connectMock.getConnectPending).toHaveBeenLastCalledWith('Agents/ops.agent'));
+    });
+
     it('keeps the choice across a tool sign-in’s round-trip, and a new authorization starts at Everything', async () => {
       const first = renderPage();
       fireEvent.click(await screen.findByRole('radio', { name: /ops/ }));

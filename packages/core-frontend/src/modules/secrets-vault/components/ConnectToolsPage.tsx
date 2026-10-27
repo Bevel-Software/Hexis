@@ -140,6 +140,14 @@ export function ConnectToolsPage() {
    */
   const loadSeq = useRef(0);
 
+  // The agent the list is for: the "Connect as" choice, in agent-connect mode
+  // only. A connection made as an agent loads only the connectors its file
+  // lists, so the page asks for the sign-ins and keys of those and no other —
+  // asking for hubspot's sign-in on the way to an agent that never loads
+  // hubspot sends the person off to sign in for nothing. Everything (null)
+  // lists what it always listed.
+  const chosenAgent = agentState != null ? connectAs.value : null;
+
   /**
    * @param quiet keep the list on screen while it refetches.
    *
@@ -154,7 +162,7 @@ export function ConnectToolsPage() {
     if (!quiet) setLoading(true);
     setRefreshing(true);
     try {
-      const pending = await getConnectPending();
+      const pending = await getConnectPending(chosenAgent);
       if (loadSeq.current !== mine) return;
       setTools(pending.tools);
       setOauth(pending.oauth);
@@ -170,11 +178,18 @@ export function ConnectToolsPage() {
         setRefreshing(false);
       }
     }
-  }, []);
+  }, [chosenAgent]);
 
+  // The first load, loud; and again, quietly, whenever the choice changes —
+  // `refresh` is remade for the chosen agent, and the list on screen is the
+  // other agent's until the new one answers, which is the one case a loud
+  // reload would have nothing to protect (no row holds a probe's verdict
+  // for a list that is about to be replaced) and still nothing to gain.
+  const loadedOnce = useRef(false);
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- the first load; refresh sets state once it answers
-    void refresh();
+    const quiet = loadedOnce.current;
+    loadedOnce.current = true;
+    void refresh(quiet);
   }, [refresh]);
 
   // Pick up (and persist) the external-agent authorization state.
@@ -422,11 +437,13 @@ export function ConnectToolsPage() {
               so before they wonder why a row has no field. */}
           {!nothingToDo && (
             <p className="mb-5 text-ui text-ink-muted">
-              These tools need a sign-in or a key before they will work in your agent. Authorize
-              each connection and enter any keys below, then head back to your agent and run the
-              tool again. Anything greyed out is not yours to do — it is waiting on the tool&apos;s
-              owner, or you took it out yourself. Your values are stored securely and never shown
-              again after saving.
+              {chosenAgent
+                ? 'These are the tools the chosen agent loads that need a sign-in or a key before they will work in your agent. '
+                : 'These tools need a sign-in or a key before they will work in your agent. '}
+              Authorize each connection and enter any keys below, then head back to your agent and
+              run the tool again. Anything greyed out is not yours to do — it is waiting on the
+              tool&apos;s owner, or you took it out yourself. Your values are stored securely and
+              never shown again after saving.
             </p>
           )}
 
@@ -438,7 +455,9 @@ export function ConnectToolsPage() {
               // every shared tool works without a personal credential, so the
               // user's only job is to finish.
               <Banner role="status" tone="ok">
-                You&apos;re all set: none of your tools need a personal sign-in or key. Click
+                {chosenAgent
+                  ? 'You’re all set: none of the tools the chosen agent loads need a personal sign-in or key. Click '
+                  : 'You’re all set: none of your tools need a personal sign-in or key. Click '}
                 “Finish &amp; return to your agent” above to complete the connection.
               </Banner>
             ) : (
