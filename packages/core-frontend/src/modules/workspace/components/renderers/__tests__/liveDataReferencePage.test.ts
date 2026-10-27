@@ -247,6 +247,20 @@ describe("the guide's live-data reference page", () => {
     expect(hrefs).toEqual(Object.keys(FIRST).map((name) => `/workspace/main/${KB_DIR_NAME}/${FOLDER}/${name}`));
   });
 
+  it('keeps a name carrying `#`, `?` or `%` in the link, each segment encoded on its own', async () => {
+    const files: Files = { 'A#1.md': ticket('Sharp', 'todo'), 'B?2.md': ticket('Query', 'doing'), 'C%3.md': ticket('Percent', 'done') };
+    const page = await mountReferencePage();
+    await answerListing(page, files);
+    await answerReads(page, files);
+    const hrefs = Array.from(document.querySelectorAll('.column a')).map((a) => a.getAttribute('href'));
+    // `#1.md` would otherwise be the URL's fragment, and the card would open `A`.
+    expect(hrefs).toEqual([
+      `/workspace/main/${KB_DIR_NAME}/Data/Tickets/A%231.md`,
+      `/workspace/main/${KB_DIR_NAME}/Data/Tickets/B%3F2.md`,
+      `/workspace/main/${KB_DIR_NAME}/Data/Tickets/C%253.md`,
+    ]);
+  });
+
   it('reads a file saved with Windows line endings like any other', async () => {
     const page = await mountReferencePage();
     const crlf: Files = { 'A.md': ticket('Alpha', 'todo', '\r\n'), 'B.md': ticket('Bravo', 'done', '\r\n') };
