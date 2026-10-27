@@ -372,6 +372,64 @@ describe('ToolManualService — MCP OAuth auto-discovery decoration', () => {
       warn.mockRestore();
     });
 
+    test('a .tool whose sign-in endpoint fails validation answers the parser’s reason, even while the catalog holds the valid version', async () => {
+      const toolsDir = join(root, wsId, KB_DIR, 'Plugins');
+      const write = (tokenUrl: string) =>
+        writeFile(
+          join(toolsDir, 'crm.tool'),
+          JSON.stringify({
+            name: 'crm',
+            type: 'http',
+            url: 'https://api.crm.example/openapi.json',
+            variables: [{ name: 'SIGNIN', scope: 'user', oauth: { clientId: 'c', authorizationUrl: HUBSPOT_ENDPOINTS.authorizationUrl, tokenUrl } }],
+          }),
+        );
+      await write(HUBSPOT_ENDPOINTS.tokenUrl);
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const svc = svcWith({ statusFor: vi.fn(async () => ({ status: 'open' as const })) });
+      expect((await svc.listAccessible('user@example.com')).some((m) => m.name === 'crm')).toBe(true);
+
+      await write('http://127.0.0.1/token');
+      await expect(svc.liveDeclaration('user@example.com', 'crm', 'SIGNIN')).resolves.toEqual({
+        refused: '`variables[0].oauth.tokenUrl` must use https',
+      });
+      await write('https://10.0.0.5/token');
+      await expect(svc.liveDeclaration('user@example.com', 'crm', 'SIGNIN')).resolves.toEqual({
+        refused: '`variables[0].oauth.tokenUrl` host is not allowed',
+      });
+      warn.mockRestore();
+    });
+
+    test('a plugin.json sign-in whose endpoint fails validation answers the reason too, not only a log line', async () => {
+      await writeDeclaredServer({ clientId: 'owner-app', ...HUBSPOT_ENDPOINTS, tokenUrl: 'http://127.0.0.1/token' });
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const svc = svcWith({ statusFor: vi.fn(async () => ({ status: 'open' as const })) });
+      const live = await svc.liveDeclaration('user@example.com', 'hubspot', 'HUBSPOT_TOKEN');
+      expect(live?.refused).toContain('HUBSPOT_TOKEN oauth.tokenUrl must use https');
+      // The catalog's public listing is unchanged by this: the server is still left out.
+      const catalog = await svc.listAccessibleCatalog('user@example.com');
+      expect(catalog.tools.some((m) => m.name === 'hubspot')).toBe(false);
+      warn.mockRestore();
+    });
+
+    test('a refusal is read-gated like the manual it would have been', async () => {
+      await writeDeclaredServer({ clientId: 'owner-app', ...HUBSPOT_ENDPOINTS, tokenUrl: 'http://127.0.0.1/token' });
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const denyAll = {
+        canRead: async () => false,
+        canReadBatch: async (_w: string, _e: string, paths: string[]) => new Map(paths.map((p) => [p, false])),
+      } as unknown as IAccessControl;
+      const locked = new ToolManualService(
+        workspaceService,
+        denyAll,
+        testKbContext({ kbDirName: KB_DIR }),
+        disk,
+        new KbPluginSource(disk, testKbContext({ kbDirName: KB_DIR })),
+      );
+      await expect(locked.liveDeclaration('user@example.com', 'hubspot', 'HUBSPOT_TOKEN')).resolves.toBeNull();
+      warn.mockRestore();
+    });
+
     test('answers no variable when the file declares none of that name, and null for an unreadable manual', async () => {
       await writeDeclaredServer({ clientId: 'owner-app', ...HUBSPOT_ENDPOINTS });
       const statusFor = vi.fn(async () => ({ status: 'oauth' as const, provider: OAUTH_PROVIDER }));

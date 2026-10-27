@@ -59,6 +59,7 @@ import {
   type ToolProbeTarget,
   type ToolVariableScope,
   type ToolVariableOAuth,
+  type LiveDeclaration,
 } from './tool-manuals.contract.js';
 
 const CACHE_TTL_MS = 60_000;
@@ -182,6 +183,19 @@ export function describeManualFault(err: unknown): string {
 interface ScanResult {
   manuals: ToolManualDescriptor[];
   invalid: InvalidToolManual[];
+  /**
+   * Every manual the parse refused whose file still says which manual it is,
+   * by slug, with the reason. Not a listing surface (`invalid` is that, by
+   * path): it lets a sign-in started on a refused declaration answer why,
+   * where the slug alone would otherwise find nothing.
+   */
+  refused: RefusedManual[];
+}
+
+interface RefusedManual {
+  slug: string;
+  path: string;
+  reason: string;
 }
 
 /**
@@ -191,7 +205,7 @@ interface ScanResult {
  * convention instance is one push away from every empty scan in the process
  * inheriting another's contents.
  */
-const emptyScan = (): ScanResult => ({ manuals: [], invalid: [] });
+const emptyScan = (): ScanResult => ({ manuals: [], invalid: [], refused: [] });
 
 const manualSerializer = new UtcpManualSerializer();
 const callTemplateSerializer = new CallTemplateSerializer();
@@ -346,7 +360,7 @@ export class ToolManualService implements IToolManualService {
     userEmail: string,
     slug: string,
     varName: string,
-  ): Promise<{ manual: ToolManualSummary; variable?: ToolVariable } | null> {
+  ): Promise<LiveDeclaration | null> {
     // The disk walk the catalog's scan is built from, run afresh and never
     // cached: a sign-in must follow the file as it is, and the catalog's scan
     // can be a refresh behind it. The whole walk rather than the one file, so
@@ -354,9 +368,15 @@ export class ToolManualService implements IToolManualService {
     // namespace dedup the catalog applies — a sign-in start is rare and
     // interactive, and a second, single-file reading of the same files is a
     // second place for those rules to drift.
-    const { manuals } = await this.readableBy(await this.scanDisk(), userEmail);
+    const { manuals, refused } = await this.readableBy(await this.scanDisk(), userEmail);
     const m = manuals.find((x) => x.slug === slug);
-    if (!m) return null;
+    if (!m) {
+      // The file is there and says it is this manual, but the parse refused
+      // it — e.g. its sign-in names an http:// or private token endpoint. That
+      // reason is the answer; "not found" would hide the one thing to fix.
+      const r = refused.find((x) => x.slug === slug);
+      return r ? { refused: r.reason } : null;
+    }
     const variable = (m.variables ?? []).find((v) => v.name === varName);
     // Completed by the catalog's own decoration, on this one fresh descriptor.
     // Only when THIS variable is a sign-in: then the manual has a declared one,
@@ -645,11 +665,11 @@ export class ToolManualService implements IToolManualService {
 
   /** A scan cut to what this caller may read — see {@link accessibleScan}. */
   private async readableBy(scan: ScanResult, userEmail: string, within?: ConnectorScope): Promise<ScanResult> {
-    const { manuals, invalid } = scan;
-    if (manuals.length === 0 && invalid.length === 0) return emptyScan();
+    const { manuals, invalid, refused } = scan;
+    if (manuals.length === 0 && invalid.length === 0 && refused.length === 0) return emptyScan();
     const wsId = this.kb.defaultWorkspaceId();
     const allowed = await this.accessControl.canReadBatch(wsId, userEmail, [
-      ...new Set([...manuals.map((m) => m.path), ...invalid.map((i) => i.path)]),
+      ...new Set([...manuals.map((m) => m.path), ...invalid.map((i) => i.path), ...refused.map((r) => r.path)]),
     ]);
     // Fail closed: keep an entry only on an explicit `true` verdict (a missing
     // entry is treated as denied, matching the KB's default-deny read model).
@@ -660,6 +680,7 @@ export class ToolManualService implements IToolManualService {
     return {
       manuals: manuals.filter((m) => inScope(m.path)),
       invalid: invalid.filter((i) => inScope(i.path)),
+      refused: refused.filter((r) => inScope(r.path)),
     };
   }
 
@@ -684,14 +705,14 @@ export class ToolManualService implements IToolManualService {
     // See `TtlCache.begin`: taken before the read so an `invalidate()` that
     // lands mid-scan discards this result instead of being overwritten by it.
     const token = this.cache.begin();
-    const { manuals, invalid } = await this.scanDisk();
+    const scanned = await this.scanDisk();
+    const { manuals } = scanned;
     await this.decorateMcpOAuth(manuals);
     // AFTER the oauth decoration, so an injected `${MCP_OAUTH}` header ref is
     // already declared and isn't re-surfaced as a bare admin key.
     for (const m of manuals) this.surfaceReferencedVariables(m);
-    const result = { manuals, invalid };
-    this.cache.set(result, token);
-    return result;
+    this.cache.set(scanned, token);
+    return scanned;
   }
 
   /**
@@ -951,6 +972,7 @@ export class ToolManualService implements IToolManualService {
     // The plugins (and their mcp.json text) come from the configured source, so
     // a dialect that expands servers from a registry lands here unchanged.
     const parsed: ToolManualDescriptor[] = [];
+    const refused: RefusedManual[] = [];
     const discovered = await this.source.discover(kbRoot);
     for (const plugin of discovered.plugins) {
       if (plugin.mcpJsonText === null) continue; // no servers is the common case, not an error
@@ -959,7 +981,9 @@ export class ToolManualService implements IToolManualService {
       // (a URL, a header, an added or dropped server, a `local: true` flip)
       // moves every server's digest — which is correct, if slightly generous.
       const from = sourceDigest(plugin.mcpJsonText + '\u0000' + (plugin.manifestText ?? ''));
-      for (const d of descriptorsFromMcpJson(plugin.relFolder, plugin.mcpJsonText, plugin.manifestText, layout)) {
+      const onRefused = (slug: string, reason: string, path: string) =>
+        refused.push({ slug, path, reason: describeManualFault(reason) });
+      for (const d of descriptorsFromMcpJson(plugin.relFolder, plugin.mcpJsonText, plugin.manifestText, layout, onRefused)) {
         d.sourceRevision = from;
         parsed.push(d);
       }
@@ -995,6 +1019,8 @@ export class ToolManualService implements IToolManualService {
         // outage from where the author stands: the tool is gone from every
         // listing, with nothing anywhere saying which file or why.
         invalid.push({ path: f.rel, reason: describeManualFault(err) });
+        const slug = refusedToolManualName(baseName(f.rel), content);
+        if (slug !== null) refused.push({ slug, path: f.rel, reason: describeManualFault(err) });
         continue;
       }
       // The route slug IS the id (unique after dedup below, snake_case → URL-safe),
@@ -1043,7 +1069,7 @@ export class ToolManualService implements IToolManualService {
     // draft workspace, and a draft's half-written `.tool` is not news about the
     // served catalog — it would also flap the log every time an agent saves.
     if (branch === this.kb.defaultBranch) this.logInvalidOnChange(invalid);
-    return { manuals, invalid };
+    return { manuals, invalid, refused };
   }
 }
 
@@ -1156,6 +1182,54 @@ function manualName(raw: string): string {
 }
 
 /**
+ * The object a `.tool` file holds: its `---` block when fenced, the whole file
+ * when not. Throws when that is not an object.
+ */
+function toolFileObject(content: string): Record<string, unknown> {
+  const fm = extractFrontmatter(content);
+  const source = fm ? fm.frontmatter : content;
+  const parsed = parseYaml(source) as unknown;
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('`.tool` file must be a YAML/JSON object (in the `---` block when fenced)');
+  }
+  return parsed as Record<string, unknown>;
+}
+
+/**
+ * A `.tool`'s manual name — its UTCP namespace, and the slug the scan serves it
+ * under. An explicit `id` is used VERBATIM, so it must be lowercase snake_case
+ * (UTCP's namespace grammar). With no explicit id, fall back to `name` then the
+ * filename and sanitize (legacy behaviour — keeps existing tools' namespaces).
+ */
+function toolManualName(obj: Record<string, unknown>, provisionalSlug: string): string {
+  const explicitId = typeof obj.id === 'string' ? obj.id.trim() : '';
+  if (!explicitId) return manualName(resolveDeclaredId(obj, provisionalSlug));
+  if (!isValidId(explicitId)) {
+    // The rejected id is NOT quoted back — see `describeManualFault`: this
+    // message becomes an `invalid[].reason` on an agent transcript, a browser
+    // and a log, and `id` is a field an author can paste anything into,
+    // including the token they meant for a header. The field name plus the
+    // rule is what the author needs; the value is in front of them.
+    throw new Error('tool `id` must be lowercase snake_case (letters, digits, underscores)');
+  }
+  return explicitId;
+}
+
+/**
+ * The manual name of a `.tool` the parser REFUSED, when the file still says
+ * which manual it is — by the same rule {@link normalizeToolManual} names a
+ * manual it accepts. `null` when even that cannot be read (unparseable YAML,
+ * a malformed `id`): then nothing can claim the refusal by name.
+ */
+function refusedToolManualName(provisionalSlug: string, content: string): string | null {
+  try {
+    return toolManualName(toolFileObject(content), provisionalSlug);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Parse + normalize a `.tool` file into a descriptor. THE TOOL IS THE
  * FRONTMATTER: a fenced file's single `---` YAML block carries everything —
  * `id`/`name`, access verbs (`read`/`write`/`owner`/`download`, read straight
@@ -1178,34 +1252,9 @@ export function normalizeToolManual(
   // finds its verbs inside the fence, the id index finds `id`/`name`, and the
   // config keys live in the same object. A fence-less file is the legacy form
   // (the whole file is the object) — JSON `.tool`s can't carry fences.
-  const fm = extractFrontmatter(content);
-  const source = fm ? fm.frontmatter : content;
-  const parsed = parseYaml(source) as unknown;
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error('`.tool` file must be a YAML/JSON object (in the `---` block when fenced)');
-  }
-  const obj = parsed as Record<string, unknown>;
+  const obj = toolFileObject(content);
   const type = normalizeType(obj.type);
-
-  // Identity: an explicit `id` is used VERBATIM as the UTCP manual namespace, so
-  // it must be lowercase snake_case (UTCP's namespace grammar). With no explicit
-  // id, fall back to `name` then the filename and sanitize (legacy behaviour —
-  // keeps existing tools' namespaces).
-  const explicitId = typeof obj.id === 'string' ? obj.id.trim() : '';
-  let name: string;
-  if (explicitId) {
-    if (!isValidId(explicitId)) {
-      // The rejected id is NOT quoted back — see `describeManualFault`: this
-      // message becomes an `invalid[].reason` on an agent transcript, a browser
-      // and a log, and `id` is a field an author can paste anything into,
-      // including the token they meant for a header. The field name plus the
-      // rule is what the author needs; the value is in front of them.
-      throw new Error('tool `id` must be lowercase snake_case (letters, digits, underscores)');
-    }
-    name = explicitId;
-  } else {
-    name = manualName(resolveDeclaredId(obj, provisionalSlug));
-  }
+  const name = toolManualName(obj, provisionalSlug);
 
   // A `.tool` may not reproduce a built-in manual's UTCP namespace — that would
   // let it read the loopback creds seeded under that namespace on the agent's

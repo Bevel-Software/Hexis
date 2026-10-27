@@ -547,6 +547,11 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
         toolManualService.liveDeclaration(email, req.params.slug, req.params.var),
         findManualVar(email, req.params.slug, req.params.var),
       ]);
+      // The file is there but its declaration is refused as it reads now (an
+      // http:// or private endpoint, say): the parser's reason is the answer,
+      // and neither a catalog still holding the earlier version nor the stored
+      // row stands in for it. Nothing is sent anywhere.
+      if (live?.refused) return void res.status(422).json({ error: live.refused });
       const manual = live?.manual ?? catalog?.manual;
       if (!manual || (!live?.variable && !catalog)) {
         return void res.status(404).json({ error: 'Tool or variable not found' });

@@ -90,39 +90,59 @@ const SERVER_NAME_RE = /^[a-z0-9][a-z0-9_-]*$/;
  * silently vanishes from the catalog the moment its edit lands.
  */
 export function validatedVariables(raw: unknown): ToolVariable[] | null {
-  if (raw === undefined) return [];
-  if (!Array.isArray(raw)) return null;
+  const verdict = judgeVariables(raw);
+  return verdict.ok ? verdict.variables : null;
+}
+
+/**
+ * {@link validatedVariables} with the reason a declaration was refused. The
+ * reason names the entry and the rule, never a value the author wrote (the
+ * same discipline as `describeManualFault`): it reaches logs and, for a
+ * sign-in start on the server, the person signing in.
+ */
+function judgeVariables(
+  raw: unknown,
+): { ok: true; variables: ToolVariable[] } | { ok: false; reason: string } {
+  const no = (reason: string) => ({ ok: false as const, reason });
+  if (raw === undefined) return { ok: true, variables: [] };
+  if (!Array.isArray(raw)) return no('`variables` must be a list');
   const out: ToolVariable[] = [];
   const declared = new Set<string>();
   for (const entry of raw) {
-    if (!isRecord(entry)) return null;
-    if (typeof entry.name !== 'string' || !/^[A-Za-z0-9_]+$/.test(entry.name)) return null;
+    if (!isRecord(entry)) return no('every `variables` entry must be an object');
+    if (typeof entry.name !== 'string' || !/^[A-Za-z0-9_]+$/.test(entry.name)) {
+      return no('every variable needs a `name` of letters, digits and underscores');
+    }
     // The `.tool` parser's declaration rules, at this file's grain: a
     // platform-seeded name may not be re-declared (it would shadow the
     // seeding), and a duplicate would make later scope resolution depend on
     // declaration order.
-    if (RESERVED_VARIABLE_NAMES.includes(entry.name) || declared.has(entry.name)) return null;
+    if (RESERVED_VARIABLE_NAMES.includes(entry.name)) return no(`variable ${entry.name} is reserved for the platform`);
+    if (declared.has(entry.name)) return no(`variable ${entry.name} is declared twice`);
     declared.add(entry.name);
     const scope = entry.scope ?? 'admin';
-    if (scope !== 'admin' && scope !== 'user') return null;
+    if (scope !== 'admin' && scope !== 'user') return no(`variable ${entry.name}: \`scope\` must be \`admin\` or \`user\``);
     let oauth: ToolVariable['oauth'];
     if (entry.oauth !== undefined) {
       // OAuth is inherently per-caller (same rule the `.tool` parser
       // enforces): an admin-shared OAuth token would leak one user's token
       // to all callers.
-      if (!isRecord(entry.oauth) || scope !== 'user') return null;
+      if (!isRecord(entry.oauth)) return no(`variable ${entry.name}: \`oauth\` must be an object`);
+      if (scope !== 'user') return no(`variable ${entry.name}: an \`oauth\` sign-in must be \`scope: user\``);
       const o = entry.oauth;
       // Confidential material never loads from a file, on either declaration
       // surface: the `.tool` parser throws on these keys, and silently
       // dropping one here would leave a plugin.json carrying a secret that
       // "worked" — the file is portable package data, readable by every
       // client that loads the plugin.
-      if (o.clientSecret !== undefined || o.client_secret !== undefined || o.secret !== undefined) return null;
+      if (o.clientSecret !== undefined || o.client_secret !== undefined || o.secret !== undefined) {
+        return no(`variable ${entry.name}: a client secret is never declared in a file — it is set through the protected client-secret route`);
+      }
       // `clientId` is trimmed and must be non-empty, exactly as the `.tool`
       // parser requires: a whitespace-only value would pass discovery and
       // then fail the owner's client-secret setup with "clientId is
       // required" — an error at the wrong surface, long after the save.
-      if (typeof o.clientId !== 'string' || !o.clientId.trim()) return null;
+      if (typeof o.clientId !== 'string' || !o.clientId.trim()) return no(`variable ${entry.name}: \`oauth.clientId\` is required`);
       // The endpoints are OPTIONAL here, unlike in a `.tool`: an MCP server
       // publishes its authorization-server metadata, so a declaration that
       // names only the client id is completed at scan time. Both or neither
@@ -137,8 +157,12 @@ export function validatedVariables(raw: unknown): ToolVariable[] | null {
       const authorizationUrl = optionalUrl(o.authorizationUrl);
       const tokenUrl = optionalUrl(o.tokenUrl);
       const resource = optionalUrl(o.resource);
-      if (authorizationUrl === null || tokenUrl === null || resource === null) return null;
-      if ((authorizationUrl === undefined) !== (tokenUrl === undefined)) return null;
+      if (authorizationUrl === null || tokenUrl === null || resource === null) {
+        return no(`variable ${entry.name}: the \`oauth\` URLs must be strings`);
+      }
+      if ((authorizationUrl === undefined) !== (tokenUrl === undefined)) {
+        return no(`variable ${entry.name}: declare both \`oauth.authorizationUrl\` and \`oauth.tokenUrl\`, or neither`);
+      }
       // The same https + SSRF gate the `.tool` parser runs on these URLs: a
       // sign-in or token exchange aimed at an internal host is a declaration
       // this surface must refuse exactly like the other one does. `resource`
@@ -151,19 +175,20 @@ export function validatedVariables(raw: unknown): ToolVariable[] | null {
         if (resource !== undefined) {
           assertSafeFetchUrl(resource, { requireHttps: true, label: `${entry.name} oauth.resource` });
         }
-      } catch {
-        return null;
+      } catch (err) {
+        // `assertSafeFetchUrl` names the field and the rule, never the URL.
+        return no(err instanceof Error ? err.message : `variable ${entry.name}: an \`oauth\` URL is invalid`);
       }
       // Forwarded verbatim as query params later — a non-string value here is
       // a malformed declaration, not something to coerce.
       if (o.authParams !== undefined) {
         if (!isRecord(o.authParams) || !Object.values(o.authParams).every((v) => typeof v === 'string')) {
-          return null;
+          return no(`variable ${entry.name}: \`oauth.authParams\` must be an object of string values`);
         }
       }
       // PKCE is on unless the declaration says `false`; anything else there is
       // a malformed flag, not a preference.
-      if (o.pkce !== undefined && typeof o.pkce !== 'boolean') return null;
+      if (o.pkce !== undefined && typeof o.pkce !== 'boolean') return no(`variable ${entry.name}: \`oauth.pkce\` must be a boolean`);
       oauth = {
         ...(authorizationUrl !== undefined ? { authorizationUrl, tokenUrl: tokenUrl! } : {}),
         clientId: o.clientId.trim(),
@@ -182,7 +207,7 @@ export function validatedVariables(raw: unknown): ToolVariable[] | null {
       ...(oauth ? { oauth } : {}),
     });
   }
-  return out;
+  return { ok: true, variables: out };
 }
 
 /**
@@ -318,6 +343,12 @@ export function descriptorsFromMcpJson(
   mcpJsonText: string,
   pluginJsonText: string | null,
   layout: KbLayout,
+  /**
+   * Told of every server this file declares and the parse refuses, with the
+   * reason the log line gives. The scan keeps them so a sign-in started on a
+   * refused server answers why, instead of finding nothing by that name.
+   */
+  onRefused?: (server: string, reason: string, path: string) => void,
 ): ToolManualDescriptor[] {
   const { pluginsDir } = layout;
   let mcp: unknown;
@@ -347,10 +378,14 @@ export function descriptorsFromMcpJson(
   const mcpJsonPath = `${pluginsDir}/${pluginFolder}/${PLUGIN_MCP_FILE}`;
 
   const out: ToolManualDescriptor[] = [];
+  const skip = (name: string, reason: string) => {
+    log.warn(`skipping mcp server "${name}" in ${mcpJsonPath}: ${reason}`);
+    onRefused?.(name, reason, mcpJsonPath);
+  };
   for (const [name, rawEntry] of Object.entries(mcp.mcpServers)) {
     const verdict = judgeMcpServerEntry(name, rawEntry);
     if (!verdict.ok) {
-      log.warn(`skipping mcp server "${name}" in ${mcpJsonPath}: ${verdict.reason}.`);
+      skip(name, `${verdict.reason}.`);
       continue;
     }
     // Narrowed by the verdict: an entry that passed is a record.
@@ -365,22 +400,23 @@ export function descriptorsFromMcpJson(
     // into outbound requests exactly the same way.
     const reserved = referencesReservedVariable({ raw, ext });
     if (reserved !== null) {
-      log.warn(
-        `skipping mcp server "${name}" in ${mcpJsonPath}: its declaration (mcp.json ` +
-          `entry or plugin.json extension) references the reserved variable "${reserved}" — API_URL and ` +
-          'CONNECTION_KEY are platform-seeded and may not appear in server declarations.',
+      skip(
+        name,
+        `its declaration (mcp.json entry or plugin.json extension) references the reserved variable "${reserved}" — ` +
+          'API_URL and CONNECTION_KEY are platform-seeded and may not appear in server declarations.',
       );
       continue;
     }
-    const variables = validatedVariables(ext.variables);
-    if (variables === null) {
-      log.warn(
-        `skipping mcp server "${name}" in ${mcpJsonPath}: its plugin.json \`variables\` ` +
-          'declaration is malformed — a dropped declaration would silently re-scope a credential, so ' +
-          'the server stays offline until the manifest is fixed.',
+    const judged = judgeVariables(ext.variables);
+    if (!judged.ok) {
+      skip(
+        name,
+        `its plugin.json \`variables\` declaration is malformed (${judged.reason}) — a dropped declaration ` +
+          'would silently re-scope a credential, so the server stays offline until the manifest is fixed.',
       );
       continue;
     }
+    const variables = judged.variables;
     const shared = {
       slug: name,
       name,
@@ -408,9 +444,9 @@ export function descriptorsFromMcpJson(
       try {
         assertSafeFetchUrl(url, { label: `mcp server "${name}" url` });
       } catch (err) {
-        log.warn(
-          `skipping mcp server "${name}" in ${mcpJsonPath}: ` +
-            `${err instanceof Error ? err.message : String(err)} (declare it \`local: true\` if it is deliberately private).`,
+        skip(
+          name,
+          `${err instanceof Error ? err.message : String(err)} (declare it \`local: true\` if it is deliberately private).`,
         );
         continue;
       }

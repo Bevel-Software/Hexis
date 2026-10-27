@@ -366,6 +366,11 @@ export interface ToolManualDetail extends Omit<ToolManualSummary, 'description'>
  */
 export type ConnectorScope = (definitionPath: string) => boolean;
 
+/** A manual as its file reads now — see {@link IToolManualService.liveDeclaration}. */
+export type LiveDeclaration =
+  | { manual: ToolManualSummary; variable?: ToolVariable; refused?: undefined }
+  | { refused: string; manual?: undefined; variable?: undefined };
+
 export interface IToolManualService {
   /** The `.tool` manuals the user can read, as summaries. */
   listAccessible(userEmail: string): Promise<ToolManualSummary[]>;
@@ -403,16 +408,15 @@ export interface IToolManualService {
    * the server's OAuth metadata by the same walk the catalog completes it with;
    * when that fails, the endpoints stay absent and `manual.setup.reason` says why.
    *
-   * `null` when no readable manual has this slug (fail-closed, like
-   * {@link getDetail}); `variable` absent when the file declares no variable of
-   * that name. Nothing the platform synthesises from discovery (the zero-config
-   * sign-in variable) is in the answer: it is not in any file.
+   * `refused` when the file declaring this slug is one the parse refuses as it
+   * reads now (an endpoint failing the https/SSRF check, say): the parser's
+   * reason, so the sign-in can say why instead of finding nothing. `null` when
+   * no readable manual has this slug (fail-closed, like {@link getDetail});
+   * `variable` absent when the file declares no variable of that name. Nothing
+   * the platform synthesises from discovery (the zero-config sign-in variable)
+   * is in the answer: it is not in any file.
    */
-  liveDeclaration(
-    userEmail: string,
-    slug: string,
-    varName: string,
-  ): Promise<{ manual: ToolManualSummary; variable?: ToolVariable } | null>;
+  liveDeclaration(userEmail: string, slug: string, varName: string): Promise<LiveDeclaration | null>;
 
   /**
    * Wire where a hidden tool's schema finding comes from (the MCP proxy, which
