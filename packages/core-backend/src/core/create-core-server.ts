@@ -3,6 +3,7 @@ import cors from 'cors';
 import path from 'node:path';
 import type { Router, RequestHandler } from 'express';
 import { createAuthRoutes } from '../modules/auth/auth.routes.js';
+import { authCookieSecure } from '../modules/auth/auth.middleware.js';
 import { createWorkspaceRoutes } from '../modules/workspace/workspace.routes.js';
 import {
   createAgentUploadRoutes,
@@ -364,6 +365,9 @@ export async function createCoreServer(
       core.authMiddleware,
       core.authProviders,
       core.config.loginPasswordEnabled,
+      // The cookie's Secure flag follows the scheme the deployment is reached
+      // on, as the SSO providers' does: one rule for every sign-in path.
+      { cookieSecure: authCookieSecure(core.config.publicBackendUrl) },
     ),
   );
 

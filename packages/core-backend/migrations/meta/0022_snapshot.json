@@ -1,5 +1,5 @@
 {
-  "id": "78f85c02-ad14-4539-bece-f809695009b5",
+  "id": "a33fb63c-faaf-46fe-8898-cac369ee92cd",
   "prevId": "22bc012f-a872-493a-a2d8-c5aaf2131d29",
   "version": "7",
   "dialect": "postgresql",
@@ -60,12 +60,6 @@
         },
         "revoked_by": {
           "name": "revoked_by",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "agent_path": {
-          "name": "agent_path",
           "type": "text",
           "primaryKey": false,
           "notNull": false
@@ -832,12 +826,6 @@
           "type": "timestamp",
           "primaryKey": false,
           "notNull": false
-        },
-        "agent_path": {
-          "name": "agent_path",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
         }
       },
       "indexes": {
@@ -1238,12 +1226,6 @@
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
-        },
-        "agent_path": {
-          "name": "agent_path",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
         }
       },
       "indexes": {
@@ -2303,6 +2285,13 @@
           "type": "text",
           "primaryKey": false,
           "notNull": false
+        },
+        "session_version": {
+          "name": "session_version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
         },
         "onboarding_done": {
           "name": "onboarding_done",

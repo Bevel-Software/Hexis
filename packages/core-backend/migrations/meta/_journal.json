@@ -159,8 +159,15 @@
     {
       "idx": 22,
       "version": "7",
-      "when": 1792657548992,
-      "tag": "0022_agent_path",
+      "when": 1792657514328,
+      "tag": "0022_session_version",
+      "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1793089896833,
+      "tag": "0023_agent_path",
       "breakpoints": true
     }
   ]

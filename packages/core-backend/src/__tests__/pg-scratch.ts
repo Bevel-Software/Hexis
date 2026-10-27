@@ -1,5 +1,8 @@
 import { randomBytes } from 'node:crypto';
 import pg from 'pg';
+import { closeDb, createDb, type Database } from '../modules/database/connection.js';
+import { runCoreMigrations } from '../modules/database/migrate.js';
+import { coreMigrationsDir } from '../assets.js';
 
 /**
  * The one fixture for tests that cross a real Postgres. They run where
@@ -9,6 +12,11 @@ import pg from 'pg';
  * of its own, made by {@link scratchDatabaseUrl} and dropped by
  * {@link dropScratchDatabases}; the database the URL names is only connected
  * to, never written.
+ *
+ * A test that wants the schema as a deployment has it opens the database
+ * through {@link openMigratedScratchDb}: this fixture is the one place
+ * outside the database module that knows how a core database is connected
+ * to and migrated, so a module's test need not import those files itself.
  */
 export const PG_ADMIN_URL = process.env.TEST_DATABASE_URL;
 
@@ -36,6 +44,29 @@ export async function scratchDatabaseUrl(prefix: string): Promise<string> {
   const url = new URL(PG_ADMIN_URL!);
   url.pathname = `/${name}`;
   return url.toString();
+}
+
+/**
+ * A scratch database at the current core schema — created, connected to with
+ * the PII key given (a fresh random one when none is), and every core
+ * migration run — as a module's test wants it. `close` ends the connection;
+ * {@link dropScratchDatabases} drops the database afterwards as for any other.
+ */
+export async function openMigratedScratchDb(
+  prefix: string,
+  opts: { piiKey?: string } = {},
+): Promise<{ db: Database; close: () => Promise<void> }> {
+  const piiKey = opts.piiKey ?? randomBytes(32).toString('base64');
+  const db = createDb(await scratchDatabaseUrl(prefix), { piiKey });
+  try {
+    await runCoreMigrations(db, coreMigrationsDir());
+  } catch (err) {
+    // The caller never receives the handle on this path, so the pool is
+    // closed here; the database itself is dropped with the others.
+    await closeDb(db);
+    throw err;
+  }
+  return { db, close: () => closeDb(db) };
 }
 
 /** Drop every scratch database this file made; for `afterAll`, with {@link PG_TEST_TIMEOUT}. */

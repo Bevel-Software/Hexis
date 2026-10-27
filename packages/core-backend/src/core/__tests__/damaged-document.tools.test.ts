@@ -16,7 +16,7 @@ import { RoutineWritePolicyService } from '../../modules/workspace/routine-write
 import { WorkflowHooks } from '../../modules/workflow/workflow-hooks.js';
 import { ToolDescriptionNotes } from '../../modules/workspace/agent-access.gate.js';
 import { SpillStore } from '../../modules/workspace/spill-store.js';
-import { WorkerPatternMatcher } from '../../modules/workspace/bounded-matcher.js';
+import { RipgrepPatternMatcher } from '../../modules/workspace/index.js';
 import { DocExtractService, type UnreadableDocument } from '../../modules/workspace/file-readers/doc-extract.service.js';
 import type { IDocumentExtractor } from '../../modules/workspace/file-readers/document-extractor.contract.js';
 import { WorkerDocumentExtractor, type WorkerDocumentExtractorOptions } from '../../modules/workspace/file-readers/extract-in-worker.js';
@@ -82,7 +82,7 @@ async function startPlatform(extractorOpts: WorkerDocumentExtractorOptions = {})
   };
   const told: UnreadableDocument[] = [];
   const docExtract = new DocExtractService(join(tempDir, '.doc-extract'), counting, { onUnreadable: (d) => told.push(d) });
-  const matcher = new WorkerPatternMatcher();
+  const matcher = new RipgrepPatternMatcher();
 
   const registry = new ToolRegistry();
   const resolve = async (auth: ToolAuth, signal: AbortSignal, sessionId?: string): Promise<ToolContext> => ({

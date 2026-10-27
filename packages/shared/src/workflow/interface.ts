@@ -43,7 +43,7 @@ import type {
   OpenChangeRequestInput,
   UpdateBranchOutcome,
 } from './types.js';
-import type { MergeResolution } from '../git/types.js';
+import type { BranchCounts, MergeResolution } from '../git/types.js';
 
 export interface IWorkflowService {
   // ── Branches ──────────────────────────────────────────────────────────────
@@ -109,6 +109,12 @@ export interface IWorkflowService {
   // `createBranch` + URL navigation covers the "start a new draft" intent.
   /** Current branch's workspace status — currently just the branch name + upstream sync state. */
   branchStatus(workspaceId: string): Promise<BranchWorkspaceStatus>;
+  /**
+   * Commits the workspace's own branch is ahead of and behind its upstream
+   * (or, with none, the nearest protected branch); null when neither
+   * resolves. Counted for this one branch: a branch listing carries no counts.
+   */
+  branchCounts(workspaceId: string): Promise<BranchCounts>;
   // `discardWorkingChanges` removed: under save=share the working tree is
   // never dirty, so there is nothing for "undo my unsaved edits" to undo.
   /**
