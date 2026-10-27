@@ -4827,17 +4827,38 @@ describe('agent read/write hooks', () => {
     expect(writes).toEqual([]);
   });
 
-  it('grep tells the read hook about every file it answers a line from, not only its root', async () => {
+  it('grep tells the read hook about every file it opens — a file with no matching line included — not only its root', async () => {
     const base = await start();
     record();
     await fs.mkdir(`${KB_DIR}/KnowledgeBase/Product/Knowledge`, { recursive: true });
     await fs.mkdir(`${KB_DIR}/KnowledgeBase/Legal/Knowledge`, { recursive: true });
     await fs.writeFile(`${KB_DIR}/KnowledgeBase/Product/Knowledge/P.md`, 'needle');
     await fs.writeFile(`${KB_DIR}/KnowledgeBase/Legal/Knowledge/L.md`, 'needle');
+    // Searched and read by ripgrep like the others; it answers no line.
+    await fs.writeFile(`${KB_DIR}/KnowledgeBase/Legal/Knowledge/Quiet.md`, 'nothing of the sort');
     await post(`${base}/api/agent/tools/grep`, { pattern: 'needle', path: KB_DIR, sessionId: 's1' });
     const paths = reads.map((r) => r.wsPath);
     expect(paths).toContain(`${KB_DIR}/KnowledgeBase/Product/Knowledge/P.md`);
     expect(paths).toContain(`${KB_DIR}/KnowledgeBase/Legal/Knowledge/L.md`);
+    expect(paths).toContain(`${KB_DIR}/KnowledgeBase/Legal/Knowledge/Quiet.md`);
+    expect(paths.filter((p) => p === `${KB_DIR}/KnowledgeBase/Legal/Knowledge/Quiet.md`)).toHaveLength(1);
+  });
+
+  it('a read hook that refuses a file the search would open ends the grep as it ends a read_file, even one that matches nothing', async () => {
+    const base = await start();
+    record();
+    hooks.onAgentRead(async (op) => {
+      if (op.wsPath === `${KB_DIR}/KnowledgeBase/Legal/Knowledge/Quiet.md`) throw new ToolError('Quiet.md is off limits to this run', 403);
+    });
+    await fs.mkdir(`${KB_DIR}/KnowledgeBase/Product/Knowledge`, { recursive: true });
+    await fs.mkdir(`${KB_DIR}/KnowledgeBase/Legal/Knowledge`, { recursive: true });
+    await fs.writeFile(`${KB_DIR}/KnowledgeBase/Product/Knowledge/P.md`, 'needle');
+    await fs.writeFile(`${KB_DIR}/KnowledgeBase/Legal/Knowledge/Quiet.md`, 'nothing of the sort');
+    const res = await post(`${base}/api/agent/tools/grep`, { pattern: 'needle', path: KB_DIR, sessionId: 's1' });
+    expect(res.status).toBe(403);
+    expect(await res.json()).toMatchObject({ error: 'Quiet.md is off limits to this run' });
+    // The refusal came at admission: the hook heard of the file, and the search answered nothing from any file.
+    expect(reads.map((r) => r.wsPath)).toContain(`${KB_DIR}/KnowledgeBase/Legal/Knowledge/Quiet.md`);
   });
 
   it('the write hook covers write_file, edit_file and mkdir, once per path', async () => {
