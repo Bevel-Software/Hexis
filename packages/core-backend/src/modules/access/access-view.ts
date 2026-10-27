@@ -6,7 +6,6 @@ import type {
   GrantSources,
   HolderList,
   IAccessControl,
-  ProspectiveHolders,
   ResolvedPrincipal,
 } from './access-control.interface.js';
 import {
@@ -167,43 +166,6 @@ export function holderPrincipals(list: HolderList): AccessPrincipalRef[] {
     ...kinded.map((p): AccessPrincipalRef => ({ kind: p.kind, name: p.name })),
     ...list.users.map((u): AccessPrincipalRef => ({ kind: 'person', name: u.name, email: u.email })),
   ];
-}
-
-/** One principal that loses or gains one verb in a move. */
-export type HolderChange = AccessPrincipalRef & { verb: 'read' | 'write' };
-
-/**
- * Who loses and who gains access in a move: per verb, the principals present
- * before and absent after, and absent before and present after — the diff the
- * app's move confirmation shows people, for an agent to pass on. A person is
- * the same person at the same address; a collective is the same principal at
- * the same name and kind.
- *
- * The lists name grants, and a writer is listed as a reader too, so a group
- * that leaves a folder everyone may read would show as losing `read` it still
- * has. While `everyone` holds a verb on the far side, nobody loses it; while
- * it held it on the near side, nobody gains it.
- */
-export function holderChanges(holders: ProspectiveHolders): { lose: HolderChange[]; gain: HolderChange[] } {
-  const key = (p: AccessPrincipalRef) =>
-    p.kind === 'person' ? `person:${(p.email ?? p.name).toLowerCase()}` : `${p.kind}:${p.name.toLowerCase()}`;
-  const isEveryone = (p: AccessPrincipalRef) => p.kind === 'role' && canonicalRoleName(p.name) === EVERYONE_CANONICAL;
-  // A person granted with no display name is named by their address, as the app names them.
-  const named = (p: AccessPrincipalRef, verb: HolderChange['verb']): HolderChange =>
-    ({ ...p, name: p.name || (p.email ?? ''), verb });
-  const lose: HolderChange[] = [];
-  const gain: HolderChange[] = [];
-  for (const verb of ['read', 'write'] as const) {
-    const before = holderPrincipals(holders.before[verb]);
-    const after = holderPrincipals(holders.after[verb]);
-    const had = new Set(before.map(key));
-    const has = new Set(after.map(key));
-    const everyoneAfter = after.some(isEveryone);
-    const everyoneBefore = before.some(isEveryone);
-    lose.push(...before.filter((p) => !has.has(key(p)) && !everyoneAfter).map((p) => named(p, verb)));
-    gain.push(...after.filter((p) => !had.has(key(p)) && !everyoneBefore).map((p) => named(p, verb)));
-  }
-  return { lose, gain };
 }
 
 /** One principal holding one verb, with every scope that names it for that verb, closest first. */

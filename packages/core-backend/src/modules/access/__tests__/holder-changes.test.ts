@@ -1,69 +1,109 @@
-import { describe, expect, it } from 'vitest';
-import { holderChanges } from '../access-view.js';
-import type { HolderList } from '../access-control.interface.js';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import os from 'node:os';
+
+import { NodeFs } from '../../kb-fs/node-fs.js';
+import type { WorkspaceService } from '../../workspace/workspace.service.js';
+import { AccessControlService } from '../access-control.service.js';
 
 /**
- * `holderChanges`: who loses and who gains opening or editing a thing in a
- * move, from the holder lists `prospectiveHolders` answers. The case these
- * tests are built on is a team handing a folder to another team, in a
- * knowledge base everyone may read.
+ * `prospectiveHolderChanges`: who loses and who gains opening or editing a
+ * file or folder in a move, over a real on-disk tree. The holder lists name
+ * grants, so these tests are about the cases a list comparison gets wrong: a
+ * group still covered by `everyone` where it lands, and a holder a rule there
+ * denies by name.
  */
 
-const list = (principals: { name: string; kind: 'role' | 'group' | 'plugin' }[], users: { name: string; email: string }[] = []): HolderList => ({
-  principals,
-  roles: principals.map((p) => p.name),
-  users,
-});
-const everyone = { name: 'everyone', kind: 'role' as const };
-const support = { name: 'Support', kind: 'group' as const };
-const operations = { name: 'Operations', kind: 'group' as const };
+const KB_DIR = 'knowledge-base';
+const rules = (body: string) => `---\n${body}---\n`;
 
-describe('holderChanges', () => {
-  it('a folder handed to another team: the old team loses editing, the new one gains it, and everyone still reads', () => {
-    const changes = holderChanges({
-      before: { read: list([everyone, support]), write: list([support]) },
-      after: { read: list([everyone, operations]), write: list([operations]) },
-    });
+describe('AccessControlService.prospectiveHolderChanges', () => {
+  let root: string;
+  let repo: string;
+  const workspaceId = 'ws-holder-changes';
+
+  beforeEach(async () => {
+    root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-holder-changes-'));
+    repo = path.join(root, workspaceId, KB_DIR);
+  });
+  afterEach(async () => {
+    if (root) await fs.rm(root, { recursive: true, force: true });
+  });
+
+  async function write(files: Record<string, string>): Promise<void> {
+    for (const [rel, contents] of Object.entries(files)) {
+      const abs = path.join(repo, rel);
+      await fs.mkdir(path.dirname(abs), { recursive: true });
+      await fs.writeFile(abs, contents);
+    }
+  }
+
+  const service = () =>
+    new AccessControlService(
+      {
+        getWorkspacePath: async () => path.join(root, workspaceId),
+        ensureRemotesFetched: async () => undefined,
+      } as unknown as WorkspaceService,
+      KB_DIR,
+      new NodeFs(),
+    );
+
+  /** Everyone reads; Support and Operations each edit their own folder. */
+  const BASE = {
+    'roles.yaml': 'roles:\n  Admin:\n    - admin@x.io\n',
+    'groups.yaml': 'groups:\n  Support:\n    - bea@x.io\n  Operations:\n    - jonas@x.io\n',
+    'access.md': rules('read:\n  - everyone\n'),
+    'Support/access.md': rules('write:\n  - Support\n'),
+    'Support/Runbooks/Warranty claim.md': '# Warranty claim\n',
+    'Operations/access.md': rules('write:\n  - Operations\n'),
+  };
+
+  it('a folder handed to another team: the old team loses editing, the new one gains it, and nobody loses opening it', async () => {
+    await write(BASE);
+    const changes = await service().prospectiveHolderChanges(workspaceId, 'Support/Runbooks', 'Operations/Runbooks');
     expect(changes).toEqual({
       lose: [{ kind: 'group', name: 'Support', verb: 'write' }],
       gain: [{ kind: 'group', name: 'Operations', verb: 'write' }],
     });
   });
 
-  it('a page leaving a folder only a team may read: that team loses opening, and everyone gains it', () => {
-    const changes = holderChanges({
-      before: { read: list([support]), write: list([support]) },
-      after: { read: list([everyone]), write: list([]) },
+  it('a person the destination denies by name loses access, though everyone may still read there', async () => {
+    await write({
+      ...BASE,
+      'Team/access.md': rules('write:\n  - Ana <ana@x.io>\n'),
+      'Team/plan.md': '# Plan\n',
+      'Closed/access.md': rules('read:\n  - everyone\n  - deny Ana <ana@x.io>\n'),
     });
-    expect(changes.lose).toEqual([
-      { kind: 'group', name: 'Support', verb: 'write' },
-    ]);
-    expect(changes.gain).toEqual([{ kind: 'role', name: 'everyone', verb: 'read' }]);
+    const changes = await service().prospectiveHolderChanges(workspaceId, 'Team/plan.md', 'Closed/plan.md');
+    expect(changes.lose).toEqual(
+      expect.arrayContaining([
+        { kind: 'person', name: 'ana@x.io', email: 'ana@x.io', verb: 'read' },
+        { kind: 'person', name: 'ana@x.io', email: 'ana@x.io', verb: 'write' },
+      ]),
+    );
   });
 
-  it('the same lists on both sides change nobody, whatever the spelling of a name', () => {
-    expect(
-      holderChanges({
-        before: { read: list([everyone]), write: list([support], [{ name: 'Ana', email: 'Ana@X.io' }]) },
-        after: { read: list([everyone]), write: list([{ name: 'support', kind: 'group' }], [{ name: '', email: 'ana@x.io' }]) },
-      }),
-    ).toEqual({ lose: [], gain: [] });
+  it('a group the destination denies loses opening it, though everyone may still read there', async () => {
+    await write({
+      ...BASE,
+      'Closed/access.md': rules('read:\n  - everyone\n  - deny Support\n'),
+    });
+    const changes = await service().prospectiveHolderChanges(workspaceId, 'Support/Runbooks', 'Closed/Runbooks');
+    expect(changes.lose).toEqual(
+      expect.arrayContaining([
+        { kind: 'group', name: 'Support', verb: 'read' },
+        { kind: 'group', name: 'Support', verb: 'write' },
+      ]),
+    );
   });
 
-  it('a group and a role sharing a name are two principals', () => {
-    const changes = holderChanges({
-      before: { read: list([everyone]), write: list([{ name: 'Support', kind: 'role' }]) },
-      after: { read: list([everyone]), write: list([support]) },
+  it('a rename that carries its own rules changes nobody', async () => {
+    await write({
+      ...BASE,
+      'Sales/access.md': rules('read:\n  - Support\nwrite:\n  - Support\n'),
+      'Sales/deal.md': '# Deal\n',
     });
-    expect(changes.lose).toEqual([{ kind: 'role', name: 'Support', verb: 'write' }]);
-    expect(changes.gain).toEqual([{ kind: 'group', name: 'Support', verb: 'write' }]);
-  });
-
-  it('a person granted with no display name is named by their address', () => {
-    const changes = holderChanges({
-      before: { read: list([everyone]), write: list([]) },
-      after: { read: list([everyone]), write: list([], [{ name: '', email: 'ops@x.io' }]) },
-    });
-    expect(changes.gain).toEqual([{ kind: 'person', name: 'ops@x.io', email: 'ops@x.io', verb: 'write' }]);
+    expect(await service().prospectiveHolderChanges(workspaceId, 'Sales', 'Revenue')).toEqual({ lose: [], gain: [] });
   });
 });

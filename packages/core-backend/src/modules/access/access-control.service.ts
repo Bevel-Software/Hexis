@@ -22,6 +22,8 @@ import type {
   GrantSources,
   PathHolders,
   PathVerbs,
+  HolderChange,
+  HolderChanges,
   ProspectiveHolders,
   ResolvedPrincipal,
 } from './access-control.interface.js';
@@ -1352,6 +1354,40 @@ function eligibleHoldersResolved(
   return { principals, roles, users };
 }
 
+/** One side of a move: the access model, the path, and the rules the file carries there. */
+type MoveSide = { model: AccessModel; path: string; own: OwnEntries | null };
+
+/** The key set behind one entry of an eligible-holders list, read back from its name and kind. */
+function keysOfHolder(model: AccessModel, holder: ResolvedPrincipal): ReadonlySet<string> {
+  for (const [canonical, record] of model.roles.byCanonical) {
+    if (record.kind === holder.kind && record.displayName === holder.name) return principalKeysOfToken(model, canonical);
+  }
+  return principalKeysOfToken(model, canonicalRoleName(holder.name));
+}
+
+/**
+ * The holders of `verb` on one side of a move that do not hold it on the
+ * other. Each is put to the other side's resolver as the gates would put it,
+ * not looked up in the other side's list: that list names grants, so it
+ * misses a group still covered there by `everyone`, and it cannot show one a
+ * rule there denies.
+ */
+function holdersNotKept(verb: 'read' | 'write', from: MoveSide, to: MoveSide): HolderChange[] {
+  const held = eligibleHoldersResolved(from.model, verb, from.path, from.own);
+  const lost: HolderChange[] = [];
+  for (const holder of held.principals) {
+    if (!hasPermissionForKeys(to.model, verb, keysOfHolder(to.model, holder), to.path, to.own)) {
+      lost.push({ kind: holder.kind, name: holder.name, verb });
+    }
+  }
+  for (const user of held.users) {
+    if (!hasPermissionResolved(to.model, verb, user.email, to.path, to.own)) {
+      lost.push({ kind: 'person', name: user.name || user.email, email: user.email, verb });
+    }
+  }
+  return lost;
+}
+
 /**
  * Every individual the model names: `roles.yaml` members, emails named inline
  * at this path's scope, and the deployment owner (bound by every rule that
@@ -1921,6 +1957,31 @@ export class AccessControlService implements IAccessControl {
       before: holdersAt(model, fromPath, ownHere),
       after: holdersAt(after, toPath, ownThere),
     };
+  }
+
+  /** Who loses and who gains `read` or `write` in a move (see the interface). */
+  async prospectiveHolderChanges(
+    workspaceId: string,
+    fromPath: string,
+    toPath: string,
+  ): Promise<HolderChanges> {
+    const model = await this.loadModel(workspaceId);
+    const repoDir = await this.repoDir(workspaceId);
+    const { isFolder, ownHere, ownThere, landing } =
+      await this.relocationSubject(repoDir, fromPath, toPath);
+    const here: MoveSide = { model, path: fromPath, own: ownHere };
+    const there: MoveSide = {
+      model: withRelocatedAccessFiles(model, fromPath, toPath, { sourceRemains: false, sourceIsFolder: isFolder, landing }),
+      path: toPath,
+      own: ownThere,
+    };
+    const lose: HolderChange[] = [];
+    const gain: HolderChange[] = [];
+    for (const verb of ['read', 'write'] as const) {
+      lose.push(...holdersNotKept(verb, here, there));
+      gain.push(...holdersNotKept(verb, there, here));
+    }
+    return { lose, gain };
   }
 
   /**

@@ -34,7 +34,7 @@ import { isRolesYamlPath, toKbRelative, resolveReadableMap, AccessDeniedError } 
 import type { ISessionSink } from './session-sink.js';
 import { isAbsence, type ITreeWalker } from '../../shared/fs.contract.js';
 import type { AccessDecisionSource, AccessTargetKind, IAccessControl } from '../access/index.js';
-import { accessRoster, holderChanges, resolveAccessView, accessMdPathForFolder, fileCarriesAccessRules, governingFolderOf } from '../access/index.js';
+import { accessRoster, resolveAccessView, accessMdPathForFolder, fileCarriesAccessRules, governingFolderOf } from '../access/index.js';
 import type { SpillStore } from './spill-store.js';
 import type { DocExtractService } from './file-readers/doc-extract.service.js';
 import { displayPath, type FileKind, type FileReader, type FileReaderRegistry, type ReadOrigin, type ReadResult } from './file-readers/file-reader.js';
@@ -3589,7 +3589,7 @@ export function registerWorkspaceTools(
       const fromRel = toKbRelative(src, kbDirName);
       const toRel = toKbRelative(dest, kbDirName);
       const changes = before.read && fromRel !== null && toRel !== null
-        ? holderChanges(await accessControl.prospectiveHolders(workspaceIdForBranch(branch), fromRel, toRel))
+        ? await accessControl.prospectiveHolderChanges(workspaceIdForBranch(branch), fromRel, toRel)
         : undefined;
       const othersChange = changes !== undefined && (changes.lose.length > 0 || changes.gain.length > 0);
       // The placeholder moves with its folder, but it is never content.

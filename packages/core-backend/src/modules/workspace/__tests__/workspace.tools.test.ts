@@ -44,8 +44,8 @@ import { TOOL_DESCRIPTION_CAP, clientVisibleLength } from '../../tool-registry/d
 
 const KB_DIR = 'knowledge-base';
 
-/** One side of a move's holders with nobody on it: a stand-in whose moves change nobody's access. */
-const NO_HOLDERS = { read: { roles: [], users: [] }, write: { roles: [], users: [] } };
+/** A move that changes nobody's access: what a stand-in without rules answers. */
+const NO_CHANGES = { lose: [], gain: [] };
 
 /** Allow-all access control — the default for tests not exercising read gating. */
 const allowAll = {
@@ -70,8 +70,8 @@ const allowAll = {
   // a folder's `access.md` files actually does to it is exercised against
   // REAL rules in "a move preview judges the destination as it will be".
   previewAccessAfterRelocation: async () => ({ read: true, write: true, download: true, owner: true }),
-  // Who else holds access before and after a move: nobody's changes here.
-  prospectiveHolders: async () => ({ before: NO_HOLDERS, after: NO_HOLDERS }),
+  // Who else loses or gains access in a move: nobody, here.
+  prospectiveHolderChanges: async () => NO_CHANGES,
 } as unknown as IAccessControl;
 
 /** Access control that denies `canRead` for an explicit set of repo-relative paths. */
@@ -3278,7 +3278,7 @@ describe('preflight for moves and deletes', () => {
     // preview learned to relocate them, which keeps every ordering and
     // oracle test below about what it is about.
     previewAccessAfterRelocation: async (_w: string, _u: string, _from: string, to: string) => verbsFor(to),
-    prospectiveHolders: async () => ({ before: NO_HOLDERS, after: NO_HOLDERS }),
+    prospectiveHolderChanges: async () => NO_CHANGES,
   } as unknown as IAccessControl;
 
   const call = async (base: string, tool: string, body: Record<string, unknown>) => {
@@ -3458,12 +3458,11 @@ describe('preflight for moves and deletes', () => {
 
     it('who else holds access is never named to a caller who cannot read what moves', async () => {
       let asked = 0;
-      const board = { read: { roles: ['Board'], users: [] }, write: { roles: [], users: [] } };
       const base = await start('write', {
         ...rules,
-        prospectiveHolders: async () => {
+        prospectiveHolderChanges: async () => {
           asked++;
-          return { before: board, after: NO_HOLDERS };
+          return { lose: [{ kind: 'group', name: 'Board', verb: 'read' }], gain: [] };
         },
       } as unknown as IAccessControl);
       await fs.writeFile(KB('Secret/plan.md'), 'plan');
@@ -4313,7 +4312,7 @@ describe('a write refused for permissions says whether and how to propose it', (
       canOwner: async () => true,
       canWriteBatchAtRef: async () => null,
       previewAccessAfterRelocation: async () => ({ read: true, write: true, download: true, owner: true }),
-      prospectiveHolders: async () => ({ before: NO_HOLDERS, after: NO_HOLDERS }),
+      prospectiveHolderChanges: async () => NO_CHANGES,
       eligibleWritersAtRef: async () => ({ roles: ['Sales Lead'], users: [{ name: 'Owner', email: 'owner@x' }] }),
     } as unknown as IAccessControl;
     return { ac, calls };
@@ -5169,7 +5168,7 @@ describe('a move preview judges the destination as it will be', () => {
       previewAccessAfterRelocation: (
         w: string, u: string, from: string, to: string, opts?: { sourceRemains?: boolean },
       ) => fresh().previewAccessAfterRelocation(w, u, from, to, opts),
-      prospectiveHolders: (w: string, from: string, to: string) => fresh().prospectiveHolders(w, from, to),
+      prospectiveHolderChanges: (w: string, from: string, to: string) => fresh().prospectiveHolderChanges(w, from, to),
     } as unknown as IAccessControl;
   };
 
