@@ -125,10 +125,10 @@ export function sharedFileRules(layout: KbLayout): readonly SharedFileRule[] {
       id: 'workspace-tmp',
       heading: "Files staged in the workspace's tmp folder",
       body:
-        "`__tmp__/<path>`, with a `branch`, names ONE file in that workspace's `tmp/` folder, where the platform " +
-        'stages files such as chat attachments. read_file, file_stat, grep (`path`) and copy_file (`src`) read it as ' +
-        'a repository file; it is read-only and never listed — copy_file it to a repository path to keep it. Entries ' +
-        'go seven days after their last change.',
+        "`__tmp__/<path>` names ONE file YOU staged in the branch workspace's `tmp/` folder (chat attachments land " +
+        'there; nobody else\'s staged files are reachable). read_file, file_stat, grep (`path`) and copy_file (`src`) ' +
+        'read it as a repository file; it is read-only and never listed — copy_file it to a repository path to keep ' +
+        'it. An entry stays up to seven days.',
     },
     {
       id: 'write-mode',

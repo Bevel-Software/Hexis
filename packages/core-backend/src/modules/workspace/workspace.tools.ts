@@ -111,7 +111,7 @@ interface AccessVerbs {
 
 
 /**
- * The caller's verdicts on a file staged in the workspace's tmp folder: it
+ * The caller's verdicts on a file you staged in the workspace's tmp folder: it
  * may be read (and copied out), nothing else — the folder is read-only
  * through the ref, and `request_file_download` does not take one.
  */
@@ -331,7 +331,7 @@ const TMP_REF_INPUTS: Readonly<Record<string, readonly string[]>> = {
  */
 const orTmpRef = (schema: JsonSchema): JsonSchema => ({
   ...schema,
-  description: `${schema.description ?? ''} Or a \`__tmp__/…\` ref to one file staged in the workspace's tmp folder.`,
+  description: `${schema.description ?? ''} Or a \`__tmp__/…\` ref to one file you staged in the workspace's tmp folder.`,
 });
 
 function asText(content: string | Buffer): string {
@@ -1390,7 +1390,7 @@ export function registerWorkspaceTools(
    */
   const tmpSourceText = (branch: string, ctx: ToolContext, ref: string): Promise<string> =>
     ctx.workspaceService
-      .readFileBinary(workspaceIdForBranch(branch), ref)
+      .readTmpFile(workspaceIdForBranch(branch), ctx.user.id, ref)
       .then((bytes) => bytes.toString('utf-8'))
       .catch(() => '');
 
@@ -1450,7 +1450,7 @@ export function registerWorkspaceTools(
     // A tmp ref names one file by rule: resolving it is the whole look, and
     // a folder or nothing there is refused by the resolver itself.
     const kind = fromTmp
-      ? (await orNotFound(src, () => ctx.workspaceService.statTmpFile(workspaceIdForBranch(branch), src), 'Nothing to copy'), 'file' as const)
+      ? (await orNotFound(src, () => ctx.workspaceService.statTmpFile(workspaceIdForBranch(branch), ctx.user.id, src), 'Nothing to copy'), 'file' as const)
       : await kindOf(fs, src);
     if (kind === null) throw notFound(src, 'Nothing to copy');
     const srcFiles = kind === 'folder' ? (await filesUnder(fs, src)).files : [src];
@@ -1492,7 +1492,7 @@ export function registerWorkspaceTools(
   const copyFromTmp = async (fs: LocalFilesystem, branch: string, ctx: ToolContext, src: string, dest: string): Promise<void> => {
     const bytes = await orNotFound(
       src,
-      () => ctx.workspaceService.readFileBinary(workspaceIdForBranch(branch), src),
+      () => ctx.workspaceService.readTmpFile(workspaceIdForBranch(branch), ctx.user.id, src),
       'Nothing to copy',
     );
     try {
@@ -2109,16 +2109,18 @@ export function registerWorkspaceTools(
 
   /**
    * What a tmp ref (see `workspace-tmp.ts`) reads as: the bytes of the one
-   * file it names in the branch workspace's `tmp/` folder — through
-   * `readFileBinary`, the resolver a distribution's tool reads it with — put
-   * through the SAME reader a repository file of that name gets. No access
-   * gate and no read hook: the folder is outside the repository, so no rule
-   * governs it and no knowledge-base path is read. A missing file is the
+   * file it names in the CALLER's own folder of the branch workspace's `tmp/`
+   * — through `readTmpFile`, the resolver a distribution's tool reads it with
+   * — put through the SAME reader a repository file of that name gets. No
+   * access gate and no read hook: the folder is outside the repository, so
+   * no rule governs it and no knowledge-base path is read; what keeps one
+   * person's staged file from another is that the ref resolves inside the
+   * caller's folder alone. A missing file — somebody else's included — is the
    * ordinary 404, naming the ref.
    */
   const readTmp = async (branch: string, ref: string, ctx: ToolContext): Promise<ReadResult> => {
     const workspaceId = workspaceIdForBranch(branch);
-    const bytes = await orNotFound(ref, () => ctx.workspaceService.readFileBinary(workspaceId, ref));
+    const bytes = await orNotFound(ref, () => ctx.workspaceService.readTmpFile(workspaceId, ctx.user.id, ref));
     return readers.readerFor(ref).read(bytes, ref, { workspaceId });
   };
 
@@ -2132,9 +2134,13 @@ export function registerWorkspaceTools(
    */
   const statTmp = async (branch: string, ref: string, ctx: ToolContext): Promise<Record<string, unknown>> => {
     const workspaceId = workspaceIdForBranch(branch);
-    const stat = await orNotFound(ref, () => ctx.workspaceService.statTmpFile(workspaceId, ref));
+    const stat = await orNotFound(ref, () => ctx.workspaceService.statTmpFile(workspaceId, ctx.user.id, ref));
     const reader = readers.readerFor(ref);
-    const bytesOf = () => orNotFound(ref, () => ctx.workspaceService.readFileBinary(workspaceId, ref));
+    // One read of the file at most: the type decision and the remembered
+    // extraction below both want the bytes, and a staged document can be large.
+    let bytes: Buffer | undefined;
+    const bytesOf = async () =>
+      (bytes ??= await orNotFound(ref, () => ctx.workspaceService.readTmpFile(workspaceId, ctx.user.id, ref)));
     const type = fileTypeOf(reader, ref, needsContent(reader) ? await bytesOf() : undefined);
     const out = {
       ...stat,
@@ -2224,7 +2230,7 @@ export function registerWorkspaceTools(
       type: 'object',
       properties: {
         branch: BRANCH_INPUT,
-        path: str(`Path to read, under \`${kbDirName}/\` (e.g. \`${kbDirName}/KnowledgeBase/Foo.md\`), with or without a leading slash — a path without that prefix is placed under \`${kbDirName}/\` — or a \`__tool_chain_spill__/…\` ref from a truncated \`call_tool_chain\`, or a \`__tmp__/…\` ref to a file staged in the workspace's tmp folder.`),
+        path: str(`Path to read, under \`${kbDirName}/\` (e.g. \`${kbDirName}/KnowledgeBase/Foo.md\`), with or without a leading slash — a path without that prefix is placed under \`${kbDirName}/\` — or a \`__tool_chain_spill__/…\` ref from a truncated \`call_tool_chain\`, or a \`__tmp__/…\` ref to a file you staged in the workspace's tmp folder.`),
         offset: int('Start character index (default 0).'),
         limit: int('Max characters to return from `offset`.'),
         sessionId: SESSION_ID_INPUT,
@@ -2855,7 +2861,7 @@ export function registerWorkspaceTools(
           // searches, so it is always read through its reader, its bytes from
           // the tmp resolver.
           const bytesOf = tmp
-            ? (ref: string) => ctx.workspaceService.readFileBinary(docs.origin.workspaceId, ref)
+            ? (ref: string) => ctx.workspaceService.readTmpFile(docs.origin.workspaceId, ctx.user.id, ref)
             : fileBytes(fs);
           const found =
             (!tmp && readers.readerFor(searchRoot) instanceof TextReader
@@ -3720,7 +3726,7 @@ export function registerWorkspaceTools(
     name: 'copy_file',
     gated: true,
     description:
-      'Copy a workspace FILE to a new path. The destination must not exist — like a move, a copy never overwrites a file or a folder; to change what is in a file that already exists, write it. Committed + pushed as you. `src` may be a `__tmp__/<path>` ref to a file staged in the workspace\'s tmp folder: the copy is how such a file is kept, as a normal repository file. ' +
+      'Copy a workspace FILE to a new path. The destination must not exist — like a move, a copy never overwrites a file or a folder; to change what is in a file that already exists, write it. Committed + pushed as you. `src` may be a `__tmp__/<path>` ref to a file you staged in the workspace\'s tmp folder: the copy is how such a file is kept, as a normal repository file. ' +
       'Preflight first: `dryRun: true` changes nothing and answers `{ src, dest, kind, descendants, access: { before, after }, accessChanges, allowed, reason? }` — `access` is your own `{ read, write, download, owner }` at the source and at the destination AS IT WILL BE once the copy has landed, with every `access.md` inside a copied folder counted at its new place. ' +
       'One exception to that shape: when the destination is one you may not write, the answer is the refusal alone — `allowed: false` with `reason`, and no `kind` and no `descendants`, because nothing about the source is read before that verdict.',
     inputs: {

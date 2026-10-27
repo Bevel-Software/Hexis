@@ -15,7 +15,7 @@ import {
   type ExistingEntryKind,
 } from '@bevel-software/platform-shared';
 import { isAbsence, type IgnoreRules, type ITreeWalker, type TreeWalkOptions } from '../../shared/fs.contract.js';
-import { BevelIgnoreStack, assertRepoRootNameFree, isTmpRef, normalizeWorkspacePath, assertValidBranchName, normalizeRepositoryAddress, sameRepository } from '../kb-fs/index.js';
+import { BevelIgnoreStack, assertRepoRootNameFree, normalizeWorkspacePath, assertValidBranchName, normalizeRepositoryAddress, sameRepository } from '../kb-fs/index.js';
 import {
   DestinationTakenError,
   inspectDestination,
@@ -44,7 +44,7 @@ import {
 import { redactSecret, urlQuerySecrets } from '../../shared/redact-secret.js';
 import { setAsideClone, setAsideRepository, setAsideRootFor, setAsideStamp } from './set-aside-clone.js';
 import { workingCopyShape } from './kb-repository.js';
-import { readTmpRef, statTmpRef, sweepTmpFolder, TMP_MAX_AGE_MS, type TmpFileStat } from './workspace-tmp.js';
+import { readTmpRef, stageTmpRef, statTmpRef, sweepTmpFolder, TMP_MAX_AGE_MS, type TmpFileStat } from './workspace-tmp.js';
 import type { IKbRepository } from './kb-repository.contract.js';
 import {
   cloneCredentialConfigArgs,
@@ -1421,19 +1421,7 @@ export class WorkspaceService implements IWorkspaceService {
     return fs.readFile(absolutePath, 'utf-8');
   }
 
-  /**
-   * The bytes at a repository path — or, for a tmp ref (`__tmp__/<path>`, see
-   * `workspace-tmp.ts`), the one file it names in this workspace's `tmp/`
-   * folder, under the ref's own rules: one file, nothing outside the folder,
-   * and a missing file a `PathNotFoundError` naming the ref. This is how a
-   * distribution's own tool reads a staged file without a reader of its own;
-   * the file tools read the folder through the same resolver.
-   *
-   * The service's other callers hand this a path they have already
-   * normalised, which starts with the checkout folder and so is never a ref.
-   */
   async readFileBinary(workspaceId: string, wsPath: string): Promise<Buffer> {
-    if (isTmpRef(wsPath)) return readTmpRef(this.workspaceDirForTmp(workspaceId), wsPath);
     const { workspaceDir, relativePath, absolutePath } = await this.resolveInsideRepo(workspaceId, wsPath);
     assertNoGitInternalsSegment(relativePath);
     await assertNotGitInternals(workspaceDir, relativePath, absolutePath);
@@ -1822,12 +1810,38 @@ export class WorkspaceService implements IWorkspaceService {
   }
 
   /**
-   * What `file_stat` reports for a tmp ref: the stat of the one file it names
-   * in this workspace's `tmp/` folder, resolved exactly as
-   * {@link readFileBinary} resolves it.
+   * The bytes of the one file a tmp ref (`__tmp__/<path>`, see
+   * `workspace-tmp.ts`) names in `ownerId`'s own folder of this workspace's
+   * `tmp/`, under the ref's rules: one file, nothing outside that folder, and
+   * a missing file — what somebody else staged included — a
+   * `PathNotFoundError` naming the ref. This is how a distribution's own tool
+   * reads a staged file without a reader of its own; the file tools read the
+   * folder through the same resolver, as the calling user.
    */
-  async statTmpFile(workspaceId: string, ref: string): Promise<TmpFileStat> {
-    return statTmpRef(this.workspaceDirForTmp(workspaceId), ref);
+  async readTmpFile(workspaceId: string, ownerId: string, ref: string): Promise<Buffer> {
+    return readTmpRef(this.workspaceDirForTmp(workspaceId), ownerId, ref);
+  }
+
+  /**
+   * What `file_stat` reports for a tmp ref: the stat of the one file it names
+   * in `ownerId`'s folder of this workspace's `tmp/`, resolved exactly as
+   * {@link readTmpFile} resolves it.
+   */
+  async statTmpFile(workspaceId: string, ownerId: string, ref: string): Promise<TmpFileStat> {
+    return statTmpRef(this.workspaceDirForTmp(workspaceId), ownerId, ref);
+  }
+
+  /**
+   * Stage `bytes` in `ownerId`'s folder of this workspace's `tmp/`, at
+   * `relativePath` inside it, and answer the ref (`__tmp__/<relativePath>`)
+   * the owner reads it back with. The one way into the folder the ref
+   * reaches — a stager (the chat's attachments, a reader of an external
+   * document) calls this rather than composing the path, so where an owner's
+   * files live is decided here once. Needs no bootstrap: a staged file
+   * belongs beside the checkout, whether or not the branch is cloned yet.
+   */
+  async stageTmpFile(workspaceId: string, ownerId: string, relativePath: string, bytes: Uint8Array): Promise<string> {
+    return stageTmpRef(this.workspaceDirForTmp(workspaceId), ownerId, relativePath, bytes);
   }
 
   /**
@@ -1884,7 +1898,8 @@ export class WorkspaceService implements IWorkspaceService {
    * outside the KB git repo, and are never committed. Computes the path directly
    * from `workspacesRoot` (no bootstrapping) and force-removes, so it's safe to
    * call after a run even if the workspace was already torn down — a missing
-   * directory is ignored.
+   * directory is ignored. Everyone's staged files go with it, which is why the
+   * ref's promise is "up to seven days" (see `workspace-tmp.ts`).
    */
   async clearTmp(workspaceId: string): Promise<void> {
     // Guard against a malicious/odd workspaceId (e.g. "..") escaping the root

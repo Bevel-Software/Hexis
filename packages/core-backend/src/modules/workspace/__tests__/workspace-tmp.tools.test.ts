@@ -44,6 +44,10 @@ const KB_DIR = 'knowledge-base';
 const DRAFT = 'main';
 /** A protected branch of the test branch model: writes are judged. */
 const PROTECTED = TEST_BRANCH_MODEL.defaultBranch;
+/** The calling user, whose staged files the ref reaches. */
+const ME = 'u';
+/** Somebody else, whose staged files it does not. */
+const OTHER = 'v';
 
 // ── fixtures: real bytes, built by the real libraries ────────────────────
 
@@ -167,9 +171,11 @@ let service: WorkspaceService;
 
 /** The directory of `branch`'s workspace: its checkout and its `tmp/` folder side by side. */
 const workspaceDir = (branch: string): string => join(root, encodeURIComponent(branch));
-/** Stage `bytes` at `rel` in `branch`'s tmp folder, as the chat or the SharePoint reader does. */
-async function stage(rel: string, bytes: Buffer | string, branch = DRAFT): Promise<string> {
-  const abs = join(workspaceDir(branch), 'tmp', rel);
+/** `owner`'s folder inside `branch`'s tmp: where the platform stages what that person attaches. */
+const ownerDir = (branch: string, owner = ME): string => join(workspaceDir(branch), 'tmp', owner);
+/** Stage `bytes` at `rel` in `owner`'s folder of `branch`'s tmp, straight on disk, as `stageTmpFile` lays it out. */
+async function stage(rel: string, bytes: Buffer | string, branch = DRAFT, owner = ME): Promise<string> {
+  const abs = join(ownerDir(branch, owner), rel);
   await mkdir(dirname(abs), { recursive: true });
   await writeFile(abs, bytes);
   return abs;
@@ -190,7 +196,7 @@ async function start(): Promise<string> {
   extractor = new WorkerDocumentExtractor();
   const filesystems = new Map<string, LocalFilesystem>();
   const resolve = async (auth: ToolAuth, signal: AbortSignal, sessionId?: string): Promise<ToolContext> => ({
-    user: { id: 'u', email: 'e@x', name: 'N' },
+    user: { id: ME, email: 'e@x', name: 'N' },
     scope: auth.scope,
     source: auth.source,
     sessionId,
@@ -199,7 +205,8 @@ async function start(): Promise<string> {
     // directory as it already stands on disk.
     workspaceService: {
       readFileBinary: (id: string, p: string) => service.readFileBinary(id, p),
-      statTmpFile: (id: string, ref: string) => service.statTmpFile(id, ref),
+      readTmpFile: (id: string, owner: string, ref: string) => service.readTmpFile(id, owner, ref),
+      statTmpFile: (id: string, owner: string, ref: string) => service.statTmpFile(id, owner, ref),
       getWorkspacePath: async (id: string) => join(root, id),
       hasBootstrappedWorkspace: async () => false,
     } as never,
@@ -218,7 +225,7 @@ async function start(): Promise<string> {
   app.use(express.json());
   const router = express.Router();
   const auth = (req: express.Request, _res: express.Response, next: express.NextFunction) => {
-    req.toolAuth = { source: 'external', userId: 'u', scope: 'write' };
+    req.toolAuth = { source: 'external', userId: ME, scope: 'write' };
     next();
   };
   registerWorkspaceTools(
@@ -367,17 +374,20 @@ describe('a tmp ref names one file inside the workspace\'s tmp folder', () => {
     }
   });
 
-  it('never follows a link out of the folder', async () => {
+  it('never follows a link out of the folder, another owner\'s folder included', async () => {
     const base = await start();
     await commitFixture('secret.md', 'repository secret');
-    await mkdir(join(workspaceDir(DRAFT), 'tmp'), { recursive: true });
-    await symlink(join(workspaceDir(DRAFT), KB_DIR), join(workspaceDir(DRAFT), 'tmp', 'kb'));
-    await symlink(join(workspaceDir(DRAFT), KB_DIR, 'secret.md'), join(workspaceDir(DRAFT), 'tmp', 'secret.md'));
-    for (const ref of ['__tmp__/kb/secret.md', '__tmp__/secret.md']) {
+    await stage('chat-uploads/theirs.md', 'their secret', DRAFT, OTHER);
+    await mkdir(ownerDir(DRAFT), { recursive: true });
+    await symlink(join(workspaceDir(DRAFT), KB_DIR), join(ownerDir(DRAFT), 'kb'));
+    await symlink(join(workspaceDir(DRAFT), KB_DIR, 'secret.md'), join(ownerDir(DRAFT), 'secret.md'));
+    await symlink(ownerDir(DRAFT, OTHER), join(ownerDir(DRAFT), 'theirs'));
+    for (const ref of ['__tmp__/kb/secret.md', '__tmp__/secret.md', '__tmp__/theirs/chat-uploads/theirs.md']) {
       const { status, body } = await call(base, 'read_file', { path: ref });
       expect(status, ref).toBe(400);
-      expect(body.error, ref).toMatch(/link that leads out of the workspace's tmp folder/);
+      expect(body.error, ref).toMatch(/link that leads out of your tmp folder/);
       expect(JSON.stringify(body), ref).not.toContain('repository secret');
+      expect(JSON.stringify(body), ref).not.toContain('their secret');
     }
   });
 
@@ -400,8 +410,8 @@ describe('a tmp ref names one file inside the workspace\'s tmp folder', () => {
 
   it('a loop of links is refused by the link rule, naming the ref and never a disk path', async () => {
     const base = await start();
-    await mkdir(join(workspaceDir(DRAFT), 'tmp'), { recursive: true });
-    await symlink(join(workspaceDir(DRAFT), 'tmp', 'loop'), join(workspaceDir(DRAFT), 'tmp', 'loop'));
+    await mkdir(ownerDir(DRAFT), { recursive: true });
+    await symlink(join(ownerDir(DRAFT), 'loop'), join(ownerDir(DRAFT), 'loop'));
     const { status, body } = await call(base, 'read_file', { path: '__tmp__/loop' });
     expect(status).toBe(400);
     expect(body.kind).toBe('tmp-ref-invalid');
@@ -531,7 +541,7 @@ describe('copy_file from a tmp ref to a repository path', () => {
     expect(repoRead.content).toBe((tmpRead.content as string).replaceAll(ref, `${KB_DIR}/${dest}`));
     expect(repoRead.canWrite).toBe(true);
     expect((await call(base, 'file_stat', { path: dest })).body).toMatchObject({ managed: false, movable: true, deletable: true, textEditable: false });
-    expect(await readFile(join(workspaceDir(DRAFT), 'tmp', 'chat-uploads/plan-a1b2c3d4e5f6.xlsx'))).toEqual(SPREADSHEET);
+    expect(await readFile(join(ownerDir(DRAFT), 'chat-uploads/plan-a1b2c3d4e5f6.xlsx'))).toEqual(SPREADSHEET);
   });
 
   it('the dry run previews the access the staged file carries in, as a repository copy does', async () => {
@@ -581,7 +591,7 @@ describe('copy_file from a tmp ref to a repository path', () => {
     const base = await start();
     await stage('a.md', '---\nread:\n  - deny everyone\n---\n# Staged\n', PROTECTED);
     previews.length = 0;
-    const read = vi.spyOn(service, 'readFileBinary');
+    const read = vi.spyOn(service, 'readTmpFile');
     try {
       const dry = await call(base, 'copy_file', { branch: PROTECTED, src: '__tmp__/a.md', dest: 'Locked/a.md', dryRun: true });
       expect(dry.status).toBe(200);
@@ -648,23 +658,87 @@ describe('every writing tool refuses a tmp ref', () => {
   });
 });
 
-// ── WorkspaceService.readFileBinary ──────────────────────────────────────
+// ── the ref reaches the caller's own files ───────────────────────────────
 
-describe('WorkspaceService.readFileBinary accepts a tmp ref', () => {
-  it('answers the staged bytes, under the same rules', async () => {
+describe("a tmp ref reaches the caller's own staged files and nobody else's", () => {
+  it('what somebody else staged is not there: the plain not-found, naming the ref, from every tool that takes one', async () => {
+    const base = await start();
+    await stage('chat-uploads/notes.txt', 'theirs\n', DRAFT, OTHER);
+    await stage('chat-uploads/notes.txt', 'theirs\n', PROTECTED, OTHER);
+    const ref = '__tmp__/chat-uploads/notes.txt';
+    const never = '__tmp__/chat-uploads/never.txt';
+    for (const [tool, args] of [
+      ['read_file', { path: ref }],
+      ['file_stat', { path: ref }],
+      ['grep', { path: ref, pattern: 'theirs' }],
+      ['copy_file', { src: ref, dest: 'KnowledgeBase/notes.txt' }],
+    ] as Array<[string, Record<string, unknown>]>) {
+      const { status, body } = await call(base, tool, args);
+      expect(status, tool).toBe(404);
+      expect(body.kind, tool).toBe('not_found');
+      expect(body.path, tool).toBe(ref);
+      // The same answer, word for word, as for a file nobody ever staged.
+      const nobody = await call(base, tool, { ...args, ...(tool === 'copy_file' ? { src: never } : { path: never }) });
+      expect(nobody.status, tool).toBe(404);
+      expect(body.error.replaceAll(ref, ''), tool).toBe(nobody.body.error.replaceAll(never, ''));
+      expect(JSON.stringify(body), tool).not.toContain('theirs');
+    }
+    // Nothing of theirs was copied, and the same ref IS the caller's own file once they stage one.
+    await expect(stat(join(workspaceDir(DRAFT), KB_DIR, 'KnowledgeBase/notes.txt'))).rejects.toThrow();
+    await stage('chat-uploads/notes.txt', 'mine\n');
+    expect((await call(base, 'read_file', { path: ref })).body.content).toBe('mine\n');
+    expect((await call(base, 'grep', { path: ref, pattern: 'mine' })).body.matches).toHaveLength(1);
+  });
+
+  it('the caller cannot reach another owner by spelling their folder into the ref', async () => {
+    const base = await start();
+    await stage('chat-uploads/plan.xlsx', SPREADSHEET, DRAFT, OTHER);
+    for (const ref of [`__tmp__/../${OTHER}/chat-uploads/plan.xlsx`, `__tmp__/${OTHER}/chat-uploads/plan.xlsx`]) {
+      const { status, body } = await call(base, 'read_file', { path: ref });
+      expect([400, 404], ref).toContain(status);
+      expect(JSON.stringify(body), ref).not.toContain('supply chain');
+    }
+  });
+
+  it('WorkspaceService.stageTmpFile lays a file out where the owner, and only the owner, reads it back', async () => {
     await start();
-    await stage('chat-uploads/plan.xlsx', SPREADSHEET);
     const id = encodeURIComponent(DRAFT);
-    expect(await service.readFileBinary(id, '__tmp__/chat-uploads/plan.xlsx')).toEqual(SPREADSHEET);
-    await expect(service.readFileBinary(id, '__tmp__/chat-uploads')).rejects.toThrow(/names a folder/);
-    await expect(service.readFileBinary(id, `__tmp__/../${KB_DIR}/x`)).rejects.toThrow(/`\.\.` segment/);
-    const missing = service.readFileBinary(id, '__tmp__/gone.xlsx');
-    await expect(missing).rejects.toBeInstanceOf(PathNotFoundError);
-    await expect(service.readFileBinary(id, '__tmp__/gone.xlsx')).rejects.toMatchObject({ path: '__tmp__/gone.xlsx' });
+    const ref = await service.stageTmpFile(id, ME, 'chat-uploads/plan.xlsx', SPREADSHEET);
+    expect(ref).toBe('__tmp__/chat-uploads/plan.xlsx');
+    expect(await readFile(join(ownerDir(DRAFT), 'chat-uploads/plan.xlsx'))).toEqual(SPREADSHEET);
+    expect(await service.readTmpFile(id, ME, ref)).toEqual(SPREADSHEET);
+    expect((await service.statTmpFile(id, ME, ref)).size).toBe(SPREADSHEET.length);
+    await expect(service.readTmpFile(id, OTHER, ref)).rejects.toBeInstanceOf(PathNotFoundError);
+    await expect(service.readTmpFile(id, ME, '__tmp__/chat-uploads')).rejects.toThrow(/names a folder/);
+    await expect(service.readTmpFile(id, ME, `__tmp__/../${KB_DIR}/x`)).rejects.toThrow(/`\.\.` segment/);
+    await expect(service.readTmpFile(id, ME, '__tmp__/gone.xlsx')).rejects.toMatchObject({ path: '__tmp__/gone.xlsx' });
+    // Staging again replaces: a staged file is the stager's own scratch.
+    await service.stageTmpFile(id, ME, 'chat-uploads/plan.xlsx', Buffer.from('v2'));
+    expect((await service.readTmpFile(id, ME, ref)).toString()).toBe('v2');
+    // The path obeys the ref's rules, and the refusal names the one it breaks.
+    await expect(service.stageTmpFile(id, ME, '../escape.txt', Buffer.from('x'))).rejects.toThrow(/`\.\.` segment/);
+    await expect(service.stageTmpFile(id, ME, '/abs.txt', Buffer.from('x'))).rejects.toThrow(/absolute/);
+    await expect(service.stageTmpFile(id, ME, 'a\\b.txt', Buffer.from('x'))).rejects.toThrow(/backslash/);
+    await expect(service.stageTmpFile(id, ME, 'folder/', Buffer.from('x'))).rejects.toThrow(/names a folder/);
+    await expect(stat(join(workspaceDir(DRAFT), 'tmp', 'escape.txt'))).rejects.toThrow();
     // A workspace id that names no single workspace directory reaches nothing.
     for (const bad of ['..', '.', '']) {
-      await expect(service.readFileBinary(bad, '__tmp__/chat-uploads/plan.xlsx')).rejects.toThrow();
+      await expect(service.readTmpFile(bad, ME, '__tmp__/chat-uploads/plan.xlsx')).rejects.toThrow();
     }
+    // An owner id that is not one path segment is a programming error, not a folder to make.
+    for (const bad of ['', '.', '..', 'a/b', 'a\\b']) {
+      await expect(service.stageTmpFile(id, bad, 'x.txt', Buffer.from('x')), bad).rejects.toThrow(/owner id/);
+      await expect(service.readTmpFile(id, bad, '__tmp__/x.txt'), bad).rejects.toThrow(/owner id/);
+    }
+  });
+
+  it("never stages through a link that leads out of the owner's folder", async () => {
+    await start();
+    const id = encodeURIComponent(DRAFT);
+    await mkdir(ownerDir(DRAFT), { recursive: true });
+    await symlink(join(workspaceDir(DRAFT), KB_DIR), join(ownerDir(DRAFT), 'kb'));
+    await expect(service.stageTmpFile(id, ME, 'kb/planted.md', Buffer.from('x'))).rejects.toThrow(/link that leads out/);
+    await expect(stat(join(workspaceDir(DRAFT), KB_DIR, 'planted.md'))).rejects.toThrow();
   });
 });
 
@@ -677,25 +751,28 @@ describe('the periodic sweep of every workspace\'s tmp folder', () => {
     await utimes(abs, when, when);
   };
 
-  it('removes an entry last modified eight days ago and keeps one modified yesterday, in every workspace', async () => {
+  it('removes an entry last modified eight days ago and keeps one modified yesterday, in every workspace and for every owner', async () => {
     await start();
     const old = await stage('chat-uploads/old.xlsx', SPREADSHEET);
     const fresh = await stage('chat-uploads/fresh.xlsx', SPREADSHEET);
+    const theirs = await stage('chat-uploads/theirs.xlsx', SPREADSHEET, DRAFT, OTHER);
     const oldFolder = await stage('sharepoint/abc/doc.docx', docxBytes('x'), PROTECTED);
     await age(old, 8);
     await age(fresh, 1);
+    await age(theirs, 8);
     await age(oldFolder, 8);
     await age(dirname(oldFolder), 8);
-    await age(join(workspaceDir(PROTECTED), 'tmp', 'sharepoint'), 8);
+    await age(join(ownerDir(PROTECTED), 'sharepoint'), 8);
     // `chat-uploads/` itself is young (an upload landed in it yesterday): the
     // old file in it goes all the same, judged on its own.
     const { removed } = await service.sweepTmp();
     await expect(stat(old)).rejects.toThrow();
+    await expect(stat(theirs)).rejects.toThrow();
     expect(await readFile(fresh)).toEqual(SPREADSHEET);
-    await expect(stat(join(workspaceDir(PROTECTED), 'tmp', 'sharepoint'))).rejects.toThrow();
+    await expect(stat(join(ownerDir(PROTECTED), 'sharepoint'))).rejects.toThrow();
     // The old file, then the folders it emptied that were old themselves.
     expect(removed[encodeURIComponent(PROTECTED)]).toBe(3);
-    expect((await stat(join(workspaceDir(DRAFT), 'tmp', 'chat-uploads'))).isDirectory()).toBe(true);
+    expect((await stat(join(ownerDir(DRAFT), 'chat-uploads'))).isDirectory()).toBe(true);
   });
 
   it('keeps the tmp folder itself, however old, and an old folder that still holds a young file', async () => {
@@ -805,13 +882,15 @@ describe('the periodic sweep of every workspace\'s tmp folder', () => {
 // ── the agent guide ──────────────────────────────────────────────────────
 
 describe('the agent guide\'s file-tools section describes the ref', () => {
-  it('states the ref, what it reaches, that it is read-only, copy_file to keep, and the seven-day sweep', async () => {
+  it("states the ref, that it reaches the caller's own files, that it is read-only, copy_file to keep, and up to seven days", async () => {
     const rule = sharedFileRules(DEFAULT_KB_LAYOUT).find((r) => r.id === 'workspace-tmp')!.body;
     expect(rule).toContain('`__tmp__/<path>`');
     expect(rule).toContain('`tmp/` folder');
+    expect(rule).toContain('YOU staged');
+    expect(rule).toContain("nobody else's staged files");
     expect(rule).toContain('read-only');
     expect(rule).toContain('copy_file it to a repository path');
-    expect(rule).toContain('seven days');
+    expect(rule).toContain('up to seven days');
     for (const tool of ['read_file', 'file_stat', 'grep', 'copy_file']) expect(rule).toContain(tool);
     expect(sharedFileRulesSection(DEFAULT_KB_LAYOUT)).toContain(rule);
     const sections = await agentGuideSections(DEFAULT_KB_LAYOUT);

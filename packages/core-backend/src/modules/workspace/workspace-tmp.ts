@@ -24,15 +24,25 @@ const log = logger('workspace-tmp');
  * will be: `tmp` is a legal folder name inside a repository, and the
  * normaliser's rule is what keeps every other path in it.
  *
- * The ref is workspace-scoped: it is resolved against the workspace of the
- * branch the call names, exactly like a repository path. It names ONE file —
- * no folder, no listing — and nothing outside that workspace's `tmp/` folder
- * is reachable through it, links included. Every resolution goes through
- * {@link resolveTmpRef}; there is no second reader of the folder.
+ * The ref is scoped twice. To the WORKSPACE: it is resolved against the
+ * workspace of the branch the call names, exactly like a repository path. And
+ * to the CALLER: what a person stages lands under their own folder,
+ * `tmp/<owner id>/` ({@link stageTmpRef}, the one way in), and a ref resolves
+ * inside the caller's own folder and nowhere else ({@link resolveTmpRef}). A
+ * file somebody else staged is therefore not there — the plain not-found,
+ * the same answer as for a file that never existed — rather than something an
+ * access rule has to refuse: the folder is outside the repository, where no
+ * `access.md` governs anything, and the only person a staged attachment is
+ * for is the one who attached it. The ref names ONE file — no folder, no
+ * listing — and nothing outside the caller's folder is reachable through it,
+ * links included. Every resolution goes through {@link resolveTmpRef}; there
+ * is no second reader of the folder.
  *
  * Entries live for {@link TMP_MAX_AGE_MS} after their last modification, then
  * the platform's periodic sweep removes them ({@link sweepTmpFolder},
- * scheduled by {@link TmpSweeper}).
+ * scheduled by {@link TmpSweeper}) — or sooner, when a distribution clears a
+ * workspace's whole `tmp/` after a run of its own (`clearTmp`): "up to seven
+ * days" is the promise, not "seven days".
  */
 
 /** The folder the ref reaches, beside the checkout in every workspace directory. */
@@ -48,6 +58,28 @@ export const TMP_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 function invalidRef(ref: string, rule: string): WorkflowValidationError {
   const shown = sanitizedPath(ref);
   return new WorkflowValidationError(`"${shown}" is not a valid tmp ref: ${rule}`, { kind: 'tmp-ref-invalid', path: shown });
+}
+
+/**
+ * The folder of one owner inside a workspace's `tmp/`: `tmp/<owner id>/`.
+ * The id is an account id, which the platform mints and which is one path
+ * segment by construction; one that is not — empty, a separator in it, a
+ * `.`/`..`, a control character — is a programming error, never a file to
+ * look for, and is refused as one.
+ */
+function ownerFolder(workspaceDir: string, ownerId: string): string {
+  if (
+    ownerId === '' ||
+    ownerId === '.' ||
+    ownerId === '..' ||
+    ownerId.includes('/') ||
+    ownerId.includes('\\') ||
+    hasControlCharacter(ownerId) ||
+    ownerId.length > 255
+  ) {
+    throw new Error(`Invalid tmp owner id "${sanitizedPath(ownerId)}": an owner's tmp folder is one path segment.`);
+  }
+  return path.join(workspaceDir, WORKSPACE_TMP_DIR, ownerId);
 }
 
 /**
@@ -104,38 +136,45 @@ function tmpRefSegments(ref: string): string[] {
 }
 
 /**
- * THE resolution of a ref, against one workspace directory: the file's
- * absolute path and its stat, or a refusal. Every read of the folder starts
- * here.
+ * THE resolution of a ref, against one owner's folder in one workspace
+ * directory: the file's absolute path and its stat, or a refusal. Every read
+ * of the folder starts here.
  *
  * - The lexical rules first ({@link tmpRefSegments}), before the disk is
  *   asked anything.
- * - Nothing there is a {@link PathNotFoundError} naming the REF, never the
- *   path on disk — the answer every file tool turns into its ordinary 404.
- *   Every other failure names the ref alone too ({@link tmpRefFailure}).
- * - The file's REAL path must lie inside the folder's real path, so a link —
- *   anywhere along the ref — that leads out of the folder is refused rather
- *   than followed. A link that stays inside is the file it points at.
+ * - Nothing there — the owner's folder included, which a person who has
+ *   staged nothing does not have — is a {@link PathNotFoundError} naming the
+ *   REF, never the path on disk: the answer every file tool turns into its
+ *   ordinary 404. What another person staged is "nothing there" too. Every
+ *   other failure names the ref alone as well ({@link tmpRefFailure}).
+ * - The file's REAL path must lie inside the owner's folder's real path, so a
+ *   link — anywhere along the ref — that leads out of it (into another
+ *   owner's folder included) is refused rather than followed. A link that
+ *   stays inside is the file it points at.
  * - A folder is refused by the rule, never listed.
  */
-export async function resolveTmpRef(workspaceDir: string, ref: string): Promise<{ absolutePath: string; stat: Stats }> {
+export async function resolveTmpRef(
+  workspaceDir: string,
+  ownerId: string,
+  ref: string,
+): Promise<{ absolutePath: string; stat: Stats }> {
   const segments = tmpRefSegments(ref);
-  const tmpDir = path.join(workspaceDir, WORKSPACE_TMP_DIR);
+  const ownerDir = ownerFolder(workspaceDir, ownerId);
   const absent = (err: unknown): never => {
     throw tmpRefFailure(ref, err);
   };
   // The folder itself must BE a folder of this workspace, not a link to one
   // somewhere else: the containment below is judged against it.
-  if ((await lstatOrNull(tmpDir).catch(absent))?.isDirectory() !== true) throw new PathNotFoundError(ref);
-  const realTmp = await fs.realpath(tmpDir).catch(absent);
-  const real = await fs.realpath(path.join(tmpDir, ...segments)).catch(absent);
+  if ((await lstatOrNull(ownerDir).catch(absent))?.isDirectory() !== true) throw new PathNotFoundError(ref);
+  const realOwnerDir = await fs.realpath(ownerDir).catch(absent);
+  const real = await fs.realpath(path.join(ownerDir, ...segments)).catch(absent);
   // THE containment check (shared/path-containment.ts), on the real paths;
   // its refusal is answered as the link rule, naming the ref. The folder
   // itself passes it, and is refused below as a folder.
   try {
-    assertWithinDirectory(real, realTmp);
+    assertWithinDirectory(real, realOwnerDir);
   } catch {
-    throw invalidRef(ref, 'it goes through a link that leads out of the workspace\'s tmp folder, and links out of it are never followed.');
+    throw invalidRef(ref, 'it goes through a link that leads out of your tmp folder, and links out of it are never followed.');
   }
   const stat = await fs.stat(real).catch(absent);
   if (stat.isDirectory()) {
@@ -147,9 +186,9 @@ export async function resolveTmpRef(workspaceDir: string, ref: string): Promise<
   return { absolutePath: real, stat };
 }
 
-/** The bytes of the one file a ref names in `workspaceDir`'s tmp folder (see {@link resolveTmpRef}). */
-export async function readTmpRef(workspaceDir: string, ref: string): Promise<Buffer> {
-  const { absolutePath } = await resolveTmpRef(workspaceDir, ref);
+/** The bytes of the one file a ref names in `ownerId`'s folder of `workspaceDir`'s tmp (see {@link resolveTmpRef}). */
+export async function readTmpRef(workspaceDir: string, ownerId: string, ref: string): Promise<Buffer> {
+  const { absolutePath } = await resolveTmpRef(workspaceDir, ownerId, ref);
   return fs.readFile(absolutePath).catch((err: unknown) => {
     // Swept or replaced between the resolve and the read: the same answer a
     // moment later would give, still naming the ref.
@@ -167,9 +206,40 @@ export interface TmpFileStat {
 }
 
 /** The stat of the one file a ref names (see {@link resolveTmpRef}). */
-export async function statTmpRef(workspaceDir: string, ref: string): Promise<TmpFileStat> {
-  const { stat } = await resolveTmpRef(workspaceDir, ref);
+export async function statTmpRef(workspaceDir: string, ownerId: string, ref: string): Promise<TmpFileStat> {
+  const { stat } = await resolveTmpRef(workspaceDir, ownerId, ref);
   return { name: ref.slice(ref.lastIndexOf('/') + 1), size: stat.size, createdAt: stat.birthtime, modifiedAt: stat.mtime };
+}
+
+/**
+ * Stage `bytes` at `relativePath` in `ownerId`'s folder of `workspaceDir`'s
+ * tmp, and answer the ref the owner reads it back with: the ONE way a file
+ * gets into the folder the ref reaches, so the convention — one folder per
+ * owner, the file's path inside it — is this function's and no stager's.
+ * `relativePath` obeys a ref's own rules (one file, no `..`, no absolute
+ * path, no backslash, no control character); the refusal names the rule.
+ * Replaces what is at the path: a staged file is the stager's own scratch,
+ * and the chat names uploads by their content. Never writes through a link
+ * that leads out of the owner's folder.
+ */
+export async function stageTmpRef(workspaceDir: string, ownerId: string, relativePath: string, bytes: Uint8Array): Promise<string> {
+  const ref = TMP_REF_PREFIX + relativePath;
+  const segments = tmpRefSegments(ref);
+  const ownerDir = ownerFolder(workspaceDir, ownerId);
+  const absolutePath = path.join(ownerDir, ...segments);
+  await fs.mkdir(path.dirname(absolutePath), { recursive: true });
+  // The parent is real and inside the owner's folder, or a link somewhere in
+  // the path would carry the bytes out of it.
+  const [realOwnerDir, realParent] = await Promise.all([fs.realpath(ownerDir), fs.realpath(path.dirname(absolutePath))]);
+  try {
+    assertWithinDirectory(realParent, realOwnerDir);
+  } catch {
+    if (realParent !== realOwnerDir) {
+      throw invalidRef(ref, 'it goes through a link that leads out of your tmp folder, and links out of it are never followed.');
+    }
+  }
+  await fs.writeFile(path.join(realParent, segments[segments.length - 1]!), bytes);
+  return ref;
 }
 
 /**
