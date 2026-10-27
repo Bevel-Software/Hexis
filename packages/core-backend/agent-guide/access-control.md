@@ -2,7 +2,19 @@
 
 Who may read and change each path, on every branch, is set by three kinds of
 file: `roles.yaml` (who holds which role), `groups.yaml` (who is in which
-group) and `access.md` files (who may do what, where).
+group) and `access.md` files (who may do what, where). A folder everyone may
+read and the Platform Team may change has this `access.md`:
+
+```yaml
+---
+owner:
+  - Admin
+---
+read:
+  - everyone
+write:
+  - Platform Team
+```
 
 - **An `access.md` has two blocks.** The body, below the closing `---`, holds
   the rules for the folder the file sits in. The frontmatter above it says who
@@ -11,21 +23,23 @@ group) and `access.md` files (who may do what, where).
   least one verb is read in an older format, where the frontmatter carried the
   folder's rules.
 - **Verbs and entries.** The verbs are `read`, `write`, `download` and
-  `owner`. Each entry is a grant (a principal) or a denial (the lowercase word
+  `owner`. Each verb takes a list, one entry per line, as above: a one-line
+  value such as `write: everyone` does not parse, and the whole file is
+  skipped. Each entry is a grant (a principal) or a denial (the lowercase word
   `deny`, a space, then the principal). `Deny` with a capital is part of a
   name, not a denial.
 - **Verbs nest.** `owner` includes `write` and `download`, and each of those
-  includes `read`: a grant gives the verbs below it, so
-  `download: Ana <ana@x.io>` alone lets Ana open a page as well as save a copy.
+  includes `read`: a grant gives the verbs below it, so a `download` grant
+  alone lets a person open a page as well as save a copy.
   A denial takes away the verbs above it: `deny read` also removes `write`,
   `download` and `owner`, and `deny write` removes `owner`. `deny write` and
   `deny download` never remove `read`.
 - **Principals** are a role from `roles.yaml`, a group from `groups.yaml`, a
   person as `Name <email>`, a plugin token, or **`everyone`**: every signed-in
-  person and their agents. `read: everyone` in a folder's body opens the folder
-  to the organisation; in a file's frontmatter it only makes that file visible
-  (a plugin's `access.md` has it there so the plugin can be found and joined,
-  which admits nobody to the plugin). When a group and a role share a name,
+  person and their agents. `everyone` under `read` in a folder's body opens the
+  folder to the organisation; in a file's frontmatter it only makes that file
+  visible (a plugin's `access.md` has it there so the plugin can be found and
+  joined, which admits nobody to the plugin). When a group and a role share a name,
   the bare name means the group and `role/<Name>` the role. A person's
   personal plugin (`{{pluginsDir}}/personal-<id>/`) grants its owner access and
   denies `everyone` outright, so opening a parent folder never opens it.
@@ -34,8 +48,9 @@ group) and `access.md` files (who may do what, where).
   `access.md` grants that verb or a higher one (grants inherited from folders
   above the plugin, and `deny` lines, do not count). `<name>` is the
   manifest's `name`, in any spelling. This is how a shared skill reaches a
-  plugin's members: `read: plugin/gtm/read` on the skill's folder. Joining or
-  leaving the plugin changes what they can read wherever the token is granted.
+  plugin's members: `plugin/gtm/read` under `read` on the skill's folder.
+  Joining or leaving the plugin changes what they can read wherever the token
+  is granted.
 - **The nearest rule decides.** For a path, the platform looks at the file's
   own rules (below), then its folder's `access.md`, then each folder above, up
   to the root, and the first one that says anything about you decides. Within
@@ -125,15 +140,17 @@ word. Do not propose one. If your user is an Admin, `edit_file` the file on
 `{{defaultBranch}}`. If not, tell them who the Admins are (the `Admin` entries)
 and that the change is made in the app's Roles page or by an Admin.
 
-### Before you change access
+### Before you say or change who has access
 
-Check what the people named can already do. `file_stat` on the path with
-`explainAccess: true` lists who holds each verb (`roster`, when you may manage
-the path's access); the active group source (`synced-groups.yaml` when groups
-are synced, `groups.yaml` otherwise) says who is in each group. It does not
-judge one named person for you. When they already have it, say so and change
-nothing. A change nobody needed still widens or narrows access for everyone
-the rule names.
+Look it up, folder by folder: one folder's rules say nothing about another's.
+`file_stat` on each path that matters, with `explainAccess: true`, lists who
+holds each verb (`roster`, when you may manage the path's access); the active
+group source (`synced-groups.yaml` when groups are synced, `groups.yaml`
+otherwise) says who is in each group, the person you are helping included. It
+does not judge one named person for you. Then name the people: who can do it
+now and, for a move or a rule change, who gains and who loses. When they
+already have it, say so and change nothing. A change nobody needed still
+widens or narrows access for everyone the rule names.
 
 ### Direct writes vs change requests
 

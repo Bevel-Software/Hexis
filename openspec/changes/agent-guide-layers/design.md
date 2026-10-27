@@ -99,24 +99,24 @@ Measured the same way, on this change's last commit (after merging `dev` at `396
 |---|---|---|---|
 | Server instructions (platform part) | 1,852 | 1,969 | 2,000 |
 | Tool list as served (41 tools) | 15,829 | 15,710 | 16,000 |
-| First contact (`get_agent_guide` with no section) | 19,342 (the whole guide) | 995 (`start-here`) | 1,200 |
-| The whole guide (`section: "all"`) | 19,342 | 18,417 | 19,000 |
-| A `read_file` of `AGENTS.md` | 19,342 (the whole guide) | 1,202 (`start-here` and the list) | |
-| One evaluation task | 19,342 | 995 to 3,413 | 6,000 |
+| First contact (`get_agent_guide` with no section) | 19,342 (the whole guide) | 1,061 (`start-here`) | 1,200 |
+| The whole guide (`section: "all"`) | 19,342 | 18,620 | 19,000 |
+| A `read_file` of `AGENTS.md` | 19,342 (the whole guide) | 1,268 (`start-here` and the list) | |
+| One evaluation task | 19,342 | 1,061 to 3,479 | 6,000 |
 | Evaluation facts stated | 27 of 53 | 53 of 53 | all |
 
 | Section | Tokens | | Section | Tokens |
 |---|---|---|---|---|
-| `start-here` | 995 | | `drafts-and-change-requests` | 1,502 |
+| `start-here` | 1,061 | | `drafts-and-change-requests` | 1,503 |
 | `how-agents-find-things` | 659 | | `skills` | 1,026 |
 | `for-git-users` | 641 | | `tools` | 952 |
 | `glossary` | 584 | | `tool-manuals` | 2,354 |
 | `directory-structure` | 1,356 | | `html-views` | 2,683 |
 | `where-a-new-file-goes` | 702 | | `conventions` | 445 |
 | `working-with-files` (computed) | 1,777 | | `new-knowledge-base` | 379 |
-| `access-control` | 2,360 | | | |
+| `access-control` | 2,496 | | | |
 
-The customer's fifteen guide loads would now cost about 15,000 tokens instead
+The customer's fifteen guide loads would now cost about 16,000 tokens instead
 of about 420,000. On an enterprise deployment the whole guide is about 27,000 tokens;
 its five sections are unchanged and outside core's checks.
 
@@ -152,7 +152,11 @@ In the existing `Test` workflow, all as vitest tests in core-backend:
 
 In the benchmark, agents wrote to the default branch without asking even where the guide said to ask. The rule is said where the agent is when it matters: on the four write tools behind almost all such writes, in `start-here`, and in the handshake header, which reaches an agent that never fetches the guide.
 
-### 7. Out of scope
+### 7. What the second benchmark round changed
+
+On ten harder tasks, agents went wrong in three places the guide's text invited, plus one it never covered. The access section showed rules on one line (`read: everyone`), which an `access.md` body does not accept, so agents that copied it broke the file; it now shows the list form. Agents stated who has access from one folder or without the group file; the section now says to look it up per folder and to name who gains and who loses. `start-here` said a person "merges" in the app, whose buttons say Approve and Apply changes, and agents repeated that word; it now uses the app's. And agents repeated a key pasted into the chat; `start-here` now says not to, and where the new one goes.
+
+### 8. Out of scope
 
 Rows of the learnings page that ask for product changes (draft skills in the app, split error messages, defaults for `branch`, `sessionId` tolerance, secret format checks) and for the human onboarding guide are listed in the pull request, not built here. The enterprise sections are bevel-platform's.
 

@@ -1,6 +1,6 @@
 ## Drafts and change requests
 
-An agent drafts, proposes and syncs; a person merges. No agent tool approves a
+An agent drafts, proposes and syncs; people approve and apply. No agent tool approves a
 file, bypasses an approval or merges a change request (`merge_change_request`
 no longer exists).
 

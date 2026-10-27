@@ -45,7 +45,14 @@ merged through a change request or written there directly by someone allowed
 to. Until then the app's skills page, `list_skills` without `branch` and the
 tool list do not show them, and "doesn't exist" means "not merged yet". To see
 a skill on a draft, pass the draft as `branch` to `list_skills` or
-`get_skill`. A person merges a change request in the app; no agent tool does.
+`get_skill`. People approve a change request and apply it in the app; no
+agent tool does.
+
+### A secret pasted into the chat
+
+Do not repeat it, not even in part. Say it should be treated as exposed and
+replaced, and where the new one goes: a shared value on the tool's page in the
+app, a personal one on the Connect page. Never in the chat.
 
 ### Which section answers what
 
