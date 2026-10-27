@@ -148,10 +148,11 @@ export class RipgrepPatternMatcher implements IPatternMatcher {
       if (this.waiting.length >= this.maxWaiting) throw new SearchBusyError();
       // Resolved by a run that ends: its slot passes straight to this one.
       await new Promise<void>((resolve, reject) => {
-        let timer: NodeJS.Timeout | undefined;
-        const onAbort = (): void => leave(new SearchAbandonedError());
+        // Every way out settles the same: the budget timer cleared, the
+        // abort listener removed. The closures below refer to one another
+        // and run only once all of them exist.
         const settle = (): void => {
-          if (timer) clearTimeout(timer);
+          clearTimeout(timer);
           wait.signal?.removeEventListener('abort', onAbort);
         };
         const waiter = {
@@ -169,13 +170,14 @@ export class RipgrepPatternMatcher implements IPatternMatcher {
           if (at >= 0) this.waiting.splice(at, 1);
           waiter.reject(err);
         };
+        const onAbort = (): void => leave(new SearchAbandonedError());
+        const timer = setTimeout(() => leave(wait.expired()), wait.timeoutMs);
         this.waiting.push(waiter);
         if (wait.signal?.aborted) {
           leave(new SearchAbandonedError());
           return;
         }
         wait.signal?.addEventListener('abort', onAbort, { once: true });
-        timer = setTimeout(() => leave(wait.expired()), wait.timeoutMs);
       });
     }
     let released = false;
