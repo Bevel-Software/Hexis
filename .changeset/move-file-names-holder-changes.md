@@ -3,7 +3,9 @@
 '@bevel-software/platform-core-frontend': patch
 ---
 
-`move_file` now tells an agent what the app's move confirmation tells a person: who loses and who gains opening or editing the file or folder. The dry run (and an unconfirmed move) answers `holderChanges: { lose, gain }`, each entry `{ kind, name, email?, verb }`, under the same rule as the app's route: only to a caller who may read what moves and the folder it lands in — the names are that folder's rules read back, so a folder the caller may not open tells them nothing. A move that changes anyone's access, not only the caller's, now wants `confirm: true` whoever calls, and the description asks the agent to tell the person who loses and who gains before it confirms.
+`move_file` now tells an agent what the app's move confirmation tells a person: who loses and who gains opening or editing the file or folder. The dry run (and an unconfirmed move) answers `holderChanges: { lose, gain }`, each entry `{ kind, name, email?, verb }`. A move that changes anyone's access, not only the caller's, now wants `confirm: true`, and the description asks the agent to tell the person who loses and who gains before it confirms.
+
+A caller must be able to read what moves and the folder it lands in, on every branch: a move preview reads both ends, and the destination folder's rules are what the names are made of. Either end unreadable is refused as `read_file` refuses it, before anything is looked at — where before, on a draft, a file the caller could not open could be moved and the folder's rules read off the answer. A folder the caller may read still moves with everything in it, files they may not read included.
 
 The app's move confirmation shows the same answer. `GET /access/prospective` returns `changes` beside its two holder lists and refuses (403) a caller who may not read the destination folder, as it already refused one who may not read what moves; the dialog renders `changes` instead of diffing the lists, which named a writer leaving a folder everyone reads as losing `read` it keeps and could not name a person the destination denies.
 

@@ -3497,7 +3497,8 @@ export function registerWorkspaceTools(
     description:
       'Move or rename a workspace FILE or FOLDER; a folder moves recursively, with everything under it. `dest` is the full new path, not the folder to move into. Committed + pushed as you. ' +
       'The destination must not exist — a move never overwrites a file or merges into a folder. Access follows the ' +
-      'DESTINATION folder, so a move can change who may open or edit the file. The dry run answers ' +
+      'DESTINATION folder, so a move can change who may open or edit the file. You must be able to read what moves and the folder it lands in; ' +
+      'otherwise the move is refused as read_file would refuse them. The dry run answers ' +
       '`{ src, dest, kind, descendants, access: { before, after }, accessChanges, holderChanges?, allowed, reason? }`: your own ' +
       'access at both ends, and who else loses or gains it. A move that changes either wants `confirm: true`; tell the person ' +
       'who loses and who gains before you confirm. ' +
@@ -3529,8 +3530,7 @@ export function registerWorkspaceTools(
           type: 'object',
           description:
             'Who loses and who gains opening (`read`) or editing (`write`) it once the move has landed: `{ lose, gain }`, each ' +
-            '`[{ kind, name, email?, verb }]` with `kind` `group`, `role`, `plugin` or `person`. Absent when nobody\'s access changes, ' +
-            'and when you may not read what moves or the folder it lands in (the move still asks for `confirm`).',
+            '`[{ kind, name, email?, verb }]` with `kind` `group`, `role`, `plugin` or `person`. Absent when nobody\'s access changes.',
         },
         allowed: { type: 'boolean', description: 'Whether the move may run.' },
         reason: str('Why it may not, when `allowed` is false.'),
@@ -3561,6 +3561,18 @@ export function registerWorkspaceTools(
       // source already deleted.
       await assertAgentWriteAllowed(agentAccessGate, ctx, branch, src);
       await assertAgentWriteAllowed(agentAccessGate, ctx, branch, dest);
+      // What moves and the folder it lands in must both be readable to the
+      // caller, refused as read_file refuses them, on every branch: a move
+      // preview reads both ends (the caller's own verdicts there, who else is
+      // affected), and the folder's rules are what the names are made of. The
+      // verdict comes BEFORE every other look, so neither end's existence is
+      // told to someone who may not know it. A folder the caller may read moves
+      // with everything in it, files they may not read included: those travel,
+      // they are not read.
+      const destFolder = dest.slice(0, dest.lastIndexOf('/'));
+      const gate = readGateFor(branch, ctx);
+      await assertCanRead(gate, src);
+      await assertCanRead(gate, destFolder);
       const fs = await ctx.getFilesystem(branch);
       const root = await workspaceRoot(branch, ctx);
       // Before the kind check, which stats THROUGH a link: a dangling link at
@@ -3585,21 +3597,18 @@ export function registerWorkspaceTools(
       ]);
       const accessChanges = verbsDiffer(before, after);
       // Who ELSE gains or loses opening or editing it: the lists the app's move
-      // confirmation shows people. A change asks for `confirm` whoever calls,
-      // but the names go only where `read_file` would go: to a caller who reads
-      // what moves AND the folder it lands in — the names are that folder's
-      // rules read back (who it grants, whom it denies), so a caller the folder
-      // shuts out must not learn them from a move preview — the rule the app's
-      // route keeps, and past the read hook on both ends. Outside the
-      // repository no rules travel.
+      // confirmation shows people. The access rules let the caller read both
+      // ends (gated above, as the app's route gates), so the names go to them —
+      // past the deployment's read hook on both ends, which may still refuse
+      // an agent what the rules allow; a change asks for `confirm` either way.
+      // Outside the repository no rules travel.
       const fromRel = toKbRelative(src, kbDirName);
       const toRel = toKbRelative(dest, kbDirName);
       const changes = fromRel !== null && toRel !== null
         ? await accessControl.prospectiveHolderChanges(workspaceIdForBranch(branch), fromRel, toRel)
         : undefined;
       const othersChange = changes !== undefined && (changes.lose.length > 0 || changes.gain.length > 0);
-      const destFolder = dest.slice(0, dest.lastIndexOf('/'));
-      const namesOthers = othersChange && before.read && (await accessAt(branch, ctx, destFolder)).read && await (async () => {
+      const namesOthers = othersChange && await (async () => {
         try {
           await notifyAgentRead(agentAccessGate, ctx, branch, src);
           await notifyAgentRead(agentAccessGate, ctx, branch, destFolder);
