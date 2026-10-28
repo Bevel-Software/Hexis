@@ -1,9 +1,11 @@
 import { describe, test, expect, beforeEach, afterEach, vi } from 'vitest';
-import { NodeFs } from '../../kb-fs/node-fs.js';
-import { KbPluginSource } from '../../plugins/index.js';
+// The real disk and the plugin source over it come from the composition-root
+// fixture, as production wires them: this suite never constructs another
+// module's implementation itself.
+import { realDisk, realPluginSource } from '../../../__tests__/real-disk.js';
 
 /** The one disk, as production wires it: the service and its discovery read the same one. */
-const disk = new NodeFs();
+const disk = realDisk();
 import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -63,7 +65,7 @@ describe('ToolManualService — MCP OAuth auto-discovery decoration', () => {
   });
 
   function svcWith(discovery: McpAuthDiscoveryPort) {
-    const svc = new ToolManualService(workspaceService, allowAll, testKbContext({ kbDirName: KB_DIR }), disk, new KbPluginSource(disk, testKbContext({ kbDirName: KB_DIR })));
+    const svc = new ToolManualService(workspaceService, allowAll, testKbContext({ kbDirName: KB_DIR }), disk, realPluginSource(disk, testKbContext({ kbDirName: KB_DIR })));
     svc.setMcpAuthDiscovery(discovery);
     return svc;
   }
@@ -426,7 +428,7 @@ describe('ToolManualService — MCP OAuth auto-discovery decoration', () => {
         denyAll,
         testKbContext({ kbDirName: KB_DIR }),
         disk,
-        new KbPluginSource(disk, testKbContext({ kbDirName: KB_DIR })),
+        realPluginSource(disk, testKbContext({ kbDirName: KB_DIR })),
       );
       await expect(locked.liveDeclaration('user@example.com', 'hubspot', 'HUBSPOT_TOKEN')).resolves.toBeNull();
       warn.mockRestore();
@@ -451,7 +453,7 @@ describe('ToolManualService — MCP OAuth auto-discovery decoration', () => {
         denyAll,
         testKbContext({ kbDirName: KB_DIR }),
         disk,
-        new KbPluginSource(disk, testKbContext({ kbDirName: KB_DIR })),
+        realPluginSource(disk, testKbContext({ kbDirName: KB_DIR })),
       );
       await expect(locked.liveDeclaration('user@example.com', 'hubspot', 'HUBSPOT_TOKEN')).resolves.toBeNull();
     });

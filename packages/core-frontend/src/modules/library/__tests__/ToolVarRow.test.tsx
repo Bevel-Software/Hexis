@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/react';
-import type { ToolVarStatus } from '../../secrets-vault/services/tool-secrets.api';
+import type { ToolVarStatus } from '../../secrets-vault';
 
 /**
  * The per-variable state matrix, one case per row of the spec table.
@@ -12,16 +12,21 @@ import type { ToolVarStatus } from '../../secrets-vault/services/tool-secrets.ap
  * clobber the discovered provider).
  */
 
+// The row reaches Secrets & connections through that module's entry, so the
+// mock sits on the entry too — the same surface, with the rest of the module
+// left as it is — never on the files behind it.
 const secretsMock = vi.hoisted(() => ({
   setAdminVar: vi.fn(),
   setUserVar: vi.fn(),
   deleteAdminVar: vi.fn(),
   setOAuthClientSecret: vi.fn(),
 }));
-vi.mock('../../secrets-vault/services/tool-secrets.api', () => secretsMock);
-
 const connectMock = vi.hoisted(() => ({ startToolOAuth: vi.fn() }));
-vi.mock('../../secrets-vault/services/connect.api', () => connectMock);
+vi.mock('../../secrets-vault', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../secrets-vault')>()),
+  ...secretsMock,
+  ...connectMock,
+}));
 
 // External navigation behind a spy-able module — never assign
 // window.location.href in a test.
