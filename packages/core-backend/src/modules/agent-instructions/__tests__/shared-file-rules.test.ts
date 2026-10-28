@@ -156,6 +156,14 @@ describe('the default branch is named', () => {
     expect(rule).not.toContain('default branch is');
   });
 
+  it('keeps a call that passes no branch working, naming none', () => {
+    // The helpers are exported: a caller written before the branch was named
+    // gets the text it got then, not a throw on an undefined name.
+    expect(sharedFileRules(DEFAULT_KB_LAYOUT)).toEqual(sharedFileRules(DEFAULT_KB_LAYOUT, ''));
+    expect(sharedFileRulesSection(DEFAULT_KB_LAYOUT)).toBe(sharedFileRulesSection(DEFAULT_KB_LAYOUT, ''));
+    expect(platformInstructions(DEFAULT_KB_LAYOUT)).toBe(platformInstructions(DEFAULT_KB_LAYOUT, ''));
+  });
+
   it('carries the same sentence in the handshake instructions and in the managed guide', async () => {
     const instructions = composeAgentInstructions(null, DEFAULT_KB_LAYOUT, 'target-company-state').instructions;
     const guide = await composeAgentGuide(DEFAULT_KB_LAYOUT, undefined, { defaultBranch: 'target-company-state' });

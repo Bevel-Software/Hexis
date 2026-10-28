@@ -70,7 +70,7 @@ export const SHARED_FILE_RULES_PLACEHOLDER = '{{sharedFileRules}}';
  * a template writes) that a string replacement would read as capture-group
  * syntax.
  */
-export function renderTemplateText(text: string, layout: KbLayout, defaultBranch: string): string {
+export function renderTemplateText(text: string, layout: KbLayout, defaultBranch = ''): string {
   return renderKbLayoutPlaceholders(text, layout).replaceAll(
     SHARED_FILE_RULES_PLACEHOLDER,
     () => sharedFileRulesSection(layout, defaultBranch),

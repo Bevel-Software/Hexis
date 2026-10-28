@@ -29,6 +29,8 @@
  * Pure text, a function of the layout and the default branch: both are
  * deployment settings, so every caller passes the values in effect when it
  * composes, and nothing here may snapshot a folder name or a branch name.
+ * The branch defaults to `''` (no branch named), so a caller that passes only
+ * the layout gets the text it got before the branch was named.
  */
 
 import {
@@ -92,7 +94,7 @@ export interface SharedFileRule {
  * than rewritten wherever the wording still reads outside its old tool — the
  * ones that said "this tool" or "this call" name the tools instead.
  */
-export function sharedFileRules(layout: KbLayout, defaultBranch: string): readonly SharedFileRule[] {
+export function sharedFileRules(layout: KbLayout, defaultBranch = ''): readonly SharedFileRule[] {
   return [
     {
       id: 'agent-guide',
@@ -283,7 +285,7 @@ function defaultBranchSentence(defaultBranch: string): string {
  * byte for byte. A `##` section so it drops into the managed guide at that
  * level and still reads as a block in the instructions blob.
  */
-export function sharedFileRulesSection(layout: KbLayout, defaultBranch: string): string {
+export function sharedFileRulesSection(layout: KbLayout, defaultBranch = ''): string {
   const body = sharedFileRules(layout, defaultBranch)
     .map((rule) => `### ${rule.heading}\n\n${rule.body}`)
     .join('\n\n');

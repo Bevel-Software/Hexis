@@ -76,7 +76,7 @@ export const TOOL_PREFIX_LINE = "This organisation's knowledge base. Search it b
  * `Plugins/`) and name the branch it reads from, which are deployment
  * settings. The guide's name is not one of them: it is `AGENTS.md` everywhere.
  */
-export function platformInstructions(layout: KbLayout, defaultBranch: string): string {
+export function platformInstructions(layout: KbLayout, defaultBranch = ''): string {
   return `${PLATFORM_HEADER}\n\n${sharedFileRulesSection(layout, defaultBranch)}`;
 }
 
