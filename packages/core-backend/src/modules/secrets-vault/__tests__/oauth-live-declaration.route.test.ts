@@ -1,8 +1,7 @@
 import type { Server as HttpServer } from 'node:http';
 import express from 'express';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createSecretsVaultRoutes } from '../secrets-vault.routes.js';
-import { InvalidSecretError, SecretOAuthError } from '../secrets-vault.contract.js';
+import { createSecretsVaultRoutes, InvalidSecretError, SecretOAuthError } from '../index.js';
 import type { ToolManualSummary, ToolVariable } from '../../tool-manuals/index.js';
 
 /**

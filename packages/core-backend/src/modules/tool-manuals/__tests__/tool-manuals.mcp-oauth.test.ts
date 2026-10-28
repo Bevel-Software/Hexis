@@ -1,8 +1,9 @@
 import { describe, test, expect, beforeEach, afterEach, vi } from 'vitest';
-// The real disk and the plugin source over it come from the composition-root
-// fixture, as production wires them: this suite never constructs another
-// module's implementation itself.
-import { realDisk, realPluginSource } from '../../../__tests__/real-disk.js';
+// The real disk, and the service wired over it, come from the composition-root
+// fixtures, as production wires them: this suite constructs no implementation
+// from its file, its own module's included.
+import { realDisk } from '../../../__tests__/real-disk.js';
+import { realToolManualService, type McpAuthDiscoveryPort } from '../../../__tests__/tool-manuals.js';
 
 /** The one disk, as production wires it: the service and its discovery read the same one. */
 const disk = realDisk();
@@ -10,7 +11,6 @@ import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
-import { ToolManualService, type McpAuthDiscoveryPort } from '../tool-manuals.service.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import type { WorkspaceService } from '../../workspace/index.js';
 import type { IAccessControl } from '../../access/index.js';
@@ -65,9 +65,10 @@ describe('ToolManualService — MCP OAuth auto-discovery decoration', () => {
   });
 
   function svcWith(discovery: McpAuthDiscoveryPort) {
-    const svc = new ToolManualService(workspaceService, allowAll, testKbContext({ kbDirName: KB_DIR }), disk, realPluginSource(disk, testKbContext({ kbDirName: KB_DIR })));
-    svc.setMcpAuthDiscovery(discovery);
-    return svc;
+    return realToolManualService(
+      { workspaceService, accessControl: allowAll, kb: testKbContext({ kbDirName: KB_DIR }), disk },
+      discovery,
+    );
   }
 
   test('a bare mcp tool whose server demands OAuth gains the synthetic sign-in var + header', async () => {
@@ -423,13 +424,12 @@ describe('ToolManualService — MCP OAuth auto-discovery decoration', () => {
         canRead: async () => false,
         canReadBatch: async (_w: string, _e: string, paths: string[]) => new Map(paths.map((p) => [p, false])),
       } as unknown as IAccessControl;
-      const locked = new ToolManualService(
+      const locked = realToolManualService({
         workspaceService,
-        denyAll,
-        testKbContext({ kbDirName: KB_DIR }),
+        accessControl: denyAll,
+        kb: testKbContext({ kbDirName: KB_DIR }),
         disk,
-        realPluginSource(disk, testKbContext({ kbDirName: KB_DIR })),
-      );
+      });
       await expect(locked.liveDeclaration('user@example.com', 'hubspot', 'HUBSPOT_TOKEN')).resolves.toBeNull();
       warn.mockRestore();
     });
@@ -445,13 +445,12 @@ describe('ToolManualService — MCP OAuth auto-discovery decoration', () => {
         canRead: async () => true,
         canReadBatch: async (_w: string, _e: string, paths: string[]) => new Map(paths.map((p) => [p, true])),
       } as unknown as IAccessControl;
-      const svc = new ToolManualService(
-        down,
-        allowAll,
-        testKbContext({ kbDirName: KB_DIR }),
+      const svc = realToolManualService({
+        workspaceService: down,
+        accessControl: allowAll,
+        kb: testKbContext({ kbDirName: KB_DIR }),
         disk,
-        realPluginSource(disk, testKbContext({ kbDirName: KB_DIR })),
-      );
+      });
       // The catalog degrades to "nothing released" and tries again next scan…
       await expect(svc.listAccessible('user@example.com')).resolves.toEqual([]);
       // …but a sign-in start must not read that as "no sign-in declared".
@@ -474,13 +473,12 @@ describe('ToolManualService — MCP OAuth auto-discovery decoration', () => {
         canRead: async () => false,
         canReadBatch: async (_w: string, _e: string, paths: string[]) => new Map(paths.map((p) => [p, false])),
       } as unknown as IAccessControl;
-      const locked = new ToolManualService(
+      const locked = realToolManualService({
         workspaceService,
-        denyAll,
-        testKbContext({ kbDirName: KB_DIR }),
+        accessControl: denyAll,
+        kb: testKbContext({ kbDirName: KB_DIR }),
         disk,
-        realPluginSource(disk, testKbContext({ kbDirName: KB_DIR })),
-      );
+      });
       await expect(locked.liveDeclaration('user@example.com', 'hubspot', 'HUBSPOT_TOKEN')).resolves.toBeNull();
     });
   });
