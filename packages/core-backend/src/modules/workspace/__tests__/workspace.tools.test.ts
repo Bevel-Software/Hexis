@@ -5289,6 +5289,30 @@ describe('a move preview judges the destination as it will be', () => {
     expect(await fs.exists(args.src)).toBe(true);
   });
 
+  it('a caller who reads what moves but not the folder it lands in gets no names, and the move still asks first', async () => {
+    const base = await seeded();
+    // `Closed/` is somebody else's: its rules are what the names would reveal
+    // (who it lets in, whom it denies). On a draft nothing stops the move, so
+    // the caller is asked to confirm, and told nothing of the folder.
+    await fs.writeFile(
+      KB('Closed/access.md'),
+      rules('read:\n  - Other <other@x.io>\n  - deny everyone\nwrite:\n  - Other <other@x.io>\n'),
+    );
+    await fs.writeFile(KB('Closed/.keep.md'), 'keep');
+    const args = { branch: 'someone/draft', src: KB('Sales/deal.md'), dest: KB('Closed/deal.md'), rewriteLinks: false };
+
+    const dry = await call(base, 'move_file', { ...args, dryRun: true });
+    expect(dry.body).toMatchObject({ allowed: true, accessChanges: true });
+    expect(dry.body.holderChanges).toBeUndefined();
+    expect(JSON.stringify(dry.body)).not.toContain('other@x.io');
+    const unconfirmed = await call(base, 'move_file', args);
+    expect(unconfirmed.body).toMatchObject({ confirmationRequired: true, moved: false });
+    expect(unconfirmed.body.message).toContain('who else may open or edit it');
+    expect(unconfirmed.body.message).not.toContain('holderChanges');
+    expect(JSON.stringify(unconfirmed.body)).not.toContain('other@x.io');
+    expect(await fs.exists(args.src)).toBe(true);
+  });
+
   it('a move out of a folder names everyone it leaves behind', async () => {
     const base = await seeded();
     const args = { src: KB('Work/Notes'), dest: KB('Legal/Notes') };

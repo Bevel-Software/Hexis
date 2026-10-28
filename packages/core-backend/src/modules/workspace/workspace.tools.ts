@@ -3529,7 +3529,8 @@ export function registerWorkspaceTools(
           type: 'object',
           description:
             'Who loses and who gains opening (`read`) or editing (`write`) it once the move has landed: `{ lose, gain }`, each ' +
-            '`[{ kind, name, email?, verb }]` with `kind` `group`, `role`, `plugin` or `person`. Absent when nobody\'s access changes.',
+            '`[{ kind, name, email?, verb }]` with `kind` `group`, `role`, `plugin` or `person`. Absent when nobody\'s access changes, ' +
+            'and when you may not read what moves or the folder it lands in (the move still asks for `confirm`).',
         },
         allowed: { type: 'boolean', description: 'Whether the move may run.' },
         reason: str('Why it may not, when `allowed` is false.'),
@@ -3586,17 +3587,22 @@ export function registerWorkspaceTools(
       // Who ELSE gains or loses opening or editing it: the lists the app's move
       // confirmation shows people. A change asks for `confirm` whoever calls,
       // but the names go only where `read_file` would go: to a caller who reads
-      // what moves (the rule the app's route keeps), and past the read hook.
-      // Outside the repository no rules travel.
+      // what moves AND the folder it lands in — the names are that folder's
+      // rules read back (who it grants, whom it denies), so a caller the folder
+      // shuts out must not learn them from a move preview — the rule the app's
+      // route keeps, and past the read hook on both ends. Outside the
+      // repository no rules travel.
       const fromRel = toKbRelative(src, kbDirName);
       const toRel = toKbRelative(dest, kbDirName);
       const changes = fromRel !== null && toRel !== null
         ? await accessControl.prospectiveHolderChanges(workspaceIdForBranch(branch), fromRel, toRel)
         : undefined;
       const othersChange = changes !== undefined && (changes.lose.length > 0 || changes.gain.length > 0);
-      const namesOthers = othersChange && before.read && await (async () => {
+      const destFolder = dest.slice(0, dest.lastIndexOf('/'));
+      const namesOthers = othersChange && before.read && (await accessAt(branch, ctx, destFolder)).read && await (async () => {
         try {
           await notifyAgentRead(agentAccessGate, ctx, branch, src);
+          await notifyAgentRead(agentAccessGate, ctx, branch, destFolder);
           return true;
         } catch {
           return false;

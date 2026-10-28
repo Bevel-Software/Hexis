@@ -2056,16 +2056,36 @@ describe('FileExplorer: delete and move ask first', () => {
   const person = (name: string, email: string) => ({ kind: 'person', name, email });
 
   /**
-   * Answer the move dialog's access lookup with these before/after holders,
-   * and everything else (the destination-writable preflight) with a writable
-   * verdict — the warnings suite covers that one on its own.
+   * Answer the move dialog's access lookup with these before/after holders —
+   * and the `changes` the server derives from the resolver, which this stand-in
+   * derives from the two sides, since no rule here denies anyone by name — and
+   * everything else (the destination-writable preflight) with a writable
+   * verdict; the warnings suite covers that one on its own.
    */
   function answerAccess(before: Side, after: Side, opts: { canWrite?: boolean } = {}) {
     const side = (s: Side) => ({ read: s.read ?? [], write: s.write ?? [] });
+    const keyOf = (p: unknown) => {
+      const { kind, name, email } = p as { kind: string; name: string; email?: string };
+      return kind === 'person' ? `person:${(email ?? name).toLowerCase()}` : `${kind}:${name.toLowerCase()}`;
+    };
+    const changesOf = (b: Side, a: Side) => {
+      const lose: unknown[] = [];
+      const gain: unknown[] = [];
+      for (const verb of ['read', 'write'] as const) {
+        const had = new Set((b[verb] ?? []).map(keyOf));
+        const has = new Set((a[verb] ?? []).map(keyOf));
+        for (const p of b[verb] ?? []) if (!has.has(keyOf(p))) lose.push({ ...(p as object), verb });
+        for (const p of a[verb] ?? []) if (!had.has(keyOf(p))) gain.push({ ...(p as object), verb });
+      }
+      return { lose, gain };
+    };
     mockAuthFetch.mockImplementation(async (url: string) => {
       const u = String(url);
       if (u.includes('/access/prospective')) {
-        return { ok: true, json: async () => ({ before: side(before), after: side(after) }) };
+        return {
+          ok: true,
+          json: async () => ({ before: side(before), after: side(after), changes: changesOf(before, after) }),
+        };
       }
       if (u.includes('/access?')) {
         return { ok: true, json: async () => ({ canWrite: opts.canWrite ?? true }) };

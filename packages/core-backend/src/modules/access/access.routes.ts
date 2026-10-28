@@ -398,9 +398,20 @@ export function createAccessRoutes(
    * nothing is moved.
    *
    * Gated like the sibling `overrides` route rather than the permissive
-   * `GET /access`: the caller must resolve read on the thing being moved. The
-   * lists name people, and someone who cannot see it has no business
-   * learning who can.
+   * `GET /access`: the caller must resolve read on the thing being moved AND
+   * on the destination folder. The lists name people, and someone who cannot
+   * see a thing has no business learning who can; the `after` lists and the
+   * `changes` are the destination folder's rules read back (whom it grants,
+   * whom it denies by name), so a folder the caller may not open tells them
+   * nothing either.
+   *
+   * `changes` is who loses and who gains `read` or `write` in the move, as the
+   * resolver judges each candidate on both sides
+   * (`prospectiveHolderChanges`) — the one answer the move dialog and the
+   * agent's `move_file` both show. The two lists are not that answer: they
+   * name grants, so a writer leaving a folder everyone reads shows as losing
+   * `read` it keeps, and a person the destination denies by name is on
+   * neither list.
    */
   router.get('/workspace/:id/access/prospective', async (req, res) => {
     const user = await requireUser(req, res);
@@ -429,13 +440,21 @@ export function createAccessRoutes(
         res.status(403).json({ error: 'You do not have access to this file.' });
         return;
       }
+      if (!(await accessControl.canRead(req.params.id, user.email, toDir))) {
+        res.status(403).json({ error: 'You do not have access to this folder.' });
+        return;
+      }
 
       const name = from.slice(from.lastIndexOf('/') + 1);
       const to = toDir ? `${toDir}/${name}` : name;
-      const { before, after } = await accessControl.prospectiveHolders(req.params.id, from, to);
+      const [{ before, after }, changes] = await Promise.all([
+        accessControl.prospectiveHolders(req.params.id, from, to),
+        accessControl.prospectiveHolderChanges(req.params.id, from, to),
+      ]);
       res.json({
         before: { read: holderPrincipals(before.read), write: holderPrincipals(before.write) },
         after: { read: holderPrincipals(after.read), write: holderPrincipals(after.write) },
+        changes,
       });
     } catch (err) {
       const { status, body } = toHttpError(err);
