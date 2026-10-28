@@ -3497,8 +3497,8 @@ export function registerWorkspaceTools(
     description:
       'Move or rename a workspace FILE or FOLDER; a folder moves recursively, with everything under it. `dest` is the full new path, not the folder to move into. Committed + pushed as you. ' +
       'The destination must not exist — a move never overwrites a file or merges into a folder. Access follows the ' +
-      'DESTINATION folder, so a move can change who may open or edit the file. You must be able to read what moves and the folder it lands in; ' +
-      'otherwise the move is refused as read_file would refuse them. The dry run answers ' +
+      'DESTINATION folder, so a move can change who may open or edit the file. You must be able to read what moves and the folder it lands in, ' +
+      'or it is refused as read_file refuses. The dry run answers ' +
       '`{ src, dest, kind, descendants, access: { before, after }, accessChanges, holderChanges?, allowed, reason? }`: your own ' +
       'access at both ends, and who else loses or gains it. A move that changes either wants `confirm: true`; tell the person ' +
       'who loses and who gains before you confirm. ' +
