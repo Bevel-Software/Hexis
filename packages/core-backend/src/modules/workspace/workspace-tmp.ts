@@ -251,19 +251,19 @@ export async function stageTmpRef(workspaceDir: string, ownerId: string, relativ
   };
   await assertOwnFolder(path.join(workspaceDir, WORKSPACE_TMP_DIR), ref, rethrow);
   await assertOwnFolder(ownerDir, ref, rethrow);
-  const absolutePath = path.join(ownerDir, ...segments);
-  await fs.mkdir(path.dirname(absolutePath), { recursive: true });
-  // The parent is real and inside the owner's folder, or a link somewhere in
-  // the path would carry the bytes out of it.
-  const [realOwnerDir, realParent] = await Promise.all([fs.realpath(ownerDir), fs.realpath(path.dirname(absolutePath))]);
-  try {
-    assertWithinDirectory(realParent, realOwnerDir);
-  } catch {
-    if (realParent !== realOwnerDir) {
-      throw invalidRef(ref, 'it goes through a link that leads out of your tmp folder, and links out of it are never followed.');
-    }
-  }
-  const target = path.join(realParent, segments[segments.length - 1]!);
+  // The workspace directory itself may not exist yet: a staged file belongs
+  // beside the checkout whether or not the branch is cloned, and the
+  // directory's path is the root's own (`workspaceDirWithinRoot`), nothing
+  // the ref names — so it is simply made.
+  await fs.mkdir(workspaceDir, { recursive: true });
+  // The folders on the way — `tmp/` and the owner's folder included, when a
+  // first staging has yet to make them — made one at a time and each judged
+  // before the next is entered: never through a link, which a recursive
+  // mkdir would follow, creating folders wherever the link leads before
+  // anything could refuse it. The one rule for the whole path, the folders
+  // already there included.
+  await makeFoldersWithin(workspaceDir, [WORKSPACE_TMP_DIR, ownerId, ...segments.slice(0, -1)], ref);
+  const target = path.join(ownerDir, ...segments);
   // The name itself: a file to replace, nothing yet, or something that is
   // neither — a link (which a write would follow) or a folder — refused.
   const standing = await lstatOrNull(target);
@@ -272,6 +272,31 @@ export async function stageTmpRef(workspaceDir: string, ownerId: string, relativ
   }
   await fs.writeFile(target, bytes);
   return ref;
+}
+
+/**
+ * The folders of `segments` under `base`, each one entered only once it is
+ * known to be a real directory of the owner's folder: a missing one is made
+ * (and judged again, since another stage may have made it meanwhile), and a
+ * link or a file standing in its place is refused as the link rule — before
+ * any folder is made beyond it, so a link on the way creates nothing where it
+ * leads. `lstat`, as everywhere in this file, so a link is seen as a link.
+ */
+async function makeFoldersWithin(base: string, segments: readonly string[], ref: string): Promise<void> {
+  let at = base;
+  for (const segment of segments) {
+    at = path.join(at, segment);
+    let standing = await lstatOrNull(at);
+    if (standing === null) {
+      await fs.mkdir(at).catch((err: unknown) => {
+        if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+      });
+      standing = await lstatOrNull(at);
+    }
+    if (standing === null || !standing.isDirectory()) {
+      throw invalidRef(ref, 'it goes through a link that leads out of your tmp folder, and links out of it are never followed.');
+    }
+  }
 }
 
 /**

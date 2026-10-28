@@ -61,7 +61,7 @@ export interface ToolContext {
   branch?: string;
   /**
    * What the caller's connection may load (`modules/agent-scope`): resolved
-   * once per call from the `.agent` file its credential connects as. The
+   * once per call from the agent configuration its credential connects as. The
    * tool handler refuses a platform tool outside it before the tool runs; the
    * tools that list skills and connectors narrow by it. Absent is Everything
    * — and a context built without it for a credential that names an agent is

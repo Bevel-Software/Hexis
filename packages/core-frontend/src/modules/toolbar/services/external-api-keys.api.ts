@@ -16,7 +16,7 @@ export interface ExternalApiKeySummary {
   revokedBy: 'owner' | 'admin' | null;
   /** Never set on a key the owner can see: a deleted key leaves their listings. */
   deletedAt?: number | null;
-  /** The `.agent` file the key connects as (a knowledge-base path), or null for Everything. */
+  /** The agent configuration the key connects as (a knowledge-base path), or null for Everything. */
   agentPath?: string | null;
   /** Model-proxy usage for this key today + the daily cap (in tokens). */
   llmUsage?: { usedTodayTokens: number; dailyTokenCap: number };

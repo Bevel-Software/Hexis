@@ -5,6 +5,7 @@ import {
   AccessDeclarationsError,
   DECLARATION_SCAN_FILE_CAP,
 } from '../access-declarations.js';
+import { registerAccessFrontmatterExtensions } from '../../access-model/access-grammar.js';
 
 /**
  * The declaration scan: WHICH files under a folder declare access rules, and
@@ -111,7 +112,10 @@ describe('listAccessDeclarationsUnder', () => {
     ]);
   });
 
-  it("reads verbs out of an .agent file's definition, governing the file itself", async () => {
+  it("reads verbs out of a distribution's configuration file (an .agent, once its kind is registered), governing the file itself", async () => {
+    // `.agent` is not core's: a distribution registers the kind at boot, as
+    // `registerAccessFrontmatterExtensions` is for, and the scan then reads it.
+    registerAccessFrontmatterExtensions(['.agent']);
     const { overrides } = await scan({
       [`${KB}/Agents/ops.agent`]: fm('name: ops\nplatformTools: [read_file]\nwrite:\n  - Developer') + '\nNotes for people.\n',
     }, 'Agents');

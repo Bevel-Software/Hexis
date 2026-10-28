@@ -1,6 +1,12 @@
 import type { HexisMcpConfig } from './config.js';
 import { renewConnectionKeyNow } from './renewal.js';
-import { parseMcpAppManifest, type McpAppManifest } from '@bevel-software/platform-mcp-core';
+import {
+  NOT_AVAILABLE_TO_CONNECTION,
+  connectionWireOf,
+  parseMcpAppManifest,
+  type ConnectionScopeWire,
+  type McpAppManifest,
+} from '@bevel-software/platform-mcp-core';
 
 /**
  * The REST surface this server reads before it can serve anything. Everything
@@ -24,6 +30,19 @@ export class DeploymentError extends Error {
     readonly status?: number,
   ) {
     super(message);
+  }
+}
+
+/**
+ * The deployment refused what the connection does not load: a connection
+ * made as an agent configuration that cannot be used (gone, unreadable, invalid)
+ * loads nothing, and says so in the refusal's own sentence. Not a permission
+ * problem — told apart from one, so a discovery read of such a connection
+ * answers "nothing" rather than failing the server.
+ */
+export class NotAvailableToConnectionError extends DeploymentError {
+  constructor(readonly sentence: string) {
+    super(sentence, 403);
   }
 }
 
@@ -84,6 +103,19 @@ async function getJson(
     // reject. Every URL here is `<baseUrl>/api/…`, and nothing after the base
     // adds another `/api/`.
     throw new ConnectionKeyRejectedError(url.slice(0, url.lastIndexOf('/api/')));
+  }
+  if (res.status === 403 && authed) {
+    // A refusal of what the connection does not load — a connection made as
+    // an agent configuration that cannot be used — is the deployment's own answer,
+    // with its code and sentence, not a permission problem with the credential.
+    const refusal = (await res
+      .clone()
+      .json()
+      .catch(() => null)) as { error?: unknown; code?: unknown } | null;
+    if (refusal?.code === NOT_AVAILABLE_TO_CONNECTION && typeof refusal.error === 'string') {
+      await res.body?.cancel().catch(() => {});
+      throw new NotAvailableToConnectionError(refusal.error);
+    }
   }
   if (res.status === 401 || res.status === 403) {
     // Only a request that actually carried the credential can blame it: the
@@ -301,13 +333,18 @@ export async function fetchAgentInstructions(config: HexisMcpConfig): Promise<st
 export type RawManual = Record<string, unknown> & { name?: unknown };
 
 /**
- * Every manual the caller can read, local-only ones included.
+ * Every manual the caller can read, local-only ones included — and, for a
+ * connection made as an agent configuration, the agent it is narrowed to as the
+ * deployment says it (`connection`), which words this server's refusals and
+ * its listing; absent for Everything.
  *
  * `?remote=false` is the opt-in the REST surface already documents for "a
  * locally installed MCP server" — the default excludes local-only manuals
  * precisely because the hosted proxy cannot run them.
  */
-export async function fetchAllManuals(config: HexisMcpConfig): Promise<RawManual[]> {
+export async function fetchAllManuals(
+  config: HexisMcpConfig,
+): Promise<{ manuals: RawManual[]; connection?: ConnectionScopeWire }> {
   const body = (await getJson(`${config.baseUrl}/api/agent/all-tools?remote=false`, {
     label: 'the tool manual list',
     headers: { Authorization: `Bearer ${config.connectionKey}` },
@@ -320,8 +357,10 @@ export async function fetchAllManuals(config: HexisMcpConfig): Promise<RawManual
       'The tool manual list did not have the expected shape (no "manuals" array) — is --url pointing at a Hexis deployment?',
     );
   }
-  return body.manuals as RawManual[];
+  const connection = connectionWireOf(body);
+  return { manuals: body.manuals as RawManual[], ...(connection ? { connection } : {}) };
 }
+
 
 /** What this server needs to know about one local-only manual beyond its name. */
 export interface LocalManualInfo {
@@ -342,16 +381,25 @@ export interface LocalManualInfo {
  * keeps the definition of "local-only" in the one place that owns it.
  */
 export async function fetchLocalOnlyManuals(config: HexisMcpConfig): Promise<Map<string, LocalManualInfo>> {
-  const body = (await getJson(`${config.baseUrl}/api/agent/tools/list_local_tools`, {
-    label: 'the local-only tool list',
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${config.connectionKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: '{}',
-    renew: renewer(config),
-  })) as { tools?: unknown };
+  let body: { tools?: unknown };
+  try {
+    body = (await getJson(`${config.baseUrl}/api/agent/tools/list_local_tools`, {
+      label: 'the local-only tool list',
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${config.connectionKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: '{}',
+      renew: renewer(config),
+    })) as { tools?: unknown };
+  } catch (err) {
+    // A connection that loads nothing (its agent configuration gone, unreadable or
+    // invalid) has no local-only tools, and the deployment's answer says so
+    // with the sentence the manual list carries too: not a failed discovery.
+    if (err instanceof NotAvailableToConnectionError) return new Map();
+    throw err;
+  }
   // Same loudness as `fetchAllManuals`: losing this list silently is losing
   // exactly the tools this server exists to add.
   if (!Array.isArray(body?.tools)) {
@@ -389,16 +437,25 @@ export async function fetchLocalOnlyManuals(config: HexisMcpConfig): Promise<Map
  */
 export class CatalogRevisionUnsupportedError extends DeploymentError {}
 
+/** What `GET /api/agent/catalog-revision` says: the revision, and the agent the connection is narrowed to, if any. */
+export interface CatalogState {
+  revision: string;
+  connection?: ConnectionScopeWire;
+}
+
 /**
  * The fingerprint of THIS caller's released catalog: every tool manual and
  * every skill the deployment's default branch serves them, as one opaque
  * string. It changes exactly when that set changes, so two equal readings mean
- * there is nothing to re-register.
+ * there is nothing to re-register. With it, the agent the connection is
+ * narrowed to as the deployment says it (`connection`; absent for
+ * Everything) — read once at startup for the handshake, which cannot wait for
+ * discovery, from the same answer that seeds the catalog watch's baseline.
  *
  * Opaque on purpose: what goes into it is the deployment's business, and this
  * process compares it for equality and nothing else.
  */
-export async function fetchCatalogRevision(config: HexisMcpConfig): Promise<string> {
+export async function fetchCatalogState(config: HexisMcpConfig): Promise<CatalogState> {
   let body: unknown;
   try {
     body = await getJson(`${config.baseUrl}/api/agent/catalog-revision`, {
@@ -425,7 +482,13 @@ export async function fetchCatalogRevision(config: HexisMcpConfig): Promise<stri
     // revision would re-register the remote manual on every single poll.
     throw new DeploymentError('The catalog revision response carried no "revision" string.');
   }
-  return revision;
+  const connection = connectionWireOf(body);
+  return { revision, ...(connection ? { connection } : {}) };
+}
+
+/** The revision alone — what the catalog watch compares on every poll. */
+export async function fetchCatalogRevision(config: HexisMcpConfig): Promise<string> {
+  return (await fetchCatalogState(config)).revision;
 }
 
 /** What a resolution attempt produced, and whether it actually succeeded. */

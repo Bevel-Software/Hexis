@@ -686,7 +686,7 @@ describe('local-token exchange', () => {
     try {
       await writeStoredCredentials(authority.base, { clientId: 'c1', refreshToken: 'r1' });
       const config = await establishOAuthConfig(authority.base, authority.mcpUrl, { print: quiet });
-      expect(await fetchAllManuals(config)).toEqual([]);
+      expect(await fetchAllManuals(config)).toEqual({ manuals: [] });
     } finally {
       await authority.close();
     }
@@ -723,7 +723,7 @@ describe('mid-run 401', () => {
       expect(config.connectionKey).toBe('internal1');
       // internal1 401s → deployment.ts consults renewConnectionKey once →
       // refresh(r2) → a2 → re-exchange → internal2 → the SAME request succeeds.
-      expect(await fetchAllManuals(config)).toEqual([]);
+      expect(await fetchAllManuals(config)).toEqual({ manuals: [] });
       // The fresh token is now the process's bearer, and the rotated refresh
       // token is on disk for the next renewal.
       expect(config.connectionKey).toBe('internal2');
@@ -816,7 +816,7 @@ describe('mid-run 401', () => {
         fetchAllManuals(config),
         fetchLocalOnlyManuals(config),
       ]);
-      expect(manuals).toEqual([]);
+      expect(manuals).toEqual({ manuals: [] });
       expect(locals.size).toBe(0);
       expect(config.connectionKey).toBe('internal-fresh');
       // Exactly two refresh grants ever ran: startup's, and ONE for the race.

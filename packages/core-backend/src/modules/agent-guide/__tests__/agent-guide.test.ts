@@ -374,6 +374,36 @@ describe('the HTML views section', () => {
     expect(docs).toContain('/workspace/main/Docs/Alice.md');
   });
 
+  // A dashboard that painted one "Loading…" line and then swapped in the whole
+  // board read as broken on a cold load (2026-10-20). These rules are what
+  // agents write pages from; the reference page under them is run by
+  // core-frontend's `liveDataReferencePage.test.ts`.
+  it('tells page authors how a page loads live data without changing shape', async () => {
+    const text = section(await composeAgentGuide(DEFAULT_KB_LAYOUT), '## HTML views').replace(/\s+/g, ' ');
+    expect(text).toContain('### Live data: a page that stays still while it loads');
+    expect(text).toContain('**Render the final page shell in the markup, before any data.**');
+    expect(text).toContain('The loading treatment — placeholder rows, `aria-busy="true"` — sits **inside** the data regions.');
+    expect(text).toContain('**Publish one consistent dataset at a time.**');
+    expect(text).toContain('Until then show no counts, no cards and no empty columns');
+    expect(text).toContain('**Refresh keeps the current board.**');
+    expect(text).toContain('**A failed read fails the whole load, visibly.**');
+    expect(text).toContain('offer a Retry button that runs the same load again');
+    expect(text).toContain('**Read in bounded parallel once the paths are known.**');
+    expect(text).toContain('**Load with `callTool`, not `callToolChain`.**');
+    expect(text).toContain("**The reads are the viewer's own.**");
+    expect(text).toContain('**Link to what the tools named by the path they answered.**');
+    expect(text).toContain('Never put the checkout folder in front of a path a tool answered: it is already there.');
+    expect(text).toContain('plain HTML and one inline script, no build step and no framework');
+    // The rule names the deployment's own checkout folder; the page links on its branch by the tool's path.
+    const docs = section(await composeAgentGuide(DEFAULT_KB_LAYOUT, undefined, { kbDirName: 'kb' }), '## HTML views');
+    expect(docs.replace(/\s+/g, ' ')).toContain('starts with the checkout folder, `kb/Data/Tickets/A.md`');
+    // Each segment of the tool's path encoded on its own, so a name carrying `#` stays a name.
+    expect(docs).toContain(
+      "link.href = '/workspace/' + encodeURIComponent(BRANCH) + '/' + ticket.path.split('/').map(encodeURIComponent).join('/');",
+    );
+    expect(docs).not.toContain('{{');
+  });
+
   it('documents window.bevel.tools: its four functions, the null check, the consent rule and requireTools with its card', async () => {
     const text = section(await composeAgentGuide(DEFAULT_KB_LAYOUT), '## HTML views').replace(/\s+/g, ' ');
     for (const member of [

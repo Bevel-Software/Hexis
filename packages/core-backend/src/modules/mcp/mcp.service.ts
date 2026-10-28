@@ -75,7 +75,16 @@ import {
   type ComposedAgentInstructions,
 } from '../agent-instructions/index.js';
 import { guideFirstDescription } from '../tool-registry/index.js';
-import { connectionRefusal, describeConnection, type ConnectionScopeWire } from '../agent-scope/index.js';
+import {
+  CONNECTION_META_KEY,
+  connectionRefusal,
+  connectionWireOf,
+  describeConnection,
+  type ConnectionScopeWire,
+} from '@bevel-software/platform-mcp-core';
+
+// Still offered from here, as this module's tests and callers learnt it.
+export { CONNECTION_META_KEY };
 
 /**
  * Configuration for the loopback proxy. `loopbackBaseUrl` is the backend's own
@@ -144,7 +153,7 @@ export interface McpCaller {
    */
   connectionId?: string | null;
   /**
-   * The `.agent` file the caller's credential connects as (a connection
+   * The agent configuration the caller's credential connects as (a connection
    * key's, or an agent connection's), or null for Everything. It rides the
    * request's loopback identity, so every agent surface behind the loopback
    * narrows to that agent's scope (`modules/agent-scope`); here it only keys
@@ -235,34 +244,20 @@ interface RequestSurface {
    * The agent the catalog was narrowed to, as `all-tools` reported it —
    * absent for Everything. A call to a tool not on a narrowed surface is
    * refused by name and agent rather than as unknown, and a connection whose
-   * agent file cannot be used is served nothing, with the sentence that says
+   * agent configuration cannot be used is served nothing, with the sentence that says
    * why.
    */
   connection?: ConnectionScopeWire;
 }
 
 /**
- * Where the sentence saying why a connection loads nothing rides a
- * `tools/list` answer: the listing has no description of its own, and an
- * empty `tools` array alone would read as an outage.
- */
-export const CONNECTION_META_KEY = 'software.bevel.hexis/connection';
-
-/**
  * The `connection` a loopback answer (`all-tools`, `catalog-revision`)
- * carries, validated at the boundary: HTTP loses the type. A malformed one
- * is dropped, which serves the surface the loopback listed — itself already
- * narrowed by the agent surfaces.
+ * carries, as a field to spread: validated at the boundary by the MCP
+ * core's reader (HTTP loses the type), and absent for Everything.
  */
-function connectionOf(body: { connection?: unknown } | null): { connection?: ConnectionScopeWire } {
-  const raw = body?.connection as { agent?: { path?: unknown; name?: unknown }; unavailable?: unknown } | undefined;
-  if (!raw || typeof raw.agent?.path !== 'string' || typeof raw.agent.name !== 'string') return {};
-  return {
-    connection: {
-      agent: { path: raw.agent.path, name: raw.agent.name },
-      ...(typeof raw.unavailable === 'string' && raw.unavailable ? { unavailable: raw.unavailable } : {}),
-    },
-  };
+function connectionOf(body: unknown): { connection?: ConnectionScopeWire } {
+  const connection = connectionWireOf(body);
+  return connection ? { connection } : {};
 }
 
 /**
@@ -626,7 +621,7 @@ export class McpService {
           return undefined;
         }),
       ]);
-      // A connection whose agent file cannot be used is served NOTHING — not
+      // A connection whose agent configuration cannot be used is served NOTHING — not
       // Everything — and the one sentence saying why rides the listing's
       // `_meta` (the handshake carries it too).
       if (connection?.unavailable) {

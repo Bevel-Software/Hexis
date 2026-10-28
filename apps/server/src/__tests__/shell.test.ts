@@ -13,7 +13,11 @@ function fakeProcess() {
   return { process, exit, signal: (event: string, arg?: unknown) => handlers.get(event)?.(arg) };
 }
 
-/** Services as the shutdown sees them, every step a spy. */
+/**
+ * Services as the shutdown sees them, every step a spy — every stoppable
+ * thing the stop sequence knows, so a graph the shell boots is let go of
+ * whole: the sweepers, the tidy-up, the search and extraction workers.
+ */
 function fakeCore(): ShellGraph & { order: string[] } {
   const order: string[] = [];
   return {
@@ -24,8 +28,32 @@ function fakeCore(): ShellGraph & { order: string[] } {
       stopSweeping: () => void order.push('jobs.stopSweeping'),
       drain: async () => void order.push('jobs.drain'),
     },
+    tmpSweeper: {
+      stopSweeping: () => void order.push('tmp.stopSweeping'),
+      drainSweep: async () => void order.push('tmp.drain'),
+    },
+    workflowService: {
+      stopTidying: () => void order.push('workflow.stopTidying'),
+      drainTidy: async () => void order.push('workflow.drainTidy'),
+    },
+    patternMatcher: { close: async () => void order.push('matcher.close') },
+    documentExtractor: { close: async () => void order.push('extractor.close') },
   };
 }
+
+/** The stop sequence's order for `fakeCore`, after the server (when one listens). */
+const RELEASE_ORDER = [
+  'jobs.stopSweeping',
+  'tmp.stopSweeping',
+  'workflow.stopTidying',
+  'jobs.drain',
+  'tmp.drain',
+  'workflow.drainTidy',
+  'matcher.close',
+  'extractor.close',
+  'commitWorker.stop',
+  'db.end',
+];
 
 function fakeServer(order: string[]): HttpServer {
   return {
@@ -55,7 +83,7 @@ describe('runShell', () => {
       process: p.process,
     });
     await exited(p.exit);
-    expect(core.order).toEqual(['jobs.stopSweeping', 'jobs.drain', 'commitWorker.stop', 'db.end']);
+    expect(core.order).toEqual(RELEASE_ORDER);
     expect(p.exit).toHaveBeenCalledWith(1);
   });
 
@@ -99,14 +127,7 @@ describe('runShell', () => {
     });
     p.signal('SIGTERM');
     await exited(p.exit);
-    expect(core.order).toEqual([
-      'server.close',
-      'server.closeAllConnections',
-      'jobs.stopSweeping',
-      'jobs.drain',
-      'commitWorker.stop',
-      'db.end',
-    ]);
+    expect(core.order).toEqual(['server.close', 'server.closeAllConnections', ...RELEASE_ORDER]);
     expect(p.exit).toHaveBeenCalledWith(0);
   });
 

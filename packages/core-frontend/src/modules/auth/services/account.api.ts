@@ -68,8 +68,13 @@ export async function changePassword(
     body: JSON.stringify({ currentPassword, newPassword }),
   });
   if (!res.ok) throw new Error(await readError(res, 'Could not change password'));
-  const body = (await res.json()) as { token: string };
-  if (getToken() === sent) setToken(body.token);
+  const body = (await res.json().catch(() => ({}))) as { token?: unknown };
+  // The change is written by now. Only a token the server actually handed
+  // back replaces the stored one: an answer without one (a replica from
+  // before the change handed tokens back, mid-deploy) must not turn the
+  // stored token into the string "undefined" and sign the person out.
+  const token = typeof body.token === 'string' && body.token ? body.token : null;
+  if (token && getToken() === sent) setToken(token);
 }
 
 export async function listAccounts(): Promise<AccountSummary[]> {

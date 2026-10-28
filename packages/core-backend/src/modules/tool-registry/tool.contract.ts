@@ -25,7 +25,7 @@ export interface ToolManualContext {
   /** The requesting user's id, when it could be resolved (for per-user gating). */
   userId?: string;
   /**
-   * What the requesting connection may load, when it was made as an `.agent`
+   * What the requesting connection may load, when it was made as an agent configuration
    * file (`modules/agent-scope`): a provider that names skills or connectors
    * in its description names only those. Absent is Everything.
    */

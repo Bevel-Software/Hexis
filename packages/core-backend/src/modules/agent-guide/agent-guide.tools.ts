@@ -105,7 +105,7 @@ export function registerAgentGuideTool(
     toolHandler(async (args, ctx) => {
       const list = await sections();
       const wanted = typeof args.section === 'string' ? args.section.trim() : '';
-      // A connection made as an `.agent` file is told so at the top of the
+      // A connection made as an agent configuration is told so at the top of the
       // whole guide: the catalog it describes is narrowed to that agent.
       // Everything is told nothing new, so its guide is the same text.
       const connection = ctx.connectionScope?.describe() ?? null;

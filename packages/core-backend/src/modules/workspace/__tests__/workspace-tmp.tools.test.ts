@@ -715,6 +715,12 @@ describe("a tmp ref reaches the caller's own staged files and nobody else's", ()
     // Staging again replaces: a staged file is the stager's own scratch.
     await service.stageTmpFile(id, ME, 'chat-uploads/plan.xlsx', Buffer.from('v2'));
     expect((await service.readTmpFile(id, ME, ref)).toString()).toBe('v2');
+    // A branch never cloned has no workspace directory yet: a staged file
+    // belongs beside where its checkout would be, so staging makes the way.
+    const uncloned = encodeURIComponent('nobody/not-cloned');
+    await expect(stat(workspaceDir('nobody/not-cloned'))).rejects.toThrow();
+    const staged = await service.stageTmpFile(uncloned, ME, 'chat-uploads/first.txt', Buffer.from('first'));
+    expect((await service.readTmpFile(uncloned, ME, staged)).toString()).toBe('first');
     // The path obeys the ref's rules, and the refusal names the one it breaks.
     await expect(service.stageTmpFile(id, ME, '../escape.txt', Buffer.from('x'))).rejects.toThrow(/`\.\.` segment/);
     await expect(service.stageTmpFile(id, ME, '/abs.txt', Buffer.from('x'))).rejects.toThrow(/absolute/);
@@ -741,6 +747,10 @@ describe("a tmp ref reaches the caller's own staged files and nobody else's", ()
     await symlink(join(workspaceDir(DRAFT), KB_DIR), join(ownerDir(DRAFT), 'kb'));
     await expect(service.stageTmpFile(id, ME, 'kb/planted.md', Buffer.from('x'))).rejects.toThrow(/link that leads out/);
     await expect(stat(join(workspaceDir(DRAFT), KB_DIR, 'planted.md'))).rejects.toThrow();
+    // Nor are folders made through it: the link is refused before anything
+    // beyond it is created, so nothing lands where the link leads.
+    await expect(service.stageTmpFile(id, ME, 'kb/deep/er/planted.md', Buffer.from('x'))).rejects.toThrow(/link that leads out/);
+    await expect(stat(join(workspaceDir(DRAFT), KB_DIR, 'deep'))).rejects.toThrow();
     // A link at the file's own name: a write would follow it into the repository.
     await symlink(join(workspaceDir(DRAFT), KB_DIR, 'secret.md'), join(ownerDir(DRAFT), 'secret.md'));
     await expect(service.stageTmpFile(id, ME, 'secret.md', Buffer.from('overwritten'))).rejects.toThrow(/not a file/);

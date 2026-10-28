@@ -61,6 +61,11 @@ export function registerToolManualsTools(
   // against them too.
   declareRouteTool('list_local_tools', LIST_LOCAL_TOOLS_INPUTS);
 
+  // The local server's discovery read (`discovery`): it asks this route at
+  // startup for the connectors it must materialize, whatever tools the
+  // connection is offered — a connection made as an agent configuration that omits
+  // the tool is answered its connectors, not refused, or the local server
+  // could not start for that agent at all.
   router.post(
     '/agent/tools/list_local_tools',
     toolAuth,
@@ -71,7 +76,7 @@ export function registerToolManualsTools(
           ? toolManualService.listLocalOnly(ctx.user.email, within)
           : toolManualService.listLocalOnly(ctx.user.email)),
       };
-    }),
+    }, { discovery: true }),
   );
 
   // A FUNCTION, not a constant — this factory runs at boot, and on a

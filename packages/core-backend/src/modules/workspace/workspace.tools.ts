@@ -863,28 +863,32 @@ async function treeScope(fs: LocalFilesystem, root: string): Promise<TreeScope> 
 
 /**
  * grep over the directory `root`: the tree is listed, then searched in two
- * passes, and no file is opened before it is judged.
+ * passes, and no file is opened before it is admitted.
  *
- * The listing opens no file. Every file a pass searches is judged readable
- * BEFORE the pass opens it, and a file the caller may not read is never
- * opened: what it holds can change neither the answer nor how long the
- * search takes, and so not whether it ends within its budget. A file that
- * was not in the listing (it appeared since) is never judged, so never
- * searched.
+ * The listing opens no file. Admission is the ONE step a file passes before
+ * either pass opens it: it is judged readable by the gate, and then — being a
+ * file the search will read, as `read_file` reads one — it is told to the
+ * read hook, which may refuse it, and with it the search. A file the caller
+ * may not read is never opened and never told of (there is no read to tell):
+ * what it holds can change neither the answer nor how long the search takes,
+ * and so not whether it ends within its budget. Judging and telling are both
+ * spent from that budget. A file that was not in the listing (it appeared
+ * since) is never admitted, so never searched.
  *
  * The text pass is ripgrep's own: every file whose reader greps its bytes as
  * text (a TextReader) is searched by it, in path order, and read nowhere else.
- * Each file is answered as ripgrep finishes it, and the pass stops at the
- * `max`-th line.
+ * It admits a batch at a time, before ripgrep opens any of it, so the hook
+ * hears of each file of a batch whether or not a line of it is answered —
+ * and, past the line that fills the cap, of the rest of that batch, which the
+ * pass then never opens. Each file is answered as ripgrep finishes it, and
+ * the pass stops at the `max`-th line.
  *
  * The document pass reads the files every other reader owns through that
  * reader, as `read_file` does — extractions under the per-call budget — and
  * has their text matched by the same engine. A document that sorts after the
  * text pass's last line cannot be among the first `max`, so it is not read.
  *
- * Answers what both found, unsorted: the caller merges, sorts and caps. Every
- * file that contributes a line, and every document opened, reaches
- * `notifyRead` first.
+ * Answers what both found, unsorted: the caller merges, sorts and caps.
  */
 async function grepTree(
   fs: LocalFilesystem,
@@ -920,15 +924,26 @@ async function grepTree(
     return reader instanceof DocumentReader || reader.greppableText !== undefined;
   });
   const out: GrepMatch[] = [];
+  // Admission (see above): the gate's verdict on `paths`, then the hook told
+  // of each readable one in path order — a refusal ends the search here, as
+  // it ends a `read_file`, before anything is opened. Spent from the budget.
+  const admit = (paths: string[]): Promise<Set<string>> =>
+    search.charged(async () => {
+      const readable = await readableFiles(gate, paths);
+      for (const p of paths) {
+        if (readable.has(p)) await notifyRead(p);
+      }
+      return readable;
+    });
 
   // Every file the walk covers, in path order. Only what is shown is ever
-  // judged, so what is judged readable is what may be answered. A name
-  // holding a control character is no file name to the platform — no tool
-  // reads or writes one — so it is not searched either.
+  // admitted, so what is admitted is what may be answered. A name holding a
+  // control character is no file name to the platform — no tool reads or
+  // writes one — so it is not searched either.
   const all = (await search.list(scope)).filter((p) => shown(at(p)) && !hasControlCharacter(p));
   const raw = all.filter((p) => !ownedBy(p, notRaw));
-  // The text pass: a batch of files is judged, then its readable files, and
-  // only they, are searched. A batch is judged before ripgrep opens any of
+  // The text pass: a batch of files is admitted, then its admitted files, and
+  // only they, are searched. A batch is admitted before ripgrep opens any of
   // it, and the pass stops at the `max`-th line, so the verdicts asked for are
   // those of the files the answer reached — few for a common word — and the
   // batches double so a rare one still walks the tree in a handful of runs.
@@ -939,14 +954,12 @@ async function grepTree(
       batch.push(raw[from]!);
       chars += raw[from]!.length;
     }
-    // Judging is part of the search: it is spent from the same budget.
-    const readable = await search.charged(() => readableFiles(gate, batch.map(at)));
+    const readable = await admit(batch.map(at));
     const only = batch.filter((p) => readable.has(at(p)));
     for await (const file of search.files(scope, { only, maxLinesPerFile: max - out.length })) {
       const p = at(file.path);
-      // Only what was judged readable answers, whatever ripgrep printed.
+      // Only what was admitted answers, whatever ripgrep printed.
       if (!readable.has(p)) continue;
-      await notifyRead(p);
       for (const l of file.lines.slice(0, max - out.length)) {
         out.push({ path: p, line: l.line, text: l.text.slice(0, GREP_LINE_CHARS) });
       }
@@ -960,11 +973,10 @@ async function grepTree(
     .filter((p) => ownedBy(p, readerOwned))
     .map(at)
     .filter((p) => last === undefined || compareSearchPaths(p, last) <= 0);
-  const readable = await search.charged(() => readableFiles(gate, candidates));
+  const readable = await admit(candidates);
   const texts: { path: string; text: string }[] = [];
   for (const p of candidates) {
     if (!readable.has(p)) continue;
-    await notifyRead(p);
     let found: SearchableText;
     try {
       found = await searchableText(fileBytes(fs), p, docs);
@@ -2823,10 +2835,12 @@ export function registerWorkspaceTools(
         // The guide's own path is not told here, because `guideAt` tells the
         // hook of the organisation's file there exactly as `read_file` does
         // (after the gate), and the platform's guide alone is nobody's file to
-        // note. Each file that contributes a line, and each document opened,
-        // goes to the hook per file below, so a hook sees every file a grep
-        // answers from rather than only its root. A tmp ref is no repository
-        // content, so there is nothing to tell.
+        // note. Each file the search opens goes to the hook per file below,
+        // before it is opened and whether or not a line of it is answered
+        // (`grepTree`'s admission), so a hook sees every file a grep reads
+        // rather than only its root, and may refuse one as it refuses a
+        // read_file. A tmp ref is no repository content, so there is nothing
+        // to tell.
         if (!tmp && !(coversGuide && kind !== 'directory')) {
           await notifyAgentRead(agentAccessGate, ctx, a.branch as string, searchRoot);
         }

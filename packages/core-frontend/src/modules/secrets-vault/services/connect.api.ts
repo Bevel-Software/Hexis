@@ -97,9 +97,14 @@ async function fail(res: Response, fallback: string): Promise<never> {
   throw new Error(message);
 }
 
-/** The caller's outstanding per-user credentials across every accessible tool. */
-export async function getConnectPending(): Promise<ConnectPending> {
-  const res = await authFetch('/api/connect/pending');
+/**
+ * The caller's outstanding per-user credentials across every accessible tool —
+ * or, with `agentPath` (the consent step's "Connect as" choice), across the
+ * connectors a connection made as that `.agent` file loads. Null is
+ * Everything.
+ */
+export async function getConnectPending(agentPath: string | null = null): Promise<ConnectPending> {
+  const res = await authFetch(agentPath ? `/api/connect/pending?agent=${encodeURIComponent(agentPath)}` : '/api/connect/pending');
   if (!res.ok) await fail(res, "Couldn't load your tools.");
   return (await res.json()) as ConnectPending;
 }
@@ -143,7 +148,7 @@ export interface McpOAuthRequest {
   scope: string | null;
   resource: string | null;
   /**
-   * The `.agent` files the person may connect this client as, offered below
+   * The agent configurations the person may connect this client as, offered below
    * Everything. Empty when there are none (or for a request that cannot take
    * a choice).
    */

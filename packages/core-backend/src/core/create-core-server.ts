@@ -428,6 +428,7 @@ export async function createCoreServer(
     toolManualService: core.toolManualService,
     accessControl: core.accessControl,
     connectionProbe: core.connectionProbeService,
+    agents: core.agentScopeService,
     stateSecret: core.config.jwtSecret,
     publicBackendUrl: core.config.publicBackendUrl,
     publicFrontendUrl: core.config.publicFrontendUrl,
