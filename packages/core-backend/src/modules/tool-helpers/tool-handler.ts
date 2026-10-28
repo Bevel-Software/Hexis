@@ -270,19 +270,21 @@ export function createToolHandlerFactory(
             ? withoutBranch(args)
             : args;
         const ctx = await resolve(auth, abort.signal, sessionId);
-        // The connection's scope, at the one route every caller of a platform
-        // tool arrives through — MCP, a chain, the local server, a script with
-        // a key — and before the tool runs. A connection made as an agent configuration
-        // file that does not list this tool is refused it by name.
+        // The connection's scope, before the tool runs, for every caller of a
+        // hosted platform tool — MCP, a chain, the local server, a script with
+        // a key. A connection made as an agent configuration that does not
+        // list this tool is refused it by name: the ONE policy,
+        // `ConnectionScope.platformToolRefusal`, which the platform-tool routes
+        // this handler does not host (the plugin-creation routes) ask as well.
         const toolName = routeToolSchemasForRequest(req.originalUrl)?.name ?? routeToolName(req.originalUrl);
         const scope =
           ctx.connectionScope ?? (auth.agentPath ? ConnectionScope.gone(auth.agentPath) : ConnectionScope.everything());
         // The handler narrows by the scope decided here, so a context built
         // without one cannot read as Everything inside the tool either.
         ctx.connectionScope = scope;
-        const allowed = scope.allowsPlatformTool(toolName) || (opts.discovery === true && scope.allowsDiscovery());
-        if (!allowed) {
-          res.status(403).json({ error: scope.refusal(toolName), code: NOT_AVAILABLE_TO_CONNECTION });
+        const refusal = scope.platformToolRefusal(toolName, { discovery: opts.discovery === true });
+        if (refusal) {
+          res.status(403).json(refusal);
           return;
         }
         if (resolved) ctx.branch = resolved.branch;

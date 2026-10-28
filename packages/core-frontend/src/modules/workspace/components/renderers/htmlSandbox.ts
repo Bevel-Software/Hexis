@@ -582,6 +582,14 @@ interface BuildSandboxedHtmlOptions {
    * way.
    */
   toolBridge?: ToolBridgeOption;
+  /**
+   * The branch the page is viewed on — `window.bevel.branch` inside the frame,
+   * so a page that reads its data through the tools and links to what they
+   * name does both on the branch it is shown on, rather than on one written
+   * into its script. Absent where the host has no branch for the page (the
+   * embed, a mail body), where the member is `null`.
+   */
+  branch?: string;
 }
 
 /**
@@ -592,7 +600,9 @@ interface BuildSandboxedHtmlOptions {
  */
 export function buildSandboxedHtml(opts: BuildSandboxedHtmlOptions): string {
   const lib = opts.libModuleSources.map(stripRelativeImports).join('\n\n');
-  const exposeGlobals = `\n;globalThis.bevel = { ${BEVEL_GLOBAL_EXPORTS.join(', ')} };\n`;
+  // `branch` is data, not code: serialized as JSON into the literal, so a
+  // branch name can hold nothing the script would read as source.
+  const exposeGlobals = `\n;globalThis.bevel = { ${BEVEL_GLOBAL_EXPORTS.join(', ')} };\nglobalThis.bevel.branch = ${JSON.stringify(opts.branch ?? null)};\n`;
   const inlineLib = escapeForScriptBody(lib + exposeGlobals + NAV_BRIDGE + KEY_BRIDGE + toolBridgeRuntime(opts.toolBridge));
 
   // Title and body are content-only — `srcDoc` already isolates them, but we

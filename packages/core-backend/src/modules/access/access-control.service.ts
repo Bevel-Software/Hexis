@@ -36,19 +36,20 @@ import {
   platformRestoreDestination,
 } from '@bevel-software/platform-shared';
 import type { KbContext } from '../../shared/kb-context.js';
-import { AccessConfigError, AccessUnreadableError, synthesizePluginPrincipals } from '../access-model/index.js';
 import {
+  AccessConfigError,
+  AccessUnreadableError,
+  synthesizePluginPrincipals,
   GROUPS_YAML,
   SYNCED_GROUPS_YAML,
   parseGroupsFile,
-  type GroupsIndex,
-} from '../access-model/index.js';
-import {
   ADMIN_CANONICAL,
   EVERYONE_CANONICAL,
   EVERYONE_DISPLAY,
   KNOWN_VERBS,
   ROLE_TOKEN_PREFIX,
+  GROUP_TOKEN_PREFIX,
+  splitPrincipalToken,
   accessMdSelfEntries,
   canonicalEmail,
   canonicalRoleName,
@@ -59,6 +60,7 @@ import {
   parseRolesYaml,
   requiredVerbsFor,
   sourceVerbsFor,
+  type GroupsIndex,
   type AccessFile,
   type OwnEntries,
   type ParsedEntry,
@@ -571,17 +573,20 @@ function addDerivedKeys(model: AccessModel, keys: Set<string>): Set<string> {
  * twin of `principalKeysOf`: a member's key set minus everything they hold
  * for reasons of their own. `null` when no group of that name exists.
  *
- * Groups are keyed by their bare canonical name (`mergeGroupsIntoRoles`);
- * roles by `role/<name>`. A bare key whose record is a ROLE is not a group,
- * however it was spelled.
+ * Groups are keyed by `group/<name>`, and by their bare canonical name
+ * when no role owns it (`mergeGroupsIntoRoles`); roles by the bare name and
+ * `role/<name>`. `group` may be spelled either way: a bare name whose record
+ * is a ROLE still finds the group through its `group/` alias, because this
+ * question is always asked of the group.
  */
 function principalKeysOfGroup(model: AccessModel, group: string): Set<string> | null {
-  const canonical = canonicalRoleName(group);
-  const record = model.roles.byCanonical.get(canonical);
+  const { name } = splitPrincipalToken(canonicalRoleName(group));
+  const record = model.roles.byCanonical.get(`${GROUP_TOKEN_PREFIX}${name}`);
   if (!record || record.kind !== 'group') return null;
-  const keys = new Set<string>([canonical]);
+  const keys = new Set<string>();
   for (const [key, principal] of model.roles.byCanonical) {
-    if (principal.kind === 'role' && principal.groupRefs?.has(canonical)) keys.add(key);
+    if (principal === record) keys.add(key);
+    else if (principal.kind === 'role' && principal.groupRefs?.has(name)) keys.add(key);
   }
   // Plugin principals were expanded from role/group entries; a plugin that
   // admits the group, or a role the group is folded into, admits the group.
@@ -638,9 +643,9 @@ function isAdminFloorScope(scope: AccessScope, relativePath: string): boolean {
 function isAdminEmail(model: AccessModel, email: string): boolean {
   if (model.deploymentOwners.has(email)) return true;
   const roles = model.roles.byEmail.get(email);
-  // Check the explicit `role/admin` alias, NOT the bare token: bare-name
-  // precedence is group-first, so a group that happens to be named "Admin"
-  // owns the bare key — and its members must never inherit the capability.
+  // Check the explicit `role/admin` alias: it is the role's whatever the
+  // bare key holds, and a group that happens to be named "Admin" is only
+  // ever `group/admin` — its members never inherit the capability.
   return !!roles && roles.has(ADMIN_ROLE_KEY);
 }
 
@@ -889,26 +894,11 @@ function resolveGrantSourcesForVerb(
 
   if (principal.kind === 'role') {
     // A named principal can be spelled two ways in a file: the bare token and
-    // the explicit `role/<name>` token. WHICH spellings are THIS principal's
-    // entries depends on who owns the bare key in the merged index:
-    //
-    //   - UNSHADOWED (no group named `<bare>`): both spellings resolve to the
-    //     role, so both count — a grant under either adds a source; a deny
-    //     under either cuts off farther grants. (The revoke splice strips both
-    //     spellings in this case too, so classification and removal agree.)
-    //   - SHADOWED (a group owns the bare key): the spellings are DIFFERENT
-    //     principals. A bare-token principal is the GROUP — only bare entries
-    //     are its own; a `role/`-token principal is the ROLE — only `role/`
-    //     entries are its own. Counting the other spelling would attribute a
-    //     shadowed bare token to the role (hiding a real `role/<name>`
-    //     ancestor grant and making its revoke a false no-op), or vice versa.
-    //
-    //   - PINNED EXACT (`tokenMatch: 'exact'`): only the literally-spelled
-    //     token is this principal's entry, shadowing notwithstanding. The
-    //     caller pinned the same identity into the splice it is checking —
-    //     a GROUP whose group has VANISHED reads "unshadowed" here, and the
-    //     alias-tolerant pair would then attribute a same-named role's
-    //     surviving `role/<name>` grant to the group.
+    //     its explicit `role/<name>` or `group/<name>` token. Which spellings
+    //     are THIS principal's entries is `ownTokensOf`'s one rule — the bare
+    //     token counts only when the bare key is this principal's (the role
+    //     when one exists, else the group), and a pinned `'exact'` counts the
+    //     literal spelling alone.
     const tokens = ownTokensOf(model, principal.role, tokenMatch);
     for (const scope of scopes) {
       const states = tokens.map((t) => scope.byRole.get(t));
@@ -937,11 +927,21 @@ function resolveGrantSourcesForVerb(
 
 /**
  * WHICH token spellings in a file are THIS role-shaped principal's own entries
- * — the shadowing rule, in one place because the grant walk, the denial walk
- * and the revoke splice must all agree on it (a disagreement attributes a
- * shadowed bare token to the wrong principal, which is how a "restrict" silently
- * strips a same-named role's grant). See `resolveGrantSourcesForVerb` for the
- * full reasoning behind each branch.
+ * — in one place because the grant walk, the denial walk and the revoke splice
+ * must all agree on it (a disagreement attributes a bare token to the wrong
+ * principal, which is how a "restrict" silently strips a same-named role's
+ * grant).
+ *
+ *   - `role/X` is the role: its own entries are `role/X`, plus the bare `X`
+ *     unless a GROUP owns the bare key (no role X exists, a group X does).
+ *   - `group/X` is the group: `group/X`, plus the bare `X` unless a ROLE
+ *     owns it — under role-first precedence a same-named role always does.
+ *   - A bare `X` is whoever owns the bare key, with that kind's explicit
+ *     spelling; a bare token with no record (`everyone`, a plugin token, a
+ *     vanished principal) is just itself plus the `role/` spelling a legacy
+ *     role grant may carry.
+ *   - PINNED EXACT (`tokenMatch: 'exact'`): only the literal spelling. The
+ *     caller pinned the same identity into the splice it is checking.
  */
 function ownTokensOf(
   model: AccessModel,
@@ -949,12 +949,14 @@ function ownTokensOf(
   tokenMatch?: 'exact' | 'name',
 ): string[] {
   const canonical = canonicalRoleName(role);
-  const explicit = canonical.startsWith(ROLE_TOKEN_PREFIX);
-  const bare = explicit ? canonical.slice(ROLE_TOKEN_PREFIX.length) : canonical;
-  const shadowed = model.roles.byCanonical.get(bare)?.kind === 'group';
-  return tokenMatch === 'exact' || shadowed
-    ? [explicit ? `${ROLE_TOKEN_PREFIX}${bare}` : bare]
-    : [bare, `${ROLE_TOKEN_PREFIX}${bare}`];
+  if (tokenMatch === 'exact') return [canonical];
+  const { prefix, name } = splitPrincipalToken(canonical);
+  const bareOwner = model.roles.byCanonical.get(name)?.kind;
+  if (prefix === 'role') return bareOwner === 'group' ? [canonical] : [name, canonical];
+  if (prefix === 'group') return bareOwner === 'role' ? [canonical] : [name, canonical];
+  if (bareOwner === 'group') return [name, `${GROUP_TOKEN_PREFIX}${name}`];
+  if (bareOwner === 'plugin') return [name];
+  return [name, `${ROLE_TOKEN_PREFIX}${name}`];
 }
 
 /**
@@ -1278,15 +1280,15 @@ function eligibleHoldersResolved(
 
   // (kind, display name) → one entry. The `byRole` keys are the merged
   // index's canonical tokens exactly as granted (bare, or the
-  // `role/<canonical>` alias); the `byCanonical` record a key hits carries
-  // its kind — a `role/` alias always hits the role record, a bare key hits
-  // whichever principal owns it under group-first precedence. A token with no
-  // record (the built-in `everyone`, or a grant naming a since-vanished
-  // principal) degrades to 'role', the pre-groups display. When one display
-  // name is granted as BOTH (a role via its `role/` alias plus a same-named
-  // group via the bare token) BOTH entries survive — they are DIFFERENT
-  // principals, and collapsing them to one would hide the role's live
-  // `role/<name>` grant from every consumer of the eligible list.
+  // `role/` or `group/` alias); the `byCanonical` record a key hits carries
+  // its kind — a `role/` alias always hits the role record, a `group/` alias
+  // the group record, a bare key the role when one exists, else the group. A
+  // token with no record (the built-in `everyone`, or a grant naming a
+  // since-vanished principal) degrades to 'role', the pre-groups display.
+  // When one display name is granted as BOTH (the role plus a same-named
+  // group via `group/`) BOTH entries survive — they are DIFFERENT
+  // principals, and collapsing them to one would hide one of the grants from
+  // every consumer of the eligible list.
   const byIdentity = new Map<string, ResolvedPrincipal>();
   const addPrincipal = (name: string, kind: ResolvedPrincipal['kind']) => {
     const key = `${kind}\0${name.toLowerCase()}`;
@@ -1328,9 +1330,9 @@ function eligibleHoldersResolved(
     verb === 'write' &&
     (relativePath === 'roles.yaml' || isAccessMdPath(relativePath))
   ) {
-    // Look the Admin ROLE up via its explicit alias — the bare key may be
-    // owned by a same-named group under group-first precedence. The override
-    // is the ROLE's capability, so the row's kind is 'role' regardless.
+    // Look the Admin ROLE up via its explicit alias, the key that is always
+    // the role's. The override is the ROLE's capability, so the row's kind is
+    // 'role' regardless.
     const adminRole = model.roles.byCanonical.get(ADMIN_ROLE_KEY);
     addPrincipal(adminRole ? adminRole.displayName : ADMIN_CANONICAL, 'role');
   }
@@ -1789,7 +1791,10 @@ export class AccessControlService implements IAccessControl {
     const model = await this.loadModel(workspaceId);
     const email = canonicalEmail(userEmail);
     const names: string[] = [];
-    for (const principal of model.roles.byCanonical.values()) {
+    // Each group once, through its `group/` alias (the bare key, when the
+    // group owns it, is the same record).
+    for (const [key, principal] of model.roles.byCanonical) {
+      if (!key.startsWith(GROUP_TOKEN_PREFIX)) continue;
       if (principal.kind === 'group' && principal.emails.has(email)) names.push(principal.displayName);
     }
     return names;
@@ -2226,9 +2231,9 @@ export class AccessControlService implements IAccessControl {
     }
     // Roles = the built-in `everyone` role plus every declared role's display
     // name — ROLE principals only, never groups. Each role is enumerated via
-    // its `role/<canonical>` alias key, which exists exactly once per role
-    // (the bare key may be owned by a same-named group under group-first
-    // precedence, and merged group entries must not appear here). `everyone`
+    // its `role/<canonical>` alias key, which exists exactly once per role;
+    // each group likewise via its `group/<canonical>` alias (a group that
+    // owns its bare key is registered under both, as one record). `everyone`
     // is surfaced so the share UI can grant public read; the grant route
     // gates it to the `read` verb only (write/owner/download everyone stay a
     // direct-access.md edit).
@@ -2241,7 +2246,7 @@ export class AccessControlService implements IAccessControl {
     const plugins = new Map<string, string>();
     for (const [key, principal] of model.roles.byCanonical) {
       if (key.startsWith(ROLE_TOKEN_PREFIX)) roles.push(principal.displayName);
-      else if (principal.kind === 'group') groups.push(principal.displayName);
+      else if (key.startsWith(GROUP_TOKEN_PREFIX) && principal.kind === 'group') groups.push(principal.displayName);
       else if (
         principal.kind === 'plugin' &&
         principal.pluginName &&

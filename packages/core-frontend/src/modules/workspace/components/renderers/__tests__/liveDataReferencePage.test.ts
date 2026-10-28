@@ -51,12 +51,13 @@ interface ToolCall {
  * The reference page, mounted the way the renderer mounts it on the app's
  * file page, with the test as the app behind `window.bevel.tools`.
  */
-async function mountReferencePage() {
+async function mountReferencePage(branch = 'main') {
   const srcdoc = buildSandboxedHtml({
     title: 'Tickets',
     libModuleSources: [],
     bodyHtml: sanitizeAgentHtml(referencePage()),
     toolBridge: true,
+    branch,
   });
   document.body.innerHTML = /<body>([\s\S]*)<\/body>/.exec(srcdoc)![1]!;
 
@@ -267,6 +268,16 @@ describe("the guide's live-data reference page", () => {
     await answerListing(page, crlf);
     await answerReads(page, crlf);
     expect(boardText()).toBe('(1)|Alpha / (0)|None / (1)|Bravo');
+  });
+
+  it('reads its data and links its cards on the branch it is viewed on, read from window.bevel.branch', async () => {
+    const page = await mountReferencePage('alice/drafts');
+    expect(page.calls.map((c) => [c.args[0], c.args[1].body.branch])).toEqual([['list_files', 'alice/drafts']]);
+    await answerListing(page, FIRST);
+    expect(page.pending().every((c) => c.args[1].body.branch === 'alice/drafts')).toBe(true);
+    await answerReads(page, FIRST);
+    const hrefs = Array.from(document.querySelectorAll('.column a')).map((a) => a.getAttribute('href'));
+    expect(hrefs).toEqual(Object.keys(FIRST).map((name) => `/workspace/alice%2Fdrafts/${KB_DIR_NAME}/${FOLDER}/${name}`));
   });
 
   it('reads in bounded parallel, only after listing, through read-only tools, never a chain', async () => {

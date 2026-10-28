@@ -645,9 +645,13 @@ export function useFileNav() {
       openWorkspacePath: surface.openWorkspacePath,
       openFilePage: surface.openFilePage,
       closeFile: () => undefined,
+      // A surface stands on no branch of its own (an embed shows one page).
+      branch: null,
     };
   }
-  return { openFile, openLink, linkTarget, openWorkspacePath, openFilePage, closeFile };
+  // `branch`: the one this tab stands on, as the URL says it — what a page
+  // shown on it is told as `window.bevel.branch`.
+  return { openFile, openLink, linkTarget, openWorkspacePath, openFilePage, closeFile, branch };
 }
 
 /**

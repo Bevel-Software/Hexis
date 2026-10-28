@@ -32,12 +32,12 @@ whose `access.md` is:
 ```yaml
 ---
 owner:
-  - Admin
+  - role/Admin
 ---
 read:
   - everyone
 write:
-  - Search Team
+  - group/Search Team
 ```
 
 The part above the second `---` says who may change this `access.md`; the

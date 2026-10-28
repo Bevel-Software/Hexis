@@ -100,7 +100,7 @@ async function fail(res: Response, fallback: string): Promise<never> {
 /**
  * The caller's outstanding per-user credentials across every accessible tool —
  * or, with `agentPath` (the consent step's "Connect as" choice), across the
- * connectors a connection made as that `.agent` file loads. Null is
+ * connectors a connection made as that agent configuration loads. Null is
  * Everything.
  */
 export async function getConnectPending(agentPath: string | null = null): Promise<ConnectPending> {

@@ -11,6 +11,7 @@ import type { WorkflowEventBus } from '../../workflow/event-bus.js';
 import type { Database } from '../../database/connection.js';
 import { createAccessRoutes } from '../access.routes.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
+import { NodeFs } from '../../kb-fs/node-fs.js';
 
 /**
  * HTTP contract for `GET /access/prospective` — what the move confirmation
@@ -80,6 +81,7 @@ async function makeHarness(opts: { canRead?: boolean; readable?: (path: string) 
       { emit: vi.fn() } as unknown as WorkflowEventBus,
       {} as unknown as Database,
       testKbContext({ kbDirName: KB }),
+      new NodeFs(),
     ),
   );
 

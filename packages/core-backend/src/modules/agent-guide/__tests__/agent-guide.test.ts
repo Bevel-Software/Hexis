@@ -397,6 +397,7 @@ describe('the HTML views section', () => {
     expect(text).toContain('**No host navigation.**');
     expect(text).toContain('`window.bevel.openNode(href)`');
     expect(text).toContain('`window.bevel.navigate(href)`');
+    expect(text).toContain('`window.bevel.branch` — the branch the page is viewed on');
     expect(text).toContain('A distribution may add data members of its own to `window.bevel`');
     expect(text).toContain('**A bare fragment scrolls the page.**');
     // Rendered for the deployment's layout like every other section.

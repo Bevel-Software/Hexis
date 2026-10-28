@@ -150,6 +150,27 @@ export class ConnectionScope {
   }
 
   /**
+   * THE policy for a call of the platform tool `toolName` by this connection:
+   * null when the call may proceed, else the body the route answers with a
+   * 403 — the refusal naming the tool and the agent, and the code that says
+   * it was the connection's choice. Every route that IS a platform tool asks
+   * this, whether `toolHandler` hosts it or it is mounted on its own (the
+   * plugin-creation routes), so the rule is written once and the answers
+   * cannot drift. `discovery` marks a route that is a discovery read of the
+   * surface (the skill routes, the local-only tool list), which a narrowed
+   * connection is answered even when its `platformTools` omits the tool;
+   * a connection that loads nothing is refused it like everything else.
+   */
+  platformToolRefusal(
+    toolName: string,
+    opts: { discovery?: boolean } = {},
+  ): { error: string; code: typeof NOT_AVAILABLE_TO_CONNECTION } | null {
+    if (this.allowsPlatformTool(toolName)) return null;
+    if (opts.discovery === true && this.allowsDiscovery()) return null;
+    return { error: this.refusal(toolName), code: NOT_AVAILABLE_TO_CONNECTION };
+  }
+
+  /**
    * One line for the text an agent is told about its connection (the MCP
    * handshake, the agent guide); null for Everything, which is told nothing
    * new.

@@ -28,11 +28,17 @@ than by a markdown document.
 
 ### `window.bevel`
 
-Core puts four members on it:
+Core puts five members on it:
 
 - `window.bevel.openNode(href)` — follow `href` as if the reader had clicked a
   link to it.
 - `window.bevel.navigate(href)` — the same function under a second name.
+- `window.bevel.branch` — the branch the page is viewed on, as a string: a
+  page that reads its data through the tools and links to what they name
+  does both there, so the same page shows a draft's data on the draft and the
+  released data on the default branch. `null` where the host has no branch
+  for the page (a page embedded on another site); read it as `window.bevel?.branch
+  ?? '<default branch>'` so the page still works there.
 - `window.bevel.tools` — the viewer's tools, or `null` where there are none
   (next section).
 - `window.bevel.requireTools()` — ask for the tools when the page cannot work
@@ -234,9 +240,10 @@ no build step and no framework:
   <section class="column" data-status="done"><h2>Done <span class="count"></span></h2><ul><li class="placeholder"></li><li class="placeholder"></li></ul></section>
 </main>
 <script>
-  // The branch the page is published on: its data and its links both come
-  // from there. A copy published on another branch sets it to that branch.
-  const BRANCH = 'main';
+  // The branch the page is viewed on: its data and its links both come from
+  // there, so the page on a draft shows the draft's tickets. Outside the app
+  // (no bridge) it reads the default branch.
+  const BRANCH = window.bevel?.branch ?? 'main';
   const FOLDER = 'Data/Tickets';
   const READS_IN_FLIGHT = 4;
   const tools = window.bevel?.tools;
