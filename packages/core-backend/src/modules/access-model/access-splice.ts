@@ -33,6 +33,7 @@ import {
   canonicalEmail,
   canonicalRoleName,
   accessMdDeclaresBodyRules,
+  splitPrincipalToken,
 } from './access-grammar.js';
 import { freshAccessMd } from './access-template.js';
 import { scanFrontmatter } from './frontmatter-lines.js';
@@ -149,15 +150,18 @@ export function validatePrincipal(p: Principal): Principal {
 /**
  * How a role-shaped principal's TOKEN is compared against a file entry:
  *
- *  - `'exact'`: the entry must carry the SAME spelling — a bare token and a
- *    `role/<name>` token are DIFFERENT principals (bare = whoever owns the
- *    bare key under group-first precedence, `role/` = the role). Grants
- *    always use this: granting the group `X` while `role/X` is present (or
- *    vice versa) must NOT be treated as already-granted, or the other
- *    principal silently never receives the grant.
- *  - `'name'`: both spellings of the name match. Revokes use this ONLY when
- *    no group shadows the bare name — then both spellings resolve to the
- *    role, and revoking the role must also remove legacy bare spellings.
+ *  - `'exact'`: the entry must carry the SAME spelling — a bare token, a
+ *    `role/<name>` token and a `group/<name>` token can be DIFFERENT
+ *    principals (bare = the role when one exists, else the group). Grants
+ *    always use this: granting `group/X` while `role/X` or a bare `X` is
+ *    present must NOT be treated as already-granted, or the group silently
+ *    never receives the grant.
+ *  - `'name'`: the principal's explicit spelling AND the bare name match —
+ *    `role/X` (or a bare `X`) matches `X` and `role/X`; `group/X` matches
+ *    `X` and `group/X`. Never across kinds: a role's revoke never touches
+ *    `group/X`, a group's never `role/X`. Revokes use this only when the
+ *    bare name is this principal's (AccessMutationService decides), so
+ *    revoking also removes the legacy bare spelling.
  */
 export type TokenMatch = 'exact' | 'name';
 
@@ -169,11 +173,14 @@ export type TokenMatch = 'exact' | 'name';
 function entryMatches(entry: ParsedEntry, p: Principal, tokenMatch: TokenMatch): boolean {
   if (p.kind === 'user') return entry.kind === 'user' && entry.email === canonicalEmail(p.email);
   if (entry.kind !== 'role') return false;
-  const canonicalPrincipal = canonicalRoleName(p.role);
-  if (tokenMatch === 'exact') return entry.role === canonicalPrincipal;
-  const strip = (token: string): string =>
-    token.startsWith('role/') ? canonicalRoleName(token.slice('role/'.length)) : token;
-  return strip(entry.role) === strip(canonicalPrincipal);
+  // Compare split, canonical halves: `group/ Product` in the request names the
+  // same principal as the `group/product` the parser reads from the file.
+  const own = splitPrincipalToken(canonicalRoleName(p.role));
+  const theirs = splitPrincipalToken(entry.role);
+  if (theirs.name !== own.name) return false;
+  if (tokenMatch === 'exact') return theirs.prefix === own.prefix;
+  // Same family only: a bare principal stands for the role, as `role/` does.
+  return theirs.prefix === null || theirs.prefix === (own.prefix ?? 'role');
 }
 
 // ---------------------------------------------------------------------------
@@ -344,10 +351,10 @@ function blockEntries(fm: string[], block: VerbBlock): { entry: ParsedEntry; lin
  * Add `principal` under `verb`. Idempotent: if an entry with the EXACT same
  * token spelling already exists with the SAME deny-ness (a grant when
  * granting, a deny when denying), returns `changed: false`. Idempotency is
- * deliberately exact-token, never name-level: a bare token and a `role/`
- * token are different principals (group-first precedence gives the bare key
- * to a same-named group), so a bare-`X` GROUP grant must go through even when
- * `role/X` is present, and vice versa. Creates the verb key (and the
+ * deliberately exact-token, never name-level: a bare token, a `role/` token
+ * and a `group/` token can be different principals (the bare key is the
+ * role's when one exists), so a `group/X` grant must go through even when a
+ * bare `X` or `role/X` is present, and vice versa. Creates the verb key (and the
  * frontmatter fence, for a fresh file) as needed. Preserves everything else
  * byte-for-byte.
  *
@@ -445,11 +452,12 @@ export function spliceGrant(
  * Preserves everything else.
  *
  * Token matching for role-shaped principals is `tokenMatch` (default `'name'`:
- * BOTH spellings — revoking the role removes legacy bare spellings too).
- * Callers pass `'exact'` when a GROUP shadows the principal's bare name: the
- * bare token then belongs to the group and the `role/` token to the role, so a
- * revoke of one must never strip the other (see AccessMutationService, which
- * derives the flag from the merged principal index).
+ * the explicit spelling and the bare one — revoking removes legacy bare
+ * spellings too). Callers pass `'exact'` when the bare name belongs to the
+ * OTHER kind (a group revoke while a same-named role owns the bare key, or a
+ * role revoke while only a group of that name exists), so a revoke of one
+ * never strips the other (see AccessMutationService, which derives the flag
+ * from the merged principal index).
  */
 export function spliceRevoke(
   text: string,

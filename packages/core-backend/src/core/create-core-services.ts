@@ -88,7 +88,7 @@ import { CreatorAccessService } from '../modules/access/creator-access.js';
 import { ChangeReadGate } from '../modules/access/change-read-gate.js';
 import { GroupsAdminService } from '../modules/access/groups-admin.service.js';
 import { UserAccessRemovalService } from '../modules/access/user-access-removal.service.js';
-import { makeRolesYamlWriteValidator } from '../modules/access-model/roles-yaml-guard.js';
+import { makeRolesYamlWriteValidator } from '../modules/access-model/index.js';
 // The implementations, from their files: the module entries offer them as
 // types only, so nothing that imports an entry loads a service.
 import { SkillService } from '../modules/skills/skills.service.js';
@@ -1653,6 +1653,7 @@ export async function createCoreServices(
     workspaceService,
     workflowService,
     accessControl,
+    disk,
     kbDirName,
     () => kb.defaultBranch,
     eventBus,

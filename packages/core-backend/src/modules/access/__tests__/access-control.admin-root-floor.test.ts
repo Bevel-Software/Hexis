@@ -242,6 +242,17 @@ describe('Admin write floor at the repository root', () => {
       expect(await fs.readFile(path.join(repo, 'access.md'), 'utf-8')).toContain('write:\n  - Admin');
     });
 
+    it('lets the root drop a GROUP named Admin — group/Admin is never the role', async () => {
+      await write(repo, 'access.md', '---\n---\nwrite:\n  - Admin\n  - group/Admin\n');
+      const group = { kind: 'role' as const, role: 'group/Admin' };
+      await expect(mutation.revoke(WS, 'folder', '', group, ADMIN, 'write')).resolves.toMatchObject({
+        changed: true,
+      });
+      const after = await fs.readFile(path.join(repo, 'access.md'), 'utf-8');
+      expect(after).not.toContain('group/Admin');
+      expect(after).toContain('write:\n  - Admin'); // the role's line is untouched
+    });
+
     it('refuses deny-here on a PERSON who is an admin at the root, with the reason, and writes nothing', async () => {
       const before = await fs.readFile(path.join(repo, 'access.md'), 'utf-8');
       for (const email of [ADMIN, OWNER]) {
@@ -310,6 +321,7 @@ describe('Admin write floor at the repository root', () => {
           { emit: () => {} } as unknown as WorkflowEventBus,
           usersDbDouble(),
           testKbContext({ kbDirName: KB }),
+          new NodeFs(),
         ),
       );
       server = await new Promise<Server>((resolve) => {
