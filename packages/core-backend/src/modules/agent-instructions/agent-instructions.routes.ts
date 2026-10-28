@@ -33,6 +33,12 @@ export function createAgentInstructionsRoutes(
    * hand gets `AGENTS.md`.
    */
   kbLayout?: () => KbLayout,
+  /**
+   * The default branch in effect, read per request, which the shared file
+   * rules name as the branch people read. Optional like the layout: without
+   * it the rules name no branch.
+   */
+  defaultBranch?: () => string,
 ): express.Router {
   const router = express.Router();
 
@@ -41,7 +47,7 @@ export function createAgentInstructionsRoutes(
     // successful one: the contract is on the route, not on the happy path.
     res.setHeader('Cache-Control', 'no-store');
     try {
-      res.json(composeAgentInstructions(await readPreamble(), kbLayout?.()));
+      res.json(composeAgentInstructions(await readPreamble(), kbLayout?.(), defaultBranch?.()));
     } catch (err) {
       log.error('reading mcp-description.md failed:', { err });
       res.status(500).json({ error: 'Failed to read the agent instructions' });

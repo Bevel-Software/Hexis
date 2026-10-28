@@ -30,7 +30,7 @@ import { createAgentUploadRoutes, isAgentUploadRawBodyPath } from '../agent-uplo
 import { READ_ONLY_CODE, type IWriteAccess } from '../../write-access/write-access.js';
 import { MAX_UPLOAD_BYTES } from '../upload-limits.js';
 import { DEFAULT_KB_LAYOUT } from '@bevel-software/platform-shared';
-import { sharedFileRules } from '../../agent-instructions/shared-file-rules.js';
+import { sharedFileRules } from '../../agent-instructions/index.js';
 
 /**
  * The upload route an agent lands files by, end to end: a token, bytes sent to
@@ -1507,7 +1507,7 @@ describe('the write tools name the upload route', () => {
     // The three failures the route exists for are named where the full
     // explanation lives: said on each of three descriptions, it took every one
     // of them past the length a client cuts at.
-    const rule = sharedFileRules(DEFAULT_KB_LAYOUT).find((r) => r.id === 'upload-route');
+    const rule = sharedFileRules(DEFAULT_KB_LAYOUT, '').find((r) => r.id === 'upload-route');
     expect(rule).toBeDefined();
     expect(rule!.body).toMatch(/cut off mid-answer/);
     expect(rule!.body).toMatch(/escapes fails to parse/);

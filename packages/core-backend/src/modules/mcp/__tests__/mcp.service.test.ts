@@ -18,7 +18,7 @@ import { splitCallLine } from '@bevel-software/platform-mcp-core';
 import type { AgentEventInput, IAgentEventRecorder } from '../../audit/audit.contract.js';
 
 /** The platform-owned part of the handshake text: the header plus the shared file rules. */
-const PLATFORM = platformInstructions(DEFAULT_KB_LAYOUT);
+const PLATFORM = platformInstructions(DEFAULT_KB_LAYOUT, '');
 
 /**
  * End-to-end proxy test: a real express app serving the registry-driven tool

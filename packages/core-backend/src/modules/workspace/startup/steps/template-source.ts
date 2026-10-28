@@ -70,10 +70,10 @@ export const SHARED_FILE_RULES_PLACEHOLDER = '{{sharedFileRules}}';
  * a template writes) that a string replacement would read as capture-group
  * syntax.
  */
-export function renderTemplateText(text: string, layout: KbLayout): string {
+export function renderTemplateText(text: string, layout: KbLayout, defaultBranch: string): string {
   return renderKbLayoutPlaceholders(text, layout).replaceAll(
     SHARED_FILE_RULES_PLACEHOLDER,
-    () => sharedFileRulesSection(layout),
+    () => sharedFileRulesSection(layout, defaultBranch),
   );
 }
 
@@ -98,8 +98,11 @@ export class TemplateSource {
   constructor(
     private readonly disk: IFsProbe,
     private readonly templateDir: string,
-    /** The layout the placeholders render as — read per file, so a name applied by setup is the one written. */
-    private readonly kb: Pick<KbContext, 'layout'>,
+    /**
+     * The layout the placeholders render as, and the default branch the shared
+     * rules name — read per file, so a name applied by setup is the one written.
+     */
+    private readonly kb: Pick<KbContext, 'layout' | 'defaultBranch'>,
   ) {}
 
   /**
@@ -188,9 +191,13 @@ export class TemplateSource {
     // happens to contain a placeholder as one.
     const layout = this.kb.layout;
     if (relPath === IGNORE_FILENAME) {
-      return renderTemplateText(raw, { ...layout, agentsFile: gitignoreLiteral(layout.agentsFile) });
+      return renderTemplateText(
+        raw,
+        { ...layout, agentsFile: gitignoreLiteral(layout.agentsFile) },
+        this.kb.defaultBranch,
+      );
     }
-    return renderTemplateText(raw, layout);
+    return renderTemplateText(raw, layout, this.kb.defaultBranch);
   }
 
   /**

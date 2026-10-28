@@ -26,9 +26,9 @@
  * which copy is current. Each description opens instead with the one
  * sentence sending the agent to the guide (`tool-registry/guide-first.ts`).
  *
- * Pure text, a function of the layout only: the guide's name is a deployment
- * setting (an alias a deployment chose before the guide left the disk), so
- * nothing here may snapshot `AGENTS.md`.
+ * Pure text, a function of the layout and the default branch: both are
+ * deployment settings, so every caller passes the values in effect when it
+ * composes, and nothing here may snapshot a folder name or a branch name.
  */
 
 import {
@@ -65,8 +65,13 @@ const PRE_RENAME_AGENTS_FILE = 'CLAUDE.md';
  * 7,400 since the `__tmp__/` ref: four tools take it, so what it reaches and
  * that it is read-only is said once here rather than in each description, and
  * the section had no room left for it.
+ *
+ * 7,700 since the conventions rule names the default branch: nothing else an
+ * agent receives names it, and the sentence is ~260 characters. Measured with
+ * a branch name of twenty characters (`target-company-state`); the name is the
+ * deployment's, so a longer one costs its own length beyond that.
  */
-export const SHARED_FILE_RULES_CAP = 7_400;
+export const SHARED_FILE_RULES_CAP = 7_700;
 
 /** One shared rule: how the guide heads it, and the rule itself. */
 export interface SharedFileRule {
@@ -87,12 +92,12 @@ export interface SharedFileRule {
  * than rewritten wherever the wording still reads outside its old tool — the
  * ones that said "this tool" or "this call" name the tools instead.
  */
-export function sharedFileRules(layout: KbLayout): readonly SharedFileRule[] {
+export function sharedFileRules(layout: KbLayout, defaultBranch: string): readonly SharedFileRule[] {
   return [
     {
       id: 'agent-guide',
       heading: "This knowledge base's own conventions",
-      body: conventionsRule(),
+      body: conventionsRule(defaultBranch),
     },
     {
       id: 'content-kinds',
@@ -244,12 +249,32 @@ function platformFileList(layout: KbLayout): string {
  * named as a fallback because a knowledge base seeded before the rename may
  * still carry one its people edited.
  */
-function conventionsRule(): string {
-  return (
+function conventionsRule(defaultBranch: string): string {
+  const guide =
     "Before your first read or change in a workspace, call `get_agent_guide` and read the platform's guide " +
     `(whole, or one section). read_file on \`${LEGACY_AGENTS_FILE}\` at the KB root answers with the same ` +
     "guide, after the organisation's own conventions file of that name when it has one: follow both. A " +
-    `\`${PRE_RENAME_AGENTS_FILE}\` at the KB root is the organisation's own too; read it if it exists.`
+    `\`${PRE_RENAME_AGENTS_FILE}\` at the KB root is the organisation's own too; read it if it exists.`;
+  const branch = defaultBranchSentence(defaultBranch);
+  return branch ? `${guide}\n\n${branch}` : guide;
+}
+
+/**
+ * The one sentence naming the deployment's default branch. Nothing else an
+ * agent is told names it — every file tool asks for "the branch you are
+ * working on" — and an agent left to guess guesses `main`, which on a
+ * deployment whose default is another branch writes where nobody reads.
+ *
+ * Empty while the deployment has no branch model (`KbContext.defaultBranch` is
+ * `''` until setup is answered): there is no name to give yet.
+ */
+function defaultBranchSentence(defaultBranch: string): string {
+  const name = defaultBranch.trim();
+  if (!name) return '';
+  return (
+    `This knowledge base's default branch is \`${name}\`: the branch people read, the one a tool with an ` +
+    'optional `branch` runs on when you leave it out, and the usual target of a change request — pass it as ' +
+    '`branch` unless you are working on a draft.'
   );
 }
 
@@ -258,8 +283,8 @@ function conventionsRule(): string {
  * byte for byte. A `##` section so it drops into the managed guide at that
  * level and still reads as a block in the instructions blob.
  */
-export function sharedFileRulesSection(layout: KbLayout): string {
-  const body = sharedFileRules(layout)
+export function sharedFileRulesSection(layout: KbLayout, defaultBranch: string): string {
+  const body = sharedFileRules(layout, defaultBranch)
     .map((rule) => `### ${rule.heading}\n\n${rule.body}`)
     .join('\n\n');
   return `## ${SHARED_RULES_SECTION}\n\n${body}`;

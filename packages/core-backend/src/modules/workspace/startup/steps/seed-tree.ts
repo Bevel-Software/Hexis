@@ -35,7 +35,7 @@ export function buildSeedTree(
   extraRootDirs: readonly string[],
   seedAdminEmails: readonly string[],
   /** Read per seed, never captured: the setup-completing save may apply the layout after this builder was composed. */
-  kb: Pick<KbContext, 'layout'>,
+  kb: Pick<KbContext, 'layout' | 'defaultBranch'>,
 ): (dir: string) => Promise<string[]> {
   // Validated eagerly; resolved per seed.
   reservedRootDirs(extraRootDirs, kb.layout);
@@ -57,7 +57,7 @@ class KbSeedTree {
     private readonly templates: TemplateSource,
     private readonly extraRootDirs: readonly string[],
     private readonly seedAdminEmails: readonly string[],
-    private readonly kb: Pick<KbContext, 'layout'>,
+    private readonly kb: Pick<KbContext, 'layout' | 'defaultBranch'>,
   ) {}
 
   /** Fill `dir` with a complete knowledge base; resolve to what was GENERATED. */
@@ -184,7 +184,7 @@ class KbSeedTree {
     if (text === null) {
       await fs.copyFile(from, to);
     } else {
-      await fs.writeFile(to, renderTemplateText(text, this.kb.layout), 'utf8');
+      await fs.writeFile(to, renderTemplateText(text, this.kb.layout, this.kb.defaultBranch), 'utf8');
     }
     await fs.chmod(to, (await fs.stat(from)).mode & 0o777);
   }

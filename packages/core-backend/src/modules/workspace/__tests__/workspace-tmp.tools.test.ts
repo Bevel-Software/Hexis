@@ -16,8 +16,8 @@ import type { ToolContext } from '../../tool-helpers/tool.contract.js';
 import type { ToolAuth } from '../../tool-auth/tool-auth.middleware.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import { NodeFs } from '../../kb-fs/node-fs.js';
-import { sharedFileRules, sharedFileRulesSection } from '../../agent-instructions/shared-file-rules.js';
-import { agentGuideSections, WORKING_WITH_FILES_SECTION_ID } from '../../agent-guide/agent-guide.js';
+import { sharedFileRules, sharedFileRulesSection } from '../../agent-instructions/index.js';
+import { agentGuideSections, WORKING_WITH_FILES_SECTION_ID } from '../../agent-guide/index.js';
 import { PathNotFoundError } from '../../../shared/domain-errors.js';
 import { registerWorkspaceTools } from '../workspace.tools.js';
 import { RipgrepPatternMatcher } from '../ripgrep-search.js';
@@ -911,7 +911,7 @@ describe('the periodic sweep of every workspace\'s tmp folder', () => {
 
 describe('the agent guide\'s file-tools section describes the ref', () => {
   it("states the ref, that it reaches the caller's own files, that it is read-only, copy_file to keep, and up to seven days", async () => {
-    const rule = sharedFileRules(DEFAULT_KB_LAYOUT).find((r) => r.id === 'workspace-tmp')!.body;
+    const rule = sharedFileRules(DEFAULT_KB_LAYOUT, '').find((r) => r.id === 'workspace-tmp')!.body;
     expect(rule).toContain('`__tmp__/<path>`');
     expect(rule).toContain('`tmp/` folder');
     expect(rule).toContain('YOU staged');
@@ -920,7 +920,7 @@ describe('the agent guide\'s file-tools section describes the ref', () => {
     expect(rule).toContain('copy_file it to a repository path');
     expect(rule).toContain('up to seven days');
     for (const tool of ['read_file', 'file_stat', 'grep', 'copy_file']) expect(rule).toContain(tool);
-    expect(sharedFileRulesSection(DEFAULT_KB_LAYOUT)).toContain(rule);
+    expect(sharedFileRulesSection(DEFAULT_KB_LAYOUT, '')).toContain(rule);
     const sections = await agentGuideSections(DEFAULT_KB_LAYOUT);
     const files = sections.find((s) => s.id === WORKING_WITH_FILES_SECTION_ID)!;
     expect(files.body).toContain(rule);

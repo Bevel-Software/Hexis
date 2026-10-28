@@ -152,7 +152,7 @@ async function template(name: string): Promise<string> {
   // `renderTemplateText`, not the layout renderer alone: the managed guide also
   // asks for the shared file rules, and a fixture rendered with half the
   // placeholders filled would read as drifted on every boot.
-  return renderTemplateText(await fs.readFile(path.join(TEMPLATE_DIR, name), 'utf8'), DEFAULT_KB_LAYOUT);
+  return renderTemplateText(await fs.readFile(path.join(TEMPLATE_DIR, name), 'utf8'), DEFAULT_KB_LAYOUT, '');
 }
 
 /** Every required file + reserved root already present, from the real template. */
@@ -590,7 +590,7 @@ describe('TemplateFilesStep', () => {
     expect(shipped).toContain('first paragraph under about 220');
     expect(shipped).not.toContain('{{');
     const composed = composeAgentInstructions(shipped);
-    expect(composed.instructions).toBe(platformInstructions(DEFAULT_KB_LAYOUT));
+    expect(composed.instructions).toBe(platformInstructions(DEFAULT_KB_LAYOUT, ''));
     expect(composed.toolPrefix).toBe(TOOL_PREFIX_LINE);
     expect(composed.unterminatedComment).toBe(false);
     expect(composed.preambleChars).toBe(0);

@@ -172,7 +172,7 @@ export class TemplateFilesStep implements OnServerStart {
      * applies the admin's names after this step was built. A snapshot taken
      * here scaffolded `Skills/` beside the `skills/` they had just chosen.
      */
-    private readonly kb: Pick<KbContext, 'layout'>,
+    private readonly kb: Pick<KbContext, 'layout' | 'defaultBranch'>,
     private readonly extraRootDirs: readonly string[] = [],
   ) {
     // Validated NOW, so a bad extra fails at boot beside the rest of the

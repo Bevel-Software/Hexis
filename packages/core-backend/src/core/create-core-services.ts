@@ -1379,7 +1379,7 @@ export async function createCoreServices(
   // the layout is read per call, so a name the setup save applies lands
   // without a restart, and the distribution's hook sees every composition.
   const agentGuideSectionsReader: AgentGuideSectionsReader = () =>
-    agentGuideSections(kb.layout, ports.agentGuide, { kbDirName });
+    agentGuideSections(kb.layout, ports.agentGuide, { kbDirName, defaultBranch: kb.defaultBranch });
   const agentGuide: AgentGuideReader = async () => joinGuideSections(await agentGuideSectionsReader());
   // The Audit log. Records through the proxy below (every call an external
   // agent makes), reads keys through the key service so their shape is
@@ -1438,6 +1438,9 @@ export async function createCoreServices(
       // The guide's name the shared file rules spell, read per request so a name
       // the setup save applies lands without a restart.
       kbLayout: () => kb.layout,
+      // The branch the shared rules name as the one people read — a getter
+      // too, so the name in effect is the one an agent is told.
+      defaultBranch: () => kb.defaultBranch,
       secretsScope,
       // Read at listing time, by when the hints below exist.
       readOnlyOverrides: () => readOnlyHints.overrides(),

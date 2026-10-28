@@ -16,8 +16,8 @@ import { ToolError, type ToolContext } from '../../tool-helpers/tool.contract.js
 import type { ToolAuth } from '../../tool-auth/tool-auth.middleware.js';
 import { registerWorkspaceTools } from '../workspace.tools.js';
 import { RipgrepPatternMatcher, type RipgrepPatternMatcherOptions } from '../index.js';
-import { sharedFileRules, sharedFileRulesSection } from '../../agent-instructions/shared-file-rules.js';
-import { composeAgentGuide } from '../../agent-guide/agent-guide.js';
+import { sharedFileRules, sharedFileRulesSection } from '../../agent-instructions/index.js';
+import { composeAgentGuide } from '../../agent-guide/index.js';
 import { GUIDE_FIRST_SENTENCE } from '../../tool-registry/guide-first.js';
 import { RoutineWritePolicyService } from '../routine-write-policy.js';
 import { UuidSessionSink, type ISessionSink } from '../session-sink.js';
@@ -825,10 +825,10 @@ describe('write modes and per-path outcomes', () => {
     // The paragraph that said this in BOTH descriptions is one shared rule now.
     // What stays on the tool is the input the agent fills, which is where the
     // decision is actually taken.
-    const rule = sharedFileRules(testKbContext().layout).find((r) => r.id === 'write-mode')!;
+    const rule = sharedFileRules(testKbContext().layout, testKbContext().defaultBranch).find((r) => r.id === 'write-mode')!;
     expect(rule.body).toContain('DEFAULTS TO `create`');
     expect(rule.body).toContain('On write_file and write_files');
-    expect(sharedFileRulesSection(testKbContext().layout).split(rule.body)).toHaveLength(2);
+    expect(sharedFileRulesSection(testKbContext().layout, testKbContext().defaultBranch).split(rule.body)).toHaveLength(2);
     for (const name of ['write_file', 'write_files']) {
       const def = tools.find((t) => t.name === name)!;
       expect(def.description, name).not.toContain('DEFAULTS TO `create`');
@@ -2089,7 +2089,7 @@ describe('office documents and PDFs', () => {
       // description. Checked on the whole body rather than on a phrase: the
       // drift this PR exists to prevent is a paragraph pasted back onto a
       // tool, and naming only two marker phrases would catch two of eight.
-      for (const rule of sharedFileRules(testKbContext().layout)) {
+      for (const rule of sharedFileRules(testKbContext().layout, testKbContext().defaultBranch)) {
         expect(def!.description, `${name} / ${rule.id}`).not.toContain(rule.body);
       }
       // The two lead-in labels the paragraphs used to arrive under are gone
@@ -2296,10 +2296,10 @@ describe('office documents and PDFs', () => {
   it('says where the images a page uses go — once, in the shared rules', async () => {
     await start();
     const tools = await toolRegistry.listInternal();
-    const rule = sharedFileRules(testKbContext().layout).find((r) => r.id === 'images-in-pages')!;
+    const rule = sharedFileRules(testKbContext().layout, testKbContext().defaultBranch).find((r) => r.id === 'images-in-pages')!;
     expect(rule.body).toContain('`assets/` folder next to the page');
     expect(rule.body).toContain('![Approval screen](./assets/approval-screen.png)');
-    expect(sharedFileRulesSection(testKbContext().layout)).toContain(rule.body);
+    expect(sharedFileRulesSection(testKbContext().layout, testKbContext().defaultBranch)).toContain(rule.body);
     for (const name of ['write_file', 'write_files']) {
       expect(tools.find((t) => t.name === name)!.description, name).not.toContain('`assets/` folder next to the page');
     }
@@ -2708,7 +2708,7 @@ describe('start_session', () => {
       const closed = { ...allowAll, canRead: async () => false } as unknown as IAccessControl;
       const base = await startSessionApp('external', undefined, wsDir, undefined, closed);
       const res = (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { firstRun?: string };
-      expect(res).toEqual({ sessionId: 'thread-xyz' });
+      expect(res).toEqual({ sessionId: 'thread-xyz', defaultBranch: 'target-company-state' });
     });
 
     it('judges the folder as the caller may see it: a page they may not read leaves the note standing', async () => {
@@ -2741,7 +2741,7 @@ describe('start_session', () => {
       } as unknown as IAccessControl;
       const base = await startSessionApp('external', undefined, wsDir, starter, pageClosed);
       const res = (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { firstRun?: string };
-      expect(res).toEqual({ sessionId: 'thread-xyz' });
+      expect(res).toEqual({ sessionId: 'thread-xyz', defaultBranch: 'target-company-state' });
     });
 
     it('never costs the session id: a workspace it cannot read answers with the id alone', async () => {
@@ -2749,7 +2749,7 @@ describe('start_session', () => {
 
       const res = await startSession();
 
-      expect(res).toEqual({ sessionId: 'thread-xyz' });
+      expect(res).toEqual({ sessionId: 'thread-xyz', defaultBranch: 'target-company-state' });
     });
   });
 });
@@ -4195,7 +4195,7 @@ describe('preflight for moves and deletes', () => {
       expect(d.description).toMatch(/destination must not exist/);
       // What refuses a move, and the dry-run/confirm protocol it shares with the
       // deletes, are shared rules — stated once, in the two shared places.
-      const rules = sharedFileRulesSection(testKbContext().layout);
+      const rules = sharedFileRulesSection(testKbContext().layout, testKbContext().defaultBranch);
       expect(rules).toContain('is a platform file and stays in its folder.');
       expect(rules).toContain('`dryRun: true`');
       expect(rules).toContain('`confirm: true`');
@@ -4223,7 +4223,7 @@ describe('preflight for moves and deletes', () => {
       const d = await def('delete_folder');
       expect(d.description).toContain('a non-empty folder wants `confirm: true`');
       // The protocol itself, and what a platform folder does to it, are shared.
-      const rules = sharedFileRulesSection(testKbContext().layout);
+      const rules = sharedFileRulesSection(testKbContext().layout, testKbContext().defaultBranch);
       expect(rules).toContain('`dryRun: true`');
       expect(rules).toContain('A non-empty folder is deleted, and a move that changes your access runs, only with `confirm: true`');
       expect(rules).toContain('platform folder');
@@ -4247,7 +4247,7 @@ describe('preflight for moves and deletes', () => {
       expect(stat.description).toContain('shared rules on what these tools never move or delete');
       // The proposal route applies to every tool a permission can refuse, so it
       // is stated once in the shared rules rather than on each of them.
-      expect(sharedFileRulesSection(testKbContext().layout)).toContain('`write-denied`');
+      expect(sharedFileRulesSection(testKbContext().layout, testKbContext().defaultBranch)).toContain('`write-denied`');
       for (const name of ['move_file', 'delete_file', 'delete_folder']) {
         expect((await def(name)).description.startsWith(GUIDE_FIRST_SENTENCE), name).toBe(true);
       }
@@ -4503,8 +4503,8 @@ describe('a write refused for permissions says whether and how to propose it', (
     // stated in the handshake instructions and in the managed guide, and in no
     // description. The refusal ITSELF still spells the steps out — that is what
     // the tests above this one assert.
-    const rule = sharedFileRules(testKbContext().layout).find((r) => r.id === 'refused-for-permissions')!;
-    expect(sharedFileRulesSection(testKbContext().layout)).toContain(rule.body);
+    const rule = sharedFileRules(testKbContext().layout, testKbContext().defaultBranch).find((r) => r.id === 'refused-for-permissions')!;
+    expect(sharedFileRulesSection(testKbContext().layout, testKbContext().defaultBranch)).toContain(rule.body);
     for (const def of tools) {
       expect(def.description ?? '', def.name).not.toContain('If this is refused for permissions');
       expect(def.description ?? '', def.name).not.toContain(rule.body);

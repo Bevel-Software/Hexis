@@ -33,7 +33,7 @@ import {
 import { isPlatformFile, platformFilesByDepth } from '@bevel-software/platform-shared';
 import { GET_AGENT_GUIDE_TOOL, GUIDE_FIRST_SENTENCE, guideFirstDescription } from '../guide-first.js';
 import { registerAgentGuideTool } from '../../agent-guide/agent-guide.tools.js';
-import { agentGuideSections } from '../../agent-guide/agent-guide.js';
+import { agentGuideSections } from '../../agent-guide/index.js';
 
 /**
  * The cap exists because clients cut a long tool description, and they cut it
@@ -325,14 +325,14 @@ describe('the shared rules describe the tools they name', () => {
     // The opener is only honest if the rules it points at are THERE. These
     // two were paragraphs of the chain's description; they moved, whole, and a
     // description that kept them as well would be the long one a client cuts.
-    const rule = sharedFileRules(testKbContext().layout).find((r) => r.id === 'tool-chain')!;
+    const rule = sharedFileRules(testKbContext().layout, testKbContext().defaultBranch).find((r) => r.id === 'tool-chain')!;
     expect(rule.body).toContain(CHAIN_FAILURES_RULE);
     expect(rule.body).toContain(CHAIN_LARGE_RESULTS_RULE);
     const served = (await hexisTools()).find((t) => t.name === CALL_TOOL_CHAIN_NAME)!;
     expect(served.description).not.toContain(CHAIN_FAILURES_RULE);
     expect(served.description).not.toContain(CHAIN_LARGE_RESULTS_RULE);
     // What a chained read does to an image was already one of the shared rules.
-    const content = sharedFileRules(testKbContext().layout).find((r) => r.id === 'content-kinds')!;
+    const content = sharedFileRules(testKbContext().layout, testKbContext().defaultBranch).find((r) => r.id === 'content-kinds')!;
     expect(content.body).toContain('image_omitted');
   });
 
@@ -351,7 +351,7 @@ describe('the shared rules describe the tools they name', () => {
     // rejects: `delete_file` has no `dryRun`, so an agent told to preflight a
     // single-file delete gets a validation error on the safe call and learns to
     // skip it. Read off the schemas rather than asserted by hand.
-    const rule = sharedFileRules(testKbContext().layout).find((r) => r.id === 'dry-run-confirm')!;
+    const rule = sharedFileRules(testKbContext().layout, testKbContext().defaultBranch).find((r) => r.id === 'dry-run-confirm')!;
     const tools = await hexisTools();
     // `toolDef` wraps a tool's own inputs under `body`, which is the schema a
     // client validates against — so that is where the argument either is or is not.
@@ -379,7 +379,7 @@ describe('the shared rules describe the tools they name', () => {
   });
 
   it('gives each platform file the depth it actually counts at', () => {
-    const rule = sharedFileRules(testKbContext().layout).find((r) => r.id === 'managed-items')!;
+    const rule = sharedFileRules(testKbContext().layout, testKbContext().defaultBranch).find((r) => r.id === 'managed-items')!;
     const { anyDepth, rootOnly } = platformFilesByDepth(testKbContext().layout);
     // The split is the half of the rule a list of names leaves out, and
     // `isPlatformFile` is the predicate the prose has to match.
@@ -390,7 +390,7 @@ describe('the shared rules describe the tools they name', () => {
   });
 
   it('says what unzip extracts, rather than that it takes any bytes', () => {
-    const rule = sharedFileRules(testKbContext().layout).find((r) => r.id === 'content-kinds')!;
+    const rule = sharedFileRules(testKbContext().layout, testKbContext().defaultBranch).find((r) => r.id === 'content-kinds')!;
     // `unzip` refuses anything but a `.zip` (`workspace.service.ts`: "Only .zip
     // files can be extracted"), so the byte-tool clause must not sweep it in.
     expect(rule.body).toContain('unzip extracts the entries of a `.zip`');

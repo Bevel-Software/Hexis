@@ -30,7 +30,7 @@ import { readAuthCookie } from '../../auth/auth.middleware.js';
 import jwt from 'jsonwebtoken';
 import { buildDownload, DOWNLOAD_PERMISSION_REQUIRED, NOT_FOUND } from '../agent-download.builder.js';
 import { READ_ONLY_CODE, type IWriteAccess } from '../../write-access/write-access.js';
-import { sharedFileRules } from '../../agent-instructions/shared-file-rules.js';
+import { sharedFileRules } from '../../agent-instructions/index.js';
 import { newWorkspaceService } from '../../../__tests__/workspace-service.js';
 
 /**
@@ -783,7 +783,7 @@ describe('credentials, deployments and the read hook', () => {
 
 describe('what agents are told', () => {
   it('describes download beside upload in the shared rule on large and binary content', () => {
-    const rule = sharedFileRules(DEFAULT_KB_LAYOUT).find((r) => r.id === 'upload-route')!;
+    const rule = sharedFileRules(DEFAULT_KB_LAYOUT, '').find((r) => r.id === 'upload-route')!;
     expect(rule.heading).toMatch(/download out/);
     expect(rule.body).toContain('`request_file_upload`');
     expect(rule.body).toContain('`request_file_download`');

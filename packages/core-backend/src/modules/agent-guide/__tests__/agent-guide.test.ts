@@ -1,7 +1,7 @@
 import { DEFAULT_KB_LAYOUT } from '@bevel-software/platform-shared';
 import { describe, expect, it } from 'vitest';
 import { mergeGroupsIntoRoles, parseRolesYaml } from '../../access-model/access-grammar.js';
-import { sharedFileRulesSection } from '../../agent-instructions/shared-file-rules.js';
+import { sharedFileRulesSection } from '../../agent-instructions/index.js';
 import {
   CORE_SECTION_IDS,
   PLATFORM_GUIDE_SEPARATOR,
@@ -42,7 +42,7 @@ describe('the guide is composed from the platform\'s sections', () => {
     const sections = await coreAgentGuideSections(DEFAULT_KB_LAYOUT);
     expect(sections.map((s) => s.id)).toEqual(CORE_SECTION_IDS);
     const rules = sections.find((s) => s.id === WORKING_WITH_FILES_SECTION_ID)!;
-    expect(rules.body).toBe(sharedFileRulesSection(DEFAULT_KB_LAYOUT));
+    expect(rules.body).toBe(sharedFileRulesSection(DEFAULT_KB_LAYOUT, ''));
     expect(rules.literal).toBe(true);
     // Every file section begins with its heading, so the guide reads as one document.
     for (const s of sections) {
@@ -68,7 +68,7 @@ describe('the guide is composed from the platform\'s sections', () => {
     // never passed through the renderer again: a folder literally named like a
     // placeholder comes out as the folder it is.
     const odd = await composeAgentGuide({ ...DEFAULT_KB_LAYOUT, knowledgeBaseDir: '{{skillsDir}}', skillsDir: 'Playbooks' });
-    expect(odd).toContain(sharedFileRulesSection({ ...DEFAULT_KB_LAYOUT, knowledgeBaseDir: '{{skillsDir}}', skillsDir: 'Playbooks' }));
+    expect(odd).toContain(sharedFileRulesSection({ ...DEFAULT_KB_LAYOUT, knowledgeBaseDir: '{{skillsDir}}', skillsDir: 'Playbooks' }, ''));
   });
 
   it('says it is served, not written, and names the one file it is read as', async () => {
@@ -128,7 +128,7 @@ describe('the guide is composed from the platform\'s sections', () => {
     expect(section(guide, '## Finding things')).toContain('Ask the graph.');
     expect(section(guide, '## Finding things')).not.toContain('grep');
     expect(guide.trimEnd().endsWith('Nodes live under `Docs/<Ontology>/Knowledge/`.')).toBe(true);
-    expect(guide).toContain(sharedFileRulesSection({ ...DEFAULT_KB_LAYOUT, knowledgeBaseDir: 'Docs' }));
+    expect(guide).toContain(sharedFileRulesSection({ ...DEFAULT_KB_LAYOUT, knowledgeBaseDir: 'Docs' }, ''));
     // An async hook is awaited, and the layout it is handed is the resolved one.
     const seen: string[] = [];
     await composeAgentGuide({ knowledgeBaseDir: ' Docs ', skillsDir: 'Skills', pluginsDir: 'Plugins' }, async (sections, layout) => {
@@ -157,7 +157,7 @@ describe('the guide is composed from the platform\'s sections', () => {
       { id: WORKING_WITH_FILES_SECTION_ID, body: '' },
       ...sections,
     ]);
-    expect(twice).toContain(sharedFileRulesSection(DEFAULT_KB_LAYOUT));
+    expect(twice).toContain(sharedFileRulesSection(DEFAULT_KB_LAYOUT, ''));
     // Replacing it under the same id is the hook's right.
     const replaced = await composeAgentGuide(DEFAULT_KB_LAYOUT, (sections) =>
       sections.map((s) => (s.id === WORKING_WITH_FILES_SECTION_ID ? { id: s.id, body: '## Working with files\n\nOurs.\n' } : s)),

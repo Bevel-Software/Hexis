@@ -10,7 +10,7 @@ import { DEFAULT_KB_LAYOUT } from '@bevel-software/platform-shared';
 import { TOOL_PREFIX_LINE, platformInstructions } from '../compose.js';
 
 /** The platform-owned text the route leads with: header + the shared file rules. */
-const PLATFORM = platformInstructions(DEFAULT_KB_LAYOUT);
+const PLATFORM = platformInstructions(DEFAULT_KB_LAYOUT, '');
 
 /**
  * `GET /agent/instructions` behind the REAL manual-auth gate, with the three

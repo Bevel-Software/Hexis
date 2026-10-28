@@ -115,6 +115,12 @@ export interface McpProxyOptions {
    * pre-setup default. Absent, the rules name `AGENTS.md`.
    */
   kbLayout?: () => KbLayout;
+  /**
+   * The default branch in effect, read per request: the shared file rules
+   * name it as the branch people read. A GETTER for the same reason as the
+   * layout. Absent, the rules name no branch.
+   */
+  defaultBranch?: () => string;
   /** Bounds of the downstream (`mcp.json`) connection pool; defaults are 4h idle / 5000 entries. */
   downstreamPool?: Pick<DownstreamPoolOptions<unknown>, 'idleTtlMs' | 'maxEntries' | 'now'>;
   /**
@@ -1059,13 +1065,14 @@ export class McpService {
    */
   private async composeAgentInstructions(): Promise<ComposedAgentInstructions> {
     const layout = this.opts.kbLayout?.();
+    const defaultBranch = this.opts.defaultBranch?.();
     const read = this.opts.readAgentPreamble;
-    if (!read) return composeAgentInstructions(null, layout);
+    if (!read) return composeAgentInstructions(null, layout, defaultBranch);
     try {
-      return composeAgentInstructions(await read(), layout);
+      return composeAgentInstructions(await read(), layout, defaultBranch);
     } catch (err) {
       log.warn('could not read mcp-description.md; this request gets the platform text alone:', { err });
-      return composeAgentInstructions(null, layout);
+      return composeAgentInstructions(null, layout, defaultBranch);
     }
   }
 
