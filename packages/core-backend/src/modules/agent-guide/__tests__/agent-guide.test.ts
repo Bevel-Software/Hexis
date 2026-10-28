@@ -397,7 +397,10 @@ describe('the HTML views section', () => {
     // The rule names the deployment's own checkout folder; the page links on its branch by the tool's path.
     const docs = section(await composeAgentGuide(DEFAULT_KB_LAYOUT, undefined, { kbDirName: 'kb' }), '## HTML views');
     expect(docs.replace(/\s+/g, ' ')).toContain('starts with the checkout folder, `kb/Data/Tickets/A.md`');
-    expect(docs).toContain("link.href = '/workspace/' + encodeURIComponent(BRANCH) + '/' + ticket.path;");
+    // Each segment of the tool's path encoded on its own, so a name carrying `#` stays a name.
+    expect(docs).toContain(
+      "link.href = '/workspace/' + encodeURIComponent(BRANCH) + '/' + ticket.path.split('/').map(encodeURIComponent).join('/');",
+    );
     expect(docs).not.toContain('{{');
   });
 

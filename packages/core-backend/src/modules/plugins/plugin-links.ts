@@ -58,8 +58,25 @@ export const LINK_GRANT_VERBS = ['read', 'write'] as const;
 export interface LinkMembership {
   /** skill path → every plugin that holds it, inline or by link. */
   bySkill: Map<string, PluginMembership[]>;
-  /** plugin folder → its links. Every plugin folder appears, linked or not. */
+  /**
+   * plugin identity (`PluginLinks.name`) → its links. Every plugin appears,
+   * linked or not. A name and a folder may differ, so a repository path is
+   * read from the value's `folder`, never from the key.
+   */
   byPlugin: Map<string, PluginLinks>;
+}
+
+/**
+ * What a reader of the link index asks it — the contract a consumer outside
+ * this module (a distribution's agent-scope resolver, through
+ * `CorePorts.agentScope`) is written against. Dropping the cache is the
+ * index owner's affair, not a reader's, so it is not here.
+ */
+export interface IPluginLinkIndex {
+  /** Every plugin's links and every skill's memberships, from the released catalog. */
+  membership(): Promise<LinkMembership>;
+  /** The memberships of one skill (empty when it is in no plugin). */
+  pluginsOf(skillPath: string): Promise<PluginMembership[]>;
 }
 
 /**
@@ -88,7 +105,7 @@ export interface LinkMembership {
  * subscriber that drops the plugin index, so a link committed on the default
  * branch shows within one round-trip.
  */
-export class PluginLinkIndex {
+export class PluginLinkIndex implements IPluginLinkIndex {
   private readonly cache: TtlCache<LinkMembership>;
 
   constructor(

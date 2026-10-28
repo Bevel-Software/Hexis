@@ -192,12 +192,14 @@ and never loses the board they were reading:
 - **Link to what the tools named by the path they answered.** A path a tool
   answers (`read_file`'s `path`, a listing's `path`) starts with the checkout
   folder, `{{kbDirName}}/Data/Tickets/A.md`, and knows nothing of where the
-  page sits. Link to it on the branch the page read it from,
-  `'/workspace/' + encodeURIComponent(BRANCH) + '/' + path`, so a card and its
-  data come from one branch; a root-relative `'/' + path` opens it on the
-  branch the page is viewed on instead (see *How a link resolves*). Never
-  put the checkout folder in front of a path a tool answered: it is already
-  there.
+  page sits. Link to it on the branch the page read it from, each segment of
+  the path encoded on its own — `'/workspace/' + encodeURIComponent(BRANCH)
+  + '/' + path.split('/').map(encodeURIComponent).join('/')` — so a card and
+  its data come from one branch and a name carrying `#`, `?` or `%` stays
+  in the path rather than ending the URL at it; a root-relative `'/' +
+  path.split('/').map(encodeURIComponent).join('/')` opens it on the branch
+  the page is viewed on instead (see *How a link resolves*). Never put the
+  checkout folder in front of a path a tool answered: it is already there.
 
 A complete page that follows these rules — plain HTML and one inline script,
 no build step and no framework:
@@ -297,7 +299,8 @@ no build step and no framework:
       column.querySelector('.count').textContent = `(${mine.length})`;
       const items = mine.map((ticket) => {
         const link = document.createElement('a');
-        link.href = '/workspace/' + encodeURIComponent(BRANCH) + '/' + ticket.path;
+        // Each segment encoded on its own: a name with `#` in it stays a name.
+        link.href = '/workspace/' + encodeURIComponent(BRANCH) + '/' + ticket.path.split('/').map(encodeURIComponent).join('/');
         link.textContent = ticket.name;
         const item = document.createElement('li');
         item.append(link);
@@ -384,10 +387,12 @@ or `window.bevel.navigate(href)`:
 - **A root-relative path**, `/{{kbDirName}}/<path>`, opens that file on the
   page's own branch, in a new tab, from a page in any folder. A path a tool
   answered (`read_file`'s `path`, a listing's `path`) already starts with the
-  checkout folder, so it is linked as `'/' + path`, never with the folder put
-  in front of it again; a path the page composed itself, without that
-  prefix, gets `'/{{kbDirName}}/'` in front. A link the page's script
-  creates after load is kept as written.
+  checkout folder, so it is linked as `'/' +
+  path.split('/').map(encodeURIComponent).join('/')` — each segment encoded
+  on its own, so a name carrying `#`, `?` or `%` stays a name — never with
+  the folder put in front of it again; a path the page composed itself,
+  without that prefix, gets `'/{{kbDirName}}/'` in front. A link the page's
+  script creates after load is kept as written.
 - **`/workspace/<branch>/<path>`** opens that file on that branch, in a new
   tab.
 - **An external address** (`http:`, `https:`, `mailto:`) opens in a new tab.
