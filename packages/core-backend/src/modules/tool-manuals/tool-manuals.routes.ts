@@ -66,7 +66,7 @@ export function createToolManualsAgentRoutes(
     pluginIndex?: Pick<IPluginIndexService, 'catalog'>;
   },
   /**
-   * Resolves the scope of a connection made as an `.agent` file, so
+   * Resolves the scope of a connection made as an agent configuration, so
    * `all-tools` lists only the connectors it loads (`modules/agent-scope`).
    */
   agentScope?: Pick<IAgentScopeResolver, 'resolve'>,
@@ -89,7 +89,7 @@ export function createToolManualsAgentRoutes(
       // Default remote-safe: exclude local-only manuals unless the caller (a locally
       // installed MCP server) explicitly opts in with `?remote=false`.
       const remoteOnly = req.query.remote !== 'false';
-      // A connection made as an `.agent` file lists only the connectors that
+      // A connection made as an agent configuration lists only the connectors that
       // file loads, and says which agent it is — the MCP proxy words its
       // refusals and its handshake from that. Everything lists as it always
       // did, with no `connection` at all.
@@ -192,7 +192,7 @@ export function createToolManualsAgentRoutes(
       if (![...verdicts.values()].some((v) => v === true)) {
         return void res.status(404).json({ error: 'Not found' });
       }
-      // A connection made as an `.agent` file materializes only a plugin
+      // A connection made as an agent configuration materializes only a plugin
       // that defines a connector the file loads — the archive is how the
       // local MCP server runs one, and nothing else asks for it. Checked
       // before any file is opened.
@@ -302,7 +302,7 @@ export function createToolManualsAgentRoutes(
       const email = await callerEmail(req);
       if (!email) return void res.status(403).json({ error: 'Forbidden' });
       const slug = Array.isArray(req.params.slug) ? req.params.slug[0] : req.params.slug;
-      // A connection made as an `.agent` file reads only the manuals of the
+      // A connection made as an agent configuration reads only the manuals of the
       // connectors it loads; another is as absent as one the person cannot read.
       const scope = await resolveConnectionScope(agentScope, email, req.toolAuth?.agentPath);
       const within = scope.connectorFilter();

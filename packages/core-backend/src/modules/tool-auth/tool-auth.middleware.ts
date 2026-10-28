@@ -48,7 +48,7 @@ export interface ToolAuth {
    */
   connectionId?: string;
   /**
-   * The `.agent` file an EXTERNAL caller's connection was made as — a
+   * The agent configuration an EXTERNAL caller's connection was made as — a
    * connection key's `api_tokens.agent_path`, or the one an `externalProxy`
    * token carries for an agent connection. Absent is Everything. Every agent
    * surface resolves it to the connection's scope (`modules/agent-scope`).
@@ -153,7 +153,7 @@ export function createTokenVerifier(
   /**
    * Where an `externalProxy` token that names an agent connection reads the
    * connection's CURRENT choice: the token outlives a re-consent, so the
-   * `.agent` it was minted with may no longer be the one chosen. A
+   * agent it was minted with may no longer be the one chosen. A
    * connection no longer live (revoked, deleted) refuses the token. Absent,
    * the token's own choice stands.
    */

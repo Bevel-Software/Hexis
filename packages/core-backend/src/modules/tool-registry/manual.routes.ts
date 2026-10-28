@@ -64,7 +64,7 @@ export function createManualRoutes(
    */
   readOnlyHints?: Pick<IToolReadOnlyHints, 'apply'>,
   /**
-   * Resolves the scope of a connection made as an `.agent` file: the external
+   * Resolves the scope of a connection made as an agent configuration: the external
    * manual then lists only the platform tools it loads, and the providers word
    * their descriptions for it (`modules/agent-scope`).
    */
@@ -98,7 +98,7 @@ export function createManualRoutes(
   router.get('/agent/utcp', manualAuth, async (req, res) => {
     const ctx = await context(req);
     const tools = await registry.listExternal(ctx);
-    // A connection made as an `.agent` file is offered only the platform
+    // A connection made as an agent configuration is offered only the platform
     // tools that file loads; a call to another is refused at its route.
     const scope = ctx.connectionScope;
     const offered = scope ? tools.filter((t) => scope.allowsPlatformTool(t.name)) : tools;

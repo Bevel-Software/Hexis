@@ -2,18 +2,20 @@ import { authFetch } from '../../../lib/api';
 
 /**
  * Connecting as an agent: an MCP connection or a connection key is made as
- * Everything (all the person may read) or as one `.agent` file of the
- * knowledge base, whose lists narrow what the connection loads. Mirrors the
- * backend's `modules/agent-scope` contract.
+ * Everything (all the person may read) or as one agent configuration of the
+ * knowledge base, whose lists narrow what the connection loads. What a
+ * configuration is — the file kind, what it says — is the distribution's;
+ * this mirrors the backend's `modules/agent-scope` contract, which only
+ * names the configuration by its path.
  */
 
-/** One `.agent` file the signed-in person may connect as. */
+/** One agent configuration the signed-in person may connect as. */
 export interface AgentChoice {
-  /** Repo-relative path of the file — what the connection records. */
+  /** Repo-relative path of the configuration — what the connection records. */
   path: string;
-  /** Its `name`, else its file name. */
+  /** Its name, as the choice shows it. */
   name: string;
-  /** Its `description`, one line; empty when it has none. */
+  /** Its description, one line; empty when it has none. */
   description: string;
 }
 
@@ -27,11 +29,11 @@ export async function listAgentChoices(): Promise<AgentChoice[]> {
 
 /**
  * How a connection's choice reads beside it: "Everything" for none, else the
- * agent's file name (the stored record is the path; its frontmatter name is
- * the file's to change).
+ * configuration's file name without its extension (the stored record is the
+ * path; the name its definition carries is the distribution's to show).
  */
 export function connectedAsLabel(agentPath: string | null | undefined): string {
   if (!agentPath) return 'Everything';
   const base = agentPath.slice(agentPath.lastIndexOf('/') + 1);
-  return base.replace(/\.agent$/i, '') || agentPath;
+  return base.replace(/\.[a-z0-9]+$/i, '') || agentPath;
 }

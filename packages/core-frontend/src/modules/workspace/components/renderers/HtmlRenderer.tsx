@@ -51,7 +51,7 @@ export function HtmlRenderer({
   onSaveStateChange,
   readOnly = false,
 }: FileRendererProps) {
-  const { openLink } = useFileNav();
+  const { openLink, branch: tabBranch } = useFileNav();
   // The fragment this tab's address arrived with (`Board.html#totals`, from a
   // section link opened in a new tab or a shared address). It names a place
   // in the PAGE, which lives in the frame, where the app's address never
@@ -144,12 +144,16 @@ export function HtmlRenderer({
         libModuleSources: [],
         bodyHtml: sanitizeAgentHtml(savedValue),
         toolBridge,
+        // The branch the page is viewed on — the real home of a page whose
+        // host is not a workspace path (a skill page), else the file page's
+        // tab: the same branch its links resolve on. Absent on a surface.
+        branch: linkHome?.branch ?? tabBranch ?? undefined,
       });
       return { srcdoc, error: null };
     } catch (err) {
       return { srcdoc: null, error: err instanceof Error ? err.message : 'Failed to build preview' };
     }
-  }, [mode, savedValue, filePath, toolBridge]);
+  }, [mode, savedValue, filePath, toolBridge, linkHome, tabBranch]);
   const bundledSrcdoc = preview?.srcdoc ?? null;
   const previewError = preview?.error ?? null;
 

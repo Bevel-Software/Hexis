@@ -55,6 +55,11 @@ const MANUALS = [
 
 const toolManualService = {
   listAccessible: async () => MANUALS,
+  // The sign-in start reads the declaration from the file; here it reads as the catalog does.
+  liveDeclaration: async (_who: string, slug: string, varName: string) => {
+    const manual = MANUALS.find((m) => m.slug === slug);
+    return manual ? { manual, variable: manual.variables.find((v) => v.name === varName) } : null;
+  },
 } as unknown as Parameters<typeof createSecretsVaultRoutes>[0]['toolManualService'];
 
 const accessControl = {

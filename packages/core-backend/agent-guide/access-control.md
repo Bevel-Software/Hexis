@@ -9,7 +9,7 @@ Access to any path — reading it as much as writing it — is governed by
   role to a group* below). Role names are
   case- and whitespace-insensitive (`Admin` = `admin` = `ADMIN`; `Product Team`
   = `product team`). The reserved names `deny` and `everyone` cannot be used, and neither can
-  names starting with `role/` or `plugin/` — those spellings are tokens in
+  names starting with `role/`, `group/` or `plugin/` — those spellings are tokens in
   access entries (below). One exception to the file's authority: the
   **deployment admin** — the address the server configuration sets as
   `ADMIN_EMAIL` — is **always an Admin**, whether or not `roles.yaml` lists
@@ -35,8 +35,11 @@ Access to any path — reading it as much as writing it — is governed by
   denials (the lowercase word `deny`, a space, then the principal).
   Capitalised forms like `Deny` are *not* triggers; they are treated as part
   of a name.
-- **Principals** are a role name from `roles.yaml`, a group name from
-  `groups.yaml`, a person as `Name <email>`, a plugin token (above), or
+- **Principals** are a role (`role/<Name>`, from `roles.yaml`), a group
+  (`group/<Name>`, from the active group source — `groups.yaml`, or
+  `synced-groups.yaml` when groups sync from an identity provider), a person
+  as `Name <email>`, a plugin
+  token (above), or
   **`everyone`** — the built-in org-wide principal: every signed-in person and
   their agents. `read: everyone` in a folder's BODY opens that folder to the
   whole organisation; it is how an organisation-wide skill or plugin is
@@ -46,8 +49,17 @@ Access to any path — reading it as much as writing it — is governed by
   to the plugin itself. A person's personal plugin
   (`{{pluginsDir}}/personal-<id>/`) grants its owner access and denies
   `everyone` outright, so opening a parent folder never opens it.
-  When a group and a role share a name, the bare name means the GROUP;
-  `role/<Name>` (for example `deny role/Reviewer`) always means the role.
+  **Write roles as `role/<Name>` and groups as `group/<Name>`** — for
+  example `read: group/Platform Team` or `deny role/Reviewer`; the Manage
+  access dialog writes them that way too. A bare name (`read: Reviewer`)
+  still works and means the ROLE when a role of that name exists, and the
+  group otherwise. So a group that shares a role's name is reached only as
+  `group/<Name>`: a bare `read: Admin` reaches the `Admin` role, never the
+  members of a group named `Admin` (unless `roles.yaml` itself lists that
+  group under the role). The same holds for a denial: a bare
+  `deny Admin` denies the role, so denying a same-named group needs
+  `deny group/Admin`. `role/<Name>` always means the role,
+  `group/<Name>` always the group.
 - **Keep an `access.md` body pure YAML**, with any explanation in `#` comments.
   A body that does not parse as YAML naming at least one verb is read in the
   older format instead, where the FRONTMATTER carried the folder's rules — so a
@@ -171,9 +183,8 @@ roles:
 - **With denials.** Group members hold the role's grants exactly as if they
   were listed by email. A denial of the role in an `access.md`
   (`deny role/Reviewer`) therefore removes the role's contribution for
-  everyone in the group, as it does for the emails. Write the `role/` form:
-  a bare `deny Reviewer` would deny a group named `Reviewer` instead, if one
-  exists. The nearest `access.md` that says
+  everyone in the group, as it does for the emails. To deny the group
+  instead, write `deny group/Platform Team`. The nearest `access.md` that says
   anything about the person decides: a person granted by name
   (`Name <email>`) in the SAME `access.md` as the denial keeps that access,
   because within one file a person's own entry beats a role entry. A grant by

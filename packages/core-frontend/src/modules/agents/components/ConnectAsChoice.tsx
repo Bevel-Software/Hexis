@@ -21,13 +21,20 @@ export interface ConnectAsChoiceProps {
 }
 
 /**
- * "Connect as": Everything (selected by default) or one `.agent` file, by
+ * "Connect as": Everything (selected by default) or one agent configuration, by
  * name with its description. Used where a connection is made — the OAuth
  * consent step and the connection-key form — so both offer the same choice
  * the same way.
+ *
+ * With no agent on offer there is no choice to make, and nothing is shown:
+ * the connection is Everything's, as every connection was before agents
+ * existed, and a page with one radio button would only ask what it cannot
+ * be asked. The one exception is a listing that FAILED — then the person is
+ * told, and confirms Everything, since the agents may well exist.
  */
 export function ConnectAsChoice({ agents, value, onChange, disabled, hint, unavailable }: ConnectAsChoiceProps) {
   const name = useId();
+  if (agents.length === 0 && !unavailable) return null;
   const options: { path: string | null; title: string; detail: string }[] = [
     {
       path: null,
@@ -65,7 +72,7 @@ export function ConnectAsChoice({ agents, value, onChange, disabled, hint, unava
       </div>
       {unavailable && (
         <div role="alert" className="text-xs text-danger bg-danger-soft border border-danger rounded-md px-2 py-1.5 space-y-1">
-          <p>Your agent files couldn't be loaded, so only Everything can be chosen right now.</p>
+          <p>Your agents couldn't be loaded, so only Everything can be chosen right now.</p>
           <label className="flex items-center gap-1.5 cursor-pointer">
             <input
               type="checkbox"

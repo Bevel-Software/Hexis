@@ -42,7 +42,7 @@ export interface ToolContextDeps {
     read: (filename: string) => Promise<string | null>,
   ) => Promise<{ groups: GroupsIndex; sourceFile: string; health: { ok: boolean } }>;
   /**
-   * Resolves the scope of a connection made as an `.agent` file. Every
+   * Resolves the scope of a connection made as an agent configuration. Every
    * deployment passes it. Absent, a credential that names an agent loads
    * nothing — a narrowing that cannot be read is never read as Everything.
    */

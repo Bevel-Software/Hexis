@@ -35,7 +35,7 @@ export class DeploymentError extends Error {
 
 /**
  * The deployment refused what the connection does not load: a connection
- * made as an `.agent` file that cannot be used (gone, unreadable, invalid)
+ * made as an agent configuration that cannot be used (gone, unreadable, invalid)
  * loads nothing, and says so in the refusal's own sentence. Not a permission
  * problem — told apart from one, so a discovery read of such a connection
  * answers "nothing" rather than failing the server.
@@ -106,7 +106,7 @@ async function getJson(
   }
   if (res.status === 403 && authed) {
     // A refusal of what the connection does not load — a connection made as
-    // an `.agent` file that cannot be used — is the deployment's own answer,
+    // an agent configuration that cannot be used — is the deployment's own answer,
     // with its code and sentence, not a permission problem with the credential.
     const refusal = (await res
       .clone()
@@ -334,7 +334,7 @@ export type RawManual = Record<string, unknown> & { name?: unknown };
 
 /**
  * Every manual the caller can read, local-only ones included — and, for a
- * connection made as an `.agent` file, the agent it is narrowed to as the
+ * connection made as an agent configuration, the agent it is narrowed to as the
  * deployment says it (`connection`), which words this server's refusals and
  * its listing; absent for Everything.
  *
@@ -394,7 +394,7 @@ export async function fetchLocalOnlyManuals(config: HexisMcpConfig): Promise<Map
       renew: renewer(config),
     })) as { tools?: unknown };
   } catch (err) {
-    // A connection that loads nothing (its agent file gone, unreadable or
+    // A connection that loads nothing (its agent configuration gone, unreadable or
     // invalid) has no local-only tools, and the deployment's answer says so
     // with the sentence the manual list carries too: not a failed discovery.
     if (err instanceof NotAvailableToConnectionError) return new Map();

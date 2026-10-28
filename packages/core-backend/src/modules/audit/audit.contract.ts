@@ -129,7 +129,7 @@ export interface AuditPrincipal {
   eventCount: number;
   user: { id: string; email: string; name: string };
   /**
-   * For a key or an agent connection: the `.agent` file it connects as (a
+   * For a key or an agent connection: the agent configuration it connects as (a
    * repo-relative knowledge-base path), or null for Everything. Absent for a
    * page, which acts as its viewer.
    */

@@ -428,6 +428,7 @@ export async function createCoreServer(
     toolManualService: core.toolManualService,
     accessControl: core.accessControl,
     connectionProbe: core.connectionProbeService,
+    agents: core.agentScopeService,
     stateSecret: core.config.jwtSecret,
     publicBackendUrl: core.config.publicBackendUrl,
     publicFrontendUrl: core.config.publicFrontendUrl,
@@ -715,6 +716,7 @@ export async function createCoreServer(
     core.eventBus,
     core.db,
     core.kb,
+    core.disk,
     [core.config.adminEmail],
   ));
   // Asking for Can edit or Owner on an item from its Manage access dialog, and

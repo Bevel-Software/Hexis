@@ -498,7 +498,7 @@ export async function createHexisMcpServer(
   // through its JWT mounts with a 401, which reads as a dead credential):
   // its revision is the catalog watch's baseline below, and what the
   // connection is narrowed to goes into the `initialize` result — a
-  // connection made as an `.agent` file is told so, as the hosted endpoint
+  // connection made as an agent configuration is told so, as the hosted endpoint
   // tells it, and one that loads nothing is told why there. Never fatal: a
   // deployment that cannot answer is one whose tools still work, frozen at
   // what discovery finds, an unknown baseline costs exactly one refresh (see
@@ -1159,7 +1159,7 @@ export async function createHexisMcpServer(
       // toolset is what a tool-less workspace looks like, and a client that
       // shows one gives its reader nothing to act on.
       if (discoveryError !== null) return { tools: [discoveryNoticeTool(discoveryError)] };
-      // A connection whose agent file cannot be used loads NOTHING — not
+      // A connection whose agent configuration cannot be used loads NOTHING — not
       // Everything — and the one sentence saying why rides the listing's
       // `_meta`, as it does on the hosted endpoint (the handshake carries it too).
       if (connection?.unavailable) return { tools: [], _meta: { [CONNECTION_META_KEY]: connection.unavailable } };

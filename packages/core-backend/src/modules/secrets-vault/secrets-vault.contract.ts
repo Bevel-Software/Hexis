@@ -75,6 +75,13 @@ export interface SecretConfigStatus {
 }
 
 /**
+ * A declared sign-in's public provider configuration, as the tool file reads it:
+ * everything but the secret (only the owner's shared row holds it) and the
+ * public-client flag (a declared client is confidential by definition).
+ */
+export type DeclaredOAuthProvider = Omit<OAuthProviderConfig, 'clientSecret' | 'publicClient'>;
+
+/**
  * How a secret is provisioned — mirrors `ToolVariableScope` in the tool-manuals
  * contract, redeclared here to keep the vault free of a tool-manuals import.
  */
@@ -186,8 +193,10 @@ export interface ISecretsVaultService {
   /**
    * Set the confidential client secret + provider config for a tool's OAuth-backed
    * variable, on the SHARED row (`user_id NULL`) for `key`. The provider meta is
-   * stored ALONGSIDE the secret so a later `.tool` edit can't redirect it. Owner-
-   * gated by the route (write access on the `.tool`).
+   * stored ALONGSIDE the secret as a record of the save; a sign-in follows the
+   * declaration as the tool file reads when it starts (`beginToolOAuthByKey`'s
+   * `provider`), not this copy. Owner-gated by the route (write access on the
+   * `.tool`).
    */
   putSharedOAuthClientSecret(input: {
     key: string;
@@ -212,16 +221,26 @@ export interface ISecretsVaultService {
    */
   getSharedOAuthProvider(key: string): Promise<OAuthProviderConfig | null>;
   /**
-   * Provision (if needed) the caller's per-user oauth row for `key` from the SHARED
-   * row's stored provider meta + client secret, then build the consent URL. 409 if
-   * the owner hasn't set the client secret. Returns the provisioned row's id (to
-   * sign into the callback state) and the consent url.
+   * Provision (if needed) the caller's per-user oauth row for `key` and build the
+   * consent URL. 409 if the owner hasn't set the client secret. Returns the
+   * provisioned row's id (to sign into the callback state) and the consent url.
    *
-   * `scopes`, when given, are the permissions to REQUEST on the consent screen —
-   * supplied by the caller from the live tool file so a scope added there takes
-   * effect without the owner re-entering the secret. Only the requested scopes
-   * follow the tool file; the client id, addresses, and secret are still read from
-   * the owner-set shared row. Omitted → the shared row's stored scopes are used.
+   * Where the provider configuration comes from depends on who registered the
+   * client, and each kind of sign-in has exactly one source:
+   *   - `provider` given — a DECLARED sign-in: the client id, endpoints, PKCE,
+   *     resource and authorize params are the declaration as the tool file reads
+   *     now, handed over by the caller. They are validated as the client-secret
+   *     save validates them (https, no private or local address) before anything
+   *     is written or built, and they are what the caller's row records, so the
+   *     token exchange and later refreshes of this grant use the configuration
+   *     the consent was given for. The shared row contributes the client secret
+   *     only, and must hold one.
+   *   - `provider` absent — a client the platform registered itself (dynamic
+   *     client registration): nothing in a file describes it, so the shared
+   *     row's stored configuration is used.
+   *
+   * `scopes`, when given, are the permissions to REQUEST on the consent screen
+   * (the live tool file's); omitted → the provider configuration's own scopes.
    */
   beginToolOAuthByKey(input: {
     userId: string;
@@ -229,6 +248,7 @@ export interface ISecretsVaultService {
     redirectUri: string;
     state: string;
     scopes?: string[];
+    provider?: DeclaredOAuthProvider;
   }): Promise<{ id: string; url: string }>;
 
   /**

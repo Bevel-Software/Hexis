@@ -11,6 +11,7 @@ import type { WorkflowEventBus } from '../../workflow/event-bus.js';
 import { createAccessRoutes } from '../access.routes.js';
 import { usersDbDouble } from './users-db-double.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
+import { NodeFs } from '../../kb-fs/node-fs.js';
 
 /**
  * HTTP-level contract tests for the revoke route's CLASSIFICATION + MODE logic —
@@ -56,6 +57,8 @@ async function makeHarness(opts: {
   effectiveEmails?: Record<string, boolean>;
   /** Override the (otherwise-empty) eligibleWriters list so a principal shows as a row in resolvedView. */
   eligibleWriters?: { roles: string[]; users: { name: string; email: string }[] };
+  /** kbPrincipals' roles — empty (the default) reads as a model that failed to load. */
+  roles?: string[];
 }): Promise<Harness> {
   const files = new Map<string, string>(Object.entries(opts.files ?? {}));
 
@@ -79,8 +82,8 @@ async function makeHarness(opts: {
     invalidate: vi.fn(),
     // The mutation service consults the merged principal index to decide
     // exact-vs-name token matching on revoke (group shadowing). No groups in
-    // these fixtures → unshadowed (name-level) matching, the legacy behavior.
-    kbPrincipals: vi.fn(async () => ({ roles: [], groups: [], people: [] })),
+    // these fixtures; no roles (the default) reads as a failed load → exact.
+    kbPrincipals: vi.fn(async () => ({ roles: opts.roles ?? [], groups: [], people: [] })),
     // resolvedView() fans out to these after a successful mutation; harmless stubs.
     // canRead/canDownload/canOwner are ALSO consumed by denyHere's assert.
     canRead: vi.fn(async (_w: string, email: string) => effEmail(email, true)),
@@ -134,7 +137,7 @@ async function makeHarness(opts: {
     (req as unknown as { userId: string }).userId = USER.id;
     next();
   });
-  app.use('/api', createAccessRoutes(accessControl, workspaceService, authService, authService, workflowService, eventBus, db, testKbContext({ kbDirName: KB })));
+  app.use('/api', createAccessRoutes(accessControl, workspaceService, authService, authService, workflowService, eventBus, db, testKbContext({ kbDirName: KB }), new NodeFs()));
 
   const server = await new Promise<Server>((resolve) => {
     const s = app.listen(0, () => resolve(s));
@@ -285,16 +288,16 @@ describe('POST /access/revoke — route classification + modes', () => {
       expect(h.stubs.files.get(`${KB}/Sales/access.md`)).toContain('Admin'); // untouched
     });
 
-    it('a GROUP revoke matches its exact bare token only — a VANISHED group never strips role/<Name>', async () => {
-      // The file grants BOTH spellings of one name: the bare token (the
-      // group's grant) and role/Product (the role's). The group has since
-      // vanished from the active source (kbPrincipals reports no groups), so
-      // the mutation layer's shadow probe reads "unshadowed" — name-level
-      // matching would strip BOTH spellings, silently revoking the ROLE. The
-      // route pins exact-token matching for group principals instead.
+    it('a GROUP revoke strips group/<Name> — a VANISHED group never strips the role spellings', async () => {
+      // The file grants every spelling of one name: the bare token and
+      // role/Product (the role's) and group/Product (the group's). The group
+      // has since vanished from the active source and the principal index
+      // says nothing about roles either (kbPrincipals reports none), so
+      // nothing vouches that the bare name is the group's: only the explicit
+      // group token goes.
       h = await makeHarness({
         files: {
-          [`${KB}/Sales/access.md`]: '---\nwrite:\n  - Product\n  - role/Product\n---\n',
+          [`${KB}/Sales/access.md`]: '---\nwrite:\n  - Product\n  - role/Product\n  - group/Product\n---\n',
         },
         grantSources: () => ({}),
       });
@@ -305,9 +308,10 @@ describe('POST /access/revoke — route classification + modes', () => {
       });
       expect(res.status).toBe(200);
       const text = h.stubs.files.get(`${KB}/Sales/access.md`)!;
-      // The group's bare grant is gone; the role's explicit grant survives.
+      // The group's grant is gone; the role's spellings survive.
+      expect(text).not.toContain('group/Product');
       expect(text).toContain('- role/Product');
-      expect(text.split('\n')).not.toContain('  - Product');
+      expect(text.split('\n')).toContain('  - Product');
     });
 
     it('a ROLE revoke still sweeps legacy bare spellings when nothing shadows the name', async () => {
@@ -318,6 +322,7 @@ describe('POST /access/revoke — route classification + modes', () => {
           [`${KB}/Sales/access.md`]: '---\nwrite:\n  - Product\n  - role/Product\n---\n',
         },
         grantSources: () => ({}),
+        roles: ['Everyone', 'Product'],
       });
       const res = await revoke({
         path: `${KB}/Sales`,

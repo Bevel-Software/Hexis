@@ -1,8 +1,0 @@
----
-'@bevel-software/platform-core-backend': minor
-'@bevel-software/platform-core-frontend': patch
----
-
-Changing your password ends every session opened with the old one. Each account carries a session generation (`users.session_version`, migration 0022, added `IF NOT EXISTS`) that every sign-in token records; a password write — the Account page's own change, an admin's reset, a starting password set on an invite — moves it on in the same write that stores the new hash, so a token or cookie issued before the change is refused at its next request on every replica, with a 401 that says the password was changed. The session that made the change is handed a fresh token, in the body and the auth cookie, which the Account page stores; its submit is disabled while a change is in flight, and a 401 from a request still carrying the old token no longer signs the changer out. A change whose current password is no longer current — another session changed it first, or a double click — writes nothing and is answered 409 in words. Tokens issued before this release count as the first generation, so the upgrade signs nobody out.
-
-The auth cookie has one issue site, `setAuthCookie`, for password login, the password change and the SSO providers alike, and its `Secure` flag follows the scheme the deployment is reached on (`authCookieSecure`) rather than `NODE_ENV`, so a deployment served over plain http keeps its event stream and inline images. `createAuthRoutes` takes `{ cookieSecure }` as a fifth argument. A password write the service refuses on purpose raises `PasswordRefusedError` and is answered 400 with its words; any other failure of the change-password and `GET /api/auth/me` routes is logged and answered with a generic 500, never the driver's message.

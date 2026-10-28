@@ -564,7 +564,7 @@ export function ExternalAgentAccessPage() {
                 agents={connectAs.agents}
                 value={connectAs.value}
                 disabled={creating}
-                hint="What the key loads. An agent file narrows it to the tools, skills and plugins the file lists, and only those you may read."
+                hint="What the key loads. An agent narrows it to the tools, skills and plugins its configuration lists, and only those you may read."
                 onChange={connectAs.setValue}
                 unavailable={connectAs.unavailable}
               />
@@ -608,7 +608,14 @@ export function ExternalAgentAccessPage() {
                         <div className="flex-1 min-w-0">
                           <div className="font-medium truncate">{k.label}</div>
                           <div className="text-[11px] text-ink-muted">
-                            <span title={k.agentPath ?? undefined}>As {connectedAsLabel(k.agentPath)}</span> · Created{' '}
+                            {/* Only a key made as an agent says so; Everything is what a key
+                                is unless it says otherwise, and needs no tag. */}
+                            {k.agentPath && (
+                              <>
+                                <span title={k.agentPath}>As {connectedAsLabel(k.agentPath)}</span> ·{' '}
+                              </>
+                            )}
+                            Created{' '}
                             {formatRelative(k.createdAt)} · Last used {formatRelative(k.lastUsedAt)}
                             {/* A key an admin took is not one you can reconnect — say so,
                                 or people try. Your own disconnect keeps its word. */}

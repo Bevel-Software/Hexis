@@ -22,7 +22,7 @@ export const CONNECTION_META_KEY = 'software.bevel.hexis/connection';
 
 /** The agent a connection was made as, by the file that defines it. */
 export interface ScopeAgent {
-  /** Repo-relative path of the `.agent` file. */
+  /** Repo-relative path of the agent configuration, as the distribution records it. */
   path: string;
   /** Its name — the frontmatter `name`, else the file's base name; the path when the file cannot be read. */
   name: string;

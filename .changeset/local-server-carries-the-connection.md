@@ -1,9 +1,0 @@
----
-'@bevel-software/hexis-mcp': minor
-'@bevel-software/platform-mcp-core': minor
-'@bevel-software/platform-core-backend': patch
----
-
-The local server (`hexis-mcp`) carries what a connection is narrowed to, as the hosted endpoint does. A connection made as an `.agent` file is told so in its `initialize` instructions, a tool off its surface is refused by name and agent rather than as "unknown", and a connection whose file is gone or unreadable starts, lists no tools (with the deployment's sentence in `tools/list`'s `_meta`), answers every call with that sentence, and is not reported as a failed discovery. The deployment says so on its manual list and its catalog revision (`connection`), which the server reads once at startup — the same read that seeds the catalog watch's baseline, so a deployment is asked nothing more than before — and again with every discovery, so an edit to the file reaches the handshake's successor listing without a restart. `fetchAllManuals` now answers `{ manuals, connection? }` rather than the bare array, `fetchCatalogState` answers the revision together with the connection (`fetchCatalogRevision` keeps answering the revision alone), and `fetchLocalOnlyManuals` answers an empty map, not an error, to a connection that loads nothing (`NotAvailableToConnectionError`, a 403 with code `not_available_to_connection`).
-
-The wire format is one module of `@bevel-software/platform-mcp-core`: `ConnectionScopeWire`, `ScopeAgent`, `connectionWireOf` (the one parser of a response body's `connection`, which drops a malformed one), `connectionRefusal` and `describeConnection` (the sentences both servers say), `NOT_AVAILABLE_TO_CONNECTION` and `CONNECTION_META_KEY`. The backend's `modules/agent-scope` re-exports them, so the hosted proxy and the local server cannot drift apart.

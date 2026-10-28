@@ -158,7 +158,7 @@ describe('the html-views guide section agrees with the renderer', () => {
     const named = new Set([...guide.matchAll(/window\.bevel\??\.(\w+)/g)].map((m) => m[1]!));
     expect([...named].sort()).toEqual(Object.keys(runBridge().bevel).sort());
     expect([...named].sort()).toEqual(Object.keys(runBridge({}, { toolBridge: true }).bevel).sort());
-    expect([...named].sort()).toEqual(['navigate', 'openNode', 'requireTools', 'tools']);
+    expect([...named].sort()).toEqual(['branch', 'navigate', 'openNode', 'requireTools', 'tools']);
     expect(flat).toContain('A distribution may add data members of its own to `window.bevel`');
   });
 

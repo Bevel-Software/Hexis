@@ -145,7 +145,7 @@ export function registerSkillsTools(
   declareRouteTool('get_skill', GET_SKILL_INPUTS);
 
   // Both skill routes are also how prompts are read (`discovery`): a
-  // connection made as an `.agent` file that names skills has them as
+  // connection made as an agent configuration that names skills has them as
   // prompts even when its `platformTools` does not offer these two tools.
   router.post(
     '/agent/tools/list_skills',
