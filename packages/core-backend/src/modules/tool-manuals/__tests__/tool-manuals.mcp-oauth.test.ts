@@ -434,6 +434,32 @@ describe('ToolManualService — MCP OAuth auto-discovery decoration', () => {
       warn.mockRestore();
     });
 
+    test('a workspace that cannot be opened is an error for a sign-in start, where the catalog answers empty', async () => {
+      await writeDeclaredServer({ clientId: 'owner-app', ...HUBSPOT_ENDPOINTS });
+      const down = {
+        getOrCreateForBranch: async () => {
+          throw new Error('workspace unavailable');
+        },
+      } as unknown as WorkspaceService;
+      const allowAll = {
+        canRead: async () => true,
+        canReadBatch: async (_w: string, _e: string, paths: string[]) => new Map(paths.map((p) => [p, true])),
+      } as unknown as IAccessControl;
+      const svc = new ToolManualService(
+        down,
+        allowAll,
+        testKbContext({ kbDirName: KB_DIR }),
+        disk,
+        realPluginSource(disk, testKbContext({ kbDirName: KB_DIR })),
+      );
+      // The catalog degrades to "nothing released" and tries again next scan…
+      await expect(svc.listAccessible('user@example.com')).resolves.toEqual([]);
+      // …but a sign-in start must not read that as "no sign-in declared".
+      await expect(svc.liveDeclaration('user@example.com', 'hubspot', 'HUBSPOT_TOKEN')).rejects.toThrow(
+        'workspace unavailable',
+      );
+    });
+
     test('answers no variable when the file declares none of that name, and null for an unreadable manual', async () => {
       await writeDeclaredServer({ clientId: 'owner-app', ...HUBSPOT_ENDPOINTS });
       const statusFor = vi.fn(async () => ({ status: 'oauth' as const, provider: OAUTH_PROVIDER }));

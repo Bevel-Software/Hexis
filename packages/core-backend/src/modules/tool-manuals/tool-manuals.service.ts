@@ -367,8 +367,10 @@ export class ToolManualService implements IToolManualService {
     // the descriptor comes out of exactly the parse, plugin discovery and
     // namespace dedup the catalog applies — a sign-in start is rare and
     // interactive, and a second, single-file reading of the same files is a
-    // second place for those rules to drift.
-    const { manuals, refused } = await this.readableBy(await this.scanDisk(), userEmail);
+    // second place for those rules to drift. A workspace that cannot be opened
+    // is an error here, never an empty answer: "no sign-in declared" would be
+    // the wrong diagnosis for a server that could not read its files.
+    const { manuals, refused } = await this.readableBy(await this.scanDisk(undefined, 'throw'), userEmail);
     const m = manuals.find((x) => x.slug === slug);
     if (!m) {
       // The file is there and says it is this manual, but the parse refused
@@ -947,11 +949,22 @@ export class ToolManualService implements IToolManualService {
    * calls: a refusal lives only in the scan it came from, so a fixed file is a
    * valid manual on the very next scan.
    */
-  private async scanDisk(branch: string = this.kb.defaultBranch): Promise<ScanResult> {
+  private async scanDisk(
+    branch: string = this.kb.defaultBranch,
+    /**
+     * What a workspace that cannot be opened means. For the catalog, an empty
+     * scan: a listing surface answers "nothing released" and the next scan
+     * tries again. For a sign-in start (`liveDeclaration`), the error itself:
+     * an empty answer there would read as "this tool has no sign-in", a
+     * misconfiguration, when the server could not read its files at all.
+     */
+    workspaceFailure: 'empty' | 'throw' = 'empty',
+  ): Promise<ScanResult> {
     let wsId: string;
     try {
       wsId = (await this.workspaceService.getOrCreateForBranch(branch)).id;
-    } catch {
+    } catch (err) {
+      if (workspaceFailure === 'throw') throw err;
       return emptyScan();
     }
     const kbRoot = path.join(await this.workspaceService.getWorkspacePath(wsId), this.kbDirName);
