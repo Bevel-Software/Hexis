@@ -49,12 +49,17 @@ async function serve(opts: {
   begin?: (input: Record<string, unknown>) => Promise<{ id: string; url: string }>;
   canWrite?: boolean;
   varName?: string;
+  /** The live read fails outright (the workspace cannot be opened) instead of answering. */
+  liveError?: Error;
 }) {
   const beginToolOAuthByKey = vi.fn(
     opts.begin ?? (async () => ({ id: 'row-1', url: 'https://app.hubspot.example/oauth/authorize?client_id=x' })),
   );
   const putSharedOAuthClientSecret = vi.fn(async () => {});
-  const liveDeclaration = vi.fn(async () => opts.live);
+  const liveDeclaration = vi.fn(async () => {
+    if (opts.liveError) throw opts.liveError;
+    return opts.live;
+  });
   const deps = {
     secretsVault: { beginToolOAuthByKey, putSharedOAuthClientSecret },
     toolManualService: { listAccessible: async () => opts.catalog, liveDeclaration },
@@ -195,5 +200,20 @@ describe('POST …/oauth/start — a declared sign-in follows the live declarati
     const s = await serve({ catalog: [], live: null });
     expect((await s.start()).status).toBe(404);
     expect(s.beginToolOAuthByKey).not.toHaveBeenCalled();
+  });
+
+  it('answers 500 when the tool files cannot be read, never a misconfiguration verdict from the catalog', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    // The catalog still holds a declared sign-in; a live read that fails must
+    // not fall back to it and answer "owner hasn't finished" (409) or "not
+    // found" (404) for what is a server fault.
+    const stale = manual([signIn({ clientId: 'client-A', ...ENDPOINTS })], { kind: 'oauth-manual' });
+    const s = await serve({ catalog: [stale], live: null, liveError: new Error('workspace unavailable') });
+
+    const res = await s.start();
+    expect(res.status).toBe(500);
+    expect(((await res.json()) as { error: string }).error).toBe('Internal error');
+    expect(s.beginToolOAuthByKey).not.toHaveBeenCalled();
+    error.mockRestore();
   });
 });
