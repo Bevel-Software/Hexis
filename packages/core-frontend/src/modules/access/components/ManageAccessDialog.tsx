@@ -373,7 +373,7 @@ function NoAccountNote({ help = NO_ACCOUNT_HELP }: { help?: string }) {
 
 /**
  * A principal's row/chip identity. Kind is PART of it: a group and a role
- * sharing a name are DIFFERENT principals server-side (bare token vs
+ * sharing a name are DIFFERENT principals server-side (`group/<name>` vs
  * `role/<name>`), so they key — and chip — separately (`g:` vs `r:`). One
  * name picked as both is two chips, and each grants its own kind.
  */
@@ -739,7 +739,7 @@ function buildRows(data: AccessResponse | null, myEmail: string): PrincipalRow[]
     list.principals ?? list.roles.map((name) => ({ name, kind: 'role' as const }));
   const touchCollective = (c: ResolvedPrincipal): PrincipalRow => {
     // Rows are keyed by KIND + name (`g:`/`r:`/`p:`) — the backend treats a
-    // bare `Product` (group) and `role/Product` (role) as DIFFERENT
+    // `group/Product` (group) and `role/Product` (role) as DIFFERENT
     // principals, so a group and a role sharing a name are two rows, each
     // mutating its own grant. Collapsing them to one row silently pointed
     // every edit at the group and hid the role's grant entirely. A plugin
@@ -1258,16 +1258,16 @@ export function ManageAccessDialog({
 
   // Resolve the CURRENT typed query into a principal to append as a chip: an
   // exact group/role match or a free-typed email. (Suggestion clicks append
-  // directly.) Group first — bare grant tokens resolve group-first, so a name
-  // shared by both defaults to the audience concept; the role stays reachable
-  // via its own suggestion row.
+  // directly.) Role first — a bare name in an access rule means the role when
+  // one exists, so a typed name shared by both picks what that name means; the
+  // group stays reachable via its own suggestion row.
   const addPending: Principal | null = useMemo(() => {
     const q = query.trim();
     if (!q) return null;
-    const groupHit = suggest?.groups?.find((g) => g.toLowerCase() === q.toLowerCase());
-    if (groupHit) return { kind: 'group', group: groupHit };
     const roleHit = suggest?.roles?.find((g) => g.toLowerCase() === q.toLowerCase());
     if (roleHit) return { kind: 'role', role: roleHit };
+    const groupHit = suggest?.groups?.find((g) => g.toLowerCase() === q.toLowerCase());
+    if (groupHit) return { kind: 'group', group: groupHit };
     if (EMAIL_RE.test(q)) return { kind: 'user', email: q, displayName: q.split('@')[0] };
     return null;
   }, [query, suggest]);

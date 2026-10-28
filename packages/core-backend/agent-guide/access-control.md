@@ -8,12 +8,12 @@ read and the Platform Team may change has this `access.md`:
 ```yaml
 ---
 owner:
-  - Admin
+  - role/Admin
 ---
 read:
   - everyone
 write:
-  - Platform Team
+  - group/Platform Team
 ```
 
 - **An `access.md` has two blocks.** The body, below the closing `---`, holds
@@ -34,13 +34,17 @@ write:
   A denial takes away the verbs above it: `deny read` also removes `write`,
   `download` and `owner`, and `deny write` removes `owner`. `deny write` and
   `deny download` never remove `read`.
-- **Principals** are a role from `roles.yaml`, a group from `groups.yaml`, a
-  person as `Name <email>`, a plugin token, or **`everyone`**: every signed-in
+- **Principals** are a role (`role/<Name>`, from `roles.yaml`), a group
+  (`group/<Name>`, from the active group source), a person as
+  `Name <email>`, a plugin token, or **`everyone`**: every signed-in
   person and their agents. `everyone` under `read` in a folder's body opens the
   folder to the organisation; in a file's frontmatter it only makes that file
   visible (a plugin's `access.md` has it there so the plugin can be found and
-  joined, which admits nobody to the plugin). When a group and a role share a name,
-  the bare name means the group and `role/<Name>` the role. A person's
+  joined, which admits nobody to the plugin). Write roles and groups with
+  their prefix, as the app's Manage access dialog does. A bare name still
+  works and means the role when one of that name exists, the group otherwise,
+  in a denial too, so a group that shares a role's name is reached only as
+  `group/<Name>`. A person's
   personal plugin (`{{pluginsDir}}/personal-<id>/`) grants its owner access and
   denies `everyone` outright, so opening a parent folder never opens it.
 - **Plugin tokens.** `plugin/<name>/read`, `plugin/<name>/write` and
@@ -130,8 +134,8 @@ roles:
 - **Members add up**: the role's members are the emails listed plus everyone
   currently in each group.
 - **A denial** of the role (`deny role/Reviewer`) removes the role's
-  contribution for everyone in the group, as for the emails. Write the `role/`
-  form: a bare `deny Reviewer` denies a group of that name if one exists.
+  contribution for everyone in the group, as for the emails. To deny the
+  group instead, write `deny group/Platform Team`.
 
 **Only an Admin changes `roles.yaml`, on a protected branch, directly.** On a
 draft anyone who can read the file may save it, but a merge puts back the

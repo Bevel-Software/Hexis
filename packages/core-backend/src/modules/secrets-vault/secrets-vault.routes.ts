@@ -23,7 +23,7 @@ import '../auth/index.js'; // Express Request augmentation (req.userId / req.use
 export interface SecretsVaultRoutesDeps {
   secretsVault: ISecretsVaultService;
   /**
-   * Resolves what a connection made as an `.agent` file loads, so the connect
+   * Resolves what a connection made as an agent configuration loads, so the connect
    * page can list only the tools the chosen agent would reach (`?agent=`).
    * Optional: a construction without one answers such a request as a
    * connection that loads nothing — a narrowing that cannot be read is never
@@ -278,7 +278,7 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
   // so a tool the caller may not read is named here in no state at all.
   //
   // `?agent=<path>` — the consent step's "Connect as" choice — narrows the
-  // listing to what a connection made as that `.agent` file would load, by the
+  // listing to what a connection made as that agent configuration would load, by the
   // ONE answer every agent surface asks (`ConnectionScope.allowsConnector`,
   // applied after the read gate exactly as the tool listing applies it). A
   // sign-in the connection will never reach is not on a page about what the

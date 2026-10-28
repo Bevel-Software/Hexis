@@ -18,7 +18,7 @@ the object, so a bare JSON `.tool` still works.
 ---
 id: my_tool
 write:
-  - Product Team
+  - group/Product Team
 type: http
 url: https://api.example.com/utcp
 ---

@@ -17,7 +17,7 @@ import { pluginFolderBelowRoot } from './plugins.service.js';
 import type { KbContext } from '../../shared/kb-context.js';
 import { PluginProvisionError, type PluginProvisionService } from './plugin-provision.service.js';
 import { argumentsRefusal } from '../tool-helpers/index.js';
-import { NOT_AVAILABLE_TO_CONNECTION, resolveConnectionScope, type IAgentScopeResolver } from '../agent-scope/index.js';
+import { resolveConnectionScope, type IAgentScopeResolver } from '../agent-scope/index.js';
 import '../tool-auth/index.js'; // Express Request.toolAuth augmentation
 import { PluginLinkError, type PluginLinksService } from './plugin-links.service.js';
 import { PluginRenameError, type PluginRenameService } from './plugin-rename.service.js';
@@ -89,9 +89,10 @@ function refuseMismatchedArguments(req: express.Request, res: express.Response):
  * Answer the connection-scope refusal when the caller's connection was made
  * as an agent configuration that does not list `toolName`; `true` when it answered.
  * These routes ARE the `create_plugin` and `my_plugin` tools but are not
- * hosted by `toolHandler`, so the check it makes for every other platform
- * tool is made here, with its answer. A session, or a key made as
- * Everything, carries no `agentPath` and is never refused.
+ * hosted by `toolHandler`, so they ask the one policy it asks —
+ * `ConnectionScope.platformToolRefusal` — and answer what it answers. A
+ * session, or a key made as Everything, carries no `agentPath` and is never
+ * refused.
  */
 async function refuseOutsideConnectionScope(
   req: express.Request,
@@ -101,8 +102,9 @@ async function refuseOutsideConnectionScope(
   agentScope: Pick<IAgentScopeResolver, 'resolve'> | undefined,
 ): Promise<boolean> {
   const scope = await resolveConnectionScope(agentScope, user.email, req.toolAuth?.agentPath);
-  if (scope.allowsPlatformTool(toolName)) return false;
-  res.status(403).json({ error: scope.refusal(toolName), code: NOT_AVAILABLE_TO_CONNECTION });
+  const refusal = scope.platformToolRefusal(toolName);
+  if (!refusal) return false;
+  res.status(403).json(refusal);
   return true;
 }
 

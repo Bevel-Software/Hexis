@@ -12,10 +12,12 @@
  *     provider then; a second write surface would fragment org management —
  *     which is the thing the mode model exists to prevent.
  *   - COLLISION GATE: create/rename refuse a name whose canonical form is a
- *     roles.yaml role. Bare-name precedence would let the group win, but a
- *     deliberately-created shadow of a capability role is far more likely a
- *     mistake than an intent — the IdP can still produce collisions, which
- *     precedence then resolves (group first, `role/<name>` for the role).
+ *     roles.yaml role — a group sharing a role's name is reachable only as
+ *     `group/<name>` and is far more likely a mistake than an intent. The IdP
+ *     (or a hand-edited groups.yaml) can still produce collisions, which
+ *     precedence then resolves: the bare name is the ROLE, `group/<name>` the
+ *     group. The roster names every rule that spells such a group bare
+ *     (`bareNameResolvesToRole`) so an Admin can rewrite it.
  *   - DEGRADE LOUDLY: a broken groups source never fails access resolution
  *     closed — groups contribute nothing and the model carries a
  *     `groupsHealth` marker, which the roster exposes so the Groups & Members page can
@@ -29,14 +31,19 @@ import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { WorkflowEventBus } from '../workflow/index.js';
 import type { AuthUser, IWorkspaceService, IWorkflowService } from '@bevel-software/platform-shared';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
+import type { ITreeWalker } from '../../shared/fs.contract.js';
 import type { IAccessControl } from './access-control.interface.js';
 import {
   GROUP_REF_PREFIX,
+  GROUP_TOKEN_PREFIX,
   canonicalRoleName,
   hasAccessFrontmatterExtension,
+  GROUPS_YAML,
+  SYNCED_GROUPS_YAML,
+  validateGroupsFile,
+  makeRolesYamlWriteValidator,
 } from '../access-model/index.js';
 import { loadActiveGroups, type GroupsHealth } from './access-control.service.js';
-import { GROUPS_YAML, SYNCED_GROUPS_YAML, validateGroupsFile, makeRolesYamlWriteValidator } from '../access-model/index.js';
 import { parseRolesModel, removeGroupRefsEverywhere, renameGroupRefs, isGroupRefMember } from './roles-edit.js';
 import {
   GroupsEditError,
@@ -49,7 +56,7 @@ import {
   type GroupsEditResult,
 } from './groups-edit.js';
 import { AdminLockedCommits, type LockedWrite } from './admin-locked-commit.js';
-import { KbReferenceScanner } from './reference-scan.js';
+import { KbReferenceScanner, readableReferences, translateRewriteWriteRefusal } from './reference-scan.js';
 
 /** Where role→group assignments live (`group:<canonical>` member entries). */
 const ROLES_YAML = 'roles.yaml';
@@ -69,8 +76,20 @@ export interface GroupRosterEntry {
   canonical: string;
   displayName: string;
   members: string[];
-  /** Every access rule referencing this group — same scan the rename uses. */
+  /**
+   * Every access rule referencing this group — same scan the rename uses —
+   * in a file the roster's viewer can read (see `getRoster`).
+   */
   referencedBy: { path: string; verb: string }[];
+  /**
+   * The access rules that name this group's name BARE while a ROLE of the same
+   * name exists. A bare name is the role, so these rules grant the role, not
+   * this group — rules written while bare names still meant the group change
+   * meaning here. An Admin rewrites each as `group/<Name>` if the group was
+   * meant. Empty when no role shares the name. Only files the roster's
+   * viewer can read are listed (see `getRoster`).
+   */
+  bareNameResolvesToRole: { path: string; verb: string }[];
   /**
    * Canonical names of roles carrying a `group:<canonical>` assignment to
    * this group — so the delete confirm can warn that those roles will lose
@@ -101,6 +120,8 @@ export class GroupsAdminService {
     private readonly workspaceService: IWorkspaceService,
     private readonly workflowService: IWorkflowService,
     private readonly accessControl: IAccessControl,
+    /** The composition root's walk — the one the resolver finds access rules with. */
+    disk: ITreeWalker,
     private readonly kbDirName: string,
     /** Live-binding thunk — see RolesAdminService's identical note. */
     private readonly defaultBranchOf: () => string,
@@ -121,7 +142,7 @@ export class GroupsAdminService {
     // The event bus keeps the roster's `referencedBy` fresh: a share-dialog
     // grant/revoke on any access.md happens outside this service, and the
     // scanner invalidates its cache on those writes' events (TTL as backstop).
-    this.references = new KbReferenceScanner(workspaceService, kbDirName, eventBus);
+    this.references = new KbReferenceScanner(workspaceService, disk, kbDirName, eventBus);
   }
 
   private get defaultBranch(): string {
@@ -166,8 +187,13 @@ export class GroupsAdminService {
    *     fallback to manual, which would resurrect retired groups).
    *   - Manual mode, broken groups.yaml: 422 with the parse message — the
    *     repair path must show the operator what to fix, never a dead page.
+   *
+   * `viewerEmail` is who the roster is for: `referencedBy` and
+   * `bareNameResolvesToRole` name only the files that viewer can read. Being
+   * an Admin is not read access to every file, and a path is itself a
+   * disclosure.
    */
-  async getRoster(): Promise<GroupsRoster> {
+  async getRoster(viewerEmail: string): Promise<GroupsRoster> {
     const workspaceId = await this.ensureWorkspace();
     const active = await loadActiveGroups((f) => this.locked.readKbFile(workspaceId, f));
     if (active.sourceFile === GROUPS_YAML && !active.health.ok) {
@@ -177,7 +203,7 @@ export class GroupsAdminService {
         reason: active.health.reason,
       });
     }
-    const [referencesByToken, assignedByGroup] = await Promise.all([
+    const [referencesByToken, { byGroup: assignedByGroup, roles }] = await Promise.all([
       this.references.scan(workspaceId),
       this.rolesReferencingGroups(workspaceId),
     ]);
@@ -190,17 +216,42 @@ export class GroupsAdminService {
         // IdP members render sorted (machine-generated file, no author order
         // to honour); manual members keep file order (the editor's view).
         members: mode === 'idp' ? [...def.emails].sort() : [...def.emails],
-        // A group's references are its BARE-token hits, unconditionally: this
-        // group exists in the active source, so under group-first precedence
-        // it owns the bare key — even when a role shares the name (the roles
-        // roster is the mirror image: it then skips the bare hits and counts
-        // only `role/<name>`). Explicit `role/<name>` hits are never a group
+        // A group's references are its `group/<name>` hits, plus its BARE
+        // hits while no role shares the name — a bare name is the role when
+        // one exists (the roles roster is the mirror image: it counts the
+        // bare hits then). Explicit `role/<name>` hits are never a group
         // reference.
-        referencedBy: referencesByToken.get(canonical) ?? [],
+        referencedBy: [
+          ...(referencesByToken.get(`${GROUP_TOKEN_PREFIX}${canonical}`) ?? []),
+          ...(roles.has(canonical) ? [] : referencesByToken.get(canonical) ?? []),
+        ],
+        bareNameResolvesToRole: roles.has(canonical) ? referencesByToken.get(canonical) ?? [] : [],
         assignedToRoles: assignedByGroup.get(canonical) ?? [],
       });
     }
+    await this.keepReadableReferences(workspaceId, viewerEmail, groups);
     return { mode, groups, groupsHealth: active.health };
+  }
+
+  /**
+   * Drop every `referencedBy` and `bareNameResolvesToRole` row whose file the
+   * viewer cannot read. Dropped, not counted: Admin status does not grant
+   * read, so a count of rules in unreadable content would be a disclosure.
+   */
+  private async keepReadableReferences(
+    workspaceId: string,
+    viewerEmail: string,
+    groups: GroupRosterEntry[],
+  ): Promise<void> {
+    const paths = [
+      ...new Set(groups.flatMap((g) => [...g.referencedBy, ...g.bareNameResolvesToRole].map((r) => r.path))),
+    ];
+    if (paths.length === 0) return;
+    const readable = await this.accessControl.canReadBatch(workspaceId, viewerEmail, paths);
+    for (const g of groups) {
+      g.referencedBy = readableReferences(g.referencedBy, readable);
+      g.bareNameResolvesToRole = readableReferences(g.bareNameResolvesToRole, readable);
+    }
   }
 
   /**
@@ -230,7 +281,7 @@ export class GroupsAdminService {
     await this.assertManualMode(await this.ensureWorkspace());
     await this.assertRoleNameFree(displayName);
     await this.runEdit(actor, (text) => editCreateGroup(text, displayName));
-    return this.getRoster();
+    return this.getRoster(actor.email);
   }
 
   /**
@@ -280,17 +331,17 @@ export class GroupsAdminService {
       );
       this.afterWrite(workspaceId, actor, files.map((f) => f.repoRel));
     });
-    return this.getRoster();
+    return this.getRoster(actor.email);
   }
 
   async addMember(actor: AuthUser, canonical: string, email: string): Promise<GroupsRoster> {
     await this.runEdit(actor, (text) => editAddMember(text, canonical, email));
-    return this.getRoster();
+    return this.getRoster(actor.email);
   }
 
   async removeMember(actor: AuthUser, canonical: string, email: string): Promise<GroupsRoster> {
     await this.runEdit(actor, (text) => editRemoveMember(text, canonical, email));
-    return this.getRoster();
+    return this.getRoster(actor.email);
   }
 
   /**
@@ -310,7 +361,7 @@ export class GroupsAdminService {
     await this.locked.withFileLocks(workspaceId, actor, [GROUPS_YAML, ROLES_YAML], () =>
       this.renameGroupLocked(workspaceId, actor, canonical, newCanonical, newDisplayName),
     );
-    return this.getRoster();
+    return this.getRoster(actor.email);
   }
 
   private async renameGroupLocked(
@@ -328,16 +379,20 @@ export class GroupsAdminService {
       files.push({ repoRel: GROUPS_YAML, content: groupsEdit.text, original: text });
     }
     if (newCanonical !== canonical) {
-      // Grant references (bare tokens in access.md + node frontmatter). The
-      // rewrite returns each file's ORIGINAL text alongside the new content,
-      // so the rollback snapshots reuse the read it already did — no second
-      // full-KB pass. Explicit `role/<name>` tokens are untouched by design:
-      // they reference the ROLE, not this group.
+      // Grant references (`group/<name>` tokens in access.md + node
+      // frontmatter, and the bare name while no role owns it), rewritten to
+      // the explicit `group/<New Name>`. The rewrite returns each file's
+      // ORIGINAL text alongside the new content, so the rollback snapshots
+      // reuse the read it already did — no second full-KB pass. Explicit
+      // `role/<name>` tokens, and a bare name a role owns, are untouched by
+      // design: they reference the ROLE, not this group.
+      const { roles } = await this.rolesReferencingGroups(workspaceId);
       const refWrites = await this.references.rewriteReferences(
         workspaceId,
-        canonical,
-        newDisplayName.trim(),
+        [`${GROUP_TOKEN_PREFIX}${canonical}`, ...(roles.has(canonical) ? [] : [canonical])],
+        `${GROUP_TOKEN_PREFIX}${newDisplayName.trim()}`,
         (message, cause) => new GroupsAdminError(message, 422, { cause }),
+        (paths) => this.accessControl.canReadBatch(workspaceId, actor.email, paths),
       );
       for (const w of refWrites) {
         files.push({ repoRel: w.repoRelativePath, content: w.content, original: w.original });
@@ -373,12 +428,22 @@ export class GroupsAdminService {
     // Roster locks are already ours (withFileLocks; strict same-user acquire
     // forbids LockingFilesystem here). Grant-reference candidates are written
     // unlocked — same exposure every reference rewrite has always had.
-    await this.locked.writeAndCommitLocked(
-      workspaceId,
-      actor,
-      files,
-      `Rename group ${canonical} → ${newDisplayName.trim()}`,
-    );
+    // The commit gates every file on the actor's write rules and restores all
+    // of them on a refusal; a refused file the actor may not read goes unnamed.
+    try {
+      await this.locked.writeAndCommitLocked(
+        workspaceId,
+        actor,
+        files,
+        `Rename group ${canonical} → ${newDisplayName.trim()}`,
+      );
+    } catch (err) {
+      throw await translateRewriteWriteRefusal(
+        err,
+        (paths) => this.accessControl.canReadBatch(workspaceId, actor.email, paths),
+        (message) => new GroupsAdminError(message, 422),
+      );
+    }
     this.afterWrite(workspaceId, actor, files.map((f) => f.repoRel));
   }
 
@@ -441,12 +506,12 @@ export class GroupsAdminService {
   }
 
   /**
-   * Refuse a group name that IS a role. Bare-name precedence (group-first)
-   * would make the group win resolution, so this is deliberate FRICTION, not
-   * a correctness need: an admin naming a group after a capability role is
-   * far more likely shadowing by accident than by intent. IdP-sourced
-   * collisions still happen (the sync writer doesn't consult roles.yaml) and
-   * precedence resolves them.
+   * Refuse a group name that IS a role. Bare-name precedence (role-first)
+   * keeps the role safe either way, so this is deliberate FRICTION, not a
+   * correctness need: a group named after a role is reachable only as
+   * `group/<name>`, which is far more likely a surprise than an intent.
+   * IdP-sourced collisions still happen (the sync writer doesn't consult
+   * roles.yaml) and precedence resolves them.
    */
   private async assertRoleNameFree(displayName: string): Promise<void> {
     const workspaceId = await this.ensureWorkspace();
@@ -462,7 +527,7 @@ export class GroupsAdminService {
     }
     if (roles.some((r) => canonicalRoleName(r.displayName) === canonical)) {
       throw new GroupsAdminError(
-        `'${displayName.trim()}' is a role name — name the group something else (a role can be referenced explicitly as 'role/${canonical}').`,
+        `'${displayName.trim()}' is a role name — name the group something else (in access rules the bare name '${displayName.trim()}' means the role).`,
         422,
       );
     }
@@ -473,17 +538,22 @@ export class GroupsAdminService {
    * Advisory (feeds the roster's `assignedToRoles` warning field): a broken
    * roles.yaml yields an empty map rather than failing the roster.
    */
-  private async rolesReferencingGroups(workspaceId: string): Promise<Map<string, string[]>> {
+  private async rolesReferencingGroups(
+    workspaceId: string,
+  ): Promise<{ byGroup: Map<string, string[]>; roles: Set<string> }> {
     const rolesText = (await this.locked.readKbFile(workspaceId, ROLES_YAML)) ?? '';
     const byGroup = new Map<string, string[]>();
+    // Every role's canonical name — who owns a bare name (role-first).
+    const roleNames = new Set<string>();
     let roles;
     try {
       roles = parseRolesModel(rolesText);
     } catch {
-      return byGroup;
+      return { byGroup, roles: roleNames };
     }
     for (const role of roles) {
       const roleCanonical = canonicalRoleName(role.displayName);
+      roleNames.add(roleCanonical);
       for (const member of role.members) {
         if (!isGroupRefMember(member)) continue;
         const groupCanonical = canonicalRoleName(member.slice(GROUP_REF_PREFIX.length));
@@ -495,7 +565,7 @@ export class GroupsAdminService {
         }
       }
     }
-    return byGroup;
+    return { byGroup, roles: roleNames };
   }
 
   private async runEdit(actor: AuthUser, pre: (text: string) => GroupsEditResult): Promise<void> {
