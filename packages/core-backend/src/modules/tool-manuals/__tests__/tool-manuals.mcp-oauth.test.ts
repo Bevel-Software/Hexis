@@ -1,17 +1,19 @@
 import { describe, test, expect, beforeEach, afterEach, vi } from 'vitest';
-import { NodeFs } from '../../kb-fs/node-fs.js';
-import { KbPluginSource } from '../../plugins/discovery/kb-plugin-source.js';
+// The real disk and the plugin source over it come from the composition-root
+// fixture, as production wires them: this suite never constructs another
+// module's implementation itself.
+import { realDisk, realPluginSource } from '../../../__tests__/real-disk.js';
 
 /** The one disk, as production wires it: the service and its discovery read the same one. */
-const disk = new NodeFs();
+const disk = realDisk();
 import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { ToolManualService, type McpAuthDiscoveryPort } from '../tool-manuals.service.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import type { IAccessControl } from '../../access/access-control.interface.js';
+import type { WorkspaceService } from '../../workspace/index.js';
+import type { IAccessControl } from '../../access/index.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 
 const KB_DIR = 'knowledge-base';
@@ -63,7 +65,7 @@ describe('ToolManualService — MCP OAuth auto-discovery decoration', () => {
   });
 
   function svcWith(discovery: McpAuthDiscoveryPort) {
-    const svc = new ToolManualService(workspaceService, allowAll, testKbContext({ kbDirName: KB_DIR }), disk, new KbPluginSource(disk, testKbContext({ kbDirName: KB_DIR })));
+    const svc = new ToolManualService(workspaceService, allowAll, testKbContext({ kbDirName: KB_DIR }), disk, realPluginSource(disk, testKbContext({ kbDirName: KB_DIR })));
     svc.setMcpAuthDiscovery(discovery);
     return svc;
   }
@@ -297,5 +299,163 @@ describe('ToolManualService — MCP OAuth auto-discovery decoration', () => {
     expect(statusFor).not.toHaveBeenCalledWith('hubspot', expect.anything());
     // The declaration is carried verbatim, opt-out included.
     expect(hubspot.variables?.[0].oauth).toMatchObject({ clientId: 'owner-app', pkce: false });
+  });
+
+  describe('liveDeclaration — what a sign-in start reads', () => {
+    const HUBSPOT_ENDPOINTS = {
+      authorizationUrl: 'https://auth.hubspot.example/authorize',
+      tokenUrl: 'https://auth.hubspot.example/token',
+    };
+
+    test('reads the file as it is now, not the catalog the last scan cached', async () => {
+      await writeDeclaredServer({ clientId: 'client-A', ...HUBSPOT_ENDPOINTS });
+      const svc = svcWith({ statusFor: vi.fn(async () => ({ status: 'open' as const })) });
+      // The catalog is scanned and cached under client A…
+      const cached = (await svc.listAccessible('user@example.com')).find((m) => m.name === 'hubspot')!;
+      expect(cached.variables?.[0].oauth?.clientId).toBe('client-A');
+
+      // …the file is edited, and nothing invalidates the catalog.
+      await writeDeclaredServer({ clientId: 'client-B', ...HUBSPOT_ENDPOINTS, scopes: ['crm.read'] });
+      const stale = (await svc.listAccessible('user@example.com')).find((m) => m.name === 'hubspot')!;
+      expect(stale.variables?.[0].oauth?.clientId).toBe('client-A');
+
+      const live = await svc.liveDeclaration('user@example.com', 'hubspot', 'HUBSPOT_TOKEN');
+      expect(live?.manual.name).toBe('hubspot');
+      expect(live?.variable?.oauth).toEqual({ clientId: 'client-B', ...HUBSPOT_ENDPOINTS, scopes: ['crm.read'] });
+    });
+
+    test('a .tool file is read afresh the same way', async () => {
+      const toolsDir = join(root, wsId, KB_DIR, 'Plugins');
+      const write = (clientId: string) =>
+        writeFile(
+          join(toolsDir, 'crm.tool'),
+          JSON.stringify({
+            name: 'crm',
+            type: 'http',
+            url: 'https://api.crm.example/openapi.json',
+            variables: [{ name: 'SIGNIN', scope: 'user', oauth: { clientId, ...HUBSPOT_ENDPOINTS } }],
+          }),
+        );
+      await write('client-A');
+      const svc = svcWith({ statusFor: vi.fn(async () => ({ status: 'open' as const })) });
+      await svc.listAccessible('user@example.com');
+      await write('client-B');
+      const live = await svc.liveDeclaration('user@example.com', 'crm', 'SIGNIN');
+      expect(live?.variable?.oauth?.clientId).toBe('client-B');
+    });
+
+    test('completes a client-id-only declaration from the server metadata, or carries the discovery reason', async () => {
+      await writeDeclaredServer({ clientId: 'owner-app' });
+      const statusFor = vi.fn(async () => ({ status: 'open' as const }));
+      const providerForDeclaredClient = vi.fn(async () => ({
+        status: 'oauth' as const,
+        provider: { ...HUBSPOT_ENDPOINTS, clientId: 'owner-app', pkce: true, resource: 'https://mcp.hubspot.example/mcp' },
+      }));
+      const live = await svcWith({ statusFor, providerForDeclaredClient }).liveDeclaration(
+        'user@example.com',
+        'hubspot',
+        'HUBSPOT_TOKEN',
+      );
+      expect(live?.variable?.oauth).toEqual({
+        clientId: 'owner-app',
+        ...HUBSPOT_ENDPOINTS,
+        resource: 'https://mcp.hubspot.example/mcp',
+      });
+      // Never a zero-config probe or registration for a declared sign-in.
+      expect(statusFor).not.toHaveBeenCalled();
+
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const stuck = await svcWith({
+        statusFor,
+        providerForDeclaredClient: async () => ({ status: 'unsupported' as const, reason: 'no authorization-server metadata' }),
+      }).liveDeclaration('user@example.com', 'hubspot', 'HUBSPOT_TOKEN');
+      expect(stuck?.variable?.oauth).toEqual({ clientId: 'owner-app' });
+      expect(stuck?.manual.setup).toEqual({ kind: 'oauth-manual', reason: 'no authorization-server metadata' });
+      warn.mockRestore();
+    });
+
+    test('a .tool whose sign-in endpoint fails validation answers the parser’s reason, even while the catalog holds the valid version', async () => {
+      const toolsDir = join(root, wsId, KB_DIR, 'Plugins');
+      const write = (tokenUrl: string) =>
+        writeFile(
+          join(toolsDir, 'crm.tool'),
+          JSON.stringify({
+            name: 'crm',
+            type: 'http',
+            url: 'https://api.crm.example/openapi.json',
+            variables: [{ name: 'SIGNIN', scope: 'user', oauth: { clientId: 'c', authorizationUrl: HUBSPOT_ENDPOINTS.authorizationUrl, tokenUrl } }],
+          }),
+        );
+      await write(HUBSPOT_ENDPOINTS.tokenUrl);
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const svc = svcWith({ statusFor: vi.fn(async () => ({ status: 'open' as const })) });
+      expect((await svc.listAccessible('user@example.com')).some((m) => m.name === 'crm')).toBe(true);
+
+      await write('http://127.0.0.1/token');
+      await expect(svc.liveDeclaration('user@example.com', 'crm', 'SIGNIN')).resolves.toEqual({
+        refused: '`variables[0].oauth.tokenUrl` must use https',
+      });
+      await write('https://10.0.0.5/token');
+      await expect(svc.liveDeclaration('user@example.com', 'crm', 'SIGNIN')).resolves.toEqual({
+        refused: '`variables[0].oauth.tokenUrl` host is not allowed',
+      });
+      warn.mockRestore();
+    });
+
+    test('a plugin.json sign-in whose endpoint fails validation answers the reason too, not only a log line', async () => {
+      await writeDeclaredServer({ clientId: 'owner-app', ...HUBSPOT_ENDPOINTS, tokenUrl: 'http://127.0.0.1/token' });
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const svc = svcWith({ statusFor: vi.fn(async () => ({ status: 'open' as const })) });
+      const live = await svc.liveDeclaration('user@example.com', 'hubspot', 'HUBSPOT_TOKEN');
+      expect(live?.refused).toContain('`variables[0].oauth.tokenUrl` must use https');
+      // Located by position, never by the name the entry declared (the .tool parser's rule).
+      expect(live?.refused).not.toContain('HUBSPOT_TOKEN');
+      // The catalog's public listing is unchanged by this: the server is still left out.
+      const catalog = await svc.listAccessibleCatalog('user@example.com');
+      expect(catalog.tools.some((m) => m.name === 'hubspot')).toBe(false);
+      warn.mockRestore();
+    });
+
+    test('a refusal is read-gated like the manual it would have been', async () => {
+      await writeDeclaredServer({ clientId: 'owner-app', ...HUBSPOT_ENDPOINTS, tokenUrl: 'http://127.0.0.1/token' });
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const denyAll = {
+        canRead: async () => false,
+        canReadBatch: async (_w: string, _e: string, paths: string[]) => new Map(paths.map((p) => [p, false])),
+      } as unknown as IAccessControl;
+      const locked = new ToolManualService(
+        workspaceService,
+        denyAll,
+        testKbContext({ kbDirName: KB_DIR }),
+        disk,
+        realPluginSource(disk, testKbContext({ kbDirName: KB_DIR })),
+      );
+      await expect(locked.liveDeclaration('user@example.com', 'hubspot', 'HUBSPOT_TOKEN')).resolves.toBeNull();
+      warn.mockRestore();
+    });
+
+    test('answers no variable when the file declares none of that name, and null for an unreadable manual', async () => {
+      await writeDeclaredServer({ clientId: 'owner-app', ...HUBSPOT_ENDPOINTS });
+      const statusFor = vi.fn(async () => ({ status: 'oauth' as const, provider: OAUTH_PROVIDER }));
+      const svc = svcWith({ statusFor });
+      // The zero-config variable is synthesised by the catalog, not declared in any file.
+      const bare = await svc.liveDeclaration('user@example.com', 'notion', 'MCP_OAUTH');
+      expect(bare?.manual.name).toBe('notion');
+      expect(bare?.variable).toBeUndefined();
+      expect(statusFor).not.toHaveBeenCalled();
+
+      const denyAll = {
+        canRead: async () => false,
+        canReadBatch: async (_w: string, _e: string, paths: string[]) => new Map(paths.map((p) => [p, false])),
+      } as unknown as IAccessControl;
+      const locked = new ToolManualService(
+        workspaceService,
+        denyAll,
+        testKbContext({ kbDirName: KB_DIR }),
+        disk,
+        realPluginSource(disk, testKbContext({ kbDirName: KB_DIR })),
+      );
+      await expect(locked.liveDeclaration('user@example.com', 'hubspot', 'HUBSPOT_TOKEN')).resolves.toBeNull();
+    });
   });
 });

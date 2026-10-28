@@ -1,9 +1,11 @@
 import { describe, expect, it, vi, afterEach } from 'vitest';
 import { createHash } from 'node:crypto';
 import { DbSecretsVaultService } from '../db-secrets-vault.service.js';
-import { SecretOAuthError } from '../secrets-vault.contract.js';
+import { InvalidSecretError, SecretOAuthError } from '../secrets-vault.contract.js';
 import { TokenCrypto } from '../../../shared/token-crypto.js';
-import type { Database } from '../../database/connection.js';
+import type { Database } from '../../database/index.js';
+import { setLogger } from '../../../shared/logging.js';
+import type { ILogger, LogFields } from '../../../shared/logger.contract.js';
 
 const ENC_KEY = Buffer.alloc(32, 7).toString('base64');
 const crypto = new TokenCrypto(ENC_KEY);
@@ -593,5 +595,220 @@ describe('DbSecretsVaultService — forceRefresh (a downstream rejected the toke
       await expect(new DbSecretsVaultService(db, ENC_KEY).forceRefresh('user-1', KEY)).resolves.toBe('skipped');
     }
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('DbSecretsVaultService — a declared sign-in follows the live declaration', () => {
+  // What the owner's client-secret save stored: client id A and its endpoints.
+  const SAVED_META = {
+    authorizationUrl: 'https://old.example.com/authorize',
+    tokenUrl: 'https://old.example.com/token',
+    clientId: 'client-A',
+    scopes: ['crm.read'],
+    authParams: {},
+    pkce: true,
+    resource: 'https://mcp.example.com/',
+  };
+  // What the tool file reads now: client id B.
+  const LIVE = {
+    authorizationUrl: 'https://app.example.com/oauth/authorize',
+    tokenUrl: 'https://api.example.com/oauth/v1/token',
+    clientId: 'client-B',
+    scopes: ['crm.read', 'crm.write'],
+    authParams: { optional_scope: 'tickets' },
+    pkce: true,
+    resource: 'https://mcp.example.com/',
+  };
+  const confidentialShared = () =>
+    sharedRow({ oauthMeta: SAVED_META, valueEncrypted: crypto.encrypt(JSON.stringify({ clientSecret: 'cs-owner' })) });
+
+  const begin = (svc: DbSecretsVaultService, provider: Record<string, unknown> = LIVE) =>
+    svc.beginToolOAuthByKey({
+      userId: 'user-1',
+      key: KEY,
+      redirectUri: 'https://bevel.example.com/api/secrets/oauth/callback',
+      state: 's',
+      provider: provider as never,
+    });
+
+  it('builds the consent URL from the live declaration, not the stored copy, and records it on the caller row', async () => {
+    const { db, captured } = makeFakeDb([[confidentialShared()], [], [{ id: 'user-row-1' }]]);
+    const { url } = await begin(new DbSecretsVaultService(db, ENC_KEY));
+
+    const consent = new URL(url);
+    expect(consent.origin + consent.pathname).toBe(LIVE.authorizationUrl);
+    expect(consent.searchParams.get('client_id')).toBe('client-B');
+    expect(consent.searchParams.get('resource')).toBe(LIVE.resource);
+    expect(consent.searchParams.get('scope')).toBe('crm.read crm.write');
+    expect(consent.searchParams.get('optional_scope')).toBe('tickets');
+    const blob = JSON.parse(crypto.decrypt(captured.values[0].valueEncrypted));
+    expect(consent.searchParams.get('code_challenge')).toBe(
+      createHash('sha256').update(blob.pendingVerifier).digest('base64url'),
+    );
+    // The secret is the owner's, unchanged; the configuration is the file's.
+    expect(blob.clientSecret).toBe('cs-owner');
+    expect(captured.values[0].oauthMeta).toMatchObject({ clientId: 'client-B', tokenUrl: LIVE.tokenUrl });
+    expect(captured.values[0].oauthMeta.publicClient).toBeUndefined();
+  });
+
+  it('omits PKCE when the declaration opts out', async () => {
+    const { db, captured } = makeFakeDb([[confidentialShared()], [], [{ id: 'user-row-1' }]]);
+    const { url } = await begin(new DbSecretsVaultService(db, ENC_KEY), { ...LIVE, pkce: false });
+    expect(new URL(url).searchParams.get('code_challenge')).toBeNull();
+    expect(JSON.parse(crypto.decrypt(captured.values[0].valueEncrypted)).pendingVerifier).toBeUndefined();
+  });
+
+  it('the exchange that completes it posts to the live token endpoint with client id B and the stored secret', async () => {
+    const start = makeFakeDb([[confidentialShared()], [], [{ id: 'user-row-1' }]]);
+    await begin(new DbSecretsVaultService(start.db, ENC_KEY));
+    // The callback reads the caller row exactly as the start wrote it.
+    const written = start.captured.values[0];
+    const userRow = sharedRow({ id: 'user-row-1', userId: 'user-1', ...written });
+    const { db } = makeFakeDb([[userRow], undefined]);
+    const fetchMock = vi.fn<(url: unknown, init?: RequestInit) => Promise<Response>>(
+      async () =>
+        new Response(JSON.stringify({ access_token: 'at', refresh_token: 'rt', expires_in: 3600 }), { status: 200 }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    await new DbSecretsVaultService(db, ENC_KEY).completeOAuth('user-1', 'user-row-1', 'code', 'https://bevel.example.com/cb');
+
+    expect(String(fetchMock.mock.calls[0][0])).toBe(LIVE.tokenUrl);
+    const body = new URLSearchParams(String(fetchMock.mock.calls[0][1]?.body));
+    expect(body.get('client_id')).toBe('client-B');
+    expect(body.get('client_secret')).toBe('cs-owner');
+    expect(body.get('resource')).toBe(LIVE.resource);
+  });
+
+  it('a later refresh of that grant uses the configuration the consent was given for', async () => {
+    const userRow = sharedRow({
+      id: 'user-row-1',
+      userId: 'user-1',
+      oauthMeta: { ...LIVE },
+      valueEncrypted: crypto.encrypt(
+        JSON.stringify({ clientSecret: 'cs-owner', tokens: { access_token: 'old', refresh_token: 'rt', expires_at: 1_000 } }),
+      ),
+    });
+    const { db } = makeFakeDb([[userRow], undefined]);
+    const fetchMock = vi.fn<(url: unknown, init?: RequestInit) => Promise<Response>>(
+      async () =>
+        new Response(JSON.stringify({ access_token: 'fresh', expires_in: 3600 }), { status: 200 }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(
+      new DbSecretsVaultService(db, ENC_KEY, undefined, async () => 'user' as const).resolve('user-1', KEY),
+    ).resolves.toBe('fresh');
+    expect(String(fetchMock.mock.calls[0][0])).toBe(LIVE.tokenUrl);
+    expect(new URLSearchParams(String(fetchMock.mock.calls[0][1]?.body)).get('client_id')).toBe('client-B');
+  });
+
+  it.each([
+    ['an http:// token endpoint', { tokenUrl: 'http://api.example.com/token' }, 'tokenUrl must use https'],
+    ['a loopback token endpoint', { tokenUrl: 'https://127.0.0.1/token' }, 'tokenUrl host is not allowed'],
+    ['a private token endpoint', { tokenUrl: 'https://10.0.0.5/token' }, 'tokenUrl host is not allowed'],
+    ['a link-local authorize endpoint', { authorizationUrl: 'https://169.254.169.254/authorize' }, 'authorizationUrl host is not allowed'],
+  ])('refuses %s with the save’s validation message, writing and sending nothing', async (_name, over, message) => {
+    const { db } = makeFakeDb([[confidentialShared()]]);
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const err = await begin(new DbSecretsVaultService(db, ENC_KEY), { ...LIVE, ...over }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(InvalidSecretError);
+    expect((err as Error).message).toBe(message);
+    expect(db.insert).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses with \"owner hasn't finished\" when the shared row holds no secret, whatever it says of itself", async () => {
+    // A row the platform once registered as a public client, under a file that
+    // now declares its own client: the declared client is confidential.
+    const { db } = makeFakeDb([[sharedRow()]]);
+    await expect(begin(new DbSecretsVaultService(db, ENC_KEY))).rejects.toThrow("hasn't finished setting this up");
+    expect(db.insert).not.toHaveBeenCalled();
+  });
+
+  it('keeps the tokens a re-entered sign-in already holds when the declaration is unchanged, key order notwithstanding', async () => {
+    // jsonb does not keep key order: the stored copy reads back reordered.
+    const reordered = Object.fromEntries(Object.entries({ ...LIVE }).reverse());
+    const existing = sharedRow({
+      id: 'user-row-1',
+      userId: 'user-1',
+      oauthMeta: reordered,
+      valueEncrypted: crypto.encrypt(JSON.stringify({ clientSecret: 'cs-owner', tokens: { access_token: 'held' } })),
+    });
+    const { db, captured } = makeFakeDb([[confidentialShared()], [existing], [{ id: 'user-row-1' }]]);
+    await begin(new DbSecretsVaultService(db, ENC_KEY));
+    expect(JSON.parse(crypto.decrypt(captured.values[0].valueEncrypted)).tokens).toEqual({ access_token: 'held' });
+  });
+
+  it('does not carry tokens minted under client A into a sign-in under client B', async () => {
+    const existing = sharedRow({
+      id: 'user-row-1',
+      userId: 'user-1',
+      oauthMeta: SAVED_META,
+      valueEncrypted: crypto.encrypt(JSON.stringify({ clientSecret: 'cs-owner', tokens: { access_token: 'under-A' } })),
+    });
+    const { db, captured } = makeFakeDb([[confidentialShared()], [existing], [{ id: 'user-row-1' }]]);
+    await begin(new DbSecretsVaultService(db, ENC_KEY));
+    expect(JSON.parse(crypto.decrypt(captured.values[0].valueEncrypted)).tokens).toBeUndefined();
+  });
+
+  it('a platform-registered client (no provider handed over) still starts from its stored row', async () => {
+    const { db, captured } = makeFakeDb([[sharedRow()], [], [{ id: 'user-row-1' }]]);
+    const { url } = await new DbSecretsVaultService(db, ENC_KEY).beginToolOAuthByKey({
+      userId: 'user-1',
+      key: KEY,
+      redirectUri: 'https://bevel.example.com/cb',
+      state: 's',
+    });
+    expect(new URL(url).searchParams.get('client_id')).toBe('dcr-client-1');
+    expect(captured.values[0].oauthMeta).toEqual(PUBLIC_META);
+  });
+
+  // The moved property, pinned in both directions: the secret used to be bound to
+  // the token endpoint recorded at its save; it now goes where the file says, and
+  // the move leaves a line naming both origins (never a path) for an operator.
+  describe('where the stored secret goes when the declaration moves the token endpoint', () => {
+    const capture = () => {
+      const lines: Array<{ message: string; fields?: LogFields }> = [];
+      const make = (): ILogger => ({
+        debug: () => {},
+        info: () => {},
+        warn: (message, fields) => void lines.push({ message, fields }),
+        error: () => {},
+        child: () => make(),
+      });
+      const previous = setLogger(make());
+      return { lines, restore: () => setLogger(previous) };
+    };
+
+    it('follows the file to the new endpoint, and says so with both origins', async () => {
+      const log = capture();
+      try {
+        const { db, captured } = makeFakeDb([[confidentialShared()], [], [{ id: 'user-row-1' }]]);
+        await begin(new DbSecretsVaultService(db, ENC_KEY));
+        expect(captured.values[0].oauthMeta.tokenUrl).toBe(LIVE.tokenUrl);
+        expect(JSON.parse(crypto.decrypt(captured.values[0].valueEncrypted)).clientSecret).toBe('cs-owner');
+        expect(log.lines).toEqual([
+          {
+            message: `sign-in on ${KEY}: the declared token endpoint differs from the one recorded when the client secret was saved`,
+            fields: { savedOrigin: 'https://old.example.com', declaredOrigin: 'https://api.example.com' },
+          },
+        ]);
+      } finally {
+        log.restore();
+      }
+    });
+
+    it('says nothing when the declared token endpoint is the one recorded at the save', async () => {
+      const log = capture();
+      try {
+        const { db } = makeFakeDb([[confidentialShared()], [], [{ id: 'user-row-1' }]]);
+        await begin(new DbSecretsVaultService(db, ENC_KEY), { ...LIVE, tokenUrl: SAVED_META.tokenUrl });
+        expect(log.lines).toEqual([]);
+      } finally {
+        log.restore();
+      }
+    });
   });
 });

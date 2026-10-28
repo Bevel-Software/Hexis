@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { logger } from '../../shared/logging.js';
 
 const log = logger('vault');
@@ -16,6 +17,7 @@ import {
   type PutSharedStaticSecretInput,
   type CreateOAuthSecretInput,
   type OAuthProviderConfig,
+  type DeclaredOAuthProvider,
   type VariableScopeResolver,
   type NamespaceSecretCount,
   isKeyInNamespace,
@@ -487,8 +489,9 @@ export class DbSecretsVaultService implements ISecretsVaultService {
       throw new InvalidSecretError('clientSecret is required');
     }
     // Validate the provider config the same way createOAuth does (SSRF-safe https
-    // URLs). Store the client secret AND the provider meta together on the shared
-    // row so a later `.tool` edit can't redirect the secret to another endpoint.
+    // URLs) and store it beside the secret as a record of what was saved — what
+    // `statusFor` and the setup surfaces read. A declared sign-in does not run
+    // from it: `beginToolOAuthByKey` is handed the declaration as it reads now.
     const provider = this.requireProvider({ ...input.provider, clientSecret: input.clientSecret });
     const blob: OAuthBlob = { clientSecret: provider.clientSecret };
     const valueEncrypted = this.crypto().encrypt(JSON.stringify(blob));
@@ -510,11 +513,15 @@ export class DbSecretsVaultService implements ISecretsVaultService {
     redirectUri: string;
     state: string;
     scopes?: string[];
+    provider?: DeclaredOAuthProvider;
   }): Promise<{ id: string; url: string }> {
     const userId = this.requireUserId(input.userId);
     const key = this.requireKey(input.key);
-    // The shared row holds the owner-set client secret + the provider meta it was
-    // set for. Both are read from HERE, never from the live `.tool`.
+    // The shared row holds the owner-set client secret. For a client the
+    // platform registered itself it also holds the provider configuration, the
+    // only description of that client there is; for a declared sign-in the
+    // configuration it holds is a record of the save, and `input.provider` (the
+    // tool file as it reads now) is what the sign-in follows.
     const [shared] = await this.db
       .select()
       .from(secrets)
@@ -524,11 +531,43 @@ export class DbSecretsVaultService implements ISecretsVaultService {
       throw new SecretOAuthError("This tool's owner hasn't finished setting this up");
     }
     const sharedBlob = this.readBlob(shared.valueEncrypted);
-    const meta = this.readMeta(shared.oauthMeta);
-    // A missing secret is "not set up yet" ONLY for confidential clients — a
-    // dynamically-registered PUBLIC client (PKCE-only) never has one.
-    if (!sharedBlob.clientSecret && !meta.publicClient) {
-      throw new SecretOAuthError("This tool's owner hasn't finished setting this up");
+    let meta: OAuthProviderConfig;
+    let oauthMeta: typeof shared.oauthMeta;
+    if (input.provider) {
+      // A declared client is confidential: without the owner's secret there is
+      // nothing to sign in with, whatever the stored row says of itself.
+      if (!sharedBlob.clientSecret) {
+        throw new SecretOAuthError("This tool's owner hasn't finished setting this up");
+      }
+      // The save's own validation (https, no private or local address), BEFORE
+      // the caller's row is written or a URL built: a declaration that fails it
+      // sends nothing anywhere.
+      meta = this.requireProvider({ ...input.provider, publicClient: false });
+      oauthMeta = this.publicProviderMeta(meta);
+      // A MOVED PROPERTY, decided on the ticket (OAuth-Sign-In-Follows-The-Live-
+      // Declaration, 2026-10-27): the secret used to be bound to the token
+      // endpoint pinned at its save, so a later file edit could not send it
+      // anywhere else; now it goes where the file says at each start, so a
+      // writer of the tool file can move it (to an https, public host — the
+      // validation above still holds). Nothing refuses that; this line is the
+      // trail an operator reads when a secret went somewhere new.
+      const recorded = (shared.oauthMeta ?? {}) as { tokenUrl?: unknown };
+      if (typeof recorded.tokenUrl === 'string' && recorded.tokenUrl !== meta.tokenUrl) {
+        // Origins only: a path or query is the file's to say, not the log's.
+        const origin = (u: string) => (URL.canParse(u) ? new URL(u).origin : '(unparseable)');
+        log.warn(`sign-in on ${key}: the declared token endpoint differs from the one recorded when the client secret was saved`, {
+          savedOrigin: origin(recorded.tokenUrl),
+          declaredOrigin: origin(meta.tokenUrl),
+        });
+      }
+    } else {
+      meta = this.readMeta(shared.oauthMeta);
+      oauthMeta = shared.oauthMeta;
+      // A missing secret is "not set up yet" ONLY for confidential clients — a
+      // dynamically-registered PUBLIC client (PKCE-only) never has one.
+      if (!sharedBlob.clientSecret && !meta.publicClient) {
+        throw new SecretOAuthError("This tool's owner hasn't finished setting this up");
+      }
     }
 
     // Carry forward any tokens the caller already holds so re-entering the flow
@@ -543,12 +582,12 @@ export class DbSecretsVaultService implements ISecretsVaultService {
     // encKey must degrade to "start fresh", not crash the recovery flow — and (b)
     // they were minted under the SAME provider config we're about to (re)write, or
     // a refresh_token for a stale client id/secret would silently fail once carried
-    // into this row after an owner rotates the shared secret.
+    // into this row after an owner rotates the shared secret or edits the
+    // declaration. Compared as values, not as serialised text: the stored side
+    // has been through jsonb, which does not keep key order, and a declared
+    // sign-in's side is built here.
     let existingTokens: OAuthTokenSet | undefined;
-    if (
-      existingUserRow?.kind === 'oauth' &&
-      JSON.stringify(existingUserRow.oauthMeta) === JSON.stringify(shared.oauthMeta)
-    ) {
+    if (existingUserRow?.kind === 'oauth' && isDeepStrictEqual(existingUserRow.oauthMeta, oauthMeta)) {
       try {
         existingTokens = this.readBlob(existingUserRow.valueEncrypted).tokens;
       } catch {
@@ -567,9 +606,13 @@ export class DbSecretsVaultService implements ISecretsVaultService {
     const requestedScopes = input.scopes && input.scopes.length ? input.scopes : meta.scopes;
     const pendingScopes = requestedScopes && requestedScopes.length ? requestedScopes.join(' ') : undefined;
 
-    // Provision (or reset) the caller's own oauth row for this key from the shared
-    // provider meta + secret, preserving any existing tokens. Keyed `<manual>_<VAR>`
-    // so `resolve` (scope 'user') returns the token once sign-in completes.
+    // Provision (or reset) the caller's own oauth row for this key from the provider
+    // configuration this start uses + the shared secret, preserving any existing
+    // tokens. The row records that configuration because `completeOAuth` and every
+    // later refresh of this grant read it from HERE: the exchange goes to the token
+    // endpoint, under the client id, that the consent was given for. Keyed
+    // `<manual>_<VAR>` so `resolve` (scope 'user') returns the token once sign-in
+    // completes.
     const blob: OAuthBlob = {
       clientSecret: sharedBlob.clientSecret,
       tokens: existingTokens,
@@ -579,16 +622,15 @@ export class DbSecretsVaultService implements ISecretsVaultService {
     const valueEncrypted = this.crypto().encrypt(JSON.stringify(blob));
     const [row] = await this.db
       .insert(secrets)
-      .values({ userId, key, kind: 'oauth', label: shared.label, valueEncrypted, oauthMeta: shared.oauthMeta })
+      .values({ userId, key, kind: 'oauth', label: shared.label, valueEncrypted, oauthMeta })
       .onConflictDoUpdate({
         target: [secrets.userId, secrets.key],
-        set: { kind: 'oauth', valueEncrypted, oauthMeta: shared.oauthMeta, updatedAt: new Date() },
+        set: { kind: 'oauth', valueEncrypted, oauthMeta, updatedAt: new Date() },
       })
       .returning();
 
-    // Build the consent URL exactly as beginOAuth does, from the stored meta —
-    // EXCEPT the requested scopes (above). Client id, addresses, and secret
-    // stay owner-pinned.
+    // Build the consent URL exactly as beginOAuth does, from the configuration
+    // this start uses, with the requested scopes chosen above.
     const url = new URL(meta.authorizationUrl);
     url.searchParams.set('response_type', 'code');
     url.searchParams.set('client_id', meta.clientId);
