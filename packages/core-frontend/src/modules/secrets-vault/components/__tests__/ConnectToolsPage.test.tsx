@@ -555,6 +555,16 @@ describe('ConnectToolsPage: inside Skills & Tools', () => {
       expect(await within(group).findByRole('radio', { name: /ops.*Watches the dashboards\./ })).not.toBeChecked();
     });
 
+    it('asks nothing when there is no agent to connect as: the connection is Everything’s, as it always was', async () => {
+      connectMock.getMcpOAuthRequest.mockResolvedValue({ clientName: 'Claude', scope: null, resource: null, agents: [] });
+      renderPage();
+      // Finish waits for the agents to answer, so once it went through, the choice had its chance to appear.
+      await finish();
+      expect(screen.queryByRole('group', { name: 'Connect as' })).toBeNull();
+      expect(screen.queryByText(/Connect as/)).toBeNull();
+      expect(connectMock.completeMcpOAuth).toHaveBeenCalledWith('signed-state', null);
+    });
+
     it('says when the agents could not be loaded, and approves Everything only once that is confirmed', async () => {
       connectMock.getMcpOAuthRequest.mockResolvedValue({
         clientName: 'Claude',

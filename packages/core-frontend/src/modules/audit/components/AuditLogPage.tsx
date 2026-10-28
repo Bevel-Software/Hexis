@@ -277,11 +277,13 @@ export function AuditLogPage() {
                                     {p.deletedAt != null && <Badge tone="outline">Deleted by owner</Badge>}
                                   </span>
                                   <span className="block text-meta text-ink-muted">
-                                    {/* What the connection loads: Everything, or the agent configuration it
-                                        was made as. A page acts as its viewer, so it has none. */}
-                                    {p.kind !== 'page' && (
+                                    {/* The agent configuration the connection was made as, when it was
+                                        made as one; a connection made as Everything, which is what a
+                                        connection is unless it says otherwise, carries no tag. A page
+                                        acts as its viewer, so it never has one. */}
+                                    {p.kind !== 'page' && p.agentPath && (
                                       <>
-                                        <span title={p.agentPath ?? undefined}>As {connectedAsLabel(p.agentPath)}</span>
+                                        <span title={p.agentPath}>As {connectedAsLabel(p.agentPath)}</span>
                                         {' · '}
                                       </>
                                     )}

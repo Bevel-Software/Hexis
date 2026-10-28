@@ -187,7 +187,8 @@ describe('AuditLogPage', () => {
     const rowOf = (label: string) => screen.getByText(label).closest('li') as HTMLElement;
     expect(rowOf('Claude')).toHaveTextContent('As delivery-mechanic');
     expect(within(rowOf('Claude')).getByTitle('Agents/delivery-mechanic.agent')).toBeInTheDocument();
-    expect(rowOf('CI pipeline')).toHaveTextContent('As Everything');
+    // Everything is what a connection is unless it says otherwise: no tag.
+    expect(rowOf('CI pipeline')).not.toHaveTextContent('As ');
   });
 
   it('shows an admin a key its owner deleted for good, marked as such, with its history intact', async () => {

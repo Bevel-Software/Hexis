@@ -817,6 +817,21 @@ describe('minting a key as an agent ("Connect as")', () => {
     expect(ops).not.toBeChecked();
   });
 
+  it('asks nothing when there is no agent to mint as: the key is Everything’s, as it always was', async () => {
+    agentChoicesMock.mockResolvedValue([]);
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    await user.click(screen.getByRole('tab', { name: 'Autonomous agents' }));
+    await user.type(screen.getByRole('textbox', { name: /Create an external API key/ }), 'CI');
+    // Create key is enabled only once the agents answered, so the choice had its chance to appear.
+    const create = screen.getByRole('button', { name: 'Create key' });
+    expect(create).toBeEnabled();
+    expect(screen.queryByRole('group', { name: 'Connect as' })).toBeNull();
+    expect(screen.queryByText(/Connect as/)).toBeNull();
+    await user.click(create);
+    expect(createMock).toHaveBeenLastCalledWith('CI', null);
+  });
+
   it('mints as Everything unless an agent is picked, and as the agent when one is', async () => {
     agentChoicesMock.mockResolvedValue([OPS]);
     const user = userEvent.setup();
@@ -876,7 +891,8 @@ describe('minting a key as an agent ("Connect as")', () => {
     await user.click(screen.getByRole('tab', { name: 'Autonomous agents' }));
     await screen.findByText('Pipeline');
     const rowOf = (label: string) => screen.getByText(label).closest('li') as HTMLElement;
-    expect(rowOf('Laptop')).toHaveTextContent('As Everything');
+    // Everything is what a key is unless it says otherwise: no tag.
+    expect(rowOf('Laptop')).not.toHaveTextContent('As ');
     expect(rowOf('Pipeline')).toHaveTextContent('As ops');
   });
 });
