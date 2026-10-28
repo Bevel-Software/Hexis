@@ -41,10 +41,8 @@ write:
   folder to the organisation; in a file's frontmatter it only makes that file
   visible (a plugin's `access.md` has it there so the plugin can be found and
   joined, which admits nobody to the plugin). Write roles and groups with
-  their prefix, as the app's Manage access dialog does. A bare name still
-  works and means the role when one of that name exists, the group otherwise,
-  in a denial too, so a group that shares a role's name is reached only as
-  `group/<Name>`. A person's
+  their prefix, as the app does: a bare name means the role when one has that
+  name, the group otherwise, in a denial too. A person's
   personal plugin (`{{pluginsDir}}/personal-<id>/`) grants its owner access and
   denies `everyone` outright, so opening a parent folder never opens it.
 - **Plugin tokens.** `plugin/<name>/read`, `plugin/<name>/write` and
@@ -53,8 +51,6 @@ write:
   above the plugin, and `deny` lines, do not count). `<name>` is the
   manifest's `name`, in any spelling. This is how a shared skill reaches a
   plugin's members: `plugin/gtm/read` under `read` on the skill's folder.
-  Joining or leaving the plugin changes what they can read wherever the token
-  is granted.
 - **The nearest rule decides.** For a path, the platform looks at the file's
   own rules (below), then its folder's `access.md`, then each folder above, up
   to the root, and the first one that says anything about you decides. Within
