@@ -75,6 +75,16 @@ import {
   type ComposedAgentInstructions,
 } from '../agent-instructions/index.js';
 import { guideFirstDescription } from '../tool-registry/index.js';
+import {
+  CONNECTION_META_KEY,
+  connectionRefusal,
+  connectionWireOf,
+  describeConnection,
+  type ConnectionScopeWire,
+} from '@bevel-software/platform-mcp-core';
+
+// Still offered from here, as this module's tests and callers learnt it.
+export { CONNECTION_META_KEY };
 
 /**
  * Configuration for the loopback proxy. `loopbackBaseUrl` is the backend's own
@@ -142,6 +152,14 @@ export interface McpCaller {
    * attributed in the Audit log; a request with neither records nothing.
    */
   connectionId?: string | null;
+  /**
+   * The agent configuration the caller's credential connects as (a connection
+   * key's, or an agent connection's), or null for Everything. It rides the
+   * request's loopback identity, so every agent surface behind the loopback
+   * narrows to that agent's scope (`modules/agent-scope`); here it only keys
+   * the surface and words the handshake.
+   */
+  agentPath?: string | null;
   /** The raw bearer the request carried. */
   bearer: string;
   /**
@@ -222,6 +240,24 @@ interface RequestSurface {
    * build, at the latest after an hour unused.
    */
   degraded: boolean;
+  /**
+   * The agent the catalog was narrowed to, as `all-tools` reported it —
+   * absent for Everything. A call to a tool not on a narrowed surface is
+   * refused by name and agent rather than as unknown, and a connection whose
+   * agent configuration cannot be used is served nothing, with the sentence that says
+   * why.
+   */
+  connection?: ConnectionScopeWire;
+}
+
+/**
+ * The `connection` a loopback answer (`all-tools`, `catalog-revision`)
+ * carries, as a field to spread: validated at the boundary by the MCP
+ * core's reader (HTTP loses the type), and absent for Everything.
+ */
+function connectionOf(body: unknown): { connection?: ConnectionScopeWire } {
+  const connection = connectionWireOf(body);
+  return connection ? { connection } : {};
 }
 
 /**
@@ -490,13 +526,26 @@ export class McpService {
     // verifier resolves it to `source: 'external'`: the caller IS an external
     // agent and must be treated like one (admitted to `start_session`/`ask`,
     // refused from internal-only tools).
+    // The agent the connection was made as rides that token too, so the
+    // surfaces behind the loopback narrow to its scope; a connection key
+    // carries its own.
+    const agentPath = caller.agentPath || null;
     const loopbackBearer =
       tokenId == null && this.internalTokens
-        ? this.internalTokens.mint({ userId, externalProxy: true }, MCP_LOOPBACK_TOKEN_TTL_MS)
+        ? this.internalTokens.mint(
+            { userId, externalProxy: true, ...(agentPath ? { agentPath } : {}) },
+            MCP_LOOPBACK_TOKEN_TTL_MS,
+          )
         : bearer;
 
     let instructions: Promise<ComposedAgentInstructions> | undefined;
     const agentInstructions = () => (instructions ??= this.composeAgentInstructions());
+    // What a narrowed connection is told about itself at the handshake: the
+    // agent it is connected as, or why it loads nothing. Read off the catalog
+    // revision (cheap), not the surface (a full discovery). Everything is
+    // told nothing new, so its handshake is exactly what it was.
+    const connectionLine = async (): Promise<string | null> =>
+      agentPath ? describeConnection((await this.fetchCatalogRevision(loopbackBearer)).connection) : null;
     // The Audit log's view of this request — only when the request can be
     // attributed to a key, an agent connection or a page. The catalog names
     // it classifies pooled tools by are the surface's, which is looked up
@@ -534,6 +583,10 @@ export class McpService {
       }));
 
     const initializing = (Array.isArray(messages) ? messages : [messages]).some((m) => isInitializeRequest(m));
+    const handshakeInstructions = async (): Promise<string> => {
+      const [{ instructions: text }, line] = await Promise.all([agentInstructions(), connectionLine()]);
+      return line ? `${text}\n\n${line}` : text;
+    };
     // The deployment's MCP Apps, read once per request. Declaring the
     // `resources` capability is what permits the two handlers below, and a
     // deployment with no view must not declare it — a client would then list
@@ -554,12 +607,12 @@ export class McpService {
         },
         // `instructions` rides the initialize result; clients that honour it
         // place the text in the model's system prompt without the model acting.
-        ...(initializing ? { instructions: (await agentInstructions()).instructions } : {}),
+        ...(initializing ? { instructions: await handshakeInstructions() } : {}),
       },
     );
 
     server.setRequestHandler(ListToolsRequestSchema, async () => inRequest(async () => {
-      const [{ tools, catalogNames }, { toolPrefix }, readOnly] = await Promise.all([
+      const [{ tools, catalogNames, connection }, { toolPrefix }, readOnly] = await Promise.all([
         requestSurface(),
         agentInstructions(),
         // A failed read lists the built-in hints rather than no listing at all.
@@ -568,6 +621,12 @@ export class McpService {
           return undefined;
         }),
       ]);
+      // A connection whose agent configuration cannot be used is served NOTHING — not
+      // Everything — and the one sentence saying why rides the listing's
+      // `_meta` (the handshake carries it too).
+      if (connection?.unavailable) {
+        return { tools: [], _meta: { [CONNECTION_META_KEY]: connection.unavailable } };
+      }
       // A discovered tool whose name collides with a meta-tool would be
       // listed but never callable (the dispatcher routes the name to the
       // meta-tool first), so drop it from the listing entirely.
@@ -694,7 +753,10 @@ export class McpService {
     }
 
     server.setRequestHandler(CallToolRequestSchema, async (request, extra) => inRequest(async () => {
-      const { client: shared, tools, unavailable, catalogNames, hidden: hiddenTools } = await requestSurface();
+      const { client: shared, tools, unavailable, catalogNames, hidden: hiddenTools, connection } = await requestSurface();
+      // Nothing is callable on a connection that loads nothing, meta-tools
+      // included: every call is answered with the reason.
+      if (connection?.unavailable) return toolError(connection.unavailable);
       // The person's client, as this request uses it: every call it makes —
       // a chain's too, which comes back from the isolate outside any async
       // context — carries this request's bearer and audit.
@@ -769,7 +831,16 @@ export class McpService {
         if (answer && owner && audit) {
           await audit.denied(`${owner.utcpName}.${toolName.slice(owner.utcpName.length + 1)}`, args);
         }
-        return answer ?? toolError(retiredToolMessage(toolName) ?? `Unknown tool "${toolName}".`);
+        // On a narrowed connection, a tool off the surface is one its agent
+        // does not load: refused by name and agent, never "unknown" — the tool
+        // may well exist, for this person, on another connection.
+        return (
+          answer ??
+          toolError(
+            retiredToolMessage(toolName) ??
+              (connection ? connectionRefusal(toolName, connection) : `Unknown tool "${toolName}".`),
+          )
+        );
       }
       const needsAuth = await needsAuthorization(proxied.manualName);
       if (needsAuth) {
@@ -879,9 +950,20 @@ export class McpService {
    */
   private async surfaceFor(caller: McpCaller, loopbackBearer: string): Promise<RequestSurface> {
     const { userId, tokenId } = caller;
-    const revision = await this.fetchCatalogRevision(loopbackBearer);
+    const { revision } = await this.fetchCatalogRevision(loopbackBearer);
     if (revision === null) return this.buildSurface(userId, tokenId, loopbackBearer, 'uncached');
-    const key = [userId, tokenId != null ? 'key' : 'person', caller.scope ?? 'write', revision].join(POOL_KEY_SEPARATOR);
+    // The agent the connection was made as is part of the key: two
+    // connections of one person made as different agents are two surfaces.
+    // (The revision already moves when the agent's FILE changes — it carries
+    // the file's digest — so an edit is a new build at the next request.)
+    // Everything adds nothing, and keeps the key it always had.
+    const key = [
+      userId,
+      tokenId != null ? 'key' : 'person',
+      caller.scope ?? 'write',
+      revision,
+      ...(caller.agentPath ? [caller.agentPath] : []),
+    ].join(POOL_KEY_SEPARATOR);
     const { value } = await this.surfaces.get(
       key,
       () => this.buildSurface(userId, tokenId, loopbackBearer, 'miss'),
@@ -893,10 +975,13 @@ export class McpService {
   /**
    * The caller's catalog revision (`GET /api/agent/catalog-revision`, the one
    * `hexis-mcp` polls), read with their bearer; null when it cannot be read.
+   * With it, the agent the caller's connection is narrowed to, when it is.
    * A deployment or a test that does not serve the route answers 404, which
    * is not worth a line in the log; anything else is.
    */
-  private async fetchCatalogRevision(bearer: string): Promise<string | null> {
+  private async fetchCatalogRevision(
+    bearer: string,
+  ): Promise<{ revision: string | null; connection?: ConnectionScopeWire }> {
     try {
       const res = await fetch(`${this.opts.loopbackBaseUrl}/api/agent/catalog-revision`, {
         headers: { Authorization: `Bearer ${bearer}` },
@@ -904,13 +989,16 @@ export class McpService {
       });
       if (!res.ok) {
         if (res.status !== 404) log.warn(`catalog-revision loopback failed: HTTP ${res.status}; building this request's surface uncached`);
-        return null;
+        return { revision: null };
       }
-      const body = (await res.json()) as { revision?: unknown };
-      return typeof body.revision === 'string' && body.revision ? body.revision : null;
+      const body = (await res.json()) as { revision?: unknown; connection?: unknown };
+      return {
+        revision: typeof body.revision === 'string' && body.revision ? body.revision : null,
+        ...connectionOf(body),
+      };
     } catch (err) {
       log.warn("catalog-revision loopback threw; building this request's surface uncached:", { err });
-      return null;
+      return { revision: null };
     }
   }
 
@@ -935,7 +1023,7 @@ export class McpService {
     // The list of manuals this caller gets: the KB manual + each `.tool` they
     // can read. Fetched over loopback with the caller's key, so ACL filtering
     // lives ONCE behind the REST surface.
-    const manuals = await this.fetchManualTemplates(loopbackBearer);
+    const { manuals, connection } = await this.fetchManualTemplates(loopbackBearer);
     const catalogMs = performance.now() - started;
     const client = await this.buildClient(userId, manuals);
     const discovered = await this.discoverTools(client, manuals, userId);
@@ -960,7 +1048,7 @@ export class McpService {
           (decision.suppressed > 0 ? ` [+${decision.suppressed} identical rebuild(s) since last line]` : ''),
       );
     }
-    return { ...discovered, client, tools };
+    return { ...discovered, client, tools, ...(connection ? { connection } : {}) };
   }
 
   /**
@@ -1039,11 +1127,13 @@ export class McpService {
    * request. HTTP transport loses the `CallTemplate` type, so we re-validate the
    * received JSON even though the producing endpoint already validated it.
    */
-  private async fetchManualTemplates(bearer: string): Promise<CallTemplate[]> {
+  private async fetchManualTemplates(
+    bearer: string,
+  ): Promise<{ manuals: CallTemplate[]; connection?: ConnectionScopeWire }> {
     // This is the REMOTE proxy, so ask for remote-capable manuals only — local-only
     // `.tool`s are surfaced instead via the `list_local_tools` tool in the KB manual.
     const body = (await this.loopbackJson(bearer, '/api/agent/all-tools?remote=true', 'all-tools')) as
-      | { manuals?: unknown }
+      | { manuals?: unknown; connection?: unknown }
       | null;
     const rawManuals: unknown[] = Array.isArray(body?.manuals) ? body.manuals : [];
 
@@ -1062,7 +1152,7 @@ export class McpService {
     }
     // Always include the KB manual, even if `all-tools` was unavailable/regressed.
     if (!hasKb) out.unshift(this.kbManualTemplate());
-    return out;
+    return { manuals: out, ...connectionOf(body) };
   }
 
   /** The KB manual's discovery template — the fallback if `all-tools` is unavailable. */

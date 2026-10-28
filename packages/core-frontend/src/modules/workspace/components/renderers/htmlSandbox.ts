@@ -373,21 +373,44 @@ const NAV_BRIDGE = `
   }
   globalThis.bevel.openNode = navigate;
   globalThis.bevel.navigate = navigate;
+  // A link that names this page's own file with a fragment
+  // ('Roadmap.html#q3') is posted like any path; the parent recognises the
+  // file and hands the fragment back to be scrolled here, as '#q3' is.
+  if (typeof globalThis.addEventListener === 'function') globalThis.addEventListener('message', function (event) {
+    if (event.source !== parent) return;
+    var msg = event.data;
+    if (!msg || typeof msg !== 'object' || msg.type !== 'bevel.jump' || typeof msg.hash !== 'string') return;
+    var hash = normalize(msg.hash);
+    if (hash.charAt(0) === '#') jumpTo(hash);
+  });
+  // A click the reader asked a NEW TAB of — Ctrl, Cmd or Shift held, or the
+  // middle button (an 'auxclick'; it never fires 'click') — is what a browser
+  // opens a new tab for. The frame cannot: the sandbox has no allow-popups,
+  // so left to the browser it opens nothing, or navigates the frame away.
+  // The parent is asked instead, for any destination, a fragment of this
+  // page included (the parent opens this page at that section).
+  function followLink(e) {
+    if (e.type === 'auxclick' && e.button !== 1) return;
+    var el = e.target;
+    var a = el && el.closest ? el.closest('a[href]') : null;
+    if (!a) return;
+    // A handler of the page's own that already cancelled this click owns
+    // it (a toggle, a hash router); the bridge stays out of its way.
+    if (e.defaultPrevented) return;
+    // Cancelled even when there is nowhere to go: left to the browser, an
+    // empty href reloads the frame against the app's URL, as '#…' would.
+    e.preventDefault();
+    var href = normalize(a.getAttribute('href') || '');
+    if (!href) return;
+    if (e.button === 1 || e.ctrlKey || e.metaKey || e.shiftKey) {
+      parent.postMessage({ type: 'bevel.navigate', href: href, newTab: true }, '*');
+      return;
+    }
+    navigate(href);
+  }
   if (typeof document !== 'undefined') {
-    document.addEventListener('click', function (e) {
-      var el = e.target;
-      var a = el && el.closest ? el.closest('a[href]') : null;
-      if (!a) return;
-      // A handler of the page's own that already cancelled this click owns
-      // it (a toggle, a hash router); the bridge stays out of its way.
-      if (e.defaultPrevented) return;
-      // Cancelled even when there is nowhere to go: left to the browser, an
-      // empty href reloads the frame against the app's URL, as '#…' would.
-      e.preventDefault();
-      var href = normalize(a.getAttribute('href') || '');
-      if (!href) return;
-      navigate(href);
-    });
+    document.addEventListener('click', followLink);
+    document.addEventListener('auxclick', followLink);
   }
 })();
 `;
@@ -559,6 +582,14 @@ interface BuildSandboxedHtmlOptions {
    * way.
    */
   toolBridge?: ToolBridgeOption;
+  /**
+   * The branch the page is viewed on — `window.bevel.branch` inside the frame,
+   * so a page that reads its data through the tools and links to what they
+   * name does both on the branch it is shown on, rather than on one written
+   * into its script. Absent where the host has no branch for the page (the
+   * embed, a mail body), where the member is `null`.
+   */
+  branch?: string;
 }
 
 /**
@@ -569,7 +600,9 @@ interface BuildSandboxedHtmlOptions {
  */
 export function buildSandboxedHtml(opts: BuildSandboxedHtmlOptions): string {
   const lib = opts.libModuleSources.map(stripRelativeImports).join('\n\n');
-  const exposeGlobals = `\n;globalThis.bevel = { ${BEVEL_GLOBAL_EXPORTS.join(', ')} };\n`;
+  // `branch` is data, not code: serialized as JSON into the literal, so a
+  // branch name can hold nothing the script would read as source.
+  const exposeGlobals = `\n;globalThis.bevel = { ${BEVEL_GLOBAL_EXPORTS.join(', ')} };\nglobalThis.bevel.branch = ${JSON.stringify(opts.branch ?? null)};\n`;
   const inlineLib = escapeForScriptBody(lib + exposeGlobals + NAV_BRIDGE + KEY_BRIDGE + toolBridgeRuntime(opts.toolBridge));
 
   // Title and body are content-only — `srcDoc` already isolates them, but we

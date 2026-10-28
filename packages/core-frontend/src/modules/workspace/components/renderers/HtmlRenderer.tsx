@@ -1,9 +1,11 @@
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { Pencil, Eye, RotateCw } from 'lucide-react';
+import { useLocation } from 'react-router-dom';
 import { useFileNav } from '../../routing/kb-routes';
 import type { FileRendererProps, RendererSaveState } from './types';
 import { buildSandboxedHtml, sanitizeAgentHtml } from './htmlSandbox';
 import { useRendererSurface } from './rendererSurface';
+import { usePageLinkHome } from './htmlToolBridge';
 import { useHtmlToolBridge } from './useHtmlToolBridge';
 import {
   HTML_FRAME_KEY_STEP,
@@ -49,11 +51,20 @@ export function HtmlRenderer({
   onSaveStateChange,
   readOnly = false,
 }: FileRendererProps) {
-  const { openLink } = useFileNav();
+  const { openLink, branch: tabBranch } = useFileNav();
+  // The fragment this tab's address arrived with (`Board.html#totals`, from a
+  // section link opened in a new tab or a shared address). It names a place
+  // in the PAGE, which lives in the frame, where the app's address never
+  // reaches: the frame is handed it as `bevel.jump` once it has loaded, the
+  // same message a click on a section link inside the page is answered with.
+  const { hash: arrivalHash } = useLocation();
   const surface = useRendererSurface();
   // Whether the surface's host grows with the page (an issue panel) rather
   // than giving it a pane to scroll in (the app, the MCP App's pane).
   const sizesToContent = surface?.sizesToContent === true;
+  // The file this page's links resolve against, where the host's `filePath`
+  // is not a workspace path on this tab's branch (a skill page).
+  const linkHome = usePageLinkHome();
   const [mode, setMode] = useState<'preview' | 'edit'>('preview');
   /**
    * The frame's height where the host grows with the page: the standard
@@ -133,12 +144,16 @@ export function HtmlRenderer({
         libModuleSources: [],
         bodyHtml: sanitizeAgentHtml(savedValue),
         toolBridge,
+        // The branch the page is viewed on — the real home of a page whose
+        // host is not a workspace path (a skill page), else the file page's
+        // tab: the same branch its links resolve on. Absent on a surface.
+        branch: linkHome?.branch ?? tabBranch ?? undefined,
       });
       return { srcdoc, error: null };
     } catch (err) {
       return { srcdoc: null, error: err instanceof Error ? err.message : 'Failed to build preview' };
     }
-  }, [mode, savedValue, filePath, toolBridge]);
+  }, [mode, savedValue, filePath, toolBridge, linkHome, tabBranch]);
   const bundledSrcdoc = preview?.srcdoc ?? null;
   const previewError = preview?.error ?? null;
 
@@ -152,21 +167,36 @@ export function HtmlRenderer({
   // node — both post a `bevel.navigate` message (the iframe sandbox can't
   // navigate the host window itself). `openLink` resolves the href the same
   // way the markdown renderer does (absolute `/workspace/…` URLs keep their
-  // branch; relative paths resolve against this file) and routes it through
-  // the in-app navigation so the URL reflects what's on screen.
+  // branch; relative paths resolve against this file) and follows it by the
+  // rule for links inside a file: another file opens in a new tab, and this
+  // page — its state, its scroll, its full-screen view — stays as it was.
+  // A link to a section of this same page (`Roadmap.html#q3` from inside
+  // Roadmap.html) is handed back to the frame as `bevel.jump`, which scrolls
+  // it the way the bridge scrolls a bare `#q3`: a fragment on the app's own
+  // address would never reach the frame. A host whose `filePath` is not a
+  // workspace path on this tab's branch (a skill page) names the page's real
+  // home through `PageLinkHomeContext`.
   useEffect(() => {
     function onNavMessage(event: MessageEvent) {
       const iframeWin = iframeRef.current?.contentWindow;
       if (!iframeWin || event.source !== iframeWin) return;
-      const msg = event.data as { type?: unknown; href?: unknown } | null;
+      const msg = event.data as { type?: unknown; href?: unknown; newTab?: unknown } | null;
       if (!msg || typeof msg !== 'object' || msg.type !== 'bevel.navigate') return;
       const href = typeof msg.href === 'string' ? msg.href : null;
       if (!href) return;
-      openLink(href, filePath);
+      openLink(href, linkHome?.path ?? filePath, {
+        homeBranch: linkHome?.branch,
+        // A modified or middle click in the page, which the frame cannot
+        // open a tab for itself (see the nav bridge in `htmlSandbox.ts`).
+        newTab: msg.newTab === true,
+        onSection: (hash) => {
+          if (hash) iframeWin.postMessage({ type: 'bevel.jump', hash }, '*');
+        },
+      });
     }
     window.addEventListener('message', onNavMessage);
     return () => window.removeEventListener('message', onNavMessage);
-  }, [openLink, filePath]);
+  }, [openLink, filePath, linkHome]);
 
   useEffect(() => {
     frameHeightRef.current = frameHeight;
@@ -310,6 +340,9 @@ export function HtmlRenderer({
             // iframe cannot exfiltrate, navigate, popup, or fetch.
             sandbox="allow-scripts"
             referrerPolicy="no-referrer"
+            onLoad={(e) => {
+              if (arrivalHash) e.currentTarget.contentWindow?.postMessage({ type: 'bevel.jump', hash: arrivalHash }, '*');
+            }}
             // In a pane the frame fills it and scrolls inside; where the host
             // grows with the page, the frame has the reader's height (a
             // flex-grown frame in an auto-height column would collapse to the

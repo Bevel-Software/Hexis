@@ -123,9 +123,11 @@ describe('restricting below a parent keeps the principal reported', () => {
     principal: Principal,
     picked: Partial<Record<Verb, boolean>> | null,
   ): Promise<void> {
+    // The mutation service derives its matching (no role shares GTM Team's
+    // name, so 'exact'); the read side is told the same.
     const opts = principal.kind === 'role' ? ({ tokenMatch: 'exact' } as const) : undefined;
     if (picked === null) {
-      await mutation.denyHere(WS, 'folder', FOLDER, principal, undefined, opts);
+      await mutation.denyHere(WS, 'folder', FOLDER, principal, undefined);
       access.invalidate(WS);
       return;
     }
@@ -135,11 +137,11 @@ describe('restricting below a parent keeps the principal reported', () => {
       const src = await access.grantSources(WS, 'folder', FOLDER, toGrantPrincipal(principal), opts);
       const list = src[verb] ?? [];
       const localOnly = list.length > 0 && list.every((s) => s.kind === 'direct');
-      if (localOnly) await mutation.revoke(WS, 'folder', FOLDER, principal, 'me@x', verb, opts);
-      else await mutation.denyHere(WS, 'folder', FOLDER, principal, verb, opts);
+      if (localOnly) await mutation.revoke(WS, 'folder', FOLDER, principal, 'me@x', verb);
+      else await mutation.denyHere(WS, 'folder', FOLDER, principal, verb);
       access.invalidate(WS);
       if (localOnly && (await effective(principal))[verb]) {
-        await mutation.denyHere(WS, 'folder', FOLDER, principal, verb, opts);
+        await mutation.denyHere(WS, 'folder', FOLDER, principal, verb);
         access.invalidate(WS);
       }
     }
@@ -153,7 +155,7 @@ describe('restricting below a parent keeps the principal reported', () => {
         opts,
       );
       if (!(denials[verb] ?? []).some((s) => s.kind === 'direct')) continue;
-      await mutation.revoke(WS, 'folder', FOLDER, principal, 'me@x', verb, opts);
+      await mutation.revoke(WS, 'folder', FOLDER, principal, 'me@x', verb);
       access.invalidate(WS);
     }
     for (const verb of minimalGrants(picked)) {

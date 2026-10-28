@@ -1,0 +1,199 @@
+import { pathUnderRoot } from '@bevel-software/platform-shared';
+import {
+  NOT_AVAILABLE_TO_CONNECTION,
+  connectionRefusal,
+  describeConnection,
+  type ConnectionScopeWire,
+  type ScopeAgent,
+} from '@bevel-software/platform-mcp-core';
+
+// The wire and its words are the MCP core's (`connection-scope-wire.ts`),
+// so the hosted proxy and the local server read and word a connection the
+// same way; offered here too, as this module's callers learnt them.
+export { NOT_AVAILABLE_TO_CONNECTION, connectionRefusal, describeConnection, type ConnectionScopeWire, type ScopeAgent };
+
+/**
+ * The resolved roots a usable agent configuration narrows a connection to — what
+ * {@link ConnectionScope.narrowed} is built from.
+ */
+export interface ScopeRoots {
+  /** Skill folders and subtrees: the `skills:` entries, each plugin folder, and the skills its manifest links. */
+  skills: readonly string[];
+  /** Connector files and subtrees: the `connectors:` entries and each plugin folder. */
+  connectors: readonly string[];
+  /** Platform tool names; null for all of them. */
+  platformTools: readonly string[] | null;
+}
+
+type State =
+  | { kind: 'everything' }
+  | { kind: 'narrowed'; agent: ScopeAgent; roots: ScopeRoots; fingerprint: string }
+  | { kind: 'unavailable'; agent: ScopeAgent; sentence: string; fingerprint: string };
+
+/**
+ * What one connection may load — the ONE answer every agent surface asks
+ * (`all-tools`, the `/agent/utcp` manual, the tool route, the skill tools,
+ * the setup tools, the catalog revision). Everything is the scope of every
+ * connection made without a choice, and asks nothing of anyone: each of its
+ * predicates is true, so a surface that consults it serves exactly what it
+ * served before connections could be narrowed.
+ *
+ * A scope only ever NARROWS. It is applied to what the person may already
+ * read — each surface asks it about items that passed the person's own read
+ * gate — so no list in an agent configuration can add an item to a connection.
+ */
+export class ConnectionScope {
+  private constructor(private readonly state: State) {}
+
+  static everything(): ConnectionScope {
+    return new ConnectionScope({ kind: 'everything' });
+  }
+
+  static narrowed(agent: ScopeAgent, roots: ScopeRoots, fingerprint: string): ConnectionScope {
+    return new ConnectionScope({ kind: 'narrowed', agent, roots, fingerprint });
+  }
+
+  /** A chosen file that cannot be used: nothing at all is loaded, and `sentence` says why. */
+  static unavailable(agent: ScopeAgent, sentence: string, fingerprint: string): ConnectionScope {
+    return new ConnectionScope({ kind: 'unavailable', agent, sentence, fingerprint });
+  }
+
+  /**
+   * A chosen file that is not there for the person — missing, or one they may
+   * no longer read: ONE answer for both, so the sentence discloses neither.
+   */
+  static gone(agentPath: string): ConnectionScope {
+    return ConnectionScope.unavailable(
+      { path: agentPath, name: agentPath },
+      `This connection was made as the agent \`${agentPath}\`, which no longer exists or which you can no ` +
+        'longer read, so it loads no tools and no skills. Reconnect and choose another agent, or Everything.',
+      `agent\u0000${agentPath}\u0000gone`,
+    );
+  }
+
+  /** True for Everything: the connection was made without choosing an agent. */
+  isEverything(): boolean {
+    return this.state.kind === 'everything';
+  }
+
+  /** Whether the skill in `skillFolder` (repo-relative) is loaded. */
+  allowsSkill(skillFolder: string): boolean {
+    const s = this.state;
+    if (s.kind === 'everything') return true;
+    if (s.kind === 'unavailable') return false;
+    return s.roots.skills.some((root) => pathUnderRoot(skillFolder, root));
+  }
+
+  /** Whether the connector defined at `definitionPath` (a `.tool` file or an MCP server definition) is loaded. */
+  allowsConnector(definitionPath: string): boolean {
+    const s = this.state;
+    if (s.kind === 'everything') return true;
+    if (s.kind === 'unavailable') return false;
+    return s.roots.connectors.some((root) => pathUnderRoot(definitionPath, root));
+  }
+
+  /**
+   * Whether any connector this connection loads is defined in `folder`
+   * (repo-relative) or in a folder that contains it — what a plugin's
+   * archive asks, since the local MCP server materializes a plugin only to
+   * run a connector it defines.
+   */
+  loadsConnectorIn(folder: string): boolean {
+    const s = this.state;
+    if (s.kind === 'everything') return true;
+    if (s.kind === 'unavailable') return false;
+    return s.roots.connectors.some((root) => pathUnderRoot(folder, root) || pathUnderRoot(root, folder));
+  }
+
+  /**
+   * {@link allowsSkill} as the narrowing a skill listing takes, or undefined
+   * for Everything — so an Everything caller's listing runs exactly the code
+   * it ran before connections could be narrowed.
+   */
+  skillFilter(): ((skillFolder: string) => boolean) | undefined {
+    return this.state.kind === 'everything' ? undefined : (p) => this.allowsSkill(p);
+  }
+
+  /** {@link allowsConnector} as the narrowing a catalog read takes, or undefined for Everything. */
+  connectorFilter(): ((definitionPath: string) => boolean) | undefined {
+    return this.state.kind === 'everything' ? undefined : (p) => this.allowsConnector(p);
+  }
+
+  /**
+   * Whether the connection's surface may be discovered: its skills read as
+   * MCP prompts, and its local-only connectors read by the local server so
+   * it can materialize them. Neither is a platform tool, so `platformTools`
+   * has no say — an agent that names skills gets them as prompts, and one
+   * that names connectors gets them served, whatever tools it is offered.
+   * False only for a file that cannot be used, which loads nothing at all.
+   */
+  allowsDiscovery(): boolean {
+    return this.state.kind !== 'unavailable';
+  }
+
+  /** Whether the platform's own tool `name` is loaded. */
+  allowsPlatformTool(name: string): boolean {
+    const s = this.state;
+    if (s.kind === 'everything') return true;
+    if (s.kind === 'unavailable') return false;
+    return s.roots.platformTools === null || s.roots.platformTools.includes(name);
+  }
+
+  /**
+   * The answer to a call of `toolName`, a tool this connection does not load:
+   * names the tool and the agent, so the caller knows the tool was refused by
+   * the connection's choice and not missing from the deployment. For a file
+   * that cannot be used, the sentence that says why.
+   */
+  refusal(toolName: string): string {
+    return connectionRefusal(toolName, this.toWire());
+  }
+
+  /**
+   * THE policy for a call of the platform tool `toolName` by this connection:
+   * null when the call may proceed, else the body the route answers with a
+   * 403 — the refusal naming the tool and the agent, and the code that says
+   * it was the connection's choice. Every route that IS a platform tool asks
+   * this, whether `toolHandler` hosts it or it is mounted on its own (the
+   * plugin-creation routes), so the rule is written once and the answers
+   * cannot drift. `discovery` marks a route that is a discovery read of the
+   * surface (the skill routes, the local-only tool list), which a narrowed
+   * connection is answered even when its `platformTools` omits the tool;
+   * a connection that loads nothing is refused it like everything else.
+   */
+  platformToolRefusal(
+    toolName: string,
+    opts: { discovery?: boolean } = {},
+  ): { error: string; code: typeof NOT_AVAILABLE_TO_CONNECTION } | null {
+    if (this.allowsPlatformTool(toolName)) return null;
+    if (opts.discovery === true && this.allowsDiscovery()) return null;
+    return { error: this.refusal(toolName), code: NOT_AVAILABLE_TO_CONNECTION };
+  }
+
+  /**
+   * One line for the text an agent is told about its connection (the MCP
+   * handshake, the agent guide); null for Everything, which is told nothing
+   * new.
+   */
+  describe(): string | null {
+    return describeConnection(this.toWire());
+  }
+
+  /**
+   * What moves the catalog revision when the agent's FILE changes — its path
+   * and a digest of its bytes, or the reason it cannot be used. Null for
+   * Everything, whose revision is exactly what it was before agents existed.
+   */
+  fingerprint(): string | null {
+    const s = this.state;
+    return s.kind === 'everything' ? null : s.fingerprint;
+  }
+
+  /** See {@link ConnectionScopeWire}; undefined for Everything. */
+  toWire(): ConnectionScopeWire | undefined {
+    const s = this.state;
+    if (s.kind === 'everything') return undefined;
+    if (s.kind === 'unavailable') return { agent: s.agent, unavailable: s.sentence };
+    return { agent: s.agent };
+  }
+}

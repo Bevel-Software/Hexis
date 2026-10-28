@@ -55,8 +55,11 @@ export type GrantPrincipal =
  * One collective principal in a resolved eligible list, with WHAT it is: a
  * ROLE (an app-defined capability) or a GROUP (a grant audience from the
  * active group source). The resolver knows the kind from the merged principal
- * index — a `role/<canonical>` alias hit is always the role; a bare token is
- * whatever owns it under group-first precedence — and the share dialog needs
+ * index — a `role/<canonical>` alias hit is always the role, a
+ * `group/<canonical>` hit always the group, and a bare token is the role when
+ * one of that name exists, otherwise the group when one exists (a token that
+ * names neither keeps the legacy `role` kind, as `everyone` does) — and the
+ * share dialog needs
  * it to badge each grantee row honestly ("Role" vs "Group") and to round-trip
  * the row's principal with the right kind.
  *
@@ -438,13 +441,19 @@ export interface IAccessControl {
    * tree that does. It writes nothing and moves nothing, and it answers the
    * caller's own verbs only — never the content of an `access.md` they may
    * not read.
+   *
+   * `sourceContent` previews a copy whose source is NO repository path — a
+   * file staged in the workspace's `tmp/` folder: its text, read exactly as a
+   * repository file's would be (frontmatter as the name it lands under, an
+   * `access.md` landing as that folder's rules). `fromPath` then only names
+   * the source; nothing is read at it.
    */
   previewAccessAfterRelocation(
     workspaceId: string,
     userEmail: string,
     fromPath: string,
     toPath: string,
-    opts?: { sourceRemains?: boolean },
+    opts?: { sourceRemains?: boolean; sourceContent?: string },
   ): Promise<PathVerbs>;
 
   /**
@@ -490,13 +499,11 @@ export interface IAccessControl {
    * access is omitted. A principal with no access anywhere yields an empty map.
    *
    * `opts.tokenMatch: 'exact'` pins a ROLE-shaped principal to its literal
-   * token spelling: only the exact token (bare, or `role/<name>`) counts as
-   * the principal's own entry, regardless of group shadowing. The mutation
-   * layer uses this so a check runs against the SAME identity a pinned
-   * exact-token splice edited — e.g. verifying a GROUP deny whose group has
-   * vanished, where the default (alias-tolerant when unshadowed) matching
-   * would misattribute a same-named role's surviving `role/<name>` grant to
-   * the group. Omitted (or `'name'`) → the shadowing-derived default.
+   * token spelling: only the exact token (bare, `role/<name>` or
+   * `group/<name>`) counts as the principal's own entry. The mutation layer
+   * uses this so a check runs against the SAME identity a pinned exact-token
+   * splice edited. Omitted (or `'name'`) → the explicit spelling plus the
+   * bare name when the bare name is this principal's (role-first).
    */
   grantSources(
     workspaceId: string,

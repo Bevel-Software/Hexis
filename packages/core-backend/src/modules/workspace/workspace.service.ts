@@ -44,6 +44,7 @@ import {
 import { redactSecret, urlQuerySecrets } from '../../shared/redact-secret.js';
 import { setAsideClone, setAsideRepository, setAsideRootFor, setAsideStamp } from './set-aside-clone.js';
 import { workingCopyShape } from './kb-repository.js';
+import { readTmpRef, stageTmpRef, statTmpRef, sweepTmpFolder, TMP_MAX_AGE_MS, type TmpFileStat } from './workspace-tmp.js';
 import type { IKbRepository } from './kb-repository.contract.js';
 import {
   cloneCredentialConfigArgs,
@@ -226,12 +227,8 @@ async function assertConditionalWriteMatches(
  * returns a verdict map keyed by those paths (`path → readable`). Injected by
  * the route from the access service so `WorkspaceService` stays access-agnostic
  * (it gets a function, not the access module). See `modules/access-model/kb-read-filter.ts`.
- *
- * `'unlisted'` hides an entry WITHOUT counting it as withheld: a listing
- * decision (the admin-only `.bevelignore`) rather than content the caller's
- * read rules keep from them, so it must not tell them something is being kept.
  */
-export type ReadTreeFilter = (wsRelPaths: string[]) => Promise<Map<string, boolean | 'unlisted'>>;
+export type ReadTreeFilter = (wsRelPaths: string[]) => Promise<Map<string, boolean>>;
 
 export class WorkspaceService implements IWorkspaceService {
   /** Maps branch → absolute directory path. Lazily populated. */
@@ -1813,12 +1810,96 @@ export class WorkspaceService implements IWorkspaceService {
   }
 
   /**
+   * The bytes of the one file a tmp ref (`__tmp__/<path>`, see
+   * `workspace-tmp.ts`) names in `ownerId`'s own folder of this workspace's
+   * `tmp/`, under the ref's rules: one file, nothing outside that folder, and
+   * a missing file — what somebody else staged included — a
+   * `PathNotFoundError` naming the ref. This is how a distribution's own tool
+   * reads a staged file without a reader of its own; the file tools read the
+   * folder through the same resolver, as the calling user.
+   */
+  async readTmpFile(workspaceId: string, ownerId: string, ref: string): Promise<Buffer> {
+    return readTmpRef(this.workspaceDirForTmp(workspaceId), ownerId, ref);
+  }
+
+  /**
+   * What `file_stat` reports for a tmp ref: the stat of the one file it names
+   * in `ownerId`'s folder of this workspace's `tmp/`, resolved exactly as
+   * {@link readTmpFile} resolves it.
+   */
+  async statTmpFile(workspaceId: string, ownerId: string, ref: string): Promise<TmpFileStat> {
+    return statTmpRef(this.workspaceDirForTmp(workspaceId), ownerId, ref);
+  }
+
+  /**
+   * Stage `bytes` in `ownerId`'s folder of this workspace's `tmp/`, at
+   * `relativePath` inside it, and answer the ref (`__tmp__/<relativePath>`)
+   * the owner reads it back with. The one way into the folder the ref
+   * reaches — a stager (the chat's attachments, a reader of an external
+   * document) calls this rather than composing the path, so where an owner's
+   * files live is decided here once. Needs no bootstrap: a staged file
+   * belongs beside the checkout, whether or not the branch is cloned yet.
+   */
+  async stageTmpFile(workspaceId: string, ownerId: string, relativePath: string, bytes: Uint8Array): Promise<string> {
+    return stageTmpRef(this.workspaceDirForTmp(workspaceId), ownerId, relativePath, bytes);
+  }
+
+  /**
+   * Remove, in every workspace directory under the root, each entry of its
+   * `tmp/` folder last modified more than `olderThanMs` ago — the platform's
+   * periodic cleanup (see `TmpSweeper`). Judged on the entry's own `lstat`,
+   * never through a link. Returns how many entries went, per workspace.
+   * An aborted `signal` ends the sweep at the next entry (see `TmpSweeper`).
+   */
+  async sweepTmp(
+    olderThanMs: number = TMP_MAX_AGE_MS,
+    now: number = Date.now(),
+    signal?: AbortSignal,
+  ): Promise<{ removed: Record<string, number> }> {
+    let entries: Array<{ name: string; isDirectory: () => boolean }>;
+    try {
+      entries = await fs.readdir(this.workspacesRoot, { withFileTypes: true });
+    } catch (err) {
+      if (isAbsence(err)) return { removed: {} };
+      throw err;
+    }
+    const removed: Record<string, number> = {};
+    for (const entry of entries) {
+      if (signal?.aborted) break;
+      if (!entry.isDirectory()) continue;
+      try {
+        const gone = await sweepTmpFolder(this.disk, path.join(this.workspacesRoot, entry.name), olderThanMs, now, signal);
+        if (gone.length > 0) removed[entry.name] = gone.length;
+      } catch (err) {
+        // One unreadable workspace spoils its own sweep, not the others'.
+        log.warn(`tmp sweep failed for ${entry.name}:`, { err });
+      }
+    }
+    return { removed };
+  }
+
+  /**
+   * The workspace directory a tmp ref resolves against, computed without
+   * bootstrapping (a branch never cloned has nothing staged): the root's own
+   * containment rule ({@link workspaceDirWithinRoot}), and not the root
+   * itself, which that rule allows — `<root>/tmp` is no workspace's folder.
+   */
+  private workspaceDirForTmp(workspaceId: string): string {
+    const dir = this.workspaceDirWithinRoot(workspaceId);
+    if (dir === path.resolve(this.workspacesRoot)) {
+      throw new Error(`Invalid workspace ID "${workspaceId}": a tmp ref resolves inside one workspace directory.`);
+    }
+    return dir;
+  }
+
+  /**
    * Remove the workspace's `tmp/` directory — transient run artifacts (code-mode
    * tool-chain spills, staged SharePoint docs) that live at the workspace root,
    * outside the KB git repo, and are never committed. Computes the path directly
    * from `workspacesRoot` (no bootstrapping) and force-removes, so it's safe to
    * call after a run even if the workspace was already torn down — a missing
-   * directory is ignored.
+   * directory is ignored. Everyone's staged files go with it, which is why the
+   * ref's promise is "up to seven days" (see `workspace-tmp.ts`).
    */
   async clearTmp(workspaceId: string): Promise<void> {
     // Guard against a malicious/odd workspaceId (e.g. "..") escaping the root
@@ -2657,19 +2738,17 @@ export class WorkspaceService implements IWorkspaceService {
       name: string;
       relativePath: string;
       readable: boolean;
-      /** Hidden by a listing decision, not a read rule: dropping it withholds nothing. */
-      unlisted: boolean;
       children: (FileTreeEntry | DirNode)[];
       /**
        * Files directly in it the caller's read rules kept out — counted, never
        * named. Only an entry the filter judged unreadable counts:
-       * `.bevelignore`d and `.git` entries never reach it, and an `'unlisted'`
-       * one is kept from no one. Folders dropped below it are added in `finish`.
+       * `.bevelignore`d and `.git` entries never reach it. Folders dropped
+       * below it are added in `finish`.
        */
       withheld: number;
     }
     const relOf = (abs: string) => path.relative(workspaceRoot, abs).replace(/\\/g, '/');
-    const top: DirNode = { name: path.basename(root), relativePath: relOf(root) || '.', readable: true, unlisted: false, children: [], withheld: 0 };
+    const top: DirNode = { name: path.basename(root), relativePath: relOf(root) || '.', readable: true, children: [], withheld: 0 };
     const nodes = new Map<string, DirNode>([['', top]]);
 
     await this.disk.walk(root, explorerWalk(), [
@@ -2690,7 +2769,6 @@ export class WorkspaceService implements IWorkspaceService {
           // dropped. No filter → identical to the pre-feature tree (regression-safe).
           const verdict = readFilter && entries.length > 0 ? await readFilter(rels) : null;
           const readable = (rel: string) => verdict === null || verdict.get(rel) === true;
-          const unlisted = (rel: string) => verdict !== null && verdict.get(rel) === 'unlisted';
           entries.forEach((entry, i) => {
             const entryRel = rels[i]!;
             if (entry.isDirectory()) {
@@ -2698,7 +2776,6 @@ export class WorkspaceService implements IWorkspaceService {
                 name: entry.name,
                 relativePath: entryRel,
                 readable: readable(entryRel),
-                unlisted: unlisted(entryRel),
                 children: [],
                 withheld: 0,
               };
@@ -2706,7 +2783,7 @@ export class WorkspaceService implements IWorkspaceService {
               node.children.push(child);
             } else if (readable(entryRel)) {
               node.children.push({ name: entry.name, relativePath: entryRel, type: 'file' });
-            } else if (!unlisted(entryRel)) {
+            } else {
               node.withheld++;
             }
           });
@@ -2735,7 +2812,7 @@ export class WorkspaceService implements IWorkspaceService {
         const sub = finish(child);
         withheld += sub.withheld ?? 0;
         if (child.readable || (sub.children?.length ?? 0) > 0) children.push(sub);
-        else if (!child.unlisted) withheld++;
+        else withheld++;
       }
       children.sort((a, b) => {
         if (a.type !== b.type) return a.type === 'directory' ? -1 : 1;

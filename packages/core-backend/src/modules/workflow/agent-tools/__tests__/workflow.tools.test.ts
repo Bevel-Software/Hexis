@@ -104,6 +104,9 @@ const workspaceService = {
 const workflowService = {
   listBranches: async (ws: string) => {
     calls.push(['listBranches', ws]);
+    // A real listing fetches first; mark when that fetch has landed.
+    await new Promise((r) => setTimeout(r, 0));
+    calls.push(['listBranches:fetched', ws]);
     return [{ name: 'main', isProtected: true }];
   },
   commitChange: async (ws: string, user: { id: string }, body: unknown) => {
@@ -117,7 +120,7 @@ const workflowService = {
   },
   createBranch: async (ws: string, name: string) => {
     calls.push(['createBranch', ws, name]);
-    return { name, isProtected: false, ahead: 0, behind: 0, hasRemote: true };
+    return { name, isProtected: false, hasRemote: true };
   },
   acquireLock: async (ws: string, branch: string, path: string) => {
     calls.push(['acquireLock', ws, branch, path]);
@@ -205,6 +208,10 @@ const workflowService = {
   branchStatus: async (ws: string) => {
     calls.push(['branchStatus', ws]);
     return { branch: ws, hasUpstream: true, unmergedFromUpstream: true };
+  },
+  branchCounts: async (ws: string) => {
+    calls.push(['branchCounts', ws]);
+    return { ahead: 3, behind: 1 };
   },
   listPendingChangePaths: async (ws: string) => {
     calls.push(['listPendingChangePaths', ws]);
@@ -516,6 +523,24 @@ describe('registerWorkflowTools', () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ branches: [{ name: 'main' }] });
     expect(calls).toContainEqual(['listBranches', 'existing-ws']);
+  });
+
+  it('list_branches declares names, protection and remote presence, and no commit counts', async () => {
+    await start();
+    for (const tools of [await registryRef!.listInternal(), await registryRef!.listExternal()]) {
+      const listBranches = tools.find((t) => t.name === 'list_branches')!;
+      const branch = (listBranches.outputs as { properties: { branches: { items: { properties: object; required: string[] } } } })
+        .properties.branches.items;
+      expect(Object.keys(branch.properties).sort()).toEqual(['hasRemote', 'isProtected', 'name']);
+      expect([...branch.required].sort()).toEqual(['hasRemote', 'isProtected', 'name']);
+      expect(listBranches.description).toContain('{ name, isProtected, hasRemote }');
+      expect(listBranches.description).not.toMatch(/\bahead\b,|\bbehind\b,/);
+      // The counts are still `branch_status`'s answer, for its one branch.
+      const branchStatus = tools.find((t) => t.name === 'branch_status')!;
+      expect((branchStatus.outputs as { required: string[] }).required).toEqual(
+        expect.arrayContaining(['ahead', 'behind', 'behindRemote']),
+      );
+    }
   });
 
   it('open_change_request acts on the SOURCE branch\'s workspace', async () => {
@@ -1008,6 +1033,26 @@ describe('save_file and the repository folder', () => {
     expect(calls.some((c) => c[0] === 'acquireLock')).toBe(false);
   });
 
+  it('refuses a tmp ref in every path input, before any lock — save_file, the history tools and update_branch\'s resolutions alike', async () => {
+    const base = await start();
+    const calls_: Array<[string, Record<string, unknown>]> = [
+      ['save_file', { path: '__tmp__/chat-uploads/plan.xlsx' }],
+      ['read_file_at', { path: '__tmp__/chat-uploads/plan.xlsx', at: 'HEAD' }],
+      ['compare_file', { path: '__tmp__/chat-uploads/plan.xlsx' }],
+      ['list_file_changes', { path: '__tmp__/chat-uploads/plan.xlsx' }],
+      ['update_branch', { resolutions: [{ path: '__tmp__/chat-uploads/plan.xlsx', choose: 'ours' }] }],
+    ];
+    for (const [tool, args] of calls_) {
+      const res = await post(`${base}/api/agent/tools/${tool}`, writeTok(), { ...args, branch: WS });
+      expect(res.status, tool).toBe(400);
+      const body = (await res.json()) as { error: string; kind: string };
+      expect(body.kind, tool).toBe('tmp-ref-read-only');
+      expect(body.error).toContain(`${tool} does not take one there`);
+      expect(body.error).toContain('copy_file');
+    }
+    expect(calls.some((c) => c[0] === 'acquireLock')).toBe(false);
+  });
+
   it('answers a missing path with a 400, not a crash', async () => {
     const base = await start();
     const res = await post(`${base}/api/agent/tools/save_file`, writeTok(), { branch: WS });
@@ -1165,8 +1210,9 @@ describe('history and syncing tools', () => {
       // The listing double names only `main`, so the draft's own entry is unknown.
       isProtected: false,
       hasRemote: true,
-      ahead: null,
-      behind: null,
+      // Counted for the draft alone, by its own workspace — not read off a listing.
+      ahead: 3,
+      behind: 1,
       behindRemote: true,
       uncommittedPaths: ['KnowledgeBase/Pending.md'],
       forkBase: 'main',
@@ -1175,6 +1221,11 @@ describe('history and syncing tools', () => {
       withheldPaths: 0,
     });
     expect(calls).toContainEqual(['changedPathsBetweenBranches', DRAFT_WS, 'main', DRAFT]);
+    expect(calls).toContainEqual(['branchCounts', DRAFT_WS]);
+    // Counted only once the listing's fetch has refreshed the remote-tracking refs.
+    const fetched = calls.findIndex((c) => c[0] === 'listBranches:fetched' && c[1] === DRAFT_WS);
+    expect(fetched).toBeGreaterThanOrEqual(0);
+    expect(calls.findIndex((c) => c[0] === 'branchCounts')).toBeGreaterThan(fetched);
 
     calls = [];
     const named = await post(tool(base, 'branch_status'), writeTok(), { branch: DRAFT, base: 'release' });

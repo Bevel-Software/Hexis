@@ -12,6 +12,7 @@ import type { WorkflowEventBus } from '../../workflow/event-bus.js';
 import { createAccessRoutes } from '../access.routes.js';
 import { usersDbDouble } from './users-db-double.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
+import { NodeFs } from '../../kb-fs/node-fs.js';
 
 /**
  * HTTP contract for `GET /access/overrides`. The scan itself is covered in
@@ -98,7 +99,7 @@ async function makeHarness(opts: {
   });
   app.use(
     '/api',
-    createAccessRoutes(accessControl, workspaceService, authService, authService, workflowService, eventBus, db, testKbContext({ kbDirName: KB })),
+    createAccessRoutes(accessControl, workspaceService, authService, authService, workflowService, eventBus, db, testKbContext({ kbDirName: KB }), new NodeFs()),
   );
 
   const server = await new Promise<Server>((resolve) => {

@@ -8,6 +8,8 @@ import { setUserVar, setAdminVar, deleteUserVar, setOAuthClientSecret } from '..
 import { SavedKeyProbeResult } from '../probe/SavedKeyProbeResult';
 import { useSavedKeyProbe, type SavedKeyProbe } from '../probe/useSavedKeyProbe';
 import { announceToolCredentialsChanged } from '../../../core/events';
+import { useConnectAsChoice } from '../../agents';
+import { ConnectAsChoice } from '../../agents/components/ConnectAsChoice';
 import {
   getConnectPending,
   startToolOAuth,
@@ -31,6 +33,20 @@ import {
  * alive across that round-trip. Cleared on Finish or when the state goes stale.
  */
 const MCP_OAUTH_STATE_KEY = 'mcp-oauth-state';
+/** The "Connect as" choice made on the way, kept beside the state for the same round-trip. */
+const MCP_OAUTH_AGENT_KEY = 'mcp-oauth-agent';
+
+/**
+ * The choice to start from: the one made earlier in THIS authorization (the
+ * page came back from a tool sign-in, its query stripped), else Everything —
+ * an authorization arriving in the address that is not the remembered one is
+ * a new connection, and starts at Everything.
+ */
+function rememberedConnectAs(): string | null {
+  const fromUrl = new URLSearchParams(window.location.search).get('oauth');
+  if (fromUrl && fromUrl !== sessionStorage.getItem(MCP_OAUTH_STATE_KEY)) return null;
+  return sessionStorage.getItem(MCP_OAUTH_AGENT_KEY);
+}
 
 /**
  * "Connect your tools" — the page a person lands on from the needs-authorization
@@ -99,6 +115,12 @@ export function ConnectToolsPage() {
   // Agent-connect mode: the signed authorization state + who is asking.
   const [agentState, setAgentState] = useState<string | null>(null);
   const [agentName, setAgentName] = useState<string | null>(null);
+  // "Connect as": the agents on offer and the choice — Everything unless the
+  // person picks one — kept across a tool sign-in's round-trip
+  // (`rememberedConnectAs`). Finish waits until the CURRENT request's agents
+  // have answered (before that it would approve Everything unseen), and for
+  // Everything to be confirmed when they could not be loaded.
+  const connectAs = useConnectAsChoice({ initial: rememberedConnectAs, expect: agentState });
   const [finishing, setFinishing] = useState(false);
   // Entries the user took OUT. Everything the server sent is in by default —
   // it used to be the other way round, and an unconfigured tool the reader had
@@ -118,6 +140,14 @@ export function ConnectToolsPage() {
    */
   const loadSeq = useRef(0);
 
+  // The agent the list is for: the "Connect as" choice, in agent-connect mode
+  // only. A connection made as an agent loads only the connectors its file
+  // lists, so the page asks for the sign-ins and keys of those and no other —
+  // asking for hubspot's sign-in on the way to an agent that never loads
+  // hubspot sends the person off to sign in for nothing. Everything (null)
+  // lists what it always listed.
+  const chosenAgent = agentState != null ? connectAs.value : null;
+
   /**
    * @param quiet keep the list on screen while it refetches.
    *
@@ -132,7 +162,7 @@ export function ConnectToolsPage() {
     if (!quiet) setLoading(true);
     setRefreshing(true);
     try {
-      const pending = await getConnectPending();
+      const pending = await getConnectPending(chosenAgent);
       if (loadSeq.current !== mine) return;
       setTools(pending.tools);
       setOauth(pending.oauth);
@@ -148,17 +178,27 @@ export function ConnectToolsPage() {
         setRefreshing(false);
       }
     }
-  }, []);
+  }, [chosenAgent]);
 
+  // The first load, loud; and again, quietly, whenever the choice changes —
+  // `refresh` is remade for the chosen agent, and the list on screen is the
+  // other agent's until the new one answers, which is the one case a loud
+  // reload would have nothing to protect (no row holds a probe's verdict
+  // for a list that is about to be replaced) and still nothing to gain.
+  const loadedOnce = useRef(false);
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- the first load; refresh sets state once it answers
-    void refresh();
+    const quiet = loadedOnce.current;
+    loadedOnce.current = true;
+    void refresh(quiet);
   }, [refresh]);
 
   // Pick up (and persist) the external-agent authorization state.
   useEffect(() => {
     const fromUrl = new URLSearchParams(window.location.search).get('oauth');
     if (fromUrl) {
+      // A NEW authorization starts at Everything (see `rememberedConnectAs`):
+      // a choice remembered from another one is not this connection's.
+      if (sessionStorage.getItem(MCP_OAUTH_STATE_KEY) !== fromUrl) sessionStorage.removeItem(MCP_OAUTH_AGENT_KEY);
       sessionStorage.setItem(MCP_OAUTH_STATE_KEY, fromUrl);
       // eslint-disable-next-line react-hooks/set-state-in-effect -- the query is read once, on arrival
       setAgentState(fromUrl);
@@ -169,23 +209,27 @@ export function ConnectToolsPage() {
 
   // Resolve who is asking; a stale/expired state silently drops the mode (the
   // agent restarts the flow if the user takes too long).
+  const settleConnectAs = connectAs.settle;
   useEffect(() => {
     if (!agentState) return;
     let cancelled = false;
     getMcpOAuthRequest(agentState)
       .then((r) => {
-        if (!cancelled) setAgentName(r.clientName);
+        if (cancelled) return;
+        setAgentName(r.clientName);
+        settleConnectAs({ agents: r.agents ?? [], failed: r.agentsUnavailable === true }, agentState);
       })
       .catch(() => {
         if (cancelled) return;
         sessionStorage.removeItem(MCP_OAUTH_STATE_KEY);
+        sessionStorage.removeItem(MCP_OAUTH_AGENT_KEY);
         setAgentState(null);
         setAgentName(null);
       });
     return () => {
       cancelled = true;
     };
-  }, [agentState]);
+  }, [agentState, settleConnectAs]);
 
   // A sign-in came back to this page (the callback lands on whichever page
   // started it): the fragment it carried is stripped, now that it has been
@@ -220,11 +264,12 @@ export function ConnectToolsPage() {
   };
 
   const onFinish = async () => {
-    if (!agentState) return;
+    if (!agentState || !connectAs.mayConnect) return;
     setFinishing(true);
     try {
-      const redirectTo = await completeMcpOAuth(agentState);
+      const redirectTo = await completeMcpOAuth(agentState, connectAs.value);
       sessionStorage.removeItem(MCP_OAUTH_STATE_KEY);
+      sessionStorage.removeItem(MCP_OAUTH_AGENT_KEY);
       window.location.href = redirectTo;
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -348,11 +393,25 @@ export function ConnectToolsPage() {
                   variant="primary"
                   size="sm"
                   className="shrink-0"
-                  disabled={finishing}
+                  disabled={finishing || !connectAs.mayConnect}
                   onClick={() => void onFinish()}
                 >
                   {finishing ? 'Finishing…' : 'Finish & return to your agent'}
                 </Button>
+              </div>
+              <div className="mt-4">
+                <ConnectAsChoice
+                  agents={connectAs.agents}
+                  value={connectAs.value}
+                  disabled={finishing}
+                  hint="What this connection loads. An agent narrows it to the tools, skills and plugins its configuration lists, and only those you may read."
+                  onChange={(path) => {
+                    connectAs.setValue(path);
+                    if (path) sessionStorage.setItem(MCP_OAUTH_AGENT_KEY, path);
+                    else sessionStorage.removeItem(MCP_OAUTH_AGENT_KEY);
+                  }}
+                  unavailable={connectAs.unavailable}
+                />
               </div>
             </Surface>
           )}
@@ -378,11 +437,13 @@ export function ConnectToolsPage() {
               so before they wonder why a row has no field. */}
           {!nothingToDo && (
             <p className="mb-5 text-ui text-ink-muted">
-              These tools need a sign-in or a key before they will work in your agent. Authorize
-              each connection and enter any keys below, then head back to your agent and run the
-              tool again. Anything greyed out is not yours to do — it is waiting on the tool&apos;s
-              owner, or you took it out yourself. Your values are stored securely and never shown
-              again after saving.
+              {chosenAgent
+                ? 'These are the tools the chosen agent loads that need a sign-in or a key before they will work in your agent. '
+                : 'These tools need a sign-in or a key before they will work in your agent. '}
+              Authorize each connection and enter any keys below, then head back to your agent and
+              run the tool again. Anything greyed out is not yours to do — it is waiting on the
+              tool&apos;s owner, or you took it out yourself. Your values are stored securely and
+              never shown again after saving.
             </p>
           )}
 
@@ -394,7 +455,9 @@ export function ConnectToolsPage() {
               // every shared tool works without a personal credential, so the
               // user's only job is to finish.
               <Banner role="status" tone="ok">
-                You&apos;re all set: none of your tools need a personal sign-in or key. Click
+                {chosenAgent
+                  ? 'You’re all set: none of the tools the chosen agent loads need a personal sign-in or key. Click '
+                  : 'You’re all set: none of your tools need a personal sign-in or key. Click '}
                 “Finish &amp; return to your agent” above to complete the connection.
               </Banner>
             ) : (

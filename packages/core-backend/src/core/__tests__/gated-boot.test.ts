@@ -37,7 +37,7 @@ afterEach(async () => {
 
 /** A core whose startup phase fails in a way the test picks. */
 function bootable(runAll: () => Promise<void>) {
-  const retries = { started: 0 };
+  const retries = { started: 0, tmpSweeps: 0 };
   const core: BootableCore = {
     config: { workspacesRoot },
     kbDirName: 'knowledge-base',
@@ -53,6 +53,11 @@ function bootable(runAll: () => Promise<void>) {
       tidyAfterSweep: async () => ({ closedEmpty: 0, removedLeftovers: 0 }),
     } as BootableCore['workflowService'],
     pluginJoinRequestJobs: { startSweeping() {} } as BootableCore['pluginJoinRequestJobs'],
+    tmpSweeper: {
+      startSweeping() {
+        retries.tmpSweeps += 1;
+      },
+    },
     startupRetry: null,
   };
   return { core, retries };
@@ -79,6 +84,8 @@ describe('startCore over a repository the host will not serve', () => {
     // that is granted access to it, needs no settings change on this side.
     expect(retries.started).toBe(1);
     expect(core.startupRetry).not.toBeNull();
+    // The tmp sweep reads the workspaces root alone, so a gated boot still runs it.
+    expect(retries.tmpSweeps).toBe(1);
   });
 
   it('comes up gated when the host rejected the credentials', async () => {

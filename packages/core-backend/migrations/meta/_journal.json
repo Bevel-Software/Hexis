@@ -155,6 +155,20 @@
       "when": 1792491290917,
       "tag": "0021_data_migrations_ledger",
       "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1792657514328,
+      "tag": "0022_session_version",
+      "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1793089896833,
+      "tag": "0023_agent_path",
+      "breakpoints": true
     }
   ]
 }

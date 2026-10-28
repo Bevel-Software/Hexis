@@ -531,9 +531,18 @@ export function withLinkedSkillRoots(
   return out;
 }
 
+/**
+ * Whether the repo-relative `path` is `root` itself or lies in the subtree
+ * `root` names — the one containment test for KB paths named by a list of
+ * roots (a plugin's linked skills, an agent configuration's entries).
+ */
+export function pathUnderRoot(path: string, root: string): boolean {
+  return path === root || path.startsWith(`${root}/`);
+}
+
 /** Whether `skillPath` (a skill folder) falls under `root` (a skill folder or a folder of skills). */
 export function skillUnderRoot(skillPath: string, root: string): boolean {
-  return skillPath === root || skillPath.startsWith(`${root}/`);
+  return pathUnderRoot(skillPath, root);
 }
 
 /**

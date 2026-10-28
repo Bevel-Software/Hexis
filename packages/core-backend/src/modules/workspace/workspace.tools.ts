@@ -1,5 +1,5 @@
 import nodeFs from 'node:fs/promises';
-import { join } from 'node:path';
+import { isAbsolute, join, relative, sep } from 'node:path';
 import AdmZip from 'adm-zip';
 import type { Router, RequestHandler } from 'express';
 import type { LocalFilesystem } from '@mastra/core/workspace';
@@ -22,7 +22,9 @@ import {
   assertInsideRepo,
   assertRepoRootNameFree,
   assertRepoRootNameFreeArgs,
+  hasControlCharacter,
   isInsideRepo,
+  isTmpRef,
   normalizePathArgs,
   normalizeWorkspacePath,
 } from '../kb-fs/index.js';
@@ -35,10 +37,11 @@ import type { AccessDecisionSource, AccessTargetKind, IAccessControl } from '../
 import { accessRoster, resolveAccessView, accessMdPathForFolder, fileCarriesAccessRules, governingFolderOf } from '../access/index.js';
 import type { SpillStore } from './spill-store.js';
 import type { DocExtractService } from './file-readers/doc-extract.service.js';
-import { displayPath, type FileKind, type FileReaderRegistry, type ReadOrigin, type ReadResult } from './file-readers/file-reader.js';
+import { displayPath, type FileKind, type FileReader, type FileReaderRegistry, type ReadOrigin, type ReadResult } from './file-readers/file-reader.js';
 import { fileTypeOf, needsContent } from './file-readers/content-mode.js';
 import { createFileReaderRegistry } from './file-readers/file-reader.registry.js';
 import { DocumentReader } from './file-readers/document-reader.js';
+import { TextReader } from './file-readers/text-reader.js';
 import { mcpImageResult } from '@bevel-software/platform-mcp-core';
 import {
   folderPlaceholderPath,
@@ -63,7 +66,14 @@ import {
   type AgentGuideReader,
 } from '../agent-guide/index.js';
 import { removeEmptyDirs } from './empty-dirs.js';
-import { endsTheSearch, type IPatternMatcher, type IPatternSearch } from './pattern-matcher.contract.js';
+import {
+  compareSearchPaths,
+  PATTERN_DIALECT,
+  type IPatternMatcher,
+  type IPatternSearch,
+  type TreeScope,
+} from './pattern-matcher.contract.js';
+import { holdsNul } from './nul-scan.js';
 import { FIRST_RUN_SECTION_ID, firstRunNote, knowledgeFolderIsNew, type FirstRunStarterSource } from './first-run.js';
 import { planMoveLinks } from './move-links.js';
 import { rethrowAsWriteDenial } from './write-denial.js';
@@ -99,6 +109,13 @@ interface AccessVerbs {
   owner: boolean;
 }
 
+
+/**
+ * The caller's verdicts on a file you staged in the workspace's tmp folder: it
+ * may be read (and copied out), nothing else — the folder is read-only
+ * through the ref, and `request_file_download` does not take one.
+ */
+const TMP_ACCESS: AccessVerbs = { read: true, write: false, download: false, owner: false };
 /** How many files `file_stat` counts under a folder before it stops and says so. */
 const DESCENDANTS_CAP = 10_000;
 
@@ -154,18 +171,25 @@ async function filterReadableEntries(
     fileWsPaths.push(dir ? `${dir}/${e.name}` : e.name);
   }
   if (fileWsPaths.length === 0) return entries;
+  const readable = await readableFiles(gate, fileWsPaths);
+  return entries.filter((e) => e.type === 'directory' || readable.has(dir ? `${dir}/${e.name}` : e.name));
+}
+
+/**
+ * The FILES among `wsPaths` the caller may read, judged in one batched ACL
+ * load by the FULL `canReadBatch` (per-node frontmatter honoured), via the
+ * shared `resolveReadableMap`. A path the verdict does not name is unreadable.
+ */
+async function readableFiles(gate: ReadGate, wsPaths: string[]): Promise<Set<string>> {
+  if (wsPaths.length === 0) return new Set();
   const verdict = await resolveReadableMap(
     (wid, email, rels) => gate.accessControl.canReadBatch(wid, email, rels),
     gate.workspaceId,
     gate.userEmail,
     gate.kbDirName,
-    fileWsPaths,
+    wsPaths,
   );
-  return entries.filter((e) => {
-    if (e.type === 'directory') return true;
-    const wsPath = dir ? `${dir}/${e.name}` : e.name;
-    return verdict.get(wsPath) === true;
-  });
+  return new Set(wsPaths.filter((p) => verdict.get(p) === true));
 }
 
 /**
@@ -283,6 +307,32 @@ const RESERVED_ROOT_NAME_TARGETS: Readonly<Record<string, readonly string[]>> = 
   // inside the handler — an archive chooses its entry names, not the caller.
   apply_file_upload: ['destination'],
 };
+
+/**
+ * The inputs that take a tmp ref (`__tmp__/<path>`, see `workspace-tmp.ts`)
+ * beside a repository path — the four reads of the one file it names. Every
+ * other tool, and every other input of these four (`copy_file`'s `dest`
+ * among them), refuses a ref before anything else runs — in
+ * `normalizePathArgs`, through the one admission gate (`kb-fs/tmp-ref.ts`):
+ * the folder is read-only through the ref, and `copy_file` to a repository
+ * path is how a file is kept.
+ */
+const TMP_REF_INPUTS: Readonly<Record<string, readonly string[]>> = {
+  read_file: ['path'],
+  file_stat: ['path'],
+  grep: ['path'],
+  copy_file: ['src'],
+};
+
+/**
+ * A path input that also takes a tmp ref (see `TMP_REF_INPUTS`): said on the
+ * input, because the descriptions of the tools that take one have no room
+ * left, and what the ref is is in the shared rules.
+ */
+const orTmpRef = (schema: JsonSchema): JsonSchema => ({
+  ...schema,
+  description: `${schema.description ?? ''} Or a \`__tmp__/…\` ref to one file you staged in the workspace's tmp folder.`,
+});
 
 function asText(content: string | Buffer): string {
   return typeof content === 'string' ? content : content.toString('utf8');
@@ -639,56 +689,78 @@ function modeOf(a: Record<string, unknown>): WriteMode {
 }
 
 /**
- * What searching ONE file amounted to. The walk ignores this (a file with
- * nothing searchable is just a file with no matches), but a grep whose path
- * NAMES that one file has nothing else to report: without this it could only
- * answer an empty match list, which reads as "your pattern is not in there"
- * when the truth is "there was never any text to look at".
+ * What a file holds for `grep` to search. The walk ignores the difference
+ * between the last two (a file with nothing searchable is just a file with no
+ * matches), but a grep whose path NAMES that one file has nothing else to
+ * report: without it, it could only answer an empty match list, which reads as
+ * "your pattern is not in there" when the truth is "there was never any text
+ * to look at".
  */
-type FileGrepOutcome =
-  /** Its text was searched; any matches are in `out`. */
-  | 'searched'
+type SearchableText =
+  /** Text to search. */
+  | { kind: 'text'; text: string }
   /** No searchable text at all: an image, binary content, a corrupt document (remembered or fresh). */
-  | 'no-text'
+  | { kind: 'no-text' }
   /** A cold document the per-call extraction budget could not afford (counted in `docs`). */
-  | 'budget-skipped';
+  | { kind: 'budget-skipped' };
+
+/** One line of a grep answer: that path, the 1-based line number, the line cut to {@link GREP_LINE_CHARS}. */
+interface GrepMatch {
+  path: string;
+  line: number;
+  text: string;
+}
+
+/** The longest stretch of a matching line a grep answer carries. */
+const GREP_LINE_CHARS = 300;
+
+/** {@link searchableText}'s `bytesOf` for a repository path: the workspace filesystem's own read. */
+function fileBytes(fs: LocalFilesystem): (path: string) => Promise<Buffer> {
+  return async (path) => asBytes(await fs.readFile(path));
+}
 
 /**
- * Search ONE file and append its matches to `out`. Shared by the directory
- * walk and by a grep whose `path` names a file, so both produce the same match
- * shape (that path, 1-based line numbers, 300-char text) under the same cap.
- *
- * What is searched is the file's reader's business: text content for the text
- * reader (null on NUL bytes / invalid UTF-8 — binary is not searchable), the
- * EXTRACTION for a document reader (marker line included, so the
- * `[slide N]`/`[sheet: …]`/`[page N]` lines are themselves searchable and line
- * numbers match what read_file returns), nothing for images.
+ * Files the text pass judges, then searches, at a time: first this many, then
+ * twice as many each time, up to {@link GREP_MAX_BATCH}. A verdict reads the
+ * file's own access rules, so a batch costs one read of each of its files.
+ * Its names also go to ripgrep on the command line, so a batch also ends
+ * once they reach {@link GREP_BATCH_CHARS}, well inside the system's limit.
+ */
+const GREP_FIRST_BATCH = 256;
+const GREP_MAX_BATCH = 2_048;
+const GREP_BATCH_CHARS = 256 * 1024;
+
+/**
+ * The text ONE file holds for `grep`, read through its reader: the text
+ * content for a text reader (none on NUL bytes / invalid UTF-8 — binary is not
+ * searchable), the EXTRACTION for a document reader (marker line included, so
+ * the `[slide N]`/`[sheet: …]`/`[page N]` lines are themselves searchable and
+ * line numbers match what read_file returns), nothing for images.
  *
  * Throws whatever reading the file throws — the caller decides whether that is
- * a file to skip (the walk) or an error to surface (a single-file grep).
+ * a file to skip (a tree search) or an error to surface (a single-file grep).
+ * `bytesOf` is where the file's bytes come from: the workspace filesystem for
+ * a repository path, the tmp resolver for a tmp ref.
  */
-async function grepOneFile(
-  fs: LocalFilesystem,
+async function searchableText(
+  bytesOf: (path: string) => Promise<Buffer>,
   path: string,
-  matcher: IPatternSearch,
-  out: { path: string; line: number; text: string }[],
-  max: number,
   docs: DocGrepState,
-): Promise<FileGrepOutcome> {
+): Promise<SearchableText> {
   const reader = docs.readers.readerFor(path);
-  const bytes = asBytes(await fs.readFile(path));
+  const bytes = await bytesOf(path);
   let content: string | null;
   if (reader instanceof DocumentReader) {
     // What the cache remembers is free — an extraction is searched, a failure
     // (a damaged file, or one that overran its budget within the hour) is
     // skipped without extracting it again. A cold document draws on the
-    // per-walk budget (see UNCACHED_DOCS_PER_GREP) — beyond it the search
+    // per-call budget (see UNCACHED_DOCS_PER_GREP) — beyond it the search
     // skips the document and counts it.
     let res = await reader.cachedRead(bytes, path);
     if (res === undefined) {
       if (docs.uncachedBudget <= 0) {
         docs.skippedUncached++;
-        return 'budget-skipped';
+        return { kind: 'budget-skipped' };
       }
       docs.uncachedBudget--;
       res = await reader.read(bytes, path, docs.origin);
@@ -698,14 +770,44 @@ async function grepOneFile(
   } else {
     content = reader.greppableText ? await reader.greppableText(bytes, path) : null;
   }
-  if (content === null) return 'no-text';
-  const lines = content.split('\n');
-  // matchingLines posts these to the worker in bounded batches, so no one
-  // copy of a large file runs on the request thread.
-  for (const i of await matcher.matchingLines(lines, max - out.length)) {
-    out.push({ path, line: i + 1, text: lines[i]!.slice(0, 300) });
+  return content === null ? { kind: 'no-text' } : { kind: 'text', text: content };
+}
+
+/**
+ * grep over the one text file `path`, by ripgrep from the folder holding it,
+ * its lines pushed onto `out`, when it is a regular file; `null`, with
+ * nothing searched, for anything else (a link, one that loops, a file gone
+ * since), which is read as read_file reads it instead. A file that answers no
+ * line has no text when ripgrep finds it binary: it holds a NUL, which
+ * {@link holdsNul} looks for in the very file that was judged.
+ */
+async function grepTextFile(
+  fs: LocalFilesystem,
+  path: string,
+  search: IPatternSearch,
+  max: number,
+  out: GrepMatch[],
+): Promise<{ kind: 'searched' } | { kind: 'no-text' } | null> {
+  const slash = path.lastIndexOf('/');
+  const scope = await treeScope(fs, slash < 0 ? '' : path.slice(0, slash));
+  const name = path.slice(slash + 1);
+  const absolute = join(scope.cwd, scope.root, name);
+  const judged = await nodeFs.lstat(absolute).catch(() => null);
+  if (judged === null || !judged.isFile()) return null;
+  const from = out.length;
+  for await (const file of search.files(scope, { only: [name], maxLinesPerFile: max })) {
+    for (const l of file.lines) out.push({ path, line: l.line, text: l.text.slice(0, GREP_LINE_CHARS) });
   }
-  return 'searched';
+  if (out.length > from) return { kind: 'searched' };
+  const binary = await orNotFound(path, () => holdsNul(absolute, judged, search), 'Nothing to search');
+  return binary ? { kind: 'no-text' } : { kind: 'searched' };
+}
+
+/** Append the lines `hits` names (0-based indices into `text`'s lines) to `out`, as matches in `path`. */
+function pushMatches(out: GrepMatch[], path: string, text: string, hits: readonly number[]): void {
+  if (hits.length === 0) return;
+  const lines = text.split('\n');
+  for (const i of hits) out.push({ path, line: i + 1, text: lines[i]!.slice(0, GREP_LINE_CHARS) });
 }
 
 /**
@@ -742,56 +844,151 @@ async function searchRootKind(
   }
 }
 
-/** JS grep over the workspace tree (read methods only) — bounded by match + depth caps. */
-async function grepWalk(
+/**
+ * Where ripgrep searches the directory `root`: from the workspace's canonical
+ * directory, with the root's canonical path relative to it. The stat that
+ * called `root` a directory already refused one outside the workspace; this
+ * refuses it again where the search is started, so ripgrep, which follows the
+ * root it is given, is never started on anything outside.
+ */
+async function treeScope(fs: LocalFilesystem, root: string): Promise<TreeScope> {
+  const cwd = await nodeFs.realpath(fs.basePath);
+  const absolute = fs.resolveAbsolutePath(root);
+  const rel = absolute === undefined ? '..' : relative(cwd, await nodeFs.realpath(absolute));
+  if (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+    throw new ToolError(`"${displayPath(root)}" is outside the workspace.`, 403);
+  }
+  return { cwd, root: rel === '' ? '.' : rel.split(sep).join('/') };
+}
+
+/**
+ * grep over the directory `root`: the tree is listed, then searched in two
+ * passes, and no file is opened before it is admitted.
+ *
+ * The listing opens no file. Admission is the ONE step a file passes before
+ * either pass opens it: it is judged readable by the gate, and then — being a
+ * file the search will read, as `read_file` reads one — it is told to the
+ * read hook, which may refuse it, and with it the search. A file the caller
+ * may not read is never opened and never told of (there is no read to tell):
+ * what it holds can change neither the answer nor how long the search takes,
+ * and so not whether it ends within its budget. Judging and telling are both
+ * spent from that budget. A file that was not in the listing (it appeared
+ * since) is never admitted, so never searched.
+ *
+ * The text pass is ripgrep's own: every file whose reader greps its bytes as
+ * text (a TextReader) is searched by it, in path order, and read nowhere else.
+ * It admits a batch at a time, before ripgrep opens any of it, so the hook
+ * hears of each file of a batch whether or not a line of it is answered —
+ * and, past the line that fills the cap, of the rest of that batch, which the
+ * pass then never opens. Each file is answered as ripgrep finishes it, and
+ * the pass stops at the `max`-th line.
+ *
+ * The document pass reads the files every other reader owns through that
+ * reader, as `read_file` does — extractions under the per-call budget — and
+ * has their text matched by the same engine. A document that sorts after the
+ * text pass's last line cannot be among the first `max`, so it is not read.
+ *
+ * Answers what both found, unsorted: the caller merges, sorts and caps.
+ */
+async function grepTree(
   fs: LocalFilesystem,
-  dir: string,
-  matcher: IPatternSearch,
-  out: { path: string; line: number; text: string }[],
+  root: string,
+  search: IPatternSearch,
   max: number,
-  depth: number,
   gate: ReadGate,
   notifyRead: (path: string) => Promise<void>,
   docs: DocGrepState,
-  /** A file the walk leaves to its caller: never opened, never counted against `max`. */
+  /** A file the search leaves to its caller: never answered, never counted against `max`. */
   skip: (path: string) => boolean = () => false,
-): Promise<void> {
-  if (out.length >= max || depth > 12) return;
-  let entries;
-  try {
-    entries = (await fs.readdir(dir || '.')) as DirEntry[];
-  } catch {
-    return;
-  }
-  // Filter unreadable KB nodes out of the walk so grep never opens — or leaks
-  // a line from — a file the caller may not read.
-  entries = await filterReadableEntries(gate, dir, entries);
-  for (const e of entries) {
-    if (out.length >= max) return;
-    if (hasGitInternalsSegment(e.name) || e.name === 'node_modules') continue;
-    if (e.type !== 'directory' && isFolderPlaceholder(e.name)) continue;
-    const p = dir ? `${dir}/${e.name}` : e.name;
-    if (e.type === 'directory') {
-      await grepWalk(fs, p, matcher, out, max, depth + 1, gate, notifyRead, docs, skip);
-    } else if (skip(p)) {
-      continue;
-    } else {
-      // Opening a file is a read of it, even when the walk started at a root
-      // the read hook was already told about — so every file the walk opens
-      // reaches the hook by name (closes the read-leak).
-      await notifyRead(p);
-      // A file the walk cannot read is silently skipped: one unreadable entry
-      // must not fail a search over the whole tree.
-      // A pattern too expensive to finish, or no worker free to run it, is not
-      // an unreadable file: either ends the whole search.
-      try {
-        await grepOneFile(fs, p, matcher, out, max, docs);
-      } catch (err) {
-        if (endsTheSearch(err)) throw err;
-        continue;
+): Promise<GrepMatch[]> {
+  const scope = await treeScope(fs, root);
+  // A folder named with a trailing slash answers the paths it is spelled
+  // with everywhere else (`a/b.md`, never `a//b.md`), so the guide's own
+  // path and every verdict meet the one spelling.
+  const base = root.replace(/\/+$/, '');
+  const at = (p: string): string => (base === '' ? p : `${base}/${p}`);
+  // ripgrep already stays out of `.git`; the folder's every other spelling,
+  // and the folder placeholder, are left out as everywhere else.
+  const shown = (p: string): boolean => !hasGitInternalsSegment(p) && !isFolderPlaceholder(p) && !skip(p);
+  // Which reader owns an extension is the registry's answer, asked of a name
+  // carrying it; a TextReader greps the bytes themselves, which is ripgrep's
+  // pass. Extensions any other reader owns are left out of it.
+  const readerOf = (ext: string): FileReader => docs.readers.readerFor(`file${ext}`);
+  const notRaw = docs.readers.ownedExtensions().filter((ext) => !(readerOf(ext) instanceof TextReader));
+  const ownedBy = (p: string, exts: readonly string[]): boolean => {
+    const lower = p.toLowerCase();
+    return exts.some((ext) => lower.endsWith(ext));
+  };
+  const readerOwned = notRaw.filter((ext) => {
+    const reader = readerOf(ext);
+    return reader instanceof DocumentReader || reader.greppableText !== undefined;
+  });
+  const out: GrepMatch[] = [];
+  // Admission (see above): the gate's verdict on `paths`, then the hook told
+  // of each readable one in path order — a refusal ends the search here, as
+  // it ends a `read_file`, before anything is opened. Spent from the budget.
+  const admit = (paths: string[]): Promise<Set<string>> =>
+    search.charged(async () => {
+      const readable = await readableFiles(gate, paths);
+      for (const p of paths) {
+        if (readable.has(p)) await notifyRead(p);
       }
+      return readable;
+    });
+
+  // Every file the walk covers, in path order. Only what is shown is ever
+  // admitted, so what is admitted is what may be answered. A name holding a
+  // control character is no file name to the platform — no tool reads or
+  // writes one — so it is not searched either.
+  const all = (await search.list(scope)).filter((p) => shown(at(p)) && !hasControlCharacter(p));
+  const raw = all.filter((p) => !ownedBy(p, notRaw));
+  // The text pass: a batch of files is admitted, then its admitted files, and
+  // only they, are searched. A batch is admitted before ripgrep opens any of
+  // it, and the pass stops at the `max`-th line, so the verdicts asked for are
+  // those of the files the answer reached — few for a common word — and the
+  // batches double so a rare one still walks the tree in a handful of runs.
+  let size = GREP_FIRST_BATCH;
+  for (let from = 0; from < raw.length && out.length < max; size = Math.min(size * 2, GREP_MAX_BATCH)) {
+    const batch: string[] = [];
+    for (let chars = 0; from < raw.length && batch.length < size && (batch.length === 0 || chars < GREP_BATCH_CHARS); from++) {
+      batch.push(raw[from]!);
+      chars += raw[from]!.length;
+    }
+    const readable = await admit(batch.map(at));
+    const only = batch.filter((p) => readable.has(at(p)));
+    for await (const file of search.files(scope, { only, maxLinesPerFile: max - out.length })) {
+      const p = at(file.path);
+      // Only what was admitted answers, whatever ripgrep printed.
+      if (!readable.has(p)) continue;
+      for (const l of file.lines.slice(0, max - out.length)) {
+        out.push({ path: p, line: l.line, text: l.text.slice(0, GREP_LINE_CHARS) });
+      }
+      // Enough: leaving the loop kills ripgrep at the file that filled the cap.
+      if (out.length >= max) break;
     }
   }
+
+  const last = out.length >= max ? out[out.length - 1]!.path : undefined;
+  const candidates = all
+    .filter((p) => ownedBy(p, readerOwned))
+    .map(at)
+    .filter((p) => last === undefined || compareSearchPaths(p, last) <= 0);
+  const readable = await admit(candidates);
+  const texts: { path: string; text: string }[] = [];
+  for (const p of candidates) {
+    if (!readable.has(p)) continue;
+    let found: SearchableText;
+    try {
+      found = await searchableText(fileBytes(fs), p, docs);
+    } catch {
+      // One document that cannot be read must not fail a search over the tree.
+      continue;
+    }
+    if (found.kind === 'text') texts.push({ path: p, text: found.text });
+  }
+  const hits = await search.matchingLines(texts.map((t) => t.text));
+  texts.forEach((t, i) => pushMatches(out, t.path, t.text, hits[i]!));
+  return out;
 }
 
 /** One `allowed-tools` entry a saved SKILL.md names that no visible tool matches. */
@@ -1111,7 +1308,9 @@ export function registerWorkspaceTools(
   const assertToolPathsNotGitInternals = async (args: Record<string, unknown>, ctx: ToolContext): Promise<void> => {
     const paths = toolPathArgs(args);
     for (const p of paths) assertNoGitInternalsSegment(p);
-    const onDisk = paths.filter((p) => !spillStore.isSpillRef(p));
+    // A spill ref belongs to no workspace, and a tmp ref to the folder beside
+    // the checkout: neither is judged against the checkout's git folder.
+    const onDisk = paths.filter((p) => !spillStore.isSpillRef(p) && !isTmpRef(p));
     if (onDisk.length === 0) return;
     const root = await gitCheckRootFor(args, ctx);
     if (root === null) return;
@@ -1168,15 +1367,20 @@ export function registerWorkspaceTools(
    * caller WILL have, never whether they may do it. The write verdicts that
    * gate the move are `writeBlocked` and the lock gate, both of which read
    * the tree as it is.
+   *
+   * `sourceContent` is the text of a source that is no repository path (a
+   * tmp ref): it carries rules in exactly as a repository file would, so it
+   * is previewed through the same relocation reading, never as "nothing
+   * travels".
    */
   const accessAfter = async (
     branch: string,
     ctx: ToolContext,
     src: string,
     dest: string,
-    opts?: { sourceRemains?: boolean },
+    opts?: { sourceRemains?: boolean; sourceContent?: string },
   ): Promise<AccessVerbs> => {
-    const from = toKbRelative(src, kbDirName);
+    const from = opts?.sourceContent !== undefined ? src : toKbRelative(src, kbDirName);
     const to = toKbRelative(dest, kbDirName);
     // Outside the repository there are no rules to carry, and none to land
     // among — the same answer `accessAt` gives for such a path.
@@ -1189,6 +1393,18 @@ export function registerWorkspaceTools(
       opts,
     );
   };
+
+  /**
+   * The text a tmp source carries into the repository, for the preview only:
+   * read as a repository source is read there — a file that cannot be read
+   * carries no rules — so the preview never answers before the write
+   * verdict. Whether the file is there at all is `statTmpFile`'s to say.
+   */
+  const tmpSourceText = (branch: string, ctx: ToolContext, ref: string): Promise<string> =>
+    ctx.workspaceService
+      .readTmpFile(workspaceIdForBranch(branch), ctx.user.id, ref)
+      .then((bytes) => bytes.toString('utf-8'))
+      .catch(() => '');
 
   /**
    * What `copy_file`'s dry run answers: the same impact shape `move_file`
@@ -1217,10 +1433,16 @@ export function registerWorkspaceTools(
    * them nothing they could not ask `file_stat` for.
    */
   const copyImpact = async (branch: string, ctx: ToolContext, src: string, dest: string) => {
-    const [before, after, blocked] = await Promise.all([
-      accessAt(branch, ctx, src),
-      accessAfter(branch, ctx, src, dest, { sourceRemains: true }),
-      writeBlocked(branch, ctx, [dest]),
+    const fromTmp = isTmpRef(src);
+    // The write verdict FIRST, and alone: a staged file's bytes are read only
+    // for a caller who may write the destination. A denied preview carries
+    // no rules from the source ('' — what an unreadable source carries), so
+    // its `access.after` is the destination's own rules for the caller.
+    const blocked = await writeBlocked(branch, ctx, [dest]);
+    const sourceContent = fromTmp ? (blocked.length > 0 ? '' : await tmpSourceText(branch, ctx, src)) : undefined;
+    const [before, after] = await Promise.all([
+      fromTmp ? TMP_ACCESS : accessAt(branch, ctx, src),
+      accessAfter(branch, ctx, src, dest, { sourceRemains: true, sourceContent }),
     ]);
     const access = { before, after };
     const accessChanges = verbsDiffer(before, after);
@@ -1237,7 +1459,11 @@ export function registerWorkspaceTools(
       };
     }
     const fs = await ctx.getFilesystem(branch);
-    const kind = await kindOf(fs, src);
+    // A tmp ref names one file by rule: resolving it is the whole look, and
+    // a folder or nothing there is refused by the resolver itself.
+    const kind = fromTmp
+      ? (await orNotFound(src, () => ctx.workspaceService.statTmpFile(workspaceIdForBranch(branch), ctx.user.id, src), 'Nothing to copy'), 'file' as const)
+      : await kindOf(fs, src);
     if (kind === null) throw notFound(src, 'Nothing to copy');
     const srcFiles = kind === 'folder' ? (await filesUnder(fs, src)).files : [src];
     const occupiedBy = await existingAt(await workspaceRoot(branch, ctx), dest);
@@ -1260,6 +1486,40 @@ export function registerWorkspaceTools(
       dryRun: true,
       copied: false,
     };
+  };
+
+  /**
+   * `copy_file` out of the workspace's tmp folder: the bytes the ref names
+   * (through the one tmp resolver), landed at `dest` by the ordinary write —
+   * the lock, the pre-disk validation, the creator's read grant for a new
+   * folder and the commit every write to the repository takes — and
+   * exclusively, so a name taken since the handler's look is refused with
+   * the same sentence rather than replaced. From then on the copy is a
+   * repository file like any other; the staged file is left where it was.
+   *
+   * A missing source is the ordinary 404 naming the ref, asked only after
+   * the write verdict (as for any copy); an absence met while landing is the
+   * destination's.
+   */
+  const copyFromTmp = async (fs: LocalFilesystem, branch: string, ctx: ToolContext, src: string, dest: string): Promise<void> => {
+    const bytes = await orNotFound(
+      src,
+      () => ctx.workspaceService.readTmpFile(workspaceIdForBranch(branch), ctx.user.id, src),
+      'Nothing to copy',
+    );
+    try {
+      // Exclusive, under the destination's lock: a name taken since the look
+      // is refused there as `DestinationTakenError` — releasing the lock
+      // untouched, so the winner's queued file stays — and answered as a
+      // repository copy's lost race is (`asEntryExists`).
+      await asEntryExists(() => fs.writeFile(dest, bytes, { overwrite: false }));
+    } catch (err) {
+      if (err instanceof ToolError) throw err;
+      const occupiedBy = await existingAt(await workspaceRoot(branch, ctx), dest);
+      if (occupiedBy !== null) throw new ToolError(entryExistsMessage(occupiedBy, dest), 409);
+      if (isAbsence(err)) throw notFound(dest, 'Nowhere to copy to');
+      throw err;
+    }
   };
 
   /**
@@ -1677,15 +1937,21 @@ export function registerWorkspaceTools(
       // spill ref; for any other, `__tool_chain_spill__/x` is an ordinary
       // path, and exempting it there would be a workspace-relative path that
       // never reached the repository — the whole bug, spelled with a prefix.
+      //
+      // The other is a tmp ref (`__tmp__/…`), left as written in exactly the
+      // inputs `TMP_REF_INPUTS` names and refused in every other one first,
+      // so no tool sees one it does not resolve itself.
       toolHandler(
         async (args, ctx) => {
           // BEFORE the normaliser: see `assertToolPathsNotGitInternals`.
           if (spec.fileTool !== false) await assertToolPathsNotGitInternals(args, ctx);
-          const normalized = normalizePathArgs(
-            args,
-            kbDirName,
-            spec.name === 'read_file' ? (v) => spillStore.isSpillRef(v) : undefined,
-          );
+          // The normaliser admits a tmp ref in exactly the inputs
+          // `TMP_REF_INPUTS` names and refuses it in every other one first.
+          const normalized = normalizePathArgs(args, kbDirName, {
+            tool: spec.name,
+            tmpRefInputs: TMP_REF_INPUTS[spec.name],
+            skip: spec.name === 'read_file' ? (v) => spillStore.isSpillRef(v) : undefined,
+          });
           // The checkout's own name is reserved at the repository root on this
           // surface too. The routes meet that rule inside `WorkspaceService`;
           // these tools write through the locking filesystem, which never
@@ -1854,6 +2120,63 @@ export function registerWorkspaceTools(
   const readForTool: ReadForTool = async (branch, p, ctx) => (await readServed(branch, p, ctx)).result;
 
   /**
+   * What a tmp ref (see `workspace-tmp.ts`) reads as: the bytes of the one
+   * file it names in the CALLER's own folder of the branch workspace's `tmp/`
+   * — through `readTmpFile`, the resolver a distribution's tool reads it with
+   * — put through the SAME reader a repository file of that name gets. No
+   * access gate and no read hook: the folder is outside the repository, so
+   * no rule governs it and no knowledge-base path is read; what keeps one
+   * person's staged file from another is that the ref resolves inside the
+   * caller's folder alone. A missing file — somebody else's included — is the
+   * ordinary 404, naming the ref.
+   */
+  const readTmp = async (branch: string, ref: string, ctx: ToolContext): Promise<ReadResult> => {
+    const workspaceId = workspaceIdForBranch(branch);
+    const bytes = await orNotFound(ref, () => ctx.workspaceService.readTmpFile(workspaceId, ctx.user.id, ref));
+    return readers.readerFor(ref).read(bytes, ref, { workspaceId });
+  };
+
+  /**
+   * `file_stat` on a tmp ref: the shape a repository file's stat has, its
+   * content fields decided by the same reader as {@link readTmp} reads with —
+   * and nothing to DO with it but read and copy out. Not written, moved,
+   * deleted or downloaded through these tools (`managed` is false: the
+   * platform's own files are a repository notion), and so not text-editable
+   * either, whatever its content.
+   */
+  const statTmp = async (branch: string, ref: string, ctx: ToolContext): Promise<Record<string, unknown>> => {
+    const workspaceId = workspaceIdForBranch(branch);
+    const stat = await orNotFound(ref, () => ctx.workspaceService.statTmpFile(workspaceId, ctx.user.id, ref));
+    const reader = readers.readerFor(ref);
+    // One read of the file at most: the type decision and the remembered
+    // extraction below both want the bytes, and a staged document can be large.
+    let bytes: Buffer | undefined;
+    const bytesOf = async () =>
+      (bytes ??= await orNotFound(ref, () => ctx.workspaceService.readTmpFile(workspaceId, ctx.user.id, ref)));
+    const type = fileTypeOf(reader, ref, needsContent(reader) ? await bytesOf() : undefined);
+    const out = {
+      ...stat,
+      path: ref,
+      type: 'file',
+      managed: false,
+      movable: false,
+      deletable: false,
+      access: TMP_ACCESS,
+      canWrite: false,
+      ...type,
+      textEditable: false,
+    };
+    // A document whose extraction failed answers that failure's notice, as a
+    // repository document does: from what the cache remembers, never by
+    // extracting.
+    if (reader instanceof DocumentReader) {
+      const remembered = await reader.cachedRead(await bytesOf(), ref);
+      if (remembered?.kind === 'refusal') return { ...out, unreadable: remembered.message };
+    }
+    return out;
+  };
+
+  /**
    * {@link readForTool}, also saying, at the guide's name, whether a file of
    * the knowledge base's own answered first on THIS branch (`guide`: `own`)
    * or the platform's guide answered alone (`alone`); `null` for any other
@@ -1919,7 +2242,7 @@ export function registerWorkspaceTools(
       type: 'object',
       properties: {
         branch: BRANCH_INPUT,
-        path: str(`Path to read, under \`${kbDirName}/\` (e.g. \`${kbDirName}/KnowledgeBase/Foo.md\`), with or without a leading slash — a path without that prefix is placed under \`${kbDirName}/\` — or a \`__tool_chain_spill__/…\` ref from a truncated \`call_tool_chain\`.`),
+        path: str(`Path to read, under \`${kbDirName}/\` (e.g. \`${kbDirName}/KnowledgeBase/Foo.md\`), with or without a leading slash — a path without that prefix is placed under \`${kbDirName}/\` — or a \`__tool_chain_spill__/…\` ref from a truncated \`call_tool_chain\`, or a \`__tmp__/…\` ref to a file you staged in the workspace's tmp folder.`),
         offset: int('Start character index (default 0).'),
         limit: int('Max characters to return from `offset`.'),
         sessionId: SESSION_ID_INPUT,
@@ -1956,7 +2279,11 @@ export function registerWorkspaceTools(
           : content;
       };
       const branch = a.branch as string;
-      const { result, guide } = await readServed(branch, p, ctx);
+      // A tmp ref is no repository path, so the `canWrite` below is false for
+      // it by the same rule as for any path outside the repository.
+      const { result, guide } = isTmpRef(p)
+        ? { result: await readTmp(branch, p, ctx), guide: null }
+        : await readServed(branch, p, ctx);
       // Judged after the read, so a path the caller may not read is refused
       // before anything is said about writing it. At the guide's name this
       // answers for the knowledge base's own file there, as `file_stat` does:
@@ -2170,7 +2497,7 @@ export function registerWorkspaceTools(
       type: 'object',
       properties: {
         branch: BRANCH_INPUT,
-        path: wsPath(kbDirName, 'Path'),
+        path: orTmpRef(wsPath(kbDirName, 'Path')),
         explainAccess: {
           type: 'boolean',
           description:
@@ -2247,6 +2574,7 @@ export function registerWorkspaceTools(
     handler: async (a, ctx: ToolContext) => {
       const p = a.path as string;
       const branch = a.branch as string;
+      if (isTmpRef(p)) return statTmp(branch, p, ctx);
       // The guide's name with no file of the knowledge base's own under it —
       // or one the caller may not read, or a copy of the guide an earlier
       // release wrote, none of which `read_file` serves: what a read answers
@@ -2408,13 +2736,14 @@ export function registerWorkspaceTools(
       name: 'grep',
       gated: true,
       description:
-        'Regex search across the workspace. Returns `{ matches: [{ path, line, text }] }` (capped). Use to find where something is defined/referenced. `path` may name a DIRECTORY (searches the subtree) or a single FILE (searches just that file); a path with nothing at it is an error, never an empty result. Searches INSIDE Office and OpenDocument files (.docx/.pptx/.xlsx, .odt/.odp/.ods), PDFs and email files (.eml/.msg) via their extracted text — matches there carry the extraction\'s line numbers, and the `[slide N]`/`[sheet: Name]`/`[page N]`/`[from]`/`[subject]` marker lines locate them; a bounded number of not-yet-extracted documents is extracted per call, and the result notes how many were skipped (re-run to cover them).',
+        `Regex search across the workspace. ${PATTERN_DIALECT} Covers hidden and git-ignored files. ` +
+        'Returns `{ matches: [{ path, line, text }] }`, capped, in path then line order. `path` may name a DIRECTORY (its subtree) or a single FILE; a path with nothing at it is an error. Searches INSIDE Office/OpenDocument, PDF and email files (.eml/.msg) via their extracted text — matches carry the extraction\'s line numbers, and the `[slide N]`/`[sheet: Name]`/`[page N]`/`[from]`/`[subject]` marker lines locate them; a bounded number of not-yet-extracted documents is extracted per call; the result notes the rest (re-run to cover them).',
       inputs: {
         type: 'object',
         properties: {
           branch: BRANCH_INPUT,
-          pattern: str('JavaScript regular expression.'),
-          path: str(`Subtree to search, or a single file to search on its own, with or without a leading slash — a path without the \`${kbDirName}/\` prefix is placed under \`${kbDirName}/\` (default: the whole repository, \`${kbDirName}/\`).`),
+          pattern: str('Regular expression, RE2-style (ripgrep): no look-around, no backreferences.'),
+          path: str(`Subtree to search, or a single file to search on its own, with or without a leading slash — a path without the \`${kbDirName}/\` prefix is placed under \`${kbDirName}/\` (default: the whole repository, \`${kbDirName}/\`) — or a \`__tmp__/…\` ref to one staged file.`),
           ignore_case: { type: 'boolean', description: 'Case-insensitive match.' },
           max_results: { type: 'integer', minimum: 1, maximum: 1000, description: 'Cap on matches (default 200).' },
           sessionId: SESSION_ID_INPUT,
@@ -2441,9 +2770,14 @@ export function registerWorkspaceTools(
       },
       write: false,
       handler: async (a, ctx: ToolContext) => {
-        // The caller's pattern never runs on the request thread: a backtracking
-        // one would hold the event loop for everyone (see IPatternMatcher).
-        const matcher = patterns.search(a.pattern as string, a.ignore_case ? 'i' : '');
+        // The caller's pattern runs in ripgrep, never on the request thread
+        // (see IPatternMatcher); one the engine refuses is answered here,
+        // before anything is searched. A caller that goes away takes the
+        // search's runs with it.
+        const search = await patterns.search(a.pattern as string, {
+          ignoreCase: Boolean(a.ignore_case),
+          signal: ctx.abortSignal,
+        });
         // No path means the whole REPOSITORY, not the workspace directory above
         // it. The workspace root also holds whatever an older build left beside
         // the checkout, and the read gate has no rules for a path outside the
@@ -2457,7 +2791,7 @@ export function registerWorkspaceTools(
         const searchRoot = typeof a.path === 'string' && a.path.length > 0 ? a.path : kbDirName;
         const fs = await ctx.getFilesystem(a.branch as string);
         const gate = readGateFor(a.branch as string, ctx);
-        const out: { path: string; line: number; text: string }[] = [];
+        const out: GrepMatch[] = [];
         const max = typeof a.max_results === 'number' ? Math.min(a.max_results, 1000) : 200;
         const docs: DocGrepState = {
           readers,
@@ -2469,8 +2803,13 @@ export function registerWorkspaceTools(
         // worth a stat.
         // A placeholder named on its own is searched as what it is to every
         // other tool: nothing.
-        const kind =
-          searchRoot === ''
+        // A tmp ref names one file by rule (see `workspace-tmp.ts`), so it is
+        // searched as a single file — never walked, and outside the repository
+        // there is no read gate or read hook for it, as for `read_file`.
+        const tmp = isTmpRef(searchRoot);
+        const kind = tmp
+          ? 'file'
+          : searchRoot === ''
             ? 'directory'
             : isFolderPlaceholder(searchRoot)
               ? 'missing'
@@ -2496,42 +2835,25 @@ export function registerWorkspaceTools(
         // The guide's own path is not told here, because `guideAt` tells the
         // hook of the organisation's file there exactly as `read_file` does
         // (after the gate), and the platform's guide alone is nobody's file to
-        // note. Each file the walk opens goes to the hook per file below, so a
-        // hook sees every path a grep reached rather than only its root.
-        if (!(coversGuide && kind !== 'directory')) {
+        // note. Each file the search opens goes to the hook per file below,
+        // before it is opened and whether or not a line of it is answered
+        // (`grepTree`'s admission), so a hook sees every file a grep reads
+        // rather than only its root, and may refuse one as it refuses a
+        // read_file. A tmp ref is no repository content, so there is nothing
+        // to tell.
+        if (!tmp && !(coversGuide && kind !== 'directory')) {
           await notifyAgentRead(agentAccessGate, ctx, a.branch as string, searchRoot);
         }
+        const notifyRead = (p: string): Promise<void> => notifyAgentRead(agentAccessGate, ctx, a.branch as string, p);
         if (coversGuide) {
           if (kind === 'directory') {
-            await grepWalk(
-              fs,
-              searchRoot,
-              matcher,
-              out,
-              max,
-              0,
-              gate,
-              (p) => notifyAgentRead(agentAccessGate, ctx, a.branch as string, p),
-              docs,
-              (p) => p === guidePath,
-            );
+            out.push(...(await grepTree(fs, searchRoot, search, max, gate, notifyRead, docs, (p) => p === guidePath)));
           }
-          const lines = (await guideAt(a.branch as string, ctx, guidePath)).split('\n');
-          for (const i of await matcher.matchingLines(lines, max - out.length)) {
-            out.push({ path: guidePath, line: i + 1, text: lines[i]!.slice(0, 300) });
-          }
+          const guide = await guideAt(a.branch as string, ctx, guidePath);
+          const [hits] = await search.matchingLines([guide]);
+          pushMatches(out, guidePath, guide, hits!);
         } else if (kind === 'directory') {
-          await grepWalk(
-            fs,
-            searchRoot,
-            matcher,
-            out,
-            max,
-            0,
-            gate,
-            (p) => notifyAgentRead(agentAccessGate, ctx, a.branch as string, p),
-            docs,
-          );
+          out.push(...(await grepTree(fs, searchRoot, search, max, gate, notifyRead, docs)));
         } else {
           // Not a directory: the permission verdict comes BEFORE every other
           // one, and it is `read_file`'s own gate on the same path — so grep
@@ -2541,15 +2863,28 @@ export function registerWorkspaceTools(
           // gets the 403, never the filesystem's complaint about it.
           await assertCanRead(gate, searchRoot);
           if (kind === 'missing') throw notFound(searchRoot, 'Nothing to search');
-          // A named FILE is searched directly: routing it through the walk would
-          // fail its readdir and answer an empty match list, which the caller
-          // cannot tell from "the pattern is not in this file".
-          const outcome = await orNotFound(
-            searchRoot,
-            () => grepOneFile(fs, searchRoot, matcher, out, max, docs),
-            'Nothing to search',
-          );
-          if (outcome === 'no-text') {
+          // A named text FILE is searched as a tree search searches it: by
+          // ripgrep, from its folder, so it answers the same lines either way
+          // (the valid UTF-8 lines of a file holding some that are not, and
+          // nothing from one ripgrep finds binary). Any other file, and any
+          // path that is not a regular file, is read through its reader,
+          // exactly as read_file reads it, its text searched by the same
+          // engine: a tree search would find nothing to walk and answer an
+          // empty match list, which the caller cannot tell from "the pattern
+          // is not in this file". A tmp ref is not in the checkout ripgrep
+          // searches, so it is always read through its reader, its bytes from
+          // the tmp resolver.
+          const bytesOf = tmp
+            ? (ref: string) => ctx.workspaceService.readTmpFile(docs.origin.workspaceId, ctx.user.id, ref)
+            : fileBytes(fs);
+          const found =
+            (!tmp && readers.readerFor(searchRoot) instanceof TextReader
+              ? await grepTextFile(fs, searchRoot, search, max, out)
+              : null) ?? (await orNotFound(searchRoot, () => searchableText(bytesOf, searchRoot, docs), 'Nothing to search'));
+          if (found.kind === 'text') {
+            const [hits] = await search.matchingLines([found.text]);
+            pushMatches(out, searchRoot, found.text, hits!);
+          } else if (found.kind === 'no-text') {
             fileNote =
               `"${displayPath(searchRoot)}" has no searchable text — it is an image, binary content, or a document ` +
               'whose text could not be extracted. There were no matches because there was nothing to search, not ' +
@@ -2563,8 +2898,11 @@ export function registerWorkspaceTools(
               `extracted and this call's extraction budget (${UNCACHED_DOCS_PER_GREP}) ran out. Re-run the ` +
               'same grep to extract and search the next batch.'
             : undefined);
+        // One order whatever found the lines, then the cap: the first
+        // `max_results` by path, then line.
+        out.sort((x, y) => compareSearchPaths(x.path, y.path) || x.line - y.line);
         return {
-          matches: out,
+          matches: out.slice(0, max),
           truncated: out.length >= max,
           ...(note !== undefined ? { note } : {}),
         };
@@ -3402,14 +3740,14 @@ export function registerWorkspaceTools(
     name: 'copy_file',
     gated: true,
     description:
-      'Copy a workspace FILE to a new path. The destination must not exist — like a move, a copy never overwrites a file or a folder; to change what is in a file that already exists, write it. Committed + pushed as you. ' +
+      'Copy a workspace FILE to a new path. The destination must not exist — like a move, a copy never overwrites a file or a folder; to change what is in a file that already exists, write it. Committed + pushed as you. `src` may be a `__tmp__/<path>` ref to a file you staged in the workspace\'s tmp folder: the copy is how such a file is kept, as a normal repository file. ' +
       'Preflight first: `dryRun: true` changes nothing and answers `{ src, dest, kind, descendants, access: { before, after }, accessChanges, allowed, reason? }` — `access` is your own `{ read, write, download, owner }` at the source and at the destination AS IT WILL BE once the copy has landed, with every `access.md` inside a copied folder counted at its new place. ' +
       'One exception to that shape: when the destination is one you may not write, the answer is the refusal alone — `allowed: false` with `reason`, and no `kind` and no `descendants`, because nothing about the source is read before that verdict.',
     inputs: {
       type: 'object',
       properties: {
         branch: BRANCH_INPUT,
-        src: wsPath(kbDirName, 'Source path'),
+        src: orTmpRef(wsPath(kbDirName, 'Source path')),
         dest: wsPath(kbDirName, 'Destination path — must not exist yet'),
         dryRun: { type: 'boolean', description: 'Answer with the impact and change nothing.' },
         sessionId: SESSION_ID_INPUT,
@@ -3437,11 +3775,14 @@ export function registerWorkspaceTools(
     proposable: true,
     handler: async (a, ctx: ToolContext) => {
       // A copy CARRIES the source content into the destination, so BOTH ends
-      // go to the write hook. Ask about both before touching disk.
-      writePolicy.assertPathWritable(ctx.sessionId, a.src as string);
+      // go to the write hook. Ask about both before touching disk. A tmp ref
+      // is not a knowledge-base path, so only the destination is one to ask
+      // about when the copy is out of the workspace's tmp folder.
+      const fromTmp = isTmpRef(a.src);
+      if (!fromTmp) writePolicy.assertPathWritable(ctx.sessionId, a.src as string);
       writePolicy.assertPathWritable(ctx.sessionId, a.dest as string);
       const branch = a.branch as string;
-      await assertAgentWriteAllowed(agentAccessGate, ctx, branch, a.src as string);
+      if (!fromTmp) await assertAgentWriteAllowed(agentAccessGate, ctx, branch, a.src as string);
       await assertAgentWriteAllowed(agentAccessGate, ctx, branch, a.dest as string);
       const src = a.src as string;
       const dest = a.dest as string;
@@ -3488,6 +3829,10 @@ export function registerWorkspaceTools(
       // the server's own absolute path. Anything that is not absence travels
       // on as it always did.
       const fs = await ctx.getFilesystem(branch);
+      if (fromTmp) {
+        await copyFromTmp(fs, branch, ctx, src, dest);
+        return { src, dest, copied: true };
+      }
       try {
         await asEntryExists(() => fs.copyFile(src, dest));
       } catch (err) {

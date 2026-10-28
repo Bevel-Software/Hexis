@@ -34,7 +34,7 @@ migration converts such files into `mcp.json` entries; do not write new ones.)
 ---
 id: my_tool
 write:
-  - Product Team
+  - group/Product Team
 owner:
   - Jane Doe <jane@x.com>
 type: http

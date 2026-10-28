@@ -6,6 +6,7 @@ import type { KbContext } from '../../shared/kb-context.js';
 import type { ReadForTool } from '../workspace/index.js';
 import type { IEmbedService } from './embed.interface.js';
 import { requireExternalSource } from '../tool-auth/index.js';
+import { assertTmpRefsTaken } from '../kb-fs/index.js';
 import { SESSION_ID_INPUT, type ToolDescriptionNotes, sessionIdInputOf } from '../workspace/index.js';
 
 /** The tool name, in one place: the app manifest keys its view by it. */
@@ -149,6 +150,10 @@ export function registerEmbedTools(
     toolHandler(async (args, ctx: ToolContext) => {
       const raw = typeof args.path === 'string' ? args.path.trim() : '';
       if (!raw) throw new ToolError('`path` is required.', 400);
+      // A tmp ref (`__tmp__/…`) is no knowledge-base page: refused by the one
+      // admission gate the normalised tools pass, before `toRepoRelative`
+      // would read it as the repository path `<kbDirName>/__tmp__/…`.
+      assertTmpRefsTaken(OPEN_PAGE_TOOL, { path: raw });
       const heading = typeof args.heading === 'string' && args.heading.trim() ? args.heading.trim() : undefined;
       const repoRelative = toRepoRelative(raw, kbDirName);
       if (repoRelative === null) throw new ToolError(OUTSIDE_REPO(kbDirName), 400);
