@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeEach, afterEach, vi } from 'vitest';
 import { NodeFs } from '../../kb-fs/node-fs.js';
-import { KbPluginSource } from '../../plugins/discovery/kb-plugin-source.js';
+import { KbPluginSource } from '../../plugins/index.js';
 
 /** The one disk, as production wires it: the service and its discovery read the same one. */
 const disk = new NodeFs();
@@ -10,8 +10,8 @@ import { join } from 'node:path';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { ToolManualService, type McpAuthDiscoveryPort } from '../tool-manuals.service.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import type { IAccessControl } from '../../access/access-control.interface.js';
+import type { WorkspaceService } from '../../workspace/index.js';
+import type { IAccessControl } from '../../access/index.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 
 const KB_DIR = 'knowledge-base';
@@ -405,7 +405,9 @@ describe('ToolManualService — MCP OAuth auto-discovery decoration', () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       const svc = svcWith({ statusFor: vi.fn(async () => ({ status: 'open' as const })) });
       const live = await svc.liveDeclaration('user@example.com', 'hubspot', 'HUBSPOT_TOKEN');
-      expect(live?.refused).toContain('HUBSPOT_TOKEN oauth.tokenUrl must use https');
+      expect(live?.refused).toContain('`variables[0].oauth.tokenUrl` must use https');
+      // Located by position, never by the name the entry declared (the .tool parser's rule).
+      expect(live?.refused).not.toContain('HUBSPOT_TOKEN');
       // The catalog's public listing is unchanged by this: the server is still left out.
       const catalog = await svc.listAccessibleCatalog('user@example.com');
       expect(catalog.tools.some((m) => m.name === 'hubspot')).toBe(false);

@@ -544,6 +544,22 @@ export class DbSecretsVaultService implements ISecretsVaultService {
       // sends nothing anywhere.
       meta = this.requireProvider({ ...input.provider, publicClient: false });
       oauthMeta = this.publicProviderMeta(meta);
+      // A MOVED PROPERTY, decided on the ticket (OAuth-Sign-In-Follows-The-Live-
+      // Declaration, 2026-10-27): the secret used to be bound to the token
+      // endpoint pinned at its save, so a later file edit could not send it
+      // anywhere else; now it goes where the file says at each start, so a
+      // writer of the tool file can move it (to an https, public host — the
+      // validation above still holds). Nothing refuses that; this line is the
+      // trail an operator reads when a secret went somewhere new.
+      const recorded = (shared.oauthMeta ?? {}) as { tokenUrl?: unknown };
+      if (typeof recorded.tokenUrl === 'string' && recorded.tokenUrl !== meta.tokenUrl) {
+        // Origins only: a path or query is the file's to say, not the log's.
+        const origin = (u: string) => (URL.canParse(u) ? new URL(u).origin : '(unparseable)');
+        log.warn(`sign-in on ${key}: the declared token endpoint differs from the one recorded when the client secret was saved`, {
+          savedOrigin: origin(recorded.tokenUrl),
+          declaredOrigin: origin(meta.tokenUrl),
+        });
+      }
     } else {
       meta = this.readMeta(shared.oauthMeta);
       oauthMeta = shared.oauthMeta;

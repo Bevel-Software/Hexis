@@ -4,6 +4,8 @@ import { DbSecretsVaultService } from '../db-secrets-vault.service.js';
 import { InvalidSecretError, SecretOAuthError } from '../secrets-vault.contract.js';
 import { TokenCrypto } from '../../../shared/token-crypto.js';
 import type { Database } from '../../database/connection.js';
+import { setLogger } from '../../../shared/logging.js';
+import type { ILogger, LogFields } from '../../../shared/logger.contract.js';
 
 const ENC_KEY = Buffer.alloc(32, 7).toString('base64');
 const crypto = new TokenCrypto(ENC_KEY);
@@ -761,5 +763,52 @@ describe('DbSecretsVaultService — a declared sign-in follows the live declarat
     });
     expect(new URL(url).searchParams.get('client_id')).toBe('dcr-client-1');
     expect(captured.values[0].oauthMeta).toEqual(PUBLIC_META);
+  });
+
+  // The moved property, pinned in both directions: the secret used to be bound to
+  // the token endpoint recorded at its save; it now goes where the file says, and
+  // the move leaves a line naming both origins (never a path) for an operator.
+  describe('where the stored secret goes when the declaration moves the token endpoint', () => {
+    const capture = () => {
+      const lines: Array<{ message: string; fields?: LogFields }> = [];
+      const make = (): ILogger => ({
+        debug: () => {},
+        info: () => {},
+        warn: (message, fields) => void lines.push({ message, fields }),
+        error: () => {},
+        child: () => make(),
+      });
+      const previous = setLogger(make());
+      return { lines, restore: () => setLogger(previous) };
+    };
+
+    it('follows the file to the new endpoint, and says so with both origins', async () => {
+      const log = capture();
+      try {
+        const { db, captured } = makeFakeDb([[confidentialShared()], [], [{ id: 'user-row-1' }]]);
+        await begin(new DbSecretsVaultService(db, ENC_KEY));
+        expect(captured.values[0].oauthMeta.tokenUrl).toBe(LIVE.tokenUrl);
+        expect(JSON.parse(crypto.decrypt(captured.values[0].valueEncrypted)).clientSecret).toBe('cs-owner');
+        expect(log.lines).toEqual([
+          {
+            message: `sign-in on ${KEY}: the declared token endpoint differs from the one recorded when the client secret was saved`,
+            fields: { savedOrigin: 'https://old.example.com', declaredOrigin: 'https://api.example.com' },
+          },
+        ]);
+      } finally {
+        log.restore();
+      }
+    });
+
+    it('says nothing when the declared token endpoint is the one recorded at the save', async () => {
+      const log = capture();
+      try {
+        const { db } = makeFakeDb([[confidentialShared()], [], [{ id: 'user-row-1' }]]);
+        await begin(new DbSecretsVaultService(db, ENC_KEY), { ...LIVE, tokenUrl: SAVED_META.tokenUrl });
+        expect(log.lines).toEqual([]);
+      } finally {
+        log.restore();
+      }
+    });
   });
 });

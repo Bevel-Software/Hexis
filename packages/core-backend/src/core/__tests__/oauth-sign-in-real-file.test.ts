@@ -5,14 +5,19 @@ import { join } from 'node:path';
 import express from 'express';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
-import { createSecretsVaultRoutes } from '../secrets-vault.routes.js';
-import { ToolManualService } from '../../tool-manuals/tool-manuals.service.js';
-import { NodeFs } from '../../kb-fs/node-fs.js';
-import { KbPluginSource } from '../../plugins/discovery/kb-plugin-source.js';
-import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import type { IAccessControl } from '../../access/access-control.interface.js';
-import { testKbContext } from '../../../__tests__/kb-context.js';
+import { createSecretsVaultRoutes } from '../../modules/secrets-vault/index.js';
+import { KbPluginSource } from '../../modules/plugins/index.js';
+import type { WorkspaceService } from '../../modules/workspace/index.js';
+import type { IAccessControl } from '../../modules/access/index.js';
+// The two concrete services this suite wires, it wires the way the composition
+// root does (`create-core-services.ts`): their modules publish them as types
+// only, and the composition root is the one place that constructs them from
+// their files. This suite stands in for that root — the routes of one module
+// over the real parser of another — which is why it lives beside it.
+import { ToolManualService } from '../../modules/tool-manuals/tool-manuals.service.js';
+import { NodeFs } from '../../modules/kb-fs/node-fs.js';
+import { workspaceIdForBranch } from '../../shared/workspace-id.js';
+import { testKbContext } from '../../__tests__/kb-context.js';
 
 /**
  * The sign-in start against REAL tool files: the routes are wired to the real
@@ -162,7 +167,7 @@ describe('POST …/oauth/start — through a real tool file', () => {
 
     const res = await s.start('hubspot', 'HUBSPOT_TOKEN');
     expect(res.status).toBe(422);
-    expect(((await res.json()) as { error: string }).error).toContain('HUBSPOT_TOKEN oauth.tokenUrl must use https');
+    expect(((await res.json()) as { error: string }).error).toContain('`variables[0].oauth.tokenUrl` must use https');
     expect(s.beginToolOAuthByKey).not.toHaveBeenCalled();
     expect(fetchSpy).toHaveBeenCalledTimes(1);
   });

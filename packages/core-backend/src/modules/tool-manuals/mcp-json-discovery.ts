@@ -96,9 +96,11 @@ export function validatedVariables(raw: unknown): ToolVariable[] | null {
 
 /**
  * {@link validatedVariables} with the reason a declaration was refused. The
- * reason names the entry and the rule, never a value the author wrote (the
- * same discipline as `describeManualFault`): it reaches logs and, for a
- * sign-in start on the server, the person signing in.
+ * reason locates the entry by its position (`` `variables[2] ``), never by
+ * the name it declared or any other value the author wrote — the `.tool`
+ * parser's discipline (`describeManualFault`): passing `[A-Za-z0-9_]+` makes
+ * a string a legal identifier, not one this process may repeat. The reason
+ * reaches logs and, for a sign-in start on the server, the person signing in.
  */
 function judgeVariables(
   raw: unknown,
@@ -108,27 +110,28 @@ function judgeVariables(
   if (!Array.isArray(raw)) return no('`variables` must be a list');
   const out: ToolVariable[] = [];
   const declared = new Set<string>();
-  for (const entry of raw) {
-    if (!isRecord(entry)) return no('every `variables` entry must be an object');
+  for (const [i, entry] of raw.entries()) {
+    const at = `\`variables[${i}]`;
+    if (!isRecord(entry)) return no(`${at}\` must be an object`);
     if (typeof entry.name !== 'string' || !/^[A-Za-z0-9_]+$/.test(entry.name)) {
-      return no('every variable needs a `name` of letters, digits and underscores');
+      return no(`${at}.name\` must match [A-Za-z0-9_]+`);
     }
     // The `.tool` parser's declaration rules, at this file's grain: a
     // platform-seeded name may not be re-declared (it would shadow the
     // seeding), and a duplicate would make later scope resolution depend on
     // declaration order.
-    if (RESERVED_VARIABLE_NAMES.includes(entry.name)) return no(`variable ${entry.name} is reserved for the platform`);
-    if (declared.has(entry.name)) return no(`variable ${entry.name} is declared twice`);
+    if (RESERVED_VARIABLE_NAMES.includes(entry.name)) return no(`${at}.name\` is reserved for platform seeding`);
+    if (declared.has(entry.name)) return no(`${at}.name\` duplicates an earlier entry's`);
     declared.add(entry.name);
     const scope = entry.scope ?? 'admin';
-    if (scope !== 'admin' && scope !== 'user') return no(`variable ${entry.name}: \`scope\` must be \`admin\` or \`user\``);
+    if (scope !== 'admin' && scope !== 'user') return no(`${at}.scope\` must be \`admin\` or \`user\``);
     let oauth: ToolVariable['oauth'];
     if (entry.oauth !== undefined) {
       // OAuth is inherently per-caller (same rule the `.tool` parser
       // enforces): an admin-shared OAuth token would leak one user's token
       // to all callers.
-      if (!isRecord(entry.oauth)) return no(`variable ${entry.name}: \`oauth\` must be an object`);
-      if (scope !== 'user') return no(`variable ${entry.name}: an \`oauth\` sign-in must be \`scope: user\``);
+      if (!isRecord(entry.oauth)) return no(`${at}.oauth\` must be an object`);
+      if (scope !== 'user') return no(`${at}\` has \`oauth\`, so its \`scope\` must be \`user\``);
       const o = entry.oauth;
       // Confidential material never loads from a file, on either declaration
       // surface: the `.tool` parser throws on these keys, and silently
@@ -136,13 +139,13 @@ function judgeVariables(
       // "worked" — the file is portable package data, readable by every
       // client that loads the plugin.
       if (o.clientSecret !== undefined || o.client_secret !== undefined || o.secret !== undefined) {
-        return no(`variable ${entry.name}: a client secret is never declared in a file — it is set through the protected client-secret route`);
+        return no(`${at}.oauth\` may not carry a client secret — it is set through the protected client-secret route`);
       }
       // `clientId` is trimmed and must be non-empty, exactly as the `.tool`
       // parser requires: a whitespace-only value would pass discovery and
       // then fail the owner's client-secret setup with "clientId is
       // required" — an error at the wrong surface, long after the save.
-      if (typeof o.clientId !== 'string' || !o.clientId.trim()) return no(`variable ${entry.name}: \`oauth.clientId\` is required`);
+      if (typeof o.clientId !== 'string' || !o.clientId.trim()) return no(`${at}.oauth.clientId\` is required`);
       // The endpoints are OPTIONAL here, unlike in a `.tool`: an MCP server
       // publishes its authorization-server metadata, so a declaration that
       // names only the client id is completed at scan time. Both or neither
@@ -158,10 +161,10 @@ function judgeVariables(
       const tokenUrl = optionalUrl(o.tokenUrl);
       const resource = optionalUrl(o.resource);
       if (authorizationUrl === null || tokenUrl === null || resource === null) {
-        return no(`variable ${entry.name}: the \`oauth\` URLs must be strings`);
+        return no(`${at}.oauth\` URLs must be strings`);
       }
       if ((authorizationUrl === undefined) !== (tokenUrl === undefined)) {
-        return no(`variable ${entry.name}: declare both \`oauth.authorizationUrl\` and \`oauth.tokenUrl\`, or neither`);
+        return no(`${at}.oauth\` must declare both \`authorizationUrl\` and \`tokenUrl\`, or neither`);
       }
       // The same https + SSRF gate the `.tool` parser runs on these URLs: a
       // sign-in or token exchange aimed at an internal host is a declaration
@@ -169,26 +172,26 @@ function judgeVariables(
       // is never fetched, but it names the remote server — same bar.
       try {
         if (authorizationUrl !== undefined) {
-          assertSafeFetchUrl(authorizationUrl, { requireHttps: true, label: `${entry.name} oauth.authorizationUrl` });
-          assertSafeFetchUrl(tokenUrl!, { requireHttps: true, label: `${entry.name} oauth.tokenUrl` });
+          assertSafeFetchUrl(authorizationUrl, { requireHttps: true, label: `${at}.oauth.authorizationUrl\`` });
+          assertSafeFetchUrl(tokenUrl!, { requireHttps: true, label: `${at}.oauth.tokenUrl\`` });
         }
         if (resource !== undefined) {
-          assertSafeFetchUrl(resource, { requireHttps: true, label: `${entry.name} oauth.resource` });
+          assertSafeFetchUrl(resource, { requireHttps: true, label: `${at}.oauth.resource\`` });
         }
       } catch (err) {
         // `assertSafeFetchUrl` names the field and the rule, never the URL.
-        return no(err instanceof Error ? err.message : `variable ${entry.name}: an \`oauth\` URL is invalid`);
+        return no(err instanceof Error ? err.message : `${at}.oauth\` has an invalid URL`);
       }
       // Forwarded verbatim as query params later — a non-string value here is
       // a malformed declaration, not something to coerce.
       if (o.authParams !== undefined) {
         if (!isRecord(o.authParams) || !Object.values(o.authParams).every((v) => typeof v === 'string')) {
-          return no(`variable ${entry.name}: \`oauth.authParams\` must be an object of string values`);
+          return no(`${at}.oauth.authParams\` must be an object of string values`);
         }
       }
       // PKCE is on unless the declaration says `false`; anything else there is
       // a malformed flag, not a preference.
-      if (o.pkce !== undefined && typeof o.pkce !== 'boolean') return no(`variable ${entry.name}: \`oauth.pkce\` must be a boolean`);
+      if (o.pkce !== undefined && typeof o.pkce !== 'boolean') return no(`${at}.oauth.pkce\` must be a boolean`);
       oauth = {
         ...(authorizationUrl !== undefined ? { authorizationUrl, tokenUrl: tokenUrl! } : {}),
         clientId: o.clientId.trim(),
