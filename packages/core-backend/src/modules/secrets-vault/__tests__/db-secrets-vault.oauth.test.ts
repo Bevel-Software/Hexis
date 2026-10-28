@@ -1,7 +1,6 @@
 import { describe, expect, it, vi, afterEach } from 'vitest';
 import { createHash } from 'node:crypto';
-import { DbSecretsVaultService } from '../db-secrets-vault.service.js';
-import { InvalidSecretError, SecretOAuthError } from '../secrets-vault.contract.js';
+import { DbSecretsVaultService, InvalidSecretError, SecretOAuthError } from '../index.js';
 import { TokenCrypto } from '../../../shared/token-crypto.js';
 import type { Database } from '../../database/index.js';
 import { setLogger } from '../../../shared/logging.js';

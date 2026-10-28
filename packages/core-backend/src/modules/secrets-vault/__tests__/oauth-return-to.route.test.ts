@@ -2,12 +2,11 @@ import type { Server as HttpServer } from 'node:http';
 import { createHmac } from 'node:crypto';
 import express from 'express';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import {
-  createSecretsVaultRoutes,
-  createSecretsVaultPublicRoutes,
-  isSafeReturnPath,
-} from '../secrets-vault.routes.js';
-import { SecretOAuthError } from '../secrets-vault.contract.js';
+import { createSecretsVaultRoutes, createSecretsVaultPublicRoutes, SecretOAuthError } from '../index.js';
+// The one deliberate white-box reach: the open-redirect predicate is pinned as
+// a unit table as well as end-to-end (see below), and it is on no entry because
+// nothing outside the routes should decide what a safe return path is.
+import { isSafeReturnPath } from '../secrets-vault.routes.js';
 
 /**
  * OAUTH `returnTo`: a sign-in started from a page other than /connect must land
