@@ -68,7 +68,7 @@ const TASKS: Task[] = [
     asks: ["Why can't I delete this?", 'moves, deletes'],
     sections: ['for-git-users', 'working-with-files'],
     facts: [
-      ['on a draft, anything you can read, unseen until merged', /On your draft you can do anything to what you can read.*Nobody else sees it until the draft is merged/],
+      ['on a draft, anything you can read, shared but not live until merged', /On your draft you can do anything to what you can read.*nothing is live until the draft is merged/],
       ['on a protected branch, write per file or propose', /On a protected branch, write access is checked per file.*how to propose it instead/],
       ['some platform files are never deleted', /are deleted by nobody/],
       ['file_stat says what may be deleted', /file_stat reports `managed`, `movable` and `deletable`/],

@@ -25,6 +25,8 @@ export interface VariableStatusPort {
     {
       key: string;
       adminConfigured: boolean;
+      /** What the owner's row is: a sign-in needs an `oauth` one, not a key left from when the variable was static. */
+      adminKind?: 'static' | 'oauth' | null;
       userConfigured: boolean;
       userAuthorized?: boolean;
       userKind?: 'static' | 'oauth' | null;
@@ -329,14 +331,16 @@ export function registerToolManualsTools(
       // reconnect step is the one agents leave out (the agent-guide benchmark, 2026-10-26).
       // By the rule the proxy hides a tool by (`userSecretGap`), so the note
       // names every tool that is hidden for want of the caller's own value. A
-      // sign-in waits on the owner's provider setup (the OAuth var's admin
-      // row): until then there is nothing to sign in to.
+      // sign-in waits on the owner's provider setup (an OAuth admin row, not a
+      // key left from when the variable was static — the Connect page counts
+      // that setup incomplete and the sign-in start refuses it): until then
+      // there is nothing to sign in to.
       const needYou = manuals.filter((m) =>
         (m.variables ?? []).some((v) => {
           if (v.scope !== 'user') return false;
           const st = statusByKey.get(varKey(m.name, v.name));
           const gap = userSecretGap({ oauth: v.oauth != null, oauthScopes: v.oauth?.scopes }, st);
-          return gap !== null && (v.oauth == null || st?.adminConfigured === true);
+          return gap !== null && (v.oauth == null || (st?.adminConfigured === true && st.adminKind === 'oauth'));
         }),
       );
       if (needYou.length > 0) {

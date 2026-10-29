@@ -16,7 +16,8 @@ platform's own words. What carries over, and what does not:
 
 **On your draft you can do anything to what you can read.** Create, edit, move
 or delete any file you can read (a few platform files aside, see
-`working-with-files`). Nobody else sees it until the draft is merged. Merging
+`working-with-files`). The draft is shared at once, so anyone who may read a
+file can open it there, but nothing is live until the draft is merged. Merging
 is where the owners of the files approve, so a delete on your draft deletes
 for everyone only once they accept it.
 

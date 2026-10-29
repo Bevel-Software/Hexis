@@ -65,7 +65,7 @@ block carries public settings only:
 | field | | |
 |---|---|---|
 | `clientId` | required | the OAuth app's client id; its owner registers the app with the redirect URI `<backend>/api/secrets/oauth/callback` |
-| `authorizationUrl`, `tokenUrl` | required in a `.tool`; leave out on an `mcp.json` server | an MCP server's are discovered from its own OAuth metadata. Both or neither |
+| `authorizationUrl`, `tokenUrl` | required in a `.tool`; optional on an `mcp.json` server | an MCP server's are discovered from its own OAuth metadata, so give them only when that discovery fails. Both or neither |
 | `scopes` | optional | `string[]`, requested at sign-in |
 | `pkce` | optional, default on | only `false` means anything |
 | `resource` | optional | the RFC 8707 resource indicator; discovered on an `mcp.json` server |
@@ -178,8 +178,8 @@ invent an endpoint or write a placeholder URL:
    The app probes it, registers itself and offers a sign-in on the Connect page
    (`oauth-auto`). An `Authorization` header or an `oauth` variable turns that
    discovery off, so add neither. Some providers do not support it
-   (`oauth-manual`, such as HubSpot or Google): write the entry, run
-   `list_tool_setup`, and read `setup.kind` and `setup.reason`.
+   (`oauth-manual`, such as HubSpot or Google): write the entry; once it is
+   live, `list_tool_setup` answers `setup.kind` and `setup.reason` for it.
 4. **For a key, use `variables`**, never a key in the file:
    `Authorization: Bearer ${NOTION_TOKEN}` and a `variables` entry with its
    scope.
@@ -197,8 +197,9 @@ All of it lands on a draft first, and goes live once merged (see `tools`).
    `oauth: { clientId }` and the `Authorization: Bearer ${VAR}` header in its
    `plugin.json` entry; for a `.tool`, the same with `authorizationUrl` and
    `tokenUrl`. A person can do the same under "Edit server" on the tool's page.
-3. Run `list_tool_setup` again: `setup.reason` must be gone. If the endpoints
-   could not be discovered, add `authorizationUrl` and `tokenUrl` from the
-   provider's docs.
+3. Once the declaration is on `{{defaultBranch}}` (a draft's entry shows in
+   `onBranchOnly` with no `setup`), run `list_tool_setup`: `setup.reason` must
+   be gone. If the endpoints could not be discovered, add `authorizationUrl`
+   and `tokenUrl` from the provider's docs.
 4. The admin pastes the **client secret** into the tool's page, never into
    the file or the chat. Then everyone signs in on the Connect page.
