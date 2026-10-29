@@ -65,3 +65,29 @@ For each evaluation task in design.md, `start-here` SHALL route it to at most tw
 #### Scenario: A fact is removed
 - **WHEN** an edit removes a fact an evaluation task relies on
 - **THEN** the evaluation test fails, naming the task and the fact
+
+### Requirement: New people are pointed at the onboarding section
+The guide SHALL have an `onboarding` section with the flow for welcoming someone new, the platform part of the server instructions SHALL say to follow it when someone is new or asks to be onboarded, and `start-here` SHALL route that question to it.
+
+#### Scenario: Someone says "onboard me"
+- **WHEN** an agent connects and reads the server instructions
+- **THEN** they say to follow the guide section `onboarding` when someone is new or asks to be onboarded
+
+#### Scenario: The section is fetched
+- **WHEN** an agent calls `get_agent_guide` with `section: "onboarding"`
+- **THEN** it gets the onboarding flow with the deployment's folder names and default branch filled in
+
+### Requirement: The hosted endpoint offers a platform `onboard` prompt
+On a connection not narrowed to an agent, the hosted MCP endpoint SHALL list a prompt named `onboard` first, beside the workspace's skills, and `prompts/get` for it SHALL return one message pointing at the `onboarding` section. A skill named `onboard` SHALL replace it. A connection narrowed to an agent SHALL list its agent's skills and nothing beside them. The local `hexis-mcp` server does not offer the prompt.
+
+#### Scenario: A connection that is not narrowed
+- **WHEN** a person's connection lists prompts
+- **THEN** `onboard` comes first, and getting it returns a message to read the guide's `onboarding` section and follow it
+
+#### Scenario: A workspace has its own onboarding
+- **WHEN** a skill named `onboard` is released
+- **THEN** the prompt list carries that skill under the name, and not the platform's prompt
+
+#### Scenario: A connection narrowed to an agent
+- **WHEN** a connection narrowed to an agent lists prompts or gets `onboard`
+- **THEN** it lists only its agent's skills, and `onboard` answers "Unknown skill"
