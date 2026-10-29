@@ -6,8 +6,7 @@
   branches may exist; `list_branches` marks each with `isProtected`.
 - **Draft**: any branch that is not protected. Work waits there for review,
   visible to whoever opens the draft.
-- **Change request**: the request to merge a draft into a protected branch. A
-  person reviews, approves and merges it in the app.
+- **Change request**: the request to merge a draft into a protected branch.
 - **Plugin**: a package: a folder under `{{pluginsDir}}/` with a `plugin.json`.
   It holds or links skills and declares tools, and its `access.md` says who
   uses it. Each person also has a private one (`my_plugin`).

@@ -5,7 +5,7 @@
 ├── {{knowledgeBaseDir}}/        ← the knowledge itself; organise it however suits you
 ├── {{skillsDir}}/               ← shared skills, organised by who owns them
 ├── {{pluginsDir}}/              ← one folder per plugin: its tools, and links to skills
-├── roles.yaml            ← who holds which role (Admin-only edits)
+├── roles.yaml            ← who holds which role
 ├── groups.yaml           ← who is in which group
 └── access.md             ← the access rules at the root
 ```

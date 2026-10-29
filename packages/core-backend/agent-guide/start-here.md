@@ -17,10 +17,10 @@ its task needs.
   branch: what is live for everyone. Work in progress lives on a draft branch.
   For example:
   `read_file({ body: { branch: "{{defaultBranch}}", path: "{{kbDirName}}/{{knowledgeBaseDir}}/Overview.md" } })`.
-- **Copy each tool's `Call:` line.** The platform's own tools take their
-  arguments under `body`; a tool from another service takes them flat. A call
-  with a missing or unknown argument is refused, and the refusal shows the
-  tool's interface.
+- **Copy each tool's `Call:` line.** It is generated from the tool's own
+  schema and shows the shape that tool takes, with every required argument;
+  optional ones are in the schema. A call with a missing or unknown argument
+  is refused, and the refusal shows the tool's interface.
 - **Pass `sessionId` only where a tool lists it.** Over MCP, call
   `start_session` once and pass its id to the tools whose arguments include
   `sessionId`. Other tools refuse it.
@@ -29,12 +29,6 @@ its task needs.
 - **Paths sit under `{{kbDirName}}/`**, as in
   `{{kbDirName}}/{{knowledgeBaseDir}}/Overview.md`. A path without that prefix
   is placed under it.
-
-### Before you write to `{{defaultBranch}}`
-
-A write there is live for everyone at once. Unless the person has already
-said where, ask first: directly on `{{defaultBranch}}` (only when they may
-write every file it touches), or on a draft with a change request.
 
 ### What is live, and what is only on a draft
 
@@ -45,8 +39,7 @@ merged through a change request or written there directly by someone allowed
 to. Until then the app's skills page, `list_skills` without `branch` and the
 tool list do not show them, and "doesn't exist" means "not merged yet". To see
 a skill on a draft, pass the draft as `branch` to `list_skills` or
-`get_skill`. People approve a change request and apply it in the app; no
-agent tool does.
+`get_skill`.
 
 ### Which section answers what
 

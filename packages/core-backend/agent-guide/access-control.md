@@ -155,9 +155,9 @@ widens or narrows access for everyone the rule names.
 ### Direct writes vs change requests
 
 - A person, or an agent acting for them, with **write or owner on every file a
-  change touches** may write directly to a protected branch. Ask the person
-  first, and prefer a change request when in doubt, when the change is large,
-  or when it touches content they do not own.
+  change touches** may write directly to a protected branch. Prefer a change
+  request when in doubt, when the change is large, or when it touches content
+  they do not own.
 - Without that access, the change goes through a **draft and a change
   request**, approved by an owner or writer of each affected file that has one.
   Agents carry exactly their user's access, never more.

@@ -18,9 +18,7 @@ platform's own words. What carries over, and what does not:
 or delete any file you can read (a few platform files aside, see
 `working-with-files`). Nobody else sees it until the draft is merged. Merging
 is where the owners of the files approve, so a delete on your draft deletes
-for everyone only once they accept it. Once merged, the draft is deleted on its
-own, unless another request is still open on it: start a new draft for the next
-change.
+for everyone only once they accept it.
 
 **On a protected branch, write access is checked per file.** If you may write
 every file a change touches, it lands directly; ask the person first. If not,

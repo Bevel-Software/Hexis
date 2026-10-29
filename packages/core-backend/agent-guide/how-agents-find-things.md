@@ -8,10 +8,9 @@ work with when they ask "does the agent read everything?".
 1. **The server instructions**: a short platform note, the rules every file
    tool shares, and this knowledge base's own description, which an admin
    writes in `mcp-description.md` at the repository root (on the app's
-   external agent page). Claude Code, Claude Desktop and Cursor put them in
-   the system prompt. Clients that drop them (claude.ai on the web, the Agent
-   SDK, Cline) get one line and the description's first paragraph at the top
-   of `start_session`, `grep`, `list_files` and `read_file` instead.
+   external agent page). Some clients put them in the system prompt; a client
+   that drops them gets one line and the description's first paragraph at the
+   top of `start_session`, `grep`, `list_files` and `read_file` instead.
 2. **The tool list**: each tool's name, description and arguments.
 3. **The skills' names and descriptions**, as prompts and through
    `list_skills`.

@@ -41,9 +41,7 @@ and its body opens with a line saying it is not approved. Once merged, it is
 in the next `list_skills` or `get_skill`; a client that cached the prompt list
 when it connected must reconnect to show it as a prompt.
 
-Before offering to change a skill, read its `canWrite` (see `access-control`):
-`list_skills` judges the `SKILL.md`, `get_skill` every file of the skill (or,
-with `file`, that file alone).
+Before offering to change a skill, check its `canWrite` (see `access-control`).
 
 **How skills reach agents.** Through this server (prompts, `list_skills`,
 `get_skill`), or as native plugins: each person can install a plugin

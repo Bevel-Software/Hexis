@@ -55,8 +55,6 @@ const NOT_THE_REGISTRYS: Readonly<Record<string, string>> = {
   // Refusal kinds and result stubs the content rule names; not schema fields.
   binary_not_writable: 'a refusal kind',
   image_omitted: 'the stub a chained image read yields',
-  // Named as the tool that no longer exists.
-  merge_change_request: 'a retired tool, named as gone',
   // Words about identifiers, and example identifiers in the manual format.
   snake_case: 'a naming style',
   serper_everyone: 'an example manual id',

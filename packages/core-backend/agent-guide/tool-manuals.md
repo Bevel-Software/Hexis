@@ -2,10 +2,9 @@
 
 A `.tool` file is a **tool manual**: it lets agents call a service's HTTP API.
 It lives in a plugin's `software.bevel.hexis/tools/` folder, beside the skills
-that use it. Anyone who can read it can use its tools; anyone who can write it
-sets its shared secrets. `.tool` files are for `http` and `inline` manuals
-only: an MCP server belongs in the plugin's `mcp.json` (see
-`directory-structure`).
+that use it. `.tool` files are for `http` and `inline` manuals only: an MCP
+server belongs in the plugin's `mcp.json` (see `directory-structure`). Who may
+use and who manages a tool is in `tools`.
 
 **The tool is the frontmatter.** A `.tool` is one `---` YAML block holding
 everything: its `id`, its access verbs (`read`/`write`/`owner`/`download`,

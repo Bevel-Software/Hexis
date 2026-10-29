@@ -1,8 +1,6 @@
 ## Drafts and change requests
 
-An agent drafts, proposes and syncs; people approve and apply. No agent tool approves a
-file, bypasses an approval or merges a change request (`merge_change_request`
-no longer exists).
+An agent drafts, proposes and syncs; people approve and apply, in the app.
 
 - **Start a draft** with `create_branch`: `name` is the new draft and `branch`
   the branch it forks from, usually `{{defaultBranch}}`:

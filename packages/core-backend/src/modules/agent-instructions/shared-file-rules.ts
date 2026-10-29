@@ -177,10 +177,10 @@ export function sharedFileRules(layout: KbLayout): readonly SharedFileRule[] {
       body:
         'move_file, copy_file and delete_folder take `dryRun: true`: it changes nothing and answers the impact — ' +
         'what the call would touch, `allowed`, and `reason` when it may not run. A non-empty folder is deleted, and a ' +
-        'move that changes your access runs, only with `confirm: true`; without it the call changes nothing and ' +
+        'move that changes anyone\'s access runs, only with `confirm: true`; without it the call changes nothing and ' +
         'returns the same impact with `confirmationRequired: true`. Do NOT set `confirm: true` on your first call — ' +
         'dry-run, check the impact, then confirm. delete_file takes neither: check it first with file_stat ' +
-        '(`deletable`) if you are unsure. delete_branch has its own `dryRun`.',
+        '(`deletable`). delete_branch has its own `dryRun`.',
     },
     {
       id: 'managed-items',
