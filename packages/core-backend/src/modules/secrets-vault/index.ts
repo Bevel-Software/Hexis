@@ -13,6 +13,12 @@ export type {
   PutStaticSecretInput,
   CreateOAuthSecretInput,
   ForcedRefreshOutcome,
+  ManagedSignInRef,
+  ManagedSignInCard,
+  ManagedSignInPort,
+  ManagedTokenRefresher,
+  ManagedTokenRevoker,
+  DeliveredTokenSet,
 } from './secrets-vault.contract.js';
 export {
   InvalidSecretError,

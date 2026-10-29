@@ -29,6 +29,8 @@ export interface VariableStatusPort {
       adminKind?: 'static' | 'oauth' | null;
       userConfigured: boolean;
       userAuthorized?: boolean;
+      /** For a shared (workspace) sign-in: the owner's row holds tokens. */
+      adminAuthorized?: boolean;
       userKind?: 'static' | 'oauth' | null;
       grantedScopes?: string;
     }[]
@@ -304,6 +306,11 @@ export function registerToolManualsTools(
             variables: (m.variables ?? []).map((v) => {
               const st = statusByKey.get(varKey(m.name, v.name));
               const isOAuth = v.oauth != null;
+              // A shared sign-in (a managed workspace connection) is
+              // authorized for everyone once an owner has connected it.
+              const authorized = isOAuth
+                ? ((v.scope === 'admin' ? st?.adminAuthorized : st?.userAuthorized) ?? false)
+                : null;
               return {
                 name: v.name,
                 scope: v.scope,
@@ -311,7 +318,8 @@ export function registerToolManualsTools(
                 oauth: isOAuth,
                 adminConfigured: st?.adminConfigured ?? false,
                 userConfigured: st?.userConfigured ?? false,
-                authorized: isOAuth ? (st?.userAuthorized ?? false) : null,
+                authorized,
+                ...(v.oauth?.managed ? { managed: v.oauth.managed } : {}),
               };
             }),
           };

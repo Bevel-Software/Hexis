@@ -433,6 +433,8 @@ export async function createCoreServer(
     publicBackendUrl: core.config.publicBackendUrl,
     publicFrontendUrl: core.config.publicFrontendUrl,
     kb: core.kb,
+    // Read at request time: the overlay binds the port after core is built.
+    managedSignIns: () => core.managedSignIns,
   };
   app.use('/api', createSecretsVaultPublicRoutes(secretsVaultRoutesDeps));
 

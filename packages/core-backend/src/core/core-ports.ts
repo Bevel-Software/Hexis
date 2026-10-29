@@ -12,6 +12,7 @@ import type { OnServerStart } from '../modules/workspace/startup/on-server-start
 import type { AgentGuideHook } from '../modules/agent-guide/agent-guide.js';
 import type { IAgentScopeResolver } from '../modules/agent-scope/index.js';
 import type { EmbedNodeIdResolver } from '../modules/embed/embed.interface.js';
+import type { ManagedSignInPort } from '../modules/secrets-vault/secrets-vault.contract.js';
 import type { IWorkspaceService } from '@bevel-software/platform-shared';
 import type { IAccessControl } from '../modules/access/index.js';
 import type { KbContext } from '../shared/kb-context.js';
@@ -190,6 +191,15 @@ export interface CorePorts {
    * for an id that names nothing. See `modules/embed/embed.interface.ts`.
    */
   embedNodeIdResolver?: EmbedNodeIdResolver;
+  /**
+   * The distribution's side of a MANAGED sign-in (a `.tool` sign-in whose
+   * `oauth` block names a platform connector): what the Connect page shows
+   * for it and how a sign-in through the broker is opened. Core default:
+   * none, so such a sign-in is listed as waiting on the deployment. Also
+   * settable after construction (`CoreServices.managedSignIns`), like the
+   * session sink. See `modules/secrets-vault/secrets-vault.contract.ts`.
+   */
+  managedSignIns?: ManagedSignInPort;
 }
 
 /**

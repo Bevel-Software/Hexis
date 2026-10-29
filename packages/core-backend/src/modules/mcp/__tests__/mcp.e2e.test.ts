@@ -651,6 +651,7 @@ describe('proxied third-party MCP servers: a rejected token gets one refresh and
     } as unknown as ISecretsVaultService;
     registerBevelSecretsVariableLoader(vault);
     const toolManuals = {
+      sharedSignInKeysForManual: async () => [],
       userScopedKeysForManual: async (manual: string) =>
         manual === 'notion' ? [{ key: KEY, name: 'ACCESS_TOKEN', label: 'Notion sign-in', oauth: true }] : [],
     } as unknown as IToolManualService;
@@ -940,6 +941,7 @@ describe('proxied third-party MCP servers: a rejected token gets one refresh and
     const { state, vault } = fakeSignIn('token-1', () => 'refreshed');
     const boom = new Error('catalog read failed\u009b31m\nerror: forged by the manual name\u2028tail');
     const toolManuals = {
+      sharedSignInKeysForManual: async () => [],
       userScopedKeysForManual: async (manual: string) => {
         if (broken) throw boom;
         return manual === 'notion' ? [{ key: KEY, name: 'ACCESS_TOKEN', label: 'Notion sign-in', oauth: true }] : [];
@@ -1061,6 +1063,7 @@ describe('proxied third-party MCP servers: a rejected token gets one refresh and
     } as unknown as ISecretsVaultService;
     registerBevelSecretsVariableLoader(withKind);
     const toolManuals = {
+      sharedSignInKeysForManual: async () => [],
       userScopedKeysForManual: async (manual: string) =>
         manual === 'notion' ? [{ key: KEY, name: 'ACCESS_TOKEN', label: 'Notion key', oauth: false }] : [],
     } as unknown as IToolManualService;

@@ -4,10 +4,11 @@ import { Badge, Banner, Button, Surface, TextField } from '../../../shared/compo
 import { cn } from '../../../lib/utils';
 import { pathForTool, readOAuthFragment, ToolLogo } from '../../library';
 import { startOAuth } from '../services/secrets.api';
-import { setUserVar, setAdminVar, deleteUserVar, setOAuthClientSecret } from '../services/tool-secrets.api';
+import { setUserVar, setAdminVar, deleteUserVar, deleteAdminVar, setOAuthClientSecret } from '../services/tool-secrets.api';
 import { SavedKeyProbeResult } from '../probe/SavedKeyProbeResult';
 import { useSavedKeyProbe, type SavedKeyProbe } from '../probe/useSavedKeyProbe';
 import { announceToolCredentialsChanged } from '../../../core/events';
+import { useAppRegistry } from '../../../core/registry';
 import { useConnectAsChoice } from '../../agents';
 import { ConnectAsChoice } from '../../agents/components/ConnectAsChoice';
 import {
@@ -19,6 +20,7 @@ import {
   type ConnectOAuth,
   type ConnectToolOAuth,
 } from '../services/connect.api';
+import { ManagedConnectorCard } from './ManagedConnectorCard';
 import {
   isActionable,
   outstandingCount,
@@ -128,6 +130,9 @@ export function ConnectToolsPage() {
   // from "4 integrations need setup" came to show two.
   const [skipped, setSkipped] = useState<Set<string>>(new Set());
   const [wiping, setWiping] = useState<Set<string>>(new Set());
+  // The distribution's foot of the page (which connectors it offers, and
+  // enabling one), when it registers one. See `AppRegistry.connectPanel`.
+  const ConnectPanel = useAppRegistry().connectPanel;
 
   /**
    * Which load is allowed to publish. Saving a key refreshes, and so does the
@@ -263,6 +268,31 @@ export function ConnectToolsPage() {
     }
   };
 
+  /**
+   * Disconnect a managed connector: the server revokes the token with the
+   * provider where it can, then deletes it here. A WORKSPACE connection is
+   * the shared row, which only a writer may remove (the server enforces it;
+   * the card offers the button to the same people).
+   */
+  const onDisconnectManaged = async (o: ConnectToolOAuth) => {
+    const id = signInId(o);
+    setWiping((s) => new Set(s).add(id));
+    try {
+      if (o.managed?.tokenScope === 'shared') await deleteAdminVar(o.slug, o.varName);
+      else await deleteUserVar(o.slug, o.varName);
+      announceToolCredentialsChanged();
+      await refresh(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setWiping((s) => {
+        const nextSet = new Set(s);
+        nextSet.delete(id);
+        return nextSet;
+      });
+    }
+  };
+
   const onFinish = async () => {
     if (!agentState || !connectAs.mayConnect) return;
     setFinishing(true);
@@ -349,6 +379,10 @@ export function ConnectToolsPage() {
   const outstanding = outstandingCount(listing) + standaloneOutstanding(listing);
   const nothingToDo =
     !loading && tools.length === 0 && oauth.length === 0 && toolOAuth.length === 0;
+  // Managed connectors get a card of their own (what they do, what they ask
+  // for); every other sign-in stays a row under "Sign-ins".
+  const connectors = toolOAuth.filter((o) => o.managed);
+  const plainSignIns = toolOAuth.filter((o) => !o.managed);
 
   // A document, like every Skills & Tools page: `LibraryLayout`'s pane is the
   // scroller. The header sticks to the top of that pane, so the title and
@@ -476,10 +510,33 @@ export function ConnectToolsPage() {
                 </Banner>
               )}
 
-              {(toolOAuth.length > 0 || oauth.length > 0) && (
+              {connectors.length > 0 && (
+                <Section title="Connectors">
+                  {connectors.map((o) => (
+                    <ManagedConnectorCard
+                      key={o.key}
+                      o={o}
+                      busy={wiping.has(signInId(o))}
+                      onConnect={() => void onAuthorizeTool(o.slug, o.varName)}
+                      onDisconnect={() => void onDisconnectManaged(o)}
+                      onOwnApp={
+                        o.canWrite
+                          ? async (clientId, clientSecret) => {
+                              await setOAuthClientSecret(o.slug, o.varName, clientSecret, clientId);
+                              announceToolCredentialsChanged();
+                              await refresh(true);
+                            }
+                          : undefined
+                      }
+                    />
+                  ))}
+                </Section>
+              )}
+
+              {(plainSignIns.length > 0 || oauth.length > 0) && (
                 <Section title="Sign-ins">
                   {/* OAuth-backed tool variables — authorized via the tool-scoped flow. */}
-                  {toolOAuth.map((o) => {
+                  {plainSignIns.map((o) => {
                     const id = signInId(o);
                     const on = isOn(id);
                     // The provider was never registered, so there is no consent
@@ -658,6 +715,19 @@ export function ConnectToolsPage() {
                 </Section>
               )}
             </>
+          )}
+
+          {/* The distribution's foot of the page — which connectors it offers
+              and enabling one — rendered whatever the lists above hold: a
+              reader with nothing to set up is exactly who comes here to
+              enable something. */}
+          {ConnectPanel && !loading && (
+            <ConnectPanel
+              onChanged={() => {
+                announceToolCredentialsChanged();
+                void refresh(true);
+              }}
+            />
           )}
         </div>
       </div>

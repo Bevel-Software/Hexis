@@ -356,12 +356,14 @@ describe('McpService — per-user credential pre-check', () => {
       keys.map((key) => ({ key, adminConfigured: false, userConfigured, userAuthorized, grantedScopes })),
   });
   const manualsWithUserVar = {
+    sharedSignInKeysForManual: async () => [],
     userScopedKeysForManual: async (manual: string) =>
       manual === 'KNOWLEDGE_BASE'
         ? [{ key: 'KNOWLEDGE_BASE_API_KEY', name: 'API_KEY', label: 'Your API key', oauth: false }]
         : [],
   };
   const manualsWithOAuthVar = {
+    sharedSignInKeysForManual: async () => [],
     userScopedKeysForManual: async (manual: string) =>
       manual === 'KNOWLEDGE_BASE'
         ? [{ key: 'KNOWLEDGE_BASE_GOOGLE', name: 'GOOGLE', label: 'Google', oauth: true }]
@@ -369,6 +371,7 @@ describe('McpService — per-user credential pre-check', () => {
   };
   // An OAuth var that requires two scopes — for the scope-coverage cases.
   const manualsWithScopedOAuthVar = {
+    sharedSignInKeysForManual: async () => [],
     userScopedKeysForManual: async (manual: string) =>
       manual === 'KNOWLEDGE_BASE'
         ? [
@@ -383,6 +386,7 @@ describe('McpService — per-user credential pre-check', () => {
         : [],
   };
   const manualsNoUserVar = {
+    sharedSignInKeysForManual: async () => [],
     userScopedKeysForManual: async () =>
       [] as { key: string; name: string; label: string | null; oauth: boolean }[],
   };
@@ -657,7 +661,7 @@ describe('McpService — agent instructions', () => {
     // The listing filter registers only ready tools; the fake manual catalog
     // says every tool is ready, so the four survive it and carry the prefix.
     const vault = { statusFor: async (_u: string, keys: string[]) => keys.map((key) => ({ key, userConfigured: true })) };
-    const manuals = { userScopedKeysForManual: async () => [{ key: 'KNOWLEDGE_BASE_X', name: 'X', oauth: false }] };
+    const manuals = { sharedSignInKeysForManual: async () => [], userScopedKeysForManual: async () => [{ key: 'KNOWLEDGE_BASE_X', name: 'X', oauth: false }] };
     const client = await setup({
       readAgentPreamble: async () => 'Acme.',
       extraTools: KB_TOOLS,
@@ -903,6 +907,7 @@ describe('McpService — the Audit log records what an agent calls', () => {
     const recorder = spyRecorder();
     const vault = { statusFor: async (_u: string, keys: string[]) => keys.map((key) => ({ key, adminConfigured: false, userConfigured: false })) };
     const manuals = {
+      sharedSignInKeysForManual: async () => [],
       userScopedKeysForManual: async (manual: string) =>
         manual === 'KNOWLEDGE_BASE' ? [{ key: 'KNOWLEDGE_BASE_API_KEY', name: 'API_KEY', label: 'Your API key', oauth: false }] : [],
     };

@@ -42,8 +42,12 @@ export function createAccountRoutes(
   >,
   adminAccess: IAdminAccessService,
   accountErasure: Pick<IAccountErasureService, 'eraseUser'>,
-  /** Who tells an invited person (see {@link IAccountHooks}); core registers nobody. */
-  accountHooks: Pick<IAccountHooks, 'runAccountInvited'>,
+  /**
+   * Who tells an invited person, and who cleans up after an account is
+   * switched off (see {@link IAccountHooks}); core registers nobody for the
+   * first and its managed-connector sign-ins for the second.
+   */
+  accountHooks: Pick<IAccountHooks, 'runAccountInvited' | 'runAccountDeactivated'>,
   accessRemoval?: Pick<UserAccessRemovalService, 'report' | 'assertRemovable' | 'remove' | 'filesNaming'>,
 ): express.Router {
   const router = express.Router();
@@ -176,11 +180,19 @@ export function createAccountRoutes(
       return;
     }
     try {
+      // Read before the switch, so the listeners get the address the account
+      // had; the row keeps it either way, this just saves a second read.
+      const target = await authService.getUserById(userId);
       if (!(await authService.deactivate(userId))) {
         res.status(404).json({ error: 'No such user' });
         return;
       }
       log.info('account audit:', { action: 'deactivate', actorUserId: req.userId, targetUserId: userId });
+      // What the account HELD elsewhere — the sign-ins it made to outside
+      // systems — is let go of now rather than left to lapse. Awaited, so
+      // the admin's answer means it: a listener that fails is logged by the
+      // seam and never fails the switch-off that already happened.
+      await accountHooks.runAccountDeactivated({ userId, email: target?.email ?? '' });
       res.status(204).end();
     } catch (error) {
       if (error instanceof AccountChangeRefusedError) {
