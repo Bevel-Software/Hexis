@@ -10,9 +10,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import { slowRipgrep } from '../../../__tests__/slow-ripgrep.js';
 import { LocalFilesystem } from '@mastra/core/workspace';
-import { GUIDE_FIRST_SENTENCE, TOOL_DESCRIPTION_CAP, ToolRegistry, clientVisibleLength } from '../../tool-registry/index.js';
+import { GUIDE_FIRST_SENTENCE, ToolRegistry } from '../../tool-registry/index.js';
 import { AccessControlService, VersionControlHooks, createToolHandlerFactory, type AgentOperationContext } from '../../../__tests__/tool-wiring.js';
-import { ToolError, routeToolSchemas, type ToolContext } from '../../tool-helpers/index.js';
+import { ToolError, type ToolContext } from '../../tool-helpers/index.js';
 import type { ToolAuth } from '../../tool-auth/index.js';
 import { registerWorkspaceTools } from '../workspace.tools.js';
 import { RipgrepPatternMatcher, type RipgrepPatternMatcherOptions } from '../index.js';
@@ -2124,30 +2124,12 @@ describe('office documents and PDFs', () => {
       // Narrowed by hand: the assertion above already failed the test if not.
       if (!compiled.checkable) throw new Error(compiled.reason);
       expect(compiled.check(exampleArguments(def.inputs)), def.name).toEqual([]);
-      // And the FLAT schema, which is what the tool's own route checks the
-      // call against: the two must agree, or a call the example produced would
-      // be refused one layer in.
-      const flat = routeToolSchemas(def.name)?.flat;
-      expect(flat, def.name).toBeDefined();
-      const flatCheck = compileCheck(flat);
-      expect(flatCheck.checkable, `${def.name} (flat): ${flatCheck.checkable ? '' : flatCheck.reason}`).toBe(true);
-      if (!flatCheck.checkable) throw new Error(flatCheck.reason);
-      expect(flatCheck.check(exampleArguments(flat)), `${def.name} (flat)`).toEqual([]);
     }
-  });
-
-  it('every description, call example and purpose prefix included, stays inside the cap a client shows', async () => {
-    await start();
-    const tools = await toolRegistry.listInternal();
-    for (const def of tools) {
-      // Measured as a CLIENT receives it: the call line, the purpose prefix at
-      // its own cap (the four knowledge-base tools carry one), and the
-      // description — the three things that ride one tool's entry.
-      const received = clientVisibleLength(def);
-      expect(received, `${def.name} is ${received} characters (cap ${TOOL_DESCRIPTION_CAP})`).toBeLessThanOrEqual(
-        TOOL_DESCRIPTION_CAP,
-      );
-    }
+    // That the FLAT schema each route checks a call against agrees with the
+    // example is the route layer's own property: tool-helpers'
+    // `route-tool-schemas.catalog.test.ts` holds it over the whole catalog.
+    // And that every description stays inside the cap a client shows is the
+    // registry's: `tool-description-length.test.ts`, over the same catalog.
   });
 
   describe('binary capability contract: a text file, a document, an image and a zip', () => {
