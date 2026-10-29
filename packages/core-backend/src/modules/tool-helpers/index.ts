@@ -56,5 +56,5 @@ export {
 } from './default-branch-write.js';
 // Reached by other modules; exported here so they stop importing the files.
 export { argumentsRefusal } from './route-argument-check.js';
-export { bodyEnvelope, declareRouteTool, routeToolSchemas } from './route-tool-schemas.js';
+export { bodyEnvelope, declareRouteTool } from './route-tool-schemas.js';
 export type { ToolHandlerFactory } from './tool-handler.js';
