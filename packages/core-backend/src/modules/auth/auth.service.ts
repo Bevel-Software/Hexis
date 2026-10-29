@@ -515,10 +515,11 @@ export class AuthService implements IAccountSwitchGuard {
    *
    * With `startingPassword` the account gets one generated here
    * ({@link generateStartingPassword}), stored only as its hash and returned
-   * once for the caller to hand on. The deployment admin and the accounts the
-   * platform runs its own work as never get a stored hash (see
-   * {@link createAccount}): theirs is made without one, as an existing one
-   * would be left.
+   * once for the caller to hand on. An owner ({@link isOwnerEmail}, with or
+   * without `ADMIN_PASSWORD` set) and the accounts the platform runs its own
+   * work as never get one: the owner is invited by nobody, as
+   * `POST /api/admin/accounts` refuses too, or the inviter would know the
+   * password of an owner who has not signed in yet. Theirs is made without one.
    *
    * The admission port is asked with the reason `invite` before the insert,
    * and only for an address with no account.
@@ -532,7 +533,7 @@ export class AuthService implements IAccountSwitchGuard {
       throw new AccountChangeRefusedError('Invalid email');
     }
     await this.assertAdmitted(normalizedEmail, 'invite');
-    const mayHoldHash = !SYSTEM_ACCOUNT_EMAILS.includes(normalizedEmail) && !this.isEnvAdminEmail(normalizedEmail);
+    const mayHoldHash = !SYSTEM_ACCOUNT_EMAILS.includes(normalizedEmail) && !this.isOwnerEmail(normalizedEmail);
     const startingPassword = options.startingPassword && mayHoldHash ? generateStartingPassword() : undefined;
     const passwordHash = startingPassword ? await hashPassword(startingPassword) : undefined;
     const [row] = await this.db

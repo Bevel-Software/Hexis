@@ -17,7 +17,7 @@ import { admitEveryone, type IAccountAdmission } from '../index.js';
 const closers: (() => Promise<void>)[] = [];
 
 async function startApp(
-  opts: { admission?: IAccountAdmission; adminEmail?: string } = {},
+  opts: { admission?: IAccountAdmission; adminEmail?: string; adminPassword?: string } = {},
 ): Promise<{ base: string; auth: AuthService; db: Database; close(): void }> {
   const { db, close } = await openMigratedScratchDb('hexis_invite');
   closers.push(close);
@@ -26,7 +26,7 @@ async function startApp(
     {
       jwtSecret: 'test-jwt-secret',
       adminEmail: opts.adminEmail ?? '',
-      adminPassword: opts.adminEmail ? 'the-environment-password' : '',
+      adminPassword: opts.adminPassword ?? (opts.adminEmail ? 'the-environment-password' : ''),
       allowedEmailDomains: [],
       loginPasswordEnabled: true,
     },
@@ -118,6 +118,23 @@ describe.skipIf(!PG_ADMIN_URL)('invitations on a real Postgres', () => {
       const app = await startApp({ adminEmail: 'owner@acme.test' });
       try {
         const res = await invite(app.base, { email: 'owner@acme.test' });
+        expect(res.status).toBe(201);
+        expect(await res.json()).not.toHaveProperty('startingPassword');
+        const [row] = await app.db.select().from(users).where(eq(users.emailBidx, 'owner@acme.test'));
+        expect(row!.passwordHash).toBeNull();
+      } finally {
+        app.close();
+      }
+    },
+    PG_TEST_TIMEOUT,
+  );
+
+  it(
+    "gives an owner's address no password with ADMIN_PASSWORD unset either, so a member can't sign in as an owner who hasn't yet",
+    async () => {
+      const app = await startApp({ adminEmail: 'owner@acme.test', adminPassword: '' });
+      try {
+        const res = await invite(app.base, { email: 'Owner@Acme.test', startingPassword: true });
         expect(res.status).toBe(201);
         expect(await res.json()).not.toHaveProperty('startingPassword');
         const [row] = await app.db.select().from(users).where(eq(users.emailBidx, 'owner@acme.test'));

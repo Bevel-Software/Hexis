@@ -46,7 +46,8 @@ when the plan is full.
 Nobody types a starting password any more. Where one is needed (password
 sign-in and no single sign-on, or "Also give them a password" ticked), the
 platform generates it, shows it once on the invited person's row to copy,
-and passes it to the deployment's invitation mail. An invite never changes
+and passes it to the deployment's invitation mail. The owner's address
+(`ADMIN_EMAIL`) never gets one, with or without `ADMIN_PASSWORD`. An invite never changes
 an account that already exists: it no longer gives a first password to an
 existing account without one. Admins set or reset a password from User
 accounts, as before.
