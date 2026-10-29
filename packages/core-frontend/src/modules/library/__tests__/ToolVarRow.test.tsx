@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
-import type { ToolVarStatus } from '../../secrets-vault/services/tool-secrets.api';
+import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/react';
+import type { ToolVarStatus } from '../../secrets-vault';
 
 /**
  * The per-variable state matrix, one case per row of the spec table.
@@ -12,16 +12,21 @@ import type { ToolVarStatus } from '../../secrets-vault/services/tool-secrets.ap
  * clobber the discovered provider).
  */
 
+// The row reaches Secrets & connections through that module's entry, so the
+// mock sits on the entry too — the same surface, with the rest of the module
+// left as it is — never on the files behind it.
 const secretsMock = vi.hoisted(() => ({
   setAdminVar: vi.fn(),
   setUserVar: vi.fn(),
   deleteAdminVar: vi.fn(),
   setOAuthClientSecret: vi.fn(),
 }));
-vi.mock('../../secrets-vault/services/tool-secrets.api', () => secretsMock);
-
 const connectMock = vi.hoisted(() => ({ startToolOAuth: vi.fn() }));
-vi.mock('../../secrets-vault/services/connect.api', () => connectMock);
+vi.mock('../../secrets-vault', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../secrets-vault')>()),
+  ...secretsMock,
+  ...connectMock,
+}));
 
 // External navigation behind a spy-able module — never assign
 // window.location.href in a test.
@@ -236,7 +241,48 @@ describe('ToolVarRow: oauth', () => {
     expect(screen.getByRole('button', { name: 'Replace client secret' })).toBeInTheDocument();
   });
 
+  it('offers a writer Replace client secret while not signed in, and it opens the client-secret editor', async () => {
+    const { onChanged } = renderRow(signin({ authorized: false }), { canWrite: true, setupKind: 'oauth-manual' });
+    expect(screen.getByRole('button', { name: 'Sign in' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Set client secret' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Replace client secret' }));
+
+    const input = screen.getByLabelText('Client secret for SIGNIN');
+    expect(input).toHaveAttribute('type', 'password');
+    fireEvent.change(input, { target: { value: 'cs_new' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() =>
+      expect(secretsMock.setOAuthClientSecret).toHaveBeenCalledWith('github', 'SIGNIN', 'cs_new'),
+    );
+    await waitFor(() => expect(onChanged).toHaveBeenCalled());
+  });
+
+  it('offers a writer Replace client secret beside Sign in again', () => {
+    renderRow(signin({ authorized: true, needsReauth: true }), { canWrite: true, setupKind: 'oauth-manual' });
+    expect(screen.getByRole('button', { name: 'Sign in again' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Replace client secret' })).toBeInTheDocument();
+  });
+
+  it('shows a reader who cannot write the tool Sign in only, in every state', () => {
+    renderRow(signin({ authorized: false }), { canWrite: false, setupKind: 'oauth-manual' });
+    expect(screen.getByRole('button', { name: 'Sign in' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /client secret/ })).toBeNull();
+    cleanup();
+    renderRow(signin({ authorized: true }), { canWrite: false, setupKind: 'oauth-manual' });
+    expect(screen.queryByRole('button', { name: /client secret/ })).toBeNull();
+    cleanup();
+    renderRow(signin({ authorized: true, needsReauth: true }), { canWrite: false, setupKind: 'oauth-manual' });
+    expect(screen.queryByRole('button', { name: /client secret/ })).toBeNull();
+  });
+
   it('never shows a client-secret affordance for oauth-auto, even to a writer', () => {
+    renderRow(signin({ authorized: false }), { canWrite: true, setupKind: 'oauth-auto' });
+    expect(screen.queryByRole('button', { name: /client secret/ })).toBeNull();
+    cleanup();
+    renderRow(signin({ authorized: true, needsReauth: true }), { canWrite: true, setupKind: 'oauth-auto' });
+    expect(screen.queryByRole('button', { name: /client secret/ })).toBeNull();
+    cleanup();
+
     renderRow(signin({ authorized: true }), { canWrite: true, setupKind: 'oauth-auto' });
     expect(screen.queryByRole('button', { name: 'Replace client secret' })).toBeNull();
 

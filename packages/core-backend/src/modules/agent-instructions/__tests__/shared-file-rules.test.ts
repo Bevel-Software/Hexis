@@ -1,6 +1,6 @@
 import { DEFAULT_KB_LAYOUT, PREAMBLE_CAP } from '@bevel-software/platform-shared';
 import { describe, expect, it } from 'vitest';
-import { composeAgentGuide } from '../../agent-guide/agent-guide.js';
+import { composeAgentGuide } from '../../agent-guide/index.js';
 import {
   INSTRUCTIONS_CAP,
   PLATFORM_HEADER,
@@ -93,10 +93,10 @@ describe('the shared file rules are one text, in two places', () => {
    * organisation's own conventions file beside it — which is what a
    * `read_file` of that name serves first.
    */
-  it('tells an agent to call get_agent_guide first, and that AGENTS.md answers with the same guide after the organisation\'s own', () => {
+  it('tells an agent to call get_agent_guide first, and that AGENTS.md answers with that start after the organisation\'s own', () => {
     const rule = sharedFileRules(DEFAULT_KB_LAYOUT).find((r) => r.id === 'agent-guide')!.body;
-    expect(rule).toContain("call `get_agent_guide` and read the platform's guide");
-    expect(rule).toContain('read_file on `AGENTS.md` at the KB root answers with the same guide');
+    expect(rule).toContain("call `get_agent_guide`: it answers the guide's start, which names the default branch");
+    expect(rule).toContain('read_file on `AGENTS.md` at the KB root answers with that start');
     expect(rule).toContain("after the organisation's own conventions file of that name");
     // The pre-rename name is still offered, for a knowledge base that kept one.
     expect(rule).toContain('`CLAUDE.md`');

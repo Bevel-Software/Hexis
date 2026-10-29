@@ -20,10 +20,17 @@
  * The sections ship as markdown files in the package's `agent-guide/` folder
  * (see `assets.ts`), one per section, with the layout placeholders the old
  * template carried (`{{knowledgeBaseDir}}`, `{{skillsDir}}`, `{{pluginsDir}}`,
- * `{{agentsFile}}`). ONE section is computed rather than read: the rules every
- * file tool shares, which the MCP handshake also sends — the same string in
- * both places, from `shared-file-rules.ts`, so a rule cannot be changed in one
- * and left stale in the other.
+ * `{{agentsFile}}`), the checkout folder's `{{kbDirName}}` and the default
+ * branch's `{{defaultBranch}}`. ONE section is computed rather than read: the
+ * rules every file tool shares, which the MCP handshake also sends — the same
+ * string in both places, from `shared-file-rules.ts`, so a rule cannot be
+ * changed in one and left stale in the other.
+ *
+ * The guide is LAYERED (see openspec/changes/agent-guide-layers/design.md):
+ * `get_agent_guide` with no section answers with the short start section
+ * ({@link START_HERE_SECTION_ID}), which says which section answers which
+ * question, and an agent fetches the others by id when a task needs them.
+ * Each section has a token budget (`guide-budget.ts`), held by a test.
  */
 
 import fs from 'node:fs/promises';
@@ -59,6 +66,13 @@ export interface AgentGuideSection {
    * could only misread a folder name it STATES as a placeholder.
    */
   literal?: boolean;
+  /**
+   * The question this section answers, as a row of the start section's
+   * "which section answers what" table. Core's sections are in that table
+   * already; a distribution sets it on a section it adds, so an agent that
+   * reads only the start section is routed to it.
+   */
+  asks?: string;
 }
 
 /**
@@ -87,20 +101,34 @@ export const WORKING_WITH_FILES_SECTION_ID = 'working-with-files';
 export const NEW_KNOWLEDGE_BASE_SECTION_ID = 'new-knowledge-base';
 
 /**
+ * The first-contact section: what `get_agent_guide` answers when no section is
+ * named. Short on purpose, and the one place that maps each question to the
+ * section answering it, so an agent fetches one section rather than the guide.
+ */
+export const START_HERE_SECTION_ID = 'start-here';
+
+/** The `section` that asks `get_agent_guide` for every section at once. */
+export const WHOLE_GUIDE_SECTION = 'all';
+
+/**
  * Core's sections, in reading order. Every id but the shared-rules one names
  * a file in the package's `agent-guide/` folder.
  */
 export const CORE_SECTION_IDS: readonly string[] = Object.freeze([
-  'introduction',
+  START_HERE_SECTION_ID,
+  'how-agents-find-things',
+  'for-git-users',
+  'glossary',
   'directory-structure',
   'where-a-new-file-goes',
   WORKING_WITH_FILES_SECTION_ID,
   'access-control',
+  'drafts-and-change-requests',
   'skills',
+  'tools',
   'tool-manuals',
   'html-views',
   'conventions',
-  'finding-things',
   NEW_KNOWLEDGE_BASE_SECTION_ID,
 ]);
 
@@ -174,10 +202,20 @@ export interface AgentGuideContext {
    * deployment's tools report back.
    */
   kbDirName?: string;
+  /**
+   * The knowledge base's default branch, rendered into `{{defaultBranch}}` so
+   * the start section names the branch every file tool's `branch` takes for
+   * what is live. Read when the guide is composed: a fresh deployment gets its
+   * branch model from the setup screen after the services are built.
+   */
+  defaultBranch?: string;
 }
 
 /** The checkout folder's name when none is given — core's own default. */
 const DEFAULT_KB_DIR_NAME = 'knowledge-base';
+
+/** What `{{defaultBranch}}` reads as when no branch is configured yet: a name no branch can have. */
+const UNCONFIGURED_DEFAULT_BRANCH = '<the default branch>';
 
 /** One section of the guide as an agent reads it: rendered, with the heading's text as its title. */
 export interface RenderedGuideSection {
@@ -197,7 +235,11 @@ export type AgentGuideSectionsReader = () => Promise<RenderedGuideSection[]>;
  * with its title. The whole guide is these joined (see
  * {@link composeAgentGuide}); `get_agent_guide` also serves one at a time.
  *
- * A hook may append, replace and drop sections, with ONE exception: the
+ * A hook may append, replace and drop sections. It replaces one by returning
+ * its own under the same id, beside core's or in its place: of two sections
+ * under one id the LAST is served, where the FIRST stood, so a distribution
+ * overrides core's `start-here` or `html-views` by adding its own and the
+ * guide keeps its order (see {@link oneSectionPerId}). ONE exception: the
  * shared file rules ({@link WORKING_WITH_FILES_SECTION_ID}) must come back
  * WITH TEXT IN THEM, as core's or as the hook's own replacement. A client
  * that drops the handshake instructions has the guide as the only place to
@@ -215,18 +257,25 @@ export async function agentGuideSections(
 ): Promise<RenderedGuideSection[]> {
   const resolved = resolveKbLayout(layout);
   const core = await coreAgentGuideSections(resolved);
-  const sections = hook ? await hook(core, resolved) : core;
+  const sections = withRoutes(oneSectionPerId(hook ? await hook(core, resolved) : core));
   const kbDirName = context.kbDirName?.trim() || DEFAULT_KB_DIR_NAME;
+  const defaultBranch = context.defaultBranch?.trim() || UNCONFIGURED_DEFAULT_BRANCH;
   const rendered = sections.map((section) => {
     const body = (
       section.literal
         ? section.body
-        : renderKbLayoutPlaceholders(section.body.replaceAll('{{kbDirName}}', () => kbDirName), resolved)
+        : renderKbLayoutPlaceholders(
+            section.body
+              .replaceAll('{{kbDirName}}', () => kbDirName)
+              .replaceAll('{{defaultBranch}}', () => defaultBranch),
+            resolved,
+          )
     ).trim();
     return { id: section.id, title: titleOf(body, section.id), body };
   });
-  // Judged over EVERY section under the id — a hook may return the id twice
-  // — on what survives the empty-body filter below: one with text is enough.
+  // One section per id by now (`oneSectionPerId`), so a hook's own version
+  // of the rules is what is judged, on what survives the empty-body filter
+  // below.
   const rules = rendered.filter((section) => section.id === WORKING_WITH_FILES_SECTION_ID);
   if (!rules.some((section) => section.body.length > 0)) {
     throw new Error(
@@ -235,6 +284,51 @@ export async function agentGuideSections(
     );
   }
   return rendered.filter((section) => section.body.length > 0);
+}
+
+/**
+ * One section per id. A hook that returns an id twice (its own version of a
+ * core section, added beside core's) means the later one: it is served in
+ * the earlier one's place, so a distribution overrides a section by adding
+ * its own under the same id, and the guide keeps core's order. Without this
+ * the whole guide carried both and `get_agent_guide` served the first, which
+ * was always core's.
+ */
+function oneSectionPerId(sections: readonly AgentGuideSection[]): readonly AgentGuideSection[] {
+  const at = new Map<string, number>();
+  const out: AgentGuideSection[] = [];
+  for (const section of sections) {
+    const index = at.get(section.id);
+    if (index === undefined) {
+      at.set(section.id, out.length);
+      out.push(section);
+    } else {
+      out[index] = section;
+    }
+  }
+  return out;
+}
+
+/**
+ * Adds a row to the start section's routing table for every section that
+ * says what it {@link AgentGuideSection.asks} and is not routed there yet.
+ * The rows go after the table's last row. A start section without the table
+ * (a distribution replaced it) is left as it is.
+ */
+function withRoutes(sections: readonly AgentGuideSection[]): readonly AgentGuideSection[] {
+  const start = sections.find((section) => section.id === START_HERE_SECTION_ID);
+  if (!start) return sections;
+  const routed = sections.filter((section) => section.asks?.trim() && !start.body.includes(`| \`${section.id}\` |`));
+  if (routed.length === 0) return sections;
+  const lines = start.body.split('\n');
+  const header = lines.findIndex((line) => /^\|\s*Question\s*\|\s*Section\s*\|/.test(line));
+  if (header < 0) return sections;
+  let last = header;
+  while (last + 1 < lines.length && lines[last + 1]!.startsWith('|')) last += 1;
+  const rows = routed.map((section) => `| ${section.asks!.trim().replaceAll('|', '\\|')} | \`${section.id}\` |`);
+  lines.splice(last + 1, 0, ...rows);
+  const body = lines.join('\n');
+  return sections.map((section) => (section === start ? { ...start, body } : section));
 }
 
 /**
@@ -260,6 +354,19 @@ export async function composeAgentGuide(
   return joinGuideSections(await agentGuideSections(layout, hook, context));
 }
 
+/**
+ * What a `read_file` of the guide's name answers: the start section and the
+ * list of every section, the same as `get_agent_guide` with no `section`, so
+ * no read hands an agent the whole guide unless it asks for it. A guide
+ * without a start section (a distribution dropped it) is answered whole.
+ */
+export function guideStartText(sections: readonly RenderedGuideSection[]): string {
+  const start = sections.find((section) => section.id === START_HERE_SECTION_ID);
+  if (!start) return joinGuideSections(sections);
+  const list = sections.map((section) => `- \`${section.id}\`: ${section.title}`).join('\n');
+  return `${start.body}\n\n### Every section\n\n${list}\n`;
+}
+
 /** The sections as one document, the way `composeAgentGuide` joins them. */
 export function joinGuideSections(sections: readonly RenderedGuideSection[]): string {
   return `${sections.map((section) => section.body).join('\n\n')}\n`;
@@ -268,12 +375,12 @@ export function joinGuideSections(sections: readonly RenderedGuideSection[]): st
 /**
  * What a `read_file` of the guide's name answers when the knowledge base has an
  * `AGENTS.md` of its own: their text first, whole, then a rule and one line
- * saying what follows, then the platform's guide. Theirs first because it is
+ * saying what follows, then the start of the platform's guide. Theirs first because it is
  * the more specific of the two, and the line between so neither is read as
  * part of the other.
  */
 export const PLATFORM_GUIDE_SEPARATOR =
-  "---\n\n_The text above is this knowledge base's own conventions file. The platform's guide follows; `get_agent_guide` returns it on its own._";
+  "---\n\n_The text above is this knowledge base's own conventions file. The start of the platform's guide follows; `get_agent_guide` with a `section` returns the rest._";
 
 export function withPlatformGuideAppended(ownText: string, guide: string): string {
   // Their text as they wrote it, line endings normalised and the trailing

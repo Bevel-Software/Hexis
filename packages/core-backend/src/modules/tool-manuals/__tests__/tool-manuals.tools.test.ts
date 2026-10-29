@@ -1,11 +1,13 @@
 import type { Server as HttpServer } from 'node:http';
 import express from 'express';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ToolRegistry } from '../../tool-registry/tool-registry.js';
-import { InternalTokenService } from '../../tool-auth/internal-token.service.js';
-import { createToolAuthMiddleware } from '../../tool-auth/tool-auth.middleware.js';
-import { createToolContextResolver } from '../../tool-helpers/tool-context.js';
-import { createToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
+import { ToolRegistry } from '../../tool-registry/index.js';
+import {
+  InternalTokenService,
+  createToolAuthMiddleware,
+  createToolContextResolver,
+  createToolHandlerFactory,
+} from '../../../__tests__/tool-wiring.js';
 import { registerToolManualsTools } from '../tool-manuals.tools.js';
 import type { IToolManualService } from '../tool-manuals.contract.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
@@ -335,5 +337,94 @@ describe('list_tool_setup — a declaration that lives on a draft says so', () =
     expect(body.onBranchOnly).toEqual([]);
     expect(body.note).toBeUndefined();
     expect(toolManualService.listDeclaredOnlyOnBranch).not.toHaveBeenCalled();
+  });
+});
+
+describe('list_tool_setup — a tool that needs the caller’s own value says so', () => {
+  const TICKETS = {
+    slug: 'ticketdesk',
+    name: 'ticketdesk',
+    path: 'Plugins/Support/ticketdesk.tool',
+    type: 'http' as const,
+    variables: [{ name: 'TICKETDESK_TOKEN', scope: 'user' as const, label: null }],
+  };
+
+  it('tells a caller without their own value where to set it, and to reconnect', async () => {
+    const base = await start();
+    vi.mocked(toolManualService.listAccessibleCatalog).mockResolvedValueOnce({ tools: [TICKETS], invalid: [] } as never);
+    // Bob has configured nothing (see `statusFor`).
+    const body = (await (await callSetup(base, 'bevel_bob')).json()) as { note?: string };
+    expect(body.note).toContain('`ticketdesk` needs your own value or sign-in');
+    expect(body.note).toContain('Connect page, never in the chat');
+    expect(body.note).toContain('reconnect your assistant');
+  });
+
+  it('says nothing to a caller who has set theirs', async () => {
+    const base = await start();
+    vi.mocked(toolManualService.listAccessibleCatalog).mockResolvedValueOnce({ tools: [TICKETS], invalid: [] } as never);
+    const body = (await (await callSetup(base, 'bevel_alice')).json()) as { note?: string };
+    expect(body.note).toBeUndefined();
+  });
+
+  const SIGN_IN = {
+    ...TICKETS,
+    variables: [{ name: 'TICKETDESK_OAUTH', scope: 'user' as const, label: null, oauth: { scopes: ['tickets'] } }],
+  };
+
+  /** The owner's side of a sign-in: a provider row of the OAuth kind. */
+  const ownerSignedUp = { adminConfigured: true, adminKind: 'oauth' as const };
+
+  it('tells a caller to sign in once the owner has set the sign-in up', async () => {
+    const base = await start();
+    vi.mocked(toolManualService.listAccessibleCatalog).mockResolvedValueOnce({ tools: [SIGN_IN], invalid: [] } as never);
+    statusFor.mockImplementationOnce(async (_userId: string, keys: string[]) =>
+      keys.map((key) => ({ key, ...ownerSignedUp, userConfigured: false })),
+    );
+    const body = (await (await callSetup(base, 'bevel_bob')).json()) as { note?: string };
+    expect(body.note).toContain('`ticketdesk` needs your own value or sign-in');
+  });
+
+  it('names a tool the proxy hides for a stale credential: the wrong kind, or a sign-in short of a scope', async () => {
+    const base = await start();
+    // A row left from when the variable was a plain key.
+    vi.mocked(toolManualService.listAccessibleCatalog).mockResolvedValueOnce({ tools: [SIGN_IN], invalid: [] } as never);
+    statusFor.mockImplementationOnce(async (_userId: string, keys: string[]) =>
+      keys.map((key) => ({ key, ...ownerSignedUp, userConfigured: true, userKind: 'static' as const })),
+    );
+    expect(((await (await callSetup(base, 'bevel_bob')).json()) as { note?: string }).note).toContain('`ticketdesk` needs your own value or sign-in');
+    // Signed in, but before the tool asked for `tickets`.
+    vi.mocked(toolManualService.listAccessibleCatalog).mockResolvedValueOnce({ tools: [SIGN_IN], invalid: [] } as never);
+    statusFor.mockImplementationOnce(async (_userId: string, keys: string[]) =>
+      keys.map((key) => ({ key, ...ownerSignedUp, userConfigured: true, userKind: 'oauth' as const, userAuthorized: true, grantedScopes: 'profile' })),
+    );
+    expect(((await (await callSetup(base, 'bevel_bob')).json()) as { note?: string }).note).toContain('`ticketdesk` needs your own value or sign-in');
+    // Signed in with the scope: nothing to say.
+    vi.mocked(toolManualService.listAccessibleCatalog).mockResolvedValueOnce({ tools: [SIGN_IN], invalid: [] } as never);
+    statusFor.mockImplementationOnce(async (_userId: string, keys: string[]) =>
+      keys.map((key) => ({ key, ...ownerSignedUp, userConfigured: true, userKind: 'oauth' as const, userAuthorized: true, grantedScopes: 'tickets' })),
+    );
+    expect(((await (await callSetup(base, 'bevel_bob')).json()) as { note?: string }).note).toBeUndefined();
+  });
+
+  it('does not send a caller to sign in before the owner has set the sign-in up', async () => {
+    const base = await start();
+    vi.mocked(toolManualService.listAccessibleCatalog).mockResolvedValueOnce({ tools: [SIGN_IN], invalid: [] } as never);
+    statusFor.mockImplementationOnce(async (_userId: string, keys: string[]) =>
+      keys.map((key) => ({ key, adminConfigured: false, userConfigured: false })),
+    );
+    const body = (await (await callSetup(base, 'bevel_bob')).json()) as { note?: string };
+    expect(body.note).toBeUndefined();
+  });
+
+  it('does not send a caller to sign in on a shared key left from when the variable was static', async () => {
+    const base = await start();
+    // The owner turned a plain key into a sign-in; the old shared row is still
+    // there, so `adminConfigured` is true, but it is no provider to sign in to.
+    vi.mocked(toolManualService.listAccessibleCatalog).mockResolvedValueOnce({ tools: [SIGN_IN], invalid: [] } as never);
+    statusFor.mockImplementationOnce(async (_userId: string, keys: string[]) =>
+      keys.map((key) => ({ key, adminConfigured: true, adminKind: 'static' as const, userConfigured: false })),
+    );
+    const body = (await (await callSetup(base, 'bevel_bob')).json()) as { note?: string };
+    expect(body.note).toBeUndefined();
   });
 });

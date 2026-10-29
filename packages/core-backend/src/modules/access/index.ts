@@ -5,7 +5,7 @@
  */
 export type { IAccessControl } from './access-control.interface.js';
 // Reached by other modules; exported here so they stop importing the files.
-export type { AccessDecisionSource, AccessTargetKind } from './access-control.interface.js';
+export type { AccessDecisionSource, AccessTargetKind, HolderChange, HolderChanges } from './access-control.interface.js';
 export { accessMdPathForFolder, fileCarriesAccessRules, governingFolderOf } from './access-mutation.service.js';
 export type { AccessMutationService, IAccessMutation, TargetKind } from './access-mutation.service.js';
 export { folderTarget, rulesFileFor } from './access-requests.contract.js';

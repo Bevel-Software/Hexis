@@ -1,157 +1,115 @@
 ## Access control
 
-Access to any path — reading it as much as writing it — is governed by
-`roles.yaml` (who has which role), `groups.yaml` (who is in which group) and
-`access.md` files (who may do what, where).
+Who may read and change each path, on every branch, is set by three kinds of
+file: `roles.yaml` (who holds which role), `groups.yaml` (who is in which
+group) and `access.md` files (who may do what, where). A folder everyone may
+read and the Platform Team may change has this `access.md`:
 
-- **Roles** in `roles.yaml` map a role name to a list of members: emails, and
-  `group:<Name>` entries that give the role to a whole group (see *Giving a
-  role to a group* below). Role names are
-  case- and whitespace-insensitive (`Admin` = `admin` = `ADMIN`; `Product Team`
-  = `product team`). The reserved names `deny` and `everyone` cannot be used, and neither can
-  names starting with `role/`, `group/` or `plugin/` — those spellings are tokens in
-  access entries (below). One exception to the file's authority: the
-  **deployment admin** — the address the server configuration sets as
-  `ADMIN_EMAIL` — is **always an Admin**, whether or not `roles.yaml` lists
-  it, and taking it out of the file does not change that. It is the rescue
-  path for a `roles.yaml` that has lost its last Admin. The App roles page
-  shows that account under Admin as a fixed member that cannot be added or
-  removed there; every other Admin membership is exactly what the file says,
-  and removing one takes effect on that person's next request.
-- **Plugins are grantable principals.** `plugin/<name>/read`,
-  `plugin/<name>/write` and `plugin/<name>/owner` in any access file mean
-  everyone who currently holds that verb on the plugin whose manifest `name`
-  is `<name>`, derived live from the plugin's own `access.md`. Any spelling
-  folds to the identifier (`plugin/GTM/read` and `plugin/gtm/read` are one
-  principal). This is how a shared skill is made visible to a plugin's
-  members: `read: plugin/gtm/read` on the skill's folder.
-  Adding or removing someone on the plugin changes what they can read
-  everywhere the token is granted, with no copying.
-- **Access rules** live in `access.md` files, which carry **two blocks with two
-  scopes**: the BODY (below the closing `---`) declares the rules for the
-  folder the file sits in, and the FRONTMATTER declares who may read and
-  write that `access.md` itself. Each block names verbs (`read`, `write`,
-  `download`, `owner`) whose entries are either grants (a bare principal) or
-  denials (the lowercase word `deny`, a space, then the principal).
-  Capitalised forms like `Deny` are *not* triggers; they are treated as part
-  of a name.
+```yaml
+---
+owner:
+  - role/Admin
+---
+read:
+  - everyone
+write:
+  - group/Platform Team
+```
+
+- **An `access.md` has two blocks.** The body, below the closing `---`, holds
+  the rules for the folder the file sits in. The frontmatter above it says who
+  may read and change that `access.md` itself. Keep the body pure YAML, with
+  any explanation in `#` comments: a body that does not parse as YAML naming at
+  least one verb is read in an older format, where the frontmatter carried the
+  folder's rules.
+- **Verbs and entries.** The verbs are `read`, `write`, `download` and
+  `owner`. Each verb takes a list, one entry per line, as above: a one-line
+  value such as `write: everyone` does not parse, and the whole file is
+  skipped. Each entry is a grant (a principal) or a denial (the lowercase word
+  `deny`, a space, then the principal). `Deny` with a capital is part of a
+  name, not a denial.
+- **Verbs nest.** `owner` includes `write` and `download`, and each of those
+  includes `read`: a grant gives the verbs below it, so a `download` grant
+  alone lets a person open a page as well as save a copy.
+  A denial takes away the verbs above it: `deny read` also removes `write`,
+  `download` and `owner`, and `deny write` removes `owner`. `deny write` and
+  `deny download` never remove `read`.
 - **Principals** are a role (`role/<Name>`, from `roles.yaml`), a group
-  (`group/<Name>`, from the active group source — `groups.yaml`, or
-  `synced-groups.yaml` when groups sync from an identity provider), a person
-  as `Name <email>`, a plugin
-  token (above), or
-  **`everyone`** — the built-in org-wide principal: every signed-in person and
-  their agents. `read: everyone` in a folder's BODY opens that folder to the
-  whole organisation; it is how an organisation-wide skill or plugin is
-  shared. The same line in a file's FRONTMATTER only makes that one file
-  visible — a plugin's `access.md` ships with `read: everyone` in its
-  frontmatter so the plugin can be found and joined, and that admits nobody
-  to the plugin itself. A person's personal plugin
-  (`{{pluginsDir}}/personal-<id>/`) grants its owner access and denies
-  `everyone` outright, so opening a parent folder never opens it.
-  **Write roles as `role/<Name>` and groups as `group/<Name>`** — for
-  example `read: group/Platform Team` or `deny role/Reviewer`; the Manage
-  access dialog writes them that way too. A bare name (`read: Reviewer`)
-  still works and means the ROLE when a role of that name exists, and the
-  group otherwise. So a group that shares a role's name is reached only as
-  `group/<Name>`: a bare `read: Admin` reaches the `Admin` role, never the
-  members of a group named `Admin` (unless `roles.yaml` itself lists that
-  group under the role). The same holds for a denial: a bare
-  `deny Admin` denies the role, so denying a same-named group needs
-  `deny group/Admin`. `role/<Name>` always means the role,
-  `group/<Name>` always the group.
-- **Keep an `access.md` body pure YAML**, with any explanation in `#` comments.
-  A body that does not parse as YAML naming at least one verb is read in the
-  older format instead, where the FRONTMATTER carried the folder's rules — so a
-  stray line of prose silently changes which block governs the folder.
-- **The verbs nest.** `owner` sits over `write` and `download`; `write` and
-  `download` each sit over `read` — anyone who may edit a node, or save a copy
-  of it, may also view it. `write` and `download` say nothing about each other.
-  The nesting is GRANT-ONLY: a grant of a higher verb confers the lower ones,
-  but `deny write` or `deny download` says nothing about `read` and never
-  strips a separate read grant. So `download: Ana <ana@x.io>` alone lets Ana
-  open the node as well as download it, and a `deny download` beside an
-  inherited read leaves her able to open it but not save it.
-- **You can only change what you can read.** Nothing is created, changed,
-  moved into or removed from a place the caller cannot read — on every
-  branch, drafts included, whatever `write:` rules say. A write tool refused
-  for this says so (`write-denied`, naming the unreadable folder), and
-  proposing is not offered either: a proposal into a folder its author cannot
-  see would vanish from them the moment it landed. Two exceptions. A NEW
-  FOLDER directly under `{{knowledgeBaseDir}}/`, `{{skillsDir}}/` or
-  `{{pluginsDir}}/`: anyone may start one, whatever the root's rules grant
-  them, and the new folder's `access.md` is seeded with the creator's own
-  `read:` grant so what they put there is visible to them (a loose FILE
-  directly at a root has no folder to carry that grant and is not excepted).
-  And an Admin — or the deployment owner — may change the files directly in
-  the repository root (`roles.yaml`, `access.md`, `groups.yaml`, …) even when
-  the root grants read to nobody: the same rescue the write
-  floor gives them, so a tree whose root rules lock everyone out stays
-  repairable from inside the app. That rescue stops at the root; a subfolder
-  an admin cannot read is closed to them like to anyone else.
-- **Resolution** walks repo root → file directory, accumulating per-principal
-  state. User-level entries trump role-level entries. A role denial removes
-  only that role's contribution; it does not undo grants from other roles.
-- **`roles.yaml` is editable only by Admin** — hard-coded in the resolver,
-  never overridable by an `access.md`.
-- **`access.md` files are picked up at any depth**, so a folder can tighten or
-  widen what it inherited from its parent.
-- **Per-file rules exist for Markdown notes and `.tool` definitions.** A note
-  (`.md`, lowercase) may name verbs in its own frontmatter, and those rules
-  apply to that one note; a `.tool` definition keeps the access verbs in its
-  own YAML the same way; a distribution may register further file kinds
-  that carry their own rules. Any other file (a PDF, a presentation, a
-  spreadsheet, an image, any binary, a `.markdown` or `.MD` file, or binary
-  content saved as `.md`) takes its folder's rules: sharing it on its own is refused with
-  `folder-governs-access`, naming the folder. To change who
-  can open such a file, change its folder's `access.md`, or move the file to a
-  folder whose rules fit.
+  (`group/<Name>`, from the active group source), a person as
+  `Name <email>`, a plugin token, or **`everyone`**: every signed-in
+  person and their agents. `everyone` under `read` in a folder's body opens the
+  folder to the organisation; in a file's frontmatter it only makes that file
+  visible (a plugin's `access.md` has it there so the plugin can be found and
+  joined, which admits nobody to the plugin). Write roles and groups with
+  their prefix, as the app does: a bare name means the role when one has that
+  name, the group otherwise, in a denial too. A person's
+  personal plugin (`{{pluginsDir}}/personal-<id>/`) grants its owner access and
+  denies `everyone` outright, so opening a parent folder never opens it.
+- **Plugin tokens.** `plugin/<name>/read`, `plugin/<name>/write` and
+  `plugin/<name>/owner` mean everyone the body of that plugin's own
+  `access.md` grants that verb or a higher one (grants inherited from folders
+  above the plugin, and `deny` lines, do not count). `<name>` is the
+  manifest's `name`, in any spelling. This is how a shared skill reaches a
+  plugin's members: `plugin/gtm/read` under `read` on the skill's folder.
+- **The nearest rule decides, verb by verb.** For a path and a verb, the
+  platform looks at the file's own rules (below), then its folder's
+  `access.md`, then each folder above, up to the root, and the first one that
+  says anything about you for that verb decides; a nearer `read` rule leaves a
+  `write` grant from a folder above in force. Within
+  one file, a rule naming you beats one for your roles or groups; a grant
+  through one of your roles beats a denial through another; `everyone` comes
+  last. No rule anywhere means no access: a folder no rule opens to you is
+  invisible to you.
+- **Per-file rules** exist for markdown notes (`.md`, lowercase) and `.tool`
+  files: verbs in a note's frontmatter, or in a `.tool`'s YAML, apply to that
+  file alone. Any other file (a PDF, an image, a spreadsheet, a `.markdown` or
+  `.MD` file) takes its folder's rules, and sharing it on its own is refused
+  with `folder-governs-access`, naming the folder. Change the folder's rules,
+  or move the file to a folder whose rules fit.
+- **You can only change what you can read**, on every branch, drafts
+  included, whatever `write` says. Such a write is refused with `write-denied`,
+  naming the place you cannot read, and proposing it is not offered: it would
+  vanish from you the moment it landed. Two exceptions. Anyone may start a new
+  folder directly under `{{knowledgeBaseDir}}/`, `{{skillsDir}}/` or
+  `{{pluginsDir}}/`, and its `access.md` is seeded with the creator's own read
+  grant (a loose file directly at a root is not excepted); on a protected
+  branch you still need write there, so start it on a draft. And an Admin may
+  always change the files at the repository root (`roles.yaml`, `access.md`,
+  `groups.yaml`), so a tree that locks everyone out stays repairable.
+- **Broken rules.** A `roles.yaml` that does not parse stops access from
+  resolving until it is fixed. An `access.md` that does not parse is skipped
+  (its folder then follows the folders above it) with no error you can see, so
+  after editing one, check the result with `file_stat` and `explainAccess`.
 
-Rules are enforced at runtime; a malformed `roles.yaml` or `access.md` surfaces
-when access is resolved.
-
-### Roles are pre-set — a "new role" is usually a group
+### Roles are pre-set: a "new role" is usually a group
 
 **What a role is.** A role in `roles.yaml` is an app role: a capability the
-platform defines and acts on (`Admin` is one), listed with the people who hold
-it. The set of roles is pre-set by the platform. A role is not a way to name a
-team.
+platform defines and acts on (`Admin` is one), with the people who hold it. The
+set of roles is pre-set. A role is not a way to name a team. The deployment
+admin (the server's `ADMIN_EMAIL`) is always an Admin, whatever the file says.
 
-**Agents never create roles.** Add people to a role that already exists, or
-remove them, and nothing more: never add a role name to `roles.yaml`, and never
-rename one — a rename is a delete plus a create. Such a write is refused with a
-422 that names the role and says: app roles are pre-set — add people to
+**Agents never create roles.** Add people to a role that exists, or remove
+them, and nothing more: never add or rename a role in `roles.yaml`. Such a
+write is refused with a 422 saying that app roles are pre-set: add people to
 existing roles, and use a GROUP for a task- or team-scoped set of people.
-Relay that refusal to your user as it stands; do not look for another way to
-write the file.
+Relay that to your user as it stands.
 
-**Is it really a group?** When someone asks for a "new role", it almost always
-is. It is a group when any of these hold:
+**Is it really a group?** It is when the name says who the people are (a team,
+a project, a customer) rather than a capability the platform has, when it
+would change when the project ends or the team reshuffles, or when its purpose
+is to give those people access to some folders.
 
-- the name says who the people are — a team, a project, a customer, a
-  committee — rather than a capability the platform already has;
-- it would change or disappear when the project ends or the team reshuffles;
-- its purpose is to give those people access to some folders or files.
-
-A request that matches a role that already exists is membership, not a new
-role.
-
-**What to do instead.**
-
-1. If an existing role already carries the capability, add the people to it.
-2. Otherwise make it a group: add or extend the group in `groups.yaml` (or
-   point your user at the app's Groups page), then grant the group in the
-   `access.md` of the folders it should reach.
-3. If your user still needs a role the platform does not have, that is not an
-   edit you can make — say so, and leave the decision to an admin.
+**What to do instead.** Add the people to an existing role that carries the
+capability. Otherwise make it a group: add it to `groups.yaml` (or point your
+user at the app's Groups page), then grant the group in the `access.md` of the
+folders it should reach. A role the platform does not have is an admin's
+decision, not an edit you can make.
 
 ### Giving a role to a group
 
-A role's member list takes a group as well as individual emails. Write the
-entry as `- group:<Name>`, where `<Name>` is a group in the active group
-source — `synced-groups.yaml` when the deployment syncs groups from an
-identity provider, `groups.yaml` otherwise. Here a `Reviewer` role the
-deployment already has goes to a whole group:
+A role's members may include a group: write `- group:<Name>`, naming a group
+in the active group source (`synced-groups.yaml` when groups are synced from
+the organisation's directory, `groups.yaml` otherwise):
 
 ```yaml
 roles:
@@ -162,166 +120,54 @@ roles:
     - group:Platform Team
 ```
 
-- **Matching.** The name is matched case- and whitespace-insensitively against
-  the active group source, like role names: `group:platform team` and
-  `group:Platform  Team` are the same entry as `group:Platform Team`.
-- **Unknown groups are refused.** An entry naming a group the active source
-  does not declare is a validation error: the write is refused with a 422
-  that names the entry and its role (`'- group:Platfrom Team' under role
-  'Reviewer'`), and nothing is saved. Create the group first, or fix the name.
-- **A group under `Admin` makes every member a full admin** — including anyone
-  added to the group later, and including the right to edit `roles.yaml`
-  itself. Only make that edit when your user is an Admin and explicitly asks
-  for exactly that, and say so in the commit summary; for anyone else, tell
-  them what it would mean and who can do it (below). `Admin` must also always keep at least one
-  direct email member; a group entry alone is not enough, so a broken
-  directory can never leave the deployment without an admin.
-- **With direct emails.** Group entries and emails add up: the role's members
-  are everyone listed by email plus everyone currently in each listed group.
-  A person in both is simply a member; adding or removing someone from the
-  group changes the role with no edit to `roles.yaml`.
-- **With denials.** Group members hold the role's grants exactly as if they
-  were listed by email. A denial of the role in an `access.md`
-  (`deny role/Reviewer`) therefore removes the role's contribution for
-  everyone in the group, as it does for the emails. To deny the group
-  instead, write `deny group/Platform Team`. The nearest `access.md` that says
-  anything about the person decides: a person granted by name
-  (`Name <email>`) in the SAME `access.md` as the denial keeps that access,
-  because within one file a person's own entry beats a role entry. A grant by
-  name in a folder further up does not survive a role denial closer to the
-  file.
+- **Matching** is case- and whitespace-insensitively against the active group
+  source, as for role names.
+- **An unknown group is a validation error**: the write is refused with a 422
+  naming the entry and its role, and nothing is saved.
+- **A group under `Admin` makes every member a full admin**, including anyone
+  added to the group later. Make that edit only when your user is an Admin and
+  asks for exactly that, and say so in the summary. `Admin` must keep at least
+  one member listed by email.
+- **Members add up**: the role's members are the emails listed plus everyone
+  currently in each group.
+- **A denial** of the role (`deny role/Reviewer`) removes the role's
+  contribution for everyone in the group, as for the emails. To deny the
+  group instead, write `deny group/Platform Team`.
 
-**Only an Admin changes `roles.yaml`, and only on the default branch.** A
-change request cannot carry the edit: when a request is merged, `roles.yaml`
-is restored to what the default branch has, so a role edit drafted on a
-branch is dropped at the merge without a word. Do not propose one. If your
-user is an Admin, `edit_file` the file on the default branch directly — for
-example, to give the Reviewer role to a group, add the entry under the
-existing role:
+**Only an Admin changes `roles.yaml`, on a protected branch, directly.** On a
+draft anyone who can read the file may save it, but a merge puts back the
+target branch's copy, so a role edit drafted on a branch is dropped without a
+word. Do not propose one. If your user is an Admin, `edit_file` the file on
+`{{defaultBranch}}`. If not, tell them who the Admins are (the `Admin` entries)
+and that the change is made in the app's Roles page or by an Admin.
 
-```yaml
-roles:
-  Admin:
-    - dana@example.com
-  Reviewer:
-    - lee@example.com
-    - group:Platform Team   # added
-```
+### Before you say or change who has access
 
-If your user is not an Admin, tell them who is (the `Admin` entries in
-`roles.yaml`) and that the change is made in the app's Roles page or by an
-admin editing the file; do not open a change request for it.
+Look it up, folder by folder: one folder's rules say nothing about another's.
+`file_stat` on each path that matters, with `explainAccess: true`, lists who
+holds each verb (`roster`, when you may manage the path's access); the active
+group source (`synced-groups.yaml` when groups are synced, `groups.yaml`
+otherwise) says who is in each group, the person you are helping included. It
+does not judge one named person for you. Then name the people: who can do it
+now and, for a move or a rule change, who gains and who loses. When they
+already have it, say so and change nothing.
 
 ### Direct writes vs change requests
 
-File-level write access decides how a change lands on the default branch:
-
-- A user — or an agent acting as that user — whose access resolution grants
-  **write or owner on every file the change touches** may commit **directly**
-  to the default branch.
-- Without that access, the change goes through a **branch + change request**,
-  approved by an owner / write-access holder of the affected files — every
-  affected file with an eligible approver needs that approval, whatever its
-  type (notes, binary files, files without an extension).
-- Agents carry exactly their user's access, never more. Before writing to the
-  default branch, **ask the user** whether to write directly or go through the
-  review flow — and prefer a change request when in doubt, when the change is
-  large, or when it touches content the user does not own.
+- A person, or an agent acting for them, with **write or owner on every file a
+  change touches** may write directly to a protected branch. Prefer a change
+  request when in doubt, when the change is large, or when it touches content
+  they do not own.
+- Without that access, the change goes through a **draft and a change
+  request**, approved by an owner or writer of each affected file that has one.
+  Agents carry exactly their user's access, never more.
 - **Check `canWrite` before offering a direct write.** `list_skills` reports
-  it for a skill's `SKILL.md`; `get_skill` for every file of the skill (or,
-  with `file`, for that one file alone — never read a file's verdict as the
-  whole skill's); `list_files` and `read_file` per path. The verdict says
-  whether the user may commit that change directly on the default branch,
-  under the rules committed there — the same answer on a draft, where anyone
-  who can read may write. `canWrite: false` means use a branch and a change
-  request; do not offer a direct write. A read-only connection gets `false`
-  everywhere and can do neither. To explain a verdict, call `file_stat` on
-  the DEFAULT branch with `explainAccess: true`: it says why, and — when you
-  can manage that path's access — who holds each verb: who can approve.
-  The one exception is `roles.yaml`: a change request cannot carry that edit
-  (see above), so `canWrite: false` there means the change is an Admin's to
-  make, in the app's Roles page or directly on the default branch — do not
-  open a request for it.
-
-### An agent proposes and syncs; a person merges
-
-- **Propose** with `open_change_request`, then give the user the request's
-  `url`. Reviewing, approving and merging a change request happen in the app,
-  by a person — no agent tool approves a file, bypasses approval, or merges a
-  request. `merge_change_request` no longer exists.
-- **Edit** an open request's title or description with `update_change_request`
-  — its author, or anyone who may merge it (an Admin, or someone who may
-  approve every file it changes); anyone else is refused, and so is a merged or
-  closed request. `description` replaces the request's description (the `body`
-  `get_change_request` answers) whole; readers see the new text at once.
-- **Sync** a draft with `update_branch` on the draft, `from` = the branch the
-  request targets. This is allowed while the draft's request is open, and is
-  how you bring it up to date. Left out, `from` is the draft's own shared
-  state: for when it moved while your workspace held commits of its own
-  (`branch_status` says `behindRemote`). `merge_branch` (`source` = the
-  target, `target` = the draft) does the same without conflict handling.
-- **Resolve conflicts** where `update_branch` answers `conflicts`: for every
-  conflicted path it carries the file at the merge base, on your side and on
-  theirs, and the working copy with git's markers — and it has left the draft
-  exactly as it was. A side is null when that side has no file, or when
-  `truncated` names it (too large, or not text): then read `ours` with
-  `read_file` (it is the draft's own file), `theirs` with `read_file_at` at
-  `from` (the branch, not a commit — its tip is not on the draft's history
-  until the merge lands), and `base` with `read_file_at` at the answer's
-  `mergeBase`. A side that is not text cannot be read that way (those
-  reads are text-only): settle such a file whole, with `choose` — `content`
-  is for text. A conflicted file you may not read on one of the two
-  branches is left out and only counted (`withheldConflicts`): it is not
-  yours to settle, so ask a person who can read it to update the draft in
-  the app. Decide each
-  file shown (keep both sides' information unless one is clearly stale;
-  `list_file_changes` says who changed what and why), then call
-  `update_branch` again **with the same `from`** and `resolutions`, one per
-  conflicted path: `content`, the resolved text, or `choose` (`ours`,
-  `theirs`, `delete`). A resolution is a write on your draft: you must be
-  able to read the file at both commits the answer names (`ours`, the
-  draft's; `theirs`, the merged-in branch's), and it takes the rule every
-  save on a draft takes — you may read the file, or it is new — never a
-  write permission. It merges, commits as you and publishes. A publish the
-  host refuses, or a replay that conflicts because the shared branch moved
-  meanwhile, answers with the saved-locally error: the merge is committed
-  on your draft but NOT shared — `branch_status` shows it ahead. Do not
-  report the draft as shared then; the next save or `share_current_branch`
-  carries the commit, and a replay that conflicts is handed to recovery.
-  Nothing else is written that way: an ordinary edit goes through the file
-  tools. You have no git command; there is never a half-done merge on disk
-  for you to finish.
-- `merge_branch` refuses to merge a draft into the branch its open change
-  request targets — it names the request; ask the user to review it in the
-  app. Into a protected branch it merges only what you could commit there
-  directly, under the rule above — and never a change to `roles.yaml`, whoever
-  you are: roles are changed in the app, not merged in from a draft.
-- **Know where a draft stands** with `branch_status`: ahead/behind, whether
-  the shared branch moved, the files written but not committed yet, the
-  protected branch it was forked from, and `changedPaths` — what it changes
-  against that base, the files a change request would carry. The list holds
-  only the files you may read; `withheldPaths` counts the rest, so when it
-  is above zero the list is not the request's whole set. Ask it before
-  proposing a draft.
-- **Read history** with `list_file_changes` (a file's commits: who, when,
-  subject), `read_file_at` (the file at a commit, or on another branch) and
-  `compare_file` (the diff of a commit, or between two branches). Each takes
-  the read the file itself takes. To put an earlier version back, read it
-  with `read_file_at` and write it with `write_file`.
-- **Delete** a draft with `delete_branch`, which removes it for everyone. Only
-  its author (`<email-localpart>/…`, or your own `suggestions/…` bundle) or an
-  Admin may. Preview with `dryRun: true` first: it changes nothing and says
-  whether the delete would go through, how many commits are not on the default
-  branch, and the last commit. A branch holding such commits is refused unless
-  you pass `discardUnmerged: true` — only when the user wants that work gone. An
-  open change request from or into the branch that proposes nothing is closed
-  by the delete. One that still proposes something refuses it, with a link:
-  its author can withdraw it, or an Admin can decline it, in the app — hand the
-  user that link. A request you cannot see is not named, and a preview leaves
-  it out, so a delete can still be refused after a clean preview. Hand the user the
-  `lastCommit` it answers, so the branch can be restored. The server removes a
-  draft on its own once its change request was merged, but only while nothing
-  has happened to it since: no commit that is not on the default branch, no
-  request open from or into it, no save still landing, no file held for
-  editing, and its last commit
-  the one that was merged. Any other draft stays until someone deletes it.
+  it for a skill's `SKILL.md`; `get_skill` for every file of the skill (or, with
+  `file`, for that file alone); `list_files` and `read_file` per path. It
+  answers for `{{defaultBranch}}` under the rules committed there, whichever
+  branch you read. `false` means use a draft and a change request. A read-only
+  connection gets `false` everywhere and can do neither. To explain a verdict,
+  call `file_stat` on `{{defaultBranch}}` with `explainAccess: true`: it says
+  why, and, when you may manage that path's access, who holds each verb (who
+  can approve). For `roles.yaml`, `false` means an Admin's change, not a
+  request.

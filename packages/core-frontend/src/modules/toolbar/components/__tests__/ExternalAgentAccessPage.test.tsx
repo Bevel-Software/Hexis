@@ -34,25 +34,35 @@ const { listMock, createMock, instructionsMock, facadeMock, registrationMock, ad
   adminState: { isAdmin: false },
 }));
 
-// Only the hook is replaced. `AdminContext` itself stays real, because the
-// instructions card below reads the context directly rather than through the
-// hook; a whole-module mock left it undefined and every case here threw.
-vi.mock('../../../admin/state/admin.context', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../../../admin/state/admin.context')>()),
+// The other modules this page reaches, replaced at their entries: that is
+// where the page imports them from, and the one surface a mock may stand in
+// for. Only the hook is replaced on `admin`; `AdminContext` itself stays real,
+// because the instructions card below reads the context directly rather than
+// through the hook; a whole-module mock left it undefined and every case here
+// threw.
+vi.mock('../../../admin', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../admin')>()),
   useAdmin: () => ({ isAdmin: adminState.isAdmin }),
 }));
 
-// The registration state the Cowork drawer reads, and the admin credentials
-// endpoint this page must never call. Mocked, or the component reaches for
-// the real endpoints over the network.
-vi.mock('../../../settings/services/github-facade.api', () => ({
-  fetchGitHubFacade: facadeMock,
+// The registration state the Cowork drawer reads.
+vi.mock('../../../settings', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../settings')>()),
   fetchMarketplaceRegistration: registrationMock,
 }));
 
+// The admin credentials endpoint this page must never call. It is reached
+// inside the settings module, by `ClaudeConnectionCard`, which the toolbar's
+// registration steps import by file rather than through the entry, so the
+// guard sits on the file too until that import moves.
+vi.mock('../../../settings/services/github-facade.api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../settings/services/github-facade.api')>()),
+  fetchGitHubFacade: facadeMock,
+}));
+
 // The agents a key may be minted as ("Connect as").
-vi.mock('../../../agents/services/agent-choices.api', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../../../agents/services/agent-choices.api')>()),
+vi.mock('../../../agents', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../agents')>()),
   listAgentChoices: agentChoicesMock,
 }));
 
@@ -817,6 +827,21 @@ describe('minting a key as an agent ("Connect as")', () => {
     expect(ops).not.toBeChecked();
   });
 
+  it('asks nothing when there is no agent to mint as: the key is Everything’s, as it always was', async () => {
+    agentChoicesMock.mockResolvedValue([]);
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    await user.click(screen.getByRole('tab', { name: 'Autonomous agents' }));
+    await user.type(screen.getByRole('textbox', { name: /Create an external API key/ }), 'CI');
+    // Create key is enabled only once the agents answered, so the choice had its chance to appear.
+    const create = screen.getByRole('button', { name: 'Create key' });
+    expect(create).toBeEnabled();
+    expect(screen.queryByRole('group', { name: 'Connect as' })).toBeNull();
+    expect(screen.queryByText(/Connect as/)).toBeNull();
+    await user.click(create);
+    expect(createMock).toHaveBeenLastCalledWith('CI', null);
+  });
+
   it('mints as Everything unless an agent is picked, and as the agent when one is', async () => {
     agentChoicesMock.mockResolvedValue([OPS]);
     const user = userEvent.setup();
@@ -876,7 +901,8 @@ describe('minting a key as an agent ("Connect as")', () => {
     await user.click(screen.getByRole('tab', { name: 'Autonomous agents' }));
     await screen.findByText('Pipeline');
     const rowOf = (label: string) => screen.getByText(label).closest('li') as HTMLElement;
-    expect(rowOf('Laptop')).toHaveTextContent('As Everything');
+    // Everything is what a key is unless it says otherwise: no tag.
+    expect(rowOf('Laptop')).not.toHaveTextContent('As ');
     expect(rowOf('Pipeline')).toHaveTextContent('As ops');
   });
 });

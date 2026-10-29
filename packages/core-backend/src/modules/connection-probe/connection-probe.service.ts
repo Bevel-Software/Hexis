@@ -12,6 +12,7 @@ import type { ISecretsVaultService } from '../secrets-vault/index.js';
 import { bevelSecretsLoaderConfig } from '../secrets-vault/index.js';
 import { utcpNamespacedKey } from '../../shared/utcp-namespace.js';
 import { assertSafeFetchUrl } from '../../shared/ssrf.js';
+import { readCapped } from '../../shared/read-capped.js';
 import type { IConnectionProbeService, ProbeStatus, ProbeVerdict } from './connection-probe.contract.js';
 
 /** How long a probe may take before we call it inconclusive. */
@@ -753,37 +754,3 @@ async function describeRejection(res: Response, redactor: SecretRedactor): Promi
   }
 }
 
-/**
- * At most `limit` bytes of a response body, decoded as text.
- *
- * Each CHUNK is sliced to the remaining budget before being decoded, not just
- * counted against it: a provider that answers in one 5MB chunk would otherwise
- * put the whole thing through the decoder before the loop noticed it was over,
- * which is the bound bypassed by the very party it is meant to bound.
- *
- * Exported for its test — the property here is how much is held in memory,
- * which the caller's 200-character snippet hides completely.
- */
-export async function readCapped(res: Response, limit: number): Promise<string> {
-  const reader = res.body?.getReader();
-  // No stream (a mocked or already-consumed response): fall back to the whole
-  // body, which for those cases is ours and small.
-  if (!reader) return (await res.text()).slice(0, limit);
-  const decoder = new TextDecoder();
-  let out = '';
-  let read = 0;
-  try {
-    while (read < limit) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      const remaining = limit - read;
-      const chunk = value.byteLength > remaining ? value.subarray(0, remaining) : value;
-      read += chunk.byteLength;
-      out += decoder.decode(chunk, { stream: true });
-      if (chunk.byteLength < value.byteLength) break;
-    }
-  } finally {
-    await reader.cancel().catch(() => {});
-  }
-  return out;
-}

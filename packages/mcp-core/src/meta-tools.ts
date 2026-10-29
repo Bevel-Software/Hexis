@@ -86,7 +86,7 @@ export const CHAIN_FAILURES_RULE = `Failures are answered, never dropped: a chai
 
 /** What a chain does with a result too large to return. Placed as {@link CHAIN_FAILURES_RULE} is. */
 export const CHAIN_LARGE_RESULTS_RULE =
-  'Large results: if the combined result+logs exceed `max_output_size` (default 200000 chars) the full JSON is spilled to a shared store and you get back a `__tool_chain_spill__/…` ref instead. Read it with `read_file` (pass that ref as `path` — `branch` is ignored — plus `offset`/`limit` to slice it), or better, re-run a narrower chain that returns only what you need.';
+  'Large results: if the combined result+logs exceed `max_output_size` (default 200000 chars) the full JSON is spilled to a shared store and you get back a `__tool_chain_spill__/…` ref instead. Read it with `read_file` (pass that ref as `path`, any existing branch as `branch`, plus `offset`/`limit` to slice it), or better, re-run a narrower chain that returns only what you need.';
 
 /**
  * What a chained read of an IMAGE gives back. On a surface with the shared
@@ -396,7 +396,7 @@ export async function dispatchMetaTool(
       truncated: true,
       result_ref: ref,
       result_bytes: bytes,
-      message: `Result+logs payload was ${fullJson.length} characters (exceeded max_output_size of ${maxOutputSize}). Full JSON saved to the shared spill store as \`${ref}\`. Read it back with \`read_file\` (pass that ref as \`path\`, \`branch\` ignored, plus \`offset\`/\`limit\` to slice), or re-run a narrower chain that returns only what you need.`,
+      message: `Result+logs payload was ${fullJson.length} characters (exceeded max_output_size of ${maxOutputSize}). Full JSON saved to the shared spill store as \`${ref}\`. Read it back with \`read_file\` (pass that ref as \`path\`, any existing branch as \`branch\`, plus \`offset\`/\`limit\` to slice), or re-run a narrower chain that returns only what you need.`,
     });
   } catch (err) {
     // `runToolChain` answers rather than throws, so a chain no longer reaches
