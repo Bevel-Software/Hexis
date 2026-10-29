@@ -121,7 +121,7 @@ describe('start_session names the default branch', () => {
     expect(await call(base)).toEqual({ sessionId: 'thread-xyz', defaultBranch: 'target-company-state' });
   });
 
-  it('answers firstRun beside them while the knowledge base is still empty', async () => {
+  it('answers firstRun beside them while the knowledge base is empty', async () => {
     wsDir = await mkdtemp(join(tmpdir(), 'bevel-start-session-'));
     await mkdir(join(wsDir, KB_DIR, 'KnowledgeBase'), { recursive: true });
     await writeFile(join(wsDir, KB_DIR, 'KnowledgeBase', STARTER_GUIDE_FILE), '# How to get started\n');
@@ -143,7 +143,7 @@ describe('start_session names the default branch', () => {
   it('says so in its description and declares the field, required, in its output schema', async () => {
     const { registry } = await startSession(testKbContext({ kbDirName: KB_DIR }));
     const def = (await registry.listExternal()).find((t) => t.name === 'start_session')!;
-    expect(def.description).toContain('Returns `{ sessionId, defaultBranch }`, plus `firstRun` while the knowledge base is still empty');
+    expect(def.description).toContain('Returns `{ sessionId, defaultBranch }`, plus `firstRun` while the knowledge base is empty');
     const outputs = def.outputs as { properties: Record<string, { description?: string }>; required: string[] };
     expect(Object.keys(outputs.properties)).toEqual(['sessionId', 'defaultBranch', 'firstRun']);
     expect(outputs.properties.defaultBranch.description).toContain('the branch people read');
