@@ -1,24 +1,21 @@
 import express from 'express';
 import { codeModeMetaTools } from '@bevel-software/platform-mcp-core';
 import { testKbContext } from './kb-context.js';
-import { EXTERNAL_KB_MANUAL_NAME } from '../modules/tool-manuals/tool-manuals.contract.js';
-import { ToolRegistry } from '../modules/tool-registry/tool-registry.js';
-import type { UtcpTool } from '../modules/tool-registry/tool.contract.js';
-import { createToolHandlerFactory } from '../modules/tool-helpers/tool-handler.js';
-import type { ToolAuth } from '../modules/tool-auth/tool-auth.middleware.js';
-import { registerWorkspaceTools } from '../modules/workspace/workspace.tools.js';
-import { RipgrepPatternMatcher } from '../modules/workspace/index.js';
-import { registerVersionControlTools } from '../modules/version-control/agent-tools/version-control.tools.js';
-import { registerPluginsTools } from '../modules/plugins/plugins.tools.js';
-import { registerSkillsTools } from '../modules/skills/skills.tools.js';
-import { registerToolManualsTools } from '../modules/tool-manuals/tool-manuals.tools.js';
-import { ToolDescriptionNotes } from '../modules/workspace/agent-access.gate.js';
-import { VersionControlHooks } from '../modules/version-control/version-control-hooks.js';
-import { UuidSessionSink } from '../modules/workspace/session-sink.js';
-import { RoutineWritePolicyService } from '../modules/workspace/routine-write-policy.js';
-import { guideFirstDescription } from '../modules/tool-registry/guide-first.js';
-import { registerAgentGuideTool } from '../modules/agent-guide/agent-guide.tools.js';
-import { agentGuideSections } from '../modules/agent-guide/agent-guide.js';
+import { EXTERNAL_KB_MANUAL_NAME, registerToolManualsTools } from '../modules/tool-manuals/index.js';
+import { ToolRegistry, guideFirstDescription, type UtcpTool } from '../modules/tool-registry/index.js';
+import type { ToolAuth } from '../modules/tool-auth/index.js';
+import { RipgrepPatternMatcher, ToolDescriptionNotes } from '../modules/workspace/index.js';
+import { registerPluginsTools } from '../modules/plugins/index.js';
+import { registerSkillsTools } from '../modules/skills/index.js';
+import { agentGuideSections, registerAgentGuideTool } from '../modules/agent-guide/index.js';
+import {
+  RoutineWritePolicyService,
+  UuidSessionSink,
+  VersionControlHooks,
+  createToolHandlerFactory,
+  registerVersionControlTools,
+  registerWorkspaceTools,
+} from './tool-wiring.js';
 
 /**
  * The tool catalog Hexis itself registers, built on stand-ins for the tests

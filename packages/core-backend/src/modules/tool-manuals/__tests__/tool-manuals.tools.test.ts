@@ -1,11 +1,13 @@
 import type { Server as HttpServer } from 'node:http';
 import express from 'express';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ToolRegistry } from '../../tool-registry/tool-registry.js';
-import { InternalTokenService } from '../../tool-auth/internal-token.service.js';
-import { createToolAuthMiddleware } from '../../tool-auth/tool-auth.middleware.js';
-import { createToolContextResolver } from '../../tool-helpers/tool-context.js';
-import { createToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
+import { ToolRegistry } from '../../tool-registry/index.js';
+import {
+  InternalTokenService,
+  createToolAuthMiddleware,
+  createToolContextResolver,
+  createToolHandlerFactory,
+} from '../../../__tests__/tool-wiring.js';
 import { registerToolManualsTools } from '../tool-manuals.tools.js';
 import type { IToolManualService } from '../tool-manuals.contract.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
