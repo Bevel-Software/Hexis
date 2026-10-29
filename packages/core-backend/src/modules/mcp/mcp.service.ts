@@ -42,6 +42,8 @@ import {
   retiredToolMessage,
   needsAuthorizationResult,
   skillPromptText,
+  ONBOARD_PROMPT,
+  promptsForSkills,
   toListedResource,
   toReadResourceResult,
   type McpAppManifest,
@@ -859,19 +861,27 @@ export class McpService {
     // loopback with the caller's key — so the default-branch catalog, access
     // filtering, and progressive disclosure all live ONCE behind that REST
     // surface, never duplicated here. Neither handler needs the tool catalog.
+    // The one prompt that is not a skill is the platform's `onboard`, offered
+    // only on a connection not narrowed to an agent, and only while no skill
+    // takes its name (see `promptsForSkills`).
+    const offerOnboard = agentPath === null;
     server.setRequestHandler(ListPromptsRequestSchema, async () => {
       const skills = await this.fetchSkillList(loopbackBearer);
-      const prompts: Prompt[] = skills.map((s) => ({
-        name: s.name,
-        description: s.description,
-        arguments: [],
-      }));
+      const prompts: Prompt[] = promptsForSkills(skills, offerOnboard);
       return { prompts };
     });
 
     server.setRequestHandler(GetPromptRequestSchema, async (request): Promise<GetPromptResult> => {
       const started = performance.now();
       const skill = await this.fetchSkill(loopbackBearer, request.params.name);
+      // No skill took the platform prompt's name: it is not a skill read, so
+      // it answers before the skill audit below.
+      if (!skill && offerOnboard && request.params.name === ONBOARD_PROMPT.name) {
+        return {
+          description: ONBOARD_PROMPT.description,
+          messages: [{ role: 'user', content: { type: 'text', text: ONBOARD_PROMPT.text } }],
+        };
+      }
       // A prompt IS a skill read — the same event `get_skill` produces.
       audit?.emit(
         { kind: 'skill', manual: skill?.path ?? null, name: request.params.name },
