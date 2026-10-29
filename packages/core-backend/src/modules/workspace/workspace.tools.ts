@@ -3497,10 +3497,11 @@ export function registerWorkspaceTools(
     description:
       'Move or rename a workspace FILE or FOLDER; a folder moves recursively, with everything under it. `dest` is the full new path, not the folder to move into. Committed + pushed as you. ' +
       'The destination must not exist — a move never overwrites a file or merges into a folder. Access follows the ' +
-      'DESTINATION folder, so a move can change what you (and others) may do with the file: the dry run answers ' +
-      '`{ src, dest, kind, descendants, access: { before, after }, accessChanges, allowed, reason? }`, where `access` is your ' +
-      'own `{ read, write, download, owner }` at the source and at the destination AS IT WILL BE once the move has landed, ' +
-      'with every `access.md` inside a moved folder counted at its new place, and a move whose `accessChanges` is true wants `confirm: true`. ' +
+      'DESTINATION folder, so a move can change who may open or edit the file. You must be able to read what moves and the folder it lands in, ' +
+      'or it is refused as read_file refuses. The dry run answers ' +
+      '`{ src, dest, kind, descendants, access: { before, after }, accessChanges, holderChanges?, allowed, reason? }`: your own ' +
+      'access at both ends, and who else loses or gains it. A move that changes either wants `confirm: true`; tell the person ' +
+      'who loses and who gains before you confirm. ' +
       'Links are rewritten by default, in one commit with the move: those in the moved files and those in other markdown files pointing at them (`links` reports them). `rewriteLinks: false` turns that off. Path mentions in plain prose or code are never changed.',
     inputs: {
       type: 'object',
@@ -3509,7 +3510,7 @@ export function registerWorkspaceTools(
         src: wsPath(kbDirName, 'Source path (file or folder)'),
         dest: wsPath(kbDirName, 'Destination path — the full new path; must not exist yet'),
         dryRun: { type: 'boolean', description: 'Answer with the impact and change nothing.' },
-        confirm: { type: 'boolean', description: 'Required when the move changes your access. Set it only after a dry run.' },
+        confirm: { type: 'boolean', description: 'Required when the move changes your access or anyone else\'s. Set it only after a dry run.' },
         rewriteLinks: { type: 'boolean', description: 'Rewrite the links into, out of and between the moved files (default true). `false` moves without touching any link.' },
         sessionId: SESSION_ID_INPUT,
       },
@@ -3523,8 +3524,14 @@ export function registerWorkspaceTools(
         dest: str('Destination path (echoes the input).'),
         kind: str('`file` or `folder`.'),
         descendants: int('Files that move: 1 for a file, the file count under a folder.'),
-        access: { type: 'object', description: 'Your `{ read, write, download, owner }` at the source (`before`) and at the destination once the move has landed (`after`).' },
+        access: { type: 'object', description: 'Your `{ read, write, download, owner }` at the source (`before`) and at the destination once the move has landed (`after`), with every `access.md` inside a moved folder counted at its new place.' },
         accessChanges: { type: 'boolean', description: 'True when any of your verdicts differs between `before` and `after`.' },
+        holderChanges: {
+          type: 'object',
+          description:
+            'Who loses and who gains opening (`read`) or editing (`write`) it once the move has landed: `{ lose, gain }`, each ' +
+            '`[{ kind, name, email?, verb }]` with `kind` `group`, `role`, `plugin` or `person`. Absent when nobody\'s access changes.',
+        },
         allowed: { type: 'boolean', description: 'Whether the move may run.' },
         reason: str('Why it may not, when `allowed` is false.'),
         dryRun: { type: 'boolean', description: 'True on a dry run.' },
@@ -3554,6 +3561,18 @@ export function registerWorkspaceTools(
       // source already deleted.
       await assertAgentWriteAllowed(agentAccessGate, ctx, branch, src);
       await assertAgentWriteAllowed(agentAccessGate, ctx, branch, dest);
+      // What moves and the folder it lands in must both be readable to the
+      // caller, refused as read_file refuses them, on every branch: a move
+      // preview reads both ends (the caller's own verdicts there, who else is
+      // affected), and the folder's rules are what the names are made of. The
+      // verdict comes BEFORE every other look, so neither end's existence is
+      // told to someone who may not know it. A folder the caller may read moves
+      // with everything in it, files they may not read included: those travel,
+      // they are not read.
+      const destFolder = dest.slice(0, dest.lastIndexOf('/'));
+      const gate = readGateFor(branch, ctx);
+      await assertCanRead(gate, src);
+      await assertCanRead(gate, destFolder);
       const fs = await ctx.getFilesystem(branch);
       const root = await workspaceRoot(branch, ctx);
       // Before the kind check, which stats THROUGH a link: a dangling link at
@@ -3577,6 +3596,27 @@ export function registerWorkspaceTools(
         accessAfter(branch, ctx, src, dest),
       ]);
       const accessChanges = verbsDiffer(before, after);
+      // Who ELSE gains or loses opening or editing it: the lists the app's move
+      // confirmation shows people. The access rules let the caller read both
+      // ends (gated above, as the app's route gates), so the names go to them —
+      // past the deployment's read hook on both ends, which may still refuse
+      // an agent what the rules allow; a change asks for `confirm` either way.
+      // Outside the repository no rules travel.
+      const fromRel = toKbRelative(src, kbDirName);
+      const toRel = toKbRelative(dest, kbDirName);
+      const changes = fromRel !== null && toRel !== null
+        ? await accessControl.prospectiveHolderChanges(workspaceIdForBranch(branch), fromRel, toRel)
+        : undefined;
+      const othersChange = changes !== undefined && (changes.lose.length > 0 || changes.gain.length > 0);
+      const namesOthers = othersChange && await (async () => {
+        try {
+          await notifyAgentRead(agentAccessGate, ctx, branch, src);
+          await notifyAgentRead(agentAccessGate, ctx, branch, destFolder);
+          return true;
+        } catch {
+          return false;
+        }
+      })();
       // The placeholder moves with its folder, but it is never content.
       const descendants = srcFiles.filter((f) => !isFolderPlaceholder(f)).length;
       // Neither end may be the platform's own: a move neither takes a platform
@@ -3684,6 +3724,7 @@ export function registerWorkspaceTools(
         descendants,
         access: { before, after },
         accessChanges,
+        ...(namesOthers ? { holderChanges: changes } : {}),
         allowed: moveReason === undefined,
         ...(moveReason !== undefined ? { reason: moveReason } : {}),
         ...(linkPlan ? { links: linkPlan.report } : {}),
@@ -3699,12 +3740,16 @@ export function registerWorkspaceTools(
       }
       if (collision) throw new ToolError(reason!, 409);
       if (linkPlan?.overCap !== undefined) throw new ToolError(linkPlan.overCap, 400);
-      if (accessChanges && a.confirm !== true) {
+      if ((accessChanges || othersChange) && a.confirm !== true) {
+        const why = [
+          ...(accessChanges ? [`your access at "${dest}" differs from "${src}"`] : []),
+          ...(othersChange ? [`it changes who else may open or edit it${namesOthers ? ' (`holderChanges`)' : ''}`] : []),
+        ];
         return {
           ...impact,
           confirmationRequired: true,
           moved: false,
-          message: `Nothing was moved: your access at "${dest}" differs from "${src}", so this move requires confirm: true.`,
+          message: `Nothing was moved: ${why.join(', and ')}, so this move requires confirm: true.`,
         };
       }
       // The look above is what produces the sentence; the filesystem's own
