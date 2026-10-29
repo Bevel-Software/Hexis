@@ -120,15 +120,15 @@ describe('the shared file rules are one text, in two places', () => {
 });
 
 /**
- * Nothing else an agent is told names the deployment's default branch, so an
- * agent left to guess guesses `main` — and on a deployment whose default is
- * another branch, writes where nobody reads. The conventions rule names it, on
- * every channel the shared rules ride.
+ * The guide's start names the deployment's default branch, but only to an
+ * agent that calls `get_agent_guide`; an agent left to guess guesses `main`,
+ * and on a deployment whose default is another branch writes where nobody
+ * reads. The conventions rule names it, on every channel the shared rules ride.
  */
 describe('the default branch is named', () => {
   const SENTENCE =
     "This knowledge base's default branch is `target-company-state`: the branch people read and the usual target of a " +
-    'change request — pass it as `branch` unless you are working on a draft.';
+    'change request; pass it as `branch` unless you are working on a draft.';
 
   /** The text under the "own conventions" heading, up to the next rule's heading. */
   const conventions = (text: string): string => {

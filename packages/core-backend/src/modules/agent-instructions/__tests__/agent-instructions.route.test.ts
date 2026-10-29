@@ -1,10 +1,9 @@
 import type { Server as HttpServer } from 'node:http';
 import express from 'express';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createManualAuthMiddleware } from '../../tool-auth/tool-auth.middleware.js';
-import type { IExternalApiKeyService } from '../../tool-auth/external-api-key.interface.js';
-import type { InternalTokenService } from '../../tool-auth/internal-token.service.js';
-import type { AuthService } from '../../auth/auth.service.js';
+import { createManualAuthMiddleware } from '../../../__tests__/tool-wiring.js';
+import type { IExternalApiKeyService, InternalTokenService } from '../../tool-auth/index.js';
+import type { AuthService } from '../../auth/index.js';
 import { createAgentInstructionsRoutes } from '../agent-instructions.routes.js';
 import { DEFAULT_KB_LAYOUT } from '@bevel-software/platform-shared';
 import { TOOL_PREFIX_LINE, platformInstructions } from '../compose.js';

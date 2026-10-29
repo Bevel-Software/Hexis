@@ -68,8 +68,9 @@ const PRE_RENAME_AGENTS_FILE = 'CLAUDE.md';
  * that it is read-only is said once here rather than in each description, and
  * the section had no room left for it.
  *
- * 7,700 since the conventions rule names the default branch: nothing else an
- * agent receives names it, and the sentence is ~260 characters. Measured with
+ * 7,700 since the conventions rule names the default branch: the guide's start
+ * names it too, but only to an agent that calls `get_agent_guide`, and the
+ * sentence is ~185 characters. Measured with
  * a branch name of twenty characters (`target-company-state`); the name is the
  * deployment's, so a longer one costs its own length beyond that.
  */
@@ -278,7 +279,7 @@ function defaultBranchSentence(defaultBranch: string): string {
   if (!name) return '';
   return (
     `This knowledge base's default branch is \`${name}\`: the branch people read and the usual target of a ` +
-    'change request — pass it as `branch` unless you are working on a draft.'
+    'change request; pass it as `branch` unless you are working on a draft.'
   );
 }
 

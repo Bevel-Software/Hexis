@@ -21,9 +21,9 @@ import { SpillStore } from '../spill-store.js';
 import { registerWorkspaceTools } from '../workspace.tools.js';
 
 /**
- * Nothing else an agent receives names the deployment's default branch — every
- * file tool asks for "the branch you are working on" — and an agent left to
- * guess guesses `main`. `start_session`, the call every agent is told to make
+ * The guide's start names the deployment's default branch, but only to an
+ * agent that calls `get_agent_guide`; every file tool asks for "the branch you
+ * are working on", and an agent left to guess guesses `main`. `start_session`, the call every agent is told to make
  * first, answers it beside the id: this deployment's, which here is not `main`
  * (`testKbContext`'s default branch is `target-company-state`).
  */

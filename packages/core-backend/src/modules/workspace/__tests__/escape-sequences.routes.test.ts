@@ -6,24 +6,19 @@ import { join } from 'node:path';
 import express, { type RequestHandler } from 'express';
 import { afterEach, describe, expect, it } from 'vitest';
 import { LocalFilesystem } from '@mastra/core/workspace';
-import { ToolRegistry } from '../../tool-registry/tool-registry.js';
-import { createManualRoutes } from '../../tool-registry/manual.routes.js';
-import { createToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
-import type { ToolContext } from '../../tool-helpers/tool.contract.js';
-import type { ToolAuth } from '../../tool-auth/tool-auth.middleware.js';
+import { ToolRegistry, createManualRoutes, GUIDE_FIRST_SENTENCE } from '../../tool-registry/index.js';
+import { createToolHandlerFactory, WorkflowHooks, createMcpRoutes, McpService } from '../../../__tests__/tool-wiring.js';
+import type { ToolContext } from '../../tool-helpers/index.js';
+import type { ToolAuth } from '../../tool-auth/index.js';
+import type { IAccessControl } from '../../access/index.js';
 import { registerWorkspaceTools } from '../workspace.tools.js';
 import { RoutineWritePolicyService } from '../routine-write-policy.js';
-import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
 import { ToolDescriptionNotes } from '../agent-access.gate.js';
 import { SpillStore } from '../spill-store.js';
 import { DocExtractService } from '../file-readers/doc-extract.service.js';
 import { WorkerDocumentExtractor } from '../file-readers/extract-in-worker.js';
-import type { IAccessControl } from '../../access/access-control.interface.js';
-import { createMcpRoutes } from '../../mcp/mcp.routes.js';
-import { McpService } from '../../mcp/mcp.service.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import { sharedFileRules, sharedFileRulesSection } from '../../agent-instructions/index.js';
-import { GUIDE_FIRST_SENTENCE } from '../../tool-registry/guide-first.js';
 
 /**
  * Who decodes escape sequences in written content a second time — settled on

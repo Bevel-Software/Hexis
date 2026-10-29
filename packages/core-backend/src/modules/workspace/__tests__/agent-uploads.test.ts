@@ -8,26 +8,25 @@ import express from 'express';
 import { afterEach, describe, expect, it } from 'vitest';
 import { LocalFilesystem } from '@mastra/core/workspace';
 import { testKbContext } from '../../../__tests__/kb-context.js';
-import { ToolRegistry } from '../../tool-registry/tool-registry.js';
-import { createToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
-import type { ToolContext } from '../../tool-helpers/tool.contract.js';
-import type { ToolAuth } from '../../tool-auth/tool-auth.middleware.js';
+import { ToolRegistry } from '../../tool-registry/index.js';
+import { createToolHandlerFactory, WorkflowHooks } from '../../../__tests__/tool-wiring.js';
+import type { ToolContext } from '../../tool-helpers/index.js';
+import type { ToolAuth } from '../../tool-auth/index.js';
+import type { IAccessControl } from '../../access/index.js';
+import { normalizeWorkspacePath } from '../../kb-fs/index.js';
+import { READ_ONLY_CODE, type IWriteAccess } from '../../write-access/index.js';
 import { registerWorkspaceTools } from '../workspace.tools.js';
 import { RoutineWritePolicyService } from '../routine-write-policy.js';
-import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
 import { ToolDescriptionNotes } from '../agent-access.gate.js';
 import { SpillStore } from '../spill-store.js';
 import { DocExtractService } from '../file-readers/doc-extract.service.js';
 import { WorkerDocumentExtractor } from '../file-readers/extract-in-worker.js';
-import type { IAccessControl } from '../../access/access-control.interface.js';
-import { normalizeWorkspacePath } from '../../kb-fs/repo-path.js';
 import {
   AgentUploadStore,
   assertUploadsRootOutsideWorkspaces,
   UPLOAD_TOKEN_REFUSAL,
 } from '../agent-upload.store.js';
 import { createAgentUploadRoutes, isAgentUploadRawBodyPath } from '../agent-upload.routes.js';
-import { READ_ONLY_CODE, type IWriteAccess } from '../../write-access/write-access.js';
 import { MAX_UPLOAD_BYTES } from '../upload-limits.js';
 import { DEFAULT_KB_LAYOUT } from '@bevel-software/platform-shared';
 import { sharedFileRules } from '../../agent-instructions/index.js';
