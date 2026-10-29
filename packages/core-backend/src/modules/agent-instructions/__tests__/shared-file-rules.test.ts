@@ -1,6 +1,6 @@
 import { DEFAULT_KB_LAYOUT, PREAMBLE_CAP } from '@bevel-software/platform-shared';
 import { describe, expect, it } from 'vitest';
-import { composeAgentGuide } from '../../agent-guide/agent-guide.js';
+import { composeAgentGuide } from '../../agent-guide/index.js';
 import {
   INSTRUCTIONS_CAP,
   PLATFORM_HEADER,

@@ -73,8 +73,7 @@ import { Banner, MenuPanel, MenuItem, TextField, IconButton, useDismissableMenu,
 import { displayFileName, fileNameTooltip } from '../utils/display-file-name';
 import { useOpenChangeRequests } from '../hooks/useOpenChangeRequests';
 import { AdminContext } from '../../admin';
-import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
-import { offersManageAccess, fetchFileAccess, fetchProspectiveAccess } from '../../access';
+import { ManageAccessDialog, offersManageAccess, fetchFileAccess, fetchProspectiveAccess } from '../../access';
 import {
   useAppRegistry,
   type FolderMenuContext,

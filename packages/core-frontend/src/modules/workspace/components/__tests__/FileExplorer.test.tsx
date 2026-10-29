@@ -44,11 +44,12 @@ const cancelMocks = vi.hoisted(() => ({
   cancelPullRequest: vi.fn(),
   deleteChangeRequest: vi.fn(),
 }));
-vi.mock('../../../pr/services/pr-cancel.api', () => cancelMocks);
+vi.mock('../../../pr', async (importOriginal) => ({ ...(await importOriginal<typeof import('../../../pr')>()), ...cancelMocks }));
 
 // The sheet itself is covered by the access module's own tests; here only
 // WHICH workspace and proposal the tree hands it matters.
-vi.mock('../../../access/components/ManageAccessDialog', () => ({
+vi.mock('../../../access', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../access')>()),
   ManageAccessDialog: (props: {
     entry: FileTreeEntry;
     workspaceId?: string;

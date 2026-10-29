@@ -4,19 +4,17 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { DEFAULT_KB_LAYOUT } from '@bevel-software/platform-shared';
 import { testKbContext } from '../../../__tests__/kb-context.js';
-import { ToolRegistry } from '../../tool-registry/tool-registry.js';
-import { GUIDE_FIRST_SENTENCE } from '../../tool-registry/guide-first.js';
-import { createToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
-import type { ToolAuth } from '../../tool-auth/tool-auth.middleware.js';
-import type { IAccessControl } from '../../access/access-control.interface.js';
+import { GUIDE_FIRST_SENTENCE, ToolRegistry } from '../../tool-registry/index.js';
+import { WorkflowHooks, createToolHandlerFactory } from '../../../__tests__/tool-wiring.js';
+import type { ToolAuth } from '../../tool-auth/index.js';
+import type { IAccessControl } from '../../access/index.js';
 import { DocExtractService } from '../file-readers/doc-extract.service.js';
 import { WorkerDocumentExtractor } from '../file-readers/extract-in-worker.js';
 import { RoutineWritePolicyService } from '../routine-write-policy.js';
 import { SpillStore } from '../spill-store.js';
-import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
 import { ToolDescriptionNotes } from '../../workspace/agent-access.gate.js';
 import { registerWorkspaceTools } from '../workspace.tools.js';
-import { sharedFileRulesSection } from '../../agent-instructions/shared-file-rules.js';
+import { sharedFileRulesSection } from '../../agent-instructions/index.js';
 import { RipgrepPatternMatcher } from '../index.js';
 
 /** The grep matcher this file's harness wires, closed once the file is done. */
