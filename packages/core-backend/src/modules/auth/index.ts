@@ -32,3 +32,10 @@ import './auth.middleware.js';
 // Reached by other modules; exported here so they stop importing the files.
 export type { IAccountSwitchGuard } from './account-switch-guard.js';
 export type { AuthService } from './auth.service.js';
+// What a DISTRIBUTION's sign-in provider needs: the plugin contract it
+// implements, the one place the auth cookie's attributes are spelled (so an
+// SSO provider sets the same cookie password login sets), and the one rule
+// for its `Secure` flag. bevel-platform's Microsoft provider imported the
+// files for these.
+export type { AuthProviderPlugin } from './auth.routes.js';
+export { AUTH_COOKIE_NAME, authCookieSecure, setAuthCookie } from './auth.middleware.js';
