@@ -5,6 +5,7 @@ import { createInvitationRoutes, type InvitationSignIn } from '../invitation.rou
 import type { AccountInvitedEvent } from '../account-hooks.js';
 import type { AuthProviderPlugin } from '../auth.routes.js';
 import type { AuthService } from '../auth.service.js';
+import { FixedWindowRateLimiter } from '../rate-limit.js';
 import { AccountAdmissionRefusedError, AccountChangeRefusedError } from '../index.js';
 import type { IAdminAccessService } from '../../admin/index.js';
 import { setLogger } from '../../../shared/logging.js';
@@ -66,7 +67,11 @@ afterEach(() => {
   server = undefined;
 });
 
-async function start(opts: { admin: boolean; signIn?: Partial<InvitationSignIn> }): Promise<string> {
+async function start(opts: {
+  admin: boolean;
+  signIn?: Partial<InvitationSignIn>;
+  limiter?: FixedWindowRateLimiter;
+}): Promise<string> {
   const adminAccess: IAdminAccessService = { isAdmin: vi.fn(async () => opts.admin) };
   const app = express();
   app.use(express.json());
@@ -82,6 +87,7 @@ async function start(opts: { admin: boolean; signIn?: Partial<InvitationSignIn> 
       adminAccess,
       { runAccountInvited },
       { passwordSignIn: true, providers: [], ...opts.signIn },
+      opts.limiter,
     ),
   );
   await new Promise<void>((resolve) => {
@@ -249,5 +255,18 @@ describe('POST /api/invitations — the event, the audit line and the refusals',
     const base = await start({ admin: false });
     expect((await invite(base, {})).status).toBe(400);
     expect(createInvitedAccount).not.toHaveBeenCalled();
+  });
+});
+
+describe('POST /api/invitations — the per-inviter budget', () => {
+  it('answers 429 past the budget, before any account is looked at', async () => {
+    const base = await start({ admin: false, limiter: new FixedWindowRateLimiter(2, 60_000) });
+    expect((await invite(base, { email: 'a@acme.test' })).status).toBe(201);
+    createInvitedAccount.mockResolvedValueOnce({ created: false });
+    expect((await invite(base, { email: 'a@acme.test' })).status).toBe(200);
+    const res = await invite(base, { email: 'b@acme.test' });
+    expect(res.status).toBe(429);
+    expect(createInvitedAccount).toHaveBeenCalledTimes(2);
+    expect(runAccountInvited).toHaveBeenCalledTimes(1);
   });
 });

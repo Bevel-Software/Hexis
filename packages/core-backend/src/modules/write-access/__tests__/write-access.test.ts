@@ -42,6 +42,7 @@ describe('isAlwaysWritable', () => {
     ['POST', '/api/admin/accounts'],
     ['POST', '/api/admin/accounts/u1/deactivate'],
     ['DELETE', '/api/admin/accounts/u1'],
+    ['POST', '/api/invitations'],
     ['POST', '/api/sync'],
     ['POST', '/api/setup/settings'],
     ['POST', '/api/workspace/w1/access/batch'],
@@ -74,6 +75,7 @@ describe('isAlwaysWritable', () => {
     ['POST', '/api/embed/heartbeat/extra'],
     // A look-alike of an allowed path is not that path.
     ['POST', '/api/admin/accountsx'],
+    ['POST', '/api/invitationsx'],
     ['POST', '/api/workspace/w1/access/batch/extra'],
     // A route nobody listed is refused by default.
     ['POST', '/api/some-new-route'],

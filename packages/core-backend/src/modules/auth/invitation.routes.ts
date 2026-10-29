@@ -5,6 +5,7 @@ import type { AuthService } from './auth.service.js';
 import { inviterOf, type IAccountHooks } from './account-hooks.js';
 import { AccountAdmissionRefusedError, AccountChangeRefusedError } from './account-admission.js';
 import { offeredProviders, type AuthProviderPlugin } from './auth.routes.js';
+import { FixedWindowRateLimiter } from './rate-limit.js';
 import type { IAdminAccessService } from '../admin/index.js';
 import './auth.middleware.js'; // Express Request augmentation
 
@@ -38,6 +39,10 @@ export interface InvitationSignIn {
  *   a deployment's mail; never logged.
  * - The admission port is asked with the reason `invite`; a refusal is 403
  *   with `kind: 'admission'` and the port's words.
+ * - Each inviter has a budget of invitations per window, and past it the
+ *   answer is 429. It is spent before any account is looked at, so nobody
+ *   signed in can keep the server hashing passwords for addresses that
+ *   already have accounts.
  *
  * `POST /api/admin/accounts` stays the admins' account API beside this.
  */
@@ -46,6 +51,8 @@ export function createInvitationRoutes(
   adminAccess: IAdminAccessService,
   accountHooks: Pick<IAccountHooks, 'runAccountInvited'>,
   signIn: InvitationSignIn,
+  /** Invitations per inviter per window. Generous: one dialog sends a whole list. */
+  limiter: FixedWindowRateLimiter = new FixedWindowRateLimiter(200, 15 * 60_000),
 ): express.Router {
   const router = express.Router();
 
@@ -78,6 +85,11 @@ export function createInvitationRoutes(
     }
     const sso = offeredProviders(signIn.providers).length > 0;
     const generate = signIn.passwordSignIn && (!sso || startingPassword === true);
+
+    if (!limiter.consume(req.userId!)) {
+      res.status(429).json({ error: 'Too many invitations. Try again later.' });
+      return;
+    }
 
     let invited: Awaited<ReturnType<AuthService['createInvitedAccount']>>;
     try {
