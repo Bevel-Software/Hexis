@@ -58,12 +58,12 @@ let invitations: InvitationRequest[];
 /** Every Admin promotion the dialog sent, in order. */
 let promotions: { email: string; ifActive?: boolean }[];
 
-function useProviders(methods: LoginProviders) {
+function answerProviders(methods: LoginProviders) {
   providers = async () => json(200, methods);
 }
 
 beforeEach(() => {
-  useProviders(SSO_AND_PASSWORD);
+  answerProviders(SSO_AND_PASSWORD);
   existing = new Set();
   invitationAnswers = new Map();
   admins = ['juan@bevel.software'];
@@ -311,7 +311,7 @@ describe('InviteDialog: the Role choice is an admin’s', () => {
   });
 
   it('anyone else sees no Role picker, and invites as Member', async () => {
-    useProviders(PASSWORD_ONLY);
+    answerProviders(PASSWORD_ONLY);
     const { input } = await mountDialog({ admin: false });
     expect(screen.queryByLabelText('Role')).not.toBeInTheDocument();
     await invite(input, ['ana@acme.com'], 'Invite 1 person');
@@ -331,7 +331,7 @@ describe('InviteDialog: how people sign in here', () => {
 
   it('has no starting-password field in any mode', async () => {
     for (const methods of [PASSWORD_ONLY, SSO_AND_PASSWORD, SSO_ONLY]) {
-      useProviders(methods);
+      answerProviders(methods);
       await mountDialog();
       expect(screen.queryByLabelText('Starting password')).not.toBeInTheDocument();
       expect(document.querySelector('input[type="password"]')).toBeNull();
@@ -340,7 +340,7 @@ describe('InviteDialog: how people sign in here', () => {
   });
 
   it('without single sign-on, asks the server for a generated password for every address', async () => {
-    useProviders(PASSWORD_ONLY);
+    answerProviders(PASSWORD_ONLY);
     const { input } = await mountDialog();
     expect(
       screen.getByText('They sign in with their email and a password made for them. You see it once, after you invite, to pass on.'),
@@ -374,13 +374,13 @@ describe('InviteDialog: how people sign in here', () => {
   });
 
   it('names several single sign-on providers', async () => {
-    useProviders({ password: true, sso: [DUENDE, { key: 'ms', label: 'Microsoft', startPath: '/api/auth/ms/start' }] });
+    answerProviders({ password: true, sso: [DUENDE, { key: 'ms', label: 'Microsoft', startPath: '/api/auth/ms/start' }] });
     await mountDialog();
     expect(screen.getByText('They sign in with Duende Demo or Microsoft.')).toBeInTheDocument();
   });
 
   it('with password sign-in off, offers no password and asks for none', async () => {
-    useProviders(SSO_ONLY);
+    answerProviders(SSO_ONLY);
     const { input } = await mountDialog();
     expect(screen.queryByLabelText('Also give them a password')).not.toBeInTheDocument();
     await invite(input, ['ana@acme.com'], 'Invite 1 person');
@@ -389,7 +389,7 @@ describe('InviteDialog: how people sign in here', () => {
   });
 
   it('with password sign-in off and no single sign-on either, sends nothing and says why', async () => {
-    useProviders({ password: false, sso: [] });
+    answerProviders({ password: false, sso: [] });
     await mountDialog({ initialEmails: ['ana@bevel.software'], settle: false });
     expect(await screen.findByRole('alert')).toHaveTextContent(
       'Nobody could sign in: password sign-in is off here and no single sign-on is set up.',
@@ -402,7 +402,7 @@ describe('InviteDialog: how people sign in here', () => {
     await mountDialog({ initialEmails: ['ana@bevel.software'] });
     expect(screen.getByRole('alert')).toHaveTextContent('Couldn’t check how people sign in here.');
     expect(screen.getByRole('button', { name: 'Invite 1 person' })).toBeDisabled();
-    useProviders(PASSWORD_ONLY);
+    answerProviders(PASSWORD_ONLY);
     await userEvent.click(screen.getByRole('button', { name: 'Retry' }));
     await screen.findByText(/^They sign in with their email and a password made for them/);
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
@@ -458,7 +458,7 @@ describe('InviteDialog: sending', () => {
 
 describe('InviteDialog: the generated password, shown once', () => {
   async function sendPasswordOnly(addresses: string[]) {
-    useProviders(PASSWORD_ONLY);
+    answerProviders(PASSWORD_ONLY);
     const view = await mountDialog({ admin: false });
     await invite(view.input, addresses, addresses.length === 1 ? 'Invite 1 person' : `Invite ${addresses.length} people`);
     await screen.findByRole('dialog', { name: /invited$/ });
@@ -509,7 +509,7 @@ describe('InviteDialog: the generated password, shown once', () => {
         </button>
       );
     }
-    useProviders(PASSWORD_ONLY);
+    answerProviders(PASSWORD_ONLY);
     render(
       <AppRegistryContext.Provider value={makeRegistry({})}>
         <AuthContext.Provider value={authValue()}>
