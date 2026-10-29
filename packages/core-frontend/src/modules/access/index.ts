@@ -9,4 +9,3 @@ export { useAccessRequests } from './hooks/useAccessRequests';
 export type { AccessRequestsState } from './hooks/useAccessRequests';
 export { formatEligible, useFileAccess } from './hooks/useFileAccess';
 export { offersManageAccess } from './manage-access-affordance';
-export { ManageAccessDialog } from './components/ManageAccessDialog';

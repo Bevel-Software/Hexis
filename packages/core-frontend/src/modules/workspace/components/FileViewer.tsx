@@ -19,7 +19,8 @@ import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { useCanonicalFileUrl, useFileNav } from '../routing/kb-routes';
 import { PullNeededBanner } from '../../git/components/PullNeededBanner';
 import { GitSyncFailedBanner } from '../../git/components/GitSyncFailedBanner';
-import { ManageAccessDialog, useFileAccess, formatEligible } from '../../access';
+import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
+import { useFileAccess, formatEligible } from '../../access';
 import { FileHistoryPanel } from '../../git/components/FileHistoryPanel';
 import { FileComparisonPanel } from '../../git/components/FileComparisonPanel';
 import {
