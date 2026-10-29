@@ -1,10 +1,10 @@
 ## Onboarding someone new
 
 Use this when someone is new here or asks to be onboarded ("onboard me", "get
-started", "what can I do here"). Give them one picture, let them choose what to
-do, and explain each idea at the moment they meet it, while they do something
-real. Write short messages in plain words, in their language, one question at a
-time.
+started", "what is this", "what can you do for me"). Give them one picture, let
+them choose what to do, and explain each idea at the moment they meet it, while
+they do something real. Write short messages in plain words, in their language,
+one question at a time.
 
 ### 1. Look around first, and say nothing yet
 
@@ -31,9 +31,9 @@ search and one read are enough for the examples.
 >
 > 1. **Ask**: get answers from <organisation>'s knowledge, each with the page
 >    it came from. *For example: <a real question one of their areas answers>*
-> 2. **Contribute**: add or change pages. A teammate approves the change before
->    it goes live. *For example: <something waiting on them, or a page they
->    could improve>*
+> 2. **Contribute**: add or change pages. Where a page isn't yours to change,
+>    the people who look after it approve your change before it goes live.
+>    *For example: <something waiting on them, or a page they could improve>*
 > 3. **Automate**: use skills, ready-made instructions I follow, and connect
 >    tools. *For example: <a real skill from `list_skills`, in one line>*
 >
@@ -69,9 +69,10 @@ after a yes. It goes on a draft (`drafts-and-change-requests`):
   `{{defaultBranch}}`, even when you may.
 
 Ask before opening a change request, then give its link: that is where they see
-the change in the app. Say once that a person approves it in the app with
-**Approve**, then **Apply changes**, and that you cannot do that for them. If a
-write is refused, say who can approve there (`access-control`).
+the change in the app. Say once that the people who look after those pages
+(their owners and writers) approve it in the app with **Approve**, then **Apply
+changes**, and that you cannot do that for them. If a write is refused, say who
+can approve there (`access-control`).
 
 **Automate.** Name two or three skills in one line each, pick one with them,
 load it with `get_skill` and run it together. Before a step that creates
