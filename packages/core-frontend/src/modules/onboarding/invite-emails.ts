@@ -81,7 +81,11 @@ export type InviteOutcome =
   | { email: string; status: 'no-seat'; message: string }
   | { email: string; status: 'error'; message: string };
 
-/** The address now has an account it can sign in to, new or already there. */
+/**
+ * The address now has an account, new or already there and not known to be
+ * switched off. Not a promise it can sign in: an account that was already
+ * there answers only that it exists.
+ */
 export function isInvited(outcome: InviteOutcome): boolean {
   return outcome.status === 'created' || (outcome.status === 'existing' && !outcome.deactivated);
 }

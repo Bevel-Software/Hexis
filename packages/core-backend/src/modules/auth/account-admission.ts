@@ -1,3 +1,5 @@
+import type { Response } from 'express';
+
 /**
  * Whether a NEW account may be provisioned on this deployment, asked before
  * the row is inserted — and whether a deactivated one may be switched back
@@ -114,6 +116,18 @@ export class AuthBackendError extends Error {
     super('The account could not be looked up');
     this.name = 'AuthBackendError';
   }
+}
+
+/**
+ * Answer the port's refusal on a route that makes or switches on an account:
+ * 403 with the port's words and `kind: 'admission'`, which tells it apart
+ * from a 403 for want of a role (a caller must not read that as "no seat
+ * left"). True when `error` was such a refusal and the answer is sent.
+ */
+export function answerAdmissionRefusal(res: Response, error: unknown): boolean {
+  if (!(error instanceof AccountAdmissionRefusedError)) return false;
+  res.status(error.status).json({ error: error.message, kind: 'admission' });
+  return true;
 }
 
 /**

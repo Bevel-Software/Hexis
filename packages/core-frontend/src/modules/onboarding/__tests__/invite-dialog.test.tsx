@@ -419,8 +419,20 @@ describe('InviteDialog: sending', () => {
     expect(invitations.map((i) => i.email)).toEqual(['new@acme.com', 'old@acme.com']);
     expect(within(rowOf('new@acme.com')).getByText('Hasn’t signed in yet')).toBeInTheDocument();
     expect(within(rowOf('old@acme.com')).getByText('Already has an account')).toBeInTheDocument();
-    expect(within(rowOf('old@acme.com')).getByText('Unchanged: signs in as before')).toBeInTheDocument();
+    expect(within(rowOf('old@acme.com')).getByText('Left as it was')).toBeInTheDocument();
+    expect(screen.getByText(/^Everyone with a new account can sign in now/)).toBeInTheDocument();
     expect(onInvited).toHaveBeenCalledTimes(1);
+  });
+
+  // `existing` says the account exists, not that it can sign in: it may be
+  // switched off or have no password, and a member is not told which.
+  it('says an address that already had an account exists, never that it can sign in', async () => {
+    existing = new Set(['old@acme.com']);
+    const { input } = await mountDialog({ admin: false });
+    await invite(input, ['old@acme.com'], 'Invite 1 person');
+    await screen.findByRole('dialog', { name: '1 person is invited' });
+    expect(screen.getByText('They already have accounts, which were left as they were.')).toBeInTheDocument();
+    expect(screen.queryByText(/sign in now|accounts are ready|signs in as before/)).not.toBeInTheDocument();
   });
 
   it('an admin’s Admin invite promotes new and existing accounts through the roles route, ifActive', async () => {
@@ -434,7 +446,7 @@ describe('InviteDialog: sending', () => {
       { email: 'new@acme.com', ifActive: true },
       { email: 'old@acme.com', ifActive: true },
     ]);
-    expect(within(rowOf('old@acme.com')).getByText('Unchanged: signs in as before, now an admin')).toBeInTheDocument();
+    expect(within(rowOf('old@acme.com')).getByText('Left as it was, now an admin')).toBeInTheDocument();
   });
 
   it('says "no seat left" on the row the deployment refused for want of a place', async () => {

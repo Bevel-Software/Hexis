@@ -50,6 +50,26 @@ async function readError(res: Response, fallback: string): Promise<string> {
 }
 
 /**
+ * The refusal of a request that makes an account, both routes alike (the
+ * admins' accounts API and the invitation): the server's words, or
+ * `fallback`, and its `kind` (`admission` when no seat was left).
+ */
+async function accountRefusal(res: Response, fallback: string): Promise<AccountRequestError> {
+  const body = (await res.json().catch(() => ({}))) as { error?: unknown; kind?: unknown };
+  const message = typeof body.error === 'string' && body.error ? body.error : fallback;
+  return new AccountRequestError(message, res.status, typeof body.kind === 'string' ? body.kind : null);
+}
+
+/**
+ * `notified` on a reply that made an account: how the deployment told the
+ * person of the invite (`'email'`, say), as its listeners answered. Empty
+ * when nobody did, and the inviter hands over the link themselves.
+ */
+function notifiedChannels(raw: unknown): string[] {
+  return Array.isArray(raw) ? raw.filter((c): c is string => typeof c === 'string') : [];
+}
+
+/**
  * Self-service password change. `currentPassword` is required once one is set.
  * The change ends every session opened before it, this one's included, so the
  * fresh token the server hands back replaces the stored one — but only the
@@ -114,20 +134,13 @@ export async function createAccount(
       keepExistingPassword: options.keepExistingPassword || undefined,
     }),
   });
-  if (!res.ok) {
-    const body = (await res.json().catch(() => ({}))) as { error?: unknown; kind?: unknown };
-    const message = typeof body.error === 'string' && body.error ? body.error : 'Could not create account';
-    throw new AccountRequestError(message, res.status, typeof body.kind === 'string' ? body.kind : null);
-  }
+  if (!res.ok) throw await accountRefusal(res, 'Could not create account');
   const body = (await res.json().catch(() => ({}))) as {
     passwordSet?: unknown;
     deactivated?: unknown;
     notified?: unknown;
   };
-  // `notified`: how the deployment told a NEW account's person of the invite
-  // (`'email'`, say), as its listeners answered; empty or absent when nobody
-  // did and the admin hands over the link themselves.
-  const notified = Array.isArray(body.notified) ? body.notified.filter((c): c is string => typeof c === 'string') : [];
+  const notified = notifiedChannels(body.notified);
   return {
     ...(typeof body.passwordSet === 'boolean' ? { passwordSet: body.passwordSet } : {}),
     ...(body.deactivated === true ? { deactivated: true } : {}),
@@ -150,11 +163,7 @@ export async function sendInvitation(request: InvitationRequest): Promise<Invita
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(request),
   });
-  if (!res.ok) {
-    const body = (await res.json().catch(() => ({}))) as { error?: unknown; kind?: unknown };
-    const message = typeof body.error === 'string' && body.error ? body.error : 'Could not invite them';
-    throw new AccountRequestError(message, res.status, typeof body.kind === 'string' ? body.kind : null);
-  }
+  if (!res.ok) throw await accountRefusal(res, 'Could not invite them');
   const body = (await res.json().catch(() => ({}))) as {
     status?: unknown;
     account?: Extract<InvitationResult, { status: 'created' }>['account'];
@@ -163,12 +172,11 @@ export async function sendInvitation(request: InvitationRequest): Promise<Invita
   };
   if (body.status === 'existing') return { status: 'existing' };
   if (body.status !== 'created' || !body.account) throw new AccountRequestError('Could not invite them', res.status);
-  const notified = Array.isArray(body.notified) ? body.notified.filter((c): c is string => typeof c === 'string') : [];
   return {
     status: 'created',
     account: body.account,
     ...(typeof body.startingPassword === 'string' && body.startingPassword ? { startingPassword: body.startingPassword } : {}),
-    notified,
+    notified: notifiedChannels(body.notified),
   };
 }
 

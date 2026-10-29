@@ -3,7 +3,7 @@ import type { InvitationResult } from '@bevel-software/platform-shared';
 import { logger } from '../../shared/logging.js';
 import type { AuthService } from './auth.service.js';
 import { inviterOf, type IAccountHooks } from './account-hooks.js';
-import { AccountAdmissionRefusedError, AccountChangeRefusedError } from './account-admission.js';
+import { AccountChangeRefusedError, answerAdmissionRefusal } from './account-admission.js';
 import { offeredProviders, type AuthProviderPlugin } from './auth.routes.js';
 import { FixedWindowRateLimiter } from './rate-limit.js';
 import type { IAdminAccessService } from '../admin/index.js';
@@ -100,10 +100,7 @@ export function createInvitationRoutes(
     try {
       invited = await authService.createInvitedAccount(email, { startingPassword: generate });
     } catch (error) {
-      if (error instanceof AccountAdmissionRefusedError) {
-        res.status(403).json({ error: error.message, kind: 'admission' });
-        return;
-      }
+      if (answerAdmissionRefusal(res, error)) return;
       if (error instanceof AccountChangeRefusedError) {
         res.status(400).json({ error: error.message });
         return;

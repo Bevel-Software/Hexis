@@ -429,9 +429,12 @@ function outcomeDetail(outcome: InviteOutcome, idp: string): string {
     }
     case 'existing': {
       // The invite changed nothing about the account, its password included.
+      // Whether it can sign in is not said: the answer is only that it
+      // exists, and it may be switched off or have no way in yet. Only a
+      // refused promotion tells that it is switched off.
       const access = outcome.deactivated
         ? 'Can’t sign in until it’s switched on in User accounts'
-        : 'Unchanged: signs in as before';
+        : 'Left as it was';
       if (outcome.roleError) return `${access}: couldn’t make them an admin (${outcome.roleError})`;
       if (outcome.promoted) return `${access}, now an admin`;
       if (outcome.alreadyAdmin) return `${access}, already an admin`;
@@ -488,6 +491,10 @@ function InvitedBody({
   // not reach — an account that was already there, a deployment with no
   // mail — and the message is offered as before, for them.
   const allEmailed = invited > 0 && outcomes.filter(isInvited).every(wasEmailed);
+  // Readiness is claimed for the accounts this invite made, and only them:
+  // one that was already there is said to exist, not to be able to sign in.
+  const created = outcomes.filter((o) => o.status === 'created').length;
+  const who = created === invited ? 'They' : 'Everyone with a new account';
   const message = inviteMessage(origin, { idp, passwordSet, passwordSignIn: Boolean(methods?.password) });
 
   return (
@@ -495,13 +502,17 @@ function InvitedBody({
       <p className="text-detail text-ink-muted">
         {invited === 0
           ? 'No accounts were created. The reason is on each row.'
-          : allEmailed
-            ? 'They have been emailed the link and how to sign in.'
-            : passwordSet
-              ? 'They can sign in now. Send them the link and their password.'
-              : idp
-                ? `They can sign in now with ${idp}. Send them the link.`
-                : 'Their accounts are ready. Send them the link so they know to sign in.'}
+          : created === 0
+            ? 'They already have accounts, which were left as they were.'
+            : allEmailed
+              ? 'They have been emailed the link and how to sign in.'
+              : passwordSet
+                ? `${who} can sign in now. Send them the link and their password.`
+                : idp
+                  ? `${who} can sign in now with ${idp}. Send them the link.`
+                  : created === invited
+                    ? 'Their accounts are ready. Send them the link so they know to sign in.'
+                    : 'The new accounts are ready. Send them the link so they know to sign in.'}
       </p>
       <ul aria-label="People" className="flex flex-col divide-y divide-line">
         {user && (

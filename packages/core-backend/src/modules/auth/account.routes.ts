@@ -7,7 +7,7 @@ const log = logger('accounts');
 import type { AuthUser } from '@bevel-software/platform-shared';
 import type { AuthService } from './auth.service.js';
 import { inviterOf, type IAccountHooks } from './account-hooks.js';
-import { AccountAdmissionRefusedError, AccountChangeRefusedError } from './account-admission.js';
+import { AccountChangeRefusedError, answerAdmissionRefusal } from './account-admission.js';
 import { erasedAccountId, type IAccountErasureService } from './account-erasure.service.js';
 import type { IAdminAccessService } from '../admin/index.js';
 import type { UserAccessRemovalService } from '../access/index.js';
@@ -140,16 +140,10 @@ export function createAccountRoutes(
       const user = await authService.createAccount(email, name, password);
       res.status(201).json(user);
     } catch (error) {
-      const msg = error instanceof Error ? error.message : 'Unknown error';
       // The deployment has no place for the account (a seat limit, say): the
       // port's own words, as a refusal rather than a malformed request.
-      // `kind` tells it apart from `requireAdmin`'s 403, which a caller must
-      // not read as "no seat left".
-      if (error instanceof AccountAdmissionRefusedError) {
-        res.status(403).json({ error: msg, kind: 'admission' });
-        return;
-      }
-      res.status(400).json({ error: msg });
+      if (answerAdmissionRefusal(res, error)) return;
+      res.status(400).json({ error: error instanceof Error ? error.message : 'Unknown error' });
     }
   });
 
@@ -203,10 +197,7 @@ export function createAccountRoutes(
       log.info('account audit:', { action: 'reactivate', actorUserId: req.userId, targetUserId: userId });
       res.status(204).end();
     } catch (error) {
-      if (error instanceof AccountAdmissionRefusedError) {
-        res.status(403).json({ error: error.message, kind: 'admission' });
-        return;
-      }
+      if (answerAdmissionRefusal(res, error)) return;
       log.error('switching an account on failed:', { err: error });
       res.status(500).json({ error: 'Could not switch this account on' });
     }
