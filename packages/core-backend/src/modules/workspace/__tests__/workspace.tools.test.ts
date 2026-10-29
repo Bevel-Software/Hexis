@@ -10,37 +10,32 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import { slowRipgrep } from '../../../__tests__/slow-ripgrep.js';
 import { LocalFilesystem } from '@mastra/core/workspace';
-import { ToolRegistry } from '../../tool-registry/tool-registry.js';
-import { createToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
-import { ToolError, type ToolContext } from '../../tool-helpers/tool.contract.js';
-import type { ToolAuth } from '../../tool-auth/tool-auth.middleware.js';
+import { GUIDE_FIRST_SENTENCE, TOOL_DESCRIPTION_CAP, ToolRegistry, clientVisibleLength } from '../../tool-registry/index.js';
+import { AccessControlService, WorkflowHooks, createToolHandlerFactory, type AgentOperationContext } from '../../../__tests__/tool-wiring.js';
+import { ToolError, routeToolSchemas, type ToolContext } from '../../tool-helpers/index.js';
+import type { ToolAuth } from '../../tool-auth/index.js';
 import { registerWorkspaceTools } from '../workspace.tools.js';
 import { RipgrepPatternMatcher, type RipgrepPatternMatcherOptions } from '../index.js';
-import { sharedFileRules, sharedFileRulesSection } from '../../agent-instructions/shared-file-rules.js';
-import { composeAgentGuide } from '../../agent-guide/agent-guide.js';
-import { GUIDE_FIRST_SENTENCE } from '../../tool-registry/guide-first.js';
+import { sharedFileRules, sharedFileRulesSection } from '../../agent-instructions/index.js';
+import { composeAgentGuide } from '../../agent-guide/index.js';
 import { RoutineWritePolicyService } from '../routine-write-policy.js';
 import { UuidSessionSink, type ISessionSink } from '../session-sink.js';
 import { FIRST_RUN_SECTION_ID, STARTER_GUIDE_FILE, firstRunNote, type FirstRunStarterSource } from '../first-run.js';
-import { WorkflowHooks, type AgentOperationContext } from '../../workflow/workflow-hooks.js';
 import { SESSION_ID_DESCRIPTION, ToolDescriptionNotes } from '../agent-access.gate.js';
 import { SpillStore } from '../spill-store.js';
 import { DocExtractService } from '../file-readers/doc-extract.service.js';
 import { WorkerDocumentExtractor } from '../file-readers/extract-in-worker.js';
 import { OCTET_STREAM_FALLBACK_NOTE } from '../file-readers/content-mode.js';
-import type { IAccessControl } from '../../access/access-control.interface.js';
-import { AccessControlService } from '../../access/access-control.service.js';
-import { NodeFs } from '../../kb-fs/node-fs.js';
+import type { IAccessControl } from '../../access/index.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
 import type { WorkspaceService } from '../workspace.service.js';
 import { DEFAULT_KB_LAYOUT, isBranchAuthoredBy, isOwnSuggestionsBranch } from '@bevel-software/platform-shared';
-import { normalizeWorkspacePath } from '../../kb-fs/repo-path.js';
+import { normalizeWorkspacePath } from '../../kb-fs/index.js';
 import { GIT_INTERNALS_MESSAGE, PathNotFoundError } from '../../../shared/domain-errors.js';
-import { AccessDeniedError } from '../../access-model/access-errors.js';
+import { AccessDeniedError } from '../../access-model/index.js';
 import { proposalTitleFor } from '../write-denial.js';
 import { NOT_FOUND_NEXT_STEP } from '../not-found.js';
 import { compileCheck, exampleArguments } from '@bevel-software/platform-mcp-core';
-import { routeToolSchemas } from '../../tool-helpers/route-tool-schemas.js';
-import { TOOL_DESCRIPTION_CAP, clientVisibleLength } from '../../tool-registry/description-length.js';
 
 const KB_DIR = 'knowledge-base';
 
@@ -2480,7 +2475,7 @@ describe('start_session', () => {
       undefined,
       undefined /* downloads */,
       starterPacks,
-      new NodeFs(),
+      realDisk(),
     );
     app.use('/api', router);
     server = await new Promise<HttpServer>((r) => {
@@ -3408,10 +3403,12 @@ describe('preflight for moves and deletes', () => {
           writes.push(op.wsPath ?? '');
         });
         expect((await call(base, 'move_file', args)).body).toMatchObject({ moved: true });
-        // `Locked/refs.md` is named (left for want of write access, its links
-        // listed), so the read hook hears of it; the unreadable page and the
-        // transcript are never named, so it never hears of them.
-        expect(reads.sort()).toEqual([KB('Locked/refs.md'), KB('Sales/deal.md'), KB('Sales/index.md')]);
+        // The move's two ends first, as read_file tells it (what moves, and
+        // the folder it lands in); then `Locked/refs.md` is named (left for
+        // want of write access, its links listed), so the read hook hears of
+        // it; the unreadable page and the transcript are never named, so it
+        // never hears of them.
+        expect(reads.sort()).toEqual([KB('Locked/refs.md'), KB('Sales/2026'), KB('Sales/deal.md'), KB('Sales/deal.md'), KB('Sales/index.md')]);
         expect([...new Set(writes)].sort()).toEqual([KB('Sales/2026/deal.md'), KB('Sales/deal.md'), KB('Sales/index.md')]);
       });
 
@@ -5174,7 +5171,7 @@ describe('a move preview judges the destination as it will be', () => {
           ensureRemotesFetched: async () => undefined,
         } as unknown as WorkspaceService,
         KB_DIR,
-        new NodeFs(),
+        realDisk(),
       );
     return {
       canRead: (w: string, u: string, r: string) => fresh().canRead(w, u, r),
@@ -5280,25 +5277,27 @@ describe('a move preview judges the destination as it will be', () => {
     expect((await call(base, 'move_file', { ...args, confirm: true })).body).toMatchObject({ moved: true });
   });
 
-  it('a source the read hook refuses gets no names, and the move still asks first', async () => {
+  it('a source the read hook refuses is refused as read_file refuses it: no preview, not even that the move would ask', async () => {
     const base = await seeded();
     await fs.writeFile(
       KB('Ops/access.md'),
       rules(`write:\n  - Mover <${MOVER}>\n  - Ops Lead <ops@x.io>\nowner:\n  - Mover <${MOVER}>\n`),
     );
     const args = { src: KB('Sales/deal.md'), dest: KB('Ops/deal.md'), rewriteLinks: false };
-    // The rules let the caller read it; a deployment's read hook does not.
+    // The rules let the caller read it; a deployment's read hook does not. The
+    // hook's refusal is the whole answer: a "this move asks for confirm" would
+    // already say what the comparison found behind the hook.
     hooks.onAgentRead(async (op) => {
       if (op.wsPath === args.src) throw new Error('not for agents');
     });
-
-    const dry = await call(base, 'move_file', { ...args, dryRun: true });
-    expect(dry.body).toMatchObject({ accessChanges: false, allowed: true });
-    expect(dry.body.holderChanges).toBeUndefined();
-    const unconfirmed = await call(base, 'move_file', args);
-    expect(unconfirmed.body).toMatchObject({ confirmationRequired: true, moved: false });
-    expect(JSON.stringify(unconfirmed.body)).not.toContain('ops@x.io');
-    expect(unconfirmed.body.message).not.toContain('holderChanges');
+    const read = await call(base, 'read_file', { path: args.src });
+    expect(read.status).toBeGreaterThanOrEqual(400);
+    for (const body of [{ ...args, dryRun: true }, args, { ...args, confirm: true }]) {
+      const res = await call(base, 'move_file', body);
+      expect(res.status).toBe(read.status);
+      expect(res.body).toEqual(read.body);
+      expect(JSON.stringify(res.body)).not.toContain('ops@x.io');
+    }
     expect(await fs.exists(args.src)).toBe(true);
   });
 
