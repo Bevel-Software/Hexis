@@ -31,9 +31,12 @@ export const INSTRUCTIONS_TOKEN_BUDGET = 2_000;
 /**
  * The platform's own tools as the hosted endpoint lists them to an MCP client:
  * each name, description (with its `Call:` line and, on the four
- * knowledge-base tools, the purpose prefix) and input schema.
+ * knowledge-base tools, the purpose prefix) and input schema. Measured over
+ * every registrar the root mounts, the change-request readers and `open_page`
+ * included: 46 tools, 17,278 tokens at 0.35.0 (an earlier figure of 15,710
+ * left those five out).
  */
-export const TOOL_LIST_TOKEN_BUDGET = 16_000;
+export const TOOL_LIST_TOKEN_BUDGET = 17_500;
 
 /** The ceiling for a section a distribution adds, which core's checks cannot see: the same as core's own. */
 export const SECTION_TOKEN_BUDGET = 2_500;

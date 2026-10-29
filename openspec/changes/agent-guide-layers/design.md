@@ -98,7 +98,7 @@ Measured the same way, on this change's last commit (after merging `dev` at `75f
 | Layer | Before | After | Budget |
 |---|---|---|---|
 | Server instructions (platform part) | 1,852 | 1,969 | 2,000 |
-| Tool list as served (41 tools) | 15,829 | 15,710 | 16,000 |
+| Tool list as served (46 tools; the figures before 0.35.0 counted 41, leaving out the change-request readers and `open_page`) | 15,829 | 17,278 | 17,500 |
 | First contact (`get_agent_guide` with no section) | 19,342 (the whole guide) | 1,061 (`start-here`) | 1,200 |
 | The whole guide (`section: "all"`) | 19,342 | 21,265 | 21,500 |
 | A `read_file` of `AGENTS.md` | 19,342 (the whole guide) | 1,268 (`start-here` and the list) | |
