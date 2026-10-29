@@ -80,10 +80,10 @@ async function listed(registry: ToolRegistry): Promise<Map<string, string>> {
 afterEach(() => kb.applyLayout({ ...DEFAULT_KB_LAYOUT }));
 
 describe('what tells an agent to read the guide first', () => {
-  it('tells an agent to call get_agent_guide first, and that AGENTS.md answers with the same guide after the organisation\'s own', () => {
+  it('tells an agent to call get_agent_guide first, and that AGENTS.md answers with that start after the organisation\'s own', () => {
     const rules = sharedFileRulesSection(kb.layout);
-    expect(rules).toContain("call `get_agent_guide` and read the platform's guide");
-    expect(rules).toContain('read_file on `AGENTS.md` at the KB root answers with the same guide');
+    expect(rules).toContain("call `get_agent_guide`: it answers the guide's start");
+    expect(rules).toContain('read_file on `AGENTS.md` at the KB root answers with that start');
     expect(rules).toContain("after the organisation's own conventions file of that name");
     expect(rules).toContain('`CLAUDE.md`');
     // One name on every deployment: the rule names no other.

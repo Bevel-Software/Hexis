@@ -22,6 +22,8 @@ import type {
   GrantSources,
   PathHolders,
   PathVerbs,
+  HolderChange,
+  HolderChanges,
   ProspectiveHolders,
   ResolvedPrincipal,
 } from './access-control.interface.js';
@@ -1354,6 +1356,70 @@ function eligibleHoldersResolved(
   return { principals, roles, users };
 }
 
+/** One side of a move: the access model, the path, and the rules the file carries there. */
+type MoveSide = { model: AccessModel; path: string; own: OwnEntries | null };
+
+/** The key set behind one entry of an eligible-holders list, read back from its name and kind. */
+function keysOfHolder(model: AccessModel, holder: ResolvedPrincipal): ReadonlySet<string> {
+  for (const [canonical, record] of model.roles.byCanonical) {
+    if (record.kind === holder.kind && record.displayName === holder.name) return principalKeysOfToken(model, canonical);
+  }
+  return principalKeysOfToken(model, canonicalRoleName(holder.name));
+}
+
+/**
+ * Who loses and who gains `verb` between the two sides of a move. The
+ * candidates are every principal and person a rule on either side names for
+ * the verb, as a grant or as a denial, and every holder either side lists;
+ * each is put to both sides' resolvers as the gates would put it. The holder
+ * lists alone are not enough: they name grants, so they miss a group still
+ * covered by `everyone`, and they cannot show someone whose only access was
+ * `everyone` and whom a rule on the far side denies by name.
+ */
+function holderChangesFor(verb: 'read' | 'write', here: MoveSide, there: MoveSide): HolderChanges {
+  const collectives = new Map<string, { holder: ResolvedPrincipal; keys: ReadonlySet<string> }>();
+  const people = new Set<string>();
+  const addCollective = (holder: ResolvedPrincipal, keys: ReadonlySet<string>) => {
+    const id = `${holder.kind}\0${holder.name.toLowerCase()}`;
+    if (!collectives.has(id)) collectives.set(id, { holder, keys });
+  };
+  for (const side of [here, there]) {
+    const held = eligibleHoldersResolved(side.model, verb, side.path, side.own);
+    for (const holder of held.principals) addCollective(holder, keysOfHolder(side.model, holder));
+    for (const user of held.users) people.add(user.email);
+    const { byRole, byEmail } = resolveAtPath(side.model, verb, side.path, side.own);
+    for (const token of byRole.keys()) {
+      const record = side.model.roles.byCanonical.get(token);
+      addCollective(
+        { name: record ? record.displayName : token, kind: record?.kind ?? 'role' },
+        principalKeysOfToken(side.model, token),
+      );
+    }
+    for (const email of byEmail.keys()) people.add(email);
+  }
+  const lose: HolderChange[] = [];
+  const gain: HolderChange[] = [];
+  const record = (had: boolean, has: boolean, change: HolderChange) => {
+    if (had && !has) lose.push(change);
+    if (!had && has) gain.push(change);
+  };
+  for (const { holder, keys } of collectives.values()) {
+    record(
+      hasPermissionForKeys(here.model, verb, keys, here.path, here.own),
+      hasPermissionForKeys(there.model, verb, keys, there.path, there.own),
+      { kind: holder.kind, name: holder.name, verb },
+    );
+  }
+  for (const email of [...people].sort()) {
+    record(
+      hasPermissionResolved(here.model, verb, email, here.path, here.own),
+      hasPermissionResolved(there.model, verb, email, there.path, there.own),
+      { kind: 'person', name: email, email, verb },
+    );
+  }
+  return { lose, gain };
+}
+
 /**
  * Every individual the model names: `roles.yaml` members, emails named inline
  * at this path's scope, and the deployment owner (bound by every rule that
@@ -1926,6 +1992,32 @@ export class AccessControlService implements IAccessControl {
       before: holdersAt(model, fromPath, ownHere),
       after: holdersAt(after, toPath, ownThere),
     };
+  }
+
+  /** Who loses and who gains `read` or `write` in a move (see the interface). */
+  async prospectiveHolderChanges(
+    workspaceId: string,
+    fromPath: string,
+    toPath: string,
+  ): Promise<HolderChanges> {
+    const model = await this.loadModel(workspaceId);
+    const repoDir = await this.repoDir(workspaceId);
+    const { isFolder, ownHere, ownThere, landing } =
+      await this.relocationSubject(repoDir, fromPath, toPath);
+    const here: MoveSide = { model, path: fromPath, own: ownHere };
+    const there: MoveSide = {
+      model: withRelocatedAccessFiles(model, fromPath, toPath, { sourceRemains: false, sourceIsFolder: isFolder, landing }),
+      path: toPath,
+      own: ownThere,
+    };
+    const lose: HolderChange[] = [];
+    const gain: HolderChange[] = [];
+    for (const verb of ['read', 'write'] as const) {
+      const changes = holderChangesFor(verb, here, there);
+      lose.push(...changes.lose);
+      gain.push(...changes.gain);
+    }
+    return { lose, gain };
   }
 
   /**

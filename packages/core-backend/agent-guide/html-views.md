@@ -3,7 +3,13 @@
 An `.html` (or `.htm`) file in the knowledge base is a live page: the app shows
 it in a sandboxed frame, scripts and all. Write one when a reader is better
 served by something interactive — a dashboard, a filterable table, a chart —
-than by a markdown document.
+than by a markdown document. Plain HTML with inline CSS and JavaScript is
+enough; no skill or template is needed.
+
+**Data written into the page is governed by the page's access.** A tool call
+answers each viewer only what they may read; bytes in the file reach everyone
+who may read the page, so never copy in data from a source fewer people may
+read.
 
 ### The frame
 
@@ -15,6 +21,10 @@ than by a markdown document.
   `<object>`, `<embed>`, `<base>` and `<meta>` are removed. Write CSS in a
   `<style>` element and code in an inline `<script>`. An image is a `data:`
   URL.
+- **The body is the page.** The app shows the sanitised contents of `<body>`
+  in a document of its own: `<style>` and inline `<script>` in `<head>` are
+  kept, moved to the start of the body; everything else in `<head>` and the
+  attributes on `<html>` and `<body>` are ignored.
 - **Scripts run as ES modules**, in source order, after the document is
   parsed: `document.getElementById` works without waiting for
   `DOMContentLoaded`, top-level `await` works, and a top-level declaration is
@@ -86,7 +96,7 @@ assume it is there:
 ```js
 const tools = window.bevel?.tools;
 if (tools) {
-  const file = await tools.callTool('read_file', { body: { branch: 'main', path: '{{knowledgeBaseDir}}/Foo.md' } });
+  const file = await tools.callTool('read_file', { body: { branch: '{{defaultBranch}}', path: '{{knowledgeBaseDir}}/Foo.md' } });
   // …show it
 } else {
   // …render without it
@@ -131,7 +141,7 @@ the app; the page never sees it.
 const input = document.getElementById('briefing');
 input.addEventListener('change', async () => {
   const answer = await window.bevel.tools.uploadFile(input.files[0], {
-    branch: 'main',
+    branch: '{{defaultBranch}}',
     destination: '{{knowledgeBaseDir}}/Campaigns/Easter',
   });
   // answer.files[0].path is where it landed
@@ -216,15 +226,10 @@ no build step and no framework:
 <head>
 <style>
   body { font: 14px system-ui, sans-serif; margin: 16px; }
-  header { display: flex; align-items: center; gap: 12px; min-height: 40px; }
-  #status { color: #555; }
+  .board { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  .column { min-height: 320px; border: 1px solid #ddd; padding: 8px; }
+  .column li { min-height: 20px; padding: 6px; list-style: none; }
   #status.error { color: #b00020; }
-  .board { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
-  .column { min-height: 320px; border: 1px solid #ddd; border-radius: 6px; padding: 8px; }
-  .column ul { list-style: none; margin: 0; padding: 0; }
-  .column li { min-height: 20px; padding: 6px; margin-bottom: 6px; border-radius: 4px; background: #f4f4f4; }
-  .column li.placeholder { background: #ececec; }
-  .count { color: #777; font-weight: normal; }
 </style>
 </head>
 <body>

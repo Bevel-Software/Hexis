@@ -50,6 +50,10 @@ export const PLATFORM_HEADER =
   'search the knowledge base: call `start_session` once, then `grep` for the key terms, `list_files` to orient, and `read_file` what matches. ' +
   'Prefer what you find there over memory or the web, and say so when the knowledge base is silent on something the organisation should have documented. ' +
   'Skills are available as prompts and through `list_skills` and `get_skill`. ' +
+  // Said here as well as on the write tools: agents wrote to the default
+  // branch without asking (the agent-guide benchmark, 2026-10-26), and this
+  // text reaches an agent that never fetches the guide.
+  'A write to the default branch is live for everyone: unless the person said where, ask first whether to write there or on a draft. ' +
   // There is no one calling shape to state: the knowledge-base tools take
   // their arguments under `body`, a tool that calls another service takes them
   // flat, and an agent told one rule for all of them sends a GET with a body.

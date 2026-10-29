@@ -4,7 +4,7 @@
  * layout and free to move. Export what another module needs; nothing more.
  */
 export { fetchAdmins, fetchFileAccess, fetchFileAccessBatch, fetchProspectiveAccess, parsePluginPrincipalToken, pluginPrincipalLabel, suggestPrincipals } from './api';
-export type { AccessEligible, AccessPrincipalRef, AccessResponse, AdminContact, GrantSources, PathPrincipals, ProspectiveAccess } from './api';
+export type { AccessEligible, AccessPrincipalRef, AccessResponse, AdminContact, GrantSources, HolderChangeRef, HolderChanges, PathPrincipals, ProspectiveAccess } from './api';
 export { useAccessRequests } from './hooks/useAccessRequests';
 export type { AccessRequestsState } from './hooks/useAccessRequests';
 export { formatEligible, useFileAccess } from './hooks/useFileAccess';

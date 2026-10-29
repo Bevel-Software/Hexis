@@ -1,4 +1,3 @@
-import express from 'express';
 import { describe, expect, it } from 'vitest';
 import {
   CALL_TOOL_CHAIN_NAME,
@@ -10,20 +9,8 @@ import {
 } from '@bevel-software/platform-mcp-core';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import { EXTERNAL_KB_MANUAL_NAME } from '../../tool-manuals/tool-manuals.contract.js';
-import { ToolRegistry } from '../tool-registry.js';
 import type { UtcpTool } from '../tool.contract.js';
-import { createToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
-import type { ToolAuth } from '../../tool-auth/tool-auth.middleware.js';
-import { registerWorkspaceTools } from '../../workspace/workspace.tools.js';
-import { RipgrepPatternMatcher } from '../../workspace/index.js';
-import { registerWorkflowTools } from '../../workflow/agent-tools/workflow.tools.js';
-import { registerPluginsTools } from '../../plugins/plugins.tools.js';
-import { registerSkillsTools } from '../../skills/skills.tools.js';
-import { registerToolManualsTools } from '../../tool-manuals/tool-manuals.tools.js';
-import { ToolDescriptionNotes } from '../../workspace/agent-access.gate.js';
-import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
-import { UuidSessionSink } from '../../workspace/session-sink.js';
-import { RoutineWritePolicyService } from '../../workspace/routine-write-policy.js';
+import type { registerSkillsTools } from '../../skills/skills.tools.js';
 import { CLIENT_SHORT_CUT, TOOL_DESCRIPTION_CAP, clientVisibleLength, firstSentenceEnd } from '../description-length.js';
 import { CAN_WRITE_CLAUSE } from '../../tool-helpers/index.js';
 import {
@@ -31,9 +18,8 @@ import {
   sharedFileRules,
 } from '../../agent-instructions/index.js';
 import { isPlatformFile, platformFilesByDepth } from '@bevel-software/platform-shared';
-import { GET_AGENT_GUIDE_TOOL, GUIDE_FIRST_SENTENCE, guideFirstDescription } from '../guide-first.js';
-import { registerAgentGuideTool } from '../../agent-guide/agent-guide.tools.js';
-import { agentGuideSections } from '../../agent-guide/agent-guide.js';
+import { GET_AGENT_GUIDE_TOOL, GUIDE_FIRST_SENTENCE } from '../guide-first.js';
+import { emptySkills, hexisTools, servedMetaTools, unused } from '../../../__tests__/hexis-catalog.js';
 
 /**
  * The cap exists because clients cut a long tool description, and they cut it
@@ -43,103 +29,10 @@ import { agentGuideSections } from '../../agent-guide/agent-guide.js';
  * NAMING the tool: the next paragraph someone appends to a description has to
  * answer to this test rather than to an agent's truncated catalog.
  *
- * Every registrar Hexis owns is mounted here, on stand-ins, because the
- * descriptions are the only thing under test: a stand-in that is never called
- * is honest about that. Tools PROXIED from connected MCP servers are not
+ * The catalog is every registrar Hexis owns, mounted on stand-ins (see
+ * `hexis-catalog.ts`). Tools PROXIED from connected MCP servers are not
  * measured — their text is the other server's.
  */
-
-/** Dependencies the registrars take but never touch while they are only building defs. */
-const unused = <T,>(): T => ({}) as T;
-
-/** A `.tool` catalog with nothing in it: the shortest honest answer for a listing. */
-const emptyManuals = {
-  listLocalOnly: async () => [],
-  listAll: async () => [],
-  list: async () => [],
-  listInvalid: async () => [],
-} as unknown as Parameters<typeof registerToolManualsTools>[4];
-
-/** A skill catalog with nothing in it — the per-user skill line is then one fixed sentence. */
-const emptySkills = { listSkills: async () => [] } as unknown as Parameters<typeof registerSkillsTools>[4];
-
-/**
- * The meta-tools as the hosted endpoint builds them (`mcp.service.ts`):
- * examples written against the namespace it registers the knowledge-base tools
- * under and against the catalog it serves, and the chain without the rules it
- * states only in the shared places. So the chain description measured here
- * carries the worked call a client is really sent, which is its longest form.
- */
-function servedMetaTools(external: readonly UtcpTool[]) {
-  return codeModeMetaTools(
-    EXTERNAL_KB_MANUAL_NAME,
-    external.map((t) => ({ utcpName: `${EXTERNAL_KB_MANUAL_NAME}.${t.name}`, inputSchema: t.inputs })),
-    { sharedRulesPointer: '' },
-    // As the hosted endpoint serves them: opening with the guide-first
-    // sentence, through the one helper the endpoint itself uses.
-  ).map((t) => ({ ...t, description: guideFirstDescription(t.description) }));
-}
-
-/** Every tool Hexis itself registers, on both surfaces, deduplicated by name. */
-async function hexisTools(skills: Parameters<typeof registerSkillsTools>[4] = emptySkills): Promise<UtcpTool[]> {
-  const registry = new ToolRegistry();
-  const router = express.Router();
-  const toolAuth = ((_req, _res, next) => next()) as unknown as ToolAuth;
-  const toolHandler = createToolHandlerFactory(unused());
-  const kb = testKbContext();
-  const gate = { recoveryBotEmail: 'bot@x', hooks: new WorkflowHooks(), notes: new ToolDescriptionNotes() };
-
-  registerWorkspaceTools(
-    registry,
-    router,
-    toolAuth,
-    toolHandler,
-    unused(),
-    unused(),
-    unused(),
-    kb,
-    gate,
-    new RoutineWritePolicyService(),
-    new UuidSessionSink(),
-    undefined,
-    undefined,
-    // The two upload tools are mounted only when a store is supplied, and
-    // every real composition supplies one: without it they would be the two
-    // descriptions this suite never measured.
-    unused(),
-    // The guide reader, not needed to build defs; then the download store,
-    // mounted on the same terms as the upload one.
-    undefined,
-    unused(),
-    // Starter packs and the tree walk, not needed; then the grep matcher,
-    // mounted on the same terms (it spawns no worker until a search runs).
-    undefined,
-    undefined,
-    new RipgrepPatternMatcher(),
-  );
-  registerWorkflowTools(registry, router, toolAuth, toolHandler, kb, async () => true, { canRead: async () => true, canReadAtRef: async () => true, canReadBatch: async () => new Map(), canReadBatchAtRef: async () => new Map(), canWrite: async () => true } as never, { recoveryBotEmail: 'recovery@x', hooks: { runAgentRead: async () => undefined }, notes: { onChange: () => undefined } } as never);
-  registerPluginsTools(registry, kb);
-  registerSkillsTools(registry, router, toolAuth, toolHandler, skills);
-  registerToolManualsTools(registry, router, toolAuth, toolHandler, emptyManuals, {
-    accessControl: unused(),
-    variableStatus: unused(),
-    kb,
-  });
-  // The guide's own tool, with the platform's sections: the one description
-  // that lists the sections is measured with the list it really carries.
-  registerAgentGuideTool(registry, router, toolAuth, toolHandler, () => agentGuideSections(kb.layout));
-
-  const byName = new Map<string, UtcpTool>();
-  // The meta-tools as a client is served them (`mcp.service.ts` opens each
-  // with the guide-first sentence at the mount), so the catalog measured here
-  // is the catalog that goes out rather than the bare constant.
-  const external = (await registry.listExternal()) as UtcpTool[];
-  const metaTools = servedMetaTools(external);
-  for (const tool of [...(await registry.listInternal()), ...external, ...metaTools]) {
-    byName.set(tool.name, tool as UtcpTool);
-  }
-  return [...byName.values()];
-}
 
 describe('no Hexis tool description is long enough to be cut', () => {
   it(`keeps every description a client is handed within ${TOOL_DESCRIPTION_CAP} characters`, async () => {

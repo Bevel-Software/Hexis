@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { DEFAULT_KB_LAYOUT, configureKbLayout } from '@bevel-software/platform-shared';
-import type { AccessPrincipalRef, PathPrincipals } from '../../../access/api';
+import type { AccessPrincipalRef, HolderChangeRef, HolderChanges } from '../../../access/api';
 import type { FileTreeEntry } from '@bevel-software/platform-shared';
 import {
   accessChangeLines,
@@ -45,29 +45,26 @@ describe('deleteSentence', () => {
  * What the move confirmation says about access. The tester who failed the
  * previous move warning asked for names — "these people would lose the
  * following access, these people would gain the following access" — so these
- * cases are the sentences, not the resolution: the resolver's before and after
- * lists go in, the lines the dialog reads go out.
+ * cases are the sentences, not the resolution: the resolver's own changes
+ * (the server's `prospectiveHolderChanges`, the same answer the agent's
+ * `move_file` gives) go in, the lines the dialog reads go out.
  */
 
 const group = (name: string): AccessPrincipalRef => ({ kind: 'group', name });
 const role = (name: string): AccessPrincipalRef => ({ kind: 'role', name });
 const person = (name: string, email: string): AccessPrincipalRef => ({ kind: 'person', name, email });
 const plugin = (token: string): AccessPrincipalRef => ({ kind: 'plugin', name: token });
+const reads = (p: AccessPrincipalRef): HolderChangeRef => ({ ...p, verb: 'read' });
+const edits = (p: AccessPrincipalRef): HolderChangeRef => ({ ...p, verb: 'write' });
 
 /** The layout is module state shared by the whole file; each test that names one puts the defaults back. */
 afterEach(() => configureKbLayout({ ...DEFAULT_KB_LAYOUT }));
 
-const side = (read: AccessPrincipalRef[], write: AccessPrincipalRef[] = []): PathPrincipals => ({
-  read,
-  write,
-});
+const changes = (lose: HolderChangeRef[], gain: HolderChangeRef[] = []): HolderChanges => ({ lose, gain });
 
 describe('accessChangeLines', () => {
   it('names who loses access, by verb', () => {
-    const change = accessChangeLines(
-      side([group('Engineering')], [group('Engineering')]),
-      side([], []),
-    );
+    const change = accessChangeLines(changes([reads(group('Engineering')), edits(group('Engineering'))]));
 
     expect(change.lose).toEqual([
       'Engineering: can no longer open',
@@ -77,98 +74,85 @@ describe('accessChangeLines', () => {
   });
 
   it('names who gains access, by verb', () => {
-    const change = accessChangeLines(side([], []), side([group('Product')], [group('Product')]));
+    const change = accessChangeLines(changes([], [reads(group('Product')), edits(group('Product'))]));
 
     expect(change.lose).toEqual([]);
     expect(change.gain).toEqual(['Product: can open', 'Product: can edit']);
   });
 
   it('lists both blocks when the move costs one group and serves another', () => {
-    const change = accessChangeLines(side([group('Engineering')]), side([group('Product')]));
+    const change = accessChangeLines(changes([reads(group('Engineering'))], [reads(group('Product'))]));
 
     expect(change.lose).toEqual(['Engineering: can no longer open']);
     expect(change.gain).toEqual(['Product: can open']);
   });
 
-  it('reports no change at all when both sides resolve the same', () => {
-    const both = side([group('Engineering'), person('Ali Raza', 'ali@x.io')], [group('Engineering')]);
-
-    expect(accessChangeLines(both, both)).toEqual({ lose: [], gain: [] });
-  });
-
-  it('is unmoved by the order the resolver happens to list principals in', () => {
-    const before = side([group('Engineering'), group('Product')]);
-    const after = side([group('Product'), group('Engineering')]);
-
-    expect(accessChangeLines(before, after)).toEqual({ lose: [], gain: [] });
+  it('reports no change at all when the resolver found none', () => {
+    expect(accessChangeLines(changes([], []))).toEqual({ lose: [], gain: [] });
   });
 
   it('names a directly granted person, by the name on the grant', () => {
-    const change = accessChangeLines(side([person('Ali Raza', 'ali@x.io')]), side([]));
+    const change = accessChangeLines(changes([reads(person('Ali Raza', 'ali@x.io'))]));
 
     expect(change.lose).toEqual(['Ali Raza: can no longer open']);
   });
 
-  it('matches a person on their address, whatever name each side carries', () => {
+  it('is one person at one address, whatever name each change carries', () => {
+    // The resolver names a person by address; the label follows the first spelling.
     const change = accessChangeLines(
-      side([person('Ali Raza', 'ali@x.io')]),
-      side([person('ali@x.io', 'ALI@x.io')]),
+      changes([reads(person('Ali Raza', 'ali@x.io')), edits(person('ali@x.io', 'ALI@x.io'))]),
     );
 
-    expect(change).toEqual({ lose: [], gain: [] });
+    expect(change.lose).toEqual(['Ali Raza: can no longer open', 'Ali Raza: can no longer edit']);
   });
 
   it('falls back to a nameless person’s address rather than an empty line', () => {
-    const change = accessChangeLines(side([]), side([person('', 'ali@x.io')]));
+    const change = accessChangeLines(changes([], [reads(person('', 'ali@x.io'))]));
 
     expect(change.gain).toEqual(['ali@x.io: can open']);
   });
 
   it('keeps a group and a same-named role apart — they are different principals', () => {
-    const change = accessChangeLines(side([group('Design')]), side([role('Design')]));
+    const change = accessChangeLines(changes([reads(group('Design'))], [reads(role('Design'))]));
 
     expect(change.lose).toEqual(['Design: can no longer open']);
     expect(change.gain).toEqual(['Design: can open']);
   });
 
   it('names a plugin principal as the share sheet does', () => {
-    const change = accessChangeLines(side([]), side([plugin('plugin/GTM/read')]));
+    const change = accessChangeLines(changes([], [reads(plugin('plugin/GTM/read'))]));
 
     expect(change.gain).toEqual(['GTM · readers: can open']);
   });
 
   it('names the built-in everyone role Everyone', () => {
-    const change = accessChangeLines(side([role('everyone')]), side([]));
+    const change = accessChangeLines(changes([reads(role('everyone'))]));
 
     expect(change.lose).toEqual(['Everyone: can no longer open']);
   });
 
-  it('puts one principal’s two verbs together, opening before editing', () => {
+  it('puts one principal’s two verbs together, opening before editing, whatever order the changes came in', () => {
     const change = accessChangeLines(
-      side([group('Engineering'), group('Ops')], [group('Ops')]),
-      side([]),
+      changes([edits(group('Ops')), reads(group('Engineering')), reads(group('Ops'))]),
     );
 
     expect(change.lose).toEqual([
-      'Engineering: can no longer open',
       'Ops: can no longer open',
       'Ops: can no longer edit',
+      'Engineering: can no longer open',
     ]);
   });
 
   it('lists a principal in both blocks when it trades one verb for another', () => {
-    const change = accessChangeLines(
-      side([group('Engineering')], [group('Engineering')]),
-      side([group('Engineering')], []),
-    );
+    const change = accessChangeLines(changes([edits(group('Engineering'))], [reads(group('Engineering'))]));
 
     expect(change.lose).toEqual(['Engineering: can no longer edit']);
-    expect(change.gain).toEqual([]);
+    expect(change.gain).toEqual(['Engineering: can open']);
   });
 
   it('shows six lines and folds the rest into "and N more"', () => {
-    const many = Array.from({ length: 9 }, (_, i) => group(`Team ${i + 1}`));
-    const change = accessChangeLines(side(many), side([]));
+    const many = Array.from({ length: 9 }, (_, i) => reads(group(`Team ${i + 1}`)));
+    const change = accessChangeLines(changes(many));
 
     expect(change.lose).toHaveLength(7);
     expect(change.lose[5]).toBe('Team 6: can no longer open');
@@ -176,16 +160,16 @@ describe('accessChangeLines', () => {
   });
 
   it('caps at six without a count when there are exactly six', () => {
-    const six = Array.from({ length: 6 }, (_, i) => group(`Team ${i + 1}`));
-    const change = accessChangeLines(side([]), side(six));
+    const six = Array.from({ length: 6 }, (_, i) => reads(group(`Team ${i + 1}`)));
+    const change = accessChangeLines(changes([], six));
 
     expect(change.gain).toHaveLength(6);
     expect(change.gain.at(-1)).toBe('Team 6: can open');
   });
 
   it('caps each block on its own', () => {
-    const losers = Array.from({ length: 8 }, (_, i) => group(`Old ${i + 1}`));
-    const change = accessChangeLines(side(losers), side([group('Product')]));
+    const losers = Array.from({ length: 8 }, (_, i) => reads(group(`Old ${i + 1}`)));
+    const change = accessChangeLines(changes(losers, [reads(group('Product'))]));
 
     expect(change.lose.at(-1)).toBe('and 2 more');
     expect(change.gain).toEqual(['Product: can open']);

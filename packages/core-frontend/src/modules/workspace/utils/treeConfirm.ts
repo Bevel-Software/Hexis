@@ -12,7 +12,8 @@ import {
   parsePluginPrincipalToken,
   pluginPrincipalLabel,
   type AccessPrincipalRef,
-  type PathPrincipals,
+  type HolderChangeRef,
+  type HolderChanges,
   type ProspectiveAccess,
 } from '../../access';
 import { KB_ROOT_DIRS } from './fileTree';
@@ -238,44 +239,39 @@ function capped(lines: string[]): string[] {
 }
 
 /**
- * Who loses and who gains access in one move: per verb, the principals
- * present before and absent after, and absent before and present after.
+ * The lines of who loses and who gains access in one move, from the
+ * resolver's own verdicts (`changes`, the server's `prospectiveHolderChanges`
+ * — the same answer the agent's `move_file` gives). Nothing is derived here
+ * from the holder lists: those name grants, so a diff of them misses a
+ * person the destination denies by name and shows a writer leaving a folder
+ * everyone reads as losing `read`.
  *
- * Lines are grouped by principal in the order the lists name them — the
- * resolver's order, collectives before directly granted people — and within a
- * principal, opening before editing. A principal that loses one verb and
- * gains another appears in both blocks, which is what happened.
+ * Lines are grouped by principal in the order the changes name them — the
+ * resolver's order, collectives before people — and within a principal,
+ * opening before editing. A principal that loses one verb and gains another
+ * appears in both blocks, which is what happened.
  */
-export function accessChangeLines(before: PathPrincipals, after: PathPrincipals): AccessChange {
+export function accessChangeLines(changes: HolderChanges): AccessChange {
   const lose: string[] = [];
   const gain: string[] = [];
-  // First-seen order over every list, so a principal's lines sit together
+  // First-seen order over both lists, so a principal's lines sit together
   // wherever the verb that introduced it came from.
   const order: AccessPrincipalRef[] = [];
   const seen = new Set<string>();
-  for (const side of [before, after]) {
-    for (const verb of ACCESS_VERBS) {
-      for (const principal of side[verb]) {
-        const key = principalKey(principal);
-        if (seen.has(key)) continue;
-        seen.add(key);
-        order.push(principal);
-      }
-    }
+  for (const change of [...changes.lose, ...changes.gain]) {
+    const key = principalKey(change);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    order.push(change);
   }
-  const keysOf = (list: AccessPrincipalRef[]) => new Set(list.map(principalKey));
-  const sides = {
-    before: { read: keysOf(before.read), write: keysOf(before.write) },
-    after: { read: keysOf(after.read), write: keysOf(after.write) },
-  };
+  const has = (list: HolderChangeRef[], key: string, verb: 'read' | 'write') =>
+    list.some((c) => c.verb === verb && principalKey(c) === key);
   for (const principal of order) {
     const key = principalKey(principal);
     const label = principalLabel(principal);
     for (const verb of ACCESS_VERBS) {
-      const had = sides.before[verb].has(key);
-      const has = sides.after[verb].has(key);
-      if (had && !has) lose.push(`${label}: can no longer ${VERB_WORD[verb]}`);
-      if (!had && has) gain.push(`${label}: can ${VERB_WORD[verb]}`);
+      if (has(changes.lose, key, verb)) lose.push(`${label}: can no longer ${VERB_WORD[verb]}`);
+      if (has(changes.gain, key, verb)) gain.push(`${label}: can ${VERB_WORD[verb]}`);
     }
   }
   return { lose: capped(lose), gain: capped(gain) };
@@ -283,7 +279,7 @@ export function accessChangeLines(before: PathPrincipals, after: PathPrincipals)
 
 /** {@link accessChangeLines} over a whole prospective-access answer. */
 export function accessChangeOf(access: ProspectiveAccess): AccessChange {
-  return accessChangeLines(access.before, access.after);
+  return accessChangeLines(access.changes);
 }
 
 /**
