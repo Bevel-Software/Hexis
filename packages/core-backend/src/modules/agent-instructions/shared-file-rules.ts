@@ -277,9 +277,8 @@ function defaultBranchSentence(defaultBranch: string): string {
   const name = defaultBranch.trim();
   if (!name) return '';
   return (
-    `This knowledge base's default branch is \`${name}\`: the branch people read, the one a tool with an ` +
-    'optional `branch` runs on when you leave it out, and the usual target of a change request — pass it as ' +
-    '`branch` unless you are working on a draft.'
+    `This knowledge base's default branch is \`${name}\`: the branch people read and the usual target of a ` +
+    'change request — pass it as `branch` unless you are working on a draft.'
   );
 }
 
