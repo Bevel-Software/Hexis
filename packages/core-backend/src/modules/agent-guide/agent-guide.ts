@@ -41,6 +41,7 @@ import {
   resolveKbLayout,
   type KbLayout,
 } from '@bevel-software/platform-shared';
+import { ONBOARDING_GUIDE_SECTION_ID } from '@bevel-software/platform-mcp-core';
 import { agentGuideDir } from '../../assets.js';
 import { sharedFileRulesSection } from '../agent-instructions/index.js';
 
@@ -116,6 +117,8 @@ export const WHOLE_GUIDE_SECTION = 'all';
  */
 export const CORE_SECTION_IDS: readonly string[] = Object.freeze([
   START_HERE_SECTION_ID,
+  // Named in mcp-core, where the platform's `/onboard` prompt points at it.
+  ONBOARDING_GUIDE_SECTION_ID,
   'how-agents-find-things',
   'for-git-users',
   'glossary',
