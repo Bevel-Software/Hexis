@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { LocalFilesystem } from '@mastra/core/workspace';
-import type { IWorkflowService } from '@bevel-software/platform-shared';
+import type { IVersionControlService } from '@bevel-software/platform-shared';
 import { LockingFilesystem, ReadOnlyFilesystem } from '../kb-fs/index.js';
 import type { WriteValidator } from '../kb-fs/index.js';
 import {
@@ -13,7 +13,7 @@ import type { WorkspaceService } from '../workspace/index.js';
 import { isAbsence } from '../../shared/fs.contract.js';
 import { assertBranchProvided } from '../../shared/domain-errors.js';
 import { branchForWorkspaceId } from '../../shared/workspace-id.js';
-import type { WorkflowEventBus } from '../workflow/index.js';
+import type { VersionControlEventBus } from '../version-control/index.js';
 import type { AuthService } from '../auth/index.js';
 import { ToolError, type ToolContext } from './tool.contract.js';
 import type { ToolAuth } from '../tool-auth/index.js';
@@ -22,8 +22,8 @@ import { resolveConnectionScope, type IAgentScopeResolver } from '../agent-scope
 export interface ToolContextDeps {
   authService: AuthService;
   workspaceService: WorkspaceService;
-  workflowService: IWorkflowService;
-  events: WorkflowEventBus;
+  versionControlService: IVersionControlService;
+  events: VersionControlEventBus;
   /** KB dir name — used to recognise (and validate) writes to `roles.yaml`. */
   kbDirName: string;
   /**
@@ -139,7 +139,7 @@ export function createToolContextResolver(deps: ToolContextDeps): ResolveToolCon
           ? new LockingFilesystem(
               { basePath, contained: true },
               {
-                workflow: deps.workflowService,
+                versionControl: deps.versionControlService,
                 workspaceId,
                 branch: branchForWorkspaceId(workspaceId),
                 user,
@@ -178,7 +178,7 @@ export function createToolContextResolver(deps: ToolContextDeps): ResolveToolCon
       focusedBranch: auth.source === 'internal' ? auth.focusedBranch : undefined,
       abortSignal,
       workspaceService: deps.workspaceService,
-      workflowService: deps.workflowService,
+      versionControlService: deps.versionControlService,
       events: deps.events,
       getFilesystem,
       getWriteValidator,

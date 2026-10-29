@@ -5,9 +5,9 @@ import path from 'node:path';
 import os from 'node:os';
 
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import type { WorkflowService } from '../../workflow/workflow.service.js';
-import type { WorkflowEventBus } from '../../workflow/event-bus.js';
-import type { FileTreeEntry, WorkflowEventPayload } from '@bevel-software/platform-shared';
+import type { VersionControlService } from '../../version-control/version-control.service.js';
+import type { VersionControlEventBus } from '../../version-control/event-bus.js';
+import type { FileTreeEntry, VersionControlEventPayload } from '@bevel-software/platform-shared';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { AccessControlService } from '../access-control.service.js';
 import { RolesAdminService } from '../roles-admin.service.js';
@@ -80,7 +80,7 @@ function stubWorkspace(workspaceDir: string): WorkspaceService {
 }
 
 /**
- * WorkflowService stub backed by the real temp repo. Models the two write paths
+ * VersionControlService stub backed by the real temp repo. Models the two write paths
  * the service uses:
  *   - Single-file ops go through a real LockingFilesystem, which calls
  *     acquireLock → (LocalFilesystem writes to disk) → releaseLock. We track the
@@ -91,7 +91,7 @@ function stubWorkspace(workspaceDir: string): WorkspaceService {
  *     (non-deferred) atomic write straight to the repo. Records commits so tests
  *     can assert one-per-op.
  */
-function stubWorkflow() {
+function stubVersionControl() {
   const commits: { summary: string }[] = [];
   const resets: string[] = [];
   /** Per-path lock rows with STRICT acquire — mirrors FileLockService: a
@@ -133,19 +133,19 @@ function stubWorkflow() {
     resetToRemote: async (_ws: string, branch: string) => {
       resets.push(branch);
     },
-  } as unknown as WorkflowService;
+  } as unknown as VersionControlService;
   return { svc, commits, resets };
 }
 
 /** Event bus stub that records every emitted payload for assertions. */
 function stubEventBus() {
-  const events: WorkflowEventPayload[] = [];
+  const events: VersionControlEventPayload[] = [];
   const bus = {
-    emit: (payload: WorkflowEventPayload) => {
+    emit: (payload: VersionControlEventPayload) => {
       events.push(payload);
       return {} as unknown;
     },
-  } as unknown as WorkflowEventBus;
+  } as unknown as VersionControlEventBus;
   return { bus, events };
 }
 
@@ -154,7 +154,7 @@ describe('RolesAdminService', () => {
   let repo: string;
   let access: AccessControlService;
   let ws: WorkspaceService;
-  let workflow: ReturnType<typeof stubWorkflow>;
+  let versionControl: ReturnType<typeof stubVersionControl>;
   let bus: ReturnType<typeof stubEventBus>;
   let svc: RolesAdminService;
 
@@ -169,9 +169,9 @@ describe('RolesAdminService', () => {
     await write(repo, 'roles.yaml', ROLES);
     ws = stubWorkspace(workspaceDir);
     access = new AccessControlService(ws, KB, new NodeFs());
-    workflow = stubWorkflow();
+    versionControl = stubVersionControl();
     bus = stubEventBus();
-    svc = new RolesAdminService(ws, workflow.svc, access, new NodeFs(), KB, () => DEFAULT_BRANCH, bus.bus, [
+    svc = new RolesAdminService(ws, versionControl.svc, access, new NodeFs(), KB, () => DEFAULT_BRANCH, bus.bus, [
       'recovery-admin@example.com',
     ]);
   });
@@ -193,7 +193,7 @@ describe('RolesAdminService', () => {
     // `DEFAULT_BRANCH` and froze it — every roles route then failed branch
     // validation with `Invalid branch name "": empty name` until a restart.
     let branch = '';
-    const late = new RolesAdminService(ws, workflow.svc, access, new NodeFs(), KB, () => branch, bus.bus);
+    const late = new RolesAdminService(ws, versionControl.svc, access, new NodeFs(), KB, () => branch, bus.bus);
     branch = DEFAULT_BRANCH;
     const roster = await late.getRoster(ADMIN.email);
     expect(roster.map((r) => r.canonical)).toEqual(['admin', 'sales']);
@@ -225,7 +225,7 @@ describe('RolesAdminService', () => {
 
     // Recovery syncs the clone to origin's default branch BEFORE writing, so the
     // restoring commit fast-forwards on push instead of diverging.
-    expect(workflow.resets).toEqual([DEFAULT_BRANCH]);
+    expect(versionControl.resets).toEqual([DEFAULT_BRANCH]);
     // Corrupted bytes parked verbatim in old-roles.yaml.
     expect(await fs.readFile(path.join(repo, 'old-roles.yaml'), 'utf-8')).toBe(corrupt);
     // roles.yaml restored to a parseable default with an Admin role.
@@ -257,7 +257,7 @@ describe('RolesAdminService', () => {
     const corrupt = 'roles:\n  Admin:\n    - a@x.eu\n  Admin:\n    - b@x.eu\n';
     await write(repo, 'roles.yaml', corrupt);
     access.invalidate(WS);
-    const adminless = new RolesAdminService(ws, workflow.svc, access, new NodeFs(), KB, () => DEFAULT_BRANCH, bus.bus);
+    const adminless = new RolesAdminService(ws, versionControl.svc, access, new NodeFs(), KB, () => DEFAULT_BRANCH, bus.bus);
     // 409, not 500: the route helper hides >=500 bodies behind a generic
     // message, and this break-glass refusal must reach the operator verbatim.
     await expect(adminless.recover(ADMIN)).rejects.toMatchObject({
@@ -298,9 +298,9 @@ describe('RolesAdminService', () => {
   it('addMember persists + is idempotent', async () => {
     await svc.addMember(ADMIN, 'sales', 'New@example.com');
     expect(await readRoles()).toContain('new@example.com');
-    const before = workflow.commits.length;
+    const before = versionControl.commits.length;
     await svc.addMember(ADMIN, 'sales', 'new@example.com'); // duplicate → no commit
-    expect(workflow.commits.length).toBe(before);
+    expect(versionControl.commits.length).toBe(before);
   });
 
   it('removeMember refuses to empty the Admin role', async () => {
@@ -359,7 +359,7 @@ describe('RolesAdminService', () => {
     // — no commit, roles.yaml byte-for-byte unchanged, admin status intact. This
     // catches a regression that would write/commit before validating.
     const before = await readRoles();
-    const commitsBefore = workflow.commits.length;
+    const commitsBefore = versionControl.commits.length;
     const realValidate = access.validateRolesYaml.bind(access);
     access.validateRolesYaml = () => ({ ok: false, errors: ['forced parse failure'] });
     try {
@@ -367,21 +367,21 @@ describe('RolesAdminService', () => {
     } finally {
       access.validateRolesYaml = realValidate;
     }
-    expect(workflow.commits.length).toBe(commitsBefore); // nothing committed
+    expect(versionControl.commits.length).toBe(commitsBefore); // nothing committed
     expect(await readRoles()).toBe(before); // file untouched
     expect(await access.canWrite(WS, 'razvan@bevel.software', 'roles.yaml')).toBe(true);
   });
 
   it('a post-commit push failure does NOT revert the landed edit (saved; retried later)', async () => {
-    // workflowService.commitChanges throwing PushNeedsAgentResolutionError
+    // versionControlService.commitChanges throwing PushNeedsAgentResolutionError
     // means the COMMIT landed and only the push needs help. The old twins
     // restored pre-edit bytes here — publishing a compensating revert of a
     // landed commit. The shared helper must keep the new bytes and surface
     // the typed 409 as-is.
-    const failing = workflow.svc as unknown as {
+    const failing = versionControl.svc as unknown as {
       commitChanges: (...args: unknown[]) => Promise<unknown>;
     };
-    const realCommit = failing.commitChanges.bind(workflow.svc);
+    const realCommit = failing.commitChanges.bind(versionControl.svc);
     failing.commitChanges = async (...args: unknown[]) => {
       await realCommit(...args); // the commit records — it "landed"
       throw new PushNeedsAgentResolutionError(DEFAULT_BRANCH, 'roles.yaml', 'rejected', 'conflict');
@@ -401,7 +401,7 @@ describe('RolesAdminService', () => {
   it('concurrent edit is serialized — a mutation 409s while another admin holds the lock', async () => {
     // Another admin is mid-edit (holds the roles.yaml lock). The getLock
     // pre-check sees a different holder and refuses with a friendly 409.
-    await workflow.svc.acquireLock(WS, DEFAULT_BRANCH, `${KB}/roles.yaml`, OTHER_ADMIN);
+    await versionControl.svc.acquireLock(WS, DEFAULT_BRANCH, `${KB}/roles.yaml`, OTHER_ADMIN);
     await expect(svc.addMember(ADMIN, 'sales', 'x@example.com')).rejects.toMatchObject({ status: 409 });
   });
 
@@ -571,7 +571,7 @@ describe('roster referencedBy under group shadowing', () => {
     const ws = stubWorkspace(workspaceDir);
     svc = new RolesAdminService(
       ws,
-      stubWorkflow().svc,
+      stubVersionControl().svc,
       new AccessControlService(ws, KB, new NodeFs()),
       new NodeFs(),
       KB,
@@ -623,13 +623,13 @@ describe('Admin fixed members — the deployment admin', () => {
   let root: string;
   let repo: string;
   let ws: WorkspaceService;
-  let workflow: ReturnType<typeof stubWorkflow>;
+  let versionControl: ReturnType<typeof stubVersionControl>;
 
   /** Service whose configured deployment admins are `admins`. */
   function serviceWith(admins: readonly string[]): RolesAdminService {
     return new RolesAdminService(
       ws,
-      workflow.svc,
+      versionControl.svc,
       new AccessControlService(ws, KB, new NodeFs()),
       new NodeFs(),
       KB,
@@ -645,7 +645,7 @@ describe('Admin fixed members — the deployment admin', () => {
     repo = path.join(workspaceDir, KB);
     await write(repo, 'roles.yaml', ROLES);
     ws = stubWorkspace(workspaceDir);
-    workflow = stubWorkflow();
+    versionControl = stubVersionControl();
   });
 
   afterEach(async () => {

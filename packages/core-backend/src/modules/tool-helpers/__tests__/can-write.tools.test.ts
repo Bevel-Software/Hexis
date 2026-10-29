@@ -14,7 +14,7 @@ import { ToolError, type ToolContext } from '../tool.contract.js';
 import type { ToolAuth } from '../../tool-auth/tool-auth.middleware.js';
 import { registerWorkspaceTools } from '../../workspace/workspace.tools.js';
 import { RoutineWritePolicyService } from '../../workspace/routine-write-policy.js';
-import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
+import { VersionControlHooks } from '../../version-control/version-control-hooks.js';
 import { ToolDescriptionNotes } from '../../workspace/agent-access.gate.js';
 import { SpillStore } from '../../workspace/spill-store.js';
 import { DocExtractService, WorkerDocumentExtractor } from '../../workspace/index.js';
@@ -98,7 +98,7 @@ let readsNoted: { branch: string; wsPath: string }[] = [];
 let listingFails: Error | null = null;
 /** The refs the skill's committed files were listed at, in order. */
 let listedAt: string[] = [];
-const hooks = new WorkflowHooks();
+const hooks = new VersionControlHooks();
 hooks.onAgentRead(async ({ branch, wsPath = '' }) => {
   readsNoted.push({ branch, wsPath });
   if (refuseRead?.(branch, wsPath)) throw new ToolError('Not in this conversation.', 403);
@@ -171,7 +171,7 @@ beforeAll(async () => {
     sessionId,
     abortSignal: signal,
     workspaceService: workspaceService as never,
-    workflowService: {} as never,
+    versionControlService: {} as never,
     events: {} as never,
     getFilesystem: async (branch: string) => new LocalFilesystem({ basePath: wsDir(branch), contained: true }),
   });

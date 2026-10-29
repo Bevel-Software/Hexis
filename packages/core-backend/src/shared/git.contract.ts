@@ -1,6 +1,6 @@
 /**
  * The contract for RUNNING git. Nothing here spawns anything — the one
- * implementation is `NodeGitRunner` in `modules/workflow/git`, wired once by
+ * implementation is `NodeGitRunner` in `modules/version-control/git`, wired once by
  * the composition root and injected into every module that shells out to git,
  * so no module carries an `execFile('git', …)` of its own.
  *

@@ -1,6 +1,6 @@
 /**
  * Read-before-write: the gate every change passes on its way to the lock
- * (`WorkflowService.acquireLock`), on every branch. Contract and rationale in
+ * (`VersionControlService.acquireLock`), on every branch. Contract and rationale in
  * `access-model/change-gate.ts`; this is the service that answers.
  *
  * The verdict is taken against the WORKING TREE, not `HEAD` as the write gate

@@ -49,19 +49,19 @@ import path from 'node:path';
 import { logger } from '../../shared/logging.js';
 
 import { type WriteValidator, LockingFilesystem } from '../kb-fs/index.js';
-import type { WorkflowDomainError } from '../../shared/domain-errors.js';
+import type { VersionControlDomainError } from '../../shared/domain-errors.js';
 import { PushNeedsAgentResolutionError } from '../../shared/domain-errors.js';
 import { isAbsence } from '../../shared/fs.contract.js';
-import type { AuthUser, IWorkspaceService, IWorkflowService } from '@bevel-software/platform-shared';
+import type { AuthUser, IWorkspaceService, IVersionControlService } from '@bevel-software/platform-shared';
 
 export interface LockedCommitDeps {
   workspaceService: IWorkspaceService;
-  workflowService: IWorkflowService;
+  versionControlService: IVersionControlService;
   kbDirName: string;
   /** Live-binding thunk — DEFAULT_BRANCH stays empty until setup. */
   defaultBranchOf: () => string;
   /** Domain-error constructor (RolesAdminError / GroupsAdminError). */
-  makeError: (message: string, status: number, payload?: Record<string, unknown>) => WorkflowDomainError;
+  makeError: (message: string, status: number, payload?: Record<string, unknown>) => VersionControlDomainError;
   /** Log prefix, e.g. 'roles-admin' / 'groups-admin'. */
   logTag: string;
   /** Contention wording: what is "being edited by <holder>". */
@@ -133,7 +133,7 @@ export class AdminLockedCommits {
     return new LockingFilesystem(
       { basePath, contained: true },
       {
-        workflow: this.deps.workflowService,
+        versionControl: this.deps.versionControlService,
         workspaceId,
         branch: this.defaultBranch,
         user: actor,
@@ -171,7 +171,7 @@ export class AdminLockedCommits {
    * module doc for the release semantics.
    *
    * `opts.coordinationFiles` names files locked ONLY to serialize with their
-   * writer — `fn` never writes them. They're acquired with the workflow
+   * writer — `fn` never writes them. They're acquired with the version-control
    * service's coordination flag (a pure mutex that skips the per-path write
    * gate — required for machine-owned files like `synced-groups.yaml`, which
    * a human actor may not, and need not, write) and always released with
@@ -197,7 +197,7 @@ export class AdminLockedCommits {
     let unrestored: Set<string> | null = null;
     try {
       for (const p of paths) {
-        const res = await this.deps.workflowService.acquireLock(
+        const res = await this.deps.versionControlService.acquireLock(
           workspaceId,
           this.defaultBranch,
           p,
@@ -248,13 +248,13 @@ export class AdminLockedCommits {
             // pointless commit whose enqueue failure strands a known-clean
             // lock until TTL. Or known-partial bytes (restore failed —
             // discarding to HEAD beats committing them).
-            await this.deps.workflowService.releaseLockNoCommit(workspaceId, this.defaultBranch, h, actor);
+            await this.deps.versionControlService.releaseLockNoCommit(workspaceId, this.defaultBranch, h, actor);
           } else {
             // Push-retry (the enqueued commit retries the share), the
             // restored-failure path, and any held path the batch never
             // committed (commit-on-release: a prior holder's still-queued
             // work must be preserved, never discarded).
-            await this.deps.workflowService.releaseLock(workspaceId, this.defaultBranch, h, actor);
+            await this.deps.versionControlService.releaseLock(workspaceId, this.defaultBranch, h, actor);
           }
         } catch (releaseErr) {
           logger(this.deps.logTag).warn(
@@ -278,7 +278,7 @@ export class AdminLockedCommits {
     files: LockedWrite[],
     summary: string,
   ): Promise<void> {
-    const { workspaceService, workflowService, logTag } = this.deps;
+    const { workspaceService, versionControlService, logTag } = this.deps;
     try {
       for (const f of files) {
         if (f.content === null) {
@@ -293,7 +293,7 @@ export class AdminLockedCommits {
           await workspaceService.writeFile(workspaceId, this.wsRel(f.repoRel), f.content);
         }
       }
-      await workflowService.commitChanges(workspaceId, actor, summary, files.map((f) => this.wsRel(f.repoRel)));
+      await versionControlService.commitChanges(workspaceId, actor, summary, files.map((f) => this.wsRel(f.repoRel)));
       // Commit landed AND pushed — the tree at these paths is clean. Mark
       // them so withFileLocks releases them WITHOUT enqueueing a release
       // commit (see the module doc — an enqueue failure would strand the

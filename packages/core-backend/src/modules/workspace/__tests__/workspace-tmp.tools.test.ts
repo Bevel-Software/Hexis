@@ -22,7 +22,7 @@ import { PathNotFoundError } from '../../../shared/domain-errors.js';
 import { registerWorkspaceTools } from '../workspace.tools.js';
 import { RipgrepPatternMatcher } from '../ripgrep-search.js';
 import { RoutineWritePolicyService } from '../routine-write-policy.js';
-import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
+import { VersionControlHooks } from '../../version-control/version-control-hooks.js';
 import { ToolDescriptionNotes } from '../agent-access.gate.js';
 import { SpillStore } from '../spill-store.js';
 import { DocExtractService } from '../file-readers/doc-extract.service.js';
@@ -210,7 +210,7 @@ async function start(): Promise<string> {
       getWorkspacePath: async (id: string) => join(root, id),
       hasBootstrappedWorkspace: async () => false,
     } as never,
-    workflowService: {} as never,
+    versionControlService: {} as never,
     events: {} as never,
     getFilesystem: async (branch: string) => {
       let fs = filesystems.get(branch);
@@ -237,7 +237,7 @@ async function start(): Promise<string> {
     new DocExtractService(docCacheDir, extractor),
     access,
     testKbContext({ kbDirName: KB_DIR }),
-    { recoveryBotEmail: 'bot@x', hooks: new WorkflowHooks(), notes: new ToolDescriptionNotes() },
+    { recoveryBotEmail: 'bot@x', hooks: new VersionControlHooks(), notes: new ToolDescriptionNotes() },
     new RoutineWritePolicyService(),
     {} as never,
     undefined,

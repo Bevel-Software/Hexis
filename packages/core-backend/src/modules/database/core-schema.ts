@@ -323,7 +323,7 @@ export const fileLocks = pgTable('file_locks', {
   holderName: encryptedText('holder_name').notNull(),
   // How the lock was acquired. 'edit' (the default) is a normal write hold —
   // the holder is editing and the release publishes their bytes.
-  // 'coordination' is a pure-mutex hold (see IWorkflowService.acquireLock)
+  // 'coordination' is a pure-mutex hold (see IVersionControlService.acquireLock)
   // that grants NO write authority. Persisted on the row — not inferred at
   // release time — so the write/checkpoint/commit-enqueue paths can refuse
   // to treat a coordination hold as write possession for as long as the row

@@ -11,7 +11,7 @@ import { createToolContextResolver } from '../tool-context.js';
 import { createToolHandlerFactory } from '../tool-handler.js';
 import { registerWorkspaceTools } from '../../workspace/workspace.tools.js';
 import { RoutineWritePolicyService } from '../../workspace/routine-write-policy.js';
-import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
+import { VersionControlHooks } from '../../version-control/version-control-hooks.js';
 import { ToolDescriptionNotes } from '../../workspace/agent-access.gate.js';
 import { SpillStore } from '../../workspace/spill-store.js';
 import { DocExtractService, WorkerDocumentExtractor } from '../../workspace/index.js';
@@ -44,7 +44,7 @@ async function start(): Promise<string> {
     getOrCreateForUser: async () => ({ id: WS }),
     getWorkspacePath: async () => root,
   } as never;
-  const workflowService = {
+  const versionControlService = {
     acquireLock: async () => ({ acquired: true, lock: { holderUserId: 'user-A', holderName: 'Admin' } }),
     releaseLock: async () => null,
     releaseLockNoCommit: async () => undefined,
@@ -53,7 +53,7 @@ async function start(): Promise<string> {
   const resolve = createToolContextResolver({
     authService,
     workspaceService,
-    workflowService,
+    versionControlService,
     events: {} as never,
     kbDirName: KB,
     creatorAccess: { planForCreate: async () => null, grantInExtractedFile: async () => null, noteAccessFileWritten: () => {} },
@@ -77,7 +77,7 @@ async function start(): Promise<string> {
   registerWorkspaceTools(registry, router, toolAuth, createToolHandlerFactory(resolve), new SpillStore(path.join(os.tmpdir(), 'bevel-test-spills')), new DocExtractService(docCache, new WorkerDocumentExtractor()), allowAll, testKbContext({ kbDirName: KB }), {
     // No hook registered: the agent-access gate refuses nothing here.
     recoveryBotEmail: 'recovery-bot@bevel.local',
-    hooks: new WorkflowHooks(),
+    hooks: new VersionControlHooks(),
     notes: new ToolDescriptionNotes(),
   }, new RoutineWritePolicyService(), {} as never);
   const app = express();

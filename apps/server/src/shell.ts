@@ -21,7 +21,7 @@ export type ShellGraph = Pick<ShutdownDeps, 'commitWorker' | 'db'> &
       | 'tmpSweeper'
       | 'patternMatcher'
       | 'documentExtractor'
-      | 'workflowService'
+      | 'versionControlService'
       | 'startupRetry'
     >
   >;

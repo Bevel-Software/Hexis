@@ -2,7 +2,7 @@ import type { ISessionSink } from '../modules/workspace/session-sink.js';
 import type {
   ISystemNoticeSink,
   RecoveryAgentRunner,
-} from '../modules/workflow/pending-commits.worker.js';
+} from '../modules/version-control/pending-commits.worker.js';
 import type { ILlmUsageMeter } from '../modules/tool-auth/llm-usage-meter.js';
 import type { AuthProviderPlugin } from '../modules/auth/auth.routes.js';
 import type { IErasureParticipant } from '../modules/auth/account-erasure.service.js';
@@ -65,9 +65,9 @@ export interface AgentScopeCollaborators {
  *   `authProviders` array) after construction, before the server is built.
  *
  * (Commit-time KB validation and the agent read/write hooks are NOT ports:
- * they are workflow lifecycle HOOKS the enterprise root registers on
- * `workflowService.hooks` after construction — see
- * `modules/workflow/workflow-hooks.ts`.)
+ * they are version-control lifecycle HOOKS the enterprise root registers on
+ * `versionControlService.hooks` after construction — see
+ * `modules/version-control/version-control-hooks.ts`.)
  */
 export interface CorePorts {
   /**

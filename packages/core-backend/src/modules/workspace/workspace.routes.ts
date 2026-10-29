@@ -7,7 +7,7 @@ import { isAbsence, type ITreeWalker } from '../../shared/fs.contract.js';
 import { printable } from '../../shared/printable.js';
 import type { IAdminAccessService } from '../admin/index.js';
 import express from 'express';
-import type { AuthUser, IWorkflowService } from '@bevel-software/platform-shared';
+import type { AuthUser, IVersionControlService } from '@bevel-software/platform-shared';
 import {
   KNOWLEDGE_DIR,
   canonicalRelativePath,
@@ -29,8 +29,8 @@ import type { AuthService } from '../auth/index.js';
 import type { IAccessControl } from '../access/index.js';
 import { canReadWorkspacePath, resolveReadableMap, toKbRelative, isRolesYamlPath, assertRolesYamlParsable } from '../access-model/index.js';
 import type { ICreatorAccess, IChangeReadGate } from '../access-model/index.js';
-import type { WorkflowEventBus } from '../workflow/index.js';
-import { PathTraversalError, WorkflowDomainError } from '../../shared/domain-errors.js';
+import type { VersionControlEventBus } from '../version-control/index.js';
+import { PathTraversalError, VersionControlDomainError } from '../../shared/domain-errors.js';
 import { domainErrorBody } from '../../shared/http-errors.js';
 import { assertWithinDirectory } from '../../shared/path-containment.js';
 import { normalizeWorkspacePath } from '../kb-fs/index.js';
@@ -52,7 +52,7 @@ import { OCTET_STREAM, rawExtensionOf, rawMimeFor } from './file-readers/raw-mim
  *
  * CANONICAL, because the mutating verbs on this surface coordinate on the
  * path: `PUT` takes an in-process write turn on it, all of them take the
- * workflow lock row keyed by it, and the bytes live at it. A save spelled
+ * version-control lock row keyed by it, and the bytes live at it. A save spelled
  * `x/a.md` and a delete spelled `./x//a.md` would otherwise take two
  * different lock rows for one file and interleave. See
  * `canonicalRelativePath` for what it refuses to touch.
@@ -72,7 +72,7 @@ function requestPath(value: unknown): string | null {
  * Every file-mutating route on this surface — `PUT /file`, `DELETE /file`,
  * `PATCH /file` (move), `POST /directory`, `POST /upload`, `POST /unzip` —
  * routes its write through `withLock(path, op)`: acquire the per-file
- * workflow lock, perform the op, then release. The release commits the
+ * version-control lock, perform the op, then release. The release commits the
  * file as a one-file change attributed to the user and pushes it to origin,
  * exactly like the lock-aware filesystem the agent writes through. There
  * is no separate "share" step; save and share are fused.
@@ -80,8 +80,8 @@ function requestPath(value: unknown): string | null {
 export function createWorkspaceRoutes(
   workspaceService: WorkspaceService,
   authService: AuthService,
-  workflowService: IWorkflowService,
-  eventBus: WorkflowEventBus,
+  versionControlService: IVersionControlService,
+  eventBus: VersionControlEventBus,
   accessControl: IAccessControl,
   kb: KbContext,
   creatorAccess: ICreatorAccess,
@@ -164,7 +164,7 @@ export function createWorkspaceRoutes(
 
   /**
    * Resolve `req.userId` to the full `AuthUser` record. Mirrors the helper
-   * in `workflow.routes.ts` so file-mutation routes can pass the user into
+   * in `version-control.routes.ts` so file-mutation routes can pass the user into
    * `acquireLock`/`releaseLock` (which need name + email for commit
    * attribution). Returns `null` and writes the response if unauthenticated.
    */
@@ -228,7 +228,7 @@ export function createWorkspaceRoutes(
   }
 
   /**
-   * Acquire the workflow lock for `(workspaceId, branch, targetPath)`, run
+   * Acquire the version-control lock for `(workspaceId, branch, targetPath)`, run
    * `op`, then release. Release commits + pushes the file as a one-file
    * change attributed to `user` — same pipeline the lock-aware filesystem
    * uses for the agent. Contention surfaces immediately as a 409-style
@@ -261,7 +261,7 @@ export function createWorkspaceRoutes(
        * platform file back, coming from `source`. Passed straight to
        * `acquireLock`, which VERIFIES both halves — that the move is a restore
        * at all, and that this caller may make it — rather than believing
-       * either. See the `IWorkflowService.acquireLock` contract.
+       * either. See the `IVersionControlService.acquireLock` contract.
        */
       platformRestore?: { source: string };
     },
@@ -277,7 +277,7 @@ export function createWorkspaceRoutes(
     // run the op without touching the lock and let the caller release
     // it on their own schedule (which is what fuses commit + push into
     // one atomic step the user explicitly triggered).
-    const existing = await workflowService.getLock(workspaceId, branch, targetPath);
+    const existing = await versionControlService.getLock(workspaceId, branch, targetPath);
     if (existing && existing.holderUserId === user.id) {
       const result = await op();
       // Disk write landed but no commit yet (caller will release later,
@@ -300,7 +300,7 @@ export function createWorkspaceRoutes(
       eventBus.emit({ kind: 'fs-tree-changed', workspaceId, branch });
       return result;
     }
-    const acquired = await workflowService.acquireLock(workspaceId, branch, targetPath, user, {
+    const acquired = await versionControlService.acquireLock(workspaceId, branch, targetPath, user, {
       platformRestore: options?.platformRestore,
     });
     if (!acquired.acquired) {
@@ -343,9 +343,9 @@ export function createWorkspaceRoutes(
       const untouched = wroteNothing(err);
       try {
         if (untouched) {
-          await workflowService.releaseLockUntouched(workspaceId, branch, targetPath, user);
+          await versionControlService.releaseLockUntouched(workspaceId, branch, targetPath, user);
         } else {
-          await workflowService.releaseLockNoCommit(workspaceId, branch, targetPath, user);
+          await versionControlService.releaseLockNoCommit(workspaceId, branch, targetPath, user);
         }
       } catch (releaseErr) {
         log.warn(
@@ -361,7 +361,7 @@ export function createWorkspaceRoutes(
       // explicit branch makes the intent obvious to readers.
       throw new Error('unreachable: opSucceeded false after try');
     }
-    await workflowService.releaseLock(workspaceId, branch, targetPath, user);
+    await versionControlService.releaseLock(workspaceId, branch, targetPath, user);
     // Signal sidebar / explorer to refresh even when no open tab matched
     // the changed path (e.g. someone else just created a new file).
     // `releaseLock` already fires `file-changed` for the path, but
@@ -427,14 +427,14 @@ export function createWorkspaceRoutes(
   /**
    * Map any thrown error to an HTTP response. Centralises the response
    * shape so each route handler stays focused on its own logic.
-   *   - `WorkflowDomainError` → its `.status` + `.payload` (a traversal is a
+   *   - `VersionControlDomainError` → its `.status` + `.payload` (a traversal is a
    *     403, an invalid path a 400, an unreadable archive a 422 — each by
    *     its TYPE; this surface used to recognise all three by their message)
    *   - Anything else with a `.status` → that status
    *   - Default → 500
    */
   function sendError(res: express.Response, err: unknown): void {
-    if (err instanceof WorkflowDomainError) {
+    if (err instanceof VersionControlDomainError) {
       res.status(err.status).json(domainErrorBody(err));
       return;
     }
@@ -479,7 +479,7 @@ export function createWorkspaceRoutes(
       // A typed domain answer — a branch origin no longer has (410), a name
       // git refuses (400) — is the client's to act on, not a failure of ours;
       // it keeps its status so the browser can say what happened.
-      if (error instanceof WorkflowDomainError) {
+      if (error instanceof VersionControlDomainError) {
         sendError(res, error);
         return;
       }
@@ -564,7 +564,7 @@ export function createWorkspaceRoutes(
    * `hasRole` can throw `AccessConfigError` when `roles.yaml` / `access.md`
    * fails to load (missing role refs, malformed YAML). Without a catch the
    * async rejection bubbles past Express and the request hangs. Route it
-   * through `sendError` so the rich `WorkflowDomainError` payload (status +
+   * through `sendError` so the rich `VersionControlDomainError` payload (status +
    * `accessConfigErrors`) surfaces to the caller — same shape the
    * `/access/has-role` endpoint returns.
    */
@@ -818,14 +818,14 @@ export function createWorkspaceRoutes(
       if (ref === null) {
         buffer = await workspaceService.readFileBinary(id, filePath);
       } else {
-        const at = await workflowService.fileBytesAtChange(id, filePath, ref, side);
+        const at = await versionControlService.fileBytesAtChange(id, filePath, ref, side);
         // Nothing at that path on that side of the save — for `before`, also
         // how a root commit answers, since it has no parent to read.
         if (at === null) {
           res.status(404).json({ error: 'File not found' });
           return;
         }
-        // `IWorkflowService` is isomorphic, so the bytes arrive typed as a
+        // `IVersionControlService` is isomorphic, so the bytes arrive typed as a
         // `Uint8Array`. `res.send` recognises a Buffer and JSON-encodes
         // anything else, so a zero-copy view over the same memory is what it
         // has to be handed — never a copy of a file that may be tens of MB.
@@ -888,7 +888,7 @@ export function createWorkspaceRoutes(
       // "File not found" would tell a reader their file had vanished. Only
       // the ref branch can raise one, so the working-tree read keeps the
       // blanket 404 it has always answered with.
-      if (ref !== null && error instanceof WorkflowDomainError) {
+      if (ref !== null && error instanceof VersionControlDomainError) {
         sendError(res, error);
         return;
       }
@@ -999,7 +999,7 @@ export function createWorkspaceRoutes(
       // to load while the entries were judged (`AccessConfigError`): both are
       // domain errors carrying their own status and payload, the same ones
       // the single-file gate answers with.
-      if (error instanceof WorkflowDomainError) {
+      if (error instanceof VersionControlDomainError) {
         sendError(res, error);
         return;
       }
@@ -1047,7 +1047,7 @@ export function createWorkspaceRoutes(
       // Traversal stays a 403 and a malformed workspace id its domain status:
       // both carry messages written to be read by the caller. (A traversal IS
       // a domain error now, so the one check covers both.)
-      if (error instanceof WorkflowDomainError) {
+      if (error instanceof VersionControlDomainError) {
         sendError(res, error);
         return;
       }
@@ -1331,7 +1331,7 @@ export function createWorkspaceRoutes(
     // ONE spelling of the target from here down. `x/a.md`, `./x/a.md` and
     // `x//a.md` are the same file and all pass the path validator, and this
     // route coordinates on that path three times over: the in-process write
-    // turn, the workflow lock row, and the bytes themselves. Two clients
+    // turn, the version-control lock row, and the bytes themselves. Two clients
     // spelling one file differently would otherwise take two different locks
     // and both pass their own precondition.
     const requested = requestPath(req.query.path);
@@ -1378,7 +1378,7 @@ export function createWorkspaceRoutes(
       // in this process may touch the path until the write is done. The write
       // inside takes the same turn re-entrantly.
       //
-      // Across instances the workflow lock below is still the coordinator;
+      // Across instances the version-control lock below is still the coordinator;
       // this only orders what this server is doing.
       await workspaceService.withPathTurn(id, filePath, async () => {
         // A stale `ifMatch` is refused before anything commits.

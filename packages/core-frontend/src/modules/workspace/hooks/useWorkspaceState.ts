@@ -5,7 +5,7 @@ import {
   isProtectedBranch,
   type FileTreeEntry,
 } from '@bevel-software/platform-shared';
-import { useEventBus, canonicalizeWorkspaceId } from '../../workflow';
+import { useEventBus, canonicalizeWorkspaceId } from '../../version-control';
 import { AuthContext } from '../../auth';
 import { fetchFileAccess } from '../../access';
 import {
@@ -1578,7 +1578,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
 
   // ── Live updates: react to other users' / agent's edits ───────────────────
   //
-  // When the backend's lock-release commits + pushes a file, the workflow
+  // When the backend's lock-release commits + pushes a file, the version-control service
   // event bus pushes a `file-changed` event to every session focused on
   // this workspace+branch. We:
   //

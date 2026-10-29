@@ -3,8 +3,8 @@ import { renderHook, waitFor, act } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import type {
   PullRequestSummary,
-  WorkflowEvent,
-  WorkflowEventPayload,
+  VersionControlEvent,
+  VersionControlEventPayload,
 } from '@bevel-software/platform-shared';
 
 const api = vi.hoisted(() => ({
@@ -20,11 +20,11 @@ vi.mock('../../../change-requests/services/change-requests.api', () => ({
 import { OpenChangeRequestsProvider } from '../open-change-requests';
 import { useOpenChangeRequests } from '../../hooks/useOpenChangeRequests';
 import { WorkspaceContext, type WorkspaceContextValue } from '../workspace.context';
-import { ChangeRequestStaleBinder } from '../../../workflow/state/ChangeRequestStaleBinder';
+import { ChangeRequestStaleBinder } from '../../../version-control/state/ChangeRequestStaleBinder';
 import {
   EventBusContext,
   type EventBusContextValue,
-} from '../../../workflow/state/event-bus.context';
+} from '../../../version-control/state/event-bus.context';
 import { PR_STALE_COALESCE_MS, PR_STALE_FALLBACK_MS } from '../../../../core/events';
 
 /**
@@ -67,20 +67,20 @@ function pr(over: Partial<PullRequestSummary> = {}): PullRequestSummary {
 }
 
 function fakeBus() {
-  const handlers = new Map<string, Set<(e: WorkflowEvent) => void>>();
+  const handlers = new Map<string, Set<(e: VersionControlEvent) => void>>();
   const value: EventBusContextValue = {
     subscribe: (kind, handler) => {
       const set = handlers.get(kind) ?? new Set();
-      set.add(handler as (e: WorkflowEvent) => void);
+      set.add(handler as (e: VersionControlEvent) => void);
       handlers.set(kind, set);
-      return () => set.delete(handler as (e: WorkflowEvent) => void);
+      return () => set.delete(handler as (e: VersionControlEvent) => void);
     },
     setFocus: () => {},
     watchWorkspace: () => () => {},
   };
-  const emit = (event: WorkflowEventPayload) => {
+  const emit = (event: VersionControlEventPayload) => {
     for (const h of handlers.get(event.kind) ?? []) {
-      h({ id: 1, ts: new Date().toISOString(), ...event } as WorkflowEvent);
+      h({ id: 1, ts: new Date().toISOString(), ...event } as VersionControlEvent);
     }
   };
   return { value, emit };

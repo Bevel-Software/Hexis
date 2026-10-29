@@ -2,14 +2,14 @@ import path from 'node:path';
 import { logger } from '../../shared/logging.js';
 
 const log = logger('directory-sync');
-import type { AuthUser, IWorkflowService } from '@bevel-software/platform-shared';
+import type { AuthUser, IVersionControlService } from '@bevel-software/platform-shared';
 import type { WorkspaceService } from '../workspace/index.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { AccessControlService } from './access-control.service.js';
 import { SYNCED_GROUPS_YAML } from '../access-model/index.js';
-import type { WorkflowEventBus } from '../workflow/index.js';
+import type { VersionControlEventBus } from '../version-control/index.js';
 import { LockingFilesystem } from '../kb-fs/index.js';
-import { PushNeedsAgentResolutionError, WorkflowDomainError } from '../../shared/domain-errors.js';
+import { PushNeedsAgentResolutionError, VersionControlDomainError } from '../../shared/domain-errors.js';
 import { isAbsence } from '../../shared/fs.contract.js';
 import type { SyncedGroupsWriterDeps } from './synced-groups-writer.js';
 
@@ -27,9 +27,9 @@ import type { SyncedGroupsWriterDeps } from './synced-groups-writer.js';
  */
 export function createSyncedGroupsCommitter(deps: {
   workspaceService: WorkspaceService;
-  workflowService: IWorkflowService;
+  versionControlService: IVersionControlService;
   accessControl: AccessControlService;
-  eventBus: WorkflowEventBus;
+  eventBus: VersionControlEventBus;
   kbDirName: string;
   bot: AuthUser;
   /** Thunk — DEFAULT_BRANCH is a live binding that stays empty until setup. */
@@ -37,7 +37,7 @@ export function createSyncedGroupsCommitter(deps: {
 }): Pick<SyncedGroupsWriterDeps, 'readCurrent' | 'persist' | 'onWritten'> {
   const {
     workspaceService,
-    workflowService,
+    versionControlService,
     accessControl,
     eventBus,
     kbDirName,
@@ -77,7 +77,7 @@ export function createSyncedGroupsCommitter(deps: {
       // roles admin's atomic writes use.
       const fsys = new LockingFilesystem(
         { basePath, contained: true },
-        { workflow: workflowService, workspaceId, branch, user: bot, kbDirName },
+        { versionControl: versionControlService, workspaceId, branch, user: bot, kbDirName },
       );
       try {
         await fsys.writeFiles(
@@ -115,19 +115,19 @@ export function createSyncedGroupsCommitter(deps: {
           // an operator (or any later write on the branch) pushes it.
           let armed = false;
           try {
-            await workflowService.releaseLock(workspaceId, branch, wsRelPath, bot);
+            await versionControlService.releaseLock(workspaceId, branch, wsRelPath, bot);
             armed = true;
           } catch (armErr) {
             const lockAlreadyReleased =
-              armErr instanceof WorkflowDomainError && armErr.payload?.kind === 'lock-not-held';
+              armErr instanceof VersionControlDomainError && armErr.payload?.kind === 'lock-not-held';
             if (lockAlreadyReleased) {
               try {
-                armed = await workflowService.hasQueuedCommit(workspaceId, branch, wsRelPath);
+                armed = await versionControlService.hasQueuedCommit(workspaceId, branch, wsRelPath);
                 if (!armed) {
                   // The row may already be gone because the worker WON the
                   // race: drained it and pushed. A branch with nothing left
                   // unpushed cannot be holding our landed commit hostage.
-                  armed = !(await workflowService.hasUnpushedCommits(workspaceId));
+                  armed = !(await versionControlService.hasUnpushedCommits(workspaceId));
                 }
               } catch (queueErr) {
                 log.warn('could not verify the pending-commit queue:', { err: queueErr });

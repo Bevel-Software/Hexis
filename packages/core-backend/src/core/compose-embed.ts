@@ -1,4 +1,4 @@
-import type { IGitService, IWorkflowService } from '@bevel-software/platform-shared';
+import type { IGitService, IVersionControlService } from '@bevel-software/platform-shared';
 import type { KbContext } from '../shared/kb-context.js';
 import type { IAccessControl } from '../modules/access/access-control.interface.js';
 import type { WriteValidator } from '../modules/kb-fs/index.js';
@@ -15,7 +15,7 @@ export interface EmbedComposition {
   workspaceService: EmbedWorkspacePort;
   accessControl: IAccessControl;
   authService: EmbedAuthPort;
-  workflowService: IWorkflowService;
+  versionControlService: IVersionControlService;
   gitService: IGitService;
   accountLinks: IAccountLinkService;
   /** The SAME extension-to-reader registry `read_file` dispatches on. */
@@ -40,7 +40,7 @@ export function composeEmbedService(deps: EmbedComposition, ports: Pick<CorePort
     deps.workspaceService,
     deps.accessControl,
     deps.authService,
-    deps.workflowService,
+    deps.versionControlService,
     deps.gitService,
     deps.accountLinks,
     deps.readers,

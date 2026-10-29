@@ -4,7 +4,7 @@ import {
   assertValidBranchName,
   assertValidRelativePath,
 } from '../branch-name.js';
-import { BranchNameError, WorkflowValidationError } from '../../../shared/domain-errors.js';
+import { BranchNameError, VersionControlValidationError } from '../../../shared/domain-errors.js';
 
 describe('assertValidBranchName', () => {
   it.each([
@@ -79,7 +79,7 @@ describe('assertValidRelativePath', () => {
     ['delete', 'Docs/a\u007Fb.md'],
     ['leading dash', '-afile'],
   ])('rejects %s (%s)', (_label, p) => {
-    expect(() => assertValidRelativePath(p)).toThrow(WorkflowValidationError);
+    expect(() => assertValidRelativePath(p)).toThrow(VersionControlValidationError);
   });
 });
 

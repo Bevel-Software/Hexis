@@ -166,7 +166,7 @@ export type MergeIntoBranchOutcome =
 /**
  * What a merge's `publish` may do while the merge still holds its workspace:
  * `push` the branch, and `pullRebase` it onto its moved remote with the merge
- * kept as a merge — the two moves every workflow push's cooperative recovery
+ * kept as a merge — the two moves every version-control push's cooperative recovery
  * is made of, so that recovery can run inside the reservation unchanged.
  */
 export interface ReservedPushOps {
@@ -187,7 +187,7 @@ export interface IGitService {
    * anything is written. `publish`, when given, runs right after the merge
    * commit, inside the same reservation, over the pushes it may make
    * (`ReservedPushOps`): the caller brings the one push policy every
-   * workflow push takes, and whatever it throws leaves the merge commit on
+   * version-control push takes, and whatever it throws leaves the merge commit on
    * the local branch, unpublished, the checkout clean (a replay that
    * conflicts undoes itself), a later call answering `nothing-to-merge`
    * without pushing — the commit is published as any local commit is.
@@ -248,7 +248,7 @@ export interface IGitService {
     name: string,
     fromBase?: string,
   ): Promise<BranchInfo>;
-  // No `switchBranch` here on purpose — see the comment in IWorkflowService.
+  // No `switchBranch` here on purpose — see the comment in IVersionControlService.
   // Branch is workspace identity under the per-branch workspace model.
   /**
    * Delete a branch. Removes the local ref (if present) AND the origin ref
@@ -491,7 +491,7 @@ export interface IGitService {
    * record the target tip, and reading that commit's change would answer with
    * another request's files. It must be in the clone, have a second parent, and
    * carry a subject naming this request; anything else rejects with
-   * `WorkflowValidationError`, which every caller reads as "the file set could
+   * `VersionControlValidationError`, which every caller reads as "the file set could
    * not be resolved" and answers fail-closed (no files, so author-only) rather
    * than reaching for a fetch per request.
    *
@@ -523,7 +523,7 @@ export interface IGitService {
    * the head it was given against is not the detail's `headSha`, so answering
    * the merge commit there would report every approval a merged request ever
    * collected as stale. Same verification, same no-network contract and the same
-   * `WorkflowValidationError` as {@link changedFilesOfAppliedChange}.
+   * `VersionControlValidationError` as {@link changedFilesOfAppliedChange}.
    */
   appliedChangeShas(
     workspaceId: string,

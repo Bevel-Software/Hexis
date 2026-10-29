@@ -5,7 +5,7 @@ import { createAccountRoutes } from '../account.routes.js';
 import type { AccountInvitedEvent } from '../account-hooks.js';
 import { AuthService } from '../auth.service.js';
 import { AccountAdmissionRefusedError, AccountChangeRefusedError } from '../account-admission.js';
-import { WorkflowDomainError } from '../../../shared/domain-errors.js';
+import { VersionControlDomainError } from '../../../shared/domain-errors.js';
 import { hashPassword } from '../password-hash.js';
 import type { Database } from '../../database/connection.js';
 import type { IAdminAccessService } from '../../admin/admin.interface.js';
@@ -487,9 +487,9 @@ describe('account routes — removing the erased address from access files', () 
 
   it('the guards refuse up front: nothing is erased', async () => {
     const { app, accessRemoval } = makeRemovalApp();
-    const { WorkflowDomainError } = await import('../../../shared/domain-errors.js');
+    const { VersionControlDomainError } = await import('../../../shared/domain-errors.js');
     accessRemoval.assertRemovable.mockRejectedValueOnce(
-      new WorkflowDomainError('This is the last Admin; the Admin role must keep at least one direct email member.', 409),
+      new VersionControlDomainError('This is the last Admin; the Admin role must keep at least one direct email member.', 409),
     );
     const base = await listen(app);
     const res = await fetch(`${base}/api/admin/accounts/u2?removeFromAccess=1`, { method: 'DELETE' });
@@ -543,7 +543,7 @@ describe('account routes — switching an account off and on', () => {
 
   it('answers a switch lock that timed out with the 409 account-busy the lock promises, not a 500', async () => {
     vi.mocked(authService.deactivate).mockRejectedValueOnce(
-      new WorkflowDomainError('Another change to this account is still being saved; try again in a moment.', 409, {
+      new VersionControlDomainError('Another change to this account is still being saved; try again in a moment.', 409, {
         kind: 'account-busy',
       }),
     );

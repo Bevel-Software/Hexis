@@ -2,7 +2,7 @@ import path from 'node:path';
 import { describe, it, expect } from 'vitest';
 import { assertValidRelativePath } from '@bevel-software/platform-shared';
 import { canonicalFileIdentity } from '../canonical-file-identity.js';
-import { PathTraversalError, WorkflowValidationError } from '../domain-errors.js';
+import { PathTraversalError, VersionControlValidationError } from '../domain-errors.js';
 
 /**
  * Two properties, and the second is the one worth the file.
@@ -75,9 +75,9 @@ describe('canonicalFileIdentity', () => {
   });
 
   it('refuses a path that climbs out rather than resolving it away', () => {
-    expect(() => canonicalFileIdentity('../etc/passwd')).toThrow(WorkflowValidationError);
+    expect(() => canonicalFileIdentity('../etc/passwd')).toThrow(VersionControlValidationError);
     expect(() => canonicalFileIdentity('knowledge-base/../../etc/passwd')).toThrow(
-      WorkflowValidationError,
+      VersionControlValidationError,
     );
   });
 
@@ -86,7 +86,7 @@ describe('canonicalFileIdentity', () => {
     // containment check alone would wave it through under a second identity
     // for `knowledge-base/y.md`.
     expect(() => canonicalFileIdentity('knowledge-base/x/../y.md')).toThrow(
-      WorkflowValidationError,
+      VersionControlValidationError,
     );
   });
 
@@ -115,7 +115,7 @@ describe('canonicalFileIdentity', () => {
     // 400 for that same body.
     for (const notAPath of [123, true, {}, [], ['a.md'], null, undefined]) {
       expect(() => canonicalFileIdentity(notAPath as unknown as string)).toThrow(
-        WorkflowValidationError,
+        VersionControlValidationError,
       );
       expect(() => canonicalFileIdentity(notAPath as unknown as string)).toThrow(
         'Invalid path: Path is required',

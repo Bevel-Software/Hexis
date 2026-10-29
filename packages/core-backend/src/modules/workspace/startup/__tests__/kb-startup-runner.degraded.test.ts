@@ -5,7 +5,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { KbRemoteUnreachableError } from '../kb-startup-runner.js';
-import { NodeGitRunner } from '../../../workflow/git/node-git-runner.js';
+import { NodeGitRunner } from '../../../version-control/git/node-git-runner.js';
 import { GitRunError, NO_GIT_CREDENTIALS, type IGitRunner } from '../../../../shared/git.contract.js';
 import type { OnServerStart, ServerStartContext, StepResult } from '../on-server-start.js';
 import { newKbStartupRunner } from '../../../../__tests__/workspace-service.js';

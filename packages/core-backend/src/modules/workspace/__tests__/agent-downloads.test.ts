@@ -18,7 +18,7 @@ import { ToolError, type ToolContext } from '../../tool-helpers/tool.contract.js
 import type { ToolAuth } from '../../tool-auth/tool-auth.middleware.js';
 import { registerWorkspaceTools } from '../workspace.tools.js';
 import { RoutineWritePolicyService } from '../routine-write-policy.js';
-import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
+import { VersionControlHooks } from '../../version-control/version-control-hooks.js';
 import { ToolDescriptionNotes } from '../agent-access.gate.js';
 import { SpillStore } from '../spill-store.js';
 import { DocExtractService } from '../file-readers/doc-extract.service.js';
@@ -152,7 +152,7 @@ async function start(options: StartOptions = {}): Promise<Started> {
     ...(options.maxOpenPerUser !== undefined ? { maxOpenPerUser: options.maxOpenPerUser } : {}),
   });
   stores.push(store);
-  const hooks = new WorkflowHooks();
+  const hooks = new VersionControlHooks();
   const readsHooked: string[] = [];
   hooks.onAgentRead(async (op) => {
     readsHooked.push(op.wsPath ?? '');
@@ -168,7 +168,7 @@ async function start(options: StartOptions = {}): Promise<Started> {
     sessionId,
     abortSignal: signal,
     workspaceService,
-    workflowService: {} as never,
+    versionControlService: {} as never,
     events: {} as never,
     getFilesystem: async () => fs,
   });
@@ -801,7 +801,7 @@ describe('what agents are told', () => {
       {} as never,
       {} as never,
       testKbContext({ kbDirName: KB }),
-      { recoveryBotEmail: 'r@x', hooks: new WorkflowHooks(), notes: new ToolDescriptionNotes() },
+      { recoveryBotEmail: 'r@x', hooks: new VersionControlHooks(), notes: new ToolDescriptionNotes() },
       new RoutineWritePolicyService(),
       {} as never,
       undefined,

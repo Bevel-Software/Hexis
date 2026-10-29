@@ -6,8 +6,8 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import type { HolderChanges, IAccessControl, ProspectiveHolders } from '../access-control.interface.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { AuthService } from '../../auth/auth.service.js';
-import type { WorkflowService } from '../../workflow/workflow.service.js';
-import type { WorkflowEventBus } from '../../workflow/event-bus.js';
+import type { VersionControlService } from '../../version-control/version-control.service.js';
+import type { VersionControlEventBus } from '../../version-control/event-bus.js';
 import type { Database } from '../../database/connection.js';
 import { createAccessRoutes } from '../access.routes.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
@@ -77,8 +77,8 @@ async function makeHarness(opts: { canRead?: boolean; readable?: (path: string) 
       {} as unknown as WorkspaceService,
       { getUserById: vi.fn(async () => USER) } as unknown as AuthService,
       { whileSwitchedOn: async (_email: string, write: () => Promise<void>) => write() },
-      {} as unknown as WorkflowService,
-      { emit: vi.fn() } as unknown as WorkflowEventBus,
+      {} as unknown as VersionControlService,
+      { emit: vi.fn() } as unknown as VersionControlEventBus,
       {} as unknown as Database,
       testKbContext({ kbDirName: KB }),
       new NodeFs(),

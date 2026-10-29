@@ -4,7 +4,7 @@ import { GitSyncFailedBanner } from '../components/GitSyncFailedBanner';
 import {
   EventBusContext,
   type EventBusContextValue,
-} from '../../workflow/state/event-bus.context';
+} from '../../version-control/state/event-bus.context';
 import {
   WorkspaceContext,
   type WorkspaceContextValue,

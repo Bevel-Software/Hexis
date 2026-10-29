@@ -22,7 +22,7 @@ import { GUIDE_FIRST_SENTENCE } from '../../tool-registry/guide-first.js';
 import { RoutineWritePolicyService } from '../routine-write-policy.js';
 import { UuidSessionSink, type ISessionSink } from '../session-sink.js';
 import { FIRST_RUN_SECTION_ID, STARTER_GUIDE_FILE, firstRunNote, type FirstRunStarterSource } from '../first-run.js';
-import { WorkflowHooks, type AgentOperationContext } from '../../workflow/workflow-hooks.js';
+import { VersionControlHooks, type AgentOperationContext } from '../../version-control/version-control-hooks.js';
 import { SESSION_ID_DESCRIPTION, ToolDescriptionNotes } from '../agent-access.gate.js';
 import { SpillStore } from '../spill-store.js';
 import { DocExtractService } from '../file-readers/doc-extract.service.js';
@@ -125,7 +125,7 @@ let focusedBranch: string | undefined;
 /** The registry the tools were mounted into, so a test can inspect their defs. */
 let toolRegistry: ToolRegistry;
 /** The hook registry the tools were mounted against, so a test can register one. */
-let hooks: WorkflowHooks;
+let hooks: VersionControlHooks;
 /** The note registry the tools were mounted against, so a test can register a note. */
 let notes: ToolDescriptionNotes;
 /**
@@ -170,7 +170,7 @@ async function start(
   await docExtractor?.close();
   const extractor = new WorkerDocumentExtractor();
   docExtractor = extractor;
-  hooks = new WorkflowHooks();
+  hooks = new VersionControlHooks();
   notes = new ToolDescriptionNotes();
   callerSource = 'internal';
   tempDir = await mkdtemp(join(tmpdir(), 'ws-tools-'));
@@ -312,7 +312,7 @@ async function start(
         return { destination: '', extracted, skipped };
       },
     } as never,
-    workflowService: {} as never,
+    versionControlService: {} as never,
     events: {} as never,
     getFilesystem: async () => fs,
   });
@@ -2445,7 +2445,7 @@ describe('start_session', () => {
             getWorkspacePath: async () => defaultWorkspaceDir,
           }
         : {}) as never,
-      workflowService: {} as never,
+      versionControlService: {} as never,
       events: {} as never,
       getFilesystem: async () => ({}) as never,
     });
@@ -2471,7 +2471,7 @@ describe('start_session', () => {
     registerWorkspaceTools(
       registry, router, auth, toolHandler,
       new SpillStore(join(tmpdir(), 'bevel-test-spills')), new DocExtractService(join(tmpdir(), 'bevel-test-doc-extract'), extractor), access, testKbContext({ kbDirName: KB_DIR }),
-      { recoveryBotEmail: RECOVERY_BOT, hooks: new WorkflowHooks(), notes: new ToolDescriptionNotes() },
+      { recoveryBotEmail: RECOVERY_BOT, hooks: new VersionControlHooks(), notes: new ToolDescriptionNotes() },
       new RoutineWritePolicyService(),
       sink ?? fakeSessionSink,
       undefined,
@@ -2606,7 +2606,7 @@ describe('start_session', () => {
     registerWorkspaceTools(
       registry, router, noopAuth, (() => () => {}) as never,
       new SpillStore(join(tmpdir(), 'bevel-test-spills')), new DocExtractService(join(tmpdir(), 'bevel-test-doc-extract'), extractor), allowAll, testKbContext({ kbDirName: KB_DIR }),
-      { recoveryBotEmail: RECOVERY_BOT, hooks: new WorkflowHooks(), notes: new ToolDescriptionNotes() },
+      { recoveryBotEmail: RECOVERY_BOT, hooks: new VersionControlHooks(), notes: new ToolDescriptionNotes() },
       new RoutineWritePolicyService(),
       {} as never,
     );
@@ -2791,7 +2791,7 @@ describe('branch is a required parameter in the tool contract', () => {
       new DocExtractService(join(tmpdir(), 'bevel-test-doc-extract'), extractor),
       allowAll,
       testKbContext({ kbDirName: KB_DIR }),
-      { recoveryBotEmail: RECOVERY_BOT, hooks: new WorkflowHooks(), notes: new ToolDescriptionNotes() },
+      { recoveryBotEmail: RECOVERY_BOT, hooks: new VersionControlHooks(), notes: new ToolDescriptionNotes() },
       new RoutineWritePolicyService(),
       {} as never,
       // Skill check, change gate, uploads, guide, downloads, starter packs, disk: not this harness's business.
@@ -4404,7 +4404,7 @@ describe('a write refused for permissions says whether and how to propose it', (
     await fs.writeFile(DENIED, 'old text\n');
     await freeDestinationFor(tool);
     denyWrites();
-    const workflowCalls = workspacePathCalls.length;
+    const versionControlCalls = workspacePathCalls.length;
 
     const { status, json } = await call(base, tool, body);
 
@@ -4427,12 +4427,12 @@ describe('a write refused for permissions says whether and how to propose it', (
     // The read verdict was asked of the repo-relative path.
     expect(calls).toContain('Sales/deal.md');
     // Nothing was created: no workspace was resolved for the DRAFT the answer
-    // suggests, and the context's workflow service is an empty stub, so a
+    // suggests, and the context's version-control service is an empty stub, so a
     // create_branch or change request would have 500d. (The tools that
     // preflight do resolve the CALLER's own workspace on the way — to read
     // the on-disk spelling and refuse links — which is not a draft.)
     const forDraft = workspacePathCalls
-      .slice(workflowCalls)
+      .slice(versionControlCalls)
       .filter((b) => b.includes(draft) || b.includes(encodeURIComponent(draft)));
     expect(forDraft).toEqual([]);
   });

@@ -207,7 +207,7 @@ export function createSetupRoutes(
    * What a change of the knowledge-base repository has to decide about, and
    * what to do when the admin decides to close.
    *
-   * Injected because the setup routes must stay free of the workflow module —
+   * Injected because the setup routes must stay free of the version-control module —
    * and a minimal mount (tests, a distribution without change requests) simply
    * has none: the default answers "no open requests", so the confirmation
    * offers no choice it cannot honour.

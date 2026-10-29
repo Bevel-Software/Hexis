@@ -4,10 +4,10 @@ import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import type { AuthUser, IWorkflowService } from '@bevel-software/platform-shared';
+import type { AuthUser, IVersionControlService } from '@bevel-software/platform-shared';
 import { testKbContext } from '../../../__tests__/kb-context.js';
-import { GitService } from '../../workflow/git/git.service.js';
-import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
+import { GitService } from '../../version-control/git/git.service.js';
+import { VersionControlHooks } from '../../version-control/version-control-hooks.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import { LockingFilesystem, MoveLockedError, MoveRacedError, MoveUndoError } from '../locking-filesystem.js';
 import { PushNeedsAgentResolutionError } from '../../../shared/domain-errors.js';
@@ -34,7 +34,7 @@ async function git(cwd: string, args: string[]): Promise<string> {
 
 let root: string;
 let repo: string;
-let workflow: IWorkflowService;
+let versionControl: IVersionControlService;
 let lockedPaths: Set<string>;
 
 async function put(rel: string, content: string | Buffer): Promise<void> {
@@ -62,14 +62,14 @@ beforeEach(async () => {
   const svc = new GitService(
     { getWorkspacePath: async () => root } as unknown as WorkspaceService,
     (() => {
-      const hooks = new WorkflowHooks();
+      const hooks = new VersionControlHooks();
       hooks.onCommitValidation(vi.fn(async () => ({ ok: true, mustFix: [], warnings: [], rawOutput: '' })));
       return hooks;
     })(),
     testKbContext({ kbDirName: KB }),
   );
   lockedPaths = new Set();
-  workflow = {
+  versionControl = {
     acquireLock: vi.fn(async (_w: string, _b: string, p: string) =>
       lockedPaths.has(p)
         ? { acquired: false, lock: { holderName: 'Bob' } }
@@ -78,7 +78,7 @@ beforeEach(async () => {
     releaseLockNoCommit: vi.fn(async () => undefined),
     releaseLockUntouched: vi.fn(async () => undefined),
     commitChanges: vi.fn((w: string, u: AuthUser, s: string, paths?: string[]) => svc.commitChanges(w, u, s, paths)),
-  } as unknown as IWorkflowService;
+  } as unknown as IVersionControlService;
 });
 
 afterEach(async () => {
@@ -88,7 +88,7 @@ afterEach(async () => {
 const fsLayer = (validateWrite?: (p: string, content: unknown) => Promise<void>) =>
   new LockingFilesystem(
     { basePath: root, contained: true },
-    { workflow, workspaceId: WS, branch: 'feature-test', user: USER, kbDirName: KB, ...(validateWrite ? { validateWrite } : {}) },
+    { versionControl, workspaceId: WS, branch: 'feature-test', user: USER, kbDirName: KB, ...(validateWrite ? { validateWrite } : {}) },
   );
 
 /** The paths each release kind was called with. */
@@ -147,16 +147,16 @@ describe('LockingFilesystem.moveWithEdits', () => {
     expect((err as Error).message).toContain(`"${KB}/Projects/A/Two.md" is being edited by Bob`);
     expect(await git(repo, ['rev-parse', 'HEAD'])).toBe(head);
     expect((await git(repo, ['status', '--porcelain'])).trim()).toBe('');
-    expect(workflow.commitChanges).not.toHaveBeenCalled();
+    expect(versionControl.commitChanges).not.toHaveBeenCalled();
     // Every lock taken was given back untouched.
-    expect(released(workflow.releaseLockUntouched)).toEqual([`${KB}/Index.md`, `${KB}/Projects/A`, `${KB}/Projects/A/One.md`]);
-    expect(workflow.releaseLockNoCommit).not.toHaveBeenCalled();
-    expect(workflow.releaseLock).not.toHaveBeenCalled();
+    expect(released(versionControl.releaseLockUntouched)).toEqual([`${KB}/Index.md`, `${KB}/Projects/A`, `${KB}/Projects/A/One.md`]);
+    expect(versionControl.releaseLockNoCommit).not.toHaveBeenCalled();
+    expect(versionControl.releaseLock).not.toHaveBeenCalled();
     expect(await read('Index.md')).toBe('[one](Projects/A/One.md)\n');
   }, 20_000);
 
   it('a file saved into the folder while the locks were being taken refuses the move, nothing moved', async () => {
-    const acquire = workflow.acquireLock as ReturnType<typeof vi.fn>;
+    const acquire = versionControl.acquireLock as ReturnType<typeof vi.fn>;
     let arrived = false;
     acquire.mockImplementation(async () => {
       // The first lock is the moment somebody else's save lands in the folder.
@@ -171,15 +171,15 @@ describe('LockingFilesystem.moveWithEdits', () => {
     expect(err).toBeInstanceOf(MoveRacedError);
     expect((err as Error).message).toContain(`"${KB}/Projects/A/Late.md" was added`);
     expect(await git(repo, ['rev-parse', 'HEAD'])).toBe(head);
-    expect(workflow.commitChanges).not.toHaveBeenCalled();
+    expect(versionControl.commitChanges).not.toHaveBeenCalled();
     expect(await read('Projects/A/Late.md')).toBe('late\n');
     expect(await read('Index.md')).toBe('[one](Projects/A/One.md)\n');
-    expect(workflow.releaseLockNoCommit).not.toHaveBeenCalled();
-    expect(released(workflow.releaseLockUntouched).length).toBeGreaterThan(0);
+    expect(versionControl.releaseLockNoCommit).not.toHaveBeenCalled();
+    expect(released(versionControl.releaseLockUntouched).length).toBeGreaterThan(0);
   });
 
   it('a move that fails and cannot be undone releases every lock with the discard, and says both', async () => {
-    (workflow.commitChanges as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+    (versionControl.commitChanges as ReturnType<typeof vi.fn>).mockImplementation(async () => {
       // Something takes the old place while the move is in flight, so the
       // undo's rename finds its destination occupied.
       await put('Projects/A/Taken.md', 'x\n');
@@ -190,8 +190,8 @@ describe('LockingFilesystem.moveWithEdits', () => {
     expect((err as Error).message).toContain('commit exploded');
     expect((err as Error).message).toContain('could not be undone');
     // Nothing is handed back as untouched: every path goes with the discard.
-    expect(workflow.releaseLockUntouched).not.toHaveBeenCalled();
-    const discarded = released(workflow.releaseLockNoCommit);
+    expect(versionControl.releaseLockUntouched).not.toHaveBeenCalled();
+    const discarded = released(versionControl.releaseLockNoCommit);
     expect(discarded).toContain(`${KB}/Projects/A`);
     expect(discarded).toContain(`${KB}/Topics/Deep/A/One.md`);
     expect(discarded).toContain(`${KB}/Index.md`);
@@ -199,8 +199,8 @@ describe('LockingFilesystem.moveWithEdits', () => {
 
   it('a commit that landed but could not be pushed enqueues the committed paths only; the folder locks go back untouched', async () => {
     // The real commit lands; only its push is refused.
-    const commit = (workflow.commitChanges as ReturnType<typeof vi.fn>).getMockImplementation()!;
-    (workflow.commitChanges as ReturnType<typeof vi.fn>).mockImplementation(async (...args: unknown[]) => {
+    const commit = (versionControl.commitChanges as ReturnType<typeof vi.fn>).getMockImplementation()!;
+    (versionControl.commitChanges as ReturnType<typeof vi.fn>).mockImplementation(async (...args: unknown[]) => {
       await commit(...args);
       throw new PushNeedsAgentResolutionError('feature-test', `${KB}/Index.md`, 'refused', '(not attempted)', 'refused');
     });
@@ -213,8 +213,8 @@ describe('LockingFilesystem.moveWithEdits', () => {
     expect(Number(await git(repo, ['rev-list', '--count', 'HEAD']))).toBe(Number(commitsBefore) + 1);
     expect((await git(repo, ['status', '--porcelain'])).trim()).toBe('');
     expect(await read('Topics/Deep/A/One.md')).toContain('../../../NodeTypes/Task.md');
-    const enqueued = released(workflow.releaseLock);
-    const untouched = released(workflow.releaseLockUntouched);
+    const enqueued = released(versionControl.releaseLock);
+    const untouched = released(versionControl.releaseLockUntouched);
     // Every file the commit named is enqueued…
     for (const p of [`${KB}/Index.md`, `${KB}/Projects/A/One.md`, `${KB}/Topics/Deep/A/One.md`, `${KB}/Topics/Deep/A/pic.png`]) {
       expect(enqueued).toContain(p);
@@ -227,7 +227,7 @@ describe('LockingFilesystem.moveWithEdits', () => {
 
   it('locks every file of a moved folder at its old and its new path', async () => {
     await fsLayer().moveWithEdits(`${KB}/Projects/A`, `${KB}/Topics/Deep/A`, edits(), 'Move A');
-    const locked = (workflow.acquireLock as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[2] as string);
+    const locked = (versionControl.acquireLock as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[2] as string);
     for (const name of ['One.md', 'Two.md', 'pic.png']) {
       expect(locked).toContain(`${KB}/Projects/A/${name}`);
       expect(locked).toContain(`${KB}/Topics/Deep/A/${name}`);
@@ -236,19 +236,19 @@ describe('LockingFilesystem.moveWithEdits', () => {
   });
 
   it('a lock store that throws gives back the locks already held, and changes nothing', async () => {
-    (workflow.acquireLock as ReturnType<typeof vi.fn>).mockImplementation(async (_w: string, _b: string, p: string) => {
+    (versionControl.acquireLock as ReturnType<typeof vi.fn>).mockImplementation(async (_w: string, _b: string, p: string) => {
       if (p === `${KB}/Projects/A/One.md`) throw new Error('lock store down');
       return { acquired: true, lock: { holderName: 'Alice' } };
     });
     await expect(
       fsLayer().moveWithEdits(`${KB}/Projects/A`, `${KB}/Topics/Deep/A`, edits(), 'Move A'),
     ).rejects.toThrow('lock store down');
-    expect(released(workflow.releaseLockUntouched)).toEqual([`${KB}/Index.md`, `${KB}/Projects/A`]);
+    expect(released(versionControl.releaseLockUntouched)).toEqual([`${KB}/Index.md`, `${KB}/Projects/A`]);
     expect((await git(repo, ['status', '--porcelain'])).trim()).toBe('');
   });
 
   it('every edit is judged again once the locks are held, and a refusal there changes nothing', async () => {
-    const acquire = workflow.acquireLock as ReturnType<typeof vi.fn>;
+    const acquire = versionControl.acquireLock as ReturnType<typeof vi.fn>;
     // A validator whose verdict depends on the state under the locks.
     const validateWrite = vi.fn(async (p: string) => {
       if (acquire.mock.calls.length > 0 && p.endsWith('Index.md')) throw new Error('refused under lock');
@@ -260,12 +260,12 @@ describe('LockingFilesystem.moveWithEdits', () => {
     expect(validateWrite.mock.calls.filter((c) => c[0] === `${KB}/Index.md`)).toHaveLength(2);
     expect(await git(repo, ['rev-parse', 'HEAD'])).toBe(head);
     expect((await git(repo, ['status', '--porcelain'])).trim()).toBe('');
-    expect(workflow.releaseLockNoCommit).not.toHaveBeenCalled();
-    expect(released(workflow.releaseLockUntouched)).toContain(`${KB}/Index.md`);
+    expect(versionControl.releaseLockNoCommit).not.toHaveBeenCalled();
+    expect(released(versionControl.releaseLockUntouched)).toContain(`${KB}/Index.md`);
   });
 
   it('an edit whose bytes cannot be put back is released with the discard, not untouched', async () => {
-    (workflow.commitChanges as ReturnType<typeof vi.fn>).mockImplementationOnce(async () => {
+    (versionControl.commitChanges as ReturnType<typeof vi.fn>).mockImplementationOnce(async () => {
       // The restore of Index.md will fail: a folder now sits at its path.
       await fs.rm(path.join(repo, 'Index.md'));
       await fs.mkdir(path.join(repo, 'Index.md'));
@@ -274,11 +274,11 @@ describe('LockingFilesystem.moveWithEdits', () => {
     await expect(
       fsLayer().moveWithEdits(`${KB}/Projects/A`, `${KB}/Topics/Deep/A`, edits(), 'Move A'),
     ).rejects.toThrow('commit exploded');
-    expect(released(workflow.releaseLockNoCommit)).toEqual([`${KB}/Index.md`]);
-    expect(released(workflow.releaseLockUntouched)).not.toContain(`${KB}/Index.md`);
+    expect(released(versionControl.releaseLockNoCommit)).toEqual([`${KB}/Index.md`]);
+    expect(released(versionControl.releaseLockUntouched)).not.toContain(`${KB}/Index.md`);
     // The moved file's edit was put back, and its lock released untouched.
     expect(await read('Projects/A/One.md')).toContain('../../NodeTypes/Task.md');
-    expect(released(workflow.releaseLockUntouched)).toContain(`${KB}/Projects/A/One.md`);
+    expect(released(versionControl.releaseLockUntouched)).toContain(`${KB}/Projects/A/One.md`);
   });
 
   it('a check refusal under the locks changes nothing', async () => {
@@ -293,7 +293,7 @@ describe('LockingFilesystem.moveWithEdits', () => {
   });
 
   it('a failing commit puts every byte back and undoes the move', async () => {
-    (workflow.commitChanges as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('commit exploded'));
+    (versionControl.commitChanges as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('commit exploded'));
     await expect(
       fsLayer().moveWithEdits(`${KB}/Projects/A`, `${KB}/Topics/Deep/A`, edits(), 'Move A'),
     ).rejects.toThrow('commit exploded');

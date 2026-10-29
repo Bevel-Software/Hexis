@@ -13,7 +13,7 @@ import { DocExtractService } from '../file-readers/doc-extract.service.js';
 import { WorkerDocumentExtractor } from '../file-readers/extract-in-worker.js';
 import { RoutineWritePolicyService } from '../routine-write-policy.js';
 import { SpillStore } from '../spill-store.js';
-import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
+import { VersionControlHooks } from '../../version-control/version-control-hooks.js';
 import { ToolDescriptionNotes } from '../../workspace/agent-access.gate.js';
 import { registerWorkspaceTools } from '../workspace.tools.js';
 import { sharedFileRulesSection } from '../../agent-instructions/shared-file-rules.js';
@@ -53,7 +53,7 @@ async function descriptions(registry: ToolRegistry = new ToolRegistry()): Promis
     kb,
     {
       recoveryBotEmail: 'recovery-bot@bevel.local',
-      hooks: new WorkflowHooks(),
+      hooks: new VersionControlHooks(),
       notes: new ToolDescriptionNotes(),
     },
     new RoutineWritePolicyService(),

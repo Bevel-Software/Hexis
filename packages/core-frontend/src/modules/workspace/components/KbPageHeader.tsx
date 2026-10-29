@@ -17,7 +17,7 @@ import { useDismissableMenu } from '../../../shared/components';
 import { HEADER_BAND, PAGE_HEADER_TESTID, TITLE_INK_ROOM } from '../../../shared/theme/header';
 import { rootAnchoredPath } from '../utils/pasteLink';
 import { displayFileName, fileNameTooltip } from '../utils/display-file-name';
-import { SELF_HOLD_MESSAGE } from '../../workflow';
+import { SELF_HOLD_MESSAGE } from '../../version-control';
 import { FullScreenButton } from './FullScreenView';
 
 /**

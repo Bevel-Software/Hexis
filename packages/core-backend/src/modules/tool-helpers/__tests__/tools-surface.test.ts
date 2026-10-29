@@ -31,7 +31,7 @@ const workspaceService = {
   getOrCreateForUser: async () => ({ id: WS }),
   getWorkspacePath: async () => '/tmp/ws',
 } as never;
-const workflowService = { listBranches: async () => [{ name: 'main', isProtected: true }] } as never;
+const versionControlService = { listBranches: async () => [{ name: 'main', isProtected: true }] } as never;
 const events = {} as never;
 
 let httpServer: HttpServer | undefined;
@@ -40,7 +40,7 @@ const internalToken = new InternalTokenService({ secret: 'test-secret' });
 async function start(): Promise<string> {
   const registry = new ToolRegistry();
   const toolAuth = createToolAuthMiddleware(externalApiKeyService, internalToken);
-  const resolve = createToolContextResolver({ authService, workspaceService, workflowService, events, kbDirName: 'knowledge-base', creatorAccess: { planForCreate: async () => null, grantInExtractedFile: async () => null, noteAccessFileWritten: () => {} } });
+  const resolve = createToolContextResolver({ authService, workspaceService, versionControlService, events, kbDirName: 'knowledge-base', creatorAccess: { planForCreate: async () => null, grantInExtractedFile: async () => null, noteAccessFileWritten: () => {} } });
   const toolHandler = createToolHandlerFactory(resolve);
 
   registry.registerExternalTool(
@@ -59,7 +59,7 @@ async function start(): Promise<string> {
     '/api/agent/tools/list_branches',
     toolAuth,
     toolHandler(async (_a: Record<string, unknown>, ctx: ToolContext) => ({
-      branches: await ctx.workflowService.listBranches('ws'),
+      branches: await ctx.versionControlService.listBranches('ws'),
       ranAs: ctx.user.id,
       source: ctx.source,
     })),

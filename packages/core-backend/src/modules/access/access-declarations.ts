@@ -1,5 +1,5 @@
 import type { FileTreeEntry, IWorkspaceService } from '@bevel-software/platform-shared';
-import { WorkflowDomainError } from '../../shared/domain-errors.js';
+import { VersionControlDomainError } from '../../shared/domain-errors.js';
 import { accessMdPathForFolder } from './access-mutation.service.js';
 import {
   EVERYONE_CANONICAL,
@@ -75,7 +75,7 @@ export interface AccessDeclaration {
 export const DECLARATION_SCAN_FILE_CAP = 400;
 
 /** 400 for a target that is not a folder. */
-export class AccessDeclarationsError extends WorkflowDomainError {
+export class AccessDeclarationsError extends VersionControlDomainError {
   constructor(message: string, status = 400) {
     super(message, status);
     this.name = 'AccessDeclarationsError';

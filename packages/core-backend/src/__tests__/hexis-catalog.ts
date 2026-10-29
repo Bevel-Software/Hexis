@@ -8,12 +8,12 @@ import { createToolHandlerFactory } from '../modules/tool-helpers/tool-handler.j
 import type { ToolAuth } from '../modules/tool-auth/tool-auth.middleware.js';
 import { registerWorkspaceTools } from '../modules/workspace/workspace.tools.js';
 import { RipgrepPatternMatcher } from '../modules/workspace/index.js';
-import { registerWorkflowTools } from '../modules/workflow/agent-tools/workflow.tools.js';
+import { registerVersionControlTools } from '../modules/version-control/agent-tools/version-control.tools.js';
 import { registerPluginsTools } from '../modules/plugins/plugins.tools.js';
 import { registerSkillsTools } from '../modules/skills/skills.tools.js';
 import { registerToolManualsTools } from '../modules/tool-manuals/tool-manuals.tools.js';
 import { ToolDescriptionNotes } from '../modules/workspace/agent-access.gate.js';
-import { WorkflowHooks } from '../modules/workflow/workflow-hooks.js';
+import { VersionControlHooks } from '../modules/version-control/version-control-hooks.js';
 import { UuidSessionSink } from '../modules/workspace/session-sink.js';
 import { RoutineWritePolicyService } from '../modules/workspace/routine-write-policy.js';
 import { guideFirstDescription } from '../modules/tool-registry/guide-first.js';
@@ -73,7 +73,7 @@ export async function hexisCatalog(
   const toolAuth = ((_req, _res, next) => next()) as unknown as ToolAuth;
   const toolHandler = createToolHandlerFactory(unused());
   const kb = testKbContext();
-  const gate = { recoveryBotEmail: 'bot@x', hooks: new WorkflowHooks(), notes: new ToolDescriptionNotes() };
+  const gate = { recoveryBotEmail: 'bot@x', hooks: new VersionControlHooks(), notes: new ToolDescriptionNotes() };
 
   registerWorkspaceTools(
     registry,
@@ -103,7 +103,7 @@ export async function hexisCatalog(
     undefined,
     new RipgrepPatternMatcher(),
   );
-  registerWorkflowTools(registry, router, toolAuth, toolHandler, kb, async () => true, { canRead: async () => true, canReadAtRef: async () => true, canReadBatch: async () => new Map(), canReadBatchAtRef: async () => new Map(), canWrite: async () => true } as never, { recoveryBotEmail: 'recovery@x', hooks: { runAgentRead: async () => undefined }, notes: { onChange: () => undefined } } as never);
+  registerVersionControlTools(registry, router, toolAuth, toolHandler, kb, async () => true, { canRead: async () => true, canReadAtRef: async () => true, canReadBatch: async () => new Map(), canReadBatchAtRef: async () => new Map(), canWrite: async () => true } as never, { recoveryBotEmail: 'recovery@x', hooks: { runAgentRead: async () => undefined }, notes: { onChange: () => undefined } } as never);
   registerPluginsTools(registry, kb);
   registerSkillsTools(registry, router, toolAuth, toolHandler, skills);
   registerToolManualsTools(registry, router, toolAuth, toolHandler, emptyManuals, {

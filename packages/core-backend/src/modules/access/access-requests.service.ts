@@ -2,7 +2,7 @@ import path from 'node:path';
 import {
   joinBranchFor,
   type AuthUser,
-  type IWorkflowService,
+  type IVersionControlService,
 } from '@bevel-software/platform-shared';
 import {
   ChangeRequestConflictsError,
@@ -78,7 +78,7 @@ export function escapeMarkdown(text: string): string {
 export class AccessRequestsService {
   constructor(
     private readonly deps: {
-      workflow: IWorkflowService;
+      versionControl: IVersionControlService;
       workspaceService: WorkspaceService;
       lifecycle: IAccessRequestLifecycle;
       kb: Pick<KbContext, 'defaultBranch' | 'defaultWorkspaceId' | 'kbDirName'>;
@@ -103,7 +103,7 @@ export class AccessRequestsService {
   }): Promise<{ number: number; level: RequestLevel }> {
     const { user, target, itemName, level } = input;
     const note = (input.note ?? '').trim();
-    const { workflow, workspaceService, kb } = this.deps;
+    const { versionControl, workspaceService, kb } = this.deps;
     const wsId = kb.defaultWorkspaceId();
     const branch = this.branchFor(user.email, target);
 
@@ -113,7 +113,7 @@ export class AccessRequestsService {
     // it is recut below. The branch name already carries the person, so
     // matching it is matching them.
     const openOnBranch = async () =>
-      (await workflow.listChangeRequests({ fresh: true })).find(
+      (await versionControl.listChangeRequests({ fresh: true })).find(
         (cr) => cr.state === 'open' && cr.branch === branch,
       );
     const existing = await openOnBranch();
@@ -124,7 +124,7 @@ export class AccessRequestsService {
     // got there first, and a message is not a contract. STRICT: the list
     // proves absence, and a listing that could not fetch proves nothing.
     const branchExists = async () =>
-      (await workflow.listBranches(wsId, { freshFetch: true, strictFetch: true })).some(
+      (await versionControl.listBranches(wsId, { freshFetch: true, strictFetch: true })).some(
         (b) => b.name === branch,
       );
     // A branch still standing here belonged to an ANSWERED request: it holds a
@@ -144,7 +144,7 @@ export class AccessRequestsService {
     let present = await branchExists();
     if (present) {
       try {
-        await workflow.deleteBranch(wsId, branch, user);
+        await versionControl.deleteBranch(wsId, branch, user);
         // A delete that RETURNED is proof enough; re-probing here would let a
         // ref list that has not caught up talk us out of cutting the branch we
         // just removed, and the proposal would have nowhere to go.
@@ -165,7 +165,7 @@ export class AccessRequestsService {
     }
     if (!present) {
       try {
-        await workflow.createBranch(wsId, branch, kb.defaultBranch);
+        await versionControl.createBranch(wsId, branch, kb.defaultBranch);
       } catch (err) {
         if (!(await branchExists())) throw err;
       }
@@ -195,7 +195,7 @@ export class AccessRequestsService {
       });
     if (onBranch !== spliced.text) {
       await workspaceService.writeFile(ws.id, wsRulesPath, spliced.text);
-      await workflow.commitChanges(
+      await versionControl.commitChanges(
         ws.id,
         user,
         `Request ${LEVEL_LABEL[level].toLowerCase()} access to ${itemName}`,
@@ -206,7 +206,7 @@ export class AccessRequestsService {
       // The level and the note are the request's own columns — what the
       // dialog and the editors' banner read back. The description is for the
       // people who read the request, and says the same things in prose.
-      const detail = await workflow.openChangeRequest(ws.id, user, {
+      const detail = await versionControl.openChangeRequest(ws.id, user, {
         sourceBranch: branch,
         targetBranch: kb.defaultBranch,
         title: `Access request: ${itemName}`,
@@ -260,10 +260,10 @@ export class AccessRequestsService {
    *                 claiming a refusal nobody made.
    */
   async status(user: AuthUser, target: AccessRequestTarget): Promise<AccessRequestStatus> {
-    const { workflow } = this.deps;
+    const { versionControl } = this.deps;
     const branch = this.branchFor(user.email, target);
 
-    const open = (await workflow.listChangeRequests({ fresh: true })).find(
+    const open = (await versionControl.listChangeRequests({ fresh: true })).find(
       (cr) => cr.state === 'open' && cr.branch === branch,
     );
     if (open) {
@@ -272,7 +272,7 @@ export class AccessRequestsService {
 
     const level = await this.levelAskedOn(branch, target, user.email);
     if (!level) return { state: 'none' };
-    const last = await workflow.latestClosedChangeRequest(user.email, branch);
+    const last = await versionControl.latestClosedChangeRequest(user.email, branch);
     return last ? { state: 'not-accepted', level, number: last.number } : { state: 'none' };
   }
 
@@ -288,7 +288,7 @@ export class AccessRequestsService {
    * for, and Can edit is the lesser claim.
    */
   private async levelOf(number: number): Promise<RequestLevel> {
-    const detail = await this.deps.workflow
+    const detail = await this.deps.versionControl
       .getChangeRequestDetail(number, { patches: false })
       .catch(() => null);
     return detail?.accessRequest?.level ?? 'write';

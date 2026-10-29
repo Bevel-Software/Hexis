@@ -12,8 +12,8 @@ import { NodeFs } from '../../kb-fs/node-fs.js';
 import type { IAccessControl } from '../access-control.interface.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import { AuthService } from '../../auth/auth.service.js';
-import type { WorkflowService } from '../../workflow/workflow.service.js';
-import type { WorkflowEventBus } from '../../workflow/event-bus.js';
+import type { VersionControlService } from '../../version-control/version-control.service.js';
+import type { VersionControlEventBus } from '../../version-control/event-bus.js';
 import type { FileTreeEntry } from '@bevel-software/platform-shared';
 import { createAccessRoutes } from '../access.routes.js';
 import { usersDbDouble } from './users-db-double.js';
@@ -113,7 +113,7 @@ async function makeHarness(
   // exactly like FileLockService (nesting bugs must fail here too).
   const locks = new Map<string, { id: string; name: string }>();
   const lockRow = (h: { id: string; name: string }) => ({ holderUserId: h.id, holderName: h.name });
-  const workflowService = {
+  const versionControlService = {
     getLock: vi.fn(async (_w: string, _b: string, p: string) => {
       const h = locks.get(p);
       return h ? lockRow(h) : null;
@@ -131,9 +131,9 @@ async function makeHarness(
     // Write-free: the lock-aware filesystem writes to disk; this just commits the
     // dirty tree. Not exercised by these route tests (no rename), but kept honest.
     commitChanges: vi.fn(async () => ({})),
-  } as unknown as WorkflowService;
+  } as unknown as VersionControlService;
 
-  const eventBus = { emit: vi.fn() } as unknown as WorkflowEventBus;
+  const eventBus = { emit: vi.fn() } as unknown as VersionControlEventBus;
   const accounts = [
     { email: 'off@example.com', deactivatedAt: new Date('2026-09-01T00:00:00Z') },
     'on@example.com',
@@ -182,7 +182,7 @@ async function makeHarness(
     (req as unknown as { userId: string }).userId = ADMIN.id;
     next();
   });
-  app.use('/api', createAccessRoutes(accessControl, workspaceService, authService, authService, workflowService, eventBus, db, testKbContext({ kbDirName: KB }), new NodeFs()));
+  app.use('/api', createAccessRoutes(accessControl, workspaceService, authService, authService, versionControlService, eventBus, db, testKbContext({ kbDirName: KB }), new NodeFs()));
 
   const server = await new Promise<Server>((resolve) => {
     const s = app.listen(0, () => resolve(s));

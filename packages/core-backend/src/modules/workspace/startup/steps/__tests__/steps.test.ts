@@ -5,7 +5,7 @@ import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { NodeGitRunner } from '../../../../workflow/git/node-git-runner.js';
+import { NodeGitRunner } from '../../../../version-control/git/node-git-runner.js';
 import type { OnServerStart, ServerStartContext, StepResult } from '../../on-server-start.js';
 import { GroupsToPluginsStep } from '../groups-to-plugins.step.js';
 import { PluginDisplayNamesStep } from '../plugin-display-names.step.js';
