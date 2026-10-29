@@ -32,7 +32,7 @@ import {
   SecretNotFoundError,
   SecretOAuthError,
 } from './secrets-vault.contract.js';
-import { timingSafeStringEqual } from '../auth/password-hash.js';
+import { timingSafeStringEqual } from '../auth/index.js';
 
 const MAX_KEY_LEN = 200;
 const MAX_LABEL_LEN = 200;
