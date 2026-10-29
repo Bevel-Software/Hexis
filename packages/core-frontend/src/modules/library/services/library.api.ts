@@ -1,16 +1,14 @@
 import { DEFAULT_BRANCH, PLUGINS_DIR, type PullRequestSummary } from '@bevel-software/platform-shared';
 import { authFetch } from '../../../lib/api';
-import { handleApiResponse } from '../../git/services/git.api';
-import { createBranch } from '../../git/services/git.api';
+import { handleApiResponse, createBranch } from '../../git';
 import {
   deleteFile,
   getOrCreateWorkspace,
   writeFile,
   type SkillToolWarning,
-} from '../../workspace/services/workspace.api';
-import { openChangeRequest } from '../../pr/services/pr-open.api';
-import { postPrComment } from '../../pr/services/pr-comments.api';
-import { branchSegment } from '../../change-requests/services/propose.api';
+} from '../../workspace';
+import { openChangeRequest, updateChangeRequest } from '../../pr';
+import { branchSegment } from '../../change-requests';
 import { ensurePersonalPlugin, type JoinRequest } from './plugins.api';
 
 /**
@@ -189,7 +187,7 @@ export interface ProposeChangeInput {
   repoRelativePath: string;
   /** The file's full new text — what the author typed in the editor. */
   content: string;
-  /** Optional "why" — lands in the change-request description / a comment. */
+  /** Optional "why" — lands in the change-request description (appended on a later round). */
   note?: string;
   userEmail: string;
   userName: string;
@@ -232,8 +230,12 @@ export async function proposeChange(
   );
 
   if (input.existingCr) {
+    // A later round's "why" joins the request's description, after what is
+    // already there — the author may edit their own request, and the
+    // description is what the reviewer reads. The server appends to the text
+    // as it holds it at the write, so a note or edit landing meanwhile stays.
     if (input.note) {
-      await postPrComment(input.existingCr.number, { body: input.note });
+      await updateChangeRequest(input.existingCr.number, { appendDescription: input.note });
     }
   } else {
     await openChangeRequest({

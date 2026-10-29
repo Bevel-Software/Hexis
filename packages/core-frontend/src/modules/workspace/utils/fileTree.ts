@@ -48,7 +48,7 @@ export function checkoutRoot(
  * Whether the tree shows the caller anything of the knowledge base at all.
  * What does not count: the reserved root folders themselves (every knowledge
  * base has them, and the server keeps them visible even to a reader who may
- * open nothing inside), and the root `.bevelignore` an admin sees in a
+ * open nothing inside), and the root `.bevelignore` every reader sees in a
  * knowledge base nobody has written to yet. Anything else — a file, or a
  * folder, at any depth — is an entry on screen.
  *

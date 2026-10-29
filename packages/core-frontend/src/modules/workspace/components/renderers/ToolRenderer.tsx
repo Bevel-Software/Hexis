@@ -7,7 +7,7 @@ import { Surface, useConfirm } from '../../../../shared/components';
 import { Markdown } from '../../../../shared/markdown/Markdown';
 import { ToolForm } from './ToolForm';
 import { ToolSecretsPanel } from '../../../secrets-vault/components/ToolSecretsPanel';
-import { listToolSecrets, type ToolSecrets } from '../../../secrets-vault/services/tool-secrets.api';
+import { listToolSecrets, type ToolSecrets } from '../../../secrets-vault';
 import { useRendererSurface } from './rendererSurface';
 
 /**

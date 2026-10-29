@@ -3,14 +3,13 @@ import { logger } from '../../shared/logging.js';
 
 const log = logger('mcp-auth');
 import { InvalidTokenError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
-import type { AuthService } from '../auth/auth.service.js';
-import { ACCOUNT_DEACTIVATED_MESSAGE, AccountDeactivatedError, AuthBackendError } from '../auth/account-admission.js';
-import type { IExternalApiKeyService } from '../tool-auth/external-api-key.interface.js';
-import type { InternalTokenService } from '../tool-auth/internal-token.service.js';
-import { rejectConnectionKey } from '../tool-auth/connection-key-rejection.js';
+import type { AuthService } from '../auth/index.js';
+import { ACCOUNT_DEACTIVATED_MESSAGE, AccountDeactivatedError, AuthBackendError } from '../auth/index.js';
+import type { IExternalApiKeyService, InternalTokenService } from '../tool-auth/index.js';
+import { rejectConnectionKey } from '../tool-auth/index.js';
 import type { BevelOAuthProvider } from './oauth/bevel-oauth-provider.js';
-import '../tool-auth/external-api-key.interface.js'; // Express Request augmentation (req.externalApiKeyId)
-import '../audit/audit.contract.js'; // Express Request augmentation (req.agentConnectionId)
+import '../tool-auth/index.js'; // Express Request augmentation (req.externalApiKeyId)
+import '../audit/index.js'; // Express Request augmentation (req.agentConnectionId)
 
 /** Which of the four credentials below an MCP request was authenticated with. */
 export type McpCallerKind = 'key' | 'oauth' | 'internal' | 'session';
@@ -25,6 +24,13 @@ declare global {
        * the page its call comes from (`X-Bevel-Page`).
        */
       mcpCallerKind?: McpCallerKind;
+      /**
+       * The agent configuration the MCP caller's credential connects as — a key's
+       * `api_tokens.agent_path`, an agent connection's
+       * `agent_connections.agent_path`, or the one an exchanged grant
+       * carries. Unset is Everything.
+       */
+      mcpAgentPath?: string;
     }
   }
 }
@@ -111,6 +117,7 @@ export function createMcpAuthMiddleware(
         req.userId = resolved.user.id;
         req.userEmail = resolved.user.email;
         req.externalApiKeyId = resolved.tokenId;
+        if (resolved.agentPath) req.mcpAgentPath = resolved.agentPath;
         req.mcpCallerKind = 'key';
         next();
         return;
@@ -137,6 +144,9 @@ export function createMcpAuthMiddleware(
         // unattributed rather than refused.
         if (typeof info.extra?.connectionId === 'string') {
           req.agentConnectionId = info.extra.connectionId;
+        }
+        if (typeof info.extra?.agentPath === 'string' && info.extra.agentPath) {
+          req.mcpAgentPath = info.extra.agentPath;
         }
         if (!req.userId) {
           unauthorized(res, 'Invalid access token');
@@ -218,10 +228,13 @@ export function createMcpAuthMiddleware(
       // stamped too (throttled, off the request's path), so the Audit log's
       // "last used" follows the local server's calls, not only its sign-ins.
       // Carried on the request so those calls are logged under the agent.
+      // The same read answers what the connection is made as NOW: a
+      // re-consent changes the row, not the token, so the row's choice is
+      // the one served, never the one the token was minted with.
       if (claim.connectionId) {
-        let live: boolean;
+        let live: { agentPath: string | null } | null;
         try {
-          live = await oauthProvider.isConnectionLive(claim.connectionId);
+          live = await oauthProvider.liveConnectionChoice(claim.connectionId);
         } catch (err) {
           log.error('agent-connection check failed:', { err });
           res.status(500).json({ error: 'Authentication backend unavailable' });
@@ -233,6 +246,9 @@ export function createMcpAuthMiddleware(
         }
         oauthProvider.noteConnectionUse(claim.connectionId);
         req.agentConnectionId = claim.connectionId;
+        if (live.agentPath) req.mcpAgentPath = live.agentPath;
+      } else if (claim.agentPath) {
+        req.mcpAgentPath = claim.agentPath;
       }
       req.mcpCallerKind = 'internal';
       next();

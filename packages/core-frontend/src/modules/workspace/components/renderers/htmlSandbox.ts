@@ -373,21 +373,44 @@ const NAV_BRIDGE = `
   }
   globalThis.bevel.openNode = navigate;
   globalThis.bevel.navigate = navigate;
+  // A link that names this page's own file with a fragment
+  // ('Roadmap.html#q3') is posted like any path; the parent recognises the
+  // file and hands the fragment back to be scrolled here, as '#q3' is.
+  if (typeof globalThis.addEventListener === 'function') globalThis.addEventListener('message', function (event) {
+    if (event.source !== parent) return;
+    var msg = event.data;
+    if (!msg || typeof msg !== 'object' || msg.type !== 'bevel.jump' || typeof msg.hash !== 'string') return;
+    var hash = normalize(msg.hash);
+    if (hash.charAt(0) === '#') jumpTo(hash);
+  });
+  // A click the reader asked a NEW TAB of — Ctrl, Cmd or Shift held, or the
+  // middle button (an 'auxclick'; it never fires 'click') — is what a browser
+  // opens a new tab for. The frame cannot: the sandbox has no allow-popups,
+  // so left to the browser it opens nothing, or navigates the frame away.
+  // The parent is asked instead, for any destination, a fragment of this
+  // page included (the parent opens this page at that section).
+  function followLink(e) {
+    if (e.type === 'auxclick' && e.button !== 1) return;
+    var el = e.target;
+    var a = el && el.closest ? el.closest('a[href]') : null;
+    if (!a) return;
+    // A handler of the page's own that already cancelled this click owns
+    // it (a toggle, a hash router); the bridge stays out of its way.
+    if (e.defaultPrevented) return;
+    // Cancelled even when there is nowhere to go: left to the browser, an
+    // empty href reloads the frame against the app's URL, as '#…' would.
+    e.preventDefault();
+    var href = normalize(a.getAttribute('href') || '');
+    if (!href) return;
+    if (e.button === 1 || e.ctrlKey || e.metaKey || e.shiftKey) {
+      parent.postMessage({ type: 'bevel.navigate', href: href, newTab: true }, '*');
+      return;
+    }
+    navigate(href);
+  }
   if (typeof document !== 'undefined') {
-    document.addEventListener('click', function (e) {
-      var el = e.target;
-      var a = el && el.closest ? el.closest('a[href]') : null;
-      if (!a) return;
-      // A handler of the page's own that already cancelled this click owns
-      // it (a toggle, a hash router); the bridge stays out of its way.
-      if (e.defaultPrevented) return;
-      // Cancelled even when there is nowhere to go: left to the browser, an
-      // empty href reloads the frame against the app's URL, as '#…' would.
-      e.preventDefault();
-      var href = normalize(a.getAttribute('href') || '');
-      if (!href) return;
-      navigate(href);
-    });
+    document.addEventListener('click', followLink);
+    document.addEventListener('auxclick', followLink);
   }
 })();
 `;
@@ -439,7 +462,7 @@ export const TOOL_CALL_TIMEOUT_MS = 15 * 60 * 1000;
  * The frame has no network (`connect-src 'none'`), so a page reaches tools the
  * way it reaches navigation: it posts `bevel.tool.call` `{ requestId, fn, args }`
  * to the parent and awaits `bevel.tool.response` `{ requestId, ok, result |
- * error, code? }`. The parent (`HtmlRenderer`, through `htmlToolBridge.ts`)
+ * error, code? }`. The parent (an HTML renderer, through `useHtmlToolBridge`)
  * answers each one over the hosted MCP server with the viewer's session —
  * after asking the viewer, on the first call that writes. Nothing about the
  * consent lives in the frame: the card is the app's, drawn outside it, and a
@@ -451,23 +474,41 @@ export const TOOL_CALL_TIMEOUT_MS = 15 * 60 * 1000;
  * and posts back only `apply_file_upload`'s answer — the upload token never
  * enters the frame.
  *
- * `tools` exists only where the app can answer it — the app's file page.
- * Everywhere else (the embed, a skill page, any other preview) it is `null`,
- * so a page checks `window.bevel && window.bevel.tools` before every use and
- * renders without tools when it is null. `requireTools()` is how a page that
- * needs them asks: it posts `bevel.tools.require` and resolves with the
- * parent's answer — `true` on the file page at once, `false` after the
+ * `tools` exists only where the app can answer it — the hosts that provide
+ * `PageToolsContext` (`htmlToolBridge.ts` lists them: the file page, the skill
+ * page). Everywhere else (the embed, the change-request and history previews)
+ * it is `null`, so a page checks `window.bevel && window.bevel.tools` before
+ * every use and renders without tools when it is null. `requireTools()` is how
+ * a page that needs them asks: it posts `bevel.tools.require` and resolves with the
+ * parent's answer — `true` at once where tools are answered, `false` after the
  * parent's card offered the way to the platform and the viewer chose either.
  *
  * Every response is matched to its request by id, and only from `parent`.
  * The `html-views` section of the agent guide documents the members, and
  * `htmlViewsGuide.test.ts` holds the two together.
  */
-function toolBridgeRuntime(enabled: boolean): string {
+/**
+ * `toolBridge`: what the document's runtime posts as, and whether it gets the
+ * tools. An object carries `documentId`, the identity the app minted for THIS
+ * document, which the runtime stamps on every message it posts (tool calls
+ * and `requireTools()` alike) — so the app can tell a message queued by a
+ * document it has since replaced (the frame's window survives a rebuild in
+ * place) from one the current document posts; `tools: false` gives such a
+ * document `bevel.tools = null` while it still asks as itself. `true` builds
+ * the tools without an identity, for a host that answers one document only;
+ * `false` or absent builds neither.
+ */
+export type ToolBridgeOption = boolean | { documentId: string; tools?: boolean };
+
+function toolBridgeRuntime(option: ToolBridgeOption | undefined): string {
+  const withIdentity = typeof option === 'object' && option !== null ? option : null;
+  const enabled = option === true || (withIdentity !== null && withIdentity.tools !== false);
+  const documentId = withIdentity?.documentId ?? null;
   return `
 ;(function () {
   var pending = {};
   var seq = 0;
+  var documentId = ${JSON.stringify(documentId)};
   function request(type, payload) {
     return new Promise(function (resolve, reject) {
       seq += 1;
@@ -478,6 +519,7 @@ function toolBridgeRuntime(enabled: boolean): string {
       }, ${TOOL_CALL_TIMEOUT_MS});
       pending[requestId] = { resolve: resolve, reject: reject, timer: timer };
       var message = { type: type, requestId: requestId };
+      if (documentId !== null) message.documentId = documentId;
       for (var key in payload) message[key] = payload[key];
       parent.postMessage(message, '*');
     });
@@ -535,10 +577,19 @@ interface BuildSandboxedHtmlOptions {
   bodyHtml: string;
   /**
    * Give the page `window.bevel.tools`: only where the parent answers tool
-   * calls, which is the app's file page. Absent or false, the member is
-   * `null`; `requireTools()` exists either way.
+   * calls — the hosts `PageToolsContext` lists in `htmlToolBridge.ts`.
+   * Absent or false, the member is `null`; `requireTools()` exists either
+   * way.
    */
-  toolBridge?: boolean;
+  toolBridge?: ToolBridgeOption;
+  /**
+   * The branch the page is viewed on — `window.bevel.branch` inside the frame,
+   * so a page that reads its data through the tools and links to what they
+   * name does both on the branch it is shown on, rather than on one written
+   * into its script. Absent where the host has no branch for the page (the
+   * embed, a mail body), where the member is `null`.
+   */
+  branch?: string;
 }
 
 /**
@@ -549,8 +600,10 @@ interface BuildSandboxedHtmlOptions {
  */
 export function buildSandboxedHtml(opts: BuildSandboxedHtmlOptions): string {
   const lib = opts.libModuleSources.map(stripRelativeImports).join('\n\n');
-  const exposeGlobals = `\n;globalThis.bevel = { ${BEVEL_GLOBAL_EXPORTS.join(', ')} };\n`;
-  const inlineLib = escapeForScriptBody(lib + exposeGlobals + NAV_BRIDGE + KEY_BRIDGE + toolBridgeRuntime(opts.toolBridge === true));
+  // `branch` is data, not code: serialized as JSON into the literal, so a
+  // branch name can hold nothing the script would read as source.
+  const exposeGlobals = `\n;globalThis.bevel = { ${BEVEL_GLOBAL_EXPORTS.join(', ')} };\nglobalThis.bevel.branch = ${JSON.stringify(opts.branch ?? null)};\n`;
+  const inlineLib = escapeForScriptBody(lib + exposeGlobals + NAV_BRIDGE + KEY_BRIDGE + toolBridgeRuntime(opts.toolBridge));
 
   // Title and body are content-only — `srcDoc` already isolates them, but we
   // still want to escape the few characters that would terminate the parent

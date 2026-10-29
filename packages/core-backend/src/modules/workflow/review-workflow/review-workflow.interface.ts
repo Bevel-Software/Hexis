@@ -3,8 +3,6 @@ import type {
   CancelPrResult,
   FileApprovalState,
   MergePrResult,
-  PostPrCommentInput,
-  PrReviewComment,
   PullRequestFile,
   PullRequestState,
 } from '@bevel-software/platform-shared';
@@ -42,42 +40,12 @@ export interface MergeGateResult {
 }
 
 /**
- * Owns the Bevel-side review state for a PR: comments (phase 2), per-file
- * approvals (phase 3), and the merge gate (phase 4). GitHub stays authoritative
- * for the diff + eventual merge; everything in this interface is in-app state
+ * Owns the Bevel-side review state for a PR: per-file approvals (phase 3) and
+ * the merge gate (phase 4). GitHub stays authoritative for the diff + eventual
+ * merge; everything in this interface is in-app state
  * the team uses to decide whether the merge should fire.
  */
 export interface IReviewWorkflowService {
-  /** List all comments for a PR, oldest first. */
-  listComments(prNumber: number): Promise<PrReviewComment[]>;
-
-  /** Post a new comment. Shape of `input` decides whether it's general, file-level, or inline. */
-  postComment(
-    prNumber: number,
-    user: AuthUser,
-    input: PostPrCommentInput,
-    headSha: string,
-  ): Promise<PrReviewComment>;
-
-  /**
-   * Edit an existing comment. Only the original author may edit — 403 otherwise.
-   * `prNumber` scopes the lookup so a caller can't touch a comment from a
-   * different PR via a guessed id; the comment must belong to this PR.
-   */
-  editComment(
-    commentId: string,
-    prNumber: number,
-    user: AuthUser,
-    body: string,
-  ): Promise<PrReviewComment>;
-
-  /**
-   * Delete a comment. Only the original author may delete — 403 otherwise.
-   * Replies are preserved (orphaned to the thread root). `prNumber` scopes the
-   * lookup so a caller can't cross PRs via a guessed id.
-   */
-  deleteComment(commentId: string, prNumber: number, user: AuthUser): Promise<void>;
-
   /**
    * Compose the per-file approval state for a PR detail response. Resolves
    * the eligible approver set against **the PR's base branch on origin**

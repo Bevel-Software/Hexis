@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { StringDecoder } from 'node:string_decoder';
 import { logger } from '../../shared/logging.js';
 
 const log = logger('access');
@@ -7,9 +8,9 @@ const log = logger('access');
 import { isAbsence, type ITreeWalker, type WalkListener } from '../../shared/fs.contract.js';
 import { assertOneSpecPerLine, isCommitSha, isGitTimeout, type IGitRunner } from '../../shared/git.contract.js';
 import { hashEmail } from '../../shared/email-identity.js';
-import { NodeGitRunner } from '../workflow/git/node-git-runner.js';
+import { NodeGitRunner } from '../workflow/index.js';
 import { readRevSha } from '../kb-fs/index.js';
-import type { WorkspaceService } from '../workspace/workspace.service.js';
+import type { WorkspaceService } from '../workspace/index.js';
 import type {
   IAccessControl,
   AccessDecision,
@@ -21,31 +22,34 @@ import type {
   GrantSources,
   PathHolders,
   PathVerbs,
+  HolderChange,
+  HolderChanges,
   ProspectiveHolders,
   ResolvedPrincipal,
 } from './access-control.interface.js';
 import {
   DEFAULT_KB_LAYOUT,
   PLUGIN_MANIFEST_FILE,
+  isFrontmatterFence,
   isPersonalPluginDir,
   pluginIdentityOf,
   platformRestoreDestination,
 } from '@bevel-software/platform-shared';
 import type { KbContext } from '../../shared/kb-context.js';
-import { AccessConfigError, AccessUnreadableError } from '../access-model/access-errors.js';
-import { synthesizePluginPrincipals } from '../access-model/plugin-principals.js';
 import {
+  AccessConfigError,
+  AccessUnreadableError,
+  synthesizePluginPrincipals,
   GROUPS_YAML,
   SYNCED_GROUPS_YAML,
   parseGroupsFile,
-  type GroupsIndex,
-} from '../access-model/group-files.js';
-import {
   ADMIN_CANONICAL,
   EVERYONE_CANONICAL,
   EVERYONE_DISPLAY,
   KNOWN_VERBS,
   ROLE_TOKEN_PREFIX,
+  GROUP_TOKEN_PREFIX,
+  splitPrincipalToken,
   accessMdSelfEntries,
   canonicalEmail,
   canonicalRoleName,
@@ -56,12 +60,13 @@ import {
   parseRolesYaml,
   requiredVerbsFor,
   sourceVerbsFor,
+  type GroupsIndex,
   type AccessFile,
   type OwnEntries,
   type ParsedEntry,
   type RolesIndex,
   type Verb,
-} from '../access-model/access-grammar.js';
+} from '../access-model/index.js';
 import {
   DIRECTORY_SYNC_BOT_EMAIL,
   DIRECTORY_SYNC_BOT_NAME,
@@ -568,17 +573,20 @@ function addDerivedKeys(model: AccessModel, keys: Set<string>): Set<string> {
  * twin of `principalKeysOf`: a member's key set minus everything they hold
  * for reasons of their own. `null` when no group of that name exists.
  *
- * Groups are keyed by their bare canonical name (`mergeGroupsIntoRoles`);
- * roles by `role/<name>`. A bare key whose record is a ROLE is not a group,
- * however it was spelled.
+ * Groups are keyed by `group/<name>`, and by their bare canonical name
+ * when no role owns it (`mergeGroupsIntoRoles`); roles by the bare name and
+ * `role/<name>`. `group` may be spelled either way: a bare name whose record
+ * is a ROLE still finds the group through its `group/` alias, because this
+ * question is always asked of the group.
  */
 function principalKeysOfGroup(model: AccessModel, group: string): Set<string> | null {
-  const canonical = canonicalRoleName(group);
-  const record = model.roles.byCanonical.get(canonical);
+  const { name } = splitPrincipalToken(canonicalRoleName(group));
+  const record = model.roles.byCanonical.get(`${GROUP_TOKEN_PREFIX}${name}`);
   if (!record || record.kind !== 'group') return null;
-  const keys = new Set<string>([canonical]);
+  const keys = new Set<string>();
   for (const [key, principal] of model.roles.byCanonical) {
-    if (principal.kind === 'role' && principal.groupRefs?.has(canonical)) keys.add(key);
+    if (principal === record) keys.add(key);
+    else if (principal.kind === 'role' && principal.groupRefs?.has(name)) keys.add(key);
   }
   // Plugin principals were expanded from role/group entries; a plugin that
   // admits the group, or a role the group is folded into, admits the group.
@@ -635,9 +643,9 @@ function isAdminFloorScope(scope: AccessScope, relativePath: string): boolean {
 function isAdminEmail(model: AccessModel, email: string): boolean {
   if (model.deploymentOwners.has(email)) return true;
   const roles = model.roles.byEmail.get(email);
-  // Check the explicit `role/admin` alias, NOT the bare token: bare-name
-  // precedence is group-first, so a group that happens to be named "Admin"
-  // owns the bare key — and its members must never inherit the capability.
+  // Check the explicit `role/admin` alias: it is the role's whatever the
+  // bare key holds, and a group that happens to be named "Admin" is only
+  // ever `group/admin` — its members never inherit the capability.
   return !!roles && roles.has(ADMIN_ROLE_KEY);
 }
 
@@ -886,26 +894,11 @@ function resolveGrantSourcesForVerb(
 
   if (principal.kind === 'role') {
     // A named principal can be spelled two ways in a file: the bare token and
-    // the explicit `role/<name>` token. WHICH spellings are THIS principal's
-    // entries depends on who owns the bare key in the merged index:
-    //
-    //   - UNSHADOWED (no group named `<bare>`): both spellings resolve to the
-    //     role, so both count — a grant under either adds a source; a deny
-    //     under either cuts off farther grants. (The revoke splice strips both
-    //     spellings in this case too, so classification and removal agree.)
-    //   - SHADOWED (a group owns the bare key): the spellings are DIFFERENT
-    //     principals. A bare-token principal is the GROUP — only bare entries
-    //     are its own; a `role/`-token principal is the ROLE — only `role/`
-    //     entries are its own. Counting the other spelling would attribute a
-    //     shadowed bare token to the role (hiding a real `role/<name>`
-    //     ancestor grant and making its revoke a false no-op), or vice versa.
-    //
-    //   - PINNED EXACT (`tokenMatch: 'exact'`): only the literally-spelled
-    //     token is this principal's entry, shadowing notwithstanding. The
-    //     caller pinned the same identity into the splice it is checking —
-    //     a GROUP whose group has VANISHED reads "unshadowed" here, and the
-    //     alias-tolerant pair would then attribute a same-named role's
-    //     surviving `role/<name>` grant to the group.
+    //     its explicit `role/<name>` or `group/<name>` token. Which spellings
+    //     are THIS principal's entries is `ownTokensOf`'s one rule — the bare
+    //     token counts only when the bare key is this principal's (the role
+    //     when one exists, else the group), and a pinned `'exact'` counts the
+    //     literal spelling alone.
     const tokens = ownTokensOf(model, principal.role, tokenMatch);
     for (const scope of scopes) {
       const states = tokens.map((t) => scope.byRole.get(t));
@@ -934,11 +927,21 @@ function resolveGrantSourcesForVerb(
 
 /**
  * WHICH token spellings in a file are THIS role-shaped principal's own entries
- * — the shadowing rule, in one place because the grant walk, the denial walk
- * and the revoke splice must all agree on it (a disagreement attributes a
- * shadowed bare token to the wrong principal, which is how a "restrict" silently
- * strips a same-named role's grant). See `resolveGrantSourcesForVerb` for the
- * full reasoning behind each branch.
+ * — in one place because the grant walk, the denial walk and the revoke splice
+ * must all agree on it (a disagreement attributes a bare token to the wrong
+ * principal, which is how a "restrict" silently strips a same-named role's
+ * grant).
+ *
+ *   - `role/X` is the role: its own entries are `role/X`, plus the bare `X`
+ *     unless a GROUP owns the bare key (no role X exists, a group X does).
+ *   - `group/X` is the group: `group/X`, plus the bare `X` unless a ROLE
+ *     owns it — under role-first precedence a same-named role always does.
+ *   - A bare `X` is whoever owns the bare key, with that kind's explicit
+ *     spelling; a bare token with no record (`everyone`, a plugin token, a
+ *     vanished principal) is just itself plus the `role/` spelling a legacy
+ *     role grant may carry.
+ *   - PINNED EXACT (`tokenMatch: 'exact'`): only the literal spelling. The
+ *     caller pinned the same identity into the splice it is checking.
  */
 function ownTokensOf(
   model: AccessModel,
@@ -946,12 +949,14 @@ function ownTokensOf(
   tokenMatch?: 'exact' | 'name',
 ): string[] {
   const canonical = canonicalRoleName(role);
-  const explicit = canonical.startsWith(ROLE_TOKEN_PREFIX);
-  const bare = explicit ? canonical.slice(ROLE_TOKEN_PREFIX.length) : canonical;
-  const shadowed = model.roles.byCanonical.get(bare)?.kind === 'group';
-  return tokenMatch === 'exact' || shadowed
-    ? [explicit ? `${ROLE_TOKEN_PREFIX}${bare}` : bare]
-    : [bare, `${ROLE_TOKEN_PREFIX}${bare}`];
+  if (tokenMatch === 'exact') return [canonical];
+  const { prefix, name } = splitPrincipalToken(canonical);
+  const bareOwner = model.roles.byCanonical.get(name)?.kind;
+  if (prefix === 'role') return bareOwner === 'group' ? [canonical] : [name, canonical];
+  if (prefix === 'group') return bareOwner === 'role' ? [canonical] : [name, canonical];
+  if (bareOwner === 'group') return [name, `${GROUP_TOKEN_PREFIX}${name}`];
+  if (bareOwner === 'plugin') return [name];
+  return [name, `${ROLE_TOKEN_PREFIX}${name}`];
 }
 
 /**
@@ -1086,6 +1091,71 @@ function parentDirOf(relativePath: string): string {
   return cut === -1 ? '' : relativePath.slice(0, cut);
 }
 
+/** The first read of {@link frontmatterHead}; each later one doubles, up to the last. */
+const HEAD_FIRST_READ = 1_024;
+const HEAD_LAST_READ = 64 * 1_024;
+
+/**
+ * The start of `file` that holds everything its frontmatter can say: its
+ * first line when that is no fence (no frontmatter at all), the text through
+ * the closing fence when there is one, and the whole file when an opening
+ * fence is never closed. Scanned for its frontmatter (`scanFrontmatter`), it
+ * answers exactly as the whole file does, by the same fence rule
+ * (`isFrontmatterFence`) — and a file with no frontmatter costs one small
+ * read however long it is.
+ */
+async function frontmatterHead(file: string): Promise<string> {
+  const handle = await fs.open(file, 'r');
+  try {
+    const decoder = new StringDecoder('utf8');
+    // What was read, kept as it was decoded and joined once, when answered:
+    // each character is scanned once, however long a line runs.
+    const pieces: string[] = [];
+    let before = 0;
+    // The line being read so far, folded (see `foldLine`), or null once it
+    // can no longer be a fence.
+    let line: string | null = '';
+    let first = true;
+    let position = 0;
+    for (let size = HEAD_FIRST_READ; ; size = Math.min(size * 2, HEAD_LAST_READ)) {
+      const chunk = Buffer.allocUnsafe(size);
+      const { bytesRead } = await handle.read(chunk, 0, size, position);
+      if (bytesRead === 0) return pieces.join('') + decoder.end();
+      position += bytesRead;
+      const piece = decoder.write(chunk.subarray(0, bytesRead));
+      pieces.push(piece);
+      let from = 0;
+      for (let nl = piece.indexOf('\n'); nl !== -1; nl = piece.indexOf('\n', from)) {
+        const fence = line !== null && isFrontmatterFence(foldLine(line, piece.slice(from, nl)));
+        // The first line opens a block or there is none; after it, the first
+        // fence closes the block.
+        if (first ? !fence : fence) return pieces.join('').slice(0, before + nl);
+        first = false;
+        line = '';
+        from = nl + 1;
+      }
+      if (line !== null) {
+        line = foldLine(line, piece.slice(from));
+        if (!'---'.startsWith(line.trim())) line = null;
+      }
+      // A first line still unfinished that already cannot be a fence.
+      if (first && line === null) return pieces.join('');
+      before += piece.length;
+    }
+  } finally {
+    await handle.close();
+  }
+}
+
+/**
+ * `line` continued by `more`, every run of whitespace folded to one space.
+ * Trimmed, it is `---` exactly when the unfolded line is, so it judges a fence
+ * as `isFrontmatterFence` does while staying a few characters long.
+ */
+function foldLine(line: string, more: string): string {
+  return `${line}${more}`.replace(/\s+/g, ' ');
+}
+
 /**
  * One file's own-entries, parsed as the path `asName` would be read.
  *
@@ -1210,15 +1280,15 @@ function eligibleHoldersResolved(
 
   // (kind, display name) → one entry. The `byRole` keys are the merged
   // index's canonical tokens exactly as granted (bare, or the
-  // `role/<canonical>` alias); the `byCanonical` record a key hits carries
-  // its kind — a `role/` alias always hits the role record, a bare key hits
-  // whichever principal owns it under group-first precedence. A token with no
-  // record (the built-in `everyone`, or a grant naming a since-vanished
-  // principal) degrades to 'role', the pre-groups display. When one display
-  // name is granted as BOTH (a role via its `role/` alias plus a same-named
-  // group via the bare token) BOTH entries survive — they are DIFFERENT
-  // principals, and collapsing them to one would hide the role's live
-  // `role/<name>` grant from every consumer of the eligible list.
+  // `role/` or `group/` alias); the `byCanonical` record a key hits carries
+  // its kind — a `role/` alias always hits the role record, a `group/` alias
+  // the group record, a bare key the role when one exists, else the group. A
+  // token with no record (the built-in `everyone`, or a grant naming a
+  // since-vanished principal) degrades to 'role', the pre-groups display.
+  // When one display name is granted as BOTH (the role plus a same-named
+  // group via `group/`) BOTH entries survive — they are DIFFERENT
+  // principals, and collapsing them to one would hide one of the grants from
+  // every consumer of the eligible list.
   const byIdentity = new Map<string, ResolvedPrincipal>();
   const addPrincipal = (name: string, kind: ResolvedPrincipal['kind']) => {
     const key = `${kind}\0${name.toLowerCase()}`;
@@ -1260,9 +1330,9 @@ function eligibleHoldersResolved(
     verb === 'write' &&
     (relativePath === 'roles.yaml' || isAccessMdPath(relativePath))
   ) {
-    // Look the Admin ROLE up via its explicit alias — the bare key may be
-    // owned by a same-named group under group-first precedence. The override
-    // is the ROLE's capability, so the row's kind is 'role' regardless.
+    // Look the Admin ROLE up via its explicit alias, the key that is always
+    // the role's. The override is the ROLE's capability, so the row's kind is
+    // 'role' regardless.
     const adminRole = model.roles.byCanonical.get(ADMIN_ROLE_KEY);
     addPrincipal(adminRole ? adminRole.displayName : ADMIN_CANONICAL, 'role');
   }
@@ -1284,6 +1354,70 @@ function eligibleHoldersResolved(
   users.sort((a, b) => a.email.localeCompare(b.email));
 
   return { principals, roles, users };
+}
+
+/** One side of a move: the access model, the path, and the rules the file carries there. */
+type MoveSide = { model: AccessModel; path: string; own: OwnEntries | null };
+
+/** The key set behind one entry of an eligible-holders list, read back from its name and kind. */
+function keysOfHolder(model: AccessModel, holder: ResolvedPrincipal): ReadonlySet<string> {
+  for (const [canonical, record] of model.roles.byCanonical) {
+    if (record.kind === holder.kind && record.displayName === holder.name) return principalKeysOfToken(model, canonical);
+  }
+  return principalKeysOfToken(model, canonicalRoleName(holder.name));
+}
+
+/**
+ * Who loses and who gains `verb` between the two sides of a move. The
+ * candidates are every principal and person a rule on either side names for
+ * the verb, as a grant or as a denial, and every holder either side lists;
+ * each is put to both sides' resolvers as the gates would put it. The holder
+ * lists alone are not enough: they name grants, so they miss a group still
+ * covered by `everyone`, and they cannot show someone whose only access was
+ * `everyone` and whom a rule on the far side denies by name.
+ */
+function holderChangesFor(verb: 'read' | 'write', here: MoveSide, there: MoveSide): HolderChanges {
+  const collectives = new Map<string, { holder: ResolvedPrincipal; keys: ReadonlySet<string> }>();
+  const people = new Set<string>();
+  const addCollective = (holder: ResolvedPrincipal, keys: ReadonlySet<string>) => {
+    const id = `${holder.kind}\0${holder.name.toLowerCase()}`;
+    if (!collectives.has(id)) collectives.set(id, { holder, keys });
+  };
+  for (const side of [here, there]) {
+    const held = eligibleHoldersResolved(side.model, verb, side.path, side.own);
+    for (const holder of held.principals) addCollective(holder, keysOfHolder(side.model, holder));
+    for (const user of held.users) people.add(user.email);
+    const { byRole, byEmail } = resolveAtPath(side.model, verb, side.path, side.own);
+    for (const token of byRole.keys()) {
+      const record = side.model.roles.byCanonical.get(token);
+      addCollective(
+        { name: record ? record.displayName : token, kind: record?.kind ?? 'role' },
+        principalKeysOfToken(side.model, token),
+      );
+    }
+    for (const email of byEmail.keys()) people.add(email);
+  }
+  const lose: HolderChange[] = [];
+  const gain: HolderChange[] = [];
+  const record = (had: boolean, has: boolean, change: HolderChange) => {
+    if (had && !has) lose.push(change);
+    if (!had && has) gain.push(change);
+  };
+  for (const { holder, keys } of collectives.values()) {
+    record(
+      hasPermissionForKeys(here.model, verb, keys, here.path, here.own),
+      hasPermissionForKeys(there.model, verb, keys, there.path, there.own),
+      { kind: holder.kind, name: holder.name, verb },
+    );
+  }
+  for (const email of [...people].sort()) {
+    record(
+      hasPermissionResolved(here.model, verb, email, here.path, here.own),
+      hasPermissionResolved(there.model, verb, email, there.path, there.own),
+      { kind: 'person', name: email, email, verb },
+    );
+  }
+  return { lose, gain };
 }
 
 /**
@@ -1657,7 +1791,10 @@ export class AccessControlService implements IAccessControl {
     const model = await this.loadModel(workspaceId);
     const email = canonicalEmail(userEmail);
     const names: string[] = [];
-    for (const principal of model.roles.byCanonical.values()) {
+    // Each group once, through its `group/` alias (the bare key, when the
+    // group owns it, is the same record).
+    for (const [key, principal] of model.roles.byCanonical) {
+      if (!key.startsWith(GROUP_TOKEN_PREFIX)) continue;
       if (principal.kind === 'group' && principal.emails.has(email)) names.push(principal.displayName);
     }
     return names;
@@ -1857,6 +1994,32 @@ export class AccessControlService implements IAccessControl {
     };
   }
 
+  /** Who loses and who gains `read` or `write` in a move (see the interface). */
+  async prospectiveHolderChanges(
+    workspaceId: string,
+    fromPath: string,
+    toPath: string,
+  ): Promise<HolderChanges> {
+    const model = await this.loadModel(workspaceId);
+    const repoDir = await this.repoDir(workspaceId);
+    const { isFolder, ownHere, ownThere, landing } =
+      await this.relocationSubject(repoDir, fromPath, toPath);
+    const here: MoveSide = { model, path: fromPath, own: ownHere };
+    const there: MoveSide = {
+      model: withRelocatedAccessFiles(model, fromPath, toPath, { sourceRemains: false, sourceIsFolder: isFolder, landing }),
+      path: toPath,
+      own: ownThere,
+    };
+    const lose: HolderChange[] = [];
+    const gain: HolderChange[] = [];
+    for (const verb of ['read', 'write'] as const) {
+      const changes = holderChangesFor(verb, here, there);
+      lose.push(...changes.lose);
+      gain.push(...changes.gain);
+    }
+    return { lose, gain };
+  }
+
   /**
    * The caller's own verbs at `toPath` as they will be once `fromPath` has
    * been moved or copied there (see the interface).
@@ -1880,11 +2043,11 @@ export class AccessControlService implements IAccessControl {
     userEmail: string,
     fromPath: string,
     toPath: string,
-    opts?: { sourceRemains?: boolean },
+    opts?: { sourceRemains?: boolean; sourceContent?: string },
   ): Promise<PathVerbs> {
     const repoDir = await this.repoDir(workspaceId);
     const { isFolder, ownThere: own, landing } =
-      await this.relocationSubject(repoDir, fromPath, toPath);
+      await this.relocationSubject(repoDir, fromPath, toPath, opts?.sourceContent);
     const model = withRelocatedAccessFiles(
       await this.loadModel(workspaceId),
       fromPath,
@@ -2068,9 +2231,9 @@ export class AccessControlService implements IAccessControl {
     }
     // Roles = the built-in `everyone` role plus every declared role's display
     // name — ROLE principals only, never groups. Each role is enumerated via
-    // its `role/<canonical>` alias key, which exists exactly once per role
-    // (the bare key may be owned by a same-named group under group-first
-    // precedence, and merged group entries must not appear here). `everyone`
+    // its `role/<canonical>` alias key, which exists exactly once per role;
+    // each group likewise via its `group/<canonical>` alias (a group that
+    // owns its bare key is registered under both, as one record). `everyone`
     // is surfaced so the share UI can grant public read; the grant route
     // gates it to the `read` verb only (write/owner/download everyone stay a
     // direct-access.md edit).
@@ -2083,7 +2246,7 @@ export class AccessControlService implements IAccessControl {
     const plugins = new Map<string, string>();
     for (const [key, principal] of model.roles.byCanonical) {
       if (key.startsWith(ROLE_TOKEN_PREFIX)) roles.push(principal.displayName);
-      else if (principal.kind === 'group') groups.push(principal.displayName);
+      else if (key.startsWith(GROUP_TOKEN_PREFIX) && principal.kind === 'group') groups.push(principal.displayName);
       else if (
         principal.kind === 'plugin' &&
         principal.pluginName &&
@@ -2516,15 +2679,20 @@ export class AccessControlService implements IAccessControl {
    * in the new (body-governed) format, where its frontmatter is self-access —
    * see {@link accessMdSelfEntries}. A legacy `access.md` still yields null:
    * its frontmatter IS the folder rules the dir chain already applies.
+   *
+   * Any other file declares them in its frontmatter alone, so only as much of
+   * it is read as the frontmatter takes (see {@link frontmatterHead}): a batch
+   * over a tree of megabyte transcripts reads a line of each, not the tree.
    */
   private async readOwnEntries(
     repoDir: string,
     relativePath: string,
   ): Promise<OwnEntries | null> {
     if (relativePath === 'roles.yaml') return null;
+    const file = path.join(repoDir, relativePath);
     let text: string;
     try {
-      text = await fs.readFile(path.join(repoDir, relativePath), 'utf-8');
+      text = isAccessMdPath(relativePath) ? await fs.readFile(file, 'utf-8') : await frontmatterHead(file);
     } catch {
       return null;
     }
@@ -2556,11 +2724,18 @@ export class AccessControlService implements IAccessControl {
    * Only absence is an answer (see `isAbsence`): a probe that failed on
    * permissions or I/O does not say "this is a file", and reading a folder as
    * one would resolve it through frontmatter it does not have.
+   *
+   * `sourceContent` is the text of a source that is NO repository path — a
+   * file staged in the workspace's `tmp/` folder, which `copy_file` lands in
+   * the repository. Nothing is probed on disk for it: it is one file by the
+   * ref's own rule, and its text is read exactly as a repository file's is,
+   * so the copy previews the rules it carries in.
    */
   private async relocationSubject(
     repoDir: string,
     fromPath: string,
     toPath: string,
+    sourceContent?: string,
   ): Promise<{
     isFolder: boolean;
     ownHere: OwnEntries | null;
@@ -2568,19 +2743,21 @@ export class AccessControlService implements IAccessControl {
     landing: AccessFile | null;
   }> {
     const nothing = { isFolder: false, ownHere: null, ownThere: null, landing: null };
-    const fromStat = await fs.lstat(path.join(repoDir, fromPath)).catch((err: unknown) => {
-      if (isAbsence(err)) return null;
-      throw err;
-    });
-    if (fromStat?.isSymbolicLink() === true) return nothing;
-    if (fromStat?.isDirectory() === true) return { ...nothing, isFolder: true };
+    if (sourceContent === undefined) {
+      const fromStat = await fs.lstat(path.join(repoDir, fromPath)).catch((err: unknown) => {
+        if (isAbsence(err)) return null;
+        throw err;
+      });
+      if (fromStat?.isSymbolicLink() === true) return nothing;
+      if (fromStat?.isDirectory() === true) return { ...nothing, isFolder: true };
+    }
     // `roles.yaml` carries no own-entries wherever it sits, exactly as
     // `readOwnEntries` has it; a read that fails for any reason is no rules,
     // which is what the gates would say about the same file.
     if (fromPath === 'roles.yaml' || toPath === 'roles.yaml') return nothing;
     let text: string;
     try {
-      text = await fs.readFile(path.join(repoDir, fromPath), 'utf-8');
+      text = sourceContent ?? (await fs.readFile(path.join(repoDir, fromPath), 'utf-8'));
     } catch {
       return nothing;
     }

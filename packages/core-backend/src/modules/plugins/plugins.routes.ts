@@ -2,7 +2,7 @@ import express from 'express';
 import { logger } from '../../shared/logging.js';
 
 const log = logger('plugins');
-import '../auth/auth.middleware.js'; // Express Request.userId / userEmail augmentation
+import '../auth/index.js'; // Express Request.userId / userEmail augmentation
 import {
   joinBranchFor,
   type AuthUser,
@@ -10,17 +10,19 @@ import {
   type ChangeRequestState,
   type IWorkflowService,
 } from '@bevel-software/platform-shared';
-import type { IAccessControl } from '../access/access-control.interface.js';
+import type { IAccessControl } from '../access/index.js';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
 import { domainErrorBody } from '../../shared/http-errors.js';
 import { pluginFolderBelowRoot } from './plugins.service.js';
 import type { KbContext } from '../../shared/kb-context.js';
 import { PluginProvisionError, type PluginProvisionService } from './plugin-provision.service.js';
-import { argumentsRefusal } from '../tool-helpers/route-argument-check.js';
+import { argumentsRefusal } from '../tool-helpers/index.js';
+import { resolveConnectionScope, type IAgentScopeResolver } from '../agent-scope/index.js';
+import '../tool-auth/index.js'; // Express Request.toolAuth augmentation
 import { PluginLinkError, type PluginLinksService } from './plugin-links.service.js';
 import { PluginRenameError, type PluginRenameService } from './plugin-rename.service.js';
 import type { JoinRequestsService } from './join-requests.service.js';
-import { folderTarget } from '../access/access-requests.contract.js';
+import { folderTarget } from '../access/index.js';
 import type { PluginJoinRequestJobs } from './join-request-jobs.service.js';
 import type { JoinRequestRecord } from './join-request-records.store.js';
 import type {
@@ -84,6 +86,29 @@ function refuseMismatchedArguments(req: express.Request, res: express.Response):
 }
 
 /**
+ * Answer the connection-scope refusal when the caller's connection was made
+ * as an agent configuration that does not list `toolName`; `true` when it answered.
+ * These routes ARE the `create_plugin` and `my_plugin` tools but are not
+ * hosted by `toolHandler`, so they ask the one policy it asks —
+ * `ConnectionScope.platformToolRefusal` — and answer what it answers. A
+ * session, or a key made as Everything, carries no `agentPath` and is never
+ * refused.
+ */
+async function refuseOutsideConnectionScope(
+  req: express.Request,
+  res: express.Response,
+  user: AuthUser,
+  toolName: string,
+  agentScope: Pick<IAgentScopeResolver, 'resolve'> | undefined,
+): Promise<boolean> {
+  const scope = await resolveConnectionScope(agentScope, user.email, req.toolAuth?.agentPath);
+  const refusal = scope.platformToolRefusal(toolName);
+  if (!refusal) return false;
+  res.status(403).json(refusal);
+  return true;
+}
+
+/**
  * The two doors through which plugin folders come to exist — ONE
  * implementation each, for the app and for agents alike:
  *
@@ -106,6 +131,8 @@ function refuseMismatchedArguments(req: express.Request, res: express.Response):
 export function createPluginCreationRoutes(
   provision: Pick<PluginProvisionService, 'createPlugin' | 'ensurePersonalPlugin'>,
   resolveUser: (req: express.Request) => Promise<AuthUser | null>,
+  /** Resolves a connection's agent choice to its scope; absent, a narrowed connection loads nothing. */
+  agentScope?: Pick<IAgentScopeResolver, 'resolve'>,
 ): express.Router {
   const router = express.Router();
 
@@ -117,8 +144,10 @@ export function createPluginCreationRoutes(
     }
     // These two routes ARE the `create_plugin` and `my_plugin` tools, so an
     // agent's call is checked against what those tools declare, exactly as a
-    // route-hosted tool's is in `toolHandler`: a call that does not match is
-    // refused before anything is provisioned.
+    // route-hosted tool's is in `toolHandler`: a call that does not match, or
+    // a connection whose agent does not list the tool, is refused before
+    // anything is provisioned.
+    if (await refuseOutsideConnectionScope(req, res, user, 'create_plugin', agentScope)) return;
     if (refuseMismatchedArguments(req, res)) return;
     // `req.body` is undefined when no JSON body was sent at all — that is a
     // 400, not a destructuring crash.
@@ -155,8 +184,10 @@ export function createPluginCreationRoutes(
     }
     // These two routes ARE the `create_plugin` and `my_plugin` tools, so an
     // agent's call is checked against what those tools declare, exactly as a
-    // route-hosted tool's is in `toolHandler`: a call that does not match is
-    // refused before anything is provisioned.
+    // route-hosted tool's is in `toolHandler`: a call that does not match, or
+    // a connection whose agent does not list the tool, is refused before
+    // anything is provisioned.
+    if (await refuseOutsideConnectionScope(req, res, user, 'my_plugin', agentScope)) return;
     if (refuseMismatchedArguments(req, res)) return;
     try {
       res.json(await provision.ensurePersonalPlugin(user));

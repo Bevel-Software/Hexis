@@ -55,7 +55,7 @@ import { DestinationTakenError, lstatOrNull, renameNoReplace, takenError } from 
 import { linkedAncestor } from '../../shared/no-link-below.js';
 import { assertInsideRepo } from './repo-path.js';
 import { GitGuardedFilesystem } from './git-guarded-filesystem.js';
-import type { CreationGrantPlan, ICreatorAccess } from '../access-model/creator.js';
+import type { CreationGrantPlan, ICreatorAccess } from '../access-model/index.js';
 
 /** How many times to retry a contended acquire before giving up. */
 const ACQUIRE_RETRY_ATTEMPTS = 3;
@@ -226,9 +226,15 @@ export class LockingFilesystem extends GitGuardedFilesystem {
     const plan = await this.planCreate(inputPath, 'file');
     if (plan?.kind === 'seed-access-md') await this.seedAccessMd(plan);
     const toWrite = content;
+    // An EXCLUSIVE write (`overwrite: false`, the `wx` flag) that finds the
+    // name taken is refused as a copy is (`asTakenRefusal`): the refusal is a
+    // `DestinationTakenError`, so the lock is released untouched. Left as the
+    // raw failure it would be a failed op, and the discard that follows resets
+    // the PATH — throwing away the winner's file, whose commit is still queued.
+    const land = () => super.writeFile(inputPath, toWrite, options);
     return this.withLock(
       inputPath,
-      () => super.writeFile(inputPath, toWrite, options),
+      () => (options?.overwrite === false ? this.asTakenRefusal(inputPath, land) : land()),
       (check || validate) &&
         (async () => {
           // The caller's verdict first: it decides whether this write happens

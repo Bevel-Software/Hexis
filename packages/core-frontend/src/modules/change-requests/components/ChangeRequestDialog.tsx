@@ -4,24 +4,29 @@ import {
   type FileDiffPayload,
   type PullRequestDetail,
   type PullRequestSummary,
+  type UpdateChangeRequestInput,
 } from '@bevel-software/platform-shared';
 import '../change-requests.css';
-import { Banner, Button, Surface } from '../../../shared/components';
+import { Banner, Button, Surface, TextAreaField, TextField } from '../../../shared/components';
 import { useModalLayer } from '../../../shared/components/useModalLayer';
 import { cn } from '../../../lib/utils';
 import { PR_STALE_EVENT } from '../../../core/events';
-import { AuthContext } from '../../auth/state/auth.context';
-import { fetchPrDetail } from '../../pr/services/pr-detail.api';
-import { useEventBus } from '../../workflow/state/event-bus.context';
-import { approvePrFile, revertPrFile, unapprovePrFile } from '../../pr/services/pr-approvals.api';
-import { deleteChangeRequest } from '../../pr/services/pr-cancel.api';
-import { refreshChangeRequestFromTarget } from '../../pr/services/pr-merge.api';
-import { GitApiError } from '../../git/services/git.api';
-import { friendlyGitError, friendlyGitMessage } from '../../git/services/error-messages';
+import { AuthContext } from '../../auth';
+import { useEventBus } from '../../workflow';
+import {
+  approvePrFile,
+  deleteChangeRequest,
+  fetchPrDetail,
+  refreshChangeRequestFromTarget,
+  revertPrFile,
+  unapprovePrFile,
+  updateChangeRequest,
+} from '../../pr';
+import { GitApiError, friendlyGitError, friendlyGitMessage } from '../../git';
 import { GitSyncFailedBanner } from '../../git/components/GitSyncFailedBanner';
 import { useApplyChangeRequest } from '../hooks/useApplyChangeRequest';
 import { readFileOnBranch } from '../services/change-requests.api';
-import { WorkspaceApiError } from '../../workspace/services/workspace.api';
+import { WorkspaceApiError } from '../../workspace';
 import { describeReadFailure } from '../services/denied-file.api';
 import { deniedSentence, readErrorLead, type ReadFailure } from '../utils/readFailure';
 import { changeAuthorName } from '../utils/author';
@@ -233,6 +238,8 @@ export function ChangeRequestDialog({
     const offs = [
       bus.subscribe('change-request-apply-failed', reread),
       bus.subscribe('change-request-merged', reread),
+      // Somebody changed the title or description: show the new text.
+      bus.subscribe('change-request-edited', reread),
     ];
     return () => {
       cancelled = true;
@@ -874,6 +881,68 @@ export function ChangeRequestDialog({
   }
 
   /**
+   * Editing the title and description — the author's, or anyone's who may
+   * merge the request (`viewerCanEdit`, the server's verdict; the PATCH route
+   * re-checks it). The description field holds the body whole: it is nothing
+   * but the description, and a save replaces exactly what the field showed.
+   */
+  const [editing, setEditing] = useState(false);
+  const [draftTitle, setDraftTitle] = useState('');
+  const [draftDescription, setDraftDescription] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
+  const shownTitle = detail?.title ?? cr.title;
+  // The text the form opened with. A save sends only the fields the reader
+  // changed FROM it — not from `detail`, which a remote edit may refresh
+  // while the form is open — so the untouched field is never written back
+  // with a stale draft.
+  const editBaseline = useRef({ title: '', description: '' });
+  function startEditing() {
+    const baseline = { title: shownTitle, description: detail?.body.trim() ?? '' };
+    editBaseline.current = baseline;
+    setDraftTitle(baseline.title);
+    setDraftDescription(baseline.description);
+    setEditError(null);
+    setEditing(true);
+  }
+  async function saveEdit() {
+    if (saving || !detail) return;
+    const title = draftTitle.trim();
+    const description = draftDescription.trim();
+    const titleChanged = title !== editBaseline.current.title;
+    const descriptionChanged = description !== editBaseline.current.description;
+    let changes: UpdateChangeRequestInput;
+    if (titleChanged) changes = descriptionChanged ? { title, description } : { title };
+    else if (descriptionChanged) changes = { description };
+    else {
+      setEditing(false);
+      return;
+    }
+    setSaving(true);
+    setEditError(null);
+    try {
+      await updateChangeRequest(cr.number, changes);
+    } catch (err) {
+      setEditError(err instanceof Error ? err.message : "Couldn't save the change request.");
+      setSaving(false);
+      return;
+    }
+    // Saved. Every list on the page re-reads — this tab does not wait on its
+    // own broadcast — and the dialog shows the new text from a fresh read; a
+    // failed read leaves the saved edit saved and shows the last text known.
+    window.dispatchEvent(new Event(PR_STALE_EVENT));
+    setEditing(false);
+    setSaving(false);
+    const seq = ++detailSeq.current;
+    try {
+      const fresh = await fetchPrDetail(cr.number, { fresh: true });
+      if (seq === detailSeq.current) setDetail(fresh);
+    } catch {
+      // The server's `change-request-edited` broadcast re-reads it again.
+    }
+  }
+
+  /**
    * Apply = record the approvals the gate requires, then merge, then wait for
    * the merge to land. The POST only acks — see `useApplyChangeRequest` for
    * why awaiting it is not an answer.
@@ -1013,7 +1082,7 @@ export function ChangeRequestDialog({
 
   const author = changeAuthorName(cr);
   const firstName = author.split(' ')[0];
-  const why = authorsReason(detail?.body);
+  const why = descriptionOf(detail?.body);
   const [whyExpanded, setWhyExpanded] = useState(false);
   /**
    * Whether the one-line view is actually hiding anything — a short reason
@@ -1029,7 +1098,7 @@ export function ChangeRequestDialog({
       className="fixed inset-0 z-[60] flex flex-col"
       role="dialog"
       aria-modal="true"
-      aria-label={`Change request: ${cr.title}`}
+      aria-label={`Change request: ${shownTitle}`}
     >
       <div className="absolute inset-0 bg-scrim" onClick={onClose} />
 
@@ -1042,13 +1111,29 @@ export function ChangeRequestDialog({
         <div className="flex items-start gap-4 px-8 pt-7">
           <div className="min-w-0 flex-1">
             <p className="text-label font-semibold uppercase text-ink-faint">Change request</p>
-            <h1 className="mt-1 text-title font-medium text-ink">{cr.title}</h1>
+            {editing ? (
+              <TextField
+                className="mt-1 text-title font-medium"
+                aria-label="Title"
+                value={draftTitle}
+                maxLength={256}
+                disabled={saving}
+                onChange={(e) => setDraftTitle(e.target.value)}
+              />
+            ) : (
+              <h1 className="mt-1 text-title font-medium text-ink">{shownTitle}</h1>
+            )}
             <p className="mt-2 flex flex-wrap items-center gap-2 text-detail text-ink-muted">
               <span>{author}</span>
               <span aria-hidden="true" className="text-ink-faint">·</span>
               <span className="font-mono">{cr.branch}</span>
             </p>
           </div>
+          {detail?.viewerCanEdit && !editing && (
+            <Button variant="quiet" size="sm" onClick={startEditing}>
+              Edit
+            </Button>
+          )}
           <Button variant="quiet" size="sm" onClick={onClose} aria-label="Close change request">
             ✕
           </Button>
@@ -1064,7 +1149,39 @@ export function ChangeRequestDialog({
             more opens the whole thing (self-scrolling past half the surface,
             so even an essay never pushes the files off screen); Hide folds it
             back to the line. */}
-        {why && (
+        {editing && (
+          <div className="mx-8 mt-5 shrink-0">
+            <TextAreaField
+              className="max-h-[40vh] min-h-32"
+              aria-label="Description"
+              placeholder="Why this change, in your words"
+              value={draftDescription}
+              maxLength={64_000}
+              disabled={saving}
+              onChange={(e) => setDraftDescription(e.target.value)}
+            />
+            {editError && (
+              <Banner tone="danger" role="alert" className="mt-3">
+                {editError}
+              </Banner>
+            )}
+            <div className="mt-3 flex items-center gap-3">
+              <Button
+                variant="primary"
+                size="sm"
+                disabled={saving || draftTitle.trim().length === 0}
+                onClick={() => void saveEdit()}
+              >
+                {saving ? 'Saving…' : 'Save'}
+              </Button>
+              <Button variant="quiet" size="sm" disabled={saving} onClick={() => setEditing(false)}>
+                Cancel
+              </Button>
+            </div>
+          </div>
+        )}
+
+        {!editing && why && (
           <blockquote
             className={cn(
               'mx-8 mt-5 shrink-0 border-l-2 border-line-strong pl-4 text-body text-ink',
@@ -1491,23 +1608,14 @@ export function ChangeRequestDialog({
 }
 
 /**
- * The author's reason, or nothing.
- *
- * A change request's body is part human and part machine: the backend appends
- * an `## Affected owners` block (and hidden identity markers) to whatever the
- * author wrote, and our propose flow writes no description at all — so the body
- * is USUALLY pure machinery. Rendering it as a pull-quote under the title
- * presents a routing table as the reason someone wants this change. Everything
- * from the first generated heading on is dropped; what survives is quoted only
- * if a human actually wrote it.
+ * The request's description, or nothing. The body IS the description — the
+ * server writes nothing of its own into it — so the quote under the title is
+ * the whole of what the author wrote, and the same text the Edit control
+ * offers. Nothing when nobody wrote one (the propose flow may leave it empty).
  */
-function authorsReason(body: string | undefined): string | null {
-  if (!body) return null;
-  const human = body
-    .split(/^##\s+/m)[0]
-    .replace(/<!--[\s\S]*?-->/g, '')
-    .trim();
-  return human.length > 0 ? human : null;
+function descriptionOf(body: string | undefined): string | null {
+  const text = body?.trim() ?? '';
+  return text.length > 0 ? text : null;
 }
 
 /**

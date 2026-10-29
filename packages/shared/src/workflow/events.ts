@@ -102,6 +102,24 @@ export interface FsTreeChangedEvent {
 }
 
 /**
+ * A document's text could not be extracted, just now: the parser refused it,
+ * or the extraction outlived its budget. Emitted once per FRESH failure —
+ * never for one answered from memory — so a person looking at the file's row
+ * in the explorer is told in place, and nothing is kept for later.
+ *
+ * `reason` follows "Could not be read:" in the explorer's notice. It names the
+ * file and quotes the parser; like every kind that names a path on a
+ * workspace, it is delivered only to sessions whose person may read `path`
+ * (the events route's delivery rule, judged by the access rules).
+ */
+export interface DocumentUnreadableEvent {
+  kind: 'document-unreadable';
+  workspaceId: string;
+  path: string;
+  reason: string;
+}
+
+/**
  * A commit landed locally but could not be pushed to the remote.
  *
  * Saving is deliberately not blocked on this: the commit is safe on the
@@ -223,6 +241,16 @@ export interface ChangeRequestMergedEvent {
 
 export interface ChangeRequestRejectedEvent {
   kind: 'change-request-rejected';
+  number: number;
+}
+
+/**
+ * A request's title or description was edited. Carries no text: every
+ * viewer re-reads the request through the list and detail endpoints it
+ * already uses, which apply its own read rules.
+ */
+export interface ChangeRequestEditedEvent {
+  kind: 'change-request-edited';
   number: number;
 }
 
@@ -353,6 +381,7 @@ export type WorkflowEventPayload =
   | LockAcquiredEvent
   | LockReleasedEvent
   | FsTreeChangedEvent
+  | DocumentUnreadableEvent
   | GitSyncFailedEvent
   | GitSyncRecoveredEvent
   | BranchSwitchedEvent
@@ -361,6 +390,7 @@ export type WorkflowEventPayload =
   | ChangeRequestOpenedEvent
   | ChangeRequestMergedEvent
   | ChangeRequestRejectedEvent
+  | ChangeRequestEditedEvent
   | ChangeRequestMergeFailedEvent
   | ChangeRequestApplyFailedEvent
   | ApprovalChangedEvent
@@ -378,6 +408,7 @@ export function isWorkspaceScoped(
     e.kind === 'lock-acquired' ||
     e.kind === 'lock-released' ||
     e.kind === 'fs-tree-changed' ||
+    e.kind === 'document-unreadable' ||
     e.kind === 'git-sync-failed' ||
     e.kind === 'git-sync-recovered'
   );

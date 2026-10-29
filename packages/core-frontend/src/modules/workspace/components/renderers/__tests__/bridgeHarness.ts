@@ -16,9 +16,22 @@ export interface BridgeRun {
    * was cancelled. `alreadyPrevented` is a click a handler of the page's own
    * cancelled before it bubbled up to the bridge. `noAnchor` is a click on
    * something that is not inside an `<a>` at all — a button, a div — which
-   * the bridge must leave alone.
+   * the bridge must leave alone. `ctrlKey`/`metaKey`/`shiftKey`/`altKey`
+   * are the keys held; `button` 1 is the middle button, which a browser
+   * dispatches as an `auxclick` (never a `click`), and so does this.
    */
-  click: (href: string, opts?: { alreadyPrevented?: boolean; noAnchor?: boolean }) => { prevented: boolean };
+  click: (
+    href: string,
+    opts?: {
+      alreadyPrevented?: boolean;
+      noAnchor?: boolean;
+      ctrlKey?: boolean;
+      metaKey?: boolean;
+      shiftKey?: boolean;
+      altKey?: boolean;
+      button?: number;
+    },
+  ) => { prevented: boolean };
   /** `window.bevel` as the page's own scripts see it. */
   bevel: Record<string, unknown>;
   /** Messages posted to the parent. */
@@ -52,15 +65,26 @@ export interface BridgeRun {
  */
 export function runBridge(
   page: { ids?: string[]; names?: string[]; namedControls?: string[] } = {},
-  opts: { toolBridge?: boolean } = {},
+  opts: { toolBridge?: boolean | { documentId: string; tools?: boolean } } = {},
 ): BridgeRun {
   // No lib sources: a vm script cannot parse an `export`. The bridge is
   // appended after the lib either way.
   const out = buildSandboxedHtml({ title: 't', libModuleSources: [], bodyHtml: '', toolBridge: opts.toolBridge });
   const scriptBody = out.match(/<script type="module">([\s\S]*?)<\/script>/)![1];
 
-  type ClickEvent = { target: { closest: () => unknown }; defaultPrevented: boolean; preventDefault: () => void };
+  type ClickEvent = {
+    type: string;
+    button: number;
+    ctrlKey: boolean;
+    metaKey: boolean;
+    shiftKey: boolean;
+    altKey: boolean;
+    target: { closest: () => unknown };
+    defaultPrevented: boolean;
+    preventDefault: () => void;
+  };
   const handlers: ((e: ClickEvent) => void)[] = [];
+  const auxHandlers: ((e: ClickEvent) => void)[] = [];
   const posted: unknown[] = [];
   const scrolled: string[] = [];
   const scrolledTags: string[] = [];
@@ -108,6 +132,7 @@ export function runBridge(
     document: {
       addEventListener: (type: string, fn: (e: ClickEvent) => void) => {
         if (type === 'click') handlers.push(fn);
+        if (type === 'auxclick') auxHandlers.push(fn);
       },
       getElementById: (id: string) => (ids.has(id) ? element(id) : null),
       // In document order a control comes first here, so a fallback that
@@ -130,7 +155,15 @@ export function runBridge(
     click: (href: string, opts = {}) => {
       let prevented = opts.alreadyPrevented ?? false;
       const anchor = opts.noAnchor ? null : { getAttribute: () => href };
-      handlers[0]({
+      const button = opts.button ?? 0;
+      const type = button === 0 ? 'click' : 'auxclick';
+      for (const fn of type === 'click' ? handlers : auxHandlers) fn({
+        type,
+        button,
+        ctrlKey: opts.ctrlKey ?? false,
+        metaKey: opts.metaKey ?? false,
+        shiftKey: opts.shiftKey ?? false,
+        altKey: opts.altKey ?? false,
         target: { closest: () => anchor },
         defaultPrevented: prevented,
         preventDefault: () => (prevented = true),

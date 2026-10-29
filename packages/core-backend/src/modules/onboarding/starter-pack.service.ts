@@ -64,11 +64,10 @@ import {
 import { logger } from '../../shared/logging.js';
 import { PushNeedsAgentResolutionError, WorkflowDomainError } from '../../shared/domain-errors.js';
 import type { KbContext } from '../../shared/kb-context.js';
-import type { IAdminAccessService } from '../admin/admin.interface.js';
-import type { IAccessControl } from '../access/access-control.interface.js';
-import type { FileChangeNotifier } from '../kb-fs/file-change-notifier.js';
-import { LockingFilesystem } from '../kb-fs/locking-filesystem.js';
-import type { WorkspaceMutex } from '../kb-fs/mutex.js';
+import type { IAdminAccessService } from '../admin/index.js';
+import type { IAccessControl } from '../access/index.js';
+import type { FileChangeNotifier, WorkspaceMutex } from '../kb-fs/index.js';
+import { LockingFilesystem } from '../kb-fs/index.js';
 import type { IFsProbe, ITreeWalker } from '../../shared/fs.contract.js';
 import {
   isUntouchedStarterPage,
@@ -76,7 +75,7 @@ import {
   type FirstRunStarter,
   type FirstRunStarterSource,
   type MayRead,
-} from '../workspace/first-run.js';
+} from '../workspace/index.js';
 import { pluginAccessMd, withCreatorGrants, type PluginSource } from '../plugins/index.js';
 import {
   NO_STARTER_PACK,

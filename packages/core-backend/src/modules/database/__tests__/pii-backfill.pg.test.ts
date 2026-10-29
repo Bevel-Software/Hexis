@@ -34,7 +34,6 @@ const TABLES = [
   'users',
   'pr_file_approvals',
   'pr_merge_log',
-  'pr_comments',
   'change_requests',
   'pending_commits',
   'file_locks',
@@ -98,8 +97,6 @@ async function plantLegacyRows(q: Query): Promise<void> {
   await q(`insert into pr_merge_log (pr_number, triggered_by_email, triggered_by_name, head_sha_at_merge, merge_method, succeeded, error)
     values (1, 'ada@example.com', 'Ada', 'abc', 'merge', true, null),
            (1, 'bo@example.com', 'Bo', 'abc', 'merge', false, 'Bo has no push right')`);
-  await q(`insert into pr_comments (pr_number, author_email, author_name, head_sha, body)
-    values (1, 'bo@example.com', 'Bo', 'abc', 'Looks right to me')`);
   await q(`insert into pending_commits (workspace_id, branch, path, author_email, author_name, last_error)
     values ('w', 'main', 'a.md', 'ada@example.com', 'Ada', 'rejected for Ada')`);
   await q(`insert into file_locks (workspace_id, branch, path, holder_user_id, holder_name, expires_at)
@@ -302,10 +299,6 @@ describe.skipIf(!ADMIN_URL)('personal data, on a real Postgres', () => {
         expect(log.every((r) => r.error === null || sealed(r.error))).toBe(true);
         expect(log.every((r) => r.triggered_by_email_bidx === keys.index(opened(r.triggered_by_email)))).toBe(true);
 
-        const [comment] = await q(`select * from pr_comments`);
-        expect([comment!.author_email, comment!.author_name, comment!.body].every(sealed)).toBe(true);
-        expect(comment!.author_email_bidx).toBe(keys.index('bo@example.com'));
-
         const [queued] = await q(`select * from pending_commits`);
         expect([queued!.author_email, queued!.author_name, queued!.last_error].every(sealed)).toBe(true);
         expect(queued!.author_email_bidx).toBe(keys.index('ada@example.com'));
@@ -347,6 +340,10 @@ describe.skipIf(!ADMIN_URL)('personal data, on a real Postgres', () => {
         ).rejects.toThrow();
         await expect(q(`insert into users (email, name) values ('x', 'x')`)).rejects.toThrow();
 
+        // Change-request comments are gone, storage and all (migration 0018).
+        const [comments] = await q(`select to_regclass('pr_comments')::text as t`);
+        expect(comments!.t).toBeNull();
+
         // And the application reads it back as it was written.
         const [read] = await db.select().from(users).where(eq(users.emailBidx, 'ADA@EXAMPLE.COM '));
         expect(read).toMatchObject({ email: 'Ada@Example.com', name: 'Ada', avatarUrl: null });
@@ -371,7 +368,7 @@ describe.skipIf(!ADMIN_URL)('personal data, on a real Postgres', () => {
         const exact = `pii:v1:${'A'.repeat(16)}:${'B'.repeat(22)}==:Q2xlYXI=`;
         const unpadded = `pii:v1:${'A'.repeat(16)}:${'B'.repeat(22)}:Q2xlYXI=`;
         await q(`update users set name = '${exact}' where email = 'bo@example.com'`);
-        await q(`update pr_comments set body = '${unpadded}'`);
+        await q(`update change_requests set title = '${unpadded}'`);
         await q(`update file_locks set holder_name = '${exact}'`);
 
         await runCoreMigrations(db, coreMigrationsDir());
@@ -379,9 +376,9 @@ describe.skipIf(!ADMIN_URL)('personal data, on a real Postgres', () => {
         const [bo] = await q(`select name from users where email_bidx = '${keys.index('bo@example.com')}'`);
         expect(bo!.name).not.toBe(exact);
         expect(opened(bo!.name)).toBe(exact);
-        const [comment] = await q(`select body from pr_comments`);
-        expect(comment!.body).not.toBe(unpadded);
-        expect(opened(comment!.body)).toBe(unpadded);
+        const [cr] = await q(`select title from change_requests`);
+        expect(cr!.title).not.toBe(unpadded);
+        expect(opened(cr!.title)).toBe(unpadded);
         const [lock] = await q(`select holder_name from file_locks`);
         expect(opened(lock!.holder_name)).toBe(exact);
         // And what the application reads back is what was typed.
@@ -400,17 +397,17 @@ describe.skipIf(!ADMIN_URL)('personal data, on a real Postgres', () => {
       async () => {
         const { db, q } = await beforeTheBackfill(await scratchDatabase());
         await plantLegacyRows(q);
-        await q(`insert into pr_comments (pr_number, author_email, author_name, head_sha, body)
-          select n, 'ada@example.com', 'Ada', 'abc', 'comment ' || n from generate_series(2, 1300) n`);
+        await q(`insert into pr_merge_log (pr_number, triggered_by_email, triggered_by_name, head_sha_at_merge, merge_method, succeeded, error)
+          select n, 'ada@example.com', 'Ada', 'abc', 'merge', false, 'refusal ' || n from generate_series(2, 1300) n`);
 
         await runCoreMigrations(db, coreMigrationsDir());
 
-        const [left] = await q(`select count(*)::int as n from pr_comments where body not like 'pii:v1:%' or author_email_bidx is null`);
+        const [left] = await q(`select count(*)::int as n from pr_merge_log where triggered_by_name not like 'pii:v1:%' or triggered_by_email_bidx is null`);
         expect(left!.n).toBe(0);
-        const [all] = await q(`select count(*)::int as n from pr_comments`);
-        expect(all!.n).toBe(1300);
-        const [one] = await q(`select body from pr_comments where pr_number = 1300`);
-        expect(opened(one!.body)).toBe('comment 1300');
+        const [all] = await q(`select count(*)::int as n from pr_merge_log`);
+        expect(all!.n).toBe(1301);
+        const [one] = await q(`select error from pr_merge_log where pr_number = 1300`);
+        expect(opened(one!.error)).toBe('refusal 1300');
       },
       TIMEOUT,
     );

@@ -32,3 +32,5 @@ export {
   BEVEL_SECRETS_LOADER_TYPE,
   DEFAULT_SECRETS_SCOPE,
 } from './secrets-variable-loader.js';
+// Reached by other modules; exported here so they stop importing the files.
+export { scopesCovered, userSecretGap, type UserSecretGap } from './secrets-vault.contract.js';

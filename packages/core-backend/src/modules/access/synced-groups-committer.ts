@@ -3,12 +3,12 @@ import { logger } from '../../shared/logging.js';
 
 const log = logger('directory-sync');
 import type { AuthUser, IWorkflowService } from '@bevel-software/platform-shared';
-import type { WorkspaceService } from '../workspace/workspace.service.js';
+import type { WorkspaceService } from '../workspace/index.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { AccessControlService } from './access-control.service.js';
-import { SYNCED_GROUPS_YAML } from '../access-model/group-files.js';
-import type { WorkflowEventBus } from '../workflow/event-bus.js';
-import { LockingFilesystem } from '../kb-fs/locking-filesystem.js';
+import { SYNCED_GROUPS_YAML } from '../access-model/index.js';
+import type { WorkflowEventBus } from '../workflow/index.js';
+import { LockingFilesystem } from '../kb-fs/index.js';
 import { PushNeedsAgentResolutionError, WorkflowDomainError } from '../../shared/domain-errors.js';
 import { isAbsence } from '../../shared/fs.contract.js';
 import type { SyncedGroupsWriterDeps } from './synced-groups-writer.js';

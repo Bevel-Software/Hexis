@@ -4,8 +4,8 @@ import { logger } from '../../shared/logging.js';
 const log = logger('account-erasure');
 import { and, eq, notExists } from 'drizzle-orm';
 import { isEncryptedBlob } from '../../shared/column-crypto.js';
-import type { Database } from '../database/connection.js';
-import type { IReviewWorkflowService } from '../workflow/review-workflow/review-workflow.interface.js';
+import type { Database } from '../database/index.js';
+import type { IReviewWorkflowService } from '../workflow/index.js';
 import {
   changeRequests,
   externalApiKeys,
@@ -14,11 +14,10 @@ import {
   oauthTokens,
   pendingCommits,
   pluginJoinRequests,
-  prComments,
   prFileApprovals,
   prMergeLog,
   users,
-} from '../database/schema.js';
+} from '../database/index.js';
 
 /** The anonymised id of one erasure — how a commit or log may name the account. */
 export function erasedAccountId(erasureId: string): string {
@@ -88,7 +87,7 @@ export interface IErasureParticipant {
  *    CASCADE (account links, watchlist sources/findings, connector configs,
  *    vault secrets); deleting a connection key cascades its usage metering.
  *  - Audit rows that must survive for the review trail (approvals, merge log,
- *    review comments, change requests, queued commits — and, via participants,
+ *    change requests, queued commits — and, via participants,
  *    e.g. routine authorship) are kept but ANONYMIZED with the per-erasure
  *    placeholder identity.
  *
@@ -225,10 +224,6 @@ export class AccountErasureService implements IAccountErasureService {
         .update(prMergeLog)
         .set({ triggeredByEmail: target.erasedEmail, triggeredByEmailBidx: erasedBidx, triggeredByName: target.erasedName })
         .where(eq(prMergeLog.triggeredByEmailBidx, emailBidx));
-      await tx
-        .update(prComments)
-        .set({ authorEmail: target.erasedEmail, authorEmailBidx: erasedBidx, authorName: target.erasedName })
-        .where(eq(prComments.authorEmailBidx, emailBidx));
       await tx
         .update(changeRequests)
         .set({ authorEmail: target.erasedEmail, authorEmailBidx: erasedBidx, authorName: target.erasedName })

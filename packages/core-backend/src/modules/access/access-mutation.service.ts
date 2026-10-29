@@ -35,26 +35,24 @@
 
 import path from 'node:path';
 
-import type { WorkspaceService } from '../workspace/workspace.service.js';
+import type { WorkspaceService } from '../workspace/index.js';
 import type { IAccessControl } from './access-control.interface.js';
 import { isAbsence } from '../../shared/fs.contract.js';
-import { isTextBytes } from '../workspace/file-readers/text-reader.js';
+import { isTextBytes } from '../workspace/index.js';
 import {
-  type Verb,
   ADMIN_CANONICAL,
   KNOWN_VERBS,
-  ROLE_TOKEN_PREFIX,
   canonicalRoleName,
+  splitPrincipalToken,
   accessFrontmatterExtensionList,
-} from '../access-model/access-grammar.js';
+} from '../access-model/index.js';
 import {
   spliceRevoke,
   spliceGrant,
   validatePrincipal,
   AccessSpliceError,
-  type Principal,
-  type TokenMatch,
-} from '../access-model/access-splice.js';
+} from '../access-model/index.js';
+import type { Verb, Principal, TokenMatch } from '../access-model/index.js';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
 import {
   canCarryFrontmatter,
@@ -90,23 +88,21 @@ export const ADMIN_ROOT_WRITE_MESSAGE =
  * this target touches the Admin ROLE's write at the repository root — the
  * root folder's `access.md`, or a file directly in the root. The resolver
  * ignores such a rule anyway (the Admin write floor), so writing it would only
- * leave a line that says something the app does not do. A bare token matched
- * `exact` is a group's (or a shadowed name's), never the Admin role. Targets
- * arrive in one spelling: the routes refuse `.` and `..` segments.
+ * leave a line that says something the app does not do. A bare `Admin` is the
+ * role (a bare name is always the role when one exists, and roles.yaml always
+ * declares Admin); `group/Admin` is a group and never the role. Targets arrive
+ * in one spelling: the routes refuse `.` and `..` segments.
  */
 export function removesAdminRootWrite(
   kind: TargetKind,
   repoRelTarget: string,
   principal: Principal,
   verb: Verb | undefined,
-  tokenMatch: TokenMatch,
 ): boolean {
   if (principal.kind !== 'role') return false;
   if (!touchesRootWrite(kind, repoRelTarget, verb)) return false;
-  const canonical = canonicalRoleName(principal.role);
-  const explicit = canonical.startsWith(ROLE_TOKEN_PREFIX);
-  if (!explicit && tokenMatch === 'exact') return false;
-  return (explicit ? canonical.slice(ROLE_TOKEN_PREFIX.length) : canonical) === ADMIN_CANONICAL;
+  const { prefix, name } = splitPrincipalToken(canonicalRoleName(principal.role));
+  return prefix !== 'group' && name === ADMIN_CANONICAL;
 }
 
 /** Whether a mutation on `verb` (absent = every verb) at this target reaches write at the repository root. */
@@ -276,38 +272,40 @@ export class AccessMutationService {
   }
 
   /**
-   * How a REVOKE of `principal` matches file tokens — the shadowing rule:
+   * How a REVOKE of `principal` matches file tokens. `'name'` strips the
+   * principal's explicit spelling AND the bare name (never the other kind's
+   * explicit spelling — see `TokenMatch`); `'exact'` strips the literal
+   * spelling alone. The bare name is stripped only when it is THIS
+   * principal's under role-first precedence:
    *
-   *   - When a GROUP owns the principal's bare name (group-first precedence),
-   *     the two spellings are DIFFERENT principals: the bare token is the
-   *     group's, `role/<name>` is the role's. Matching is `'exact'` so
-   *     revoking the role never strips the group's bare grant (and revoking
-   *     the group never strips the role's explicit grant).
-   *   - Unshadowed, both spellings resolve to the ROLE (bare falls back to
-   *     it), so matching is `'name'`: revoking the role also removes legacy
-   *     bare spellings — the historical cleanup behavior.
+   *   - A ROLE (`role/<name>`, or a bare name) owns the bare key unless no
+   *     role of that name exists and a group does — then the bare token is
+   *     the group's, and matching is `'exact'`. A model that fails to load
+   *     keeps it `'exact'` too.
+   *   - A GROUP (`group/<name>`) owns the bare key only while no role of
+   *     that name exists — otherwise the bare token is the role's, and
+   *     matching is `'exact'`. A group that has VANISHED from the active
+   *     source still reads correctly: the question is whether a ROLE holds
+   *     the name. A model that fails to load says nothing about roles, so a
+   *     group revoke then stays `'exact'` rather than risk a role's grant.
    *
    * Judged against THIS workspace's merged principal index (`kbPrincipals` —
    * the same model the resolver reads), so revoke agrees with resolution on
-   * who owns the bare key. A model that fails to load yields no groups, i.e.
-   * unshadowed — matching degrades to the pre-groups name-level behavior.
-   *
-   * GROUP revokes never take the name-level path: the route passes
-   * `tokenMatch: 'exact'` explicitly (see `revoke`'s `opts`), because this
-   * shadow probe cannot tell a group apart from a role once the group has
-   * VANISHED from the active source — the bare name then reads "unshadowed"
-   * and a name-level group revoke would strip a same-named role's live
-   * `role/<Name>` grant.
+   * who owns the bare key.
    */
   private async revokeTokenMatch(workspaceId: string, principal: Principal): Promise<TokenMatch> {
     if (principal.kind !== 'role') return 'exact'; // user matching ignores the mode
-    const canonical = canonicalRoleName(principal.role);
-    const bare = canonical.startsWith(ROLE_TOKEN_PREFIX)
-      ? canonical.slice(ROLE_TOKEN_PREFIX.length)
-      : canonical;
-    const { groups } = await this.accessControl.kbPrincipals(workspaceId);
-    const shadowed = groups.some((g) => canonicalRoleName(g) === bare);
-    return shadowed ? 'exact' : 'name';
+    const { prefix, name } = splitPrincipalToken(canonicalRoleName(principal.role));
+    const { roles, groups } = await this.accessControl.kbPrincipals(workspaceId);
+    const isRole = roles.some((r) => canonicalRoleName(r) === name);
+    if (prefix === 'group') {
+      // `roles` always carries at least `Everyone` once the model loads.
+      return isRole || roles.length === 0 ? 'exact' : 'name';
+    }
+    const isGroup = groups.some((g) => canonicalRoleName(g) === name);
+    // No roles at all means the model failed to load: stay exact, so a role
+    // revoke never strips a same-named group's bare grant.
+    return roles.length === 0 || (!isRole && isGroup) ? 'exact' : 'name';
   }
 
   /**
@@ -372,11 +370,10 @@ export class AccessMutationService {
     // When present, strip ONLY this verb (a per-checkbox toggle in the share UI);
     // absent strips the principal from every verb (the whole-principal Remove).
     verb?: Verb,
-    // `tokenMatch` overrides the shadow-derived matching. The route passes
-    // 'exact' for GROUP principals: a group's grant is its bare token only,
-    // and once the group has vanished the shadow probe can no longer tell it
-    // from a role — name-level matching would then strip a same-named role's
-    // `role/<Name>` grant.
+    // `tokenMatch` overrides the derived matching (see revokeTokenMatch).
+    // One production caller: the plugin-links unlink pins `'exact'` for its
+    // `plugin/<Name>/<verb>` tokens. Pin only `'exact'` — a pinned `'name'`
+    // would bypass the guard that never strips across kinds.
     opts?: { tokenMatch?: TokenMatch },
   ): Promise<{ changed: boolean; editPath: string }> {
     void _actingUserEmail; // referenced to satisfy no-unused-vars until something consumes it
@@ -386,8 +383,8 @@ export class AccessMutationService {
     // missing FILE node is a bad target and should surface, not silently no-op
     // — same rule grant() uses.
     const original = await this.readOrEmpty(workspaceId, kind, repoRelTarget, editPath);
-    // Alias-tolerant vs exact-token matching, decided by group shadowing —
-    // see revokeTokenMatch — unless the caller pinned it.
+    // Alias-tolerant vs exact-token matching, decided by who owns the bare
+    // name — see revokeTokenMatch — unless the caller pinned it.
     const tokenMatch = opts?.tokenMatch ?? (await this.revokeTokenMatch(workspaceId, principal));
     let next = original;
     let changed = false;
@@ -409,7 +406,7 @@ export class AccessMutationService {
     // Refused only when an Admin write entry would really go: a whole-row
     // Remove at a root that grants Admin other verbs but no write line (write
     // comes from the floor) strips those verbs as usual.
-    if (writeRemoved && removesAdminRootWrite(kind, repoRelTarget, principal, verb, tokenMatch)) {
+    if (writeRemoved && removesAdminRootWrite(kind, repoRelTarget, principal, verb)) {
       throw adminRootWriteRefusal();
     }
     if (!changed) return { changed: false, editPath };
@@ -457,7 +454,7 @@ export class AccessMutationService {
     repoRelTarget: string,
     principal: Principal,
     verb?: Verb,
-    // Same override as `revoke` — the route pins 'exact' for GROUP principals.
+    // Same override as `revoke`; no production caller passes it here.
     opts?: { tokenMatch?: TokenMatch },
   ): Promise<{ changed: boolean; editPath: string }> {
     this.assertPrincipalSafe(principal);
@@ -465,10 +462,10 @@ export class AccessMutationService {
     const original = await this.readOrEmpty(workspaceId, kind, repoRelTarget, editPath);
 
     const verbsToDeny = verb ? [verb] : KNOWN_VERBS;
-    // Same shadowing-aware matching as revoke(): the strip must not swallow a
-    // same-named OTHER principal's grant (bare = group vs role/<name> = role).
+    // Same matching as revoke(): the strip must not swallow a same-named
+    // OTHER principal's grant (`group/<name>` vs the role's bare/`role/`).
     const tokenMatch = opts?.tokenMatch ?? (await this.revokeTokenMatch(workspaceId, principal));
-    if (removesAdminRootWrite(kind, repoRelTarget, principal, verb, tokenMatch)) {
+    if (removesAdminRootWrite(kind, repoRelTarget, principal, verb)) {
       throw adminRootWriteRefusal();
     }
     // A PERSON who is an admin keeps root write through the floor, so a deny
@@ -508,10 +505,8 @@ export class AccessMutationService {
 
     // (3) Assert the deny actually removed effective access on the targeted
     // verb(s) — else roll back. The check evaluates the SAME token identity
-    // the deny above spliced (`tokenMatch` rides along): with a pinned exact
-    // GROUP deny whose group has vanished, alias-tolerant matching would read
-    // a same-named role's surviving `role/<Name>` grant as the group still
-    // having access — rolling back a fully effective deny as "ineffective".
+    // the deny above spliced (`tokenMatch` rides along), so a pinned exact
+    // deny is never judged by spellings it did not touch.
     const stillHas = await this.principalStillHasAccess(
       workspaceId,
       kind,
@@ -610,3 +605,9 @@ export class AccessMutationService {
     return new AccessMutationError(err instanceof Error ? err.message : 'mutation failed', 500);
   }
 }
+
+/**
+ * What another module needs of the mutation service: to grant and to revoke.
+ * Injected by the composition root, which owns the implementation.
+ */
+export type IAccessMutation = Pick<AccessMutationService, 'grant' | 'revoke'>;

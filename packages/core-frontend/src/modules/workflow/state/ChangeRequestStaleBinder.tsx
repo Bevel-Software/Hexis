@@ -12,6 +12,7 @@ const STALE_KINDS = [
   'change-request-opened',
   'change-request-merged',
   'change-request-rejected',
+  'change-request-edited',
   'change-request-apply-failed',
   'resync',
 ] as const;

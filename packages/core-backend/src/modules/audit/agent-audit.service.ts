@@ -1,8 +1,8 @@
 import { and, count, desc, eq, isNotNull, isNull, lt, max, min, or, type SQL } from 'drizzle-orm';
 import { logger } from '../../shared/logging.js';
-import type { Database } from '../database/connection.js';
-import { agentConnections, agentEvents, externalApiKeys, oauthTokens, users } from '../database/schema.js';
-import type { IExternalApiKeyService } from '../tool-auth/external-api-key.interface.js';
+import type { Database } from '../database/index.js';
+import { agentConnections, agentEvents, externalApiKeys, oauthTokens, users } from '../database/index.js';
+import type { IExternalApiKeyService } from '../tool-auth/index.js';
 import {
   AuditPrincipalNotFoundError,
   InvalidCursorError,
@@ -151,6 +151,7 @@ export class AgentAuditService implements IAgentAuditService, IAgentEventRecorde
         deletedAt: k.deletedAt,
         eventCount: counts.get(k.id) ?? 0,
         user: k.user,
+        agentPath: k.agentPath ?? null,
       })),
       ...connectionRows.map(({ connection: c, user }) => ({
         kind: 'agent' as const,
@@ -162,6 +163,7 @@ export class AgentAuditService implements IAgentAuditService, IAgentEventRecorde
         revokedBy: (c.revokedBy as 'owner' | 'admin' | null) ?? null,
         eventCount: counts.get(c.id) ?? 0,
         user,
+        agentPath: c.agentPath ?? null,
       })),
       ...pageRows.flatMap((r) =>
         r.pagePath

@@ -72,7 +72,6 @@ function detailOf(files: Record<string, unknown>[]): Record<string, unknown> {
     headSha: 'head-1',
     baseSha: 'base-1',
     files,
-    comments: [],
     approvals: files.map((f) => approvalOf(f.path as string)),
     mergeableInBevel: false,
     mergeBlockedReasons: files.map((f) => `${f.path as string} is not approved`),
@@ -94,8 +93,6 @@ const externalApiKeyService = {
     t === 'bevel_key' ? { user: { id: 'user-A', email: 'e@x', name: 'N' }, tokenId: 'tok' } : null,
 } as never;
 const authService = { getUserById: async (id: string) => ({ id, email: 'e@x', name: 'N' }) } as never;
-/** A declined change request: no sha records what it proposed, so it has no head. */
-const DECLINED_CR = 21;
 
 const workspaceService = {
   getOrCreateForUser: async () => ({ id: WS }),
@@ -107,6 +104,9 @@ const workspaceService = {
 const workflowService = {
   listBranches: async (ws: string) => {
     calls.push(['listBranches', ws]);
+    // A real listing fetches first; mark when that fetch has landed.
+    await new Promise((r) => setTimeout(r, 0));
+    calls.push(['listBranches:fetched', ws]);
     return [{ name: 'main', isProtected: true }];
   },
   commitChange: async (ws: string, user: { id: string }, body: unknown) => {
@@ -120,7 +120,7 @@ const workflowService = {
   },
   createBranch: async (ws: string, name: string) => {
     calls.push(['createBranch', ws, name]);
-    return { name, isProtected: false, ahead: 0, behind: 0, hasRemote: true };
+    return { name, isProtected: false, hasRemote: true };
   },
   acquireLock: async (ws: string, branch: string, path: string) => {
     calls.push(['acquireLock', ws, branch, path]);
@@ -129,15 +129,12 @@ const workflowService = {
   releaseLock: async (ws: string, branch: string, path: string) => {
     calls.push(['releaseLock', ws, branch, path]);
   },
-  // #21 is DECLINED: the service reads such a row from nothing (no sha records
-  // what it proposed), so its detail carries no head — which is what the comment
-  // tool has to anchor to. Every other number is an ordinary open request.
   getChangeRequestDetail: async (number: number) => ({
     number,
     url: `https://bevel.example.com/change-requests/${number}`,
-    headSha: number === DECLINED_CR ? '' : 'head-1',
+    headSha: 'head-1',
     approvals: [],
-    state: number === DECLINED_CR ? 'closed' : 'open',
+    state: 'open',
     title: 'T',
     base: 'main',
   }),
@@ -181,10 +178,6 @@ const workflowService = {
     }
     return { kind: 'deleted', branch: name, lastCommit: 'tip-1', discardedCommits: name === 'me/unmerged' ? 3 : 0 };
   },
-  postComment: async (number: number, _user: unknown, input: { path?: string }) => {
-    calls.push(['postComment', number, input.path]);
-    return { id: 'c-1' };
-  },
   // The history and syncing reads, answered from a fixed script.
   listChangesForFile: async (ws: string, path: string, limit?: number) => {
     calls.push(['listChangesForFile', ws, path, limit]);
@@ -215,6 +208,10 @@ const workflowService = {
   branchStatus: async (ws: string) => {
     calls.push(['branchStatus', ws]);
     return { branch: ws, hasUpstream: true, unmergedFromUpstream: true };
+  },
+  branchCounts: async (ws: string) => {
+    calls.push(['branchCounts', ws]);
+    return { ahead: 3, behind: 1 };
   },
   listPendingChangePaths: async (ws: string) => {
     calls.push(['listPendingChangePaths', ws]);
@@ -373,51 +370,6 @@ describe('registerWorkflowTools', () => {
     expect(calls).toContainEqual(['commitChange', WS, 'user-A', { summary: 'fix typo', description: undefined }]);
   });
 
-  // A change request's files are repository-relative; the Copy path form
-  // carries the clone folder, which is dropped so the comment lands on the file.
-  it('post_change_request_comment anchors a copied workspace path to the repository-relative file', async () => {
-    const base = await start();
-    for (const path of ['/knowledge-base/KnowledgeBase/Foo.md', 'knowledge-base/KnowledgeBase/Foo.md', 'KnowledgeBase/Foo.md']) {
-      const res = await post(`${base}/api/agent/tools/post_change_request_comment`, writeTok(), { number: 3, body: 'hi', path });
-      expect(res.status, path).toBe(200);
-    }
-    expect(calls.filter((c) => c[0] === 'postComment')).toEqual([
-      ['postComment', 3, 'KnowledgeBase/Foo.md'],
-      ['postComment', 3, 'KnowledgeBase/Foo.md'],
-      ['postComment', 3, 'KnowledgeBase/Foo.md'],
-    ]);
-  });
-
-  // An agent hands the change request's link to a person, so the tools that
-  // act on one by number return its `{ number, url }` beside their own payload.
-  it('post_change_request_comment returns the change request link', async () => {
-    const base = await start();
-    const comment = await post(`${base}/api/agent/tools/post_change_request_comment`, writeTok(), { number: 3, body: 'hi' });
-    expect(comment.status).toBe(200);
-    const commentBody = await comment.json();
-    expect(commentBody).toMatchObject({
-      comment: { id: 'c-1' },
-      changeRequest: { number: 3, url: 'https://bevel.example.com/change-requests/3' },
-    });
-    // A configured address yields an absolute link, so no note rides along.
-    expect(commentBody.changeRequest).not.toHaveProperty('urlNote');
-  });
-
-  // A comment anchors to a commit. A declined request records none — nothing
-  // durable says what it proposed, so it is read from nothing and its detail
-  // carries no head. Say so, rather than letting the service's `head sha is
-  // required` come back as a 400 about an argument the caller never passed.
-  it('post_change_request_comment says why a declined request takes no comment', async () => {
-    const base = await start();
-    const res = await post(`${base}/api/agent/tools/post_change_request_comment`, writeTok(), { number: DECLINED_CR, body: 'why was this turned down?' });
-    expect(res.status).toBe(409);
-    expect(((await res.json()) as { error: string }).error).toMatch(
-      new RegExp(`#${DECLINED_CR} is closed and has no commit to anchor a comment to`),
-    );
-    // Nothing was written: the refusal happens before the service is asked.
-    expect(calls.some((c) => c[0] === 'postComment')).toBe(false);
-  });
-
   describe('delete_branch', () => {
     it('is on both catalogs, takes name, dryRun and discardUnmerged, and is a write tool', async () => {
       await start();
@@ -571,6 +523,24 @@ describe('registerWorkflowTools', () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ branches: [{ name: 'main' }] });
     expect(calls).toContainEqual(['listBranches', 'existing-ws']);
+  });
+
+  it('list_branches declares names, protection and remote presence, and no commit counts', async () => {
+    await start();
+    for (const tools of [await registryRef!.listInternal(), await registryRef!.listExternal()]) {
+      const listBranches = tools.find((t) => t.name === 'list_branches')!;
+      const branch = (listBranches.outputs as { properties: { branches: { items: { properties: object; required: string[] } } } })
+        .properties.branches.items;
+      expect(Object.keys(branch.properties).sort()).toEqual(['hasRemote', 'isProtected', 'name']);
+      expect([...branch.required].sort()).toEqual(['hasRemote', 'isProtected', 'name']);
+      expect(listBranches.description).toContain('{ name, isProtected, hasRemote }');
+      expect(listBranches.description).not.toMatch(/\bahead\b,|\bbehind\b,/);
+      // The counts are still `branch_status`'s answer, for its one branch.
+      const branchStatus = tools.find((t) => t.name === 'branch_status')!;
+      expect((branchStatus.outputs as { required: string[] }).required).toEqual(
+        expect.arrayContaining(['ahead', 'behind', 'behindRemote']),
+      );
+    }
   });
 
   it('open_change_request acts on the SOURCE branch\'s workspace', async () => {
@@ -744,6 +714,37 @@ describe('registerWorkflowTools', () => {
       expect((await open(base)).approvals).toEqual([
         { path: 'KnowledgeBase/Opaque.md', roles: [], users: [], approved: false, inMergeGate: false, approversUnknown: true },
       ]);
+    });
+
+    it('names each user owner by name, or by email when the name is empty — never a blank string', async () => {
+      const base = await start();
+      opened = detailOf([
+        { path: 'Skills/Owned/SKILL.md', status: 'modified', additions: 1, deletions: 1, isBinary: false, sha: 'b5', rawUrl: 'r5' },
+      ]);
+      // What the resolver hands back for owners `roles.yaml` lists by email:
+      // an empty name. QA saw `users: [""]` here while `mergeBlockedReasons`
+      // named qa-user2@example.com.
+      opened.approvals = [
+        {
+          path: 'Skills/Owned/SKILL.md',
+          eligibleApprovers: {
+            roles: [],
+            users: [
+              { name: '', email: 'qa-user2@example.com' },
+              { name: 'Razvan Radulescu', email: 'razvan.radulescu@bevel.software' },
+              { name: '  ', email: 'qa-user3@example.com' },
+              { name: '', email: '' },
+            ],
+          },
+          approvedBy: [],
+          eligibilityResolved: true,
+          isApproved: false,
+          inMergeGate: true,
+        },
+      ];
+      const [entry] = (await open(base)).approvals as { users: string[] }[];
+      expect(entry.users).toEqual(['qa-user2@example.com', 'Razvan Radulescu', 'qa-user3@example.com']);
+      expect(entry.users.every((u) => u.trim() !== '')).toBe(true);
     });
 
     it('surfaces the `change-request-conflicts` error as before', async () => {
@@ -1032,6 +1033,26 @@ describe('save_file and the repository folder', () => {
     expect(calls.some((c) => c[0] === 'acquireLock')).toBe(false);
   });
 
+  it('refuses a tmp ref in every path input, before any lock — save_file, the history tools and update_branch\'s resolutions alike', async () => {
+    const base = await start();
+    const calls_: Array<[string, Record<string, unknown>]> = [
+      ['save_file', { path: '__tmp__/chat-uploads/plan.xlsx' }],
+      ['read_file_at', { path: '__tmp__/chat-uploads/plan.xlsx', at: 'HEAD' }],
+      ['compare_file', { path: '__tmp__/chat-uploads/plan.xlsx' }],
+      ['list_file_changes', { path: '__tmp__/chat-uploads/plan.xlsx' }],
+      ['update_branch', { resolutions: [{ path: '__tmp__/chat-uploads/plan.xlsx', choose: 'ours' }] }],
+    ];
+    for (const [tool, args] of calls_) {
+      const res = await post(`${base}/api/agent/tools/${tool}`, writeTok(), { ...args, branch: WS });
+      expect(res.status, tool).toBe(400);
+      const body = (await res.json()) as { error: string; kind: string };
+      expect(body.kind, tool).toBe('tmp-ref-read-only');
+      expect(body.error).toContain(`${tool} does not take one there`);
+      expect(body.error).toContain('copy_file');
+    }
+    expect(calls.some((c) => c[0] === 'acquireLock')).toBe(false);
+  });
+
   it('answers a missing path with a 400, not a crash', async () => {
     const base = await start();
     const res = await post(`${base}/api/agent/tools/save_file`, writeTok(), { branch: WS });
@@ -1189,8 +1210,9 @@ describe('history and syncing tools', () => {
       // The listing double names only `main`, so the draft's own entry is unknown.
       isProtected: false,
       hasRemote: true,
-      ahead: null,
-      behind: null,
+      // Counted for the draft alone, by its own workspace — not read off a listing.
+      ahead: 3,
+      behind: 1,
       behindRemote: true,
       uncommittedPaths: ['KnowledgeBase/Pending.md'],
       forkBase: 'main',
@@ -1199,6 +1221,11 @@ describe('history and syncing tools', () => {
       withheldPaths: 0,
     });
     expect(calls).toContainEqual(['changedPathsBetweenBranches', DRAFT_WS, 'main', DRAFT]);
+    expect(calls).toContainEqual(['branchCounts', DRAFT_WS]);
+    // Counted only once the listing's fetch has refreshed the remote-tracking refs.
+    const fetched = calls.findIndex((c) => c[0] === 'listBranches:fetched' && c[1] === DRAFT_WS);
+    expect(fetched).toBeGreaterThanOrEqual(0);
+    expect(calls.findIndex((c) => c[0] === 'branchCounts')).toBeGreaterThan(fetched);
 
     calls = [];
     const named = await post(tool(base, 'branch_status'), writeTok(), { branch: DRAFT, base: 'release' });

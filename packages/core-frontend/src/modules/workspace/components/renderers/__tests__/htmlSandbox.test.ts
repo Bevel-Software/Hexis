@@ -483,6 +483,51 @@ describe('buildSandboxedHtml', () => {
   });
 
   /**
+   * A click the reader asked a new tab of. The frame's sandbox has no
+   * allow-popups, so the browser cannot open one from inside it: the bridge
+   * cancels the click and asks the parent, saying so (`newTab: true`), for
+   * every destination, a fragment of this page included. A plain click and
+   * an Alt click are followed as before.
+   */
+  describe('a modified or middle click asks the parent for a new tab', () => {
+    it('posts newTab for Ctrl, Cmd, Shift and the middle button, to another file and to a section of this page', () => {
+      const bridge = runBridge({ ids: ['totals'] });
+      expect(bridge.click('Board.html', { ctrlKey: true })).toEqual({ prevented: true });
+      expect(bridge.click('Board.html#q3', { metaKey: true })).toEqual({ prevented: true });
+      expect(bridge.click('  https://example.com/docs  ', { shiftKey: true })).toEqual({ prevented: true });
+      expect(bridge.click('#totals', { button: 1 })).toEqual({ prevented: true });
+      expect(bridge.posted).toEqual([
+        { type: 'bevel.navigate', href: 'Board.html', newTab: true },
+        { type: 'bevel.navigate', href: 'Board.html#q3', newTab: true },
+        { type: 'bevel.navigate', href: 'https://example.com/docs', newTab: true },
+        { type: 'bevel.navigate', href: '#totals', newTab: true },
+      ]);
+      // A section asked for in a new tab does not scroll this one.
+      expect(bridge.scrolled).toEqual([]);
+    });
+
+    it('follows a plain or an Alt click as before, and leaves the right button alone', () => {
+      const bridge = runBridge({ ids: ['totals'] });
+      bridge.click('Board.html');
+      bridge.click('Board.html', { altKey: true });
+      bridge.click('#totals');
+      expect(bridge.click('Board.html', { button: 2 })).toEqual({ prevented: false });
+      expect(bridge.posted).toEqual([
+        { type: 'bevel.navigate', href: 'Board.html' },
+        { type: 'bevel.navigate', href: 'Board.html' },
+      ]);
+      expect(bridge.scrolled).toEqual(['totals']);
+    });
+
+    it('leaves a modified click the page already cancelled to the page', () => {
+      const bridge = runBridge();
+      bridge.click('Board.html', { ctrlKey: true, alreadyPrevented: true });
+      bridge.click('Board.html', { button: 1, alreadyPrevented: true });
+      expect(bridge.posted).toEqual([]);
+    });
+  });
+
+  /**
    * A bare fragment is an in-page jump by either route. Left to the browser, a
    * `srcdoc` frame resolves `#totals` against the APP's URL and navigates
    * itself away; handed to the parent, the app re-opens the same file with
@@ -592,6 +637,20 @@ describe('buildSandboxedHtml', () => {
       ]);
       expect(bridge.scrolled).toEqual([]);
     });
+
+    it('a fragment the parent hands back (a link to this page by its own name) scrolls as a bare one does', async () => {
+      const bridge = runBridge({ ids: ['q3'] });
+      await bridge.deliver({ type: 'bevel.jump', hash: '#q3' });
+      expect(bridge.scrolled).toEqual(['q3']);
+      expect(bridge.posted).toEqual([]);
+    });
+
+    it('takes a jump from the parent only: a message from anywhere else scrolls nothing', async () => {
+      const bridge = runBridge({ ids: ['q3'] });
+      await bridge.deliver({ type: 'bevel.jump', hash: '#q3' }, { fromParent: false });
+      await bridge.deliver({ type: 'bevel.jump', hash: 'q3' });
+      expect(bridge.scrolled).toEqual([]);
+    });
   });
 
   it('embeds the body HTML verbatim (sanitization happens upstream)', () => {
@@ -651,6 +710,33 @@ describe('window.bevel.tools in the frame', () => {
     ]);
     expect((posted[4]!.args as unknown[])[0]).toBe(file);
     expect(new Set(posted.map((m) => m.requestId)).size).toBe(5);
+  });
+
+  it('stamps every message with the identity the app built the document with, and none without one', async () => {
+    // The real runtime, given the identity the app minted for this document:
+    // tool calls and requireTools alike carry it, so the app can tell this
+    // document's messages from a replaced document's. Built with `true`, the
+    // runtime posts no identity; built with `tools: false`, the document has
+    // no tools but still asks `requireTools` as itself.
+    const named = runBridge({}, { toolBridge: { documentId: 'doc-abc' } });
+    void toolsOf(named)!.callTool('read_file', { body: { path: 'a.md' } });
+    void (named.bevel.requireTools as () => Promise<boolean>)();
+    expect((named.posted as Array<Record<string, unknown>>).map((m) => [m.type, m.documentId])).toEqual([
+      ['bevel.tool.call', 'doc-abc'],
+      ['bevel.tools.require', 'doc-abc'],
+    ]);
+
+    const anonymous = runBridge({}, { toolBridge: true });
+    void toolsOf(anonymous)!.callTool('read_file', {});
+    void (anonymous.bevel.requireTools as () => Promise<boolean>)();
+    expect((anonymous.posted as Array<Record<string, unknown>>).every((m) => !('documentId' in m))).toBe(true);
+
+    const toolless = runBridge({}, { toolBridge: { documentId: 'doc-xyz', tools: false } });
+    expect(toolsOf(toolless)).toBeNull();
+    void (toolless.bevel.requireTools as () => Promise<boolean>)();
+    expect((toolless.posted as Array<Record<string, unknown>>).map((m) => [m.type, m.documentId])).toEqual([
+      ['bevel.tools.require', 'doc-xyz'],
+    ]);
   });
 
   it("resolves with the parent's answer and rejects with its error and code, matched by request id", async () => {

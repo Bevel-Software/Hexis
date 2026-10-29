@@ -10,7 +10,7 @@
  * `externalApiKeys`) from here. `schema.ts` re-exports both, so existing
  * imports keep working unchanged.
  *
- * PII columns (emails, display names, change-request/comment text) are
+ * PII columns (emails, display names, change-request text) are
  * `encryptedText` — AES-256-GCM ciphertext in the database, transparently
  * decrypted on read (see `shared/column-crypto.ts`). Because the ciphertext is
  * randomized, equality lookups and unique constraints on those columns go
@@ -41,6 +41,16 @@ export const users = pgTable('users', {
    * until an admin (or the user, from their Account page) sets one.
    */
   passwordHash: text('password_hash'),
+  /**
+   * Which generation of this account's sessions is honoured. Every session
+   * token carries the value it was issued at (`sv`; a token from before the
+   * column existed carries none and counts as 0), and one whose value is not
+   * the row's is refused. Changing the password moves it on, so every session
+   * opened with the old password ends at its next request — the one that
+   * made the change is handed a fresh token. Connection keys are not
+   * sessions and do not look at it.
+   */
+  sessionVersion: integer('session_version').default(0).notNull(),
   /**
    * The one onboarding fact the server keeps: has this person concluded the
    * connect-your-agent setup (the welcome page's Done, or the reminder
@@ -129,47 +139,13 @@ export const prMergeLog = pgTable('pr_merge_log', {
 }));
 
 /**
- * In-app PR comments. GitHub is authoritative for the diff + PR metadata;
- * Bevel owns the review conversation. Comments never round-trip to GitHub.
- *
- * Shape encodes three comment kinds:
- *   • General PR comment        — path null, line null
- *   • File-level comment        — path set,  line null
- *   • Inline (line-anchored)    — path set,  line set
- *
- * Threading: replies point at their root via `parentId`. Root comments have
- * `parentId = null`. We use a self-FK-less column (no DB-side constraint) to
- * keep the parent row independently deletable — the service layer tolerates
- * orphan replies rather than cascading deletes and losing discussion context.
- */
-export const prComments = pgTable('pr_comments', {
-  id: uuid('id').defaultRandom().primaryKey(),
-  prNumber: integer('pr_number').notNull(),
-  authorEmail: encryptedText('author_email').notNull(),
-  /** Blind index of `author_email` — GDPR-erasure lookup. */
-  authorEmailBidx: blindIndexText('author_email_bidx').notNull(),
-  authorName: encryptedText('author_name').notNull(),
-  path: text('path'),
-  line: integer('line'),
-  headSha: text('head_sha').notNull(),
-  // Encrypted: review conversation exists only in this DB (never on GitHub).
-  body: encryptedText('body').notNull(),
-  parentId: uuid('parent_id'),
-  createdAt: timestamp('created_at').defaultNow().notNull(),
-  updatedAt: timestamp('updated_at'),
-}, (t) => ({
-  byPr: index('pr_comments_by_pr').on(t.prNumber),
-  byThread: index('pr_comments_by_thread').on(t.prNumber, t.path, t.line),
-}));
-
-/**
  * Change requests (the app's own "pull request" model). The app used to lean on
  * GitHub PRs via the `gh` CLI; now a change request is a plain DB row plus git
  * branches, so ANY git host (GitHub, GitLab, Bitbucket, Azure DevOps, self-
  * hosted) works — the remote only stores commits/branches.
  *
  * `number` is the human-facing id and the join key the sibling tables
- * (`pr_file_approvals`, `pr_comments`, `pr_merge_log`) reference in their
+ * (`pr_file_approvals`, `pr_merge_log`) reference in their
  * `pr_number` column — those columns now hold THIS number, not a GitHub PR
  * number. It's a DB-assigned identity so allocation is race-free.
  *
@@ -187,7 +163,24 @@ export const changeRequests = pgTable('change_requests', {
   // is deliberately stored unencrypted (see encryptPii), so a defaulted row
   // and an app-written empty body hold the identical representation.
   title: encryptedText('title').notNull(),
+  /**
+   * The request's description, and nothing else: exactly what its author (or
+   * a later edit) wrote. Hexis keeps none of its own facts in here — who must
+   * approve each file is resolved live from the access rules, and an access
+   * request's level and note have columns of their own below. Bodies written
+   * before this release carried both as prose and hidden markers; the first
+   * start on it moves them out (`moveLegacyRequestBodies` in `migrate.ts`).
+   */
   body: encryptedText('body').notNull().default(''),
+  /**
+   * Set on a request the access-request flow opened: the level the person
+   * asked for. Null on every other request. Read back by that flow to say
+   * "Requested: Owner" from the request itself, whose row is always readable,
+   * rather than from a branch a stale clone may not see yet.
+   */
+  accessRequestLevel: text('access_request_level'),
+  /** The requester's note, when they wrote one. Encrypted: a person's own words. */
+  accessRequestNote: encryptedText('access_request_note'),
   authorEmail: encryptedText('author_email').notNull(), // lowercased at insert
   /** Blind index of `author_email` — GDPR-erasure lookup. */
   authorEmailBidx: blindIndexText('author_email_bidx').notNull(),
@@ -242,6 +235,10 @@ export const changeRequests = pgTable('change_requests', {
     'change_requests_state_check',
     sql`${t.state} IN ('open', 'merged', 'closed')`,
   ),
+  accessRequestLevelCheck: check(
+    'change_requests_access_request_level_check',
+    sql`${t.accessRequestLevel} IS NULL OR ${t.accessRequestLevel} IN ('write', 'owner')`,
+  ),
 }));
 
 /**
@@ -290,6 +287,15 @@ export const externalApiKeys = pgTable('api_tokens', {
    * deleted in one step.
    */
   deletedAt: timestamp('deleted_at'),
+  /**
+   * The agent configuration the key connects as — a repo-relative knowledge-base
+   * path, chosen when the key is minted. Null is Everything: the key sees
+   * every tool, skill and plugin its owner may read, exactly as before the
+   * column existed. The path is the whole record: the file is re-read on
+   * every surface build, so editing it changes what the key sees without a
+   * new key (see `modules/agent-scope`).
+   */
+  agentPath: text('agent_path'),
 }, (t) => ({
   byUser: index('api_tokens_by_user').on(t.userId),
 }));
@@ -499,6 +505,12 @@ export const oauthAuthCodes = pgTable('oauth_auth_codes', {
   expiresAt: timestamp('expires_at').notNull(),
   consumedAt: timestamp('consumed_at'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
+  /**
+   * The "Connect as" choice made on the consent step, carried from Finish to
+   * the token exchange that makes (or finds) the agent connection — the code
+   * is the only thing that travels between the two. Null is Everything.
+   */
+  agentPath: text('agent_path'),
 }, (t) => ({
   // Sweep expired/spent rows without a full scan.
   byExpiry: index('oauth_auth_codes_by_expiry').on(t.expiresAt),
@@ -538,6 +550,14 @@ export const agentConnections = pgTable('agent_connections', {
   revokedAt: timestamp('revoked_at'),
   /** `owner` | `admin` — who ended it; null while live. Same vocabulary as `api_tokens.revoked_by`. */
   revokedBy: text('revoked_by'),
+  /**
+   * The agent configuration the person chose to connect as on the consent step — a
+   * repo-relative knowledge-base path — or null for Everything. Set by every
+   * consent that lands on the row, so re-authorising with another choice
+   * changes what the agent sees from its next request. Same meaning as
+   * `api_tokens.agent_path`.
+   */
+  agentPath: text('agent_path'),
 }, (t) => ({
   byUser: index('agent_connections_by_user').on(t.userId),
   liveUnq: uniqueIndex('agent_connections_live_unq')
@@ -883,3 +903,23 @@ export const atlassianAccountLinks = pgTable('atlassian_account_links', {
 }, (t) => ({
   byUser: index('atlassian_account_links_by_user').on(t.userId),
 }));
+
+/**
+ * The ledger of the DATA halves of migrations: the rewrites SQL cannot do
+ * because they read sealed columns, run by the application right after the
+ * SQL history under the same lock (`migrate.ts`). One row per pass, written
+ * in the SAME transaction as the rows it rewrote, so a pass is recorded done
+ * exactly when its work is — a crash between the SQL history's own ledger
+ * and the pass leaves no row here, and the next start runs the pass. Drizzle's
+ * `__drizzle_migrations_core` ledger records only the SQL.
+ *
+ * The PII backfill of migration 0016 predates this table and keeps its own
+ * marker (the nullability of the blind-index columns it finalises).
+ */
+export const dataMigrations = pgTable('data_migrations', {
+  /** The pass, named after the migration whose data half it is: `0020_change_request_body_is_the_description`. */
+  name: text('name').primaryKey(),
+  appliedAt: timestamp('applied_at').defaultNow().notNull(),
+  /** What the pass did, for an operator reading the ledger: rows moved, say. */
+  note: text('note'),
+});

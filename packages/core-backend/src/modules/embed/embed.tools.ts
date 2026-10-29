@@ -1,15 +1,13 @@
 import type { Router, RequestHandler } from 'express';
-import type { IToolRegistry } from '../tool-registry/tool.contract.js';
-import { ToolError } from '../tool-helpers/tool.contract.js';
-import { toolDef } from '../tool-helpers/tool-def.js';
-import type { ToolHandlerFactory } from '../tool-helpers/tool-handler.js';
-import type { ToolContext } from '../tool-helpers/tool.contract.js';
+import type { IToolRegistry } from '../tool-registry/index.js';
+import { ToolError, toolDef } from '../tool-helpers/index.js';
+import type { ToolHandlerFactory, ToolContext } from '../tool-helpers/index.js';
 import type { KbContext } from '../../shared/kb-context.js';
-import type { ReadForTool } from '../workspace/workspace.tools.js';
+import type { ReadForTool } from '../workspace/index.js';
 import type { IEmbedService } from './embed.interface.js';
-import { requireExternalSource } from '../tool-auth/tool-auth.middleware.js';
-import { SESSION_ID_INPUT, type ToolDescriptionNotes } from '../workspace/agent-access.gate.js';
-import { sessionIdInputOf } from '../workspace/workspace.tools.js';
+import { requireExternalSource } from '../tool-auth/index.js';
+import { assertTmpRefsTaken } from '../kb-fs/index.js';
+import { SESSION_ID_INPUT, type ToolDescriptionNotes, sessionIdInputOf } from '../workspace/index.js';
 
 /** The tool name, in one place: the app manifest keys its view by it. */
 export const OPEN_PAGE_TOOL = 'open_page';
@@ -152,6 +150,10 @@ export function registerEmbedTools(
     toolHandler(async (args, ctx: ToolContext) => {
       const raw = typeof args.path === 'string' ? args.path.trim() : '';
       if (!raw) throw new ToolError('`path` is required.', 400);
+      // A tmp ref (`__tmp__/…`) is no knowledge-base page: refused by the one
+      // admission gate the normalised tools pass, before `toRepoRelative`
+      // would read it as the repository path `<kbDirName>/__tmp__/…`.
+      assertTmpRefsTaken(OPEN_PAGE_TOOL, { path: raw });
       const heading = typeof args.heading === 'string' && args.heading.trim() ? args.heading.trim() : undefined;
       const repoRelative = toRepoRelative(raw, kbDirName);
       if (repoRelative === null) throw new ToolError(OUTSIDE_REPO(kbDirName), 400);

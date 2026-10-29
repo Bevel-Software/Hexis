@@ -17,14 +17,15 @@ import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
 import { ToolDescriptionNotes } from '../agent-access.gate.js';
 import { SpillStore } from '../spill-store.js';
 import { DocExtractService } from '../file-readers/doc-extract.service.js';
+import { WorkerDocumentExtractor } from '../file-readers/extract-in-worker.js';
 import { AccessControlService } from '../../access/access-control.service.js';
 import { NodeFs } from '../../kb-fs/node-fs.js';
 import { BRANCH_REQUIRED_MESSAGE } from '../../../shared/domain-errors.js';
 import { callLine, compileCheck, exampleArguments } from '@bevel-software/platform-mcp-core';
-import { WorkerPatternMatcher } from '../bounded-matcher.js';
+import { RipgrepPatternMatcher } from '../index.js';
 
 /** The grep matcher this file's harness wires, closed once the file is done. */
-const patternMatcher = new WorkerPatternMatcher();
+const patternMatcher = new RipgrepPatternMatcher();
 afterAll(() => patternMatcher.close());
 
 /**
@@ -91,7 +92,7 @@ beforeAll(async () => {
     },
     createToolHandlerFactory(resolve),
     new SpillStore(join(tmpdir(), 'bevel-test-spills')),
-    new DocExtractService(docCache),
+    new DocExtractService(docCache, new WorkerDocumentExtractor()),
     access,
     testKbContext({ kbDirName: KB }),
     { recoveryBotEmail: 'recovery-bot@bevel.local', hooks: new WorkflowHooks(), notes: new ToolDescriptionNotes() },
@@ -178,7 +179,7 @@ describe('POST /api/agent/tools/<name> checks the arguments against the tool', (
     expect(status).toBe(400);
     expect(body.kind).toBe('arguments-do-not-match');
     expect(body.error).toContain('"pattern" is required, and was not given.');
-    expect(body.error).toContain('pattern (string, required) — JavaScript regular expression.');
+    expect(body.error).toContain('pattern (string, required) — Regular expression, RE2-style (ripgrep): no look-around, no backreferences.');
     // Not a 200 that matched every file, which is what this surface answered
     // before the check lived in the route.
     expect(body.matches).toBeUndefined();

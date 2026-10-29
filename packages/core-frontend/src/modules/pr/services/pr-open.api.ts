@@ -1,5 +1,5 @@
 import { authFetch } from '../../../lib/api';
-import { handleApiResponse } from '../../git/services/git.api';
+import { handleApiResponse } from '../../git';
 
 /** Request shape of `POST /api/workflow/change-requests` (see backend
  *  `modules/workflow/workflow.routes.ts`). */

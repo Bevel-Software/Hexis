@@ -61,8 +61,12 @@ const PRE_RENAME_AGENTS_FILE = 'CLAUDE.md';
  * of every call rather than of how to write one, and why large, escape-heavy
  * and binary content goes by upload, which three write tools each said in
  * full.
+ *
+ * 7,400 since the `__tmp__/` ref: four tools take it, so what it reaches and
+ * that it is read-only is said once here rather than in each description, and
+ * the section had no room left for it.
  */
-export const SHARED_FILE_RULES_CAP = 7_000;
+export const SHARED_FILE_RULES_CAP = 7_400;
 
 /** One shared rule: how the guide heads it, and the rule itself. */
 export interface SharedFileRule {
@@ -115,6 +119,18 @@ export function sharedFileRules(layout: KbLayout): readonly SharedFileRule[] {
         'binary file reads as a one-line description rather than raw bytes.',
     },
     {
+      // What `__tmp__/` reaches and what it does not (see
+      // `workspace/workspace-tmp.ts`) — four tools take the ref, so it is a
+      // shared rule rather than a sentence in each description.
+      id: 'workspace-tmp',
+      heading: "Files staged in the workspace's tmp folder",
+      body:
+        "`__tmp__/<path>` names ONE file YOU staged in the branch workspace's `tmp/` folder (chat attachments land " +
+        'there; nobody else\'s staged files are reachable). read_file, file_stat, grep (`path`) and copy_file (`src`) ' +
+        'read it as a repository file; it is read-only and never listed — copy_file it to a repository path to keep ' +
+        'it. An entry stays up to seven days.',
+    },
+    {
       id: 'write-mode',
       heading: 'What a write may do at a path',
       body:
@@ -161,10 +177,10 @@ export function sharedFileRules(layout: KbLayout): readonly SharedFileRule[] {
       body:
         'move_file, copy_file and delete_folder take `dryRun: true`: it changes nothing and answers the impact — ' +
         'what the call would touch, `allowed`, and `reason` when it may not run. A non-empty folder is deleted, and a ' +
-        'move that changes your access runs, only with `confirm: true`; without it the call changes nothing and ' +
+        'move that changes anyone\'s access runs, only with `confirm: true`; without it the call changes nothing and ' +
         'returns the same impact with `confirmationRequired: true`. Do NOT set `confirm: true` on your first call — ' +
         'dry-run, check the impact, then confirm. delete_file takes neither: check it first with file_stat ' +
-        '(`deletable`) if you are unsure. delete_branch has its own `dryRun`.',
+        '(`deletable`). delete_branch has its own `dryRun`.',
     },
     {
       id: 'managed-items',
@@ -184,7 +200,7 @@ export function sharedFileRules(layout: KbLayout): readonly SharedFileRule[] {
       id: 'refused-for-permissions',
       heading: 'When a write is refused for permissions',
       body:
-        'A refusal is not necessarily the end of the road: the `write-denied` error says whether you may propose the ' +
+        'The `write-denied` error says whether you may propose the ' +
         'change instead (create a branch from this one, repeat the call on it, then `open_change_request` into this ' +
         'branch) and lists those steps.',
     },
@@ -222,17 +238,19 @@ function platformFileList(layout: KbLayout): string {
  * The conventions reminder — where the platform's guide is, that the
  * organisation's own conventions file comes with it, and to read both first.
  *
- * The guide is read by name at the repository root, where coding agents look
- * for an `AGENTS.md` by convention, and `get_agent_guide` returns it alone.
+ * The guide's start is read by name at the repository root, where coding
+ * agents look for an `AGENTS.md` by convention, and `get_agent_guide` returns
+ * it or any one section.
  * One name on every deployment, so the rule takes no layout. `CLAUDE.md` is
  * named as a fallback because a knowledge base seeded before the rename may
  * still carry one its people edited.
  */
 function conventionsRule(): string {
   return (
-    "Before your first read or change in a workspace, call `get_agent_guide` and read the platform's guide " +
-    `(whole, or one section). read_file on \`${LEGACY_AGENTS_FILE}\` at the KB root answers with the same ` +
-    "guide, after the organisation's own conventions file of that name when it has one: follow both. A " +
+    "Before your first read or change in a workspace, call `get_agent_guide`: it answers the guide's start, " +
+    "which names the default branch and the section for each question. " +
+    `read_file on \`${LEGACY_AGENTS_FILE}\` at the KB root answers with ` +
+    "that start, after the organisation's own conventions file of that name when it has one: follow both. A " +
     `\`${PRE_RENAME_AGENTS_FILE}\` at the KB root is the organisation's own too; read it if it exists.`
   );
 }

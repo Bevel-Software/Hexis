@@ -51,11 +51,10 @@ import {
   type AuthUser,
 } from '@bevel-software/platform-shared';
 import type { KbContext } from '../../shared/kb-context.js';
-import type { WorkspaceService } from '../workspace/workspace.service.js';
-import type { IAccessControl } from '../access/access-control.interface.js';
-import { creatorPrincipal } from '../access-model/creator.js';
-import { spliceGrant } from '../access-model/access-splice.js';
-import { WorkspaceMutex } from '../kb-fs/mutex.js';
+import type { WorkspaceService } from '../workspace/index.js';
+import type { IAccessControl } from '../access/index.js';
+import { creatorPrincipal, spliceGrant } from '../access-model/index.js';
+import { WorkspaceMutex } from '../kb-fs/index.js';
 
 /** Commit machinery the provision rides — the pending-commit pipeline, run inline. */
 export interface ProvisionCommitDriver {

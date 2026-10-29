@@ -379,6 +379,21 @@ export interface ToolManualDetail extends Omit<ToolManualSummary, 'description'>
   hiddenTools: HiddenTool[];
 }
 
+/**
+ * A connection's narrowing of the catalog: whether the connector defined at
+ * `definitionPath` (a `.tool` file, or the MCP server definition a server
+ * entry came from) is one the connection loads. Applied AFTER the caller's
+ * read gate, so it can only take manuals away. The agent surfaces pass the
+ * connection scope's `allowsConnector` (`modules/agent-scope`); absent is the
+ * whole readable catalog.
+ */
+export type ConnectorScope = (definitionPath: string) => boolean;
+
+/** A manual as its file reads now — see {@link IToolManualService.liveDeclaration}. */
+export type LiveDeclaration =
+  | { manual: ToolManualSummary; variable?: ToolVariable; refused?: undefined }
+  | { refused: string; manual?: undefined; variable?: undefined };
+
 export interface IToolManualService {
   /** The `.tool` manuals the user can read, as summaries. */
   listAccessible(userEmail: string): Promise<ToolManualSummary[]>;
@@ -400,7 +415,7 @@ export interface IToolManualService {
    * unparseable by definition, so the verdict comes from its folder's
    * `access.md` chain — default-deny, as everywhere else.
    */
-  listAccessibleCatalog(userEmail: string): Promise<AccessibleCatalog>;
+  listAccessibleCatalog(userEmail: string, within?: ConnectorScope): Promise<AccessibleCatalog>;
   /**
    * One readable `.tool` by slug, with its description + capabilities, for the
    * browser tool page. `null` when no such slug exists OR the caller can't read
@@ -408,6 +423,23 @@ export interface IToolManualService {
    * confirm that a tool the caller can't see exists).
    */
   getDetail(userEmail: string, slug: string): Promise<ToolManualDetail | null>;
+  /**
+   * One manual's declaration as its file reads on the default branch NOW, for a
+   * sign-in about to start: the files are parsed afresh, never served from the
+   * catalog's cached scan, so an edit made seconds ago is already what this
+   * answers. A sign-in variable that names only its `clientId` is completed from
+   * the server's OAuth metadata by the same walk the catalog completes it with;
+   * when that fails, the endpoints stay absent and `manual.setup.reason` says why.
+   *
+   * `refused` when the file declaring this slug is one the parse refuses as it
+   * reads now (an endpoint failing the https/SSRF check, say): the parser's
+   * reason, so the sign-in can say why instead of finding nothing. `null` when
+   * no readable manual has this slug (fail-closed, like {@link getDetail});
+   * `variable` absent when the file declares no variable of that name. Nothing
+   * the platform synthesises from discovery (the zero-config sign-in variable)
+   * is in the answer: it is not in any file.
+   */
+  liveDeclaration(userEmail: string, slug: string, varName: string): Promise<LiveDeclaration | null>;
 
   /**
    * Wire where a hidden tool's schema finding comes from (the MCP proxy, which
@@ -429,7 +461,7 @@ export interface IToolManualService {
    * manual's embedded tools breaks without touching anything a summary shows.
    * Opaque to callers: only equality is ever asked of these lines.
    */
-  catalogFingerprints(userEmail: string): Promise<string[]>;
+  catalogFingerprints(userEmail: string, within?: ConnectorScope): Promise<string[]>;
   /**
    * Every manual in the catalog, UNFILTERED by access — the mirror of
    * `skillService.listSkills(undefined)`. For caller-INDEPENDENT counting only
@@ -445,7 +477,7 @@ export interface IToolManualService {
    * NOT include the KB manual (the route prepends that). With `{ remoteOnly: true }`
    * (the remote MCP proxy), LOCAL-ONLY manuals (`remote: false`) are excluded.
    */
-  toManualCallTemplates(userEmail: string, opts?: { remoteOnly?: boolean }): Promise<CallTemplate[]>;
+  toManualCallTemplates(userEmail: string, opts?: { remoteOnly?: boolean; within?: ConnectorScope }): Promise<CallTemplate[]>;
   /**
    * The caller's accessible LOCAL-ONLY (`remote: false`) manuals.
    *
@@ -453,21 +485,23 @@ export interface IToolManualService {
    * both: `name` is the UTCP namespace its `${VAR}` refs are keyed by, and
    * `slug` is what addresses the manual on the variable-resolution route.
    */
-  listLocalOnly(userEmail: string): Promise<{ slug: string; name: string; path: string }[]>;
+  listLocalOnly(userEmail: string, within?: ConnectorScope): Promise<{ slug: string; name: string; path: string }[]>;
   /**
    * Tools declared on `branch` whose namespace the default-branch catalog does
    * not serve yet, filtered to what the caller can read there. The catalog is
    * built from the default branch only, so a server an agent declares on its
    * draft is invisible to every tool surface until the draft is merged — this
    * is how the agent is told where its declaration lives. `[]` for the default
-   * branch itself, or a branch with no workspace.
+   * branch itself, or a branch with no workspace. `within` narrows the answer
+   * to a connection's connectors, after the read gate, as the catalog's does.
    */
   listDeclaredOnlyOnBranch(
     userEmail: string,
     branch: string,
+    within?: ConnectorScope,
   ): Promise<{ name: string; path: string; type: ToolManualType }[]>;
   /** The embedded UTCP manual for an inline `.tool` (served at `/api/tools/:slug/manual`). */
-  resolveInlineManual(userEmail: string, slug: string): Promise<UtcpManualDict | null>;
+  resolveInlineManual(userEmail: string, slug: string, opts?: { within?: ConnectorScope }): Promise<UtcpManualDict | null>;
   /** Validate a draft `.tool` file's content for the renderer preview. */
   preview(content: string): Promise<ToolManualPreview>;
   /**

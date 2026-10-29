@@ -6,8 +6,44 @@ import {
   accessFrontmatterExtensionList,
   parseOwnAccessEntries,
   parseRolesYaml,
+  parseAccessEntry,
+  mergeGroupsIntoRoles,
 } from '../access-grammar.js';
-import { parseGroupsFile } from '../group-files.js';
+import { parseGroupsFile, unsafeNameReason } from '../group-files.js';
+
+describe('principal spellings — a bare name is the role, group/<Name> the group', () => {
+  it('parses group/<Name> into the canonical group token, spacing normalised', () => {
+    const r = parseAccessEntry('group/ Product  Team');
+    expect(r).toEqual({ ok: true, entry: { kind: 'role', role: 'group/product team', displayRole: 'group/ Product  Team', deny: false } });
+    const d = parseAccessEntry('deny group/Admin');
+    expect(d.ok && d.entry.kind === 'role' && d.entry.role).toBe('group/admin');
+    expect(parseAccessEntry('group/').ok).toBe(false);
+  });
+
+  it('reserves the group/ prefix for roles and groups alike', () => {
+    const roles = parseRolesYaml('roles:\n  Admin:\n    - a@x.io\n  group/Ops:\n    - b@x.io\n');
+    expect(roles.ok).toBe(false);
+    if (!roles.ok) expect(roles.errors.join(' ')).toMatch(/reserved 'group\/' prefix/);
+    expect(unsafeNameReason('group/Ops')).toMatch(/group\//);
+  });
+
+  it('merging keeps the bare key for the role and registers group/ for every group', () => {
+    const parsed = parseRolesYaml('roles:\n  Admin:\n    - admin@x.io\n');
+    if (!parsed.ok) throw new Error('roles');
+    const groups = parseGroupsFile('groups:\n  Admin:\n    - mallory@x.io\n  Sales:\n    - sam@x.io\n', 'groups.yaml');
+    if (!groups.ok) throw new Error('groups');
+    const warnings = mergeGroupsIntoRoles(parsed.index, groups.groups, 'groups.yaml');
+    const idx = parsed.index.byCanonical;
+    expect(idx.get('admin')?.kind).toBe('role');
+    expect(idx.get('role/admin')).toBe(idx.get('admin'));
+    expect(idx.get('group/admin')?.kind).toBe('group');
+    expect(idx.get('sales')?.kind).toBe('group');
+    expect(idx.get('group/sales')).toBe(idx.get('sales'));
+    // The group's member holds only the group's keys, never the role's.
+    expect([...(parsed.index.byEmail.get('mallory@x.io') ?? [])]).toEqual(['group/admin']);
+    expect(warnings.join(' ')).toMatch(/resolves to the ROLE; use 'group\/admin'/);
+  });
+});
 
 describe('parseYamlSubset — inline empty collections', () => {
   it('reads `key: []` as an empty list, not the scalar "[]"', () => {
@@ -103,6 +139,7 @@ describe('the access-frontmatter extension set', () => {
     expect(accessFrontmatterExtensionList()).toHaveLength(after);
     expect(accessFrontmatterExtensionList()).toContain('.md');
     expect(accessFrontmatterExtensionList()).toContain('.tool');
+    expect(accessFrontmatterExtensionList()).not.toContain('.agent');
   });
 
   it('throws on a malformed extension rather than skipping it', () => {

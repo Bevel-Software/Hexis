@@ -3,6 +3,7 @@ import cors from 'cors';
 import path from 'node:path';
 import type { Router, RequestHandler } from 'express';
 import { createAuthRoutes } from '../modules/auth/auth.routes.js';
+import { authCookieSecure } from '../modules/auth/auth.middleware.js';
 import { createWorkspaceRoutes } from '../modules/workspace/workspace.routes.js';
 import {
   createAgentUploadRoutes,
@@ -16,10 +17,15 @@ import { createWorkflowRoutes } from '../modules/workflow/workflow.routes.js';
 import { createEventAccess, createEventsRoutes, EventDelivery } from '../modules/workflow/index.js';
 import { createAccessRoutes } from '../modules/access/access.routes.js';
 import { createAccessRequestRoutes } from '../modules/access/access-requests.routes.js';
+import { AccessRequestsService } from '../modules/access/access-requests.service.js';
 import { createMcpRoutes } from '../modules/mcp/mcp.routes.js';
 import { createOAuthConsentRoutes } from '../modules/mcp/oauth/oauth-consent.routes.js';
 import { mcpAuthRouter } from '@modelcontextprotocol/sdk/server/auth/router.js';
 import { createManualRoutes } from '../modules/tool-registry/manual.routes.js';
+import {
+  createToolHintsAgentRoutes,
+  createToolHintsRoutes,
+} from '../modules/tool-registry/read-only-hints.js';
 import { createCatalogRevisionRoutes } from './catalog-revision.js';
 import {
   createToolManualsAgentRoutes,
@@ -359,6 +365,9 @@ export async function createCoreServer(
       core.authMiddleware,
       core.authProviders,
       core.config.loginPasswordEnabled,
+      // The cookie's Secure flag follows the scheme the deployment is reached
+      // on, as the SSO providers' does: one rule for every sign-in path.
+      { cookieSecure: authCookieSecure(core.config.publicBackendUrl) },
     ),
   );
 
@@ -378,6 +387,7 @@ export async function createCoreServer(
     core.internalTokenService,
     core.mcpOAuthProvider,
     core.mcpResourceMetadataUrl,
+    core.agentScopeService,
   ));
 
   // Remote sync — `POST /api/sync`, called by a git host's webhook or a
@@ -418,6 +428,7 @@ export async function createCoreServer(
     toolManualService: core.toolManualService,
     accessControl: core.accessControl,
     connectionProbe: core.connectionProbeService,
+    agents: core.agentScopeService,
     stateSecret: core.config.jwtSecret,
     publicBackendUrl: core.config.publicBackendUrl,
     publicFrontendUrl: core.config.publicFrontendUrl,
@@ -478,7 +489,7 @@ export async function createCoreServer(
   // because they are the only ones that gate their whole payload on the
   // caller's read access, so they take the access service and nothing else.
   registerChangeRequestReadTools(core.toolRegistry, toolsRouter, ta, th, core.accessControl, core.kb);
-  const workspaceTools = registerWorkspaceTools(core.toolRegistry, toolsRouter, ta, th, core.spillStore, core.docExtractService, core.accessControl, core.kb, agentAccessGate, core.routineWritePolicy, core.sessionSink, allowedToolsChecker, core.changeGate, core.agentUploadStore, core.agentGuide, core.agentDownloadStore, core.starterPackService, core.disk, core.patternMatcher);
+  const workspaceTools = registerWorkspaceTools(core.toolRegistry, toolsRouter, ta, th, core.spillStore, core.docExtractService, core.accessControl, core.kb, agentAccessGate, core.routineWritePolicy, core.sessionSink, allowedToolsChecker, core.changeGate, core.agentUploadStore, core.agentGuideStart, core.agentDownloadStore, core.starterPackService, core.disk, core.patternMatcher);
   // `open_page` — the knowledge-base page shown inside a chat. Registered
   // here, on the same router as the file tools, because it answers with
   // `read_file`'s own read: the read hook, the access gate and the
@@ -541,11 +552,17 @@ export async function createCoreServer(
     agentAccessGate,
     core,
   });
+  // What MCP clients are told about each platform tool's effect: read by the
+  // agent manual (the hosted endpoint) and by `/agent/tool-hints` (hexis-mcp).
+  const { readOnlyHints } = core;
   toolsRouter.use(createManualRoutes(
     core.toolRegistry,
     core.manualAuthMiddleware,
     async (userId) => (await core.authService.getUserById(userId))?.email,
+    readOnlyHints,
+    core.agentScopeService,
   ));
+  toolsRouter.use(createToolHintsAgentRoutes(readOnlyHints, core.manualAuthMiddleware));
   // The aggregated manual list (KB + the caller's accessible `.tool`s) + inline
   // `.tool` sub-manuals. Mounted on the tools router so they share `manualAuth`
   // and sit before the JWT `/api` mounts.
@@ -560,6 +577,7 @@ export async function createCoreServer(
       disk: core.disk,
       pluginIndex: core.pluginIndexService,
     },
+    core.agentScopeService,
   ));
   // What every connected agent is told at session start, as the hosted proxy
   // composes it: read by the local `hexis-mcp` bridge at startup and by the
@@ -574,6 +592,7 @@ export async function createCoreServer(
     skills: core.skillService,
     manualAuth: core.manualAuthMiddleware,
     resolveUserEmail: async (userId) => (await core.authService.getUserById(userId))?.email,
+    agentScope: core.agentScopeService,
     // The views move the revision too: a release that changes a view and no
     // manual would otherwise leave a running local server on the old one.
     mcpApps: core.mcpAppService,
@@ -588,6 +607,7 @@ export async function createCoreServer(
     core.secretsVaultService,
     core.manualAuthMiddleware,
     async (userId) => (await core.authService.getUserById(userId))?.email,
+    core.agentScopeService,
   ));
   app.use('/api', toolsRouter);
 
@@ -630,6 +650,7 @@ export async function createCoreServer(
     createPluginCreationRoutes(
       core.pluginProvisionService,
       async (req) => (req.userId ? ((await core.authService.getUserById(req.userId)) ?? null) : null),
+      core.agentScopeService,
     ),
   );
 
@@ -674,6 +695,7 @@ export async function createCoreServer(
   const eventDelivery = new EventDelivery(createEventAccess({
     accessControl: core.accessControl,
     kbDirName: core.kbDirName,
+    getChangeRequest: (number) => core.workflowService.getChangeRequest(number),
     workspaces: {
       hasWorkspace: (workspaceId) => core.workspaceService.hasBootstrappedWorkspace(workspaceId),
       anyWorkspaceId: async () => (await core.workspaceService.findAnyWorkspaceId()) ?? core.kb.defaultWorkspaceId(),
@@ -696,6 +718,7 @@ export async function createCoreServer(
     core.eventBus,
     core.db,
     core.kb,
+    core.disk,
     [core.config.adminEmail],
   ));
   // Asking for Can edit or Owner on an item from its Manage access dialog, and
@@ -724,7 +747,12 @@ export async function createCoreServer(
       skillService: core.skillService,
       accessControl: core.accessControl,
       workflow: core.workflowService,
-      workspaceService: core.workspaceService,
+      requests: new AccessRequestsService({
+        workflow: core.workflowService,
+        workspaceService: core.workspaceService,
+        lifecycle: core.joinRequestsService,
+        kb: core.kb,
+      }),
       joinRequests: core.joinRequestsService,
       kb: core.kb,
       resolveUser: async (req) =>
@@ -760,6 +788,8 @@ export async function createCoreServer(
   // Admin-status resolver (CORE — see the note in admin-access.routes.ts;
   // the full admin router is an enterprise `ext.authed` extension).
   app.use('/api', core.authMiddleware, createAdminAccessRoutes(core.adminAccess));
+  // The Tools page's read-only toggles: anyone signed in reads, admins write.
+  app.use('/api', core.authMiddleware, createToolHintsRoutes(readOnlyHints, core.adminAccess));
   // Groups admin (manual-mode CRUD; typed refusals in IdP mode) —
   // admin-gated inside.
   app.use('/api', core.authMiddleware, createGroupsAdminRoutes({
@@ -888,6 +918,7 @@ export async function createCoreServer(
       clientNameFor: (st) => core.githubFacade.clientNameFor(st),
       completeConsent: (userId, st) => core.githubFacade.completeConsent(userId, st),
     },
+    agents: core.agentScopeService,
   }));
 
   // What an Owner pastes into Claude's admin settings to register this

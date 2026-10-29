@@ -13,13 +13,9 @@ import { useNavigate } from 'react-router-dom';
 import { ChevronRight, FileText, Puzzle, Search, Sparkles, Wrench } from 'lucide-react';
 import { MenuPanel, useDismissableMenu, useLatestRef } from '../../../shared/components';
 import { cn } from '../../../lib/utils';
-import { useWorkspace } from '../../workspace/state/workspace.context';
-import { useMergedWorkspaceTree } from '../../workspace/hooks/useMergedWorkspaceTree';
-import { useFileNav } from '../../workspace/routing/kb-routes';
-import { knowledgeFiles } from '../../workspace/utils/fileTree';
-import { listSkills } from '../../library/services/library.api';
-import { listPlugins } from '../../library/services/plugins.api';
-import { listToolSecrets } from '../../secrets-vault/services/tool-secrets.api';
+import { useWorkspace, useMergedWorkspaceTree, useFileNav, knowledgeFiles } from '../../workspace';
+import { listSkills, listPlugins } from '../../library';
+import { listToolSecrets } from '../../secrets-vault';
 import { rankByName, rankByNames } from '../search/rank';
 import {
   libraryResults,
@@ -39,7 +35,7 @@ import {
   shortcutHint,
   shortcutKeycapWidth,
 } from '../commands/command-menu';
-import { useSetupChecklist } from '../../onboarding/state/onboarding';
+import { useSetupChecklist } from '../../onboarding';
 
 /** Rows per group. Past this the query is too short to be useful, not the list too long. */
 const GROUP_LIMIT = 8;

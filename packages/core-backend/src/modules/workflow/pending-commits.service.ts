@@ -38,9 +38,9 @@ import { and, asc, eq, inArray, isNull, min, or, sql, type SQL } from 'drizzle-o
 import { logger } from '../../shared/logging.js';
 
 const log = logger('pending-commits');
-import type { Database } from '../database/connection.js';
+import type { Database } from '../database/index.js';
 import { canonicalEmail } from '../../shared/email-identity.js';
-import { pendingCommits } from '../database/schema.js';
+import { pendingCommits } from '../database/index.js';
 import { canonicalWorkspaceId } from '../../shared/workspace-id.js';
 
 /**

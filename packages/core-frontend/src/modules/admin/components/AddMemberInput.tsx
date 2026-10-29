@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState, type Ref } from 'react';
 import { Loader2 } from 'lucide-react';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
-import { suggestPrincipals } from '../../access/api';
+import { suggestPrincipals } from '../../access';
 import { initials } from '../../../lib/email';
 
 /** A person offered by the suggest endpoint — name and email, nothing more. */

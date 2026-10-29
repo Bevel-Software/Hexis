@@ -1,10 +1,11 @@
 import express from 'express';
-import type { IAdminAccessService } from '../admin/admin.interface.js';
+import type { IAdminAccessService } from '../admin/index.js';
 import { logger } from '../../shared/logging.js';
 
 const log = logger('setup');
+import type {
+  DeploymentSettingsService} from './deployment-settings.service.js';
 import {
-  DeploymentSettingsService,
   SettingsValidationError,
   validateHttpsRemote,
   type OidcCredentials,
@@ -31,10 +32,10 @@ import type { KbContext } from '../../shared/kb-context.js';
 import { failureOf, type GitFailure } from '../../shared/git-failure.js';
 import { redactSecret, urlQuerySecrets } from '../../shared/redact-secret.js';
 import { listRootFolders, pickListingBranch } from './git-root-folders.js';
-import { sameRepository } from '../kb-fs/remote-url.js';
+import { sameRepository } from '../kb-fs/index.js';
 import { MANAGED_DEFAULT_BRANCH } from './managed-repository.js';
 import { GIT_MODES, type GitHubAppRepository, type RepositorySource } from './repository-source.js';
-import '../auth/auth.middleware.js'; // Express Request augmentation
+import '../auth/index.js'; // Express Request augmentation
 
 /**
  * What setup needs of the ways a deployment can be given its repository:

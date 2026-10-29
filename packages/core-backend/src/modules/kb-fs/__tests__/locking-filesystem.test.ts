@@ -1482,6 +1482,31 @@ describe('LockingFilesystem — a destination that is taken is refused, never re
     expect(await fs.readFile(onDisk(TAKEN), 'utf-8')).toBe('the winner of the race');
   });
 
+  /**
+   * The same race for an EXCLUSIVE write (`overwrite: false`), which is how
+   * `copy_file` lands bytes read out of the workspace's tmp folder: the
+   * refusal is the clash sentence, and the lock releases untouched rather
+   * than discarding the winner's queued file.
+   */
+  it('an exclusive write onto a taken name is the same refusal, and releases UNTOUCHED', async () => {
+    const workflow = makeWorkflow();
+    const layer = new LockingFilesystem(
+      { basePath: root, contained: true },
+      { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB },
+    );
+    await fs.writeFile(onDisk(TAKEN), 'the winner of the race');
+
+    await expect(layer.writeFile(TAKEN, 'the loser', { overwrite: false })).rejects.toMatchObject({
+      name: 'DestinationTakenError',
+      message: 'A file named taken.md already exists in KnowledgeBase.',
+    });
+
+    expect(workflow.releaseLockUntouched).toHaveBeenCalledWith('ws-feat', 'feat', TAKEN, USER);
+    expect(workflow.releaseLockNoCommit).not.toHaveBeenCalled();
+    expect(workflow.releaseLock).not.toHaveBeenCalled();
+    expect(await fs.readFile(onDisk(TAKEN), 'utf-8')).toBe('the winner of the race');
+  });
+
   it.skipIf(process.platform === 'win32')('answers the clash sentence when a DANGLING link holds the name', async () => {
     // A link to nothing still owns the directory entry, so the exclusive
     // create fails — and an existence probe that follows links would say the

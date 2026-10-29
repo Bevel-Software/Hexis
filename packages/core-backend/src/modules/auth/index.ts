@@ -15,6 +15,8 @@ export {
   AccountChangeRefusedError,
   AccountDeactivatedError,
   AuthBackendError,
+  SESSION_ENDED_MESSAGE,
+  SessionEndedError,
   admitEveryone,
   type AccountAdmissionVerdict,
   type AccountProvisionReason,
@@ -27,3 +29,6 @@ export { timingSafeStringEqual } from './password-hash.js';
 // The Express `Request` augmentation (`req.userId`, …): a module whose routes
 // read it imports this entry, never the middleware file.
 import './auth.middleware.js';
+// Reached by other modules; exported here so they stop importing the files.
+export type { IAccountSwitchGuard } from './account-switch-guard.js';
+export type { AuthService } from './auth.service.js';

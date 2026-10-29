@@ -1,7 +1,7 @@
 import '@utcp/http';
 import { HttpCallTemplateSerializer } from '@utcp/http';
 import { ToolSerializer } from '@utcp/sdk';
-import type { JsonSchema, UtcpTool } from '../tool-registry/tool.contract.js';
+import type { JsonSchema, UtcpTool } from '../tool-registry/index.js';
 import { declareRouteTool } from './route-tool-schemas.js';
 
 const httpTemplate = new HttpCallTemplateSerializer();
@@ -16,7 +16,7 @@ const toolSerializer = new ToolSerializer();
 export const BRANCH_INPUT: JsonSchema = {
   type: 'string',
   minLength: 1,
-  description: 'The branch (draft) whose workspace this operates on — pass the branch you are currently working on.',
+  description: 'The branch to work on: the default branch (`get_agent_guide` names it) or your draft.',
 };
 
 /**
@@ -146,7 +146,9 @@ export interface ToolDefSpec {
   branch?: BranchDeclaration;
   /**
    * The tool writes. A `write` tag says the same. A writing tool cannot
-   * declare `defaults-to-default-branch`.
+   * declare `defaults-to-default-branch`. It is also the tool's built-in
+   * read-only hint to MCP clients: a tool that declares no write is listed
+   * `readOnlyHint: true` (see `tool-registry/read-only-hints.ts`).
    */
   write?: boolean;
 }
@@ -185,7 +187,9 @@ export function toolDef(spec: ToolDefSpec): UtcpTool {
     description: spec.description,
     inputs: wire,
     outputs: spec.outputs ?? { type: 'object', properties: {} },
-    tags: spec.tags ?? [],
+    // `write: true` is carried as the `write` tag too: the tag is what survives
+    // serialization, and what the write gate and the read-only hint read.
+    tags: spec.write ? [...new Set([...(spec.tags ?? []), 'write'])] : (spec.tags ?? []),
     tool_call_template: httpTemplate.validateDict({
       call_template_type: 'http',
       http_method: 'POST',

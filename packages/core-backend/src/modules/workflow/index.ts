@@ -10,4 +10,11 @@ export { CHANGE_REQUEST_URL_NOTE, changeRequestLink, changeRequestLinkBase } fro
 export { WorkflowEventBus } from './event-bus.js';
 export { createEventsRoutes } from './events.routes.js';
 export { EventDelivery, createEventAccess } from './events-delivery.js';
-export type { EventAccess, EventViewer, IEventDelivery } from './events-delivery.js';
+export type { ChangeRequestFacts, EventAccess, EventViewer, IEventDelivery } from './events-delivery.js';
+// Reached by other modules; exported here so they stop importing the files.
+export { NodeGitRunner } from './git/node-git-runner.js';
+export { RECOVERY_BOT_EMAIL } from './recovery-bot.js';
+export type { IReviewWorkflowService } from './review-workflow/review-workflow.interface.js';
+export { sanitizeError } from './sanitize-error.js';
+export type { WorkflowHooks } from './workflow-hooks.js';
+export type { WorkflowService } from './workflow.service.js';

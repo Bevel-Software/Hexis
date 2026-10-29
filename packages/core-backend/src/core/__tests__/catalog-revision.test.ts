@@ -4,6 +4,7 @@ import type { Server } from 'node:http';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { SkillSummary } from '../../modules/skills/skills.contract.js';
 import { catalogRevision, createCatalogRevisionRoutes } from '../catalog-revision.js';
+import { agentFile, agentScopeOver, inMemoryKb, type InMemoryKb } from '../../modules/agent-scope/__tests__/in-memory-kb.js';
 
 /**
  * The fingerprint a long-lived client polls to learn that the released catalog
@@ -226,5 +227,93 @@ describe('GET /agent/catalog-revision', () => {
     const res = await fetch(`${url}/agent/catalog-revision`);
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ revision: catalogRevision([], []), tools: 0, skills: 0 });
+  });
+});
+
+describe('GET /agent/catalog-revision, for a connection made as an .agent file', () => {
+  let http: Server | null = null;
+
+  afterEach(async () => {
+    if (http) await new Promise<void>((resolve) => http!.close(() => resolve()));
+    http = null;
+  });
+
+  const lines = [
+    ['ops', 'ops', 'Plugins/Ops/ops.tool', 'http', 'remote', '', 's'].join('\u0000'),
+    ['crm', 'crm', 'Plugins/Sales/crm.tool', 'http', 'remote', '', 's'].join('\u0000'),
+  ];
+  const paths = ['Plugins/Ops/ops.tool', 'Plugins/Sales/crm.tool'];
+  const skills = [skill({ name: 'notes', path: 'Skills/Release/notes' }), skill({ name: 'pitch', path: 'Skills/Sales/pitch' })];
+
+  async function mount(kb: InMemoryKb, agentPath: string | undefined) {
+    // The two services narrow by the predicate they are handed, AFTER their
+    // own read gate — stood in for here by the lists above, all readable.
+    const catalogFingerprints = vi.fn(async (_email: string, within?: (p: string) => boolean) =>
+      lines.filter((_, i) => !within || within(paths[i]!)),
+    );
+    const listSkills = vi.fn(async (_email: string, opts?: { within?: (p: string) => boolean }) =>
+      skills.filter((s) => !opts?.within || opts.within(s.path)),
+    );
+    const agentScope = agentScopeOver(kb);
+    const resolve = vi.spyOn(agentScope, 'resolve');
+    const app = express();
+    app.use(
+      createCatalogRevisionRoutes({
+        toolManuals: { catalogFingerprints } as never,
+        skills: { listSkills } as never,
+        manualAuth: (req, _res, next) => {
+          req.toolAuth = { userId: 'u1', ...(agentPath ? { agentPath } : {}) } as never;
+          next();
+        },
+        resolveUserEmail: async () => 'ada@example.com',
+        agentScope,
+      }),
+    );
+    http = app.listen(0);
+    await new Promise<void>((r) => http!.once('listening', r));
+    const url = `http://127.0.0.1:${(http.address() as AddressInfo).port}/agent/catalog-revision`;
+    const read = async () =>
+      (await (await fetch(url)).json()) as { revision: string; tools: number; skills: number; connection?: unknown };
+    return { read, catalogFingerprints, listSkills, resolve };
+  }
+
+  it('Everything is the revision it always was: nothing resolved, nothing narrowed, no `connection`', async () => {
+    const { read, catalogFingerprints, listSkills, resolve } = await mount(inMemoryKb({}), undefined);
+    expect(await read()).toEqual({ revision: catalogRevision(lines, skills), tools: 2, skills: 2 });
+    expect(catalogFingerprints).toHaveBeenCalledWith('ada@example.com');
+    expect(listSkills).toHaveBeenCalledWith('ada@example.com');
+    expect(resolve).not.toHaveBeenCalled();
+  });
+
+  it("is the fingerprint of what the agent loads, and names the agent", async () => {
+    const kb = inMemoryKb({ 'Agents/ops.agent': agentFile('name: ops\nconnectors: [Plugins/Ops]\nskills: [Skills/Release]') });
+    const { read } = await mount(kb, 'Agents/ops.agent');
+    const body = await read();
+    expect(body.tools).toBe(1);
+    expect(body.skills).toBe(1);
+    expect(body.connection).toEqual({ agent: { path: 'Agents/ops.agent', name: 'ops' } });
+    expect(body.revision).not.toBe(catalogRevision(lines, skills));
+  });
+
+  it('moves at the next read after the .agent file is edited — no reconnect', async () => {
+    const kb = inMemoryKb({ 'Agents/ops.agent': agentFile('connectors: [Plugins/Ops]') });
+    const { read } = await mount(kb, 'Agents/ops.agent');
+    const before = await read();
+    expect(await read()).toEqual(before);
+    kb.files.set('Agents/ops.agent', agentFile('connectors: [Plugins/Ops]\nskills: [Skills/Sales]'));
+    const after = await read();
+    expect(after.revision).not.toBe(before.revision);
+    expect(after.skills).toBe(1);
+    // Even an edit that changes nothing listed moves it: the file is the configuration.
+    kb.files.set('Agents/ops.agent', agentFile('connectors: [Plugins/Ops]\nskills: [Skills/Sales]\ndescription: now described'));
+    expect((await read()).revision).not.toBe(after.revision);
+  });
+
+  it('a deleted file is an empty catalog with the reason, never Everything', async () => {
+    const { read } = await mount(inMemoryKb({}), 'Agents/gone.agent');
+    const body = await read();
+    expect(body.tools).toBe(0);
+    expect(body.skills).toBe(0);
+    expect((body.connection as { unavailable?: string }).unavailable).toMatch(/no longer exists or which you can no longer read/);
   });
 });

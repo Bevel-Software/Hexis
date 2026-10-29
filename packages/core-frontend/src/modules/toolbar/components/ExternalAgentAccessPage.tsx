@@ -22,7 +22,9 @@ import { CODEX_LOGIN_NOTE, GITHUB_LINK_KIND, marketplaceCommands, marketplaceGit
 import { AgentInstructionsCard } from './AgentInstructionsCard';
 import { CONNECT_TOOLS_PATH } from '../../library';
 import { CoworkSetupSteps } from './CoworkSetupSteps';
-import { useAdmin } from '../../admin/state/admin.context';
+import { useAdmin } from '../../admin';
+import { connectedAsLabel, listAgentChoices, useConnectAsChoice } from '../../agents';
+import { ConnectAsChoice } from '../../agents/components/ConnectAsChoice';
 import {
   type ExternalApiKeySummary,
   type MintedExternalApiKey,
@@ -96,6 +98,10 @@ export function ExternalAgentAccessPage() {
   const [loadError, setLoadError] = useState<string | null>(null);
 
   const [label, setLabel] = useState('');
+  // "Connect as" for a new key: Everything unless an agent is picked. Until
+  // the agents answer, a key would be minted as Everything by default; when
+  // they could not be loaded, an Everything key waits to be confirmed.
+  const connectAs = useConnectAsChoice();
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
 
@@ -128,15 +134,34 @@ export function ExternalAgentAccessPage() {
     void refresh();
   }, [refresh]);
 
+  // The agents a key may be minted as. A failure costs only the choice —
+  // Everything is always on offer — and is shown, not passed off as none.
+  const settleConnectAs = connectAs.settle;
+  useEffect(() => {
+    let cancelled = false;
+    listAgentChoices().then(
+      (agents) => {
+        if (!cancelled) settleConnectAs({ agents });
+      },
+      () => {
+        if (!cancelled) settleConnectAs({ agents: [], failed: true });
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [settleConnectAs]);
+
   async function handleCreate() {
     const trimmed = label.trim();
-    if (trimmed.length === 0 || trimmed.length > MAX_LABEL_LEN || creating) return;
+    if (trimmed.length === 0 || trimmed.length > MAX_LABEL_LEN || creating || !connectAs.mayConnect) return;
     setCreating(true);
     setCreateError(null);
     try {
-      const minted = await createExternalApiKey(trimmed);
+      const minted = await createExternalApiKey(trimmed, connectAs.value);
       setReveal(minted);
       setLabel('');
+      connectAs.setValue(null);
       // Optimistic-ish: refresh the list so the new row shows up underneath
       // the reveal modal.
       void refresh();
@@ -172,7 +197,7 @@ export function ExternalAgentAccessPage() {
   }
 
   const trimmed = label.trim();
-  const canSubmit = trimmed.length > 0 && trimmed.length <= MAX_LABEL_LEN && !creating;
+  const canSubmit = trimmed.length > 0 && trimmed.length <= MAX_LABEL_LEN && !creating && connectAs.mayConnect;
 
   // Surface the keys that matter: active keys first (most-recently-used at the
   // top, never-used ones last among the active), with disconnected keys sunk
@@ -535,6 +560,14 @@ export function ExternalAgentAccessPage() {
                   {creating ? 'Creating…' : 'Create key'}
                 </button>
               </div>
+              <ConnectAsChoice
+                agents={connectAs.agents}
+                value={connectAs.value}
+                disabled={creating}
+                hint="What the key loads. An agent narrows it to the tools, skills and plugins its configuration lists, and only those you may read."
+                onChange={connectAs.setValue}
+                unavailable={connectAs.unavailable}
+              />
               {createError && (
                 <div className="text-xs text-red-600 bg-red-50 border border-red-200 rounded px-2 py-1.5">
                   {createError}
@@ -575,7 +608,15 @@ export function ExternalAgentAccessPage() {
                         <div className="flex-1 min-w-0">
                           <div className="font-medium truncate">{k.label}</div>
                           <div className="text-[11px] text-ink-muted">
-                            Created {formatRelative(k.createdAt)} · Last used {formatRelative(k.lastUsedAt)}
+                            {/* Only a key made as an agent says so; Everything is what a key
+                                is unless it says otherwise, and needs no tag. */}
+                            {k.agentPath && (
+                              <>
+                                <span title={k.agentPath}>As {connectedAsLabel(k.agentPath)}</span> ·{' '}
+                              </>
+                            )}
+                            Created{' '}
+                            {formatRelative(k.createdAt)} · Last used {formatRelative(k.lastUsedAt)}
                             {/* A key an admin took is not one you can reconnect — say so,
                                 or people try. Your own disconnect keeps its word. */}
                             {revoked &&

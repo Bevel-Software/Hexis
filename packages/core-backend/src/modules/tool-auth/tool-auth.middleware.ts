@@ -3,9 +3,9 @@ import { logger } from '../../shared/logging.js';
 
 const log = logger('tools');
 import type { IExternalApiKeyService } from './external-api-key.interface.js';
-import type { AuthService } from '../auth/auth.service.js';
-import { ACCOUNT_DEACTIVATED_MESSAGE, AuthBackendError } from '../auth/account-admission.js';
-import { InternalTokenService } from './internal-token.service.js';
+import type { AuthService } from '../auth/index.js';
+import { ACCOUNT_DEACTIVATED_MESSAGE, AuthBackendError } from '../auth/index.js';
+import type { InternalTokenService } from './internal-token.service.js';
 import {
   INVALID_CONNECTION_KEY_CHALLENGE,
   INVALID_CONNECTION_KEY_MESSAGE,
@@ -47,6 +47,13 @@ export interface ToolAuth {
    * recorder attributes a direct tool call to.
    */
   connectionId?: string;
+  /**
+   * The agent configuration an EXTERNAL caller's connection was made as — a
+   * connection key's `api_tokens.agent_path`, or the one an `externalProxy`
+   * token carries for an agent connection. Absent is Everything. Every agent
+   * surface resolves it to the connection's scope (`modules/agent-scope`).
+   */
+  agentPath?: string;
   /** Always `'write'` now (the middleware sets it for both internal + external — neither credential carries scope). The read path is dormant until consumer agents are removed. */
   scope: 'read' | 'write';
 }
@@ -115,6 +122,14 @@ export type VerifyResult =
   | { ok: false; status: number; message: string; challenge?: string };
 
 /**
+ * A live agent connection's current "Connect as" choice, or null when it is
+ * gone or revoked — what `BevelOAuthProvider.liveConnectionChoice` answers.
+ */
+export interface ConnectionChoices {
+  liveConnectionChoice(connectionId: string): Promise<{ agentPath: string | null } | null>;
+}
+
+/**
  * The framework-agnostic verify core: bearer token (the value AFTER `Bearer `) →
  * normalized `ToolAuth`, accepting EITHER a `bevel_…` connection key (external —
  * pipeline-agent, MCP) OR an internal HMAC token (our own agent's loopback). A
@@ -135,6 +150,14 @@ export function createTokenVerifier(
    * it; absent, internal tokens are judged on their signature alone.
    */
   accounts?: Pick<AuthService, 'isActive'>,
+  /**
+   * Where an `externalProxy` token that names an agent connection reads the
+   * connection's CURRENT choice: the token outlives a re-consent, so the
+   * agent it was minted with may no longer be the one chosen. A
+   * connection no longer live (revoked, deleted) refuses the token. Absent,
+   * the token's own choice stands.
+   */
+  connections?: ConnectionChoices,
 ): (token: string | undefined) => Promise<VerifyResult> {
   const missing = { ok: false as const, status: 401, message: 'A connection key or internal token is required' };
   return async (token) => {
@@ -152,6 +175,13 @@ export function createTokenVerifier(
       if (accounts && !(await accounts.isActive(claim.userId))) {
         return { ok: false, status: 401, message: ACCOUNT_DEACTIVATED_MESSAGE };
       }
+      let agentPath = claim.agentPath;
+      if (claim.externalProxy && claim.connectionId && connections) {
+        const live = await connections.liveConnectionChoice(claim.connectionId);
+        // A revoked connection's token is dead here too, as it is at the MCP endpoint.
+        if (!live) return { ok: false, status: 401, message: 'Access for this agent was revoked' };
+        agentPath = live.agentPath ?? undefined;
+      }
       return claim.externalProxy
         ? {
             ok: true,
@@ -159,6 +189,7 @@ export function createTokenVerifier(
               source: 'external',
               userId: claim.userId,
               ...(claim.connectionId ? { connectionId: claim.connectionId } : {}),
+              ...(agentPath ? { agentPath } : {}),
               scope: 'write',
             },
           }
@@ -169,7 +200,16 @@ export function createTokenVerifier(
     if (externalApiKeyService.looksLikeExternalApiKey(token)) {
       const resolved = await externalApiKeyService.verifyAndLoadToken(token);
       if (resolved) {
-        return { ok: true, auth: { source: 'external', userId: resolved.user.id, tokenId: resolved.tokenId, scope: 'write' } };
+        return {
+          ok: true,
+          auth: {
+            source: 'external',
+            userId: resolved.user.id,
+            tokenId: resolved.tokenId,
+            ...(resolved.agentPath ? { agentPath: resolved.agentPath } : {}),
+            scope: 'write',
+          },
+        };
       }
       // A live key of a switched-off account is told so, not sent to mint another.
       if (await externalApiKeyService.isKeyOfSwitchedOffAccount?.(token)) {
@@ -192,8 +232,9 @@ export function createToolAuthMiddleware(
   externalApiKeyService: IExternalApiKeyService,
   internalTokenService: InternalTokenService,
   accounts?: Pick<AuthService, 'isActive'>,
+  connections?: ConnectionChoices,
 ): RequestHandler {
-  const verify = createTokenVerifier(externalApiKeyService, internalTokenService, accounts);
+  const verify = createTokenVerifier(externalApiKeyService, internalTokenService, accounts, connections);
   return async (req: Request, res: Response, next: NextFunction) => {
     const header = req.headers.authorization;
     if (!header || !header.toLowerCase().startsWith('bearer ')) {
@@ -233,8 +274,9 @@ export function createManualAuthMiddleware(
   externalApiKeyService: IExternalApiKeyService,
   internalTokenService: InternalTokenService,
   authService: Pick<AuthService, 'isActive' | 'resolveSession'>,
+  connections?: ConnectionChoices,
 ): RequestHandler {
-  const verify = createTokenVerifier(externalApiKeyService, internalTokenService, authService);
+  const verify = createTokenVerifier(externalApiKeyService, internalTokenService, authService, connections);
   return async (req: Request, res: Response, next: NextFunction) => {
     const header = req.headers.authorization;
     if (!header || !header.toLowerCase().startsWith('bearer ')) {

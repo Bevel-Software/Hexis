@@ -1,11 +1,10 @@
 import express from 'express';
-import type { AuthUser } from '@bevel-software/platform-shared';
-import type { IWorkflowService } from '@bevel-software/platform-shared';
+import type { AuthUser, IWorkflowService } from '@bevel-software/platform-shared';
 import { logger } from '../../shared/logging.js';
 import type { KbContext } from '../../shared/kb-context.js';
 import { branchForWorkspaceId } from '../../shared/workspace-id.js';
-import type { AuthService } from '../auth/auth.service.js';
-import type { WorkspaceService } from '../workspace/workspace.service.js';
+import type { AuthService } from '../auth/index.js';
+import type { WorkspaceService } from '../workspace/index.js';
 import type { IAccessControl } from './access-control.interface.js';
 import {
   AccessMutationError,
@@ -22,12 +21,8 @@ import {
   type AccessRequestTarget,
   type IAccessRequestLifecycle,
 } from './access-requests.contract.js';
-import {
-  AccessRequestsService,
-  extractRequestNote,
-  itemNameOf,
-} from './access-requests.service.js';
-import '../auth/auth.middleware.js'; // Express Request.userId augmentation
+import { AccessRequestsService, itemNameOf } from './access-requests.service.js';
+import '../auth/index.js'; // Express Request.userId augmentation
 
 const log = logger('access.request');
 
@@ -235,16 +230,16 @@ export function createAccessRequestRoutes(deps: {
       }
       const crs = await workflow.listChangeRequests();
       const rows = await lifecycle.list(target.path, target, crs, user);
-      // The note lives in the request's description and nowhere else, so it
-      // is read back per request. Bounded by the open requests on ONE item —
-      // a handful at most — and a detail that cannot be fetched costs the
-      // note, never the line it belongs to.
+      // The note is the request's own column, read back per request.
+      // Bounded by the open requests on ONE item — a handful at most — and a
+      // detail that cannot be fetched costs the note, never the line it
+      // belongs to.
       const withNotes = await Promise.all(
         rows.map(async (row) => {
           const detail = await workflow
             .getChangeRequestDetail(row.number, { patches: false })
             .catch(() => null);
-          const note = extractRequestNote(detail?.body);
+          const note = detail?.accessRequest?.note;
           return note ? { ...row, note } : row;
         }),
       );

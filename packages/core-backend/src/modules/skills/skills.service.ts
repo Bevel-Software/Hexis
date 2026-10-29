@@ -5,9 +5,9 @@ const log = logger('skills');
 import fs from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { parseDocument } from 'yaml';
-import type { WorkspaceService } from '../workspace/workspace.service.js';
+import type { WorkspaceService } from '../workspace/index.js';
 import type { KbContext } from '../../shared/kb-context.js';
-import type { IAccessControl } from '../access/access-control.interface.js';
+import type { IAccessControl } from '../access/index.js';
 import { extractFrontmatter, resolveDeclaredId, dedupeById } from '../../shared/frontmatter-id.js';
 import type { IgnoreRules, ITreeWalker } from '../../shared/fs.contract.js';
 import { TtlCache } from '../../shared/ttl-cache.js';
@@ -108,7 +108,9 @@ export class SkillService implements ISkillService {
 
   async listSkills(userEmail?: string, options: ListSkillsOptions = {}): Promise<SkillSummary[]> {
     const { catalog, branch } = await this.catalogFor(options.branch);
-    const visible = userEmail ? await this.readableSkills(catalog, userEmail) : catalog.skills;
+    const readable = userEmail ? await this.readableSkills(catalog, userEmail) : catalog.skills;
+    const within = options.within;
+    const visible = within ? readable.filter((s) => within(s.summary.path)) : readable;
     if (branch === undefined) return visible.map((s) => s.summary);
     // Marking reads both copies of a folder, so it happens only here, on a
     // branch read that asked for it — the released catalog every other surface
@@ -135,6 +137,8 @@ export class SkillService implements ISkillService {
     // A skill the branch deleted is not a skill as far as this answer goes:
     // the same `not_found` a name nobody ever used gets.
     if (!found) return { ok: false, error: 'not_found' };
+    // Outside the connection's skills: not there, for this connection.
+    if (options.within && !options.within(found.summary.path)) return { ok: false, error: 'not_found' };
 
     // Through `readable`, not a bare `canRead`: the two gates must never
     // disagree. `canRead` reads a file's own frontmatter rules off disk on

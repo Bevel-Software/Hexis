@@ -16,3 +16,15 @@ export { pathForTool } from './routes/library-paths';
 export { ToolLogo, type ToolLogoProps } from './components/ToolLogo';
 /** The outcome a tool sign-in carries back in the fragment, read once on arrival. */
 export { readOAuthFragment, type OAuthFragmentOutcome } from './utils/oauth-fragment';
+// Reached by other modules; exported here so they stop importing the files.
+export { LIBRARY_ROOT, isLibraryLocation, pathForLibraryFilter, pathForPlugin, pathForSkill, urlForLibraryItem } from './routes/library-paths';
+export { listSkills } from './services/library.api';
+export type { LibrarySkillSummary } from './services/library.api';
+export { listPlugins } from './services/plugins.api';
+export type { PluginSummary } from './services/plugins.api';
+export { useLibrary } from './state/library-data';
+export { usePluginsRevision } from './state/plugins-revision';
+export { useLibraryToast } from './state/toast.context';
+export { COPY_FAILED_TOAST, copyToClipboard } from './utils/clipboard';
+export { PERSONAL_PLUGIN_NAME, displayFirstName } from './utils/personal-plugin';
+export { pluginLabel, pluginNameForPath } from './utils/plugin-summary';

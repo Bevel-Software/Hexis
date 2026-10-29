@@ -139,6 +139,7 @@ describe('access routes on a proposal branch (real git)', () => {
         { emit: () => {} } as unknown as WorkflowEventBus,
         usersDbDouble(),
         testKbContext({ kbDirName: KB }),
+        new NodeFs(),
       ),
     );
     server = await new Promise<Server>((resolve) => {

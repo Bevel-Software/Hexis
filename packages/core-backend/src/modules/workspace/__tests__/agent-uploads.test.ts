@@ -18,6 +18,7 @@ import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
 import { ToolDescriptionNotes } from '../agent-access.gate.js';
 import { SpillStore } from '../spill-store.js';
 import { DocExtractService } from '../file-readers/doc-extract.service.js';
+import { WorkerDocumentExtractor } from '../file-readers/extract-in-worker.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import { normalizeWorkspacePath } from '../../kb-fs/repo-path.js';
 import {
@@ -243,7 +244,7 @@ async function start(options: StartOptions = {}): Promise<string> {
     fakeAuth,
     toolHandler,
     new SpillStore(join(tmpdir(), 'bevel-test-spills')),
-    new DocExtractService(docCacheDir),
+    new DocExtractService(docCacheDir, new WorkerDocumentExtractor()),
     access,
     testKbContext({ kbDirName: KB_DIR }),
     { recoveryBotEmail: 'recovery-bot@bevel.local', hooks: new WorkflowHooks(), notes: new ToolDescriptionNotes() },
@@ -1271,7 +1272,15 @@ describe('a token is good once, for one user, for a limited time', () => {
     const res = await call(base, 'apply_file_upload', { branch: DRAFT, token, destination: KB_DIR });
     expect(res.status).toBe(404);
     expect((await json<{ error: string }>(res)).error).toBe(UPLOAD_TOKEN_REFUSAL);
+    // The refusal drops the record and starts the delete without awaiting it,
+    // so a sweep run straight after no longer names the file and leaves it to
+    // that delete. Wait for the delete to land, under a deadline, instead of
+    // racing it: a readdir taken mid-`rm` failed CI on PR #457.
     await uploads.sweepNow();
+    const deadline = Date.now() + 2_000;
+    while (Date.now() < deadline && (await readdir(uploadsDir)).length > 0) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
     expect(await readdir(uploadsDir)).toEqual([]);
   });
 
