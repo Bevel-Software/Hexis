@@ -50,7 +50,7 @@ import {
   type LoadedSkill,
 } from '@bevel-software/platform-mcp-core';
 import type { KbLayout } from '@bevel-software/platform-shared';
-import { bevelSecretsLoaderConfig, type ForcedRefreshOutcome, type ISecretsVaultService, scopesCovered } from '../secrets-vault/index.js';
+import { bevelSecretsLoaderConfig, type ForcedRefreshOutcome, type ISecretsVaultService, userSecretGap } from '../secrets-vault/index.js';
 import { EXTERNAL_KB_MANUAL_NAME } from '../tool-manuals/index.js';
 import type { IToolManualService } from '../tool-manuals/index.js';
 import type { SpillStore } from '../workspace/index.js';
@@ -1697,41 +1697,11 @@ export class McpService {
     const statusMap = new Map(status.map((s) => [s.key, s]));
     const missing: { name: string; label?: string | null; brokenSignIn: boolean }[] = [];
     for (const v of userVars) {
-      const st = statusMap.get(v.key);
+      // The one readiness rule `list_tool_setup` reports from (`userSecretGap`).
       // A sign-in the caller already HAS a row for but that isn't (or is no
-      // longer) usable: dead/wiped grant, abandoned consent, missing scopes.
-      const brokenSignIn = Boolean(v.oauth && st?.userConfigured);
-      if (!st?.userConfigured) {
-        missing.push({ name: v.name, label: v.label, brokenSignIn }); // no row at all → needs a value / sign-in
-        continue;
-      }
-      // A row of the OTHER kind is not this credential: a `.tool` edited from
-      // an OAuth sign-in to a plain key (or back) leaves the old row behind,
-      // and serving a token where a key is declared — or a key where a
-      // sign-in is — fails opaquely at the provider. Not a broken sign-in
-      // either: nothing to reset, the user has to set the credential up as
-      // the manual now declares it.
-      const declaredKind = v.oauth ? 'oauth' : 'static';
-      if (st.userKind && st.userKind !== declaredKind) {
-        missing.push({ name: v.name, label: v.label, brokenSignIn: false });
-        continue;
-      }
-      // An OAuth-backed var whose row exists but has no token yet is NOT ready —
-      // the user has registered but not completed sign-in. Fail closed: anything
-      // other than a confirmed `true` (including a non-oauth row → undefined)
-      // counts as not-yet-authorized.
-      if (v.oauth && st.userAuthorized !== true) {
-        missing.push({ name: v.name, label: v.label, brokenSignIn });
-        continue;
-      }
-      // An OAuth-backed var the user signed in for, but whose token was granted
-      // fewer scopes than the tool now declares, is ALSO not ready — the call would
-      // otherwise fail opaquely at the provider. Compare the live required scopes
-      // against the token's recorded granted scopes; an under-scoped (or unknown)
-      // token needs re-authorization.
-      if (v.oauth && !scopesCovered(v.oauthScopes, st.grantedScopes)) {
-        missing.push({ name: v.name, label: v.label, brokenSignIn });
-      }
+      // longer) usable is a broken sign-in: abandoned consent, missing scopes.
+      const gap = userSecretGap(v, statusMap.get(v.key));
+      if (gap) missing.push({ name: v.name, label: v.label, brokenSignIn: gap === 'unauthorized' || gap === 'under-scoped' });
     }
     return missing;
   }

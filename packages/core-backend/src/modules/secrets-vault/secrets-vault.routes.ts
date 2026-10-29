@@ -694,7 +694,22 @@ export function createSecretsVaultPublicRoutes(deps: SecretsVaultRoutesDeps): ex
       back(`authorized=${encodeURIComponent(state.i)}`, dest);
     } catch (err) {
       log.error('oauth callback failed:', { err });
-      back(`error=${encodeURIComponent('Authorization failed. Check the provider configuration and try again.')}`, dest);
+      // A provider's REFUSAL (the vault's error carrying the provider's HTTP
+      // status) names the provider's error code and Hexis's own sentence for
+      // it — the one thing the person on the Connect page (or the agent they
+      // paste it to) can act on: a client the provider does not accept, a
+      // refused authorization code. Nothing of the provider's text is in it.
+      // Every other failure stays the generic line: a transport error quotes
+      // what fetch said, which is not a provider's word.
+      const refusal = err instanceof SecretOAuthError && err.providerStatus !== undefined ? err.message : null;
+      back(
+        `error=${encodeURIComponent(
+          refusal
+            ? `Authorization failed. ${refusal}`
+            : 'Authorization failed. Check the provider configuration and try again.',
+        )}`,
+        dest,
+      );
     }
   });
 

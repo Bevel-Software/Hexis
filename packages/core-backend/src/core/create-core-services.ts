@@ -171,6 +171,7 @@ import { AgentAuditService, retentionDaysFrom } from '../modules/audit/agent-aud
 import { readAgentPreamble, type AgentPreambleReader } from '../modules/agent-instructions/index.js';
 import {
   agentGuideSections,
+  guideStartText,
   joinGuideSections,
   type AgentGuideReader,
   type AgentGuideSectionsReader,
@@ -296,6 +297,12 @@ export interface CoreServices {
    * `read_file` of the guide's name answer. See modules/agent-guide.
    */
   agentGuide: AgentGuideReader;
+  /**
+   * The start of that guide and the list of its sections: what a `read_file`
+   * of the guide's name answers, the same as `get_agent_guide` with no
+   * `section`. See `guideStartText`.
+   */
+  agentGuideStart: AgentGuideReader;
   /** The same guide as its sections, each with its title — what `get_agent_guide` lists and serves one of. */
   agentGuideSections: AgentGuideSectionsReader;
   mcpServerEditService: McpServerEditService;
@@ -1376,11 +1383,13 @@ export async function createCoreServices(
   // serves the same composition to the local bridge and the frontend card.
   const readPreamble: AgentPreambleReader = () => readAgentPreamble(workspaceService, kb, disk);
   // The guide every agent is told to read first, composed when asked for —
-  // the layout is read per call, so a name the setup save applies lands
-  // without a restart, and the distribution's hook sees every composition.
+  // the layout and the default branch are read per call, so a name the setup
+  // save applies lands without a restart, and the distribution's hook sees
+  // every composition.
   const agentGuideSectionsReader: AgentGuideSectionsReader = () =>
     agentGuideSections(kb.layout, ports.agentGuide, { kbDirName, defaultBranch: kb.defaultBranch });
   const agentGuide: AgentGuideReader = async () => joinGuideSections(await agentGuideSectionsReader());
+  const agentGuideStart: AgentGuideReader = async () => guideStartText(await agentGuideSectionsReader());
   // The Audit log. Records through the proxy below (every call an external
   // agent makes), reads keys through the key service so their shape is
   // defined once, and prunes past the retention setting — read per sweep, so
@@ -1726,6 +1735,7 @@ export async function createCoreServices(
     pendingToolsService,
     readAgentPreamble: readPreamble,
     agentGuide,
+    agentGuideStart,
     agentGuideSections: agentGuideSectionsReader,
     pluginIndexService,
     pluginProvisionService,

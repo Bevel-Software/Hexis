@@ -250,6 +250,14 @@ const int = (description: string): JsonSchema => ({ type: 'integer', description
 const str = (description: string): JsonSchema => ({ type: 'string', description });
 
 /**
+ * A write to the default branch is live at once, so the agent asks first. Said on the four
+ * tools behind 87 of the 91 writes there in the agent-guide benchmark (2026-10-26); `start-here`
+ * says it for the other write tools.
+ */
+const ASK_BEFORE_DEFAULT_BRANCH =
+  ' On the default branch a write is live for everyone at once: unless the person already said where, ask them first whether to write there or propose it on a draft.';
+
+/**
  * The upload route, named on every tool that takes content as a JSON string.
  *
  * ONE sentence, and the tools' own: it is what stops the three failures the
@@ -1113,8 +1121,9 @@ export function registerWorkspaceTools(
    */
   uploads?: AgentUploadStore,
   /**
-   * The platform's agent guide (see `modules/agent-guide`), which `read_file`
-   * and `file_stat` answer at the guide's name in the repository root — after
+   * The start of the platform's agent guide and the list of its sections
+   * (`guideStartText` in `modules/agent-guide`), which `read_file` and
+   * `file_stat` answer at the guide's name in the repository root — after
    * the knowledge base's own file of that name, when it has one. Optional for
    * the harnesses that are about the file primitives; without it the two
    * tools read the disk and nothing else.
@@ -2010,13 +2019,13 @@ export function registerWorkspaceTools(
   const startSessionDef = toolDef({
     name: 'start_session',
     description:
-      'Mint this conversation\'s id: the `sessionId` KnowledgeBase tools take. Call this ONCE, at the start of your work — minting a new id mid-run starts a second conversation. The id is also a chat session in the app, so you can hand the SAME id to the `ask` tool: your reads and your questions are then one conversation. Pass the returned id as `sessionId` on every later KnowledgeBase tool call, inside `call_tool_chain` too. RETRYING IS SAFE: a call that fails created nothing, so retry it. If a retry lands after a success you hold two independent ids, which is harmless: keep passing the one you already used and ignore the other. Returns `{ sessionId, defaultBranch }`, plus `firstRun` while the knowledge base is still empty: a note to act on.',
+      'Mint this conversation\'s id: the `sessionId` KnowledgeBase tools take. Call this ONCE, at the start of your work — minting a new id mid-run starts a second conversation as far as the server is concerned. Pass the returned id as `sessionId` to every tool whose arguments list it, inside `call_tool_chain` too; the others refuse it. Where the deployment offers an `ask` tool, hand it the SAME id: your reads and your questions are then one conversation. RETRYING IS SAFE: a call that fails created nothing, so retry it. If a retry lands after a success you hold two independent ids, which is harmless: keep passing the one you already used and ignore the other. Returns `{ sessionId, defaultBranch }`, plus `firstRun` while the knowledge base is empty: a note to act on.',
     path: '/api/agent/tools/start_session',
     inputs: { type: 'object', properties: {}, additionalProperties: false },
     outputs: {
       type: 'object',
       properties: {
-        sessionId: str('The minted session id — pass it as `sessionId` on subsequent KnowledgeBase tool calls and to `ask`.'),
+        sessionId: str('The minted session id — pass it as `sessionId` to the tools that take one, and to `ask` where there is one.'),
         defaultBranch: str(
           "The deployment's default branch: the branch people read, and the one to pass as `branch` unless you are working on a draft.",
         ),
@@ -2240,7 +2249,7 @@ export function registerWorkspaceTools(
       'Read a workspace file as text. Returns `{ path, content, canWrite }`. Per the shared content rule: text as ' +
       'text, documents and email as extracted text, an image as the picture, anything else as a one-line ' +
       'description. Also reads a `__tool_chain_spill__/…` ref back from a truncated `call_tool_chain`: it ' +
-      'belongs to no workspace, so `branch` is ignored and no `canWrite` comes back. `offset`/`limit` slice the ' +
+      'belongs to no workspace: any existing `branch` will do, and no `canWrite` comes back. `offset`/`limit` slice the ' +
       'content (characters; bytes for a spill ref; ignored for an image): page through large files and ' +
       'spills, never read multi-MB whole. `canWrite`: may you change this file directly on the default branch. ' +
       CAN_WRITE_CLAUSE,
@@ -2249,8 +2258,8 @@ export function registerWorkspaceTools(
       properties: {
         branch: BRANCH_INPUT,
         path: str(`Path to read, under \`${kbDirName}/\` (e.g. \`${kbDirName}/KnowledgeBase/Foo.md\`), with or without a leading slash — a path without that prefix is placed under \`${kbDirName}/\` — or a \`__tool_chain_spill__/…\` ref from a truncated \`call_tool_chain\`, or a \`__tmp__/…\` ref to a file you staged in the workspace's tmp folder.`),
-        offset: int('Start character index (default 0).'),
-        limit: int('Max characters to return from `offset`.'),
+        offset: int('Start character index (bytes for a spill ref; default 0).'),
+        limit: int('Max characters to return from `offset` (bytes for a spill ref).'),
         sessionId: SESSION_ID_INPUT,
       },
       required: ['branch', 'path'],
@@ -2925,6 +2934,7 @@ export function registerWorkspaceTools(
     description:
       'Write a workspace TEXT file. The change is committed + pushed as you. Returns `{ path, bytes, outcome }`, where `outcome` is ' +
       '`created`, `replaced` or `updated`.' +
+      ASK_BEFORE_DEFAULT_BRANCH +
       UPLOAD_ROUTE_NOTE,
     inputs: {
       type: 'object',
@@ -3015,6 +3025,7 @@ export function registerWorkspaceTools(
       '`created` / `replaced` / `updated` for a path it wrote, or `refused` with `error` (the code) and `message` (why) for a ' +
       'path it could not. `count` is how many were written. A path it refuses — the mode said no, or the file is not text — ' +
       'does not stop the others; read `files` to see what landed.' +
+      ASK_BEFORE_DEFAULT_BRANCH +
       UPLOAD_ROUTE_NOTE,
     inputs: {
       type: 'object',
@@ -3052,7 +3063,7 @@ export function registerWorkspaceTools(
                 enum: ['created', 'replaced', 'updated', 'refused'],
                 description: 'What happened at this path. `refused` means nothing was written there and the file is untouched.',
               },
-              error: str('Present when `outcome` is `refused`: the refusal code — `exists`, `missing` or `binary_not_writable`.'),
+              error: str('Present when `outcome` is `refused`: the refusal code, such as `exists`, `missing`, `binary_not_writable` or a code of the deployment\'s own write check.'),
               message: str('Present when `outcome` is `refused`: the full refusal, the same one write_file would have given.'),
             },
             required: ['path', 'outcome'],
@@ -3187,6 +3198,7 @@ export function registerWorkspaceTools(
     gated: true,
     description:
       'Replace an exact string in a workspace TEXT file. `old_string` must appear exactly once unless `replace_all`. Committed + pushed as you.' +
+      ASK_BEFORE_DEFAULT_BRANCH +
       UPLOAD_ROUTE_NOTE,
     inputs: {
       type: 'object',
@@ -3266,7 +3278,8 @@ export function registerWorkspaceTools(
     name: 'delete_file',
     gated: true,
     description:
-      'Delete ONE workspace file. Committed + pushed as you. Its folder stays, even when this was its last file. Files only: a folder is refused with a pointer to `delete_folder`.',
+      'Delete ONE workspace file. Committed + pushed as you. Its folder stays, even when this was its last file. Files only: a folder is refused with a pointer to `delete_folder`.' +
+      ASK_BEFORE_DEFAULT_BRANCH,
     inputs: {
       type: 'object',
       properties: {
@@ -3490,10 +3503,11 @@ export function registerWorkspaceTools(
     description:
       'Move or rename a workspace FILE or FOLDER; a folder moves recursively, with everything under it. `dest` is the full new path, not the folder to move into. Committed + pushed as you. ' +
       'The destination must not exist — a move never overwrites a file or merges into a folder. Access follows the ' +
-      'DESTINATION folder, so a move can change what you (and others) may do with the file: the dry run answers ' +
-      '`{ src, dest, kind, descendants, access: { before, after }, accessChanges, allowed, reason? }`, where `access` is your ' +
-      'own `{ read, write, download, owner }` at the source and at the destination AS IT WILL BE once the move has landed, ' +
-      'with every `access.md` inside a moved folder counted at its new place, and a move whose `accessChanges` is true wants `confirm: true`. ' +
+      'DESTINATION folder, so a move can change who may open or edit the file. You must be able to read what moves and the folder it lands in, ' +
+      'or it is refused as read_file refuses. The dry run answers ' +
+      '`{ src, dest, kind, descendants, access: { before, after }, accessChanges, holderChanges?, allowed, reason? }`: your own ' +
+      'access at both ends, and who else loses or gains it. A move that changes either wants `confirm: true`; tell the person ' +
+      'who loses and who gains before you confirm. ' +
       'Links are rewritten by default, in one commit with the move: those in the moved files and those in other markdown files pointing at them (`links` reports them). `rewriteLinks: false` turns that off. Path mentions in plain prose or code are never changed.',
     inputs: {
       type: 'object',
@@ -3502,7 +3516,7 @@ export function registerWorkspaceTools(
         src: wsPath(kbDirName, 'Source path (file or folder)'),
         dest: wsPath(kbDirName, 'Destination path — the full new path; must not exist yet'),
         dryRun: { type: 'boolean', description: 'Answer with the impact and change nothing.' },
-        confirm: { type: 'boolean', description: 'Required when the move changes your access. Set it only after a dry run.' },
+        confirm: { type: 'boolean', description: 'Required when the move changes your access or anyone else\'s. Set it only after a dry run.' },
         rewriteLinks: { type: 'boolean', description: 'Rewrite the links into, out of and between the moved files (default true). `false` moves without touching any link.' },
         sessionId: SESSION_ID_INPUT,
       },
@@ -3516,8 +3530,14 @@ export function registerWorkspaceTools(
         dest: str('Destination path (echoes the input).'),
         kind: str('`file` or `folder`.'),
         descendants: int('Files that move: 1 for a file, the file count under a folder.'),
-        access: { type: 'object', description: 'Your `{ read, write, download, owner }` at the source (`before`) and at the destination once the move has landed (`after`).' },
+        access: { type: 'object', description: 'Your `{ read, write, download, owner }` at the source (`before`) and at the destination once the move has landed (`after`), with every `access.md` inside a moved folder counted at its new place.' },
         accessChanges: { type: 'boolean', description: 'True when any of your verdicts differs between `before` and `after`.' },
+        holderChanges: {
+          type: 'object',
+          description:
+            'Who loses and who gains opening (`read`) or editing (`write`) it once the move has landed: `{ lose, gain }`, each ' +
+            '`[{ kind, name, email?, verb }]` with `kind` `group`, `role`, `plugin` or `person`. Absent when nobody\'s access changes.',
+        },
         allowed: { type: 'boolean', description: 'Whether the move may run.' },
         reason: str('Why it may not, when `allowed` is false.'),
         dryRun: { type: 'boolean', description: 'True on a dry run.' },
@@ -3547,6 +3567,18 @@ export function registerWorkspaceTools(
       // source already deleted.
       await assertAgentWriteAllowed(agentAccessGate, ctx, branch, src);
       await assertAgentWriteAllowed(agentAccessGate, ctx, branch, dest);
+      // What moves and the folder it lands in must both be readable to the
+      // caller, refused as read_file refuses them, on every branch: a move
+      // preview reads both ends (the caller's own verdicts there, who else is
+      // affected), and the folder's rules are what the names are made of. The
+      // verdict comes BEFORE every other look, so neither end's existence is
+      // told to someone who may not know it. A folder the caller may read moves
+      // with everything in it, files they may not read included: those travel,
+      // they are not read.
+      const destFolder = dest.slice(0, dest.lastIndexOf('/'));
+      const gate = readGateFor(branch, ctx);
+      await assertCanRead(gate, src);
+      await assertCanRead(gate, destFolder);
       const fs = await ctx.getFilesystem(branch);
       const root = await workspaceRoot(branch, ctx);
       // Before the kind check, which stats THROUGH a link: a dangling link at
@@ -3570,6 +3602,27 @@ export function registerWorkspaceTools(
         accessAfter(branch, ctx, src, dest),
       ]);
       const accessChanges = verbsDiffer(before, after);
+      // Who ELSE gains or loses opening or editing it: the lists the app's move
+      // confirmation shows people. The access rules let the caller read both
+      // ends (gated above, as the app's route gates), so the names go to them —
+      // past the deployment's read hook on both ends, which may still refuse
+      // an agent what the rules allow; a change asks for `confirm` either way.
+      // Outside the repository no rules travel.
+      const fromRel = toKbRelative(src, kbDirName);
+      const toRel = toKbRelative(dest, kbDirName);
+      const changes = fromRel !== null && toRel !== null
+        ? await accessControl.prospectiveHolderChanges(workspaceIdForBranch(branch), fromRel, toRel)
+        : undefined;
+      const othersChange = changes !== undefined && (changes.lose.length > 0 || changes.gain.length > 0);
+      const namesOthers = othersChange && await (async () => {
+        try {
+          await notifyAgentRead(agentAccessGate, ctx, branch, src);
+          await notifyAgentRead(agentAccessGate, ctx, branch, destFolder);
+          return true;
+        } catch {
+          return false;
+        }
+      })();
       // The placeholder moves with its folder, but it is never content.
       const descendants = srcFiles.filter((f) => !isFolderPlaceholder(f)).length;
       // Neither end may be the platform's own: a move neither takes a platform
@@ -3677,6 +3730,7 @@ export function registerWorkspaceTools(
         descendants,
         access: { before, after },
         accessChanges,
+        ...(namesOthers ? { holderChanges: changes } : {}),
         allowed: moveReason === undefined,
         ...(moveReason !== undefined ? { reason: moveReason } : {}),
         ...(linkPlan ? { links: linkPlan.report } : {}),
@@ -3692,12 +3746,16 @@ export function registerWorkspaceTools(
       }
       if (collision) throw new ToolError(reason!, 409);
       if (linkPlan?.overCap !== undefined) throw new ToolError(linkPlan.overCap, 400);
-      if (accessChanges && a.confirm !== true) {
+      if ((accessChanges || othersChange) && a.confirm !== true) {
+        const why = [
+          ...(accessChanges ? [`your access at "${dest}" differs from "${src}"`] : []),
+          ...(othersChange ? [`it changes who else may open or edit it${namesOthers ? ' (`holderChanges`)' : ''}`] : []),
+        ];
         return {
           ...impact,
           confirmationRequired: true,
           moved: false,
-          message: `Nothing was moved: your access at "${dest}" differs from "${src}", so this move requires confirm: true.`,
+          message: `Nothing was moved: ${why.join(', and ')}, so this move requires confirm: true.`,
         };
       }
       // The look above is what produces the sentence; the filesystem's own
@@ -3747,8 +3805,8 @@ export function registerWorkspaceTools(
     gated: true,
     description:
       'Copy a workspace FILE to a new path. The destination must not exist — like a move, a copy never overwrites a file or a folder; to change what is in a file that already exists, write it. Committed + pushed as you. `src` may be a `__tmp__/<path>` ref to a file you staged in the workspace\'s tmp folder: the copy is how such a file is kept, as a normal repository file. ' +
-      'Preflight first: `dryRun: true` changes nothing and answers `{ src, dest, kind, descendants, access: { before, after }, accessChanges, allowed, reason? }` — `access` is your own `{ read, write, download, owner }` at the source and at the destination AS IT WILL BE once the copy has landed, with every `access.md` inside a copied folder counted at its new place. ' +
-      'One exception to that shape: when the destination is one you may not write, the answer is the refusal alone — `allowed: false` with `reason`, and no `kind` and no `descendants`, because nothing about the source is read before that verdict.',
+      'Preflight first: `dryRun: true` changes nothing and answers `{ src, dest, kind, descendants, access: { before, after }, accessChanges, allowed, reason? }` — `access` is your own `{ read, write, download, owner }` at the source and at the destination AS IT WILL BE once the copy has landed, with the copy\'s own rules counted at its new place. ' +
+      'One exception to that shape: when the destination is one you may not write, the answer is the refusal (`allowed: false` with `reason`, and the access figures) with no `kind` and no `descendants`, because nothing about the source is read before that verdict.',
     inputs: {
       type: 'object',
       properties: {
@@ -4209,7 +4267,7 @@ export function registerWorkspaceTools(
         '`replaced` / `updated`, or `refused` with `error` (the code) and `message` (why). `count` is how many landed and ' +
         '`total` how many paths there were; `files` is cut to the first 25 unless you pass `all: true`. ' +
         'Every path is judged one by one — by your write access, the platform-file rules and what is already there — ' +
-        'exactly as `write_file` judges it, and a refused path does not stop the others. ' +
+        'as `write_file` judges it, except that platform files are refused and binary content is fine; a refused path does not stop the others. ' +
         'The token is single-use: it is spent by the apply that lands it, and refused if you use it twice, let it ' +
         'expire, or present one issued to somebody else. `mode` means what it means on `write_file`.',
       inputs: {
@@ -4293,7 +4351,7 @@ export function registerWorkspaceTools(
         'each one inside a folder too, is included only if you may read AND download that file. Returns ' +
         '`{ expiresAt, expiresInSeconds, files: [{ path, bytes, sha256, downloadUrl }], folders: [{ path, bytes, ' +
         'downloadUrl, files }], refused: [{ path, reason }] }`: a link per file, with its own content type, and per ' +
-        `folder a zip at full repository paths (\`apply_file_upload\` it at \`${kbDirName}/\` to put every file back). ` +
+        `folder a zip at full repository paths (\`apply_file_upload\` it at \`${kbDirName}/\` to put them back). ` +
         'Fetch with any HTTP client (`curl -o <name> "<downloadUrl>"`, or the address without its last segment and an ' +
         '`x-download-token` header). Each link works ONCE, for 15 minutes, and serves the files as they are now. ' +
         'Refused: `not found` (missing or named-but-unreadable; folders omit unreadable files), ' +

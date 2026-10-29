@@ -7,18 +7,30 @@ import type { IAccessControl } from '../access/index.js';
 import { utcpNamespacedKey } from '../../shared/utcp-namespace.js';
 import type { ConnectorScope, IToolManualService } from './tool-manuals.contract.js';
 import type { HiddenToolSource } from '../../shared/hidden-tools.js';
+import { userSecretGap } from '../secrets-vault/index.js';
 
 /**
  * What `list_tool_setup` needs from the secrets vault (structurally satisfied
  * by `ISecretsVaultService.statusFor`). A local port keeps this module free of
- * a secrets-vault import — the same decoupling discipline as
- * `McpAuthDiscoveryPort` in the service.
+ * the vault service — the same decoupling discipline as
+ * `McpAuthDiscoveryPort` in the service. Only the vault's pure readiness rule
+ * (`userSecretGap`, its exported contract) is imported, the one the MCP proxy
+ * hides tools by.
  */
 export interface VariableStatusPort {
   statusFor(
     userId: string,
     keys: string[],
-  ): Promise<{ key: string; adminConfigured: boolean; userConfigured: boolean; userAuthorized?: boolean }[]>;
+  ): Promise<
+    {
+      key: string;
+      adminConfigured: boolean;
+      userConfigured: boolean;
+      userAuthorized?: boolean;
+      userKind?: 'static' | 'oauth' | null;
+      grantedScopes?: string;
+    }[]
+  >;
 }
 
 /**
@@ -240,7 +252,9 @@ export function registerToolManualsTools(
         },
         note: {
           type: 'string',
-          description: 'Present when `onBranchOnly` is non-empty: what it takes for those tools to go live.',
+          description:
+            'Present when something is left to do: what it takes for the tools in `onBranchOnly` to go live, and for ' +
+            'tools that need your own value or sign-in to work.',
         },
       },
       required: ['tools', 'invalid', 'onBranchOnly'],
@@ -302,17 +316,38 @@ export function registerToolManualsTools(
         }),
       );
       const onBranchOnly = pending.map((p) => ({ ...p, branch: branch! }));
-      if (onBranchOnly.length === 0) return { tools, invalid, onBranchOnly };
-      return {
-        tools,
-        invalid,
-        onBranchOnly,
-        note:
+      const notes: string[] = [];
+      if (onBranchOnly.length > 0) {
+        notes.push(
           `${onBranchOnly.map((p) => `\`${p.name}\``).join(', ')} ${onBranchOnly.length === 1 ? 'is' : 'are'} declared on ` +
-          `\`${branch}\` only. Tools are served from \`${deps.kb.defaultBranch}\`, so ${onBranchOnly.length === 1 ? 'it stays' : 'they stay'} ` +
-          'unlisted, uncallable and without a sign-in until that branch is merged: open a change request with ' +
-          `\`open_change_request\` (target \`${deps.kb.defaultBranch}\`), then ask the user to review and merge it in the app.`,
-      };
+            `\`${branch}\` only. Tools are served from \`${deps.kb.defaultBranch}\`, so ${onBranchOnly.length === 1 ? 'it stays' : 'they stay'} ` +
+            'unlisted, uncallable and without a sign-in until that branch is merged: open a change request with ' +
+            `\`open_change_request\` (target \`${deps.kb.defaultBranch}\`), then ask the user to review and merge it in the app.`,
+        );
+      }
+      // The person's own part, said where the agent is when a tool "does not work": the
+      // reconnect step is the one agents leave out (the agent-guide benchmark, 2026-10-26).
+      // By the rule the proxy hides a tool by (`userSecretGap`), so the note
+      // names every tool that is hidden for want of the caller's own value. A
+      // sign-in waits on the owner's provider setup (the OAuth var's admin
+      // row): until then there is nothing to sign in to.
+      const needYou = manuals.filter((m) =>
+        (m.variables ?? []).some((v) => {
+          if (v.scope !== 'user') return false;
+          const st = statusByKey.get(varKey(m.name, v.name));
+          const gap = userSecretGap({ oauth: v.oauth != null, oauthScopes: v.oauth?.scopes }, st);
+          return gap !== null && (v.oauth == null || st?.adminConfigured === true);
+        }),
+      );
+      if (needYou.length > 0) {
+        notes.push(
+          `${needYou.map((t) => `\`${t.name}\``).join(', ')} ${needYou.length === 1 ? 'needs' : 'need'} your own value or sign-in. ` +
+            'Set it yourself on the Connect page, never in the chat; then reconnect your assistant, or start a new chat, ' +
+            'so the tool is listed.',
+        );
+      }
+      if (notes.length === 0) return { tools, invalid, onBranchOnly };
+      return { tools, invalid, onBranchOnly, note: notes.join(' ') };
     }),
   );
 }

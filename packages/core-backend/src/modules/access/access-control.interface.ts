@@ -92,6 +92,17 @@ export type PathHolders = { read: HolderList; write: HolderList };
  */
 export type ProspectiveHolders = { before: PathHolders; after: PathHolders };
 
+/** One principal that loses or gains one verb in a move. A person is named by their address when they have no display name. */
+export type HolderChange = {
+  kind: 'group' | 'role' | 'plugin' | 'person';
+  name: string;
+  email?: string;
+  verb: 'read' | 'write';
+};
+
+/** Who loses and who gains opening or editing a file or folder in a move — see {@link IAccessControl.prospectiveHolderChanges}. */
+export type HolderChanges = { lose: HolderChange[]; gain: HolderChange[] };
+
 /** One caller's own verdict per access verb on one path. */
 export type PathVerbs = { read: boolean; write: boolean; download: boolean; owner: boolean };
 
@@ -419,6 +430,21 @@ export interface IAccessControl {
     fromPath: string,
     toPath: string,
   ): Promise<ProspectiveHolders>;
+
+  /**
+   * Who loses and who gains `read` or `write` on one file or folder if a move
+   * puts it at `toPath`, over the same relocation as
+   * {@link IAccessControl.prospectiveHolders}. A holder on one side loses (or
+   * gains) the verb only when it does not hold it on the other side: the
+   * lists name grants, so a group no rule names at the destination may still
+   * read there through `everyone`, and one a rule denies there may not.
+   * Writes nothing and moves nothing.
+   */
+  prospectiveHolderChanges(
+    workspaceId: string,
+    fromPath: string,
+    toPath: string,
+  ): Promise<HolderChanges>;
 
   /**
    * The CALLER'S OWN `{ read, write, download, owner }` at `toPath` as they

@@ -1,7 +1,6 @@
 import { describe, expect, it, vi, afterEach } from 'vitest';
 import { createHash } from 'node:crypto';
-import { DbSecretsVaultService } from '../db-secrets-vault.service.js';
-import { InvalidSecretError, SecretOAuthError } from '../secrets-vault.contract.js';
+import { DbSecretsVaultService, InvalidSecretError, SecretOAuthError } from '../index.js';
 import { TokenCrypto } from '../../../shared/token-crypto.js';
 import type { Database } from '../../database/index.js';
 import { setLogger } from '../../../shared/logging.js';
@@ -595,6 +594,217 @@ describe('DbSecretsVaultService — forceRefresh (a downstream rejected the toke
       await expect(new DbSecretsVaultService(db, ENC_KEY).forceRefresh('user-1', KEY)).resolves.toBe('skipped');
     }
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("DbSecretsVaultService — a refused token request names the provider's error code, never its text", () => {
+  const confidentialRow = (blob: Record<string, unknown>) =>
+    sharedRow({
+      id: 'user-row-1',
+      userId: 'user-1',
+      oauthMeta: { ...PUBLIC_META, publicClient: false },
+      valueEncrypted: crypto.encrypt(JSON.stringify(blob)),
+    });
+  const SECRET = 'client-secret-1';
+  const BLOB = { clientSecret: SECRET, pendingVerifier: 'the-verifier' };
+  const INVALID_CLIENT =
+    'Token endpoint returned HTTP 400 (invalid_client). The client id or client secret this sign-in uses is not accepted by the provider. The tool owner should check the declared client id and set the client secret again.';
+
+  async function exchangeFailure(
+    body: string | ReadableStream<Uint8Array>,
+    status = 400,
+    blob: Record<string, unknown> = BLOB,
+  ): Promise<SecretOAuthError> {
+    const { db } = makeFakeDb([[confidentialRow(blob)]]);
+    const svc = new DbSecretsVaultService(db, ENC_KEY);
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(body, { status })));
+    try {
+      await svc.completeOAuth('user-1', 'user-row-1', 'the-code', 'https://bevel.example.com/cb');
+    } catch (err) {
+      expect(err).toBeInstanceOf(SecretOAuthError);
+      return err as SecretOAuthError;
+    }
+    throw new Error('the exchange was expected to fail');
+  }
+
+  it('names an OAuth error code and says what to do about it, with the status', async () => {
+    const client = await exchangeFailure(
+      JSON.stringify({ error: 'invalid_client', error_description: 'Client authentication failed' }),
+    );
+    expect(client.message).toBe(INVALID_CLIENT);
+    expect(client.providerStatus).toBe(400);
+    const grant = await exchangeFailure(JSON.stringify({ error: 'invalid_grant' }));
+    expect(grant.message).toBe(
+      'Token endpoint returned HTTP 400 (invalid_grant). The provider refused the grant: for a sign-in, a redirect URL mismatch or an expired or reused authorization code; for a refresh, a refresh token that has expired or been revoked. Sign in again.',
+    );
+    const scope = await exchangeFailure(JSON.stringify({ error: 'invalid_scope' }));
+    expect(scope.message).toBe(
+      "Token endpoint returned HTTP 400 (invalid_scope). The provider refused the scopes this sign-in asks for. The tool owner should check the declared scopes against the provider's app.",
+    );
+    const unauthorized = await exchangeFailure(JSON.stringify({ error: 'unauthorized_client' }));
+    expect(unauthorized.message).toBe(
+      "Token endpoint returned HTTP 400 (unauthorized_client). The provider does not allow this client to use this grant. The tool owner should check the provider's app settings.",
+    );
+  });
+
+  it("names a provider's own status code (HubSpot's shape) with the sentence of its OAuth equivalent", async () => {
+    const err = await exchangeFailure(
+      JSON.stringify({ status: 'BAD_CLIENT_SECRET', message: 'client secret does not match', correlationId: 'c1' }),
+    );
+    expect(err.message).toBe(INVALID_CLIENT.replace('(invalid_client)', '(BAD_CLIENT_SECRET)'));
+  });
+
+  it('takes nothing of the body but the code: descriptions, unknown shapes, plain text and cut bodies leave no trace', async () => {
+    const withDescription = JSON.stringify({ error: 'invalid_client', error_description: `secret ${SECRET} rejected` });
+    expect((await exchangeFailure(withDescription)).message).toBe(INVALID_CLIENT);
+    for (const body of [
+      JSON.stringify({ detail: `${SECRET} rejected` }),
+      `<html>${SECRET} rejected</html>`,
+      `${SECRET} rejected\nmore`,
+      JSON.stringify({ error: 'invalid_client', error_description: SECRET }).slice(0, 30),
+      JSON.stringify(`${SECRET} rejected`),
+      JSON.stringify([`${SECRET} rejected`]),
+      '{}',
+      '',
+    ]) {
+      expect((await exchangeFailure(body)).message).toBe('Token endpoint returned HTTP 400');
+    }
+  });
+
+  it('takes a code only when it is exactly one Hexis knows: anything else in that field is not a code', async () => {
+    // A secret, a secret with a suffix, a near-miss of a known code, a
+    // prototype key, free text: none is on the list, none reaches a message.
+    for (const code of [
+      'wordy_secret',
+      'wordy_secret_rejected',
+      'Invalid_Client',
+      'invalid_client ',
+      'invalid_token',
+      'constructor',
+      'bad code',
+      '',
+    ]) {
+      const err = await exchangeFailure(JSON.stringify({ error: code }), 400, {
+        clientSecret: 'wordy_secret',
+        pendingVerifier: 'the-verifier',
+      });
+      expect(err.message).toBe('Token endpoint returned HTTP 400');
+    }
+  });
+
+  it('keeps the status when the refusal body cannot be read, so a refused refresh still retires the grant', async () => {
+    const failing = () =>
+      new ReadableStream<Uint8Array>({
+        pull() {
+          throw new Error('connection reset');
+        },
+      });
+    const err = await exchangeFailure(failing(), 401);
+    expect(err.message).toBe('Token endpoint returned HTTP 401');
+    expect(err.providerStatus).toBe(401);
+
+    const { db, captured } = makeFakeDb([
+      [confidentialRow({ clientSecret: SECRET, tokens: { access_token: 'at', refresh_token: 'rt', expires_at: 1 } })],
+      undefined,
+    ]);
+    const svc = new DbSecretsVaultService(db, ENC_KEY);
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(failing(), { status: 400 })));
+    await expect(svc.forceRefresh('user-1', KEY)).resolves.toBe('rejected');
+    expect(JSON.parse(crypto.decrypt(captured.set[0].valueEncrypted))).toEqual({ clientSecret: SECRET });
+  });
+
+  it('reads a refusal body only up to its cap and cancels the rest of the stream', async () => {
+    // Without the cap this never returns: the stream has no end.
+    let pulls = 0;
+    let cancelled = false;
+    const endless = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulls += 1;
+        controller.enqueue(new TextEncoder().encode('z'.repeat(1024)));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const err = await exchangeFailure(endless, 502);
+    expect(err.message).toBe('Token endpoint returned HTTP 502');
+    expect(pulls).toBeLessThanOrEqual(3);
+    expect(cancelled).toBe(true);
+  });
+
+  it('a refused refresh is logged with the key, the outcome and the code as the sign-in is wiped', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const row = confidentialRow({
+      clientSecret: SECRET,
+      tokens: { access_token: 'at-old', refresh_token: 'rt-old', expires_at: 1 },
+    });
+    const { db } = makeFakeDb([[row], undefined]);
+    const svc = new DbSecretsVaultService(db, ENC_KEY);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ error: 'invalid_grant', error_description: 'rt-old was revoked' }), {
+            status: 400,
+          }),
+      ),
+    );
+
+    await expect(svc.forceRefresh('user-1', KEY)).resolves.toBe('rejected');
+
+    const line = warn.mock.calls.map((c) => String(c[0])).find((m) => m.includes('refresh refused'));
+    expect(line).toContain(`refresh refused for "${KEY}", sign-in wiped: Token endpoint returned HTTP 400 (invalid_grant).`);
+    expect(line).not.toContain('rt-old');
+    warn.mockRestore();
+  });
+
+  it('a refused refresh that lost to a concurrent rotation logs that the rotated sign-in was kept, not wiped', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const row = confidentialRow({
+      clientSecret: SECRET,
+      tokens: { access_token: 'at-old', refresh_token: 'rt-old', expires_at: 1 },
+    });
+    const rotated = crypto.encrypt(
+      JSON.stringify({ clientSecret: SECRET, tokens: { access_token: 'rotated-at', refresh_token: 'rt-2' } }),
+    );
+    // The row moved on between our read and our guarded wipe: the wipe matches nothing.
+    const { db, updates } = whereAwareDb({ ...row, valueEncrypted: rotated }, row.valueEncrypted);
+    const svc = new DbSecretsVaultService(db, ENC_KEY);
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ error: 'invalid_grant' }), { status: 400 })));
+
+    await expect(svc.forceRefresh('user-1', KEY)).resolves.toBe('refreshed');
+    expect(updates).toEqual([]);
+
+    const line = warn.mock.calls.map((c) => String(c[0])).find((m) => m.includes('refresh refused'));
+    expect(line).toContain(`refresh refused for "${KEY}", the row had been rotated by a concurrent refresh meanwhile`);
+    expect(line).toContain('the rotated sign-in is kept: Token endpoint returned HTTP 400 (invalid_grant)');
+    expect(line).not.toContain('sign-in wiped');
+    warn.mockRestore();
+  });
+
+  it('a refused refresh whose wipe matched nothing because the row was replaced logs that nothing was wiped', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const row = confidentialRow({
+      clientSecret: SECRET,
+      tokens: { access_token: 'at-old', refresh_token: 'rt-old', expires_at: 1 },
+    });
+    // Read as the OAuth row it was; by the time the wipe writes, an edit has
+    // made it a static value, so the guarded wipe matches nothing and no grant
+    // is there to serve: `rejected`, yet nothing was wiped.
+    const { db, updates } = whereAwareDb(
+      { ...row, kind: 'static', valueEncrypted: crypto.encrypt(JSON.stringify({ value: 'x' })) },
+      { valueEncrypted: row.valueEncrypted, kind: 'oauth' },
+    );
+    const svc = new DbSecretsVaultService(db, ENC_KEY);
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ error: 'invalid_grant' }), { status: 400 })));
+
+    await expect(svc.forceRefresh('user-1', KEY)).resolves.toBe('rejected');
+    expect(updates).toEqual([]);
+
+    const line = warn.mock.calls.map((c) => String(c[0])).find((m) => m.includes('refresh refused'));
+    expect(line).toContain(`refresh refused for "${KEY}", the row had been removed or replaced meanwhile; nothing wiped:`);
+    expect(line).not.toContain('sign-in wiped');
+    warn.mockRestore();
   });
 });
 

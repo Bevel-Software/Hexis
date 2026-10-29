@@ -362,6 +362,36 @@ export function scopesCovered(required: string[] | undefined, granted: string | 
   return missingScopes(required, granted).length === 0;
 }
 
+/** Why a caller's own value for a per-user variable is not ready yet; see {@link userSecretGap}. */
+export type UserSecretGap = 'missing' | 'wrong-kind' | 'unauthorized' | 'under-scoped';
+
+/**
+ * Whether the CALLER's own value for a per-user variable is ready, and if not,
+ * why: the one rule the MCP proxy hides a tool by and `list_tool_setup` reports
+ * from, so the two cannot disagree. `null` when it is ready.
+ *
+ * - `missing`: no row at all, so it needs a value or a sign-in.
+ * - `wrong-kind`: a row of the OTHER kind than the manual now declares. A
+ *   `.tool` edited from an OAuth sign-in to a plain key (or back) leaves the
+ *   old row behind, and serving a token where a key is declared fails
+ *   opaquely at the provider. The credential has to be set up again.
+ * - `unauthorized`: an OAuth row with no token yet: registered, sign-in not
+ *   completed. Fail closed: anything but a confirmed `true` counts.
+ * - `under-scoped`: a token granted fewer scopes than the tool now declares,
+ *   so the call would fail at the provider; it needs signing in again.
+ */
+export function userSecretGap(
+  declared: { oauth: boolean; oauthScopes?: string[] },
+  status: Pick<SecretConfigStatus, 'userConfigured' | 'userAuthorized' | 'grantedScopes'> & { userKind?: SecretKind | null } | undefined,
+): UserSecretGap | null {
+  if (!status?.userConfigured) return 'missing';
+  const declaredKind: SecretKind = declared.oauth ? 'oauth' : 'static';
+  if (status.userKind && status.userKind !== declaredKind) return 'wrong-kind';
+  if (declared.oauth && status.userAuthorized !== true) return 'unauthorized';
+  if (declared.oauth && !scopesCovered(declared.oauthScopes, status.grantedScopes)) return 'under-scoped';
+  return null;
+}
+
 /**
  * Is the stored row the KIND the manual now declares — i.e. would the thing the
  * UI is about to offer actually work?

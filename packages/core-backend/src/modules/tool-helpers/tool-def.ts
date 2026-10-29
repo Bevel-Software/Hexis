@@ -16,7 +16,7 @@ const toolSerializer = new ToolSerializer();
 export const BRANCH_INPUT: JsonSchema = {
   type: 'string',
   minLength: 1,
-  description: 'The branch (draft) whose workspace this operates on — pass the branch you are currently working on.',
+  description: 'The branch to work on: the default branch (`get_agent_guide` names it) or your draft.',
 };
 
 /**
