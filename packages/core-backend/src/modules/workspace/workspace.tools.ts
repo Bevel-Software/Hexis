@@ -2019,18 +2019,28 @@ export function registerWorkspaceTools(
   const startSessionDef = toolDef({
     name: 'start_session',
     description:
-      'Mint this conversation\'s id: the `sessionId` KnowledgeBase tools take. Call this ONCE, at the start of your work — minting a new id mid-run starts a second conversation as far as the server is concerned. Pass the returned id as `sessionId` to every tool whose arguments list it, inside `call_tool_chain` too; the others refuse it. Where the deployment offers an `ask` tool, hand it the SAME id: your reads and your questions are then one conversation. RETRYING IS SAFE: a call that fails created nothing, so retry it. If a retry lands after a success you hold two independent ids, which is harmless: keep passing the one you already used and ignore the other. Returns `{ sessionId }`, plus `firstRun` while the knowledge base is still empty: a note to act on.',
+      'Mint this conversation\'s id: the `sessionId` KnowledgeBase tools take. Call this ONCE, at the start of your work — minting a new id mid-run starts a second conversation. Pass the returned id as `sessionId` to every tool whose arguments list it, inside `call_tool_chain` too; the others refuse it. Where there is an `ask` tool, hand it the SAME id: reads and questions are then one conversation. RETRYING IS SAFE: a call that fails created nothing, so retry it. If a retry lands after a success you hold two ids, which is harmless: keep the one you already used. Returns `{ sessionId, connectedAs }`: `connectedAs` is the agent this connection was made as (`{ path, name }`), null for Everything. Plus `firstRun` while the knowledge base is still empty: a note to act on.',
     path: '/api/agent/tools/start_session',
     inputs: { type: 'object', properties: {}, additionalProperties: false },
     outputs: {
       type: 'object',
       properties: {
         sessionId: str('The minted session id — pass it as `sessionId` to the tools that take one, and to `ask` where there is one.'),
+        connectedAs: {
+          type: ['object', 'null'],
+          description:
+            'The agent configuration this connection was made as: its `path` and `name`. Null when the connection was made as Everything.',
+          properties: {
+            path: str('Repository-relative path of the agent configuration.'),
+            name: str('Its name, or the path when the file cannot be read.'),
+          },
+          required: ['path', 'name'],
+        },
         firstRun: str(
           `Present only while the knowledge base holds nothing but its starter guide (and a starter pack's untouched pages): what to offer the person (the guide's \`${FIRST_RUN_SECTION_ID}\` section says how).`,
         ),
       },
-      required: ['sessionId'],
+      required: ['sessionId', 'connectedAs'],
     },
     tags: ['workspace'],
   });
@@ -2049,8 +2059,12 @@ export function registerWorkspaceTools(
     requireExternalSource,
     toolHandler(async (_args, ctx) => {
       const { sessionId } = await sessionSink.createSession(ctx.user.id, new Date());
+      // What the connection was made as, read off the scope the tool handler
+      // already resolved from the token: no lookup, no clone.
+      const agent = ctx.connectionScope?.toWire()?.agent;
+      const connectedAs = agent ? { path: agent.path, name: agent.name } : null;
       const firstRun = await firstRunFor(ctx);
-      return firstRun ? { sessionId, firstRun } : { sessionId };
+      return firstRun ? { sessionId, connectedAs, firstRun } : { sessionId, connectedAs };
     }),
   );
 

@@ -1,6 +1,7 @@
 import { DEFAULT_KB_LAYOUT } from '@bevel-software/platform-shared';
 import { describe, expect, it } from 'vitest';
 import {
+  GUIDE_FIRST_LINE,
   PLATFORM_HEADER,
   platformInstructions,
   PREAMBLE_CAP,
@@ -24,6 +25,19 @@ import {
 const PLATFORM = platformInstructions(DEFAULT_KB_LAYOUT);
 
 describe('composeAgentInstructions: the handshake text', () => {
+  it('opens with the one line that sends the agent to the guide, then the header, with or without a preamble', () => {
+    // Clients cut the instructions they show the model, so the line that must
+    // survive the cut comes first; everything after it is the text as it was.
+    expect(GUIDE_FIRST_LINE).toBe(
+      'Before anything else, call `get_agent_guide` and read the guide: it says what this deployment is and what this connection loads.',
+    );
+    for (const raw of [null, 'We sell permits.']) {
+      const { instructions } = composeAgentInstructions(raw);
+      expect(instructions.split('\n')[0], JSON.stringify(raw)).toBe(GUIDE_FIRST_LINE);
+      expect(instructions.startsWith(`${GUIDE_FIRST_LINE}\n\n${PLATFORM_HEADER}\n\n`), JSON.stringify(raw)).toBe(true);
+    }
+  });
+
   it('sends the platform text alone — header and shared rules — for an absent, empty, whitespace or comment-only preamble', () => {
     for (const raw of [null, '', '   \n\n', '<!-- notes to myself -->', '<!--\nline one\nline two\n-->\n']) {
       const out = composeAgentInstructions(raw);
@@ -45,7 +59,7 @@ describe('composeAgentInstructions: the handshake text', () => {
   it('hands the two parts and the fixed prefix line back separately, for the card', () => {
     const out = composeAgentInstructions('We sell permits.');
     expect(out.header).toBe(PLATFORM);
-    expect(out.header.startsWith(PLATFORM_HEADER)).toBe(true);
+    expect(out.header.startsWith(`${GUIDE_FIRST_LINE}\n\n${PLATFORM_HEADER}`)).toBe(true);
     expect(out.preamble).toBe('We sell permits.');
     expect(out.toolPrefixLine).toBe(TOOL_PREFIX_LINE);
     expect(out.toolPrefix.startsWith(out.toolPrefixLine)).toBe(true);

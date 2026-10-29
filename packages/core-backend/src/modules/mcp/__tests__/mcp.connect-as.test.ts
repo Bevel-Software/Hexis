@@ -11,6 +11,7 @@ import { createManualRoutes } from '../../tool-registry/manual.routes.js';
 import { ToolRegistry } from '../../tool-registry/tool-registry.js';
 import { toolDef } from '../../tool-helpers/index.js';
 import type { ConnectionScopeWire } from '../../agent-scope/index.js';
+import { GUIDE_FIRST_LINE } from '../../agent-instructions/index.js';
 
 /**
  * The MCP proxy's half of connecting as an agent. The surfaces behind the
@@ -164,6 +165,9 @@ describe('a narrowed connection', () => {
         'platform tools, connectors, skills and plugins that file lists, and of those only what you may read.',
     );
     expect(everything).not.toContain('connected as the agent');
+    // Both open with the line that sends the agent to the guide, which names
+    // the connection whole; the connection line stays last.
+    for (const text of [narrowed, everything]) expect(text!.split('\n')[0]).toBe(GUIDE_FIRST_LINE);
   });
 
   it('two connections of one person made as different agents never share a built surface', async () => {
