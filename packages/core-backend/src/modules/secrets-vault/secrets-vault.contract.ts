@@ -72,6 +72,21 @@ export interface SecretConfigStatus {
    * required scopes have grown.
    */
   grantedScopes?: string;
+  /**
+   * For an OAuth-backed SHARED row (a managed connector enabled as a workspace
+   * connection): whether an admin has completed the sign-in. `undefined` when
+   * the shared row is static or absent — the shared row of an ordinary tool
+   * sign-in holds the client secret, never tokens, so this is false there.
+   */
+  adminAuthorized?: boolean;
+  /** The shared row's granted scopes, when it holds tokens. Same rule as `grantedScopes`. */
+  adminGrantedScopes?: string;
+  /** The connected account on the caller's row, when the row remembers one. */
+  userAccount?: string;
+  /** The connected account on the shared row, when it remembers one. */
+  adminAccount?: string;
+  /** A managed sign-in's shared row was replaced by an owner's own app (`clientId` set, no `managed`). */
+  adminBringsOwnApp?: boolean;
 }
 
 /**
@@ -83,10 +98,88 @@ export type SecretScope = 'admin' | 'user';
 /** Resolves a UTCP-namespaced key (`<manual>_<VAR>`) to its provisioning scope. */
 export type VariableScopeResolver = (key: string) => Promise<SecretScope>;
 
+/**
+ * A sign-in made through Bevel's managed OAuth app for a connector: the
+ * tokens arrived from the broker, and renewing them goes back through it.
+ * Redeclared here (the vault takes no import from managed-connectors) in the
+ * same way `SecretScope` mirrors the tool-manuals contract.
+ */
+export interface ManagedSignInRef {
+  connectorId: string;
+  scopeSet: string;
+}
+
+/** The token set a broker refresh or handoff delivers — what the vault stores. */
+export interface DeliveredTokenSet {
+  access_token: string;
+  refresh_token?: string;
+  /** Epoch ms; absent when the provider gave no lifetime. */
+  expires_at?: number;
+  token_type?: string;
+  /** Space-delimited scopes granted, or the requested ones when the provider echoed none. */
+  scope?: string;
+}
+
+/**
+ * Renews a managed sign-in's tokens through the broker, which holds the
+ * managed app's client secret (this deployment never does). Throws
+ * {@link SecretOAuthError} with the broker's `providerStatus` on a refusal,
+ * so the vault tells a dead grant (400/401 → wipe) from an outage (keep).
+ */
+export interface ManagedTokenRefresher {
+  refresh(ref: ManagedSignInRef, refreshToken: string): Promise<DeliveredTokenSet>;
+}
+
+/**
+ * Tells the provider a managed sign-in's tokens are no longer wanted, where
+ * the provider offers a way (Google, HubSpot; Microsoft has none). Best
+ * effort: a failure is logged without token material and the local delete
+ * proceeds — the tokens are gone from here either way.
+ */
+export interface ManagedTokenRevoker {
+  revoke(ref: ManagedSignInRef, tokens: { access_token: string; refresh_token?: string }): Promise<void>;
+}
+
+/** What the Connect page shows for a managed sign-in, from the connector it belongs to. */
+export interface ManagedSignInCard {
+  displayName: string;
+  /** A lucide icon name. */
+  icon: string;
+  /** One line: what connecting lets Hexis do. */
+  description: string;
+  /** Plain-language permissions of the scope set. */
+  permissions: string[];
+  scopeSetLabel: string;
+  dataResidency: string;
+  subprocessor: string;
+}
+
+/**
+ * The distribution's side of a managed sign-in: it knows the connectors
+ * (their names, permissions, data notes) and how to open a sign-in through
+ * the broker. Core asks it two things and otherwise treats the resulting
+ * row like any other OAuth sign-in. Absent, a managed sign-in is listed as
+ * waiting on the deployment and cannot be started.
+ */
+export interface ManagedSignInPort {
+  /** Whether sign-ins can be started here at all (a broker is configured). */
+  available(): boolean;
+  /** The card for a sign-in, or null for a connector this distribution does not know. */
+  describe(ref: ManagedSignInRef): ManagedSignInCard | null;
+  /**
+   * Open a sign-in for `key` and answer the provider URL to send the browser
+   * to. `userId` null is a workspace (shared) connection, which the route
+   * allows only to a writer of the tool. `returnTo` is a same-origin path on
+   * this deployment the browser lands on afterwards.
+   */
+  start(input: { userId: string | null; key: string; ref: ManagedSignInRef; returnTo: string }): Promise<{ url: string }>;
+}
+
 /** Non-secret OAuth provider config the user supplies when registering an oauth secret. */
 export interface OAuthProviderConfig {
   authorizationUrl: string;
   tokenUrl: string;
+  /** Absent only on a managed sign-in (`managed` set): the client is the broker's. */
   clientId: string;
   /** Kept out of listings; stored encrypted alongside the tokens. */
   clientSecret?: string;
@@ -107,6 +200,10 @@ export interface OAuthProviderConfig {
    * server's canonical URL).
    */
   resource?: string;
+  /** Set on a managed sign-in: the broker does the round-trip and the refresh. `clientId` is then `''`. */
+  managed?: ManagedSignInRef;
+  /** The connected account, as the broker reported it (an email, a portal name). Shown on the card. */
+  account?: string;
 }
 
 export interface CreateOAuthSecretInput {
@@ -230,6 +327,34 @@ export interface ISecretsVaultService {
     state: string;
     scopes?: string[];
   }): Promise<{ id: string; url: string }>;
+
+  // --- Managed sign-ins (tokens arrive from the broker, not from a code exchange here) ---
+  /**
+   * Open a managed sign-in: write (or keep) the row the handoff will land on,
+   * remembering the one-time `nonce` the broker must echo. `userId` null is
+   * the SHARED row (a workspace connection). Existing tokens survive, so a
+   * reconnect that is abandoned leaves the old connection working.
+   */
+  beginManagedConnection(input: {
+    userId: string | null;
+    key: string;
+    provider: OAuthProviderConfig;
+    nonce: string;
+  }): Promise<void>;
+  /**
+   * Land the broker's handoff: the row's pending nonce must match (constant
+   * time), or the handoff is refused as a replay or a stray. Stores the
+   * tokens, clears the nonce, remembers the account.
+   */
+  completeManagedConnection(input: {
+    userId: string | null;
+    key: string;
+    nonce: string;
+    tokens: DeliveredTokenSet;
+    account?: string;
+  }): Promise<void>;
+  /** Revoke (where the provider allows) and delete every managed sign-in of one user — deprovisioning. */
+  removeManagedRowsOfUser(userId: string): Promise<number>;
 
   /**
    * Resolve the injectable value for a UTCP variable `key` — the only reader of

@@ -1574,14 +1574,30 @@ export class McpService {
     manualName: string,
   ): Promise<{ name: string; label?: string | null; brokenSignIn: boolean }[]> {
     if (!this.secretsVault || !this.toolManuals || !manualName) return [];
-    const userVars = await this.toolManuals.userScopedKeysForManual(manualName);
-    if (userVars.length === 0) return [];
-    const status = await this.secretsVault.statusFor(
-      userId,
-      userVars.map((v) => v.key),
-    );
+    const [userVars, sharedSignIns] = await Promise.all([
+      this.toolManuals.userScopedKeysForManual(manualName),
+      this.toolManuals.sharedSignInKeysForManual(manualName),
+    ]);
+    if (userVars.length === 0 && sharedSignIns.length === 0) return [];
+    const status = await this.secretsVault.statusFor(userId, [
+      ...userVars.map((v) => v.key),
+      ...sharedSignIns.map((v) => v.key),
+    ]);
     const statusMap = new Map(status.map((s) => [s.key, s]));
     const missing: { name: string; label?: string | null; brokenSignIn: boolean }[] = [];
+    // A WORKSPACE sign-in (a managed connector enabled as one shared
+    // connection) is nobody's personal credential, but a tool whose one
+    // connection has not been made — or no longer covers what the tool
+    // declares — fails just as opaquely at the provider. Reported like a
+    // personal one, with words that say whose job it is; never a "broken
+    // sign-in" of the caller's, since there is nothing of theirs to reset.
+    for (const v of sharedSignIns) {
+      const st = statusMap.get(v.key);
+      const connected = st?.adminAuthorized === true && scopesCovered(v.oauthScopes, st.adminGrantedScopes);
+      if (!connected) {
+        missing.push({ name: v.name, label: `${v.label ?? v.name} (a tool owner connects this for the workspace)`, brokenSignIn: false });
+      }
+    }
     for (const v of userVars) {
       const st = statusMap.get(v.key);
       // A sign-in the caller already HAS a row for but that isn't (or is no

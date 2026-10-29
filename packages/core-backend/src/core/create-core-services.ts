@@ -112,6 +112,7 @@ import {
   DbSecretsVaultService,
   McpOAuthDiscoveryService,
   registerBevelSecretsVariableLoader,
+  type ManagedSignInPort,
 } from '../modules/secrets-vault/index.js';
 import { ConnectionProbeService } from '../modules/connection-probe/index.js';
 import { GitService } from '../modules/workflow/git/git.service.js';
@@ -407,6 +408,12 @@ export interface CoreServices {
   // ── Server-time seams (enterprise overwrites after construction) ────────
   /** `start_session` backing — core default {@link UuidSessionSink}. */
   sessionSink: ISessionSink;
+  /**
+   * The managed sign-in port (see `CorePorts.managedSignIns`), or null when
+   * the distribution registers none. Mutable for the same reason the session
+   * sink is: the overlay builds it after core, from services core returned.
+   */
+  managedSignIns: ManagedSignInPort | null;
   /** Connection-key LLM metering view — core default unmetered. */
   usageMeter: ILlmUsageMeter;
   /** SSO plugins the auth router mounts — same array instance as the port. */
@@ -1715,6 +1722,7 @@ export async function createCoreServices(
     // Server-time seams — defaults here; the enterprise overlay overwrites
     // (or, for the array, pushes into) these after construction.
     sessionSink: ports.sessionSink ?? new UuidSessionSink(),
+    managedSignIns: ports.managedSignIns ?? null,
     usageMeter: ports.usageMeter ?? unmeteredLlmUsage,
     authProviders,
   };

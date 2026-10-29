@@ -406,6 +406,20 @@ export class ToolManualService implements IToolManualService {
       }));
   }
 
+  async sharedSignInKeysForManual(
+    manualName: string,
+  ): Promise<{ key: string; name: string; label: string | null; oauthScopes?: string[] }[]> {
+    const manual = (await this.scan()).manuals.find((m) => m.name === manualName);
+    return (manual?.variables ?? [])
+      .filter((v) => v.scope === 'admin' && v.oauth != null)
+      .map((v) => ({
+        key: utcpNamespacedKey(manualName, v.name),
+        name: v.name,
+        label: v.label ?? null,
+        oauthScopes: v.oauth?.scopes,
+      }));
+  }
+
   async scopeOfVariable(effectiveKey: string): Promise<ToolVariableScope> {
     // UTCP looks up `<namespace-with-doubled-underscores>_<VAR>`. Find the manual
     // whose namespace prefixes this key; the declared var is the remainder. Match
@@ -840,8 +854,15 @@ export class ToolManualService implements IToolManualService {
       m.setup = { kind: 'oauth-manual', reason: `sign-in endpoint discovery is unavailable — ${declaredByHand}` };
       return;
     }
+    // A file-declared sign-in carries its client id unless it is managed, and
+    // a managed one has nothing to discover: its endpoints are in the file.
+    const clientId = v.oauth?.clientId;
+    if (!clientId) {
+      m.setup = { kind: 'oauth-manual', reason: `the sign-in names no client id — ${declaredByHand}` };
+      return;
+    }
     try {
-      const found = await discovery.providerForDeclaredClient(m.name, m.url!, v.oauth!.clientId);
+      const found = await discovery.providerForDeclaredClient(m.name, m.url!, clientId);
       if (found.status !== 'oauth') {
         m.setup = {
           kind: 'oauth-manual',
@@ -1471,8 +1492,11 @@ function normalizeVariables(raw: unknown): ToolVariable[] {
     const label = typeof e.label === 'string' && e.label.trim() ? e.label.trim() : undefined;
     const oauth = normalizeVariableOAuth(at, e.oauth);
     // OAuth is inherently per-caller — each user signs in for their own token. An
-    // admin-shared OAuth token would leak one user's token to all callers.
-    if (oauth && scope !== 'user') {
+    // admin-shared OAuth token would leak one user's token to all callers. The
+    // one exception is a MANAGED sign-in enabled as a workspace connection:
+    // there the shared token is the point (one CRM account for the company),
+    // and only an owner of the tool can make it.
+    if (oauth && scope !== 'user' && !oauth.managed) {
       throw new Error(`${at}\` has \`oauth\`, so its \`scope\` must be \`user\``);
     }
     return {
@@ -1532,8 +1556,22 @@ function normalizeVariableOAuth(at: string, raw: unknown): ToolVariableOAuth | u
   };
   const authorizationUrl = safeUrl(o.authorizationUrl, 'authorizationUrl');
   const tokenUrl = safeUrl(o.tokenUrl, 'tokenUrl');
+  // A managed sign-in names the platform connector it goes through instead
+  // of a client id: the client is the broker's. Both parts are ids of OURS
+  // (matched against the catalog later), so the shape check here is all the
+  // file gets — and neither value is repeated in a refusal.
+  let managed: { connectorId: string; scopeSet: string } | undefined;
+  if (o.managed !== undefined) {
+    const m = o.managed as Record<string, unknown> | null;
+    const connectorId = m && typeof m === 'object' && typeof m.connectorId === 'string' ? m.connectorId.trim() : '';
+    const scopeSet = m && typeof m === 'object' && typeof m.scopeSet === 'string' ? m.scopeSet.trim() : '';
+    if (!isValidId(connectorId) || !isValidId(scopeSet)) {
+      throw new Error(`${at}.oauth.managed\` must be { connectorId, scopeSet } (lowercase snake_case ids)`);
+    }
+    managed = { connectorId, scopeSet };
+  }
   const clientId = typeof o.clientId === 'string' && o.clientId.trim() ? o.clientId.trim() : '';
-  if (!clientId) throw new Error(`${at}.oauth.clientId\` is required`);
+  if (!clientId && !managed) throw new Error(`${at}.oauth.clientId\` is required`);
   let scopes: string[] | undefined;
   if (o.scopes !== undefined) {
     if (!Array.isArray(o.scopes) || !o.scopes.every((s) => typeof s === 'string')) {
@@ -1562,11 +1600,12 @@ function normalizeVariableOAuth(at: string, raw: unknown): ToolVariableOAuth | u
   return {
     authorizationUrl,
     tokenUrl,
-    clientId,
+    ...(clientId ? { clientId } : {}),
     ...(scopes ? { scopes } : {}),
     ...(authParams ? { authParams } : {}),
     ...(o.pkce === false ? { pkce: false } : {}),
     ...(resource ? { resource } : {}),
+    ...(managed ? { managed } : {}),
   };
 }
 

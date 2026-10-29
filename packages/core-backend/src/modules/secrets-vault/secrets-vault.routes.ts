@@ -11,6 +11,8 @@ import {
   missingScopes,
   configuredAs,
   type ISecretsVaultService,
+  type ManagedSignInPort,
+  type SecretConfigStatus,
 } from './secrets-vault.contract.js';
 import type { IToolManualService, ToolManualSummary, ToolVariable } from '../tool-manuals/tool-manuals.contract.js';
 import type { IConnectionProbeService } from '../connection-probe/connection-probe.contract.js';
@@ -38,6 +40,36 @@ export interface SecretsVaultRoutesDeps {
   publicBackendUrl: string;
   /** Public base URL of the SPA — where the OAuth callback lands the browser. */
   publicFrontendUrl: string;
+  /**
+   * The distribution's managed sign-in port, read per request (the overlay
+   * binds it after boot). Absent or null: a managed sign-in is listed as
+   * waiting on the deployment, and starting one is refused with that reason.
+   */
+  managedSignIns?: () => ManagedSignInPort | null;
+}
+
+/**
+ * The card a managed sign-in renders as on the Connect page, as `/connect/pending`
+ * and `/secrets/tools` report it beside the ordinary fields.
+ */
+interface ManagedSignInView {
+  connectorId: string;
+  scopeSet: string;
+  /** Who the connection belongs to: each person, or the workspace. */
+  tokenScope: 'user' | 'shared';
+  displayName: string;
+  icon: string;
+  description: string;
+  permissions: string[];
+  scopeSetLabel: string;
+  dataResidency: string;
+  subprocessor: string;
+  /** The connected account the row remembers, for "Connected as …". */
+  account: string | null;
+  /** The owner replaced the managed app with the deployment's own (the ordinary flow then applies). */
+  ownApp: boolean;
+  /** Sign-ins through the broker can be started on this deployment. */
+  available: boolean;
 }
 
 function redirectUriFor(publicBackendUrl: string): string {
@@ -105,6 +137,34 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
     if (!manual) return null;
     const variable = (manual.variables ?? []).find((v) => v.name === varName);
     return variable ? { manual, variable } : null;
+  }
+
+  /**
+   * The card for a managed sign-in, or null for an ordinary one. Built from
+   * the variable (which connector), the port (what the connector is) and
+   * the row (whose account, whether an owner brought their own app).
+   */
+  function managedView(v: ToolVariable, st: SecretConfigStatus | undefined): ManagedSignInView | null {
+    const ref = v.oauth?.managed;
+    if (!ref) return null;
+    const port = deps.managedSignIns?.() ?? null;
+    const card = port?.describe(ref) ?? null;
+    const shared = v.scope === 'admin';
+    return {
+      connectorId: ref.connectorId,
+      scopeSet: ref.scopeSet,
+      tokenScope: shared ? 'shared' : 'user',
+      displayName: card?.displayName ?? v.label ?? ref.connectorId,
+      icon: card?.icon ?? 'Plug',
+      description: card?.description ?? '',
+      permissions: card?.permissions ?? [],
+      scopeSetLabel: card?.scopeSetLabel ?? ref.scopeSet,
+      dataResidency: card?.dataResidency ?? '',
+      subprocessor: card?.subprocessor ?? '',
+      account: (shared ? st?.adminAccount : st?.userAccount) ?? null,
+      ownApp: st?.adminBringsOwnApp === true,
+      available: port?.available() === true,
+    };
   }
 
   router.get('/secrets', async (req, res) => {
@@ -227,11 +287,16 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
             const key = varKey(m.name, v.name);
             const st = statusByKey.get(key);
             const isOAuth = v.oauth != null;
-            const authorized = isOAuth ? (st?.userAuthorized ?? false) : undefined;
+            // A SHARED sign-in (a managed workspace connection) is authorized
+            // when the shared row holds tokens — one connection for everyone.
+            const shared = isOAuth && v.scope === 'admin';
+            const authorized = isOAuth ? ((shared ? st?.adminAuthorized : st?.userAuthorized) ?? false) : undefined;
             // For an OAuth var: which declared permissions the token doesn't cover,
             // so the panel can say WHAT it works for and what it doesn't. Only
             // meaningful once authorized (an unauthorized var has no token at all).
-            const missing = isOAuth && authorized ? missingScopes(v.oauth?.scopes, st?.grantedScopes) : [];
+            const granted = shared ? st?.adminGrantedScopes : st?.grantedScopes;
+            const missing = isOAuth && authorized ? missingScopes(v.oauth?.scopes, granted) : [];
+            const managed = managedView(v, st);
             return {
               name: v.name,
               scope: v.scope,
@@ -243,6 +308,7 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
               authorized,
               needsReauth: isOAuth && authorized === true && missing.length > 0,
               missingScopes: missing,
+              ...(managed ? { managed } : {}),
             };
           }),
         })),
@@ -338,21 +404,33 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
       const toolOAuth = manuals.flatMap((m) => {
         const canWrite = canWriteBySlug.get(m.slug) ?? false;
         return (m.variables ?? [])
-          .filter((v) => v.scope === 'user' && v.oauth)
+          // Every per-user sign-in, plus a managed WORKSPACE connection (the
+          // one `admin`-scoped sign-in there is): listed for everyone who can
+          // read the tool, since everyone calls through it, with Connect
+          // offered to the writers who can make it.
+          .filter((v) => v.oauth && (v.scope === 'user' || v.oauth.managed))
           .map((v) => {
             const st = statusByKey.get(varKey(m.name, v.name));
-            const authorized = st?.userAuthorized ?? false;
+            const managed = managedView(v, st);
+            const shared = v.scope === 'admin';
+            const authorized = (shared ? st?.adminAuthorized : st?.userAuthorized) ?? false;
             // Signed in, but the token's granted scopes no longer cover what the
             // tool declares → surface as needing re-authorization, not as connected.
             const needsReauth =
-              authorized && !scopesCovered(v.oauth?.scopes, st?.grantedScopes);
+              authorized && !scopesCovered(v.oauth?.scopes, shared ? st?.adminGrantedScopes : st?.grantedScopes);
             // On an oauth var the ADMIN row is the provider registration — the
             // client secret — without which nobody's Authorize can work. It is a
             // workspace value like any other, so it carries the same flag. It
             // must be an OAUTH row: `beginToolOAuthByKey` refuses a static one,
             // so a shared key left over from before this var was made OAuth
             // would otherwise light up Authorize with nothing behind it.
-            const ownerConfigured = configuredAs('oauth', st?.adminConfigured, st?.adminKind);
+            //
+            // A MANAGED sign-in needs no registration here — the broker holds
+            // it — so it is configured when the deployment can reach a broker,
+            // or when an owner replaced the managed app with their own.
+            const ownerConfigured = managed
+              ? managed.ownApp || managed.available
+              : configuredAs('oauth', st?.adminConfigured, st?.adminKind);
             return {
               slug: m.slug,
               varName: v.name,
@@ -362,7 +440,10 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
               authorized,
               needsReauth,
               ownerConfigured,
-              ownerOnly: !ownerConfigured && !canWrite,
+              // A shared connection is made by a writer; for a reader it is
+              // the owner's to do, connected or not.
+              ownerOnly: (!ownerConfigured || shared) && !canWrite,
+              ...(managed ? { managed, canWrite } : {}),
             };
           });
       });
@@ -470,13 +551,24 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
         });
       }
       const clientSecret = (req.body ?? {}).clientSecret;
+      // A managed sign-in names no client of its own; an owner who brings
+      // the deployment's own app ("use our own app") supplies its id here
+      // with the secret, and the pinned row then runs the ordinary flow:
+      // this deployment's redirect URI, a direct token exchange and refresh.
+      const ownClientId = typeof (req.body ?? {}).clientId === 'string' ? (req.body.clientId as string).trim() : '';
+      const clientId = found.variable.oauth.clientId ?? ownClientId;
+      if (!clientId) {
+        return void res.status(422).json({
+          error: 'This sign-in goes through the managed connector. To use your own OAuth app instead, send its client id with the secret.',
+        });
+      }
       await secretsVault.putSharedOAuthClientSecret({
         key: varKey(found.manual.name, found.variable.name),
         clientSecret,
         provider: {
           authorizationUrl,
           tokenUrl,
-          clientId: found.variable.oauth.clientId,
+          clientId,
           scopes: found.variable.oauth.scopes,
           // Static authorize params (e.g. Google's `access_type=offline`) so the
           // provider returns a refresh token — stored with the secret so a later
@@ -511,6 +603,33 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
         return void res.status(422).json({ error: 'This variable is not an OAuth sign-in.' });
       }
       const key = varKey(found.manual.name, found.variable.name);
+      const returnTo: unknown = (req.body ?? {}).returnTo;
+      // A MANAGED sign-in goes through the broker — unless an owner pinned the
+      // deployment's own app on the shared row, in which case the ordinary
+      // flow below applies exactly as for a file-declared client.
+      const ref = found.variable.oauth.managed;
+      if (ref) {
+        const [st] = await secretsVault.statusFor(userId, [key]);
+        if (st?.adminBringsOwnApp !== true) {
+          const port = deps.managedSignIns?.() ?? null;
+          if (!port || !port.available()) {
+            return void res.status(409).json({
+              error: 'This deployment is not connected to a connector broker yet. Ask your admin to configure it.',
+            });
+          }
+          const shared = found.variable.scope === 'admin';
+          if (shared && !(await accessControl.canWrite(defaultWs(), email, found.manual.path))) {
+            return void res.status(403).json({ error: 'Only a writer of this tool can connect its workspace account.' });
+          }
+          const { url } = await port.start({
+            userId: shared ? null : userId,
+            key,
+            ref,
+            returnTo: isSafeReturnPath(returnTo) ? returnTo : '/connect',
+          });
+          return void res.json({ url });
+        }
+      }
       // Provision the caller's oauth row (from the owner-set secret) FIRST — its id
       // is what the un-authed callback keys on. Pass an empty state placeholder; we
       // sign the real state below with the returned id and swap it into the URL, so
@@ -530,7 +649,6 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
       // the provider, so the state is the only thing it can trust. An absent or
       // unsafe `returnTo` falls back to the legacy `'connect'` marker, which
       // keeps a body-less start byte-identical to what it produced before.
-      const returnTo: unknown = (req.body ?? {}).returnTo;
       const state = signState(deps.stateSecret, {
         u: userId,
         i: id,

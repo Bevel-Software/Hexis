@@ -38,6 +38,7 @@ const accountErasure = {
 /** The invite listeners: nobody registered unless a test says so (see "an invite tells the listeners"). */
 const accountHooks = {
   runAccountInvited: vi.fn<(event: AccountInvitedEvent) => Promise<string[]>>(async () => []),
+  runAccountDeactivated: vi.fn<(event: { userId: string; email: string }) => Promise<string[]>>(async () => []),
 };
 
 function makeApp(opts: { admin: boolean; email?: string }) {

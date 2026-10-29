@@ -81,6 +81,7 @@ A `user`-scoped variable can be filled by **signing in** instead of by a typed v
 | `pkce` | optional, default **on** | PKCE S256 — MCP servers require it; providers without it ignore it. Only `false` is meaningful. |
 | `resource` | optional | RFC 8707 resource indicator (the MCP server URL); discovered on an `mcp.json` server |
 | `authParams` | optional | extra static authorize params, e.g. Google's `access_type: offline` |
+| `managed` | in place of `clientId` | `{ connectorId, scopeSet }`: the sign-in goes through a connector the platform's distribution manages (its own OAuth app, a broker doing the round-trip). Written by the Connect page when an admin enables such a connector; do not write it by hand. With it, and only with it, the variable may be `scope: admin`: one workspace connection an owner makes, read by every caller. |
 
 **Never** a `clientSecret` — a `.tool` carrying one fails to load, and an `mcp.json` server whose plugin.json entry carries one is dropped from the catalog. The secret is pasted once by a tool writer on the tool's page, then every member signs in on the Connect page.
 

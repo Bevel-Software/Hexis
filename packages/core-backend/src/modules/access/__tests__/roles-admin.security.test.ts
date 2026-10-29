@@ -146,7 +146,7 @@ describe('SECURITY: Admin-role removal takes effect on the next request', () => 
       (req as unknown as { userEmail?: string }).userEmail = req.header('x-test-email') ?? undefined;
       next();
     });
-    app.use('/api', createAccountRoutes(authService, adminAccess, erasure, { runAccountInvited: async () => [] }));
+    app.use('/api', createAccountRoutes(authService, adminAccess, erasure, { runAccountInvited: async () => [], runAccountDeactivated: async () => [] }));
     server = await new Promise<Server>((resolve) => {
       const s = app.listen(0, () => resolve(s));
     });

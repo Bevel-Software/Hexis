@@ -54,6 +54,36 @@ export interface ConnectOAuth {
   authorized: boolean;
 }
 
+/**
+ * A sign-in that goes through a managed connector: Bevel's own OAuth app, a
+ * broker that does the provider round-trip, nothing for the owner to
+ * register. What the card shows comes from the connector's definition on the
+ * server; what the row can DO is the same Connect / Reconnect / Disconnect as
+ * any sign-in, plus "Connected as" once the account is known.
+ */
+export interface ManagedSignIn {
+  connectorId: string;
+  scopeSet: string;
+  /** `user`: each person connects their own account. `shared`: one workspace connection an owner makes. */
+  tokenScope: 'user' | 'shared';
+  displayName: string;
+  /** A lucide icon name. */
+  icon: string;
+  /** One line: what connecting lets Hexis do. */
+  description: string;
+  /** Plain-language permissions of the scope set. */
+  permissions: string[];
+  scopeSetLabel: string;
+  dataResidency: string;
+  subprocessor: string;
+  /** The connected account, once the sign-in reported one. */
+  account: string | null;
+  /** An owner replaced the managed app with the deployment's own; the ordinary flow applies. */
+  ownApp: boolean;
+  /** The deployment can start sign-ins through the broker. False ⇒ the admin has setup to do. */
+  available: boolean;
+}
+
 /** An OAuth-backed variable declared BY a tool — authorized via the tool-scoped start. */
 export interface ConnectToolOAuth {
   slug: string;
@@ -62,6 +92,10 @@ export interface ConnectToolOAuth {
   key: string;
   label: string | null;
   authorized: boolean;
+  /** Present for a managed connector's sign-in — see {@link ManagedSignIn}. */
+  managed?: ManagedSignIn;
+  /** With `managed`: whether the caller may write the tool (disconnect a shared connection, bring an own app). */
+  canWrite?: boolean;
   /**
    * Authorized, but the token's granted permissions no longer cover what the tool
    * declares now (a scope was added since sign-in) — show Reconnect, not Connected.

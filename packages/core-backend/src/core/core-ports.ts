@@ -11,6 +11,7 @@ import type { IWriteAccess } from '../modules/write-access/write-access.js';
 import type { OnServerStart } from '../modules/workspace/startup/on-server-start.js';
 import type { AgentGuideHook } from '../modules/agent-guide/agent-guide.js';
 import type { EmbedNodeIdResolver } from '../modules/embed/embed.interface.js';
+import type { ManagedSignInPort } from '../modules/secrets-vault/secrets-vault.contract.js';
 
 /**
  * Every seam the enterprise overlay can fill in the CORE composition
@@ -148,6 +149,15 @@ export interface CorePorts {
    * for an id that names nothing. See `modules/embed/embed.interface.ts`.
    */
   embedNodeIdResolver?: EmbedNodeIdResolver;
+  /**
+   * The distribution's side of a MANAGED sign-in (a `.tool` sign-in whose
+   * `oauth` block names a platform connector): what the Connect page shows
+   * for it and how a sign-in through the broker is opened. Core default:
+   * none, so such a sign-in is listed as waiting on the deployment. Also
+   * settable after construction (`CoreServices.managedSignIns`), like the
+   * session sink. See `modules/secrets-vault/secrets-vault.contract.ts`.
+   */
+  managedSignIns?: ManagedSignInPort;
 }
 
 /**

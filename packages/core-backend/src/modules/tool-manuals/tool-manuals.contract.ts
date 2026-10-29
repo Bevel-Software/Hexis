@@ -52,7 +52,12 @@ export interface ToolVariableOAuth {
   /** Absent on an mcp.json server ⇒ discovered from the server's OAuth metadata. */
   authorizationUrl?: string;
   tokenUrl?: string;
-  clientId: string;
+  /**
+   * Required on an ordinary sign-in. Absent ONLY on a managed one (see
+   * `managed`), whose client is Bevel's and lives on the broker; an owner who
+   * brings their own app supplies it on the client-secret route instead.
+   */
+  clientId?: string;
   scopes?: string[];
   /**
    * Extra static query params appended to the authorization request — e.g.
@@ -77,6 +82,21 @@ export interface ToolVariableOAuth {
    * endpoints are declared by hand too.
    */
   resource?: string;
+  /**
+   * The sign-in goes through Bevel's managed OAuth app for a platform
+   * connector: the broker does the provider round-trip and hands the tokens
+   * to this deployment, and renews them on its behalf. Written by the
+   * connector template an admin enables; `clientId` is then absent. The
+   * broker decides the scopes it requests from its own copy of the
+   * connector's definition, so an edited file cannot widen them.
+   */
+  managed?: ManagedSignIn;
+}
+
+/** Which managed connector and scope set a sign-in belongs to. */
+export interface ManagedSignIn {
+  connectorId: string;
+  scopeSet: string;
 }
 
 /**
@@ -93,8 +113,11 @@ export interface ToolVariable {
   label?: string;
   /**
    * When present, this variable is OAuth-backed: the user signs in with the
-   * declared provider to obtain a token. Only valid with `scope:'user'` (each
-   * caller authorizes their own). The client secret is NOT declared here.
+   * declared provider to obtain a token. Valid with `scope:'user'` (each
+   * caller authorizes their own), or with `scope:'admin'` ONLY for a managed
+   * sign-in — one workspace connection an owner makes, read by every caller
+   * (the shared row then holds the tokens). The client secret is NOT
+   * declared here.
    */
   oauth?: ToolVariableOAuth;
 }
@@ -491,6 +514,15 @@ export interface IToolManualService {
   ): Promise<
     { key: string; name: string; label: string | null; oauth: boolean; oauthScopes?: string[] }[]
   >;
+  /**
+   * The SHARED (`admin`-scoped) sign-ins a manual declares — a managed
+   * connector enabled as a workspace connection. The pre-call check reads
+   * these so a tool whose one connection nobody has made yet fails with
+   * "an owner needs to connect it" instead of an opaque provider error.
+   */
+  sharedSignInKeysForManual(
+    manualName: string,
+  ): Promise<{ key: string; name: string; label: string | null; oauthScopes?: string[] }[]>;
   /** Drop the cached catalog (call after a merge to the default branch). */
   invalidate(): void;
 }
