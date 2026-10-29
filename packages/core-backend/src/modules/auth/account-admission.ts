@@ -15,6 +15,8 @@ export type AccountProvisionReason =
   | 'sso'
   /** An admin creating an account from the app. */
   | 'admin-create'
+  /** Anyone signed in inviting somebody (`POST /api/invitations`). */
+  | 'invite'
   /** The deployment owner's first password sign-in, which creates their row. */
   | 'bootstrap'
   /** A verified identity from an embedding surface that needs a row without a session. */

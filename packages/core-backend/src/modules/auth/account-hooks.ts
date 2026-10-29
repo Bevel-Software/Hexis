@@ -5,22 +5,26 @@ import { ListenerSeam, type NotifyingListener } from '../../shared/listener-seam
 const log = logger('accounts');
 
 /**
- * An admin invited somebody: a NEW account was made for the address. Never
- * raised for an account that was already there (an invite that only set a
- * starting password, a password reset, a rename), and never for a first
- * single sign-on, which provisions by itself: the person is already in.
+ * Somebody invited somebody: a NEW account was made for the address, by an
+ * admin or by anyone signed in (`POST /api/invitations`). Never raised for an
+ * account that was already there (a password reset, a rename), and never
+ * for a first single sign-on, which provisions by itself: the person is
+ * already in.
  */
 export interface AccountInvitedEvent {
-  /** The new account, as the admin's answer carries it. */
+  /** The new account, as the inviter's answer carries it. */
   account: Pick<AuthUser, 'id' | 'email' | 'name'>;
-  /** The admin who invited them. */
+  /** Who invited them. */
   invitedBy: Pick<AuthUser, 'id' | 'email' | 'name'>;
-  /**
-   * Whether the account was created with a starting password the admin
-   * typed. The password itself never travels: a listener that writes to the
-   * person says it comes from the admin separately.
-   */
+  /** Whether the account was created with a starting password. */
   passwordSet: boolean;
+  /**
+   * The starting password the platform generated for the account, absent
+   * when none was. It travels here so a listener that writes to the person
+   * can put it in the invitation, with the request to sign in and change
+   * it; a listener must not log it or keep it.
+   */
+  startingPassword?: string;
 }
 
 /**

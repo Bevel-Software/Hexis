@@ -22,6 +22,7 @@ import {
 } from './password-hash.js';
 import { RECOVERY_BOT_EMAIL } from '../workflow/index.js';
 import { DIRECTORY_SYNC_BOT_EMAIL } from '../access/index.js';
+import { generateStartingPassword } from './starting-password.js';
 import { takeAccountSwitchLock } from './account-switch-lock.js';
 import type { IAccountSwitchGuard } from './account-switch-guard.js';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
@@ -504,6 +505,49 @@ export class AuthService implements IAccountSwitchGuard {
     const [existing] = await this.db.select().from(users).where(eq(users.emailBidx, normalizedEmail)).limit(1);
     if (!existing) throw new Error('Could not set the password');
     return { user: this.toClientUser(existing), created: false, passwordSet: false, deactivated: existing.deactivatedAt != null };
+  }
+
+  /**
+   * An invitation: a NEW account for the address, or nothing at all. The
+   * insert does nothing on conflict, so an address that already has an
+   * account is never written, not its password, its name or its switched-off
+   * state, whoever invites (`created: false`, and nothing else).
+   *
+   * With `startingPassword` the account gets one generated here
+   * ({@link generateStartingPassword}), stored only as its hash and returned
+   * once for the caller to hand on. The deployment admin and the accounts the
+   * platform runs its own work as never get a stored hash (see
+   * {@link createAccount}): theirs is made without one, as an existing one
+   * would be left.
+   *
+   * The admission port is asked with the reason `invite` before the insert,
+   * and only for an address with no account.
+   */
+  async createInvitedAccount(
+    email: string,
+    options: { startingPassword: boolean },
+  ): Promise<{ created: true; user: AuthUser; startingPassword?: string } | { created: false }> {
+    const normalizedEmail = canonicalEmail(email ?? '');
+    if (!EMAIL_REGEX.test(normalizedEmail)) {
+      throw new AccountChangeRefusedError('Invalid email');
+    }
+    await this.assertAdmitted(normalizedEmail, 'invite');
+    const mayHoldHash = !SYSTEM_ACCOUNT_EMAILS.includes(normalizedEmail) && !this.isEnvAdminEmail(normalizedEmail);
+    const startingPassword = options.startingPassword && mayHoldHash ? generateStartingPassword() : undefined;
+    const passwordHash = startingPassword ? await hashPassword(startingPassword) : undefined;
+    const [row] = await this.db
+      .insert(users)
+      .values({
+        email: normalizedEmail,
+        emailBidx: normalizedEmail,
+        name: normalizedEmail.split('@')[0] || normalizedEmail,
+        ...(passwordHash ? { passwordHash } : {}),
+      })
+      .onConflictDoNothing({ target: users.emailBidx })
+      .returning();
+    // No row back: the address already had an account, and it is untouched.
+    if (!row) return { created: false };
+    return { created: true, user: this.toClientUser(row), ...(startingPassword ? { startingPassword } : {}) };
   }
 
   /**
