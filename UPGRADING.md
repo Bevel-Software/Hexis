@@ -33,6 +33,28 @@ earlier release added for it — the Skills & Tools sidebar shows that root as
 a file tree now); write a `plugin.json` into every plugin folder that predates
 the manifest. Each is idempotent, so a second start writes nothing.
 
+### Anyone signed in can invite people (0.35+)
+
+From 0.35 the toolbar's Invite button, the Invite people command and Manage
+access's Invite action open the Invite dialog for everyone signed in, not
+only admins. A member invites as Member; only an admin can invite as Admin.
+There is no setting to turn this off: a deployment that wants nobody to
+create password accounts turns password sign-in off (`LOGIN_PASSWORD=false`).
+On a cloud deployment each invited account still takes a seat and is refused
+when the plan is full.
+
+Nobody types a starting password any more. Where one is needed (password
+sign-in and no single sign-on, or "Also give them a password" ticked), the
+platform generates it, shows it once on the invited person's row to copy,
+and passes it to the deployment's invitation mail. An invite never changes
+an account that already exists: it no longer gives a first password to an
+existing account without one. Admins set or reset a password from User
+accounts, as before.
+
+Hosts that listen for invitations (`onAccountInvited`) receive the generated
+password as `startingPassword` on the event, and the admission port is asked
+with the new reason `invite`.
+
 ### A change request's body is its description (0.32+)
 
 From 0.32 a change request's stored body is exactly its description. Until
