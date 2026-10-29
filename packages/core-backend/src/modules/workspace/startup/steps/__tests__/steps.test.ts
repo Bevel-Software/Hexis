@@ -17,8 +17,13 @@ import { TemplateFilesStep } from '../template-files.step.js';
 import { buildSeedTree } from '../seed-tree.js';
 import { defaultKbTemplateDir } from '../../../../../assets.js';
 import { DEFAULT_KB_LAYOUT } from '@bevel-software/platform-shared';
-import { renderTemplateText } from '../template-source.js';
-import { TOOL_PREFIX_LINE, composeAgentInstructions, platformInstructions } from '../../../../agent-instructions/index.js';
+import { SHARED_FILE_RULES_PLACEHOLDER, renderTemplateText } from '../template-source.js';
+import {
+  TOOL_PREFIX_LINE,
+  composeAgentInstructions,
+  platformInstructions,
+  sharedFileRulesSection,
+} from '../../../../agent-instructions/index.js';
 import { testKbContext } from '../../../../../__tests__/kb-context.js';
 import { newKbStartupRunner } from '../../../../../__tests__/workspace-service.js';
 
@@ -871,6 +876,25 @@ describe('buildSeedTree', () => {
     // The generated paths — what the runner force-adds past a template .gitignore.
     expect(generated.sort()).toEqual(['KnowledgeBase/.gitkeep', 'Plugins/.gitkeep', 'Skills/.gitkeep', 'roles.yaml']);
     expect(await exists(dest, 'roles.yaml')).toBe(true);
+  });
+
+  it('seeds the shared rules naming the default branch, and naming none for a caller that hands only the layout', async () => {
+    const templateDir = path.join(root, 'seed-rules-template');
+    await fs.mkdir(templateDir, { recursive: true });
+    await fs.writeFile(path.join(templateDir, 'rules.md'), SHARED_FILE_RULES_PLACEHOLDER, 'utf8');
+    const seed = async (kb: Parameters<typeof buildSeedTree>[4], name: string): Promise<string> => {
+      const dest = path.join(root, name);
+      await fs.mkdir(dest, { recursive: true });
+      await buildSeedTree(new NodeFs(), templateDir, [], ['admin@example.com'], kb)(dest);
+      return fs.readFile(path.join(dest, 'rules.md'), 'utf8');
+    };
+
+    const named = await seed({ layout: DEFAULT_KB_LAYOUT, defaultBranch: 'target-company-state' }, 'seed-rules-named');
+    expect(named).toBe(sharedFileRulesSection(DEFAULT_KB_LAYOUT, 'target-company-state'));
+    expect(named).toContain("This knowledge base's default branch is `target-company-state`");
+    // The context took only `{ layout }` before the branch was named; that
+    // call still compiles and seeds the rules without the sentence.
+    expect(await seed({ layout: DEFAULT_KB_LAYOUT }, 'seed-rules-layout-only')).toBe(sharedFileRulesSection(DEFAULT_KB_LAYOUT, ''));
   });
 
   it('seeds the layout in effect when it seeds, not the one it was composed under', async () => {

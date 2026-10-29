@@ -70,6 +70,14 @@ export const SHARED_FILE_RULES_PLACEHOLDER = '{{sharedFileRules}}';
  * a template writes) that a string replacement would read as capture-group
  * syntax.
  */
+/**
+ * What rendering a template reads of the knowledge base: its layout, and the
+ * default branch the shared rules name. The branch is optional so a caller
+ * that hands only `{ layout }` keeps compiling and gets the rules without the
+ * branch sentence, as before the branch was named.
+ */
+export type TemplateKb = Pick<KbContext, 'layout'> & Partial<Pick<KbContext, 'defaultBranch'>>;
+
 export function renderTemplateText(text: string, layout: KbLayout, defaultBranch = ''): string {
   return renderKbLayoutPlaceholders(text, layout).replaceAll(
     SHARED_FILE_RULES_PLACEHOLDER,
@@ -102,7 +110,7 @@ export class TemplateSource {
      * The layout the placeholders render as, and the default branch the shared
      * rules name — read per file, so a name applied by setup is the one written.
      */
-    private readonly kb: Pick<KbContext, 'layout' | 'defaultBranch'>,
+    private readonly kb: TemplateKb,
   ) {}
 
   /**

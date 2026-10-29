@@ -6,10 +6,9 @@ import {
   type KbLayout,
 } from '@bevel-software/platform-shared';
 import { IGNORE_FILENAME, isAbsence, type IFsProbe } from '../../../../shared/fs.contract.js';
-import type { KbContext } from '../../../../shared/kb-context.js';
 import { PREAMBLE_FILE } from '../../../agent-instructions/index.js';
 import { isManagedGuide } from '../../../agent-guide/index.js';
-import { TemplateSource } from './template-source.js';
+import { TemplateSource, type TemplateKb } from './template-source.js';
 import type { KbBranch, OnServerStart, ServerStartContext, StepResult } from '../on-server-start.js';
 import { hasGitInternalsSegment } from '../../../../shared/git-internals.js';
 
@@ -172,7 +171,7 @@ export class TemplateFilesStep implements OnServerStart {
      * applies the admin's names after this step was built. A snapshot taken
      * here scaffolded `Skills/` beside the `skills/` they had just chosen.
      */
-    private readonly kb: Pick<KbContext, 'layout' | 'defaultBranch'>,
+    private readonly kb: TemplateKb,
     private readonly extraRootDirs: readonly string[] = [],
   ) {
     // Validated NOW, so a bad extra fails at boot beside the rest of the
