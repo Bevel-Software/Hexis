@@ -13,10 +13,10 @@ import {
   type WorkspaceContextValue,
 } from '../../state/workspace.context';
 import { makeWorkspaceFixture } from '../../__tests__/testFixtures';
-import { GitContext, type GitContextValue } from '../../../git/state/git.context';
-import { AuthContext, type AuthContextValue } from '../../../auth/state/auth.context';
+import { GitContext, type GitContextValue } from '../../../git';
+import { AuthContext, type AuthContextValue } from '../../../auth';
 import { OpenChangeRequestsContext } from '../../state/open-change-requests.context';
-import { AdminContext, type AdminContextValue } from '../../../admin/state/admin.context';
+import { AdminContext, type AdminContextValue } from '../../../admin';
 import { PR_STALE_EVENT } from '../../../../core/events';
 import { EventBusProvider } from '../../../workflow';
 import type { WorkflowEvent } from '@bevel-software/platform-shared';

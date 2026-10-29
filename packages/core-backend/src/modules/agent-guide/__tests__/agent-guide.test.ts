@@ -1,6 +1,6 @@
 import { DEFAULT_KB_LAYOUT } from '@bevel-software/platform-shared';
 import { describe, expect, it } from 'vitest';
-import { mergeGroupsIntoRoles, parseRolesYaml } from '../../access-model/access-grammar.js';
+import { mergeGroupsIntoRoles, parseRolesYaml } from '../../access-model/index.js';
 import { sharedFileRulesSection } from '../../agent-instructions/index.js';
 import {
   CORE_SECTION_IDS,
