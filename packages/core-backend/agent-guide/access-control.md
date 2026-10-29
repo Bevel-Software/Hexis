@@ -51,9 +51,11 @@ write:
   above the plugin, and `deny` lines, do not count). `<name>` is the
   manifest's `name`, in any spelling. This is how a shared skill reaches a
   plugin's members: `plugin/gtm/read` under `read` on the skill's folder.
-- **The nearest rule decides.** For a path, the platform looks at the file's
-  own rules (below), then its folder's `access.md`, then each folder above, up
-  to the root, and the first one that says anything about you decides. Within
+- **The nearest rule decides, verb by verb.** For a path and a verb, the
+  platform looks at the file's own rules (below), then its folder's
+  `access.md`, then each folder above, up to the root, and the first one that
+  says anything about you for that verb decides; a nearer `read` rule leaves a
+  `write` grant from a folder above in force. Within
   one file, a rule naming you beats one for your roles or groups; a grant
   through one of your roles beats a denial through another; `everyone` comes
   last. No rule anywhere means no access: a folder no rule opens to you is
@@ -90,13 +92,12 @@ admin (the server's `ADMIN_EMAIL`) is always an Admin, whatever the file says.
 them, and nothing more: never add or rename a role in `roles.yaml`. Such a
 write is refused with a 422 saying that app roles are pre-set: add people to
 existing roles, and use a GROUP for a task- or team-scoped set of people.
-Relay that to your user as it stands; do not look for another way in.
+Relay that to your user as it stands.
 
 **Is it really a group?** It is when the name says who the people are (a team,
 a project, a customer) rather than a capability the platform has, when it
 would change when the project ends or the team reshuffles, or when its purpose
-is to give those people access to some folders. A request that matches an
-existing role is membership, not a new role.
+is to give those people access to some folders.
 
 **What to do instead.** Add the people to an existing role that carries the
 capability. Otherwise make it a group: add it to `groups.yaml` (or point your
@@ -149,8 +150,7 @@ group source (`synced-groups.yaml` when groups are synced, `groups.yaml`
 otherwise) says who is in each group, the person you are helping included. It
 does not judge one named person for you. Then name the people: who can do it
 now and, for a move or a rule change, who gains and who loses. When they
-already have it, say so and change nothing. A change nobody needed still
-widens or narrows access for everyone the rule names.
+already have it, say so and change nothing.
 
 ### Direct writes vs change requests
 
