@@ -92,7 +92,9 @@ describe('get_agent_guide', () => {
       expect(def).toBeDefined();
       expect(def!.description).toContain('ALWAYS call this first, before anything else in the platform.');
       expect(def!.description).toContain('With no `section` it returns the start section');
-      expect(def!.description).toContain('`"all"` returns the whole guide, as does `read_file` on `AGENTS.md` at the KB root');
+      expect(def!.description).toContain('only `"all"` returns the whole guide.');
+      // The read of the guide's name is the start too (`guideStartText`), never the whole guide.
+      expect(def!.description).toContain('`read_file` on `AGENTS.md` at the KB root answers with the same start section');
       // The sections, a distribution's own included, by id and title.
       expect(def!.description).toContain(
         'Sections: `introduction` (Knowledge base), `access-control` (Access control), `knowledge-graph` (Knowledge graph).',

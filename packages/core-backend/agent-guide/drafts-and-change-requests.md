@@ -12,8 +12,8 @@ no longer exists).
   digits as one `-`: `paul.brandt@` gives `paul-brandt/`. Only that prefix
   makes the draft theirs, so they can delete it later. Ask for the email if
   you do not know it. A draft is shared at once, and the file tools then take
-  it as `branch`. In the app, the person sees it by choosing it in the branch
-  switcher; otherwise the app shows `{{defaultBranch}}`.
+  it as `branch`. In the app, the person sees it through its change request
+  once you open one; until then the app shows them `{{defaultBranch}}`.
 - **Saving shares.** Every write is committed as the person and shared,
   moments after the call returns; there is no separate push. `branch_status`
   lists writes still landing. `share_current_branch` is only for sharing

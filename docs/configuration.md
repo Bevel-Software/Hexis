@@ -92,9 +92,10 @@ An agent gets it two ways:
 - the `get_agent_guide` tool returns its short start section, which names the
   default branch and says which section answers which question; an agent then
   fetches the sections a task needs, or the whole guide with `section: "all"`;
-- a `read_file` of `AGENTS.md` at the top of the repository returns it too.
-  When your repository has an `AGENTS.md` of its own, that file comes first,
-  whole, and the platform's guide follows it after a marked separator.
+- a `read_file` of `AGENTS.md` at the top of the repository returns the same
+  start section and the list of sections. When your repository has an
+  `AGENTS.md` of its own, that file comes first, whole, and the start of the
+  platform's guide follows it after a marked separator.
 
 Your `AGENTS.md` is yours: the platform never writes to it, never hides it
 from the file tree, and it moves and deletes like any other page. Put your own

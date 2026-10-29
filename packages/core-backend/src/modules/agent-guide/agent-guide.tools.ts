@@ -46,11 +46,11 @@ export function registerAgentGuideTool(
       "The platform's guide to this knowledge base. ALWAYS call this first, before anything else in the " +
       'platform. With no `section` it returns the start section: the default branch every file tool takes, the ' +
       'first-call rules, and which section answers which question. Then fetch only the section a task needs, by ' +
-      '`section`; `"' +
+      '`section`; only `"' +
       WHOLE_GUIDE_SECTION +
-      '"` returns the whole guide, as does `read_file` on `' +
+      '"` returns the whole guide. `read_file` on `' +
       AGENT_GUIDE_FILE +
-      "` at the KB root (after the knowledge base's own " +
+      "` at the KB root answers with the same start section (after the knowledge base's own " +
       AGENT_GUIDE_FILE +
       ` when it has one). Returns \`{ guide }\` as markdown. Sections: ${sectionList}.`;
     // The description stays under the cap WHATEVER a distribution adds, in

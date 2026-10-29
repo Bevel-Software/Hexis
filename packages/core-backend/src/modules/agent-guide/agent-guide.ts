@@ -235,7 +235,11 @@ export type AgentGuideSectionsReader = () => Promise<RenderedGuideSection[]>;
  * with its title. The whole guide is these joined (see
  * {@link composeAgentGuide}); `get_agent_guide` also serves one at a time.
  *
- * A hook may append, replace and drop sections, with ONE exception: the
+ * A hook may append, replace and drop sections. It replaces one by returning
+ * its own under the same id, beside core's or in its place: of two sections
+ * under one id the LAST is served, where the FIRST stood, so a distribution
+ * overrides core's `start-here` or `html-views` by adding its own and the
+ * guide keeps its order (see {@link oneSectionPerId}). ONE exception: the
  * shared file rules ({@link WORKING_WITH_FILES_SECTION_ID}) must come back
  * WITH TEXT IN THEM, as core's or as the hook's own replacement. A client
  * that drops the handshake instructions has the guide as the only place to
@@ -253,7 +257,7 @@ export async function agentGuideSections(
 ): Promise<RenderedGuideSection[]> {
   const resolved = resolveKbLayout(layout);
   const core = await coreAgentGuideSections(resolved);
-  const sections = withRoutes(hook ? await hook(core, resolved) : core);
+  const sections = withRoutes(oneSectionPerId(hook ? await hook(core, resolved) : core));
   const kbDirName = context.kbDirName?.trim() || DEFAULT_KB_DIR_NAME;
   const defaultBranch = context.defaultBranch?.trim() || UNCONFIGURED_DEFAULT_BRANCH;
   const rendered = sections.map((section) => {
@@ -269,8 +273,9 @@ export async function agentGuideSections(
     ).trim();
     return { id: section.id, title: titleOf(body, section.id), body };
   });
-  // Judged over EVERY section under the id — a hook may return the id twice
-  // — on what survives the empty-body filter below: one with text is enough.
+  // One section per id by now (`oneSectionPerId`), so a hook's own version
+  // of the rules is what is judged, on what survives the empty-body filter
+  // below.
   const rules = rendered.filter((section) => section.id === WORKING_WITH_FILES_SECTION_ID);
   if (!rules.some((section) => section.body.length > 0)) {
     throw new Error(
@@ -279,6 +284,29 @@ export async function agentGuideSections(
     );
   }
   return rendered.filter((section) => section.body.length > 0);
+}
+
+/**
+ * One section per id. A hook that returns an id twice (its own version of a
+ * core section, added beside core's) means the later one: it is served in
+ * the earlier one's place, so a distribution overrides a section by adding
+ * its own under the same id, and the guide keeps core's order. Without this
+ * the whole guide carried both and `get_agent_guide` served the first, which
+ * was always core's.
+ */
+function oneSectionPerId(sections: readonly AgentGuideSection[]): readonly AgentGuideSection[] {
+  const at = new Map<string, number>();
+  const out: AgentGuideSection[] = [];
+  for (const section of sections) {
+    const index = at.get(section.id);
+    if (index === undefined) {
+      at.set(section.id, out.length);
+      out.push(section);
+    } else {
+      out[index] = section;
+    }
+  }
+  return out;
 }
 
 /**

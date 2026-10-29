@@ -58,7 +58,7 @@ const TASKS: Task[] = [
     facts: [
       ['where a skill lives', /A skill is a folder holding a `SKILL\.md`/],
       ['quote YAML values', /Quote a value that contains `: `/],
-      ['a draft shows in Knowledge', /choose the draft in the branch switcher and it shows in Knowledge/],
+      ['a draft is seen through its change request', /its change request, once you open one, shows every changed file/],
       ['the catalog shows only merged skills', /A skill on a draft is not live.*pass the draft: `list_skills/],
       ['tools likewise', /Skills and tools go live only once they are on `main`/],
     ],

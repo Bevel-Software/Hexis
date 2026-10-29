@@ -156,6 +156,30 @@ describe('the guide is composed from the platform\'s sections', () => {
     expect(core).not.toContain('graph-rules');
   });
 
+  it('serves a distribution\'s own version of a core section in core\'s place, when the hook adds it under the same id', async () => {
+    const hook = (sections: readonly AgentGuideSection[]) => [
+      ...sections,
+      // The enterprise way: its own sections appended, two of them under core ids.
+      { id: 'html-views', body: '## Pages, our way\n\nOurs.\n' },
+      { id: 'start-here', body: '## Start here\n\nOurs first.\n\n| Question | Section |\n|---|---|\n| Pages? | `html-views` |\n' },
+      { id: 'graph', body: '## Graph\n\nNodes.\n', asks: 'How is the graph written?' },
+    ];
+    const sections = await agentGuideSections(DEFAULT_KB_LAYOUT, hook);
+    const core = await agentGuideSections(DEFAULT_KB_LAYOUT);
+    // One section per id, each where core's stood, the hook's text in it.
+    expect(sections.map((s) => s.id)).toEqual([...core.map((s) => s.id), 'graph']);
+    expect(sections.find((s) => s.id === 'html-views')!.body).toBe('## Pages, our way\n\nOurs.');
+    const start = sections.find((s) => s.id === 'start-here')!.body;
+    expect(start.startsWith('## Start here\n\nOurs first.')).toBe(true);
+    // The overriding start section is the one routed to: a row for the added section lands in ITS table.
+    expect(start).toContain('| How is the graph written? | `graph` |');
+    expect(start).not.toContain('`for-git-users`');
+    // The whole guide carries the override once, and never core's text under that id.
+    const guide = joinGuideSections(sections);
+    expect(guide.match(/^## Pages, our way$/gm)).toHaveLength(1);
+    expect(guide).not.toContain('## HTML views');
+  });
+
   it('answers a read of AGENTS.md with the start section and every section by id, not the whole guide', async () => {
     const sections = await agentGuideSections(DEFAULT_KB_LAYOUT, undefined, { defaultBranch: 'main' });
     const text = guideStartText(sections);
