@@ -462,16 +462,17 @@ describe('SearchPalette: commands', () => {
     expect(groupRows('Pages')).toContain('OnboardingKnowledge');
   });
 
-  it('keeps admin-only commands from members', async () => {
+  it('keeps admin-only commands from members, and offers them Invite people', async () => {
     const user = userEvent.setup();
     renderPalette({ admin: false });
     await user.click(trigger());
     expect(groupRows('Actions')).toEqual([
       'Create new pageC (shortcut C)',
+      'Invite peopleShift I (shortcut Shift I)',
       'Go to Skills & ToolsShift S (shortcut Shift S)',
     ]);
     await user.type(input(), 'invite');
-    expect(group('Actions')).toBeNull();
+    expect(groupRows('Actions')).toEqual(['Invite peopleShift I (shortcut Shift I)']);
     await user.clear(input());
     await user.type(input(), 'app roles');
     expect(group('Actions')).toBeNull();
@@ -901,10 +902,10 @@ describe('SearchPalette: shortcuts', () => {
     expect(location()).toBe('/workspace/main');
   });
 
-  it('lets the key through where its command is not on offer: ⇧I for someone who is not an admin', () => {
+  it('⇧I opens the Invite dialog for someone who is not an admin too', () => {
     renderPalette({ admin: false });
-    expect(shift('i')).toBe(true);
-    expect(inviteOpen).not.toHaveBeenCalled();
+    expect(shift('i')).toBe(false);
+    expect(inviteOpen).toHaveBeenCalledTimes(1);
   });
 
   // A distribution's command gets a working key for the `shortcut` it set,

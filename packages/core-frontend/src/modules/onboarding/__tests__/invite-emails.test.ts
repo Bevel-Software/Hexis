@@ -1,247 +1,141 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { isInvited, sendInvites, wasEmailed } from '../invite-emails';
+import type { InvitationRequest, InvitationResult } from '@bevel-software/platform-shared';
+import { gotPassword, isInvited, sendInvites, wasEmailed } from '../invite-emails';
 
 /** Every invite promotion is sent `ifActive`: the server refuses a switched-off account at the write. */
 const ACTIVE = { ifActive: true };
 
 /**
- * `sendInvites` with and without a starting password: who gets it, who keeps
- * their own, who is left alone, and that a send with a password never writes
- * blind when the account list cannot be read (the server's account write
- * replaces a stored password).
+ * `sendInvites` over `POST /api/invitations`: one request per address, in
+ * order; each answer reshaped into the row the dialog shows; an admin's
+ * Admin invite promoted through the roles route afterwards.
  */
 
-const PW = 'welcome-to-acme';
-/** How a starting password is sent: the server never writes it over one of the account's own. */
-const KEEP = { keepExistingPassword: true };
+const PW = 'Gen3ratedPassw0rd';
 
-function makeApi(accounts: { email: string; hasPassword?: boolean; isEnvAdmin?: boolean; deactivatedAt?: string | null }[] | Error) {
+/** Addresses that already have an account, as the server would answer them. */
+const EXISTING = new Set(['old@acme.com', 'boss@acme.com', 'off@acme.com']);
+
+function makeApi() {
   return {
-    listAccounts: vi.fn(async () => {
-      if (accounts instanceof Error) throw accounts;
-      return accounts;
-    }),
-    createAccount: vi.fn<
-      (
-        email: string,
-        name: string,
-        password?: string,
-        options?: { keepExistingPassword?: boolean },
-      ) => Promise<{ passwordSet?: boolean; deactivated?: boolean; notified?: string[] } | void>
-    >(async () => ({ passwordSet: true })),
-    addMember: vi.fn(async () => []),
+    sendInvitation: vi.fn<(request: InvitationRequest) => Promise<InvitationResult>>(async (request) =>
+      EXISTING.has(request.email)
+        ? { status: 'existing' }
+        : {
+            status: 'created',
+            account: { id: `id-${request.email}`, email: request.email, name: request.email.split('@')[0]! },
+            ...(request.startingPassword ? { startingPassword: PW } : {}),
+            notified: [],
+          },
+    ),
+    addMember: vi.fn<(canonical: string, email: string, options?: { ifActive?: boolean }) => Promise<unknown>>(
+      async () => [],
+    ),
     fetchRoles: vi.fn(async () => [{ canonical: 'admin', members: ['boss@acme.com'] }]),
   };
 }
 
 let api: ReturnType<typeof makeApi>;
 beforeEach(() => {
-  api = makeApi([
-    { email: 'nopw@acme.com', hasPassword: false },
-    { email: 'own@acme.com', hasPassword: true },
-    { email: 'env@acme.com', hasPassword: false, isEnvAdmin: true },
-    { email: 'off@acme.com', hasPassword: false, deactivatedAt: '2026-09-01T00:00:00Z' },
-  ]);
+  api = makeApi();
 });
 
-describe('sendInvites with a starting password', () => {
-  it('creates new accounts with it and completes an existing one that has none', async () => {
-    const result = await sendInvites(['new@acme.com', 'nopw@acme.com'], 'member', api, { password: PW });
-    expect(api.createAccount.mock.calls).toEqual([
-      ['new@acme.com', '', PW, KEEP],
-      ['nopw@acme.com', '', PW, KEEP],
-    ]);
-    expect(result).toEqual({
-      status: 'sent',
-      outcomes: [
-        { email: 'new@acme.com', status: 'created', role: 'member', passwordSet: true },
-        { email: 'nopw@acme.com', status: 'existing', passwordSet: true },
-      ],
-    });
-  });
-
-  it('never writes an account with its own password, the deployment admin, or a switched-off one', async () => {
-    const result = await sendInvites(['own@acme.com', 'env@acme.com', 'off@acme.com'], 'member', api, { password: PW });
-    expect(api.createAccount).not.toHaveBeenCalled();
-    expect(result).toEqual({
-      status: 'sent',
-      outcomes: [
-        { email: 'own@acme.com', status: 'existing', hasOwnPassword: true },
-        { email: 'env@acme.com', status: 'existing', hasOwnPassword: true },
-        { email: 'off@acme.com', status: 'existing', deactivated: true },
-      ],
-    });
-  });
-
-  it('still makes Admin invites admins, after the password', async () => {
-    await sendInvites(['new@acme.com', 'nopw@acme.com'], 'admin', api, { password: PW });
-    expect(api.createAccount.mock.calls.map((c) => c[2])).toEqual([PW, PW]);
-    expect(api.addMember.mock.calls).toEqual([
-      ['admin', 'new@acme.com', ACTIVE],
-      ['admin', 'nopw@acme.com', ACTIVE],
+describe('sendInvites', () => {
+  it('sends one invitation per address, in order, with the role and the password flag', async () => {
+    await sendInvites(['a@acme.com', 'b@acme.com'], 'member', api, { startingPassword: true });
+    expect(api.sendInvitation.mock.calls).toEqual([
+      [{ email: 'a@acme.com', role: 'member', startingPassword: true }],
+      [{ email: 'b@acme.com', role: 'member', startingPassword: true }],
     ]);
   });
 
-  it('leaves an existing account as it was when setting the password fails, with the reason', async () => {
-    api.createAccount.mockRejectedValueOnce(new Error('Password too common'));
-    const result = await sendInvites(['nopw@acme.com'], 'admin', api, { password: PW });
-    expect(result).toEqual({
-      status: 'sent',
-      outcomes: [{ email: 'nopw@acme.com', status: 'existing', passwordError: 'Password too common' }],
-    });
-    expect(api.addMember).not.toHaveBeenCalled();
-  });
-
-  it('sends nothing at all when the account list cannot be read', async () => {
-    api = makeApi(new Error('down'));
-    const result = await sendInvites(['new@acme.com'], 'admin', api, { password: PW });
-    expect(result).toEqual({ status: 'accounts-unreadable' });
-    expect(api.createAccount).not.toHaveBeenCalled();
+  it('puts the generated password on the created row and nothing on an existing one', async () => {
+    const outcomes = await sendInvites(['new@acme.com', 'old@acme.com'], 'member', api, { startingPassword: true });
+    expect(outcomes).toEqual([
+      { email: 'new@acme.com', status: 'created', role: 'member', startingPassword: PW },
+      { email: 'old@acme.com', status: 'existing' },
+    ]);
+    expect(outcomes.map(gotPassword)).toEqual([true, false]);
     expect(api.addMember).not.toHaveBeenCalled();
     expect(api.fetchRoles).not.toHaveBeenCalled();
   });
 
-  it('keeps a password the account set after the list was read: the server refused the write', async () => {
-    api.createAccount.mockResolvedValue({ passwordSet: false });
-    const result = await sendInvites(['nopw@acme.com', 'new@acme.com'], 'member', api, { password: PW });
-    expect(api.createAccount.mock.calls).toEqual([
-      ['nopw@acme.com', '', PW, KEEP],
-      ['new@acme.com', '', PW, KEEP],
+  it('without a password flag sends none, and the server decides', async () => {
+    const outcomes = await sendInvites(['new@acme.com'], 'member', api);
+    expect(api.sendInvitation).toHaveBeenCalledWith({ email: 'new@acme.com', role: 'member' });
+    expect(outcomes).toEqual([{ email: 'new@acme.com', status: 'created', role: 'member' }]);
+  });
+
+  it("an admin's Admin invite promotes new and existing accounts through the roles route, ifActive", async () => {
+    const outcomes = await sendInvites(['new@acme.com', 'old@acme.com', 'boss@acme.com'], 'admin', api);
+    expect(api.addMember.mock.calls).toEqual([
+      ['admin', 'new@acme.com', ACTIVE],
+      ['admin', 'old@acme.com', ACTIVE],
     ]);
-    expect(result).toEqual({
-      status: 'sent',
-      outcomes: [
-        { email: 'nopw@acme.com', status: 'existing', hasOwnPassword: true },
-        // Not on the list, but there with a password of its own by the time of the write.
-        { email: 'new@acme.com', status: 'existing', hasOwnPassword: true },
-      ],
+    expect(outcomes).toEqual([
+      { email: 'new@acme.com', status: 'created', role: 'admin' },
+      { email: 'old@acme.com', status: 'existing', promoted: true },
+      { email: 'boss@acme.com', status: 'existing', alreadyAdmin: true },
+    ]);
+  });
+
+  it('reports an existing account the promotion found switched off as switched off, not invited', async () => {
+    api.addMember.mockRejectedValueOnce(Object.assign(new Error('switched off'), { kind: 'deactivated' }));
+    const [outcome] = await sendInvites(['off@acme.com'], 'admin', api);
+    expect(outcome).toEqual({ email: 'off@acme.com', status: 'existing', deactivated: true });
+    expect(isInvited(outcome!)).toBe(false);
+  });
+
+  it('keeps a new account as Member, with the reason, when its promotion fails', async () => {
+    api.addMember.mockRejectedValueOnce(new Error('roles.yaml is locked'));
+    const [outcome] = await sendInvites(['new@acme.com'], 'admin', api, { startingPassword: true });
+    expect(outcome).toEqual({
+      email: 'new@acme.com',
+      status: 'created',
+      role: 'member',
+      roleError: 'roles.yaml is locked',
+      startingPassword: PW,
     });
   });
 
-  it('reports an account switched off after the list was read as switched off, not invited', async () => {
-    api.createAccount.mockResolvedValue({ passwordSet: false, deactivated: true });
-    const result = await sendInvites(['nopw@acme.com', 'new@acme.com'], 'member', api, { password: PW });
-    expect(result).toEqual({
-      status: 'sent',
-      outcomes: [
-        { email: 'nopw@acme.com', status: 'existing', deactivated: true },
-        { email: 'new@acme.com', status: 'existing', deactivated: true },
-      ],
-    });
-    if (result.status !== 'sent') throw new Error('not sent');
-    expect(result.outcomes.filter((o) => isInvited(o, true))).toEqual([]);
-  });
-
-  it('does not make a switched-off account an Admin, listed so or switched off since the read', async () => {
-    // Listed as switched off: no password write and no promotion.
-    const listed = await sendInvites(['off@acme.com'], 'admin', api, { password: PW });
-    expect(listed).toEqual({ status: 'sent', outcomes: [{ email: 'off@acme.com', status: 'existing', deactivated: true }] });
-    // Switched off between the read and the write: the server left it, and so does the promotion.
-    api.createAccount.mockResolvedValue({ passwordSet: false, deactivated: true });
-    const since = await sendInvites(['nopw@acme.com', 'new@acme.com'], 'admin', api, { password: PW });
-    expect(since).toEqual({
-      status: 'sent',
-      outcomes: [
-        { email: 'nopw@acme.com', status: 'existing', deactivated: true },
-        { email: 'new@acme.com', status: 'existing', deactivated: true },
-      ],
-    });
-    expect(api.addMember).not.toHaveBeenCalled();
-  });
-
-  it('still promotes an account that got its own password since the read', async () => {
-    api.createAccount.mockResolvedValue({ passwordSet: false });
-    await sendInvites(['new@acme.com'], 'admin', api, { password: PW });
-    expect(api.addMember.mock.calls).toEqual([['admin', 'new@acme.com', ACTIVE]]);
-  });
-
-  it('reports an account switched off between the read and the promotion as switched off, not an admin', async () => {
-    // The list says switched on and it has its own password, so nothing is
-    // written but the promotion — which the server refuses at the write.
-    api.addMember.mockRejectedValueOnce(Object.assign(new Error('This account is switched off'), { kind: 'deactivated' }));
-    const result = await sendInvites(['own@acme.com'], 'admin', api, { password: PW });
-    expect(api.addMember.mock.calls).toEqual([['admin', 'own@acme.com', ACTIVE]]);
-    expect(result).toEqual({
-      status: 'sent',
-      outcomes: [{ email: 'own@acme.com', status: 'existing', hasOwnPassword: true, deactivated: true }],
-    });
-    if (result.status !== 'sent') throw new Error('not sent');
-    expect(result.outcomes.filter((o) => isInvited(o, true))).toEqual([]);
-  });
-
-  it('carries the password in no outcome', async () => {
-    const result = await sendInvites(['new@acme.com', 'nopw@acme.com', 'own@acme.com'], 'member', api, {
-      password: PW,
-    });
-    expect(JSON.stringify(result)).not.toContain(PW);
-  });
-});
-
-describe('sendInvites without a password', () => {
-  it('gives no account one', async () => {
-    await sendInvites(['new@acme.com', 'nopw@acme.com'], 'member', api);
-    expect(api.createAccount.mock.calls).toEqual([['new@acme.com', '']]);
-  });
-
-  it('treats every address as new when the list cannot be read, as before', async () => {
-    api = makeApi(new Error('down'));
-    const result = await sendInvites(['new@acme.com'], 'member', api);
-    expect(api.createAccount).toHaveBeenCalledWith('new@acme.com', '');
-    expect(result).toEqual({ status: 'sent', outcomes: [{ email: 'new@acme.com', status: 'created', role: 'member' }] });
-  });
-  it('leaves a switched-off account unchanged on an Admin invite: no promotion', async () => {
-    const result = await sendInvites(['off@acme.com'], 'admin', api);
-    expect(api.addMember).not.toHaveBeenCalled();
-    expect(result).toEqual({ status: 'sent', outcomes: [{ email: 'off@acme.com', status: 'existing', deactivated: true }] });
+  it('reads an admission refusal as no seat, and any other refusal as an error in its words', async () => {
+    api.sendInvitation
+      .mockRejectedValueOnce(Object.assign(new Error('Your plan is full'), { kind: 'admission' }))
+      .mockRejectedValueOnce(Object.assign(new Error('Only an admin can invite someone as Admin'), { kind: null }));
+    const outcomes = await sendInvites(['a@acme.com', 'b@acme.com', 'c@acme.com'], 'member', api);
+    expect(outcomes).toEqual([
+      { email: 'a@acme.com', status: 'no-seat', message: 'Your plan is full' },
+      { email: 'b@acme.com', status: 'error', message: 'Only an admin can invite someone as Admin' },
+      { email: 'c@acme.com', status: 'created', role: 'member' },
+    ]);
   });
 });
 
 describe('sendInvites carries how the deployment told the person', () => {
   it('a new account the server says was emailed carries `notified`; one nobody told does not', async () => {
-    api.createAccount
-      .mockResolvedValueOnce({ passwordSet: true, notified: ['email'] })
-      .mockResolvedValueOnce({ passwordSet: true, notified: [] });
-    const result = await sendInvites(['one@acme.com', 'two@acme.com'], 'member', api, { password: PW });
-    expect(result).toEqual({
-      status: 'sent',
-      outcomes: [
-        { email: 'one@acme.com', status: 'created', role: 'member', passwordSet: true, notified: ['email'] },
-        { email: 'two@acme.com', status: 'created', role: 'member', passwordSet: true },
-      ],
+    api.sendInvitation.mockResolvedValueOnce({
+      status: 'created',
+      account: { id: '1', email: 'mailed@acme.com', name: 'mailed' },
+      startingPassword: PW,
+      notified: ['email'],
     });
-    expect(wasEmailed(result.status === 'sent' ? result.outcomes[0]! : failedOutcome)).toBe(true);
-    expect(wasEmailed(result.status === 'sent' ? result.outcomes[1]! : failedOutcome)).toBe(false);
-  });
-
-  it('without a password too, and only for a NEW account: an existing one that got a password was not invited', async () => {
-    api.createAccount.mockResolvedValue({ notified: ['email'] });
-    const result = await sendInvites(['new@acme.com'], 'member', api);
-    expect(result).toEqual({
-      status: 'sent',
-      outcomes: [{ email: 'new@acme.com', status: 'created', role: 'member', notified: ['email'] }],
-    });
-    // The server answers `notified` for a new account only; an existing
-    // account's password write never carries it onto the row.
-    api.createAccount.mockResolvedValue({ passwordSet: true, notified: ['email'] });
-    const existing = await sendInvites(['nopw@acme.com'], 'member', api, { password: PW });
-    expect(existing).toEqual({
-      status: 'sent',
-      outcomes: [{ email: 'nopw@acme.com', status: 'existing', passwordSet: true }],
-    });
+    const outcomes = await sendInvites(['mailed@acme.com', 'quiet@acme.com'], 'member', api, { startingPassword: true });
+    expect(outcomes).toEqual([
+      { email: 'mailed@acme.com', status: 'created', role: 'member', startingPassword: PW, notified: ['email'] },
+      { email: 'quiet@acme.com', status: 'created', role: 'member', startingPassword: PW },
+    ]);
+    expect(outcomes.map(wasEmailed)).toEqual([true, false]);
   });
 });
 
-const failedOutcome = { email: 'x@acme.com', status: 'error' as const, message: 'never' };
-
 describe('isInvited', () => {
-  const failed = { email: 'nopw@acme.com', status: 'existing' as const, passwordError: 'Password too common' };
-  it('does not count an account whose password could not be set, without single sign-on', () => {
-    expect(isInvited(failed)).toBe(false);
+  it('counts a new account and an existing one that is on', () => {
+    expect(isInvited({ email: 'a@acme.com', status: 'created', role: 'member' })).toBe(true);
+    expect(isInvited({ email: 'b@acme.com', status: 'existing' })).toBe(true);
   });
-  it('counts it with single sign-on: it can still sign in that way', () => {
-    expect(isInvited(failed, true)).toBe(true);
-  });
-  it('never counts a switched-off account', () => {
-    expect(isInvited({ email: 'off@acme.com', status: 'existing', deactivated: true }, true)).toBe(false);
+  it('never counts a switched-off account, a seat refusal or an error', () => {
+    expect(isInvited({ email: 'off@acme.com', status: 'existing', deactivated: true })).toBe(false);
+    expect(isInvited({ email: 'x@acme.com', status: 'no-seat', message: 'full' })).toBe(false);
+    expect(isInvited({ email: 'x@acme.com', status: 'error', message: 'never' })).toBe(false);
   });
 });

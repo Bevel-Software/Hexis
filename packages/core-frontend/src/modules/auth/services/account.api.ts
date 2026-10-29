@@ -1,3 +1,4 @@
+import type { InvitationRequest, InvitationResult } from '@bevel-software/platform-shared';
 import { authFetch, getToken, setToken } from '../../../lib/api';
 
 /** One row of the admin Accounts list (`GET /api/admin/accounts`). */
@@ -131,6 +132,43 @@ export async function createAccount(
     ...(typeof body.passwordSet === 'boolean' ? { passwordSet: body.passwordSet } : {}),
     ...(body.deactivated === true ? { deactivated: true } : {}),
     ...(notified.length > 0 ? { notified } : {}),
+  };
+}
+
+/**
+ * Invite one address (`POST /api/invitations`), for anyone signed in: a NEW
+ * account, or `{ status: 'existing' }` for an address that has one, which
+ * the server leaves exactly as it was. `startingPassword` asks the server to
+ * generate a password for the new account; the answer carries it this once.
+ *
+ * A refusal throws {@link AccountRequestError}; `kind: 'admission'` means
+ * the deployment's admission rules had no place for the account.
+ */
+export async function sendInvitation(request: InvitationRequest): Promise<InvitationResult> {
+  const res = await authFetch('/api/invitations', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: unknown; kind?: unknown };
+    const message = typeof body.error === 'string' && body.error ? body.error : 'Could not invite them';
+    throw new AccountRequestError(message, res.status, typeof body.kind === 'string' ? body.kind : null);
+  }
+  const body = (await res.json().catch(() => ({}))) as {
+    status?: unknown;
+    account?: Extract<InvitationResult, { status: 'created' }>['account'];
+    startingPassword?: unknown;
+    notified?: unknown;
+  };
+  if (body.status === 'existing') return { status: 'existing' };
+  if (body.status !== 'created' || !body.account) throw new AccountRequestError('Could not invite them', res.status);
+  const notified = Array.isArray(body.notified) ? body.notified.filter((c): c is string => typeof c === 'string') : [];
+  return {
+    status: 'created',
+    account: body.account,
+    ...(typeof body.startingPassword === 'string' && body.startingPassword ? { startingPassword: body.startingPassword } : {}),
+    notified,
   };
 }
 
