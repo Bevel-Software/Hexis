@@ -4263,7 +4263,8 @@ describe('preflight for moves and deletes', () => {
       // The protocol itself, and what a platform folder does to it, are shared.
       const rules = sharedFileRulesSection(testKbContext().layout);
       expect(rules).toContain('`dryRun: true`');
-      expect(rules).toContain('A non-empty folder is deleted, and a move that changes your access runs, only with `confirm: true`');
+      // Anyone's: a move asks when it changes who else may open or edit the file too (`holderChanges`).
+      expect(rules).toContain("A non-empty folder is deleted, and a move that changes anyone's access runs, only with `confirm: true`");
       expect(rules).toContain('platform folder');
       const dry = await call(base, 'delete_folder', { path: KB('Sales/archive'), dryRun: true });
       const unconfirmed = await call(base, 'delete_folder', { path: KB('Sales/archive') });
