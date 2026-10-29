@@ -140,6 +140,15 @@ describe.skipIf(!PG_ADMIN_URL)('invitations on a real Postgres', () => {
         expect(await res.json()).toEqual({ error: 'No seat left', kind: 'admission' });
         expect(canProvision).toHaveBeenCalledWith('new@acme.test', 'invite');
         expect(await app.db.select().from(users)).toEqual([]);
+
+        // A port with no seat left is not asked about an address that
+        // already has an account: that address learns only `existing`.
+        await app.db.insert(users).values({ email: 'old@acme.test', emailBidx: 'old@acme.test', name: 'old' });
+        canProvision.mockClear();
+        const existing = await invite(app.base, { email: 'old@acme.test' });
+        expect(existing.status).toBe(200);
+        expect(await existing.json()).toEqual({ status: 'existing' });
+        expect(canProvision).not.toHaveBeenCalled();
       } finally {
         app.close();
       }

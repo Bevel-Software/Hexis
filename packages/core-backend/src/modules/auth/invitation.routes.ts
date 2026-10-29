@@ -51,7 +51,12 @@ export function createInvitationRoutes(
   adminAccess: IAdminAccessService,
   accountHooks: Pick<IAccountHooks, 'runAccountInvited'>,
   signIn: InvitationSignIn,
-  /** Invitations per inviter per window. Generous: one dialog sends a whole list. */
+  /**
+   * Invitations per inviter per window. Generous: one dialog sends a whole
+   * list. Held in this process, like the sign-in limiters: Hexis runs one
+   * replica (see `core/lifecycle.ts`), and a second one would get a budget
+   * of its own.
+   */
   limiter: FixedWindowRateLimiter = new FixedWindowRateLimiter(200, 15 * 60_000),
 ): express.Router {
   const router = express.Router();
