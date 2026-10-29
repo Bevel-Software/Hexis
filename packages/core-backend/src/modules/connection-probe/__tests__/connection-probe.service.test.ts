@@ -4,8 +4,8 @@ import type {
   IToolManualService,
   ToolHealthCheck,
   ToolProbeTarget,
-} from '../../tool-manuals/tool-manuals.contract.js';
-import type { ISecretsVaultService } from '../../secrets-vault/secrets-vault.contract.js';
+} from '../../tool-manuals/index.js';
+import type { ISecretsVaultService } from '../../secrets-vault/index.js';
 
 /**
  * The three-way verdict is the whole point of this module, and the line that

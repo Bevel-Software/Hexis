@@ -4,8 +4,8 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { AuditLogPage } from '../components/AuditLogPage';
 import { groupByAccount } from '../components/principal-grouping';
-import { AdminContext } from '../../admin/state/admin.context';
-import { AuthContext } from '../../auth/state/auth.context';
+import { AdminContext } from '../../admin';
+import { AuthContext } from '../../auth';
 import {
   listPrincipals,
   listEvents,
