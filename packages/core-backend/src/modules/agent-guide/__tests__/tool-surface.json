@@ -162,6 +162,15 @@
       "body.section"
     ]
   },
+  "get_change_request": {
+    "servedTo": [
+      "MCP",
+      "in-app agent"
+    ],
+    "arguments": [
+      "body.number (required)"
+    ]
+  },
   "get_skill": {
     "servedTo": [
       "MCP",
@@ -194,6 +203,43 @@
       "in-app agent"
     ],
     "arguments": []
+  },
+  "list_change_request_files": {
+    "servedTo": [
+      "MCP",
+      "in-app agent"
+    ],
+    "arguments": [
+      "body.include: patches",
+      "body.number (required)",
+      "body.page",
+      "body.per_page"
+    ]
+  },
+  "list_change_request_reviews": {
+    "servedTo": [
+      "MCP",
+      "in-app agent"
+    ],
+    "arguments": [
+      "body.number (required)",
+      "body.page",
+      "body.per_page"
+    ]
+  },
+  "list_change_requests": {
+    "servedTo": [
+      "MCP",
+      "in-app agent"
+    ],
+    "arguments": [
+      "body.author",
+      "body.base",
+      "body.head",
+      "body.page",
+      "body.per_page",
+      "body.state: open | closed | all"
+    ]
   },
   "list_file_changes": {
     "servedTo": [
@@ -303,6 +349,16 @@
       "body.sourceBranch (required)",
       "body.targetBranch (required)",
       "body.title (required)"
+    ]
+  },
+  "open_page": {
+    "servedTo": [
+      "MCP"
+    ],
+    "arguments": [
+      "body.heading",
+      "body.path (required)",
+      "body.sessionId"
     ]
   },
   "read_file": {
