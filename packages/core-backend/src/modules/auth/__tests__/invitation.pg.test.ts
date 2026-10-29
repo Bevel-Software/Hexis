@@ -16,12 +16,20 @@ import { admitEveryone, type IAccountAdmission } from '../index.js';
  */
 const closers: (() => Promise<void>)[] = [];
 
-async function startApp(opts: { admission?: IAccountAdmission } = {}): Promise<{ base: string; auth: AuthService; db: Database; close(): void }> {
+async function startApp(
+  opts: { admission?: IAccountAdmission; adminEmail?: string } = {},
+): Promise<{ base: string; auth: AuthService; db: Database; close(): void }> {
   const { db, close } = await openMigratedScratchDb('hexis_invite');
   closers.push(close);
   const auth = new AuthService(
     db,
-    { jwtSecret: 'test-jwt-secret', adminEmail: '', adminPassword: '', allowedEmailDomains: [], loginPasswordEnabled: true },
+    {
+      jwtSecret: 'test-jwt-secret',
+      adminEmail: opts.adminEmail ?? '',
+      adminPassword: opts.adminEmail ? 'the-environment-password' : '',
+      allowedEmailDomains: [],
+      loginPasswordEnabled: true,
+    },
     opts.admission ?? admitEveryone,
   );
   const app = express();
@@ -97,6 +105,23 @@ describe.skipIf(!PG_ADMIN_URL)('invitations on a real Postgres', () => {
           expect(await res.json()).toEqual({ status: 'existing' });
         }
         expect(await app.db.select().from(users).orderBy(users.email)).toEqual(before);
+      } finally {
+        app.close();
+      }
+    },
+    PG_TEST_TIMEOUT,
+  );
+
+  it(
+    "never stores a hash for the deployment admin's address: that account signs in with the environment's password",
+    async () => {
+      const app = await startApp({ adminEmail: 'owner@acme.test' });
+      try {
+        const res = await invite(app.base, { email: 'owner@acme.test' });
+        expect(res.status).toBe(201);
+        expect(await res.json()).not.toHaveProperty('startingPassword');
+        const [row] = await app.db.select().from(users).where(eq(users.emailBidx, 'owner@acme.test'));
+        expect(row!.passwordHash).toBeNull();
       } finally {
         app.close();
       }

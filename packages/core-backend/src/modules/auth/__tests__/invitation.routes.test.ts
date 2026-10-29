@@ -157,6 +157,12 @@ describe('POST /api/invitations — the starting password follows how people sig
     expect(createInvitedAccount).toHaveBeenLastCalledWith('b@acme.test', { startingPassword: true });
   });
 
+  it('password sign-in and no single sign-on: one is generated even when the client asks for none', async () => {
+    const base = await start({ admin: false });
+    await invite(base, { email: 'a@acme.test', startingPassword: false });
+    expect(createInvitedAccount).toHaveBeenLastCalledWith('a@acme.test', { startingPassword: true });
+  });
+
   it('a provider that says it is off is no single sign-on', async () => {
     const base = await start({ admin: false, signIn: { providers: [{ ...sso, isEnabled: () => false }] } });
     await invite(base, { email: 'a@acme.test' });

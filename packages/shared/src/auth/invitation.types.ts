@@ -3,10 +3,9 @@ import type { AuthUser } from './types.js';
 /**
  * `POST /api/invitations`: invite one address. Anyone signed in may send it;
  * `role: 'admin'` only an admin. `startingPassword` asks the server to
- * generate a starting password for the new account: refused when password
- * sign-in is off. Left out, the server decides from how the deployment signs
- * people in (password sign-in and no single sign-on: a password; otherwise
- * none).
+ * generate a starting password for the new account where single sign-on is
+ * on too; it is refused when password sign-in is off. Where password sign-in
+ * is the only way in, every new account gets one whatever this says.
  */
 export interface InvitationRequest {
   email: string;

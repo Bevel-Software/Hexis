@@ -182,9 +182,9 @@ export async function sendInvites(
         created ? { email, status: 'created', role: 'admin', ...created } : { email, status: 'existing', promoted: true },
       );
     } catch (err) {
-      if (isSwitchedOff(err)) {
-        // Only an account that was already there can be switched off.
-        outcomes.push(created ? { email, status: 'created', role: 'member', ...created } : { email, status: 'existing', deactivated: true });
+      // Only an account that was already there can be switched off.
+      if (!created && isSwitchedOff(err)) {
+        outcomes.push({ email, status: 'existing', deactivated: true });
         continue;
       }
       const roleError = err instanceof Error ? err.message : 'Could not make them an admin';

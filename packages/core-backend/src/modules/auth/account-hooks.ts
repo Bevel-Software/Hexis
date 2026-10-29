@@ -28,6 +28,26 @@ export interface AccountInvitedEvent {
 }
 
 /**
+ * Who invited, for the event: their account, by name, when it can be read.
+ * The invited account is already made by the time this is asked, so a failed
+ * read falls back to the identity the request carries rather than answering
+ * an error a retry could not make good (the account is not new the second
+ * time).
+ */
+export async function inviterOf(
+  caller: { userId?: string; userEmail?: string },
+  getUserById: (id: string) => Promise<AuthUser | null>,
+): Promise<Pick<AuthUser, 'id' | 'email' | 'name'>> {
+  const requester = { id: caller.userId ?? '', email: caller.userEmail ?? '', name: '' };
+  if (!caller.userId) return requester;
+  const by = await getUserById(caller.userId).catch((err: unknown) => {
+    log.warn('the inviter could not be read; the invite names them by address:', { err });
+    return null;
+  });
+  return by ?? requester;
+}
+
+/**
  * A listener answers how it reached the person — a non-empty channel name,
  * `'email'` say — or null when it did not; the rule is {@link NotifyingListener}'s:
  * awaited, a throw logged and counted as null, never failing the invite.

@@ -1,8 +1,8 @@
 import express from 'express';
-import type { AuthUser, InvitationResult } from '@bevel-software/platform-shared';
+import type { InvitationResult } from '@bevel-software/platform-shared';
 import { logger } from '../../shared/logging.js';
 import type { AuthService } from './auth.service.js';
-import type { IAccountHooks } from './account-hooks.js';
+import { inviterOf, type IAccountHooks } from './account-hooks.js';
 import { AccountAdmissionRefusedError, AccountChangeRefusedError } from './account-admission.js';
 import { offeredProviders, type AuthProviderPlugin } from './auth.routes.js';
 import type { IAdminAccessService } from '../admin/index.js';
@@ -29,8 +29,10 @@ export interface InvitationSignIn {
  *   route makes no role write either way: the Admin role is a `roles.yaml`
  *   membership the dialog adds after, through the roles route.
  * - The starting password is generated here, never typed. With password
- *   sign-in and no single sign-on every new account gets one, or nobody
- *   invited could sign in. With both, only when `startingPassword` is true.
+ *   sign-in and no single sign-on every new account gets one, whatever
+ *   `startingPassword` says, or nobody invited could sign in (the deployment
+ *   admin's and the system accounts' addresses excepted: they never hold a
+ *   stored password). With both, only when `startingPassword` is true.
  *   With password sign-in off none is made, and asking for one is a 400.
  *   It is returned once in the answer and carried on the invited event for
  *   a deployment's mail; never logged.
@@ -107,20 +109,10 @@ export function createInvitationRoutes(
       targetUserId: user.id,
       passwordGenerated: password !== undefined,
     });
-    // The inviter, by name when their account can be read. The account is
-    // made already: a failed read falls back to the identity the request
-    // carries rather than answering an error a retry could not make good.
-    const requester = { id: req.userId ?? '', email: req.userEmail ?? '', name: '' };
-    const by: AuthUser | null = req.userId
-      ? await authService.getUserById(req.userId).catch((err: unknown) => {
-          log.warn('the inviter could not be read; the invite names them by address:', { err });
-          return null;
-        })
-      : null;
     const account = { id: user.id, email: user.email, name: user.name };
     const notified = await accountHooks.runAccountInvited({
       account,
-      invitedBy: by ?? requester,
+      invitedBy: await inviterOf(req, (id) => authService.getUserById(id)),
       passwordSet: password !== undefined,
       ...(password !== undefined ? { startingPassword: password } : {}),
     });
