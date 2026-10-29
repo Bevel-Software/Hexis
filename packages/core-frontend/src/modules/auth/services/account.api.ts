@@ -169,6 +169,7 @@ export async function sendInvitation(request: InvitationRequest): Promise<Invita
     account?: Extract<InvitationResult, { status: 'created' }>['account'];
     startingPassword?: unknown;
     notified?: unknown;
+    singleSignOn?: unknown;
   };
   if (body.status === 'existing') return { status: 'existing' };
   if (body.status !== 'created' || !body.account) throw new AccountRequestError('Could not invite them', res.status);
@@ -177,6 +178,8 @@ export async function sendInvitation(request: InvitationRequest): Promise<Invita
     account: body.account,
     ...(typeof body.startingPassword === 'string' && body.startingPassword ? { startingPassword: body.startingPassword } : {}),
     notified: notifiedChannels(body.notified),
+    // Never assumed: only a server that says so has single sign-on letting them in.
+    singleSignOn: body.singleSignOn === true,
   };
 }
 

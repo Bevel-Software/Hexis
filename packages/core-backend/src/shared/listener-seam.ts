@@ -1,4 +1,6 @@
+import { inspect } from 'node:util';
 import type { ILogger } from './logger.contract.js';
+import { redactSecret } from './redact-secret.js';
 
 /**
  * A listener answers how it reached the people an event concerns — a
@@ -26,10 +28,16 @@ export class ListenerSeam<E> {
    * @param log Where a failed listener is reported.
    * @param failed The line logged for one, said in the seam's own terms
    *   ("an account-invited listener failed; the person was not notified by it:").
+   * @param secretsOf The values in an event that must never reach the log
+   *   (a generated starting password). A listener's error often quotes what
+   *   it was sending (a mailer echoes its payload), so when the event has
+   *   any, the failure is logged as its inspected text with each of them
+   *   scrubbed, never as the raw error.
    */
   constructor(
     private readonly log: ILogger,
     private readonly failed: string,
+    private readonly secretsOf: (event: E) => readonly (string | undefined)[] = () => [],
   ) {}
 
   add(listener: NotifyingListener<E>): void {
@@ -44,7 +52,9 @@ export class ListenerSeam<E> {
         const channel = await listener(event);
         if (channel !== null && channel !== '') notified.push(channel);
       } catch (err) {
-        this.log.error(this.failed, { err });
+        const secrets = this.secretsOf(event).filter((v): v is string => !!v);
+        if (secrets.length === 0) this.log.error(this.failed, { err });
+        else this.log.error(this.failed, { failure: redactSecret(inspect(err, { depth: 4 }), secrets) });
       }
     }
     return notified;

@@ -47,7 +47,7 @@ export interface InvitationSignIn {
  * `POST /api/admin/accounts` stays the admins' account API beside this.
  */
 export function createInvitationRoutes(
-  authService: Pick<AuthService, 'createInvitedAccount' | 'getUserById'>,
+  authService: Pick<AuthService, 'createInvitedAccount' | 'getUserById' | 'isEmailDomainAllowed'>,
   adminAccess: IAdminAccessService,
   accountHooks: Pick<IAccountHooks, 'runAccountInvited'>,
   signIn: InvitationSignIn,
@@ -135,6 +135,9 @@ export function createInvitationRoutes(
       account,
       ...(password !== undefined ? { startingPassword: password } : {}),
       notified,
+      // Single sign-on refuses an address outside the allowed domains, so the
+      // dialog may say "signs in with SSO" only where this is true.
+      singleSignOn: sso && authService.isEmailDomainAllowed(user.email),
     };
     res.status(201).json(answer);
   });

@@ -23,6 +23,8 @@ const GENERATED = 'Gen3ratedPassw0rdXYZ';
 
 const createInvitedAccount = vi.fn<AuthService['createInvitedAccount']>();
 const getUserById = vi.fn<AuthService['getUserById']>(async (id) => ({ id, email: `${id}@acme.test`, name: 'Inviter' }));
+// The deployment's ALLOWED_EMAIL_DOMAINS, as single sign-on reads it: acme.test only.
+const isEmailDomainAllowed = vi.fn<AuthService['isEmailDomainAllowed']>((email) => email.endsWith('@acme.test'));
 const runAccountInvited = vi.fn<(event: AccountInvitedEvent) => Promise<string[]>>(async () => []);
 
 /** Every line logged while a test runs, message and fields. */
@@ -83,7 +85,7 @@ async function start(opts: {
   app.use(
     '/api',
     createInvitationRoutes(
-      { createInvitedAccount, getUserById },
+      { createInvitedAccount, getUserById, isEmailDomainAllowed },
       adminAccess,
       { runAccountInvited },
       { passwordSignIn: true, providers: [], ...opts.signIn },
@@ -116,6 +118,7 @@ describe('POST /api/invitations — who may invite as what', () => {
       account: { id: 'new-1', email: 'new@acme.test', name: 'new' },
       startingPassword: GENERATED,
       notified: [],
+      singleSignOn: false,
     });
     expect(createInvitedAccount).toHaveBeenCalledWith('new@acme.test', { startingPassword: true });
   });
@@ -184,6 +187,13 @@ describe('POST /api/invitations — the starting password follows how people sig
     expect(res.status).toBe(201);
     expect(await res.json()).not.toHaveProperty('startingPassword');
     expect(createInvitedAccount).toHaveBeenLastCalledWith('a@acme.test', { startingPassword: false });
+  });
+
+  it('says single sign-on lets the account in only when the address is in a domain it admits', async () => {
+    const base = await start({ admin: false, signIn: { providers: [sso] } });
+    expect((await (await invite(base, { email: 'in@acme.test' })).json()).singleSignOn).toBe(true);
+    // Outside ALLOWED_EMAIL_DOMAINS: the account is made, but SSO would refuse it.
+    expect((await (await invite(base, { email: 'out@elsewhere.test' })).json()).singleSignOn).toBe(false);
   });
 
   it('refuses a startingPassword that is not a boolean', async () => {

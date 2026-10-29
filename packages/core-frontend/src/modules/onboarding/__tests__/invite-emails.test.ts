@@ -26,6 +26,7 @@ function makeApi() {
             account: { id: `id-${request.email}`, email: request.email, name: request.email.split('@')[0]! },
             ...(request.startingPassword ? { startingPassword: PW } : {}),
             notified: [],
+            singleSignOn: false,
           },
     ),
     addMember: vi.fn<(canonical: string, email: string, options?: { ifActive?: boolean }) => Promise<unknown>>(
@@ -112,12 +113,27 @@ describe('sendInvites', () => {
 });
 
 describe('sendInvites carries how the deployment told the person', () => {
+  it('a new account single sign-on lets in carries `singleSignOn`; one it refuses does not', async () => {
+    api.sendInvitation.mockResolvedValueOnce({
+      status: 'created',
+      account: { id: '1', email: 'in@acme.com', name: 'in' },
+      notified: [],
+      singleSignOn: true,
+    });
+    const outcomes = await sendInvites(['in@acme.com', 'out@elsewhere.com'], 'member', api, { startingPassword: false });
+    expect(outcomes).toEqual([
+      { email: 'in@acme.com', status: 'created', role: 'member', singleSignOn: true },
+      { email: 'out@elsewhere.com', status: 'created', role: 'member' },
+    ]);
+  });
+
   it('a new account the server says was emailed carries `notified`; one nobody told does not', async () => {
     api.sendInvitation.mockResolvedValueOnce({
       status: 'created',
       account: { id: '1', email: 'mailed@acme.com', name: 'mailed' },
       startingPassword: PW,
       notified: ['email'],
+      singleSignOn: false,
     });
     const outcomes = await sendInvites(['mailed@acme.com', 'quiet@acme.com'], 'member', api, { startingPassword: true });
     expect(outcomes).toEqual([

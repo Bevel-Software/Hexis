@@ -73,6 +73,8 @@ export class AccountHooks implements IAccountHooks {
   private readonly invited = new ListenerSeam<AccountInvitedEvent>(
     log,
     'an account-invited listener failed; the person was not notified by it:',
+    // A mailer's error can quote the message it was sending, password and all.
+    (event) => [event.startingPassword],
   );
 
   onAccountInvited(hook: AccountInvitedHook): void {

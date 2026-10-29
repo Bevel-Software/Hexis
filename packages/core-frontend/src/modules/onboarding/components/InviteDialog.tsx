@@ -416,13 +416,18 @@ function outcomeDetail(outcome: InviteOutcome, idp: string): string {
         : outcome.role === 'admin'
           ? 'Admin'
           : 'Member';
+      // Single sign-on is named only where the server said it lets this
+      // address in: it refuses one outside the deployment's allowed domains.
+      const viaIdp = idp && outcome.singleSignOn ? idp : '';
       const how = outcome.startingPassword
-        ? idp
-          ? `signs in with ${idp} or the password below`
+        ? viaIdp
+          ? `signs in with ${viaIdp} or the password below`
           : 'signs in with the password below'
-        : idp
-          ? `signs in with ${idp}`
-          : null;
+        : viaIdp
+          ? `signs in with ${viaIdp}`
+          : idp
+            ? `can’t sign in yet: ${idp} doesn’t accept this address here`
+            : null;
       // The deployment emailed them the invite itself (see `wasEmailed`): the
       // row says so first, since it is what the inviter no longer has to do.
       return [wasEmailed(outcome) ? 'Emailed' : null, as, how].filter(Boolean).join(' · ');
@@ -495,6 +500,9 @@ function InvitedBody({
   // one that was already there is said to exist, not to be able to sign in.
   const created = outcomes.filter((o) => o.status === 'created').length;
   const who = created === invited ? 'They' : 'Everyone with a new account';
+  // New accounts with no password that single sign-on refuses (an address
+  // outside the deployment's allowed domains): nothing lets them in yet.
+  const shutOut = idp ? outcomes.filter((o) => o.status === 'created' && !o.startingPassword && !o.singleSignOn).length : 0;
   const message = inviteMessage(origin, { idp, passwordSet, passwordSignIn: Boolean(methods?.password) });
 
   return (
@@ -504,7 +512,11 @@ function InvitedBody({
           ? 'No accounts were created. The reason is on each row.'
           : created === 0
             ? 'They already have accounts, which were left as they were.'
-            : allEmailed
+            : shutOut === created
+              ? `${created === invited ? 'They' : 'The new accounts'} can’t sign in yet: ${idp} doesn’t accept their addresses here.`
+              : shutOut > 0
+                ? `Not every new account can sign in yet: ${idp} doesn’t accept some addresses here. Each row says which.`
+                : allEmailed
               ? 'They have been emailed the link and how to sign in.'
               : passwordSet
                 ? `${who} can sign in now. Send them the link and their password.`

@@ -45,6 +45,10 @@ function json(status: number, body: unknown): Response {
 
 /** What the sign-in probe answers; a function so a test can fail or hold it. */
 let providers: () => Promise<Response>;
+/** Whether the stand-in deployment offers single sign-on. */
+let ssoOffered: boolean;
+/** Addresses outside the domains its single sign-on admits (`ALLOWED_EMAIL_DOMAINS`). */
+let ssoRefused: Set<string>;
 /** Addresses the stand-in server already has an account for. */
 let existing: Set<string>;
 /** Per-address answers that override the default for one invitation. */
@@ -59,12 +63,14 @@ let invitations: InvitationRequest[];
 let promotions: { email: string; ifActive?: boolean }[];
 
 function answerProviders(methods: LoginProviders) {
+  ssoOffered = methods.sso.length > 0;
   providers = async () => json(200, methods);
 }
 
 beforeEach(() => {
   answerProviders(SSO_AND_PASSWORD);
   existing = new Set();
+  ssoRefused = new Set();
   invitationAnswers = new Map();
   admins = ['juan@bevel.software'];
   notified = [];
@@ -90,6 +96,7 @@ beforeEach(() => {
         account: { id: `id-${request.email}`, email: request.email, name: request.email.split('@')[0] },
         ...(request.startingPassword ? { startingPassword: GENERATED } : {}),
         notified,
+        singleSignOn: ssoOffered && !ssoRefused.has(request.email),
       });
     }
     if (url === '/api/access/roles') return json(200, { roles: [{ canonical: 'admin', members: admins }] });
@@ -371,6 +378,40 @@ describe('InviteDialog: how people sign in here', () => {
     await screen.findByRole('dialog', { name: '1 person is invited' });
     expect(invitations).toEqual([{ email: 'ana@acme.com', role: 'member', startingPassword: false }]);
     expect(screen.queryByRole('button', { name: /^Copy password/ })).not.toBeInTheDocument();
+  });
+
+  it('says single sign-on lets in only the addresses it accepts, and that the others can’t sign in yet', async () => {
+    ssoRefused = new Set(['out@elsewhere.com']);
+    const { input } = await mountDialog();
+    await invite(input, ['ana@acme.com', 'out@elsewhere.com'], 'Invite 2 people');
+    await screen.findByRole('dialog', { name: '2 people are invited' });
+    expect(within(rowOf('ana@acme.com')).getByText('Member · signs in with Duende Demo')).toBeInTheDocument();
+    expect(
+      within(rowOf('out@elsewhere.com')).getByText('Member · can’t sign in yet: Duende Demo doesn’t accept this address here'),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText('Not every new account can sign in yet: Duende Demo doesn’t accept some addresses here. Each row says which.'),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/can sign in now/)).not.toBeInTheDocument();
+  });
+
+  it('claims no single sign-on readiness when it accepts none of the new addresses', async () => {
+    ssoRefused = new Set(['out@elsewhere.com']);
+    const { input } = await mountDialog();
+    await invite(input, ['out@elsewhere.com'], 'Invite 1 person');
+    await screen.findByRole('dialog', { name: '1 person is invited' });
+    expect(screen.getByText('They can’t sign in yet: Duende Demo doesn’t accept their addresses here.')).toBeInTheDocument();
+    expect(screen.queryByText(/can sign in now|signs in with Duende/)).not.toBeInTheDocument();
+  });
+
+  it('a password lets in an address single sign-on refuses: the row names only the password', async () => {
+    ssoRefused = new Set(['out@elsewhere.com']);
+    const { input } = await mountDialog();
+    await userEvent.click(screen.getByLabelText('Also give them a password'));
+    await invite(input, ['out@elsewhere.com'], 'Invite 1 person');
+    await screen.findByRole('dialog', { name: '1 person is invited' });
+    expect(within(rowOf('out@elsewhere.com')).getByText('Member · signs in with the password below')).toBeInTheDocument();
+    expect(screen.getByText(/^They can sign in now\. Send them the link and their password\./)).toBeInTheDocument();
   });
 
   it('names several single sign-on providers', async () => {

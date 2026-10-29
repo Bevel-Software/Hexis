@@ -18,6 +18,10 @@ export interface InvitationRequest {
  * `startingPassword` is the generated password, present only when one was
  * made, and returned this once: it is stored only as a hash. `notified`:
  * how the deployment told the person (`'email'`, say), empty when nobody did.
+ * `singleSignOn`: whether this deployment's single sign-on lets the address
+ * in. False when none is offered, and false when the address is outside the
+ * domains it admits (`ALLOWED_EMAIL_DOMAINS`): such an account can sign in
+ * only with its starting password, or not at all without one.
  *
  * `existing`: the address already has an account, and nothing was written to
  * it. That is all the answer says about it.
@@ -28,5 +32,6 @@ export type InvitationResult =
       account: Pick<AuthUser, 'id' | 'email' | 'name'>;
       startingPassword?: string;
       notified: string[];
+      singleSignOn: boolean;
     }
   | { status: 'existing' };

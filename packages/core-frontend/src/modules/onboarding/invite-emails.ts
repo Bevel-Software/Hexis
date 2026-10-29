@@ -54,6 +54,8 @@ export type InviteOutcome =
    * `notified`: how the deployment told the person of the invite (`'email'`
    * from the cloud's mail, say), as the server's listeners answered; absent
    * when nobody did and the inviter hands over the link themselves.
+   * `singleSignOn`: the deployment's single sign-on lets this address in;
+   * absent when none is offered or it refuses the address's domain.
    */
   | {
       email: string;
@@ -62,6 +64,7 @@ export type InviteOutcome =
       roleError?: string;
       startingPassword?: string;
       notified?: string[];
+      singleSignOn?: boolean;
     }
   /**
    * Already had an account, which the invite left exactly as it was. Invited
@@ -170,6 +173,7 @@ export async function sendInvites(
         ? {
             ...(result.startingPassword ? { startingPassword: result.startingPassword } : {}),
             ...(result.notified.length > 0 ? { notified: result.notified } : {}),
+            ...(result.singleSignOn ? { singleSignOn: true } : {}),
           }
         : null;
     if (role !== 'admin') {
