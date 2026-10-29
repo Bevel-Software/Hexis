@@ -1,5 +1,5 @@
 /**
- * CORE platform tables — the git-backed workspace/workflow, auth, access,
+ * CORE platform tables — the git-backed workspace and version control, auth, access,
  * change requests, locks, the pending-commits queue, connection keys, MCP
  * OAuth, the Secrets Vault, and the embed's Atlassian account links. A
  * core-only deployment migrates and runs on exactly these tables.

@@ -145,7 +145,7 @@ export interface ProcessConfig {
 }
 
 /**
- * Configuration for the CORE platform: the git-backed workspace/workflow,
+ * Configuration for the CORE platform: the git-backed workspace and version control,
  * skills, tools, secrets vault, access control, and the MCP surface. Contains
  * NO LLM, connector, or SSO-provider settings — those live on the enterprise
  * `AppConfig` (config.ts), which extends this class. A core-only deployment

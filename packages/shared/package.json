@@ -1,7 +1,7 @@
 {
   "name": "@bevel-software/platform-shared",
   "version": "0.34.0",
-  "description": "Shared types and pure domain utilities of the Bevel core platform (auth, workspace, git/workflow contracts, branch registry).",
+  "description": "Shared types and pure domain utilities of the Bevel core platform (auth, workspace, git/version-control contracts, branch registry).",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
