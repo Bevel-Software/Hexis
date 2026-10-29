@@ -561,7 +561,7 @@ function toolBridgeRuntime(option: ToolBridgeOption | undefined): string {
 `;
 }
 
-interface BuildSandboxedHtmlOptions {
+export interface BuildSandboxedHtmlOptions {
   /** Display title (rendered in the iframe doc's <title>). */
   title: string;
   /** knowledge-base JS library files, in dependency order. */
