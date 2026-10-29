@@ -502,8 +502,17 @@ function InvitedBody({
   const who = created === invited ? 'They' : 'Everyone with a new account';
   // New accounts with no password that single sign-on refuses (an address
   // outside the deployment's allowed domains): nothing lets them in yet.
-  const shutOut = idp ? outcomes.filter((o) => o.status === 'created' && !o.startingPassword && !o.singleSignOn).length : 0;
-  const message = inviteMessage(origin, { idp, passwordSet, passwordSignIn: Boolean(methods?.password) });
+  const shutOutEmails = idp
+    ? outcomes.filter((o) => o.status === 'created' && !o.startingPassword && !o.singleSignOn).map((o) => o.email)
+    : [];
+  const shutOut = shutOutEmails.length;
+  // The message tells whoever reads it how to sign in, so it is for the
+  // people something lets in: never offered to a shut-out account, and it
+  // names single sign-on only when it lets in someone it goes to.
+  const forwardTo = outcomes.filter((o) => isInvited(o) && !shutOutEmails.includes(o.email));
+  const messageIdp = forwardTo.some((o) => o.status !== 'created' || o.singleSignOn) ? idp : '';
+  const message = inviteMessage(origin, { idp: messageIdp, passwordSet, passwordSignIn: Boolean(methods?.password) });
+  const messageLabel = shutOut > 0 ? `Or send this message to everyone but ${shutOutEmails.join(', ')}` : 'Or send this message';
 
   return (
     <div className="flex flex-col gap-4 py-1">
@@ -572,7 +581,7 @@ function InvitedBody({
             </Banner>
           )}
           <CopyRow label="Where they sign in" text={origin} copyLabel="Copy link" mono />
-          {!allEmailed && <CopyRow label="Or send this message" text={message} copyLabel="Copy message" />}
+          {!allEmailed && forwardTo.length > 0 && <CopyRow label={messageLabel} text={message} copyLabel="Copy message" />}
         </>
       )}
     </div>

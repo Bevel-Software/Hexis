@@ -1,4 +1,3 @@
-import { inspect } from 'node:util';
 import type { ILogger } from './logger.contract.js';
 import { redactSecret } from './redact-secret.js';
 
@@ -31,8 +30,8 @@ export class ListenerSeam<E> {
    * @param secretsOf The values in an event that must never reach the log
    *   (a generated starting password). A listener's error often quotes what
    *   it was sending (a mailer echoes its payload), so when the event has
-   *   any, the failure is logged as its inspected text with each of them
-   *   scrubbed, never as the raw error.
+   *   any, the failure is logged as {@link describeFailure} — selected text
+   *   fields only, each of them scrubbed — never as the raw error.
    */
   constructor(
     private readonly log: ILogger,
@@ -54,9 +53,37 @@ export class ListenerSeam<E> {
       } catch (err) {
         const secrets = this.secretsOf(event).filter((v): v is string => !!v);
         if (secrets.length === 0) this.log.error(this.failed, { err });
-        else this.log.error(this.failed, { failure: redactSecret(inspect(err, { depth: 4 }), secrets) });
+        else this.log.error(this.failed, { failure: redactSecret(describeFailure(err), secrets) });
       }
     }
     return notified;
   }
+}
+
+/** How deep a chain of `cause`s is followed when a failure is described. */
+const MAX_CAUSE_DEPTH = 4;
+
+/**
+ * A thrown value as text for a log line that must be scrubbed: for the error
+ * and each `cause` under it, its stack (or name and message) and a string or
+ * numeric `code` — nothing else. Arbitrary fields are left out on purpose: a
+ * mailer can carry its payload as a Buffer or an encoded body, where the
+ * secret is no longer the literal text the scrub looks for.
+ */
+function describeFailure(err: unknown): string {
+  const lines: string[] = [];
+  let current: unknown = err;
+  for (let depth = 0; depth < MAX_CAUSE_DEPTH && current !== undefined && current !== null; depth++) {
+    const prefix = depth === 0 ? '' : 'caused by: ';
+    if (!(current instanceof Error)) {
+      lines.push(prefix + (typeof current === 'string' ? current : `a thrown ${typeof current}`));
+      break;
+    }
+    const code = (current as { code?: unknown }).code;
+    const codeText = typeof code === 'string' || typeof code === 'number' ? ` [code: ${code}]` : '';
+    const text = typeof current.stack === 'string' ? current.stack : `${current.name}: ${String(current.message)}`;
+    lines.push(prefix + text + codeText);
+    current = current.cause;
+  }
+  return lines.join('\n');
 }

@@ -393,6 +393,8 @@ describe('InviteDialog: how people sign in here', () => {
       screen.getByText('Not every new account can sign in yet: Duende Demo doesn’t accept some addresses here. Each row says which.'),
     ).toBeInTheDocument();
     expect(screen.queryByText(/can sign in now/)).not.toBeInTheDocument();
+    // The message to forward is for the people single sign-on lets in, and says so.
+    expect(screen.getByText('Or send this message to everyone but out@elsewhere.com')).toBeInTheDocument();
   });
 
   it('claims no single sign-on readiness when it accepts none of the new addresses', async () => {
@@ -402,6 +404,9 @@ describe('InviteDialog: how people sign in here', () => {
     await screen.findByRole('dialog', { name: '1 person is invited' });
     expect(screen.getByText('They can’t sign in yet: Duende Demo doesn’t accept their addresses here.')).toBeInTheDocument();
     expect(screen.queryByText(/can sign in now|signs in with Duende/)).not.toBeInTheDocument();
+    // Nobody it could go to: no message telling them to sign in with Duende Demo.
+    expect(screen.queryByRole('button', { name: 'Copy message' })).not.toBeInTheDocument();
+    expect(screen.queryByText(/with Duende Demo/)).not.toBeInTheDocument();
   });
 
   it('a password lets in an address single sign-on refuses: the row names only the password', async () => {

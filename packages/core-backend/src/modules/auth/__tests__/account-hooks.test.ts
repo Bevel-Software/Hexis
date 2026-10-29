@@ -74,6 +74,36 @@ describe('AccountHooks: an account was invited', () => {
     }
   });
 
+  it('a listener error carrying the password in a Buffer or an encoded field never logs it', async () => {
+    const hooks = new AccountHooks();
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const password = 'Kq7mZt3xWp9rHs4v';
+    try {
+      // A mailer keeping its payload as bytes and as base64: the literal scrub cannot see either.
+      const failure = Object.assign(new Error('550 rejected', { cause: Object.assign(new Error('smtp'), { body: Buffer.from(password) }) }), {
+        code: 'EENVELOPE',
+        body: Buffer.from(`Your password is ${password}`),
+        encoded: Buffer.from(password).toString('base64'),
+      });
+      hooks.onAccountInvited(async () => {
+        throw failure;
+      });
+      expect(await hooks.runAccountInvited({ ...EVENT, startingPassword: password })).toEqual([]);
+      expect(error).toHaveBeenCalledTimes(1);
+      const logged = error.mock.calls[0]!.map((arg) => inspect(arg, { depth: 6 })).join(' ');
+      expect(logged).toContain('550 rejected');
+      expect(logged).toContain('EENVELOPE');
+      expect(logged).toContain('caused by: Error: smtp');
+      for (const form of [password, Buffer.from(password).toString('hex'), Buffer.from(password).toString('base64')]) {
+        expect(logged).not.toContain(form);
+      }
+      // Buffer bytes as inspect prints them (`<Buffer 4b 71 ...>`).
+      expect(logged).not.toContain('<Buffer');
+    } finally {
+      error.mockRestore();
+    }
+  });
+
   it('an empty channel name is no channel: it counts as not having notified', async () => {
     const hooks = new AccountHooks();
     hooks.onAccountInvited(async () => '');
