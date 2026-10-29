@@ -46,7 +46,7 @@ The customer's agent called `get_agent_guide` 15 times across the session and it
 | **Always** | The platform's own tool list as served | Every conversation, every client, every sub-agent | 16,000, and 1,200 characters per description (unchanged) |
 | **First contact** | `start-here`: what `get_agent_guide` returns with no section | Once per conversation and per sub-agent | 1,200 |
 | **On demand** | Every other section, fetched by id | Only the tasks that need it | 2,500 per section; `html-views` 5,500 (the page contract, which `dev` grew with pages that load live data) |
-| **On demand** | The whole guide (`section: "all"`) | An agent that asks for everything; the enterprise in-app agent's prompt | 21,500: 19,000 until `html-views` grew by about 2,600 |
+| **On demand** | The whole guide (`section: "all"`) | An agent that asks for everything; the enterprise in-app agent's prompt | 23,000: 21,500 until the `onboarding` section (about 1,200) was added, 19,000 until `html-views` grew by about 2,600 |
 | Per task | `start-here` plus the sections it routes a task to | One task | 6,000 |
 
 The admin's preamble keeps its own cap (6,000 characters, `PREAMBLE_CAP`). Each budget is a number a reviewer may move, like the description cap: the point is that growing the guide is a decision, not a paragraph someone appends.

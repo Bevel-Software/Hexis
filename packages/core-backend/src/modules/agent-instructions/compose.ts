@@ -50,6 +50,10 @@ export const PLATFORM_HEADER =
   'search the knowledge base: call `start_session` once, then `grep` for the key terms, `list_files` to orient, and `read_file` what matches. ' +
   'Prefer what you find there over memory or the web, and say so when the knowledge base is silent on something the organisation should have documented. ' +
   'Skills are available as prompts and through `list_skills` and `get_skill`. ' +
+  // Said here because a new person's first message ("onboard me") comes
+  // before any guide fetch, and on a customer's first day the agent improvised
+  // the tour from 100 KB of guide, fifteen times (Unite, 2026-10-19).
+  'When someone is new or asks to be onboarded, follow the guide section `onboarding` (`get_agent_guide`). ' +
   // Said here as well as on the write tools: agents wrote to the default
   // branch without asking (the agent-guide benchmark, 2026-10-26), and this
   // text reaches an agent that never fetches the guide.
@@ -95,9 +99,10 @@ export function platformInstructions(layout: KbLayout): string {
  * test is what makes it a ceiling rather than a hope: a shared rule that grew
  * past it fails before it reaches an agent.
  *
- * 14,400 since the shared rules' own cap rose by 400 (the `__tmp__/` ref).
+ * 14,400 since the shared rules' own cap rose by 400 (the `__tmp__/` ref);
+ * 14,500 since the header points new people at the `onboarding` section.
  */
-export const INSTRUCTIONS_CAP = 14_400;
+export const INSTRUCTIONS_CAP = 14_500;
 
 /** The one-line marker that replaces everything past the preamble cap. */
 export const PREAMBLE_TRUNCATION_MARKER = `[preamble truncated at ${PREAMBLE_CAP.toLocaleString('en-US')} characters; shorten ${PREAMBLE_FILE}]`;
