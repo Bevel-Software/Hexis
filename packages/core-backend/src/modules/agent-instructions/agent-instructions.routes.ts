@@ -27,10 +27,11 @@ export function createAgentInstructionsRoutes(
   manualAuth: RequestHandler,
   readPreamble: AgentPreambleReader,
   /**
-   * The layout in effect, read per request — the shared file rules name the
-   * guide by the name a deployment saved for it, which the setup save may
-   * change without a restart. Optional so a construction with no layout in
-   * hand gets `AGENTS.md`.
+   * The layout in effect, read per request — the shared file rules spell the
+   * root folders (`Skills/`, the knowledge folder) and the platform files by
+   * the names a deployment saved, which the setup save may change without a
+   * restart. Optional so a construction with no layout in hand gets the
+   * default layout. The guide itself is `AGENTS.md` on every deployment.
    */
   kbLayout?: () => KbLayout,
   /**

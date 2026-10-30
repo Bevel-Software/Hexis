@@ -2402,7 +2402,7 @@ describe('start_session', () => {
     // The default branch's workspace directory, for the tests about the
     // `firstRun` note. Without one the workspace service is a bare stand-in
     // the note's check cannot use, which is what every other test here wants:
-    // the call answers with the id alone.
+    // the call answers with the id and the default branch, never `firstRun`.
     defaultWorkspaceDir?: string,
     // The starter pack the knowledge base was filled from, for the note.
     starterPacks?: FirstRunStarterSource,
@@ -2682,7 +2682,7 @@ describe('start_session', () => {
 
     /**
      * The note is a read: it says what the knowledge folder holds. A caller
-     * who may not read the folder gets the id alone, and a pack page the
+     * who may not read the folder gets the id and the default branch alone, and a pack page the
      * caller may not read is judged as anybody's page, so the note never
      * tells them it is still a placeholder.
      */
@@ -2726,7 +2726,7 @@ describe('start_session', () => {
       expect(res).toEqual({ sessionId: 'thread-xyz', defaultBranch: 'target-company-state' });
     });
 
-    it('never costs the session id: a workspace it cannot read answers with the id alone', async () => {
+    it('never costs the session id: a workspace it cannot read answers with the id and the default branch', async () => {
       await rm(wsDir, { recursive: true, force: true });
 
       const res = await startSession();

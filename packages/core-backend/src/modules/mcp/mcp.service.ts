@@ -109,10 +109,11 @@ export interface McpProxyOptions {
    */
   readAgentPreamble?: AgentPreambleReader;
   /**
-   * The layout in effect, read per request: the shared file rules name the
-   * guide by the name a deployment saved for it, and the setup save applies
-   * a layout without a restart. A GETTER, so nothing snapshots the
-   * pre-setup default. Absent, the rules name `AGENTS.md`.
+   * The layout in effect, read per request: the shared file rules spell the
+   * root folders and platform files by the names a deployment saved, and the
+   * setup save applies a layout without a restart. A GETTER, so nothing
+   * snapshots the pre-setup default. Absent, the rules use the default
+   * layout. The guide is `AGENTS.md` either way.
    */
   kbLayout?: () => KbLayout;
   /**

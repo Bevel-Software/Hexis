@@ -130,7 +130,7 @@ describe('no Hexis tool description is long enough to be cut', () => {
     // purpose, and this assertion is what keeps that a stated fact rather than
     // an oversight: if it ever reaches the catalog, the cap test above measures
     // it like everything else.
-    const { createCallToolChainTool } = await import('../../code-mode/code-mode.tool.js');
+    const { createCallToolChainTool } = await import('../../code-mode/index.js');
     const mastraTool = createCallToolChainTool(unused(), unused(), EXTERNAL_KB_MANUAL_NAME) as unknown as {
       description: string;
     };
