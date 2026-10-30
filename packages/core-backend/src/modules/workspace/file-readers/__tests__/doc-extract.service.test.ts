@@ -152,6 +152,16 @@ describe('DocExtractService — how long a failure is remembered', () => {
     expect(told).toHaveLength(1);
   });
 
+  it('two reads of the same bytes at different paths share one extraction, and each marker names its own path', async () => {
+    const extractor = scriptedExtractor(() => ({ ok: true, summary: '1 page', text: '[page 1]\nshared' }));
+    const service = new DocExtractService(cacheRoot, extractor, { now, onUnreadable });
+    const bytes = Buffer.from('same bytes, two names');
+    const [a, b] = await Promise.all([service.extract('a/deck.pdf', bytes, ORIGIN), service.extract('b/copy.pdf', bytes, ORIGIN)]);
+    expect(extractor.calls).toBe(1);
+    expect(a).toEqual({ ok: true, marker: '[extracted text of a/deck.pdf — 1 page]', text: '[page 1]\nshared' });
+    expect(b).toEqual({ ok: true, marker: '[extracted text of b/copy.pdf — 1 page]', text: '[page 1]\nshared' });
+  });
+
   it('still answers the read when whoever is told throws', async () => {
     const extractor = scriptedExtractor(() => TIMEOUT);
     const service = new DocExtractService(cacheRoot, extractor, {

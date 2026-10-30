@@ -32,7 +32,7 @@ import type { WorkflowHooks } from '../workflow/index.js';
  * takes, so a run's reads and its questions share one conversation.
  */
 export const SESSION_ID_DESCRIPTION =
-  "This conversation's id, so the server can tell one run's calls apart. External agents (direct MCP calls and `call_tool_chain` alike): call the `start_session` tool ONCE at the very start of your work to obtain it, then pass that id here — the same id `ask` takes. The in-process agent runtime supplies this automatically (do not set it yourself).";
+  "This conversation's id: call `start_session` once, at the start of your work, and pass its id here, inside `call_tool_chain` too (and to `ask`, where the deployment offers it). The in-process agent runtime sets it itself.";
 
 /**
  * The `sessionId` input every gated tool declares. The description a MOUNTED

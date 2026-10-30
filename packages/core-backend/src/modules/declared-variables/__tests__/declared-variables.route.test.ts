@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createDeclaredVariableRoutes } from '../declared-variables.routes.js';
 import type { IToolManualService, ToolManualSummary } from '../../tool-manuals/tool-manuals.contract.js';
 import type { ISecretsVaultService } from '../../secrets-vault/secrets-vault.contract.js';
+import { ConnectionScope, type IAgentScopeResolver } from '../../agent-scope/index.js';
 
 /**
  * The one core route that releases secret VALUES. What is worth pinning here is
@@ -46,6 +47,9 @@ async function mount(opts: {
   source?: 'session' | 'external' | 'internal';
   manuals?: ToolManualSummary[];
   secrets?: Record<string, string>;
+  /** The `.agent` file the caller's connection was made as; absent is Everything. */
+  agentPath?: string;
+  agentScope?: Pick<IAgentScopeResolver, 'resolve'>;
 }): Promise<Harness> {
   const userId = opts.userId ?? 'user-1';
   const source = opts.source ?? 'external';
@@ -64,10 +68,18 @@ async function mount(opts: {
       toolManualService,
       secretsVault,
       (req, _res, next) => {
-        if (userId) req.toolAuth = { userId, source, scope: 'write' } as typeof req.toolAuth;
+        if (userId) {
+          req.toolAuth = {
+            userId,
+            source,
+            scope: 'write',
+            ...(opts.agentPath ? { agentPath: opts.agentPath } : {}),
+          } as typeof req.toolAuth;
+        }
         next();
       },
       async () => 'runner@x.eu',
+      opts.agentScope,
     ),
   );
   httpServer = await new Promise<HttpServer>((r) => {
@@ -131,6 +143,37 @@ describe('POST /agent/local-tools/:slug/variables', () => {
     const { base, resolve } = await mount({ manuals: [] });
     expect((await fetch(`${base}/agent/local-tools/git/variables`, { method: 'POST' })).status).toBe(404);
     expect(resolve).not.toHaveBeenCalled();
+  });
+
+  it("releases only the variables of a connector the connection's .agent file loads", async () => {
+    const agent = { path: 'Agents/ops.agent', name: 'Ops' };
+    const loading = (connectors: string[]) => ({
+      resolve: async () => ConnectionScope.narrowed(agent, { skills: [], connectors, platformTools: null }, 'fp'),
+    });
+    // A folder entry over the tool's plugin loads it.
+    const inScope = await mount({
+      manuals: [GIT_TOOL],
+      secrets: { git_GITHUB_TOKEN: 'ghp_secret' },
+      agentPath: agent.path,
+      agentScope: loading(['Plugins/Engineering']),
+    });
+    expect((await fetch(`${inScope.base}/agent/local-tools/git/variables`, { method: 'POST' })).status).toBe(200);
+    await new Promise<void>((r) => httpServer!.close(() => r()));
+
+    // A readable tool the file does not load is as absent as an unreadable one.
+    const outOfScope = await mount({
+      manuals: [GIT_TOOL],
+      secrets: { git_GITHUB_TOKEN: 'ghp_secret' },
+      agentPath: agent.path,
+      agentScope: loading(['Plugins/billing.tool']),
+    });
+    expect((await fetch(`${outOfScope.base}/agent/local-tools/git/variables`, { method: 'POST' })).status).toBe(404);
+    expect(outOfScope.resolve).not.toHaveBeenCalled();
+    await new Promise<void>((r) => httpServer!.close(() => r()));
+
+    // A narrowed connection with no resolver wired loads nothing.
+    const unwired = await mount({ manuals: [GIT_TOOL], agentPath: agent.path });
+    expect((await fetch(`${unwired.base}/agent/local-tools/git/variables`, { method: 'POST' })).status).toBe(404);
   });
 
   it('403s an unauthenticated caller', async () => {

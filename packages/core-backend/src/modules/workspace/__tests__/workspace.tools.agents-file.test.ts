@@ -4,19 +4,17 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { DEFAULT_KB_LAYOUT } from '@bevel-software/platform-shared';
 import { testKbContext } from '../../../__tests__/kb-context.js';
-import { ToolRegistry } from '../../tool-registry/tool-registry.js';
-import { GUIDE_FIRST_SENTENCE } from '../../tool-registry/guide-first.js';
-import { createToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
-import type { ToolAuth } from '../../tool-auth/tool-auth.middleware.js';
-import type { IAccessControl } from '../../access/access-control.interface.js';
+import { GUIDE_FIRST_SENTENCE, ToolRegistry } from '../../tool-registry/index.js';
+import { WorkflowHooks, createToolHandlerFactory } from '../../../__tests__/tool-wiring.js';
+import type { ToolAuth } from '../../tool-auth/index.js';
+import type { IAccessControl } from '../../access/index.js';
 import { DocExtractService } from '../file-readers/doc-extract.service.js';
 import { WorkerDocumentExtractor } from '../file-readers/extract-in-worker.js';
 import { RoutineWritePolicyService } from '../routine-write-policy.js';
 import { SpillStore } from '../spill-store.js';
-import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
 import { ToolDescriptionNotes } from '../../workspace/agent-access.gate.js';
 import { registerWorkspaceTools } from '../workspace.tools.js';
-import { sharedFileRulesSection } from '../../agent-instructions/shared-file-rules.js';
+import { sharedFileRulesSection } from '../../agent-instructions/index.js';
 import { RipgrepPatternMatcher } from '../index.js';
 
 /** The grep matcher this file's harness wires, closed once the file is done. */
@@ -80,10 +78,10 @@ async function listed(registry: ToolRegistry): Promise<Map<string, string>> {
 afterEach(() => kb.applyLayout({ ...DEFAULT_KB_LAYOUT }));
 
 describe('what tells an agent to read the guide first', () => {
-  it('tells an agent to call get_agent_guide first, and that AGENTS.md answers with the same guide after the organisation\'s own', () => {
+  it('tells an agent to call get_agent_guide first, and that AGENTS.md answers with that start after the organisation\'s own', () => {
     const rules = sharedFileRulesSection(kb.layout);
-    expect(rules).toContain("call `get_agent_guide` and read the platform's guide");
-    expect(rules).toContain('read_file on `AGENTS.md` at the KB root answers with the same guide');
+    expect(rules).toContain("call `get_agent_guide`: it answers the guide's start");
+    expect(rules).toContain('read_file on `AGENTS.md` at the KB root answers with that start');
     expect(rules).toContain("after the organisation's own conventions file of that name");
     expect(rules).toContain('`CLAUDE.md`');
     // One name on every deployment: the rule names no other.

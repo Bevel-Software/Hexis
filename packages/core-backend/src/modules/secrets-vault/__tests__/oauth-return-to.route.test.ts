@@ -2,11 +2,11 @@ import type { Server as HttpServer } from 'node:http';
 import { createHmac } from 'node:crypto';
 import express from 'express';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import {
-  createSecretsVaultRoutes,
-  createSecretsVaultPublicRoutes,
-  isSafeReturnPath,
-} from '../secrets-vault.routes.js';
+import { createSecretsVaultRoutes, createSecretsVaultPublicRoutes, SecretOAuthError } from '../index.js';
+// The one deliberate white-box reach: the open-redirect predicate is pinned as
+// a unit table as well as end-to-end (see below), and it is on no entry because
+// nothing outside the routes should decide what a safe return path is.
+import { isSafeReturnPath } from '../secrets-vault.routes.js';
 
 /**
  * OAUTH `returnTo`: a sign-in started from a page other than /connect must land
@@ -54,6 +54,11 @@ const MANUALS = [
 
 const toolManualService = {
   listAccessible: async () => MANUALS,
+  // The sign-in start reads the declaration from the file; here it reads as the catalog does.
+  liveDeclaration: async (_who: string, slug: string, varName: string) => {
+    const manual = MANUALS.find((m) => m.slug === slug);
+    return manual ? { manual, variable: manual.variables.find((v) => v.name === varName) } : null;
+  },
 } as unknown as Parameters<typeof createSecretsVaultRoutes>[0]['toolManualService'];
 
 const accessControl = {
@@ -254,7 +259,35 @@ describe('GET /api/secrets/oauth/callback — where the browser lands', () => {
     const state = signState({ u: 'u1', i: 'secret-1', n: 'nonce', r: RETURN_TO });
     const location = await callback(base, state);
     expect(location.startsWith(`${FRONTEND}${RETURN_TO}#error=`)).toBe(true);
-    // The user-facing message is generic — provider detail stays in the log.
+    // A failure that is not the provider's word stays generic: only the
+    // vault's own error carries a reason that was scrubbed for the page.
+    expect(decodeURIComponent(location.split('#error=')[1])).toBe(
+      'Authorization failed. Check the provider configuration and try again.',
+    );
+  });
+
+  it("carries the provider's error code and Hexis's sentence to the page when the exchange was refused", async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const refusal =
+      'Token endpoint returned HTTP 400 (invalid_client). The client id or client secret this sign-in uses is not accepted by the provider. The tool owner should check the declared client id and set the client secret again.';
+    completeOAuth.mockImplementation(async () => {
+      throw new SecretOAuthError(refusal, 400);
+    });
+    const base = await baseUrl();
+    const state = signState({ u: 'u1', i: 'secret-1', n: 'nonce', r: RETURN_TO });
+    const location = await callback(base, state);
+    expect(decodeURIComponent(location.split('#error=')[1])).toBe(`Authorization failed. ${refusal}`);
+  });
+
+  it("keeps the generic message for the vault's own TRANSPORT errors, which quote what fetch said", async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    completeOAuth.mockImplementation(async () => {
+      // No provider status: not a provider's word, and never scrubbed.
+      throw new SecretOAuthError('Token endpoint request failed: fetch failed https://user:pw@provider.example/token');
+    });
+    const base = await baseUrl();
+    const state = signState({ u: 'u1', i: 'secret-1', n: 'nonce', r: RETURN_TO });
+    const location = await callback(base, state);
     expect(decodeURIComponent(location.split('#error=')[1])).toBe(
       'Authorization failed. Check the provider configuration and try again.',
     );

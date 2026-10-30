@@ -127,7 +127,7 @@ describe('SECURITY: Admin-role removal takes effect on the next request', () => 
     // cache and could pass this test while production still served stale
     // verdicts, which is the failure mode worth guarding.
     access = new AccessControlService(ws, KB, new NodeFs(), [OWNER]);
-    rolesAdmin = new RolesAdminService(ws, stubWorkflow(), access, KB, () => DEFAULT_BRANCH, undefined, [
+    rolesAdmin = new RolesAdminService(ws, stubWorkflow(), access, new NodeFs(), KB, () => DEFAULT_BRANCH, undefined, [
       OWNER,
     ]);
     const adminAccess = new AdminAccessService(access, ws, DEFAULT_BRANCH, [OWNER]);

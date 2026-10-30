@@ -360,6 +360,56 @@ describe('AccessControlService.previewAccessAfterRelocation', () => {
     expect(await verbsAt(service(), 'Legal/note.md')).toEqual(after);
   });
 
+  /**
+   * A copy whose source is no repository path — a file staged in the
+   * workspace's `tmp/` folder — carries rules in by its text alone
+   * (`sourceContent`), read exactly as a repository file's would be. Checked,
+   * as every other case here, against the gates once the bytes really landed.
+   */
+  describe('a source outside the repository, previewed by its content', () => {
+    const REF = '__tmp__/staged.md';
+
+    it('its own frontmatter governs the file it lands as', async () => {
+      await write({ ...BASE, 'Work/access.md': rules(`write:\n  - Mover <${MOVER}>\n`) });
+      const staged = rules(`read:\n  - deny everyone\n  - Other <other@x.io>\n`) + '# Staged\n';
+
+      const svc = service();
+      expect(await verbsAt(svc, 'Work/staged.md')).toMatchObject({ read: true, write: true });
+      const after = await svc.previewAccessAfterRelocation(
+        workspaceId, MOVER, REF, 'Work/staged.md', { sourceRemains: true, sourceContent: staged },
+      );
+      // The staged file shuts the caller out of what it becomes.
+      expect(after.read).toBe(false);
+
+      await write({ 'Work/staged.md': staged });
+      expect(await verbsAt(service(), 'Work/staged.md')).toEqual(after);
+    });
+
+    it('landing as an access.md, it gives the destination folder its rules', async () => {
+      await write({ ...BASE, 'Legal/note.md': '# Note\n' });
+      const staged = rules(`write:\n  - Mover <${MOVER}>\nowner:\n  - Mover <${MOVER}>\n`);
+
+      const svc = service();
+      expect(await verbsAt(svc, 'Legal/access.md')).toMatchObject({ write: false, owner: false });
+      const after = await svc.previewAccessAfterRelocation(
+        workspaceId, MOVER, REF, 'Legal/access.md', { sourceRemains: true, sourceContent: staged },
+      );
+      expect(after).toMatchObject({ write: true, owner: true });
+
+      await write({ 'Legal/access.md': staged });
+      expect(await verbsAt(service(), 'Legal/access.md')).toEqual(after);
+    });
+
+    it('nothing is read at the ref: a repository path spelled like it is not the source', async () => {
+      await write({ ...BASE, [REF]: rules(`read:\n  - deny everyone\n`) + '# Not the staged file\n' });
+
+      const after = await service().previewAccessAfterRelocation(
+        workspaceId, MOVER, REF, 'Work/staged.md', { sourceRemains: true, sourceContent: '# Staged\n' },
+      );
+      expect(after).toEqual(await verbsAt(service(), 'Work/staged.md'));
+    });
+  });
+
   it('answers the caller\'s own verbs and nothing else, and writes nothing', async () => {
     await write({
       ...BASE,

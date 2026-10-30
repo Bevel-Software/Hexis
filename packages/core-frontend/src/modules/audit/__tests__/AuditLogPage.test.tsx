@@ -4,8 +4,8 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { AuditLogPage } from '../components/AuditLogPage';
 import { groupByAccount } from '../components/principal-grouping';
-import { AdminContext } from '../../admin/state/admin.context';
-import { AuthContext } from '../../auth/state/auth.context';
+import { AdminContext } from '../../admin';
+import { AuthContext } from '../../auth';
 import {
   listPrincipals,
   listEvents,
@@ -175,6 +175,20 @@ describe('AuditLogPage', () => {
     expect(within(bob).getByText('Old script')).toBeInTheDocument();
     expect(within(bob).getByText('Revoked by an admin')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Revoke key for Old script/ })).not.toBeInTheDocument();
+  });
+
+  it('shows what each connection and key connects as: Everything, or the agent file it was made as', async () => {
+    vi.mocked(listPrincipals).mockResolvedValue([
+      { ...ALICE_CLAUDE, agentPath: 'Agents/delivery-mechanic.agent' },
+      { ...ALICE_CI, agentPath: null },
+    ]);
+    renderPage({ isAdmin: true });
+    await waitFor(() => expect(screen.getByText('CI pipeline')).toBeInTheDocument());
+    const rowOf = (label: string) => screen.getByText(label).closest('li') as HTMLElement;
+    expect(rowOf('Claude')).toHaveTextContent('As delivery-mechanic');
+    expect(within(rowOf('Claude')).getByTitle('Agents/delivery-mechanic.agent')).toBeInTheDocument();
+    // Everything is what a connection is unless it says otherwise: no tag.
+    expect(rowOf('CI pipeline')).not.toHaveTextContent('As ');
   });
 
   it('shows an admin a key its owner deleted for good, marked as such, with its history intact', async () => {

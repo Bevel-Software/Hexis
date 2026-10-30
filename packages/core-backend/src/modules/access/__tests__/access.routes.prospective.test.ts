@@ -3,14 +3,14 @@ import type { AddressInfo } from 'node:net';
 import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 
-import type { IAccessControl, ProspectiveHolders } from '../access-control.interface.js';
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import type { AuthService } from '../../auth/auth.service.js';
-import type { WorkflowService } from '../../workflow/workflow.service.js';
-import type { WorkflowEventBus } from '../../workflow/event-bus.js';
-import type { Database } from '../../database/connection.js';
+import type { HolderChanges, IAccessControl, ProspectiveHolders } from '../access-control.interface.js';
+import type { WorkspaceService } from '../../workspace/index.js';
+import type { AuthService } from '../../auth/index.js';
+import type { WorkflowEventBus, WorkflowService } from '../../workflow/index.js';
+import type { Database } from '../../database/index.js';
 import { createAccessRoutes } from '../access.routes.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
 
 /**
  * HTTP contract for `GET /access/prospective` — what the move confirmation
@@ -40,17 +40,28 @@ const HOLDERS: ProspectiveHolders = {
   },
 };
 
+/** What the resolver judges changed: Engineering loses editing, Ali gains opening. */
+const CHANGES: HolderChanges = {
+  lose: [{ kind: 'group', name: 'Engineering', verb: 'write' }],
+  gain: [{ kind: 'person', name: 'ali@bevel.software', email: 'ali@bevel.software', verb: 'read' }],
+};
+
 interface Harness {
   server: Server;
   baseUrl: string;
   canRead: ReturnType<typeof vi.fn>;
   prospectiveHolders: ReturnType<typeof vi.fn>;
+  prospectiveHolderChanges: ReturnType<typeof vi.fn>;
 }
 
-async function makeHarness(opts: { canRead?: boolean } = {}): Promise<Harness> {
-  const canRead = vi.fn(async () => opts.canRead ?? true);
+/** `canRead` answers `opts.canRead` for every path, or per path through `opts.readable`. */
+async function makeHarness(opts: { canRead?: boolean; readable?: (path: string) => boolean } = {}): Promise<Harness> {
+  const canRead = vi.fn(async (_ws: string, _email: string, path: string) =>
+    opts.readable ? opts.readable(path) : (opts.canRead ?? true),
+  );
   const prospectiveHolders = vi.fn(async () => HOLDERS);
-  const accessControl = { canRead, prospectiveHolders } as unknown as IAccessControl;
+  const prospectiveHolderChanges = vi.fn(async () => CHANGES);
+  const accessControl = { canRead, prospectiveHolders, prospectiveHolderChanges } as unknown as IAccessControl;
 
   const app = express();
   app.use(express.json());
@@ -69,6 +80,7 @@ async function makeHarness(opts: { canRead?: boolean } = {}): Promise<Harness> {
       { emit: vi.fn() } as unknown as WorkflowEventBus,
       {} as unknown as Database,
       testKbContext({ kbDirName: KB }),
+      realDisk(),
     ),
   );
 
@@ -76,7 +88,7 @@ async function makeHarness(opts: { canRead?: boolean } = {}): Promise<Harness> {
     const s = app.listen(0, () => resolve(s));
   });
   const addr = server.address() as AddressInfo;
-  return { server, baseUrl: `http://127.0.0.1:${addr.port}`, canRead, prospectiveHolders };
+  return { server, baseUrl: `http://127.0.0.1:${addr.port}`, canRead, prospectiveHolders, prospectiveHolderChanges };
 }
 
 function close(s: Server): Promise<void> {
@@ -108,6 +120,13 @@ describe('GET /access/prospective', () => {
       'Knowledge/Legal/contract.md',
       'Knowledge/Sales/contract.md',
     );
+    // The resolver's own changes ride along: the one answer the move dialog
+    // renders, and the same the agent's `move_file` gives.
+    expect(h.prospectiveHolderChanges).toHaveBeenCalledWith(
+      WS,
+      'Knowledge/Legal/contract.md',
+      'Knowledge/Sales/contract.md',
+    );
     expect(await res.json()).toEqual({
       before: {
         read: [{ kind: 'group', name: 'Engineering' }],
@@ -120,7 +139,30 @@ describe('GET /access/prospective', () => {
         ],
         write: [],
       },
+      changes: CHANGES,
     });
+  });
+
+  it('refuses a caller who cannot read the destination folder, resolving nothing: the lists and changes are that folder\'s rules read back', async () => {
+    h = await makeHarness({ readable: (path) => path !== 'Knowledge/Sales' });
+
+    const res = await get(
+      `from=${encodeURIComponent('Knowledge/Legal/contract.md')}&toDir=${encodeURIComponent('Knowledge/Sales')}`,
+    );
+
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: 'You do not have access to this folder.' });
+    expect(h.canRead).toHaveBeenCalledWith(WS, USER.email, 'Knowledge/Sales');
+    expect(h.prospectiveHolders).not.toHaveBeenCalled();
+    expect(h.prospectiveHolderChanges).not.toHaveBeenCalled();
+  });
+
+  it('asks the read gate about the repo root when the destination is the root', async () => {
+    h = await makeHarness();
+
+    await get(`from=${encodeURIComponent('Knowledge/Legal/contract.md')}&toDir=`);
+
+    expect(h.canRead).toHaveBeenCalledWith(WS, USER.email, '');
   });
 
   it('strips the workspace-relative kb prefix from both ends', async () => {

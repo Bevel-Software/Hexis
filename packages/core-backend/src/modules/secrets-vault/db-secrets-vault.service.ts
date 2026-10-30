@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { logger } from '../../shared/logging.js';
 
 const log = logger('vault');
@@ -7,6 +8,8 @@ import type { Database } from '../database/index.js';
 import { secrets } from '../database/index.js';
 import { TokenCrypto } from '../../shared/token-crypto.js';
 import { assertSafeFetchUrl } from '../../shared/ssrf.js';
+import { readCapped } from '../../shared/read-capped.js';
+import { standardTokenErrorCode } from '../../shared/oauth-token-error.js';
 import {
   type ISecretsVaultService,
   type SecretSummary,
@@ -16,6 +19,7 @@ import {
   type PutSharedStaticSecretInput,
   type CreateOAuthSecretInput,
   type OAuthProviderConfig,
+  type DeclaredOAuthProvider,
   type VariableScopeResolver,
   type NamespaceSecretCount,
   isKeyInNamespace,
@@ -32,6 +36,79 @@ const MAX_VALUE_LEN = 100_000;
 const REFRESH_SKEW_MS = 60_000;
 /** Upper bound on a token-endpoint round-trip, so a hung provider can't block callers. */
 const TOKEN_REQUEST_TIMEOUT_MS = 10_000;
+/** How much of a refusing token endpoint's body is read for its error code: an OAuth error object, never a whole error page. */
+const TOKEN_ERROR_BODY_MAX_BYTES = 2048;
+// Hexis's own sentences for a refused token request: what to change, in our
+// words, never the provider's.
+const HINT_CLIENT =
+  'The client id or client secret this sign-in uses is not accepted by the provider. The tool owner should check the declared client id and set the client secret again.';
+const HINT_GRANT =
+  'The provider refused the grant: for a sign-in, a redirect URL mismatch or an expired or reused authorization code; for a refresh, a refresh token that has expired or been revoked. Sign in again.';
+const HINT_SCOPE =
+  "The provider refused the scopes this sign-in asks for. The tool owner should check the declared scopes against the provider's app.";
+const HINT_UNAUTHORIZED =
+  "The provider does not allow this client to use this grant. The tool owner should check the provider's app settings.";
+const HINT_REQUEST =
+  'The provider found the token request malformed. The tool owner should check the declared endpoints and parameters.';
+const HINT_PROVIDER = 'The provider could not serve the token request. Try again later.';
+
+/**
+ * Hexis's sentence for each error code a refusing token endpoint may answer:
+ * the standard ones (`shared/oauth-token-error.ts` is the one list of those,
+ * read here and by the OIDC configuration check) in `error`, and the ones
+ * HubSpot's token endpoint answers in its `status` field. Only a code from
+ * those lists is ever taken, exactly, so no other string a provider puts in a
+ * field — a secret, a secret with a suffix, free text — can reach a message.
+ * Nothing else of the body is ever taken: no description, no message, no first
+ * line. That is why a message built here needs no scrubbing, cutting or
+ * decoding, and why every spelling a secret could reach a log in (escaped,
+ * encoded, cut) stays inexpressible. A standard code without a sentence here
+ * (`access_denied`) is named and left unexplained.
+ */
+const TOKEN_ERROR_HINTS: ReadonlyMap<string, string> = new Map([
+  ['invalid_request', HINT_REQUEST],
+  ['invalid_client', HINT_CLIENT],
+  ['invalid_grant', HINT_GRANT],
+  ['unauthorized_client', HINT_UNAUTHORIZED],
+  ['unsupported_grant_type', HINT_UNAUTHORIZED],
+  ['invalid_scope', HINT_SCOPE],
+  ['server_error', HINT_PROVIDER],
+  ['temporarily_unavailable', HINT_PROVIDER],
+  ['BAD_CLIENT_ID', HINT_CLIENT],
+  ['BAD_CLIENT_SECRET', HINT_CLIENT],
+  ['BAD_AUTH_CODE', HINT_GRANT],
+  ['BAD_REDIRECT_URI', HINT_GRANT],
+]);
+
+/** The codes HubSpot's token endpoint answers in `status` instead of a standard `error`. */
+const HUBSPOT_STATUS_CODES: ReadonlySet<string> = new Set(['BAD_CLIENT_ID', 'BAD_CLIENT_SECRET', 'BAD_AUTH_CODE', 'BAD_REDIRECT_URI']);
+
+/**
+ * The known error code a refusing token endpoint answered, or null: a standard
+ * `error` (RFC 6749 §5.2), else HubSpot's own `status`, when it is exactly one
+ * of the codes known. Without even the code, a bare "HTTP 400" cannot tell a
+ * client the provider does not accept from a refused grant.
+ */
+export function tokenEndpointErrorCode(bodyText: string): string | null {
+  const standard = standardTokenErrorCode(bodyText);
+  if (standard !== null) return standard;
+  let json: unknown;
+  try {
+    json = JSON.parse(bodyText);
+  } catch {
+    return null;
+  }
+  if (!json || typeof json !== 'object' || Array.isArray(json)) return null;
+  const { status } = json as Record<string, unknown>;
+  return typeof status === 'string' && HUBSPOT_STATUS_CODES.has(status) ? status : null;
+}
+
+/** The refusal in one message: the status, the known code when there is one, and Hexis's sentence for it. */
+export function describeTokenEndpointRefusal(status: number, code: string | null): string {
+  const base = `Token endpoint returned HTTP ${status}`;
+  const hint = code === null ? undefined : TOKEN_ERROR_HINTS.get(code);
+  return hint ? `${base} (${code}). ${hint}` : base;
+}
 
 /**
  * How a row is stored, or `null` when there is no row — the column is a plain
@@ -487,8 +564,9 @@ export class DbSecretsVaultService implements ISecretsVaultService {
       throw new InvalidSecretError('clientSecret is required');
     }
     // Validate the provider config the same way createOAuth does (SSRF-safe https
-    // URLs). Store the client secret AND the provider meta together on the shared
-    // row so a later `.tool` edit can't redirect the secret to another endpoint.
+    // URLs) and store it beside the secret as a record of what was saved — what
+    // `statusFor` and the setup surfaces read. A declared sign-in does not run
+    // from it: `beginToolOAuthByKey` is handed the declaration as it reads now.
     const provider = this.requireProvider({ ...input.provider, clientSecret: input.clientSecret });
     const blob: OAuthBlob = { clientSecret: provider.clientSecret };
     const valueEncrypted = this.crypto().encrypt(JSON.stringify(blob));
@@ -510,11 +588,15 @@ export class DbSecretsVaultService implements ISecretsVaultService {
     redirectUri: string;
     state: string;
     scopes?: string[];
+    provider?: DeclaredOAuthProvider;
   }): Promise<{ id: string; url: string }> {
     const userId = this.requireUserId(input.userId);
     const key = this.requireKey(input.key);
-    // The shared row holds the owner-set client secret + the provider meta it was
-    // set for. Both are read from HERE, never from the live `.tool`.
+    // The shared row holds the owner-set client secret. For a client the
+    // platform registered itself it also holds the provider configuration, the
+    // only description of that client there is; for a declared sign-in the
+    // configuration it holds is a record of the save, and `input.provider` (the
+    // tool file as it reads now) is what the sign-in follows.
     const [shared] = await this.db
       .select()
       .from(secrets)
@@ -524,11 +606,43 @@ export class DbSecretsVaultService implements ISecretsVaultService {
       throw new SecretOAuthError("This tool's owner hasn't finished setting this up");
     }
     const sharedBlob = this.readBlob(shared.valueEncrypted);
-    const meta = this.readMeta(shared.oauthMeta);
-    // A missing secret is "not set up yet" ONLY for confidential clients — a
-    // dynamically-registered PUBLIC client (PKCE-only) never has one.
-    if (!sharedBlob.clientSecret && !meta.publicClient) {
-      throw new SecretOAuthError("This tool's owner hasn't finished setting this up");
+    let meta: OAuthProviderConfig;
+    let oauthMeta: typeof shared.oauthMeta;
+    if (input.provider) {
+      // A declared client is confidential: without the owner's secret there is
+      // nothing to sign in with, whatever the stored row says of itself.
+      if (!sharedBlob.clientSecret) {
+        throw new SecretOAuthError("This tool's owner hasn't finished setting this up");
+      }
+      // The save's own validation (https, no private or local address), BEFORE
+      // the caller's row is written or a URL built: a declaration that fails it
+      // sends nothing anywhere.
+      meta = this.requireProvider({ ...input.provider, publicClient: false });
+      oauthMeta = this.publicProviderMeta(meta);
+      // A MOVED PROPERTY, decided on the ticket (OAuth-Sign-In-Follows-The-Live-
+      // Declaration, 2026-10-27): the secret used to be bound to the token
+      // endpoint pinned at its save, so a later file edit could not send it
+      // anywhere else; now it goes where the file says at each start, so a
+      // writer of the tool file can move it (to an https, public host — the
+      // validation above still holds). Nothing refuses that; this line is the
+      // trail an operator reads when a secret went somewhere new.
+      const recorded = (shared.oauthMeta ?? {}) as { tokenUrl?: unknown };
+      if (typeof recorded.tokenUrl === 'string' && recorded.tokenUrl !== meta.tokenUrl) {
+        // Origins only: a path or query is the file's to say, not the log's.
+        const origin = (u: string) => (URL.canParse(u) ? new URL(u).origin : '(unparseable)');
+        log.warn(`sign-in on ${key}: the declared token endpoint differs from the one recorded when the client secret was saved`, {
+          savedOrigin: origin(recorded.tokenUrl),
+          declaredOrigin: origin(meta.tokenUrl),
+        });
+      }
+    } else {
+      meta = this.readMeta(shared.oauthMeta);
+      oauthMeta = shared.oauthMeta;
+      // A missing secret is "not set up yet" ONLY for confidential clients — a
+      // dynamically-registered PUBLIC client (PKCE-only) never has one.
+      if (!sharedBlob.clientSecret && !meta.publicClient) {
+        throw new SecretOAuthError("This tool's owner hasn't finished setting this up");
+      }
     }
 
     // Carry forward any tokens the caller already holds so re-entering the flow
@@ -543,12 +657,12 @@ export class DbSecretsVaultService implements ISecretsVaultService {
     // encKey must degrade to "start fresh", not crash the recovery flow — and (b)
     // they were minted under the SAME provider config we're about to (re)write, or
     // a refresh_token for a stale client id/secret would silently fail once carried
-    // into this row after an owner rotates the shared secret.
+    // into this row after an owner rotates the shared secret or edits the
+    // declaration. Compared as values, not as serialised text: the stored side
+    // has been through jsonb, which does not keep key order, and a declared
+    // sign-in's side is built here.
     let existingTokens: OAuthTokenSet | undefined;
-    if (
-      existingUserRow?.kind === 'oauth' &&
-      JSON.stringify(existingUserRow.oauthMeta) === JSON.stringify(shared.oauthMeta)
-    ) {
+    if (existingUserRow?.kind === 'oauth' && isDeepStrictEqual(existingUserRow.oauthMeta, oauthMeta)) {
       try {
         existingTokens = this.readBlob(existingUserRow.valueEncrypted).tokens;
       } catch {
@@ -567,9 +681,13 @@ export class DbSecretsVaultService implements ISecretsVaultService {
     const requestedScopes = input.scopes && input.scopes.length ? input.scopes : meta.scopes;
     const pendingScopes = requestedScopes && requestedScopes.length ? requestedScopes.join(' ') : undefined;
 
-    // Provision (or reset) the caller's own oauth row for this key from the shared
-    // provider meta + secret, preserving any existing tokens. Keyed `<manual>_<VAR>`
-    // so `resolve` (scope 'user') returns the token once sign-in completes.
+    // Provision (or reset) the caller's own oauth row for this key from the provider
+    // configuration this start uses + the shared secret, preserving any existing
+    // tokens. The row records that configuration because `completeOAuth` and every
+    // later refresh of this grant read it from HERE: the exchange goes to the token
+    // endpoint, under the client id, that the consent was given for. Keyed
+    // `<manual>_<VAR>` so `resolve` (scope 'user') returns the token once sign-in
+    // completes.
     const blob: OAuthBlob = {
       clientSecret: sharedBlob.clientSecret,
       tokens: existingTokens,
@@ -579,16 +697,15 @@ export class DbSecretsVaultService implements ISecretsVaultService {
     const valueEncrypted = this.crypto().encrypt(JSON.stringify(blob));
     const [row] = await this.db
       .insert(secrets)
-      .values({ userId, key, kind: 'oauth', label: shared.label, valueEncrypted, oauthMeta: shared.oauthMeta })
+      .values({ userId, key, kind: 'oauth', label: shared.label, valueEncrypted, oauthMeta })
       .onConflictDoUpdate({
         target: [secrets.userId, secrets.key],
-        set: { kind: 'oauth', valueEncrypted, oauthMeta: shared.oauthMeta, updatedAt: new Date() },
+        set: { kind: 'oauth', valueEncrypted, oauthMeta, updatedAt: new Date() },
       })
       .returning();
 
-    // Build the consent URL exactly as beginOAuth does, from the stored meta —
-    // EXCEPT the requested scopes (above). Client id, addresses, and secret
-    // stay owner-pinned.
+    // Build the consent URL exactly as beginOAuth does, from the configuration
+    // this start uses, with the requested scopes chosen above.
     const url = new URL(meta.authorizationUrl);
     url.searchParams.set('response_type', 'code');
     url.searchParams.set('client_id', meta.clientId);
@@ -732,7 +849,18 @@ export class DbSecretsVaultService implements ISecretsVaultService {
         err instanceof SecretOAuthError &&
         (err.providerStatus === 400 || err.providerStatus === 401)
       ) {
-        return this.wipeTokens(row, blob);
+        // The only trace of a sign-in that silently turns into "not connected":
+        // say which one, the provider's reason, and what the guarded wipe did —
+        // a concurrent refresh may have rotated the tokens first, in which case
+        // nothing was wiped and the rotated grant is served.
+        const result = await this.wipeTokens(row, blob);
+        const did = result.wiped
+          ? 'sign-in wiped'
+          : result.outcome === 'refreshed'
+            ? 'the row had been rotated by a concurrent refresh meanwhile; the rotated sign-in is kept'
+            : 'the row had been removed or replaced meanwhile; nothing wiped';
+        log.warn(`refresh refused for "${row.key}", ${did}: ${err.message}`);
+        return result;
       }
       return { outcome: 'transient' };
     }
@@ -794,7 +922,10 @@ export class DbSecretsVaultService implements ISecretsVaultService {
   private async wipeTokens(
     row: typeof secrets.$inferSelect,
     blob: OAuthBlob,
-  ): Promise<{ outcome: 'refreshed'; accessToken: string } | { outcome: 'rejected'; accessToken: null }> {
+  ): Promise<
+    | { outcome: 'refreshed'; accessToken: string; wiped: false }
+    | { outcome: 'rejected'; accessToken: null; wiped: boolean }
+  > {
     const next: OAuthBlob = { clientSecret: blob.clientSecret };
     // Guarded on the ciphertext we read, so a concurrent refresh that
     // already persisted ROTATED tokens can't be wiped by our stale
@@ -807,13 +938,17 @@ export class DbSecretsVaultService implements ISecretsVaultService {
       .where(and(eq(secrets.id, row.id), eq(secrets.valueEncrypted, row.valueEncrypted)))
       .returning({ id: secrets.id });
     if (Array.isArray(wiped) && wiped.length === 0) {
+      // `wiped: false` either way: this write matched nothing, and the caller
+      // reports what it did, not what it set out to do.
       const fresh = await this.currentAccessToken(row.id);
-      return fresh ? { outcome: 'refreshed', accessToken: fresh } : { outcome: 'rejected', accessToken: null };
+      return fresh
+        ? { outcome: 'refreshed', accessToken: fresh, wiped: false }
+        : { outcome: 'rejected', accessToken: null, wiped: false };
     }
     // The sign-in just became not-connected — let credential-validity caches
     // (pooled downstream connections dialed with the dead token) drop it now.
     this.notifyMutation(row.userId);
-    return { outcome: 'rejected', accessToken: null };
+    return { outcome: 'rejected', accessToken: null, wiped: true };
   }
 
   async putSharedOAuthProvider(input: {
@@ -887,7 +1022,15 @@ export class DbSecretsVaultService implements ISecretsVaultService {
       throw new SecretOAuthError(msg);
     }
     if (!res.ok) {
-      throw new SecretOAuthError(`Token endpoint returned HTTP ${res.status}`, res.status);
+      // The provider's error CODE rides in the message: the callback route and
+      // the refresh path log that message, and it is the one line that says
+      // WHY a sign-in failed (a client the provider does not accept, a refused
+      // authorization code). Best effort: the STATUS is the contract (the
+      // refresh path reads 400/401 off it to retire a dead grant), and a body
+      // that fails to read must not turn a definitive refusal into an
+      // unclassified error.
+      const code = tokenEndpointErrorCode(await readCapped(res, TOKEN_ERROR_BODY_MAX_BYTES).catch(() => ''));
+      throw new SecretOAuthError(describeTokenEndpointRefusal(res.status, code), res.status);
     }
     const json = (await res.json()) as Record<string, unknown>;
     const accessToken = typeof json.access_token === 'string' ? json.access_token : '';

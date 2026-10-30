@@ -10,6 +10,7 @@ import {
   scopesCovered,
   missingScopes,
   configuredAs,
+  type DeclaredOAuthProvider,
   type ISecretsVaultService,
 } from './secrets-vault.contract.js';
 import type { IToolManualService, ToolManualSummary, ToolVariable } from '../tool-manuals/index.js';
@@ -17,10 +18,19 @@ import type { IConnectionProbeService } from '../connection-probe/index.js';
 import { utcpNamespacedKey } from '../../shared/utcp-namespace.js';
 import type { IAccessControl } from '../access/index.js';
 import type { KbContext } from '../../shared/kb-context.js';
+import { resolveConnectionScope, type IAgentScopeResolver } from '../agent-scope/index.js';
 import '../auth/index.js'; // Express Request augmentation (req.userId / req.userEmail)
 
 export interface SecretsVaultRoutesDeps {
   secretsVault: ISecretsVaultService;
+  /**
+   * Resolves what a connection made as an agent configuration loads, so the connect
+   * page can list only the tools the chosen agent would reach (`?agent=`).
+   * Optional: a construction without one answers such a request as a
+   * connection that loads nothing — a narrowing that cannot be read is never
+   * read as Everything.
+   */
+  agents?: Pick<IAgentScopeResolver, 'resolve'>;
   /** The released branch's clone — where the `.tool` files the access verdicts are read from live. */
   kb: Pick<KbContext, 'defaultWorkspaceId'>;
   /** Source of `.tool` manuals + their declared variable scopes (default-branch catalog). */
@@ -42,6 +52,38 @@ export interface SecretsVaultRoutesDeps {
 
 function redirectUriFor(publicBackendUrl: string): string {
   return `${publicBackendUrl}/api/secrets/oauth/callback`;
+}
+
+/**
+ * What of a declared sign-in is its provider configuration — ONE reading, for
+ * the client-secret save (which stores it as a record) and the sign-in start
+ * (which runs from it). `null` while the declaration has no endpoints: it named
+ * only its client id and the server's metadata could not complete it.
+ */
+function declaredProvider(variable: ToolVariable): DeclaredOAuthProvider | null {
+  const oauth = variable.oauth;
+  if (!oauth?.authorizationUrl || !oauth.tokenUrl) return null;
+  return {
+    authorizationUrl: oauth.authorizationUrl,
+    tokenUrl: oauth.tokenUrl,
+    clientId: oauth.clientId,
+    scopes: oauth.scopes,
+    // Static authorize params (e.g. Google's `access_type=offline`) so the
+    // provider returns a refresh token.
+    authParams: oauth.authParams,
+    // PKCE unless the declaration opted out; the resource indicator when the
+    // server (or the declaration) names one.
+    pkce: oauth.pkce !== false,
+    resource: oauth.resource,
+  };
+}
+
+/** Why a declared sign-in has no endpoints — the discovery's own reason when it gave one. */
+function endpointsUnknown(manual: ToolManualSummary): string {
+  const why = manual.setup?.reason;
+  return why
+    ? `The sign-in endpoints for this server aren't known yet: ${why}.`
+    : "The sign-in endpoints for this server aren't known yet — declare `authorizationUrl` and `tokenUrl` on the sign-in variable.";
 }
 
 /**
@@ -267,12 +309,21 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
   // that is already set is nobody's outstanding work, so it is dropped. What is
   // not relaxed is readability: the listing is still built from `listAccessible`,
   // so a tool the caller may not read is named here in no state at all.
+  //
+  // `?agent=<path>` — the consent step's "Connect as" choice — narrows the
+  // listing to what a connection made as that agent configuration would load, by the
+  // ONE answer every agent surface asks (`ConnectionScope.allowsConnector`,
+  // applied after the read gate exactly as the tool listing applies it). A
+  // sign-in the connection will never reach is not on a page about what the
+  // connection needs. Absent, the listing is Everything's, as it always was.
   router.get('/connect/pending', async (req, res) => {
     const userId = req.userId;
     const email = req.userEmail;
     if (!userId || !email) return void res.status(401).json({ error: 'Not authenticated' });
     try {
-      const manuals = await toolManualService.listAccessible(email);
+      const agentPath = typeof req.query.agent === 'string' && req.query.agent.trim() !== '' ? req.query.agent : null;
+      const scope = await resolveConnectionScope(deps.agents, email, agentPath);
+      const manuals = (await toolManualService.listAccessible(email)).filter((m) => scope.allowsConnector(m.path));
       // BOTH tiers now — the workspace values are reported as well, so their
       // stored state has to be asked for.
       const allKeys = manuals.flatMap((m) => (m.variables ?? []).map((v) => varKey(m.name, v.name)));
@@ -371,9 +422,11 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
       // Secrets page. A TOOL sign-in provisions a per-user row in the same
       // table (keyed `<manual>_<VAR>`), so exclude every tool-var key here or
       // an authorized tool sign-in would render twice — once as a toolOAuth
-      // row and again as a "standalone" one.
+      // row and again as a "standalone" one. They belong to no connector, so
+      // a connection narrowed to an agent's connectors has nothing to do with
+      // them: listed for Everything only.
       const toolOAuthKeys = new Set(toolOAuth.map((o) => o.key));
-      const secrets = await secretsVault.list(userId);
+      const secrets = scope.isEverything() ? await secretsVault.list(userId) : [];
       const oauth = secrets
         .filter((s) => s.kind === 'oauth' && !toolOAuthKeys.has(s.key))
         .map((s) => ({ id: s.id, key: s.key, label: s.label, authorized: s.authorized ?? false }));
@@ -441,8 +494,8 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
 
   // Set the confidential client secret for a tool's OAuth-backed variable — the
   // ONLY place the secret is provided. Requires WRITE on the `.tool`. The provider
-  // config comes from the variable's own `oauth` declaration (stored WITH the
-  // secret so a later `.tool` edit can't redirect it).
+  // config of the variable's own `oauth` declaration is stored with the secret as
+  // a record of the save; a sign-in start reads the declaration afresh.
   router.put('/secrets/tools/:slug/vars/:var/oauth/admin', async (req, res) => {
     const userId = req.userId;
     const email = req.userEmail;
@@ -456,38 +509,17 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
       if (!(await accessControl.canWrite(defaultWs(), email, found.manual.path))) {
         return void res.status(403).json({ error: 'You need write access to this tool to set its client secret.' });
       }
-      const { authorizationUrl, tokenUrl } = found.variable.oauth;
       // A declaration that names only its client id is completed from the
-      // server's OAuth metadata at scan time. When that didn't happen, pinning
-      // the secret to a provider with no endpoints would leave every sign-in
-      // failing later with a far less specific error than the catalog's own.
-      if (!authorizationUrl || !tokenUrl) {
-        const why = found.manual.setup?.reason;
-        return void res.status(422).json({
-          error: why
-            ? `The sign-in endpoints for this server aren't known yet: ${why}.`
-            : "The sign-in endpoints for this server aren't known yet — declare `authorizationUrl` and `tokenUrl` on the sign-in variable.",
-        });
-      }
+      // server's OAuth metadata. When that didn't happen, storing the secret
+      // with a provider that has no endpoints would leave every sign-in failing
+      // later with a far less specific error than the catalog's own.
+      const provider = declaredProvider(found.variable);
+      if (!provider) return void res.status(422).json({ error: endpointsUnknown(found.manual) });
       const clientSecret = (req.body ?? {}).clientSecret;
       await secretsVault.putSharedOAuthClientSecret({
         key: varKey(found.manual.name, found.variable.name),
         clientSecret,
-        provider: {
-          authorizationUrl,
-          tokenUrl,
-          clientId: found.variable.oauth.clientId,
-          scopes: found.variable.oauth.scopes,
-          // Static authorize params (e.g. Google's `access_type=offline`) so the
-          // provider returns a refresh token — stored with the secret so a later
-          // `.tool` edit can't redirect the flow.
-          authParams: found.variable.oauth.authParams,
-          // PKCE unless the declaration opted out; the resource indicator when
-          // the server (or the declaration) names one. Both pinned here for the
-          // same reason as the rest: the flow runs from the stored row.
-          pkce: found.variable.oauth.pkce !== false,
-          resource: found.variable.oauth.resource,
-        },
+        provider,
       });
       res.status(201).json({ ok: true });
     } catch (err) {
@@ -505,12 +537,37 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
     const email = req.userEmail;
     if (!userId || !email) return void res.status(401).json({ error: 'Not authenticated' });
     try {
-      const found = await findManualVar(email, req.params.slug, req.params.var);
-      if (!found) return void res.status(404).json({ error: 'Tool or variable not found' });
-      if (!found.variable.oauth) {
-        return void res.status(422).json({ error: 'This variable is not an OAuth sign-in.' });
+      // Two sources, one per kind of sign-in. A DECLARED one follows its tool
+      // file as it reads now — never the catalog's scan, which can be a refresh
+      // behind the file, and never the copy the client-secret save stored. A
+      // client the platform registered itself (oauth-auto) is described by no
+      // file: the catalog's discovery surfaced it, and its stored row is the
+      // only description of it there is.
+      const [live, catalog] = await Promise.all([
+        toolManualService.liveDeclaration(email, req.params.slug, req.params.var),
+        findManualVar(email, req.params.slug, req.params.var),
+      ]);
+      // The file is there but its declaration is refused as it reads now (an
+      // http:// or private endpoint, say): the parser's reason is the answer,
+      // and neither a catalog still holding the earlier version nor the stored
+      // row stands in for it. Nothing is sent anywhere.
+      if (live?.refused) return void res.status(422).json({ error: live.refused });
+      const manual = live?.manual ?? catalog?.manual;
+      if (!manual || (!live?.variable && !catalog)) {
+        return void res.status(404).json({ error: 'Tool or variable not found' });
       }
-      const key = varKey(found.manual.name, found.variable.name);
+      const key = varKey(manual.name, req.params.var);
+      const declared = live?.variable?.oauth ? live.variable : null;
+      const registered =
+        !declared && catalog?.manual.setup?.kind === 'oauth-auto' && catalog.variable.oauth ? catalog.variable : null;
+      const signIn = declared ?? registered;
+      // No sign-in in the file and none the platform registered: whatever the
+      // shared row still holds is not used.
+      if (!signIn?.oauth) {
+        throw new SecretOAuthError("This tool's owner hasn't finished setting this up");
+      }
+      const provider = declared ? declaredProvider(declared) : undefined;
+      if (provider === null) return void res.status(422).json({ error: endpointsUnknown(manual) });
       // Provision the caller's oauth row (from the owner-set secret) FIRST — its id
       // is what the un-authed callback keys on. Pass an empty state placeholder; we
       // sign the real state below with the returned id and swap it into the URL, so
@@ -520,10 +577,10 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
         key,
         redirectUri: redirectUriFor(deps.publicBackendUrl),
         state: '',
-        // Request the permissions the tool file declares RIGHT NOW (not the frozen
-        // copy on the owner-set row), so adding a scope to the `.tool` takes effect
-        // on the next sign-in. The secret/clientId/addresses stay owner-pinned.
-        scopes: found.variable.oauth.scopes,
+        // Request the permissions the tool file declares RIGHT NOW, so adding a
+        // scope takes effect on the next sign-in.
+        scopes: signIn.oauth.scopes,
+        provider,
       });
       // The return path is signed INTO the state (HMAC-SHA256) rather than kept
       // in a query param or a cookie: the callback arrives un-authenticated from
@@ -637,7 +694,22 @@ export function createSecretsVaultPublicRoutes(deps: SecretsVaultRoutesDeps): ex
       back(`authorized=${encodeURIComponent(state.i)}`, dest);
     } catch (err) {
       log.error('oauth callback failed:', { err });
-      back(`error=${encodeURIComponent('Authorization failed. Check the provider configuration and try again.')}`, dest);
+      // A provider's REFUSAL (the vault's error carrying the provider's HTTP
+      // status) names the provider's error code and Hexis's own sentence for
+      // it — the one thing the person on the Connect page (or the agent they
+      // paste it to) can act on: a client the provider does not accept, a
+      // refused authorization code. Nothing of the provider's text is in it.
+      // Every other failure stays the generic line: a transport error quotes
+      // what fetch said, which is not a provider's word.
+      const refusal = err instanceof SecretOAuthError && err.providerStatus !== undefined ? err.message : null;
+      back(
+        `error=${encodeURIComponent(
+          refusal
+            ? `Authorization failed. ${refusal}`
+            : 'Authorization failed. Check the provider configuration and try again.',
+        )}`,
+        dest,
+      );
     }
   });
 

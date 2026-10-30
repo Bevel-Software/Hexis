@@ -47,6 +47,14 @@ describe('changePassword and the token it hands back', () => {
     expect(getToken()).toBe('other-account-token');
   });
 
+  it('keeps the stored token when a success answer carries no token, rather than storing "undefined"', async () => {
+    setToken('token-before-the-change');
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+
+    await changePassword('old-password-1', 'new-password-1');
+    expect(getToken()).toBe('token-before-the-change');
+  });
+
   it('keeps the stored token when the change is refused', async () => {
     setToken('token-before-the-change');
     vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(

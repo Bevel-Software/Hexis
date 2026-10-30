@@ -97,6 +97,7 @@ async function makeHarness(
       { emit: vi.fn() } as unknown as WorkflowEventBus,
       db,
       testKbContext({ kbDirName: KB }),
+      new NodeFs(),
       deploymentAdmins,
     ),
   );

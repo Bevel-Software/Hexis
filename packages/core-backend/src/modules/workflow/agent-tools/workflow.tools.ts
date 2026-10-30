@@ -237,7 +237,9 @@ export function registerWorkflowTools(
         // `getFilesystem` — so the branch-less call the tool handler refuses
         // before this runs would otherwise commit to, or fork from, a
         // workspace literally named "undefined".
-        (args, ctx) => spec.handler(normalizePathArgs(args, kbDirName), ctx),
+        // The normaliser also refuses a tmp ref (`__tmp__/…`) in every path
+        // input: none of these tools takes one (see `kb-fs/tmp-ref.ts`).
+        (args, ctx) => spec.handler(normalizePathArgs(args, kbDirName, { tool: spec.name }), ctx),
         { write: spec.write },
       ),
     );
@@ -277,9 +279,10 @@ export function registerWorkflowTools(
   mount({
     name: 'commit_change',
     description:
-      'Save the currently-pending file edits as a new change on the current branch. Each change ' +
-      'must affect exactly one file — if multiple files are dirty, returns a structured error ' +
-      'listing them; commit them one at a time. Refused on protected branches without write permission.',
+      'Commit, as you, the one file left uncommitted on `branch`, without sharing it. Writes commit and share ' +
+      'on their own moments later (`branch_status` lists those still landing); `unzip` leaves its files uncommitted. ' +
+      'If several files are uncommitted, returns a structured error listing them; commit them one at a time. ' +
+      'Refused on protected branches without write permission.',
     inputs: {
       type: 'object',
       properties: {
@@ -307,7 +310,7 @@ export function registerWorkflowTools(
     name: 'save_file',
     description:
       'Schedule the file at <path> for commit + push using whatever bytes are on disk (no content ' +
-      'rewrite) — for binary uploads or files left uncommitted. On lock contention returns ' +
+      'rewrite) — for files left uncommitted, such as those `unzip` extracts. On lock contention returns ' +
       '`{ saved: false, reason }` rather than throwing. The commit lands asynchronously.',
     inputs: {
       type: 'object',
@@ -355,8 +358,9 @@ export function registerWorkflowTools(
   mount({
     name: 'share_current_branch',
     description:
-      'Publish the current branch to the shared remote so teammates and any change request pick up ' +
-      'your commits. No arguments. Refused on protected branches without write permission.',
+      'Publish `branch` to the shared remote so teammates and any change request pick up its commits. ' +
+      'Writes already share on their own: this is for sharing again after a refused push (`branch_status` shows ' +
+      'the branch ahead). Refused on protected branches without write permission.',
     inputs: { type: 'object', properties: {}, additionalProperties: false },
     outputs: {
       type: 'object',
@@ -375,10 +379,11 @@ export function registerWorkflowTools(
     description:
       'Create a new unprotected draft named `name`, forked from the existing branch `branch`. The ' +
       `backend rejects protected names (${protectedInline(kb)}) and filesystem-invalid names — surface ` +
-      'those errors verbatim. Convention: `<email-localpart>/<kebab-slug>`. Does NOT switch the ' +
-      'agent onto the new draft.',
+      'those errors verbatim. Name it `<you>/<kebab-slug>`: `<you>` is the person\'s email before the @, in lower case, ' +
+      'with each run of characters other than letters and digits as one `-` (`paul.brandt@` gives `paul-brandt/`). ' +
+      'Only that prefix makes the draft theirs, to delete later. Does NOT switch the agent onto the new draft.',
     // `branch` here is the fork BASE — its own meaning — so skip the generic
-    // workspace-`branch` injection ("the branch you are currently working on"),
+    // workspace-`branch` injection ("the branch to work on: ... or your draft"),
     // whose wording invites filling in the draft being created instead.
     skipBranch: true,
     // The handler refuses a missing `name` with a message that says what the
@@ -387,7 +392,7 @@ export function registerWorkflowTools(
     inputs: {
       type: 'object',
       properties: {
-        name: { type: 'string', minLength: 1, description: 'Name of the draft to create (`<email-localpart>/<kebab-slug>` for user drafts). Must not exist yet.' },
+        name: { type: 'string', minLength: 1, description: 'Name of the draft to create (`<you>/<kebab-slug>` for user drafts, as the description says). Must not exist yet.' },
         branch: { type: 'string', minLength: 1, description: 'Existing branch to fork the new draft from — usually the branch you are currently on.' },
       },
       required: ['name', 'branch'],
@@ -435,7 +440,7 @@ export function registerWorkflowTools(
     description:
       'Open a change request from a draft branch into a target branch. Auto-merges the latest target ' +
       'into the source first, pushes, then creates the CR. On conflicts returns a ' +
-      '`change-request-conflicts` error with affected paths. The author marker is injected server-side. ' +
+      '`change-request-conflicts` error with affected paths. ' +
       'Answers a SUMMARY, not the request\'s content: `url` first (hand it to the user), then `number`, ' +
       '`title`, `state`, `sourceBranch`, `targetBranch`, `approvals` (who must approve each file), ' +
       '`mergeBlockedReasons` (what blocks the merge), and `files` — the changed paths with their kind of ' +
@@ -547,12 +552,13 @@ export function registerWorkflowTools(
     name: 'merge_branch',
     description:
       'Merge branch `source` into branch `target` as you, and publish `target`. An agent proposes and syncs; ' +
-      'a person merges: this tool never lands a change request. It refuses while a change request from `source` ' +
+      'a person merges: this never lands a change request. It refuses while a change request from `source` ' +
       'into `target` is open (naming it): ask the user to review it in the app. It refuses ' +
-      'when `target` is a protected branch unless you could commit every changed file directly to it. ' +
+      'when `target` is a protected branch unless you could commit every changed file directly to it (never ' +
+      'for a change to `roles.yaml`). ' +
       'SYNC: merging the target into your draft (`source` = the change request\'s target, `target` = your draft) ' +
       'is always allowed, even with the draft\'s request open. ' +
-      'Writes are committed asynchronously; the merge first waits up to 20s for those on `source`. ' +
+      'Writes are committed asynchronously; it waits up to 20s for those on `source`. ' +
       'Returns `merged` with the merge commit; `nothing-to-merge` with `target`\'s tip when it already holds ' +
       'all of `source`; `pending-commits` (nothing merged) when writes are still committing — retry shortly — ' +
       'or one failed (`needsAttention`: tell the user); or `conflicts-need-resolution` with the conflicting ' +
@@ -616,7 +622,7 @@ export function registerWorkflowTools(
     name: 'delete_branch',
     description:
       'Delete branch `name` from the shared repository and the server. Allowed for the ' +
-      'branch\'s author (`<email-localpart>/…`, or your own `suggestions/…` bundle) or an Admin. Refuses a ' +
+      'branch\'s author (`<you>/…` per `create_branch`, or your own `suggestions/…` bundle) or an Admin. Refuses a ' +
       'protected branch, a name that is not a branch, a branch with saves still landing or a file held ' +
       '(retry once they land). An open change request from or into it that proposes nothing is closed and the ' +
       'delete goes ahead; one that still proposes something refuses it, naming and linking it: its author ' +
@@ -834,13 +840,13 @@ export function registerWorkflowTools(
       'One file as it was at a point in history: `at` is a commit (from `list_file_changes`, on `branch`\'s ' +
       'own history) or the name of another branch (its published tip). Answers `content` (null when the ' +
       'file was not there) and `sha`, the commit it was read at; for a commit, also `before`, the file ' +
-      'just before that commit. To put an earlier version back, write it with `write_file`. Takes the read ' +
-      'the file takes at that point.',
+      'just before that commit. To put an earlier version back, write it with `write_file`. Takes your ' +
+      'read of the file on `branch` now and, for a branch, also at its tip.',
     inputs: {
       type: 'object',
       properties: {
         path: { type: 'string', minLength: 1, description: 'The file, workspace-relative.' },
-        at: { type: 'string', minLength: 1, description: 'A commit sha, or a branch name.' },
+        at: { type: 'string', minLength: 1, description: 'A full commit sha (40 or 64 hex characters), or a branch name.' },
         sessionId: SESSION_ID_INPUT,
       },
       required: ['path', 'at'],

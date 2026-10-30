@@ -5,20 +5,34 @@ import type { ToolContext, ToolHandlerFactory } from '../tool-helpers/index.js';
 import { toolDef, declareRouteTool } from '../tool-helpers/index.js';
 import type { IAccessControl } from '../access/index.js';
 import { utcpNamespacedKey } from '../../shared/utcp-namespace.js';
-import type { IToolManualService } from './tool-manuals.contract.js';
+import type { ConnectorScope, IToolManualService } from './tool-manuals.contract.js';
 import type { HiddenToolSource } from '../../shared/hidden-tools.js';
+import { userSecretGap } from '../secrets-vault/index.js';
 
 /**
  * What `list_tool_setup` needs from the secrets vault (structurally satisfied
  * by `ISecretsVaultService.statusFor`). A local port keeps this module free of
- * a secrets-vault import — the same decoupling discipline as
- * `McpAuthDiscoveryPort` in the service.
+ * the vault service — the same decoupling discipline as
+ * `McpAuthDiscoveryPort` in the service. Only the vault's pure readiness rule
+ * (`userSecretGap`, its exported contract) is imported, the one the MCP proxy
+ * hides tools by.
  */
 export interface VariableStatusPort {
   statusFor(
     userId: string,
     keys: string[],
-  ): Promise<{ key: string; adminConfigured: boolean; userConfigured: boolean; userAuthorized?: boolean }[]>;
+  ): Promise<
+    {
+      key: string;
+      adminConfigured: boolean;
+      /** What the owner's row is: a sign-in needs an `oauth` one, not a key left from when the variable was static. */
+      adminKind?: 'static' | 'oauth' | null;
+      userConfigured: boolean;
+      userAuthorized?: boolean;
+      userKind?: 'static' | 'oauth' | null;
+      grantedScopes?: string;
+    }[]
+  >;
 }
 
 /**
@@ -51,7 +65,9 @@ export function registerToolManualsTools(
     hiddenTools?: HiddenToolSource;
   },
 ): void {
-  registry.registerExternalTool((ctx) => buildListLocalToolsDef(toolManualService, ctx.userEmail));
+  registry.registerExternalTool((ctx) =>
+    buildListLocalToolsDef(toolManualService, ctx.userEmail, ctx.connectionScope?.connectorFilter()),
+  );
   registry.registerInternalTool((ctx) => buildListLocalToolsDef(toolManualService, ctx.userEmail));
   // The def above is built per catalog listing (its description names the
   // tools configured for THIS caller), so declare the arguments here as well:
@@ -59,12 +75,22 @@ export function registerToolManualsTools(
   // against them too.
   declareRouteTool('list_local_tools', LIST_LOCAL_TOOLS_INPUTS);
 
+  // The local server's discovery read (`discovery`): it asks this route at
+  // startup for the connectors it must materialize, whatever tools the
+  // connection is offered — a connection made as an agent configuration that omits
+  // the tool is answered its connectors, not refused, or the local server
+  // could not start for that agent at all.
   router.post(
     '/agent/tools/list_local_tools',
     toolAuth,
-    toolHandler(async (_args, ctx: ToolContext) => ({
-      tools: await toolManualService.listLocalOnly(ctx.user.email),
-    })),
+    toolHandler(async (_args, ctx: ToolContext) => {
+      const within = ctx.connectionScope?.connectorFilter();
+      return {
+        tools: await (within
+          ? toolManualService.listLocalOnly(ctx.user.email, within)
+          : toolManualService.listLocalOnly(ctx.user.email)),
+      };
+    }, { discovery: true }),
   );
 
   // A FUNCTION, not a constant — this factory runs at boot, and on a
@@ -228,7 +254,9 @@ export function registerToolManualsTools(
         },
         note: {
           type: 'string',
-          description: 'Present when `onBranchOnly` is non-empty: what it takes for those tools to go live.',
+          description:
+            'Present when something is left to do: what it takes for the tools in `onBranchOnly` to go live, and for ' +
+            'tools that need your own value or sign-in to work.',
         },
       },
       required: ['tools', 'invalid', 'onBranchOnly'],
@@ -243,12 +271,17 @@ export function registerToolManualsTools(
     toolHandler(async (args, ctx: ToolContext) => {
       // The in-app agent is focused on its own draft; an external caller names it.
       const branch = typeof args.branch === 'string' && args.branch ? args.branch : ctx.focusedBranch;
+      const within = ctx.connectionScope?.connectorFilter();
       // The catalog comes back whole — what parsed AND what was refused — from
       // ONE scan, so the refused files cost no second walk of the workspace and
       // the two halves cannot disagree about which files made it.
       const [{ tools: manuals, invalid }, pending] = await Promise.all([
-        toolManualService.listAccessibleCatalog(ctx.user.email),
-        branch ? toolManualService.listDeclaredOnlyOnBranch(ctx.user.email, branch) : Promise.resolve([]),
+        // Only the connectors the caller's connection loads: setup is counted
+        // for the tools this connection can call, not every one the person can.
+        within
+          ? toolManualService.listAccessibleCatalog(ctx.user.email, within)
+          : toolManualService.listAccessibleCatalog(ctx.user.email),
+        branch ? toolManualService.listDeclaredOnlyOnBranch(ctx.user.email, branch, within) : Promise.resolve([]),
       ]);
       const allKeys = manuals.flatMap((m) => (m.variables ?? []).map((v) => varKey(m.name, v.name)));
       const status = await deps.variableStatus.statusFor(ctx.user.id, allKeys);
@@ -285,25 +318,48 @@ export function registerToolManualsTools(
         }),
       );
       const onBranchOnly = pending.map((p) => ({ ...p, branch: branch! }));
-      if (onBranchOnly.length === 0) return { tools, invalid, onBranchOnly };
-      return {
-        tools,
-        invalid,
-        onBranchOnly,
-        note:
+      const notes: string[] = [];
+      if (onBranchOnly.length > 0) {
+        notes.push(
           `${onBranchOnly.map((p) => `\`${p.name}\``).join(', ')} ${onBranchOnly.length === 1 ? 'is' : 'are'} declared on ` +
-          `\`${branch}\` only. Tools are served from \`${deps.kb.defaultBranch}\`, so ${onBranchOnly.length === 1 ? 'it stays' : 'they stay'} ` +
-          'unlisted, uncallable and without a sign-in until that branch is merged: open a change request with ' +
-          `\`open_change_request\` (target \`${deps.kb.defaultBranch}\`), then ask the user to review and merge it in the app.`,
-      };
+            `\`${branch}\` only. Tools are served from \`${deps.kb.defaultBranch}\`, so ${onBranchOnly.length === 1 ? 'it stays' : 'they stay'} ` +
+            'unlisted, uncallable and without a sign-in until that branch is merged: open a change request with ' +
+            `\`open_change_request\` (target \`${deps.kb.defaultBranch}\`), then ask the user to review and merge it in the app.`,
+        );
+      }
+      // The person's own part, said where the agent is when a tool "does not work": the
+      // reconnect step is the one agents leave out (the agent-guide benchmark, 2026-10-26).
+      // By the rule the proxy hides a tool by (`userSecretGap`), so the note
+      // names every tool that is hidden for want of the caller's own value. A
+      // sign-in waits on the owner's provider setup (an OAuth admin row, not a
+      // key left from when the variable was static — the Connect page counts
+      // that setup incomplete and the sign-in start refuses it): until then
+      // there is nothing to sign in to.
+      const needYou = manuals.filter((m) =>
+        (m.variables ?? []).some((v) => {
+          if (v.scope !== 'user') return false;
+          const st = statusByKey.get(varKey(m.name, v.name));
+          const gap = userSecretGap({ oauth: v.oauth != null, oauthScopes: v.oauth?.scopes }, st);
+          return gap !== null && (v.oauth == null || (st?.adminConfigured === true && st.adminKind === 'oauth'));
+        }),
+      );
+      if (needYou.length > 0) {
+        notes.push(
+          `${needYou.map((t) => `\`${t.name}\``).join(', ')} ${needYou.length === 1 ? 'needs' : 'need'} your own value or sign-in. ` +
+            'Set it yourself on the Connect page, never in the chat; then reconnect your assistant, or start a new chat, ' +
+            'so the tool is listed.',
+        );
+      }
+      if (notes.length === 0) return { tools, invalid, onBranchOnly };
+      return { tools, invalid, onBranchOnly, note: notes.join(' ') };
     }),
   );
 }
 
 /** "Local-only tools configured for you: `a`, `b`." (or a none note), filtered to what the caller may read. */
-async function localToolsLine(svc: IToolManualService, userEmail?: string): Promise<string> {
+async function localToolsLine(svc: IToolManualService, userEmail?: string, within?: ConnectorScope): Promise<string> {
   if (!userEmail) return 'No local-only tools are currently configured.';
-  const tools = await svc.listLocalOnly(userEmail);
+  const tools = await (within ? svc.listLocalOnly(userEmail, within) : svc.listLocalOnly(userEmail));
   if (tools.length === 0) return 'No local-only tools are currently configured.';
   return `Local-only tools configured for you: ${tools.map((t) => `\`${t.name}\``).join(', ')}.`;
 }
@@ -311,7 +367,7 @@ async function localToolsLine(svc: IToolManualService, userEmail?: string): Prom
 /** `list_local_tools` takes nothing; a const so the route and the def share one declaration. */
 const LIST_LOCAL_TOOLS_INPUTS = { type: 'object' as const, properties: {}, additionalProperties: false };
 
-async function buildListLocalToolsDef(svc: IToolManualService, userEmail?: string): Promise<UtcpTool> {
+async function buildListLocalToolsDef(svc: IToolManualService, userEmail?: string, within?: ConnectorScope): Promise<UtcpTool> {
   return toolDef({
     name: 'list_local_tools',
     description:
@@ -324,7 +380,7 @@ async function buildListLocalToolsDef(svc: IToolManualService, userEmail?: strin
       'machine. Otherwise each entry gives the tool’s name and its `.tool` file ' +
       'path in the knowledge base — read that file with `read_file` and wire the tool into your local ' +
       'setup by hand. ' +
-      (await localToolsLine(svc, userEmail)),
+      (await localToolsLine(svc, userEmail, within)),
     path: '/api/agent/tools/list_local_tools',
     inputs: LIST_LOCAL_TOOLS_INPUTS,
     outputs: {

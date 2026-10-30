@@ -484,6 +484,68 @@ describe('RipgrepPatternMatcher', () => {
     }
   });
 
+  it('a caller gone while its run waits for a slot leaves the queue, answered abandoned, and the queue is free again', async () => {
+    const slow = await slowRipgrep();
+    try {
+      const m = matcher({ maxRunning: 1, maxWaiting: 1 });
+      const holder = await m.search('needle', { ignoreCase: false });
+      const running = all(holder);
+      while ((await slow.alive()).length === 0) await new Promise((r) => setTimeout(r, 20));
+      // The pattern check of a new search is a run: with the one slot held it queues.
+      const gone = new AbortController();
+      const queued = m.search('needle', { ignoreCase: false, signal: gone.signal });
+      await new Promise((r) => setTimeout(r, 50));
+      gone.abort();
+      await expect(queued).rejects.toMatchObject({ status: 499, details: { code: 'search_abandoned' } });
+      // Its place in the queue went with it: the next search waits rather than being refused as one too many.
+      const next = m.search('needle', { ignoreCase: false });
+      const outcome = await Promise.race([next.then(() => 'ran', () => 'refused'), new Promise((r) => setTimeout(() => r('waiting'), 200))]);
+      expect(outcome).toBe('waiting');
+      await m.close();
+      await expect(next).rejects.toMatchObject({ status: 503 });
+      await expect(running).rejects.toMatchObject({ status: 503 });
+      expect(await slow.alive()).toEqual([]);
+    } finally {
+      await slow.remove();
+    }
+  });
+
+  it('charges the wait for a slot to the budget, and answers the 400 from the queue when the budget passes there', async () => {
+    // Every search of a matcher has the same budget, so a queued search can
+    // outwait its own only once it has spent part of it: one walk of 500 ms
+    // against a budget of 800, then a wait behind a fresh search's 500 ms
+    // walk, which outlasts the 300 ms the first has left.
+    const slow = await slowRipgrep({ walkMs: 500 });
+    try {
+      await put('kb/a.md', 'needle\n');
+      const m = matcher({ maxRunning: 1, maxWaiting: 1, budgetMs: 800 });
+      const scope = { cwd: dir, root: 'kb' };
+      const s = await m.search('needle', { ignoreCase: false });
+      expect(await s.list(scope)).toEqual([]);
+      const holder = await m.search('needle', { ignoreCase: false });
+      const holding = holder.list(scope);
+      while ((await slow.alive()).length === 0) await new Promise((r) => setTimeout(r, 20));
+      const started = Date.now();
+      const queued = s.list(scope);
+      // Refused from the queue, before the holder's walk ends — so it never ran.
+      const first = await Promise.race([
+        queued.then(
+          () => 'ran',
+          () => 'refused',
+        ),
+        holding.then(() => 'the holder finished first'),
+      ]);
+      expect(first).toBe('refused');
+      await expect(queued).rejects.toMatchObject({ status: 400, details: { code: 'pattern_too_expensive' } });
+      expect(Date.now() - started).toBeLessThan(1_000);
+      // The wait spent the budget: a later run is refused at once.
+      await expect(s.matchingLines(['needle'])).rejects.toMatchObject({ details: { code: 'pattern_too_expensive' } });
+      expect(await holding).toEqual([]);
+    } finally {
+      await slow.remove();
+    }
+  });
+
   it('refuses a run past the queue with a 503 and ends every run on close', async () => {
     const slow = await slowRipgrep();
     try {

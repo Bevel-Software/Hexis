@@ -8,6 +8,7 @@ import { GITHUB_LINK_KIND } from '../../../shared/marketplace-url';
 import { useAdmin } from '../../admin';
 import { useAuth } from '../../auth';
 import { listPrincipals, revokeAgent, revokeKey, type AuditPrincipal } from '../services/audit.api';
+import { connectedAsLabel } from '../../agents';
 import { groupByAccount, principalKey } from './principal-grouping';
 import { AuditEventsPanel } from './AuditEventsPanel';
 
@@ -276,6 +277,16 @@ export function AuditLogPage() {
                                     {p.deletedAt != null && <Badge tone="outline">Deleted by owner</Badge>}
                                   </span>
                                   <span className="block text-meta text-ink-muted">
+                                    {/* The agent configuration the connection was made as, when it was
+                                        made as one; a connection made as Everything, which is what a
+                                        connection is unless it says otherwise, carries no tag. A page
+                                        acts as its viewer, so it never has one. */}
+                                    {p.kind !== 'page' && p.agentPath && (
+                                      <>
+                                        <span title={p.agentPath}>As {connectedAsLabel(p.agentPath)}</span>
+                                        {' · '}
+                                      </>
+                                    )}
                                     <span title={formatAbsolute(p.createdAt)}>
                                       {p.kind === 'agent' ? 'Connected' : p.kind === 'page' ? 'First call' : 'Created'}{' '}
                                       {formatRelative(p.createdAt)}
