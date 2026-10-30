@@ -4,4 +4,4 @@
  * role in the knowledge base's `roles.yaml`. Routes that gate on it take the
  * contract; the implementation is wired by the composition root.
  */
-export type { IAdminAccessService } from './admin.interface.js';
+export type { IAdminAccessService, IAdminRoleLookup } from './admin.interface.js';

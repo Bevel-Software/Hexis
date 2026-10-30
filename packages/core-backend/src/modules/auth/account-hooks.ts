@@ -5,22 +5,46 @@ import { ListenerSeam, type NotifyingListener } from '../../shared/listener-seam
 const log = logger('accounts');
 
 /**
- * An admin invited somebody: a NEW account was made for the address. Never
- * raised for an account that was already there (an invite that only set a
- * starting password, a password reset, a rename), and never for a first
- * single sign-on, which provisions by itself: the person is already in.
+ * Somebody invited somebody: a NEW account was made for the address, by an
+ * admin or by anyone signed in (`POST /api/invitations`). Never raised for an
+ * account that was already there (a password reset, a rename), and never
+ * for a first single sign-on, which provisions by itself: the person is
+ * already in.
  */
 export interface AccountInvitedEvent {
-  /** The new account, as the admin's answer carries it. */
+  /** The new account, as the inviter's answer carries it. */
   account: Pick<AuthUser, 'id' | 'email' | 'name'>;
-  /** The admin who invited them. */
+  /** Who invited them. */
   invitedBy: Pick<AuthUser, 'id' | 'email' | 'name'>;
-  /**
-   * Whether the account was created with a starting password the admin
-   * typed. The password itself never travels: a listener that writes to the
-   * person says it comes from the admin separately.
-   */
+  /** Whether the account was created with a starting password. */
   passwordSet: boolean;
+  /**
+   * The starting password the platform generated for the account, absent
+   * when none was. It travels here so a listener that writes to the person
+   * can put it in the invitation, with the request to sign in and change
+   * it; a listener must not log it or keep it.
+   */
+  startingPassword?: string;
+}
+
+/**
+ * Who invited, for the event: their account, by name, when it can be read.
+ * The invited account is already made by the time this is asked, so a failed
+ * read falls back to the identity the request carries rather than answering
+ * an error a retry could not make good (the account is not new the second
+ * time).
+ */
+export async function inviterOf(
+  caller: { userId?: string; userEmail?: string },
+  getUserById: (id: string) => Promise<AuthUser | null>,
+): Promise<Pick<AuthUser, 'id' | 'email' | 'name'>> {
+  const requester = { id: caller.userId ?? '', email: caller.userEmail ?? '', name: '' };
+  if (!caller.userId) return requester;
+  const by = await getUserById(caller.userId).catch((err: unknown) => {
+    log.warn('the inviter could not be read; the invite names them by address:', { err });
+    return null;
+  });
+  return by ?? requester;
 }
 
 /**
@@ -49,6 +73,8 @@ export class AccountHooks implements IAccountHooks {
   private readonly invited = new ListenerSeam<AccountInvitedEvent>(
     log,
     'an account-invited listener failed; the person was not notified by it:',
+    // A mailer's error can quote the message it was sending, password and all.
+    (event) => [event.startingPassword],
   );
 
   onAccountInvited(hook: AccountInvitedHook): void {

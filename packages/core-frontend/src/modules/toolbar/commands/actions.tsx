@@ -121,17 +121,13 @@ const EDIT_PAGE: CommandAction = {
   },
 };
 
-/**
- * Admins only: creating accounts is an admin act. The toolbar's Invite shows to
- * everyone and tells a non-admin whom to ask; a command menu entry that only
- * answers "ask an admin" would be noise in a list of things you can do.
- */
+/** Everyone's, as the toolbar's Invite is: anyone signed in invites people. */
 const INVITE: CommandAction = {
   id: 'invite',
   label: 'Invite people',
   keywords: ['team', 'teammates', 'members', 'users', 'add people', 'accounts'],
   icon: <UserPlus size={ICON_SIZE} />,
-  visible: (ctx) => ctx.isAdmin && ctx.invite !== null,
+  visible: (ctx) => ctx.invite !== null,
   run: (ctx) => ctx.invite?.open(),
 };
 
@@ -322,8 +318,8 @@ export function visibleActions(actions: readonly CommandAction[], ctx: CommandCo
 
 /**
  * What an empty menu offers before anything is typed: a handful of the
- * commonest verbs, not the whole list — Create new page, Invite people (for an
- * admin), Connect your agent while that onboarding is open, and a way to the
+ * commonest verbs, not the whole list — Create new page, Invite people,
+ * Connect your agent while that onboarding is open, and a way to the
  * other app. Drawn from `visible`, so nothing is suggested that is not
  * offered.
  */

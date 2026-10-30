@@ -1,3 +1,4 @@
+import type { InvitationRequest, InvitationResult } from '@bevel-software/platform-shared';
 import { authFetch, getToken, setToken } from '../../../lib/api';
 
 /** One row of the admin Accounts list (`GET /api/admin/accounts`). */
@@ -46,6 +47,26 @@ export class AccountRequestError extends Error {
 async function readError(res: Response, fallback: string): Promise<string> {
   const body = await res.json().catch(() => ({}));
   return (body as { error?: string }).error || fallback;
+}
+
+/**
+ * The refusal of a request that makes an account, both routes alike (the
+ * admins' accounts API and the invitation): the server's words, or
+ * `fallback`, and its `kind` (`admission` when no seat was left).
+ */
+async function accountRefusal(res: Response, fallback: string): Promise<AccountRequestError> {
+  const body = (await res.json().catch(() => ({}))) as { error?: unknown; kind?: unknown };
+  const message = typeof body.error === 'string' && body.error ? body.error : fallback;
+  return new AccountRequestError(message, res.status, typeof body.kind === 'string' ? body.kind : null);
+}
+
+/**
+ * `notified` on a reply that made an account: how the deployment told the
+ * person of the invite (`'email'`, say), as its listeners answered. Empty
+ * when nobody did, and the inviter hands over the link themselves.
+ */
+function notifiedChannels(raw: unknown): string[] {
+  return Array.isArray(raw) ? raw.filter((c): c is string => typeof c === 'string') : [];
 }
 
 /**
@@ -113,24 +134,52 @@ export async function createAccount(
       keepExistingPassword: options.keepExistingPassword || undefined,
     }),
   });
-  if (!res.ok) {
-    const body = (await res.json().catch(() => ({}))) as { error?: unknown; kind?: unknown };
-    const message = typeof body.error === 'string' && body.error ? body.error : 'Could not create account';
-    throw new AccountRequestError(message, res.status, typeof body.kind === 'string' ? body.kind : null);
-  }
+  if (!res.ok) throw await accountRefusal(res, 'Could not create account');
   const body = (await res.json().catch(() => ({}))) as {
     passwordSet?: unknown;
     deactivated?: unknown;
     notified?: unknown;
   };
-  // `notified`: how the deployment told a NEW account's person of the invite
-  // (`'email'`, say), as its listeners answered; empty or absent when nobody
-  // did and the admin hands over the link themselves.
-  const notified = Array.isArray(body.notified) ? body.notified.filter((c): c is string => typeof c === 'string') : [];
+  const notified = notifiedChannels(body.notified);
   return {
     ...(typeof body.passwordSet === 'boolean' ? { passwordSet: body.passwordSet } : {}),
     ...(body.deactivated === true ? { deactivated: true } : {}),
     ...(notified.length > 0 ? { notified } : {}),
+  };
+}
+
+/**
+ * Invite one address (`POST /api/invitations`), for anyone signed in: a NEW
+ * account, or `{ status: 'existing' }` for an address that has one, which
+ * the server leaves exactly as it was. `startingPassword` asks the server to
+ * generate a password for the new account; the answer carries it this once.
+ *
+ * A refusal throws {@link AccountRequestError}; `kind: 'admission'` means
+ * the deployment's admission rules had no place for the account.
+ */
+export async function sendInvitation(request: InvitationRequest): Promise<InvitationResult> {
+  const res = await authFetch('/api/invitations', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+  });
+  if (!res.ok) throw await accountRefusal(res, 'Could not invite them');
+  const body = (await res.json().catch(() => ({}))) as {
+    status?: unknown;
+    account?: Extract<InvitationResult, { status: 'created' }>['account'];
+    startingPassword?: unknown;
+    notified?: unknown;
+    singleSignOn?: unknown;
+  };
+  if (body.status === 'existing') return { status: 'existing' };
+  if (body.status !== 'created' || !body.account) throw new AccountRequestError('Could not invite them', res.status);
+  return {
+    status: 'created',
+    account: body.account,
+    ...(typeof body.startingPassword === 'string' && body.startingPassword ? { startingPassword: body.startingPassword } : {}),
+    notified: notifiedChannels(body.notified),
+    // Never assumed: only a server that says so has single sign-on letting them in.
+    singleSignOn: body.singleSignOn === true,
   };
 }
 

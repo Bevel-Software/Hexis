@@ -51,6 +51,15 @@ export interface AuthProviderPlugin {
   mountRoutes(router: express.Router, authService: AuthService): void;
 }
 
+/**
+ * The single sign-on providers offered right now: present, and enabled when
+ * they say whether they are. The login screen's probe lists them, and an
+ * invitation reads from them whether the deployment has single sign-on.
+ */
+export function offeredProviders(providers: readonly AuthProviderPlugin[]): AuthProviderPlugin[] {
+  return providers.filter((p) => p.isEnabled?.() ?? true);
+}
+
 export function createAuthRoutes(
   authService: AuthService,
   authMiddleware: express.RequestHandler,
@@ -131,9 +140,7 @@ export function createAuthRoutes(
   router.get('/auth/providers', (_req, res) => {
     res.json({
       password: passwordLoginEnabled,
-      sso: providers
-        .filter((p) => p.isEnabled?.() ?? true)
-        .map((p) => ({ key: p.key, label: p.label, startPath: p.startPath })),
+      sso: offeredProviders(providers).map((p) => ({ key: p.key, label: p.label, startPath: p.startPath })),
     });
   });
 

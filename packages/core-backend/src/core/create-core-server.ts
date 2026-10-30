@@ -61,6 +61,7 @@ import { createAdminAccessRoutes } from '../modules/admin/admin-access.routes.js
 import { createGroupsAdminRoutes } from '../modules/access/groups-admin.routes.js';
 import { createUpdateCheckRoutes } from '../modules/update-check/update-check.routes.js';
 import { createAccountRoutes } from '../modules/auth/account.routes.js';
+import { createInvitationRoutes } from '../modules/auth/invitation.routes.js';
 import { createConnectionKeysAdminRoutes } from '../modules/tool-auth/connection-keys-admin.routes.js';
 import { createAuditRoutes } from '../modules/audit/audit.routes.js';
 import { createAgentConnectionRoutes } from '../modules/audit/agent-connection.routes.js';
@@ -817,6 +818,15 @@ export async function createCoreServer(
     core.accountErasureService,
     core.accountHooks,
     core.userAccessRemovalService,
+  ));
+  // Invitations: anyone signed in makes a NEW account for somebody (Member;
+  // Admin only for an admin), with a generated starting password where the
+  // deployment signs in with passwords.
+  app.use('/api', core.authMiddleware, createInvitationRoutes(
+    core.authService,
+    core.adminAccess,
+    core.accountHooks,
+    { passwordSignIn: core.config.loginPasswordEnabled, providers: core.authProviders },
   ));
   // Connection keys across the deployment (list per account, revoke any) —
   // admin-gated inside. The per-user key surface stays on /api/mcp/…

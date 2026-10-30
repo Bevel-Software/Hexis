@@ -1,12 +1,11 @@
-import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
-import { ChevronDown, Eye, EyeOff, KeyRound, RotateCw } from 'lucide-react';
-import { MIN_PASSWORD_LENGTH } from '@bevel-software/platform-shared';
-import { Badge, Banner, Button, Dialog, TextField, type BadgeTone } from '../../../shared/components';
+import { useContext, useEffect, useId, useRef, useState, type ReactNode } from 'react';
+import { ChevronDown, KeyRound, RotateCw } from 'lucide-react';
+import { Badge, Banner, Button, Dialog, type BadgeTone } from '../../../shared/components';
 import { SlotBoundary } from '../../../shared/components/SlotBoundary';
 import { useAppRegistry } from '../../../core/registry';
-import { useAuth, useSignInMethods, createAccount, listAccounts } from '../../auth';
+import { useAuth, useSignInMethods, sendInvitation } from '../../auth';
 import type { LoginProviders } from '../../auth';
-import { addMember, fetchRoles } from '../../admin';
+import { AdminContext, addMember, fetchRoles } from '../../admin';
 import { copyToClipboard } from '../../library';
 import { initials } from '../../../lib/email';
 import { EmailChipsInput } from './EmailChipsInput';
@@ -33,10 +32,13 @@ function either(labels: string[]): string {
 }
 
 /**
- * What the form asks for, from how the deployment signs people in:
- * - `password`: password sign-in and no single sign-on — a starting password
- *   is required, or nobody invited could sign in;
- * - `sso`: single sign-on and password sign-in — a password is an option;
+ * What the form offers, from how the deployment signs people in:
+ * - `password`: password sign-in and no single sign-on — every new account
+ *   gets a generated starting password, or nobody invited could sign in (the
+ *   owner's and the system accounts' addresses, and from a non-admin one
+ *   that already holds Admin, excepted: the answer says);
+ * - `sso`: single sign-on and password sign-in — a generated password is an
+ *   option;
  * - `sso-only`: password sign-in is off — no password at all;
  * - `none`: password sign-in is off and no single sign-on is on either —
  *   nobody invited could sign in, so nothing can be sent;
@@ -63,41 +65,46 @@ interface InviteDialogProps {
  * Invite your team: addresses in, accounts out, under the same access rules
  * as everything else (Share → Manage access decides what they then see).
  *
+ * Anyone signed in invites; only an admin chooses the Role (Member or
+ * Admin), and everyone else invites Members, which is all the server takes
+ * from them.
+ *
  * How the invited people get in depends on the deployment, so the dialog
  * asks it first (`GET /api/auth/providers`) and lets nothing be sent until it
- * knows. Without single sign-on it requires a starting password, given to
- * every account the send creates or that has none yet; with single sign-on
- * the password is an option. An account that has its own password keeps it.
+ * knows. Nobody types a password: without single sign-on the server
+ * generates one for every new account but an owner's or a system account's
+ * (or, from a non-admin, one that already holds Admin);
+ * with single sign-on that is an
+ * option. An account that is already there is left exactly as it was.
  *
  * Two views in one dialog. The form; then, after sending, who is invited,
  * how each of them signs in, and how to tell them. The second view exists
  * because creating an account sends nobody anything — core has no mail — so
- * the admin leaves with the sign-in address and a message to forward, not
+ * the inviter leaves with the sign-in address and a message to forward, not
  * with an assumption that people were notified.
  *
- * The starting password lives in this component's state only. It is never in
- * the message or anything else a copy button copies, never shown again after
- * the send, and gone with the dialog.
+ * A generated password is shown on its row in the result view, with a Copy
+ * button, and nowhere else: never in the message, never again after Done or
+ * "Invite more people" (both drop the outcomes), and gone with the dialog.
  *
  * Feedback stays INSIDE the dialog: the Library's toasts only exist under its
  * own routes, and this opens from Knowledge too.
  */
 export function InviteDialog({ open, onClose, onInvited, initialEmails }: InviteDialogProps) {
   const { user } = useAuth();
+  // Optional context: the dialog is mounted bare in tests, and a verdict not
+  // in yet reads as "not an admin" — a Member invite, which is always allowed.
+  const isAdmin = useContext(AdminContext)?.isAdmin ?? false;
   const signIn = useSignInMethods();
   const methods = signIn.status === 'ready' ? signIn.methods : null;
   const mode = formMode(methods);
   const [emails, setEmails] = useState<string[]>(() => initialEmails ?? []);
   const [draft, setDraft] = useState('');
   const [role, setRole] = useState<InviteRole>('member');
-  const [password, setPassword] = useState('');
   const [alsoPassword, setAlsoPassword] = useState(false);
   const [sending, setSending] = useState(false);
-  // A send with a password stopped before any write: the account list could not be read.
-  const [accountsUnreadable, setAccountsUnreadable] = useState(false);
+  // The outcomes of the last send; the generated passwords live here and nowhere else.
   const [outcomes, setOutcomes] = useState<InviteOutcome[] | null>(null);
-  // Whether the send that produced `outcomes` carried a starting password (never the password itself).
-  const [sentWithPassword, setSentWithPassword] = useState(false);
   const emailsId = useId();
   const doneRef = useRef<HTMLButtonElement>(null);
 
@@ -123,31 +130,22 @@ export function InviteDialog({ open, onClose, onInvited, initialEmails }: Invite
   for (const email of splitEmails(draft)) if (!pending.includes(email)) pending.push(email);
   const valid = pending.filter(isValidEmail);
   const wantsPassword = mode === 'password' || (mode === 'sso' && alsoPassword);
-  const passwordOk = !wantsPassword || password.length >= MIN_PASSWORD_LENGTH;
-  const canSend = mode !== 'unknown' && mode !== 'none' && valid.length > 0 && passwordOk && !sending;
+  const canSend = mode !== 'unknown' && mode !== 'none' && valid.length > 0 && !sending;
 
   async function send() {
     if (!canSend) return;
     setSending(true);
-    setAccountsUnreadable(false);
     try {
       const result = await sendInvites(
         valid,
-        role,
-        { listAccounts, createAccount, addMember, fetchRoles },
-        { password: wantsPassword ? password : undefined },
+        isAdmin ? role : 'member',
+        { sendInvitation, addMember, fetchRoles },
+        { startingPassword: wantsPassword },
       );
-      if (result.status === 'accounts-unreadable') {
-        // Nothing was written; the form keeps what the admin typed.
-        setAccountsUnreadable(true);
-        return;
-      }
       setEmails([]);
       setDraft('');
-      setPassword('');
-      setSentWithPassword(wantsPassword);
-      setOutcomes(result.outcomes);
-      if (result.outcomes.some((o) => o.status === 'created' || gotPassword(o) || (o.status === 'existing' && o.promoted))) {
+      setOutcomes(result);
+      if (result.some((o) => o.status === 'created' || (o.status === 'existing' && o.promoted))) {
         onInvited?.();
       }
     } finally {
@@ -159,15 +157,12 @@ export function InviteDialog({ open, onClose, onInvited, initialEmails }: Invite
     setEmails([]);
     setDraft('');
     setRole('member');
-    setPassword('');
     setAlsoPassword(false);
-    setSentWithPassword(false);
     setOutcomes(null);
   }
 
   if (outcomes) {
-    const sso = (methods?.sso.length ?? 0) > 0;
-    const invited = outcomes.filter((o) => isInvited(o, sso)).length;
+    const invited = outcomes.filter(isInvited).length;
     return (
       <Dialog
         open={open}
@@ -189,7 +184,7 @@ export function InviteDialog({ open, onClose, onInvited, initialEmails }: Invite
           </>
         }
       >
-        <InvitedBody outcomes={outcomes} invited={invited} methods={methods} passwordGiven={sentWithPassword} />
+        <InvitedBody outcomes={outcomes} invited={invited} methods={methods} isAdmin={isAdmin} />
       </Dialog>
     );
   }
@@ -226,12 +221,6 @@ export function InviteDialog({ open, onClose, onInvited, initialEmails }: Invite
             <Banner tone="danger" role="alert">
               Nobody could sign in: password sign-in is off here and no single sign-on is set up.
             </Banner>
-          ) : accountsUnreadable ? (
-            <RetryAlert
-              text="Nothing was sent: couldn’t check who already has an account."
-              onRetry={() => void send()}
-              disabled={!canSend}
-            />
           ) : null
         }
         ssoLabels={methods?.sso.map((p) => p.label) ?? []}
@@ -240,10 +229,9 @@ export function InviteDialog({ open, onClose, onInvited, initialEmails }: Invite
         onEmailsChange={setEmails}
         draft={draft}
         onDraftChange={setDraft}
+        showRole={isAdmin}
         role={role}
         onRoleChange={setRole}
-        password={password}
-        onPasswordChange={setPassword}
         alsoPassword={alsoPassword}
         onAlsoPasswordChange={setAlsoPassword}
         validCount={valid.length}
@@ -256,12 +244,12 @@ export function InviteDialog({ open, onClose, onInvited, initialEmails }: Invite
 }
 
 /** A red bar saying what went wrong, with a Retry beside it. */
-function RetryAlert({ text, onRetry, disabled = false }: { text: string; onRetry(): void; disabled?: boolean }) {
+function RetryAlert({ text, onRetry }: { text: string; onRetry(): void }) {
   return (
     <Banner tone="danger" role="alert">
       <div className="flex items-center gap-3">
         <span className="flex-1">{text}</span>
-        <Button size="sm" leadingIcon={<RotateCw size={14} aria-hidden />} onClick={onRetry} disabled={disabled}>
+        <Button size="sm" leadingIcon={<RotateCw size={14} aria-hidden />} onClick={onRetry}>
           Retry
         </Button>
       </div>
@@ -286,10 +274,9 @@ function InviteFormBody({
   onEmailsChange,
   draft,
   onDraftChange,
+  showRole,
   role,
   onRoleChange,
-  password,
-  onPasswordChange,
   alsoPassword,
   onAlsoPasswordChange,
   validCount,
@@ -305,10 +292,10 @@ function InviteFormBody({
   onEmailsChange(next: string[]): void;
   draft: string;
   onDraftChange(next: string): void;
+  /** The Role choice is an admin's: anyone else invites Members. */
+  showRole: boolean;
   role: InviteRole;
   onRoleChange(next: InviteRole): void;
-  password: string;
-  onPasswordChange(next: string): void;
   alsoPassword: boolean;
   onAlsoPasswordChange(next: boolean): void;
   validCount: number;
@@ -324,31 +311,17 @@ function InviteFormBody({
   const Extras = useAppRegistry().inviteExtras;
   const invalidId = useId();
   const roleId = useId();
-  const passwordId = useId();
-  const helpId = useId();
 
-  const showPassword = mode === 'password' || (mode === 'sso' && alsoPassword);
-  const tooShort = showPassword && password.length > 0 && password.length < MIN_PASSWORD_LENGTH;
+  const withPassword = mode === 'password' || (mode === 'sso' && alsoPassword);
   const idp = either(ssoLabels);
   const help =
     mode === 'password'
-      ? 'They sign in with their email and the password you set.'
+      ? 'They sign in with their email and a password made for them. You see it once, after you invite, to pass on.'
       : (mode === 'sso' || mode === 'sso-only') && idp
-        ? showPassword
-          ? `They sign in with ${idp}, or with their email and the password you set.`
+        ? withPassword
+          ? `They sign in with ${idp}, or with their email and a password made for them. You see it once, after you invite.`
           : `They sign in with ${idp}.`
         : null;
-
-  const passwordField = (
-    <PasswordField
-      id={passwordId}
-      value={password}
-      onChange={onPasswordChange}
-      invalid={tooShort}
-      disabled={sending}
-      describedBy={helpId}
-    />
-  );
 
   return (
     <div className="flex flex-col gap-5 py-2">
@@ -373,28 +346,29 @@ function InviteFormBody({
         )}
       </div>
       <div className="flex flex-col gap-2">
-        <div className={`grid grid-cols-[9rem_1fr] gap-3 ${mode === 'password' ? '' : 'items-end'}`}>
-          <div className="flex flex-col gap-1.5">
-            <FieldLabel htmlFor={roleId}>Role</FieldLabel>
-            <div className="relative">
-              <select
-                id={roleId}
-                value={role}
-                disabled={sending}
-                onChange={(e) => onRoleChange(e.target.value as InviteRole)}
-                className="w-full appearance-none rounded-md border border-line-strong bg-surface py-2 pl-2.5 pr-8 text-ui text-ink"
-              >
-                <option value="member">Member</option>
-                <option value="admin">Admin</option>
-              </select>
-              <ChevronDown
-                size={14}
-                aria-hidden
-                className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-ink-muted"
-              />
+        <div className={`grid gap-3 items-end ${showRole ? 'grid-cols-[9rem_1fr]' : 'grid-cols-1'}`}>
+          {showRole && (
+            <div className="flex flex-col gap-1.5">
+              <FieldLabel htmlFor={roleId}>Role</FieldLabel>
+              <div className="relative">
+                <select
+                  id={roleId}
+                  value={role}
+                  disabled={sending}
+                  onChange={(e) => onRoleChange(e.target.value as InviteRole)}
+                  className="w-full appearance-none rounded-md border border-line-strong bg-surface py-2 pl-2.5 pr-8 text-ui text-ink"
+                >
+                  <option value="member">Member</option>
+                  <option value="admin">Admin</option>
+                </select>
+                <ChevronDown
+                  size={14}
+                  aria-hidden
+                  className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-ink-muted"
+                />
+              </div>
             </div>
-          </div>
-          {mode === 'password' && passwordField}
+          )}
           {mode === 'sso' && (
             <label className="flex h-[38px] items-center gap-2 text-ui text-ink">
               <input
@@ -408,18 +382,7 @@ function InviteFormBody({
             </label>
           )}
         </div>
-        {mode === 'sso' && alsoPassword && <div className="mt-3">{passwordField}</div>}
-        {tooShort ? (
-          <p id={helpId} className="text-meta text-danger">
-            The password needs at least {MIN_PASSWORD_LENGTH} characters.
-          </p>
-        ) : (
-          help && (
-            <p id={helpId} className="text-meta text-ink-faint">
-              {help}
-            </p>
-          )
-        )}
+        {help && <p className="text-meta text-ink-faint">{help}</p>}
       </div>
       {Extras && (
         <SlotBoundary label="invite panel">
@@ -430,78 +393,26 @@ function InviteFormBody({
   );
 }
 
-/**
- * The starting password: masked, with an eye button to check what was typed.
- * `new-password` so the browser offers to generate one rather than filling
- * in the admin's own.
- */
-function PasswordField({
-  id,
-  value,
-  onChange,
-  invalid,
-  disabled,
-  describedBy,
-}: {
-  id: string;
-  value: string;
-  onChange(next: string): void;
-  invalid: boolean;
-  disabled: boolean;
-  describedBy: string;
-}) {
-  const [shown, setShown] = useState(false);
-  return (
-    <div className="flex flex-col gap-1.5">
-      <FieldLabel htmlFor={id}>Starting password</FieldLabel>
-      <div className="relative">
-        <TextField
-          id={id}
-          type={shown ? 'text' : 'password'}
-          autoComplete="new-password"
-          required
-          value={value}
-          disabled={disabled}
-          onChange={(e) => onChange(e.target.value)}
-          aria-invalid={invalid || undefined}
-          aria-describedby={describedBy}
-          className={`pr-10 ${invalid ? 'border-danger' : ''}`}
-        />
-        <button
-          type="button"
-          aria-label={shown ? 'Hide password' : 'Show password'}
-          aria-pressed={shown}
-          onClick={() => setShown((s) => !s)}
-          className="absolute inset-y-0 right-0 flex items-center px-3 text-ink-faint hover:text-ink"
-        >
-          {shown ? <EyeOff size={16} aria-hidden /> : <Eye size={16} aria-hidden />}
-        </button>
-      </div>
-    </div>
-  );
-}
-
 /** How each outcome reads on its row. */
 const OUTCOME_BADGE: Record<InviteOutcome['status'], { tone: BadgeTone; label: string }> = {
   created: { tone: 'neutral', label: 'Hasn’t signed in yet' },
-  existing: { tone: 'outline', label: 'Already had an account' },
+  existing: { tone: 'outline', label: 'Already has an account' },
   'no-seat': { tone: 'wait', label: 'Not invited: no seat left' },
   error: { tone: 'danger', label: 'Not invited' },
 };
 
 /**
- * A switched-off account is on the list but cannot sign in: its row says so,
- * in the waiting tone, rather than "Already had an account" beside a claim
- * that it is ready. One whose password could not be set says that.
+ * An account an admin's promotion found switched off cannot sign in: its row
+ * says so, in the waiting tone, rather than "Already has an account" beside
+ * a claim that it is ready.
  */
 function outcomeBadge(outcome: InviteOutcome): { tone: BadgeTone; label: string } {
   if (outcome.status === 'existing' && outcome.deactivated) return { tone: 'wait', label: 'Account switched off' };
-  if (outcome.status === 'existing' && outcome.passwordError) return { tone: 'danger', label: 'Password not set' };
   return OUTCOME_BADGE[outcome.status];
 }
 
 /** How the person on one row signs in — or why they can't. */
-function outcomeDetail(outcome: InviteOutcome, idp: string, passwordGiven: boolean): string {
+function outcomeDetail(outcome: InviteOutcome, idp: string): string {
   switch (outcome.status) {
     case 'created': {
       const as = outcome.roleError
@@ -509,35 +420,30 @@ function outcomeDetail(outcome: InviteOutcome, idp: string, passwordGiven: boole
         : outcome.role === 'admin'
           ? 'Admin'
           : 'Member';
-      const how = outcome.passwordSet
-        ? idp
-          ? `signs in with ${idp} or password`
-          : 'signs in with the password you set'
-        : idp
-          ? `signs in with ${idp}`
-          : null;
+      // Single sign-on is named only where the server said it lets this
+      // address in: it refuses one outside the deployment's allowed domains.
+      const viaIdp = idp && outcome.singleSignOn ? idp : '';
+      const how = outcome.startingPassword
+        ? viaIdp
+          ? `signs in with ${viaIdp} or the password below`
+          : 'signs in with the password below'
+        : viaIdp
+          ? `signs in with ${viaIdp}`
+          : idp
+            ? `can’t sign in yet: ${idp} doesn’t accept this address here`
+            : 'can’t sign in yet: no password was made for this address';
       // The deployment emailed them the invite itself (see `wasEmailed`): the
-      // row says so first, since it is what the admin no longer has to do.
+      // row says so first, since it is what the inviter no longer has to do.
       return [wasEmailed(outcome) ? 'Emailed' : null, as, how].filter(Boolean).join(' · ');
     }
     case 'existing': {
-      if (outcome.passwordError) {
-        const failed = `Couldn’t set the password: ${outcome.passwordError}`;
-        return idp ? `${failed} · signs in with ${idp}` : failed;
-      }
+      // The invite changed nothing about the account, its password included.
+      // Whether it can sign in is not said: the answer is only that it
+      // exists, and it may be switched off or have no way in yet. Only a
+      // refused promotion tells that it is switched off.
       const access = outcome.deactivated
         ? 'Can’t sign in until it’s switched on in User accounts'
-        : outcome.passwordSet
-          ? idp
-            ? `Had no password: now signs in with ${idp} or the one you set`
-            : 'Had no password: now uses the one you set'
-          : outcome.hasOwnPassword
-            ? passwordGiven
-              ? 'Signs in with their own password (unchanged)'
-              : 'Signs in with their own password'
-            : idp
-              ? `Signs in with ${idp}`
-              : 'Can sign in already';
+        : 'Left as it was';
       if (outcome.roleError) return `${access}: couldn’t make them an admin (${outcome.roleError})`;
       if (outcome.promoted) return `${access}, now an admin`;
       if (outcome.alreadyAdmin) return `${access}, already an admin`;
@@ -552,76 +458,129 @@ function outcomeDetail(outcome: InviteOutcome, idp: string, passwordGiven: boole
 const INTRO = 'I’ve added you to our workspace, where we keep what our AI agents should know about the company.';
 
 /**
- * The message to forward, saying how to sign in on this deployment. Never
- * the password: when one was set, it tells them it comes separately.
+ * The message to forward, saying how to sign in. `idp`: the single sign-on
+ * that lets the reader in ('' when none does). `password`: 'separately' when
+ * one was generated for them, never the password itself; 'own' when they
+ * sign in with a password of their own; 'none' when no password lets them in.
  */
-function inviteMessage(origin: string, how: { idp: string; passwordSet: boolean; passwordSignIn: boolean }): string {
-  const { idp, passwordSet, passwordSignIn } = how;
-  if (passwordSet && idp) {
+function inviteMessage(origin: string, how: { idp: string; password: 'separately' | 'own' | 'none' }): string {
+  const { idp, password } = how;
+  if (password === 'separately' && idp) {
     return `${INTRO} Sign in at ${origin} with ${idp}, or with your work email and the password I’ll send you separately (change it on your Account page). Then connect your agent from the welcome page.`;
   }
-  if (passwordSet) {
+  if (password === 'separately') {
     return `${INTRO} Sign in at ${origin} with your work email and the password I’ll send you separately. Then change it on your Account page and connect your agent from the welcome page.`;
   }
+  if (password === 'own' && idp) {
+    return `${INTRO} Sign in at ${origin} with ${idp} or with your work email and your password, then connect your agent from the welcome page.`;
+  }
   if (idp) return `${INTRO} Sign in at ${origin} with ${idp}, then connect your agent from the welcome page.`;
-  if (passwordSignIn) {
+  if (password === 'own') {
     return `${INTRO} Sign in at ${origin} with your work email and your password, then connect your agent from the welcome page.`;
   }
   return `${INTRO} Sign in with your work account at ${origin}, then connect your agent from the welcome page.`;
+}
+
+/**
+ * The message for one person, from what the server said lets them in: a new
+ * account names single sign-on only where it admits the address, and a
+ * password only where one was made. Of an account that was already there
+ * only its existence is known, so it is told every way this deployment offers.
+ */
+function messageFor(outcome: InviteOutcome, origin: string, idp: string, passwordSignIn: boolean): string {
+  if (outcome.status === 'created') {
+    return inviteMessage(origin, {
+      idp: outcome.singleSignOn ? idp : '',
+      password: gotPassword(outcome) ? 'separately' : 'none',
+    });
+  }
+  return inviteMessage(origin, { idp, password: passwordSignIn ? 'own' : 'none' });
 }
 
 function InvitedBody({
   outcomes,
   invited,
   methods,
-  passwordGiven,
+  isAdmin,
 }: {
   outcomes: InviteOutcome[];
   invited: number;
   methods: LoginProviders | null;
-  /** The send carried a starting password, whoever ended up with it. */
-  passwordGiven: boolean;
+  /** The inviter's own row says what they are. */
+  isAdmin: boolean;
 }) {
   const { user } = useAuth();
   const origin = window.location.origin;
   const idp = either(methods?.sso.map((p) => p.label) ?? []);
-  // Who was given the starting password in this send: the reminder names
-  // them when it was not everyone invited, since a person who kept their own
-  // password cannot use it.
+  // Who got a generated password in this send: the reminder names them when
+  // it was not everyone invited, since an existing account got none.
   const gotIt = outcomes.filter(gotPassword).length;
   const passwordSet = gotIt > 0;
   // The deployment emailed EVERY invited person the invite itself (the
-  // cloud's mail, say): the admin has nothing to send but a password. One
-  // person it did not reach — an existing account that only got a
-  // password, a deployment with no mail — and the message is offered as
-  // before, for them.
-  // The same single-sign-on test `invited` was counted with (a provider is
-  // one whatever its label says), so the two agree on who was invited.
-  const sso = (methods?.sso.length ?? 0) > 0;
-  const allEmailed = invited > 0 && outcomes.filter((o) => isInvited(o, sso)).every(wasEmailed);
-  const message = inviteMessage(origin, { idp, passwordSet, passwordSignIn: Boolean(methods?.password) });
+  // cloud's mail, say): the inviter has nothing to send. One person it did
+  // not reach — an account that was already there, a deployment with no
+  // mail — and the message is offered as before, for them.
+  const allEmailed = invited > 0 && outcomes.filter(isInvited).every(wasEmailed);
+  // Readiness is claimed for the accounts this invite made, and only them:
+  // one that was already there is said to exist, not to be able to sign in.
+  const created = outcomes.filter((o) => o.status === 'created').length;
+  const who = created === invited ? 'They' : 'Everyone with a new account';
+  // New accounts nothing lets in yet: no password was made for them, and
+  // single sign-on is off or refuses the address (one outside the allowed
+  // domains). Without single sign-on that is an address the server makes no
+  // password for: the owner's, a system account's, or an Admin's from a
+  // non-admin.
+  const shutOutEmails = outcomes
+    .filter((o) => o.status === 'created' && !o.startingPassword && !(idp && o.singleSignOn))
+    .map((o) => o.email);
+  const shutOut = shutOutEmails.length;
+  const shutOutWhy = idp ? `${idp} doesn’t accept` : 'no password was made for';
+  // The message tells whoever reads it how to sign in, so it is for the
+  // people something lets in, never a shut-out account, and each person is
+  // told only the ways that let them in. People told the same share one
+  // message; when they differ, each message names who it is for.
+  const forwardTo = outcomes.filter((o) => isInvited(o) && !shutOutEmails.includes(o.email));
+  const messages: { text: string; emails: string[] }[] = [];
+  for (const outcome of forwardTo) {
+    const text = messageFor(outcome, origin, idp, Boolean(methods?.password));
+    const same = messages.find((m) => m.text === text);
+    if (same) same.emails.push(outcome.email);
+    else messages.push({ text, emails: [outcome.email] });
+  }
+  const messageLabel = (emails: string[]) =>
+    messages.length > 1
+      ? `Or send this message to ${emails.join(', ')}`
+      : shutOut > 0
+        ? `Or send this message to everyone but ${shutOutEmails.join(', ')}`
+        : 'Or send this message';
 
   return (
     <div className="flex flex-col gap-4 py-1">
       <p className="text-detail text-ink-muted">
         {invited === 0
           ? 'No accounts were created. The reason is on each row.'
-          : allEmailed
-            ? passwordSet
-              ? 'They have been emailed the link. Send them the password separately.'
-              : 'They have been emailed the link and how to sign in.'
-            : passwordSet
-              ? 'They can sign in now. Send them the link and the password.'
-              : idp
-                ? `They can sign in now with ${idp}. Send them the link.`
-                : 'Their accounts are ready. Send them the link so they know to sign in.'}
+          : created === 0
+            ? 'They already have accounts, which were left as they were.'
+            : shutOut === created
+              ? `${created === invited ? 'They' : 'The new accounts'} can’t sign in yet: ${shutOutWhy} their addresses here.`
+              : shutOut > 0
+                ? `Not every new account can sign in yet: ${shutOutWhy} some addresses here. Each row says which.`
+                : allEmailed
+              ? 'They have been emailed the link and how to sign in.'
+              : passwordSet
+                ? `${who} can sign in now. Send them the link and their password.`
+                : idp
+                  ? `${who} can sign in now with ${idp}. Send them the link.`
+                  : created === invited
+                    ? 'Their accounts are ready. Send them the link so they know to sign in.'
+                    : 'The new accounts are ready. Send them the link so they know to sign in.'}
       </p>
       <ul aria-label="People" className="flex flex-col divide-y divide-line">
         {user && (
           <PersonRow
             label={`${user.name} (you)`}
             detail={user.email}
-            badge={<Badge>Admin</Badge>}
+            badge={<Badge>{isAdmin ? 'Admin' : 'Member'}</Badge>}
             strong
           />
         )}
@@ -631,9 +590,19 @@ function InvitedBody({
             <PersonRow
               key={outcome.email}
               label={outcome.email}
-              detail={outcomeDetail(outcome, idp, passwordGiven)}
+              detail={outcomeDetail(outcome, idp)}
               badge={<Badge tone={badge.tone}>{badge.label}</Badge>}
-            />
+            >
+              {outcome.status === 'created' && outcome.startingPassword && (
+                <CopyRow
+                  label={`Password for ${outcome.email}`}
+                  text={outcome.startingPassword}
+                  copyLabel="Copy"
+                  mono
+                  compact
+                />
+              )}
+            </PersonRow>
           );
         })}
       </ul>
@@ -642,17 +611,20 @@ function InvitedBody({
           {passwordSet && (
             <Banner tone="wait" role="status" icon={<KeyRound size={16} aria-hidden />}>
               <span className="font-semibold">
-                {gotIt === invited
-                  ? 'Send them the password you set, separately.'
-                  : `Send the password you set, separately, to the ${gotIt === 1 ? 'person' : `${gotIt} people`} whose row says they use it.`}
+                {gotIt === 1
+                  ? 'Copy the password on its row now: it isn’t shown again.'
+                  : 'Copy each password on its row now: they aren’t shown again.'}
               </span>{' '}
               {allEmailed
-                ? 'It isn’t in the email they were sent.'
-                : 'It isn’t in the message below, so the message is safe to post in a shared channel.'}
+                ? 'Send it to them separately if their email didn’t carry it, and ask them to change it on their Account page.'
+                : 'Send it to them separately. It isn’t in the message below, so the message is safe to post in a shared channel.'}
             </Banner>
           )}
           <CopyRow label="Where they sign in" text={origin} copyLabel="Copy link" mono />
-          {!allEmailed && <CopyRow label="Or send this message" text={message} copyLabel="Copy message" />}
+          {!allEmailed &&
+            messages.map((m) => (
+              <CopyRow key={m.text} label={messageLabel(m.emails)} text={m.text} copyLabel="Copy message" />
+            ))}
         </>
       )}
     </div>
@@ -664,29 +636,35 @@ function PersonRow({
   detail,
   badge,
   strong = false,
+  children,
 }: {
   label: string;
   detail: string;
   badge: ReactNode;
   strong?: boolean;
+  /** Under the row: a created account's generated password. */
+  children?: ReactNode;
 }) {
   return (
-    <li className="flex items-center gap-2.5 py-2">
-      <span
-        aria-hidden
-        className="flex size-[26px] flex-none items-center justify-center rounded-full border border-line bg-sunken text-micro font-bold text-ink-muted"
-      >
-        {initials(label)}
-      </span>
-      <span className="min-w-0 flex-1">
-        <span className={`block truncate text-ui text-ink ${strong ? 'font-semibold' : ''}`}>
-          {label}
+    <li className="flex flex-col gap-1.5 py-2">
+      <div className="flex items-center gap-2.5">
+        <span
+          aria-hidden
+          className="flex size-[26px] flex-none items-center justify-center rounded-full border border-line bg-sunken text-micro font-bold text-ink-muted"
+        >
+          {initials(label)}
         </span>
-        <span className="block truncate text-meta text-ink-faint" title={detail}>
-          {detail}
+        <span className="min-w-0 flex-1">
+          <span className={`block truncate text-ui text-ink ${strong ? 'font-semibold' : ''}`}>
+            {label}
+          </span>
+          <span className="block truncate text-meta text-ink-faint" title={detail}>
+            {detail}
+          </span>
         </span>
-      </span>
-      {badge}
+        {badge}
+      </div>
+      {children && <div className="pl-[36px]">{children}</div>}
     </li>
   );
 }
@@ -701,17 +679,20 @@ function CopyRow({
   text,
   copyLabel,
   mono = false,
+  compact = false,
 }: {
   label: string;
   text: string;
   copyLabel: string;
   mono?: boolean;
+  /** Inside a person's row: the label names it for assistive technology only. */
+  compact?: boolean;
 }) {
   const [state, setState] = useState<'idle' | 'copied' | 'failed'>('idle');
   const labelId = useId();
   return (
     <div className="flex flex-col gap-1.5">
-      <span id={labelId} className="text-detail font-medium text-ink">
+      <span id={labelId} className={compact ? 'sr-only' : 'text-detail font-medium text-ink'}>
         {label}
       </span>
       <div className="flex items-stretch overflow-hidden rounded-md border border-line bg-sunken">
@@ -723,6 +704,7 @@ function CopyRow({
         </p>
         <button
           type="button"
+          aria-label={compact ? `${copyLabel} ${label.charAt(0).toLowerCase()}${label.slice(1)}` : undefined}
           onClick={() => {
             void copyToClipboard(text).then((ok) => setState(ok ? 'copied' : 'failed'));
           }}
