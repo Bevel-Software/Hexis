@@ -59,7 +59,6 @@ function makeWorkspace(overrides: Partial<WorkspaceContextValue> = {}): Workspac
     moveEntry: async () => {},
     saveFile: async () => {},
     reloadTabFromDisk: async () => {},
-    clearChangedOnBranch: () => {},
     setPendingContent: () => {},
     acceptPendingContent: async () => {},
     rejectPendingContent: async () => {},

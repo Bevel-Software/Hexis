@@ -12,4 +12,4 @@ The same holds on a skill's page and a tool's page in Skills & Tools: when someo
 
 A commit pulled from the git host onto a file with unsaved edits — the one write the file lock cannot stop — now merges the edits onto the new content (a line-based three-way merge, `node-diff3`) and keeps the result unsaved, with a banner saying so. When the two collide the edits are discarded, as before, and the banner says that instead.
 
-For downstream frontends: `deleteEntry` resolves `{ closedActive, newActivePath }` on success (still `false` when called off); `OpenTab` gains the optional `deletedBy`, `changedOnBranch` and `remoteRevision`; the workspace context gains `clearChangedOnBranch` and the optional `isOwnDelete`.
+For downstream frontends: `deleteEntry` resolves `{ closedActive, newActivePath }` on success (still `false` when called off); `OpenTab` gains the optional `deletedBy`, `changedOnBranch` and `remoteRevision`; the workspace context gains the optional `clearChangedOnBranch`, `isOwnDelete` and `forgetOwnDelete`, so a provider or fixture built against the old shape still type-checks.

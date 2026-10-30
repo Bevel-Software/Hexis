@@ -420,8 +420,8 @@ export interface WorkspaceContextValue {
    * marks the tab deleted, as someone else's delete does, rather than closing it.
    */
   reloadTabFromDisk: (relativePath: string) => Promise<void>;
-  /** Dismiss the changed-on-branch banner of the tab at `relativePath`. */
-  clearChangedOnBranch: (relativePath: string) => void;
+  /** Dismiss the changed-on-branch banner of the tab at `relativePath`. Optional, as `isOwnDelete` is. */
+  clearChangedOnBranch?: (relativePath: string) => void;
   /**
    * Called by the chat hook when the agent has written a new version of the
    * currently-active file. Routes to `activeTab.pendingFileContent`. The chat

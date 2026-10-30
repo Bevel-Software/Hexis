@@ -1725,7 +1725,7 @@ export function FileViewer() {
                       : 'This file changed on the branch while you were editing. Your edits were merged in and saved.')
                     : 'This file changed on the branch while you were editing, and your edits could not be merged. They were discarded.'}
                 </span>
-                <Button variant="quiet" size="sm" title="Dismiss" onClick={() => clearChangedOnBranch(openFilePath)}>
+                <Button variant="quiet" size="sm" title="Dismiss" onClick={() => clearChangedOnBranch?.(openFilePath)}>
                   Dismiss
                 </Button>
               </div>
