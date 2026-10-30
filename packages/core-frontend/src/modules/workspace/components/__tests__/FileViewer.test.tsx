@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, waitFor, act, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Routes, Route, useLocation, useNavigationType } from 'react-router-dom';
@@ -10,8 +10,7 @@ import type {
   WorkingTreeStatus,
 } from '@bevel-software/platform-shared';
 
-// Mock the access API before importing the component tree — useFileAccess
-// fires a fetch in an effect on mount, and we don't want real network in tests.
+// The access verdict the server gives — useFileAccess asks for it on mount.
 type Eligible = { roles: string[]; users: { name: string; email: string }[] };
 const EMPTY_ELIGIBLE: Eligible = { roles: [], users: [] };
 const accessMock = vi.hoisted(() => ({
@@ -29,19 +28,12 @@ const accessMock = vi.hoisted(() => ({
   fetchFileAccess: vi.fn(),
 }));
 accessMock.fetchFileAccess.mockImplementation(async () => accessMock.result);
-vi.mock('../../../access/api', () => ({
-  fetchFileAccess: accessMock.fetchFileAccess,
-  fetchFileAccessBatch: vi.fn(async () => ({ results: {} })),
-}));
-
-// Mock the lock API too — useFileLock acquires/heartbeats/releases against
-// real endpoints. In these tests we just need the acquire to succeed so the
-// save flow can finish; lock contention paths are exercised in lock-specific
-// tests, not here.
-vi.mock('../../../workflow/services/lock.api', async (importOriginal) => ({
-  // The sentences (SELF_HOLD_MESSAGE, EDITING_ENDED_MESSAGE) stay real.
-  ...(await importOriginal<typeof import('../../../workflow/services/lock.api')>()),
-  acquireLock: vi.fn(async () => ({
+// The lock endpoints. useFileLock acquires/heartbeats/releases against them;
+// these tests only need the acquire to succeed so the save flow can finish —
+// lock contention paths are exercised in lock-specific tests, not here.
+type Handler = (...args: unknown[]) => Promise<unknown>;
+const lockMock = vi.hoisted(() => ({
+  acquireLock: vi.fn<Handler>(async () => ({
     acquired: true,
     lock: {
       branch: 'alice/draft',
@@ -53,44 +45,32 @@ vi.mock('../../../workflow/services/lock.api', async (importOriginal) => ({
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
     },
   })),
-  heartbeatLock: vi.fn(async () => ({})),
-  checkpointLockedFile: vi.fn(async () => null),
-  releaseLock: vi.fn(async (): Promise<void> => {}),
-  getLock: vi.fn(async () => null),
-  LockApiError: class LockApiError extends Error {
-    readonly status: number;
-    readonly body: unknown;
-    constructor(status: number, message: string, body?: unknown) {
-      super(message);
-      this.status = status;
-      this.body = body;
-    }
-  },
+  heartbeatLock: vi.fn<Handler>(async () => ({})),
+  checkpointLockedFile: vi.fn<Handler>(async () => null),
+  releaseLock: vi.fn<Handler>(async () => ({ queued: true })),
+  getLock: vi.fn<Handler>(async () => null),
 }));
+const acquireLockMock = lockMock.acquireLock;
+const getLockMock = lockMock.getLock;
+const releaseLockMock = lockMock.releaseLock;
 
-// The propose flow's one side effect that leaves the page: the network call
-// that commits to the suggestions branch and opens the change request. The
-// spy is the assertion surface; the branch-name helper stays real.
+// The change-requests entry the page calls. Proposing is the flow's one side
+// effect that leaves the page: the network call that commits to the
+// suggestions branch and opens the change request. The spy is the assertion
+// surface; the branch-name helper stays real.
 const proposeMock = vi.hoisted(() =>
   vi.fn(async () => ({ branch: 'suggestions/reader-u9/knowledge' })),
 );
-vi.mock('../../../change-requests/services/propose.api', async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import('../../../change-requests/services/propose.api')>();
-  return { ...actual, proposeKnowledgeChange: proposeMock };
-});
 // Entering propose mode checks for the caller's open proposal and reads the
-// file's proposed version; the change boxes read the default-branch raw for
-// their diffs — all stubbed so tests decide what is in flight.
+// file's proposed version — both stubbed so tests decide what is in flight.
 const myCrsMock = vi.hoisted(() => vi.fn(async (): Promise<unknown[]> => []));
 const readBranchMock = vi.hoisted(() => vi.fn(async () => ''));
-vi.mock('../../../change-requests/services/change-requests.api', () => ({
+vi.mock('../../../change-requests', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../change-requests')>()),
+  proposeKnowledgeChange: proposeMock,
   listOpenChangeRequests: vi.fn(async () => []),
   listMyChangeRequests: myCrsMock,
   readFileOnBranch: readBranchMock,
-  // No fork point: the change boxes fall back to the default branch, which is
-  // what these tests diff against.
-  readFileAtForkPoint: vi.fn(async () => ({ content: null, forkSha: null })),
 }));
 
 // The access sheet is a 1200-line dialog with its own suite and its own
@@ -108,8 +88,8 @@ vi.mock('../../../access/components/ManageAccessDialog', () => ({
 // `recordActivity`, which has no other visible effect (it resets a timer), so
 // there is no way to assert the scroll→lock wiring without a spy on it.
 const lockActivity = vi.hoisted(() => ({ recordActivity: vi.fn() }));
-vi.mock('../../../workflow/hooks/useFileLock', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../../../workflow/hooks/useFileLock')>();
+vi.mock('../../../workflow', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../workflow')>();
   const { useCallback } = await import('react');
   return {
     ...actual,
@@ -132,27 +112,78 @@ vi.mock('../../../workflow/hooks/useFileLock', async (importOriginal) => {
 // admin. Not offered unless a test says so.
 const starterPacksMock = vi.hoisted(() => ({
   fetchStarterPacks: vi.fn(async () => ({ offered: false, chosen: null, packs: [], chosenPack: null }) as unknown),
-  chooseStarterPack: vi.fn(async () => ({}) as unknown),
-}));
-vi.mock('../../../onboarding/services/starter-packs.api', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../../../onboarding/services/starter-packs.api')>()),
-  ...starterPacksMock,
+  chooseStarterPack: vi.fn<(id: string) => Promise<unknown>>(async () => ({})),
 }));
 
+/**
+ * The server, as the access, lock and onboarding modules reach it. The page
+ * asks those modules' own hooks (useFileAccess, useFileLock, useStarterPacks),
+ * and they call their endpoints, so the test answers the endpoints rather than
+ * replacing the modules' files. Each route hands the request to the handler
+ * named after the call it answers — a test decides the outcome there and reads
+ * the arguments back — and turns what the handler gives into the response the
+ * module reads: a value is a 200, a thrown `LockApiError` its status and body,
+ * any other throw a network failure. Every other request goes to the fetch that
+ * was there before.
+ */
+async function answer(handler: () => Promise<unknown>, wrap: (value: unknown) => unknown = (v) => v) {
+  try {
+    return Response.json(wrap(await handler()));
+  } catch (err) {
+    if (!(err instanceof LockApiError)) throw err;
+    return Response.json({ error: err.message, ...(err.body as object | undefined) }, { status: err.status });
+  }
+}
+function serverRoute(input: RequestInfo | URL, init?: RequestInit): Promise<Response> | null {
+  const url = new URL(String(input instanceof Request ? input.url : input), 'http://app');
+  const method = init?.method ?? 'GET';
+  const body = typeof init?.body === 'string' ? (JSON.parse(init.body) as Record<string, string>) : {};
+  const q = (name: string) => url.searchParams.get(name) ?? '';
+  const ws = /^\/api\/workspace\/([^/]+)\/(.*)$/.exec(url.pathname);
+  if (ws) {
+    const [id, rest] = [decodeURIComponent(ws[1]), ws[2]];
+    if (rest === 'access' && method === 'GET') {
+      const kind = q('kind');
+      return answer(() =>
+        kind && kind !== 'file'
+          ? accessMock.fetchFileAccess(id, q('path'), kind)
+          : accessMock.fetchFileAccess(id, q('path')),
+      );
+    }
+    if (rest === 'access/batch') return answer(async () => ({ results: {} }));
+    if (rest === 'workflow/locks' && method === 'POST') return answer(() => lockMock.acquireLock(id, body.branch, body.path));
+    if (rest === 'workflow/locks' && method === 'GET') {
+      return answer(() => lockMock.getLock(id, q('branch'), q('path')), (lock) => ({ lock }));
+    }
+    if (rest === 'workflow/locks' && method === 'DELETE') {
+      return answer(() =>
+        init?.keepalive
+          ? lockMock.releaseLock(id, body.branch, body.path, body.summary, { keepalive: true })
+          : lockMock.releaseLock(id, body.branch, body.path, body.summary),
+      );
+    }
+    if (rest === 'workflow/locks/heartbeat') return answer(() => lockMock.heartbeatLock(id, body.branch, body.path));
+    if (rest === 'workflow/locks/checkpoint') {
+      return answer(() => lockMock.checkpointLockedFile(id, body.branch, body.path, body.summary), (change) => ({ change }));
+    }
+  }
+  if (url.pathname === '/api/onboarding/starter-packs') return answer(() => starterPacksMock.fetchStarterPacks());
+  if (url.pathname === '/api/onboarding/starter-pack') return answer(() => starterPacksMock.chooseStarterPack(body.id));
+  return null;
+}
+beforeEach(() => {
+  const before = globalThis.fetch;
+  vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) => serverRoute(input, init) ?? before(input, init));
+});
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
 import { FileViewer } from '../FileViewer';
-// The lock API is mocked above; import the mocked fns so individual tests can
-// override the acquire outcome (e.g. a 403 on enter-edit).
-import {
-  acquireLock as acquireLockMock,
-  getLock as getLockMock,
-  releaseLock as releaseLockMock,
-  LockApiError,
-  SELF_HOLD_MESSAGE,
-} from '../../../workflow/services/lock.api';
+import { LockApiError, SELF_HOLD_MESSAGE } from '../../../workflow';
 import { WorkspaceContext, type WorkspaceContextValue } from '../../state/workspace.context';
-import { GitContext, type GitContextValue } from '../../../git/state/git.context';
-import { ReviewContext, type ReviewContextValue } from '../../../review/state/review.context';
-import { AuthContext, type AuthContextValue } from '../../../auth/state/auth.context';
+import { GitContext, type GitContextValue } from '../../../git';
+import { AuthContext, type AuthContextValue } from '../../../auth';
 import { OpenChangeRequestsContext } from '../../state/open-change-requests.context';
 import { OPEN_COMPARISON_EVENT } from '../../../../core/events';
 import { AppRegistryContext, makeRegistry, type FileRendererDef } from '../../../../core/registry';
@@ -160,6 +191,14 @@ import { Dialog } from '../../../../shared/components';
 import type { FileRendererProps } from '../renderers';
 
 let injectPendingFromTest: ((value?: string) => void) | null = null;
+/**
+ * What the workspace state does when a change pulled from the git host meets
+ * the tab's unsaved edits: new buffer and baseline, the outcome, and one more
+ * `remoteRevision`. Needs `captureTyped` so the baseline is its own.
+ */
+let injectRemoteChangeFromTest:
+  | ((change: { content: string; savedContent: string; outcome: 'merged' | 'discarded' }) => void)
+  | null = null;
 
 function makeStatus(branch = 'alice/draft'): WorkingTreeStatus {
   return {
@@ -287,6 +326,19 @@ function ViewerHarness({
   const [openFileContent, setOpenFileContent] = useState(initialContent);
   const [savedContent, setSavedContent] = useState(initialContent);
   const [pendingFileContent, setPendingFileContent] = useState<string | null>(null);
+  const [changedOnBranch, setChangedOnBranch] = useState<'merged' | 'discarded' | null>(null);
+  const [remoteRevision, setRemoteRevision] = useState(0);
+  useEffect(() => {
+    injectRemoteChangeFromTest = ({ content, savedContent: saved, outcome }) => {
+      setOpenFileContent(content);
+      setSavedContent(saved);
+      setChangedOnBranch(outcome);
+      setRemoteRevision((n) => n + 1);
+    };
+    return () => {
+      injectRemoteChangeFromTest = null;
+    };
+  }, []);
 
   useEffect(() => {
     injectPendingFromTest = (value?: string) => {
@@ -305,6 +357,8 @@ function ViewerHarness({
         savedContent: effectiveSaved,
         isDirty: false,
         pendingFileContent,
+        changedOnBranch,
+        remoteRevision,
       }
     : null;
   const workspace: WorkspaceContextValue = {
@@ -353,6 +407,7 @@ function ViewerHarness({
       setSavedContent(content);
     },
     reloadTabFromDisk: async () => {},
+    clearChangedOnBranch: () => setChangedOnBranch(null),
     setPendingContent: (content: string) => {
       setPendingFileContent(content);
     },
@@ -363,21 +418,6 @@ function ViewerHarness({
     rejectPendingContent: async () => {
       setPendingFileContent(null);
     },
-  };
-  const review: ReviewContextValue = {
-    session: null,
-    selectedPath: null,
-    fileDiff: null,
-    isLoadingDiff: false,
-    lastError: null,
-    isLoading: false,
-    refresh: async () => {},
-    selectPath: async () => {},
-    acceptOne: async () => {},
-    rejectOne: async () => {},
-    acceptAll: async () => {},
-    rejectAll: async () => {},
-    clearError: () => {},
   };
   const auth: AuthContextValue = {
     user: authUser,
@@ -394,33 +434,31 @@ function ViewerHarness({
       <AuthContext.Provider value={auth}>
         <WorkspaceContext.Provider value={workspace}>
           <GitContext.Provider value={makeGit(branch ? makeStatus(branch) : null, gitAvailability)}>
-            <ReviewContext.Provider value={review}>
-                <OpenChangeRequestsContext.Provider
-                  value={{
-                    paths: new Set(changeRequests.length && filePath ? [filePath] : []),
-                    minePaths: new Map(),
-                    mineNumbers: new Set<number>(),
-                    forPath: (p) =>
-                      p === filePath
-                        ? (changeRequests.map((c) => ({
-                            number: c.number,
-                            title: c.title,
-                            appAuthor: { name: c.who },
-                            author: { login: 'bevel-bot' },
-                            branch: `suggestions/${c.who.toLowerCase().replace(/\s+/g, '-')}/knowledge`,
-                            createdAt: new Date().toISOString(),
-                            touchedNodePaths: ['Knowledge/Foo.md'],
-                          })) as never)
-                        : [],
-                  }}
-                >
-                  <button type="button" onClick={() => setPendingFileContent(pendingValue)}>
-                    Inject pending
-                  </button>
-                  <FileViewer />
-                  <LocationEcho />
-                </OpenChangeRequestsContext.Provider>
-            </ReviewContext.Provider>
+              <OpenChangeRequestsContext.Provider
+                value={{
+                  paths: new Set(changeRequests.length && filePath ? [filePath] : []),
+                  minePaths: new Map(),
+                  mineNumbers: new Set<number>(),
+                  forPath: (p) =>
+                    p === filePath
+                      ? (changeRequests.map((c) => ({
+                          number: c.number,
+                          title: c.title,
+                          appAuthor: { name: c.who },
+                          author: { login: 'bevel-bot' },
+                          branch: `suggestions/${c.who.toLowerCase().replace(/\s+/g, '-')}/knowledge`,
+                          createdAt: new Date().toISOString(),
+                          touchedNodePaths: ['Knowledge/Foo.md'],
+                        })) as never)
+                      : [],
+                }}
+              >
+                <button type="button" onClick={() => setPendingFileContent(pendingValue)}>
+                  Inject pending
+                </button>
+                <FileViewer />
+                <LocationEcho />
+              </OpenChangeRequestsContext.Provider>
           </GitContext.Provider>
         </WorkspaceContext.Provider>
       </AuthContext.Provider>
@@ -474,7 +512,7 @@ describe('FileViewer', () => {
     readBranchMock.mockImplementation(async () => '');
     // Restore the default "acquire succeeds" behaviour so a per-test 403
     // override doesn't leak into the next test.
-    vi.mocked(acquireLockMock).mockImplementation(async () => ({
+    acquireLockMock.mockImplementation(async () => ({
       acquired: true,
       lock: {
         branch: 'alice/draft',
@@ -739,7 +777,7 @@ describe('FileViewer', () => {
     // canWrite=true → the Edit button renders on a protected branch.
     accessMock.fetchFileAccess.mockRejectedValueOnce(new Error('network down'));
     // The authoritative backend gate refuses the lock with a 403.
-    vi.mocked(acquireLockMock).mockRejectedValueOnce(
+    acquireLockMock.mockRejectedValueOnce(
       new LockApiError(
         403,
         'You don\'t have permission to write to "Knowledge/Foo.md". Eligible: Admin.',
@@ -767,7 +805,7 @@ describe('FileViewer', () => {
   // Someone else has the page open for editing: the reader is told who, in
   // plain words, and Edit says the same on hover.
   it('says who is editing a page someone else has open', async () => {
-    vi.mocked(getLockMock).mockResolvedValueOnce({
+    getLockMock.mockResolvedValueOnce({
       branch: 'alice/draft',
       path: 'knowledge-base/Knowledge/Foo.md',
       holderUserId: 'u2',
@@ -791,7 +829,7 @@ describe('FileViewer', () => {
   it('says a page held by the viewer is theirs, and gives Edit back when the hold ends', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
-      vi.mocked(acquireLockMock).mockResolvedValueOnce({
+      acquireLockMock.mockResolvedValueOnce({
         acquired: false,
         lock: {
           branch: 'alice/draft',
@@ -824,7 +862,7 @@ describe('FileViewer', () => {
       expect(edit).toHaveAttribute('title', SELF_HOLD_MESSAGE);
 
       // The hold expires; the re-check finds the page free.
-      vi.mocked(getLockMock).mockResolvedValue(null);
+      getLockMock.mockResolvedValue(null);
       await act(async () => { await vi.advanceTimersByTimeAsync(11_500); });
 
       await waitFor(() => expect(screen.queryByText(SELF_HOLD_MESSAGE)).not.toBeInTheDocument());
@@ -864,7 +902,7 @@ describe('FileViewer', () => {
     // Unsaved text: the browser asks first, as today.
     await waitFor(() => expect(tryToClose()).toBe(true));
 
-    vi.mocked(releaseLockMock).mockClear();
+    releaseLockMock.mockClear();
     await act(async () => { window.dispatchEvent(new Event('pagehide')); });
 
     expect(releaseLockMock).toHaveBeenCalledTimes(1);
@@ -1470,6 +1508,92 @@ describe('FileViewer: proposing a change without write access', () => {
     );
   });
 
+  // A change pulled from the git host bumps `remoteRevision`, which remounts
+  // an editor onto the tab's merged buffer — but a proposal's buffer is
+  // seeded from the proposal, and a remount put that old seed back over the
+  // keystrokes Send still held.
+  it('keeps the proposal being typed when a change is pulled onto the branch', async () => {
+    denyWrite();
+    myCrsMock.mockResolvedValue([
+      { number: 12, state: 'open', branch: 'suggestions/reader-u9/knowledge' },
+    ]);
+    readBranchMock.mockResolvedValue('first proposed paragraph');
+    const user = userEvent.setup();
+    render(
+      <ViewerHarness
+        initialContent="official"
+        branch="target-company-state"
+        authUser={reader}
+        captureTyped
+      />,
+    );
+    await user.click(await screen.findByRole('button', { name: 'Propose changes' }));
+    const textarea = await screen.findByRole('textbox');
+    await user.type(textarea, ' plus a second thought');
+
+    await act(async () => {
+      injectRemoteChangeFromTest?.({ content: 'official, updated', savedContent: 'official, updated', outcome: 'discarded' });
+    });
+
+    expect(screen.getByRole('textbox')).toHaveValue('first proposed paragraph plus a second thought');
+  });
+
+  // No open proposal: the editor starts from the tab's text, and the pulled
+  // change remounted it onto the tab's new buffer — the typing gone from the
+  // screen while Send still held it.
+  it('keeps a new proposal being typed, and sends it, when a change is pulled onto the branch', async () => {
+    denyWrite();
+    const user = userEvent.setup();
+    render(
+      <ViewerHarness
+        initialContent="official"
+        branch="target-company-state"
+        authUser={reader}
+        captureTyped
+      />,
+    );
+    await user.click(await screen.findByRole('button', { name: 'Propose changes' }));
+    const textarea = await screen.findByRole('textbox');
+    await user.type(textarea, ' plus my thought');
+
+    await act(async () => {
+      injectRemoteChangeFromTest?.({ content: 'official, updated', savedContent: 'official, updated', outcome: 'discarded' });
+    });
+
+    expect(screen.getByRole('textbox')).toHaveValue('official plus my thought');
+    await user.click(screen.getByRole('button', { name: 'Send proposal' }));
+    await waitFor(() =>
+      expect(proposeMock).toHaveBeenCalledWith(expect.objectContaining({ content: 'official plus my thought' })),
+    );
+  });
+
+  // The editor shows the text the proposal opened on; its "unsaved" baseline
+  // has to be that text too, or the pull alone counts as an edit.
+  it('does not count a pulled change as typing in a proposal nobody typed into', async () => {
+    denyWrite();
+    const user = userEvent.setup();
+    render(
+      <ViewerHarness
+        initialContent="official"
+        branch="target-company-state"
+        authUser={reader}
+        captureTyped
+      />,
+    );
+    await user.click(await screen.findByRole('button', { name: 'Propose changes' }));
+    await screen.findByRole('textbox');
+
+    await act(async () => {
+      injectRemoteChangeFromTest?.({ content: 'official, updated', savedContent: 'official, updated', outcome: 'discarded' });
+    });
+
+    expect(screen.getByRole('textbox')).toHaveValue('official');
+    // Leaving the page is not held up for unsaved work: there is none.
+    const leaving = new Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(leaving);
+    expect(leaving.defaultPrevented).toBe(false);
+  });
+
   it('closes without sending when nothing was typed over the open proposal', async () => {
     denyWrite();
     myCrsMock.mockResolvedValue([
@@ -1549,6 +1673,23 @@ describe('FileViewer: proposing a change without write access', () => {
     // permission stripe with it (removed for readers everywhere).
     expect(await screen.findByRole('button', { name: 'Propose changes' })).toBeInTheDocument();
     expect(screen.queryByText(/You don't have permission to edit/i)).not.toBeInTheDocument();
+  });
+
+  it('shows no changed-on-the-branch banner while proposing: those edits are not on this branch', async () => {
+    denyWrite();
+    const user = userEvent.setup();
+    render(
+      <ViewerHarness initialContent="official" branch="target-company-state" authUser={reader} captureTyped />,
+    );
+    await user.click(await screen.findByRole('button', { name: 'Propose changes' }));
+    await user.type(await screen.findByRole('textbox'), ' proposed');
+
+    await act(async () => {
+      injectRemoteChangeFromTest?.({ content: 'upstream', savedContent: 'upstream', outcome: 'discarded' });
+    });
+
+    expect(screen.getByText(/You're proposing a change/)).toBeInTheDocument();
+    expect(screen.queryByText(/changed on the branch while you were editing/)).not.toBeInTheDocument();
   });
 });
 
@@ -1877,12 +2018,12 @@ describe('FileViewer: opening straight into the editor', () => {
       eligible: { roles: ['Admin'], users: [] },
       owners: EMPTY_ELIGIBLE,
     };
-    vi.mocked(acquireLockMock).mockClear();
+    acquireLockMock.mockClear();
   });
 
   it('enters edit mode once, caret under the title, and clears the request', async () => {
     const user = userEvent.setup();
-    vi.mocked(acquireLockMock).mockClear();
+    acquireLockMock.mockClear();
     render(
       <ViewerHarness
         initialContent={'# Untitled\n\n'}
@@ -1928,7 +2069,7 @@ describe('FileViewer: opening straight into the editor', () => {
   it('leaves the caret alone on a later Edit by hand when the request was turned away', async () => {
     const user = userEvent.setup();
     // The request's enter-edit is refused by the lock …
-    vi.mocked(acquireLockMock).mockRejectedValueOnce(
+    acquireLockMock.mockRejectedValueOnce(
       new LockApiError(403, 'You don\'t have permission to write to this page.', {
         access: { path: NEW_PAGE, eligibleRoles: ['Admin'], eligibleUsers: [] },
       }),
@@ -2001,6 +2142,96 @@ describe('FileViewer: opening straight into the editor', () => {
     expect(screen.getByRole('button', { name: 'Propose changes' })).toBeInTheDocument();
     expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
     expect(acquireLockMock).not.toHaveBeenCalled();
+  });
+});
+
+// A commit pulled from the git host changed the open file while it had
+// unsaved edits. The workspace state merged them (or could not); the viewer
+// says which, and the editor shows the buffer that came out of it.
+describe('FileViewer: the file changed on the branch while you were editing', () => {
+  it('shows the merged text in the editor, still unsaved, under the merged banner', async () => {
+    const user = userEvent.setup();
+    render(<ViewerHarness initialContent="First line." captureTyped />);
+
+    await user.click(screen.getByRole('button', { name: 'Edit' }));
+    await user.type(screen.getByRole('textbox'), ' Mine.');
+
+    await act(async () => {
+      injectRemoteChangeFromTest?.({
+        content: 'Upstream first line. Mine.',
+        savedContent: 'Upstream first line.',
+        outcome: 'merged',
+      });
+    });
+
+    expect(
+      await screen.findByText(
+        'This file changed on the branch while you were editing. Your edits were merged in; save to keep them.',
+      ),
+    ).toBeInTheDocument();
+    expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('Upstream first line. Mine.');
+    // Unsaved, not a clean buffer that happens to hold the merged text.
+    expect(screen.getByText('Unsaved')).toBeInTheDocument();
+  });
+
+  it('says the edits were discarded when they could not be merged, and shows the new content', async () => {
+    const user = userEvent.setup();
+    render(<ViewerHarness initialContent="First line." captureTyped />);
+
+    await user.click(screen.getByRole('button', { name: 'Edit' }));
+    await user.type(screen.getByRole('textbox'), ' Mine.');
+
+    await act(async () => {
+      injectRemoteChangeFromTest?.({
+        content: 'Theirs instead.',
+        savedContent: 'Theirs instead.',
+        outcome: 'discarded',
+      });
+    });
+
+    expect(
+      await screen.findByText(
+        'This file changed on the branch while you were editing, and your edits could not be merged. They were discarded.',
+      ),
+    ).toBeInTheDocument();
+    expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('Theirs instead.');
+  });
+
+  it('says the merged edits were saved once a save has written them', async () => {
+    render(<ViewerHarness initialContent="First line." captureTyped />);
+    await act(async () => {
+      injectRemoteChangeFromTest?.({
+        content: 'Upstream first line. Mine.',
+        savedContent: 'Upstream first line. Mine.',
+        outcome: 'merged',
+      });
+    });
+
+    expect(
+      await screen.findByText(
+        'This file changed on the branch while you were editing. Your edits were merged in and saved.',
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/save to keep them/)).not.toBeInTheDocument();
+  });
+
+  it('Dismiss takes the banner away', async () => {
+    const user = userEvent.setup();
+    render(<ViewerHarness initialContent="First line." captureTyped />);
+    await act(async () => {
+      injectRemoteChangeFromTest?.({ content: 'New.', savedContent: 'New.', outcome: 'discarded' });
+    });
+    const banner = await screen.findByText(/your edits could not be merged/);
+
+    await user.click(within(banner.closest('[role="status"]') as HTMLElement).getByRole('button', { name: 'Dismiss' }));
+
+    expect(screen.queryByText(/your edits could not be merged/)).not.toBeInTheDocument();
+  });
+
+  it('shows no banner when nothing came from the branch', async () => {
+    render(<ViewerHarness initialContent="First line." captureTyped />);
+    await screen.findByRole('button', { name: 'Edit' });
+    expect(screen.queryByText(/changed on the branch while you were editing/)).not.toBeInTheDocument();
   });
 });
 

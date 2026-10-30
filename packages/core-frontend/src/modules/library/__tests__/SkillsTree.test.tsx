@@ -1,9 +1,8 @@
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen, fireEvent, within } from '@testing-library/react';
-import { MemoryRouter, useLocation } from 'react-router-dom';
+import { render, screen, fireEvent, within, act, waitFor } from '@testing-library/react';
+import { MemoryRouter, useLocation, useNavigate } from 'react-router-dom';
 import { DEFAULT_BRANCH, type FileTreeEntry } from '@bevel-software/platform-shared';
-import { WorkspaceContext, type WorkspaceContextValue } from '../../workspace/state/workspace.context';
-import { makeWorkspaceFixture } from '../../workspace/__tests__/testFixtures';
+import { WorkspaceContext, type WorkspaceContextValue } from '../../workspace';
 import { PluginsTree, SkillsTree } from '../components/SkillsTree';
 
 /**
@@ -15,6 +14,57 @@ import { PluginsTree, SkillsTree } from '../components/SkillsTree';
  */
 
 const KB = 'knowledge-base';
+
+/** The workspace state the trees read: an idle checkout, plus what a test overrides. */
+function makeWorkspace(overrides: Partial<WorkspaceContextValue> = {}): WorkspaceContextValue {
+  return {
+    workspaceId: 'ws-1',
+    kbDirName: 'knowledge-base',
+    fileTree: null,
+    bootstrapError: null,
+    workspaceBranch: 'main',
+    retryBootstrap: () => {},
+    openTabs: [],
+    activeTab: null,
+    dirtyTabFilenames: [],
+    openFilePath: null,
+    openFileContent: null,
+    openFileSavedContent: null,
+    hasUnsavedFileChanges: false,
+    pendingFileContent: null,
+    setActiveTabContent: () => {},
+    bumpFsRevision: () => {},
+    setPersistenceBranch: () => {},
+    fsRevision: 0,
+    uploadErrors: new Map(),
+    uploadNotices: new Map(),
+    clearUploadNotice: () => {},
+    isUploading: false,
+    uploadProgress: null,
+    pendingUploads: new Map(),
+    refreshFileTree: async () => null,
+    addTab: async () => true,
+    closeTab: async () => ({ closed: true, newActivePath: null }),
+    activateTab: () => {},
+    reorderTab: () => {},
+    closeAllTabs: () => {},
+    hydrateTabs: async () => ({ surviving: [], dropped: [], denied: [], superseded: false }),
+    createFile: async () => {},
+    createDirectory: async () => {},
+    unzipHere: async () => ({ extracted: 0, skipped: [], destination: '' }),
+    uploadFiles: async () => {},
+    dispatchUpload: async () => {},
+    clearUploadError: () => {},
+    deleteEntry: async () => {},
+    moveEntry: async () => {},
+    saveFile: async () => {},
+    reloadTabFromDisk: async () => {},
+    setPendingContent: () => {},
+    acceptPendingContent: async () => {},
+    rejectPendingContent: async () => {},
+    ...overrides,
+  };
+}
 
 const file = (rel: string): FileTreeEntry => ({ name: rel.split('/').pop()!, relativePath: rel, type: 'file' });
 const dir = (rel: string, children: FileTreeEntry[]): FileTreeEntry => ({
@@ -41,13 +91,22 @@ const TREE: FileTreeEntry = dir('.', [
   ]),
 ]);
 
+// A Knowledge page on the same branch: a workspace URL, but not the item.
+const ELSEWHERE = `/workspace/${DEFAULT_BRANCH}/${KB}/KnowledgeBase/Handbook.md`;
+
 function LocationProbe() {
   const location = useLocation();
-  return <div aria-label="pathname">{location.pathname}</div>;
+  const navigate = useNavigate();
+  return (
+    <>
+      <div aria-label="pathname">{location.pathname}</div>
+      <button type="button" onClick={() => navigate(ELSEWHERE)}>Go elsewhere</button>
+    </>
+  );
 }
 
 function renderTree(url: string, over: Partial<WorkspaceContextValue> = {}) {
-  const workspace = makeWorkspaceFixture({ fileTree: TREE, kbDirName: KB, ...over });
+  const workspace = makeWorkspace({ fileTree: TREE, kbDirName: KB, ...over });
   const view = render(
     <MemoryRouter initialEntries={[url]}>
       <WorkspaceContext.Provider value={workspace}>
@@ -186,7 +245,7 @@ describe('SkillsTree', () => {
 
   it('keeps a right-click anywhere in the section from reaching the nav behind it', () => {
     const onNav = vi.fn();
-    const workspace = makeWorkspaceFixture({ fileTree: TREE, kbDirName: KB });
+    const workspace = makeWorkspace({ fileTree: TREE, kbDirName: KB });
     render(
       <MemoryRouter initialEntries={['/skills-and-tools']}>
         <WorkspaceContext.Provider value={workspace}>
@@ -217,6 +276,117 @@ describe('SkillsTree', () => {
  * manifests and all. One component, one set of rows; what differs is the
  * folder it is handed.
  */
+// Deleting the Library item on screen. Its canonical URL is a workspace URL
+// too, so "no tab left" used to land on Knowledge home — the other surface.
+describe('SkillsTree: deleting the item on screen', () => {
+  const ITEM = `${KB}/Skills/Sales/discovery-call/checklist.md`;
+
+  async function deleteRow(name: string) {
+    fireEvent.contextMenu(row(name));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: /Delete/i }));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
+    });
+  }
+
+  it('lands on Skills & Tools, not Knowledge home, when no tab is left', async () => {
+    const deleteEntry = vi.fn(async () => ({ closedActive: true, newActivePath: null }));
+    renderTree(`/workspace/${DEFAULT_BRANCH}/${ITEM}`, { deleteEntry, openFilePath: ITEM });
+
+    await deleteRow('checklist.md');
+
+    expect(deleteEntry).toHaveBeenCalledWith(ITEM);
+    await waitFor(() => expect(screen.getByLabelText('pathname').textContent).toBe('/skills-and-tools'));
+  });
+
+  // A skill's page holds no tab, so the delete reports no active tab closed —
+  // yet the skill on screen is gone. Before, the page stayed on its URL.
+  it("lands on Skills & Tools when the skill's folder on screen is deleted, though no tab closed", async () => {
+    const SKILL_MD = `${KB}/Skills/Sales/discovery-call/SKILL.md`;
+    const deleteEntry = vi.fn(async () => ({ closedActive: false, newActivePath: null }));
+    renderTree(`/workspace/${DEFAULT_BRANCH}/${SKILL_MD}`, { deleteEntry, openFilePath: null });
+
+    await deleteRow('discovery-call');
+
+    expect(deleteEntry).toHaveBeenCalledWith(`${KB}/Skills/Sales/discovery-call`);
+    await waitFor(() => expect(screen.getByLabelText('pathname').textContent).toBe('/skills-and-tools'));
+  });
+
+  // The active tab is one the skill's page never held — here a Knowledge file.
+  it("lands on Skills & Tools, not on the active Knowledge tab, when the skill's page held no tab", async () => {
+    const SKILL_MD = `${KB}/Skills/Sales/discovery-call/SKILL.md`;
+    const deleteEntry = vi.fn(async () => ({ closedActive: false, newActivePath: `${KB}/Handbook.md` }));
+    renderTree(`/workspace/${DEFAULT_BRANCH}/${SKILL_MD}`, { deleteEntry, openFilePath: `${KB}/Handbook.md` });
+
+    await deleteRow('discovery-call');
+
+    expect(deleteEntry).toHaveBeenCalledWith(`${KB}/Skills/Sales/discovery-call`);
+    await waitFor(() => expect(screen.getByLabelText('pathname').textContent).toBe('/skills-and-tools'));
+  });
+
+  // A tab that did close lands as any other: on the tab that is left.
+  it("lands on the tab that is left when the Library file's own tab closed", async () => {
+    const LEFT = `${KB}/Handbook.md`;
+    const deleteEntry = vi.fn(async () => ({ closedActive: true, newActivePath: LEFT }));
+    renderTree(`/workspace/${DEFAULT_BRANCH}/${ITEM}`, { deleteEntry, openFilePath: ITEM });
+
+    await deleteRow('checklist.md');
+
+    expect(deleteEntry).toHaveBeenCalledWith(ITEM);
+    await waitFor(() => expect(screen.getByLabelText('pathname').textContent).toBe(`/workspace/${DEFAULT_BRANCH}/${LEFT}`));
+  });
+
+  it("lands on Skills & Tools when the skill's SKILL.md goes while another of its files is on screen", async () => {
+    const deleteEntry = vi.fn(async () => ({ closedActive: false, newActivePath: null }));
+    renderTree(`/workspace/${DEFAULT_BRANCH}/${KB}/Skills/Sales/discovery-call/checklist.md`, { deleteEntry, openFilePath: null });
+
+    await deleteRow('SKILL.md');
+    expect(deleteEntry).toHaveBeenCalledWith(`${KB}/Skills/Sales/discovery-call/SKILL.md`);
+    // The skill's SKILL.md IS the skill: its other files go with it.
+    await waitFor(() => expect(screen.getByLabelText('pathname').textContent).toBe('/skills-and-tools'));
+  });
+
+  // The landing reads the page as it is when the delete answers: a user who
+  // went elsewhere while it ran stays where they went.
+  it('leaves a page the user moved to while the delete ran', async () => {
+    let answer!: (result: { closedActive: boolean; newActivePath: null }) => void;
+    const deleteEntry = vi.fn(() => new Promise<{ closedActive: boolean; newActivePath: null }>((resolve) => { answer = resolve; }));
+    renderTree(`/workspace/${DEFAULT_BRANCH}/${KB}/Skills/Sales/discovery-call/SKILL.md`, { deleteEntry, openFilePath: null });
+
+    await deleteRow('discovery-call');
+    expect(deleteEntry).toHaveBeenCalledWith(`${KB}/Skills/Sales/discovery-call`);
+    fireEvent.click(screen.getByRole('button', { name: 'Go elsewhere' }));
+    await act(async () => { answer({ closedActive: false, newActivePath: null }); });
+
+    expect(screen.getByLabelText('pathname').textContent).toBe(ELSEWHERE);
+  });
+
+  it('stays on the skill when the delete was called off', async () => {
+    const page = `/workspace/${DEFAULT_BRANCH}/${KB}/Skills/Sales/discovery-call/SKILL.md`;
+    const deleteEntry = vi.fn(async () => false as const);
+    renderTree(page, { deleteEntry, openFilePath: null });
+
+    await deleteRow('discovery-call');
+
+    expect(deleteEntry).toHaveBeenCalled();
+    expect(screen.getByLabelText('pathname').textContent).toBe(page);
+  });
+
+  it('lands on the tab that is left when there is one', async () => {
+    const left = `${KB}/KnowledgeBase/Handbook.md`;
+    const deleteEntry = vi.fn(async () => ({ closedActive: true, newActivePath: left }));
+    renderTree(`/workspace/${DEFAULT_BRANCH}/${ITEM}`, { deleteEntry, openFilePath: ITEM });
+
+    await deleteRow('checklist.md');
+
+    await waitFor(() =>
+      expect(screen.getByLabelText('pathname')).toHaveTextContent(`/workspace/${DEFAULT_BRANCH}/${left}`),
+    );
+  });
+});
+
 describe('PluginsTree', () => {
   const PLUGINS: FileTreeEntry = dir('.', [
     dir(KB, [
@@ -239,7 +409,7 @@ describe('PluginsTree', () => {
     onCreatePlugin?: (parent: string) => void,
     isGroupingFolder?: (rel: string) => boolean,
   ) {
-    const workspace = makeWorkspaceFixture({ fileTree: PLUGINS, kbDirName: KB, ...over });
+    const workspace = makeWorkspace({ fileTree: PLUGINS, kbDirName: KB, ...over });
     return render(
       <MemoryRouter initialEntries={[url]}>
         <WorkspaceContext.Provider value={workspace}>
@@ -412,7 +582,7 @@ describe('The Library trees root at the checkout', () => {
   ]);
 
   function renderBoth(tree: FileTreeEntry | null) {
-    const workspace = makeWorkspaceFixture({ fileTree: tree, kbDirName: KB });
+    const workspace = makeWorkspace({ fileTree: tree, kbDirName: KB });
     return render(
       <MemoryRouter initialEntries={['/skills-and-tools']}>
         <WorkspaceContext.Provider value={workspace}>
