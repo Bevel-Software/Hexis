@@ -7,7 +7,7 @@ import type { AuthProviderPlugin } from '../auth.routes.js';
 import type { AuthService } from '../auth.service.js';
 import { FixedWindowRateLimiter } from '../rate-limit.js';
 import { AccountAdmissionRefusedError, AccountChangeRefusedError } from '../index.js';
-import type { IAdminAccessService } from '../../admin/index.js';
+import type { IAdminAccessService, IAdminRoleLookup } from '../../admin/index.js';
 import { setLogger } from '../../../shared/logging.js';
 import type { ILogger, LogFields } from '../../../shared/logger.contract.js';
 
@@ -73,11 +73,20 @@ async function start(opts: {
   admin: boolean;
   /** Addresses that already hold Admin (in `roles.yaml`), besides the inviter. */
   admins?: string[];
+  /** Reading whether an invited address holds Admin fails. */
+  adminLookupFails?: boolean;
   signIn?: Partial<InvitationSignIn>;
   limiter?: FixedWindowRateLimiter;
 }): Promise<string> {
-  const adminAccess: IAdminAccessService = {
-    isAdmin: vi.fn(async (email) => (email === 'inviter@acme.test' ? opts.admin : (opts.admins ?? []).includes(email ?? ''))),
+  const holds = (email: string | undefined) =>
+    email === 'inviter@acme.test' ? opts.admin : (opts.admins ?? []).includes(email ?? '');
+  const adminAccess: IAdminAccessService & IAdminRoleLookup = {
+    // Like the real check: a failed read answers "not admin".
+    isAdmin: vi.fn(async (email) => (opts.adminLookupFails && email !== 'inviter@acme.test' ? false : holds(email))),
+    holdsAdmin: vi.fn(async (email) => {
+      if (opts.adminLookupFails) throw new Error('roles.yaml unreadable');
+      return holds(email);
+    }),
   };
   const app = express();
   app.use(express.json());
@@ -152,6 +161,21 @@ describe('POST /api/invitations — who may invite as what', () => {
 
   it('still makes one when an admin invites an address that already holds Admin', async () => {
     const base = await start({ admin: true, admins: ['boss@acme.test'] });
+    const res = await invite(base, { email: 'boss@acme.test' });
+    expect(res.status).toBe(201);
+    expect((await res.json()).startingPassword).toBe(GENERATED);
+  });
+
+  it("answers 503 and writes nothing when a member's invite cannot tell whether the address holds Admin", async () => {
+    const base = await start({ admin: false, adminLookupFails: true });
+    const res = await invite(base, { email: 'boss@acme.test' });
+    expect(res.status).toBe(503);
+    expect(createInvitedAccount).not.toHaveBeenCalled();
+    expect(runAccountInvited).not.toHaveBeenCalled();
+  });
+
+  it("does not ask when an admin invites, so a failed lookup does not stop the admin's invite", async () => {
+    const base = await start({ admin: true, adminLookupFails: true });
     const res = await invite(base, { email: 'boss@acme.test' });
     expect(res.status).toBe(201);
     expect((await res.json()).startingPassword).toBe(GENERATED);

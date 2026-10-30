@@ -7,7 +7,7 @@ import { inviterOf, type IAccountHooks } from './account-hooks.js';
 import { AccountChangeRefusedError, answerAdmissionRefusal } from './account-admission.js';
 import { offeredProviders, type AuthProviderPlugin } from './auth.routes.js';
 import { FixedWindowRateLimiter } from './rate-limit.js';
-import type { IAdminAccessService } from '../admin/index.js';
+import type { IAdminAccessService, IAdminRoleLookup } from '../admin/index.js';
 import './auth.middleware.js'; // Express Request augmentation
 
 const log = logger('accounts');
@@ -38,6 +38,8 @@ export interface InvitationSignIn {
  *   from a non-admin, an address that already holds Admin). With
  *   both, only when `startingPassword` is true.
  *   With password sign-in off none is made, and asking for one is a 400.
+ *   When whether the address holds Admin cannot be read, a non-admin's
+ *   invite that would make a password is a 503 and nothing is written.
  *   It is returned once in the answer and carried on the invited event for
  *   a deployment's mail; never logged.
  * - The admission port is asked with the reason `invite`; a refusal is 403
@@ -51,7 +53,7 @@ export interface InvitationSignIn {
  */
 export function createInvitationRoutes(
   authService: Pick<AuthService, 'createInvitedAccount' | 'getUserById' | 'isEmailDomainAllowed'>,
-  adminAccess: IAdminAccessService,
+  adminAccess: IAdminAccessService & IAdminRoleLookup,
   accountHooks: Pick<IAccountHooks, 'runAccountInvited'>,
   signIn: InvitationSignIn,
   /**
@@ -93,13 +95,20 @@ export function createInvitationRoutes(
       return;
     }
     const sso = offeredProviders(signIn.providers).length > 0;
+    let generate = signIn.passwordSignIn && (!sso || startingPassword === true);
     // An address that already holds Admin (listed in `roles.yaml` before it
     // has an account) gets no password from a non-admin's invite: whoever
-    // learned it would sign in as an admin. Asked only when one would be made.
-    const generate =
-      signIn.passwordSignIn &&
-      (!sso || startingPassword === true) &&
-      (inviterIsAdmin || !(await adminAccess.isAdmin(canonicalEmail(email))));
+    // learned it would sign in as an admin. Asked only when one would be made,
+    // and a lookup that fails is never read as "not an admin".
+    if (generate && !inviterIsAdmin) {
+      try {
+        generate = !(await adminAccess.holdsAdmin(canonicalEmail(email)));
+      } catch (error) {
+        log.warn('an invite could not tell whether the address holds Admin:', { err: error });
+        res.status(503).json({ error: "Could not check this address's role. Try again later." });
+        return;
+      }
+    }
 
     if (!limiter.consume(req.userId!)) {
       res.status(429).json({ error: 'Too many invitations. Try again later.' });

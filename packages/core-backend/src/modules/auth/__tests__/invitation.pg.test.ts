@@ -41,7 +41,7 @@ async function startApp(
   });
   app.use(
     '/api',
-    createInvitationRoutes(auth, { isAdmin: async () => false }, { runAccountInvited: async () => [] }, { passwordSignIn: true, providers: [] }),
+    createInvitationRoutes(auth, { isAdmin: async () => false, holdsAdmin: async () => false }, { runAccountInvited: async () => [] }, { passwordSignIn: true, providers: [] }),
   );
   const server: Server = await new Promise((resolve) => {
     const s = app.listen(0, () => resolve(s));
