@@ -513,7 +513,14 @@ function InvitedBody({
   // names single sign-on only when it lets in someone it goes to.
   const forwardTo = outcomes.filter((o) => isInvited(o) && !shutOutEmails.includes(o.email));
   const messageIdp = forwardTo.some((o) => o.status !== 'created' || o.singleSignOn) ? idp : '';
-  const message = inviteMessage(origin, { idp: messageIdp, passwordSet, passwordSignIn: Boolean(methods?.password) });
+  // It promises a password sent separately only when everyone it goes to got
+  // one: an account that was already there gets none.
+  const messagePassword = forwardTo.length > 0 && forwardTo.every(gotPassword);
+  const message = inviteMessage(origin, {
+    idp: messageIdp,
+    passwordSet: messagePassword,
+    passwordSignIn: Boolean(methods?.password),
+  });
   const messageLabel = shutOut > 0 ? `Or send this message to everyone but ${shutOutEmails.join(', ')}` : 'Or send this message';
 
   return (

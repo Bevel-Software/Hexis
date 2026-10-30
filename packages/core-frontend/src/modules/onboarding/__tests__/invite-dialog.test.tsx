@@ -550,6 +550,15 @@ describe('InviteDialog: the generated password, shown once', () => {
     expect(copyMock).toHaveBeenLastCalledWith(expect.not.stringContaining(GENERATED));
   });
 
+  it('promises no password in the message when it also goes to an account that was already there', async () => {
+    existing = new Set(['old@acme.com']);
+    await sendPasswordOnly(['ana@acme.com', 'old@acme.com']);
+    const message = screen.getByText(/^I’ve added you to/);
+    expect(message).not.toHaveTextContent('send you separately');
+    expect(message).toHaveTextContent('with your work email and your password');
+    expect(within(rowOf('ana@acme.com')).getByText(GENERATED)).toBeInTheDocument();
+  });
+
   it('is gone after "Invite more people", and not shown again', async () => {
     await sendPasswordOnly(['ana@acme.com']);
     await userEvent.click(screen.getByRole('button', { name: 'Invite more people' }));
