@@ -790,8 +790,11 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     // If the tab's content was invalidated (fsRevision bump), refetch in the
     // background so the renderer shows fresh bytes. The renderer's existing
     // null-content guard renders an empty/loading state until content arrives.
-    // A tab already known to be deleted has nothing to read.
-    if (tab.content === null && workspaceId && !tab.deletedBy) {
+    // A tab already known to be deleted has nothing to read. A pending agent
+    // preview keeps its bytes through that bump and `file-changed` skips it, so
+    // this read is how it learns the file went while it sat in the background;
+    // `applyReadBytes` lands none of it.
+    if ((tab.content === null || tab.pendingFileContent !== null) && workspaceId && !tab.deletedBy) {
       const path = tab.path;
       // The same guard the eager refetch and `addTab` carry: a switch while
       // this read is in flight clears the strip, and a tab of the SAME path
@@ -2085,7 +2088,8 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
   // When the working tree mutates, refetch the active tab's bytes in the
   // background and swap only if they actually changed. Inactive non-dirty
   // tabs are nulled so re-activating them triggers a refetch. Dirty tabs are
-  // never touched — that's the user's in-flight work.
+  // never touched — that's the user's in-flight work — nor are pending agent
+  // previews, whose bytes are the baseline being reviewed.
   //
   // **Why we don't null the active tab too** — nulling it would unmount the
   // renderer until the eager refetch resolves (FileViewer early-returns when
@@ -2108,10 +2112,12 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     // Null inactive non-dirty tabs so re-activating them triggers a refetch.
     // The active tab keeps its current content — the eager refetch below
     // swaps it only if the bytes actually changed. A deleted tab keeps what
-    // it has: there is nothing left to refetch.
+    // it has: there is nothing left to refetch. So does a pending agent preview:
+    // its bytes are the baseline Reject writes back, and no read may replace
+    // them (`applyReadBytes`), so nulled they would stay on "Opening" for good.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setOpenTabs((prev) => prev.map((t) => {
-      if (t.isDirty || t.deletedBy || t.path === activePath) return t;
+      if (t.isDirty || t.deletedBy || t.pendingFileContent !== null || t.path === activePath) return t;
       return { ...t, content: null, savedContent: null };
     }));
 

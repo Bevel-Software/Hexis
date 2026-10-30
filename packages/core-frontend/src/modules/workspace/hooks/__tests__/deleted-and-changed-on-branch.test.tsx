@@ -540,6 +540,67 @@ describe('a file deleted by someone else', () => {
     expect(result.current.activeTab?.pendingFileContent).toBeNull();
   });
 
+  describe('an agent\'s change awaiting review on a background tab, after another file changed', () => {
+    const AGENT = '# Draft\n\nThe agent rewrote this.';
+
+    // Open an agent preview, switch tabs, another file changes.
+    async function previewInBackground() {
+      const result = await mountReady();
+      await open(result, 'KB/Draft.md');
+      const baseline = result.current.activeTab?.savedContent;
+      await act(async () => { result.current.setPendingContent(AGENT); });
+      await open(result, 'KB/Other.md');
+      await act(async () => { result.current.bumpFsRevision(); });
+      return { result, baseline };
+    }
+
+    it('comes back with the preview and its baseline, never stalled on Opening', async () => {
+      const { result, baseline } = await previewInBackground();
+
+      await act(async () => { result.current.activateTab(tabAt(result, 'KB/Draft.md')!); });
+      await settle();
+
+      const tab = result.current.activeTab;
+      expect(tab?.path).toBe('KB/Draft.md');
+      expect(tab?.content).toBe(baseline);
+      expect(tab?.savedContent).toBe(baseline);
+      expect(tab?.pendingFileContent).toBe(AGENT);
+    });
+
+    it('Accept takes the agent\'s text', async () => {
+      const { result } = await previewInBackground();
+      await act(async () => { result.current.activateTab(tabAt(result, 'KB/Draft.md')!); });
+
+      await act(async () => { await result.current.acceptPendingContent(); });
+
+      expect(result.current.activeTab?.content).toBe(AGENT);
+      expect(result.current.activeTab?.pendingFileContent).toBeNull();
+    });
+
+    it('Reject writes the original baseline back', async () => {
+      const { result, baseline } = await previewInBackground();
+      await act(async () => { result.current.activateTab(tabAt(result, 'KB/Draft.md')!); });
+      disk.set('KB/Draft.md', AGENT);
+
+      await act(async () => { await result.current.rejectPendingContent(); });
+
+      expect(disk.get('KB/Draft.md')).toBe(baseline);
+      expect(result.current.activeTab?.content).toBe(baseline);
+      expect(result.current.activeTab?.pendingFileContent).toBeNull();
+    });
+
+    it('still learns on the switch that someone else deleted the file', async () => {
+      const { result, baseline } = await previewInBackground();
+      disk.delete('KB/Draft.md');
+
+      await act(async () => { result.current.activateTab(tabAt(result, 'KB/Draft.md')!); });
+
+      await waitFor(() => expect(result.current.activeTab?.deletedBy).toMatchObject({ name: null }));
+      expect(result.current.activeTab?.content).toBe(baseline);
+      expect(result.current.activeTab?.pendingFileContent).toBe(AGENT);
+    });
+  });
+
   it('dates the delete when the tab learns of it, and keeps that time', async () => {
     const result = await mountReady();
     await open(result, 'KB/Draft.md');
