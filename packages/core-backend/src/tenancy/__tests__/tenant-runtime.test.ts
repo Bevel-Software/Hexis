@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import type { TenantConfig } from '../../core-config.js';
-import { TenantRuntime, type TenantGraph } from '../tenant-runtime.js';
-import type { TenantDescriptor } from '../tenant-source.contract.js';
+import { TenantRuntime, type TenantGraph } from '../index.js';
+import type { TenantDescriptor } from '../index.js';
 
 const descriptor: TenantDescriptor = { slug: 'acme', hosts: ['acme.test'], config: {} as TenantConfig };
 
@@ -142,6 +142,110 @@ describe('TenantRuntime', () => {
     h.finish();
     await next;
     expect(h.events).toEqual(['activate:1', 'stop:1', 'activate:2']);
+  });
+
+  it('takes a newer descriptor while nothing runs, and the activation that follows builds from it', async () => {
+    const built: string[] = [];
+    let release: (() => void) | null = null;
+    const runtime = new TenantRuntime(descriptor, {
+      activate: async (d) => {
+        built.push(d.hosts.join(','));
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        return { core: {} } as unknown as TenantGraph;
+      },
+      stop: async () => undefined,
+      busy: async () => false,
+    });
+    const moved: TenantDescriptor = { ...descriptor, hosts: ['acme.example'] };
+
+    // While the graph is being built, and while it runs, the descriptor it
+    // was built from stays: its config is live.
+    const first = runtime.handle();
+    await settle();
+    runtime.adopt(moved);
+    expect(runtime.descriptor).toBe(descriptor);
+    release!();
+    await first;
+    runtime.adopt(moved);
+    expect(runtime.descriptor).toBe(descriptor);
+
+    // Evicted: taken, and the request that waits out the eviction starts
+    // the tenant from it.
+    const evicting = runtime.evict();
+    runtime.adopt(moved);
+    expect(runtime.descriptor).toBe(moved);
+    const second = runtime.handle();
+    await evicting;
+    await settle();
+    release!();
+    await second;
+    expect(built).toEqual(['acme.test', 'acme.example']);
+  });
+
+  it('takes a newer descriptor during an eviction that is still waiting on an activation, and starts from it', async () => {
+    const built: string[] = [];
+    let release: (() => void) | null = null;
+    const runtime = new TenantRuntime(descriptor, {
+      activate: async (d) => {
+        built.push(d.hosts.join(','));
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        return { core: {} } as unknown as TenantGraph;
+      },
+      stop: async () => undefined,
+      busy: async () => false,
+    });
+    const moved: TenantDescriptor = { ...descriptor, hosts: ['acme.example'] };
+    const first = runtime.handle();
+    await settle();
+    const evicting = runtime.evict();
+    expect(runtime.state).toBe('evicting');
+    // The record changes while the build the eviction waits for is still
+    // running: whatever that build produces is retired, so the descriptor
+    // is taken, and the request that waits out the eviction starts from it.
+    runtime.adopt(moved);
+    expect(runtime.descriptor).toBe(moved);
+    const second = runtime.handle();
+    release!();
+    await first;
+    await evicting;
+    await settle();
+    release!();
+    await second;
+    expect(built).toEqual(['acme.test', 'acme.example']);
+  });
+
+  it('takes a newer descriptor inside a failure window, and tries it once the window has passed', async () => {
+    let now = 0;
+    const built: string[] = [];
+    let fail = true;
+    const runtime = new TenantRuntime(descriptor, {
+      activate: async (d) => {
+        built.push(d.hosts.join(','));
+        if (fail) throw new Error('the remote said no');
+        return { core: {} } as unknown as TenantGraph;
+      },
+      stop: async () => undefined,
+      busy: async () => false,
+      now: () => now,
+      retry: { initialMs: 100, maxMs: 100 },
+    });
+    await expect(runtime.handle()).rejects.toThrow('the remote said no');
+    const moved: TenantDescriptor = { ...descriptor, hosts: ['acme.example'] };
+    runtime.adopt(moved);
+    expect(runtime.descriptor).toBe(moved);
+    // Inside the window the failure is still answered from memory...
+    now = 99;
+    await expect(runtime.handle()).rejects.toThrow('the remote said no');
+    // ...and past it the next activation builds from the newer descriptor.
+    now = 100;
+    fail = false;
+    await runtime.handle();
+    expect(built).toEqual(['acme.test', 'acme.example']);
+    expect(runtime.state).toBe('active');
   });
 
   it('an eviction that lands during an activation waits for it and stops what it built', async () => {

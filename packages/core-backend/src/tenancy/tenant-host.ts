@@ -120,11 +120,20 @@ export function createTenantHost(opts: TenantHostOptions): TenantHost {
   const activationWaitMs = opts.activationWaitMs ?? DEFAULT_ACTIVATION_WAIT_MS;
   const idleMs = (opts.idleMinutes ?? DEFAULT_IDLE_MINUTES) * 60_000;
 
+  // One runtime per slug for the life of the process, so a tenant's graph
+  // is activated once per burst and its open responses are counted in one
+  // place. The descriptor is the source's current word, and the runtime
+  // takes it whenever its graph is not running: a tenant whose record
+  // changed while it was stopped — deleted and set up again under the same
+  // name, or edited by the operator — is built from the record as it is
+  // now, not as it was when the process first met the name.
   const runtimeFor = (descriptor: TenantDescriptor): TenantRuntime => {
     let runtime = runtimes.get(descriptor.slug);
     if (!runtime) {
       runtime = new TenantRuntime(descriptor, opts.runtime);
       runtimes.set(descriptor.slug, runtime);
+    } else {
+      runtime.adopt(descriptor);
     }
     return runtime;
   };
