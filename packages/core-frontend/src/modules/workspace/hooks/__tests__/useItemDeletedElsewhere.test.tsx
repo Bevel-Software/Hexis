@@ -32,7 +32,7 @@ const changed = (path: string): WorkflowEvent => ({
 });
 
 function mount(workspace?: Partial<WorkspaceContextValue>) {
-  const value = makeWorkspaceFixture(workspace ?? {});
+  const value = makeWorkspaceFixture({ workspaceId: WS, ...workspace });
   const wrapper = ({ children }: { children: ReactNode }) => (
     <EventBusProvider>
       <WorkspaceContext.Provider value={value}>{children}</WorkspaceContext.Provider>
@@ -133,6 +133,30 @@ describe('useItemDeletedElsewhere', () => {
 
     await waitFor(() => expect(forgetOwnDelete).toHaveBeenCalled());
     expect(ownDeletes.has(TOOL_A)).toBe(true);
+  });
+
+  // The workspace's record is for its own branch: the Library watches the
+  // default branch while the session is on another.
+  it('neither reads nor ends a delete of ours made on another branch', async () => {
+    const bus = stubServerEventStream();
+    const ownDeletes = new Set<string>([TOOL_A]);
+    const isOwnDelete = vi.fn((path: string) => ownDeletes.has(path));
+    const forgetOwnDelete = vi.fn((path: string) => { ownDeletes.delete(path); });
+    readFile.mockResolvedValue('{}');
+    const { result } = mount({ workspaceId: 'feature', isOwnDelete, forgetOwnDelete });
+    expect(readFile).not.toHaveBeenCalled();
+
+    act(() => bus.emit(changed(TOOL_A)));
+    await waitFor(() => expect(readFile).toHaveBeenCalledTimes(1));
+    await act(async () => {});
+    expect(forgetOwnDelete).not.toHaveBeenCalled();
+    expect(ownDeletes.has(TOOL_A)).toBe(true);
+
+    // Someone else deletes it on the watched branch: the notice shows.
+    readFile.mockRejectedValue(new WorkspaceApiError(404));
+    act(() => bus.emit(changed(TOOL_A)));
+    await waitFor(() => expect(result.current?.name).toBe('Sam Rivera'));
+    expect(isOwnDelete).not.toHaveBeenCalled();
   });
 
   it('reads nothing on open when no delete of ours covers the item', () => {

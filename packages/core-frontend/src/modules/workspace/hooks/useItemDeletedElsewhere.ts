@@ -49,8 +49,13 @@ export function useItemDeletedElsewhere({
   const bus = useEventBus();
   // Read softly: a tool page may be mounted with no workspace around it.
   const workspace = useContext(WorkspaceContext);
-  const isOwnDeleteRef = useLatestRef(workspace?.isOwnDelete);
-  const forgetOwnDeleteRef = useLatestRef(workspace?.forgetOwnDelete);
+  // The context remembers its own workspace's deletes, by path alone: the
+  // Library watches the default branch while the session may be on another,
+  // and a delete there is not one here.
+  const sameWorkspace = !!workspace?.workspaceId && !!workspaceId
+    && canonicalizeWorkspaceId(workspace.workspaceId) === canonicalizeWorkspaceId(workspaceId);
+  const isOwnDeleteRef = useLatestRef(sameWorkspace ? workspace.isOwnDelete : undefined);
+  const forgetOwnDeleteRef = useLatestRef(sameWorkspace ? workspace.forgetOwnDelete : undefined);
   const suppressedRef = useLatestRef(suppressed);
   const key = workspaceId && itemPath && keyFile ? `${workspaceId}\n${keyFile}` : null;
   // Stored WITH the item it is about, so another item reads as not deleted.
