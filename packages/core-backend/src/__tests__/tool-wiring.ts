@@ -18,9 +18,11 @@ export { createToolAuthMiddleware } from '../modules/tool-auth/tool-auth.middlew
 export { InternalTokenService } from '../modules/tool-auth/internal-token.service.js';
 export { registerWorkspaceTools } from '../modules/workspace/workspace.tools.js';
 export { registerWorkflowTools } from '../modules/workflow/agent-tools/workflow.tools.js';
+export { registerChangeRequestReadTools } from '../modules/workflow/agent-tools/change-request-read.tools.js';
+export { registerEmbedTools } from '../modules/embed/embed.tools.js';
 export { UuidSessionSink } from '../modules/workspace/session-sink.js';
 export { RoutineWritePolicyService } from '../modules/workspace/routine-write-policy.js';
-export { AccessControlService } from '../modules/access/access-control.service.js';
+export { AccessControlService, loadActiveGroups } from '../modules/access/access-control.service.js';
 export { WorkflowHooks, type AgentOperationContext } from '../modules/workflow/workflow-hooks.js';
 export { createManualAuthMiddleware } from '../modules/tool-auth/tool-auth.middleware.js';
 export { readAuthCookie } from '../modules/auth/auth.middleware.js';

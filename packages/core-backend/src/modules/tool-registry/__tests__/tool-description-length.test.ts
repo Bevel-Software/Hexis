@@ -9,8 +9,8 @@ import {
 } from '@bevel-software/platform-mcp-core';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import { EXTERNAL_KB_MANUAL_NAME } from '../../tool-manuals/index.js';
-import type { registerSkillsTools } from '../../skills/index.js';
 import type { UtcpTool } from '../tool.contract.js';
+import type { registerSkillsTools } from '../../skills/index.js';
 import { CLIENT_SHORT_CUT, TOOL_DESCRIPTION_CAP, clientVisibleLength, firstSentenceEnd } from '../description-length.js';
 import { CAN_WRITE_CLAUSE } from '../../tool-helpers/index.js';
 import {

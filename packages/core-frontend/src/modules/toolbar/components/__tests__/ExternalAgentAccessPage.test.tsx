@@ -34,25 +34,35 @@ const { listMock, createMock, instructionsMock, facadeMock, registrationMock, ad
   adminState: { isAdmin: false },
 }));
 
-// Only the hook is replaced. `AdminContext` itself stays real, because the
-// instructions card below reads the context directly rather than through the
-// hook; a whole-module mock left it undefined and every case here threw.
-vi.mock('../../../admin/state/admin.context', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../../../admin/state/admin.context')>()),
+// The other modules this page reaches, replaced at their entries: that is
+// where the page imports them from, and the one surface a mock may stand in
+// for. Only the hook is replaced on `admin`; `AdminContext` itself stays real,
+// because the instructions card below reads the context directly rather than
+// through the hook; a whole-module mock left it undefined and every case here
+// threw.
+vi.mock('../../../admin', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../admin')>()),
   useAdmin: () => ({ isAdmin: adminState.isAdmin }),
 }));
 
-// The registration state the Cowork drawer reads, and the admin credentials
-// endpoint this page must never call. Mocked, or the component reaches for
-// the real endpoints over the network.
-vi.mock('../../../settings/services/github-facade.api', () => ({
-  fetchGitHubFacade: facadeMock,
+// The registration state the Cowork drawer reads.
+vi.mock('../../../settings', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../settings')>()),
   fetchMarketplaceRegistration: registrationMock,
 }));
 
+// The admin credentials endpoint this page must never call. It is reached
+// inside the settings module, by `ClaudeConnectionCard`, which the toolbar's
+// registration steps import by file rather than through the entry, so the
+// guard sits on the file too until that import moves.
+vi.mock('../../../settings/services/github-facade.api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../settings/services/github-facade.api')>()),
+  fetchGitHubFacade: facadeMock,
+}));
+
 // The agents a key may be minted as ("Connect as").
-vi.mock('../../../agents/services/agent-choices.api', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../../../agents/services/agent-choices.api')>()),
+vi.mock('../../../agents', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../agents')>()),
   listAgentChoices: agentChoicesMock,
 }));
 

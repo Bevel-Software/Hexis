@@ -15,7 +15,7 @@ import type { IAccessControl } from '../../modules/access/index.js';
 // their files. This suite stands in for that root — the routes of one module
 // over the real parser of another — which is why it lives beside it.
 import { ToolManualService } from '../../modules/tool-manuals/tool-manuals.service.js';
-import { NodeFs } from '../../modules/kb-fs/node-fs.js';
+import { realDisk } from '../../__tests__/real-disk.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import { testKbContext } from '../../__tests__/kb-context.js';
 
@@ -86,7 +86,7 @@ const writePlugin = (oauth: Record<string, unknown>) =>
   ]);
 
 async function serve() {
-  const disk = new NodeFs();
+  const disk = realDisk();
   const kb = testKbContext({ kbDirName: KB_DIR });
   const accessControl = {
     canRead: async () => true,
