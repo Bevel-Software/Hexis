@@ -40,15 +40,17 @@ access's Invite action open the Invite dialog for everyone signed in, not
 only admins. A member invites as Member; only an admin can invite as Admin.
 There is no setting to turn this off: a deployment that wants nobody to
 create password accounts turns password sign-in off (`LOGIN_PASSWORD=false`).
-On a cloud deployment each invited account still takes a seat and is refused
-when the plan is full.
+On a cloud deployment each newly created account still takes a seat and is
+refused when the plan is full; an address that already has an account takes
+no seat and answers `existing`.
 
 Nobody types a starting password any more. Where one is needed (password
 sign-in and no single sign-on, or "Also give them a password" ticked), the
 platform generates it, shows it once on the invited person's row to copy,
 and passes it to the deployment's invitation mail. The owner's address
-(`ADMIN_EMAIL`) never gets one, with or without `ADMIN_PASSWORD`. An invite never changes
-an account that already exists: it no longer gives a first password to an
+(`ADMIN_EMAIL`, with or without `ADMIN_PASSWORD`) and the system accounts'
+addresses never get one. An invite never changes an account that already
+exists: it no longer gives a first password to an
 existing account without one. Admins set or reset a password from User
 accounts, as before.
 

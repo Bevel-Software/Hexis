@@ -33,7 +33,8 @@ export interface InvitationSignIn {
  *   sign-in and no single sign-on every new account gets one, whatever
  *   `startingPassword` says, or nobody invited could sign in (the deployment
  *   owner's and the system accounts' addresses excepted: an inviter never
- *   learns an owner's password, and the system accounts hold none). With both, only when `startingPassword` is true.
+ *   learns an owner's password, and the system accounts hold none). With
+ *   both, only when `startingPassword` is true.
  *   With password sign-in off none is made, and asking for one is a 400.
  *   It is returned once in the answer and carried on the invited event for
  *   a deployment's mail; never logged.

@@ -34,7 +34,8 @@ function either(labels: string[]): string {
 /**
  * What the form offers, from how the deployment signs people in:
  * - `password`: password sign-in and no single sign-on — every new account
- *   gets a generated starting password, or nobody invited could sign in;
+ *   gets a generated starting password, or nobody invited could sign in (the
+ *   owner's and the system accounts' addresses excepted: the answer says);
  * - `sso`: single sign-on and password sign-in — a generated password is an
  *   option;
  * - `sso-only`: password sign-in is off — no password at all;
@@ -70,7 +71,8 @@ interface InviteDialogProps {
  * How the invited people get in depends on the deployment, so the dialog
  * asks it first (`GET /api/auth/providers`) and lets nothing be sent until it
  * knows. Nobody types a password: without single sign-on the server
- * generates one for every new account; with single sign-on that is an
+ * generates one for every new account but an owner's or a system account's;
+ * with single sign-on that is an
  * option. An account that is already there is left exactly as it was.
  *
  * Two views in one dialog. The form; then, after sending, who is invited,
