@@ -6,7 +6,8 @@ import type { AuthUser } from './types.js';
  * generate a starting password for the new account where single sign-on is
  * on too; it is refused when password sign-in is off. Where password sign-in
  * is the only way in, every new account gets one whatever this says, except
- * on the owner's and the system accounts' addresses, which never get one.
+ * on the owner's and the system accounts' addresses, which never get one,
+ * and, from a non-admin, on an address that already holds Admin.
  */
 export interface InvitationRequest {
   email: string;

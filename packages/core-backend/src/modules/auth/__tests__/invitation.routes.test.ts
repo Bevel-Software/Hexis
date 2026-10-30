@@ -71,10 +71,14 @@ afterEach(() => {
 
 async function start(opts: {
   admin: boolean;
+  /** Addresses that already hold Admin (in `roles.yaml`), besides the inviter. */
+  admins?: string[];
   signIn?: Partial<InvitationSignIn>;
   limiter?: FixedWindowRateLimiter;
 }): Promise<string> {
-  const adminAccess: IAdminAccessService = { isAdmin: vi.fn(async () => opts.admin) };
+  const adminAccess: IAdminAccessService = {
+    isAdmin: vi.fn(async (email) => (email === 'inviter@acme.test' ? opts.admin : (opts.admins ?? []).includes(email ?? ''))),
+  };
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
@@ -136,6 +140,21 @@ describe('POST /api/invitations — who may invite as what', () => {
     const res = await invite(base, { email: 'new@acme.test', role: 'admin' });
     expect(res.status).toBe(201);
     expect(createInvitedAccount).toHaveBeenCalledTimes(1);
+  });
+
+  it('makes no password when a member invites an address that already holds Admin', async () => {
+    const base = await start({ admin: false, admins: ['boss@acme.test'] });
+    const res = await invite(base, { email: 'Boss@Acme.test', startingPassword: true });
+    expect(res.status).toBe(201);
+    expect((await res.json()).startingPassword).toBeUndefined();
+    expect(createInvitedAccount).toHaveBeenCalledWith('Boss@Acme.test', { startingPassword: false });
+  });
+
+  it('still makes one when an admin invites an address that already holds Admin', async () => {
+    const base = await start({ admin: true, admins: ['boss@acme.test'] });
+    const res = await invite(base, { email: 'boss@acme.test' });
+    expect(res.status).toBe(201);
+    expect((await res.json()).startingPassword).toBe(GENERATED);
   });
 
   it('refuses a role that is neither member nor admin', async () => {

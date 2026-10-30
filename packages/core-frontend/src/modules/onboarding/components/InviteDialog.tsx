@@ -35,7 +35,8 @@ function either(labels: string[]): string {
  * What the form offers, from how the deployment signs people in:
  * - `password`: password sign-in and no single sign-on — every new account
  *   gets a generated starting password, or nobody invited could sign in (the
- *   owner's and the system accounts' addresses excepted: the answer says);
+ *   owner's and the system accounts' addresses, and from a non-admin one
+ *   that already holds Admin, excepted: the answer says);
  * - `sso`: single sign-on and password sign-in — a generated password is an
  *   option;
  * - `sso-only`: password sign-in is off — no password at all;
@@ -71,7 +72,8 @@ interface InviteDialogProps {
  * How the invited people get in depends on the deployment, so the dialog
  * asks it first (`GET /api/auth/providers`) and lets nothing be sent until it
  * knows. Nobody types a password: without single sign-on the server
- * generates one for every new account but an owner's or a system account's;
+ * generates one for every new account but an owner's or a system account's
+ * (or, from a non-admin, one that already holds Admin);
  * with single sign-on that is an
  * option. An account that is already there is left exactly as it was.
  *
@@ -429,7 +431,7 @@ function outcomeDetail(outcome: InviteOutcome, idp: string): string {
           ? `signs in with ${viaIdp}`
           : idp
             ? `can’t sign in yet: ${idp} doesn’t accept this address here`
-            : null;
+            : 'can’t sign in yet: no password was made for this address';
       // The deployment emailed them the invite itself (see `wasEmailed`): the
       // row says so first, since it is what the inviter no longer has to do.
       return [wasEmailed(outcome) ? 'Emailed' : null, as, how].filter(Boolean).join(' · ');
@@ -456,22 +458,43 @@ function outcomeDetail(outcome: InviteOutcome, idp: string): string {
 const INTRO = 'I’ve added you to our workspace, where we keep what our AI agents should know about the company.';
 
 /**
- * The message to forward, saying how to sign in on this deployment. Never
- * the password: when one was made, it tells them it comes separately.
+ * The message to forward, saying how to sign in. `idp`: the single sign-on
+ * that lets the reader in ('' when none does). `password`: 'separately' when
+ * one was generated for them, never the password itself; 'own' when they
+ * sign in with a password of their own; 'none' when no password lets them in.
  */
-function inviteMessage(origin: string, how: { idp: string; passwordSet: boolean; passwordSignIn: boolean }): string {
-  const { idp, passwordSet, passwordSignIn } = how;
-  if (passwordSet && idp) {
+function inviteMessage(origin: string, how: { idp: string; password: 'separately' | 'own' | 'none' }): string {
+  const { idp, password } = how;
+  if (password === 'separately' && idp) {
     return `${INTRO} Sign in at ${origin} with ${idp}, or with your work email and the password I’ll send you separately (change it on your Account page). Then connect your agent from the welcome page.`;
   }
-  if (passwordSet) {
+  if (password === 'separately') {
     return `${INTRO} Sign in at ${origin} with your work email and the password I’ll send you separately. Then change it on your Account page and connect your agent from the welcome page.`;
   }
+  if (password === 'own' && idp) {
+    return `${INTRO} Sign in at ${origin} with ${idp} or with your work email and your password, then connect your agent from the welcome page.`;
+  }
   if (idp) return `${INTRO} Sign in at ${origin} with ${idp}, then connect your agent from the welcome page.`;
-  if (passwordSignIn) {
+  if (password === 'own') {
     return `${INTRO} Sign in at ${origin} with your work email and your password, then connect your agent from the welcome page.`;
   }
   return `${INTRO} Sign in with your work account at ${origin}, then connect your agent from the welcome page.`;
+}
+
+/**
+ * The message for one person, from what the server said lets them in: a new
+ * account names single sign-on only where it admits the address, and a
+ * password only where one was made. Of an account that was already there
+ * only its existence is known, so it is told every way this deployment offers.
+ */
+function messageFor(outcome: InviteOutcome, origin: string, idp: string, passwordSignIn: boolean): string {
+  if (outcome.status === 'created') {
+    return inviteMessage(origin, {
+      idp: outcome.singleSignOn ? idp : '',
+      password: gotPassword(outcome) ? 'separately' : 'none',
+    });
+  }
+  return inviteMessage(origin, { idp, password: passwordSignIn ? 'own' : 'none' });
 }
 
 function InvitedBody({
@@ -502,26 +525,34 @@ function InvitedBody({
   // one that was already there is said to exist, not to be able to sign in.
   const created = outcomes.filter((o) => o.status === 'created').length;
   const who = created === invited ? 'They' : 'Everyone with a new account';
-  // New accounts with no password that single sign-on refuses (an address
-  // outside the deployment's allowed domains): nothing lets them in yet.
-  const shutOutEmails = idp
-    ? outcomes.filter((o) => o.status === 'created' && !o.startingPassword && !o.singleSignOn).map((o) => o.email)
-    : [];
+  // New accounts nothing lets in yet: no password was made for them, and
+  // single sign-on is off or refuses the address (one outside the allowed
+  // domains). Without single sign-on that is an address the server makes no
+  // password for: the owner's, a system account's, or an Admin's from a
+  // non-admin.
+  const shutOutEmails = outcomes
+    .filter((o) => o.status === 'created' && !o.startingPassword && !(idp && o.singleSignOn))
+    .map((o) => o.email);
   const shutOut = shutOutEmails.length;
+  const shutOutWhy = idp ? `${idp} doesn’t accept` : 'no password was made for';
   // The message tells whoever reads it how to sign in, so it is for the
-  // people something lets in: never offered to a shut-out account, and it
-  // names single sign-on only when it lets in someone it goes to.
+  // people something lets in, never a shut-out account, and each person is
+  // told only the ways that let them in. People told the same share one
+  // message; when they differ, each message names who it is for.
   const forwardTo = outcomes.filter((o) => isInvited(o) && !shutOutEmails.includes(o.email));
-  const messageIdp = forwardTo.some((o) => o.status !== 'created' || o.singleSignOn) ? idp : '';
-  // It promises a password sent separately only when everyone it goes to got
-  // one: an account that was already there gets none.
-  const messagePassword = forwardTo.length > 0 && forwardTo.every(gotPassword);
-  const message = inviteMessage(origin, {
-    idp: messageIdp,
-    passwordSet: messagePassword,
-    passwordSignIn: Boolean(methods?.password),
-  });
-  const messageLabel = shutOut > 0 ? `Or send this message to everyone but ${shutOutEmails.join(', ')}` : 'Or send this message';
+  const messages: { text: string; emails: string[] }[] = [];
+  for (const outcome of forwardTo) {
+    const text = messageFor(outcome, origin, idp, Boolean(methods?.password));
+    const same = messages.find((m) => m.text === text);
+    if (same) same.emails.push(outcome.email);
+    else messages.push({ text, emails: [outcome.email] });
+  }
+  const messageLabel = (emails: string[]) =>
+    messages.length > 1
+      ? `Or send this message to ${emails.join(', ')}`
+      : shutOut > 0
+        ? `Or send this message to everyone but ${shutOutEmails.join(', ')}`
+        : 'Or send this message';
 
   return (
     <div className="flex flex-col gap-4 py-1">
@@ -531,9 +562,9 @@ function InvitedBody({
           : created === 0
             ? 'They already have accounts, which were left as they were.'
             : shutOut === created
-              ? `${created === invited ? 'They' : 'The new accounts'} can’t sign in yet: ${idp} doesn’t accept their addresses here.`
+              ? `${created === invited ? 'They' : 'The new accounts'} can’t sign in yet: ${shutOutWhy} their addresses here.`
               : shutOut > 0
-                ? `Not every new account can sign in yet: ${idp} doesn’t accept some addresses here. Each row says which.`
+                ? `Not every new account can sign in yet: ${shutOutWhy} some addresses here. Each row says which.`
                 : allEmailed
               ? 'They have been emailed the link and how to sign in.'
               : passwordSet
@@ -590,7 +621,10 @@ function InvitedBody({
             </Banner>
           )}
           <CopyRow label="Where they sign in" text={origin} copyLabel="Copy link" mono />
-          {!allEmailed && forwardTo.length > 0 && <CopyRow label={messageLabel} text={message} copyLabel="Copy message" />}
+          {!allEmailed &&
+            messages.map((m) => (
+              <CopyRow key={m.text} label={messageLabel(m.emails)} text={m.text} copyLabel="Copy message" />
+            ))}
         </>
       )}
     </div>

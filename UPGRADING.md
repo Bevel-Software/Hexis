@@ -49,7 +49,9 @@ sign-in and no single sign-on, or "Also give them a password" ticked), the
 platform generates it, shows it once on the invited person's row to copy,
 and passes it to the deployment's invitation mail. The owner's address
 (`ADMIN_EMAIL`, with or without `ADMIN_PASSWORD`) and the system accounts'
-addresses never get one. An invite never changes an account that already
+addresses never get one, and a non-admin's invite makes none for an address
+that already holds Admin in `roles.yaml`. Such an account is created with no
+way in, and its row says so. An invite never changes an account that already
 exists: it no longer gives a first password to an
 existing account without one. Admins set or reset a password from User
 accounts, as before.

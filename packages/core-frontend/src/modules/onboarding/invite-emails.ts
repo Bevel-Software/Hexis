@@ -112,7 +112,8 @@ function isSwitchedOff(err: unknown): boolean {
  * Invite each address (`POST /api/invitations`). The server makes a NEW
  * account, with a generated starting password when `startingPassword` asks
  * for one (and unasked where password sign-in is the only way in; never for
- * the owner's or a system account's address), or says
+ * the owner's or a system account's address, nor from a non-admin for one
+ * that already holds Admin), or says
  * the address already has one, which it leaves exactly as it was.
  *
  * One at a time, not in parallel. Each create asks the deployment's admission

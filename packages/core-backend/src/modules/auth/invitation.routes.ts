@@ -1,6 +1,7 @@
 import express from 'express';
 import type { InvitationResult } from '@bevel-software/platform-shared';
 import { logger } from '../../shared/logging.js';
+import { canonicalEmail } from '../../shared/email-identity.js';
 import type { AuthService } from './auth.service.js';
 import { inviterOf, type IAccountHooks } from './account-hooks.js';
 import { AccountChangeRefusedError, answerAdmissionRefusal } from './account-admission.js';
@@ -33,7 +34,8 @@ export interface InvitationSignIn {
  *   sign-in and no single sign-on every new account gets one, whatever
  *   `startingPassword` says, or nobody invited could sign in (the deployment
  *   owner's and the system accounts' addresses excepted: an inviter never
- *   learns an owner's password, and the system accounts hold none). With
+ *   learns an owner's password, and the system accounts hold none; nor,
+ *   from a non-admin, an address that already holds Admin). With
  *   both, only when `startingPassword` is true.
  *   With password sign-in off none is made, and asking for one is a 400.
  *   It is returned once in the answer and carried on the invited event for
@@ -81,7 +83,8 @@ export function createInvitationRoutes(
       res.status(400).json({ error: 'startingPassword must be a boolean' });
       return;
     }
-    if (role === 'admin' && !(await adminAccess.isAdmin(req.userEmail))) {
+    const inviterIsAdmin = await adminAccess.isAdmin(req.userEmail);
+    if (role === 'admin' && !inviterIsAdmin) {
       res.status(403).json({ error: 'Only an admin can invite someone as Admin' });
       return;
     }
@@ -90,7 +93,13 @@ export function createInvitationRoutes(
       return;
     }
     const sso = offeredProviders(signIn.providers).length > 0;
-    const generate = signIn.passwordSignIn && (!sso || startingPassword === true);
+    // An address that already holds Admin (listed in `roles.yaml` before it
+    // has an account) gets no password from a non-admin's invite: whoever
+    // learned it would sign in as an admin. Asked only when one would be made.
+    const generate =
+      signIn.passwordSignIn &&
+      (!sso || startingPassword === true) &&
+      (inviterIsAdmin || !(await adminAccess.isAdmin(canonicalEmail(email))));
 
     if (!limiter.consume(req.userId!)) {
       res.status(429).json({ error: 'Too many invitations. Try again later.' });

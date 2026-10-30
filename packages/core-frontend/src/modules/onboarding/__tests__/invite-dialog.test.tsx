@@ -419,6 +419,21 @@ describe('InviteDialog: how people sign in here', () => {
     expect(screen.getByText(/^They can sign in now\. Send them the link and their password\./)).toBeInTheDocument();
   });
 
+  it('names single sign-on only in the message for the people it lets in', async () => {
+    ssoRefused = new Set(['out@elsewhere.com']);
+    const { input } = await mountDialog();
+    await userEvent.click(screen.getByLabelText('Also give them a password'));
+    await invite(input, ['ana@acme.com', 'out@elsewhere.com'], 'Invite 2 people');
+    await screen.findByRole('dialog', { name: '2 people are invited' });
+    const messages = screen.getAllByText(/^I’ve added you to/);
+    expect(messages).toHaveLength(2);
+    expect(screen.getByText('Or send this message to ana@acme.com')).toBeInTheDocument();
+    expect(screen.getByText('Or send this message to out@elsewhere.com')).toBeInTheDocument();
+    expect(messages[0]).toHaveTextContent('with Duende Demo, or with your work email and the password');
+    expect(messages[1]).not.toHaveTextContent('Duende Demo');
+    expect(messages[1]).toHaveTextContent('with your work email and the password I’ll send you separately');
+  });
+
   it('names several single sign-on providers', async () => {
     answerProviders({ password: true, sso: [DUENDE, { key: 'ms', label: 'Microsoft', startPath: '/api/auth/ms/start' }] });
     await mountDialog();
@@ -550,13 +565,55 @@ describe('InviteDialog: the generated password, shown once', () => {
     expect(copyMock).toHaveBeenLastCalledWith(expect.not.stringContaining(GENERATED));
   });
 
-  it('promises no password in the message when it also goes to an account that was already there', async () => {
+  it('promises a password only in the message for the people who got one', async () => {
     existing = new Set(['old@acme.com']);
     await sendPasswordOnly(['ana@acme.com', 'old@acme.com']);
-    const message = screen.getByText(/^I’ve added you to/);
-    expect(message).not.toHaveTextContent('send you separately');
-    expect(message).toHaveTextContent('with your work email and your password');
-    expect(within(rowOf('ana@acme.com')).getByText(GENERATED)).toBeInTheDocument();
+    const messages = screen.getAllByText(/^I’ve added you to/);
+    expect(messages).toHaveLength(2);
+    expect(screen.getByText('Or send this message to ana@acme.com')).toBeInTheDocument();
+    expect(screen.getByText('Or send this message to old@acme.com')).toBeInTheDocument();
+    expect(messages[0]).toHaveTextContent('the password I’ll send you separately');
+    expect(messages[1]).not.toHaveTextContent('send you separately');
+    expect(messages[1]).toHaveTextContent('with your work email and your password');
+    for (const message of messages) expect(message.textContent).not.toContain(GENERATED);
+  });
+
+  // The server makes no password for the owner's or a system account's
+  // address, nor for an Admin's from a non-admin: without single sign-on
+  // nothing lets that account in, and the view says so.
+  it('says a new account with no password can’t sign in yet, where single sign-on is off', async () => {
+    invitationAnswers.set('owner@acme.com', () =>
+      json(201, {
+        status: 'created',
+        account: { id: 'id-owner', email: 'owner@acme.com', name: 'owner' },
+        notified: [],
+        singleSignOn: false,
+      }),
+    );
+    await sendPasswordOnly(['ana@acme.com', 'owner@acme.com']);
+    expect(
+      within(rowOf('owner@acme.com')).getByText('Member · can’t sign in yet: no password was made for this address'),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText('Not every new account can sign in yet: no password was made for some addresses here. Each row says which.'),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/can sign in now|accounts are ready/)).not.toBeInTheDocument();
+    expect(screen.getByText('Or send this message to everyone but owner@acme.com')).toBeInTheDocument();
+  });
+
+  it('claims no readiness when no new account got a password, where single sign-on is off', async () => {
+    invitationAnswers.set('owner@acme.com', () =>
+      json(201, {
+        status: 'created',
+        account: { id: 'id-owner', email: 'owner@acme.com', name: 'owner' },
+        notified: [],
+        singleSignOn: false,
+      }),
+    );
+    await sendPasswordOnly(['owner@acme.com']);
+    expect(screen.getByText('They can’t sign in yet: no password was made for their addresses here.')).toBeInTheDocument();
+    expect(screen.queryByText(/can sign in now|accounts are ready/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Copy message' })).not.toBeInTheDocument();
   });
 
   it('is gone after "Invite more people", and not shown again', async () => {
