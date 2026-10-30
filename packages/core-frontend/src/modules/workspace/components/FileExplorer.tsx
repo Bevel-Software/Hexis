@@ -676,12 +676,16 @@ function ContextMenu({
         // and is refused now (`addTab`). Nothing closed, but the page was on
         // its way to the deleted file: land on the tab that is left all the same.
         const openingDeleted = result && !result.closedActive && namesDeleted;
-        if (result && (result.closedActive ? onScreen : openingDeleted) && branchOnScreen !== null) {
-          navigate(landingAfterClose(pathname, branchOnScreen, result.newActivePath), { replace: true });
-        } else if (result && branchOnScreen !== null && deleteTookLibraryItem(pathname, kbDirName, entry.relativePath)) {
-          // A skill's or a tool's page holds no tab, so no tab closed — but
-          // the item on screen is gone all the same. Land as with no tab left.
-          navigate(landingAfterClose(pathname, branchOnScreen, null), { replace: true });
+        // A skill's or a tool's page holds no tab, so no tab closed — but the
+        // item on screen is gone all the same. The active tab is one it never
+        // held, often a Knowledge file: land as with no tab left, not on that.
+        const tookLibraryItem = result && deleteTookLibraryItem(pathname, kbDirName, entry.relativePath);
+        if (result && branchOnScreen !== null) {
+          if (result.closedActive ? onScreen : openingDeleted && !tookLibraryItem) {
+            navigate(landingAfterClose(pathname, branchOnScreen, result.newActivePath), { replace: true });
+          } else if (tookLibraryItem) {
+            navigate(landingAfterClose(pathname, branchOnScreen, null), { replace: true });
+          }
         }
         return true;
       } catch (err) {

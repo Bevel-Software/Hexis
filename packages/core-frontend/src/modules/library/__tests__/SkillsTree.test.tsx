@@ -315,6 +315,30 @@ describe('SkillsTree: deleting the item on screen', () => {
     await waitFor(() => expect(screen.getByLabelText('pathname').textContent).toBe('/skills-and-tools'));
   });
 
+  // The active tab is one the skill's page never held — here a Knowledge file.
+  it("lands on Skills & Tools, not on the active Knowledge tab, when the skill's page held no tab", async () => {
+    const SKILL_MD = `${KB}/Skills/Sales/discovery-call/SKILL.md`;
+    const deleteEntry = vi.fn(async () => ({ closedActive: false, newActivePath: `${KB}/Handbook.md` }));
+    renderTree(`/workspace/${DEFAULT_BRANCH}/${SKILL_MD}`, { deleteEntry, openFilePath: `${KB}/Handbook.md` });
+
+    await deleteRow('discovery-call');
+
+    expect(deleteEntry).toHaveBeenCalledWith(`${KB}/Skills/Sales/discovery-call`);
+    await waitFor(() => expect(screen.getByLabelText('pathname').textContent).toBe('/skills-and-tools'));
+  });
+
+  // A tab that did close lands as any other: on the tab that is left.
+  it("lands on the tab that is left when the Library file's own tab closed", async () => {
+    const LEFT = `${KB}/Handbook.md`;
+    const deleteEntry = vi.fn(async () => ({ closedActive: true, newActivePath: LEFT }));
+    renderTree(`/workspace/${DEFAULT_BRANCH}/${ITEM}`, { deleteEntry, openFilePath: ITEM });
+
+    await deleteRow('checklist.md');
+
+    expect(deleteEntry).toHaveBeenCalledWith(ITEM);
+    await waitFor(() => expect(screen.getByLabelText('pathname').textContent).toBe(`/workspace/${DEFAULT_BRANCH}/${LEFT}`));
+  });
+
   it("lands on Skills & Tools when the skill's SKILL.md goes while another of its files is on screen", async () => {
     const deleteEntry = vi.fn(async () => ({ closedActive: false, newActivePath: null }));
     renderTree(`/workspace/${DEFAULT_BRANCH}/${KB}/Skills/Sales/discovery-call/checklist.md`, { deleteEntry, openFilePath: null });
