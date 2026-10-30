@@ -20,8 +20,8 @@ import type { ToolAuth } from '../../tool-auth/tool-auth.middleware.js';
 import type { AuthService } from '../../auth/auth.service.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import type { ICreatorAccess } from '../../access-model/creator.js';
-import type { WorkflowEventBus } from '../../workflow/event-bus.js';
-import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
+import type { VersionControlEventBus } from '../../version-control/event-bus.js';
+import { VersionControlHooks } from '../../version-control/version-control-hooks.js';
 import { ToolDescriptionNotes } from '../../workspace/agent-access.gate.js';
 import { RoutineWritePolicyService } from '../routine-write-policy.js';
 import { SpillStore } from '../spill-store.js';
@@ -146,8 +146,8 @@ describe('workspace tools — a branch that cannot be opened', () => {
         getUserById: async () => ({ id: 'u', email: 'alice@example.com', name: 'Alice' }),
       } as unknown as AuthService,
       workspaceService: workspaces,
-      workflowService: {} as never,
-      events: { emit: () => {} } as unknown as WorkflowEventBus,
+      versionControlService: {} as never,
+      events: { emit: () => {} } as unknown as VersionControlEventBus,
       kbDirName: KB_DIR,
       creatorAccess: stubCreatorAccess,
     });
@@ -196,7 +196,7 @@ describe('workspace tools — a branch that cannot be opened', () => {
       testKbContext({ kbDirName: KB_DIR }),
       {
         recoveryBotEmail: 'recovery-bot@bevel.local',
-        hooks: new WorkflowHooks(),
+        hooks: new VersionControlHooks(),
         notes: new ToolDescriptionNotes(),
       },
       new RoutineWritePolicyService(),

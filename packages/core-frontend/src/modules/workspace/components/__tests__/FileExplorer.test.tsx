@@ -18,8 +18,8 @@ import { AuthContext, type AuthContextValue } from '../../../auth';
 import { OpenChangeRequestsContext } from '../../state/open-change-requests.context';
 import { AdminContext, type AdminContextValue } from '../../../admin';
 import { PR_STALE_EVENT } from '../../../../core/events';
-import { EventBusProvider } from '../../../workflow';
-import type { WorkflowEvent } from '@bevel-software/platform-shared';
+import { EventBusProvider } from '../../../version-control';
+import type { VersionControlEvent } from '@bevel-software/platform-shared';
 import {
   AppRegistryContext,
   makeRegistry,
@@ -4261,7 +4261,7 @@ describe('FileExplorer: a document the server could not read', () => {
       this.listeners.set(type, (this.listeners.get(type) ?? []).filter((f) => f !== fn));
     }
     close() {}
-    deliver(event: WorkflowEvent) {
+    deliver(event: VersionControlEvent) {
       for (const fn of [...(this.listeners.get('message') ?? [])]) {
         fn(new MessageEvent('message', { data: JSON.stringify(event) }));
       }
@@ -4298,7 +4298,7 @@ describe('FileExplorer: a document the server could not read', () => {
     let id = 1;
     const push = (payload: { workspaceId: string; path: string; reason: string }) =>
       act(() => {
-        const event = { id: id++, ts: new Date().toISOString(), kind: 'document-unreadable', ...payload } as WorkflowEvent;
+        const event = { id: id++, ts: new Date().toISOString(), kind: 'document-unreadable', ...payload } as VersionControlEvent;
         FakeEventSource.current!.deliver(event);
       });
     return { push };

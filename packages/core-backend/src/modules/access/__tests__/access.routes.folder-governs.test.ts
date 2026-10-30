@@ -10,8 +10,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { IAccessControl } from '../access-control.interface.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { AuthService } from '../../auth/auth.service.js';
-import type { WorkflowService } from '../../workflow/workflow.service.js';
-import type { WorkflowEventBus } from '../../workflow/event-bus.js';
+import type { VersionControlService } from '../../version-control/version-control.service.js';
+import type { VersionControlEventBus } from '../../version-control/event-bus.js';
 import { createAccessRoutes } from '../access.routes.js';
 import { usersDbDouble } from './users-db-double.js';
 import { AccessMutationError, AccessMutationService } from '../access-mutation.service.js';
@@ -137,13 +137,13 @@ describe('access mutations on a file that cannot carry frontmatter', () => {
     // The third release shape: the caller held the lock and touched nothing,
     // so disk and commit queue are left exactly as they are.
     releaseLockUntouched = vi.fn(async () => undefined);
-    const workflowService = {
+    const versionControlService = {
       getLock: vi.fn(async () => null),
       acquireLock,
       releaseLock: vi.fn(async () => undefined),
       releaseLockNoCommit,
       releaseLockUntouched,
-    } as unknown as WorkflowService;
+    } as unknown as VersionControlService;
 
     const app = express();
     app.use(express.json());
@@ -158,8 +158,8 @@ describe('access mutations on a file that cannot carry frontmatter', () => {
         workspaceService,
         { getUserById: vi.fn(async () => USER) } as unknown as AuthService,
         { whileSwitchedOn: async (_email: string, write: () => Promise<void>) => write() },
-        workflowService,
-        { emit: vi.fn() } as unknown as WorkflowEventBus,
+        versionControlService,
+        { emit: vi.fn() } as unknown as VersionControlEventBus,
         usersDbDouble(),
         testKbContext({ kbDirName: KB }),
         new NodeFs(),

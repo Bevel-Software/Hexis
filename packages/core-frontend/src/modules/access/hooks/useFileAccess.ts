@@ -90,7 +90,7 @@ export function useFileAccess(
       return;
     }
     // Drafts are free-for-all (mirrors the backend's branch-protected gates
-    // in workflow/git.service.ts and workflow.service.ts). Skip the network
+    // in version-control/git/git.service.ts and version-control.service.ts). Skip the network
     // call entirely so a slow/failed lookup never grays out the editor on a
     // draft. `branch === null` is the bootstrap window before status loads;
     // return canWrite=null so callers stay optimistic until we know.

@@ -1,5 +1,5 @@
 import { describe, test, expect } from 'vitest';
-import { DEFAULT_BRANCH, type ChangeRequest, type IWorkflowService } from '@bevel-software/platform-shared';
+import { DEFAULT_BRANCH, type ChangeRequest, type IVersionControlService } from '@bevel-software/platform-shared';
 import { PendingToolsService } from '../pending-tools.service.js';
 import { hashEmail } from '../../../shared/email-identity.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
@@ -90,11 +90,11 @@ function harness(opts: {
     listAllSummaries: async () => (opts.released ?? []) as ToolManualSummary[],
   } as unknown as IToolManualService;
 
-  const workflow = {
+  const versionControl = {
     listChangeRequests: async () => opts.crs,
-  } as unknown as IWorkflowService;
+  } as unknown as IVersionControlService;
 
-  return new PendingToolsService(workspaceService, accessControl, toolManuals, workflow, testKbContext());
+  return new PendingToolsService(workspaceService, accessControl, toolManuals, versionControl, testKbContext());
 }
 
 const ADMIN_WRITES = { [TOOL_PATH]: [ADMIN] };
@@ -357,20 +357,20 @@ describe('PendingToolsService', () => {
   });
 
   /**
-   * This hangs off the library's list load. A workflow service that cannot
+   * This hangs off the library's list load. A version-control service that cannot
    * answer must cost the reader an empty review shelf, not their whole library.
    */
   test('degrades to nothing pending when the change requests cannot be listed', async () => {
-    const workflow = {
+    const versionControl = {
       listChangeRequests: async () => {
         throw new Error('offline');
       },
-    } as unknown as IWorkflowService;
+    } as unknown as IVersionControlService;
     const svc = new PendingToolsService(
       {} as unknown as WorkspaceService,
       {} as unknown as IAccessControl,
       { listAllSummaries: async () => [] } as unknown as IToolManualService,
-      workflow,
+      versionControl,
       testKbContext(),
     );
     await expect(svc.listPendingTools(AUTHOR)).resolves.toEqual([]);
@@ -385,7 +385,7 @@ describe('PendingToolsService', () => {
           throw new Error('workspace gone');
         },
       } as unknown as IToolManualService,
-      { listChangeRequests: async () => [cr()] } as unknown as IWorkflowService,
+      { listChangeRequests: async () => [cr()] } as unknown as IVersionControlService,
       testKbContext(),
     );
     await expect(svc.listPendingTools(AUTHOR)).resolves.toEqual([]);

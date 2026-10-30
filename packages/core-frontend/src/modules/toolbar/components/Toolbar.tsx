@@ -57,7 +57,7 @@ export function Toolbar() {
   // own: the branch switcher is an enterprise contribution scoped (by the
   // item itself, via useActiveAppId) to the Knowledge app — the git module
   // still ships the component, the core shell just doesn't mount it.
-  // (Share/Discard buttons retired with the workflow migration: lock release
+  // (Share/Discard buttons retired with the version-control migration: lock release
   // auto-commits + pushes, so there is no separate "share" step.)
   const toolbarItems = useMemo(
     () =>

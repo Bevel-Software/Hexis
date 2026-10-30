@@ -15,9 +15,9 @@ import type { IRoutineWritePolicy } from './routine-write-policy.js';
 import type { ToolHandlerFactory } from '../tool-helpers/index.js';
 import { requireInternalSource, requireExternalSource } from '../tool-auth/index.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
-import { GitInternalsError, WorkflowValidationError } from '../../shared/domain-errors.js';
+import { GitInternalsError, VersionControlValidationError } from '../../shared/domain-errors.js';
 // Leaf-level shared primitive (same exception `workspace.service.ts` already
-// relies on) — not a workflow service, so this stays inside the module boundary.
+// relies on) — not a version-control service, so this stays inside the module boundary.
 import {
   assertInsideRepo,
   assertRepoRootNameFree,
@@ -669,7 +669,7 @@ function refuseEntry(entry: Record<string, unknown>, err: unknown): void {
     entry.message = err.message;
     return;
   }
-  if (err instanceof GitInternalsError || err instanceof WorkflowValidationError) {
+  if (err instanceof GitInternalsError || err instanceof VersionControlValidationError) {
     entry.error = (err.payload as { kind?: string } | undefined)?.kind ?? 'refused';
     entry.message = err.message;
     return;
@@ -1534,7 +1534,7 @@ export function registerWorkspaceTools(
 
   /**
    * The paths among `paths` the caller may NOT write, judged exactly as the
-   * lock gate judges them (`WorkflowService.acquireLock`): on a protected
+   * lock gate judges them (`VersionControlService.acquireLock`): on a protected
    * branch only, against the access tree at HEAD, with no rules at HEAD
    * meaning allow. Empty on a draft branch — changes there reach a protected
    * branch only through a change request.
@@ -3091,7 +3091,7 @@ export function registerWorkspaceTools(
       for (const f of files) writePolicy.assertPathWritable(ctx.sessionId, f.path);
       const fs = await ctx.getFilesystem(a.branch as string);
       // `write: true` guarantees a LockingFilesystem here; `writeFiles` lands the
-      // batch as one commit. Structural cast avoids a workflow-internal import.
+      // batch as one commit. Structural cast avoids a version-control-internal import.
       const batching = fs as unknown as {
         writeFiles(
           writes: { path: string; content: string }[],
@@ -3438,7 +3438,7 @@ export function registerWorkspaceTools(
         // ordering trick to keep the rest governed on the way — nothing lands
         // until all of it does. The placeholders go too: this is the one
         // operation that removes a folder. Structural cast, as `write_files`
-        // does, to avoid importing the workflow-internal class here.
+        // does, to avoid importing the version-control-internal class here.
         if (files.length > 0) {
           const batch = fs as unknown as {
             writeFiles(

@@ -53,7 +53,7 @@ import {
   AccessSpliceError,
 } from '../access-model/index.js';
 import type { Verb, Principal, TokenMatch } from '../access-model/index.js';
-import { WorkflowDomainError } from '../../shared/domain-errors.js';
+import { VersionControlDomainError } from '../../shared/domain-errors.js';
 import {
   canCarryFrontmatter,
   FOLDER_GOVERNS_ACCESS_KIND,
@@ -64,7 +64,7 @@ import {
 export type TargetKind = 'folder' | 'file';
 
 /** Bad-request-class mutation failure (invalid principal, unknown role/group, lockout). */
-export class AccessMutationError extends WorkflowDomainError {
+export class AccessMutationError extends VersionControlDomainError {
   constructor(message: string, status = 400, payload?: Record<string, unknown>) {
     super(message, status, payload);
     this.name = 'AccessMutationError';

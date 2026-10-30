@@ -1,0 +1,811 @@
+/**
+ * `IVersionControlService` — the abstraction the rest of the app talks to instead
+ * of raw git/gh. See `bevel-platform/PLAN.md` for the motivation and the spec the
+ * methods here encode (protected branches, atomic per-file changes, file
+ * locks, change requests as branch-pair reconciliations).
+ *
+ * Naming convention: methods speak version-control vocabulary (`commitChange`,
+ * `openChangeRequest`, `acquireLock`), never git vocabulary (`commit`,
+ * `createPr`, no analogue for locks). Implementations may delegate to the
+ * existing git/PR/change-request-review services until those are folded into
+ * `modules/version-control`; callers should not depend on that fact.
+ *
+ * Some methods on this interface have no backing service yet — file locks,
+ * `openChangeRequest`, `updateFromTarget`. The facade implementation throws
+ * `NotImplementedVersionControlError` from those until the underlying support
+ * lands. The interface defines them up-front so consumers can plan against
+ * the final surface area.
+ */
+
+import type { AuthUser } from '../auth/types.js';
+import type { ChangeRequestApplyFailureKind, UpdateChangeRequestFields } from '../git/pr.types.js';
+import type {
+  AcquireLockResult,
+  Branch,
+  BranchSyncOutcome,
+  BranchWorkspaceStatus,
+  CancelChangeRequestResult,
+  Change,
+  ChangeInput,
+  ChangeRequest,
+  ChangeRequestDetail,
+  ChangeRequestUpdateResult,
+  ChangeRequestState,
+  ChangedFile,
+  DeleteBranchPreview,
+  DeleteBranchResult,
+  FileApproval,
+  FileLock,
+  FolderChangeRequest,
+  FolderChangeRequestRemoval,
+  MergeBranchOutcome,
+  MergeChangeRequestOutcome,
+  OpenChangeRequestInput,
+  UpdateBranchOutcome,
+} from './types.js';
+import type { BranchCounts, MergeResolution } from '../git/types.js';
+
+export interface IVersionControlService {
+  // ── Branches ──────────────────────────────────────────────────────────────
+
+  /**
+   * `freshFetch` bypasses the fetch TTL; `strictFetch` makes a failed fetch
+   * throw instead of serving the stale refs — for a caller that uses the
+   * list to prove a branch ABSENT (a stale list proves nothing).
+   */
+  listBranches(workspaceId: string, opts?: { freshFetch?: boolean; strictFetch?: boolean }): Promise<Branch[]>;
+  /**
+   * Create a new unprotected branch. Protected branches cannot be created
+   * via version control — the protected set is bootstrapped from the KB repo's
+   * initial state and never grown at runtime. Holds the branch-lifecycle
+   * lock for `name`, so creation is serialised with the branch's deletion
+   * and with the retirement of a stale clone under that name.
+   */
+  createBranch(workspaceId: string, name: string, fromBase?: string): Promise<Branch>;
+  /**
+   * Delete a branch. Removes both local and origin refs in one call. The
+   * branch's author (per `<email-localpart>/...` naming) OR an admin (per the
+   * workspace's `roles.yaml`) can delete it. Admins can additionally remove
+   * unprefixed CLI-created branches that have no recognisable author.
+   *
+   * `onlyIfNoRemote: true` is the legacy orphan-cleanup path: bypasses the
+   * author/admin check (callers prune any orphan they encounter) and refuses
+   * if origin still has the ref. Protected and current branches always reject.
+   */
+  deleteBranch(
+    workspaceId: string,
+    name: string,
+    user: AuthUser,
+    opts?: { onlyIfNoRemote?: boolean },
+  ): Promise<void>;
+  /**
+   * An agent's `delete_branch`: the app's author-or-Admin rule, plus the
+   * guards an agent needs and a person in the branch switcher does not.
+   * Refuses a protected branch, a name that is not a branch, a branch an open
+   * change request that still proposes something (or whose changes cannot be
+   * determined) comes from or goes into, a branch whose checkout still has
+   * saves landing or a file held, and — unless `discardUnmerged` — one holding
+   * commits that are not on the default branch. Open requests that propose
+   * nothing block nothing: they are closed only once every other check has
+   * passed, just before the branch is removed — never by a preview or a
+   * refused deletion. Fetches first, strictly: when the shared repository
+   * cannot be reached it refuses. Runs from the default branch's workspace,
+   * whichever workspace the caller is in. `dryRun` reports what a deletion
+   * would do and changes nothing. `maySee` is the caller's view of change
+   * requests: one it answers no for is left out of the preview and refused on
+   * without its number or link. Absent, every request is visible.
+   */
+  deleteBranchChecked(
+    user: AuthUser,
+    name: string,
+    opts?: { dryRun?: boolean; discardUnmerged?: boolean; maySee?: (number: number) => Promise<boolean> },
+  ): Promise<DeleteBranchPreview | DeleteBranchResult>;
+  // `switchBranch` removed: under the per-branch workspace model the active
+  // branch is the workspace's identity. Switching branches is a workspace
+  // selection (`WorkspaceService.getOrCreateForBranch`), not an operation
+  // on an existing workspace's clone.
+  // `forkCurrentToDraft` removed: under the per-branch workspace model each
+  // branch is its own workspace; nothing carries uncommitted edits across.
+  // `createBranch` + URL navigation covers the "start a new draft" intent.
+  /** Current branch's workspace status — currently just the branch name + upstream sync state. */
+  branchStatus(workspaceId: string): Promise<BranchWorkspaceStatus>;
+  /**
+   * Commits the workspace's own branch is ahead of and behind its upstream
+   * (or, with none, the nearest protected branch); null when neither
+   * resolves. Counted for this one branch: a branch listing carries no counts.
+   */
+  branchCounts(workspaceId: string): Promise<BranchCounts>;
+  // `discardWorkingChanges` removed: under save=share the working tree is
+  // never dirty, so there is nothing for "undo my unsaved edits" to undo.
+  /**
+   * Push the current branch upstream so other users (and change requests)
+   * can see the commits on it. Version-control term: "share current branch". The
+   * underlying implementation is `git push -u origin <branch>`.
+   */
+  shareCurrentBranch(workspaceId: string, user: AuthUser): Promise<void>;
+  /**
+   * Number of commits on `branch` that aren't on `baseBranch` — exactly
+   * what a CR from `branch` to `baseBranch` would propose for review.
+   * Implemented as `git rev-list --count <baseBranch>..<branch>` against
+   * the workspace's clone; returns 0 when the branch has no unmerged
+   * commits (a fresh fork that nobody wrote to) and when either ref
+   * cannot be resolved. Background runs use this to decide whether a
+   * routine branch deserves a change request — without it, a run where
+   * the agent commits files but forgets to call `open_change_request`
+   * would silently lose its work to the no-changes cleanup path.
+   */
+  countCommitsAhead(workspaceId: string, branch: string, baseBranch: string): Promise<number>;
+  /** Fetch remote refs without modifying the working tree. */
+  refreshRemotes(workspaceId: string): Promise<void>;
+  /**
+   * Pull the latest remote state into the current branch (rebase strategy).
+   * On a rebase CONFLICT (local commits vs origin), throws the typed
+   * pull-conflict error AND queues a background recovery run attributed to
+   * `user` when provided (falls back to the recovery bot).
+   */
+  updateFromRemote(workspaceId: string, user?: AuthUser): Promise<void>;
+  /**
+   * The remote-sync step for ONE branch's clone, driven by a git host's
+   * webhook or a pipeline rather than by a person's save. Pulls with the same
+   * rebase-and-autostash `updateFromRemote` uses and, when HEAD moved,
+   * announces the new tree (`fs-tree-changed`, one `file-changed` per path)
+   * so open browsers, agents and the catalogues see it at once.
+   *
+   * On a conflict it does what `updateFromRemote` does — the divergence goes
+   * to the same background recovery ladder (attributed to the recovery bot,
+   * since no person triggered the sync) — and, because that is not resolved
+   * at request time, reports it as a `conflict` outcome naming the files, so
+   * the caller can fail and a person can step in if recovery does not clear
+   * it. Never throws for a per-branch failure; every failure is an outcome.
+   */
+  syncWorkspaceFromRemote(workspaceId: string): Promise<BranchSyncOutcome>;
+  /**
+   * Retire the clone of a branch the host has deleted (a `remote-gone`
+   * outcome). Runs under the branch-lifecycle lock — the one `createBranch`
+   * and `deleteBranch` hold, so no Hexis operation can recreate the branch
+   * while the clone is examined and removed — revalidates against origin
+   * first, and backs off while a clone of the branch is being bootstrapped.
+   * A branch recreated in the meantime therefore keeps its clone. Returns
+   * whether the clone was removed.
+   */
+  retireRemoteGoneClone(workspaceId: string): Promise<boolean>;
+  /**
+   * Hard-reset the workspace's checked-out branch to `origin/<branch>` (fetch
+   * first), discarding any local divergence. Break-glass primitive for
+   * roles.yaml recovery so the restoring commit can fast-forward on push.
+   */
+  resetToRemote(workspaceId: string, branch: string): Promise<void>;
+  /**
+   * Best-fit protected branch that `branch` was forked from — picks the
+   * protected branch on origin yielding the smallest "ahead" count.
+   * Returns null if no protected branch can be reached.
+   */
+  resolveForkBase(workspaceId: string, branch: string): Promise<string | null>;
+  /**
+   * Paths that the next `commitChange` would include — what `git add -A`
+   * would stage: modified + deleted + renamed + untracked (honouring
+   * `.gitignore`). Returns only paths.
+   */
+  listPendingChangePaths(workspaceId: string): Promise<string[]>;
+  // `listWorkingChanges` + `diffFileInWorking` removed: under save=share the
+  // working tree is never dirty, so both report the empty state by
+  // definition. Cross-branch / per-commit diff cases are covered by
+  // `compareFile` + `showFileAtChange` below.
+
+  // ── Changes ───────────────────────────────────────────────────────────────
+
+  /**
+   * Commit one atomic change. The current backing implementation packs every
+   * dirty path in the working tree into the commit; the version-control spec
+   * eventually constrains this to one file per change, enforced at the
+   * commit boundary. Until that lands, callers should already commit
+   * one-file-at-a-time by convention.
+   */
+  commitChange(workspaceId: string, user: AuthUser, input: ChangeInput): Promise<Change>;
+  /**
+   * Commit whatever the caller has already written to the working tree as ONE
+   * atomic change, then push. Unlike `commitChange` (one file at a time, guarded
+   * at the commit boundary) this commits the whole dirty set together — for the
+   * rare case where a group of files must land together or not at all (e.g. a
+   * role rename rewriting `roles.yaml` + every reference). Does NOT write
+   * content: the caller writes the files first (e.g. via the lock-aware
+   * filesystem) and is responsible for any validation. Returns null on a
+   * no-op — nothing to commit WITHIN SCOPE: with `onlyPaths` given, none of
+   * those paths is dirty (other paths may well be); without it, the whole
+   * tree is clean.
+   *
+   * `onlyPaths` (workspace-relative) scopes the commit to the caller's own
+   * files: on a shared per-branch workspace other paths may be dirty from a
+   * concurrent save whose commit is still queued, and an unscoped commit
+   * would sweep them in under this caller's author/summary. Omitted → the
+   * whole dirty set (legacy behavior for flows that own the workspace).
+   */
+  commitChanges(
+    workspaceId: string,
+    user: AuthUser,
+    summary: string,
+    onlyPaths?: string[],
+  ): Promise<Change | null>;
+  /** Per-file history. Newest first; clamps to ≤ 100 entries. */
+  listChangesForFile(workspaceId: string, path: string, limit?: number): Promise<Change[]>;
+  /**
+   * Diff of one file between two branches. Both names must resolve to a
+   * known branch on this workspace (local head or remote-tracking). `diff`
+   * is the raw unified diff body — empty when identical, with the "new
+   * file" / "deleted file" headers when the file only exists on one side —
+   * and `from`/`to` the commits each side was served from. `authorize` is
+   * the caller's read verdict, asked inside the git layer's reservation
+   * before anything is said about the path at either side, with every
+   * commit each branch resolves to in this repository (local head and
+   * published tip, the served one first) — all must grant, as the compare
+   * route has always required of both refs; its throw is the answer.
+   * Required: content from another branch is never served without it.
+   */
+  compareFile(
+    workspaceId: string,
+    path: string,
+    fromBranch: string,
+    toBranch: string,
+    authorize: (sides: { from: string[]; to: string[] }) => Promise<void>,
+  ): Promise<{ diff: string; from: string; to: string }>;
+  /**
+   * Diff of one file at a specific change (sha) — i.e. `git show <sha> -- <path>`.
+   * Used by the File viewer's History tab.
+   */
+  showFileAtChange(workspaceId: string, path: string, sha: string): Promise<string>;
+  /**
+   * Full file contents on both sides of one change: `baseline` at `<sha>^`
+   * (null when the file — or the parent commit — doesn't exist there),
+   * `current` at `<sha>` (null when absent). Used by the File viewer's
+   * History tab to render markdown changes as a rendered-markdown diff.
+   */
+  fileAtChange(
+    workspaceId: string,
+    path: string,
+    sha: string,
+  ): Promise<{ baseline: string | null; current: string | null }>;
+  /**
+   * One file's BYTES at a change, for the viewers that read the file itself
+   * rather than a text buffer — a past save of a pdf, an image, a Word
+   * document, a deck, a workbook, a message.
+   *
+   * `side: 'after'` is the file as that save left it; `'before'` is `<sha>^`,
+   * which is what the save that DELETED a file has to show. `null` means the
+   * file was not there on the side asked for.
+   *
+   * Refuses a sha that is not in the history of the branch the workspace has
+   * checked out — a past version is served per branch, and the text history
+   * routes above carry the same rule. Access to the file itself is the
+   * caller's to check, exactly as for `fileAtChange`.
+   *
+   * `Uint8Array`, not `Buffer`: this interface is isomorphic and `packages/
+   * shared` carries no node types. The backing implementation returns a
+   * `Buffer`, which IS one.
+   */
+  fileBytesAtChange(
+    workspaceId: string,
+    path: string,
+    sha: string,
+    side: 'after' | 'before',
+  ): Promise<{ bytes: Uint8Array; blobId: string } | null>;
+  /**
+   * One file as it stood at a change request's fork point (`sha`, which must
+   * lie on the target branch's history) — the "before" side of the request
+   * dialog's diff. `null` when the path did not exist there. Access is the
+   * caller's to check.
+   */
+  fileAtForkPoint(
+    workspaceId: string,
+    baseBranch: string,
+    sha: string,
+    path: string,
+  ): Promise<string | null>;
+  /**
+   * A change request's current fork point: the merge base of the freshly
+   * fetched target and source branches, or `null` when they share no history.
+   */
+  changeRequestForkPoint(
+    workspaceId: string,
+    baseBranch: string,
+    headBranch: string,
+  ): Promise<string | null>;
+
+  // ── File locks (new — currently NotImplementedVersionControlError) ──────────────
+
+  // Every lock method below coordinates on ONE canonical identity per file:
+  // `x/a.md`, `./x/a.md` and `x//a.md` name the same lock, so a lock acquired
+  // under any of them is contended, heartbeated, checkpointed, released and
+  // read under any other. A path that escapes the workspace, or that only
+  // becomes relative by being laundered, is refused with the same status the
+  // file verbs answer for that input: 400 for an unusable path, 403 for one
+  // that resolves outside the workspace.
+
+  /**
+   * Try to acquire an edit lock on `(branch, path)` for the caller. Returns
+   * `{ acquired: true, lock }` on success; `{ acquired: false, lock }` if
+   * someone else already holds it (the existing lock is included so the UI
+   * can render "Locked by X" without a follow-up call).
+   *
+   * Pessimistic per the spec. Auto-released when the lock expires past TTL
+   * without a heartbeat — stale locks must not block forever.
+   *
+   * `opts.coordination` acquires the lock as a PURE MUTEX: the implementation
+   * skips its write-permission gate for the path, because the caller only
+   * wants to serialize against the path's writer (e.g. hold a machine-owned
+   * file steady across a read → check → decide flow) and will never write the
+   * path itself. A coordination hold grants NO write authority — the mode is
+   * persisted on the lock row, and every path that would treat "you hold the
+   * lock" as write possession (`commitFileWhileLocked`, `releaseLock`'s
+   * commit enqueue) refuses a coordination hold. Contention, TTL, and
+   * heartbeat behave identically. Release ONLY via `releaseLockNoCommit` (or
+   * `releaseLockUntouched`) — `releaseLock` rejects rather than ever enqueue
+   * a commit for a hold that was never allowed to write. Internal callers
+   * only; never plumbed from a route.
+   *
+   * Every non-coordination acquire also passes the READ-BEFORE-WRITE gate, on
+   * every branch: the caller must be able to read the path (for a new path,
+   * where it lands), or the path must start a new folder directly under one
+   * of the three roots (knowledge, skills, plugins). Nothing is created,
+   * changed or removed where its author cannot see it, whatever write rules
+   * say; a refusal is an `AccessDeniedError` whose `access.unreadable` names
+   * the place. A write that passed only as a platform-file restore is not
+   * asked — that rescue exists for a destination whose rules deny the admin
+   * making it.
+   *
+   * `opts.platformRestore` CLAIMS that this acquire is the destination side of
+   * an admin putting a misplaced platform file back (`access.md`, `roles.yaml`,
+   * `.bevelignore`, the agent guide), and names the move's `source` — the path the
+   * file is coming FROM, in the same spelling as `path`.
+   *
+   * It is a claim, not an authorisation. The implementation re-asks both
+   * halves of it: that source→path is a restore at all (a misplaced copy
+   * going back under its own name, never the root's own copy coming out —
+   * `isPlatformRestoreShape`), and that the access module
+   * (`canRestorePlatformFile`) lets this caller land this exact path. Only
+   * both yeses let the acquire past the write gate, so a caller that omits or
+   * fakes the source gains nothing: the gate never takes the route's word for
+   * which move this is.
+   */
+  acquireLock(
+    workspaceId: string,
+    branch: string,
+    path: string,
+    user: AuthUser,
+    opts?: { coordination?: boolean; platformRestore?: { source: string } },
+  ): Promise<AcquireLockResult>;
+  /** Heartbeat to keep an acquired lock alive past its current TTL. */
+  heartbeatLock(workspaceId: string, branch: string, path: string, user: AuthUser): Promise<FileLock>;
+  /**
+   * Commit the lock-held file's accumulated edits as a change *without*
+   * releasing the lock. Used by the client-side autosave checkpoint timer
+   * so the lock stays exclusively the caller's across many interim
+   * commits — releasing + reacquiring around every checkpoint would let
+   * another user grab the lock in the gap. Returns `null` when the file
+   * has no pending edits (idempotent). Refused when the lock isn't held
+   * by `user`.
+   */
+  commitFileWhileLocked(
+    workspaceId: string,
+    branch: string,
+    path: string,
+    user: AuthUser,
+    summary?: string,
+  ): Promise<Change | null>;
+
+  /**
+   * Release a held lock. The "I'm done editing this file" terminal signal.
+   *
+   * **Does not commit or push synchronously.** This method enqueues a row in
+   * `pending_commits` and drops the lock, then returns `void`. The background
+   * `PendingCommitsWorker` claims the row, synthesises the commit subject
+   * (callers do *not* supply one — the worker derives a default from the path
+   * and any worker-side metadata), runs `commitFile` against whatever bytes
+   * are on disk, and pushes the result. Decoupling the user-visible lock
+   * release from git means a transient push failure no longer wedges the
+   * editor, and a process crash mid-commit becomes resumable instead of
+   * leaving an orphan on disk. See `lock-decoupling-plan.md` for the full
+   * design.
+   *
+   * The autosave-checkpoint timer and explicit `commitChange` calls land
+   * commits directly (no queue); `releaseLock` is queue-only.
+   */
+  releaseLock(
+    workspaceId: string,
+    branch: string,
+    path: string,
+    user: AuthUser,
+  ): Promise<void>;
+  /**
+   * Drop the lock **without committing**. Used on the failure path of a
+   * lock-aware write — when the underlying op threw, we don't want the
+   * normal `releaseLock` to commit + push whatever partial state happens
+   * to be on disk. The lock row goes away (so the next caller can edit
+   * the file) and the path's working-tree changes are discarded back to
+   * HEAD on a BEST-EFFORT basis: the implementation logs and continues
+   * when the discard itself fails (releasing beats stranding the lock),
+   * so a caller must not treat a completed release as proof the tree is
+   * clean — worst case the path stays dirty until the next save on it.
+   * Idempotent like `releaseLock`: a no-op when the caller doesn't hold
+   * the lock.
+   */
+  releaseLockNoCommit(
+    workspaceId: string,
+    branch: string,
+    path: string,
+    user: AuthUser,
+  ): Promise<void>;
+  /**
+   * Drop the lock for a path the caller held but **never touched** — the
+   * third release shape, between `releaseLock` and `releaseLockNoCommit`.
+   * Neither enqueues a commit (on a shared workspace the path may carry a
+   * PRIOR save's dirty bytes whose queued commit an enqueue would re-attribute
+   * to this caller and whose retry ladder it would reset) nor discards (a
+   * discard back to HEAD would destroy those same still-queued bytes). Used
+   * by batch flows for paths that were merely locked — a creator seed that
+   * no-op'd, a path never reached before the batch failed. Idempotent like
+   * the other releases: a no-op when the caller doesn't hold the lock.
+   */
+  releaseLockUntouched(
+    workspaceId: string,
+    branch: string,
+    path: string,
+    user: AuthUser,
+  ): Promise<void>;
+  /**
+   * Whether the background commit queue holds a LIVE row (one the worker
+   * will still drive — pending or running, not a terminally-escalated one)
+   * for `(branch, path)`. Lets a caller that landed a commit but hit a push
+   * failure PROVE the retry vehicle exists instead of inferring it from
+   * lock state (a release that failed before its enqueue and a release that
+   * enqueued-then-dropped both leave the lock gone — only the queue itself
+   * can tell them apart).
+   */
+  hasQueuedCommit(workspaceId: string, branch: string, path: string): Promise<boolean>;
+  /**
+   * Whether the workspace's local branch is ahead of (or has no) upstream —
+   * i.e. holds commits not yet published. The complement of `hasQueuedCommit`
+   * for push-retry proofs: no live queued row AND nothing unpushed means the
+   * worker already drained the row and published it.
+   */
+  hasUnpushedCommits(workspaceId: string): Promise<boolean>;
+  /** Current lock holder for `(branch, path)`, or null when nobody holds it. */
+  getLock(workspaceId: string, branch: string, path: string): Promise<FileLock | null>;
+
+  // ── Change Requests ───────────────────────────────────────────────────────
+
+  listChangeRequests(opts?: { fresh?: boolean }): Promise<ChangeRequest[]>;
+  /**
+   * Change requests in ANY of `states`, newest first. `listChangeRequests`
+   * answers the open ones only — the app's lists are all about what is still
+   * being decided — so a reader catching up on what HAPPENED (the agent read
+   * tools' `state: closed` / `state: all`) needs this one.
+   */
+  listChangeRequestsByState(
+    states: ChangeRequestState[],
+    /** `workspaceId`: the clone to read file lists in; any clone will do, and a caller that resolved one passes it so the list and the by-number reads agree. */
+    opts?: { fresh?: boolean; workspaceId?: string },
+  ): Promise<ChangeRequest[]>;
+  /** Change requests authored by the given user (matched on stored author identity). */
+  listChangeRequestsAuthoredBy(
+    emailOrLogin: string,
+    opts?: { fresh?: boolean },
+  ): Promise<ChangeRequest[]>;
+  /** Change requests touching files the user has write permission on. */
+  listChangeRequestsForUser(
+    workspaceId: string,
+    email: string,
+    opts?: { fresh?: boolean },
+  ): Promise<ChangeRequest[]>;
+  getChangeRequest(number: number): Promise<ChangeRequest | null>;
+  /**
+   * The NEWEST change request from `sourceBranch` by `authorEmail` that is no
+   * longer open, or null when every one of theirs on that branch is still
+   * open (or there never was one).
+   *
+   * Why it is asked this narrowly: a request that has been declined, or that
+   * its author withdrew, leaves no other trace — `listChangeRequestsAuthoredBy`
+   * lists open requests only, and nothing records WHO closed a request. Asking
+   * for the last non-open one on a deterministic branch is enough to tell
+   * "your last request was not accepted" from "you never asked", without a new
+   * column. A MERGED request counts as non-open too: the caller distinguishes
+   * the two by whether the access it asked for has landed.
+   */
+  latestClosedChangeRequest(
+    authorEmail: string,
+    sourceBranch: string,
+  ): Promise<{ number: number; state: ChangeRequestState } | null>;
+  getChangeRequestDetail(
+    number: number,
+    /**
+     * `fresh` bypasses the detail cache. `patches` defaults to true: clients
+     * get the full detail, per-file patches included, and it is cached.
+     * `patches: false` is for internal reads that never look at
+     * `files[].patch` (approve / withdraw / revert pin their work on the
+     * detail): patch generation is skipped and the result stays out of the
+     * detail cache. Mirrors IPullRequestService.getPrDetail.
+     */
+    opts?: { fresh?: boolean; workspaceId?: string; viewerEmail?: string; patches?: boolean },
+  ): Promise<ChangeRequestDetail | null>;
+
+  /**
+   * Open a new change request. Per spec, auto-merges `targetBranch` into
+   * `sourceBranch` and surfaces the resulting diff as the changes to review.
+   * Throws `NotImplementedVersionControlError` until the backing create-PR path
+   * lands in the version-control module (today the agent shells `gh pr create`
+   * directly).
+   */
+  openChangeRequest(
+    workspaceId: string,
+    user: AuthUser,
+    input: OpenChangeRequestInput,
+  ): Promise<ChangeRequestDetail>;
+
+  /**
+   * Re-run `targetBranch → sourceBranch` merge on an existing change request
+   * and push it — the request dialog's Update, offered when the target has
+   * advanced since the request was opened. Only the request's author or
+   * someone who may apply it (`viewerCanUpdate`) may run it (403 otherwise).
+   * A conflicting merge is aborted, leaving the branch exactly as it was, and
+   * surfaces as `ChangeRequestConflictsError` (409).
+   *
+   * Answers the refreshed detail plus `updatedPaths`: which files the merge
+   * changed on the branch, so a caller showing the pre-update files can
+   * replace exactly those.
+   */
+  updateFromTarget(
+    workspaceId: string,
+    user: AuthUser,
+    number: number,
+  ): Promise<ChangeRequestUpdateResult>;
+
+  // Approvals — per-file, tied to the file's current change. New changes
+  // invalidate approvals on the affected file.
+  approveFile(
+    number: number,
+    path: string,
+    user: AuthUser,
+    files: ChangedFile[],
+    headSha: string,
+    baseBranch: string,
+    authorIdHash: string | null,
+    workspaceId: string,
+  ): Promise<FileApproval[]>;
+  unapproveFile(
+    number: number,
+    path: string,
+    user: AuthUser,
+    files: ChangedFile[],
+    headSha: string,
+    baseBranch: string,
+    authorIdHash: string | null,
+    workspaceId: string,
+  ): Promise<FileApproval[]>;
+
+  /**
+   * Decline ONE file of an open change request: restore its merge-base
+   * version on the source branch so it drops out of the request's diff.
+   * Same permission as approving the file. When the last file is declined
+   * the request closes itself and its source branch is retired
+   * (`closed: true` in the result).
+   */
+  revertChangeRequestFile(
+    number: number,
+    user: AuthUser,
+    repoRelPath: string,
+  ): Promise<{ closed: boolean; remainingPaths: string[] }>;
+
+  /**
+   * Close an OPEN change request whose diff has emptied (authoritatively
+   * re-verified; a failed diff never closes) and retire its source branch.
+   * Returns true when this call closed it.
+   */
+  closeEmptyChangeRequest(number: number, user: AuthUser): Promise<boolean>;
+
+  /**
+   * The open change requests proposing files under a KB-repo-relative
+   * folder, each with whether the caller may take those files out of it
+   * (their own request, they are an admin, or they may write every file it
+   * proposes under the folder).
+   */
+  changeRequestsUnderFolder(folder: string, user: AuthUser): Promise<FolderChangeRequest[]>;
+
+  /**
+   * Take every file under the folder out of every open change request
+   * proposing one; a request left empty is withdrawn. All or nothing: refused
+   * (403), with nothing touched, when the caller may not act on even one of
+   * them.
+   */
+  removeFolderFromChangeRequests(folder: string, user: AuthUser): Promise<FolderChangeRequestRemoval[]>;
+
+  /**
+   * Close every open change request either of whose branches no longer exists
+   * — source or target, since a proposal needs both ends. Such a request
+   * cannot be read, reviewed, applied or declined — it is a tombstone, and it
+   * makes every open-list poll throw `unknown branch`.
+   *
+   * Closes rather than deletes (the row is the only surviving evidence of the
+   * proposal), and fails safe: an unreachable origin closes nothing, because
+   * "cannot reach" and "was deleted" look identical from here. Returns how
+   * many it closed. No `user` — it is a system sweep, not somebody's verdict.
+   */
+  closeChangeRequestsWithDeletedBranches(): Promise<number>;
+
+  /**
+   * Delete a change request outright: close it and retire its source branch.
+   * Admin-only (write on `roles.yaml` at `origin/<base>`); refuses a merged
+   * request.
+   */
+  deleteChangeRequest(number: number, user: AuthUser): Promise<void>;
+
+  /**
+   * Change an OPEN request's title and/or description. Its author, an admin,
+   * or the holder of write on every changed file — the people who may close
+   * it; anyone else gets a worded 403, and a merged or closed request a
+   * worded 409.
+   */
+  updateChangeRequest(
+    number: number,
+    user: AuthUser,
+    input: UpdateChangeRequestFields,
+  ): Promise<ChangeRequest>;
+
+  /**
+   * Reject a change request without merging. Authorized for the author or
+   * for users with write permission to every changed file on the target
+   * branch.
+   */
+  rejectChangeRequest(
+    number: number,
+    user: AuthUser,
+    state: ChangeRequestState,
+    authorIdHash: string | null,
+    baseBranch: string,
+    workspaceId: string,
+  ): Promise<CancelChangeRequestResult>;
+
+  /**
+   * Merge a change request. The version-control service tries a direct merge first; on
+   * conflicts it returns a `conflicts-need-resolution` outcome and the
+   * caller (typically the agent) is responsible for resolving them as new
+   * changes on the source branch. Once the source contains target cleanly,
+   * a subsequent `mergeChangeRequest` call lands the merge.
+   *
+   * The hard merge invariant — only this method may invoke `gh pr merge` —
+   * is preserved through the facade by delegating to
+   * `IChangeRequestReviewService.mergePr`.
+   */
+  mergeChangeRequest(
+    number: number,
+    user: AuthUser,
+    headSha: string,
+    approvals: FileApproval[],
+    state: ChangeRequestState,
+    title: string,
+    baseBranch: string,
+    workspaceId: string,
+    opts?: { bypass?: boolean },
+  ): Promise<MergeChangeRequestOutcome>;
+
+  /** Start an apply attempt on a request; the token scopes `recordApplyFailure`. */
+  beginApplyAttempt(number: number): number;
+
+  /** End an attempt `beginApplyAttempt` started, whatever its outcome. */
+  endApplyAttempt(number: number, attempt: number): void;
+
+  /**
+   * Persist why an apply did not land on the (still open) request, and
+   * announce `change-request-apply-failed` to every session so the author and
+   * other viewers re-read it — not only the user who clicked. Resolves false,
+   * recording and announcing nothing, when `attempt` is no longer the latest
+   * or the request is no longer open.
+   */
+  recordApplyFailure(
+    number: number,
+    failure: { reason: string; kind: ChangeRequestApplyFailureKind; at?: Date },
+    user: AuthUser,
+    attempt: number,
+  ): Promise<boolean>;
+
+  /**
+   * Merge `sourceBranch` into `targetBranch` directly, authored as `user`,
+   * and publish the target. The agent path for merging branches — it never
+   * lands a change request:
+   *
+   *   - refused (`OpenChangeRequestBlocksMergeError`, naming the request) when
+   *     a change request from `sourceBranch` into `targetBranch` is open; a
+   *     person merges that one in the app. The reverse direction — the target
+   *     into the source, the sync that keeps a draft current — is allowed.
+   *   - refused (`VersionControlDomainError`, `kind: 'protected-merge-target'`,
+   *     status 403, listing the denied paths) when `targetBranch` is protected
+   *     and `user` could not commit every file the merge changes directly to
+   *     it. Decided against the target commit the merge is built on, not a
+   *     workspace `HEAD` that may be behind it.
+   *   - refused (`VersionControlDomainError`, `kind: 'protected-merge-changes-roles'`,
+   *     status 403) when `targetBranch` is protected and the merge would
+   *     change its `roles.yaml` — whoever the caller is. Roles never change
+   *     through a merge; a change request's merge restores the target's copy
+   *     first, and this path refuses instead. Roles are changed in the app.
+   *   - refused (`VersionControlDomainError`, `kind: 'merge-target-busy'`, status
+   *     409) when `targetBranch`'s workspace still holds unshared edits: the
+   *     merge resets it to the published tip, which would discard them.
+   *
+   * Conflicts write nothing and come back as `conflicts-need-resolution`.
+   *
+   * Writes are committed asynchronously, so before merging this waits — up to
+   * 20 seconds, holding no lock — for `sourceBranch` to have no queued commit.
+   * Still queued after that, or a queued commit escalated to a person, comes
+   * back as `pending-commits` with nothing merged. A target that already held
+   * everything on the source comes back as `nothing-to-merge` with its tip;
+   * `merged` means a merge commit was made.
+   */
+  mergeBranch(user: AuthUser, sourceBranch: string, targetBranch: string): Promise<MergeBranchOutcome>;
+
+  /**
+   * Bring another branch's published state into the branch this workspace is
+   * on — `from` (a target the draft was forked from, say), or, left out, the
+   * branch's own published state when it diverged from the local one — as a
+   * merge commit authored by `user`, and publish it. The agent's way of
+   * refreshing a draft and of resolving conflicts: a conflict comes back
+   * described (`conflicts`: both sides, the base, the working copy with
+   * markers), the working tree untouched; a second call with a resolution
+   * per conflicted path lands the merge. See `IGitService.mergeIntoBranch`.
+   *
+   *   - refused (`VersionControlDomainError`, `kind: 'protected-update-target'`,
+   *     403) for a protected branch: those are updated through change requests.
+   *   - refused (`VersionControlValidationError`) when `from` is not on the shared
+   *     repository, or when a resolution names a path that is not conflicted.
+   *   - refused (`VersionControlDomainError`, `kind: 'branch-busy'`, 409) while the
+   *     workspace holds edits not committed yet: a merge over them could lose
+   *     them.
+   *   - `pending-commits` when writes on either branch are still being
+   *     committed (waited for, up to 20 seconds); nothing merged.
+   *   - `merged` means the merge commit is PUBLISHED: the push runs inside the
+   *     merge's own reservation, through the cooperative recovery every
+   *     version-control push takes — a push the host rejects because the branch
+   *     moved is retried with the merge replayed on top. A replay that
+   *     conflicts, or a host that refuses, throws the saved-locally hand-off
+   *     (`PushNeedsAgentResolutionError`, its `path` the branch: no single
+   *     file is at issue, and no conflicted path is named), the merge commit
+   *     kept on the branch, unpublished, the checkout clean.
+   *
+   * Per-file read access to what a `conflicts` answer carries is the
+   * CALLER's to check and withhold, as for `fileAtBranch`. Resolutions come
+   * with `validateWrite`, the caller's pre-disk write gate (what its file
+   * writes take before a byte lands — a `roles.yaml` that must parse, say):
+   * required with them, refused without; asked with the workspace path and
+   * the content of every resolution that brings content, inside the merge's
+   * reservation before the merge runs; its throw refuses the update. A side
+   * kept whole brings no new content and is not asked.
+   */
+  updateBranch(
+    workspaceId: string,
+    user: AuthUser,
+    opts?: { from?: string } & (
+      | { resolutions?: undefined; validateWrite?: undefined }
+      | { resolutions: MergeResolution[]; validateWrite: (wsPath: string, content: string) => void | Promise<void> }
+    ),
+  ): Promise<UpdateBranchOutcome>;
+  /**
+   * One file as `branch` has it, with the commit it was read at (`IGitService.readFileAtBranch`).
+   * Access to the file at that commit is the caller's to check — through
+   * `authorize`, asked before anything is said about the path there with
+   * every commit the branch resolves to (local head and published tip, the
+   * served one first), all of which must grant. Required: content from
+   * another branch is never served without it.
+   */
+  fileAtBranch(
+    workspaceId: string,
+    path: string,
+    branch: string,
+    authorize: (commits: string[]) => Promise<void>,
+  ): Promise<{ sha: string; ref: string; content: string | null }>;
+  /**
+   * The repository-relative paths `branch` changes against `base` — a
+   * three-dot diff of their published tips, rename-aware — the list a change
+   * request from `branch` into `base` would carry. Unfiltered: a path's name
+   * is information too, and which of them the caller may read is the
+   * CALLER's to decide (at `origin/<base>`, as the change-request reads do)
+   * before any of them is shown.
+   */
+  changedPathsBetweenBranches(workspaceId: string, base: string, branch: string): Promise<string[]>;
+}

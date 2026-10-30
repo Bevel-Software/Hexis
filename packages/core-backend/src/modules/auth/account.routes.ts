@@ -12,7 +12,7 @@ import { erasedAccountId, type IAccountErasureService } from './account-erasure.
 import type { IAdminAccessService } from '../admin/index.js';
 import type { UserAccessRemovalService } from '../access/index.js';
 import { sendError } from '../access/index.js';
-import { WorkflowDomainError } from '../../shared/domain-errors.js';
+import { VersionControlDomainError } from '../../shared/domain-errors.js';
 import { canonicalEmail } from '../../shared/email-identity.js';
 import './auth.middleware.js'; // Express Request augmentation
 
@@ -191,7 +191,7 @@ export function createAccountRoutes(
       // invite's promotion committing roles.yaml, say): the 409 the lock
       // promises, with its words, so the admin tries again rather than
       // reading an outage.
-      if (error instanceof WorkflowDomainError) {
+      if (error instanceof VersionControlDomainError) {
         res.status(error.status).json({ error: error.message, ...(error.payload ?? {}) });
         return;
       }
@@ -343,7 +343,7 @@ export function createAccountRoutes(
         log.warn(`could not list the files still naming erased account ${accountId}: ${errorText(scanErr)}`);
       }
       const message =
-        err instanceof WorkflowDomainError && err.status < 500
+        err instanceof VersionControlDomainError && err.status < 500
           ? err.message
           : 'The change to roles, groups and access rules could not be committed.';
       res.json({ erased: true, accessRemoval: { ok: false, error: message, removedFrom: [], stillNamedIn } });

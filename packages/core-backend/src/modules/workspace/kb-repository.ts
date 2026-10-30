@@ -76,7 +76,7 @@ const READY_MARKER = 'hexis-repository-ready';
 /** Where a converted clone's stash and other local refs are kept, per workspace (see `importLocalRefs`). */
 export const CONVERTED_REFS = 'refs/kb-converted';
 
-/** Fallback committer identity; every workflow commit overrides it with `--author`. */
+/** Fallback committer identity; every version-control commit overrides it with `--author`. */
 const BOT_NAME = 'Bevel Workflow';
 const BOT_EMAIL = 'bevel-workflow@bevel.software';
 

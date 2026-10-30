@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import type { SQL } from 'drizzle-orm';
-import { WorkflowDomainError } from '../../../shared/domain-errors.js';
+import { VersionControlDomainError } from '../../../shared/domain-errors.js';
 import { ACCOUNT_BUSY_MESSAGE, ACCOUNT_SWITCH_LOCK_WAIT_MS, takeAccountSwitchLock } from '../account-switch-lock.js';
 
 /** A transaction handle that records what it ran, and fails the lock statement when told to. */
@@ -32,7 +32,7 @@ describe('takeAccountSwitchLock', () => {
   it('answers a wait that ran out as a 409 account-busy, in the words the admin is told', async () => {
     const { tx } = fakeTx({ code: '55P03', message: 'canceling statement due to lock timeout' });
     const refusal = takeAccountSwitchLock(tx, 'alice@example.com');
-    await expect(refusal).rejects.toBeInstanceOf(WorkflowDomainError);
+    await expect(refusal).rejects.toBeInstanceOf(VersionControlDomainError);
     await expect(refusal).rejects.toMatchObject({ status: 409, message: ACCOUNT_BUSY_MESSAGE, payload: { kind: 'account-busy' } });
   });
 

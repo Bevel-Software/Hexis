@@ -20,11 +20,11 @@ import {
   timingSafeStringEqual,
   MIN_PASSWORD_LENGTH,
 } from './password-hash.js';
-import { RECOVERY_BOT_EMAIL } from '../workflow/index.js';
+import { RECOVERY_BOT_EMAIL } from '../version-control/index.js';
 import { DIRECTORY_SYNC_BOT_EMAIL } from '../access/index.js';
 import { takeAccountSwitchLock } from './account-switch-lock.js';
 import type { IAccountSwitchGuard } from './account-switch-guard.js';
-import { WorkflowDomainError } from '../../shared/domain-errors.js';
+import { VersionControlDomainError } from '../../shared/domain-errors.js';
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -895,7 +895,7 @@ export class AuthService implements IAccountSwitchGuard {
         .from(users)
         .where(eq(users.emailBidx, canonicalEmail(email)));
       if (account?.deactivatedAt) {
-        throw new WorkflowDomainError('This account is switched off', 409, { kind: 'deactivated' });
+        throw new VersionControlDomainError('This account is switched off', 409, { kind: 'deactivated' });
       }
       await write();
     });
@@ -965,7 +965,7 @@ export class AuthService implements IAccountSwitchGuard {
 
   /**
    * The live accounts behind a set of addresses — the approvers of a change
-   * request just opened, which the workflow module hands to the deployment's
+   * request just opened, which the version-control module hands to the deployment's
    * notification listeners as people with accounts (`ApproverAccounts`).
    *
    * One indexed read through the email's blind index, never a scan of every

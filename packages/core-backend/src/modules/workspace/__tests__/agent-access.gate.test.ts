@@ -7,7 +7,7 @@ import {
   ToolDescriptionNotes,
   type AgentAccessGate,
 } from '../agent-access.gate.js';
-import { WorkflowHooks, type AgentOperationContext } from '../../workflow/workflow-hooks.js';
+import { VersionControlHooks, type AgentOperationContext } from '../../version-control/version-control-hooks.js';
 import { ToolError, type ToolContext } from '../../tool-helpers/tool.contract.js';
 
 const RECOVERY_EMAIL = 'recovery-bot@bevel.local';
@@ -21,7 +21,7 @@ function ctx(over: Partial<ToolContext> = {}): ToolContext {
     sessionId: 's1',
     abortSignal: new AbortController().signal,
     workspaceService: {} as never,
-    workflowService: {} as never,
+    versionControlService: {} as never,
     events: {} as never,
     getFilesystem: async () => ({}) as never,
     ...over,
@@ -30,7 +30,7 @@ function ctx(over: Partial<ToolContext> = {}): ToolContext {
 
 /** A gate with a fresh hook registry, plus the two lists of what the hooks saw. */
 function makeGate(): { gate: AgentAccessGate; reads: AgentOperationContext[]; writes: AgentOperationContext[] } {
-  const hooks = new WorkflowHooks();
+  const hooks = new VersionControlHooks();
   const reads: AgentOperationContext[] = [];
   const writes: AgentOperationContext[] = [];
   hooks.onAgentRead(async (op) => {
@@ -84,7 +84,7 @@ describe('notifyAgentRead', () => {
   });
 
   it('refuses the read with the hook\'s own message and status', async () => {
-    const hooks = new WorkflowHooks();
+    const hooks = new VersionControlHooks();
     hooks.onAgentRead(async () => {
       throw new ToolError('Not in this conversation.', 403);
     });
@@ -98,7 +98,7 @@ describe('notifyAgentRead', () => {
   it('is a no-op with no hook registered', async () => {
     const gate: AgentAccessGate = {
       recoveryBotEmail: RECOVERY_EMAIL,
-      hooks: new WorkflowHooks(),
+      hooks: new VersionControlHooks(),
       notes: new ToolDescriptionNotes(),
     };
     await expect(notifyAgentRead(gate, ctx({ sessionId: undefined }), 'main', P_FILE)).resolves.toBeUndefined();
@@ -123,7 +123,7 @@ describe('assertAgentWriteAllowed', () => {
   });
 
   it('refuses the write with the hook\'s own message and status', async () => {
-    const hooks = new WorkflowHooks();
+    const hooks = new VersionControlHooks();
     hooks.onPreWrite(async () => {
       throw new ToolError('Not in this conversation.', 403);
     });
@@ -135,7 +135,7 @@ describe('assertAgentWriteAllowed', () => {
   });
 
   it('runs every registered write hook, in registration order, until one throws', async () => {
-    const hooks = new WorkflowHooks();
+    const hooks = new VersionControlHooks();
     const seen: string[] = [];
     hooks.onPreWrite(async () => {
       seen.push('first');
@@ -162,7 +162,7 @@ describe('assertAgentWriteAllowed', () => {
   it('is a no-op with no hook registered, with or without a session id', async () => {
     const gate: AgentAccessGate = {
       recoveryBotEmail: RECOVERY_EMAIL,
-      hooks: new WorkflowHooks(),
+      hooks: new VersionControlHooks(),
       notes: new ToolDescriptionNotes(),
     };
     await expect(assertAgentWriteAllowed(gate, ctx(), 'main', P_FILE)).resolves.toBeUndefined();

@@ -1,7 +1,7 @@
 import express from 'express';
 import type { AuthUser } from '@bevel-software/platform-shared';
 import { logger } from '../../shared/logging.js';
-import { WorkflowDomainError } from '../../shared/domain-errors.js';
+import { VersionControlDomainError } from '../../shared/domain-errors.js';
 import type { IStarterPackService } from './onboarding.contract.js';
 import '../auth/index.js'; // Express Request augmentation (req.userId)
 
@@ -66,7 +66,7 @@ export function createOnboardingRoutes(
     try {
       res.json(await starterPacks.choose(user, id.trim()));
     } catch (err) {
-      if (err instanceof WorkflowDomainError) {
+      if (err instanceof VersionControlDomainError) {
         res.status(err.status).json({ error: err.message });
         return;
       }

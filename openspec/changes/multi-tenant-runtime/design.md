@@ -8,7 +8,7 @@ What stood in the way was process-global state. The inventory (2026-09-24):
 |---|---|---|
 | `DEFAULT_BRANCH`, `PROTECTED_BRANCHES`, `PROTECTED_BRANCH_DISPLAY_NAMES` live bindings | `packages/shared/src/git/protected.ts`, read by 54 server files | `BranchModelValue` by constructor (phase 1) |
 | `KNOWLEDGE_BASE_DIR`, `SKILLS_DIR`, `PLUGINS_DIR`, `AGENTS_FILE`, `currentKbLayout()`, `onKbLayoutApplied` | `packages/shared/src/workspace/kb-layout.ts`, `platform-files.ts` | `KbLayout` by constructor; helpers take a required `layout` (phase 1) |
-| `process.env.GITHUB_TOKEN` written at boot and by the setup screen, read in six places | `core-config.ts`, `deployment-settings.service.ts`, `git.contract.ts`, `redact-secret.ts`, `clone-config.ts`, `workspace.service.ts`, `workflow.service.ts`, `review-workflow.service.ts` | `GitCredentials` provider injected into `NodeGitRunner` (phase 2) |
+| `process.env.GITHUB_TOKEN` written at boot and by the setup screen, read in six places | `core-config.ts`, `deployment-settings.service.ts`, `git.contract.ts`, `redact-secret.ts`, `clone-config.ts`, `workspace.service.ts`, `version-control.service.ts`, `change-request-review.service.ts` | `GitCredentials` provider injected into `NodeGitRunner` (phase 2) |
 | `getDb` singleton | `modules/database/connection.ts` | `createDb(url, { schema })`, cache keyed by url and schema (phase 3) |
 | Advisory lock ids `(HEXI, 1 or 3)` are database-wide | `modules/database/advisory-lock.ts` | second int `lock ^ crc32(tenantKey)`; empty key keeps today's ids (phase 3) |
 | `sharedSecretsVault` static for the UTCP `bevel_secrets` loader | `secrets-vault/secrets-variable-loader.ts` | map keyed by tenant (phase 3) |

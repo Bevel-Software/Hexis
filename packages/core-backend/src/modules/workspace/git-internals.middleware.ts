@@ -12,7 +12,7 @@ const GIT_GUARDED_QUERY_KEYS = ['path', 'toDir'] as const;
 const GIT_GUARDED_BODY_KEYS = ['path', 'oldPath', 'newPath', 'destination', 'paths', 'ancestor'] as const;
 /**
  * `from` names a PATH on the prospective-access route (`?from=<file>&toDir=…`)
- * and a BRANCH on the workflow comparison (`?from=<branch>`), so it is judged
+ * and a BRANCH on the version-control comparison (`?from=<branch>`), so it is judged
  * only where it is a path — a branch called after the git folder is refused
  * by the branch-name rule, not by this one.
  */
@@ -49,7 +49,7 @@ export function gitGuardedInputs(req: express.Request): string[] {
  * request must not make the server do.
  *
  * Mounted at the app, ahead of every router under that prefix — the file
- * routes, the review routes, the workflow and access ones, and whatever an
+ * routes, the review routes, the version-control and access ones, and whatever an
  * extension mounts — so a router added later is covered by the fact of its
  * prefix rather than by remembering this. The services underneath refuse
  * again on their own; this is what keeps the refusal ahead of the gates.

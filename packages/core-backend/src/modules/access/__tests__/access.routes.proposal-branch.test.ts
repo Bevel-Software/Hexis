@@ -10,8 +10,8 @@ import { NodeFs } from '../../kb-fs/node-fs.js';
 
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { AuthService } from '../../auth/auth.service.js';
-import type { WorkflowService } from '../../workflow/workflow.service.js';
-import type { WorkflowEventBus } from '../../workflow/event-bus.js';
+import type { VersionControlService } from '../../version-control/version-control.service.js';
+import type { VersionControlEventBus } from '../../version-control/event-bus.js';
 import { usersDbDouble } from './users-db-double.js';
 import { AccessControlService } from '../access-control.service.js';
 import { createAccessRoutes } from '../access.routes.js';
@@ -115,12 +115,12 @@ describe('access routes on a proposal branch (real git)', () => {
       git(repo, 'add', '-A');
       git(repo, 'commit', '-q', '-m', `access: ${wsPath} on ${branch}`);
     });
-    const workflowService = {
+    const versionControlService = {
       getLock: async () => null,
       acquireLock: async () => ({ acquired: true, lock: {} }),
       releaseLock,
       releaseLockNoCommit: async () => undefined,
-    } as unknown as WorkflowService;
+    } as unknown as VersionControlService;
 
     const app = express();
     app.use(express.json());
@@ -135,8 +135,8 @@ describe('access routes on a proposal branch (real git)', () => {
         workspaceService,
         authService,
         authService,
-        workflowService,
-        { emit: () => {} } as unknown as WorkflowEventBus,
+        versionControlService,
+        { emit: () => {} } as unknown as VersionControlEventBus,
         usersDbDouble(),
         testKbContext({ kbDirName: KB }),
         new NodeFs(),

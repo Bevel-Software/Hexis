@@ -9,7 +9,7 @@ import express from 'express';
 import type { AuthUser } from '@bevel-software/platform-shared';
 
 import { MarketplaceRepoService, type MarketplaceCompiler } from '../marketplace-repo.service.js';
-import { NodeGitRunner } from '../../workflow/git/node-git-runner.js';
+import { NodeGitRunner } from '../../version-control/git/node-git-runner.js';
 import {
   GitHubFacadeCredentialsService,
   GitHubFacade,

@@ -4,7 +4,7 @@ import type { AdvisoryLease } from '../modules/database/advisory-lock.js';
 import { bootMaySurvive, type KbStartupRunner } from '../modules/workspace/startup/kb-startup-runner.js';
 import { noteBesideCheckout } from '../modules/workspace/startup/beside-checkout.js';
 import { unregisterBevelSecretsVariableLoader } from '../modules/secrets-vault/secrets-variable-loader.js';
-import type { WorkflowService } from '../modules/workflow/workflow.service.js';
+import type { VersionControlService } from '../modules/version-control/version-control.service.js';
 import type { PluginJoinRequestJobs } from '../modules/plugins/join-request-jobs.service.js';
 import type { TmpSweeper } from '../modules/workspace/workspace-tmp.js';
 import { printable } from '../shared/printable.js';
@@ -292,7 +292,7 @@ export interface BootableCore {
   config: { workspacesRoot: string };
   kbDirName: string;
   kbStartupRunner: Pick<KbStartupRunner, 'runAll' | 'retryUntilMaintained'>;
-  workflowService: Pick<WorkflowService, 'closeChangeRequestsWithDeletedBranches' | 'tidyAfterSweep'>;
+  versionControlService: Pick<VersionControlService, 'closeChangeRequestsWithDeletedBranches' | 'tidyAfterSweep'>;
   pluginJoinRequestJobs: Pick<PluginJoinRequestJobs, 'startSweeping'>;
   /** The periodic sweep of every workspace's `tmp/` folder, started here and stopped by {@link stopCore}. */
   tmpSweeper: Pick<TmpSweeper, 'startSweeping'>;
@@ -393,7 +393,7 @@ export async function startCore<C extends BootableCore>(
   // have been unusable since the branch went away, so landing a few seconds
   // into uptime is soon enough. Errors are swallowed inside the sweep, which
   // fails safe by closing nothing.
-  void core.workflowService
+  void core.versionControlService
     .closeChangeRequestsWithDeletedBranches()
     .then((n) => {
       if (n > 0) {
@@ -404,7 +404,7 @@ export async function startCore<C extends BootableCore>(
     // Then the tidy-up: open requests that propose nothing are closed, and the
     // branches merged requests left behind removed (behind its own setting).
     // Fails safe on a failed fetch, and never throws.
-    .then(() => core.workflowService.tidyAfterSweep());
+    .then(() => core.versionControlService.tidyAfterSweep());
 
   // Recorded join requests that are still owed, resumed — now, and then on a
   // timer. SEQUENCED AFTER the startup phase for the same reason as the sweep
@@ -481,12 +481,12 @@ export interface CoreStopDeps {
    */
   documentExtractor?: { close(): Promise<void> };
   /**
-   * The workflow service, for the tidy-up it runs after each sweep (closing
+   * The version-control service, for the tidy-up it runs after each sweep (closing
    * empty requests, removing leftover branches): detached from whatever
    * started it, so stopped and awaited here before the pool goes. Optional:
    * a caller that has not built one passes nothing.
    */
-  workflowService?: { stopTidying(): void; drainTidy(): Promise<void> };
+  versionControlService?: { stopTidying(): void; drainTidy(): Promise<void> };
   /** The startup phase's retry, if the boot left one asking — see {@link BootableCore.startupRetry}. */
   startupRetry?: { stop(): void } | null;
   /** The database — its pool is ended last, once nothing above can still need it. */
@@ -582,7 +582,7 @@ async function releaseCore(deps: CoreStopDeps, remaining: () => number, log: (m:
   deps.startupRetry?.stop();
   // The post-sweep tidy-up: no new round, and the one under way stops at its
   // next request or branch. Synchronous.
-  deps.workflowService?.stopTidying();
+  deps.versionControlService?.stopTidying();
   // Clearing the interval stops future ticks; it does nothing to a job a
   // tick already started, which holds a claim it heartbeats through the
   // pool and is mid-clone or mid-push. Awaited here, in the budget: a job
@@ -614,8 +614,8 @@ async function releaseCore(deps: CoreStopDeps, remaining: () => number, log: (m:
   // The tidy-up in flight fetches and deletes branches through the pool and
   // the default branch's checkout: awaited, so the next graph for this
   // tenant cannot find a branch deletion still running under it.
-  if (deps.workflowService) {
-    await bounded(deps.workflowService.drainTidy(), remaining(), 'finishing the branch tidy-up', log);
+  if (deps.versionControlService) {
+    await bounded(deps.versionControlService.drainTidy(), remaining(), 'finishing the branch tidy-up', log);
   }
   // Its ripgrep runs end with the graph; a search still running is answered busy or stopped.
   if (deps.patternMatcher) {

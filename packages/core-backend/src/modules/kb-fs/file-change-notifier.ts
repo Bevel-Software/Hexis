@@ -1,7 +1,7 @@
 /**
  * One in-process notification fired AFTER a set of file changes is committed +
  * pushed (post-lock-release), so backend services can react to KB writes without
- * the per-file TTL wait. Distinct from the SSE `WorkflowEventBus`, which fans
+ * the per-file TTL wait. Distinct from the SSE `VersionControlEventBus`, which fans
  * scoped events to browser sessions; this is an unscoped, server-side domain hook.
  *
  * BATCHED by design: a single-file save emits `paths: [p]`, a batch write
@@ -10,7 +10,7 @@
  * id-repair rebuilds the id index) handle a whole batch off one rebuild instead
  * of N back-to-back ones.
  *
- * Emitted from the two post-commit chokepoints (`WorkflowService.runPendingCommit`
+ * Emitted from the two post-commit chokepoints (`VersionControlService.runPendingCommit`
  * for single-file writes, `LockingFilesystem.writeFiles` for batches).
  *
  * Every listener is invoked inside try/catch — a throwing subscriber must never

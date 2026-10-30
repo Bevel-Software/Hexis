@@ -18,9 +18,9 @@ import { GitContext } from '../modules/git/state/git.context';
 import { AutoUpdateContext } from '../modules/git/state/auto-update.context';
 import { useGitState } from '../modules/git/hooks/useGitState';
 import { useAutoPullUpdates } from '../modules/git/hooks/useAutoPullUpdates';
-import { EventBusProvider } from '../modules/workflow';
-import { EventBusFocusBinder } from '../modules/workflow/state/EventBusFocusBinder';
-import { ChangeRequestStaleBinder } from '../modules/workflow/state/ChangeRequestStaleBinder';
+import { EventBusProvider } from '../modules/version-control';
+import { EventBusFocusBinder } from '../modules/version-control/state/EventBusFocusBinder';
+import { ChangeRequestStaleBinder } from '../modules/version-control/state/ChangeRequestStaleBinder';
 import { Toolbar } from '../modules/toolbar/components/Toolbar';
 import { DemoBanner } from '../modules/layout/components/DemoBanner';
 import { ReadOnlyBanner } from '../modules/layout/components/ReadOnlyBanner';
@@ -84,7 +84,7 @@ import { ConfirmProvider } from '../shared/components';
 
 /**
  * The registry-driven application shell for the core modules (workspace, git,
- * pr, access, auth, workflow/SSE, layout, secrets-vault, tools, toolbar,
+ * pr, access, auth, version control/SSE, layout, secrets-vault, tools, toolbar,
  * library, and the admin roles page). Everything else — chat, connectors,
  * routines, watchlist, voice, embed, onboarding, admin LLM/feedback pages —
  * is contributed through the {@link AppRegistry} passed in (see

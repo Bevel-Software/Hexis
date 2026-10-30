@@ -3,12 +3,12 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 
-import type { AuthUser, IWorkflowService } from '@bevel-software/platform-shared';
+import type { AuthUser, IVersionControlService } from '@bevel-software/platform-shared';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { AccessControlService } from '../access-control.service.js';
-import type { WorkflowEventBus } from '../../workflow/event-bus.js';
+import type { VersionControlEventBus } from '../../version-control/event-bus.js';
 import { createSyncedGroupsCommitter } from '../synced-groups-committer.js';
-import { PushNeedsAgentResolutionError, WorkflowValidationError } from '../../../shared/domain-errors.js';
+import { PushNeedsAgentResolutionError, VersionControlValidationError } from '../../../shared/domain-errors.js';
 
 const KB = 'knowledge-base';
 const BOT: AuthUser = { id: 'bot-1', email: 'directory-sync@bevel.local', name: 'Directory Sync Bot' };
@@ -26,7 +26,7 @@ describe('createSyncedGroupsCommitter.persist — post-commit push failures', ()
   });
 
   function makeDeps(
-    workflowOverrides: Partial<
+    versionControlOverrides: Partial<
       Record<'commitChanges' | 'releaseLock' | 'hasQueuedCommit' | 'hasUnpushedCommits', unknown>
     > = {},
   ) {
@@ -44,7 +44,7 @@ describe('createSyncedGroupsCommitter.persist — post-commit push failures', ()
     // Default: the branch still carries the landed-but-unpushed commit — the
     // truthful answer everywhere except the worker-won-the-race scenario.
     const hasUnpushedCommits = vi.fn(async () => true);
-    const workflowService = {
+    const versionControlService = {
       acquireLock: vi.fn(async () => ({ acquired: true, lock: {} })),
       releaseLock,
       releaseLockNoCommit,
@@ -52,13 +52,13 @@ describe('createSyncedGroupsCommitter.persist — post-commit push failures', ()
       hasQueuedCommit,
       hasUnpushedCommits,
       commitChanges: vi.fn(async () => ({})),
-      ...workflowOverrides,
-    } as unknown as IWorkflowService;
+      ...versionControlOverrides,
+    } as unknown as IVersionControlService;
     const accessControl = { invalidate: vi.fn() } as unknown as AccessControlService;
-    const eventBus = { emit: vi.fn() } as unknown as WorkflowEventBus;
+    const eventBus = { emit: vi.fn() } as unknown as VersionControlEventBus;
     const committer = createSyncedGroupsCommitter({
       workspaceService,
-      workflowService,
+      versionControlService,
       accessControl,
       eventBus,
       kbDirName: KB,
@@ -99,7 +99,7 @@ describe('createSyncedGroupsCommitter.persist — post-commit push failures', ()
       .mockResolvedValueOnce(undefined)
       // The committer's arm probe: nothing left to release.
       .mockRejectedValue(
-        new WorkflowValidationError('Cannot release lock: not held by you.', {
+        new VersionControlValidationError('Cannot release lock: not held by you.', {
           kind: 'lock-not-held',
         }),
       );
@@ -125,7 +125,7 @@ describe('createSyncedGroupsCommitter.persist — post-commit push failures', ()
     // unpublished forever. With the queue consulted directly, an empty queue
     // must surface the original push failure.
     const releaseLock = vi.fn().mockRejectedValue(
-      new WorkflowValidationError('Cannot release lock: not held by you.', {
+      new VersionControlValidationError('Cannot release lock: not held by you.', {
         kind: 'lock-not-held',
       }),
     );
@@ -154,7 +154,7 @@ describe('createSyncedGroupsCommitter.persist — post-commit push failures', ()
       .fn()
       .mockResolvedValueOnce(undefined) // writeFiles' release: enqueued + dropped
       .mockRejectedValue(
-        new WorkflowValidationError('Cannot release lock: not held by you.', {
+        new VersionControlValidationError('Cannot release lock: not held by you.', {
           kind: 'lock-not-held',
         }),
       );
@@ -171,7 +171,7 @@ describe('createSyncedGroupsCommitter.persist — post-commit push failures', ()
 
   it('REJECTS when the queue itself cannot be read (armed must be PROVEN, never assumed)', async () => {
     const releaseLock = vi.fn().mockRejectedValue(
-      new WorkflowValidationError('Cannot release lock: not held by you.', {
+      new VersionControlValidationError('Cannot release lock: not held by you.', {
         kind: 'lock-not-held',
       }),
     );

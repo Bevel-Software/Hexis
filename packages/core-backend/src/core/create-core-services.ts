@@ -128,26 +128,26 @@ import {
   registerBevelSecretsVariableLoader,
 } from '../modules/secrets-vault/index.js';
 import { ConnectionProbeService } from '../modules/connection-probe/index.js';
-import { GitService } from '../modules/workflow/git/git.service.js';
-import { NodeGitRunner } from '../modules/workflow/git/node-git-runner.js';
-import { PullRequestService } from '../modules/workflow/git/pull-request.service.js';
+import { GitService } from '../modules/version-control/git/git.service.js';
+import { NodeGitRunner } from '../modules/version-control/git/node-git-runner.js';
+import { PullRequestService } from '../modules/version-control/git/pull-request.service.js';
 import { WorkspaceIdMutex, WorkspaceMutex } from '../modules/kb-fs/mutex.js';
-import { assertGitVersion } from '../modules/workflow/git/git-version.js';
+import { assertGitVersion } from '../modules/version-control/git/git-version.js';
 import { DiffService } from '../modules/diff/diff.service.js';
-import { ReviewWorkflowService } from '../modules/workflow/review-workflow/review-workflow.service.js';
-import { FileLockService } from '../modules/workflow/file-lock.service.js';
-import { WorkflowEventBus } from '../modules/workflow/index.js';
+import { ChangeRequestReviewService } from '../modules/version-control/change-request-review/change-request-review.service.js';
+import { FileLockService } from '../modules/version-control/file-lock.service.js';
+import { VersionControlEventBus } from '../modules/version-control/index.js';
 import { FileChangeNotifier } from '../modules/kb-fs/file-change-notifier.js';
 import { StarterPackService } from '../modules/onboarding/starter-pack.service.js';
-import { WorkflowService } from '../modules/workflow/workflow.service.js';
-import { WorkflowHooks } from '../modules/workflow/workflow-hooks.js';
-import { ChangeRequestHooks, type IChangeRequestHooks } from '../modules/workflow/change-request-hooks.js';
-import { PendingCommitsService } from '../modules/workflow/pending-commits.service.js';
+import { VersionControlService } from '../modules/version-control/version-control.service.js';
+import { VersionControlHooks } from '../modules/version-control/version-control-hooks.js';
+import { ChangeRequestHooks, type IChangeRequestHooks } from '../modules/version-control/change-request-hooks.js';
+import { PendingCommitsService } from '../modules/version-control/pending-commits.service.js';
 import {
   PendingCommitsWorker,
   consoleSystemNoticeSink,
-} from '../modules/workflow/pending-commits.worker.js';
-import { ensureRecoveryBotUser } from '../modules/workflow/recovery-bot.js';
+} from '../modules/version-control/pending-commits.worker.js';
+import { ensureRecoveryBotUser } from '../modules/version-control/recovery-bot.js';
 import { AdminAccessService } from '../modules/admin/admin-access.service.js';
 import {
   SyncedGroupsWriter,
@@ -353,9 +353,9 @@ export interface CoreServices {
   gitService: GitService;
   pullRequestService: PullRequestService;
   diffService: DiffService;
-  reviewWorkflowService: ReviewWorkflowService;
+  changeRequestReviewService: ChangeRequestReviewService;
   fileLockService: FileLockService;
-  workflowService: WorkflowService;
+  versionControlService: VersionControlService;
   /**
    * The seam for "a change request was opened": a deployment registers here
    * how the reviewers are told (the cloud's mail, say), and the open's answer
@@ -364,7 +364,7 @@ export interface CoreServices {
   changeRequestHooks: IChangeRequestHooks;
   /** Remote sync (`POST /api/sync`): a git host or pipeline makes the clones catch up. */
   kbSyncService: KbSyncService;
-  eventBus: WorkflowEventBus;
+  eventBus: VersionControlEventBus;
   fileChangeNotifier: FileChangeNotifier;
   pendingCommitsService: PendingCommitsService;
   pendingCommitsWorker: PendingCommitsWorker;
@@ -922,16 +922,16 @@ export async function createCoreServices(
   // registers its listener here, after this returns (see `AccountHooks`).
   const accountHooks = new AccountHooks();
 
-  // Workflow lifecycle hooks — the ONE registry this composition shares
+  // Version-control lifecycle hooks — the ONE registry this composition shares
   // between GitService (advisory commit validation), the agent-access gate
   // (the blocking agentRead / preWrite hooks), and the composition root,
-  // which registers module-owned handlers on `workflowService.hooks` right
+  // which registers module-owned handlers on `versionControlService.hooks` right
   // after this function returns. Core registers none: no commit-time
   // validation (advisory anyway) and nothing that refuses an agent call.
-  const workflowHooks = new WorkflowHooks();
+  const versionControlHooks = new VersionControlHooks();
   const gitService = new GitService(
     workspaceService,
-    workflowHooks,
+    versionControlHooks,
     kb,
     workspaceMutex,
     accessControl,
@@ -968,7 +968,7 @@ export async function createCoreServices(
   // the post-switch backup reseed — but switchBranch is gone with the
   // per-branch workspace model, so the injection no longer applies.)
   workspaceService.setDiffService(diffService);
-  const reviewWorkflowService = new ReviewWorkflowService(
+  const changeRequestReviewService = new ChangeRequestReviewService(
     db,
     accessControl,
     workspaceService,
@@ -976,14 +976,14 @@ export async function createCoreServices(
   );
   // Late-bind the comment enricher so PullRequestService.getPrDetail includes
   // our DB-backed comments without forcing a circular constructor dependency.
-  pullRequestService.setDetailEnricher(reviewWorkflowService);
+  pullRequestService.setDetailEnricher(changeRequestReviewService);
 
-  // Workflow facade — the abstraction every app consumer should reach for
-  // instead of the individual git / PR / review-workflow services. See
+  // Version-control facade — the abstraction every app consumer should reach for
+  // instead of the individual git / PR / change-request-review services. See
   // PLAN.md for the migration story. Today it delegates straight through;
-  // implementations migrate into the workflow module over later steps.
+  // implementations migrate into the version-control module over later steps.
   const fileLockService = new FileLockService(db);
-  // Background commit queue. The `WorkflowService.releaseLock` path
+  // Background commit queue. The `VersionControlService.releaseLock` path
   // enqueues a row here instead of running commitFile + push inline; the
   // worker drains the queue out of band so a git hiccup can't block the
   // user-visible save path. See `lock-decoupling-plan.md`.
@@ -998,11 +998,11 @@ export async function createCoreServices(
     (await pendingCommitsService.hasAnyForWorkspace(workspaceId)) ||
     (await fileLockService.hasAnyActive(workspaceId)),
   );
-  // In-process event bus: every WorkflowService mutation method that
+  // In-process event bus: every VersionControlService mutation method that
   // succeeds emits a typed event; the SSE route fans it to connected
   // browser sessions. Single instance per Node process — survives across
   // requests, doesn't survive restarts (clients reconnect + resync).
-  const eventBus = new WorkflowEventBus();
+  const eventBus = new VersionControlEventBus();
   // Office-document/PDF/email text extraction for `read_file`/`grep`, cached
   // by content hash beside the workspaces root (see `DocExtractionCache`),
   // failures included. A fresh failure is told to the people looking at the
@@ -1020,11 +1020,11 @@ export async function createCoreServices(
   // of a distribution registers its listener here, after this returns (see
   // `ChangeRequestHooks`).
   const changeRequestHooks = new ChangeRequestHooks();
-  const workflowService = new WorkflowService(
+  const versionControlService = new VersionControlService(
     db,
     gitService,
     pullRequestService,
-    reviewWorkflowService,
+    changeRequestReviewService,
     workspaceService,
     accessControl,
     fileLockService,
@@ -1033,10 +1033,10 @@ export async function createCoreServices(
     changeGate,
     eventBus,
     fileChangeNotifier,
-    // Exposed as `workflowService.hooks` — the SAME instance GitService and
+    // Exposed as `versionControlService.hooks` — the SAME instance GitService and
     // the agent-access gate consult, so a deployment's registrations against
     // it reach every hook point.
-    workflowHooks,
+    versionControlHooks,
     // Exposed as `changeRequestHooks`, the same instance, for the same reason.
     changeRequestHooks,
     // The opened event names the approvers as accounts; auth answers which
@@ -1045,7 +1045,7 @@ export async function createCoreServices(
   );
   // The leftover-branch cleanup asks the Deployment page at every round, so
   // switching it off there applies without a restart.
-  workflowService.leftoverCleanupEnabled = () => retireMergedBranchesOn(settings.resolve('retireMergedBranches'));
+  versionControlService.leftoverCleanupEnabled = () => retireMergedBranchesOn(settings.resolve('retireMergedBranches'));
 
   // Join requests: derived entirely from two copies of a plugin's `access.md`
   // (the request's branch vs the default branch), so it holds no state — it
@@ -1053,7 +1053,7 @@ export async function createCoreServices(
   // have all landed.
   const joinRequestsService = new JoinRequestsService(
     workspaceService,
-    workflowService,
+    versionControlService,
     kb,
     // Read-only: the one question a request asks of the resolver is whether
     // the person it names already holds what it proposes.
@@ -1065,7 +1065,7 @@ export async function createCoreServices(
   // answered in a database round-trip instead of a clone, and what survives a
   // restart with the request still owed.
   const pluginJoinRequestJobs = new PluginJoinRequestJobs(new DbJoinRequestStore(db), {
-    workflow: workflowService,
+    versionControl: versionControlService,
     workspaceService,
     kb,
     // A record keys on the plugin's primary FOLDER below the root, which the
@@ -1095,7 +1095,7 @@ export async function createCoreServices(
   // index counts, so a link drops that cache too.
   const pluginLinksService = new PluginLinksService(
     workspaceService,
-    workflowService,
+    versionControlService,
     accessControl,
     new AccessMutationService(workspaceService, accessControl, kb.kbDirName),
     skillService,
@@ -1108,7 +1108,7 @@ export async function createCoreServices(
   // then drops every cache that keyed on the old identity.
   const pluginRenameService = new PluginRenameService(
     workspaceService,
-    workflowService,
+    versionControlService,
     accessControl,
     pluginSource,
     disk,
@@ -1149,16 +1149,16 @@ export async function createCoreServices(
     gitRunner,
   );
 
-  // Remote sync. Drives the workflow module's per-branch pull-and-announce
+  // Remote sync. Drives the version-control module's per-branch pull-and-announce
   // over every clone the workspace service knows about; owns no git of its own.
-  const kbSyncService = new KbSyncService(workflowService, workspaceService);
+  const kbSyncService = new KbSyncService(versionControlService, workspaceService);
   // Server-scoped MCP editing — the tool page's edit form. One server's truth
   // spans a plugin's mcp.json AND plugin.json extensions block, and this is
   // the ONE writer that rewrites both entries and commits them together (see
   // McpServerEditService).
   const mcpServerEditService = new McpServerEditService(
     workspaceService,
-    workflowService,
+    versionControlService,
     accessControl,
     toolManualService,
     kb,
@@ -1171,7 +1171,7 @@ export async function createCoreServices(
   // folder's rules are at HEAD before the endpoint answers.
   const pluginProvisionService = new PluginProvisionService(
     workspaceService,
-    workflowService,
+    versionControlService,
     accessControl,
     kb,
     eventBus,
@@ -1181,26 +1181,26 @@ export async function createCoreServices(
 
   // Pending skills: the other half of the catalog — skills that exist only on
   // an open change request's branch. Built here rather than beside
-  // `skillService` because it needs the workflow service, which does not exist
+  // `skillService` because it needs the version-control service, which does not exist
   // that early; it holds no state of its own, so where it is constructed is the
   // only thing the ordering decides.
   const pendingSkillsService = new PendingSkillsService(
     workspaceService,
     accessControl,
     skillService,
-    workflowService,
+    versionControlService,
     kb,
   );
 
   // The same missing half, for tools: a `.tool` manual or an `mcp.json` server
   // an agent proposes is nowhere in the product until its change request
-  // merges. Built here for the same reason — it needs the workflow service —
+  // merges. Built here for the same reason — it needs the version-control service —
   // and stateless for the same reason.
   const pendingToolsService = new PendingToolsService(
     workspaceService,
     accessControl,
     toolManualService,
-    workflowService,
+    versionControlService,
     kb,
   );
 
@@ -1238,7 +1238,7 @@ export async function createCoreServices(
     packsDir: config.starterPacksDir,
     kb,
     workspaceService,
-    workflow: workflowService,
+    versionControl: versionControlService,
     adminAccess,
     settings,
     accessControl,
@@ -1288,7 +1288,7 @@ export async function createCoreServices(
   // can only exist once the vault does.
   const toolDeleteService = new ToolDeleteService(
     workspaceService,
-    workflowService,
+    versionControlService,
     accessControl,
     toolManualService,
     skillService,
@@ -1338,7 +1338,7 @@ export async function createCoreServices(
   // rows it owns; each module contributes its slice as a participant.
   const accountErasureService = new AccountErasureService(
     db,
-    reviewWorkflowService,
+    changeRequestReviewService,
     ports.erasureParticipants ?? [],
   );
 
@@ -1411,7 +1411,7 @@ export async function createCoreServices(
       workspaceService,
       accessControl,
       authService,
-      workflowService,
+      versionControlService,
       gitService,
       accountLinks: new AccountLinkService(db),
       // The SAME extension-to-reader registry `read_file` dispatches on, so the
@@ -1527,7 +1527,7 @@ export async function createCoreServices(
   const resolveToolContext = createToolContextResolver({
     authService,
     workspaceService,
-    workflowService,
+    versionControlService,
     events: eventBus,
     kbDirName: kbDirName,
     creatorAccess,
@@ -1587,7 +1587,7 @@ export async function createCoreServices(
     // swallowed the `opts` carrying `skipValidation`, so the burst-validation
     // skip was a no-op in production while every unit test — which stubs this
     // port — passed. No wrapper, no gap to fall through.
-    workflow: workflowService,
+    versionControl: versionControlService,
     // Both escalation sinks come through CorePorts: the recovery agent and the
     // notice sink are enterprise-owned (background-agent factory / feedback
     // dashboard); core defaults skip recovery and log to stderr.
@@ -1647,7 +1647,7 @@ export async function createCoreServices(
       source,
       ...createSyncedGroupsCommitter({
         workspaceService,
-        workflowService,
+        versionControlService,
         accessControl,
         eventBus,
         kbDirName,
@@ -1663,7 +1663,7 @@ export async function createCoreServices(
   // directory token route drives.
   const groupsAdminService = new GroupsAdminService(
     workspaceService,
-    workflowService,
+    versionControlService,
     accessControl,
     disk,
     kbDirName,
@@ -1675,7 +1675,7 @@ export async function createCoreServices(
   // The deployment owner is never removed this way.
   const userAccessRemovalService = new UserAccessRemovalService(
     workspaceService,
-    workflowService,
+    versionControlService,
     accessControl,
     disk,
     kbDirName,
@@ -1757,9 +1757,9 @@ export async function createCoreServices(
     gitService,
     pullRequestService,
     diffService,
-    reviewWorkflowService,
+    changeRequestReviewService,
     fileLockService,
-    workflowService,
+    versionControlService,
     changeRequestHooks,
     kbSyncService,
     eventBus,

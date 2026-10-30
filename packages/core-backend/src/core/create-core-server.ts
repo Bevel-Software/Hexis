@@ -13,8 +13,8 @@ import { createAgentDownloadRoutes } from '../modules/workspace/agent-download.r
 import { createGitInternalsRouteGuard } from '../modules/workspace/git-internals.middleware.js';
 import { startCore } from './lifecycle.js';
 import { createDiffRoutes } from '../modules/diff/diff.routes.js';
-import { createWorkflowRoutes } from '../modules/workflow/workflow.routes.js';
-import { createEventAccess, createEventsRoutes, EventDelivery } from '../modules/workflow/index.js';
+import { createVersionControlRoutes } from '../modules/version-control/version-control.routes.js';
+import { createEventAccess, createEventsRoutes, EventDelivery } from '../modules/version-control/index.js';
 import { createAccessRoutes } from '../modules/access/access.routes.js';
 import { createAccessRequestRoutes } from '../modules/access/access-requests.routes.js';
 import { AccessRequestsService } from '../modules/access/access-requests.service.js';
@@ -32,12 +32,12 @@ import {
   createToolManualsBrowserRoutes,
   registerToolManualsTools,
 } from '../modules/tool-manuals/index.js';
-import { registerWorkflowTools } from '../modules/workflow/agent-tools/workflow.tools.js';
-import { changeRequestScope, registerChangeRequestReadTools } from '../modules/workflow/agent-tools/change-request-read.tools.js';
+import { registerVersionControlTools } from '../modules/version-control/agent-tools/version-control.tools.js';
+import { changeRequestScope, registerChangeRequestReadTools } from '../modules/version-control/agent-tools/change-request-read.tools.js';
 import { createOnboardingRoutes } from '../modules/onboarding/onboarding.routes.js';
 import { registerWorkspaceTools } from '../modules/workspace/workspace.tools.js';
 import { registerAgentGuideTool } from '../modules/agent-guide/index.js';
-import { RECOVERY_BOT_EMAIL } from '../modules/workflow/recovery-bot.js';
+import { RECOVERY_BOT_EMAIL } from '../modules/version-control/recovery-bot.js';
 import {
   registerSkillsTools,
   createSkillsRoutes,
@@ -468,12 +468,12 @@ export async function createCoreServer(
   // Shared agent-access gate config, consumed by every tool surface that
   // touches the KB (file tools + graph tools). The gate decides nothing
   // itself: it calls the read and write hooks a deployment registered on
-  // `workflowService.hooks`, and carries the notes that deployment wants
+  // `versionControlService.hooks`, and carries the notes that deployment wants
   // agents to read about the gated tools. Core registers neither, so a
   // core-only deployment refuses nothing and says nothing extra.
   const agentAccessGate: AgentAccessGate = {
     recoveryBotEmail: RECOVERY_BOT_EMAIL,
-    hooks: core.workflowService.hooks,
+    hooks: core.versionControlService.hooks,
     notes: new ToolDescriptionNotes(),
   };
   // A skill's `allowed-tools`, checked against what the caller can see — on
@@ -482,8 +482,8 @@ export async function createCoreServer(
   const allowedToolsChecker = new AllowedToolsChecker(core.toolRegistry, core.toolManualService, core.kb);
   // `delete_branch` sees change requests as `get_change_request` does.
   // The history tools take the per-file read the file itself takes (`accessControl`).
-  registerWorkflowTools(core.toolRegistry, toolsRouter, ta, th, core.kb, changeRequestScope(core.accessControl, core.kb).maySee, core.accessControl, agentAccessGate);
-  // The five read tools over change requests. Separate from the workflow tools
+  registerVersionControlTools(core.toolRegistry, toolsRouter, ta, th, core.kb, changeRequestScope(core.accessControl, core.kb).maySee, core.accessControl, agentAccessGate);
+  // The five read tools over change requests. Separate from the version-control tools
   // because they are the only ones that gate their whole payload on the
   // caller's read access, so they take the access service and nothing else.
   registerChangeRequestReadTools(core.toolRegistry, toolsRouter, ta, th, core.accessControl, core.kb);
@@ -617,7 +617,7 @@ export async function createCoreServer(
   app.use('/api', toolsRouter);
 
   // The same guard on the PARSED body, for the WHOLE `/workspace/:id` prefix
-  // and ahead of EVERY router under it — the file routes, the review, workflow
+  // and ahead of EVERY router under it — the file routes, the review, version control
   // and access ones, and whatever an extension mounts below. Mounted here,
   // before the extension phase, so an overlay surface added there is covered
   // by its prefix rather than by remembering this. No auth in front of it: the
@@ -668,7 +668,7 @@ export async function createCoreServer(
   app.use('/api', core.authMiddleware, createWorkspaceRoutes(
     core.workspaceService,
     core.authService,
-    core.workflowService,
+    core.versionControlService,
     core.eventBus,
     core.accessControl,
     core.kb,
@@ -678,11 +678,12 @@ export async function createCoreServer(
     allowedToolsChecker,
     core.changeGate,
   ));
-  // Workflow is the only branches / changes / change-request surface. The
+  // Version control is the only branches / changes / change-request surface. The
   // former /git/*, /pr/*, /pr/:n/* routes are gone — every consumer goes
   // through /workflow/* now.
-  app.use('/api', core.authMiddleware, createWorkflowRoutes(
-    core.workflowService,
+  // The `/workflow/` prefix is kept for API compatibility until a core major.
+  app.use('/api', core.authMiddleware, createVersionControlRoutes(
+    core.versionControlService,
     core.workspaceService,
     core.authService,
     core.eventBus,
@@ -700,7 +701,7 @@ export async function createCoreServer(
   const eventDelivery = new EventDelivery(createEventAccess({
     accessControl: core.accessControl,
     kbDirName: core.kbDirName,
-    getChangeRequest: (number) => core.workflowService.getChangeRequest(number),
+    getChangeRequest: (number) => core.versionControlService.getChangeRequest(number),
     workspaces: {
       hasWorkspace: (workspaceId) => core.workspaceService.hasBootstrappedWorkspace(workspaceId),
       anyWorkspaceId: async () => (await core.workspaceService.findAnyWorkspaceId()) ?? core.kb.defaultWorkspaceId(),
@@ -710,7 +711,7 @@ export async function createCoreServer(
   app.use('/api', core.authMiddleware, createDiffRoutes(
     core.diffService,
     core.authService,
-    core.workflowService,
+    core.versionControlService,
     core.accessControl,
     core.kbDirName,
   ));
@@ -719,7 +720,7 @@ export async function createCoreServer(
     core.workspaceService,
     core.authService,
     core.authService,
-    core.workflowService,
+    core.versionControlService,
     core.eventBus,
     core.db,
     core.kb,
@@ -734,7 +735,7 @@ export async function createCoreServer(
     accessControl: core.accessControl,
     workspaceService: core.workspaceService,
     authService: core.authService,
-    workflow: core.workflowService,
+    versionControl: core.versionControlService,
     lifecycle: core.joinRequestsService,
     kb: core.kb,
   }));
@@ -751,9 +752,9 @@ export async function createCoreServer(
     createSkillAccessRequestRoutes({
       skillService: core.skillService,
       accessControl: core.accessControl,
-      workflow: core.workflowService,
+      versionControl: core.versionControlService,
       requests: new AccessRequestsService({
-        workflow: core.workflowService,
+        versionControl: core.versionControlService,
         workspaceService: core.workspaceService,
         lifecycle: core.joinRequestsService,
         kb: core.kb,
@@ -773,7 +774,7 @@ export async function createCoreServer(
   app.use('/api', core.authMiddleware, createPluginsRoutes(
     core.pluginIndexService,
     core.accessControl,
-    core.workflowService,
+    core.versionControlService,
     core.joinRequestsService,
     core.pluginJoinRequestJobs,
     core.pluginProvisionService,
@@ -876,12 +877,12 @@ export async function createCoreServer(
         githubApp: core.githubApp,
       },
       // What a move to another repository has to decide about, and what it
-      // runs under. Bound here rather than handed the whole workflow service:
+      // runs under. Bound here rather than handed the whole version-control service:
       // the setup routes ask two questions, hold the commit worker for the
       // move, and know nothing else about a request or a commit.
       {
-        countOpen: () => core.workflowService.countOpenChangeRequests(),
-        closeAsRepositoryReplaced: () => core.workflowService.closeOpenChangeRequestsAsRepositoryReplaced(),
+        countOpen: () => core.versionControlService.countOpenChangeRequests(),
+        closeAsRepositoryReplaced: () => core.versionControlService.closeOpenChangeRequestsAsRepositoryReplaced(),
         whileCommitsHeld: (work) => core.whileCommitsHeld(work),
       },
     ),

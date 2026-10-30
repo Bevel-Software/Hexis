@@ -246,7 +246,7 @@ export class PluginRenameService {
       );
     } catch (err) {
       // One failure is NOT a failed commit: the commit landed locally and only
-      // the push did not (the typed hand-off the workflow throws). Restoring
+      // the push did not (the typed hand-off the version-control service throws). Restoring
       // the old bytes then would stack an uncommitted inverse of a real
       // commit; the recovery flow owns that state, so it is left alone — and
       // since the tree DID change, every cache keyed on the old identity is

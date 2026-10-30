@@ -32,7 +32,7 @@ function staticDirFor(nodeEnv: string): string | undefined {
 /**
  * Standalone CORE deployment: no enterprise extensions — empty ports, empty
  * server extensions. Everything the server mounts (auth, MCP + its OAuth AS,
- * the unified tool surface, workspace/workflow/diff/access/skills/tool-manuals/
+ * the unified tool surface, workspace/version-control/diff/access/skills/tool-manuals/
  * secrets routes, SSE) comes from `createCoreServer`'s fixed mount order.
  *
  * With `TENANTS_FILE` set the same process serves several knowledge bases,

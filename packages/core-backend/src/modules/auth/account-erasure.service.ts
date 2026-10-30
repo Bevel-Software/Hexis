@@ -5,7 +5,7 @@ const log = logger('account-erasure');
 import { and, eq, notExists } from 'drizzle-orm';
 import { isEncryptedBlob } from '../../shared/column-crypto.js';
 import type { Database } from '../database/index.js';
-import type { IReviewWorkflowService } from '../workflow/index.js';
+import type { IChangeRequestReviewService } from '../version-control/index.js';
 import {
   changeRequests,
   externalApiKeys,
@@ -114,11 +114,11 @@ export class AccountErasureService implements IAccountErasureService {
   constructor(
     private readonly db: Database,
     /**
-     * The review workflow owns the approvals and the lock their writers take,
-     * so it does the rewrite (see `IReviewWorkflowService.eraseApprover`);
+     * The change-request review owns the approvals and the lock their writers take,
+     * so it does the rewrite (see `IChangeRequestReviewService.eraseApprover`);
      * this module only decides WHEN, inside its own transaction.
      */
-    private readonly reviewWorkflow: Pick<IReviewWorkflowService, 'eraseApprover'>,
+    private readonly changeRequestReview: Pick<IChangeRequestReviewService, 'eraseApprover'>,
     private readonly participants: IErasureParticipant[] = [],
   ) {}
 
@@ -209,14 +209,14 @@ export class AccountErasureService implements IAccountErasureService {
 
       // Audit rows: anonymize in place (no user FK on these; they key by email).
       //
-      // The approvals belong to the review workflow, and so does the lock
+      // The approvals belong to the change-request review, and so does the lock
       // their writers take — one of those writers COPIES rows (a change request
       // bringing itself up to date re-pins the approvals its merge did not
       // disturb onto the new head), and a copy that read this person's row a
       // moment before the rewrite would insert their real address back
-      // afterwards. The workflow takes that lock exclusively and rewrites the
+      // afterwards. The version-control service takes that lock exclusively and rewrites the
       // rows, in THIS transaction, so it stays held until the erasure commits.
-      await this.reviewWorkflow.eraseApprover(tx, target.email, {
+      await this.changeRequestReview.eraseApprover(tx, target.email, {
         email: target.erasedEmail,
         name: target.erasedName,
       });

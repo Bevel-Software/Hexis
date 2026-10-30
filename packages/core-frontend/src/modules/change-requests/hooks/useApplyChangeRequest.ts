@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { PullRequestSummary } from '@bevel-software/platform-shared';
-import { useEventBus } from '../../workflow';
+import { useEventBus } from '../../version-control';
 import { fetchPrDetail, approvePrFile, mergePullRequest } from '../../pr';
 import { friendlyGitError, friendlyGitMessage } from '../../git';
 

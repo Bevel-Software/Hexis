@@ -7,8 +7,8 @@ import type { FileTreeEntry } from '@bevel-software/platform-shared';
 import type { IAccessControl } from '../access-control.interface.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { AuthService } from '../../auth/auth.service.js';
-import type { WorkflowService } from '../../workflow/workflow.service.js';
-import type { WorkflowEventBus } from '../../workflow/event-bus.js';
+import type { VersionControlService } from '../../version-control/version-control.service.js';
+import type { VersionControlEventBus } from '../../version-control/event-bus.js';
 import { createAccessRoutes } from '../access.routes.js';
 import { usersDbDouble } from './users-db-double.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
@@ -87,8 +87,8 @@ async function makeHarness(opts: {
   } as unknown as WorkspaceService;
 
   const authService = { getUserById: vi.fn(async () => USER) } as unknown as AuthService;
-  const workflowService = {} as unknown as WorkflowService;
-  const eventBus = { emit: vi.fn() } as unknown as WorkflowEventBus;
+  const versionControlService = {} as unknown as VersionControlService;
+  const eventBus = { emit: vi.fn() } as unknown as VersionControlEventBus;
   const db = usersDbDouble();
 
   const app = express();
@@ -99,7 +99,7 @@ async function makeHarness(opts: {
   });
   app.use(
     '/api',
-    createAccessRoutes(accessControl, workspaceService, authService, authService, workflowService, eventBus, db, testKbContext({ kbDirName: KB }), new NodeFs()),
+    createAccessRoutes(accessControl, workspaceService, authService, authService, versionControlService, eventBus, db, testKbContext({ kbDirName: KB }), new NodeFs()),
   );
 
   const server = await new Promise<Server>((resolve) => {

@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { WorkflowValidationError } from '../../shared/domain-errors.js';
+import { VersionControlValidationError } from '../../shared/domain-errors.js';
 import { sanitizedPath } from '../../shared/printable.js';
 import { assertTmpRefsTaken, isTmpRef } from './tmp-ref.js';
 
@@ -112,7 +112,7 @@ export function assertInsideRepo(wsPath: string, kbDirName: string): void {
     // forge a second line of the answer, in the message and in the `path` a
     // JSON consumer reads.
     const shown = sanitizedPath(wsPath);
-    throw new WorkflowValidationError(
+    throw new VersionControlValidationError(
       `"${shown}" contains a control character: a line break, a NUL or another invisible byte is not part of any ` +
         'file name, and git reads a line break in a path as the end of one object name and the start of another. ' +
         'Remove it and send the name as it is written.',
@@ -127,7 +127,7 @@ export function assertInsideRepo(wsPath: string, kbDirName: string): void {
     .replace(/^(\.\.(\/|$))+/, '')
     .replace(/^\.$/, '');
   const corrected = isInsideRepo(normalized, kbDirName) ? normalized : `${kbDirName}/${normalized}`;
-  throw new WorkflowValidationError(
+  throw new VersionControlValidationError(
     `"${wsPath}" is outside the knowledge base repository: paths are workspace-relative, must start with "${kbDirName}/" and may not contain "." or ".." segments or backslashes. ` +
       `Use "${corrected}" instead. A file written without that prefix lands beside the repository, where it is never committed or pushed.`,
     { kind: 'path-outside-repo', path: wsPath, kbDirName, corrected },
@@ -183,7 +183,7 @@ export function normalizeWorkspacePath(wsPath: string, kbDirName: string): strin
   // `core-config` and the `kbDirName` setting validator both refuse this at
   // the point it is SET, so reaching here means the two drifted.
   if (CONTROL_CHARACTERS.test(kbDirName)) {
-    throw new WorkflowValidationError(
+    throw new VersionControlValidationError(
       `the configured checkout folder name (kbDirName / KB_DIR_NAME) contains a control character: "${sanitizedPath(kbDirName)}". ` +
         'Every workspace path is prefixed with it, so no path can be resolved until the setting is corrected.',
       { kind: 'kb-dir-name-control-character', kbDirName: sanitizedPath(kbDirName) },
@@ -237,7 +237,7 @@ export function assertRepoRootNameFree(wsPath: string, kbDirName: string): void 
   const segments = String(wsPath).replace(/\/+$/, '').split('/');
   const reserved = kbDirName.toLowerCase();
   if (segments[0] !== kbDirName || segments[1]?.toLowerCase() !== reserved) return;
-  throw new WorkflowValidationError(
+  throw new VersionControlValidationError(
     `"${segments[1]}" is reserved: it is the checkout folder's name. A folder of that name at the repository root ` +
       `could never be reached — every workspace path starting with "${kbDirName}/" names the checkout itself — so it cannot be created, moved to or renamed to.` +
       // Said only when the caller spelled it differently, so the ordinary

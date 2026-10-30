@@ -13,7 +13,7 @@
 /**
  * Sanitize a server-derived string before splicing it into an agent-facing
  * prompt. The prompts are dispatched as if the user typed them, so anything
- * that originated server-side (`recoveryDetail` from a workflow error,
+ * that originated server-side (`recoveryDetail` from a version-control error,
  * `conflictedPaths` from a 409 payload) is in principle untrusted with
  * respect to the agent: a control character, a backtick that closes our
  * code-fence, or a 50KB rebase stderr could skew the agent's reading of
