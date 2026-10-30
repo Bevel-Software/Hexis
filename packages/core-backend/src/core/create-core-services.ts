@@ -1444,9 +1444,12 @@ export async function createCoreServices(
       // For the needs-authorization setup link surfaced to external agents.
       publicFrontendUrl: config.publicFrontendUrl,
       readAgentPreamble: readPreamble,
-      // The guide's name the shared file rules spell, read per request so a name
-      // the setup save applies lands without a restart.
+      // The root-folder and platform-file names the shared file rules spell,
+      // read per request so a layout the setup save applies lands without a restart.
       kbLayout: () => kb.layout,
+      // The branch the shared rules name as the one people read — a getter
+      // too, so the name in effect is the one an agent is told.
+      defaultBranch: () => kb.defaultBranch,
       secretsScope,
       // Read at listing time, by when the hints below exist.
       readOnlyOverrides: () => readOnlyHints.overrides(),
