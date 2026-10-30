@@ -1,10 +1,9 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { IFsProbe, ITreeWalker } from '../../../../shared/fs.contract.js';
-import type { KbContext } from '../../../../shared/kb-context.js';
 import { renderRolesYaml } from '../../../access-model/index.js';
 import { reservedRootDirs } from './template-files.step.js';
-import { TEMPLATE_SOURCE_FALLBACKS, TemplateSource, renderTemplateText } from './template-source.js';
+import { TEMPLATE_SOURCE_FALLBACKS, TemplateSource, renderTemplateText, type TemplateKb } from './template-source.js';
 import { assertNotGitInternals, hasGitInternalsSegment } from '../../../../shared/git-internals.js';
 import { GitInternalsError } from '../../../../shared/domain-errors.js';
 import { isManagedGuide } from '../../../agent-guide/index.js';
@@ -35,7 +34,7 @@ export function buildSeedTree(
   extraRootDirs: readonly string[],
   seedAdminEmails: readonly string[],
   /** Read per seed, never captured: the setup-completing save may apply the layout after this builder was composed. */
-  kb: Pick<KbContext, 'layout'>,
+  kb: TemplateKb,
 ): (dir: string) => Promise<string[]> {
   // Validated eagerly; resolved per seed.
   reservedRootDirs(extraRootDirs, kb.layout);
@@ -57,7 +56,7 @@ class KbSeedTree {
     private readonly templates: TemplateSource,
     private readonly extraRootDirs: readonly string[],
     private readonly seedAdminEmails: readonly string[],
-    private readonly kb: Pick<KbContext, 'layout'>,
+    private readonly kb: TemplateKb,
   ) {}
 
   /** Fill `dir` with a complete knowledge base; resolve to what was GENERATED. */
@@ -184,7 +183,7 @@ class KbSeedTree {
     if (text === null) {
       await fs.copyFile(from, to);
     } else {
-      await fs.writeFile(to, renderTemplateText(text, this.kb.layout), 'utf8');
+      await fs.writeFile(to, renderTemplateText(text, this.kb.layout, this.kb.defaultBranch), 'utf8');
     }
     await fs.chmod(to, (await fs.stat(from)).mode & 0o777);
   }

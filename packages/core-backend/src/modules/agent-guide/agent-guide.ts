@@ -174,9 +174,10 @@ async function readCoreSectionFiles(): Promise<ReadonlyMap<string, string>> {
 /**
  * Core's sections for `layout`: the files, placeholders unrendered, with the
  * shared-rules section computed and in its place. What a distribution's hook
- * is handed.
+ * is handed. `defaultBranch` is the branch the shared rules name (see
+ * {@link AgentGuideContext.defaultBranch}).
  */
-export async function coreAgentGuideSections(layout: KbLayout): Promise<AgentGuideSection[]> {
+export async function coreAgentGuideSections(layout: KbLayout, defaultBranch = ''): Promise<AgentGuideSection[]> {
   coreSectionFiles ??= readCoreSectionFiles();
   let files: ReadonlyMap<string, string>;
   try {
@@ -188,7 +189,7 @@ export async function coreAgentGuideSections(layout: KbLayout): Promise<AgentGui
   }
   return CORE_SECTION_IDS.map((id) =>
     id === WORKING_WITH_FILES_SECTION_ID
-      ? { id, body: sharedFileRulesSection(layout), literal: true }
+      ? { id, body: sharedFileRulesSection(layout, defaultBranch), literal: true }
       : { id, body: files.get(id)! },
   );
 }
@@ -205,8 +206,9 @@ export interface AgentGuideContext {
   /**
    * The knowledge base's default branch, rendered into `{{defaultBranch}}` so
    * the start section names the branch every file tool's `branch` takes for
-   * what is live. Read when the guide is composed: a fresh deployment gets its
-   * branch model from the setup screen after the services are built.
+   * what is live, and named by the shared file rules in the same sentence the
+   * MCP handshake carries. Read when the guide is composed: a fresh deployment
+   * gets its branch model from the setup screen after the services are built.
    */
   defaultBranch?: string;
 }
@@ -256,7 +258,7 @@ export async function agentGuideSections(
   context: AgentGuideContext = {},
 ): Promise<RenderedGuideSection[]> {
   const resolved = resolveKbLayout(layout);
-  const core = await coreAgentGuideSections(resolved);
+  const core = await coreAgentGuideSections(resolved, context.defaultBranch);
   const sections = withRoutes(oneSectionPerId(hook ? await hook(core, resolved) : core));
   const kbDirName = context.kbDirName?.trim() || DEFAULT_KB_DIR_NAME;
   const defaultBranch = context.defaultBranch?.trim() || UNCONFIGURED_DEFAULT_BRANCH;

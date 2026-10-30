@@ -6,24 +6,19 @@ import { join } from 'node:path';
 import express, { type RequestHandler } from 'express';
 import { afterEach, describe, expect, it } from 'vitest';
 import { LocalFilesystem } from '@mastra/core/workspace';
-import { ToolRegistry } from '../../tool-registry/tool-registry.js';
-import { createManualRoutes } from '../../tool-registry/manual.routes.js';
-import { createToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
-import type { ToolContext } from '../../tool-helpers/tool.contract.js';
-import type { ToolAuth } from '../../tool-auth/tool-auth.middleware.js';
+import { ToolRegistry, createManualRoutes, GUIDE_FIRST_SENTENCE } from '../../tool-registry/index.js';
+import { createToolHandlerFactory, VersionControlHooks, createMcpRoutes, McpService } from '../../../__tests__/tool-wiring.js';
+import type { ToolContext } from '../../tool-helpers/index.js';
+import type { ToolAuth } from '../../tool-auth/index.js';
+import type { IAccessControl } from '../../access/index.js';
 import { registerWorkspaceTools } from '../workspace.tools.js';
 import { RoutineWritePolicyService } from '../routine-write-policy.js';
-import { VersionControlHooks } from '../../version-control/version-control-hooks.js';
 import { ToolDescriptionNotes } from '../agent-access.gate.js';
 import { SpillStore } from '../spill-store.js';
 import { DocExtractService } from '../file-readers/doc-extract.service.js';
 import { WorkerDocumentExtractor } from '../file-readers/extract-in-worker.js';
-import type { IAccessControl } from '../../access/access-control.interface.js';
-import { createMcpRoutes } from '../../mcp/mcp.routes.js';
-import { McpService } from '../../mcp/mcp.service.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
-import { sharedFileRules, sharedFileRulesSection } from '../../agent-instructions/shared-file-rules.js';
-import { GUIDE_FIRST_SENTENCE } from '../../tool-registry/guide-first.js';
+import { sharedFileRules, sharedFileRulesSection } from '../../agent-instructions/index.js';
 
 /**
  * Who decodes escape sequences in written content a second time — settled on
@@ -371,18 +366,18 @@ describe('what the write tools tell an agent about escape sequences', () => {
     // a SHARED rule: stated in the handshake instructions and in the managed
     // agent guide, and repeated in no tool description — a description that
     // carried it was long enough for a client to cut the end off.
-    const rule = sharedFileRules(testKbContext().layout).find((r) => r.id === 'escape-sequences')!;
+    const rule = sharedFileRules(testKbContext().layout, testKbContext().defaultBranch).find((r) => r.id === 'escape-sequences')!;
     expect(rule.body).toContain('some clients decode escape sequences in arguments before sending');
     // The way out is the upload route, which the rule after it spells out by
     // the names of the tools this deployment serves.
     expect(rule.body).toContain('by upload (see below), which lands it unchanged');
-    const upload = sharedFileRules(testKbContext().layout).find((r) => r.id === 'upload-route')!;
+    const upload = sharedFileRules(testKbContext().layout, testKbContext().defaultBranch).find((r) => r.id === 'upload-route')!;
     expect(upload.body).toContain('`request_file_upload`');
     expect(upload.body).toContain('`apply_file_upload`');
     // It names the three tools it is about, so an agent reading the section
     // knows where it applies.
     for (const name of ['write_file', 'write_files', 'edit_file']) expect(rule.body, name).toContain(name);
-    expect(sharedFileRulesSection(testKbContext().layout)).toContain(rule.body);
+    expect(sharedFileRulesSection(testKbContext().layout, testKbContext().defaultBranch)).toContain(rule.body);
 
     const carrying = Object.entries(served)
       .filter(([, d]) => d.includes('decode escape sequences in arguments before sending') || d.includes('some clients decode them in arguments'))
