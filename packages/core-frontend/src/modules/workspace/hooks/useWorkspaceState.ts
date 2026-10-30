@@ -496,7 +496,11 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       markLanded(readFrom, path, seq);
       // Same bytes: skip a re-render that would briefly unmount the renderer.
       if (content === t.content && content === t.savedContent) return t;
-      return { ...t, content, savedContent: content, isDirty: false, pendingFileContent: null };
+      // A clean tab may be open in the editor: it reloads the new bytes.
+      return {
+        ...t, content, savedContent: content, isDirty: false, pendingFileContent: null,
+        remoteRevision: (t.remoteRevision ?? 0) + 1,
+      };
     }));
   }, [isStaleFind, isStaleLanding, markLanded]);
   // Unsaved-work questions are asked in the app's own dialog and awaited.
@@ -1979,16 +1983,20 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     // Update the matching tab — both the cached current value and the on-disk
     // baseline now equal what was written; clear dirty. A save that merged
     // onto a pulled commit keeps the banner: the person has not seen it yet.
+    // Its text is not the editor's, which an autosave leaves open, so the
+    // editor reloads it; otherwise its next save writes over the pull.
     setOpenTabs((prev) => {
       const idx = prev.findIndex((t) => t.path === relativePath);
       if (idx < 0) return prev;
       const next = prev.slice();
+      const t = next[idx];
       next[idx] = {
-        ...next[idx],
+        ...t,
         content: toWrite,
         savedContent: toWrite,
         isDirty: false,
         changedOnBranch: mergedOntoPull ? 'merged' : null,
+        ...(mergedOntoPull ? { remoteRevision: (t.remoteRevision ?? 0) + 1 } : {}),
       };
       return next;
     });
@@ -2370,12 +2378,14 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
                   remoteRevision,
                 };
               }
+              // A clean tab may be open in the editor: it reloads the new bytes.
               return {
                 ...base,
                 content,
                 savedContent: content,
                 isDirty: false,
                 pendingFileContent: null,
+                remoteRevision: (t.remoteRevision ?? 0) + 1,
               };
             }),
           );

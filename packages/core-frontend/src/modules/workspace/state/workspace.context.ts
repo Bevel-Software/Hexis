@@ -119,9 +119,10 @@ export interface OpenTab {
    */
   changedOnBranch?: 'merged' | 'discarded' | null;
   /**
-   * Counts the times content from outside replaced this tab's unsaved buffer
-   * (a merge, or a discard). The editor keys on it, so it reloads its buffer
-   * from `content` instead of keeping the text the change was merged into.
+   * Counts the times the tab's text changed under the editor: new bytes read
+   * from disk, a merge onto them or a discard, a save merged onto a pulled
+   * commit. The editor keys on it, so it reloads its buffer from `content`
+   * instead of keeping, and later saving, the text it had before.
    */
   remoteRevision?: number;
 }

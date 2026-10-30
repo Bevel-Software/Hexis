@@ -111,9 +111,9 @@ export function FileViewer() {
     activeTab: openTab,
     clearChangedOnBranch,
   } = useWorkspace();
-  // A change pulled from the git host reached this tab's unsaved edits —
-  // merged in, or discarded when they collided. Bumps `remoteRevision`, which
-  // the editor's key carries so it reloads the buffer it was editing.
+  // The tab's text changed under the editor: new bytes from disk, or a change
+  // pulled from the git host merged into the edits or discarding them. Bumps
+  // `remoteRevision`, which the editor's key carries so it reloads its buffer.
   const changedOnBranch = openTab?.changedOnBranch ?? null;
   const remoteRevision = openTab?.remoteRevision ?? 0;
   const { fileViewerPanels, renderers } = useAppRegistry();

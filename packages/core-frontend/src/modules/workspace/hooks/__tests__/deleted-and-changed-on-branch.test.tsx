@@ -1382,6 +1382,29 @@ describe('a change pulled from the git host onto the open file', () => {
     expect(result.current.activeTab?.savedContent).toBe(pulled);
     expect(result.current.activeTab?.isDirty).toBe(false);
     expect(result.current.activeTab?.changedOnBranch ?? null).toBeNull();
+    // Open in the editor with nothing typed yet, it reloads the new bytes:
+    // keeping the old ones, its next save would write them over the pull.
+    expect(result.current.activeTab?.remoteRevision).toBe(1);
+  });
+
+  it('a clean tab re-read from disk with new bytes reloads the editor too', async () => {
+    const result = await editedTab();
+    const pulled = BASE.replace('Third paragraph.', 'Third paragraph, updated.');
+    disk.set('KB/Notes.md', pulled);
+
+    await act(async () => { await result.current.reloadTabFromDisk('KB/Notes.md'); });
+
+    expect(result.current.activeTab?.content).toBe(pulled);
+    expect(result.current.activeTab?.remoteRevision).toBe(1);
+  });
+
+  it('a clean tab re-read from disk with the same bytes keeps the editor as it is', async () => {
+    const result = await editedTab();
+
+    await act(async () => { await result.current.reloadTabFromDisk('KB/Notes.md'); });
+
+    expect(result.current.activeTab?.content).toBe(BASE);
+    expect(result.current.activeTab?.remoteRevision ?? 0).toBe(0);
   });
 
   /** The next file-changed read is held until `answer` is called; later reads answer from `disk`. */
@@ -1467,6 +1490,10 @@ describe('a change pulled from the git host onto the open file', () => {
     expect(tab.isDirty).toBe(false);
     // The person has not seen the change yet: the banner still says the edits were merged.
     expect(tab.changedOnBranch).toBe('merged');
+    // The change read lands nothing past the save's write, so the save is
+    // what tells an editor an autosave left open to reload the merged text;
+    // keeping its own, its next save would write over the pulled commit.
+    expect(tab.remoteRevision).toBe(1);
   });
 
   it('a save waiting on a change read whose bytes collide with the edits writes nothing over them', async () => {
