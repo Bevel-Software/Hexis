@@ -2,8 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent, within, act, waitFor } from '@testing-library/react';
 import { MemoryRouter, useLocation, useNavigate } from 'react-router-dom';
 import { DEFAULT_BRANCH, type FileTreeEntry } from '@bevel-software/platform-shared';
-import { WorkspaceContext, type WorkspaceContextValue } from '../../workspace/state/workspace.context';
-import { makeWorkspaceFixture } from '../../workspace/__tests__/testFixtures';
+import { WorkspaceContext, type WorkspaceContextValue } from '../../workspace';
 import { PluginsTree, SkillsTree } from '../components/SkillsTree';
 
 /**
@@ -15,6 +14,58 @@ import { PluginsTree, SkillsTree } from '../components/SkillsTree';
  */
 
 const KB = 'knowledge-base';
+
+/** The workspace state the trees read: an idle checkout, plus what a test overrides. */
+function makeWorkspace(overrides: Partial<WorkspaceContextValue> = {}): WorkspaceContextValue {
+  return {
+    workspaceId: 'ws-1',
+    kbDirName: 'knowledge-base',
+    fileTree: null,
+    bootstrapError: null,
+    workspaceBranch: 'main',
+    retryBootstrap: () => {},
+    openTabs: [],
+    activeTab: null,
+    dirtyTabFilenames: [],
+    openFilePath: null,
+    openFileContent: null,
+    openFileSavedContent: null,
+    hasUnsavedFileChanges: false,
+    pendingFileContent: null,
+    setActiveTabContent: () => {},
+    bumpFsRevision: () => {},
+    setPersistenceBranch: () => {},
+    fsRevision: 0,
+    uploadErrors: new Map(),
+    uploadNotices: new Map(),
+    clearUploadNotice: () => {},
+    isUploading: false,
+    uploadProgress: null,
+    pendingUploads: new Map(),
+    refreshFileTree: async () => null,
+    addTab: async () => true,
+    closeTab: async () => ({ closed: true, newActivePath: null }),
+    activateTab: () => {},
+    reorderTab: () => {},
+    closeAllTabs: () => {},
+    hydrateTabs: async () => ({ surviving: [], dropped: [], denied: [], superseded: false }),
+    createFile: async () => {},
+    createDirectory: async () => {},
+    unzipHere: async () => ({ extracted: 0, skipped: [], destination: '' }),
+    uploadFiles: async () => {},
+    dispatchUpload: async () => {},
+    clearUploadError: () => {},
+    deleteEntry: async () => {},
+    moveEntry: async () => {},
+    saveFile: async () => {},
+    reloadTabFromDisk: async () => {},
+    clearChangedOnBranch: () => {},
+    setPendingContent: () => {},
+    acceptPendingContent: async () => {},
+    rejectPendingContent: async () => {},
+    ...overrides,
+  };
+}
 
 const file = (rel: string): FileTreeEntry => ({ name: rel.split('/').pop()!, relativePath: rel, type: 'file' });
 const dir = (rel: string, children: FileTreeEntry[]): FileTreeEntry => ({
@@ -56,7 +107,7 @@ function LocationProbe() {
 }
 
 function renderTree(url: string, over: Partial<WorkspaceContextValue> = {}) {
-  const workspace = makeWorkspaceFixture({ fileTree: TREE, kbDirName: KB, ...over });
+  const workspace = makeWorkspace({ fileTree: TREE, kbDirName: KB, ...over });
   const view = render(
     <MemoryRouter initialEntries={[url]}>
       <WorkspaceContext.Provider value={workspace}>
@@ -195,7 +246,7 @@ describe('SkillsTree', () => {
 
   it('keeps a right-click anywhere in the section from reaching the nav behind it', () => {
     const onNav = vi.fn();
-    const workspace = makeWorkspaceFixture({ fileTree: TREE, kbDirName: KB });
+    const workspace = makeWorkspace({ fileTree: TREE, kbDirName: KB });
     render(
       <MemoryRouter initialEntries={['/skills-and-tools']}>
         <WorkspaceContext.Provider value={workspace}>
@@ -335,7 +386,7 @@ describe('PluginsTree', () => {
     onCreatePlugin?: (parent: string) => void,
     isGroupingFolder?: (rel: string) => boolean,
   ) {
-    const workspace = makeWorkspaceFixture({ fileTree: PLUGINS, kbDirName: KB, ...over });
+    const workspace = makeWorkspace({ fileTree: PLUGINS, kbDirName: KB, ...over });
     return render(
       <MemoryRouter initialEntries={[url]}>
         <WorkspaceContext.Provider value={workspace}>
@@ -508,7 +559,7 @@ describe('The Library trees root at the checkout', () => {
   ]);
 
   function renderBoth(tree: FileTreeEntry | null) {
-    const workspace = makeWorkspaceFixture({ fileTree: tree, kbDirName: KB });
+    const workspace = makeWorkspace({ fileTree: tree, kbDirName: KB });
     return render(
       <MemoryRouter initialEntries={['/skills-and-tools']}>
         <WorkspaceContext.Provider value={workspace}>

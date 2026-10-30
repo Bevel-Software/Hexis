@@ -2,13 +2,10 @@ import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { act, render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import type { ReactNode } from 'react';
-import {
-  WorkspaceContext,
-  type WorkspaceContextValue,
-} from '../../workspace/state/workspace.context';
-import { AdminContext } from '../../admin/state/admin.context';
-import { AuthContext, type AuthContextValue } from '../../auth/state/auth.context';
-import type { ToolSecrets } from '../../secrets-vault/services/tool-secrets.api';
+import { WorkspaceContext, type WorkspaceContextValue } from '../../workspace';
+import { AdminContext } from '../../admin';
+import { AuthContext, type AuthContextValue } from '../../auth';
+import type { ToolSecrets } from '../../secrets-vault';
 import type { ToolManualDetail } from '../services/tools.api';
 
 /**
@@ -27,7 +24,11 @@ const secretsMock = vi.hoisted(() => ({
   deleteAdminVar: vi.fn(),
   setOAuthClientSecret: vi.fn(),
 }));
-vi.mock('../../secrets-vault/services/tool-secrets.api', () => secretsMock);
+vi.mock('../../secrets-vault', async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  ...secretsMock,
+  startToolOAuth: vi.fn(),
+}));
 
 const toolsMock = vi.hoisted(() => ({
   getToolDetail: vi.fn(),
@@ -54,16 +55,11 @@ vi.mock('../state/library-data', () => ({
 }));
 
 const sourceMock = vi.hoisted(() => ({ readFileOnBranch: vi.fn() }));
-vi.mock('../../change-requests/services/change-requests.api', () => sourceMock);
-
-// The deleted check's read of the tool's file.
-const workspaceApiMock = vi.hoisted(() => ({ readFile: vi.fn() }));
-vi.mock('../../workspace/services/workspace.api', async (importOriginal) => ({
+vi.mock('../../change-requests', async (importOriginal) => ({
   ...(await importOriginal<object>()),
-  readFile: workspaceApiMock.readFile,
+  ...sourceMock,
 }));
 
-vi.mock('../../secrets-vault/services/connect.api', () => ({ startToolOAuth: vi.fn() }));
 vi.mock('../utils/navigate-external', () => ({ navigateExternal: vi.fn() }));
 
 import { ToolPage } from '../components/tool-page/ToolPage';
@@ -73,8 +69,8 @@ import { expectTitleKeepsItsInk } from '../../../__tests__/title-ink-room';
 import { PAGE_HEADER_TESTID } from '../../../shared/theme/header';
 import { TOOL_CREDENTIALS_STALE_EVENT } from '../../../core/events';
 import { DEFAULT_BRANCH, type WorkflowEvent } from '@bevel-software/platform-shared';
-import { EventBusContext, type EventBusContextValue } from '../../workflow/state/event-bus.context';
-import { WorkspaceApiError } from '../../workspace/services/workspace.api';
+import { EventBusProvider } from '../../workflow';
+import { stubServerEventStream } from '../../../__tests__/server-event-stream';
 
 const GITHUB: ToolSecrets = {
   slug: 'heyreach',
@@ -188,7 +184,6 @@ beforeEach(() => {
   libraryMock.listSkills.mockReset().mockResolvedValue([]);
   libraryMock.getSkill.mockReset().mockResolvedValue({ allowedTools: [] });
   sourceMock.readFileOnBranch.mockReset().mockResolvedValue(SOURCE);
-  workspaceApiMock.readFile.mockReset().mockResolvedValue(SOURCE);
 });
 
 describe('ToolPage: frame', () => {
@@ -729,28 +724,36 @@ describe('ToolPage: source', () => {
 describe('ToolPage: deleted by someone else', () => {
   const TOOL_FILE = 'knowledge-base/Plugins/GTM/heyreach.tool';
 
-  function makeBus() {
-    const handlers: Record<string, ((e: WorkflowEvent) => void)[]> = {};
-    const bus: EventBusContextValue & { emit(e: WorkflowEvent): void } = {
-      subscribe(kind, handler) {
-        (handlers[kind] ??= []).push(handler as (e: WorkflowEvent) => void);
-        return () => {
-          handlers[kind] = (handlers[kind] ?? []).filter((h) => h !== handler);
-        };
-      },
-      setFocus() {},
-      watchWorkspace: () => () => {},
-      emit(e) {
-        (handlers[e.kind] ?? []).forEach((h) => h(e));
-      },
+  /**
+   * The workspace's file route, which the deleted check reads the tool's file
+   * through: it is there until a test sets `gone`. `reads` holds every
+   * `[workspace, path]` asked for.
+   */
+  const fileRoute = { gone: false, reads: [] as [string, string][] };
+  let realFetch: typeof fetch;
+  beforeEach(() => {
+    fileRoute.gone = false;
+    fileRoute.reads = [];
+    // A plain stand-in, not a `vi.spyOn`: the page's event stream wraps fetch
+    // in turn, and assigning over a spy rewires the spy instead of replacing it.
+    realFetch = globalThis.fetch;
+    globalThis.fetch = async (input, init) => {
+      const file = /^\/api\/workspace\/([^/]+)\/file\?path=([^&]+)/.exec(String(input));
+      if (!file) return realFetch(input, init);
+      fileRoute.reads.push([decodeURIComponent(file[1]), decodeURIComponent(file[2])]);
+      return fileRoute.gone
+        ? new Response('{}', { status: 404 })
+        : new Response(JSON.stringify({ content: SOURCE }), { status: 200 });
     };
-    return bus;
-  }
+  });
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
 
-  function renderWithBus(bus: EventBusContextValue) {
+  function renderWithBus() {
     return render(
       <MemoryRouter initialEntries={['/skills-and-tools/tools/heyreach']}>
-        <EventBusContext.Provider value={bus}>
+        <EventBusProvider>
           {wrap(
             <Routes>
               <Route path="/skills-and-tools/tools/:slug" element={<ToolPage />} />
@@ -758,7 +761,7 @@ describe('ToolPage: deleted by someone else', () => {
             </Routes>,
             false,
           )}
-        </EventBusContext.Provider>
+        </EventBusProvider>
         <LocationProbe />
       </MemoryRouter>,
     );
@@ -777,11 +780,11 @@ describe('ToolPage: deleted by someone else', () => {
   });
 
   it('shows the notice with the file, the branch and who, and Close lands on Skills & Tools', async () => {
-    const bus = makeBus();
-    renderWithBus(bus);
+    const bus = stubServerEventStream();
+    renderWithBus();
     await screen.findByRole('heading', { name: 'heyreach', level: 1 });
 
-    workspaceApiMock.readFile.mockRejectedValue(new WorkspaceApiError(404));
+    fileRoute.gone = true;
     act(() => bus.emit(deleted('Sam Rivera')));
 
     expect(await screen.findByRole('heading', { name: 'This file was deleted' })).toBeInTheDocument();
@@ -789,18 +792,18 @@ describe('ToolPage: deleted by someone else', () => {
       `heyreach.tool was deleted from ${DEFAULT_BRANCH} by Sam Rivera a moment ago.`,
     );
     expect(screen.queryByRole('heading', { name: 'heyreach', level: 1 })).toBeNull();
-    expect(workspaceApiMock.readFile).toHaveBeenCalledWith(encodeURIComponent(DEFAULT_BRANCH), TOOL_FILE);
+    expect(fileRoute.reads).toContainEqual([DEFAULT_BRANCH, TOOL_FILE]);
 
     fireEvent.click(screen.getByRole('button', { name: 'Close' }));
     await waitFor(() => expect(screen.getByLabelText('pathname').textContent).toBe('/skills-and-tools'));
   });
 
   it('names nobody for a pull from the git host', async () => {
-    const bus = makeBus();
-    renderWithBus(bus);
+    const bus = stubServerEventStream();
+    renderWithBus();
     await screen.findByRole('heading', { name: 'heyreach', level: 1 });
 
-    workspaceApiMock.readFile.mockRejectedValue(new WorkspaceApiError(404));
+    fileRoute.gone = true;
     act(() => bus.emit({ ...deleted('Git sync'), byUserId: 'system' } as WorkflowEvent));
 
     expect(await screen.findByRole('heading', { name: 'This file was deleted' })).toBeInTheDocument();

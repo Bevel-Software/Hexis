@@ -20,7 +20,7 @@ vi.mock('../../routing/kb-routes', async (importOriginal) => {
 import { DEFAULT_BRANCH, type WorkingTreeStatus } from '@bevel-software/platform-shared';
 import { FileRoute } from '../FileRoute';
 import { WorkspaceApiError } from '../../services/workspace.api';
-import { GitContext, type GitContextValue } from '../../../git/state/git.context';
+import { GitContext, type GitContextValue } from '../../../git';
 import {
   WorkspaceContext,
   type WorkspaceContextValue,
@@ -28,8 +28,7 @@ import {
   type HydrateResult,
 } from '../../state/workspace.context';
 import { makeWorkspaceFixture } from '../../__tests__/testFixtures';
-import { ReviewContext, type ReviewContextValue } from '../../../review/state/review.context';
-import { AuthContext, type AuthContextValue } from '../../../auth/state/auth.context';
+import { AuthContext, type AuthContextValue } from '../../../auth';
 
 function makeStatus(branch = 'alice/draft'): WorkingTreeStatus {
   return { branch, hasUpstream: true, unmergedFromUpstream: false };
@@ -176,21 +175,6 @@ function renderAt(
       ? { ...ws, workspaceBranch: git.status?.branch ?? null }
       : ws;
   let workspace = onStatusBranch(opts.workspace ?? makeWorkspace());
-  const review: ReviewContextValue = {
-    session: null,
-    selectedPath: null,
-    fileDiff: null,
-    isLoadingDiff: false,
-    lastError: null,
-    isLoading: false,
-    refresh: async () => {},
-    selectPath: async () => {},
-    acceptOne: async () => {},
-    rejectOne: async () => {},
-    acceptAll: async () => {},
-    rejectAll: async () => {},
-    clearError: () => {},
-  };
   const auth: AuthContextValue = {
     user: null,
     token: null,
@@ -204,9 +188,7 @@ function renderAt(
       <AuthContext.Provider value={auth}>
         <WorkspaceContext.Provider value={workspace}>
           <GitContext.Provider value={git}>
-            <ReviewContext.Provider value={review}>
-                {children}
-            </ReviewContext.Provider>
+            {children}
           </GitContext.Provider>
         </WorkspaceContext.Provider>
       </AuthContext.Provider>

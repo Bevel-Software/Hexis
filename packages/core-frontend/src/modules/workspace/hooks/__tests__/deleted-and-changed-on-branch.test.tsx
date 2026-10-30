@@ -30,7 +30,8 @@ const apiMocks = vi.hoisted(() => {
 });
 vi.mock('../../services/workspace.api', () => apiMocks);
 
-import { EventBusContext, type EventBusContextValue } from '../../../workflow/state/event-bus.context';
+import { EventBusProvider } from '../../../workflow';
+import { stubServerEventStream } from '../../../../__tests__/server-event-stream';
 import { useWorkspaceState } from '../useWorkspaceState';
 const WorkspaceApiError = apiMocks.WorkspaceApiError;
 
@@ -47,26 +48,6 @@ function treeOf(paths: string[]) {
     type: 'directory' as const,
     children: paths.map((p) => ({ name: p.split('/').pop()!, relativePath: p, type: 'file' as const })),
   };
-}
-
-function makeFakeBus() {
-  const handlers: Record<string, ((e: WorkflowEvent) => void)[]> = {};
-  const bus: EventBusContextValue & { emit(e: WorkflowEvent): void } = {
-    subscribe(kind, handler) {
-      (handlers[kind] ??= []).push(handler as (e: WorkflowEvent) => void);
-      return () => {
-        handlers[kind] = (handlers[kind] ?? []).filter((h) => h !== handler);
-      };
-    },
-    setFocus() {},
-    watchWorkspace() {
-      return () => {};
-    },
-    emit(e) {
-      (handlers[e.kind] ?? []).forEach((h) => h(e));
-    },
-  };
-  return bus;
 }
 
 function fileChanged(path: string, by: { id: string; name: string } = { id: 'u-sam', name: 'Sam Rivera' }): WorkflowEvent {
@@ -89,14 +70,14 @@ function envelope() {
   return { id: ++eventId, ts: new Date().toISOString() };
 }
 
-let bus: ReturnType<typeof makeFakeBus>;
+let bus: ReturnType<typeof stubServerEventStream>;
 
 async function mountReady() {
   const { result } = renderHook(() => useWorkspaceState(), {
     wrapper: ({ children }: { children: ReactNode }) => (
-      <EventBusContext.Provider value={bus}>
+      <EventBusProvider>
         <ConfirmProvider>{children}</ConfirmProvider>
-      </EventBusContext.Provider>
+      </EventBusProvider>
     ),
   });
   await waitFor(() => expect(result.current.workspaceId).toBe('ws-1'));
@@ -134,7 +115,7 @@ beforeEach(() => {
     ['KB/Dir/a.md', 'a'],
     ['KB/Draft.md', '# Draft\n\nA page to delete.'],
   ]);
-  bus = makeFakeBus();
+  bus = stubServerEventStream();
   apiMocks.getOrCreateWorkspace.mockResolvedValue({
     workspace: { id: 'ws-1', name: 'Workspace', absolutePath: '/tmp/ws-1', createdAt: '2026-10-09T00:00:00.000Z' },
     fileTree: treeOf([...disk.keys()]),
@@ -323,9 +304,9 @@ function mountWithEditor() {
     return tab ? <Editor key={tab.path} path={tab.path} content={tab.content ?? ''} save={hook.current.saveFile} /> : null;
   }
   render(
-    <EventBusContext.Provider value={bus}>
+    <EventBusProvider>
       <ConfirmProvider><Harness /></ConfirmProvider>
-    </EventBusContext.Provider>,
+    </EventBusProvider>,
   );
   return hook;
 }
