@@ -75,13 +75,13 @@ export const TOOL_PREFIX_LINE = "This organisation's knowledge base. Search it b
  * `header` field carries and what the card shows as fixed and not editable;
  * the admin's preamble follows it.
  *
- * A FUNCTION of the layout, because the shared rules name the platform files
- * by the root names a deployment chose (`Skills/`, `Plugins/`), which are
- * deployment settings. The guide's name is not one of them: it is `AGENTS.md`
- * everywhere.
+ * A FUNCTION of the layout and the default branch, because the shared rules
+ * name the platform files by the root names a deployment chose (`Skills/`,
+ * `Plugins/`) and name the branch it reads from, which are deployment
+ * settings. The guide's name is not one of them: it is `AGENTS.md` everywhere.
  */
-export function platformInstructions(layout: KbLayout): string {
-  return `${PLATFORM_HEADER}\n\n${sharedFileRulesSection(layout)}`;
+export function platformInstructions(layout: KbLayout, defaultBranch = ''): string {
+  return `${PLATFORM_HEADER}\n\n${sharedFileRulesSection(layout, defaultBranch)}`;
 }
 
 /**
@@ -95,9 +95,10 @@ export function platformInstructions(layout: KbLayout): string {
  * test is what makes it a ceiling rather than a hope: a shared rule that grew
  * past it fails before it reaches an agent.
  *
- * 14,400 since the shared rules' own cap rose by 400 (the `__tmp__/` ref).
+ * 14,400 since the shared rules' own cap rose by 400 (the `__tmp__/` ref);
+ * 14,700 since it rose by 300 more (the sentence naming the default branch).
  */
-export const INSTRUCTIONS_CAP = 14_400;
+export const INSTRUCTIONS_CAP = 14_700;
 
 /** The one-line marker that replaces everything past the preamble cap. */
 export const PREAMBLE_TRUNCATION_MARKER = `[preamble truncated at ${PREAMBLE_CAP.toLocaleString('en-US')} characters; shorten ${PREAMBLE_FILE}]`;
@@ -139,12 +140,18 @@ export interface ComposedAgentInstructions {
  * caller with no layout in hand (a test, a surface that predates the setting)
  * gets the defaults. The guide's name is not among them: it is `AGENTS.md` on
  * every deployment.
+ *
+ * `defaultBranch` is the branch the shared rules name as the one people read
+ * (`KbContext.defaultBranch`, read when composing). Without one — a caller
+ * with no knowledge base in hand, or a deployment not yet set up — the rules
+ * name no branch.
  */
 export function composeAgentInstructions(
   preamble: string | null,
   layout: KbLayout = DEFAULT_KB_LAYOUT,
+  defaultBranch = '',
 ): ComposedAgentInstructions {
-  const platform = platformInstructions(layout);
+  const platform = platformInstructions(layout, defaultBranch);
   const { text, unterminated } = stripHtmlComments(preamble ?? '');
   const normalized = text.replace(/\r\n?/g, '\n');
   const stripped = normalized.trim();

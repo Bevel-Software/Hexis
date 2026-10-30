@@ -10,15 +10,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { LocalFilesystem } from '@mastra/core/workspace';
 import { DEFAULT_KB_LAYOUT } from '@bevel-software/platform-shared';
 import { testKbContext } from '../../../__tests__/kb-context.js';
-import { NodeFs } from '../../kb-fs/node-fs.js';
-import { AccessControlService } from '../../access/access-control.service.js';
-import { ToolRegistry } from '../../tool-registry/tool-registry.js';
-import { createToolHandlerFactory, type ToolBranchPort } from '../../tool-helpers/tool-handler.js';
-import { ToolError, type ToolContext } from '../../tool-helpers/tool.contract.js';
-import type { ToolAuth } from '../../tool-auth/tool-auth.middleware.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
+import { AccessControlService, createToolHandlerFactory, type ToolBranchPort, WorkflowHooks, readAuthCookie } from '../../../__tests__/tool-wiring.js';
+import { ToolRegistry } from '../../tool-registry/index.js';
+import { ToolError, type ToolContext } from '../../tool-helpers/index.js';
+import type { ToolAuth } from '../../tool-auth/index.js';
+import { READ_ONLY_CODE, type IWriteAccess } from '../../write-access/index.js';
 import { registerWorkspaceTools } from '../workspace.tools.js';
 import { RoutineWritePolicyService } from '../routine-write-policy.js';
-import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
 import { ToolDescriptionNotes } from '../agent-access.gate.js';
 import { SpillStore } from '../spill-store.js';
 import { DocExtractService } from '../file-readers/doc-extract.service.js';
@@ -26,11 +25,9 @@ import { WorkerDocumentExtractor } from '../file-readers/extract-in-worker.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { AgentDownloadStore, DOWNLOAD_TOKEN_REFUSAL } from '../agent-download.store.js';
 import { attachmentDisposition, createAgentDownloadRoutes, createDownloadFetcherIdentifier } from '../agent-download.routes.js';
-import { readAuthCookie } from '../../auth/auth.middleware.js';
 import jwt from 'jsonwebtoken';
 import { buildDownload, DOWNLOAD_PERMISSION_REQUIRED, NOT_FOUND } from '../agent-download.builder.js';
-import { READ_ONLY_CODE, type IWriteAccess } from '../../write-access/write-access.js';
-import { sharedFileRules } from '../../agent-instructions/shared-file-rules.js';
+import { sharedFileRules } from '../../agent-instructions/index.js';
 import { newWorkspaceService } from '../../../__tests__/workspace-service.js';
 
 /**
@@ -141,9 +138,9 @@ async function start(options: StartOptions = {}): Promise<Started> {
     root,
     'https://example.invalid/kb.git',
     testKbContext({ kbDirName: KB }),
-    new NodeFs(),
+    realDisk(),
   );
-  const accessControl = new AccessControlService(workspaceService, KB, new NodeFs());
+  const accessControl = new AccessControlService(workspaceService, KB, realDisk());
   const store = new AgentDownloadStore({
     root: downloadsRoot,
     publicBaseUrl: PUBLIC_BASE,
@@ -783,7 +780,7 @@ describe('credentials, deployments and the read hook', () => {
 
 describe('what agents are told', () => {
   it('describes download beside upload in the shared rule on large and binary content', () => {
-    const rule = sharedFileRules(DEFAULT_KB_LAYOUT).find((r) => r.id === 'upload-route')!;
+    const rule = sharedFileRules(DEFAULT_KB_LAYOUT, '').find((r) => r.id === 'upload-route')!;
     expect(rule.heading).toMatch(/download out/);
     expect(rule.body).toContain('`request_file_upload`');
     expect(rule.body).toContain('`request_file_download`');
