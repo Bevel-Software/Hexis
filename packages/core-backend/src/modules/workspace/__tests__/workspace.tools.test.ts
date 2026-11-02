@@ -10,37 +10,32 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import { slowRipgrep } from '../../../__tests__/slow-ripgrep.js';
 import { LocalFilesystem } from '@mastra/core/workspace';
-import { ToolRegistry } from '../../tool-registry/tool-registry.js';
-import { createToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
-import { ToolError, type ToolContext } from '../../tool-helpers/tool.contract.js';
-import type { ToolAuth } from '../../tool-auth/tool-auth.middleware.js';
+import { GUIDE_FIRST_SENTENCE, ToolRegistry } from '../../tool-registry/index.js';
+import { AccessControlService, WorkflowHooks, createToolHandlerFactory, type AgentOperationContext } from '../../../__tests__/tool-wiring.js';
+import { ToolError, type ToolContext } from '../../tool-helpers/index.js';
+import type { ToolAuth } from '../../tool-auth/index.js';
 import { registerWorkspaceTools } from '../workspace.tools.js';
 import { RipgrepPatternMatcher, type RipgrepPatternMatcherOptions } from '../index.js';
-import { sharedFileRules, sharedFileRulesSection } from '../../agent-instructions/shared-file-rules.js';
-import { composeAgentGuide } from '../../agent-guide/agent-guide.js';
-import { GUIDE_FIRST_SENTENCE } from '../../tool-registry/guide-first.js';
+import { sharedFileRules, sharedFileRulesSection } from '../../agent-instructions/index.js';
+import { composeAgentGuide } from '../../agent-guide/index.js';
 import { RoutineWritePolicyService } from '../routine-write-policy.js';
 import { UuidSessionSink, type ISessionSink } from '../session-sink.js';
 import { FIRST_RUN_SECTION_ID, STARTER_GUIDE_FILE, firstRunNote, type FirstRunStarterSource } from '../first-run.js';
-import { WorkflowHooks, type AgentOperationContext } from '../../workflow/workflow-hooks.js';
 import { SESSION_ID_DESCRIPTION, ToolDescriptionNotes } from '../agent-access.gate.js';
 import { SpillStore } from '../spill-store.js';
 import { DocExtractService } from '../file-readers/doc-extract.service.js';
 import { WorkerDocumentExtractor } from '../file-readers/extract-in-worker.js';
 import { OCTET_STREAM_FALLBACK_NOTE } from '../file-readers/content-mode.js';
-import type { IAccessControl } from '../../access/access-control.interface.js';
-import { AccessControlService } from '../../access/access-control.service.js';
-import { NodeFs } from '../../kb-fs/node-fs.js';
+import type { IAccessControl } from '../../access/index.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
 import type { WorkspaceService } from '../workspace.service.js';
 import { DEFAULT_KB_LAYOUT, isBranchAuthoredBy, isOwnSuggestionsBranch } from '@bevel-software/platform-shared';
-import { normalizeWorkspacePath } from '../../kb-fs/repo-path.js';
+import { normalizeWorkspacePath } from '../../kb-fs/index.js';
 import { GIT_INTERNALS_MESSAGE, PathNotFoundError } from '../../../shared/domain-errors.js';
-import { AccessDeniedError } from '../../access-model/access-errors.js';
+import { AccessDeniedError } from '../../access-model/index.js';
 import { proposalTitleFor } from '../write-denial.js';
 import { NOT_FOUND_NEXT_STEP } from '../not-found.js';
 import { compileCheck, exampleArguments } from '@bevel-software/platform-mcp-core';
-import { routeToolSchemas } from '../../tool-helpers/route-tool-schemas.js';
-import { TOOL_DESCRIPTION_CAP, clientVisibleLength } from '../../tool-registry/description-length.js';
 
 const KB_DIR = 'knowledge-base';
 
@@ -830,10 +825,10 @@ describe('write modes and per-path outcomes', () => {
     // The paragraph that said this in BOTH descriptions is one shared rule now.
     // What stays on the tool is the input the agent fills, which is where the
     // decision is actually taken.
-    const rule = sharedFileRules(testKbContext().layout).find((r) => r.id === 'write-mode')!;
+    const rule = sharedFileRules(testKbContext().layout, testKbContext().defaultBranch).find((r) => r.id === 'write-mode')!;
     expect(rule.body).toContain('DEFAULTS TO `create`');
     expect(rule.body).toContain('On write_file and write_files');
-    expect(sharedFileRulesSection(testKbContext().layout).split(rule.body)).toHaveLength(2);
+    expect(sharedFileRulesSection(testKbContext().layout, testKbContext().defaultBranch).split(rule.body)).toHaveLength(2);
     for (const name of ['write_file', 'write_files']) {
       const def = tools.find((t) => t.name === name)!;
       expect(def.description, name).not.toContain('DEFAULTS TO `create`');
@@ -2094,7 +2089,7 @@ describe('office documents and PDFs', () => {
       // description. Checked on the whole body rather than on a phrase: the
       // drift this PR exists to prevent is a paragraph pasted back onto a
       // tool, and naming only two marker phrases would catch two of eight.
-      for (const rule of sharedFileRules(testKbContext().layout)) {
+      for (const rule of sharedFileRules(testKbContext().layout, testKbContext().defaultBranch)) {
         expect(def!.description, `${name} / ${rule.id}`).not.toContain(rule.body);
       }
       // The two lead-in labels the paragraphs used to arrive under are gone
@@ -2129,30 +2124,12 @@ describe('office documents and PDFs', () => {
       // Narrowed by hand: the assertion above already failed the test if not.
       if (!compiled.checkable) throw new Error(compiled.reason);
       expect(compiled.check(exampleArguments(def.inputs)), def.name).toEqual([]);
-      // And the FLAT schema, which is what the tool's own route checks the
-      // call against: the two must agree, or a call the example produced would
-      // be refused one layer in.
-      const flat = routeToolSchemas(def.name)?.flat;
-      expect(flat, def.name).toBeDefined();
-      const flatCheck = compileCheck(flat);
-      expect(flatCheck.checkable, `${def.name} (flat): ${flatCheck.checkable ? '' : flatCheck.reason}`).toBe(true);
-      if (!flatCheck.checkable) throw new Error(flatCheck.reason);
-      expect(flatCheck.check(exampleArguments(flat)), `${def.name} (flat)`).toEqual([]);
     }
-  });
-
-  it('every description, call example and purpose prefix included, stays inside the cap a client shows', async () => {
-    await start();
-    const tools = await toolRegistry.listInternal();
-    for (const def of tools) {
-      // Measured as a CLIENT receives it: the call line, the purpose prefix at
-      // its own cap (the four knowledge-base tools carry one), and the
-      // description — the three things that ride one tool's entry.
-      const received = clientVisibleLength(def);
-      expect(received, `${def.name} is ${received} characters (cap ${TOOL_DESCRIPTION_CAP})`).toBeLessThanOrEqual(
-        TOOL_DESCRIPTION_CAP,
-      );
-    }
+    // That the FLAT schema each route checks a call against agrees with the
+    // example is the route layer's own property: tool-helpers'
+    // `route-tool-schemas.catalog.test.ts` holds it over the whole catalog.
+    // And that every description stays inside the cap a client shows is the
+    // registry's: `tool-description-length.test.ts`, over the same catalog.
   });
 
   describe('binary capability contract: a text file, a document, an image and a zip', () => {
@@ -2301,10 +2278,10 @@ describe('office documents and PDFs', () => {
   it('says where the images a page uses go — once, in the shared rules', async () => {
     await start();
     const tools = await toolRegistry.listInternal();
-    const rule = sharedFileRules(testKbContext().layout).find((r) => r.id === 'images-in-pages')!;
+    const rule = sharedFileRules(testKbContext().layout, testKbContext().defaultBranch).find((r) => r.id === 'images-in-pages')!;
     expect(rule.body).toContain('`assets/` folder next to the page');
     expect(rule.body).toContain('![Approval screen](./assets/approval-screen.png)');
-    expect(sharedFileRulesSection(testKbContext().layout)).toContain(rule.body);
+    expect(sharedFileRulesSection(testKbContext().layout, testKbContext().defaultBranch)).toContain(rule.body);
     for (const name of ['write_file', 'write_files']) {
       expect(tools.find((t) => t.name === name)!.description, name).not.toContain('`assets/` folder next to the page');
     }
@@ -2425,7 +2402,7 @@ describe('start_session', () => {
     // The default branch's workspace directory, for the tests about the
     // `firstRun` note. Without one the workspace service is a bare stand-in
     // the note's check cannot use, which is what every other test here wants:
-    // the call answers with the id alone.
+    // the call answers with the id and the default branch, never `firstRun`.
     defaultWorkspaceDir?: string,
     // The starter pack the knowledge base was filled from, for the note.
     starterPacks?: FirstRunStarterSource,
@@ -2480,7 +2457,7 @@ describe('start_session', () => {
       undefined,
       undefined /* downloads */,
       starterPacks,
-      new NodeFs(),
+      realDisk(),
     );
     app.use('/api', router);
     server = await new Promise<HttpServer>((r) => {
@@ -2705,7 +2682,7 @@ describe('start_session', () => {
 
     /**
      * The note is a read: it says what the knowledge folder holds. A caller
-     * who may not read the folder gets the id alone, and a pack page the
+     * who may not read the folder gets the id and the default branch alone, and a pack page the
      * caller may not read is judged as anybody's page, so the note never
      * tells them it is still a placeholder.
      */
@@ -2713,7 +2690,7 @@ describe('start_session', () => {
       const closed = { ...allowAll, canRead: async () => false } as unknown as IAccessControl;
       const base = await startSessionApp('external', undefined, wsDir, undefined, closed);
       const res = (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { firstRun?: string };
-      expect(res).toEqual({ sessionId: 'thread-xyz' });
+      expect(res).toEqual({ sessionId: 'thread-xyz', defaultBranch: 'target-company-state' });
     });
 
     it('judges the folder as the caller may see it: a page they may not read leaves the note standing', async () => {
@@ -2746,15 +2723,15 @@ describe('start_session', () => {
       } as unknown as IAccessControl;
       const base = await startSessionApp('external', undefined, wsDir, starter, pageClosed);
       const res = (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { firstRun?: string };
-      expect(res).toEqual({ sessionId: 'thread-xyz' });
+      expect(res).toEqual({ sessionId: 'thread-xyz', defaultBranch: 'target-company-state' });
     });
 
-    it('never costs the session id: a workspace it cannot read answers with the id alone', async () => {
+    it('never costs the session id: a workspace it cannot read answers with the id and the default branch', async () => {
       await rm(wsDir, { recursive: true, force: true });
 
       const res = await startSession();
 
-      expect(res).toEqual({ sessionId: 'thread-xyz' });
+      expect(res).toEqual({ sessionId: 'thread-xyz', defaultBranch: 'target-company-state' });
     });
   });
 });
@@ -3408,10 +3385,12 @@ describe('preflight for moves and deletes', () => {
           writes.push(op.wsPath ?? '');
         });
         expect((await call(base, 'move_file', args)).body).toMatchObject({ moved: true });
-        // `Locked/refs.md` is named (left for want of write access, its links
-        // listed), so the read hook hears of it; the unreadable page and the
-        // transcript are never named, so it never hears of them.
-        expect(reads.sort()).toEqual([KB('Locked/refs.md'), KB('Sales/deal.md'), KB('Sales/index.md')]);
+        // The move's two ends first, as read_file tells it (what moves, and
+        // the folder it lands in); then `Locked/refs.md` is named (left for
+        // want of write access, its links listed), so the read hook hears of
+        // it; the unreadable page and the transcript are never named, so it
+        // never hears of them.
+        expect(reads.sort()).toEqual([KB('Locked/refs.md'), KB('Sales/2026'), KB('Sales/deal.md'), KB('Sales/deal.md'), KB('Sales/index.md')]);
         expect([...new Set(writes)].sort()).toEqual([KB('Sales/2026/deal.md'), KB('Sales/deal.md'), KB('Sales/index.md')]);
       });
 
@@ -4233,7 +4212,7 @@ describe('preflight for moves and deletes', () => {
       expect(d.description).toMatch(/destination must not exist/);
       // What refuses a move, and the dry-run/confirm protocol it shares with the
       // deletes, are shared rules — stated once, in the two shared places.
-      const rules = sharedFileRulesSection(testKbContext().layout);
+      const rules = sharedFileRulesSection(testKbContext().layout, testKbContext().defaultBranch);
       expect(rules).toContain('is a platform file and stays in its folder.');
       expect(rules).toContain('`dryRun: true`');
       expect(rules).toContain('`confirm: true`');
@@ -4261,7 +4240,7 @@ describe('preflight for moves and deletes', () => {
       const d = await def('delete_folder');
       expect(d.description).toContain('a non-empty folder wants `confirm: true`');
       // The protocol itself, and what a platform folder does to it, are shared.
-      const rules = sharedFileRulesSection(testKbContext().layout);
+      const rules = sharedFileRulesSection(testKbContext().layout, testKbContext().defaultBranch);
       expect(rules).toContain('`dryRun: true`');
       // Anyone's: a move asks when it changes who else may open or edit the file too (`holderChanges`).
       expect(rules).toContain("A non-empty folder is deleted, and a move that changes anyone's access runs, only with `confirm: true`");
@@ -4286,7 +4265,7 @@ describe('preflight for moves and deletes', () => {
       expect(stat.description).toContain('shared rules on what these tools never move or delete');
       // The proposal route applies to every tool a permission can refuse, so it
       // is stated once in the shared rules rather than on each of them.
-      expect(sharedFileRulesSection(testKbContext().layout)).toContain('`write-denied`');
+      expect(sharedFileRulesSection(testKbContext().layout, testKbContext().defaultBranch)).toContain('`write-denied`');
       for (const name of ['move_file', 'delete_file', 'delete_folder']) {
         expect((await def(name)).description.startsWith(GUIDE_FIRST_SENTENCE), name).toBe(true);
       }
@@ -4543,8 +4522,8 @@ describe('a write refused for permissions says whether and how to propose it', (
     // stated in the handshake instructions and in the managed guide, and in no
     // description. The refusal ITSELF still spells the steps out — that is what
     // the tests above this one assert.
-    const rule = sharedFileRules(testKbContext().layout).find((r) => r.id === 'refused-for-permissions')!;
-    expect(sharedFileRulesSection(testKbContext().layout)).toContain(rule.body);
+    const rule = sharedFileRules(testKbContext().layout, testKbContext().defaultBranch).find((r) => r.id === 'refused-for-permissions')!;
+    expect(sharedFileRulesSection(testKbContext().layout, testKbContext().defaultBranch)).toContain(rule.body);
     for (const def of tools) {
       expect(def.description ?? '', def.name).not.toContain('If this is refused for permissions');
       expect(def.description ?? '', def.name).not.toContain(rule.body);
@@ -5174,7 +5153,7 @@ describe('a move preview judges the destination as it will be', () => {
           ensureRemotesFetched: async () => undefined,
         } as unknown as WorkspaceService,
         KB_DIR,
-        new NodeFs(),
+        realDisk(),
       );
     return {
       canRead: (w: string, u: string, r: string) => fresh().canRead(w, u, r),
@@ -5280,25 +5259,27 @@ describe('a move preview judges the destination as it will be', () => {
     expect((await call(base, 'move_file', { ...args, confirm: true })).body).toMatchObject({ moved: true });
   });
 
-  it('a source the read hook refuses gets no names, and the move still asks first', async () => {
+  it('a source the read hook refuses is refused as read_file refuses it: no preview, not even that the move would ask', async () => {
     const base = await seeded();
     await fs.writeFile(
       KB('Ops/access.md'),
       rules(`write:\n  - Mover <${MOVER}>\n  - Ops Lead <ops@x.io>\nowner:\n  - Mover <${MOVER}>\n`),
     );
     const args = { src: KB('Sales/deal.md'), dest: KB('Ops/deal.md'), rewriteLinks: false };
-    // The rules let the caller read it; a deployment's read hook does not.
+    // The rules let the caller read it; a deployment's read hook does not. The
+    // hook's refusal is the whole answer: a "this move asks for confirm" would
+    // already say what the comparison found behind the hook.
     hooks.onAgentRead(async (op) => {
       if (op.wsPath === args.src) throw new Error('not for agents');
     });
-
-    const dry = await call(base, 'move_file', { ...args, dryRun: true });
-    expect(dry.body).toMatchObject({ accessChanges: false, allowed: true });
-    expect(dry.body.holderChanges).toBeUndefined();
-    const unconfirmed = await call(base, 'move_file', args);
-    expect(unconfirmed.body).toMatchObject({ confirmationRequired: true, moved: false });
-    expect(JSON.stringify(unconfirmed.body)).not.toContain('ops@x.io');
-    expect(unconfirmed.body.message).not.toContain('holderChanges');
+    const read = await call(base, 'read_file', { path: args.src });
+    expect(read.status).toBeGreaterThanOrEqual(400);
+    for (const body of [{ ...args, dryRun: true }, args, { ...args, confirm: true }]) {
+      const res = await call(base, 'move_file', body);
+      expect(res.status).toBe(read.status);
+      expect(res.body).toEqual(read.body);
+      expect(JSON.stringify(res.body)).not.toContain('ops@x.io');
+    }
     expect(await fs.exists(args.src)).toBe(true);
   });
 

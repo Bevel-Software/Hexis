@@ -1,6 +1,6 @@
 import { Tiktoken } from 'js-tiktoken/lite';
 import o200kBase from 'js-tiktoken/ranks/o200k_base';
-import { GUIDE_TOKEN_ENCODING } from '../modules/agent-guide/guide-budget.js';
+import { GUIDE_TOKEN_ENCODING } from '../modules/agent-guide/index.js';
 
 /**
  * Token counts for the tests that hold agent-facing text to a budget

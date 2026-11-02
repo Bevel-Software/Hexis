@@ -4,4 +4,4 @@
  * layout and free to move. Export what another module needs; nothing more.
  */
 export { addMember, fetchRoles } from './services/roles.api';
-export { AdminContext, useAdmin } from './state/admin.context';
+export { AdminContext, useAdmin, type AdminContextValue } from './state/admin.context';

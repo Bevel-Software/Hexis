@@ -1,24 +1,23 @@
 import express from 'express';
 import { codeModeMetaTools } from '@bevel-software/platform-mcp-core';
 import { testKbContext } from './kb-context.js';
-import { EXTERNAL_KB_MANUAL_NAME } from '../modules/tool-manuals/tool-manuals.contract.js';
-import { ToolRegistry } from '../modules/tool-registry/tool-registry.js';
-import type { UtcpTool } from '../modules/tool-registry/tool.contract.js';
-import { createToolHandlerFactory } from '../modules/tool-helpers/tool-handler.js';
-import type { ToolAuth } from '../modules/tool-auth/tool-auth.middleware.js';
-import { registerWorkspaceTools } from '../modules/workspace/workspace.tools.js';
-import { RipgrepPatternMatcher } from '../modules/workspace/index.js';
-import { registerWorkflowTools } from '../modules/workflow/agent-tools/workflow.tools.js';
-import { registerPluginsTools } from '../modules/plugins/plugins.tools.js';
-import { registerSkillsTools } from '../modules/skills/skills.tools.js';
-import { registerToolManualsTools } from '../modules/tool-manuals/tool-manuals.tools.js';
-import { ToolDescriptionNotes } from '../modules/workspace/agent-access.gate.js';
-import { WorkflowHooks } from '../modules/workflow/workflow-hooks.js';
-import { UuidSessionSink } from '../modules/workspace/session-sink.js';
-import { RoutineWritePolicyService } from '../modules/workspace/routine-write-policy.js';
-import { guideFirstDescription } from '../modules/tool-registry/guide-first.js';
-import { registerAgentGuideTool } from '../modules/agent-guide/agent-guide.tools.js';
-import { agentGuideSections } from '../modules/agent-guide/agent-guide.js';
+import { EXTERNAL_KB_MANUAL_NAME, registerToolManualsTools } from '../modules/tool-manuals/index.js';
+import { ToolRegistry, guideFirstDescription, type UtcpTool } from '../modules/tool-registry/index.js';
+import type { ToolAuth } from '../modules/tool-auth/index.js';
+import { RipgrepPatternMatcher, ToolDescriptionNotes } from '../modules/workspace/index.js';
+import { registerPluginsTools } from '../modules/plugins/index.js';
+import { registerSkillsTools } from '../modules/skills/index.js';
+import { agentGuideSections, registerAgentGuideTool } from '../modules/agent-guide/index.js';
+import {
+  RoutineWritePolicyService,
+  UuidSessionSink,
+  WorkflowHooks,
+  createToolHandlerFactory,
+  registerChangeRequestReadTools,
+  registerEmbedTools,
+  registerWorkflowTools,
+  registerWorkspaceTools,
+} from './tool-wiring.js';
 
 /**
  * The tool catalog Hexis itself registers, built on stand-ins for the tests
@@ -75,7 +74,11 @@ export async function hexisCatalog(
   const kb = testKbContext();
   const gate = { recoveryBotEmail: 'bot@x', hooks: new WorkflowHooks(), notes: new ToolDescriptionNotes() };
 
-  registerWorkspaceTools(
+  // The change-request readers come first, as the root mounts them: they
+  // gate their whole payload on the caller's read access and take the access
+  // service and nothing else.
+  registerChangeRequestReadTools(registry, router, toolAuth, toolHandler, unused(), kb);
+  const workspaceTools = registerWorkspaceTools(
     registry,
     router,
     toolAuth,
@@ -110,6 +113,16 @@ export async function hexisCatalog(
     accessControl: unused(),
     variableStatus: unused(),
     kb,
+  });
+  // `open_page`, on the file tools' router with `read_file`'s own read, as the
+  // root mounts it; its stand-ins answer nothing, since only its def is read.
+  registerEmbedTools(registry, router, toolAuth, toolHandler, {
+    embedService: unused(),
+    kb,
+    readForTool: workspaceTools.readForTool,
+    canBeReached: () => true,
+    appUrlFor: () => '',
+    notes: gate.notes,
   });
   // The guide's own tool, with the platform's sections: the one description
   // that lists the sections is measured with the list it really carries.

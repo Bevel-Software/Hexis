@@ -2,12 +2,9 @@ import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import express from 'express';
 import { afterEach, describe, expect, it } from 'vitest';
-import { ToolRegistry } from '../../tool-registry/tool-registry.js';
-import { GUIDE_FIRST_SENTENCE } from '../../tool-registry/guide-first.js';
-import { TOOL_DESCRIPTION_CAP } from '../../tool-registry/description-length.js';
-import { createToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
-import type { ToolContext } from '../../tool-helpers/tool.contract.js';
-import { toolDef } from '../../tool-helpers/tool-def.js';
+import { GUIDE_FIRST_SENTENCE, TOOL_DESCRIPTION_CAP, ToolRegistry } from '../../tool-registry/index.js';
+import { createToolHandlerFactory } from '../../../__tests__/tool-wiring.js';
+import { toolDef, type ToolContext } from '../../tool-helpers/index.js';
 import { GET_AGENT_GUIDE_TOOL, registerAgentGuideTool } from '../agent-guide.tools.js';
 import { DEFAULT_KB_LAYOUT } from '@bevel-software/platform-shared';
 import {

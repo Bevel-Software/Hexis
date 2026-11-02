@@ -9,7 +9,7 @@ import {
   platformInstructions,
   prefixToolDescription,
 } from '../../agent-instructions/index.js';
-import { EXTERNAL_KB_MANUAL_NAME } from '../../tool-manuals/tool-manuals.contract.js';
+import { EXTERNAL_KB_MANUAL_NAME } from '../../tool-manuals/index.js';
 import { CORE_SECTION_IDS, START_HERE_SECTION_ID, agentGuideSections, joinGuideSections } from '../agent-guide.js';
 import {
   INSTRUCTIONS_TOKEN_BUDGET,

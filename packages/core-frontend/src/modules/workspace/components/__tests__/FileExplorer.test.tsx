@@ -13,10 +13,10 @@ import {
   type WorkspaceContextValue,
 } from '../../state/workspace.context';
 import { makeWorkspaceFixture } from '../../__tests__/testFixtures';
-import { GitContext, type GitContextValue } from '../../../git/state/git.context';
-import { AuthContext, type AuthContextValue } from '../../../auth/state/auth.context';
+import { GitContext, type GitContextValue } from '../../../git';
+import { AuthContext, type AuthContextValue } from '../../../auth';
 import { OpenChangeRequestsContext } from '../../state/open-change-requests.context';
-import { AdminContext, type AdminContextValue } from '../../../admin/state/admin.context';
+import { AdminContext, type AdminContextValue } from '../../../admin';
 import { PR_STALE_EVENT } from '../../../../core/events';
 import { EventBusProvider } from '../../../workflow';
 import type { WorkflowEvent } from '@bevel-software/platform-shared';
@@ -44,10 +44,14 @@ const cancelMocks = vi.hoisted(() => ({
   cancelPullRequest: vi.fn(),
   deleteChangeRequest: vi.fn(),
 }));
-vi.mock('../../../pr/services/pr-cancel.api', () => cancelMocks);
+vi.mock('../../../pr', async (importOriginal) => ({ ...(await importOriginal<typeof import('../../../pr')>()), ...cancelMocks }));
 
 // The sheet itself is covered by the access module's own tests; here only
 // WHICH workspace and proposal the tree hands it matters.
+// A component is composed by importing its file, never through a module's
+// index (the Module Map's one allowance for React components), so the
+// component's file is the surface the tree reaches it through, and the one a
+// mock stands in for.
 vi.mock('../../../access/components/ManageAccessDialog', () => ({
   ManageAccessDialog: (props: {
     entry: FileTreeEntry;

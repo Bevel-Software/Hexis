@@ -27,6 +27,9 @@ draft or a change request does), update that text in the same pull request.
   each thing once.
 - A section that needs more room raises its budget in `guide-budget.ts`, with
   the reason in the pull request.
+- Bevel's team: before changing any of this text, run the agent-guide
+  benchmark (private, in `bevel-platform` at `evals/agent-guide/`) with the
+  change against its base, and say in the pull request what it found.
 
 Prose in the guide follows the house style: plain, short sentences, no em
 dashes.

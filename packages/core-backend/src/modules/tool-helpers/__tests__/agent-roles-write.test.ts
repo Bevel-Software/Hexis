@@ -4,20 +4,26 @@ import os from 'node:os';
 import path from 'node:path';
 import express from 'express';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { ToolRegistry } from '../../tool-registry/tool-registry.js';
-import { InternalTokenService } from '../../tool-auth/internal-token.service.js';
-import { createToolAuthMiddleware } from '../../tool-auth/tool-auth.middleware.js';
+import { ToolRegistry } from '../../tool-registry/index.js';
+import {
+  InternalTokenService,
+  RoutineWritePolicyService,
+  WorkflowHooks,
+  createToolAuthMiddleware,
+  loadActiveGroups,
+  registerWorkspaceTools,
+} from '../../../__tests__/tool-wiring.js';
 import { createToolContextResolver } from '../tool-context.js';
 import { createToolHandlerFactory } from '../tool-handler.js';
-import { registerWorkspaceTools } from '../../workspace/workspace.tools.js';
-import { RoutineWritePolicyService } from '../../workspace/routine-write-policy.js';
-import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
-import { ToolDescriptionNotes } from '../../workspace/agent-access.gate.js';
-import { SpillStore } from '../../workspace/spill-store.js';
-import { DocExtractService, WorkerDocumentExtractor } from '../../workspace/index.js';
-import { NEW_ROLE_GUIDANCE } from '../../access-model/roles-yaml-guard.js';
-import { loadActiveGroups } from '../../access/access-control.service.js';
+import { DocExtractService, SpillStore, ToolDescriptionNotes, WorkerDocumentExtractor } from '../../workspace/index.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
+
+/**
+ * The sentence a refused role creation carries to the agent, as the agent
+ * guide states it too: asserted as the words a person reads, not as the
+ * module's constant, so a reworded refusal is a visible change here.
+ */
+const NEW_ROLE_GUIDANCE = 'add people to existing roles, and use a GROUP for a task- or team-scoped set of people';
 
 /**
  * The agent's file tools over the production context resolver and a real

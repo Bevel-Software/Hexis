@@ -3,8 +3,8 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 
-import { NodeFs } from '../../kb-fs/node-fs.js';
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
+import type { WorkspaceService } from '../../workspace/index.js';
 import { AccessControlService } from '../access-control.service.js';
 
 /**
@@ -46,7 +46,7 @@ describe('AccessControlService.prospectiveHolderChanges', () => {
         ensureRemotesFetched: async () => undefined,
       } as unknown as WorkspaceService,
       KB_DIR,
-      new NodeFs(),
+      realDisk(),
     );
 
   /** Everyone reads; Support and Operations each edit their own folder. */

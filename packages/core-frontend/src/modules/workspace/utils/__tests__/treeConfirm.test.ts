@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { DEFAULT_KB_LAYOUT, configureKbLayout } from '@bevel-software/platform-shared';
-import type { AccessPrincipalRef, HolderChangeRef, HolderChanges } from '../../../access/api';
+import type { AccessPrincipalRef, HolderChangeRef, HolderChanges } from '../../../access';
 import type { FileTreeEntry } from '@bevel-software/platform-shared';
 import {
   accessChangeLines,

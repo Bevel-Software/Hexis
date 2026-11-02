@@ -12,16 +12,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createMcpRoutes } from '../mcp.routes.js';
 import { McpService } from '../mcp.service.js';
-import { SpillStore } from '../../workspace/spill-store.js';
-import { createManualRoutes } from '../../tool-registry/manual.routes.js';
-import { ToolRegistry } from '../../tool-registry/tool-registry.js';
-import { toolDef } from '../../tool-helpers/tool-def.js';
+import { SpillStore } from '../../workspace/index.js';
+import { ToolRegistry, createManualRoutes } from '../../tool-registry/index.js';
+import { toolDef } from '../../tool-helpers/index.js';
 import { DEFAULT_KB_LAYOUT } from '@bevel-software/platform-shared';
 import { platformInstructions } from '../../agent-instructions/index.js';
 import { startFakeDownstreamMcpServer, type FakeDownstreamMcpServer } from './fake-downstream-mcp-server.js';
-import { registerBevelSecretsVariableLoader } from '../../secrets-vault/secrets-variable-loader.js';
-import type { ForcedRefreshOutcome, ISecretsVaultService } from '../../secrets-vault/secrets-vault.contract.js';
-import type { IToolManualService } from '../../tool-manuals/tool-manuals.contract.js';
+import { registerBevelSecretsVariableLoader } from '../../secrets-vault/index.js';
+import type { ForcedRefreshOutcome, ISecretsVaultService } from '../../secrets-vault/index.js';
+import type { IToolManualService } from '../../tool-manuals/index.js';
 import { setLogger } from '../../../shared/logging.js';
 import type { ILogger } from '../../../shared/logger.contract.js';
 import { formatProbeReport, probeFirstCall } from '../first-call-probe.js';
@@ -117,6 +116,8 @@ interface PlatformOptions {
   /** Bind this port — how a "restarted" platform comes back at the same address. */
   port?: number;
   readAgentPreamble?: () => Promise<string | null>;
+  /** The default branch the instructions name, read per request as the composition root wires it. */
+  defaultBranch?: () => string;
   /** Extra manuals the catalog serves each caller (beyond the KB manual). */
   manualsFor?: (bearer: string) => unknown[];
   poolNow?: () => number;
@@ -185,6 +186,7 @@ async function startPlatform(opts: PlatformOptions = {}): Promise<Platform> {
     spillStore: new SpillStore(join(tmpdir(), 'bevel-test-spills')),
     publicFrontendUrl: 'http://localhost:5173',
     readAgentPreamble: opts.readAgentPreamble,
+    defaultBranch: opts.defaultBranch,
     downstreamPool: opts.poolNow ? { now: opts.poolNow } : undefined,
   }, opts.secretsVault, opts.toolManuals);
   const stub = {} as never;
@@ -487,11 +489,28 @@ describe('agent instructions over the real transport', () => {
   it('the initialize result carries the platform text and the preamble body inline', async () => {
     const { baseUrl } = await startPlatform({
       readAgentPreamble: async () => 'Acme builds solar farms.\n\n<!-- private -->Look in Projects/ first.',
+      defaultBranch: () => 'target-company-state',
     });
     const { client } = await connectSdkClient(baseUrl);
     const instructions = client.getInstructions();
-    expect(instructions).toBe(`${platformInstructions(DEFAULT_KB_LAYOUT)}\n\nAcme builds solar farms.\n\nLook in Projects/ first.`);
+    expect(instructions).toBe(
+      `${platformInstructions(DEFAULT_KB_LAYOUT, 'target-company-state')}\n\nAcme builds solar farms.\n\nLook in Projects/ first.`,
+    );
     expect(instructions).not.toContain('private');
+    // The deployment's default branch, by its own name — not `main`.
+    expect(instructions).toContain("This knowledge base's default branch is `target-company-state`");
+  });
+
+  it('a default branch renamed between two initializes is the one the second names', async () => {
+    let branch = 'target-company-state';
+    const { baseUrl } = await startPlatform({ defaultBranch: () => branch });
+    const { client: before } = await connectSdkClient(baseUrl);
+    branch = 'company-state';
+    const { client: after } = await connectSdkClient(baseUrl);
+    expect(after.getInstructions()).toContain("This knowledge base's default branch is `company-state`");
+    expect(after.getInstructions()).not.toContain('target-company-state');
+    // Nothing else moved: the text is the old one with the name swapped.
+    expect(after.getInstructions()).toBe(before.getInstructions()!.replaceAll('target-company-state', 'company-state'));
   });
 
   it('a later initialize on the SAME process after the file changed carries the new text — read per request', async () => {

@@ -8,5 +8,5 @@ export { createAccount, deactivateAccount, deleteAccount, getAccountReferences, 
 export type { AccountReferences, AccountSummary } from './services/account.api';
 export { takePostLoginRedirect } from './services/sso';
 export type { LoginProviders } from './services/sso';
-export { AuthContext, useAuth } from './state/auth.context';
+export { AuthContext, useAuth, type AuthContextValue } from './state/auth.context';
 export { useSignInMethods } from './state/use-sign-in-methods';

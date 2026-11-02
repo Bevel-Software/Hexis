@@ -1146,7 +1146,8 @@ export function registerWorkspaceTools(
   /**
    * The one tree walk (see `shared/fs.contract.ts`), for the `firstRun`
    * note's look at the knowledge folder. Optional for the harnesses about the
-   * file primitives; without it `start_session` answers the id alone.
+   * file primitives; without it `start_session` answers
+   * `{ sessionId, defaultBranch }` and never `firstRun`.
    */
   disk?: ITreeWalker,
   /**
@@ -2019,18 +2020,21 @@ export function registerWorkspaceTools(
   const startSessionDef = toolDef({
     name: 'start_session',
     description:
-      'Mint this conversation\'s id: the `sessionId` KnowledgeBase tools take. Call this ONCE, at the start of your work — minting a new id mid-run starts a second conversation as far as the server is concerned. Pass the returned id as `sessionId` to every tool whose arguments list it, inside `call_tool_chain` too; the others refuse it. Where the deployment offers an `ask` tool, hand it the SAME id: your reads and your questions are then one conversation. RETRYING IS SAFE: a call that fails created nothing, so retry it. If a retry lands after a success you hold two independent ids, which is harmless: keep passing the one you already used and ignore the other. Returns `{ sessionId }`, plus `firstRun` while the knowledge base is still empty: a note to act on.',
+      'Mint this conversation\'s id: the `sessionId` KnowledgeBase tools take. Call this ONCE, at the start of your work — minting a new id mid-run starts a second conversation as far as the server is concerned. Pass the returned id as `sessionId` to every tool whose arguments list it, inside `call_tool_chain` too; the others refuse it. Where the deployment offers an `ask` tool, hand it the SAME id: your reads and your questions are then one conversation. RETRYING IS SAFE: a call that fails created nothing, so retry it. If a retry lands after a success you hold two independent ids, which is harmless: keep passing the one you already used and ignore the other. Returns `{ sessionId, defaultBranch }`, plus `firstRun` while the knowledge base is empty: a note to act on.',
     path: '/api/agent/tools/start_session',
     inputs: { type: 'object', properties: {}, additionalProperties: false },
     outputs: {
       type: 'object',
       properties: {
         sessionId: str('The minted session id — pass it as `sessionId` to the tools that take one, and to `ask` where there is one.'),
+        defaultBranch: str(
+          "The deployment's default branch: the branch people read, and the one to pass as `branch` unless you are working on a draft.",
+        ),
         firstRun: str(
           `Present only while the knowledge base holds nothing but its starter guide (and a starter pack's untouched pages): what to offer the person (the guide's \`${FIRST_RUN_SECTION_ID}\` section says how).`,
         ),
       },
-      required: ['sessionId'],
+      required: ['sessionId', 'defaultBranch'],
     },
     tags: ['workspace'],
   });
@@ -2049,8 +2053,11 @@ export function registerWorkspaceTools(
     requireExternalSource,
     toolHandler(async (_args, ctx) => {
       const { sessionId } = await sessionSink.createSession(ctx.user.id, new Date());
+      // Read here, not at registration: the setup save applies a branch model
+      // to the running graph, and the name in effect is the one to give.
+      const defaultBranch = kb.defaultBranch;
       const firstRun = await firstRunFor(ctx);
-      return firstRun ? { sessionId, firstRun } : { sessionId };
+      return firstRun ? { sessionId, defaultBranch, firstRun } : { sessionId, defaultBranch };
     }),
   );
 
@@ -3566,10 +3573,15 @@ export function registerWorkspaceTools(
       // preview reads both ends (the caller's own verdicts there, who else is
       // affected), and the folder's rules are what the names are made of. The
       // verdict comes BEFORE every other look, so neither end's existence is
-      // told to someone who may not know it. A folder the caller may read moves
-      // with everything in it, files they may not read included: those travel,
-      // they are not read.
+      // told to someone who may not know it. The deployment's read hook is
+      // asked first, as read_file asks it, and its refusal is the answer: a
+      // move the hook would not let read is not previewed at all, since even
+      // "this move asks for confirm" would tell what the comparison found. A
+      // folder the caller may read moves with everything in it, files they
+      // may not read included: those travel, they are not read.
       const destFolder = dest.slice(0, dest.lastIndexOf('/'));
+      await notifyAgentRead(agentAccessGate, ctx, branch, src);
+      await notifyAgentRead(agentAccessGate, ctx, branch, destFolder);
       const gate = readGateFor(branch, ctx);
       await assertCanRead(gate, src);
       await assertCanRead(gate, destFolder);
@@ -3597,26 +3609,16 @@ export function registerWorkspaceTools(
       ]);
       const accessChanges = verbsDiffer(before, after);
       // Who ELSE gains or loses opening or editing it: the lists the app's move
-      // confirmation shows people. The access rules let the caller read both
-      // ends (gated above, as the app's route gates), so the names go to them —
-      // past the deployment's read hook on both ends, which may still refuse
-      // an agent what the rules allow; a change asks for `confirm` either way.
-      // Outside the repository no rules travel.
+      // confirmation shows people. The caller may read both ends (the hook and
+      // the rules, gated above, as the app's route gates), so the names go to
+      // them, and a change asks for `confirm`. Outside the repository no rules
+      // travel.
       const fromRel = toKbRelative(src, kbDirName);
       const toRel = toKbRelative(dest, kbDirName);
       const changes = fromRel !== null && toRel !== null
         ? await accessControl.prospectiveHolderChanges(workspaceIdForBranch(branch), fromRel, toRel)
         : undefined;
       const othersChange = changes !== undefined && (changes.lose.length > 0 || changes.gain.length > 0);
-      const namesOthers = othersChange && await (async () => {
-        try {
-          await notifyAgentRead(agentAccessGate, ctx, branch, src);
-          await notifyAgentRead(agentAccessGate, ctx, branch, destFolder);
-          return true;
-        } catch {
-          return false;
-        }
-      })();
       // The placeholder moves with its folder, but it is never content.
       const descendants = srcFiles.filter((f) => !isFolderPlaceholder(f)).length;
       // Neither end may be the platform's own: a move neither takes a platform
@@ -3724,7 +3726,7 @@ export function registerWorkspaceTools(
         descendants,
         access: { before, after },
         accessChanges,
-        ...(namesOthers ? { holderChanges: changes } : {}),
+        ...(othersChange ? { holderChanges: changes } : {}),
         allowed: moveReason === undefined,
         ...(moveReason !== undefined ? { reason: moveReason } : {}),
         ...(linkPlan ? { links: linkPlan.report } : {}),
@@ -3743,7 +3745,7 @@ export function registerWorkspaceTools(
       if ((accessChanges || othersChange) && a.confirm !== true) {
         const why = [
           ...(accessChanges ? [`your access at "${dest}" differs from "${src}"`] : []),
-          ...(othersChange ? [`it changes who else may open or edit it${namesOthers ? ' (`holderChanges`)' : ''}`] : []),
+          ...(othersChange ? ['it changes who else may open or edit it (`holderChanges`)'] : []),
         ];
         return {
           ...impact,

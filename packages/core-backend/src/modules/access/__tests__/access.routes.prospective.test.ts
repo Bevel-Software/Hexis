@@ -4,14 +4,13 @@ import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 
 import type { HolderChanges, IAccessControl, ProspectiveHolders } from '../access-control.interface.js';
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import type { AuthService } from '../../auth/auth.service.js';
-import type { WorkflowService } from '../../workflow/workflow.service.js';
-import type { WorkflowEventBus } from '../../workflow/event-bus.js';
-import type { Database } from '../../database/connection.js';
+import type { WorkspaceService } from '../../workspace/index.js';
+import type { AuthService } from '../../auth/index.js';
+import type { WorkflowEventBus, WorkflowService } from '../../workflow/index.js';
+import type { Database } from '../../database/index.js';
 import { createAccessRoutes } from '../access.routes.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
-import { NodeFs } from '../../kb-fs/node-fs.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
 
 /**
  * HTTP contract for `GET /access/prospective` — what the move confirmation
@@ -81,7 +80,7 @@ async function makeHarness(opts: { canRead?: boolean; readable?: (path: string) 
       { emit: vi.fn() } as unknown as WorkflowEventBus,
       {} as unknown as Database,
       testKbContext({ kbDirName: KB }),
-      new NodeFs(),
+      realDisk(),
     ),
   );
 

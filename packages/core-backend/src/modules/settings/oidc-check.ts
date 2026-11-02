@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import { isStandardTokenErrorCode } from '../../shared/oauth-token-error.js';
 
 /** The single sign-on configuration a deployment would sign people in with. */
 export interface OidcConfiguration {
@@ -54,21 +55,6 @@ const REQUEST_TIMEOUT_MS = 10_000;
  * for a bad authorization code, and the one every mainstream provider sends.
  */
 const CODE_REJECTIONS: readonly string[] = ['invalid_grant'];
-
-/**
- * The other error codes RFC 6749 §5.2 (and OIDC Core §3.1.2.6) define — the
- * only ones echoed back in an "unverified" message. Anything else in `error`
- * is text of the provider's choosing, and could be the secret reflected back.
- */
-const ECHOED_ERRORS: readonly string[] = [
-  'invalid_request',
-  'unauthorized_client',
-  'unsupported_grant_type',
-  'invalid_scope',
-  'access_denied',
-  'server_error',
-  'temporarily_unavailable',
-];
 
 /** The issuer as the provider appends `/.well-known/...` to it: no trailing slash. */
 export function normalizeIssuerUrl(issuerUrl: string): string {
@@ -219,9 +205,10 @@ export async function checkOidcConfiguration(
     };
   }
   if (CODE_REJECTIONS.includes(errorCode)) return { outcome: 'verified' };
-  // Only a standard error code is echoed — anything else could be text of the
-  // provider's choosing, the secret included.
-  const code = ECHOED_ERRORS.includes(errorCode) ? ` (${errorCode})` : ` (HTTP ${status})`;
+  // Only a standard error code is echoed (the one list the vault reads a
+  // refusal by too) — anything else could be text of the provider's choosing,
+  // the secret included.
+  const code = isStandardTokenErrorCode(errorCode) ? ` (${errorCode})` : ` (HTTP ${status})`;
   return {
     outcome: 'unverified',
     error: `The application ID and secret could not be verified — the provider gave an answer that does not say whether they are right${code}.`,
