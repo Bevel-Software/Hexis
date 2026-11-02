@@ -119,20 +119,15 @@ export function registerToolManualsTools(
     // hidden tool's entry CONTAINS is on the field below rather than here.
     description:
       'Configuration status of every `.tool` the current user can access: what each needs set up and what is ' +
-      'configured, as `{ tools, invalid, onBranchOnly, note? }`. Scoped to the CALLER: a `.tool` it cannot ' +
-      'READ is absent, and a `user` variable\'s flags are the caller\'s own. An `admin` variable with `oauth` is a ' +
-      'WORKSPACE connection (a managed connector an owner connected once for everyone): its `authorized` is that ' +
-      'connection\'s, and only a writer of the tool can make or remake it. ' +
-      'Secret VALUES are never returned and can never be set through a tool: an admin enters them in the tool ' +
-      'editor; users sign in on /connect. ' +
-      'Setting a tool\'s shared secrets is gated by `canWrite` on the `.tool` FILE (its frontmatter ' +
-      '`write:`/`owner:` verbs and the access.md chain), NOT by a platform role: who manages the file configures ' +
-      'the tool. ' +
-      '`hiddenTools` names the tools Hexis hides from agents for an invalid schema. ' +
-      'The listing is the RELEASED catalog, built from the default branch only: a server or `.tool` you declared on a ' +
-      'draft is not listed, callable or signed-in-able until it is merged. Pass `branch` (the draft you wrote the ' +
-      'declaration on) and `onBranchOnly` names every tool declared there that the default branch does not serve ' +
-      'yet — open a change request and ask the user to merge it.',
+      'configured, as `{ tools, invalid, onBranchOnly, note? }`. Scoped to the CALLER: a `.tool` it cannot READ is ' +
+      "absent, and a `user` variable's flags are the caller's own. An `admin` variable with `oauth` is a WORKSPACE " +
+      "connection: `authorized` is the owner's connection, which only a writer of the tool can make or remake. " +
+      'Secret VALUES are never returned or set through a tool: an admin enters them in the tool editor; users sign ' +
+      'in on /connect. Setting shared secrets is gated by `canWrite` on the `.tool` FILE (its frontmatter verbs and ' +
+      'the access.md chain), not by a platform role. `hiddenTools` names the tools Hexis hides for an invalid ' +
+      'schema. The listing is the RELEASED catalog (default branch only): a server or `.tool` declared on a draft is ' +
+      'not listed, callable or signed-in-able until merged. Pass `branch` and `onBranchOnly` names every tool ' +
+      'declared there that the default branch does not serve yet — open a change request and ask the user to merge it.',
     path: '/api/agent/tools/list_tool_setup',
     inputs: {
       type: 'object',
