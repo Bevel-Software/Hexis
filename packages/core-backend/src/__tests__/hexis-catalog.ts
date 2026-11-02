@@ -13,6 +13,8 @@ import {
   UuidSessionSink,
   WorkflowHooks,
   createToolHandlerFactory,
+  registerChangeRequestReadTools,
+  registerEmbedTools,
   registerWorkflowTools,
   registerWorkspaceTools,
 } from './tool-wiring.js';
@@ -72,7 +74,11 @@ export async function hexisCatalog(
   const kb = testKbContext();
   const gate = { recoveryBotEmail: 'bot@x', hooks: new WorkflowHooks(), notes: new ToolDescriptionNotes() };
 
-  registerWorkspaceTools(
+  // The change-request readers come first, as the root mounts them: they
+  // gate their whole payload on the caller's read access and take the access
+  // service and nothing else.
+  registerChangeRequestReadTools(registry, router, toolAuth, toolHandler, unused(), kb);
+  const workspaceTools = registerWorkspaceTools(
     registry,
     router,
     toolAuth,
@@ -107,6 +113,16 @@ export async function hexisCatalog(
     accessControl: unused(),
     variableStatus: unused(),
     kb,
+  });
+  // `open_page`, on the file tools' router with `read_file`'s own read, as the
+  // root mounts it; its stand-ins answer nothing, since only its def is read.
+  registerEmbedTools(registry, router, toolAuth, toolHandler, {
+    embedService: unused(),
+    kb,
+    readForTool: workspaceTools.readForTool,
+    canBeReached: () => true,
+    appUrlFor: () => '',
+    notes: gate.notes,
   });
   // The guide's own tool, with the platform's sections: the one description
   // that lists the sections is measured with the list it really carries.

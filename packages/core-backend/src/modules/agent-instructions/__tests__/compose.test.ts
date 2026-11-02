@@ -22,7 +22,7 @@ import {
  * The rules themselves are pinned in `shared-file-rules.test.ts`; here they are
  * only the fixed text the preamble follows.
  */
-const PLATFORM = platformInstructions(DEFAULT_KB_LAYOUT);
+const PLATFORM = platformInstructions(DEFAULT_KB_LAYOUT, '');
 
 describe('composeAgentInstructions: the handshake text', () => {
   it('opens with the one line that sends the agent to the guide, then the header, with or without a preamble', () => {

@@ -9,6 +9,7 @@ import { secrets } from '../database/index.js';
 import { TokenCrypto } from '../../shared/token-crypto.js';
 import { assertSafeFetchUrl } from '../../shared/ssrf.js';
 import { readCapped } from '../../shared/read-capped.js';
+import { standardTokenErrorCode } from '../../shared/oauth-token-error.js';
 import {
   type ISecretsVaultService,
   type SecretSummary,
@@ -52,17 +53,19 @@ const HINT_REQUEST =
 const HINT_PROVIDER = 'The provider could not serve the token request. Try again later.';
 
 /**
- * The error codes a refusing token endpoint may answer that Hexis KNOWS,
- * each with its sentence: the OAuth ones (RFC 6749 §5.2) in `error`, and the
- * ones HubSpot's token endpoint answers in its `status` field. A finite list,
- * on purpose: a code is taken only when it is one of these, exactly, so no
- * other string a provider puts in that field — a secret, a secret with a
- * suffix, free text — can reach a message. Nothing else of the body is ever
- * taken: no description, no message, no first line. That is why a message
- * built here needs no scrubbing, cutting or decoding, and why every spelling
- * a secret could reach a log in (escaped, encoded, cut) stays inexpressible.
+ * Hexis's sentence for each error code a refusing token endpoint may answer:
+ * the standard ones (`shared/oauth-token-error.ts` is the one list of those,
+ * read here and by the OIDC configuration check) in `error`, and the ones
+ * HubSpot's token endpoint answers in its `status` field. Only a code from
+ * those lists is ever taken, exactly, so no other string a provider puts in a
+ * field — a secret, a secret with a suffix, free text — can reach a message.
+ * Nothing else of the body is ever taken: no description, no message, no first
+ * line. That is why a message built here needs no scrubbing, cutting or
+ * decoding, and why every spelling a secret could reach a log in (escaped,
+ * encoded, cut) stays inexpressible. A standard code without a sentence here
+ * (`access_denied`) is named and left unexplained.
  */
-const TOKEN_ERROR_CODES: ReadonlyMap<string, string> = new Map([
+const TOKEN_ERROR_HINTS: ReadonlyMap<string, string> = new Map([
   ['invalid_request', HINT_REQUEST],
   ['invalid_client', HINT_CLIENT],
   ['invalid_grant', HINT_GRANT],
@@ -77,13 +80,18 @@ const TOKEN_ERROR_CODES: ReadonlyMap<string, string> = new Map([
   ['BAD_REDIRECT_URI', HINT_GRANT],
 ]);
 
+/** The codes HubSpot's token endpoint answers in `status` instead of a standard `error`. */
+const HUBSPOT_STATUS_CODES: ReadonlySet<string> = new Set(['BAD_CLIENT_ID', 'BAD_CLIENT_SECRET', 'BAD_AUTH_CODE', 'BAD_REDIRECT_URI']);
+
 /**
- * The known error code a refusing token endpoint answered, or null: `error`
- * (RFC 6749 §5.2) or a provider's own `status`, when it is exactly one of
- * {@link TOKEN_ERROR_CODES}. Without even the code, a bare "HTTP 400" cannot
- * tell a client the provider does not accept from a refused grant.
+ * The known error code a refusing token endpoint answered, or null: a standard
+ * `error` (RFC 6749 §5.2), else HubSpot's own `status`, when it is exactly one
+ * of the codes known. Without even the code, a bare "HTTP 400" cannot tell a
+ * client the provider does not accept from a refused grant.
  */
 export function tokenEndpointErrorCode(bodyText: string): string | null {
+  const standard = standardTokenErrorCode(bodyText);
+  if (standard !== null) return standard;
   let json: unknown;
   try {
     json = JSON.parse(bodyText);
@@ -91,15 +99,14 @@ export function tokenEndpointErrorCode(bodyText: string): string | null {
     return null;
   }
   if (!json || typeof json !== 'object' || Array.isArray(json)) return null;
-  const record = json as Record<string, unknown>;
-  const code = [record.error, record.status].find((v): v is string => typeof v === 'string');
-  return code !== undefined && TOKEN_ERROR_CODES.has(code) ? code : null;
+  const { status } = json as Record<string, unknown>;
+  return typeof status === 'string' && HUBSPOT_STATUS_CODES.has(status) ? status : null;
 }
 
 /** The refusal in one message: the status, the known code when there is one, and Hexis's sentence for it. */
 export function describeTokenEndpointRefusal(status: number, code: string | null): string {
   const base = `Token endpoint returned HTTP ${status}`;
-  const hint = code === null ? undefined : TOKEN_ERROR_CODES.get(code);
+  const hint = code === null ? undefined : TOKEN_ERROR_HINTS.get(code);
   return hint ? `${base} (${code}). ${hint}` : base;
 }
 

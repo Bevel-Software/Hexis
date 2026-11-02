@@ -1146,7 +1146,8 @@ export function registerWorkspaceTools(
   /**
    * The one tree walk (see `shared/fs.contract.ts`), for the `firstRun`
    * note's look at the knowledge folder. Optional for the harnesses about the
-   * file primitives; without it `start_session` answers the id alone.
+   * file primitives; without it `start_session` answers
+   * `{ sessionId, defaultBranch }` and never `firstRun`.
    */
   disk?: ITreeWalker,
   /**
@@ -2019,13 +2020,16 @@ export function registerWorkspaceTools(
   const startSessionDef = toolDef({
     name: 'start_session',
     description:
-      'Mint this conversation\'s id: the `sessionId` KnowledgeBase tools take. Call this ONCE, at the start of your work — minting a new id mid-run starts a second conversation. Pass the returned id as `sessionId` to every tool whose arguments list it, inside `call_tool_chain` too; the others refuse it. Where there is an `ask` tool, hand it the SAME id: reads and questions are then one conversation. RETRYING IS SAFE: a call that fails created nothing, so retry it. If a retry lands after a success you hold two ids, which is harmless: keep the one you already used. Returns `{ sessionId, connectedAs }`: `connectedAs` is the agent this connection was made as (`{ path, name }`), null for Everything. Plus `firstRun` while the knowledge base is still empty: a note to act on.',
+      'Mint this conversation\'s id: the `sessionId` KnowledgeBase tools take. Call this ONCE, at the start of your work: a new id mid-run starts a second conversation. Pass the returned id as `sessionId` to every tool whose arguments list it, inside `call_tool_chain` too; the others refuse it. Where there is an `ask` tool, hand it the SAME id: reads and questions are then one conversation. RETRYING IS SAFE: a call that fails created nothing, so retry it. If a retry lands after a success you hold two ids, which is harmless: keep the one you already used. Returns `{ sessionId, defaultBranch, connectedAs }`: `connectedAs` is the agent this connection was made as (`{ path, name }`), null for Everything. Plus `firstRun` while the knowledge base is empty: a note to act on.',
     path: '/api/agent/tools/start_session',
     inputs: { type: 'object', properties: {}, additionalProperties: false },
     outputs: {
       type: 'object',
       properties: {
         sessionId: str('The minted session id — pass it as `sessionId` to the tools that take one, and to `ask` where there is one.'),
+        defaultBranch: str(
+          "The deployment's default branch: the branch people read, and the one to pass as `branch` unless you are working on a draft.",
+        ),
         connectedAs: {
           type: ['object', 'null'],
           description:
@@ -2040,7 +2044,7 @@ export function registerWorkspaceTools(
           `Present only while the knowledge base holds nothing but its starter guide (and a starter pack's untouched pages): what to offer the person (the guide's \`${FIRST_RUN_SECTION_ID}\` section says how).`,
         ),
       },
-      required: ['sessionId', 'connectedAs'],
+      required: ['sessionId', 'defaultBranch', 'connectedAs'],
     },
     tags: ['workspace'],
   });
@@ -2059,12 +2063,15 @@ export function registerWorkspaceTools(
     requireExternalSource,
     toolHandler(async (_args, ctx) => {
       const { sessionId } = await sessionSink.createSession(ctx.user.id, new Date());
+      // Read here, not at registration: the setup save applies a branch model
+      // to the running graph, and the name in effect is the one to give.
+      const defaultBranch = kb.defaultBranch;
       // What the connection was made as, read off the scope the tool handler
       // already resolved from the token: no lookup, no clone.
       const agent = ctx.connectionScope?.toWire()?.agent;
       const connectedAs = agent ? { path: agent.path, name: agent.name } : null;
       const firstRun = await firstRunFor(ctx);
-      return firstRun ? { sessionId, connectedAs, firstRun } : { sessionId, connectedAs };
+      return firstRun ? { sessionId, defaultBranch, connectedAs, firstRun } : { sessionId, defaultBranch, connectedAs };
     }),
   );
 

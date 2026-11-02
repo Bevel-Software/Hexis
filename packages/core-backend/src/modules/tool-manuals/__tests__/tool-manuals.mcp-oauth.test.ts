@@ -97,8 +97,10 @@ describe('ToolManualService — MCP OAuth auto-discovery decoration', () => {
 
     // The served call template carries the header the variable loader will fill.
     const templates = await svc.toManualCallTemplates('user@example.com');
-    const notionTemplate = templates.find((t) => t.name === 'notion') as any;
-    expect(notionTemplate.config.mcpServers.notion.headers).toEqual({
+    const notionTemplate = templates.find((t) => t.name === 'notion') as
+      | { config: { mcpServers: Record<string, { headers: Record<string, string> }> } }
+      | undefined;
+    expect(notionTemplate?.config.mcpServers.notion?.headers).toEqual({
       Authorization: 'Bearer ${MCP_OAUTH}',
     });
   });
