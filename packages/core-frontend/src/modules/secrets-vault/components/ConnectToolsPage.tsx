@@ -22,7 +22,7 @@ import {
   type ConnectToolOAuth,
 } from '../services/connect.api';
 import { ManagedConnectorCard } from './ManagedConnectorCard';
-import { isManagedRow } from '../utils/managed-card-state';
+import { canBringOwnApp, isManagedRow } from '../utils/managed-card-state';
 import {
   isActionable,
   outstandingCount,
@@ -522,7 +522,7 @@ export function ConnectToolsPage() {
                       onConnect={() => void onAuthorizeTool(o.slug, o.varName)}
                       onDisconnect={() => void onDisconnectManaged(o)}
                       onOwnApp={
-                        o.canWrite
+                        canBringOwnApp(o)
                           ? async (clientId, clientSecret) => {
                               await setOAuthClientSecret(o.slug, o.varName, clientSecret, clientId);
                               announceToolCredentialsChanged();

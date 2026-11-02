@@ -85,7 +85,13 @@ export interface SecretConfigStatus {
   userAccount?: string;
   /** The connected account on the shared row, when it remembers one. */
   adminAccount?: string;
-  /** A managed sign-in's shared row was replaced by an owner's own app (`clientId` set, no `managed`). */
+  /**
+   * The shared row is an OAuth client of the OWNER's (a `clientId`, no managed
+   * mark). For an ordinary sign-in that is simply its registration; for a
+   * variable declared managed it means an owner replaced the managed app with
+   * the deployment's own, and the ordinary flow applies. `undefined` when the
+   * shared row is static or absent.
+   */
   adminBringsOwnApp?: boolean;
 }
 
@@ -187,8 +193,9 @@ export interface OAuthProviderConfig {
   authorizationUrl: string;
   tokenUrl: string;
   /**
-   * The OAuth client. A managed sign-in (`managed` set) passes `''`, since the
-   * client is the broker's; every other sign-in requires a non-empty value.
+   * The OAuth client. A managed sign-in (`managed` set) has none of its own,
+   * since the client is the broker's: the vault stores `''` whatever a caller
+   * sends. Every other sign-in requires a non-empty value.
    */
   clientId: string;
   /** Kept out of listings; stored encrypted alongside the tokens. */

@@ -518,7 +518,7 @@ describe('account routes — switching an account off and on', () => {
       return res;
     });
     await vi.waitFor(() => expect(accountHooks.runAccountDeactivated).toHaveBeenCalledTimes(1));
-    expect(accountHooks.runAccountDeactivated).toHaveBeenCalledWith(expect.objectContaining({ userId: 'u2' }));
+    expect(accountHooks.runAccountDeactivated).toHaveBeenCalledWith({ userId: 'u2', email: 'u2@example.com' });
     expect(answered).toBe(false);
     settle();
     expect((await pending).status).toBe(204);

@@ -816,6 +816,10 @@ export class ToolManualService implements IToolManualService {
       if (m.type !== 'mcp') continue;
       const oauthVar = (m.variables ?? []).find((v) => v.oauth != null);
       if (oauthVar) {
+        // A MANAGED sign-in has nothing for an owner to set up here: its
+        // client is the broker's, its endpoints are in the file. No setup
+        // kind, so no surface asks for a client secret it does not need.
+        if (oauthVar.oauth?.managed) continue;
         // An owner-registered client is `oauth-manual` by definition — whether
         // the declaration is complete or still needs its endpoints discovered.
         // Explicit wins over discovery: never registered over, never probed

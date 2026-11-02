@@ -44,8 +44,9 @@ export function createAccountRoutes(
   accountErasure: Pick<IAccountErasureService, 'eraseUser'>,
   /**
    * Who tells an invited person, and who cleans up after an account is
-   * switched off (see {@link IAccountHooks}); core registers nobody for the
-   * first and its managed-connector sign-ins for the second.
+   * switched off (see {@link IAccountHooks}); core registers nobody for
+   * either. A distribution registers what it holds for a person elsewhere
+   * (its managed-connector sign-ins, say) where it builds that.
    */
   accountHooks: Pick<IAccountHooks, 'runAccountInvited' | 'runAccountDeactivated'>,
   accessRemoval?: Pick<UserAccessRemovalService, 'report' | 'assertRemovable' | 'remove' | 'filesNaming'>,
@@ -181,14 +182,18 @@ export function createAccountRoutes(
     }
     try {
       // Read before the switch, so the listeners get the address the account
-      // had; the row keeps it either way, this just saves a second read. A
-      // failed read costs the listeners the address, never the switch-off.
-      const target = await authService.getUserById(userId).catch(() => undefined);
+      // had; the row keeps it either way, so a failed read is tried once more
+      // after the switch, and never costs the switch-off itself.
+      let target = await authService.getUserById(userId).catch(() => undefined);
       if (!(await authService.deactivate(userId))) {
         res.status(404).json({ error: 'No such user' });
         return;
       }
       log.info('account audit:', { action: 'deactivate', actorUserId: req.userId, targetUserId: userId });
+      if (!target) target = await authService.getUserById(userId).catch(() => undefined);
+      if (!target) {
+        log.warn('account deactivated, but its address could not be read for the listeners', { targetUserId: userId });
+      }
       // What the account HELD elsewhere — the sign-ins it made to outside
       // systems — is let go of now rather than left to lapse. Awaited, so
       // the admin's answer means it: a listener that fails is logged by the

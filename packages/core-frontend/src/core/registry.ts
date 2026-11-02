@@ -374,13 +374,13 @@ export interface ToolbarItemDef {
   order?: number;
 }
 
-/** Props for the overlay-provided panel on the Groups settings page. */
 /** What the Connect page tells its distribution panel — see `AppRegistry.connectPanel`. */
 export interface ConnectPanelProps {
   /** The panel changed what the page lists (enabled or disabled a connector): refetch. */
   onChanged: () => void;
 }
 
+/** Props for the overlay-provided panel on the Groups settings page. */
 export interface GroupsDirectoryPanelProps {
   /** The active group source, as the roster reports it. */
   mode: 'manual' | 'idp';

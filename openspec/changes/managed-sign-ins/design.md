@@ -36,4 +36,5 @@ One workspace connection (HubSpot's "one CRM for the company") is the shared row
 ## Risks / Trade-offs
 
 - A `.tool` can be edited to widen `scopes`: that only changes what a token must cover to count as connected. The broker requests scopes from its own copy of the connector, so the edit cannot widen the grant.
+- Revocation is best effort: when the provider cannot be reached (or has no revocation endpoint, as Microsoft has not), the local row is still deleted and the provider-side grant lives on until it lapses. There is no retry or reconciliation in v1; the failure is logged by key and connector, never by token, and the log line is where an operator finds a grant to revoke by hand. This matters most for deprovisioning, where the person can no longer sign in to Hexis but the provider still honours the refresh token the broker could present.
 - `clientId` on `ToolVariableOAuth` is now optional. The two consumers that needed it are guarded; a distribution reading it must guard too.

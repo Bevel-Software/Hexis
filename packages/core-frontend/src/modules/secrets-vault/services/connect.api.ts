@@ -103,13 +103,20 @@ export interface ConnectToolOAuth {
    */
   needsReauth: boolean;
   /**
-   * The owner-side half is done: the provider registration (client secret) exists,
-   * so Authorize can actually reach a consent screen. Until it does, nobody's
-   * sign-in can work — which is why the row is outstanding even for a person who
-   * has nothing to do about it.
+   * The owner-side half is done, so Authorize can actually reach a consent
+   * screen: for an ordinary sign-in the provider registration (client secret)
+   * exists; for a MANAGED one the deployment can reach its broker, an owner
+   * pinned their own app, or a token is already stored. Until it is, nobody's
+   * sign-in can work — which is why the row is outstanding even for a person
+   * who has nothing to do about it.
    */
   ownerConfigured: boolean;
-  /** Waiting on the registration above, and the caller may not write it. */
+  /**
+   * Not the caller's to do: an ordinary sign-in waiting on the registration
+   * above that the caller may not write, or a managed WORKSPACE connection
+   * (one an owner makes for everyone) seen by someone who may not write the
+   * tool.
+   */
   ownerOnly: boolean;
 }
 

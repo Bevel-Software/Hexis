@@ -131,11 +131,15 @@ export function ToolVarRow({
   if (variable.oauth) {
     // An OAuth client secret only exists for a MANUALLY declared provider.
     const mayEditClientSecret = canWrite && setupKind !== 'oauth-auto';
-    // The owner's half is done when a client secret is stored — or, for a
-    // MANAGED sign-in, when the deployment can reach its broker (or an owner
-    // pinned their own app): there is no secret to store for the broker's app.
-    const ownerReady =
-      variable.adminConfigured || (variable.managed ? variable.managed.available || variable.managed.ownApp : false);
+    // The owner's half is done when a client secret is stored on a row of the
+    // OAuth kind (a key left from when the variable was static is not one) —
+    // or, for a MANAGED sign-in, when the deployment can reach its broker or
+    // an owner pinned their own app: there is no secret to store for the
+    // broker's app. A WORKSPACE connection (an `admin` variable) is made by a
+    // writer of the tool; a reader gets no control the server would refuse.
+    const ownerReady = variable.managed
+      ? (variable.managed.available || variable.managed.ownApp) && (variable.scope !== 'admin' || canWrite)
+      : variable.adminConfigured && variable.adminKind !== 'static';
 
     if (variable.authorized && !variable.needsReauth) {
       description = 'Each person sets their own';

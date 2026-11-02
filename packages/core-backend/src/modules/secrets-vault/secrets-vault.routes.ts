@@ -347,6 +347,9 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
               label: v.label ?? null,
               key,
               adminConfigured: st?.adminConfigured ?? false,
+              // What the owner's row IS, so a surface can tell a client of the
+              // OAuth kind from a key left from when the variable was static.
+              adminKind: st?.adminKind ?? null,
               userConfigured: st?.userConfigured ?? false,
               oauth: isOAuth,
               authorized,
@@ -480,9 +483,11 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
             //
             // A MANAGED sign-in needs no registration here — the broker holds
             // it — so it is configured when the deployment can reach a broker,
-            // or when an owner replaced the managed app with their own.
+            // when an owner replaced the managed app with their own, or when a
+            // token is already stored (nothing is outstanding for a connection
+            // that works, whatever the broker is doing).
             const ownerConfigured = managed
-              ? managed.ownApp || managed.available
+              ? managed.ownApp || managed.available || authorized
               : configuredAs('oauth', st?.adminConfigured, st?.adminKind);
             return {
               slug: m.slug,
@@ -493,9 +498,12 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
               authorized,
               needsReauth,
               ownerConfigured,
-              // A shared connection is made by a writer; for a reader it is
-              // the owner's to do, connected or not.
-              ownerOnly: (!ownerConfigured || shared) && !canWrite,
+              // Not the caller's to do: an ordinary sign-in waiting on a
+              // registration the caller may not write, or a managed WORKSPACE
+              // connection seen by someone who may not write the tool. A
+              // managed personal sign-in is always the caller's own, broker or
+              // no broker.
+              ownerOnly: managed ? shared && !canWrite : !ownerConfigured && !canWrite,
               ...(managed ? { managed, canWrite } : {}),
             };
           });
@@ -668,6 +676,15 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
       const ref = signIn.oauth.managed;
       if (ref) {
         const [st] = await secretsVault.statusFor(userId, [key]);
+        // An owner's own app runs the ordinary flow, whose tokens land on the
+        // caller's own row. A WORKSPACE connection reads the shared row, so
+        // the two cannot meet: that combination is refused here rather than
+        // signing an owner in to a row nobody reads.
+        if (st?.adminBringsOwnApp === true && signIn.scope === 'admin') {
+          return void res.status(422).json({
+            error: 'A workspace connection cannot use your own OAuth app yet. Remove the client secret to connect it through the managed connector.',
+          });
+        }
         if (st?.adminBringsOwnApp !== true) {
           const port = deps.managedSignIns?.() ?? null;
           if (!port || !port.available()) {

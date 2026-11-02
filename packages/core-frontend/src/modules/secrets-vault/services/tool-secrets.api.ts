@@ -18,6 +18,11 @@ export interface ToolVarStatus {
   key: string;
   /** A shared (admin) value exists. */
   adminConfigured: boolean;
+  /**
+   * What the shared row IS: a sign-in needs an `oauth` one, not a key left
+   * from when the variable was static. `null` when there is no shared row.
+   */
+  adminKind?: 'static' | 'oauth' | null;
   /** The caller's own value exists. */
   userConfigured: boolean;
   /** This variable is filled by an OAuth sign-in, not a typed value. */
@@ -121,7 +126,9 @@ async function deleteVar(slug: string, varName: string, tier: ToolVarScope): Pro
  * Store the confidential OAuth CLIENT SECRET for a tool's declared sign-in
  * provider — the owner-side half of a manual OAuth setup. Requires write access
  * to the `.tool`; the public provider config is pinned server-side from the
- * file's own `oauth` declaration.
+ * file's own `oauth` declaration. A MANAGED declaration names no client, so
+ * the caller's `clientId` is used then: the deployment's own app, replacing
+ * the managed one.
  */
 export async function setOAuthClientSecret(
   slug: string,

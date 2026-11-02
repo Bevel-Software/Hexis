@@ -378,7 +378,7 @@ export class McpService {
   private readonly manualFailures = new ManualFailureMemo();
   private readonly surfaceLog = new SurfaceLogThrottle();
   // One forced token refresh per (user, manual) per minute — see downstream-token-refresh.
-  private readonly tokenRefreshes: DownstreamRefreshGuard<ForcedRefreshOutcome>;
+  private readonly tokenRefreshes: DownstreamRefreshGuard<ForcedRefreshOutcome | 'rejected-shared'>;
   /**
    * The tools each pooled manual last advertised, by manual definition. A
    * downstream can only be asked what its tools are over a connection, and a
@@ -1559,7 +1559,7 @@ export class McpService {
       this.downstream.evictWhere((k) => k === poolKey);
       return { retry: true };
     }
-    if (outcome === 'rejected') {
+    if (outcome === 'rejected' || outcome === 'rejected-shared') {
       // The connection was dialed with a grant that no longer exists; the
       // vault's mutation signal drops it too, this keeps the next request
       // honest whether or not that is wired.
@@ -1568,8 +1568,11 @@ export class McpService {
         retry: false,
         credentialTransient: false,
         error: new Error(
-          `Your sign-in for "${manualName}" was rejected and has been disconnected. ` +
-            `Re-authorize it on ${this.opts.publicFrontendUrl}/connect, then run the tool again.`,
+          outcome === 'rejected-shared'
+            ? `The workspace connection for "${manualName}" was rejected by the provider and has been disconnected. ` +
+              `A tool owner has to reconnect it on ${this.opts.publicFrontendUrl}/connect; then run the tool again.`
+            : `Your sign-in for "${manualName}" was rejected and has been disconnected. ` +
+              `Re-authorize it on ${this.opts.publicFrontendUrl}/connect, then run the tool again.`,
         ),
       };
     }
@@ -1596,10 +1599,11 @@ export class McpService {
   private async refreshDownstreamToken(
     userId: string,
     manualName: string,
-  ): Promise<ForcedRefreshOutcome | 'guarded' | undefined> {
+  ): Promise<ForcedRefreshOutcome | 'rejected-shared' | 'guarded' | undefined> {
     const vault = this.secretsVault;
     if (!vault || !this.toolManuals || !manualName) return undefined;
     let keys: string[];
+    let sharedKeys = new Set<string>();
     try {
       // Every sign-in the manual declares: the caller's own, and a workspace
       // connection every caller resolves (the vault's forceRefresh reads the
@@ -1609,6 +1613,7 @@ export class McpService {
         this.toolManuals.sharedSignInKeysForManual(manualName),
       ]);
       keys = [...own.filter((v) => v.oauth).map((v) => v.key), ...shared.map((v) => v.key)];
+      sharedKeys = new Set(shared.map((v) => v.key));
     } catch (err) {
       // The error's own message is caller-controlled as well (it quotes the
       // manual, and may quote a provider's reply), and a raw Error handed to
@@ -1623,12 +1628,20 @@ export class McpService {
     if (keys.length === 0) return undefined;
     const attempt = this.tokenRefreshes.run(`${userId}${POOL_KEY_SEPARATOR}${manualName}`, async () => {
       const outcomes: ForcedRefreshOutcome[] = [];
+      // A dead WORKSPACE connection is told apart from a dead personal one:
+      // the caller cannot repair it, a writer of the tool can, and the words
+      // the caller gets have to say so.
+      let rejectedShared = false;
       for (const key of keys) {
         // A vault fault is not a verdict on the grant: keep the token, try later.
-        outcomes.push(await vault.forceRefresh(userId, key).catch((): ForcedRefreshOutcome => 'transient'));
+        const result = await vault.forceRefresh(userId, key).catch((): ForcedRefreshOutcome => 'transient');
+        if (result === 'rejected' && sharedKeys.has(key)) rejectedShared = true;
+        outcomes.push(result);
       }
-      const outcome: ForcedRefreshOutcome = outcomes.includes('rejected')
-        ? 'rejected'
+      const outcome: ForcedRefreshOutcome | 'rejected-shared' = outcomes.includes('rejected')
+        ? rejectedShared
+          ? 'rejected-shared'
+          : 'rejected'
         : outcomes.includes('transient')
           ? 'transient'
           : outcomes.includes('refreshed')

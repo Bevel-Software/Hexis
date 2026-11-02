@@ -9,7 +9,7 @@ export function isManagedRow(o: ConnectToolOAuth): o is ManagedToolOAuth {
 
 /**
  * The state a managed connector card shows, in the Library's vocabulary:
- *  - unavailable      nothing stored, and the deployment is not connected to a broker (the admin's job)
+ *  - unavailable      nothing stored, and no way to open a sign-in from here (the admin's job)
  *  - owner-only       a workspace connection a reader cannot make
  *  - ready            nothing stored yet
  *  - connected        a token is stored (the card adds the account when known)
@@ -31,7 +31,19 @@ export function managedCardState(o: ManagedToolOAuth): ManagedCardState {
   return 'ready';
 }
 
-/** Whether a sign-in can be opened from this deployment: through the broker, or through an owner's own app. */
+/**
+ * Whether a sign-in can be opened from this deployment. A personal one goes
+ * through the broker, or through an owner's own app pinned in its place. A
+ * WORKSPACE connection goes through the broker alone: an owner's own app
+ * would sign the owner in to their own row, which nobody reads for it, so
+ * that combination is not offered (the server refuses it too).
+ */
 export function canStartSignIn(o: ManagedToolOAuth): boolean {
+  if (o.managed.tokenScope === 'shared') return o.managed.available && !o.managed.ownApp;
   return o.managed.ownApp || o.managed.available;
+}
+
+/** Whether "use our own app" is offered: a writer, on a personal connection (see `canStartSignIn`). */
+export function canBringOwnApp(o: ManagedToolOAuth): boolean {
+  return o.canWrite === true && o.managed.tokenScope === 'user';
 }

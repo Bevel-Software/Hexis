@@ -65,6 +65,11 @@ export interface AgentScopeCollaborators {
  *   enterprise root overwrites the `CoreServices` fields (or pushes into the
  *   `authProviders` array) after construction, before the server is built.
  *
+ * - REQUEST-TIME seams (`managedSignIns`): seeded onto `CoreServices` the same
+ *   way, but the routes that use it read the field on every request rather
+ *   than at mount, so the enterprise root may assign it at any point after
+ *   construction — even after the server is listening.
+ *
  * (Commit-time KB validation and the agent read/write hooks are NOT ports:
  * they are workflow lifecycle HOOKS the enterprise root registers on
  * `workflowService.hooks` after construction — see

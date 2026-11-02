@@ -194,6 +194,10 @@ async function setup(deps?: {
   httpServer = await new Promise<HttpServer>((resolve) => {
     const s = app.listen(0, () => resolve(s));
   });
+  // Every server a test opens is closed after it, not only the last: a test
+  // that sets up twice would otherwise leave the first one listening.
+  const opened = httpServer;
+  cleanups.push(() => new Promise<void>((r) => opened.close(() => r())));
   const port = (httpServer.address() as { port: number }).port;
   loopbackBase = `http://127.0.0.1:${port}`;
 

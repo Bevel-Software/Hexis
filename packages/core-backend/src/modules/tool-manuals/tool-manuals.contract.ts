@@ -551,8 +551,9 @@ export interface IToolManualService {
   /**
    * The SHARED (`admin`-scoped) sign-ins a manual declares — a managed
    * connector enabled as a workspace connection. The pre-call check reads
-   * these so a tool whose one connection nobody has made yet fails with
-   * "an owner needs to connect it" instead of an opaque provider error.
+   * these so a tool whose one connection nobody has made yet is reported as
+   * missing its sign-in, labelled "(a tool owner connects this for the
+   * workspace)", instead of failing opaquely at the provider.
    */
   sharedSignInKeysForManual(
     manualName: string,

@@ -315,12 +315,8 @@ export class DbSecretsVaultService implements ISecretsVaultService {
   }
 
   async remove(userId: string, id: string): Promise<void> {
-    await this.revokeManagedBefore(and(eq(secrets.id, id), eq(secrets.userId, userId)));
-    const res = await this.db
-      .delete(secrets)
-      .where(and(eq(secrets.id, id), eq(secrets.userId, userId)))
-      .returning({ id: secrets.id });
-    if (res.length === 0) throw new SecretNotFoundError(id);
+    const gone = await this.revokeThenDelete(and(eq(secrets.id, id), eq(secrets.userId, userId)));
+    if (gone.length === 0) throw new SecretNotFoundError(id);
     this.notifyMutation(userId);
   }
 
@@ -355,23 +351,44 @@ export class DbSecretsVaultService implements ISecretsVaultService {
   }
 
   async removeShared(key: string): Promise<void> {
-    await this.revokeManagedBefore(and(isNull(secrets.userId), eq(secrets.key, key)));
-    const res = await this.db
-      .delete(secrets)
-      .where(and(isNull(secrets.userId), eq(secrets.key, key)))
-      .returning({ id: secrets.id });
-    if (res.length === 0) throw new SecretNotFoundError(key);
+    const gone = await this.revokeThenDelete(and(isNull(secrets.userId), eq(secrets.key, key)));
+    if (gone.length === 0) throw new SecretNotFoundError(key);
     this.notifyMutation(null);
   }
 
   async removeUserByKey(userId: string, key: string): Promise<void> {
-    await this.revokeManagedBefore(and(eq(secrets.userId, userId), eq(secrets.key, key)));
-    const res = await this.db
-      .delete(secrets)
-      .where(and(eq(secrets.userId, userId), eq(secrets.key, key)))
-      .returning({ id: secrets.id });
-    if (res.length === 0) throw new SecretNotFoundError(key);
+    const gone = await this.revokeThenDelete(and(eq(secrets.userId, userId), eq(secrets.key, key)));
+    if (gone.length === 0) throw new SecretNotFoundError(key);
     this.notifyMutation(userId);
+  }
+
+  /**
+   * Delete the rows `where` names, each told to its provider first when it
+   * is a managed sign-in with tokens (see {@link revokeRow}). The delete is
+   * guarded on the ciphertext the revoke read: a handoff or a refresh landing
+   * in between has replaced the tokens, and deleting THOSE unrevoked is the
+   * leak the revoke exists to prevent. A miss re-reads the row and goes
+   * again, bounded; what could not be settled in those passes is left
+   * standing rather than deleted blind.
+   */
+  private async revokeThenDelete(where: ReturnType<typeof and>): Promise<{ id: string; userId: string | null; kind: string }[]> {
+    const gone: { id: string; userId: string | null; kind: string }[] = [];
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const rows = await this.db.select().from(secrets).where(where);
+      if (rows.length === 0) break;
+      let missed = false;
+      for (const row of rows) {
+        await this.revokeRow(row);
+        const deleted = await this.db
+          .delete(secrets)
+          .where(and(eq(secrets.id, row.id), eq(secrets.valueEncrypted, row.valueEncrypted)))
+          .returning({ id: secrets.id, userId: secrets.userId, kind: secrets.kind });
+        if (deleted.length === 0) missed = true;
+        else gone.push(...deleted);
+      }
+      if (!missed) break;
+    }
+    return gone;
   }
 
   async removeManagedRowsOfUser(userId: string): Promise<number> {
@@ -385,11 +402,7 @@ export class DbSecretsVaultService implements ISecretsVaultService {
       .where(and(eq(secrets.userId, userId), eq(secrets.kind, 'oauth')));
     const managed = rows.filter((r) => this.managedRefOf(r.oauthMeta) !== null);
     if (managed.length === 0) return 0;
-    for (const row of managed) await this.revokeRow(row);
-    const deleted = await this.db
-      .delete(secrets)
-      .where(and(eq(secrets.userId, userId), inArray(secrets.id, managed.map((r) => r.id))))
-      .returning({ id: secrets.id });
+    const deleted = await this.revokeThenDelete(and(eq(secrets.userId, userId), inArray(secrets.id, managed.map((r) => r.id))));
     if (deleted.length > 0) this.notifyMutation(userId);
     return deleted.length;
   }
@@ -426,10 +439,13 @@ export class DbSecretsVaultService implements ISecretsVaultService {
     } catch (err) {
       // The key names the sign-in; the message is ours or the revoker's, and
       // the revoker's own rule is never to put a token in one.
+      // The key and the connector name the sign-in. The error itself stays
+      // out: a revoker's message is its own, and this line is the one place a
+      // token could otherwise reach a log from this path.
       log.warn('revoking a managed sign-in with its provider failed; deleting it here anyway', {
         key: row.key,
         connector: ref.connectorId,
-        err,
+        failure: err instanceof Error ? err.name : typeof err,
       });
     } finally {
       if (timer) clearTimeout(timer);
@@ -467,14 +483,14 @@ export class DbSecretsVaultService implements ISecretsVaultService {
         const rows = await this.namespaceRows(prefix);
         if (rows.length === 0) break;
         // A managed sign-in under the namespace is told to its provider
-        // before the delete, for the same reason the per-row removals do.
-        if (this.managedRevoker) {
-          await this.revokeManagedBefore(inArray(secrets.id, rows.map((r) => r.id)));
-        }
-        const deleted = await this.db
-          .delete(secrets)
-          .where(inArray(secrets.id, rows.map((r) => r.id)))
-          .returning({ userId: secrets.userId, kind: secrets.kind });
+        // before the delete, for the same reason the per-row removals do —
+        // and guarded the same way, when a revoker is there to need it.
+        const deleted = this.managedRevoker
+          ? await this.revokeThenDelete(inArray(secrets.id, rows.map((r) => r.id)))
+          : await this.db
+              .delete(secrets)
+              .where(inArray(secrets.id, rows.map((r) => r.id)))
+              .returning({ id: secrets.id, userId: secrets.userId, kind: secrets.kind });
         gone.push(...deleted);
       }
     } finally {
@@ -576,7 +592,8 @@ export class DbSecretsVaultService implements ISecretsVaultService {
   }): Promise<void> {
     const key = this.requireKey(input.key);
     const userId = input.userId === null ? null : this.requireUserId(input.userId);
-    if (!input.provider.managed) throw new InvalidSecretError('a managed sign-in needs its connector reference');
+    const ref = input.provider.managed;
+    if (!ref) throw new InvalidSecretError('a managed sign-in needs its connector reference');
     if (typeof input.nonce !== 'string' || input.nonce.length < 16) throw new InvalidSecretError('nonce is required');
     const oauthMeta = this.publicProviderMeta(this.requireProvider(input.provider, { managed: true }));
     const where = userId === null ? and(isNull(secrets.userId), eq(secrets.key, key)) : and(eq(secrets.userId, userId), eq(secrets.key, key));
@@ -588,11 +605,17 @@ export class DbSecretsVaultService implements ISecretsVaultService {
     // fails loudly rather than forever. The same rule `beginOAuth` follows.
     for (let attempt = 0; attempt < BEGIN_MANAGED_ATTEMPTS; attempt++) {
       const [existing] = await this.db.select().from(secrets).where(where).limit(1);
-      // Keep what a managed row already holds (its tokens, so an abandoned
-      // reconnect costs nothing); start clean over anything else — a static
-      // value or an owner-app sign-in under this key is not this connection.
+      // Keep what the SAME connection already holds (its tokens, so an
+      // abandoned reconnect costs nothing). The same connection means the same
+      // connector and scope set: a row of another connector's, or of another
+      // set's, holds a token for something else, and a declaration that
+      // changed must not hand it to the new one. Start clean over anything
+      // else too — a static value or an owner-app sign-in under this key.
+      const storedRef = existing?.kind === 'oauth' ? this.managedRefOf(existing.oauthMeta) : null;
+      const sameConnection =
+        storedRef !== null && storedRef.connectorId === ref.connectorId && storedRef.scopeSet === ref.scopeSet;
       let kept: OAuthBlob = {};
-      if (existing?.kind === 'oauth' && this.managedRefOf(existing.oauthMeta)) {
+      if (existing && sameConnection) {
         try {
           kept = this.readBlob(existing.valueEncrypted);
         } catch {
@@ -601,7 +624,7 @@ export class DbSecretsVaultService implements ISecretsVaultService {
       }
       const next: OAuthBlob = { tokens: kept.tokens, pendingNonce: input.nonce };
       const valueEncrypted = this.crypto().encrypt(JSON.stringify(next));
-      const account = existing?.kind === 'oauth' ? (existing.oauthMeta as Record<string, unknown> | null)?.account : undefined;
+      const account = sameConnection ? (existing!.oauthMeta as Record<string, unknown> | null)?.account : undefined;
       const meta = typeof account === 'string' && account ? { ...oauthMeta, account } : oauthMeta;
       if (!existing) {
         await this.db.insert(secrets).values({ userId, key, kind: 'oauth', label: null, valueEncrypted, oauthMeta: meta });
@@ -612,9 +635,12 @@ export class DbSecretsVaultService implements ISecretsVaultService {
         .set({ kind: 'oauth', valueEncrypted, oauthMeta: meta, updatedAt: new Date() })
         .where(and(eq(secrets.id, existing.id), eq(secrets.valueEncrypted, existing.valueEncrypted)))
         .returning({ id: secrets.id });
-      // No mutation signal on success: nothing a cache holds about this
-      // credential changed (the tokens, if any, are the same ones).
-      if (!Array.isArray(written) || written.length > 0) return;
+      if (Array.isArray(written) && written.length === 0) continue;
+      // A row that held something ELSE (a value, another connection's
+      // tokens, an owner's app) no longer does: caches keyed on it are told.
+      // The same connection's tokens carried over unchanged tell nobody.
+      if (!kept.tokens) this.notifyMutation(userId);
+      return;
     }
     throw new SecretOAuthError('The sign-in could not be opened: its stored credential kept changing. Try again.');
   }
@@ -1384,8 +1410,10 @@ export class DbSecretsVaultService implements ISecretsVaultService {
     const cfg = p as Record<string, unknown>;
     const authorizationUrl = this.requireUrl(cfg.authorizationUrl, 'authorizationUrl');
     const tokenUrl = this.requireUrl(cfg.tokenUrl, 'tokenUrl');
-    const clientId = typeof cfg.clientId === 'string' ? cfg.clientId.trim() : '';
     const managed = opts.managed ? (this.managedRefOf(cfg) ?? undefined) : undefined;
+    // A managed sign-in has no client of its own: whatever id a caller sends
+    // beside the connector reference is not stored, so no row can claim one.
+    const clientId = managed ? '' : typeof cfg.clientId === 'string' ? cfg.clientId.trim() : '';
     if (!clientId && !managed) throw new InvalidSecretError('clientId is required');
     const scopes = Array.isArray(cfg.scopes) ? cfg.scopes.map(String) : undefined;
     const authParams =

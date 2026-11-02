@@ -28,7 +28,7 @@ const MANAGED_META = {
 
 /** The sequential fake drizzle chain the oauth suite uses, capturing what is written. */
 function makeFakeDb(queue: unknown[]) {
-  const captured: { values: Record<string, unknown>[]; set: Record<string, unknown>[] } = { values: [], set: [] };
+  const captured: { values: Record<string, unknown>[]; set: Record<string, unknown>[]; where: unknown[] } = { values: [], set: [], where: [] };
   function nextChain() {
     const result = queue.shift();
     const chain: Record<string, unknown> = {};
@@ -39,7 +39,7 @@ function makeFakeDb(queue: unknown[]) {
       });
     chain.values = passthrough((a) => captured.values.push(a[0] as Record<string, unknown>));
     chain.set = passthrough((a) => captured.set.push(a[0] as Record<string, unknown>));
-    chain.where = passthrough();
+    chain.where = passthrough((a) => captured.where.push(a[0]));
     chain.limit = passthrough();
     chain.from = passthrough();
     chain.returning = passthrough();
@@ -54,6 +54,65 @@ function makeFakeDb(queue: unknown[]) {
     delete: vi.fn(() => nextChain()),
   } as unknown as Database;
   return { db, captured };
+}
+
+/**
+ * Does a drizzle condition bind `value`? The condition is an SQL object whose
+ * bound parameters sit in nested `queryChunks`; the test only needs to know
+ * WHETHER a given ciphertext (or an `is null` chunk) is in it.
+ */
+function binds(cond: unknown, value: string): boolean {
+  const seen = new Set<unknown>();
+  const walk = (node: unknown): boolean => {
+    if (node === value) return true;
+    if (Array.isArray(node)) return node.some(walk);
+    if (node === null || typeof node !== 'object' || seen.has(node)) return false;
+    seen.add(node);
+    return Object.values(node as Record<string, unknown>).some(walk);
+  };
+  return walk(cond);
+}
+
+/**
+ * A drizzle stub that answers UPDATEs from their WHERE clause: an update lands
+ * only when its guard binds the row's CURRENT ciphertext. `reads` are what the
+ * selects answer in order; `current` is the row as it is when a write arrives.
+ */
+function whereAwareDb(input: { reads: ReturnType<typeof row>[]; current: ReturnType<typeof row> }) {
+  const reads = [...input.reads];
+  const captured: { values: Record<string, unknown>[]; set: Record<string, unknown>[] } = { values: [], set: [] };
+  const updates: { landed: boolean }[] = [];
+  const select = () => {
+    const result = [reads.shift() ?? input.current];
+    const chain: Record<string, unknown> = {};
+    chain.from = () => chain;
+    chain.where = () => chain;
+    chain.limit = () => chain;
+    chain.then = (onF: (v: unknown) => unknown, onR: (e: unknown) => unknown) => Promise.resolve(result).then(onF, onR);
+    return chain;
+  };
+  const update = () => {
+    const chain: Record<string, unknown> = {};
+    let landed = false;
+    chain.set = (v: Record<string, unknown>) => {
+      captured.set.push(v);
+      return chain;
+    };
+    chain.where = (cond: unknown) => {
+      landed = binds(cond, input.current.valueEncrypted);
+      updates.push({ landed });
+      return chain;
+    };
+    chain.returning = () => Promise.resolve(landed ? [{ id: input.current.id }] : []);
+    return chain;
+  };
+  const db = {
+    select: vi.fn(select),
+    update: vi.fn(update),
+    insert: vi.fn(),
+    delete: vi.fn(),
+  } as unknown as Database;
+  return { db, captured, updates };
 }
 
 function row(blob: Record<string, unknown>, meta: Record<string, unknown> = MANAGED_META, userId: string | null = USER) {
@@ -85,19 +144,32 @@ describe('a managed sign-in: begin and the handoff', () => {
     expect(captured.set[0].oauthMeta).toMatchObject({ managed: { connectorId: 'microsoft365', scopeSet: 'read' } });
   });
 
-  it('begin never overwrites tokens a concurrent refresh rotated: a guarded miss re-reads and rebuilds', async () => {
+  it('begin never overwrites tokens a concurrent refresh rotated: the guard misses the stale ciphertext, the re-read lands', async () => {
     const stale = row({ tokens: { access_token: 'old', refresh_token: 'r-old' } });
     const rotated = row({ tokens: { access_token: 'new', refresh_token: 'r-new' } });
-    // First read sees the stale row; the guarded update misses (0 rows, the
-    // refresh landed in between); the re-read sees the rotated row; the
-    // second guarded update lands.
-    const { db, captured } = makeFakeDb([[stale], [], [rotated], [{ id: 'row-1' }]]);
+    // The row as the first read sees it, and as it IS by the time the write
+    // arrives. An update lands only when its guard binds the current
+    // ciphertext — an unguarded write, or one guarded on the stale read,
+    // fails this test.
+    const { db, captured, updates } = whereAwareDb({ reads: [stale, rotated], current: rotated });
     const vault = new DbSecretsVaultService(db, ENC_KEY);
     await vault.beginManagedConnection({ userId: USER, key: KEY, provider: MANAGED_META, nonce: NONCE });
-    expect(captured.set).toHaveLength(2);
+    expect(updates.map((u) => u.landed)).toEqual([false, true]);
     const landed = decryptSet(captured, 1);
     expect(landed.tokens).toEqual({ access_token: 'new', refresh_token: 'r-new' });
     expect(landed.pendingNonce).toBe(NONCE);
+  });
+
+  it('begin keeps tokens only for the SAME connection: another scope set’s token is not carried over', async () => {
+    const otherSet = row({ tokens: { access_token: 'draft-token' } }, { ...MANAGED_META, managed: { connectorId: 'microsoft365', scopeSet: 'read_draft' } });
+    const { db, captured } = makeFakeDb([[otherSet], [{ id: 'row-1' }]]);
+    const vault = new DbSecretsVaultService(db, ENC_KEY);
+    const changed: (string | null)[] = [];
+    vault.onMutation((u) => changed.push(u));
+    await vault.beginManagedConnection({ userId: USER, key: KEY, provider: MANAGED_META, nonce: NONCE });
+    expect(decryptSet(captured).tokens).toBeUndefined();
+    // Something else was replaced: caches are told.
+    expect(changed).toEqual([USER]);
   });
 
   it('begin gives up after repeated misses, leaving the row as it is', async () => {
@@ -208,17 +280,42 @@ describe('a managed sign-in: refresh through the broker', () => {
     expect(captured.set).toHaveLength(0);
   });
 
-  it('forceRefresh repairs the SHARED row of a workspace connection', async () => {
+  it('forceRefresh repairs the SHARED row of a workspace connection: it reads user_id IS NULL, not the caller’s row', async () => {
     const shared = row({ tokens: expired }, MANAGED_META, null);
-    const { db } = makeFakeDb([[shared], [{ id: 'row-1' }]]);
+    const { db, captured } = makeFakeDb([[shared], [{ id: 'row-1' }]]);
     const refresher: ManagedTokenRefresher = { refresh: vi.fn(async () => ({ access_token: 'fresh' })) };
     const vault = new DbSecretsVaultService(db, ENC_KEY, () => 5_000_000, async () => 'admin');
     vault.setManagedTokenHandlers({ refresher });
     expect(await vault.forceRefresh(USER, KEY)).toBe('refreshed');
+    // The read's predicate: the shared tier (an `is null` on user_id), and
+    // never the caller's id.
+    const [readWhere] = captured.where;
+    expect(binds(readWhere, ' is null')).toBe(true);
+    expect(binds(readWhere, USER)).toBe(false);
+    // And what was persisted is the refreshed set, on the row read.
+    expect(decryptSet(captured).tokens).toMatchObject({ access_token: 'fresh', refresh_token: 'rt' });
   });
 });
 
 describe('a managed sign-in: revoked with the provider before it is deleted', () => {
+  it('a delete is guarded on the ciphertext the revoke read: tokens a handoff landed in between are not deleted unrevoked', async () => {
+    const before = row({ tokens: { access_token: 'at-1', refresh_token: 'rt-1' } });
+    const after = row({ tokens: { access_token: 'at-2', refresh_token: 'rt-2' } });
+    const revoked: string[] = [];
+    const revoker: ManagedTokenRevoker = {
+      revoke: vi.fn(async (_ref, tokens) => {
+        revoked.push(tokens.access_token);
+      }),
+    };
+    // Read `before`, revoke it, delete misses (the row moved on); read
+    // `after`, revoke it, delete lands.
+    const { db } = makeFakeDb([[before], [], [after], [{ id: 'row-1', userId: USER, kind: 'oauth' }]]);
+    const vault = new DbSecretsVaultService(db, ENC_KEY);
+    vault.setManagedTokenHandlers({ revoker });
+    await vault.removeUserByKey(USER, KEY);
+    expect(revoked).toEqual(['at-1', 'at-2']);
+  });
+
   it('removeUserByKey tells the revoker first, then deletes, and deletes even when revoking fails', async () => {
     const stored = row({ tokens: { access_token: 'at', refresh_token: 'rt' } });
     const order: string[] = [];
@@ -256,7 +353,8 @@ describe('a managed sign-in: revoked with the provider before it is deleted', ()
     const managed = row({ tokens: { access_token: 'at' } });
     const ordinary = { ...row({ tokens: { access_token: 'o' } }, { ...MANAGED_META, managed: undefined, clientId: 'own' }), id: 'row-2', key: 'other_TOKEN' };
     const revoker: ManagedTokenRevoker = { revoke: vi.fn(async () => undefined) };
-    const { db } = makeFakeDb([[managed, ordinary], [{ id: 'row-1' }]]);
+    // The user's rows; then the managed one re-read for the guarded delete; then the delete's answer.
+    const { db } = makeFakeDb([[managed, ordinary], [managed], [{ id: 'row-1', userId: USER, kind: 'oauth' }]]);
     const vault = new DbSecretsVaultService(db, ENC_KEY);
     vault.setManagedTokenHandlers({ revoker });
     expect(await vault.removeManagedRowsOfUser(USER)).toBe(1);
