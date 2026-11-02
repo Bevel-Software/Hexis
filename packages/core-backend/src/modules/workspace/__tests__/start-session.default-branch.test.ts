@@ -116,7 +116,7 @@ afterEach(async () => {
 });
 
 describe('start_session names the default branch', () => {
-  it('answers { sessionId, defaultBranch }, the branch being the deployment\'s', async () => {
+  it('answers { sessionId, defaultBranch, connectedAs }, the branch being the deployment\'s', async () => {
     const { base } = await startSession(testKbContext({ kbDirName: KB_DIR }));
     expect(await call(base)).toEqual({ sessionId: 'thread-xyz', defaultBranch: 'target-company-state', connectedAs: null });
   });

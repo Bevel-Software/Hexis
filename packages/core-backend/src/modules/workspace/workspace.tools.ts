@@ -1147,7 +1147,7 @@ export function registerWorkspaceTools(
    * The one tree walk (see `shared/fs.contract.ts`), for the `firstRun`
    * note's look at the knowledge folder. Optional for the harnesses about the
    * file primitives; without it `start_session` answers
-   * `{ sessionId, defaultBranch }` and never `firstRun`.
+   * `{ sessionId, defaultBranch, connectedAs }` and never `firstRun`.
    */
   disk?: ITreeWalker,
   /**
