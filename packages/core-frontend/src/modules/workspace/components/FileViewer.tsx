@@ -108,7 +108,14 @@ export function FileViewer() {
     rejectPendingContent,
     addTab,
     reloadTabFromDisk,
+    activeTab: openTab,
+    clearChangedOnBranch,
   } = useWorkspace();
+  // The tab's text changed under the editor: new bytes from disk, or a change
+  // pulled from the git host merged into the edits or discarding them. Bumps
+  // `remoteRevision`, which the editor's key carries so it reloads its buffer.
+  const changedOnBranch = openTab?.changedOnBranch ?? null;
+  const remoteRevision = openTab?.remoteRevision ?? 0;
   const { fileViewerPanels, renderers } = useAppRegistry();
   const git = useGit();
   // Hiding the tree buys margin, not line length (proto:709), and the pane
@@ -228,6 +235,14 @@ export function FileViewer() {
    * sends what the editor showed, never what it replaced.
    */
   const proposeBufferRef = useRef<string | null>(null);
+  /**
+   * The text a proposal opened on: its seed, or the tab's text when there is
+   * no open proposal. The editor mounts on it and keeps one mount for the
+   * whole session, so a change pulled onto the tab meanwhile neither remounts
+   * it nor reaches its buffer — Send sends what is on screen. Read only while
+   * `proposeMode`; set on every entry.
+   */
+  const [proposeBase, setProposeBase] = useState<string | null>(null);
   // Picker overrides set by the chat tool-card's "View full comparison" link.
   // Cleared when the user opens a different file so a deep-link doesn't stick
   // around and override their natural defaults on the next open.
@@ -785,6 +800,7 @@ export function FileViewer() {
       // Switched files while the seed loaded — this propose is moot.
       if (openFilePathRef.current !== targetPath) return;
       setProposeSeed(seed);
+      setProposeBase(seed ?? openFileContentRef.current);
       proposeBufferRef.current = seed ?? openFileContentRef.current;
       setProposeMode(true);
     })().finally(() => setIsEnteringPropose(false));
@@ -1320,7 +1336,11 @@ export function FileViewer() {
       // trigger a remount that would discard their typing —
       // savedContent stays stable through an edit until the save
       // commits, then advances once.
-      key={editMode || proposeMode ? `${openFilePath}|edit` : `${openFilePath}|${openFileSavedContent?.length ?? 0}|${openFileSavedContent?.slice(0, 64) ?? ''}|${openFileSavedContent?.slice(-64) ?? ''}`}
+      // A change pulled from the git host remounts the editor onto the merged
+      // buffer (`remoteRevision`) — but not a proposal in progress: a remount
+      // would put the text it opened on (or the tab's, pulled over) back over
+      // the keystrokes Send still holds.
+      key={editMode || proposeMode ? `${openFilePath}|edit|${proposeMode ? 'proposal' : remoteRevision}` : `${openFilePath}|${openFileSavedContent?.length ?? 0}|${openFileSavedContent?.slice(0, 64) ?? ''}|${openFileSavedContent?.slice(-64) ?? ''}`}
       // In propose mode with an open proposal, the buffer AND the dirty
       // baseline are the PROPOSED text (the seed) — the editor continues the
       // pending change, and "dirty" means "differs from what I already
@@ -1328,15 +1348,17 @@ export function FileViewer() {
       content={
         isReviewingPending
           ? pendingFileContent!
-          : proposeMode && proposeSeed !== null
-            ? proposeSeed
+          : proposeMode
+            ? proposeSeed ?? proposeBase ?? openFileContent
             : openFileContent
       }
       savedContent={
         isReviewingPending
           ? pendingFileContent!
-          : proposeMode && proposeSeed !== null
-            ? proposeSeed
+          : proposeMode
+            // The same text `content` starts from: with no seed, the text the
+            // proposal opened on, so a change pulled since is not an edit.
+            ? (proposeSeed ?? proposeBase ?? openFileSavedContent ?? openFileContent)
             : (openFileSavedContent ?? openFileContent)
       }
       filePath={openFilePath}
@@ -1678,6 +1700,33 @@ export function FileViewer() {
                   disabled={isSubmitting}
                 >
                   Accept
+                </Button>
+              </div>
+            </Banner>
+          )}
+
+          {/* The file changed on the branch under unsaved edits: a commit
+              pulled from the git host, which the file lock cannot stop. Not
+              while proposing: those edits are for the suggestions branch. */}
+          {changedOnBranch && openFilePath && !proposeMode && (
+            <Banner
+              role="status"
+              tone={changedOnBranch === 'merged' ? 'wait' : 'danger'}
+              icon={changedOnBranch === 'merged' ? <History size={14} /> : <AlertTriangle size={14} />}
+              aria-live="polite"
+              className="mb-4 flex-none"
+            >
+              <div className="flex items-center gap-2">
+                <span className="flex-1">
+                  {changedOnBranch === 'merged'
+                    ? (openTab?.content !== openTab?.savedContent
+                      ? 'This file changed on the branch while you were editing. Your edits were merged in; save to keep them.'
+                      // A save that waited on the change has written the merge.
+                      : 'This file changed on the branch while you were editing. Your edits were merged in and saved.')
+                    : 'This file changed on the branch while you were editing, and your edits could not be merged. They were discarded.'}
+                </span>
+                <Button variant="quiet" size="sm" title="Dismiss" onClick={() => clearChangedOnBranch?.(openFilePath)}>
+                  Dismiss
                 </Button>
               </div>
             </Banner>

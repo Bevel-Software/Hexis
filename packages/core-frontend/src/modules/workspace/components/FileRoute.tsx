@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { useWorkspace } from '../state/workspace.context';
 import { WorkspaceApiError } from '../services/workspace.api';
@@ -13,8 +13,11 @@ import {
   fetchNodeWorkspacePath,
   fetchNodeId,
 } from '../routing/kb-routes';
+import { landingAfterClose } from '../routing/landing';
 import { Banner, Button, Surface, useLatestRef } from '../../../shared/components';
 import { FileViewer } from './FileViewer';
+import { DeletedFileNotice } from './DeletedFileNotice';
+import { ErrorScreen } from './ErrorScreen';
 
 type SyncError =
   | { kind: 'dirty'; current: string; target: string; dirtyFilenames: string[] }
@@ -24,6 +27,32 @@ type SyncError =
   | { kind: 'file-denied'; path: string }
   | { kind: 'file-load-failed'; path: string; message: string }
   | null;
+
+/**
+ * Every id → path this app has learned, keyed by branch and id. A deleted
+ * file's id no longer resolves, so returning to its id URL (Back, or a switch
+ * to its tab) loaded the id token as a path and said "File not found" over a
+ * tab that holds the deleted notice. The path it last had finds that tab, and
+ * ONLY that tab: an open tab at that path marked deleted (`pathFromUrl`).
+ * Anything else at the path — the same file under a new id, or a new file
+ * written there — is not what the old id named, so an id that no longer
+ * resolves and has no such tab is forgotten and says "File not found".
+ * Module-level so it outlives a remount of the page (Knowledge home and back).
+ */
+const knownIdPaths = new Map<string, string>();
+
+/** `id` names `path` on `branch` now: no other id there names it any more. */
+function rememberIdPath(branch: string, id: string, path: string) {
+  const prefix = `${branch}/`;
+  for (const [key, known] of knownIdPaths) {
+    // An id has no slash, so a key of a branch nested under this one
+    // (`a/b/<id>` for branch `a`) is not this branch's.
+    if (known === path && key.startsWith(prefix) && !key.slice(prefix.length).includes('/')) {
+      knownIdPaths.delete(key);
+    }
+  }
+  knownIdPaths.set(`${prefix}${id}`, path);
+}
 
 /**
  * `canonicalize` (default on): replace a path URL with the node's id URL once
@@ -67,8 +96,10 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
   // ignored; `path: null` means the id resolved to no readable node (a dangling
   // id, or a bare token that's actually a plain file — we then fall back to
   // loading the segment as a literal path).
+  // `lastKnown`: the path an id that no longer resolves had when it last did,
+  // kept only while a deleted tab at that path is open (`knownIdPaths`).
   const [idResolved, setIdResolved] = useState<
-    { seg: string; branch: string; path: string | null } | null
+    { seg: string; branch: string; path: string | null; lastKnown: string | null } | null
   >(null);
 
   const currentBranch = git.status?.branch ?? null;
@@ -100,11 +131,17 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
   // while the async resolve is in flight (so we don't briefly load the id token
   // as a path), falling back to the literal segment if the id resolved to no
   // node (the bare-token-is-really-a-file case).
+  const retainedDeletedPath =
+    idResolved?.lastKnown &&
+    workspace.openTabs.some((t) => t.path === idResolved.lastKnown && t.deletedBy)
+      ? idResolved.lastKnown
+      : null;
   const pathFromUrl = segmentIsId
     ? idResolved && idResolved.seg === segment && idResolved.branch === branchFromUrl
-      ? idResolved.path ?? segment
+      ? idResolved.path ?? retainedDeletedPath ?? segment
       : ''
     : segment;
+  const openTabsRef = useLatestRef(workspace.openTabs);
 
   // ── Resolve an id segment → its file path ────────────────────────────────
   useEffect(() => {
@@ -115,13 +152,23 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
     if (!branchFromUrl) return;
     let cancelled = false;
     (async () => {
-      const path = await fetchNodeWorkspacePath(branchFromUrl, segment);
-      if (!cancelled) setIdResolved({ seg: segment, branch: branchFromUrl, path });
+      const resolved = await fetchNodeWorkspacePath(branchFromUrl, segment);
+      if (cancelled) return;
+      const key = `${branchFromUrl}/${segment}`;
+      let lastKnown: string | null = null;
+      if (resolved) {
+        rememberIdPath(branchFromUrl, segment, resolved);
+      } else {
+        const known = knownIdPaths.get(key) ?? null;
+        if (known && openTabsRef.current.some((t) => t.path === known && t.deletedBy)) lastKnown = known;
+        else knownIdPaths.delete(key);
+      }
+      setIdResolved({ seg: segment, branch: branchFromUrl, path: resolved, lastKnown });
     })();
     return () => {
       cancelled = true;
     };
-  }, [segmentIsId, segment, branchFromUrl]);
+  }, [segmentIsId, segment, branchFromUrl, openTabsRef]);
 
   // ── Canonicalize a path URL → the node's id URL ──────────────────────────
   // Once the file is the active tab, look up its node id and replace the path
@@ -145,6 +192,7 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
     let cancelled = false;
     (async () => {
       const nodeId = await fetchNodeId(branchFromUrl, segment);
+      if (nodeId) rememberIdPath(branchFromUrl, nodeId, segment);
       if (!cancelled && nodeId) {
         navigate(kbNodeUrl(branchFromUrl, nodeId) + searchRef.current + location.hash, {
           replace: true,
@@ -531,8 +579,23 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
    */
   const resolvingId = segmentIsId && pathFromUrl === '';
 
+  /**
+   * The file on screen was deleted by someone else (`deletedBy` is set only
+   * for a delete this session did not make — its own close the tab and move
+   * the address). Shown in place of the file, whatever the tab still holds:
+   * a background tab whose bytes were dropped has nothing to load either.
+   */
+  const deletedTab =
+    !error &&
+    currentBranch === branchFromUrl &&
+    workspaceBranch === branchFromUrl &&
+    workspace.activeTab?.deletedBy && workspace.activeTab.path === pathFromUrl
+      ? workspace.activeTab
+      : null;
+
   const loadingFile =
     !error &&
+    !deletedTab &&
     !goneBranch &&
     !unknownBranch &&
     !bootstrapFailure &&
@@ -549,6 +612,7 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
           : bootstrapFailure ? 'bootstrap-failed'
             : statusUnknown ? 'git-status-failed'
               : error ? error.kind
+                : deletedTab ? 'file-deleted'
                 : loadingFile ? 'loading'
                   : 'viewer';
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -653,6 +717,26 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
     );
   }
 
+  if (deletedTab) {
+    return (
+      <DeletedFileNotice
+        fileName={basename(deletedTab.path)}
+        branch={branchFromUrl}
+        deletedBy={deletedTab.deletedBy}
+        edits={deletedTab.isDirty ? deletedTab.content ?? '' : null}
+        agentVersion={deletedTab.pendingFileContent}
+        onClose={async () => {
+          // Close lands as the person's own delete does (`landingAfterClose`).
+          // The notice already said the edits exist only here and offered to
+          // copy them, so it does not ask again.
+          const { closed, newActivePath } = await workspace.closeTab(deletedTab, { skipConfirm: true });
+          if (!closed) return;
+          navigate(landingAfterClose(location.pathname, branchFromUrl, newActivePath), { replace: true });
+        }}
+      />
+    );
+  }
+
   if (error?.kind === 'file-missing') {
     return (
       <ErrorScreen title="File not found">
@@ -742,29 +826,3 @@ function describeError(err: unknown): { status: number | null; message: string }
   };
 }
 
-/**
- * One frame for the four full-screen states this route can end in.
- *
- * They said the same thing four different ways before — four copies of the
- * centring, four hand-rolled buttons, four type scales. Every sentence they
- * carried is preserved verbatim, including the dirty-branch explanation;
- * only the chrome is shared.
- */
-function ErrorScreen({
-  title,
-  role,
-  children,
-}: {
-  title: string;
-  role?: 'alert';
-  children: ReactNode;
-}) {
-  return (
-    <div className="flex h-full w-full items-center justify-center bg-canvas px-6">
-      <div role={role} className="max-w-md space-y-3 text-center">
-        <h2 className="text-head text-ink">{title}</h2>
-        {children}
-      </div>
-    </div>
-  );
-}

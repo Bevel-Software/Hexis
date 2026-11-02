@@ -1,17 +1,15 @@
-import { describe, it, expect, vi, beforeEach, afterEach, type MockInstance } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { useContext } from 'react';
 import { render, screen, fireEvent, waitFor, act, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
-import {
-  WorkspaceContext,
-  type WorkspaceContextValue,
-} from '../../workspace/state/workspace.context';
-import { AuthContext, type AuthContextValue } from '../../auth/state/auth.context';
-import { GitContext, type GitContextValue } from '../../git/state/git.context';
+import { WorkspaceContext, type WorkspaceContextValue } from '../../workspace';
+import { AuthContext, type AuthContextValue } from '../../auth';
+import { GitContext, type GitContextValue } from '../../git';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import type { PullRequestSummary, WorkflowEvent } from '@bevel-software/platform-shared';
-import { EventBusContext, type EventBusContextValue } from '../../workflow/state/event-bus.context';
-import type { ToolSecrets } from '../../secrets-vault/services/tool-secrets.api';
+import { EventBusProvider } from '../../workflow';
+import { stubServerEventStream } from '../../../__tests__/server-event-stream';
+import type { ToolSecrets } from '../../secrets-vault';
 import type { LibraryContextValue } from '../state/library-data';
 
 // The page's data loading goes through the module's api service (which wraps
@@ -64,30 +62,43 @@ vi.mock('../services/library.api', () => ({
   suggestionBranchFor: (email: string, skill: string) =>
     `suggestions/${email.split('@')[0]}/${skill}`,
 }));
-// The workspace write path — what a writer's in-place Save goes through.
-vi.mock('../../workspace/services/workspace.api', async (importOriginal) => ({
-  ...(await importOriginal<object>()),
-  getOrCreateWorkspace: apiMock.getOrCreateWorkspace,
+// The workspace entry: the write path a writer's in-place Save goes through,
+// and the branch reads. The change-request module's hooks read a branch's file
+// as its workspace's file, so a workspace stands for the branch it was asked
+// for and its reads are answered by `readFileOnBranch` below — the one place
+// a test says what a branch holds.
+const workspaceBranches = vi.hoisted(() => new Map<string, string>());
+vi.mock('../../workspace', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../workspace')>()),
+  getOrCreateWorkspace: async (branch: string) => {
+    const answer = ((await apiMock.getOrCreateWorkspace(branch)) as
+      | { workspace: { id: string; kbDirName: string } }
+      | undefined) ?? { workspace: { id: `ws-${branch}`, kbDirName: 'knowledge-base' } };
+    workspaceBranches.set(answer.workspace.id, branch);
+    return answer;
+  },
   writeFile: apiMock.writeFile,
+  readFile: (id: string, path: string) =>
+    apiMock.readFileOnBranch(workspaceBranches.get(id) ?? id, path.replace(/^knowledge-base\//, '')),
 }));
-// The change-request module's reads — the branch-file read feeds the editor
+// The change-request module's entry — the branch-file read feeds the editor
 // base and the per-request diffs.
-vi.mock('../../change-requests/services/change-requests.api', () => ({
+vi.mock('../../change-requests', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../change-requests')>()),
   listOpenChangeRequests: vi.fn(async () => []),
   listMyChangeRequests: vi.fn(async () => []),
   readFileOnBranch: apiMock.readFileOnBranch,
-  // No fork point: the change boxes fall back to the default branch, which is
-  // what these tests diff against.
-  readFileAtForkPoint: vi.fn(async () => ({ content: null, forkSha: null })),
 }));
-vi.mock('../../pr/services/pr-merge.api', () => ({ mergePullRequest: apiMock.mergePullRequest }));
-vi.mock('../../pr/services/pr-cancel.api', () => ({
+// Merging, cancelling and approving a change request. Approving is a step of
+// its own before the merge — the gate refuses to merge a markdown file with
+// owners until an eligible approver has approved this head.
+vi.mock('../../pr', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../pr')>()),
+  mergePullRequest: apiMock.mergePullRequest,
   cancelPullRequest: apiMock.cancelPullRequest,
+  fetchPrDetail: apiMock.fetchPrDetail,
+  approvePrFile: apiMock.approvePrFile,
 }));
-// Approving is a step of its own before the merge — the gate refuses to merge a
-// markdown file with owners until an eligible approver has approved this head.
-vi.mock('../../pr/services/pr-detail.api', () => ({ fetchPrDetail: apiMock.fetchPrDetail }));
-vi.mock('../../pr/services/pr-approvals.api', () => ({ approvePrFile: apiMock.approvePrFile }));
 
 // Keep the markdown pipeline (mermaid etc.) out of this test — the stub renders
 // the raw source so assertions can see the body text, plus probes for the
@@ -163,9 +174,10 @@ vi.mock('../../workspace/components/renderers/HtmlRenderer', () => {
   };
 });
 
-// The file bar's Edit-or-Propose decision asks the per-file access resolver.
-// Default here is the READER's answer (`canWrite: false`) so the proposing
-// suites below exercise the propose path; the Edit test flips it.
+// The file bar's Edit-or-Propose decision asks the per-file access resolver,
+// which the server routes below answer from here. Default is the READER's
+// answer (`canWrite: false`) so the proposing suites below exercise the
+// propose path; the Edit test flips it.
 const accessMock = vi.hoisted(() => ({
   result: {
     canWrite: false,
@@ -178,13 +190,6 @@ const accessMock = vi.hoisted(() => ({
   suggestPrincipals: vi.fn(),
 }));
 accessMock.fetchFileAccess.mockImplementation(async () => accessMock.result);
-vi.mock('../../access/api', async (importOriginal) => ({
-  ...(await importOriginal<object>()),
-  fetchFileAccess: accessMock.fetchFileAccess,
-  fetchFileAccessBatch: vi.fn(async () => ({ results: {} })),
-  grantAccess: accessMock.grantAccess,
-  suggestPrincipals: accessMock.suggestPrincipals,
-}));
 
 // The page reads the catalog through `useLibrary()`. Mocking the hook rather
 // than mounting `LibraryProvider` keeps the provider's real fetch (and its N+1
@@ -322,37 +327,10 @@ function libraryValue(
   } as unknown as LibraryContextValue;
 }
 
-/**
- * A test double for the event bus. The merge outcome only reaches the page this
- * way — the POST that starts it acks 202 and returns long before git has run —
- * so a test that never emits is a test of an apply that never finished, which
- * is itself worth asserting.
- */
-function makeFakeBus() {
-  const handlers: Record<string, ((e: WorkflowEvent) => void)[]> = {};
-  const bus: EventBusContextValue & { emit(e: WorkflowEvent): void } = {
-    subscribe(kind, handler) {
-      (handlers[kind] ??= []).push(handler as (e: WorkflowEvent) => void);
-      return () => {
-        handlers[kind] = (handlers[kind] ?? []).filter((h) => h !== handler);
-      };
-    },
-    setFocus() {},
-    watchWorkspace() {
-      return () => {};
-    },
-    emit(e) {
-      (handlers[e.kind] ?? []).forEach((h) => h(e));
-    },
-  };
-  return bus;
-}
-
 function renderPage(
   owned: boolean,
   crs: PullRequestSummary[] = [],
   mine: number[] = [],
-  bus: EventBusContextValue = makeFakeBus(),
   routerState?: Record<string, unknown>,
   /** Catalog-state overrides — e.g. `{ loading: true }` for the early case. */
   library?: Partial<LibraryContextValue>,
@@ -364,7 +342,7 @@ function renderPage(
   workspaceValue: WorkspaceContextValue = workspace,
 ) {
   libraryMock.value = { ...libraryValue(owned, crs, mine), ...library };
-  return render(harness(bus, gitValue, routerState, pageProps, workspaceValue));
+  return render(harness(gitValue, routerState, pageProps, workspaceValue));
 }
 
 /** Where a link out of the page took the router: the Knowledge app's path. */
@@ -411,7 +389,6 @@ async function settled() {
  * (`historyOpen`) those tests are about, and pass whatever the page did.
  */
 function harness(
-  bus: EventBusContextValue,
   gitValue: GitContextValue,
   routerState?: Record<string, unknown>,
   pageProps?: { provisional?: boolean },
@@ -419,6 +396,12 @@ function harness(
   /** The fragment the page's address arrives with, e.g. `#steps`. */
   hash = '',
 ) {
+  // The page listens on the app's own event bus. The merge outcome only reaches
+  // it this way — the POST that starts it acks 202 and returns long before git
+  // has run — so a test that never emits is a test of an apply that never
+  // finished, which is itself worth asserting. A test reaches the same stream
+  // by calling `stubServerEventStream()` itself.
+  stubServerEventStream();
   return (
     <MemoryRouter
       initialEntries={[
@@ -428,7 +411,7 @@ function harness(
       <AuthContext.Provider value={auth}>
         <WorkspaceContext.Provider value={workspaceValue}>
           <GitContext.Provider value={gitValue}>
-          <EventBusContext.Provider value={bus}>
+          <EventBusProvider>
             {/* The real toast provider: the success message IS the page's
                 report that the merge landed, so a stubbed-out toast would
                 leave the one assertion that matters unmakeable. */}
@@ -439,10 +422,11 @@ function harness(
                   element={<SkillPage {...(pageProps ?? {})} />}
                 />
                 <Route path="/workspace/*" element={<NavigatedTo />} />
+                <Route path="/skills-and-tools" element={<NavigatedTo />} />
                 <Route path="/skills-and-tools/connect" element={<NavigatedTo />} />
               </Routes>
             </LibraryToastProvider>
-          </EventBusContext.Provider>
+          </EventBusProvider>
           </GitContext.Provider>
         </WorkspaceContext.Provider>
       </AuthContext.Provider>
@@ -464,29 +448,74 @@ Collect the news and draft the letter.`;
 const RAW_BRANCH = RAW_MAIN.replace('draft the letter', 'ship the letter');
 
 /**
- * The node id of the file in the pane, as the backend answers it for the
- * default branch (`resolve-path`): SKILL.md is the node `newsletter`, and
- * no other file of the skill is a node. Every other request goes to the real
- * fetch, as it always has.
+ * The server, for what the page reaches through other modules' own hooks and
+ * dialogs rather than through their entries:
+ *
+ * - the node id of the file in the pane, as the backend answers it for the
+ *   default branch (`resolve-path`): SKILL.md is the node `newsletter`, and
+ *   no other file of the skill is a node;
+ * - the access routes (the verdict, a grant and the principal suggestions),
+ *   each handed to the `accessMock` handler named after the call it answers;
+ * - the fork-point read of the change boxes: no fork point, so they fall back
+ *   to the default branch, which is what these tests diff against.
+ *
+ * Every other request goes to the real fetch, as it always has.
  */
-let resolvePathSpy: MockInstance<typeof fetch>;
+let realFetch: typeof fetch;
+/**
+ * The workspace's file route, which the deleted check reads SKILL.md through:
+ * the skill is there unless a test sets `gone`. `reads` holds every
+ * `[workspace, path]` asked for.
+ */
+const fileRoute = { gone: false, reads: [] as [string, string][] };
 beforeEach(() => {
-  const realFetch = globalThis.fetch;
-  resolvePathSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+  fileRoute.gone = false;
+  fileRoute.reads = [];
+  // A plain stand-in, not a `vi.spyOn`: the page's event stream wraps fetch
+  // in turn, and assigning over a spy rewires the spy instead of replacing it.
+  realFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
     const url = String(input);
+    const file = /^\/api\/workspace\/([^/]+)\/file\?path=([^&]+)/.exec(url);
+    if (file) {
+      fileRoute.reads.push([decodeURIComponent(file[1]), decodeURIComponent(file[2])]);
+      return fileRoute.gone
+        ? new Response('{}', { status: 404 })
+        : new Response(JSON.stringify({ content: RAW_MAIN }), { status: 200 });
+    }
+    const access = /^\/api\/workspace\/([^/]+)\/access(\/[a-z]+)?\?(.*)$/.exec(url)
+      ?? /^\/api\/workspace\/([^/]+)\/access(\/[a-z]+)()$/.exec(url);
+    if (access) {
+      const [id, route, q] = [decodeURIComponent(access[1]), access[2] ?? '', new URLSearchParams(access[3])];
+      const body = typeof init?.body === 'string' ? JSON.parse(init.body) : undefined;
+      const answer = async (call: () => Promise<unknown>) => Response.json(await call());
+      if (route === '') {
+        const [path, kind] = [q.get('path') ?? '', q.get('kind')];
+        return answer(() =>
+          kind && kind !== 'file' ? accessMock.fetchFileAccess(id, path, kind) : accessMock.fetchFileAccess(id, path),
+        );
+      }
+      if (route === '/batch') return Response.json({ results: {} });
+      if (route === '/grant') return answer(() => accessMock.grantAccess(id, body));
+      if (route === '/suggest') return answer(() => accessMock.suggestPrincipals(id, q.get('q') ?? ''));
+    }
+    if (url.includes('/fork-point-file?')) return Response.json({ content: null, forkSha: null });
     if (!url.includes('/resolve-path?')) return realFetch(input, init);
     return url.includes(encodeURIComponent('knowledge-base/Skills/newsletter/SKILL.md'))
       ? new Response(JSON.stringify({ id: 'newsletter' }), { status: 200 })
       : new Response('{}', { status: 404 });
-  });
+  };
 });
 afterEach(() => {
-  resolvePathSpy.mockRestore();
+  globalThis.fetch = realFetch;
 });
 
 beforeEach(() => {
   apiMock.getSkill.mockReset().mockResolvedValue(skillDetail);
   apiMock.getSkillFile.mockReset().mockResolvedValue('watchlist:\n  - topic: AI');
+  // Each branch its own workspace, unless a test names the one a save lands in.
+  apiMock.getOrCreateWorkspace.mockReset();
+  workspaceBranches.clear();
   apiMock.readFileOnBranch
     .mockReset()
     .mockImplementation((branch: string) =>
@@ -750,7 +779,7 @@ describe('SkillPage', () => {
    */
   it('hides the Owner badge from a writer who is not an owner, and keeps their editor affordances', async () => {
     const writer = libraryValue(false, [foreignCr], [], true);
-    renderPage(false, [foreignCr], [], makeFakeBus(), undefined, {
+    renderPage(false, [foreignCr], [], undefined, {
       items: writer.items,
       writableSkills: writer.writableSkills,
     });
@@ -919,7 +948,7 @@ describe('SkillPage', () => {
       eligible: { roles: [], users: [] },
       owners: { roles: [], users: [] },
     };
-    renderPage(true, [], [], makeFakeBus(), { startEditing: true });
+    renderPage(true, [], [], { startEditing: true });
     expect(await screen.findByRole('textbox', { name: 'Edit SKILL.md' })).toBeInTheDocument();
   });
 
@@ -955,7 +984,7 @@ describe('SkillPage', () => {
       eligible: { roles: [], users: [] },
       owners: { roles: [], users: [] },
     };
-    renderPage(true, [], [], makeFakeBus(), { startEditing: true });
+    renderPage(true, [], [], { startEditing: true });
 
     const heading = await screen.findByRole('heading', { name: 'newsletter' });
     const skillTab = screen.getByRole('tab', { name: 'SKILL.md' });
@@ -1008,7 +1037,7 @@ describe('SkillPage', () => {
       ['failed to load', failed],
     ])('holds the "doesn\'t exist" verdict while the catalog %s', async (_label, lib) => {
       apiMock.getSkill.mockRejectedValueOnce(new Error('nope'));
-      renderPage(false, [], [], makeFakeBus(), undefined, lib, { provisional: true });
+      renderPage(false, [], [], undefined, lib, { provisional: true });
 
       await waitFor(() => expect(apiMock.getSkill).toHaveBeenCalled());
       expect(
@@ -1021,7 +1050,7 @@ describe('SkillPage', () => {
 
     it('does conclude absence once the catalog has answered', async () => {
       apiMock.getSkill.mockRejectedValueOnce(new Error('nope'));
-      renderPage(false, [], [], makeFakeBus(), undefined, { loading: false, error: null }, {
+      renderPage(false, [], [], undefined, { loading: false, error: null }, {
         provisional: true,
       });
 
@@ -1034,7 +1063,7 @@ describe('SkillPage', () => {
       // A confirmed name's detail error is real — report it immediately, even
       // mid-refresh. Suppressing it would hide a genuine access failure.
       apiMock.getSkill.mockRejectedValueOnce(new Error('nope'));
-      renderPage(false, [], [], makeFakeBus(), undefined, early);
+      renderPage(false, [], [], undefined, early);
 
       expect(
         await screen.findByText(/doesn't exist, or you don't have access to it/),
@@ -1267,8 +1296,8 @@ describe('SkillPage: deciding on a change', () => {
   });
 
   it('reports success only once the merge event lands', async () => {
-    const bus = makeFakeBus();
-    renderPage(true, [foreignCr], [], bus);
+    const bus = stubServerEventStream();
+    renderPage(true, [foreignCr], []);
     fireEvent.click(await screen.findByRole('button', { name: 'Approve' }));
     await waitFor(() => expect(apiMock.mergePullRequest).toHaveBeenCalledWith(7));
 
@@ -1286,8 +1315,8 @@ describe('SkillPage: deciding on a change', () => {
    * directly under a message saying it had changed.
    */
   it('re-reads the skill so the pane shows the merged text', async () => {
-    const bus = makeFakeBus();
-    renderPage(true, [foreignCr], [], bus);
+    const bus = stubServerEventStream();
+    renderPage(true, [foreignCr], []);
     expect((await screen.findByTestId('md-view')).textContent).toContain('draft the letter');
 
     // What the default branch returns once the change request has landed.
@@ -1310,8 +1339,7 @@ describe('SkillPage: deciding on a change', () => {
   it('does not report a closed change request as applied', async () => {
     vi.useFakeTimers();
     try {
-      const bus = makeFakeBus();
-      renderPage(true, [foreignCr], [], bus);
+      renderPage(true, [foreignCr], []);
       // `findBy*` needs real timers to settle the initial load.
       await vi.waitFor(() => screen.getByRole('button', { name: 'Approve' }));
       fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
@@ -1333,8 +1361,8 @@ describe('SkillPage: deciding on a change', () => {
   });
 
   it('marks the box blocked when the merge comes back conflicted', async () => {
-    const bus = makeFakeBus();
-    renderPage(true, [foreignCr], [], bus);
+    const bus = stubServerEventStream();
+    renderPage(true, [foreignCr], []);
     fireEvent.click(await screen.findByRole('button', { name: 'Approve' }));
     await waitFor(() => expect(apiMock.mergePullRequest).toHaveBeenCalledWith(7));
 
@@ -1372,8 +1400,8 @@ describe('SkillPage: deciding on a change', () => {
    * approve" would strip the only part the owner can act on.
    */
   it('shows a gate refusal verbatim and keeps Approve available', async () => {
-    const bus = makeFakeBus();
-    renderPage(true, [foreignCr], [], bus);
+    const bus = stubServerEventStream();
+    renderPage(true, [foreignCr], []);
     fireEvent.click(await screen.findByRole('button', { name: 'Approve' }));
     await waitFor(() => expect(apiMock.mergePullRequest).toHaveBeenCalledWith(7));
 
@@ -1606,24 +1634,23 @@ describe('SkillPage: deciding on a change', () => {
      * after the reader had gone back to reading.
      */
     it('closes for good when git stops answering mid-read', async () => {
-      const bus = makeFakeBus();
-      const { rerender } = renderPage(false, [], [], bus);
+      const { rerender } = renderPage(false, [], []);
       fireEvent.click(await screen.findByRole('button', { name: 'Version history' }));
       await screen.findByText(/^Timeline:/);
 
       // A poll fails: the log goes away, and so does its trigger.
-      rerender(harness(bus, { ...git, availability: 'error' } as GitContextValue));
+      rerender(harness({ ...git, availability: 'error' } as GitContextValue));
       expect(screen.queryByText(/^Timeline:/)).toBeNull();
 
       // The next poll succeeds. The file is still what is on screen.
-      rerender(harness(bus, git));
+      rerender(harness(git));
       expect(await screen.findByTestId('md-view')).toBeInTheDocument();
       expect(screen.queryByText(/^Timeline:/)).toBeNull();
       expect(screen.getByRole('button', { name: 'Version history' })).toBeInTheDocument();
     });
 
     it('has no trigger at all when git cannot answer', async () => {
-      renderPage(false, [], [], makeFakeBus(), undefined, undefined, undefined, {
+      renderPage(false, [], [], undefined, undefined, undefined, {
         ...git,
         availability: 'loading',
       } as GitContextValue);
@@ -1653,7 +1680,7 @@ describe('SkillPage: links and images in the file', () => {
       .spyOn(window, 'open')
       .mockImplementation(() => ({ opener: window }) as unknown as Window);
     try {
-      renderPage(false, [], [], makeFakeBus(), undefined, undefined, undefined, {
+      renderPage(false, [], [], undefined, undefined, undefined, {
         ...git,
         status: { ...git.status!, branch: 'alice/draft' },
       });
@@ -1744,7 +1771,7 @@ describe('SkillPage: links and images in the file', () => {
   it("opens another node on the default branch, where the file was read, while a draft is checked out", async () => {
     const open = vi.spyOn(window, 'open').mockImplementation(() => ({ opener: window }) as unknown as Window);
     try {
-      renderPage(false, [], [], makeFakeBus(), undefined, undefined, undefined, {
+      renderPage(false, [], [], undefined, undefined, undefined, {
         ...git,
         status: { ...git.status!, branch: 'alice/draft' },
       });
@@ -1773,7 +1800,7 @@ describe('SkillPage: links and images in the file', () => {
     };
     try {
       libraryMock.value = libraryValue(false, [], []);
-      render(harness(makeFakeBus(), git, undefined, undefined, workspace, '#steps'));
+      render(harness(git, undefined, undefined, workspace, '#steps'));
       await settled();
       await waitFor(() => expect(scrolled).toContain('steps'));
     } finally {
@@ -1782,7 +1809,7 @@ describe('SkillPage: links and images in the file', () => {
   });
 
   it("names the file's real home for an HTML page's links: its workspace path, on the default branch", async () => {
-    renderPage(false, [], [], makeFakeBus(), undefined, undefined, undefined, {
+    renderPage(false, [], [], undefined, undefined, undefined, {
       ...git,
       status: { ...git.status!, branch: 'alice/draft' },
     });
@@ -1803,7 +1830,7 @@ describe('SkillPage: links and images in the file', () => {
   });
 
   it('hands the view no resolver before the workspace has named its KB dir', async () => {
-    renderPage(false, [], [], makeFakeBus(), undefined, undefined, undefined, git, {
+    renderPage(false, [], [], undefined, undefined, undefined, git, {
       workspaceId: 'target-company-state',
       kbDirName: null,
     } as unknown as WorkspaceContextValue);
@@ -1861,7 +1888,7 @@ describe('SkillPage: Share', () => {
   it("a plugin-bundled skill offers Share on ITS folder, not the plugin's", async () => {
     const path = 'Plugins/newsroom/skills/newsletter';
     apiMock.getSkill.mockResolvedValue({ ...skillDetail, path, files: [`${path}/sources.yaml`] });
-    renderPage(false, [], [], makeFakeBus(), undefined, {
+    renderPage(false, [], [], undefined, {
       items: libraryValue(false).items.map((i) => ({ ...i, path, plugin: 'newsroom' })),
       skills: [{ ...skillSummary, path }],
     });
@@ -1945,11 +1972,142 @@ describe('SkillPage: Share', () => {
   });
 
   it('offers no Share before the KB dir is known. There is no folder path to hand over yet', async () => {
-    renderPage(false, [], [], makeFakeBus(), undefined, undefined, undefined, git, {
+    renderPage(false, [], [], undefined, undefined, undefined, git, {
       workspaceId: 'target-company-state',
       kbDirName: null,
     } as unknown as WorkspaceContextValue);
     await settled();
     expect(screen.queryByRole('button', { name: 'Share' })).toBeNull();
+  });
+});
+
+/**
+ * Someone else deletes the skill on screen: the page shows the same "This
+ * file was deleted" notice as the Knowledge file page (the same component),
+ * not the old content until a reload; Close lands on Skills & Tools.
+ */
+describe('SkillPage: deleted by someone else', () => {
+  const SKILL_MD = 'knowledge-base/Skills/newsletter/SKILL.md';
+  const changed = (over: { path?: string } = {}): WorkflowEvent => ({
+    id: 1,
+    ts: '',
+    kind: 'file-changed',
+    workspaceId: DEFAULT_BRANCH,
+    branch: DEFAULT_BRANCH,
+    path: SKILL_MD,
+    newSha: 'abc',
+    byUserId: 'u2',
+    byUserName: 'Sam Rivera',
+    ...over,
+  });
+  const gone = () => {
+    fileRoute.gone = true;
+  };
+
+  it('replaces the page with the notice, naming the file, the branch and who; Close lands on Skills & Tools', async () => {
+    const bus = stubServerEventStream();
+    renderPage(false, [], []);
+    await settled();
+
+    gone();
+    act(() => bus.emit(changed()));
+
+    expect(await screen.findByRole('heading', { name: 'This file was deleted' })).toBeInTheDocument();
+    expect(screen.getByText(/was deleted from/).textContent).toBe(
+      `newsletter/SKILL.md was deleted from ${DEFAULT_BRANCH} by Sam Rivera a moment ago.`,
+    );
+    expect(screen.queryByTestId('md-view')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Copy edits' })).toBeNull();
+    expect(fileRoute.reads).toContainEqual([DEFAULT_BRANCH, SKILL_MD]);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    await waitFor(() => expect(screen.getByTestId('navigated-to').textContent).toBe('/skills-and-tools'));
+  });
+
+  it('names nobody when the delete came from the git host or a folder-wide change', async () => {
+    const bus = stubServerEventStream();
+    renderPage(false, [], []);
+    await settled();
+
+    gone();
+    act(() => bus.emit({ id: 2, ts: '', kind: 'fs-tree-changed', workspaceId: DEFAULT_BRANCH, branch: DEFAULT_BRANCH }));
+
+    expect(await screen.findByRole('heading', { name: 'This file was deleted' })).toBeInTheDocument();
+    expect(screen.getByText(/was deleted from/).textContent).toBe(
+      `newsletter/SKILL.md was deleted from ${DEFAULT_BRANCH}.`,
+    );
+  });
+
+  it('names SKILL.md, the file that was deleted, while another file of the skill is on screen', async () => {
+    const bus = stubServerEventStream();
+    renderPage(false, [], []);
+    await settled();
+    fireEvent.click(screen.getByRole('tab', { name: 'sources.yaml' }));
+    await waitFor(() =>
+      expect(apiMock.getSkillFile).toHaveBeenCalledWith('newsletter', 'sources.yaml'),
+    );
+
+    gone();
+    act(() => bus.emit(changed()));
+
+    expect(await screen.findByRole('heading', { name: 'This file was deleted' })).toBeInTheDocument();
+    expect(screen.getByText(/was deleted from/).textContent).toBe(
+      `newsletter/SKILL.md was deleted from ${DEFAULT_BRANCH} by Sam Rivera a moment ago.`,
+    );
+  });
+
+  it('keeps unsaved edits on the notice with Copy edits', async () => {
+    accessMock.result = {
+      canWrite: true,
+      eligible: { roles: [], users: [] },
+      owners: { roles: [], users: [] },
+    };
+    const bus = stubServerEventStream();
+    renderPage(true, [], []);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    const box = await screen.findByRole('textbox', { name: 'Edit SKILL.md' });
+    fireEvent.change(box, { target: { value: 'my half-written body' } });
+
+    gone();
+    act(() => bus.emit(changed()));
+
+    expect(await screen.findByRole('heading', { name: 'This file was deleted' })).toBeInTheDocument();
+    expect(screen.getByText('Your unsaved edits exist only here. Copy them before you close.')).toBeInTheDocument();
+    expect(screen.getByLabelText('Your unsaved edits').textContent).toBe('my half-written body');
+    expect(screen.getByRole('button', { name: 'Copy edits' })).toBeInTheDocument();
+  });
+
+  it('stays on the skill when the file is still there (a save, not a delete)', async () => {
+    const bus = stubServerEventStream();
+    renderPage(false, [], []);
+    await settled();
+
+    act(() => bus.emit(changed()));
+
+    await waitFor(() => expect(fileRoute.reads).toContainEqual([DEFAULT_BRANCH, SKILL_MD]));
+    expect(screen.queryByRole('heading', { name: 'This file was deleted' })).toBeNull();
+    expect(screen.getByTestId('md-view')).toBeInTheDocument();
+  });
+
+  it("is not shown for this person's own delete, nor for another skill's file", async () => {
+    const bus = stubServerEventStream();
+    // The delete starts once the page is open, as it does from its sidebar.
+    let deleting = false;
+    const pending = vi.fn((path: string) => deleting && path.startsWith('knowledge-base/Skills/newsletter'));
+    renderPage(false, [], [], undefined, undefined, undefined, git, {
+      ...workspace,
+      isOwnDelete: pending,
+    } as WorkspaceContextValue);
+    await settled();
+
+    deleting = true;
+    gone();
+    act(() => bus.emit(changed({ path: 'knowledge-base/Skills/other/SKILL.md' })));
+    expect(fileRoute.reads).toEqual([]);
+
+    act(() => bus.emit(changed()));
+    await waitFor(() => expect(pending).toHaveBeenCalledWith(SKILL_MD));
+    expect(screen.queryByRole('heading', { name: 'This file was deleted' })).toBeNull();
   });
 });

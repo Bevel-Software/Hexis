@@ -1,14 +1,11 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { act, render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import type { ReactNode } from 'react';
-import {
-  WorkspaceContext,
-  type WorkspaceContextValue,
-} from '../../workspace/state/workspace.context';
-import { AdminContext } from '../../admin/state/admin.context';
-import { AuthContext, type AuthContextValue } from '../../auth/state/auth.context';
-import type { ToolSecrets } from '../../secrets-vault/services/tool-secrets.api';
+import { WorkspaceContext, type WorkspaceContextValue } from '../../workspace';
+import { AdminContext } from '../../admin';
+import { AuthContext, type AuthContextValue } from '../../auth';
+import type { ToolSecrets } from '../../secrets-vault';
 import type { ToolManualDetail } from '../services/tools.api';
 
 /**
@@ -27,7 +24,11 @@ const secretsMock = vi.hoisted(() => ({
   deleteAdminVar: vi.fn(),
   setOAuthClientSecret: vi.fn(),
 }));
-vi.mock('../../secrets-vault/services/tool-secrets.api', () => secretsMock);
+vi.mock('../../secrets-vault', async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  ...secretsMock,
+  startToolOAuth: vi.fn(),
+}));
 
 const toolsMock = vi.hoisted(() => ({
   getToolDetail: vi.fn(),
@@ -50,13 +51,15 @@ vi.mock('../services/library.api', () => ({
 // catalog the folder name stands in as the label — which is what the frame
 // tests assert on — and the provider's own fetches stay out of the picture.
 vi.mock('../state/library-data', () => ({
-  useLibrary: () => ({ pluginSummaries: [] }),
+  useLibrary: () => ({ pluginSummaries: [], reload: () => {}, reloadPlugins: () => {} }),
 }));
 
 const sourceMock = vi.hoisted(() => ({ readFileOnBranch: vi.fn() }));
-vi.mock('../../change-requests/services/change-requests.api', () => sourceMock);
+vi.mock('../../change-requests', async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  ...sourceMock,
+}));
 
-vi.mock('../../secrets-vault/services/connect.api', () => ({ startToolOAuth: vi.fn() }));
 vi.mock('../utils/navigate-external', () => ({ navigateExternal: vi.fn() }));
 
 import { ToolPage } from '../components/tool-page/ToolPage';
@@ -65,6 +68,9 @@ import { expectMenuAtTheEndOfTheTitleRow, expectTitleRowSpansTheDocumentColumn }
 import { expectTitleKeepsItsInk } from '../../../__tests__/title-ink-room';
 import { PAGE_HEADER_TESTID } from '../../../shared/theme/header';
 import { TOOL_CREDENTIALS_STALE_EVENT } from '../../../core/events';
+import { DEFAULT_BRANCH, type WorkflowEvent } from '@bevel-software/platform-shared';
+import { EventBusProvider } from '../../workflow';
+import { stubServerEventStream } from '../../../__tests__/server-event-stream';
 
 const GITHUB: ToolSecrets = {
   slug: 'heyreach',
@@ -708,5 +714,101 @@ describe('ToolPage: source', () => {
       'Plugins/GTM/mcp.json',
     );
     expect(document.querySelector('pre')!.textContent).toBe(MCP_JSON);
+  });
+});
+
+/**
+ * Someone else deletes the tool on screen: the same "This file was deleted"
+ * notice as the Knowledge file page, and Close lands on Skills & Tools.
+ */
+describe('ToolPage: deleted by someone else', () => {
+  const TOOL_FILE = 'knowledge-base/Plugins/GTM/heyreach.tool';
+
+  /**
+   * The workspace's file route, which the deleted check reads the tool's file
+   * through: it is there until a test sets `gone`. `reads` holds every
+   * `[workspace, path]` asked for.
+   */
+  const fileRoute = { gone: false, reads: [] as [string, string][] };
+  let realFetch: typeof fetch;
+  beforeEach(() => {
+    fileRoute.gone = false;
+    fileRoute.reads = [];
+    // A plain stand-in, not a `vi.spyOn`: the page's event stream wraps fetch
+    // in turn, and assigning over a spy rewires the spy instead of replacing it.
+    realFetch = globalThis.fetch;
+    globalThis.fetch = async (input, init) => {
+      const file = /^\/api\/workspace\/([^/]+)\/file\?path=([^&]+)/.exec(String(input));
+      if (!file) return realFetch(input, init);
+      fileRoute.reads.push([decodeURIComponent(file[1]), decodeURIComponent(file[2])]);
+      return fileRoute.gone
+        ? new Response('{}', { status: 404 })
+        : new Response(JSON.stringify({ content: SOURCE }), { status: 200 });
+    };
+  });
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  function renderWithBus() {
+    return render(
+      <MemoryRouter initialEntries={['/skills-and-tools/tools/heyreach']}>
+        <EventBusProvider>
+          {wrap(
+            <Routes>
+              <Route path="/skills-and-tools/tools/:slug" element={<ToolPage />} />
+              <Route path="/skills-and-tools" element={<div>Gallery</div>} />
+            </Routes>,
+            false,
+          )}
+        </EventBusProvider>
+        <LocationProbe />
+      </MemoryRouter>,
+    );
+  }
+
+  const deleted = (byUserName: string): WorkflowEvent => ({
+    id: 1,
+    ts: '',
+    kind: 'file-changed',
+    workspaceId: DEFAULT_BRANCH,
+    branch: DEFAULT_BRANCH,
+    path: TOOL_FILE,
+    newSha: 'abc',
+    byUserId: 'u2',
+    byUserName,
+  });
+
+  it('shows the notice with the file, the branch and who, and Close lands on Skills & Tools', async () => {
+    const bus = stubServerEventStream();
+    renderWithBus();
+    await screen.findByRole('heading', { name: 'heyreach', level: 1 });
+
+    fileRoute.gone = true;
+    act(() => bus.emit(deleted('Sam Rivera')));
+
+    expect(await screen.findByRole('heading', { name: 'This file was deleted' })).toBeInTheDocument();
+    expect(screen.getByText(/was deleted from/).textContent).toBe(
+      `heyreach.tool was deleted from ${DEFAULT_BRANCH} by Sam Rivera a moment ago.`,
+    );
+    expect(screen.queryByRole('heading', { name: 'heyreach', level: 1 })).toBeNull();
+    expect(fileRoute.reads).toContainEqual([DEFAULT_BRANCH, TOOL_FILE]);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    await waitFor(() => expect(screen.getByLabelText('pathname').textContent).toBe('/skills-and-tools'));
+  });
+
+  it('names nobody for a pull from the git host', async () => {
+    const bus = stubServerEventStream();
+    renderWithBus();
+    await screen.findByRole('heading', { name: 'heyreach', level: 1 });
+
+    fileRoute.gone = true;
+    act(() => bus.emit({ ...deleted('Git sync'), byUserId: 'system' } as WorkflowEvent));
+
+    expect(await screen.findByRole('heading', { name: 'This file was deleted' })).toBeInTheDocument();
+    expect(screen.getByText(/was deleted from/).textContent).toBe(
+      `heyreach.tool was deleted from ${DEFAULT_BRANCH}.`,
+    );
   });
 });

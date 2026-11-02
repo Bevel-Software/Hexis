@@ -3,6 +3,16 @@
  * without reaching into the Library's files.
  */
 
+/**
+ * The routing contract that says which URLs are Skills & Tools pages, which
+ * workspace file such a page shows, and whether a delete took that item.
+ */
+export {
+  LIBRARY_ROOT,
+  deleteTookLibraryItem,
+  isLibraryLocation,
+  libraryItemWorkspacePath,
+} from './routes/library-paths';
 /** Where "Connect your tools" lives; every in-app link to it uses this. */
 export { CONNECT_TOOLS_PATH } from './routes/library-paths';
 /**
@@ -17,7 +27,7 @@ export { ToolLogo, type ToolLogoProps } from './components/ToolLogo';
 /** The outcome a tool sign-in carries back in the fragment, read once on arrival. */
 export { readOAuthFragment, type OAuthFragmentOutcome } from './utils/oauth-fragment';
 // Reached by other modules; exported here so they stop importing the files.
-export { LIBRARY_ROOT, isLibraryLocation, pathForLibraryFilter, pathForPlugin, pathForSkill, urlForLibraryItem } from './routes/library-paths';
+export { pathForLibraryFilter, pathForPlugin, pathForSkill, urlForLibraryItem } from './routes/library-paths';
 export { listSkills } from './services/library.api';
 export type { LibrarySkillSummary } from './services/library.api';
 export { listPlugins } from './services/plugins.api';
