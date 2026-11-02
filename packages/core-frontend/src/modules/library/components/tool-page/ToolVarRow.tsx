@@ -131,6 +131,11 @@ export function ToolVarRow({
   if (variable.oauth) {
     // An OAuth client secret only exists for a MANUALLY declared provider.
     const mayEditClientSecret = canWrite && setupKind !== 'oauth-auto';
+    // The owner's half is done when a client secret is stored — or, for a
+    // MANAGED sign-in, when the deployment can reach its broker (or an owner
+    // pinned their own app): there is no secret to store for the broker's app.
+    const ownerReady =
+      variable.adminConfigured || (variable.managed ? variable.managed.available || variable.managed.ownApp : false);
 
     if (variable.authorized && !variable.needsReauth) {
       description = 'Each person sets their own';
@@ -158,7 +163,7 @@ export function ToolVarRow({
           Sign in again
         </Button>,
       );
-    } else if (variable.adminConfigured) {
+    } else if (ownerReady) {
       description = 'Each person sets their own';
       meta.push(
         <Button key="signin" size="sm" disabled={busy} onClick={() => void signIn()}>

@@ -1680,6 +1680,11 @@ function normalizeVariableOAuth(at: string, raw: unknown): ToolVariableOAuth | u
   }
   const clientId = typeof o.clientId === 'string' && o.clientId.trim() ? o.clientId.trim() : '';
   if (!clientId && !managed) throw new Error(`${at}.oauth.clientId\` is required`);
+  // One client or the other: a managed sign-in runs with the broker's app, and
+  // a client id beside it would be a declaration two flows claim.
+  if (clientId && managed) {
+    throw new Error(`${at}.oauth\` names both \`managed\` and a \`clientId\`; a managed sign-in has no client of its own`);
+  }
   let scopes: string[] | undefined;
   if (o.scopes !== undefined) {
     if (!Array.isArray(o.scopes) || !o.scopes.every((s) => typeof s === 'string')) {

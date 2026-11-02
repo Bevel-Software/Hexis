@@ -390,6 +390,42 @@ describe('McpService — per-user credential pre-check', () => {
     userScopedKeysForManual: async () =>
       [] as { key: string; name: string; label: string | null; oauth: boolean }[],
   };
+  // A WORKSPACE connection (a managed connector an owner connects once for
+  // everyone): no personal variable, one shared sign-in.
+  const manualsWithSharedSignIn = {
+    sharedSignInKeysForManual: async (manual: string) =>
+      manual === 'KNOWLEDGE_BASE'
+        ? [{ key: 'KNOWLEDGE_BASE_ACCESS_TOKEN', name: 'ACCESS_TOKEN', label: 'HubSpot sign-in', oauthScopes: ['crm.objects.contacts.read'] }]
+        : [],
+    userScopedKeysForManual: async () => [] as { key: string; name: string; label: string | null; oauth: boolean }[],
+  };
+  const sharedVault = (adminAuthorized: boolean, adminGrantedScopes?: string) => ({
+    statusFor: async (_userId: string, keys: string[]) =>
+      keys.map((key) => ({ key, adminConfigured: adminAuthorized, userConfigured: false, adminAuthorized, adminGrantedScopes })),
+  });
+
+  describe('a workspace connection nobody has made', () => {
+    it('refuses the call with words that say an owner connects it, without resetting the caller’s own grant', async () => {
+      const revokeOAuthAccess = vi.fn(async () => undefined);
+      const client = await setup({ secretsVault: sharedVault(false), toolManuals: manualsWithSharedSignIn, tokenId: null, revokeOAuthAccess });
+      const res = await client.callTool({ name: 'ask', arguments: { body: { prompt: 'hello' } } });
+      expect(res.isError).toBe(true);
+      const text = (res.content as Array<{ text: string }>)[0].text;
+      expect(text).toMatch(/HubSpot sign-in \(a tool owner connects this for the workspace\)/);
+      expect(text).toMatch(/\/connect/);
+      expect(revokeOAuthAccess).not.toHaveBeenCalled();
+    });
+
+    it('is hidden from a connection-key listing until an owner connects it with a covering token', async () => {
+      const names = async (c: Awaited<ReturnType<typeof setup>>) => (await c.listTools()).tools.map((t) => t.name).sort();
+      const unconnected = await setup({ secretsVault: sharedVault(false), toolManuals: manualsWithSharedSignIn });
+      expect(await names(unconnected)).toEqual(['call_tool_chain', 'list_tools', 'tools_info']);
+      const underScoped = await setup({ secretsVault: sharedVault(true, 'oauth'), toolManuals: manualsWithSharedSignIn });
+      expect(await names(underScoped)).toEqual(['call_tool_chain', 'list_tools', 'tools_info']);
+      const connected = await setup({ secretsVault: sharedVault(true, 'oauth crm.objects.contacts.read'), toolManuals: manualsWithSharedSignIn });
+      expect(await names(connected)).toEqual(['ask', 'boom', 'call_tool_chain', 'list_tools', 'refy', 'tools_info']);
+    });
+  });
 
   it('gates a tool whose personal credential is unset — returns the setup link, not the tool', async () => {
     const client = await setup({ secretsVault: vault(false), toolManuals: manualsWithUserVar });

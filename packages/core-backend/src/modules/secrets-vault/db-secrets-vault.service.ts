@@ -41,6 +41,10 @@ const MAX_VALUE_LEN = 100_000;
 const REFRESH_SKEW_MS = 60_000;
 /** Upper bound on a token-endpoint round-trip, so a hung provider can't block callers. */
 const TOKEN_REQUEST_TIMEOUT_MS = 10_000;
+/** Upper bound on telling a provider a managed sign-in is over, so a deletion never waits on it. */
+const REVOKE_TIMEOUT_MS = 10_000;
+/** How often a managed sign-in's opening is retried against a row that keeps changing under it. */
+const BEGIN_MANAGED_ATTEMPTS = 3;
 /** How much of a refusing token endpoint's body is read for its error code: an OAuth error object, never a whole error page. */
 const TOKEN_ERROR_BODY_MAX_BYTES = 2048;
 // Hexis's own sentences for a refused token request: what to change, in our
@@ -311,6 +315,7 @@ export class DbSecretsVaultService implements ISecretsVaultService {
   }
 
   async remove(userId: string, id: string): Promise<void> {
+    await this.revokeManagedBefore(and(eq(secrets.id, id), eq(secrets.userId, userId)));
     const res = await this.db
       .delete(secrets)
       .where(and(eq(secrets.id, id), eq(secrets.userId, userId)))
@@ -330,6 +335,10 @@ export class DbSecretsVaultService implements ISecretsVaultService {
     const label = this.normaliseLabel(input.label);
     const valueEncrypted = this.crypto().encrypt(input.value);
 
+    // A shared row that held a managed workspace connection is told to its
+    // provider before this value replaces it; the tokens would otherwise go
+    // unrevoked with the row's kind.
+    await this.revokeManagedBefore(and(isNull(secrets.userId), eq(secrets.key, key)));
     // Upsert the ONE shared row for this key (user_id NULL). The conflict target
     // is the partial unique index `secrets_shared_key_unq` — hence `targetWhere`.
     const [row] = await this.db
@@ -404,8 +413,16 @@ export class DbSecretsVaultService implements ISecretsVaultService {
     if (!ref) return;
     const tokens = this.readTokensSafe(row.valueEncrypted);
     if (!tokens?.access_token) return;
+    // Bounded: the delete that follows is the user's decision, and a revoker
+    // that never settles must not hold it.
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      await this.managedRevoker.revoke(ref, { access_token: tokens.access_token, refresh_token: tokens.refresh_token });
+      await Promise.race([
+        this.managedRevoker.revoke(ref, { access_token: tokens.access_token, refresh_token: tokens.refresh_token }),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`revocation did not settle within ${REVOKE_TIMEOUT_MS}ms`)), REVOKE_TIMEOUT_MS);
+        }),
+      ]);
     } catch (err) {
       // The key names the sign-in; the message is ours or the revoker's, and
       // the revoker's own rule is never to put a token in one.
@@ -414,6 +431,8 @@ export class DbSecretsVaultService implements ISecretsVaultService {
         connector: ref.connectorId,
         err,
       });
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   }
 
@@ -559,34 +578,45 @@ export class DbSecretsVaultService implements ISecretsVaultService {
     const userId = input.userId === null ? null : this.requireUserId(input.userId);
     if (!input.provider.managed) throw new InvalidSecretError('a managed sign-in needs its connector reference');
     if (typeof input.nonce !== 'string' || input.nonce.length < 16) throw new InvalidSecretError('nonce is required');
-    const oauthMeta = this.publicProviderMeta(this.requireProvider(input.provider));
+    const oauthMeta = this.publicProviderMeta(this.requireProvider(input.provider, { managed: true }));
     const where = userId === null ? and(isNull(secrets.userId), eq(secrets.key, key)) : and(eq(secrets.userId, userId), eq(secrets.key, key));
-    const [existing] = await this.db.select().from(secrets).where(where).limit(1);
-    // Keep what a managed row already holds (its tokens, so an abandoned
-    // reconnect costs nothing); start clean over anything else — a static
-    // value or an owner-app sign-in under this key is not this connection.
-    let kept: OAuthBlob = {};
-    if (existing?.kind === 'oauth' && this.managedRefOf(existing.oauthMeta)) {
-      try {
-        kept = this.readBlob(existing.valueEncrypted);
-      } catch {
-        kept = {};
+    // Read-modify-write on a LIVE credential: a refresh running concurrently
+    // may rotate the tokens between the read and the write, and writing our
+    // copy over them would leave the row holding a dead refresh token. So the
+    // update is guarded on the ciphertext read, and a miss re-reads and
+    // rebuilds from the fresh row; bounded, so a row that keeps changing
+    // fails loudly rather than forever. The same rule `beginOAuth` follows.
+    for (let attempt = 0; attempt < BEGIN_MANAGED_ATTEMPTS; attempt++) {
+      const [existing] = await this.db.select().from(secrets).where(where).limit(1);
+      // Keep what a managed row already holds (its tokens, so an abandoned
+      // reconnect costs nothing); start clean over anything else — a static
+      // value or an owner-app sign-in under this key is not this connection.
+      let kept: OAuthBlob = {};
+      if (existing?.kind === 'oauth' && this.managedRefOf(existing.oauthMeta)) {
+        try {
+          kept = this.readBlob(existing.valueEncrypted);
+        } catch {
+          kept = {};
+        }
       }
-    }
-    const next: OAuthBlob = { tokens: kept.tokens, pendingNonce: input.nonce };
-    const valueEncrypted = this.crypto().encrypt(JSON.stringify(next));
-    const account = existing?.kind === 'oauth' ? (existing.oauthMeta as Record<string, unknown> | null)?.account : undefined;
-    const meta = typeof account === 'string' && account ? { ...oauthMeta, account } : oauthMeta;
-    if (existing) {
-      await this.db
+      const next: OAuthBlob = { tokens: kept.tokens, pendingNonce: input.nonce };
+      const valueEncrypted = this.crypto().encrypt(JSON.stringify(next));
+      const account = existing?.kind === 'oauth' ? (existing.oauthMeta as Record<string, unknown> | null)?.account : undefined;
+      const meta = typeof account === 'string' && account ? { ...oauthMeta, account } : oauthMeta;
+      if (!existing) {
+        await this.db.insert(secrets).values({ userId, key, kind: 'oauth', label: null, valueEncrypted, oauthMeta: meta });
+        return;
+      }
+      const written = await this.db
         .update(secrets)
         .set({ kind: 'oauth', valueEncrypted, oauthMeta: meta, updatedAt: new Date() })
-        .where(eq(secrets.id, existing.id));
-    } else {
-      await this.db.insert(secrets).values({ userId, key, kind: 'oauth', label: null, valueEncrypted, oauthMeta: meta });
+        .where(and(eq(secrets.id, existing.id), eq(secrets.valueEncrypted, existing.valueEncrypted)))
+        .returning({ id: secrets.id });
+      // No mutation signal on success: nothing a cache holds about this
+      // credential changed (the tokens, if any, are the same ones).
+      if (!Array.isArray(written) || written.length > 0) return;
     }
-    // No mutation signal: nothing a cache holds about this credential changed
-    // (the tokens, if any, are the same ones).
+    throw new SecretOAuthError('The sign-in could not be opened: its stored credential kept changing. Try again.');
   }
 
   async completeManagedConnection(input: {
@@ -778,6 +808,9 @@ export class DbSecretsVaultService implements ISecretsVaultService {
     const blob: OAuthBlob = { clientSecret: provider.clientSecret };
     const valueEncrypted = this.crypto().encrypt(JSON.stringify(blob));
     const oauthMeta = this.publicProviderMeta(provider);
+    // An owner's own app replacing a managed workspace connection: the
+    // connection's tokens are revoked with the provider before they go.
+    await this.revokeManagedBefore(and(isNull(secrets.userId), eq(secrets.key, key)));
     await this.db
       .insert(secrets)
       .values({ userId: null, key, kind: 'oauth', label: null, valueEncrypted, oauthMeta })
@@ -823,8 +856,11 @@ export class DbSecretsVaultService implements ISecretsVaultService {
       }
       // The save's own validation (https, no private or local address), BEFORE
       // the caller's row is written or a URL built: a declaration that fails it
-      // sends nothing anywhere.
-      meta = this.requireProvider({ ...input.provider, publicClient: false });
+      // sends nothing anywhere. A MANAGED declaration names no client of its
+      // own; reaching here means an owner pinned the deployment's own app on
+      // the shared row, and that app's id is the one the flow runs with.
+      const clientId = input.provider.clientId || this.readMeta(shared.oauthMeta).clientId;
+      meta = this.requireProvider({ ...input.provider, clientId, publicClient: false });
       oauthMeta = this.publicProviderMeta(meta);
       // A MOVED PROPERTY, decided on the ticket (OAuth-Sign-In-Follows-The-Live-
       // Declaration, 2026-10-27): the secret used to be bound to the token
@@ -1192,6 +1228,7 @@ export class DbSecretsVaultService implements ISecretsVaultService {
     const blob: OAuthBlob = { clientSecret: provider.clientSecret };
     const valueEncrypted = this.crypto().encrypt(JSON.stringify(blob));
     const oauthMeta = this.publicProviderMeta(provider);
+    await this.revokeManagedBefore(and(isNull(secrets.userId), eq(secrets.key, key)));
     await this.db
       .insert(secrets)
       .values({ userId: null, key, kind: 'oauth', label, valueEncrypted, oauthMeta })
@@ -1336,13 +1373,19 @@ export class DbSecretsVaultService implements ISecretsVaultService {
     };
   }
 
-  private requireProvider(p: unknown): OAuthProviderConfig {
+  /**
+   * @param opts.managed Accept a MANAGED provider (no client id of its own,
+   *   a connector reference instead). Only the managed sign-in paths pass it:
+   *   everywhere else a provider needs a client id, and a `managed` field a
+   *   caller slipped in is dropped rather than making the row one.
+   */
+  private requireProvider(p: unknown, opts: { managed?: boolean } = {}): OAuthProviderConfig {
     if (!p || typeof p !== 'object') throw new InvalidSecretError('provider is required');
     const cfg = p as Record<string, unknown>;
     const authorizationUrl = this.requireUrl(cfg.authorizationUrl, 'authorizationUrl');
     const tokenUrl = this.requireUrl(cfg.tokenUrl, 'tokenUrl');
     const clientId = typeof cfg.clientId === 'string' ? cfg.clientId.trim() : '';
-    const managed = this.managedRefOf(cfg) ?? undefined;
+    const managed = opts.managed ? (this.managedRefOf(cfg) ?? undefined) : undefined;
     if (!clientId && !managed) throw new InvalidSecretError('clientId is required');
     const scopes = Array.isArray(cfg.scopes) ? cfg.scopes.map(String) : undefined;
     const authParams =

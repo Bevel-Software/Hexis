@@ -7,7 +7,7 @@ import type { IAccessControl } from '../access/index.js';
 import { utcpNamespacedKey } from '../../shared/utcp-namespace.js';
 import type { ConnectorScope, IToolManualService } from './tool-manuals.contract.js';
 import type { HiddenToolSource } from '../../shared/hidden-tools.js';
-import { userSecretGap } from '../secrets-vault/index.js';
+import { scopesCovered, userSecretGap } from '../secrets-vault/index.js';
 
 /**
  * What `list_tool_setup` needs from the secrets vault (structurally satisfied
@@ -29,8 +29,9 @@ export interface VariableStatusPort {
       adminKind?: 'static' | 'oauth' | null;
       userConfigured: boolean;
       userAuthorized?: boolean;
-      /** For a shared (workspace) sign-in: the owner's row holds tokens. */
+      /** For a shared (workspace) sign-in: the owner's row holds tokens, and what they were granted. */
       adminAuthorized?: boolean;
+      adminGrantedScopes?: string;
       userKind?: 'static' | 'oauth' | null;
       grantedScopes?: string;
     }[]
@@ -307,9 +308,12 @@ export function registerToolManualsTools(
               const st = statusByKey.get(varKey(m.name, v.name));
               const isOAuth = v.oauth != null;
               // A shared sign-in (a managed workspace connection) is
-              // authorized for everyone once an owner has connected it.
+              // authorized for everyone once an owner has connected it with a
+              // token that still covers what the tool declares.
               const authorized = isOAuth
-                ? ((v.scope === 'admin' ? st?.adminAuthorized : st?.userAuthorized) ?? false)
+                ? v.scope === 'admin'
+                  ? st?.adminAuthorized === true && scopesCovered(v.oauth?.scopes, st.adminGrantedScopes)
+                  : (st?.userAuthorized ?? false)
                 : null;
               return {
                 name: v.name,

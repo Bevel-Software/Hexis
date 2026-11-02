@@ -504,10 +504,26 @@ describe('account routes — removing the erased address from access files', () 
 describe('account routes — switching an account off and on', () => {
   const post = (base: string, path: string) => fetch(`${base}/api/admin/accounts/${path}`, { method: 'POST' });
 
-  it('switches another account off and back on', async () => {
+  it('switches another account off and back on, telling the deactivated listeners and waiting for them', async () => {
+    // The listeners settle when the test says: the answer must not come first.
+    let settle!: () => void;
+    const settled = new Promise<string[]>((resolve) => {
+      settle = () => resolve(['managed-connections']);
+    });
+    vi.mocked(accountHooks.runAccountDeactivated).mockReset().mockReturnValueOnce(settled);
     const base = await listen(makeApp({ admin: true }));
-    expect((await post(base, 'u2/deactivate')).status).toBe(204);
+    let answered = false;
+    const pending = post(base, 'u2/deactivate').then((res) => {
+      answered = true;
+      return res;
+    });
+    await vi.waitFor(() => expect(accountHooks.runAccountDeactivated).toHaveBeenCalledTimes(1));
+    expect(accountHooks.runAccountDeactivated).toHaveBeenCalledWith(expect.objectContaining({ userId: 'u2' }));
+    expect(answered).toBe(false);
+    settle();
+    expect((await pending).status).toBe(204);
     expect(authService.deactivate).toHaveBeenCalledWith('u2');
+    vi.mocked(accountHooks.runAccountDeactivated).mockResolvedValue([]);
     expect((await post(base, 'u2/reactivate')).status).toBe(204);
     expect(authService.reactivate).toHaveBeenCalledWith('u2');
   });

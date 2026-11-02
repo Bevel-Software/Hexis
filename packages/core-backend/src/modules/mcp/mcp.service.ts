@@ -1601,7 +1601,14 @@ export class McpService {
     if (!vault || !this.toolManuals || !manualName) return undefined;
     let keys: string[];
     try {
-      keys = (await this.toolManuals.userScopedKeysForManual(manualName)).filter((v) => v.oauth).map((v) => v.key);
+      // Every sign-in the manual declares: the caller's own, and a workspace
+      // connection every caller resolves (the vault's forceRefresh reads the
+      // shared row for an admin-scoped key, as resolve does).
+      const [own, shared] = await Promise.all([
+        this.toolManuals.userScopedKeysForManual(manualName),
+        this.toolManuals.sharedSignInKeysForManual(manualName),
+      ]);
+      keys = [...own.filter((v) => v.oauth).map((v) => v.key), ...shared.map((v) => v.key)];
     } catch (err) {
       // The error's own message is caller-controlled as well (it quotes the
       // manual, and may quote a provider's reply), and a raw Error handed to

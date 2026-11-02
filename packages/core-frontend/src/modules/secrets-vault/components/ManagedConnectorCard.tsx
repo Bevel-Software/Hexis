@@ -3,8 +3,7 @@ import { Link } from 'react-router-dom';
 import { Badge, Button, Surface, TextField } from '../../../shared/components';
 import { cn } from '../../../lib/utils';
 import { pathForTool, ToolLogo } from '../../library';
-import type { ConnectToolOAuth } from '../services/connect.api';
-import { managedCardState, type ManagedCardState } from '../utils/managed-card-state';
+import { canStartSignIn, managedCardState, type ManagedCardState, type ManagedToolOAuth } from '../utils/managed-card-state';
 
 /**
  * One managed connector on the Connect page: what connecting lets Hexis do,
@@ -23,7 +22,7 @@ const STATE_BADGE: Record<ManagedCardState, { text: string; tone: 'ok' | 'wait' 
 };
 
 export interface ManagedConnectorCardProps {
-  o: ConnectToolOAuth;
+  o: ManagedToolOAuth;
   busy: boolean;
   onConnect: () => void;
   onDisconnect: () => void;
@@ -32,20 +31,24 @@ export interface ManagedConnectorCardProps {
 }
 
 export function ManagedConnectorCard({ o, busy, onConnect, onDisconnect, onOwnApp }: ManagedConnectorCardProps) {
-  const m = o.managed!;
+  const m = o.managed;
   const state = managedCardState(o);
   const badge = STATE_BADGE[state];
-  const canAct = state !== 'unavailable' && state !== 'owner-only';
+  // Connect and Reconnect need a way to open a sign-in (the broker, or an
+  // owner's own app) and a reader allowed to; Disconnect needs only a
+  // stored token the reader may remove.
+  const canStart = canStartSignIn(o) && state !== 'owner-only';
+  const canDisconnect = o.authorized && state !== 'owner-only';
   const shared = m.tokenScope === 'shared';
   const [ownAppOpen, setOwnAppOpen] = useState(false);
   return (
     <Surface tone="surface" radius="xl" elevation="card" padded data-testid={`connector-${m.connectorId}`}>
       <div className="flex items-center gap-2.5">
-        <ToolLogo slug={o.slug} name={m.displayName} className={cn(!canAct && 'grayscale')} />
+        <ToolLogo slug={o.slug} name={m.displayName} className={cn(state === 'unavailable' || state === 'owner-only' ? 'grayscale' : undefined)} />
         <Link
           to={pathForTool(o.slug)}
           aria-label={`Open ${m.displayName}`}
-          className={cn('truncate text-ui font-semibold hover:underline', canAct ? 'text-ink' : 'text-ink-faint')}
+          className={cn('truncate text-ui font-semibold hover:underline', state === 'unavailable' || state === 'owner-only' ? 'text-ink-faint' : 'text-ink')}
         >
           {m.displayName}
         </Link>
@@ -53,12 +56,12 @@ export function ManagedConnectorCard({ o, busy, onConnect, onDisconnect, onOwnAp
           {state === 'connected' && m.account ? `Connected as ${m.account}` : badge.text}
         </Badge>
         <span className="ml-auto flex shrink-0 items-center gap-1.5">
-          {canAct && (state === 'connected' || state === 'needs-reconnect') && (
+          {canDisconnect && (
             <Button variant="quiet" size="tiny" disabled={busy} onClick={onDisconnect}>
               Disconnect
             </Button>
           )}
-          {canAct && (
+          {canStart && (
             <Button variant={state === 'connected' ? 'outline' : 'primary'} size="tiny" disabled={busy} onClick={onConnect}>
               {state === 'connected' || state === 'needs-reconnect' ? 'Reconnect' : 'Connect'}
             </Button>
@@ -75,7 +78,7 @@ export function ManagedConnectorCard({ o, busy, onConnect, onDisconnect, onOwnAp
       )}
       <p className="mt-2 text-detail text-ink-faint">
         {shared ? 'One connection for the whole workspace, made by a tool owner.' : 'You connect your own account.'}
-        {state === 'unavailable' && ' This deployment is not connected to a connector broker yet; ask your admin.'}
+        {!canStartSignIn(o) && ' This deployment is not connected to a connector broker yet; ask your admin.'}
         {m.ownApp && ' Signing in through your organisation’s own app.'}
       </p>
       {onOwnApp && (
@@ -139,7 +142,7 @@ function OwnAppForm({
         >
           Save
         </Button>
-        <Button variant="quiet" size="sm" onClick={onCancel}>
+        <Button variant="quiet" size="sm" disabled={busy} onClick={onCancel}>
           Cancel
         </Button>
       </div>

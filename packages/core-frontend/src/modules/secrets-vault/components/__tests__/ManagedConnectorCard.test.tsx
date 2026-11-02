@@ -1,12 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { ManagedConnectorCard } from '../ManagedConnectorCard';
-import { managedCardState } from '../../utils/managed-card-state';
-import type { ConnectToolOAuth } from '../../services/connect.api';
+import { managedCardState, type ManagedToolOAuth } from '../../utils/managed-card-state';
 
 /** A managed sign-in row as `/connect/pending` sends it, with the parts under test overridden. */
-function row(over: Partial<ConnectToolOAuth> = {}, managedOver: Partial<NonNullable<ConnectToolOAuth['managed']>> = {}): ConnectToolOAuth {
+function row(over: Partial<ManagedToolOAuth> = {}, managedOver: Partial<ManagedToolOAuth['managed']> = {}): ManagedToolOAuth {
   return {
     slug: 'microsoft365',
     varName: 'ACCESS_TOKEN',
@@ -44,6 +43,9 @@ describe('the state a managed connector card shows', () => {
     ['connected', row({ authorized: true })],
     ['needs-reconnect', row({ authorized: true, needsReauth: true })],
     ['unavailable', row({}, { available: false })],
+    // A stored token still works while the broker is unreachable: the card
+    // says so, and withholds the buttons that would need the broker.
+    ['connected', row({ authorized: true }, { available: false })],
     ['owner-only', row({ ownerOnly: true })],
     // An owner's own app makes the deployment's own flow apply: no broker needed.
     ['ready', row({}, { available: false, ownApp: true })],
@@ -53,10 +55,19 @@ describe('the state a managed connector card shows', () => {
 });
 
 describe('ManagedConnectorCard', () => {
-  const renderCard = (o: ConnectToolOAuth, handlers: Partial<{ onConnect: () => void; onDisconnect: () => void }> = {}) =>
+  const renderCard = (
+    o: ManagedToolOAuth,
+    handlers: Partial<{ onConnect: () => void; onDisconnect: () => void; onOwnApp: (id: string, secret: string) => Promise<void> }> = {},
+  ) =>
     render(
       <MemoryRouter>
-        <ManagedConnectorCard o={o} busy={false} onConnect={handlers.onConnect ?? vi.fn()} onDisconnect={handlers.onDisconnect ?? vi.fn()} />
+        <ManagedConnectorCard
+          o={o}
+          busy={false}
+          onConnect={handlers.onConnect ?? vi.fn()}
+          onDisconnect={handlers.onDisconnect ?? vi.fn()}
+          onOwnApp={handlers.onOwnApp}
+        />
       </MemoryRouter>,
     );
 
@@ -92,10 +103,29 @@ describe('ManagedConnectorCard', () => {
     expect(screen.getByText(/not connected to a connector broker yet/)).toBeInTheDocument();
   });
 
+  it('keeps a stored token usable while the broker is unreachable: Disconnect stays, Reconnect goes', () => {
+    renderCard(row({ authorized: true }, { available: false, account: 'alice@acme.example' }));
+    expect(screen.getByText('Connected as alice@acme.example')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Disconnect' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Reconnect|Connect/ })).toBeNull();
+  });
+
   it('a workspace connection a reader cannot make is greyed as needing an owner', () => {
     renderCard(row({ ownerOnly: true }, { tokenScope: 'shared' }));
     expect(screen.getByText('Needs an owner')).toBeInTheDocument();
     expect(screen.getByText(/One connection for the whole workspace/)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Connect/ })).toBeNull();
+  });
+
+  it('an owner can bring the deployment’s own app: the form sends the client id and the secret', async () => {
+    const onOwnApp = vi.fn(async () => undefined);
+    renderCard(row({ canWrite: true }), { onOwnApp });
+    fireEvent.click(screen.getByRole('button', { name: 'Use our own app instead' }));
+    fireEvent.change(screen.getByLabelText('Client id'), { target: { value: 'own-client' } });
+    fireEvent.change(screen.getByLabelText('Client secret'), { target: { value: 'own-secret' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(onOwnApp).toHaveBeenCalledWith('own-client', 'own-secret'));
+    // The form closes once the save settled.
+    await waitFor(() => expect(screen.queryByLabelText('Client id')).toBeNull());
   });
 });

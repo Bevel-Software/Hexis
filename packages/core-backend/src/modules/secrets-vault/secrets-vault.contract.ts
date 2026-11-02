@@ -186,7 +186,10 @@ export interface ManagedSignInPort {
 export interface OAuthProviderConfig {
   authorizationUrl: string;
   tokenUrl: string;
-  /** Absent only on a managed sign-in (`managed` set): the client is the broker's. */
+  /**
+   * The OAuth client. A managed sign-in (`managed` set) passes `''`, since the
+   * client is the broker's; every other sign-in requires a non-empty value.
+   */
   clientId: string;
   /** Kept out of listings; stored encrypted alongside the tokens. */
   clientSecret?: string;

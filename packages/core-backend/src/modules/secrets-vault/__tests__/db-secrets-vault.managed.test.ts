@@ -76,7 +76,7 @@ const decryptSet = (captured: { set: Record<string, unknown>[] }, i = 0) =>
 describe('a managed sign-in: begin and the handoff', () => {
   it('begin writes a row that expects the nonce, keeping tokens a managed row already held', async () => {
     const existing = row({ tokens: { access_token: 'old', refresh_token: 'r-old' } });
-    const { db, captured } = makeFakeDb([[existing], []]);
+    const { db, captured } = makeFakeDb([[existing], [{ id: 'row-1' }]]);
     const vault = new DbSecretsVaultService(db, ENC_KEY);
     await vault.beginManagedConnection({ userId: USER, key: KEY, provider: MANAGED_META, nonce: NONCE });
     const blob = decryptSet(captured);
@@ -85,9 +85,34 @@ describe('a managed sign-in: begin and the handoff', () => {
     expect(captured.set[0].oauthMeta).toMatchObject({ managed: { connectorId: 'microsoft365', scopeSet: 'read' } });
   });
 
+  it('begin never overwrites tokens a concurrent refresh rotated: a guarded miss re-reads and rebuilds', async () => {
+    const stale = row({ tokens: { access_token: 'old', refresh_token: 'r-old' } });
+    const rotated = row({ tokens: { access_token: 'new', refresh_token: 'r-new' } });
+    // First read sees the stale row; the guarded update misses (0 rows, the
+    // refresh landed in between); the re-read sees the rotated row; the
+    // second guarded update lands.
+    const { db, captured } = makeFakeDb([[stale], [], [rotated], [{ id: 'row-1' }]]);
+    const vault = new DbSecretsVaultService(db, ENC_KEY);
+    await vault.beginManagedConnection({ userId: USER, key: KEY, provider: MANAGED_META, nonce: NONCE });
+    expect(captured.set).toHaveLength(2);
+    const landed = decryptSet(captured, 1);
+    expect(landed.tokens).toEqual({ access_token: 'new', refresh_token: 'r-new' });
+    expect(landed.pendingNonce).toBe(NONCE);
+  });
+
+  it('begin gives up after repeated misses, leaving the row as it is', async () => {
+    const stored = row({ tokens: { access_token: 'at' } });
+    const { db } = makeFakeDb([[stored], [], [stored], [], [stored], []]);
+    const vault = new DbSecretsVaultService(db, ENC_KEY);
+    await expect(
+      vault.beginManagedConnection({ userId: USER, key: KEY, provider: MANAGED_META, nonce: NONCE }),
+    ).rejects.toBeInstanceOf(SecretOAuthError);
+    expect((db as unknown as { insert: ReturnType<typeof vi.fn> }).insert).not.toHaveBeenCalled();
+  });
+
   it('begin inserts a fresh row when there is none, and starts clean over a row of another kind', async () => {
     const stale = { ...row({ clientSecret: 'secret-of-an-own-app' }, { ...MANAGED_META, managed: undefined, clientId: 'own' }) };
-    const { db, captured } = makeFakeDb([[stale], []]);
+    const { db, captured } = makeFakeDb([[stale], [{ id: 'row-1' }]]);
     const vault = new DbSecretsVaultService(db, ENC_KEY);
     await vault.beginManagedConnection({ userId: USER, key: KEY, provider: MANAGED_META, nonce: NONCE });
     const blob = decryptSet(captured);
@@ -236,6 +261,27 @@ describe('a managed sign-in: revoked with the provider before it is deleted', ()
     vault.setManagedTokenHandlers({ revoker });
     expect(await vault.removeManagedRowsOfUser(USER)).toBe(1);
     expect(revoker.revoke).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('a managed provider is accepted only where a managed sign-in is opened', () => {
+  it('createOAuth still requires a client id, whatever `managed` a caller slips in', async () => {
+    const vault = new DbSecretsVaultService(makeFakeDb([]).db, ENC_KEY);
+    await expect(vault.createOAuth({ userId: USER, key: 'mine_TOKEN', provider: MANAGED_META })).rejects.toThrow(/clientId is required/);
+  });
+
+  it('an own app replacing a shared managed connection revokes its tokens first', async () => {
+    const shared = row({ tokens: { access_token: 'at', refresh_token: 'rt' } }, MANAGED_META, null);
+    const revoker: ManagedTokenRevoker = { revoke: vi.fn(async () => undefined) };
+    const { db } = makeFakeDb([[shared], []]);
+    const vault = new DbSecretsVaultService(db, ENC_KEY);
+    vault.setManagedTokenHandlers({ revoker });
+    await vault.putSharedOAuthClientSecret({
+      key: KEY,
+      clientSecret: 'own-secret',
+      provider: { ...MANAGED_META, managed: undefined, clientId: 'own-app' },
+    });
+    expect(revoker.revoke).toHaveBeenCalledWith({ connectorId: 'microsoft365', scopeSet: 'read' }, { access_token: 'at', refresh_token: 'rt' });
   });
 });
 

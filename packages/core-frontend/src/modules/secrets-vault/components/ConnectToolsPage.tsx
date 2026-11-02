@@ -9,6 +9,7 @@ import { SavedKeyProbeResult } from '../probe/SavedKeyProbeResult';
 import { useSavedKeyProbe, type SavedKeyProbe } from '../probe/useSavedKeyProbe';
 import { announceToolCredentialsChanged } from '../../../core/events';
 import { useAppRegistry } from '../../../core/registry';
+import { SlotBoundary } from '../../../shared/components/SlotBoundary';
 import { useConnectAsChoice } from '../../agents';
 import { ConnectAsChoice } from '../../agents/components/ConnectAsChoice';
 import {
@@ -21,6 +22,7 @@ import {
   type ConnectToolOAuth,
 } from '../services/connect.api';
 import { ManagedConnectorCard } from './ManagedConnectorCard';
+import { isManagedRow } from '../utils/managed-card-state';
 import {
   isActionable,
   outstandingCount,
@@ -381,7 +383,7 @@ export function ConnectToolsPage() {
     !loading && tools.length === 0 && oauth.length === 0 && toolOAuth.length === 0;
   // Managed connectors get a card of their own (what they do, what they ask
   // for); every other sign-in stays a row under "Sign-ins".
-  const connectors = toolOAuth.filter((o) => o.managed);
+  const connectors = toolOAuth.filter(isManagedRow);
   const plainSignIns = toolOAuth.filter((o) => !o.managed);
 
   // A document, like every Skills & Tools page: `LibraryLayout`'s pane is the
@@ -722,12 +724,14 @@ export function ConnectToolsPage() {
               reader with nothing to set up is exactly who comes here to
               enable something. */}
           {ConnectPanel && !loading && (
-            <ConnectPanel
-              onChanged={() => {
-                announceToolCredentialsChanged();
-                void refresh(true);
-              }}
-            />
+            <SlotBoundary label="connect panel">
+              <ConnectPanel
+                onChanged={() => {
+                  announceToolCredentialsChanged();
+                  void refresh(true);
+                }}
+              />
+            </SlotBoundary>
           )}
         </div>
       </div>

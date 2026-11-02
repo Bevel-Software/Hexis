@@ -181,8 +181,9 @@ export function createAccountRoutes(
     }
     try {
       // Read before the switch, so the listeners get the address the account
-      // had; the row keeps it either way, this just saves a second read.
-      const target = await authService.getUserById(userId);
+      // had; the row keeps it either way, this just saves a second read. A
+      // failed read costs the listeners the address, never the switch-off.
+      const target = await authService.getUserById(userId).catch(() => undefined);
       if (!(await authService.deactivate(userId))) {
         res.status(404).json({ error: 'No such user' });
         return;
