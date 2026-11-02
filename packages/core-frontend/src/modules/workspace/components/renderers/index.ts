@@ -31,6 +31,12 @@ export {
   type HtmlToolBridgeResult,
 } from './useHtmlToolBridge';
 export { OpenPageInPlatformContext, PageToolsContext, type PageTools } from './htmlToolBridge';
+// The frame document builders, for a DISTRIBUTION's HTML renderer: one that
+// inlines its own libraries (bevel-platform's knowledge graph client, d3,
+// mermaid) builds its document the way `HtmlRenderer` builds core's, and its
+// tests prove what a page sees the way core's own do. Without these on the
+// entry such a renderer reached into `htmlSandbox.ts` directly.
+export { buildSandboxedHtml, sanitizeAgentHtml, type BuildSandboxedHtmlOptions } from './htmlSandbox';
 export { useKbGraphLoader } from './kbGraphLoader';
 
 /**
