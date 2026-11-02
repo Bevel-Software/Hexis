@@ -5,11 +5,11 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import { NodeFs } from '../../kb-fs/node-fs.js';
 import type { IWorkflowService } from '@bevel-software/platform-shared';
-import type { IAccessControl } from '../../access/access-control.interface.js';
-import type { ICreatorAccess } from '../../access-model/creator.js';
-import type { IAdminAccessService } from '../../admin/admin.interface.js';
-import type { WorkflowEventBus } from '../../workflow/event-bus.js';
-import type { AuthService } from '../../auth/auth.service.js';
+import type { IAccessControl } from '../../access/index.js';
+import type { ICreatorAccess } from '../../access-model/index.js';
+import type { IAdminAccessService } from '../../admin/index.js';
+import type { WorkflowEventBus } from '../../workflow/index.js';
+import type { AuthService } from '../../auth/index.js';
 import { createWorkspaceRoutes } from '../workspace.routes.js';
 import type { WorkspaceService, ReadTreeFilter } from '../workspace.service.js';
 

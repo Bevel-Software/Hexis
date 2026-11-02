@@ -20,7 +20,7 @@ vi.mock('../../routing/kb-routes', async (importOriginal) => {
 import type { WorkingTreeStatus } from '@bevel-software/platform-shared';
 import { FileRoute } from '../FileRoute';
 import { WorkspaceApiError } from '../../services/workspace.api';
-import { GitContext, type GitContextValue } from '../../../git/state/git.context';
+import { GitContext, type GitContextValue } from '../../../git';
 import {
   WorkspaceContext,
   type WorkspaceContextValue,
@@ -29,7 +29,7 @@ import {
 } from '../../state/workspace.context';
 import { makeWorkspaceFixture } from '../../__tests__/testFixtures';
 import { ReviewContext, type ReviewContextValue } from '../../../review/state/review.context';
-import { AuthContext, type AuthContextValue } from '../../../auth/state/auth.context';
+import { AuthContext, type AuthContextValue } from '../../../auth';
 import { AppRegistryContext, makeRegistry, type AppDef } from '../../../../core/registry';
 
 function makeStatus(branch = 'alice/draft'): WorkingTreeStatus {
