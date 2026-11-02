@@ -11,7 +11,7 @@ import { AuthContext } from '../modules/auth/state/auth.context';
 import { useAuthState } from '../modules/auth/hooks/useAuthState';
 import { LoginScreen } from '../modules/auth/components/LoginScreen';
 import { SetupGate } from '../modules/setup/components/SetupGate';
-import { WorkspaceContext } from '../modules/workspace/state/workspace.context';
+import { WorkspaceContext, useWorkspace } from '../modules/workspace/state/workspace.context';
 import { useWorkspaceState } from '../modules/workspace/hooks/useWorkspaceState';
 import { GitContext } from '../modules/git/state/git.context';
 import { AutoUpdateContext } from '../modules/git/state/auto-update.context';
@@ -252,20 +252,22 @@ const CORE_APPS: AppDef[] = [
  * a file URL under it renders THAT app's element, which mounts the narrowed
  * `KnowledgeSurface`, and claims that app the same way. Same shape rule, read
  * from the path's root and the registry; with no root claimed it never applies.
+ * It never meets the library: `Skills/` and `Plugins/` are core's own roots,
+ * which `rootClaims` refuses to hand to an app.
  */
 function CoreSurfaces() {
   const location = useLocation();
   const claim = useContext(AppClaimContext);
   const { apps } = useAppRegistry();
   const claims = useRootClaims();
+  const { kbDirName } = useWorkspace();
   const library = isLibraryLocation(location.pathname);
   const claimsSkills = library && location.pathname.startsWith(KB_ROUTE_PREFIX);
   const host = useMemo(() => {
-    if (library) return undefined;
     const file = matchPath(`${KB_ROUTE_PREFIX}/:branch/*`, location.pathname);
-    const id = file ? appHostingPath(claims, safeDecode(file.params['*'] ?? '')) : undefined;
+    const id = file ? appHostingPath(claims, safeDecode(file.params['*'] ?? ''), kbDirName) : undefined;
     return id === undefined ? undefined : apps.find((app) => app.id === id);
-  }, [library, location.pathname, claims, apps]);
+  }, [location.pathname, claims, kbDirName, apps]);
   const claimedApp = host ? host.id : claimsSkills ? 'skills-tools' : null;
   useEffect(() => {
     if (!claimedApp) return;

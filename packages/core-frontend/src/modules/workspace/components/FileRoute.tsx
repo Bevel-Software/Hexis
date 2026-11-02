@@ -135,7 +135,7 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
   // canonical swap below.
   const hostedPath =
     segmentIsId && idResolved?.seg === segment && idResolved.branch === branchFromUrl && idResolved.path
-      ? appHostingPath(claims, idResolved.path) && idResolved.path
+      ? appHostingPath(claims, idResolved.path, workspace.kbDirName) && idResolved.path
       : undefined;
   useEffect(() => {
     if (!hostedPath) return;
@@ -163,7 +163,7 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
   const searchRef = useLatestRef(location.search);
   useEffect(() => {
     if (!canonicalize || segmentIsId || !segment || !branchFromUrl) return;
-    if (appHostingPath(claims, segment)) return;
+    if (appHostingPath(claims, segment, workspace.kbDirName)) return;
     if (openFilePath !== segment) return;
     let cancelled = false;
     (async () => {
@@ -178,7 +178,7 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
     return () => {
       cancelled = true;
     };
-  }, [canonicalize, segmentIsId, segment, branchFromUrl, openFilePath, location.hash, navigate, routerStateRef, searchRef, claims]);
+  }, [canonicalize, segmentIsId, segment, branchFromUrl, openFilePath, location.hash, navigate, routerStateRef, searchRef, claims, workspace.kbDirName]);
 
   // ── Branch sync + hydrate + URL → state (forward direction) ──────────────
 

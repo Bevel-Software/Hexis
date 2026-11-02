@@ -2444,9 +2444,9 @@ export function FileExplorer({ roots }: { roots?: readonly string[] } = {}) {
   const showsPath = useCallback(
     (path: string) => {
       const root = path.split('/').filter(Boolean)[1];
-      return roots ? root !== undefined && roots.includes(root) : appHostingPath(claims, path) === undefined;
+      return roots ? root !== undefined && roots.includes(root) : appHostingPath(claims, path, kbDirName) === undefined;
     },
-    [roots, claims],
+    [roots, claims, kbDirName],
   );
   const pinnedEntries = useMemo(
     () =>
@@ -2518,7 +2518,10 @@ export function FileExplorer({ roots }: { roots?: readonly string[] } = {}) {
     const plugins = findDir(PLUGINS_DIR);
     // Same for Skills: the Library surface renders it, not this explorer.
     const skills = findDir(SKILLS_DIR);
-    if (!knowledgeBase && !data && !agents && !workflows && !plugins && !skills) return null;
+    // And a root an app claims: the flat tree would show it, and it is not
+    // Knowledge's to show.
+    const anyClaimed = kids.some((c) => c.type === 'directory' && claimed(c.name));
+    if (!knowledgeBase && !data && !agents && !workflows && !plugins && !skills && !anyClaimed) return null;
     // Any other top-level content folder (e.g. a stray `Legal/`) folds into
     // Knowledge, unless an app claims it.
     const otherDirs = kids.filter(

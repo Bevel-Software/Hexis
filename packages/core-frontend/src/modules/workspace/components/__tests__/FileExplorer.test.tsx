@@ -1239,6 +1239,22 @@ describe('FileExplorer sections: root folders', () => {
     expect(sectionNames()).toEqual(['Knowledge', 'Legal']);
   });
 
+  /**
+   * A tree with none of core's roots falls back to the flat tree, which
+   * would show every folder. A claimed root among them keeps the sections,
+   * so the claimed one stays out.
+   */
+  it('keeps a claimed root out of a tree with none of core’s roots', () => {
+    const tree: FileTreeEntry = {
+      name: '.',
+      relativePath: '.',
+      type: 'directory',
+      children: [dir('Pipelines'), dir('Legal')],
+    };
+    renderExplorer({ fileTree: tree, apps: [agentsApp(['Pipelines'])] });
+    expect(sectionNames()).toEqual(['Knowledge', 'Legal']);
+  });
+
   /** The narrowed tree: its roots, in its order, and nothing else of the knowledge base. */
   it('shows only its roots when narrowed', () => {
     const tree: FileTreeEntry = {

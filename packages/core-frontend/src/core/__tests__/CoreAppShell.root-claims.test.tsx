@@ -217,4 +217,30 @@ describe('CoreAppShell: a root folder an app claims', () => {
       error.mockRestore();
     }
   });
+
+  /*
+   * Knowledge and Skills & Tools are built on these: the library's URLs open
+   * on the library whatever the registry says, so a claim on one could never
+   * be honoured.
+   */
+  it.each(['KnowledgeBase', 'Skills', 'Plugins'])('refuses an app claiming core’s own root %s', (root) => {
+    const greedy: AppDef = { id: 'greedy', label: 'Greedy', path: '/greedy', roots: [root], element: <div /> };
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      expect(() => renderShellAt('/workspace', [greedy])).toThrow(
+        `The root folder "${root}" is core's own; the app "greedy" cannot claim it.`,
+      );
+    } finally {
+      error.mockRestore();
+    }
+  });
+
+  it('opens a path outside the knowledge base in Knowledge, even under a claimed name', async () => {
+    const outside = 'other-repo/Agents/coder.agent';
+    session.workspace = workspaceOn(outside, 'role: coder');
+    renderShellAt(`/workspace/main/${outside}`, [agentsApp]);
+
+    await waitFor(() => expect(screen.getByLabelText('active app')).toHaveTextContent('knowledge'));
+    expect(screen.queryByTestId('agents-frame')).not.toBeInTheDocument();
+  });
 });
