@@ -38,10 +38,15 @@ export class AdminAccessService implements IAdminAccessService {
     const normalized = canonicalEmail(email);
     if (this.alwaysAdminEmails.includes(normalized)) return true;
     try {
+      const branch = typeof this.branch === 'function' ? this.branch() : this.branch;
+      // `''` until the branch model is entered on the setup screen. Before
+      // that there is no roles.yaml anywhere, so nobody beyond the bootstrap
+      // admin is an admin yet — a plain answer, not a failure: every sign-in
+      // and status poll on a fresh deployment asks this.
+      if (!branch) return false;
       // Ensure the authoritative clone is on disk, then resolve Admin-role
       // membership via the access model. Any failure (missing/invalid
       // roles.yaml, clone error) resolves to "not admin" — the safe default.
-      const branch = typeof this.branch === 'function' ? this.branch() : this.branch;
       await this.workspaceService.getOrCreateForBranch(branch);
       return await this.accessControl.canWrite(workspaceIdForBranch(branch), email, 'roles.yaml');
     } catch (err) {

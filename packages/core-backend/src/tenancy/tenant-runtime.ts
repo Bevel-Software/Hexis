@@ -90,11 +90,10 @@ export class TenantRuntime {
   private readonly now: () => number;
   private readonly retryInitialMs: number;
   private readonly retryMaxMs: number;
+  private current: TenantDescriptor;
 
-  constructor(
-    readonly descriptor: TenantDescriptor,
-    deps: TenantRuntimeDeps = {},
-  ) {
+  constructor(descriptor: TenantDescriptor, deps: TenantRuntimeDeps = {}) {
+    this.current = descriptor;
     this.activate = deps.activate ?? activateWithCore;
     this.stopGraph = deps.stop ?? ((graph) => stopCore(graph.core));
     this.isBusy = deps.busy ?? queuedCommits;
@@ -121,8 +120,31 @@ export class TenantRuntime {
     return this.openResponses;
   }
 
+  /**
+   * What the next activation builds from. While a graph runs it is what
+   * that graph was built from, except during its eviction: the graph being
+   * retired may already be behind a newer descriptor (see {@link adopt}).
+   */
+  get descriptor(): TenantDescriptor {
+    return this.current;
+  }
+
+  /**
+   * Take a newer descriptor for the same tenant. A graph that runs, or is
+   * being built, keeps the descriptor it was built from — its config is
+   * already live, and the host's eviction is how it is retired. While
+   * nothing runs (idle, or in a failure window) the descriptor is replaced,
+   * and so is it during an eviction, whatever that eviction is still
+   * waiting to stop: the activation that follows builds from it, since a
+   * request that waits out an eviction starts the tenant afresh anyway.
+   */
+  adopt(descriptor: TenantDescriptor): void {
+    if (!this.eviction && (this.graph || this.activation)) return;
+    this.current = descriptor;
+  }
+
   get slug(): string {
-    return this.descriptor.slug;
+    return this.current.slug;
   }
 
   get state(): TenantState {
@@ -147,7 +169,7 @@ export class TenantRuntime {
     if (this.eviction) await this.eviction;
     if (this.graph) return this.graph;
     if (this.failure && this.now() < this.failure.until) throw this.failure.error;
-    this.activation ??= this.activate(this.descriptor).then(
+    this.activation ??= this.activate(this.current).then(
       (graph) => {
         this.graph = graph;
         this.activation = null;
