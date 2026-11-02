@@ -528,6 +528,21 @@ describe('account routes — switching an account off and on', () => {
     expect(authService.reactivate).toHaveBeenCalledWith('u2');
   });
 
+  it('reads the address again after the switch when the first read failed, and tells the listeners \'\' only when both do', async () => {
+    vi.mocked(accountHooks.runAccountDeactivated).mockReset().mockResolvedValue([]);
+    const base = await listen(makeApp({ admin: true }));
+    // First read away, second one back: the listeners get the address.
+    vi.mocked(authService.getUserById).mockRejectedValueOnce(new Error('users table is away'));
+    expect((await post(base, 'u2/deactivate')).status).toBe(204);
+    expect(accountHooks.runAccountDeactivated).toHaveBeenLastCalledWith({ userId: 'u2', email: 'u2@example.com' });
+    // Both reads away: the switch-off still happens, the listeners get ''.
+    vi.mocked(authService.getUserById)
+      .mockRejectedValueOnce(new Error('users table is away'))
+      .mockRejectedValueOnce(new Error('users table is still away'));
+    expect((await post(base, 'u2/deactivate')).status).toBe(204);
+    expect(accountHooks.runAccountDeactivated).toHaveBeenLastCalledWith({ userId: 'u2', email: '' });
+  });
+
   it('refuses an admin switching off their own account, so an admin who can sign in always remains', async () => {
     vi.mocked(authService.deactivate).mockClear();
     const base = await listen(makeApp({ admin: true }));

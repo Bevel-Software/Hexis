@@ -106,13 +106,26 @@ function whereAwareDb(input: { reads: ReturnType<typeof row>[]; current: ReturnT
     chain.returning = () => Promise.resolve(landed ? [{ id: input.current.id }] : []);
     return chain;
   };
+  const deletes: { landed: boolean }[] = [];
+  const del = () => {
+    const chain: Record<string, unknown> = {};
+    let landed = false;
+    chain.where = (cond: unknown) => {
+      landed = binds(cond, input.current.valueEncrypted);
+      deletes.push({ landed });
+      return chain;
+    };
+    chain.returning = () =>
+      Promise.resolve(landed ? [{ id: input.current.id, userId: input.current.userId, kind: input.current.kind }] : []);
+    return chain;
+  };
   const db = {
     select: vi.fn(select),
     update: vi.fn(update),
     insert: vi.fn(),
-    delete: vi.fn(),
+    delete: vi.fn(del),
   } as unknown as Database;
-  return { db, captured, updates };
+  return { db, captured, updates, deletes };
 }
 
 function row(blob: Record<string, unknown>, meta: Record<string, unknown> = MANAGED_META, userId: string | null = USER) {
@@ -160,16 +173,32 @@ describe('a managed sign-in: begin and the handoff', () => {
     expect(landed.pendingNonce).toBe(NONCE);
   });
 
-  it('begin keeps tokens only for the SAME connection: another scope set’s token is not carried over', async () => {
+  it('begin keeps tokens only for the SAME connection: another scope set’s token is revoked, not carried over', async () => {
     const otherSet = row({ tokens: { access_token: 'draft-token' } }, { ...MANAGED_META, managed: { connectorId: 'microsoft365', scopeSet: 'read_draft' } });
+    const revoker: ManagedTokenRevoker = { revoke: vi.fn(async () => undefined) };
     const { db, captured } = makeFakeDb([[otherSet], [{ id: 'row-1' }]]);
     const vault = new DbSecretsVaultService(db, ENC_KEY);
+    vault.setManagedTokenHandlers({ revoker });
     const changed: (string | null)[] = [];
     vault.onMutation((u) => changed.push(u));
     await vault.beginManagedConnection({ userId: USER, key: KEY, provider: MANAGED_META, nonce: NONCE });
     expect(decryptSet(captured).tokens).toBeUndefined();
+    expect(captured.set[0].oauthMeta).not.toHaveProperty('account');
+    expect(revoker.revoke).toHaveBeenCalledWith({ connectorId: 'microsoft365', scopeSet: 'read_draft' }, { access_token: 'draft-token', refresh_token: undefined });
     // Something else was replaced: caches are told.
     expect(changed).toEqual([USER]);
+  });
+
+  it('begin survives losing the insert race: the next pass updates the row the other start made', async () => {
+    const theirs = row({ pendingNonce: 'their-nonce-their-nonce' });
+    // No row; our insert collides; the re-read finds theirs; the guarded update lands.
+    const { db, captured } = makeFakeDb([[], [theirs], [{ id: 'row-1' }]]);
+    (db as unknown as { insert: ReturnType<typeof vi.fn> }).insert.mockImplementationOnce(() => ({
+      values: () => Promise.reject(Object.assign(new Error('duplicate key value violates unique constraint'), { code: '23505' })),
+    }));
+    const vault = new DbSecretsVaultService(db, ENC_KEY);
+    await vault.beginManagedConnection({ userId: USER, key: KEY, provider: MANAGED_META, nonce: NONCE });
+    expect(decryptSet(captured).pendingNonce).toBe(NONCE);
   });
 
   it('begin gives up after repeated misses, leaving the row as it is', async () => {
@@ -307,13 +336,15 @@ describe('a managed sign-in: revoked with the provider before it is deleted', ()
         revoked.push(tokens.access_token);
       }),
     };
-    // Read `before`, revoke it, delete misses (the row moved on); read
-    // `after`, revoke it, delete lands.
-    const { db } = makeFakeDb([[before], [], [after], [{ id: 'row-1', userId: USER, kind: 'oauth' }]]);
+    // The row as the first read sees it, and as it IS when the delete
+    // arrives: a delete lands only when its guard binds the current
+    // ciphertext, so an unguarded or stale-guarded delete fails this test.
+    const { db, deletes } = whereAwareDb({ reads: [before, after], current: after });
     const vault = new DbSecretsVaultService(db, ENC_KEY);
     vault.setManagedTokenHandlers({ revoker });
     await vault.removeUserByKey(USER, KEY);
     expect(revoked).toEqual(['at-1', 'at-2']);
+    expect(deletes.map((d) => d.landed)).toEqual([false, true]);
   });
 
   it('removeUserByKey tells the revoker first, then deletes, and deletes even when revoking fails', async () => {

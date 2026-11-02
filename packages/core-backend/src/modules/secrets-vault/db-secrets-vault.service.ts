@@ -119,6 +119,12 @@ export function describeTokenEndpointRefusal(status: number, code: string | null
   return hint ? `${base} (${code}). ${hint}` : base;
 }
 
+/** Postgres `unique_violation`: a concurrent insert won the race for a key. */
+function isUniqueViolation(err: unknown): boolean {
+  const code = (err as { code?: unknown; cause?: { code?: unknown } } | null)?.code ?? (err as { cause?: { code?: unknown } } | null)?.cause?.code;
+  return code === '23505';
+}
+
 /**
  * How a row is stored, or `null` when there is no row — the column is a plain
  * string, and anything that is not `oauth` is a stored value (`toSummary` reads
@@ -376,9 +382,11 @@ export class DbSecretsVaultService implements ISecretsVaultService {
     for (let attempt = 0; attempt < 3; attempt++) {
       const rows = await this.db.select().from(secrets).where(where);
       if (rows.length === 0) break;
+      // Every row's revocation at once, so a bulk delete (a namespace, a
+      // person's connections) waits one revocation's bound, not one per row.
+      await Promise.all(rows.map((row) => this.revokeRow(row)));
       let missed = false;
       for (const row of rows) {
-        await this.revokeRow(row);
         const deleted = await this.db
           .delete(secrets)
           .where(and(eq(secrets.id, row.id), eq(secrets.valueEncrypted, row.valueEncrypted)))
@@ -417,7 +425,7 @@ export class DbSecretsVaultService implements ISecretsVaultService {
   private async revokeManagedBefore(where: ReturnType<typeof and>): Promise<void> {
     if (!this.managedRevoker) return;
     const rows = await this.db.select().from(secrets).where(where);
-    for (const row of rows) await this.revokeRow(row);
+    await Promise.all(rows.map((row) => this.revokeRow(row)));
   }
 
   private async revokeRow(row: typeof secrets.$inferSelect): Promise<void> {
@@ -437,8 +445,6 @@ export class DbSecretsVaultService implements ISecretsVaultService {
         }),
       ]);
     } catch (err) {
-      // The key names the sign-in; the message is ours or the revoker's, and
-      // the revoker's own rule is never to put a token in one.
       // The key and the connector name the sign-in. The error itself stays
       // out: a revoker's message is its own, and this line is the one place a
       // token could otherwise reach a log from this path.
@@ -627,9 +633,19 @@ export class DbSecretsVaultService implements ISecretsVaultService {
       const account = sameConnection ? (existing!.oauthMeta as Record<string, unknown> | null)?.account : undefined;
       const meta = typeof account === 'string' && account ? { ...oauthMeta, account } : oauthMeta;
       if (!existing) {
-        await this.db.insert(secrets).values({ userId, key, kind: 'oauth', label: null, valueEncrypted, oauthMeta: meta });
-        return;
+        try {
+          await this.db.insert(secrets).values({ userId, key, kind: 'oauth', label: null, valueEncrypted, oauthMeta: meta });
+          return;
+        } catch (err) {
+          // Another start of the same sign-in inserted the row first: the
+          // next pass finds it and updates it, as it would any existing row.
+          if (isUniqueViolation(err)) continue;
+          throw err;
+        }
       }
+      // A row that held ANOTHER connection's tokens is about to lose them:
+      // the provider is told first, as on every other replacement.
+      if (!sameConnection && storedRef) await this.revokeRow(existing);
       const written = await this.db
         .update(secrets)
         .set({ kind: 'oauth', valueEncrypted, oauthMeta: meta, updatedAt: new Date() })
