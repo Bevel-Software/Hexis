@@ -71,7 +71,8 @@ type Status = Partial<{
   adminBringsOwnApp: boolean;
 }>;
 
-let httpServer: HttpServer | undefined;
+/** Every server a test opened; all are closed after it, so a test may serve twice. */
+const servers: HttpServer[] = [];
 
 async function serve(opts: {
   auth: { userId: string; email: string };
@@ -123,9 +124,10 @@ async function serve(opts: {
       managedSignIns: () => (opts.port === undefined ? port : opts.port),
     }),
   );
-  httpServer = await new Promise<HttpServer>((resolve) => {
+  const httpServer = await new Promise<HttpServer>((resolve) => {
     const s = app.listen(0, () => resolve(s));
   });
+  servers.push(httpServer);
   const base = `http://127.0.0.1:${(httpServer.address() as { port: number }).port}`;
   return { base, beginToolOAuthByKey };
 }
@@ -141,8 +143,7 @@ const unavailable: ManagedSignInPort = { ...port, available: () => false };
 
 afterEach(async () => {
   start.mockClear();
-  if (httpServer) await new Promise<void>((r) => httpServer!.close(() => r()));
-  httpServer = undefined;
+  for (const s of servers.splice(0)) await new Promise<void>((r) => s.close(() => r()));
 });
 
 const startSignIn = (base: string, slug: string, body?: unknown) =>
@@ -187,7 +188,6 @@ describe('POST /api/secrets/tools/:slug/vars/:var/oauth/start on a managed sign-
     const reader = await serve({ auth: { userId: 'u1', email: 'a@x.com' }, manuals: [SHARED], canWrite: false });
     expect((await startSignIn(reader.base, 'hubspot')).status).toBe(403);
     expect(start).not.toHaveBeenCalled();
-    await new Promise<void>((r) => httpServer!.close(() => r()));
     const writer = await serve({ auth: { userId: 'u1', email: 'a@x.com' }, manuals: [SHARED], canWrite: true });
     expect((await startSignIn(writer.base, 'hubspot')).status).toBe(200);
     expect(start).toHaveBeenCalledWith(expect.objectContaining({ userId: null, key: 'hubspot_ACCESS_TOKEN', ref: { connectorId: 'hubspot', scopeSet: 'read' } }));
@@ -268,7 +268,6 @@ describe('GET /api/connect/pending with managed sign-ins', () => {
   it('a workspace connection is listed for a reader as the owner’s to make, and for a writer as theirs', async () => {
     const reader = await serve({ auth: { userId: 'u1', email: 'a@x.com' }, manuals: [SHARED], canWrite: false, status: { adminAuthorized: false } });
     expect((await pending(reader.base))[0]).toMatchObject({ slug: 'hubspot', ownerOnly: true, canWrite: false, managed: { tokenScope: 'shared' } });
-    await new Promise<void>((r) => httpServer!.close(() => r()));
     const writer = await serve({
       auth: { userId: 'u1', email: 'a@x.com' },
       manuals: [SHARED],
