@@ -54,12 +54,20 @@ export function checkoutRoot(
  *
  * Read from the checkout down, like every other surface. A workspace whose
  * checkout is missing shows nothing, whatever else was written beside it.
+ *
+ * `hiddenRoot` names the top-level folders the tree does not show (the roots
+ * an app claims, `AppDef.roots`): nothing in them is on screen here.
  */
-export function treeHasVisibleEntries(tree: FileTreeEntry | null, kbDirName: string | null): boolean {
+export function treeHasVisibleEntries(
+  tree: FileTreeEntry | null,
+  kbDirName: string | null,
+  hiddenRoot: (name: string) => boolean = () => false,
+): boolean {
   const kbRoot = checkoutRoot(tree, kbDirName);
   if (!kbRoot) return false;
   return (kbRoot.children ?? []).some((c) => {
     if (c.type === 'file') return c.name !== '.bevelignore';
+    if (hiddenRoot(c.name)) return false;
     return !KB_ROOT_DIRS.has(c.name) || (c.children?.length ?? 0) > 0;
   });
 }

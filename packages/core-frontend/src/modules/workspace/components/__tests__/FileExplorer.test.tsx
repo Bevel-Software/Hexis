@@ -3275,6 +3275,48 @@ describe('FileExplorer: an empty tree says why', () => {
     renderExplorer({ fileTree: null });
     expect(screen.queryByTestId('tree-empty-notice')).not.toBeInTheDocument();
   });
+
+  /**
+   * A root an app claims is not in Knowledge's tree, so what it holds does
+   * not make that tree non-empty: the notice and its hint still show.
+   */
+  const hostingApp = (roots: string[]): AppDef => ({
+    id: 'agents',
+    label: 'Agents',
+    path: '/agents',
+    element: <div />,
+    roots,
+  });
+
+  it('says "empty" when the only content is under a claimed root', () => {
+    renderExplorer({
+      fileTree: seeded([], {}, [dirAt(`${KBD}/Agents`, [fileAt(`${KBD}/Agents/Planner.md`)])]),
+      apps: [hostingApp(['Agents'])],
+      workspaceId: 'alice%2Fdraft',
+    });
+    expect(screen.getByTestId('tree-empty-notice')).toHaveTextContent('This knowledge base is empty.');
+    expect(screen.getByTestId('tree-empty-create-hint')).toBeInTheDocument();
+  });
+
+  it('says "empty" for a tree that predates the split whose only folder is claimed', () => {
+    renderExplorer({
+      fileTree: rootedAtCheckout(
+        dirAt('.', [dirAt(KBD, [dirAt(`${KBD}/Pipelines`, [fileAt(`${KBD}/Pipelines/run.workflow`)])])]),
+      ),
+      apps: [hostingApp(['Pipelines'])],
+      workspaceId: 'alice%2Fdraft',
+    });
+    expect(screen.queryByText('Pipelines')).not.toBeInTheDocument();
+    expect(screen.getByTestId('tree-empty-notice')).toHaveTextContent('This knowledge base is empty.');
+    expect(screen.getByTestId('tree-empty-create-hint')).toBeInTheDocument();
+  });
+
+  it('still counts that content when no app claims the root', () => {
+    renderExplorer({
+      fileTree: seeded([], {}, [dirAt(`${KBD}/Agents`, [fileAt(`${KBD}/Agents/Planner.md`)])]),
+    });
+    expect(screen.queryByTestId('tree-empty-notice')).not.toBeInTheDocument();
+  });
 });
 
 // The sidebar refuses a platform file's drag and its rename itself, with the

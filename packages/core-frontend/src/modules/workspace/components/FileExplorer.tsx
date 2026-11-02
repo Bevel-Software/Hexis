@@ -2235,13 +2235,18 @@ export const CHECKOUT_MISSING_MESSAGE = 'Nothing to show here: the repository ch
  * reserved roots aside, an entry anywhere counts, because a stray top-level
  * folder is folded into Knowledge). A Library tree shows one root
  * (`scope: 'root'`): it is empty when that root is, whatever the notes
- * beside it hold.
+ * beside it hold. A root an app claims is not in Knowledge's tree, so what
+ * it holds does not count there either.
  */
 export function EmptyTreeNotice({ rootPath, scope = 'tree' }: { rootPath: string | null; scope?: 'tree' | 'root' }) {
   const { kbDirName } = useWorkspace();
   const { tree, withheld: listingWithheld } = useMergedWorkspaceTree();
+  const claims = useRootClaims();
   const oneRoot = scope === 'root' && rootPath !== null;
-  const empty = tree !== null && (oneRoot ? !subtreeHasVisibleEntries(tree, rootPath) : !treeHasVisibleEntries(tree, kbDirName));
+  const claimed = (name: string) => appClaimingRoot(claims, name) !== undefined;
+  const empty =
+    tree !== null &&
+    (oneRoot ? !subtreeHasVisibleEntries(tree, rootPath) : !treeHasVisibleEntries(tree, kbDirName, claimed));
   // What was kept out of what THIS notice covers: one root's own count, or
   // the listing's — a Skills tree emptied by the rules says so; a Skills tree
   // that is simply empty beside a withheld Knowledge does not.

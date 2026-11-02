@@ -354,6 +354,14 @@ describe('treeHasVisibleEntries', () => {
     expect(treeHasVisibleEntries(d('.', [d('kb', [f('kb/a.md')])]), 'kb')).toBe(true);
   });
 
+  it('does not count a hidden root, nor anything in it', () => {
+    const claimed = (name: string) => name.toLowerCase() === 'agents';
+    expect(treeHasVisibleEntries(kb(d('kb/Agents', [f('kb/Agents/a.md')])), 'kb', claimed)).toBe(false);
+    expect(treeHasVisibleEntries(d('.', [d('kb', [d('kb/Agents', [f('kb/Agents/a.md')])])]), 'kb', claimed)).toBe(false);
+    expect(treeHasVisibleEntries(kb(d('kb/Agents', [f('kb/Agents/a.md')]), d('kb/Legal')), 'kb', claimed)).toBe(true);
+    expect(treeHasVisibleEntries(kb(d('kb/Agents', [f('kb/Agents/a.md')])), 'kb')).toBe(true);
+  });
+
   it('counts nothing outside the checkout, and nothing when there is no checkout', () => {
     const strays = [d('KnowledgeBase', [f('KnowledgeBase/Planted.md')]), f('Stray.docx')];
     expect(treeHasVisibleEntries(d('.', [...strays, d('kb', [d('kb/KnowledgeBase')])]), 'kb')).toBe(false);
