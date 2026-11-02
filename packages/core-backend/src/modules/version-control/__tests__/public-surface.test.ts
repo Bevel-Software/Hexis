@@ -4,11 +4,15 @@ import { dirname, join } from 'node:path';
 import type express from 'express';
 import { describe, expect, it } from 'vitest';
 import type { IVersionControlService } from '@bevel-software/platform-shared';
-import type { IAccessControl } from '../../access/access-control.interface.js';
-import type { AuthService } from '../../auth/auth.service.js';
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import { createEventsRoutes, VersionControlEventBus, type IEventDelivery } from '../index.js';
-import { createVersionControlRoutes } from '../version-control.routes.js';
+import type { IAccessControl } from '../../access/index.js';
+import type { AuthService } from '../../auth/index.js';
+import type { WorkspaceService } from '../../workspace/index.js';
+import {
+  createEventsRoutes,
+  createVersionControlRoutes,
+  VersionControlEventBus,
+  type IEventDelivery,
+} from '../index.js';
 
 /**
  * The module's name is internal; what it mounts is not. The frontend, the

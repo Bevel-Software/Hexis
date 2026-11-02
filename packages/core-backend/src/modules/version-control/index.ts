@@ -9,6 +9,7 @@
 export { CHANGE_REQUEST_URL_NOTE, changeRequestLink, changeRequestLinkBase } from './git/change-request-link.js';
 export { VersionControlEventBus } from './event-bus.js';
 export { createEventsRoutes } from './events.routes.js';
+export { createVersionControlRoutes } from './version-control.routes.js';
 export { EventDelivery, createEventAccess } from './events-delivery.js';
 export type { ChangeRequestFacts, EventAccess, EventViewer, IEventDelivery } from './events-delivery.js';
 // Reached by other modules; exported here so they stop importing the files.
