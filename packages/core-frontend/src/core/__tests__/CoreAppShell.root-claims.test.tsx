@@ -223,7 +223,7 @@ describe('CoreAppShell: a root folder an app claims', () => {
    * on the library whatever the registry says, so a claim on one could never
    * be honoured.
    */
-  it.each(['KnowledgeBase', 'Skills', 'Plugins'])('refuses an app claiming core’s own root %s', (root) => {
+  it.each(['KnowledgeBase', 'Skills', 'Plugins', 'skills'])('refuses an app claiming core’s own root %s', (root) => {
     const greedy: AppDef = { id: 'greedy', label: 'Greedy', path: '/greedy', roots: [root], element: <div /> };
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});
     try {
@@ -233,6 +233,27 @@ describe('CoreAppShell: a root folder an app claims', () => {
     } finally {
       error.mockRestore();
     }
+  });
+
+  /* Root names compare case-insensitively, as the layout's do. */
+  it('refuses two apps claiming one root in different cases', () => {
+    const rival: AppDef = { id: 'runs', label: 'Runs', path: '/runs', roots: ['workflows'], element: <div /> };
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      expect(() => renderShellAt('/workspace', [agentsApp, rival])).toThrow(
+        'The root folder "workflows" is claimed by two apps: "agents" and "runs".',
+      );
+    } finally {
+      error.mockRestore();
+    }
+  });
+
+  it('opens a file in the claiming app when the claim names its root in another case', async () => {
+    session.workspace = workspaceOn(AGENT, 'role: coder');
+    renderShellAt(`/workspace/main/${AGENT}`, [{ ...agentsApp, roots: ['agents', 'workflows'] }]);
+
+    expect(await screen.findByTestId('agents-frame')).toBeInTheDocument();
+    expect(screen.getByLabelText('active app')).toHaveTextContent('agents');
   });
 
   it('opens a path outside the knowledge base in Knowledge, even under a claimed name', async () => {

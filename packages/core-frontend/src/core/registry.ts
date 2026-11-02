@@ -342,7 +342,7 @@ export interface AppDef {
   order?: number;
   /**
    * Top-level folders of the knowledge base this app hosts, by name
-   * (`['Agents', 'Workflows', 'Data']`). Core claims none.
+   * (`['Agents', 'Workflows', 'Data']`), compared case-insensitively. Core claims none.
    *
    * A claimed root leaves the Knowledge explorer, and a file URL under it
    * (`/workspace/<branch>/<kbDir>/<root>/…`, the URL `kbFileUrl` builds) opens
@@ -365,24 +365,37 @@ export interface AppDef {
  * `root → app id`. Throws when two apps claim the same root, or when an app
  * claims one of core's own roots, so a misconfigured registry fails when the
  * shell mounts, not when someone follows a link.
+ *
+ * Root names compare case-insensitively, as the layout's do: the workspaces
+ * live on case-insensitive filesystems, where `Agents` and `agents` are one
+ * folder. The map is keyed by the lowercased name; read it through
+ * {@link appClaimingRoot}.
  */
 export function rootClaims(apps: readonly AppDef[]): ReadonlyMap<string, string> {
   const layout = currentKbLayout();
-  const coreRoots = new Set([layout.knowledgeBaseDir, layout.skillsDir, layout.pluginsDir]);
+  const coreRoots = new Set(
+    [layout.knowledgeBaseDir, layout.skillsDir, layout.pluginsDir].map((n) => n.toLowerCase()),
+  );
   const claims = new Map<string, string>();
   for (const app of apps) {
     for (const root of app.roots ?? []) {
-      if (coreRoots.has(root)) {
+      const key = root.toLowerCase();
+      if (coreRoots.has(key)) {
         throw new Error(`The root folder "${root}" is core's own; the app "${app.id}" cannot claim it.`);
       }
-      const holder = claims.get(root);
+      const holder = claims.get(key);
       if (holder !== undefined && holder !== app.id) {
         throw new Error(`The root folder "${root}" is claimed by two apps: "${holder}" and "${app.id}".`);
       }
-      claims.set(root, app.id);
+      claims.set(key, app.id);
     }
   }
   return claims;
+}
+
+/** The app that claims a root folder, by name in any case, or undefined. */
+export function appClaimingRoot(claims: ReadonlyMap<string, string>, root: string): string | undefined {
+  return claims.get(root.toLowerCase());
 }
 
 /**
@@ -405,7 +418,7 @@ export function appHostingPath(
   if (claims.size === 0) return undefined;
   const [kbDir, root] = workspacePath.split('/').filter(Boolean);
   if (root === undefined || (kbDirName !== null && kbDir !== kbDirName)) return undefined;
-  return claims.get(root);
+  return appClaimingRoot(claims, root);
 }
 
 /** {@link rootClaims} for the registry in context. */

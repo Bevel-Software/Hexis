@@ -1240,9 +1240,9 @@ describe('FileExplorer sections: root folders', () => {
   });
 
   /**
-   * A tree with none of core's roots falls back to the flat tree, which
-   * would show every folder. A claimed root among them keeps the sections,
-   * so the claimed one stays out.
+   * A tree with none of core's roots falls back to the flat tree: the
+   * checkout row, with its own path and actions. A claimed root is left out
+   * of it, and no other folder stands in for a Knowledge section.
    */
   it('keeps a claimed root out of a tree with none of core’s roots', () => {
     const tree: FileTreeEntry = {
@@ -1252,7 +1252,21 @@ describe('FileExplorer sections: root folders', () => {
       children: [dir('Pipelines'), dir('Legal')],
     };
     renderExplorer({ fileTree: tree, apps: [agentsApp(['Pipelines'])] });
-    expect(sectionNames()).toEqual(['Knowledge', 'Legal']);
+    expect(screen.getByText('Legal')).toBeInTheDocument();
+    expect(screen.queryByText('Pipelines')).not.toBeInTheDocument();
+    expect(screen.queryByText('Knowledge')).not.toBeInTheDocument();
+  });
+
+  /** Root names compare case-insensitively, as the layout's do. */
+  it('leaves out a root claimed in another case', () => {
+    const tree: FileTreeEntry = {
+      name: '.',
+      relativePath: '.',
+      type: 'directory',
+      children: [dir('KnowledgeBase'), dir('Agents'), dir('Legal')],
+    };
+    renderExplorer({ fileTree: tree, apps: [agentsApp(['agents', 'LEGAL'])] });
+    expect(sectionNames()).toEqual(['Knowledge']);
   });
 
   /** The narrowed tree: its roots, in its order, and nothing else of the knowledge base. */

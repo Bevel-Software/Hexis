@@ -76,6 +76,7 @@ import { AdminContext } from '../../admin';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { offersManageAccess, fetchFileAccess, fetchProspectiveAccess } from '../../access';
 import {
+  appClaimingRoot,
   appHostingPath,
   useAppRegistry,
   useRootClaims,
@@ -2443,8 +2444,9 @@ export function FileExplorer({ roots }: { roots?: readonly string[] } = {}) {
   // leaves the claimed roots to their app, a narrowed tree shows its own.
   const showsPath = useCallback(
     (path: string) => {
-      const root = path.split('/').filter(Boolean)[1];
-      return roots ? root !== undefined && roots.includes(root) : appHostingPath(claims, path, kbDirName) === undefined;
+      const root = path.split('/').filter(Boolean)[1]?.toLowerCase();
+      if (!roots) return appHostingPath(claims, path, kbDirName) === undefined;
+      return root !== undefined && roots.some((r) => r.toLowerCase() === root);
     },
     [roots, claims, kbDirName],
   );
@@ -2500,13 +2502,13 @@ export function FileExplorer({ roots }: { roots?: readonly string[] } = {}) {
       return found ? { ...found, name } : null;
     };
     if (roots) {
-      return {
-        knowledge: null,
-        roots: roots.map(asSection).filter((e): e is FileTreeEntry => e !== null),
-        looseFiles: [],
-      };
+      // By name in any case, as a claim is read (see `rootClaims`).
+      const narrowed = roots
+        .map((name) => kids.find((c) => c.type === 'directory' && c.name.toLowerCase() === name.toLowerCase()))
+        .filter((e): e is FileTreeEntry => e !== undefined);
+      return { knowledge: null, roots: narrowed, looseFiles: [] };
     }
-    const claimed = (name: string) => claims.has(name);
+    const claimed = (name: string) => appClaimingRoot(claims, name) !== undefined;
     const knowledgeBase = findDir(KNOWLEDGE_BASE_DIR);
     const data = findDir(DATA_DIR);
     const agents = findDir(AGENTS_DIR);
@@ -2518,10 +2520,7 @@ export function FileExplorer({ roots }: { roots?: readonly string[] } = {}) {
     const plugins = findDir(PLUGINS_DIR);
     // Same for Skills: the Library surface renders it, not this explorer.
     const skills = findDir(SKILLS_DIR);
-    // And a root an app claims: the flat tree would show it, and it is not
-    // Knowledge's to show.
-    const anyClaimed = kids.some((c) => c.type === 'directory' && claimed(c.name));
-    if (!knowledgeBase && !data && !agents && !workflows && !plugins && !skills && !anyClaimed) return null;
+    if (!knowledgeBase && !data && !agents && !workflows && !plugins && !skills) return null;
     // Any other top-level content folder (e.g. a stray `Legal/`) folds into
     // Knowledge, unless an app claims it.
     const otherDirs = kids.filter(
@@ -2549,6 +2548,22 @@ export function FileExplorer({ roots }: { roots?: readonly string[] } = {}) {
       looseFiles: kids.filter((c) => c.type === 'file'),
     };
   }, [checkout, roots, claims]);
+
+  // The flat tree of a clone that predates the split, less the roots an app
+  // claims: still the checkout row, with its own path and actions, so a
+  // claim never makes another folder stand in for it.
+  const flatRoot = useMemo(
+    () =>
+      checkout && claims.size > 0
+        ? {
+            ...checkout,
+            children: checkout.children?.filter(
+              (c) => c.type !== 'directory' || appClaimingRoot(claims, c.name) === undefined,
+            ),
+          }
+        : checkout,
+    [checkout, claims],
+  );
 
   const handleDrop = useCallback(
     (e: React.DragEvent) => {
@@ -2655,7 +2670,7 @@ export function FileExplorer({ roots }: { roots?: readonly string[] } = {}) {
           // fallback is a different SHAPE, never a different directory — and
           // it is the ROOT row, not a folder inside one: the workspace
           // directory above it is not something this explorer shows.
-          <FileTreeNode entry={checkout} depth={0} root />
+          <FileTreeNode entry={flatRoot ?? checkout} depth={0} root />
         )}
         {/* Under the (empty) roots, so the hint's "folder above" is on
             screen: Knowledge's own folder is where a first page goes. A tree
