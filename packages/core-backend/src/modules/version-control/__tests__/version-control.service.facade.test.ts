@@ -173,9 +173,7 @@ function makeAccessControl(): IAccessControl {
 /**
  * The facade exists only to delegate — these tests pin down that contract.
  * For each backed method we verify (a) the right underlying call is made
- * with the right arguments, (b) the underlying return propagates back. For
- * each unimplemented method we verify it rejects with
- * `NotImplementedVersionControlError` so consumers can switch on the error class.
+ * with the right arguments, (b) the underlying return propagates back.
  *
  * Cache invalidation (`PullRequestService.invalidateDetailCache`) is part
  * of the facade contract for mutating change-request methods — without it

@@ -9,12 +9,6 @@
  * `createPr`, no analogue for locks). Implementations may delegate to the
  * existing git/PR/change-request-review services until those are folded into
  * `modules/version-control`; callers should not depend on that fact.
- *
- * Some methods on this interface have no backing service yet — file locks,
- * `openChangeRequest`, `updateFromTarget`. The facade implementation throws
- * `NotImplementedVersionControlError` from those until the underlying support
- * lands. The interface defines them up-front so consumers can plan against
- * the final surface area.
  */
 
 import type { AuthUser } from '../auth/types.js';
@@ -310,7 +304,7 @@ export interface IVersionControlService {
     headBranch: string,
   ): Promise<string | null>;
 
-  // ── File locks (new — currently NotImplementedVersionControlError) ──────────────
+  // ── File locks ──────────────────────────────────────────────────────────────
 
   // Every lock method below coordinates on ONE canonical identity per file:
   // `x/a.md`, `./x/a.md` and `x//a.md` name the same lock, so a lock acquired
@@ -528,11 +522,9 @@ export interface IVersionControlService {
   ): Promise<ChangeRequestDetail | null>;
 
   /**
-   * Open a new change request. Per spec, auto-merges `targetBranch` into
+   * Open a new change request. Auto-merges `targetBranch` into
    * `sourceBranch` and surfaces the resulting diff as the changes to review.
-   * Throws `NotImplementedVersionControlError` until the backing create-PR path
-   * lands in the version-control module (today the agent shells `gh pr create`
-   * directly).
+   * A conflicting merge surfaces as `ChangeRequestConflictsError` (409).
    */
   openChangeRequest(
     workspaceId: string,

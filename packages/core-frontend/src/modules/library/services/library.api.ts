@@ -15,8 +15,8 @@ import { ensurePersonalPlugin, type JoinRequest } from './plugins.api';
  * Library data access. Skills come from the browser skill routes
  * (`GET /api/skills`, `GET /api/skills/:name[?file=…]`) — the same
  * default-branch, per-user-`canRead`-filtered catalog the agent sees.
- * Change requests come from the version-control routes the pr module already talks
- * to. Integration (tool) data is NOT here — the Library reuses
+ * Change requests come from the version-control module's `/api/workflow`
+ * routes, which the pr module already talks to. Integration (tool) data is NOT here — the Library reuses
  * `secrets-vault/services/tool-secrets.api.ts` directly.
  */
 

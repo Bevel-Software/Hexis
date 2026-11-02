@@ -10,11 +10,6 @@
  *   1. Lock in the version-control vocabulary on the consumer side.
  *   2. Concentrate every call into git/PR/change-request-review into one place
  *      so the agent prompt can stop knowing about `git` / `gh`.
- *
- * Methods backed by services that don't exist yet (locks, openChangeRequest,
- * updateFromTarget) throw `NotImplementedVersionControlError`. The interface
- * defines them so frontend / agent code can wire to the final surface while
- * those backings land.
  */
 
 import path from 'node:path';

@@ -113,14 +113,13 @@ export type AcquireLockResult =
 // ── Change Requests ──────────────────────────────────────────────────────────
 
 /**
- * A change request is the reconciliation of two branches. In the current
- * implementation this is backed by a GitHub pull request; the alias hides
- * that from callers. `state` values map 1:1 (`open`/`merged`/`closed`).
+ * A change request is the reconciliation of two branches, kept as a
+ * `change_requests` row plus the two branches; it shares the pull-request
+ * shapes, and the alias hides that from callers. `state` values map 1:1
+ * (`open`/`merged`/`closed`).
  *
- * Opening a change request is defined in the spec as auto-merging target →
- * source first; that part isn't yet implemented in the backing services, so
- * `openChangeRequest` on `IVersionControlService` currently throws
- * `NotImplementedVersionControlError`.
+ * `openChangeRequest` on `IVersionControlService` auto-merges target →
+ * source first, so the request shows the post-merge diff.
  */
 export type ChangeRequest = PullRequestSummary;
 export type ChangeRequestDetail = PullRequestDetail;
