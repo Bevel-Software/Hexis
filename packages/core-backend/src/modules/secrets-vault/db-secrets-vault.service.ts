@@ -5,7 +5,7 @@ import { logger } from '../../shared/logging.js';
 const log = logger('vault');
 import { and, desc, eq, inArray, isNull, like, or } from 'drizzle-orm';
 import type { Database } from '../database/index.js';
-import { secrets } from '../database/index.js';
+import { pgErrorCode, secrets } from '../database/index.js';
 import { TokenCrypto } from '../../shared/token-crypto.js';
 import { assertSafeFetchUrl } from '../../shared/ssrf.js';
 import { readCapped } from '../../shared/read-capped.js';
@@ -117,12 +117,6 @@ export function describeTokenEndpointRefusal(status: number, code: string | null
   const base = `Token endpoint returned HTTP ${status}`;
   const hint = code === null ? undefined : TOKEN_ERROR_HINTS.get(code);
   return hint ? `${base} (${code}). ${hint}` : base;
-}
-
-/** Postgres `unique_violation`: a concurrent insert won the race for a key. */
-function isUniqueViolation(err: unknown): boolean {
-  const code = (err as { code?: unknown; cause?: { code?: unknown } } | null)?.code ?? (err as { cause?: { code?: unknown } } | null)?.cause?.code;
-  return code === '23505';
 }
 
 /**
@@ -639,7 +633,7 @@ export class DbSecretsVaultService implements ISecretsVaultService {
         } catch (err) {
           // Another start of the same sign-in inserted the row first: the
           // next pass finds it and updates it, as it would any existing row.
-          if (isUniqueViolation(err)) continue;
+          if (pgErrorCode(err) === '23505') continue; // unique_violation
           throw err;
         }
       }
@@ -1165,7 +1159,12 @@ export class DbSecretsVaultService implements ISecretsVaultService {
           : result.outcome === 'refreshed'
             ? 'the row had been rotated by a concurrent refresh meanwhile; the rotated sign-in is kept'
             : 'the row had been removed or replaced meanwhile; nothing wiped';
-        log.warn(`refresh refused for "${row.key}", ${did}: ${err.message}`);
+        // A managed row's refusal came from the refresher, whose words are its
+        // own (a port may put the refresh token it was handed in them): only
+        // the status it reported is logged. The vault's own token request
+        // writes fixed sentences, which are safe to repeat.
+        const why = meta.managed ? `the broker refused it (HTTP ${err.providerStatus ?? 'unknown'})` : err.message;
+        log.warn(`refresh refused for "${row.key}", ${did}: ${why}`);
         return result;
       }
       return { outcome: 'transient' };

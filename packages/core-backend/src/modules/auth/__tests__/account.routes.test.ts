@@ -7,8 +7,8 @@ import { AuthService } from '../auth.service.js';
 import { AccountAdmissionRefusedError, AccountChangeRefusedError } from '../account-admission.js';
 import { WorkflowDomainError } from '../../../shared/domain-errors.js';
 import { hashPassword } from '../password-hash.js';
-import type { Database } from '../../database/connection.js';
-import type { IAdminAccessService } from '../../admin/admin.interface.js';
+import type { Database } from '../../database/index.js';
+import type { IAdminAccessService } from '../../admin/index.js';
 
 const authService = {
   listAccounts: vi.fn(async () => [

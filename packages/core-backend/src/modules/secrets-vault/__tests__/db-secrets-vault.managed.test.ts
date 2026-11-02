@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { DbSecretsVaultService } from '../db-secrets-vault.service.js';
 import { SecretOAuthError, type ManagedTokenRefresher, type ManagedTokenRevoker } from '../secrets-vault.contract.js';
 import { TokenCrypto } from '../../../shared/token-crypto.js';
-import type { Database } from '../../database/connection.js';
+import type { Database } from '../../database/index.js';
 
 /**
  * A MANAGED sign-in: the tokens arrive from the broker through a handoff the
