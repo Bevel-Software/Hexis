@@ -24,9 +24,9 @@ search and one read are enough for the examples.
 
 ### 2. Welcome, and offer three things
 
-> Hi <first name>, welcome to Hexis.
+> Hi <first name>, welcome to <organisation>'s knowledge base.
 >
-> Hexis is <organisation>'s shared knowledge, and I, your agent, can read it
+> It holds <organisation>'s shared knowledge, and I, your agent, can read it
 > and work in it. You can:
 >
 > 1. **Ask**: get answers from <organisation>'s knowledge, each with the page
@@ -42,7 +42,9 @@ search and one read are enough for the examples.
 Every name in an example must come from a tool result in this conversation;
 never invent one. With nothing about the person, use the organisation's
 top-level areas and its first useful skill; without their name, say "Hi,
-welcome to Hexis". Keep it under about 150 words. If their first message also
+welcome". When `list_skills` names no released skill, leave the Automate
+example out and say that tools can still be connected. Keep it under about
+150 words. If their first message also
 asks a question, answer it in two or three lines above the welcome. Then stop
 and wait. An answer that is a question, not a number, is option 1.
 
@@ -75,7 +77,9 @@ changes**, and that you cannot do that for them. If a write is refused, say who
 can approve there (`access-control`).
 
 **Automate.** Name two or three skills in one line each, pick one with them,
-load it with `get_skill` and run it together. Before a step that creates
+load it with `get_skill` and run it together. With one released skill, offer
+that one; with none, say so and offer Ask or Contribute instead, or connecting
+a tool (`tools`). Before a step that creates
 something outside the knowledge base, show it and ask. If the skill needs a
 tool, `tools` says what each person sets up and when it starts working. A
 secret pasted into the chat is never repeated or used: say to enter it on the
@@ -93,5 +97,5 @@ project (Claude Code, Cursor), ask once whether they want a line for its
 `AGENTS.md` or `CLAUDE.md`, the only text that agent always reads, and give it
 only on a yes:
 
-> Before answering about <organisation>'s <areas>, search the Hexis connector
-> and cite the page used.
+> Before answering about <organisation>'s <areas>, search the knowledge-base
+> connector and cite the page used.

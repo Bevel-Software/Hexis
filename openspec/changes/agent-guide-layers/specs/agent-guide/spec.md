@@ -67,11 +67,15 @@ For each evaluation task in design.md, `start-here` SHALL route it to at most tw
 - **THEN** the evaluation test fails, naming the task and the fact
 
 ### Requirement: New people are pointed at the onboarding section
-The guide SHALL have an `onboarding` section with the flow for welcoming someone new, the platform part of the server instructions SHALL say to follow it when someone is new or asks to be onboarded, and `start-here` SHALL route that question to it.
+The guide SHALL have an `onboarding` section with the flow for welcoming someone new, and `start-here` SHALL route that question to it. The server instructions SHALL NOT repeat the routing: they tell an agent to read the guide first, and the guide's start is where the question is routed. A distribution's hook SHALL NOT drop or empty the section, since the platform's `onboard` prompt points at it by id.
 
 #### Scenario: Someone says "onboard me"
-- **WHEN** an agent connects and reads the server instructions
-- **THEN** they say to follow the guide section `onboarding` when someone is new or asks to be onboarded
+- **WHEN** an agent reads the guide's start
+- **THEN** its routing table sends "someone is new, asks what this is or what you can do for them, or asks to be onboarded" to the `onboarding` section
+
+#### Scenario: A hook drops the section
+- **WHEN** a distribution's hook returns the sections without `onboarding`, or with an empty one
+- **THEN** composing the guide fails, naming the section and the prompt that points at it
 
 #### Scenario: The section is fetched
 - **WHEN** an agent calls `get_agent_guide` with `section: "onboarding"`
@@ -90,4 +94,4 @@ On a connection not narrowed to an agent, the hosted MCP endpoint SHALL list a p
 
 #### Scenario: A connection narrowed to an agent
 - **WHEN** a connection narrowed to an agent lists prompts or gets `onboard`
-- **THEN** it lists only its agent's skills, and `onboard` answers "Unknown skill"
+- **THEN** it lists only its agent's skills, and `onboard` answers "Unknown skill" unless the agent's skills include one of that name

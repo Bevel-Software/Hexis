@@ -95,6 +95,19 @@ export type AgentGuideReader = () => Promise<string>;
 export const WORKING_WITH_FILES_SECTION_ID = 'working-with-files';
 
 /**
+ * The sections a hook may neither drop nor empty, because something outside
+ * the guide points an agent at them by id (see `composeAgentGuide`).
+ */
+const REQUIRED_SECTIONS: readonly { id: string; pointedAtBy: string; content: string }[] = Object.freeze([
+  { id: WORKING_WITH_FILES_SECTION_ID, pointedAtBy: 'which every file tool points at', content: 'the rules' },
+  {
+    id: ONBOARDING_GUIDE_SECTION_ID,
+    pointedAtBy: "which the platform's `onboard` prompt points at",
+    content: 'an onboarding flow',
+  },
+]);
+
+/**
  * What to do on a knowledge base nobody has written in yet: the section the
  * `firstRun` note `start_session` answers with points at (see
  * workspace/first-run.ts, which names it by this constant).
@@ -281,12 +294,17 @@ export async function agentGuideSections(
   // One section per id by now (`oneSectionPerId`), so a hook's own version
   // of the rules is what is judged, on what survives the empty-body filter
   // below.
-  const rules = rendered.filter((section) => section.id === WORKING_WITH_FILES_SECTION_ID);
-  if (!rules.some((section) => section.body.length > 0)) {
-    throw new Error(
-      `The agent guide hook ${rules.length === 0 ? 'dropped' : 'emptied'} the "${WORKING_WITH_FILES_SECTION_ID}" ` +
-        'section, which every file tool points at. Keep it, or replace it under the same id with the rules in it.',
-    );
+  // Two sections something outside the guide points at, so a hook may not
+  // take them away: the file tools name the rules, and the platform's
+  // `onboard` prompt sends an agent to the onboarding section by id.
+  for (const required of REQUIRED_SECTIONS) {
+    const found = rendered.filter((section) => section.id === required.id);
+    if (!found.some((section) => section.body.length > 0)) {
+      throw new Error(
+        `The agent guide hook ${found.length === 0 ? 'dropped' : 'emptied'} the "${required.id}" ` +
+          `section, ${required.pointedAtBy}. Keep it, or replace it under the same id with ${required.content} in it.`,
+      );
+    }
   }
   return rendered.filter((section) => section.body.length > 0);
 }
