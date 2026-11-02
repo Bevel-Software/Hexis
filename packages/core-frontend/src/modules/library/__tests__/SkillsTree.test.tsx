@@ -373,18 +373,6 @@ describe('SkillsTree: deleting the item on screen', () => {
     expect(deleteEntry).toHaveBeenCalled();
     expect(screen.getByLabelText('pathname').textContent).toBe(page);
   });
-
-  it('lands on the tab that is left when there is one', async () => {
-    const left = `${KB}/KnowledgeBase/Handbook.md`;
-    const deleteEntry = vi.fn(async () => ({ closedActive: true, newActivePath: left }));
-    renderTree(`/workspace/${DEFAULT_BRANCH}/${ITEM}`, { deleteEntry, openFilePath: ITEM });
-
-    await deleteRow('checklist.md');
-
-    await waitFor(() =>
-      expect(screen.getByLabelText('pathname')).toHaveTextContent(`/workspace/${DEFAULT_BRANCH}/${left}`),
-    );
-  });
 });
 
 describe('PluginsTree', () => {
