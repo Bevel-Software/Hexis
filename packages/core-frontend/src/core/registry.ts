@@ -13,6 +13,7 @@
 import {
   createContext,
   useContext,
+  useMemo,
   type ComponentType,
   type ReactElement,
   type ReactNode,
@@ -339,6 +340,63 @@ export interface AppDef {
   description?: string;
   /** Sort order in the list (core: Knowledge 10, Skills & Tools 20). */
   order?: number;
+  /**
+   * Top-level folders of the knowledge base this app hosts, by name
+   * (`['Agents', 'Workflows', 'Data']`). Core claims none.
+   *
+   * A claimed root leaves the Knowledge explorer, and a file URL under it
+   * (`/workspace/<branch>/<kbDir>/<root>/…`, the URL `kbFileUrl` builds) opens
+   * in THIS app: the shell renders `element` in place of the Knowledge surface
+   * and puts the switcher on this app. The URL space does not change, so every
+   * link to such a file lands here. `element` is then rendered under the
+   * `/workspace/*` route, so it must show its folder surface
+   * (`KnowledgeSurface` with `roots`) for a location it does not route itself.
+   *
+   * Two apps claiming one root is a composition error: the shell throws when
+   * it is mounted, naming the root and both apps.
+   */
+  roots?: string[];
+}
+
+/**
+ * Which app claims each root folder (see {@link AppDef.roots}), as
+ * `root → app id`. Throws when two apps claim the same root, so a
+ * misconfigured registry fails when the shell mounts, not when someone
+ * follows a link.
+ */
+export function rootClaims(apps: readonly AppDef[]): ReadonlyMap<string, string> {
+  const claims = new Map<string, string>();
+  for (const app of apps) {
+    for (const root of app.roots ?? []) {
+      const holder = claims.get(root);
+      if (holder !== undefined && holder !== app.id) {
+        throw new Error(`The root folder "${root}" is claimed by two apps: "${holder}" and "${app.id}".`);
+      }
+      claims.set(root, app.id);
+    }
+  }
+  return claims;
+}
+
+/**
+ * The app that hosts a workspace-relative path (`<kbDir>/<root>/…`), or
+ * undefined when its root is claimed by none. The one reading of a claim:
+ * the shell routes by it, the explorer hides by it, the file route keeps a
+ * hosted file's URL by it.
+ */
+export function appHostingPath(
+  claims: ReadonlyMap<string, string>,
+  workspacePath: string,
+): string | undefined {
+  if (claims.size === 0) return undefined;
+  const root = workspacePath.split('/').filter(Boolean)[1];
+  return root === undefined ? undefined : claims.get(root);
+}
+
+/** {@link rootClaims} for the registry in context. */
+export function useRootClaims(): ReadonlyMap<string, string> {
+  const { apps } = useAppRegistry();
+  return useMemo(() => rootClaims(apps), [apps]);
 }
 
 /**

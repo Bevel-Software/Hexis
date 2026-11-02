@@ -23,7 +23,7 @@ every tool reports paths with it; a path without it is placed under
 backslashes and other absolute paths are refused.
 
 Only those three folders are structural, and `Data/`, `Agents/` and
-`Pipelines/` are reserved names on every deployment. Under
+`Workflows/` are reserved names on every deployment. Under
 `{{knowledgeBaseDir}}/`, subfolders, naming and whether a topic is one file or
 twenty are yours to decide. `{{skillsDir}}/` holds shared skills at any depth:
 the folder that holds a `SKILL.md` is the skill, and the folders above it are

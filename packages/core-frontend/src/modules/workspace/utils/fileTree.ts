@@ -10,7 +10,7 @@ import { isAccessRulesFile as isAccessRulesPath } from './display-file-name';
 // RESERVED is not the same as CREATED (see kb-layout.ts): core only seeds
 // KnowledgeBase/, Skills/ and Plugins/, but every reserved name renders as its
 // own root when present — a distribution that owns the execution layer seeds
-// Data/, Agents/ and Pipelines/, and a KB that has them must not see them
+// Data/, Agents/ and Workflows/, and a KB that has them must not see them
 // folded into Knowledge as stray content. A function, not a module-scope set:
 // three of the names are configurable and arrive after this module loads.
 export const KB_ROOT_DIRS = {

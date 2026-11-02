@@ -247,7 +247,7 @@ describe('suggestedPages', () => {
       dir('knowledge-base', [
         dir('knowledge-base/KnowledgeBase', [
           dir('knowledge-base/KnowledgeBase/Data', [page('knowledge-base/KnowledgeBase/Data/rows.md')]),
-          dir('knowledge-base/KnowledgeBase/Pipelines', [page('knowledge-base/KnowledgeBase/Pipelines/run.md')]),
+          dir('knowledge-base/KnowledgeBase/Workflows', [page('knowledge-base/KnowledgeBase/Workflows/run.md')]),
           dir('knowledge-base/KnowledgeBase/Skills', [page('knowledge-base/KnowledgeBase/Skills/x.md')]),
           dir('knowledge-base/KnowledgeBase/Team', [page('knowledge-base/KnowledgeBase/Team/People.md')]),
         ]),

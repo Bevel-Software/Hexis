@@ -7,7 +7,7 @@ import {
   HEXIS_EXTENSION_NS,
   HEXIS_TOOLS_DIR,
   PERSONAL_PLUGIN_PREFIX,
-  PIPELINES_DIR,
+  WORKFLOWS_DIR,
   PLUGIN_MANIFEST_FILE,
   PLUGIN_MCP_FILE,
   PLUGIN_SKILLS_DIR,
@@ -217,7 +217,7 @@ describe('the guide names the folders and files kb-layout.ts defines', () => {
 
   it('names the platform files and reserved folders by their defined names', async () => {
     const guide = (await agentGuideSections(DEFAULT_KB_LAYOUT)).map((s) => s.body).join('\n');
-    for (const name of [...FIXED_PLATFORM_FILE_NAMES, GROUPS_YAML, SYNCED_GROUPS_YAML, PREAMBLE_FILE, BUNDLE_FILE, DATA_DIR, AGENTS_DIR, PIPELINES_DIR]) {
+    for (const name of [...FIXED_PLATFORM_FILE_NAMES, GROUPS_YAML, SYNCED_GROUPS_YAML, PREAMBLE_FILE, BUNDLE_FILE, DATA_DIR, AGENTS_DIR, WORKFLOWS_DIR]) {
       expect(guide, name).toContain(name);
     }
     // A lowercase `.yaml` or `.json` file the guide names is one of the
