@@ -13,8 +13,12 @@ import { createAgentDownloadRoutes } from '../modules/workspace/agent-download.r
 import { createGitInternalsRouteGuard } from '../modules/workspace/git-internals.middleware.js';
 import { startCore } from './lifecycle.js';
 import { createDiffRoutes } from '../modules/diff/diff.routes.js';
-import { createVersionControlRoutes } from '../modules/version-control/version-control.routes.js';
-import { createEventAccess, createEventsRoutes, EventDelivery } from '../modules/version-control/index.js';
+import {
+  createEventAccess,
+  createEventsRoutes,
+  createVersionControlRoutes,
+  EventDelivery,
+} from '../modules/version-control/index.js';
 import { createAccessRoutes } from '../modules/access/access.routes.js';
 import { createAccessRequestRoutes } from '../modules/access/access-requests.routes.js';
 import { AccessRequestsService } from '../modules/access/access-requests.service.js';

@@ -1,9 +1,11 @@
-import { readFileSync } from 'node:fs';
-import { createRequire } from 'node:module';
-import { dirname, join } from 'node:path';
 import type express from 'express';
 import { describe, expect, it } from 'vitest';
-import type { IVersionControlService } from '@bevel-software/platform-shared';
+import {
+  isUserScoped,
+  isWorkspaceScoped,
+  type IVersionControlService,
+  type VersionControlEventPayload,
+} from '@bevel-software/platform-shared';
 import type { IAccessControl } from '../../access/index.js';
 import type { AuthService } from '../../auth/index.js';
 import type { WorkspaceService } from '../../workspace/index.js';
@@ -68,27 +70,17 @@ const VERSION_CONTROL_ROUTES = [
   'POST /workflow/change-requests/:number/merge',
 ];
 
-const EVENT_KINDS = [
-  'agent-connected',
-  'agent-tool-call',
-  'approval-changed',
-  'branch-switched',
-  'change-request-apply-failed',
-  'change-request-edited',
-  'change-request-merge-failed',
-  'change-request-merged',
-  'change-request-opened',
-  'change-request-rejected',
-  'document-unreadable',
+/** The kinds the delivery filters scope by name; every other kind is broadcast. */
+const WORKSPACE_SCOPED_KINDS = [
   'file-changed',
-  'fs-tree-changed',
-  'git-sync-failed',
-  'git-sync-recovered',
-  'heartbeat',
   'lock-acquired',
   'lock-released',
-  'resync',
+  'fs-tree-changed',
+  'document-unreadable',
+  'git-sync-failed',
+  'git-sync-recovered',
 ];
+const USER_SCOPED_KINDS = ['agent-tool-call', 'agent-connected', 'branch-switched', 'change-request-merge-failed'];
 
 describe('version-control public surface', () => {
   it('mounts every REST route at the path it had before the module was renamed', () => {
@@ -108,12 +100,15 @@ describe('version-control public surface', () => {
     expect(routesOf(router)).toEqual(['GET /events', 'POST /events/:sessionId/focus']);
   });
 
-  it('keeps every SSE event kind the shared contract declares', () => {
-    // The kinds are a type-only union, and the backend's typecheck skips
-    // tests, so the pin reads the contract's source rather than a type.
-    const shared = dirname(createRequire(import.meta.url).resolve('@bevel-software/platform-shared/package.json'));
-    const source = readFileSync(join(shared, 'src', 'version-control', 'events.ts'), 'utf-8');
-    const kinds = [...source.matchAll(/^\s+kind: '([a-z-]+)';$/gm)].map((m) => m[1]).sort();
-    expect(kinds).toEqual(EVENT_KINDS);
+  it('scopes the workspace and user SSE event kinds by the names they had before the module was renamed', () => {
+    // Through the shared contract's exported scope rule: a kind renamed there
+    // stops being scoped and the filters would broadcast it. The broadcast
+    // kinds are a type-only union, held by the typecheck of the code that emits them.
+    const scopeOf = (kind: string) => {
+      const event = { kind } as VersionControlEventPayload;
+      return isWorkspaceScoped(event) ? 'workspace' : isUserScoped(event) ? 'user' : 'broadcast';
+    };
+    expect(WORKSPACE_SCOPED_KINDS.map(scopeOf)).toEqual(WORKSPACE_SCOPED_KINDS.map(() => 'workspace'));
+    expect(USER_SCOPED_KINDS.map(scopeOf)).toEqual(USER_SCOPED_KINDS.map(() => 'user'));
   });
 });
