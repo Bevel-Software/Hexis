@@ -879,16 +879,23 @@ export class McpService {
     });
 
     server.setRequestHandler(GetPromptRequestSchema, async (request): Promise<GetPromptResult> => {
+      // The platform's own prompt is served exactly when `prompts/list`
+      // offered it: the connection is not narrowed and no released skill
+      // takes the name — judged on the skill LIST, the same answer the
+      // listing used, never on a read that failed. A workspace's own
+      // `onboard` skill is then read like any other prompt, and a read that
+      // fails is a failed read, not a reason to serve the platform's text.
+      if (offerOnboard && request.params.name === ONBOARD_PROMPT.name) {
+        const released = await this.fetchSkillList(loopbackBearer);
+        if (!released.some((s) => s.name === ONBOARD_PROMPT.name)) {
+          return {
+            description: ONBOARD_PROMPT.description,
+            messages: [{ role: 'user', content: { type: 'text', text: ONBOARD_PROMPT.text } }],
+          };
+        }
+      }
       const started = performance.now();
       const skill = await this.fetchSkill(loopbackBearer, request.params.name);
-      // No skill took the platform prompt's name: it is not a skill read, so
-      // it answers before the skill audit below.
-      if (!skill && offerOnboard && request.params.name === ONBOARD_PROMPT.name) {
-        return {
-          description: ONBOARD_PROMPT.description,
-          messages: [{ role: 'user', content: { type: 'text', text: ONBOARD_PROMPT.text } }],
-        };
-      }
       // A prompt IS a skill read — the same event `get_skill` produces.
       audit?.emit(
         { kind: 'skill', manual: skill?.path ?? null, name: request.params.name },

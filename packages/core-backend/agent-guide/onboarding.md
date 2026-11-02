@@ -9,7 +9,8 @@ one question at a time.
 ### 1. Look around first, and say nothing yet
 
 The welcome uses real examples, so find them first. About eight calls; one
-search and one read are enough for the examples.
+search and one read are enough for the examples. Every read below takes
+`branch: "{{defaultBranch}}"`, the branch people read.
 
 - `read_file` on `{{kbDirName}}/mcp-description.md`: what this knowledge base
   holds. If it is still the commented-out template, it says nothing about this
@@ -43,10 +44,12 @@ Every name in an example must come from a tool result in this conversation;
 never invent one. With nothing about the person, use the organisation's
 top-level areas and its first useful skill; without their name, say "Hi,
 welcome". When `list_skills` names no released skill, leave the Automate
-example out and say that tools can still be connected. Keep it under about
-150 words. If their first message also
-asks a question, answer it in two or three lines above the welcome. Then stop
-and wait. An answer that is a question, not a number, is option 1.
+example out and say that tools can still be connected. When the knowledge
+base has no area or page of the organisation's own yet, leave the Ask example
+out and say it is still empty, so Contribute is where to start. Keep it under
+about 150 words. If their first message also asks a question, answer it in two
+or three lines above the welcome. Then stop and wait. A reply that names or
+asks for one of the three is that option; any other question is option 1.
 
 ### 3. Do the option they chose
 

@@ -56,6 +56,8 @@ async function setup(deps?: {
   connectionId?: string | null;
   /** The agent the credential connects as; absent = Everything. */
   agentPath?: string | null;
+  /** Released skills listed beside `rfi` — listed only: `get_skill` answers not-found for them. */
+  listedOnly?: { name: string; description: string; path: string }[];
 }) {
   skillRequests = [];
   const registry = new ToolRegistry();
@@ -117,7 +119,7 @@ async function setup(deps?: {
   app.post('/api/agent/tools/list_skills', (req, res) => {
     const b = (req.body ?? {}) as Record<string, unknown>;
     skillRequests.push({ tool: 'list_skills', body: b });
-    const released = [{ name: 'rfi', description: 'RFI answers', path: 'Plugins/Sales/rfi' }];
+    const released = [{ name: 'rfi', description: 'RFI answers', path: 'Plugins/Sales/rfi' }, ...(deps?.listedOnly ?? [])];
     res.json({
       skills:
         typeof b.branch === 'string'
@@ -908,6 +910,20 @@ describe('McpService — the Audit log records what an agent calls', () => {
     const client = await setup();
     const got = await client.getPrompt({ name: 'onboard' });
     expect(got.messages[0].content.text).toContain('get_agent_guide({ body: { section: "onboarding" } })');
+  });
+
+  it("serves a workspace's own onboard skill in the platform prompt's place, and never the platform text when reading it fails", async () => {
+    const client = await setup({ listedOnly: [{ name: 'onboard', description: 'Our own onboarding', path: 'Plugins/People/onboard' }] });
+    const { prompts } = await client.listPrompts();
+    // The workspace's skill, in the catalog's own order; the platform's prompt is not added beside it.
+    expect(prompts.map((p) => [p.name, p.description])).toEqual([
+      ['rfi', 'RFI answers'],
+      ['onboard', 'Our own onboarding'],
+    ]);
+    // The skill is listed but its read answers not-found (the harness knows
+    // only `rfi`): the same failed read any prompt gets, never the platform's
+    // onboarding text under the workspace's name.
+    await expect(client.getPrompt({ name: 'onboard' })).rejects.toThrow(/Unknown skill "onboard"/);
   });
 
   it('serves a connection narrowed to an agent its skills and nothing beside them', async () => {

@@ -257,16 +257,19 @@ export type AgentGuideSectionsReader = () => Promise<RenderedGuideSection[]>;
  * its own under the same id, beside core's or in its place: of two sections
  * under one id the LAST is served, where the FIRST stood, so a distribution
  * overrides core's `start-here` or `html-views` by adding its own and the
- * guide keeps its order (see {@link oneSectionPerId}). ONE exception: the
- * shared file rules ({@link WORKING_WITH_FILES_SECTION_ID}) must come back
- * WITH TEXT IN THEM, as core's or as the hook's own replacement. A client
- * that drops the handshake instructions has the guide as the only place to
- * read the rules — a guide without them would leave agents nothing to read.
- * A hook that drops the section, or hands it back empty, is a composition
- * error, thrown rather than served. Judged on what would be SERVED — the
- * rendered, trimmed body — so a replacement of whitespace is caught like a
- * missing one, rather than passing the check and vanishing with the other
- * empty sections below.
+ * guide keeps its order (see {@link oneSectionPerId}). TWO exceptions, the
+ * sections something outside the guide points an agent at by id
+ * (`REQUIRED_SECTIONS`): the shared file rules
+ * ({@link WORKING_WITH_FILES_SECTION_ID}), which every file tool names — a
+ * client that drops the handshake instructions has the guide as the only
+ * place to read them — and the onboarding section
+ * ({@link ONBOARDING_GUIDE_SECTION_ID}), which the platform's `onboard`
+ * prompt sends an agent to. Each must come back WITH TEXT IN IT, as core's
+ * or as the hook's own replacement. A hook that drops one, or hands it back
+ * empty, is a composition error, thrown rather than served. Judged on what
+ * would be SERVED — the rendered, trimmed body — so a replacement of
+ * whitespace is caught like a missing one, rather than passing the check and
+ * vanishing with the other empty sections below.
  */
 export async function agentGuideSections(
   layout: KbLayout,

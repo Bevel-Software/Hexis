@@ -53,7 +53,8 @@ export const PLATFORM_HEADER =
   // Not said here: how to onboard someone new. The guide's start routes that
   // question to the `onboarding` section, and that row is what the agents
   // read (the agent-guide benchmark, 2026-10-29: every onboarding run reached
-  // the section through `start-here`; chat clients never see this text). The
+  // the section through `start-here`, including the runs in clients that
+  // drop `instructions` — claude.ai on the web, the Agent SDK, Cline). The
   // handshake stays the text an agent gets before it reads the guide, not a
   // second copy of the guide's routing.
   // Said here as well as on the write tools: agents wrote to the default
