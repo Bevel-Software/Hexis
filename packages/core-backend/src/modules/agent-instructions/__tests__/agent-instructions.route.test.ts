@@ -6,7 +6,7 @@ import type { IExternalApiKeyService, InternalTokenService } from '../../tool-au
 import type { AuthService } from '../../auth/index.js';
 import { createAgentInstructionsRoutes } from '../agent-instructions.routes.js';
 import { DEFAULT_KB_LAYOUT } from '@bevel-software/platform-shared';
-import { TOOL_PREFIX_LINE, platformInstructions } from '../compose.js';
+import { GUIDE_FIRST_LINE, TOOL_PREFIX_LINE, platformInstructions } from '../compose.js';
 
 /** The platform-owned text the route leads with: header + the shared file rules. */
 const PLATFORM = platformInstructions(DEFAULT_KB_LAYOUT, '');
@@ -65,6 +65,8 @@ describe('GET /agent/instructions', () => {
       expect(res.headers.get('cache-control')).toBe('no-store');
       const body = (await res.json()) as Record<string, unknown>;
       expect(body.instructions).toBe(`${PLATFORM}\n\nAcme builds solar farms.`);
+      // The same first line the MCP handshake opens with: the guide, first.
+      expect((body.instructions as string).split('\n')[0]).toBe(GUIDE_FIRST_LINE);
       expect(body.toolPrefix).toBe(`${TOOL_PREFIX_LINE} Acme builds solar farms.`);
       expect(body).toMatchObject({
         truncated: false,

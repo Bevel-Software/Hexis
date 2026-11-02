@@ -206,7 +206,7 @@ export function formatProbeReport(report: FirstCallProbeReport): string {
 }
 
 /**
- * The id out of a `tools/call` result. The tool answers `{ sessionId }`, which
+ * The id out of a `tools/call` result. The tool answers `{ sessionId, … }`, which
  * reaches a client either as `structuredContent` or — the shape the KB surface
  * actually sends — as one JSON text block. Read both rather than betting on
  * one, and treat "answered, but with no id in it" as a failure of its own

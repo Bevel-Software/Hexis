@@ -70,10 +70,20 @@ export const PLATFORM_HEADER =
 export const TOOL_PREFIX_LINE = "This organisation's knowledge base. Search it before answering from memory.";
 
 /**
- * The whole platform-owned part of the handshake text: what Hexis is, then the
- * rules every file tool shares (see `shared-file-rules.ts`). This is what the
- * `header` field carries and what the card shows as fixed and not editable;
- * the admin's preamble follows it.
+ * The first line of the handshake text, ahead of everything else. Clients cut
+ * the instructions they show the model, so the line that must survive the cut
+ * comes first: it sends the agent to the guide, the one text that says in full
+ * what this deployment is and, for a connection made as an agent, what that
+ * connection loads.
+ */
+export const GUIDE_FIRST_LINE =
+  'Before anything else, call `get_agent_guide` and read the guide: it says what this deployment is and what this connection loads.';
+
+/**
+ * The whole platform-owned part of the handshake text: the guide-first line,
+ * what Hexis is, then the rules every file tool shares (see
+ * `shared-file-rules.ts`). This is what the `header` field carries and what
+ * the card shows as fixed and not editable; the admin's preamble follows it.
  *
  * A FUNCTION of the layout and the default branch, because the shared rules
  * name the platform files by the root names a deployment chose (`Skills/`,
@@ -81,7 +91,7 @@ export const TOOL_PREFIX_LINE = "This organisation's knowledge base. Search it b
  * settings. The guide's name is not one of them: it is `AGENTS.md` everywhere.
  */
 export function platformInstructions(layout: KbLayout, defaultBranch = ''): string {
-  return `${PLATFORM_HEADER}\n\n${sharedFileRulesSection(layout, defaultBranch)}`;
+  return `${GUIDE_FIRST_LINE}\n\n${PLATFORM_HEADER}\n\n${sharedFileRulesSection(layout, defaultBranch)}`;
 }
 
 /**
@@ -96,9 +106,11 @@ export function platformInstructions(layout: KbLayout, defaultBranch = ''): stri
  * past it fails before it reaches an agent.
  *
  * 14,400 since the shared rules' own cap rose by 400 (the `__tmp__/` ref);
- * 14,700 since it rose by 300 more (the sentence naming the default branch).
+ * 14,700 since it rose by 300 more (the sentence naming the default branch);
+ * 14,900 since the guide-first line opens the text (130 characters with its
+ * blank line).
  */
-export const INSTRUCTIONS_CAP = 14_700;
+export const INSTRUCTIONS_CAP = 14_900;
 
 /** The one-line marker that replaces everything past the preamble cap. */
 export const PREAMBLE_TRUNCATION_MARKER = `[preamble truncated at ${PREAMBLE_CAP.toLocaleString('en-US')} characters; shorten ${PREAMBLE_FILE}]`;

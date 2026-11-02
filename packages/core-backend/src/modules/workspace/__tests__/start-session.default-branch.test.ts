@@ -116,9 +116,9 @@ afterEach(async () => {
 });
 
 describe('start_session names the default branch', () => {
-  it('answers { sessionId, defaultBranch }, the branch being the deployment\'s', async () => {
+  it('answers { sessionId, defaultBranch, connectedAs }, the branch being the deployment\'s', async () => {
     const { base } = await startSession(testKbContext({ kbDirName: KB_DIR }));
-    expect(await call(base)).toEqual({ sessionId: 'thread-xyz', defaultBranch: 'target-company-state' });
+    expect(await call(base)).toEqual({ sessionId: 'thread-xyz', defaultBranch: 'target-company-state', connectedAs: null });
   });
 
   it('answers firstRun beside them while the knowledge base is empty', async () => {
@@ -129,6 +129,7 @@ describe('start_session names the default branch', () => {
     expect(await call(base)).toEqual({
       sessionId: 'thread-xyz',
       defaultBranch: 'target-company-state',
+      connectedAs: null,
       firstRun: firstRunNote(`${KB_DIR}/KnowledgeBase`),
     });
   });
@@ -137,16 +138,17 @@ describe('start_session names the default branch', () => {
     const kb = testKbContext({ kbDirName: KB_DIR });
     const { base } = await startSession(kb);
     kb.applyBranchModel({ defaultBranch: 'company-state', protectedBranches: ['company-state'] });
-    expect(await call(base)).toEqual({ sessionId: 'thread-xyz', defaultBranch: 'company-state' });
+    expect(await call(base)).toEqual({ sessionId: 'thread-xyz', defaultBranch: 'company-state', connectedAs: null });
   });
 
   it('says so in its description and declares the field, required, in its output schema', async () => {
     const { registry } = await startSession(testKbContext({ kbDirName: KB_DIR }));
     const def = (await registry.listExternal()).find((t) => t.name === 'start_session')!;
-    expect(def.description).toContain('Returns `{ sessionId, defaultBranch }`, plus `firstRun` while the knowledge base is empty');
+    expect(def.description).toContain('Returns `{ sessionId, defaultBranch, connectedAs }`');
+    expect(def.description).toContain('Plus `firstRun` while the knowledge base is empty');
     const outputs = def.outputs as { properties: Record<string, { description?: string }>; required: string[] };
-    expect(Object.keys(outputs.properties)).toEqual(['sessionId', 'defaultBranch', 'firstRun']);
+    expect(Object.keys(outputs.properties)).toEqual(['sessionId', 'defaultBranch', 'connectedAs', 'firstRun']);
     expect(outputs.properties.defaultBranch.description).toContain('the branch people read');
-    expect(outputs.required).toEqual(['sessionId', 'defaultBranch']);
+    expect(outputs.required).toEqual(['sessionId', 'defaultBranch', 'connectedAs']);
   });
 });
