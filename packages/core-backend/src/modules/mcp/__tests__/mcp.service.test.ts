@@ -10,13 +10,13 @@ import { McpService } from '../mcp.service.js';
 import { SpillStore } from '../../workspace/index.js';
 import { createManualRoutes, ToolRegistry, GUIDE_FIRST_SENTENCE } from '../../tool-registry/index.js';
 import { toolDef } from '../../tool-helpers/index.js';
+import type { AgentEventInput, IAgentEventRecorder } from '../../audit/index.js';
 import { DEFAULT_KB_LAYOUT } from '@bevel-software/platform-shared';
 import { TOOL_PREFIX_LINE, platformInstructions } from '../../agent-instructions/index.js';
 import { splitCallLine } from '@bevel-software/platform-mcp-core';
-import type { AgentEventInput, IAgentEventRecorder } from '../../audit/index.js';
 
 /** The platform-owned part of the handshake text: the header plus the shared file rules. */
-const PLATFORM = platformInstructions(DEFAULT_KB_LAYOUT);
+const PLATFORM = platformInstructions(DEFAULT_KB_LAYOUT, '');
 
 /**
  * End-to-end proxy test: a real express app serving the registry-driven tool
