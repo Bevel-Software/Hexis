@@ -37,6 +37,7 @@ import {
   SKILLS_DIR,
   AGENTS_DIR,
   PIPELINES_DIR,
+  pathUnderRoot,
 } from '@bevel-software/platform-shared';
 import {
   KNOWLEDGE_UPLOAD_TARGET,
@@ -666,10 +667,7 @@ function ContextMenu({
         // URL names its file through the id, and the active tab is the file
         // it opened, so a delete that closed that tab took it.
         const named = filePathFromPathname(pathname);
-        const namesDeleted = named !== null && (
-          named === entry.relativePath
-          || named.startsWith(`${entry.relativePath}/`)
-        );
+        const namesDeleted = named !== null && pathUnderRoot(named, entry.relativePath);
         const onScreen = named !== null && (NODE_ID_LINK_RE.test(named) || namesDeleted);
         // The address names the deleted file by path while its tab never
         // opened — the read opening it was still out when the delete landed,

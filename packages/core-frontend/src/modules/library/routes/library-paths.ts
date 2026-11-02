@@ -5,6 +5,7 @@ import {
   currentKbLayout,
   pluginOfPath,
   isPersonalPluginFolder,
+  pathUnderRoot,
 } from '@bevel-software/platform-shared';
 import { matchPath } from 'react-router-dom';
 import { KB_ROUTE_PREFIX, kbFileUrl, safeDecode } from '../../workspace';
@@ -280,7 +281,7 @@ export function deleteTookLibraryItem(pathname: string, kbDirName: string | null
   if (!isLibraryLocation(pathname)) return false;
   const onScreen = libraryItemWorkspacePath(pathname, kbDirName);
   if (onScreen === null) return false;
-  if (onScreen === deletedPath || onScreen.startsWith(`${deletedPath}/`)) return true;
+  if (pathUnderRoot(onScreen, deletedPath)) return true;
   const skillMd = '/SKILL.md';
   return deletedPath.endsWith(skillMd) && onScreen.startsWith(deletedPath.slice(0, -skillMd.length + 1));
 }

@@ -1,4 +1,5 @@
 import { useContext, useEffect, useState } from 'react';
+import { pathUnderRoot } from '@bevel-software/platform-shared';
 import { useLatestRef } from '../../../shared/components';
 import { canonicalizeWorkspaceId, useEventBus } from '../../workflow';
 import { readFile, WorkspaceApiError } from '../services/workspace.api';
@@ -114,7 +115,7 @@ export function useItemDeletedElsewhere({
 
     const offFileChanged = bus.subscribe('file-changed', (event) => {
       if (canonicalizeWorkspaceId(event.workspaceId) !== subscribedCanon) return;
-      if (event.path !== itemPath && !event.path.startsWith(`${itemPath}/`)) return;
+      if (!pathUnderRoot(event.path, itemPath)) return;
       check(event.byUserId === 'system' || !event.byUserName ? null : event.byUserName);
     });
     const offTreeChanged = bus.subscribe('fs-tree-changed', (event) => {

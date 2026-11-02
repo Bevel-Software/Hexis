@@ -3,6 +3,7 @@ import {
   DEFAULT_BRANCH,
   currentBranchModel,
   isProtectedBranch,
+  pathUnderRoot,
   type FileTreeEntry,
 } from '@bevel-software/platform-shared';
 import { useEventBus, canonicalizeWorkspaceId } from '../../workflow';
@@ -68,11 +69,6 @@ const UNSAVED_TABS_BULK_WARNING = (filenames: string[]) =>
 function basename(path: string): string {
   const i = path.lastIndexOf('/');
   return i >= 0 ? path.slice(i + 1) : path;
-}
-
-/** `path` is `entry` itself, or under it when `entry` is a folder. */
-function isWithin(path: string, entry: string): boolean {
-  return path === entry || path.startsWith(entry + '/');
 }
 
 /**
@@ -623,7 +619,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
    */
   const isPendingDelete = useCallback((path: string) => {
     for (const pending of pendingDeletePathsRef.current) {
-      if (path === pending || path.startsWith(pending + '/')) return true;
+      if (pathUnderRoot(path, pending)) return true;
     }
     return false;
   }, []);
@@ -641,10 +637,10 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
         ownDeletesRef.current.delete(deleted);
         continue;
       }
-      if (!isWithin(path, deleted)) continue;
+      if (!pathUnderRoot(path, deleted)) continue;
       // Found back by a read sent after this delete answered: not ours any more.
       const restoredSince = [...ownRestoresRef.current].some(([restored, restoredAt]) =>
-        restoredAt > at && isWithin(path, restored));
+        restoredAt > at && pathUnderRoot(path, restored));
       if (!restoredSince) return true;
     }
     return false;
@@ -665,7 +661,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     const confirmed = deleteConfirmedOrderRef.current.get(readFrom);
     if (!confirmed) return false;
     for (const [deleted, order] of confirmed) {
-      if (order > readSentOrder && isWithin(path, deleted)) return true;
+      if (order > readSentOrder && pathUnderRoot(path, deleted)) return true;
     }
     return false;
   }, []);
@@ -1758,10 +1754,8 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     // Tab sweep: close every tab whose path matches the deleted path or starts
     // with `deletedPath + '/'` (directory delete). If any swept tab is dirty,
     // confirm once with all affected filenames before proceeding.
-    const prefix = relativePath + '/';
-    const toClose = openTabsRef.current.filter(
-      (t) => t.path === relativePath || t.path.startsWith(prefix),
-    );
+    const isDeleted = (path: string) => pathUnderRoot(path, relativePath);
+    const toClose = openTabsRef.current.filter((t) => isDeleted(t.path));
     const dirty = toClose.filter((t) => t.isDirty);
     if (dirty.length > 0) {
       const { confirmed } = await confirm({
@@ -1817,12 +1811,11 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     // re-created the file this delete just removed. The set drops each path
     // once its tab has closed.
     for (const t of openTabsRef.current) {
-      if (t.path === relativePath || t.path.startsWith(prefix)) deletedPathsRef.current.add(t.path);
+      if (isDeleted(t.path)) deletedPathsRef.current.add(t.path);
     }
     // Close tabs only after the server confirmed — keeps tab content +
     // cursor position intact on the rollback path. Read the strip as it is
     // NOW: tabs may have opened or closed while the delete ran.
-    const isDeleted = (path: string) => path === relativePath || path.startsWith(prefix);
     const tabsNow = openTabsRef.current;
     const activePath = activeTabPathRef.current;
     const closedActive = activePath !== null && isDeleted(activePath);
@@ -1911,7 +1904,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     const refuse = () => new Error(`${basename(relativePath)} was deleted from this branch; it was not saved.`);
     const waitOrder = ++orderRef.current;
     const inFlight = () => [...deletesInFlightRef.current.get(readFrom) ?? []]
-      .some((pending) => isWithin(relativePath, pending));
+      .some((pending) => pathUnderRoot(relativePath, pending));
     const deleted = () => inFlight() || isOvertakenByOwnDelete(readFrom, relativePath, waitOrder)
       || (workspaceIdRef.current === readFrom
         && (deletedPathsRef.current.has(relativePath) || isOwnDelete(relativePath)));
