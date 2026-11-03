@@ -670,6 +670,7 @@ describe('proxied third-party MCP servers: a rejected token gets one refresh and
     } as unknown as ISecretsVaultService;
     registerBevelSecretsVariableLoader(vault);
     const toolManuals = {
+      sharedSignInKeysForManual: async () => [],
       userScopedKeysForManual: async (manual: string) =>
         manual === 'notion' ? [{ key: KEY, name: 'ACCESS_TOKEN', label: 'Notion sign-in', oauth: true }] : [],
     } as unknown as IToolManualService;
@@ -787,6 +788,45 @@ describe('proxied third-party MCP servers: a rejected token gets one refresh and
     expect(state.refreshes).toBe(1);
     expect((await vault.statusFor('user-A', [KEY]))[0]?.userAuthorized).toBe(false);
     expect(refreshLines(logs)[0]).toContain('manual=\\"notion\\" user=\\"user-A\\" outcome=rejected');
+  });
+
+  it('a WORKSPACE connection rejected on refresh tells the caller a tool owner has to reconnect it, and does not retry', async () => {
+    quiet();
+    let valid = 'token-1';
+    downstream = await startFakeDownstreamMcpServer({ acceptsToken: (t) => t === valid });
+    // The same sign-in, declared as one shared connection: the manual reports
+    // it under `sharedSignInKeysForManual`, the vault under the owner's row.
+    const state = { token: 'token-1' as string | null, refreshes: 0 };
+    const vault = {
+      resolve: async (_userId: string, key: string) => (key === KEY ? state.token : null),
+      statusFor: async (_userId: string, keys: string[]) =>
+        keys.map((key) => ({ key, adminConfigured: true, adminKind: 'oauth', userConfigured: false, adminAuthorized: state.token !== null })),
+      forceRefresh: async (_userId: string, key: string) => {
+        expect(key).toBe(KEY);
+        state.refreshes += 1;
+        state.token = null;
+        return 'rejected' as const;
+      },
+    } as unknown as ISecretsVaultService;
+    registerBevelSecretsVariableLoader(vault);
+    const toolManuals = {
+      sharedSignInKeysForManual: async (manual: string) =>
+        manual === 'notion' ? [{ key: KEY, name: 'ACCESS_TOKEN', label: 'Notion sign-in' }] : [],
+      userScopedKeysForManual: async () => [],
+    } as unknown as IToolManualService;
+    const { baseUrl } = await startPlatform({ manualsFor: notionManual(downstream), secretsVault: vault, toolManuals });
+    const { client } = await connectSdkClient(baseUrl);
+    await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'one' } });
+
+    valid = 'nothing-valid-any-more';
+
+    const res = await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'two' } });
+    expect(res.isError).toBe(true);
+    expect(toolText(res)).toContain('The workspace connection for "notion" was rejected by the provider and has been disconnected');
+    expect(toolText(res)).toContain('A tool owner has to reconnect it on http://localhost:5173/connect');
+    expect(toolText(res)).not.toContain('Your sign-in');
+    expect(state.refreshes).toBe(1);
+    expect(downstream.executions()).toBe(1); // nothing was retried against a dead workspace grant
   });
 
   it('transient refresh failure: the original error comes back, the token is kept, and a later call tries again', async () => {
@@ -959,6 +999,7 @@ describe('proxied third-party MCP servers: a rejected token gets one refresh and
     const { state, vault } = fakeSignIn('token-1', () => 'refreshed');
     const boom = new Error('catalog read failed\u009b31m\nerror: forged by the manual name\u2028tail');
     const toolManuals = {
+      sharedSignInKeysForManual: async () => [],
       userScopedKeysForManual: async (manual: string) => {
         if (broken) throw boom;
         return manual === 'notion' ? [{ key: KEY, name: 'ACCESS_TOKEN', label: 'Notion sign-in', oauth: true }] : [];
@@ -1080,6 +1121,7 @@ describe('proxied third-party MCP servers: a rejected token gets one refresh and
     } as unknown as ISecretsVaultService;
     registerBevelSecretsVariableLoader(withKind);
     const toolManuals = {
+      sharedSignInKeysForManual: async () => [],
       userScopedKeysForManual: async (manual: string) =>
         manual === 'notion' ? [{ key: KEY, name: 'ACCESS_TOKEN', label: 'Notion key', oauth: false }] : [],
     } as unknown as IToolManualService;

@@ -1,4 +1,5 @@
 import { authFetch } from '../../../lib/api';
+import type { ManagedSignIn } from './connect.api';
 
 /**
  * Per-tool secrets API. A `.tool` manual declares which `${VAR}`s are set by the
@@ -17,6 +18,11 @@ export interface ToolVarStatus {
   key: string;
   /** A shared (admin) value exists. */
   adminConfigured: boolean;
+  /**
+   * What the shared row IS: a sign-in needs an `oauth` one, not a key left
+   * from when the variable was static. `null` when there is no shared row.
+   */
+  adminKind?: 'static' | 'oauth' | null;
   /** The caller's own value exists. */
   userConfigured: boolean;
   /** This variable is filled by an OAuth sign-in, not a typed value. */
@@ -27,6 +33,8 @@ export interface ToolVarStatus {
   needsReauth?: boolean;
   /** For an oauth var: the declared scopes the token was NOT granted (what it can't do). */
   missingScopes?: string[];
+  /** For a managed connector's sign-in: the card the Connect page shows (see `ManagedSignIn`). */
+  managed?: ManagedSignIn;
 }
 
 /**
@@ -118,15 +126,23 @@ async function deleteVar(slug: string, varName: string, tier: ToolVarScope): Pro
  * Store the confidential OAuth CLIENT SECRET for a tool's declared sign-in
  * provider — the owner-side half of a manual OAuth setup. Requires write access
  * to the `.tool`; the public provider config is pinned server-side from the
- * file's own `oauth` declaration.
+ * file's own `oauth` declaration. A MANAGED declaration names no client, so
+ * the caller's `clientId` is used then: the deployment's own app, replacing
+ * the managed one.
  */
-export async function setOAuthClientSecret(slug: string, varName: string, clientSecret: string): Promise<void> {
+export async function setOAuthClientSecret(
+  slug: string,
+  varName: string,
+  clientSecret: string,
+  /** For a managed sign-in only: the deployment's OWN app, replacing the managed one ("use our own app"). */
+  clientId?: string,
+): Promise<void> {
   const res = await authFetch(
     `/api/secrets/tools/${encodeURIComponent(slug)}/vars/${encodeURIComponent(varName)}/oauth/admin`,
     {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ clientSecret }),
+      body: JSON.stringify(clientId ? { clientSecret, clientId } : { clientSecret }),
     },
   );
   if (!res.ok) await unwrap(res, "Couldn't save the client secret.");

@@ -4,7 +4,7 @@ import {
   joinBranchFor,
   type AuthUser,
   type ChangeRequest,
-  type IWorkflowService,
+  type IVersionControlService,
 } from '@bevel-software/platform-shared';
 import { type WorkspaceService } from '../../workspace/workspace.service.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
@@ -82,10 +82,10 @@ function makeHarness(
       return text;
     }),
   } as unknown as WorkspaceService;
-  const workflow = {
+  const versionControl = {
     rejectChangeRequest: vi.fn(async () => ({ number: 7, state: 'closed' })),
     deleteBranch: vi.fn(async () => undefined),
-  } as unknown as IWorkflowService;
+  } as unknown as IVersionControlService;
   const asked: { verb: string; path: string; email: string }[] = [];
   const answer = (verb: 'canRead' | 'canWrite' | 'canOwner' | 'canDownload') =>
     vi.fn(async (_ws: string, email: string, path: string) => {
@@ -99,8 +99,8 @@ function makeHarness(
     canDownload: answer('canDownload'),
   } as unknown as IAccessControl;
   return {
-    svc: new JoinRequestsService(workspaceService, workflow, testKbContext(), accessControl),
-    workflow,
+    svc: new JoinRequestsService(workspaceService, versionControl, testKbContext(), accessControl),
+    versionControl,
     asked,
     fetches,
   };
@@ -112,8 +112,8 @@ describe('a request settles once the person holds what it asked for', () => {
     // so an owner grant made in the dialog retires the Can edit request.
     const h = makeHarness(ASKS_WRITE, { canWrite: true });
     await expect(h.svc.list('GTM', folderTarget(FOLDER), [cr()], ACTOR)).resolves.toEqual([]);
-    expect(h.workflow.rejectChangeRequest).toHaveBeenCalled();
-    expect(h.workflow.deleteBranch).toHaveBeenCalledWith(expect.anything(), BRANCH, ACTOR);
+    expect(h.versionControl.rejectChangeRequest).toHaveBeenCalled();
+    expect(h.versionControl.deleteBranch).toHaveBeenCalledWith(expect.anything(), BRANCH, ACTOR);
   });
 
   it('asks about the ITEM, not its rules file — a folder request is about the folder', async () => {
@@ -134,7 +134,7 @@ describe('a request settles once the person holds what it asked for', () => {
     const out = await h.svc.list('GTM', folderTarget(FOLDER), [cr()], ACTOR);
     expect(out).toHaveLength(1);
     expect(out[0].proposals.map((p) => p.verb)).toEqual(['write']);
-    expect(h.workflow.rejectChangeRequest).not.toHaveBeenCalled();
+    expect(h.versionControl.rejectChangeRequest).not.toHaveBeenCalled();
   });
 
   it('keeps today\'s literal rule for a proposal naming a ROLE', async () => {
@@ -145,7 +145,7 @@ describe('a request settles once the person holds what it asked for', () => {
     const out = await h.svc.list('GTM', folderTarget(FOLDER), [cr()], ACTOR);
     expect(out).toHaveLength(1);
     expect(out[0].proposals.map((p) => p.label)).toEqual(['role/Analysts']);
-    expect(h.workflow.rejectChangeRequest).not.toHaveBeenCalled();
+    expect(h.versionControl.rejectChangeRequest).not.toHaveBeenCalled();
   });
 
   it('leaves the request open when the resolver cannot answer', async () => {
@@ -155,7 +155,7 @@ describe('a request settles once the person holds what it asked for', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const out = await h.svc.list('GTM', folderTarget(FOLDER), [cr()], ACTOR);
     expect(out).toHaveLength(1);
-    expect(h.workflow.rejectChangeRequest).not.toHaveBeenCalled();
+    expect(h.versionControl.rejectChangeRequest).not.toHaveBeenCalled();
     warn.mockRestore();
   });
 });
@@ -182,27 +182,27 @@ describe('a branch that cannot be read settles nothing', () => {
     expect(h.fetches.some((f) => f.force)).toBe(true);
     expect(out).toHaveLength(1);
     expect(out[0].proposals.map((p) => p.verb)).toEqual(['write']);
-    expect(h.workflow.rejectChangeRequest).not.toHaveBeenCalled();
+    expect(h.versionControl.rejectChangeRequest).not.toHaveBeenCalled();
   });
 
   it('leaves the request open — and unclosed — when the branch still cannot be read', async () => {
     const h = makeHarness(undefined);
     await expect(h.svc.list('GTM', folderTarget(FOLDER), [cr()], ACTOR)).resolves.toEqual([]);
-    expect(h.workflow.rejectChangeRequest).not.toHaveBeenCalled();
-    expect(h.workflow.deleteBranch).not.toHaveBeenCalled();
+    expect(h.versionControl.rejectChangeRequest).not.toHaveBeenCalled();
+    expect(h.versionControl.deleteBranch).not.toHaveBeenCalled();
   });
 
   it('reconcile refuses to settle one it could not read', async () => {
     const h = makeHarness(undefined);
     await expect(h.svc.reconcile('GTM', folderTarget(FOLDER), cr(), ACTOR)).resolves.toBe(false);
-    expect(h.workflow.rejectChangeRequest).not.toHaveBeenCalled();
+    expect(h.versionControl.rejectChangeRequest).not.toHaveBeenCalled();
   });
 
   it('still settles a branch it DID read that proposes nothing', async () => {
     // The distinction has to cut both ways, or nothing would ever retire.
     const h = makeHarness(DEFAULT_MD);
     await expect(h.svc.reconcile('GTM', folderTarget(FOLDER), cr(), ACTOR)).resolves.toBe(true);
-    expect(h.workflow.rejectChangeRequest).toHaveBeenCalled();
+    expect(h.versionControl.rejectChangeRequest).toHaveBeenCalled();
   });
 });
 
@@ -227,7 +227,7 @@ describe('a person the rules explicitly deny', () => {
     const out = await h.svc.list('GTM', folderTarget(FOLDER), [cr()], ACTOR);
     expect(out).toHaveLength(1);
     expect(out[0].proposals.map((p) => p.verb)).toEqual(['write']);
-    expect(h.workflow.rejectChangeRequest).not.toHaveBeenCalled();
+    expect(h.versionControl.rejectChangeRequest).not.toHaveBeenCalled();
   });
 
   it('retires it once the grant has landed and the resolver says they write', async () => {
@@ -254,8 +254,8 @@ describe('a stale ref must not be mistaken for a finished request', () => {
     const h = staleHarness();
     const out = await h.svc.list('GTM', folderTarget(FOLDER), [cr()], ACTOR);
 
-    expect(h.workflow.rejectChangeRequest).not.toHaveBeenCalled();
-    expect(h.workflow.deleteBranch).not.toHaveBeenCalled();
+    expect(h.versionControl.rejectChangeRequest).not.toHaveBeenCalled();
+    expect(h.versionControl.deleteBranch).not.toHaveBeenCalled();
     // And having fetched, it reports the proposal rather than nothing.
     expect(out).toHaveLength(1);
     expect(out[0].proposals.map((p) => p.verb)).toEqual(['write']);
@@ -264,7 +264,7 @@ describe('a stale ref must not be mistaken for a finished request', () => {
   it('reconcile refuses to settle it either', async () => {
     const h = staleHarness();
     await expect(h.svc.reconcile('GTM', folderTarget(FOLDER), cr(), ACTOR)).resolves.toBe(false);
-    expect(h.workflow.rejectChangeRequest).not.toHaveBeenCalled();
+    expect(h.versionControl.rejectChangeRequest).not.toHaveBeenCalled();
   });
 
   it('confirms with a FORCED fetch before closing anything', async () => {
@@ -272,7 +272,7 @@ describe('a stale ref must not be mistaken for a finished request', () => {
     await h.svc.list('GTM', folderTarget(FOLDER), [cr()], ACTOR);
     expect(h.fetches.some((f) => f.force)).toBe(true);
     // Genuinely finished — the confirming read agrees, so it closes.
-    expect(h.workflow.rejectChangeRequest).toHaveBeenCalled();
+    expect(h.versionControl.rejectChangeRequest).toHaveBeenCalled();
   });
 });
 
@@ -318,10 +318,10 @@ describe('a request whose target is a FILE', () => {
         return text;
       }),
     } as unknown as WorkspaceService;
-    const workflow = {
+    const versionControl = {
       rejectChangeRequest: vi.fn(async () => ({ number: 7, state: 'closed' })),
       deleteBranch: vi.fn(async () => undefined),
-    } as unknown as IWorkflowService;
+    } as unknown as IVersionControlService;
     const answer = (verb: string) => vi.fn(async () => holds[verb] ?? false);
     const accessControl = {
       canRead: answer('canRead'),
@@ -330,8 +330,8 @@ describe('a request whose target is a FILE', () => {
       canDownload: answer('canDownload'),
     } as unknown as IAccessControl;
     return {
-      svc: new JoinRequestsService(workspaceService, workflow, testKbContext(), accessControl),
-      workflow,
+      svc: new JoinRequestsService(workspaceService, versionControl, testKbContext(), accessControl),
+      versionControl,
       workspaceService,
     };
   }
@@ -342,8 +342,8 @@ describe('a request whose target is a FILE', () => {
 
     expect(out).toHaveLength(1);
     expect(out[0].proposals.map((p) => p.verb)).toEqual(['write']);
-    expect(h.workflow.rejectChangeRequest).not.toHaveBeenCalled();
-    expect(h.workflow.deleteBranch).not.toHaveBeenCalled();
+    expect(h.versionControl.rejectChangeRequest).not.toHaveBeenCalled();
+    expect(h.versionControl.deleteBranch).not.toHaveBeenCalled();
   });
 
   it('reads the FILE itself, never an access.md beside it', async () => {

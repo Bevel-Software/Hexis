@@ -2,10 +2,10 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import type { AuthUser, IWorkflowService } from '@bevel-software/platform-shared';
+import type { AuthUser, IVersionControlService } from '@bevel-software/platform-shared';
 import type { IDiffService } from '../diff.interface.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
-import { WorkflowValidationError } from '../../../shared/domain-errors.js';
+import { VersionControlValidationError } from '../../../shared/domain-errors.js';
 import { rejectPathsLocked } from '../diff.routes.js';
 
 /**
@@ -21,7 +21,7 @@ const BRANCH = 'alice/revert-test';
 const WORKSPACE_ID = workspaceIdForBranch(BRANCH);
 
 interface Harness {
-  workflow: IWorkflowService;
+  versionControl: IVersionControlService;
   diff: IDiffService;
   calls: string[];
   workspaceDir: string;
@@ -56,7 +56,7 @@ async function makeHarness(overrides: {
     overrides.commit?.();
     return { sha: 'abc', summary } as never;
   });
-  const workflow = { acquireLock, releaseLockNoCommit, commitChanges } as unknown as IWorkflowService;
+  const versionControl = { acquireLock, releaseLockNoCommit, commitChanges } as unknown as IVersionControlService;
 
   const revertPlan = vi.fn(async (_ws: string, paths: string[]) => ({
     workspaceDir,
@@ -66,7 +66,7 @@ async function makeHarness(overrides: {
     deletes: paths.filter((p) => p.endsWith('added.md')),
   }));
   const diff = { revertPlan } as unknown as IDiffService;
-  return { workflow, diff, calls, workspaceDir };
+  return { versionControl, diff, calls, workspaceDir };
 }
 
 describe('rejectPathsLocked', () => {
@@ -82,7 +82,7 @@ describe('rejectPathsLocked', () => {
     const h = await makeHarness();
     workspaceDir = h.workspaceDir;
 
-    await rejectPathsLocked(h.workflow, h.diff, WORKSPACE_ID, USER, 'knowledge-base', [
+    await rejectPathsLocked(h.versionControl, h.diff, WORKSPACE_ID, USER, 'knowledge-base', [
       'knowledge-base/a.md',
       'knowledge-base/added.md',
     ]);
@@ -104,7 +104,7 @@ describe('rejectPathsLocked', () => {
     const h = await makeHarness();
     workspaceDir = h.workspaceDir;
     await expect(
-      rejectPathsLocked(h.workflow, h.diff, WORKSPACE_ID, USER, 'knowledge-base', []),
+      rejectPathsLocked(h.versionControl, h.diff, WORKSPACE_ID, USER, 'knowledge-base', []),
     ).resolves.toBeUndefined();
     expect(h.calls).toEqual([]);
   });
@@ -119,11 +119,11 @@ describe('rejectPathsLocked', () => {
     workspaceDir = h.workspaceDir;
 
     await expect(
-      rejectPathsLocked(h.workflow, h.diff, WORKSPACE_ID, USER, 'knowledge-base', [
+      rejectPathsLocked(h.versionControl, h.diff, WORKSPACE_ID, USER, 'knowledge-base', [
         'knowledge-base/a.md',
         'knowledge-base/added.md',
       ]),
-    ).rejects.toBeInstanceOf(WorkflowValidationError);
+    ).rejects.toBeInstanceOf(VersionControlValidationError);
 
     // No commit landed and the disk is untouched — the batch is atomic.
     expect(h.calls.some((c) => c.startsWith('commit:'))).toBe(false);
@@ -131,7 +131,7 @@ describe('rejectPathsLocked', () => {
     await expect(fs.access(path.join(h.workspaceDir, 'knowledge-base/added.md'))).resolves.toBeUndefined();
   }, 15_000);
 
-  it('surfaces a commit failure as a WorkflowValidationError and releases without committing', async () => {
+  it('surfaces a commit failure as a VersionControlValidationError and releases without committing', async () => {
     const h = await makeHarness({
       commit: () => {
         throw new Error('push rejected');
@@ -140,10 +140,10 @@ describe('rejectPathsLocked', () => {
     workspaceDir = h.workspaceDir;
 
     await expect(
-      rejectPathsLocked(h.workflow, h.diff, WORKSPACE_ID, USER, 'knowledge-base', [
+      rejectPathsLocked(h.versionControl, h.diff, WORKSPACE_ID, USER, 'knowledge-base', [
         'knowledge-base/a.md',
       ]),
-    ).rejects.toBeInstanceOf(WorkflowValidationError);
+    ).rejects.toBeInstanceOf(VersionControlValidationError);
     // Locks were dropped via the no-commit path after the failure.
     expect(h.calls.filter((c) => c.startsWith('releaseNoCommit:'))).toHaveLength(1);
   });

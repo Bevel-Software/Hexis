@@ -44,7 +44,7 @@ describe('get_agent_guide', () => {
         source: 'internal',
         abortSignal: new AbortController().signal,
         workspaceService: {} as never,
-        workflowService: {} as never,
+        versionControlService: {} as never,
         events: {} as never,
         getFilesystem: async () => {
           throw new Error('the guide reads no file');

@@ -9,8 +9,8 @@ import {
 import { AuthContext, type AuthContextValue } from '../../auth/state/auth.context';
 import { GitContext, type GitContextValue } from '../../git/state/git.context';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
-import type { PullRequestSummary, WorkflowEvent } from '@bevel-software/platform-shared';
-import { EventBusContext, type EventBusContextValue } from '../../workflow/state/event-bus.context';
+import type { PullRequestSummary, VersionControlEvent } from '@bevel-software/platform-shared';
+import { EventBusContext, type EventBusContextValue } from '../../version-control/state/event-bus.context';
 import type { ToolSecrets } from '../../secrets-vault/services/tool-secrets.api';
 import type { LibraryContextValue } from '../state/library-data';
 
@@ -329,10 +329,10 @@ function libraryValue(
  * is itself worth asserting.
  */
 function makeFakeBus() {
-  const handlers: Record<string, ((e: WorkflowEvent) => void)[]> = {};
-  const bus: EventBusContextValue & { emit(e: WorkflowEvent): void } = {
+  const handlers: Record<string, ((e: VersionControlEvent) => void)[]> = {};
+  const bus: EventBusContextValue & { emit(e: VersionControlEvent): void } = {
     subscribe(kind, handler) {
-      (handlers[kind] ??= []).push(handler as (e: WorkflowEvent) => void);
+      (handlers[kind] ??= []).push(handler as (e: VersionControlEvent) => void);
       return () => {
         handlers[kind] = (handlers[kind] ?? []).filter((h) => h !== handler);
       };

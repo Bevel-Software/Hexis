@@ -24,7 +24,7 @@
 import type { FileContent } from '@mastra/core/workspace';
 import { GROUP_REF_PREFIX, canonicalRoleName, parseRolesYaml, parseYamlSubset } from './access-grammar.js';
 import type { GroupsIndex } from './group-files.js';
-import { WorkflowDomainError } from '../../shared/domain-errors.js';
+import { VersionControlDomainError } from '../../shared/domain-errors.js';
 import type { WriteValidator } from '../kb-fs/index.js';
 
 /** Repo-relative basename of the roles file (it lives at the KB repo root). */
@@ -35,7 +35,7 @@ export const ROLES_YAML_BASENAME = 'roles.yaml';
  * the edit is refused and nothing is written. Carries the parser errors so the
  * editor / agent can show exactly what's wrong.
  */
-export class RolesYamlInvalidError extends WorkflowDomainError {
+export class RolesYamlInvalidError extends VersionControlDomainError {
   readonly errors: string[];
   constructor(errors: string[]) {
     super(
@@ -102,7 +102,7 @@ export const NEW_ROLE_GUIDANCE =
  * self-contained because a tool error reaches the agent as its message alone,
  * and the agent relays it to its user.
  */
-export class RolesYamlNewRoleError extends WorkflowDomainError {
+export class RolesYamlNewRoleError extends VersionControlDomainError {
   readonly roleNames: string[];
   constructor(roleNames: string[]) {
     const quoted = roleNames.map((n) => `'${n}'`).join(', ');
@@ -171,7 +171,7 @@ interface GroupEntry {
  * entry with only a log warning — the role silently reaches nobody — so it is
  * refused up front, naming each entry, in the same 422 shape as the others.
  */
-export class RolesYamlUnknownGroupError extends WorkflowDomainError {
+export class RolesYamlUnknownGroupError extends VersionControlDomainError {
   readonly entries: { role: string; entry: string }[];
   constructor(entries: { role: string; entry: string }[], sourceFile: string) {
     const listed = entries.map((e) => `'- ${e.entry}' under role '${e.role}'`).join(', ');

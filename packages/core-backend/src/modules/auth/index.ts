@@ -32,3 +32,4 @@ import './auth.middleware.js';
 // Reached by other modules; exported here so they stop importing the files.
 export type { IAccountSwitchGuard } from './account-switch-guard.js';
 export type { AuthService } from './auth.service.js';
+export type { IAccountErasureService } from './account-erasure.service.js';

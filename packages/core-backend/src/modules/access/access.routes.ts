@@ -22,8 +22,8 @@ import type { KbContext } from '../../shared/kb-context.js';
 import type { ITreeWalker } from '../../shared/fs.contract.js';
 import { branchForWorkspaceId } from '../../shared/workspace-id.js';
 import type { AuthService, IAccountSwitchGuard } from '../auth/index.js';
-import type { WorkflowService, WorkflowEventBus } from '../workflow/index.js';
-import { WorkflowDomainError } from '../../shared/domain-errors.js';
+import type { VersionControlService, VersionControlEventBus } from '../version-control/index.js';
+import { VersionControlDomainError } from '../../shared/domain-errors.js';
 import { AccessDeniedError } from '../access-model/index.js';
 import {
   AccessMutationService,
@@ -90,8 +90,8 @@ export function createAccessRoutes(
   authService: AuthService,
   /** Auth's switch-off coordination, for the invite's promotion (`ifActive`). */
   switchGuard: IAccountSwitchGuard,
-  workflowService: WorkflowService,
-  eventBus: WorkflowEventBus,
+  versionControlService: VersionControlService,
+  eventBus: VersionControlEventBus,
   db: Database,
   kb: KbContext,
   /** The composition root's walk, for the roles admin's reference scan. */
@@ -104,7 +104,7 @@ export function createAccessRoutes(
   const mutation = new AccessMutationService(workspaceService, accessControl, kbDirName);
   const rolesAdmin = new RolesAdminService(
     workspaceService,
-    workflowService,
+    versionControlService,
     accessControl,
     disk,
     kbDirName,
@@ -878,7 +878,7 @@ export function createAccessRoutes(
     user: AuthUser,
     op: () => Promise<void>,
   ): Promise<void> {
-    const existing = await workflowService.getLock(workspaceId, branch, wsEditPath);
+    const existing = await versionControlService.getLock(workspaceId, branch, wsEditPath);
     if (existing && existing.holderUserId === user.id) {
       // Caller already holds the lock (mid-edit) — write without touching it.
       await op();
@@ -894,7 +894,7 @@ export function createAccessRoutes(
       eventBus.emit({ kind: 'fs-tree-changed', workspaceId, branch });
       return;
     }
-    const acquired = await workflowService.acquireLock(workspaceId, branch, wsEditPath, user);
+    const acquired = await versionControlService.acquireLock(workspaceId, branch, wsEditPath, user);
     if (!acquired.acquired) {
       const holder = acquired.lock.holderName || 'another user';
       const err: Error & { status?: number } = new Error(
@@ -913,16 +913,16 @@ export function createAccessRoutes(
         // upload. Every other failure may have left partial bytes, so it keeps
         // the discarding release.
         if (isFolderGovernsRefusal(err)) {
-          await workflowService.releaseLockUntouched(workspaceId, branch, wsEditPath, user);
+          await versionControlService.releaseLockUntouched(workspaceId, branch, wsEditPath, user);
         } else {
-          await workflowService.releaseLockNoCommit(workspaceId, branch, wsEditPath, user);
+          await versionControlService.releaseLockNoCommit(workspaceId, branch, wsEditPath, user);
         }
       } catch {
         /* best-effort */
       }
       throw err;
     }
-    await workflowService.releaseLock(workspaceId, branch, wsEditPath, user);
+    await versionControlService.releaseLock(workspaceId, branch, wsEditPath, user);
     eventBus.emit({ kind: 'fs-tree-changed', workspaceId, branch });
   }
 
@@ -1238,7 +1238,7 @@ export function createAccessRoutes(
       if (err instanceof AccessDeniedError || err instanceof AccessMutationError) {
         logger('access.revoke.denied').warn(
           `ws=${workspaceId} byUserId=${user.id} -> ${
-            err instanceof WorkflowDomainError ? err.status : 500
+            err instanceof VersionControlDomainError ? err.status : 500
           }`,
         );
       }

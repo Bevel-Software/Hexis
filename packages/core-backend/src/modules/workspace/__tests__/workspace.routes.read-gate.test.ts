@@ -4,11 +4,11 @@ import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import { NodeFs } from '../../kb-fs/node-fs.js';
-import type { IWorkflowService } from '@bevel-software/platform-shared';
+import type { IVersionControlService } from '@bevel-software/platform-shared';
 import type { IAccessControl } from '../../access/index.js';
 import type { ICreatorAccess } from '../../access-model/index.js';
 import type { IAdminAccessService } from '../../admin/index.js';
-import type { WorkflowEventBus } from '../../workflow/index.js';
+import type { VersionControlEventBus } from '../../version-control/index.js';
 import type { AuthService } from '../../auth/index.js';
 import { createWorkspaceRoutes } from '../workspace.routes.js';
 import type { WorkspaceService, ReadTreeFilter } from '../workspace.service.js';
@@ -91,8 +91,8 @@ async function makeHarness(opts: {
     createWorkspaceRoutes(
       workspaceService,
       authService,
-      {} as unknown as IWorkflowService,
-      {} as unknown as WorkflowEventBus,
+      {} as unknown as IVersionControlService,
+      {} as unknown as VersionControlEventBus,
       accessControl,
       testKbContext({ kbDirName: KB }),
       stubCreatorAccess,

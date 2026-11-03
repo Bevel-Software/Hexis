@@ -1,7 +1,7 @@
 /**
  * The app registry: the contract between the core shell (`CoreAppShell`) and
  * optional (enterprise) modules. The core owns workspace, git, pr, access,
- * auth, workflow/SSE, layout, secrets-vault, tools, toolbar and the admin
+ * auth, version control/SSE, layout, secrets-vault, tools, toolbar and the admin
  * roles page; everything else (chat, connectors, routines, watchlist, voice,
  * embed, review, onboarding, admin LLM/feedback pages) is contributed through
  * an `AppRegistry` instance passed to `<CoreAppShell registry={...} />`.
@@ -460,6 +460,12 @@ export interface ToolbarItemDef {
   order?: number;
 }
 
+/** What the Connect page tells its distribution panel — see `AppRegistry.connectPanel`. */
+export interface ConnectPanelProps {
+  /** The panel changed what the page lists (enabled or disabled a connector): refetch. */
+  onChanged: () => void;
+}
+
 /** Props for the overlay-provided panel on the Groups settings page. */
 export interface GroupsDirectoryPanelProps {
   /** The active group source, as the roster reports it. */
@@ -539,6 +545,16 @@ export interface AppRegistry {
    * the page ends with its form, as it always has.
    */
   deploymentPanel?: ComponentType;
+  /**
+   * A panel at the foot of the Connect page ("Connect your tools"). Core's
+   * page lists the sign-ins and keys the reader's tools need, managed
+   * connectors among them once they are enabled; which connectors a
+   * distribution offers, and enabling one in a plugin, is the distribution's
+   * to show. Rendered for every reader (the panel decides what an admin
+   * sees), and told when it changed something so the page refetches.
+   * Absent means the page ends with its lists, as it always has.
+   */
+  connectPanel?: ComponentType<ConnectPanelProps>;
   /**
    * A way to sign in that the DISTRIBUTION runs, offered beside the
    * deployment's own identity provider. See {@link SignInOptionDef}.

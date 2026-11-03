@@ -10,7 +10,7 @@ import { testKbContext, TEST_BRANCH_MODEL } from '../../../__tests__/kb-context.
 import { NodeFs } from '../../kb-fs/node-fs.js';
 import type { AuthService } from '../../auth/auth.service.js';
 import type { ICreatorAccess } from '../../access-model/creator.js';
-import type { WorkflowEventBus } from '../../workflow/event-bus.js';
+import type { VersionControlEventBus } from '../../version-control/event-bus.js';
 import type { ToolAuth } from '../../tool-auth/tool-auth.middleware.js';
 import type { KbContext } from '../../../shared/kb-context.js';
 import { BRANCH_REQUIRED_MESSAGE } from '../../../shared/domain-errors.js';
@@ -122,8 +122,8 @@ describe('a tool declares how it treats its branch', () => {
         getUserById: async () => ({ id: 'u', email: 'alice@example.com', name: 'Alice' }),
       } as unknown as AuthService,
       workspaceService: workspaces,
-      workflowService: {} as never,
-      events: { emit: () => {} } as unknown as WorkflowEventBus,
+      versionControlService: {} as never,
+      events: { emit: () => {} } as unknown as VersionControlEventBus,
       kbDirName: KB_DIR,
       creatorAccess: {} as ICreatorAccess,
     });

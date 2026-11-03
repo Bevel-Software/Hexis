@@ -9,7 +9,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { LocalFilesystem } from '@mastra/core/workspace';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import { ToolRegistry } from '../../tool-registry/index.js';
-import { createToolHandlerFactory, WorkflowHooks } from '../../../__tests__/tool-wiring.js';
+import { createToolHandlerFactory, VersionControlHooks } from '../../../__tests__/tool-wiring.js';
 import type { ToolContext } from '../../tool-helpers/index.js';
 import type { ToolAuth } from '../../tool-auth/index.js';
 import type { IAccessControl } from '../../access/index.js';
@@ -222,7 +222,7 @@ async function start(options: StartOptions = {}): Promise<string> {
         }
       },
     } as never,
-    workflowService: {} as never,
+    versionControlService: {} as never,
     events: {} as never,
     getFilesystem: async () => fs,
   });
@@ -246,7 +246,7 @@ async function start(options: StartOptions = {}): Promise<string> {
     new DocExtractService(docCacheDir, new WorkerDocumentExtractor()),
     access,
     testKbContext({ kbDirName: KB_DIR }),
-    { recoveryBotEmail: 'recovery-bot@bevel.local', hooks: new WorkflowHooks(), notes: new ToolDescriptionNotes() },
+    { recoveryBotEmail: 'recovery-bot@bevel.local', hooks: new VersionControlHooks(), notes: new ToolDescriptionNotes() },
     new RoutineWritePolicyService(),
     {} as never,
     undefined,

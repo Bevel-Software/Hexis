@@ -460,12 +460,12 @@ describe('stopCore', () => {
             order.push('startupRetry.stop');
           },
         },
-        workflowService: {
+        versionControlService: {
           stopTidying() {
-            order.push('workflowService.stopTidying');
+            order.push('versionControlService.stopTidying');
           },
           async drainTidy() {
-            order.push('workflowService.drainTidy');
+            order.push('versionControlService.drainTidy');
           },
         },
         db: {
@@ -488,10 +488,10 @@ describe('stopCore', () => {
       'pluginJoinRequestJobs.stopSweeping',
       'agentUploadStore.stopSweeping',
       'startupRetry.stop',
-      'workflowService.stopTidying',
+      'versionControlService.stopTidying',
       'pluginJoinRequestJobs.drain',
       'agentUploadStore.drainSweep',
-      'workflowService.drainTidy',
+      'versionControlService.drainTidy',
       'commitWorker.stop',
       'db.end',
     ]);
@@ -550,10 +550,10 @@ describe('stopCore', () => {
     expect(g.order).toEqual([
       'pluginJoinRequestJobs.stopSweeping',
       'agentUploadStore.stopSweeping',
-      'workflowService.stopTidying',
+      'versionControlService.stopTidying',
       'pluginJoinRequestJobs.drain',
       'agentUploadStore.drainSweep',
-      'workflowService.drainTidy',
+      'versionControlService.drainTidy',
       'commitWorker.stop',
       'db.end',
     ]);
@@ -594,10 +594,10 @@ describe('stopCore', () => {
       'pluginJoinRequestJobs.stopSweeping',
       'agentUploadStore.stopSweeping',
       'startupRetry.stop',
-      'workflowService.stopTidying',
+      'versionControlService.stopTidying',
       'pluginJoinRequestJobs.drain',
       'agentUploadStore.drainSweep',
-      'workflowService.drainTidy',
+      'versionControlService.drainTidy',
       'db.end',
     ]);
   });

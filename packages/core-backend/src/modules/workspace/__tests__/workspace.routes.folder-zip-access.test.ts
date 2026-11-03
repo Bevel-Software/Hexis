@@ -8,10 +8,10 @@ import AdmZip from 'adm-zip';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import { NodeFs } from '../../kb-fs/node-fs.js';
-import type { IWorkflowService } from '@bevel-software/platform-shared';
+import type { IVersionControlService } from '@bevel-software/platform-shared';
 import type { ICreatorAccess } from '../../access-model/creator.js';
 import type { IAdminAccessService } from '../../admin/admin.interface.js';
-import type { WorkflowEventBus } from '../../workflow/event-bus.js';
+import type { VersionControlEventBus } from '../../version-control/event-bus.js';
 import type { AuthService } from '../../auth/auth.service.js';
 import { AccessControlService } from '../../access/access-control.service.js';
 import { createWorkspaceRoutes } from '../workspace.routes.js';
@@ -109,8 +109,8 @@ describe('GET /folder/zip judges every file it packs (real resolver, real zip)',
       createWorkspaceRoutes(
         workspaceService,
         authService,
-        {} as unknown as IWorkflowService,
-        {} as unknown as WorkflowEventBus,
+        {} as unknown as IVersionControlService,
+        {} as unknown as VersionControlEventBus,
         accessControl,
         testKbContext({ kbDirName: KB }),
         stubCreatorAccess,

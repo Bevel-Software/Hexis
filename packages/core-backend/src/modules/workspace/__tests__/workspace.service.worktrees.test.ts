@@ -8,7 +8,7 @@ import os from 'node:os';
 import { NodeFs } from '../../kb-fs/node-fs.js';
 import { KbRepository, workingCopyShape } from '../kb-repository.js';
 import { setAsideRepository } from '../set-aside-clone.js';
-import { NodeGitRunner } from '../../workflow/git/node-git-runner.js';
+import { NodeGitRunner } from '../../version-control/git/node-git-runner.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import type { IGitRunner } from '../../../shared/git.contract.js';
 import { newWorkspaceService } from '../../../__tests__/workspace-service.js';

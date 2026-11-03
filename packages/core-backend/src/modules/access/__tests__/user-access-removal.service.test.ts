@@ -6,7 +6,7 @@ import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import type { WorkflowService } from '../../workflow/workflow.service.js';
+import type { VersionControlService } from '../../version-control/version-control.service.js';
 import type { AuthUser } from '@bevel-software/platform-shared';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { PushNeedsAgentResolutionError } from '../../../shared/domain-errors.js';
@@ -62,7 +62,7 @@ function stubWorkspace(workspaceDir: string): WorkspaceService {
   } as unknown as WorkspaceService;
 }
 
-function stubWorkflow(opts: { failCommit?: boolean; pushNeedsResolution?: boolean } = {}) {
+function stubVersionControl(opts: { failCommit?: boolean; pushNeedsResolution?: boolean } = {}) {
   const commits: { summary: string; paths: string[]; author: string }[] = [];
   const locks = new Map<string, AuthUser>();
   const lockRow = (h: AuthUser) => ({ holderUserId: h.id, holderName: h.name });
@@ -89,7 +89,7 @@ function stubWorkflow(opts: { failCommit?: boolean; pushNeedsResolution?: boolea
       if (opts.pushNeedsResolution) throw new PushNeedsAgentResolutionError(DEFAULT_BRANCH, paths[0], 'diverged', 'rebase failed');
       return {} as unknown;
     },
-  } as unknown as WorkflowService;
+  } as unknown as VersionControlService;
   return { svc, commits, locks };
 }
 
@@ -167,11 +167,11 @@ describe('UserAccessRemovalService', () => {
 
   const read = (rel: string) => fs.readFile(path.join(repo, rel), 'utf-8');
 
-  function build(workflow = stubWorkflow(), owners: string[] = ['owner@x.io'], disk: ITreeWalker = new NodeFs()) {
+  function build(versionControl = stubVersionControl(), owners: string[] = ['owner@x.io'], disk: ITreeWalker = new NodeFs()) {
     const access = new AccessControlService(workspace as never, KB, new NodeFs());
     return {
-      workflow,
-      service: new UserAccessRemovalService(workspace, workflow.svc, access, disk, KB, () => DEFAULT_BRANCH, undefined, owners),
+      versionControl,
+      service: new UserAccessRemovalService(workspace, versionControl.svc, access, disk, KB, () => DEFAULT_BRANCH, undefined, owners),
     };
   }
 
@@ -236,12 +236,12 @@ describe('UserAccessRemovalService', () => {
   });
 
   it('removes the address from all four kinds of file in ONE commit named by the anonymised id', async () => {
-    const { service, workflow } = build();
+    const { service, versionControl } = build();
     const before = await read('access.md');
     const result = await service.remove(ADMIN, LEE, 'deleted-1234');
 
-    expect(workflow.commits).toHaveLength(1);
-    const [commit] = workflow.commits;
+    expect(versionControl.commits).toHaveLength(1);
+    const [commit] = versionControl.commits;
     expect(commit.summary).toBe('Remove erased account deleted-1234 from roles, groups and access rules');
     expect(commit.summary).not.toContain('lee');
     expect(commit.author).toBe('admin@x.io');
@@ -258,15 +258,15 @@ describe('UserAccessRemovalService', () => {
     expect(await read('Sales/access.md')).not.toContain('lee@x.io');
     expect((await service.report(LEE)).total).toBe(0);
     // No locks left behind.
-    expect(workflow.locks.size).toBe(0);
+    expect(versionControl.locks.size).toBe(0);
   });
 
   it('counts synced groups but never writes them, reporting the file as still naming the user', async () => {
     await write(repo, 'synced-groups.yaml', 'groups:\n  Engineering:\n    - lee@x.io\n');
-    const { service, workflow } = build();
+    const { service, versionControl } = build();
     expect((await service.report(LEE)).groups).toBe(2);
     const result = await service.remove(ADMIN, LEE, 'deleted-1');
-    expect(workflow.commits[0].paths).not.toContain(`${KB}/synced-groups.yaml`);
+    expect(versionControl.commits[0].paths).not.toContain(`${KB}/synced-groups.yaml`);
     expect(result.stillNamedIn).toEqual(['synced-groups.yaml']);
   });
 
@@ -278,11 +278,11 @@ describe('UserAccessRemovalService', () => {
       .spyOn(AccessControlService.prototype, 'canWriteBatchAtRef')
       .mockImplementation(async (_ws, _ref, _email, paths) => new Map(paths.map((p) => [p, p !== 'Sales/Plan.md'])));
     try {
-      const { service, workflow } = build();
+      const { service, versionControl } = build();
       const result = await service.remove(ADMIN, LEE, 'deleted-1');
 
-      expect(workflow.commits).toHaveLength(1);
-      expect(workflow.commits[0].paths.sort()).toEqual(
+      expect(versionControl.commits).toHaveLength(1);
+      expect(versionControl.commits[0].paths.sort()).toEqual(
         ['Sales/access.md', 'groups.yaml', 'roles.yaml'].map((p) => `${KB}/${p}`).sort(),
       );
       expect(result.removedFrom.sort()).toEqual(['Sales/access.md', 'groups.yaml', 'roles.yaml']);
@@ -291,7 +291,7 @@ describe('UserAccessRemovalService', () => {
       expect(await read('Sales/Plan.md')).toBe(NODE);
       expect(await read('roles.yaml')).not.toContain('lee@x.io');
       expect(await read('Sales/access.md')).not.toContain('lee@x.io');
-      expect(workflow.locks.size).toBe(0);
+      expect(versionControl.locks.size).toBe(0);
     } finally {
       canWrite.mockRestore();
     }
@@ -308,9 +308,9 @@ describe('UserAccessRemovalService', () => {
 
       // The pre-check only ever narrows the set; with nothing known, attempt
       // them all — the lock gate remains the authority.
-      const { service, workflow } = build();
+      const { service, versionControl } = build();
       const result = await service.remove(ADMIN, LEE, 'deleted-1');
-      expect(workflow.commits).toHaveLength(1);
+      expect(versionControl.commits).toHaveLength(1);
       expect(result.removedFrom.sort()).toEqual(['Sales/Plan.md', 'Sales/access.md', 'groups.yaml', 'roles.yaml']);
       expect(result.stillNamedIn).toEqual([]);
     } finally {
@@ -330,25 +330,25 @@ describe('UserAccessRemovalService', () => {
   });
 
   it('refuses the owner and the last Admin, writing nothing', async () => {
-    const { service, workflow } = build(stubWorkflow(), ['Lee@x.io']);
+    const { service, versionControl } = build(stubVersionControl(), ['Lee@x.io']);
     const report = await service.report(LEE);
     expect(report.removable).toBe(false);
     expect(report.blockedReason).toBe('The owner stays in roles and access rules.');
     await expect(service.remove(ADMIN, LEE, 'deleted-1')).rejects.toMatchObject({ status: 409 });
 
-    const other = build(stubWorkflow(), []);
+    const other = build(stubVersionControl(), []);
     expect((await other.service.report('admin@x.io')).removable).toBe(true);
     await write(repo, 'roles.yaml', 'roles:\n  Admin:\n    - lee@x.io\n');
     expect((await other.service.report(LEE)).blockedReason).toMatch(/last Admin/);
     await expect(other.service.remove(ADMIN, LEE, 'deleted-1')).rejects.toMatchObject({ status: 409 });
 
-    expect(workflow.commits).toHaveLength(0);
-    expect(other.workflow.commits).toHaveLength(0);
+    expect(versionControl.commits).toHaveLength(0);
+    expect(other.versionControl.commits).toHaveLength(0);
     expect(await read('groups.yaml')).toBe(GROUPS);
   });
 
   it('a failed commit restores every file and leaves them naming the user', async () => {
-    const { service } = build(stubWorkflow({ failCommit: true }));
+    const { service } = build(stubVersionControl({ failCommit: true }));
     await expect(service.remove(ADMIN, LEE, 'deleted-1')).rejects.toThrow(/push rejected/);
     expect(await read('roles.yaml')).toBe(ROLES);
     expect(await read('Sales/access.md')).toBe(SALES_ACCESS);
@@ -363,12 +363,12 @@ describe('UserAccessRemovalService', () => {
         return { ...result, holes: [...result.holes, 'Secret'] };
       },
     } as unknown as ITreeWalker;
-    const { service, workflow } = build(stubWorkflow(), ['owner@x.io'], holey);
+    const { service, versionControl } = build(stubVersionControl(), ['owner@x.io'], holey);
     await expect(service.remove(ADMIN, LEE, 'deleted-1')).rejects.toMatchObject({
       status: 422,
       message: expect.stringMatching(/could not be read \(Secret\)/),
     });
-    expect(workflow.commits).toHaveLength(0);
+    expect(versionControl.commits).toHaveLength(0);
     expect(await read('roles.yaml')).toBe(ROLES);
   });
 
@@ -377,9 +377,9 @@ describe('UserAccessRemovalService', () => {
       throw new Error('cache gone');
     });
     try {
-      const { service, workflow } = build();
+      const { service, versionControl } = build();
       const result = await service.remove(ADMIN, LEE, 'deleted-1');
-      expect(workflow.commits).toHaveLength(1);
+      expect(versionControl.commits).toHaveLength(1);
       expect(result.removedFrom.sort()).toEqual(['Sales/Plan.md', 'Sales/access.md', 'groups.yaml', 'roles.yaml']);
       expect(result.stillNamedIn).toEqual([]);
       // The refresh really ran after the commit and really threw.
@@ -391,9 +391,9 @@ describe('UserAccessRemovalService', () => {
   });
 
   it('a commit whose push needs resolution is reported as removed, publishing pending', async () => {
-    const { service, workflow } = build(stubWorkflow({ pushNeedsResolution: true }));
+    const { service, versionControl } = build(stubVersionControl({ pushNeedsResolution: true }));
     const result = await service.remove(ADMIN, LEE, 'deleted-1');
-    expect(workflow.commits).toHaveLength(1);
+    expect(versionControl.commits).toHaveLength(1);
     expect(result.publishPending).toBe(true);
     expect(result.removedFrom.sort()).toEqual(['Sales/Plan.md', 'Sales/access.md', 'groups.yaml', 'roles.yaml']);
     expect(result.stillNamedIn).toEqual([]);

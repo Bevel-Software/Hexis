@@ -48,10 +48,10 @@ function bootable(runAll: () => Promise<void>) {
         return { stop() {} };
       },
     } as BootableCore['kbStartupRunner'],
-    workflowService: {
+    versionControlService: {
       closeChangeRequestsWithDeletedBranches: async () => 0,
       tidyAfterSweep: async () => ({ closedEmpty: 0, removedLeftovers: 0 }),
-    } as BootableCore['workflowService'],
+    } as BootableCore['versionControlService'],
     pluginJoinRequestJobs: { startSweeping() {} } as BootableCore['pluginJoinRequestJobs'],
     tmpSweeper: {
       startSweeping() {
