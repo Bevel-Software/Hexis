@@ -5,6 +5,7 @@ import { chainExample, type ChainExample, type ChainExampleTool } from './chain-
 import { toCallToolResult, toolError, describeToolFailure, withTransportDetail, omitImagePayloads } from './results.js';
 import { retiredToolInFailure } from './retired-tools.js';
 import { withCallExample } from './tool-interface.js';
+import { toolTitle } from './tool-title.js';
 import {
   CHAIN_TIMEOUT_DEFAULT_MS,
   CHAIN_TIMEOUT_MAX_MS,
@@ -221,7 +222,7 @@ export function codeModeMetaTools(
   return metaTools.map((t) => {
     const override = options.readOnly && Object.hasOwn(options.readOnly, t.name) ? options.readOnly[t.name] : undefined;
     const readOnlyHint = typeof override === 'boolean' ? override : META_TOOL_READ_ONLY[t.name] === true;
-    return { ...t, annotations: { readOnlyHint } };
+    return { ...t, title: toolTitle(t.name), annotations: { readOnlyHint } };
   });
 }
 
