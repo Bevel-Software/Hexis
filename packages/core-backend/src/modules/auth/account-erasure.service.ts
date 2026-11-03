@@ -119,8 +119,26 @@ export class AccountErasureService implements IAccountErasureService {
      * this module only decides WHEN, inside its own transaction.
      */
     private readonly changeRequestReview: Pick<IChangeRequestReviewService, 'eraseApprover'>,
+    /**
+     * The distribution's slices (`CorePorts.erasureParticipants`): held by
+     * reference, read at erasure time, so a root may fill the array after
+     * construction.
+     */
     private readonly participants: IErasureParticipant[] = [],
+    /**
+     * Core's own module slices (the vault's managed sign-ins, say), run
+     * BEFORE the distribution's. Kept apart from the port's array so core
+     * never writes into an array it does not own: a root that builds a graph
+     * over the same array more than once would otherwise accumulate every
+     * past graph's slices, each still pointing at that graph's closed pool.
+     */
+    private readonly coreParticipants: IErasureParticipant[] = [],
   ) {}
+
+  /** Every slice, core's first, as it is at erasure time. */
+  private allParticipants(): IErasureParticipant[] {
+    return [...this.coreParticipants, ...this.participants];
+  }
 
   async listUsers(): Promise<AdminUserView[]> {
     // Sorted in-process: `email` is ciphertext in the database, so ORDER BY
@@ -162,7 +180,7 @@ export class AccountErasureService implements IAccountErasureService {
     // outside the transaction on purpose: external stores are separate
     // systems, and the pre-passes are idempotent, so a failure here leaves a
     // retryable state rather than a half-committed one.
-    for (const p of this.participants) {
+    for (const p of this.allParticipants()) {
       if (p.before) await p.before(target);
     }
 
@@ -251,7 +269,7 @@ export class AccountErasureService implements IAccountErasureService {
       // still satisfiable — and so a participant that MISSES rows makes the
       // users delete below fail on its RESTRICT FK, rolling everything back:
       // a loud retry, never a silent orphan.
-      for (const p of this.participants) {
+      for (const p of this.allParticipants()) {
         if (!p.inTransaction) continue;
         const cb = await p.inTransaction(tx, target);
         if (cb) postCommit.push(cb);

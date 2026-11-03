@@ -12,6 +12,7 @@ import type { OnServerStart } from '../modules/workspace/startup/on-server-start
 import type { AgentGuideHook } from '../modules/agent-guide/agent-guide.js';
 import type { IAgentScopeResolver } from '../modules/agent-scope/index.js';
 import type { EmbedNodeIdResolver } from '../modules/embed/embed.interface.js';
+import type { ManagedSignInPort } from '../modules/secrets-vault/secrets-vault.contract.js';
 import type { IWorkspaceService } from '@bevel-software/platform-shared';
 import type { IAccessControl } from '../modules/access/index.js';
 import type { KbContext } from '../shared/kb-context.js';
@@ -63,6 +64,11 @@ export interface AgentScopeCollaborators {
  *   them onto `CoreServices` from these ports (with the defaults below); the
  *   enterprise root overwrites the `CoreServices` fields (or pushes into the
  *   `authProviders` array) after construction, before the server is built.
+ *
+ * - REQUEST-TIME seams (`managedSignIns`): seeded onto `CoreServices` the same
+ *   way, but the routes that use it read the field on every request rather
+ *   than at mount, so the enterprise root may assign it at any point after
+ *   construction — even after the server is listening.
  *
  * (Commit-time KB validation and the agent read/write hooks are NOT ports:
  * they are version-control lifecycle HOOKS the enterprise root registers on
@@ -190,6 +196,15 @@ export interface CorePorts {
    * for an id that names nothing. See `modules/embed/embed.interface.ts`.
    */
   embedNodeIdResolver?: EmbedNodeIdResolver;
+  /**
+   * The distribution's side of a MANAGED sign-in (a `.tool` sign-in whose
+   * `oauth` block names a platform connector): what the Connect page shows
+   * for it and how a sign-in through the broker is opened. Core default:
+   * none, so such a sign-in is listed as waiting on the deployment. Also
+   * settable after construction (`CoreServices.managedSignIns`), like the
+   * session sink. See `modules/secrets-vault/secrets-vault.contract.ts`.
+   */
+  managedSignIns?: ManagedSignInPort;
 }
 
 /**

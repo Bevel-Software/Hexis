@@ -196,6 +196,10 @@ async function setup(deps?: {
   httpServer = await new Promise<HttpServer>((resolve) => {
     const s = app.listen(0, () => resolve(s));
   });
+  // Every server a test opens is closed after it, not only the last: a test
+  // that sets up twice would otherwise leave the first one listening.
+  const opened = httpServer;
+  cleanups.push(() => new Promise<void>((r) => opened.close(() => r())));
   const port = (httpServer.address() as { port: number }).port;
   loopbackBase = `http://127.0.0.1:${port}`;
 
@@ -363,12 +367,14 @@ describe('McpService — per-user credential pre-check', () => {
       keys.map((key) => ({ key, adminConfigured: false, userConfigured, userAuthorized, grantedScopes })),
   });
   const manualsWithUserVar = {
+    sharedSignInKeysForManual: async () => [],
     userScopedKeysForManual: async (manual: string) =>
       manual === 'KNOWLEDGE_BASE'
         ? [{ key: 'KNOWLEDGE_BASE_API_KEY', name: 'API_KEY', label: 'Your API key', oauth: false }]
         : [],
   };
   const manualsWithOAuthVar = {
+    sharedSignInKeysForManual: async () => [],
     userScopedKeysForManual: async (manual: string) =>
       manual === 'KNOWLEDGE_BASE'
         ? [{ key: 'KNOWLEDGE_BASE_GOOGLE', name: 'GOOGLE', label: 'Google', oauth: true }]
@@ -376,6 +382,7 @@ describe('McpService — per-user credential pre-check', () => {
   };
   // An OAuth var that requires two scopes — for the scope-coverage cases.
   const manualsWithScopedOAuthVar = {
+    sharedSignInKeysForManual: async () => [],
     userScopedKeysForManual: async (manual: string) =>
       manual === 'KNOWLEDGE_BASE'
         ? [
@@ -390,9 +397,46 @@ describe('McpService — per-user credential pre-check', () => {
         : [],
   };
   const manualsNoUserVar = {
+    sharedSignInKeysForManual: async () => [],
     userScopedKeysForManual: async () =>
       [] as { key: string; name: string; label: string | null; oauth: boolean }[],
   };
+  // A WORKSPACE connection (a managed connector an owner connects once for
+  // everyone): no personal variable, one shared sign-in.
+  const manualsWithSharedSignIn = {
+    sharedSignInKeysForManual: async (manual: string) =>
+      manual === 'KNOWLEDGE_BASE'
+        ? [{ key: 'KNOWLEDGE_BASE_ACCESS_TOKEN', name: 'ACCESS_TOKEN', label: 'HubSpot sign-in', oauthScopes: ['crm.objects.contacts.read'] }]
+        : [],
+    userScopedKeysForManual: async () => [] as { key: string; name: string; label: string | null; oauth: boolean }[],
+  };
+  const sharedVault = (adminAuthorized: boolean, adminGrantedScopes?: string) => ({
+    statusFor: async (_userId: string, keys: string[]) =>
+      keys.map((key) => ({ key, adminConfigured: adminAuthorized, userConfigured: false, adminAuthorized, adminGrantedScopes })),
+  });
+
+  describe('a workspace connection nobody has made', () => {
+    it('refuses the call with words that say an owner connects it, without resetting the caller’s own grant', async () => {
+      const revokeOAuthAccess = vi.fn(async () => undefined);
+      const client = await setup({ secretsVault: sharedVault(false), toolManuals: manualsWithSharedSignIn, tokenId: null, revokeOAuthAccess });
+      const res = await client.callTool({ name: 'ask', arguments: { body: { prompt: 'hello' } } });
+      expect(res.isError).toBe(true);
+      const text = (res.content as Array<{ text: string }>)[0].text;
+      expect(text).toMatch(/HubSpot sign-in \(a tool owner connects this for the workspace\)/);
+      expect(text).toMatch(/\/connect/);
+      expect(revokeOAuthAccess).not.toHaveBeenCalled();
+    });
+
+    it('is hidden from a connection-key listing until an owner connects it with a covering token', async () => {
+      const names = async (c: Awaited<ReturnType<typeof setup>>) => (await c.listTools()).tools.map((t) => t.name).sort();
+      const unconnected = await setup({ secretsVault: sharedVault(false), toolManuals: manualsWithSharedSignIn });
+      expect(await names(unconnected)).toEqual(['call_tool_chain', 'list_tools', 'tools_info']);
+      const underScoped = await setup({ secretsVault: sharedVault(true, 'oauth'), toolManuals: manualsWithSharedSignIn });
+      expect(await names(underScoped)).toEqual(['call_tool_chain', 'list_tools', 'tools_info']);
+      const connected = await setup({ secretsVault: sharedVault(true, 'oauth crm.objects.contacts.read'), toolManuals: manualsWithSharedSignIn });
+      expect(await names(connected)).toEqual(['ask', 'boom', 'call_tool_chain', 'list_tools', 'refy', 'tools_info']);
+    });
+  });
 
   it('gates a tool whose personal credential is unset — returns the setup link, not the tool', async () => {
     const client = await setup({ secretsVault: vault(false), toolManuals: manualsWithUserVar });
@@ -664,7 +708,7 @@ describe('McpService — agent instructions', () => {
     // The listing filter registers only ready tools; the fake manual catalog
     // says every tool is ready, so the four survive it and carry the prefix.
     const vault = { statusFor: async (_u: string, keys: string[]) => keys.map((key) => ({ key, userConfigured: true })) };
-    const manuals = { userScopedKeysForManual: async () => [{ key: 'KNOWLEDGE_BASE_X', name: 'X', oauth: false }] };
+    const manuals = { sharedSignInKeysForManual: async () => [], userScopedKeysForManual: async () => [{ key: 'KNOWLEDGE_BASE_X', name: 'X', oauth: false }] };
     const client = await setup({
       readAgentPreamble: async () => 'Acme.',
       extraTools: KB_TOOLS,
@@ -936,6 +980,7 @@ describe('McpService — the Audit log records what an agent calls', () => {
     const recorder = spyRecorder();
     const vault = { statusFor: async (_u: string, keys: string[]) => keys.map((key) => ({ key, adminConfigured: false, userConfigured: false })) };
     const manuals = {
+      sharedSignInKeysForManual: async () => [],
       userScopedKeysForManual: async (manual: string) =>
         manual === 'KNOWLEDGE_BASE' ? [{ key: 'KNOWLEDGE_BASE_API_KEY', name: 'API_KEY', label: 'Your API key', oauth: false }] : [],
     };
