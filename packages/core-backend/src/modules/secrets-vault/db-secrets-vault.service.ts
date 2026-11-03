@@ -1193,7 +1193,10 @@ export class DbSecretsVaultService implements ISecretsVaultService {
     // rule as the exchange: only an ABSENT field means "unchanged"; an echoed
     // value, empty included, is the provider's word.
     if (refreshed.scope === undefined) refreshed.scope = tokens.scope;
-    const next: OAuthBlob = { clientSecret: blob.clientSecret, tokens: refreshed };
+    // A sign-in in flight on this row (a managed reconnect waiting for its
+    // handoff, a consent waiting for its exchange) survives the refresh: the
+    // nonce or verifier it minted is what that handoff must match.
+    const next: OAuthBlob = { clientSecret: blob.clientSecret, tokens: refreshed, ...this.inFlightOf(blob) };
 
     // Optimistic concurrency: only persist if the stored ciphertext is unchanged,
     // so a concurrent refresh on the same row doesn't clobber (Microsoft pattern).
@@ -1240,7 +1243,22 @@ export class DbSecretsVaultService implements ISecretsVaultService {
     }
   }
 
-  /** Drop a dead grant's token set, keeping the client secret. See {@link refreshRow}. */
+  /**
+   * What a row holds for a sign-in IN FLIGHT: the one-time nonce a managed
+   * handoff must echo, the PKCE verifier and requested scopes a code exchange
+   * must present. A refresh or a wipe rewrites the row's tokens, never these:
+   * dropping them would refuse the handoff or the exchange that is about to
+   * land, for a reason the person could not see.
+   */
+  private inFlightOf(blob: OAuthBlob): Pick<OAuthBlob, 'pendingNonce' | 'pendingVerifier' | 'pendingScopes'> {
+    return {
+      ...(blob.pendingNonce ? { pendingNonce: blob.pendingNonce } : {}),
+      ...(blob.pendingVerifier ? { pendingVerifier: blob.pendingVerifier } : {}),
+      ...(blob.pendingScopes ? { pendingScopes: blob.pendingScopes } : {}),
+    };
+  }
+
+  /** Drop a dead grant's token set, keeping the client secret and any sign-in in flight. See {@link refreshRow}. */
   private async wipeTokens(
     row: typeof secrets.$inferSelect,
     blob: OAuthBlob,
@@ -1248,7 +1266,7 @@ export class DbSecretsVaultService implements ISecretsVaultService {
     | { outcome: 'refreshed'; accessToken: string; wiped: false }
     | { outcome: 'rejected'; accessToken: null; wiped: boolean }
   > {
-    const next: OAuthBlob = { clientSecret: blob.clientSecret };
+    const next: OAuthBlob = { clientSecret: blob.clientSecret, ...this.inFlightOf(blob) };
     // Guarded on the ciphertext we read, so a concurrent refresh that
     // already persisted ROTATED tokens can't be wiped by our stale
     // failure. When that guard trips (0 rows), the failure was against a

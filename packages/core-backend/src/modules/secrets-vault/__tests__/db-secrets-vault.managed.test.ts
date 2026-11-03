@@ -330,6 +330,33 @@ describe('a managed sign-in: refresh through the broker', () => {
     expect(decryptSet(captured).tokens).toBeUndefined();
   });
 
+  it('a reconnect waiting for its handoff survives a refresh and a wipe in between: the nonce stays on the row', async () => {
+    // `beginManagedConnection` keeps the tokens a managed row holds beside the
+    // nonce it mints, so a refresh (or a dead grant's wipe) can land on the row
+    // while the person is still with the provider. The handoff that follows
+    // must still find its nonce.
+    const waitingWithTokens = row({ tokens: expired, pendingNonce: NONCE });
+    const refresher: ManagedTokenRefresher = { refresh: vi.fn(async () => ({ access_token: 'fresh', expires_at: 9_000_000 })) };
+    const refreshedDb = makeFakeDb([[waitingWithTokens], [{ id: 'row-1' }]]);
+    const v1 = new DbSecretsVaultService(refreshedDb.db, ENC_KEY, () => 5_000_000, scopeOf);
+    v1.setManagedTokenHandlers({ refresher });
+    expect(await v1.resolve(USER, KEY)).toBe('fresh');
+    expect(decryptSet(refreshedDb.captured)).toMatchObject({ pendingNonce: NONCE, tokens: { access_token: 'fresh' } });
+
+    const dead: ManagedTokenRefresher = {
+      refresh: vi.fn(async () => {
+        throw new SecretOAuthError('The connector broker answered HTTP 401', 401);
+      }),
+    };
+    const wipedDb = makeFakeDb([[waitingWithTokens], [{ id: 'row-1' }]]);
+    const v2 = new DbSecretsVaultService(wipedDb.db, ENC_KEY, () => 5_000_000, scopeOf);
+    v2.setManagedTokenHandlers({ refresher: dead });
+    expect(await v2.resolve(USER, KEY)).toBeNull();
+    const wiped = decryptSet(wipedDb.captured);
+    expect(wiped.tokens).toBeUndefined();
+    expect(wiped.pendingNonce).toBe(NONCE);
+  });
+
   it('with no broker wired, an expired token is served as it is and nothing is written', async () => {
     const stored = row({ tokens: expired });
     const { db, captured } = makeFakeDb([[stored]]);
