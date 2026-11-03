@@ -4,7 +4,7 @@ import type { SQL } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import { AgentAuditService } from '../../audit/index.js';
 import type { Database } from '../../database/index.js';
-import type { IExternalApiKeyService } from '../../tool-auth/external-api-key.interface.js';
+import type { IExternalApiKeyService } from '../../tool-auth/index.js';
 import { closeMountedRoutes, mountMcpRoutes } from './mcp-routes-harness.js';
 
 /**
@@ -78,5 +78,17 @@ describe('GET /mcp/external-api-keys', () => {
     expect(fake.where).toHaveLength(1);
     const { sql, params } = new PgDialect().sqlToQuery(fake.where[0]!);
     expect({ sql, params }).toEqual({ sql: '"agent_events"."user_id" = $1', params: ['user-A'] });
+  });
+
+  it("answers a failed read with a fixed error, never the database's own message", async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const keys = { listForUser: vi.fn(async () => [summary('k-1', NOW)]) } as unknown as IExternalApiKeyService;
+    const lastCalls = { lastCalls: vi.fn(async () => Promise.reject(new Error('relation "agent_events" does not exist'))) };
+    const llm = { usageForTokens: vi.fn(async () => ({})), dailyCap: 0 };
+    const base = await mountMcpRoutes({ externalApiKeyService: keys, llmUsageService: llm, lastCalls });
+
+    const res = await fetch(`${base}/api/mcp/external-api-keys`);
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: "Couldn't load external API keys." });
   });
 });

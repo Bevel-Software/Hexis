@@ -4,9 +4,8 @@ import type { SQL } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import { AgentAuditService, retentionDaysFrom } from '../agent-audit.service.js';
 import { AuditPrincipalNotFoundError, InvalidCursorError, pagePrincipalId, parsePagePrincipalId } from '../audit.contract.js';
-import type { Database } from '../../database/connection.js';
-import { agentConnections, oauthTokens } from '../../database/schema.js';
-import type { IExternalApiKeyService } from '../../tool-auth/external-api-key.interface.js';
+import { agentConnections, oauthTokens, type Database } from '../../database/index.js';
+import type { IExternalApiKeyService } from '../../tool-auth/index.js';
 
 /**
  * The fake drizzle chain the other service tests use: every chainable method

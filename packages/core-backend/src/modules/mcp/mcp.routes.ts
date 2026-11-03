@@ -282,8 +282,10 @@ export function createMcpRoutes(
         })),
       );
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Unknown error';
-      res.status(500).json({ error: msg });
+      // A failed read here is a database error, whose message names tables
+      // and SQL: logged for the operator, never sent to the browser.
+      log.error('listing external API keys failed:', { err });
+      res.status(500).json({ error: "Couldn't load external API keys." });
     }
   });
 
