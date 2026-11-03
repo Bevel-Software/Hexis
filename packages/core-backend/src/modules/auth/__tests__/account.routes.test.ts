@@ -557,10 +557,20 @@ describe('account routes — switching an account off and on', () => {
       ran.push(`second:${event.userId}`);
       return 'managed-connections';
     });
-    const base = await listen(makeApp({ admin: true, hooks }));
-    expect((await post(base, 'u2/deactivate')).status).toBe(204);
-    expect(authService.deactivate).toHaveBeenCalledWith('u2');
-    expect(ran).toEqual(['first', 'second:u2']);
+    // Logged, so a listener that let go of nothing is diagnosable from the
+    // server's log (the seam writes through the default logger, which prints
+    // to the console) — the same way the invite seam's failures are pinned.
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const base = await listen(makeApp({ admin: true, hooks }));
+      expect((await post(base, 'u2/deactivate')).status).toBe(204);
+      expect(authService.deactivate).toHaveBeenCalledWith('u2');
+      expect(ran).toEqual(['first', 'second:u2']);
+      const lines = logged.mock.calls.map((args) => args.map(String).join(' '));
+      expect(lines.some((l) => l.includes('an account-deactivated listener failed') && l.includes('the broker is down'))).toBe(true);
+    } finally {
+      logged.mockRestore();
+    }
   });
 
   it('refuses an admin switching off their own account, so an admin who can sign in always remains', async () => {

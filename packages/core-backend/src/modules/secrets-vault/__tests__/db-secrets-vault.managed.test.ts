@@ -518,18 +518,24 @@ describe('a managed sign-in: revoked with the provider before it is deleted', ()
   });
 
   it('a managed row that keeps changing under the revoke is reported, and an erasure is refused rather than cascading it unrevoked', async () => {
-    const managed = row({ tokens: { access_token: 'at' } });
     const revoker: ManagedTokenRevoker = { revoke: vi.fn(async () => undefined) };
-    // The user's rows; then, three times, the row re-read and a delete that
-    // misses it (its ciphertext changed since the read, every time).
-    const unsettled = () => makeFakeDb([[managed], [managed], [], [managed], [], [managed], []]);
-    const vault = new DbSecretsVaultService(unsettled().db, ENC_KEY);
+    // Every read sees the row as it was; by the time each delete arrives the
+    // row IS something else (a refresh rotated its tokens), so the guard on
+    // the ciphertext read misses — three times, the bound.
+    const asRead = row({ tokens: { access_token: 'at-1', refresh_token: 'rt-1' } });
+    const asItIs = row({ tokens: { access_token: 'at-2', refresh_token: 'rt-2' } });
+    const unsettled = () => whereAwareDb({ reads: [asRead, asRead, asRead, asRead], current: asItIs });
+    const first = unsettled();
+    const vault = new DbSecretsVaultService(first.db, ENC_KEY);
     vault.setManagedTokenHandlers({ revoker });
     await expect(vault.removeManagedRowsOfUser(USER)).rejects.toThrow(/kept changing while being revoked/);
+    expect(first.deletes.map((d) => d.landed)).toEqual([false, false, false]);
 
-    const v2 = new DbSecretsVaultService(unsettled().db, ENC_KEY);
+    const second = unsettled();
+    const v2 = new DbSecretsVaultService(second.db, ENC_KEY);
     v2.setManagedTokenHandlers({ revoker });
     await expect(managedSignInErasure(v2).before({ userId: USER })).rejects.toThrow(/kept changing/);
+    expect(second.deletes.map((d) => d.landed)).toEqual([false, false, false]);
   });
 
   it('erasing the account revokes its managed sign-ins before the rows cascade away with the user', async () => {
