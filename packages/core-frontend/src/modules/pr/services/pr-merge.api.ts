@@ -18,7 +18,7 @@ export interface MergeAccepted {
  * **Asynchronous** — the gate re-validation + `gh pr merge` can take tens of
  * seconds on a large change request (long enough to hit the gateway's idle
  * timeout), so the endpoint acks with 202 and runs the merge in the
- * background. The outcome arrives over the workflow event bus:
+ * background. The outcome arrives over the version-control event bus:
  * `change-request-merged` on success, `change-request-merge-failed`
  * (with a `conflicts` flag) on failure. Callers show a pending state until
  * one of those events lands.

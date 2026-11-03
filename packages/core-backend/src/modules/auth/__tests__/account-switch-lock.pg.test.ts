@@ -5,7 +5,7 @@ import { closeDb, createDb, type Database } from '../../database/connection.js';
 import { runCoreMigrations } from '../../database/migrate.js';
 import { coreMigrationsDir } from '../../../assets.js';
 import { PG_ADMIN_URL, PG_TEST_TIMEOUT, dropScratchDatabases, scratchDatabaseUrl } from '../../../__tests__/pg-scratch.js';
-import { WorkflowDomainError } from '../../../shared/domain-errors.js';
+import { VersionControlDomainError } from '../../../shared/domain-errors.js';
 import { AuthService } from '../auth.service.js';
 import { ACCOUNT_BUSY_MESSAGE, takeAccountSwitchLock } from '../account-switch-lock.js';
 
@@ -51,7 +51,7 @@ describe.skipIf(!PG_ADMIN_URL)('the account switch lock under contention, on a r
       const { db, url } = await migratedDatabase();
       const holder = await holdLock(url, 'alice@acme.test');
       const refusal = db.transaction((tx) => takeAccountSwitchLock(tx, 'Alice@Acme.test', 200));
-      await expect(refusal).rejects.toBeInstanceOf(WorkflowDomainError);
+      await expect(refusal).rejects.toBeInstanceOf(VersionControlDomainError);
       await expect(refusal).rejects.toMatchObject({ status: 409, message: ACCOUNT_BUSY_MESSAGE, payload: { kind: 'account-busy' } });
       // Released, the lock is taken at once.
       await holder.query('commit');

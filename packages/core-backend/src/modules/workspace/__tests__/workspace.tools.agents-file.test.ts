@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { DEFAULT_KB_LAYOUT } from '@bevel-software/platform-shared';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import { GUIDE_FIRST_SENTENCE, ToolRegistry } from '../../tool-registry/index.js';
-import { WorkflowHooks, createToolHandlerFactory } from '../../../__tests__/tool-wiring.js';
+import { VersionControlHooks, createToolHandlerFactory } from '../../../__tests__/tool-wiring.js';
 import type { ToolAuth } from '../../tool-auth/index.js';
 import type { IAccessControl } from '../../access/index.js';
 import { DocExtractService } from '../file-readers/doc-extract.service.js';
@@ -51,7 +51,7 @@ async function descriptions(registry: ToolRegistry = new ToolRegistry()): Promis
     kb,
     {
       recoveryBotEmail: 'recovery-bot@bevel.local',
-      hooks: new WorkflowHooks(),
+      hooks: new VersionControlHooks(),
       notes: new ToolDescriptionNotes(),
     },
     new RoutineWritePolicyService(),
@@ -79,7 +79,7 @@ afterEach(() => kb.applyLayout({ ...DEFAULT_KB_LAYOUT }));
 
 describe('what tells an agent to read the guide first', () => {
   it('tells an agent to call get_agent_guide first, and that AGENTS.md answers with that start after the organisation\'s own', () => {
-    const rules = sharedFileRulesSection(kb.layout);
+    const rules = sharedFileRulesSection(kb.layout, kb.defaultBranch);
     expect(rules).toContain("call `get_agent_guide`: it answers the guide's start");
     expect(rules).toContain('read_file on `AGENTS.md` at the KB root answers with that start');
     expect(rules).toContain("after the organisation's own conventions file of that name");
@@ -99,10 +99,10 @@ describe('what tells an agent to read the guide first', () => {
 
   it('lists the guide under no name as a platform file, and ignores a name a deployment saved for it', () => {
     kb.applyLayout({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
-    const rules = sharedFileRulesSection(kb.layout);
+    const rules = sharedFileRulesSection(kb.layout, kb.defaultBranch);
     expect(rules).toContain('`access.md` or `.bevelignore` in any folder, `roles.yaml` at the repository root');
     expect(rules).not.toContain('HEXIS.md');
-    expect(rules).toBe(sharedFileRulesSection(DEFAULT_KB_LAYOUT));
+    expect(rules).toBe(sharedFileRulesSection(DEFAULT_KB_LAYOUT, kb.defaultBranch));
   });
 
   /**

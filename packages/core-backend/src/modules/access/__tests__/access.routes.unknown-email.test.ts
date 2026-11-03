@@ -6,8 +6,8 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import type { IAccessControl } from '../access-control.interface.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { AuthService } from '../../auth/auth.service.js';
-import type { WorkflowService } from '../../workflow/workflow.service.js';
-import type { WorkflowEventBus } from '../../workflow/event-bus.js';
+import type { VersionControlService } from '../../version-control/version-control.service.js';
+import type { VersionControlEventBus } from '../../version-control/event-bus.js';
 import { createAccessRoutes } from '../access.routes.js';
 import type { Database } from '../../database/connection.js';
 import { usersDbDouble } from './users-db-double.js';
@@ -89,12 +89,12 @@ async function makeHarness(opts: {
   } as unknown as WorkspaceService;
 
   const authService = { getUserById: vi.fn(async () => USER) } as unknown as AuthService;
-  const workflowService = {
+  const versionControlService = {
     getLock: vi.fn(async () => null),
     acquireLock: vi.fn(async () => ({ acquired: true, lock: {} })),
     releaseLock: vi.fn(async () => undefined),
     releaseLockNoCommit: vi.fn(async () => undefined),
-  } as unknown as WorkflowService;
+  } as unknown as VersionControlService;
 
   const app = express();
   app.use(express.json());
@@ -109,8 +109,8 @@ async function makeHarness(opts: {
       workspaceService,
       authService,
       authService,
-      workflowService,
-      { emit: vi.fn() } as unknown as WorkflowEventBus,
+      versionControlService,
+      { emit: vi.fn() } as unknown as VersionControlEventBus,
       opts.db ?? usersDbDouble(opts.accounts ?? []),
       testKbContext({ kbDirName: KB }),
       new NodeFs(),

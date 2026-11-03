@@ -2,7 +2,7 @@ import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { joinBranchFor, type IWorkflowService } from '@bevel-software/platform-shared';
+import { joinBranchFor, type IVersionControlService } from '@bevel-software/platform-shared';
 
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { testKbContext, TEST_BRANCH_MODEL } from '../../../__tests__/kb-context.js';
@@ -71,7 +71,7 @@ async function makeHarness(opts: HarnessOpts = {}) {
   const opened: unknown[] = [];
   const written: { path: string; text: string }[] = [];
 
-  const workflow = {
+  const versionControl = {
     listChangeRequestsAuthoredBy: vi.fn(async () => openCrs),
     listChangeRequests: vi.fn(async () => openCrs),
     // The ref list FOLLOWS create and delete, as origin's does: a probe that
@@ -94,7 +94,7 @@ async function makeHarness(opts: HarnessOpts = {}) {
     latestClosedChangeRequest: vi.fn(async () => lastClosed),
     getChangeRequest: vi.fn(async (n: number) => ({ number: n, state: 'open' })),
     getChangeRequestDetail: vi.fn(async () => ({ body: '', ...detail })),
-  } as unknown as IWorkflowService;
+  } as unknown as IVersionControlService;
 
   const workspaceService = {
     getOrCreateForBranch: vi.fn(async (branch: string) => ({ id: workspaceIdForBranch(branch) })),
@@ -143,7 +143,7 @@ async function makeHarness(opts: HarnessOpts = {}) {
       accessControl,
       workspaceService,
       authService: { getUserById: async () => RITA } as unknown as AuthService,
-      workflow,
+      versionControl,
       lifecycle,
       kb: testKbContext({ kbDirName: KB }),
     }),
@@ -153,7 +153,7 @@ async function makeHarness(opts: HarnessOpts = {}) {
   });
   const { port } = server.address() as AddressInfo;
   const base = `http://127.0.0.1:${port}/api/workspace`;
-  return { server, base, workflow, workspaceService, accessControl, lifecycle, opened, written };
+  return { server, base, versionControl, workspaceService, accessControl, lifecycle, opened, written };
 }
 
 const post = (url: string, body: unknown) =>
@@ -264,7 +264,7 @@ describe('POST /workspace/:id/access/request', () => {
     server = h.server;
     const res = await post(`${h.base}/${LIVE_WS}/access/request`, folderBody);
     expect(await res.json()).toMatchObject({ number: 31 });
-    expect(h.workflow.openChangeRequest).not.toHaveBeenCalled();
+    expect(h.versionControl.openChangeRequest).not.toHaveBeenCalled();
     expect(h.workspaceService.writeFile).not.toHaveBeenCalled();
   });
 
@@ -290,7 +290,7 @@ describe('POST /workspace/:id/access/request', () => {
     const res = await post(`${h.base}/${workspaceIdForBranch('rita/draft')}/access/request`, folderBody);
     expect(res.status).toBe(400);
     expect(await res.json()).toMatchObject({ kind: 'not-live-workspace' });
-    expect(h.workflow.openChangeRequest).not.toHaveBeenCalled();
+    expect(h.versionControl.openChangeRequest).not.toHaveBeenCalled();
   });
 
   it('answers as unknown for an item the caller cannot read', async () => {
@@ -298,7 +298,7 @@ describe('POST /workspace/:id/access/request', () => {
     server = h.server;
     const res = await post(`${h.base}/${LIVE_WS}/access/request`, folderBody);
     expect(res.status).toBe(404);
-    expect(h.workflow.openChangeRequest).not.toHaveBeenCalled();
+    expect(h.versionControl.openChangeRequest).not.toHaveBeenCalled();
   });
 
   it('refuses an editor — they have the dialog, not a request', async () => {
@@ -329,7 +329,7 @@ describe('POST /workspace/:id/access/request', () => {
     expect(
       (await post(`${h.base}/${LIVE_WS}/access/request`, { ...folderBody, note: 'x'.repeat(501) })).status,
     ).toBe(400);
-    expect(h.workflow.openChangeRequest).not.toHaveBeenCalled();
+    expect(h.versionControl.openChangeRequest).not.toHaveBeenCalled();
   });
 });
 
@@ -517,10 +517,10 @@ describe('a branch left over from an answered request', () => {
     const res = await post(`${h.base}/${LIVE_WS}/access/request`, folderBody);
 
     expect(res.status).toBe(200);
-    expect(h.workflow.deleteBranch).toHaveBeenCalledWith(LIVE_WS, stale, expect.anything());
-    expect(h.workflow.createBranch).toHaveBeenCalledWith(LIVE_WS, stale, LIVE);
+    expect(h.versionControl.deleteBranch).toHaveBeenCalledWith(LIVE_WS, stale, expect.anything());
+    expect(h.versionControl.createBranch).toHaveBeenCalledWith(LIVE_WS, stale, LIVE);
     // Order matters: recut first, THEN write the proposal onto it.
-    const deleted = (h.workflow.deleteBranch as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
+    const deleted = (h.versionControl.deleteBranch as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
     const written = (h.workspaceService.writeFile as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
     expect(deleted).toBeLessThan(written);
   });
@@ -529,20 +529,20 @@ describe('a branch left over from an answered request', () => {
     const h = await makeHarness();
     server = h.server;
     await post(`${h.base}/${LIVE_WS}/access/request`, folderBody);
-    expect(h.workflow.deleteBranch).not.toHaveBeenCalled();
-    expect(h.workflow.createBranch).toHaveBeenCalledWith(LIVE_WS, stale, LIVE);
+    expect(h.versionControl.deleteBranch).not.toHaveBeenCalled();
+    expect(h.versionControl.createBranch).toHaveBeenCalledWith(LIVE_WS, stale, LIVE);
   });
 
   it('still opens the request when the recut fails, rather than refusing the person', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     const h = await makeHarness({ existingBranches: [stale] });
-    (h.workflow.deleteBranch as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+    (h.versionControl.deleteBranch as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
       new Error('the branch could not be removed'),
     );
     server = h.server;
     const res = await post(`${h.base}/${LIVE_WS}/access/request`, folderBody);
     expect(res.status).toBe(200);
-    expect(h.workflow.openChangeRequest).toHaveBeenCalled();
+    expect(h.versionControl.openChangeRequest).toHaveBeenCalled();
   });
 
   it('answers with the rival request when one opened while the recut was under way', async () => {
@@ -551,16 +551,16 @@ describe('a branch left over from an answered request', () => {
     // request is what they both get.
     const h = await makeHarness({ existingBranches: [stale] });
     let listings = 0;
-    (h.workflow.listChangeRequests as ReturnType<typeof vi.fn>).mockImplementation(async () =>
+    (h.versionControl.listChangeRequests as ReturnType<typeof vi.fn>).mockImplementation(async () =>
       listings++ === 0 ? [] : [{ number: 55, branch: stale, state: 'open' }],
     );
-    (h.workflow.deleteBranch as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+    (h.versionControl.deleteBranch as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
       new Error('Branch has an open change request (#55).'),
     );
     server = h.server;
     const res = await post(`${h.base}/${LIVE_WS}/access/request`, folderBody);
     expect(await res.json()).toMatchObject({ number: 55 });
-    expect(h.workflow.openChangeRequest).not.toHaveBeenCalled();
+    expect(h.versionControl.openChangeRequest).not.toHaveBeenCalled();
   });
 
   it('answers a re-send with the level the OPEN request asks for, not the one just sent', async () => {
@@ -609,7 +609,7 @@ describe('what a failed send tells the person', () => {
     // reader2/join-artest3-04i7dr4-0nxlotq and try again" is not.
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     const h = await makeHarness();
-    (h.workflow.openChangeRequest as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+    (h.versionControl.openChangeRequest as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
       new ChangeRequestConflictsError(joinBranchFor(RITA.email, FOLDER), LIVE, [
         `${FOLDER}/access.md`,
       ]),

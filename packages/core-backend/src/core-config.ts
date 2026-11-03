@@ -3,7 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { defaultKbTemplateDir, defaultStarterPacksDir } from './assets.js';
 import { assertKeyDecodesTo32Bytes } from './shared/token-crypto.js';
-import { DEFAULT_GIT_TIMEOUT_MS } from './modules/workflow/git/node-git-runner.js';
+import { DEFAULT_GIT_TIMEOUT_MS } from './modules/version-control/git/node-git-runner.js';
 import { DEFAULT_DB_SCHEMA, assertSchemaName } from './modules/database/connection.js';
 import { logger } from './shared/logging.js';
 import { hasControlCharacter } from './modules/kb-fs/repo-path.js';
@@ -145,7 +145,7 @@ export interface ProcessConfig {
 }
 
 /**
- * Configuration for the CORE platform: the git-backed workspace/workflow,
+ * Configuration for the CORE platform: the git-backed workspace and version control,
  * skills, tools, secrets vault, access control, and the MCP surface. Contains
  * NO LLM, connector, or SSO-provider settings — those live on the enterprise
  * `AppConfig` (config.ts), which extends this class. A core-only deployment
@@ -372,7 +372,7 @@ export class CoreConfig implements TenantConfig, ProcessConfig {
   readonly trustProxy: string;
   /**
    * Deadline in milliseconds on every git command, after which the child is
-   * killed and the call fails (see `modules/workflow/git/node-git-runner.ts`).
+   * killed and the call fails (see `modules/version-control/git/node-git-runner.ts`).
    *
    * Configurable because the right ceiling depends on the deployment's own git
    * host and the size of its knowledge base: a first clone over a slow link can

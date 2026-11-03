@@ -1,5 +1,5 @@
 import express from 'express';
-import type { AuthUser, IWorkflowService } from '@bevel-software/platform-shared';
+import type { AuthUser, IVersionControlService } from '@bevel-software/platform-shared';
 import { logger } from '../../shared/logging.js';
 import type { KbContext } from '../../shared/kb-context.js';
 import { branchForWorkspaceId } from '../../shared/workspace-id.js';
@@ -48,15 +48,15 @@ export function createAccessRequestRoutes(deps: {
   accessControl: IAccessControl;
   workspaceService: WorkspaceService;
   authService: AuthService;
-  workflow: IWorkflowService;
+  versionControl: IVersionControlService;
   lifecycle: IAccessRequestLifecycle;
   kb: KbContext;
 }): express.Router {
-  const { accessControl, workspaceService, authService, workflow, lifecycle, kb } = deps;
+  const { accessControl, workspaceService, authService, versionControl, lifecycle, kb } = deps;
   const { kbDirName } = kb;
   const router = express.Router({ mergeParams: true });
   const mutation = new AccessMutationService(workspaceService, accessControl, kbDirName);
-  const requests = new AccessRequestsService({ workflow, workspaceService, lifecycle, kb });
+  const requests = new AccessRequestsService({ versionControl, workspaceService, lifecycle, kb });
 
   async function requireUser(
     req: express.Request,
@@ -228,7 +228,7 @@ export function createAccessRequestRoutes(deps: {
         res.json({ requests: [] });
         return;
       }
-      const crs = await workflow.listChangeRequests();
+      const crs = await versionControl.listChangeRequests();
       const rows = await lifecycle.list(target.path, target, crs, user);
       // The note is the request's own column, read back per request.
       // Bounded by the open requests on ONE item — a handful at most — and a
@@ -236,7 +236,7 @@ export function createAccessRequestRoutes(deps: {
       // belongs to.
       const withNotes = await Promise.all(
         rows.map(async (row) => {
-          const detail = await workflow
+          const detail = await versionControl
             .getChangeRequestDetail(row.number, { patches: false })
             .catch(() => null);
           const note = detail?.accessRequest?.note;
@@ -265,7 +265,7 @@ export function createAccessRequestRoutes(deps: {
         res.status(400).json({ error: 'Invalid change request number' });
         return;
       }
-      const cr = await workflow.getChangeRequest(number);
+      const cr = await versionControl.getChangeRequest(number);
       if (!cr) {
         res.status(404).json({ error: 'Not found' });
         return;

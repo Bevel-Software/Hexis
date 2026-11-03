@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
-import type { PullRequestSummary, WorkflowEvent } from '@bevel-software/platform-shared';
-import { EventBusContext, type EventBusContextValue } from '../../workflow/state/event-bus.context';
+import type { PullRequestSummary, VersionControlEvent } from '@bevel-software/platform-shared';
+import { EventBusContext, type EventBusContextValue } from '../../version-control/state/event-bus.context';
 import {
   OpenChangeRequestsContext,
   NO_CHANGE_REQUESTS,
@@ -50,10 +50,10 @@ const CR: PullRequestSummary = {
 } as unknown as PullRequestSummary;
 
 function makeFakeBus() {
-  const handlers: Record<string, ((e: WorkflowEvent) => void)[]> = {};
-  const bus: EventBusContextValue & { emit(e: WorkflowEvent): void } = {
+  const handlers: Record<string, ((e: VersionControlEvent) => void)[]> = {};
+  const bus: EventBusContextValue & { emit(e: VersionControlEvent): void } = {
     subscribe(kind, handler) {
-      (handlers[kind] ??= []).push(handler as (e: WorkflowEvent) => void);
+      (handlers[kind] ??= []).push(handler as (e: VersionControlEvent) => void);
       return () => {
         handlers[kind] = (handlers[kind] ?? []).filter((h) => h !== handler);
       };
@@ -154,7 +154,7 @@ describe('FileChangeBoxes: who may decide', () => {
     expect(api.fetchPrDetail).toHaveBeenCalledWith(CR.number, { fresh: true });
 
     act(() => {
-      bus.emit({ kind: 'change-request-merged', number: CR.number } as unknown as WorkflowEvent);
+      bus.emit({ kind: 'change-request-merged', number: CR.number } as unknown as VersionControlEvent);
     });
     expect(
       await screen.findByText('Published: the file now reads with that change.'),

@@ -57,7 +57,7 @@ import { uploadErrorNextStep } from '../utils/uploadError';
 import { useMergedWorkspaceTree } from '../hooks/useMergedWorkspaceTree';
 import { ChangeRequestDialog } from '../../change-requests/components/ChangeRequestDialog';
 import { PR_STALE_EVENT, SUGGESTIONS_RETRACTED_EVENT } from '../../../core/events';
-import { canonicalizeWorkspaceId, useEventBusSubscription } from '../../workflow';
+import { canonicalizeWorkspaceId, useEventBusSubscription } from '../../version-control';
 import {
   listChangeRequestsUnderFolder,
   removeFolderFromChangeRequests,

@@ -3,7 +3,7 @@ import {
   PLUGIN_MCP_FILE,
   pluginOfPath,
   type ChangeRequest,
-  type IWorkflowService,
+  type IVersionControlService,
   type KbLayout,
 } from '@bevel-software/platform-shared';
 import { type WorkspaceService } from '../workspace/index.js';
@@ -54,7 +54,7 @@ export class PendingToolsService implements IPendingToolService {
     private readonly workspaceService: WorkspaceService,
     private readonly accessControl: IAccessControl,
     private readonly toolManuals: Pick<IToolManualService, 'listAllSummaries'>,
-    private readonly workflow: IWorkflowService,
+    private readonly versionControl: IVersionControlService,
     private readonly kb: KbContext,
   ) {}
 
@@ -77,7 +77,7 @@ export class PendingToolsService implements IPendingToolService {
       {
         workspaceService: this.workspaceService,
         accessControl: this.accessControl,
-        workflow: this.workflow,
+        versionControl: this.versionControl,
         kb: this.kb,
       },
       userEmail,

@@ -43,7 +43,7 @@ describe('the guide is composed from the platform\'s sections', () => {
     const sections = await coreAgentGuideSections(DEFAULT_KB_LAYOUT);
     expect(sections.map((s) => s.id)).toEqual(CORE_SECTION_IDS);
     const rules = sections.find((s) => s.id === WORKING_WITH_FILES_SECTION_ID)!;
-    expect(rules.body).toBe(sharedFileRulesSection(DEFAULT_KB_LAYOUT));
+    expect(rules.body).toBe(sharedFileRulesSection(DEFAULT_KB_LAYOUT, ''));
     expect(rules.literal).toBe(true);
     // Every section begins with its heading, so the guide reads as one document.
     for (const s of sections) expect(s.body.startsWith('## '), s.id).toBe(true);
@@ -66,7 +66,7 @@ describe('the guide is composed from the platform\'s sections', () => {
     // never passed through the renderer again: a folder literally named like a
     // placeholder comes out as the folder it is.
     const odd = await composeAgentGuide({ ...DEFAULT_KB_LAYOUT, knowledgeBaseDir: '{{skillsDir}}', skillsDir: 'Playbooks' });
-    expect(odd).toContain(sharedFileRulesSection({ ...DEFAULT_KB_LAYOUT, knowledgeBaseDir: '{{skillsDir}}', skillsDir: 'Playbooks' }));
+    expect(odd).toContain(sharedFileRulesSection({ ...DEFAULT_KB_LAYOUT, knowledgeBaseDir: '{{skillsDir}}', skillsDir: 'Playbooks' }, ''));
   });
 
   it('says it is served, not written, and names the one file it is read as', async () => {
@@ -127,7 +127,7 @@ describe('the guide is composed from the platform\'s sections', () => {
     expect(section(guide, '## Words used here')).toContain('Ask the graph.');
     expect(section(guide, '## Words used here')).not.toContain('Plugin');
     expect(guide.trimEnd().endsWith('Nodes live under `Docs/<Ontology>/Knowledge/`.')).toBe(true);
-    expect(guide).toContain(sharedFileRulesSection({ ...DEFAULT_KB_LAYOUT, knowledgeBaseDir: 'Docs' }));
+    expect(guide).toContain(sharedFileRulesSection({ ...DEFAULT_KB_LAYOUT, knowledgeBaseDir: 'Docs' }, ''));
     // An async hook is awaited, and the layout it is handed is the resolved one.
     const seen: string[] = [];
     await composeAgentGuide({ knowledgeBaseDir: ' Docs ', skillsDir: 'Skills', pluginsDir: 'Plugins' }, async (sections, layout) => {
@@ -192,6 +192,21 @@ describe('the guide is composed from the platform\'s sections', () => {
     expect(guideStartText(without)).toBe(joinGuideSections(without));
   });
 
+  it("refuses a hook that drops or empties the onboarding section, which the platform's onboard prompt points at", async () => {
+    await expect(
+      composeAgentGuide(DEFAULT_KB_LAYOUT, (sections) => sections.filter((s) => s.id !== 'onboarding')),
+    ).rejects.toThrow(/dropped the "onboarding" section, which the platform's `onboard` prompt points at/);
+    await expect(
+      composeAgentGuide(DEFAULT_KB_LAYOUT, (sections) => sections.map((s) => (s.id === 'onboarding' ? { id: s.id, body: ' \n' } : s))),
+    ).rejects.toThrow(/emptied the "onboarding" section/);
+    // Replacing it under the same id is the hook's right: an organisation
+    // ships its own onboarding.
+    const own = await composeAgentGuide(DEFAULT_KB_LAYOUT, (sections) =>
+      sections.map((s) => (s.id === 'onboarding' ? { id: s.id, body: '## Welcome\n\nOur own flow.' } : s)),
+    );
+    expect(own).toContain('Our own flow.');
+  });
+
   it('refuses a hook that drops or empties the shared file rules, which every file tool points at', async () => {
     await expect(
       composeAgentGuide(DEFAULT_KB_LAYOUT, (sections) => sections.filter((s) => s.id !== WORKING_WITH_FILES_SECTION_ID)),
@@ -211,7 +226,7 @@ describe('the guide is composed from the platform\'s sections', () => {
       { id: WORKING_WITH_FILES_SECTION_ID, body: '' },
       ...sections,
     ]);
-    expect(twice).toContain(sharedFileRulesSection(DEFAULT_KB_LAYOUT));
+    expect(twice).toContain(sharedFileRulesSection(DEFAULT_KB_LAYOUT, ''));
     // Replacing it under the same id is the hook's right.
     const replaced = await composeAgentGuide(DEFAULT_KB_LAYOUT, (sections) =>
       sections.map((s) => (s.id === WORKING_WITH_FILES_SECTION_ID ? { id: s.id, body: '## Working with files\n\nOurs.\n' } : s)),

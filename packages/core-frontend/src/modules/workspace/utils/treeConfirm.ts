@@ -290,7 +290,7 @@ export function accessChangeOf(access: ProspectiveAccess): AccessChange {
  * nothing — the dialog never blocks on it, and the server stays the gate.
  * A move into a folder the caller may not write is REFUSED today: the move
  * route acquires the write lock on both ends, and the lock gate throws
- * AccessDeniedError on a protected branch (`WorkflowService.acquireLock`).
+ * AccessDeniedError on a protected branch (`VersionControlService.acquireLock`).
  * Only uploads are rerouted to a suggestion; a move is not.
  */
 export function moveWarnings(opts: {

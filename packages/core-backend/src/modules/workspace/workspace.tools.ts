@@ -15,9 +15,9 @@ import type { IRoutineWritePolicy } from './routine-write-policy.js';
 import type { ToolHandlerFactory } from '../tool-helpers/index.js';
 import { requireInternalSource, requireExternalSource } from '../tool-auth/index.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
-import { GitInternalsError, WorkflowValidationError } from '../../shared/domain-errors.js';
+import { GitInternalsError, VersionControlValidationError } from '../../shared/domain-errors.js';
 // Leaf-level shared primitive (same exception `workspace.service.ts` already
-// relies on) — not a workflow service, so this stays inside the module boundary.
+// relies on) — not a version-control service, so this stays inside the module boundary.
 import {
   assertInsideRepo,
   assertRepoRootNameFree,
@@ -669,7 +669,7 @@ function refuseEntry(entry: Record<string, unknown>, err: unknown): void {
     entry.message = err.message;
     return;
   }
-  if (err instanceof GitInternalsError || err instanceof WorkflowValidationError) {
+  if (err instanceof GitInternalsError || err instanceof VersionControlValidationError) {
     entry.error = (err.payload as { kind?: string } | undefined)?.kind ?? 'refused';
     entry.message = err.message;
     return;
@@ -1146,7 +1146,8 @@ export function registerWorkspaceTools(
   /**
    * The one tree walk (see `shared/fs.contract.ts`), for the `firstRun`
    * note's look at the knowledge folder. Optional for the harnesses about the
-   * file primitives; without it `start_session` answers the id alone.
+   * file primitives; without it `start_session` answers
+   * `{ sessionId, defaultBranch }` and never `firstRun`.
    */
   disk?: ITreeWalker,
   /**
@@ -1533,7 +1534,7 @@ export function registerWorkspaceTools(
 
   /**
    * The paths among `paths` the caller may NOT write, judged exactly as the
-   * lock gate judges them (`WorkflowService.acquireLock`): on a protected
+   * lock gate judges them (`VersionControlService.acquireLock`): on a protected
    * branch only, against the access tree at HEAD, with no rules at HEAD
    * meaning allow. Empty on a draft branch — changes there reach a protected
    * branch only through a change request.
@@ -2019,18 +2020,21 @@ export function registerWorkspaceTools(
   const startSessionDef = toolDef({
     name: 'start_session',
     description:
-      'Mint this conversation\'s id: the `sessionId` KnowledgeBase tools take. Call this ONCE, at the start of your work — minting a new id mid-run starts a second conversation as far as the server is concerned. Pass the returned id as `sessionId` to every tool whose arguments list it, inside `call_tool_chain` too; the others refuse it. Where the deployment offers an `ask` tool, hand it the SAME id: your reads and your questions are then one conversation. RETRYING IS SAFE: a call that fails created nothing, so retry it. If a retry lands after a success you hold two independent ids, which is harmless: keep passing the one you already used and ignore the other. Returns `{ sessionId }`, plus `firstRun` while the knowledge base is still empty: a note to act on.',
+      'Mint this conversation\'s id: the `sessionId` KnowledgeBase tools take. Call this ONCE, at the start of your work — minting a new id mid-run starts a second conversation as far as the server is concerned. Pass the returned id as `sessionId` to every tool whose arguments list it, inside `call_tool_chain` too; the others refuse it. Where the deployment offers an `ask` tool, hand it the SAME id: your reads and your questions are then one conversation. RETRYING IS SAFE: a call that fails created nothing, so retry it. If a retry lands after a success you hold two independent ids, which is harmless: keep passing the one you already used and ignore the other. Returns `{ sessionId, defaultBranch }`, plus `firstRun` while the knowledge base is empty: a note to act on.',
     path: '/api/agent/tools/start_session',
     inputs: { type: 'object', properties: {}, additionalProperties: false },
     outputs: {
       type: 'object',
       properties: {
         sessionId: str('The minted session id — pass it as `sessionId` to the tools that take one, and to `ask` where there is one.'),
+        defaultBranch: str(
+          "The deployment's default branch: the branch people read, and the one to pass as `branch` unless you are working on a draft.",
+        ),
         firstRun: str(
           `Present only while the knowledge base holds nothing but its starter guide (and a starter pack's untouched pages): what to offer the person (the guide's \`${FIRST_RUN_SECTION_ID}\` section says how).`,
         ),
       },
-      required: ['sessionId'],
+      required: ['sessionId', 'defaultBranch'],
     },
     tags: ['workspace'],
   });
@@ -2049,8 +2053,11 @@ export function registerWorkspaceTools(
     requireExternalSource,
     toolHandler(async (_args, ctx) => {
       const { sessionId } = await sessionSink.createSession(ctx.user.id, new Date());
+      // Read here, not at registration: the setup save applies a branch model
+      // to the running graph, and the name in effect is the one to give.
+      const defaultBranch = kb.defaultBranch;
       const firstRun = await firstRunFor(ctx);
-      return firstRun ? { sessionId, firstRun } : { sessionId };
+      return firstRun ? { sessionId, defaultBranch, firstRun } : { sessionId, defaultBranch };
     }),
   );
 
@@ -3084,7 +3091,7 @@ export function registerWorkspaceTools(
       for (const f of files) writePolicy.assertPathWritable(ctx.sessionId, f.path);
       const fs = await ctx.getFilesystem(a.branch as string);
       // `write: true` guarantees a LockingFilesystem here; `writeFiles` lands the
-      // batch as one commit. Structural cast avoids a workflow-internal import.
+      // batch as one commit. Structural cast avoids a version-control-internal import.
       const batching = fs as unknown as {
         writeFiles(
           writes: { path: string; content: string }[],
@@ -3431,7 +3438,7 @@ export function registerWorkspaceTools(
         // ordering trick to keep the rest governed on the way — nothing lands
         // until all of it does. The placeholders go too: this is the one
         // operation that removes a folder. Structural cast, as `write_files`
-        // does, to avoid importing the workflow-internal class here.
+        // does, to avoid importing the version-control-internal class here.
         if (files.length > 0) {
           const batch = fs as unknown as {
             writeFiles(

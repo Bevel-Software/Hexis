@@ -1,4 +1,4 @@
-import { WorkflowValidationError } from '../../shared/domain-errors.js';
+import { VersionControlValidationError } from '../../shared/domain-errors.js';
 import { sanitizedPath } from '../../shared/printable.js';
 
 /**
@@ -33,9 +33,9 @@ export function isTmpRef(value: unknown): boolean {
  * copying it into the repository. A 400 with a `kind` to branch on, before
  * any gate, lock or write.
  */
-export function tmpRefReadOnlyRefusal(ref: string, tool: string): WorkflowValidationError {
+export function tmpRefReadOnlyRefusal(ref: string, tool: string): VersionControlValidationError {
   const shown = sanitizedPath(ref);
-  return new WorkflowValidationError(
+  return new VersionControlValidationError(
     `"${shown}" is a tmp ref, and ${tool} does not take one there: the workspace's tmp folder is read-only through ` +
       'the ref. read_file, file_stat and grep read the one file it names; to keep the file, copy_file it to a ' +
       'repository path (the ref as `src`, the repository path as `dest`).',

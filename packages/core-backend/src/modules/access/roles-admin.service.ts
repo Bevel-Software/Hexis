@@ -36,9 +36,9 @@ import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import { logger } from '../../shared/logging.js';
 
 const log = logger('roles.recover');
-import type { WorkflowEventBus } from '../workflow/index.js';
-import type { AuthUser, IWorkspaceService, IWorkflowService } from '@bevel-software/platform-shared';
-import { WorkflowDomainError } from '../../shared/domain-errors.js';
+import type { VersionControlEventBus } from '../version-control/index.js';
+import type { AuthUser, IWorkspaceService, IVersionControlService } from '@bevel-software/platform-shared';
+import { VersionControlDomainError } from '../../shared/domain-errors.js';
 import type { ITreeWalker } from '../../shared/fs.contract.js';
 import type { IAccessControl } from './access-control.interface.js';
 import {
@@ -77,7 +77,7 @@ import { AdminLockedCommits } from './admin-locked-commit.js';
 import { KbReferenceScanner, readableReferences } from './reference-scan.js';
 
 /** A mutation that cannot proceed (invariant violation, contention, not found). */
-export class RolesAdminError extends WorkflowDomainError {
+export class RolesAdminError extends VersionControlDomainError {
   constructor(message: string, status = 422, payload?: Record<string, unknown>) {
     super(message, status, payload);
     this.name = 'RolesAdminError';
@@ -185,7 +185,7 @@ export class RolesAdminService {
 
   constructor(
     private readonly workspaceService: IWorkspaceService,
-    private readonly workflowService: IWorkflowService,
+    private readonly versionControlService: IVersionControlService,
     private readonly accessControl: IAccessControl,
     /** The composition root's walk — the one the resolver finds access rules with. */
     disk: ITreeWalker,
@@ -205,7 +205,7 @@ export class RolesAdminService {
      * a roles.yaml / access.md change is an access change, and without this an
      * open tab keeps a now-stale read verdict until a manual reload.
      */
-    private readonly eventBus?: WorkflowEventBus,
+    private readonly eventBus?: VersionControlEventBus,
     /**
      * This deployment's configured admins (`ADMIN_EMAIL`) — the same list the
      * resolver treats as `deploymentOwners`, so it serves two purposes here:
@@ -218,7 +218,7 @@ export class RolesAdminService {
   ) {
     this.locked = new AdminLockedCommits({
       workspaceService,
-      workflowService,
+      versionControlService,
       kbDirName,
       defaultBranchOf,
       makeError: (message, status, payload) => new RolesAdminError(message, status, payload),
@@ -293,7 +293,7 @@ export class RolesAdminService {
    * error is status-less and would surface as 500).
    */
   private async assertRolesUnlocked(workspaceId: string, actor: AuthUser): Promise<void> {
-    const held = await this.workflowService.getLock(
+    const held = await this.versionControlService.getLock(
       workspaceId,
       this.defaultBranch,
       `${this.kbDirName}/${ROLES_YAML}`,
@@ -422,7 +422,7 @@ export class RolesAdminService {
     // the fix never reaches it). Best-effort: if origin is unreachable we fall
     // back to the local state and still attempt the local fix.
     try {
-      await this.workflowService.resetToRemote(workspaceId, this.defaultBranch);
+      await this.versionControlService.resetToRemote(workspaceId, this.defaultBranch);
       this.accessControl.invalidate(workspaceId);
     } catch (err) {
       log.warn('could not sync with origin before recovery; proceeding with local state:', { err });

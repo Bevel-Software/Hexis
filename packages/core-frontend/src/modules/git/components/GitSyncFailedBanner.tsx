@@ -1,6 +1,6 @@
 import { useCallback, useContext, useState } from 'react';
 import { AlertTriangle, CloudOff } from 'lucide-react';
-import { useEventBusSubscription, canonicalizeWorkspaceId } from '../../workflow';
+import { useEventBusSubscription, canonicalizeWorkspaceId } from '../../version-control';
 import { useWorkspace, WorkspaceContext, useFileNav } from '../../workspace';
 
 /**

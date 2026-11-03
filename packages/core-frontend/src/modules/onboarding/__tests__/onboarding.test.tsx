@@ -17,8 +17,8 @@ import { SidebarFrame } from '../../layout/components/SidebarFrame';
 import { SIDEBAR_HEADER_TESTID } from '../../../shared/theme/header';
 import { AGENT_RECHECK_MS } from '../state/agent-connection';
 import type { AgentConnection } from '../services/agent-connection.api';
-import { EventBusContext, type EventBusContextValue } from '../../workflow/state/event-bus.context';
-import type { WorkflowEvent, WorkflowEventPayload } from '@bevel-software/platform-shared';
+import { EventBusContext, type EventBusContextValue } from '../../version-control/state/event-bus.context';
+import type { VersionControlEvent, VersionControlEventPayload } from '@bevel-software/platform-shared';
 
 /**
  * The onboarding contract, end to end on the client:
@@ -655,28 +655,28 @@ describe('WelcomePage', () => {
  * by the test.
  */
 function fakeBus() {
-  const handlers = new Map<string, Set<(e: WorkflowEvent) => void>>();
+  const handlers = new Map<string, Set<(e: VersionControlEvent) => void>>();
   const value: EventBusContextValue = {
     subscribe: (kind, handler) => {
       const set = handlers.get(kind) ?? new Set();
-      set.add(handler as (e: WorkflowEvent) => void);
+      set.add(handler as (e: VersionControlEvent) => void);
       handlers.set(kind, set);
-      return () => set.delete(handler as (e: WorkflowEvent) => void);
+      return () => set.delete(handler as (e: VersionControlEvent) => void);
     },
     setFocus: () => {},
     watchWorkspace: () => () => {},
   };
-  const emit = (event: WorkflowEventPayload) => {
+  const emit = (event: VersionControlEventPayload) => {
     act(() => {
       for (const h of handlers.get(event.kind) ?? []) {
-        h({ id: 1, ts: new Date().toISOString(), ...event } as WorkflowEvent);
+        h({ id: 1, ts: new Date().toISOString(), ...event } as VersionControlEvent);
       }
     });
   };
   return { value, emit, listening: (kind: string) => (handlers.get(kind)?.size ?? 0) > 0 };
 }
 
-const ARRIVED: WorkflowEventPayload = {
+const ARRIVED: VersionControlEventPayload = {
   kind: 'agent-connected',
   forUserId: 'u1',
   client: 'Claude',

@@ -1,4 +1,4 @@
-import { BranchNameError, WorkflowValidationError } from '../../shared/domain-errors.js';
+import { BranchNameError, VersionControlValidationError } from '../../shared/domain-errors.js';
 
 // The protected-branch list is the knowledge base's (`KbContext.protectedBranches`):
 // services ask the context they were built with, so the backend guard and the
@@ -47,8 +47,8 @@ export function assertValidBranchName(name: string): void {
  * path we pass to `git` as a pathspec. Must stay within the repo; forward slashes only.
  */
 export function assertValidRelativePath(relativePath: string): void {
-  if (!relativePath) throw new WorkflowValidationError('path is required');
-  if (relativePath.length > 1024) throw new WorkflowValidationError('path too long');
+  if (!relativePath) throw new VersionControlValidationError('path is required');
+  if (relativePath.length > 1024) throw new VersionControlValidationError('path too long');
   // NUL, every other C0 control and DEL. A NUL is named on its own because it
   // terminates a C string and git's `-z` output; the rest are refused with it
   // because a LINE BREAK in a path is a separator in git's line-oriented stdin
@@ -59,22 +59,22 @@ export function assertValidRelativePath(relativePath: string): void {
   // check every path handed to git as a pathspec passes through.
   // eslint-disable-next-line no-control-regex
   if (/[\x00-\x1F\x7F]/.test(relativePath)) {
-    throw new WorkflowValidationError(
+    throw new VersionControlValidationError(
       relativePath.includes('\0') ? 'path contains NUL' : 'path contains a control character',
     );
   }
   if (relativePath.includes('\\')) {
-    throw new WorkflowValidationError('path must use forward slashes only');
+    throw new VersionControlValidationError('path must use forward slashes only');
   }
   if (relativePath.startsWith('/') || /^[A-Za-z]:/.test(relativePath)) {
-    throw new WorkflowValidationError('path must be relative');
+    throw new VersionControlValidationError('path must be relative');
   }
   const parts = relativePath.split('/');
   if (parts.some((p) => p === '..' || p === '.')) {
-    throw new WorkflowValidationError('path must not contain "." or ".."');
+    throw new VersionControlValidationError('path must not contain "." or ".."');
   }
   if (relativePath.startsWith('-')) {
-    throw new WorkflowValidationError('path must not start with "-"');
+    throw new VersionControlValidationError('path must not start with "-"');
   }
   // Pathspec glob characters (`*`, `?`, `[`, `]`, `!`) and pathspec magic (`:(…)`)
   // would otherwise be interpreted by `git add -- <path>` / `git log -- <path>`

@@ -42,6 +42,8 @@ import {
   retiredToolMessage,
   needsAuthorizationResult,
   skillPromptText,
+  ONBOARD_PROMPT,
+  promptsForSkills,
   toListedResource,
   toReadResourceResult,
   type McpAppManifest,
@@ -50,7 +52,7 @@ import {
   type LoadedSkill,
 } from '@bevel-software/platform-mcp-core';
 import type { KbLayout } from '@bevel-software/platform-shared';
-import { bevelSecretsLoaderConfig, type ForcedRefreshOutcome, type ISecretsVaultService, userSecretGap } from '../secrets-vault/index.js';
+import { bevelSecretsLoaderConfig, type ForcedRefreshOutcome, type ISecretsVaultService, scopesCovered, userSecretGap } from '../secrets-vault/index.js';
 import { EXTERNAL_KB_MANUAL_NAME } from '../tool-manuals/index.js';
 import type { IToolManualService } from '../tool-manuals/index.js';
 import type { SpillStore } from '../workspace/index.js';
@@ -109,12 +111,19 @@ export interface McpProxyOptions {
    */
   readAgentPreamble?: AgentPreambleReader;
   /**
-   * The layout in effect, read per request: the shared file rules name the
-   * guide by the name a deployment saved for it, and the setup save applies
-   * a layout without a restart. A GETTER, so nothing snapshots the
-   * pre-setup default. Absent, the rules name `AGENTS.md`.
+   * The layout in effect, read per request: the shared file rules spell the
+   * root folders and platform files by the names a deployment saved, and the
+   * setup save applies a layout without a restart. A GETTER, so nothing
+   * snapshots the pre-setup default. Absent, the rules use the default
+   * layout. The guide is `AGENTS.md` either way.
    */
   kbLayout?: () => KbLayout;
+  /**
+   * The default branch in effect, read per request: the shared file rules
+   * name it as the branch people read. A GETTER for the same reason as the
+   * layout. Absent, the rules name no branch.
+   */
+  defaultBranch?: () => string;
   /** Bounds of the downstream (`mcp.json`) connection pool; defaults are 4h idle / 5000 entries. */
   downstreamPool?: Pick<DownstreamPoolOptions<unknown>, 'idleTtlMs' | 'maxEntries' | 'now'>;
   /**
@@ -378,7 +387,7 @@ export class McpService {
   private readonly manualFailures = new ManualFailureMemo();
   private readonly surfaceLog = new SurfaceLogThrottle();
   // One forced token refresh per (user, manual) per minute — see downstream-token-refresh.
-  private readonly tokenRefreshes: DownstreamRefreshGuard<ForcedRefreshOutcome>;
+  private readonly tokenRefreshes: DownstreamRefreshGuard<ForcedRefreshOutcome | 'rejected-shared'>;
   /**
    * The tools each pooled manual last advertised, by manual definition. A
    * downstream can only be asked what its tools are over a connection, and a
@@ -859,17 +868,32 @@ export class McpService {
     // loopback with the caller's key — so the default-branch catalog, access
     // filtering, and progressive disclosure all live ONCE behind that REST
     // surface, never duplicated here. Neither handler needs the tool catalog.
+    // The one prompt that is not a skill is the platform's `onboard`, offered
+    // only on a connection not narrowed to an agent, and only while no skill
+    // takes its name (see `promptsForSkills`).
+    const offerOnboard = agentPath === null;
     server.setRequestHandler(ListPromptsRequestSchema, async () => {
       const skills = await this.fetchSkillList(loopbackBearer);
-      const prompts: Prompt[] = skills.map((s) => ({
-        name: s.name,
-        description: s.description,
-        arguments: [],
-      }));
+      const prompts: Prompt[] = promptsForSkills(skills, offerOnboard);
       return { prompts };
     });
 
     server.setRequestHandler(GetPromptRequestSchema, async (request): Promise<GetPromptResult> => {
+      // The platform's own prompt is served exactly when `prompts/list`
+      // offered it: the connection is not narrowed and no released skill
+      // takes the name — judged on the skill LIST, the same answer the
+      // listing used, never on a read that failed. A workspace's own
+      // `onboard` skill is then read like any other prompt, and a read that
+      // fails is a failed read, not a reason to serve the platform's text.
+      if (offerOnboard && request.params.name === ONBOARD_PROMPT.name) {
+        const released = await this.fetchSkillList(loopbackBearer);
+        if (!released.some((s) => s.name === ONBOARD_PROMPT.name)) {
+          return {
+            description: ONBOARD_PROMPT.description,
+            messages: [{ role: 'user', content: { type: 'text', text: ONBOARD_PROMPT.text } }],
+          };
+        }
+      }
       const started = performance.now();
       const skill = await this.fetchSkill(loopbackBearer, request.params.name);
       // A prompt IS a skill read — the same event `get_skill` produces.
@@ -1059,13 +1083,14 @@ export class McpService {
    */
   private async composeAgentInstructions(): Promise<ComposedAgentInstructions> {
     const layout = this.opts.kbLayout?.();
+    const defaultBranch = this.opts.defaultBranch?.();
     const read = this.opts.readAgentPreamble;
-    if (!read) return composeAgentInstructions(null, layout);
+    if (!read) return composeAgentInstructions(null, layout, defaultBranch);
     try {
-      return composeAgentInstructions(await read(), layout);
+      return composeAgentInstructions(await read(), layout, defaultBranch);
     } catch (err) {
       log.warn('could not read mcp-description.md; this request gets the platform text alone:', { err });
-      return composeAgentInstructions(null, layout);
+      return composeAgentInstructions(null, layout, defaultBranch);
     }
   }
 
@@ -1559,7 +1584,7 @@ export class McpService {
       this.downstream.evictWhere((k) => k === poolKey);
       return { retry: true };
     }
-    if (outcome === 'rejected') {
+    if (outcome === 'rejected' || outcome === 'rejected-shared') {
       // The connection was dialed with a grant that no longer exists; the
       // vault's mutation signal drops it too, this keeps the next request
       // honest whether or not that is wired.
@@ -1568,8 +1593,11 @@ export class McpService {
         retry: false,
         credentialTransient: false,
         error: new Error(
-          `Your sign-in for "${manualName}" was rejected and has been disconnected. ` +
-            `Re-authorize it on ${this.opts.publicFrontendUrl}/connect, then run the tool again.`,
+          outcome === 'rejected-shared'
+            ? `The workspace connection for "${manualName}" was rejected by the provider and has been disconnected. ` +
+              `A tool owner has to reconnect it on ${this.opts.publicFrontendUrl}/connect; then run the tool again.`
+            : `Your sign-in for "${manualName}" was rejected and has been disconnected. ` +
+              `Re-authorize it on ${this.opts.publicFrontendUrl}/connect, then run the tool again.`,
         ),
       };
     }
@@ -1596,12 +1624,21 @@ export class McpService {
   private async refreshDownstreamToken(
     userId: string,
     manualName: string,
-  ): Promise<ForcedRefreshOutcome | 'guarded' | undefined> {
+  ): Promise<ForcedRefreshOutcome | 'rejected-shared' | 'guarded' | undefined> {
     const vault = this.secretsVault;
     if (!vault || !this.toolManuals || !manualName) return undefined;
     let keys: string[];
+    let sharedKeys = new Set<string>();
     try {
-      keys = (await this.toolManuals.userScopedKeysForManual(manualName)).filter((v) => v.oauth).map((v) => v.key);
+      // Every sign-in the manual declares: the caller's own, and a workspace
+      // connection every caller resolves (the vault's forceRefresh reads the
+      // shared row for an admin-scoped key, as resolve does).
+      const [own, shared] = await Promise.all([
+        this.toolManuals.userScopedKeysForManual(manualName),
+        this.toolManuals.sharedSignInKeysForManual(manualName),
+      ]);
+      keys = [...own.filter((v) => v.oauth).map((v) => v.key), ...shared.map((v) => v.key)];
+      sharedKeys = new Set(shared.map((v) => v.key));
     } catch (err) {
       // The error's own message is caller-controlled as well (it quotes the
       // manual, and may quote a provider's reply), and a raw Error handed to
@@ -1616,12 +1653,20 @@ export class McpService {
     if (keys.length === 0) return undefined;
     const attempt = this.tokenRefreshes.run(`${userId}${POOL_KEY_SEPARATOR}${manualName}`, async () => {
       const outcomes: ForcedRefreshOutcome[] = [];
+      // A dead WORKSPACE connection is told apart from a dead personal one:
+      // the caller cannot repair it, a writer of the tool can, and the words
+      // the caller gets have to say so.
+      let rejectedShared = false;
       for (const key of keys) {
         // A vault fault is not a verdict on the grant: keep the token, try later.
-        outcomes.push(await vault.forceRefresh(userId, key).catch((): ForcedRefreshOutcome => 'transient'));
+        const result = await vault.forceRefresh(userId, key).catch((): ForcedRefreshOutcome => 'transient');
+        if (result === 'rejected' && sharedKeys.has(key)) rejectedShared = true;
+        outcomes.push(result);
       }
-      const outcome: ForcedRefreshOutcome = outcomes.includes('rejected')
-        ? 'rejected'
+      const outcome: ForcedRefreshOutcome | 'rejected-shared' = outcomes.includes('rejected')
+        ? rejectedShared
+          ? 'rejected-shared'
+          : 'rejected'
         : outcomes.includes('transient')
           ? 'transient'
           : outcomes.includes('refreshed')
@@ -1681,14 +1726,30 @@ export class McpService {
     manualName: string,
   ): Promise<{ name: string; label?: string | null; brokenSignIn: boolean }[]> {
     if (!this.secretsVault || !this.toolManuals || !manualName) return [];
-    const userVars = await this.toolManuals.userScopedKeysForManual(manualName);
-    if (userVars.length === 0) return [];
-    const status = await this.secretsVault.statusFor(
-      userId,
-      userVars.map((v) => v.key),
-    );
+    const [userVars, sharedSignIns] = await Promise.all([
+      this.toolManuals.userScopedKeysForManual(manualName),
+      this.toolManuals.sharedSignInKeysForManual(manualName),
+    ]);
+    if (userVars.length === 0 && sharedSignIns.length === 0) return [];
+    const status = await this.secretsVault.statusFor(userId, [
+      ...userVars.map((v) => v.key),
+      ...sharedSignIns.map((v) => v.key),
+    ]);
     const statusMap = new Map(status.map((s) => [s.key, s]));
     const missing: { name: string; label?: string | null; brokenSignIn: boolean }[] = [];
+    // A WORKSPACE sign-in (a managed connector enabled as one shared
+    // connection) is nobody's personal credential, but a tool whose one
+    // connection has not been made — or no longer covers what the tool
+    // declares — fails just as opaquely at the provider. Reported like a
+    // personal one, with words that say whose job it is; never a "broken
+    // sign-in" of the caller's, since there is nothing of theirs to reset.
+    for (const v of sharedSignIns) {
+      const st = statusMap.get(v.key);
+      const connected = st?.adminAuthorized === true && scopesCovered(v.oauthScopes, st.adminGrantedScopes);
+      if (!connected) {
+        missing.push({ name: v.name, label: `${v.label ?? v.name} (a tool owner connects this for the workspace)`, brokenSignIn: false });
+      }
+    }
     for (const v of userVars) {
       // The one readiness rule `list_tool_setup` reports from (`userSecretGap`).
       // A sign-in the caller already HAS a row for but that isn't (or is no
