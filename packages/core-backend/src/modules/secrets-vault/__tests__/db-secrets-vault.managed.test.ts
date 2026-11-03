@@ -29,7 +29,12 @@ const MANAGED_META = {
 
 /** The sequential fake drizzle chain the oauth suite uses, capturing what is written. */
 function makeFakeDb(queue: unknown[]) {
-  const captured: { values: Record<string, unknown>[]; set: Record<string, unknown>[]; where: unknown[] } = { values: [], set: [], where: [] };
+  const captured: { values: Record<string, unknown>[]; set: Record<string, unknown>[]; where: unknown[]; for: unknown[] } = {
+    values: [],
+    set: [],
+    where: [],
+    for: [],
+  };
   function nextChain() {
     const result = queue.shift();
     const chain: Record<string, unknown> = {};
@@ -45,7 +50,7 @@ function makeFakeDb(queue: unknown[]) {
     chain.from = passthrough();
     chain.returning = passthrough();
     chain.onConflictDoUpdate = passthrough();
-    chain.for = passthrough();
+    chain.for = passthrough((a) => captured.for.push(a[0]));
     chain.then = (onF: (v: unknown) => unknown, onR: (e: unknown) => unknown) => Promise.resolve(result).then(onF, onR);
     return chain;
   }
@@ -78,14 +83,16 @@ function binds(cond: unknown, value: string): boolean {
 /**
  * A drizzle stub that answers UPDATEs from their WHERE clause: an update lands
  * only when its guard binds the row's CURRENT ciphertext. `reads` are what the
- * selects answer in order; `current` is the row as it is when a write arrives.
+ * selects answer in order; `current` is the row as it is when a write arrives,
+ * or null when there is no row (a fresh key).
  */
-function whereAwareDb(input: { reads: ReturnType<typeof row>[]; current: ReturnType<typeof row> }) {
+function whereAwareDb(input: { reads: ReturnType<typeof row>[]; current: ReturnType<typeof row> | null }) {
   const reads = [...input.reads];
   const captured: { values: Record<string, unknown>[]; set: Record<string, unknown>[] } = { values: [], set: [] };
   const updates: { landed: boolean }[] = [];
   const select = () => {
-    const result = [reads.shift() ?? input.current];
+    const next = reads.shift() ?? input.current;
+    const result = next ? [next] : [];
     const chain: Record<string, unknown> = {};
     chain.from = () => chain;
     chain.where = () => chain;
@@ -101,11 +108,11 @@ function whereAwareDb(input: { reads: ReturnType<typeof row>[]; current: ReturnT
       return chain;
     };
     chain.where = (cond: unknown) => {
-      landed = binds(cond, input.current.valueEncrypted);
+      landed = input.current !== null && binds(cond, input.current.valueEncrypted);
       updates.push({ landed });
       return chain;
     };
-    chain.returning = () => Promise.resolve(landed ? [{ id: input.current.id }] : []);
+    chain.returning = () => Promise.resolve(landed && input.current ? [{ id: input.current.id }] : []);
     return chain;
   };
   const deletes: { landed: boolean }[] = [];
@@ -113,31 +120,35 @@ function whereAwareDb(input: { reads: ReturnType<typeof row>[]; current: ReturnT
     const chain: Record<string, unknown> = {};
     let landed = false;
     chain.where = (cond: unknown) => {
-      landed = binds(cond, input.current.valueEncrypted);
+      landed = input.current !== null && binds(cond, input.current.valueEncrypted);
       deletes.push({ landed });
       return chain;
     };
     chain.returning = () =>
-      Promise.resolve(landed ? [{ id: input.current.id, userId: input.current.userId, kind: input.current.kind }] : []);
+      Promise.resolve(landed && input.current ? [{ id: input.current.id, userId: input.current.userId, kind: input.current.kind }] : []);
     return chain;
   };
-  // An upsert lands only when its `setWhere` guard binds the row's CURRENT
-  // ciphertext (or carries no guard at all); a miss answers no row, as the
-  // database does when the conflict update's WHERE is false.
+  // An upsert with no row to conflict with INSERTS, guard or no guard, as the
+  // database does; with a row there, it lands only when its `setWhere` guard
+  // binds the row's CURRENT ciphertext (or carries no guard at all), and a
+  // miss answers no row, as the database does when the conflict update's
+  // WHERE is false.
   const inserts: { landed: boolean }[] = [];
   const insert = () => {
     const chain: Record<string, unknown> = {};
     let landed = true;
+    let written: Record<string, unknown> | undefined;
     chain.values = (v: Record<string, unknown>) => {
       captured.values.push(v);
+      written = v;
       return chain;
     };
     chain.onConflictDoUpdate = (cfg: { setWhere?: unknown }) => {
-      landed = cfg.setWhere === undefined || binds(cfg.setWhere, input.current.valueEncrypted);
+      landed = input.current === null || cfg.setWhere === undefined || binds(cfg.setWhere, input.current.valueEncrypted);
       inserts.push({ landed });
       return chain;
     };
-    chain.returning = () => Promise.resolve(landed ? [input.current] : []);
+    chain.returning = () => Promise.resolve(landed ? [input.current ?? { id: 'fresh-row', ...written }] : []);
     return chain;
   };
   const db = {
@@ -349,11 +360,49 @@ describe('replacing a managed row is guarded on what its revoke read', () => {
     expect(db.inserts.map((i) => i.landed)).toEqual([false, false, false]);
   });
 
+  it('a fresh key with no row to conflict with is inserted under the guard, with nothing to revoke', async () => {
+    const r = revoker();
+    const db = whereAwareDb({ reads: [], current: null });
+    const vault = new DbSecretsVaultService(db.db, ENC_KEY);
+    vault.setManagedTokenHandlers({ revoker: r });
+    const summary = await vault.putStatic({ userId: USER, key: KEY, value: 'typed-token' });
+    expect(summary.key).toBe(KEY);
+    expect(db.inserts).toEqual([{ landed: true }]);
+    expect(r.revoke).not.toHaveBeenCalled();
+  });
+
   it('with no revoker wired the replacement is one plain write, as before managed sign-ins', async () => {
     const db = whereAwareDb({ reads: [], current: asItIs });
     await new DbSecretsVaultService(db.db, ENC_KEY).putStatic({ userId: USER, key: KEY, value: 'typed-token' });
     expect(db.db.select).not.toHaveBeenCalled();
     expect(db.inserts).toEqual([{ landed: true }]);
+  });
+});
+
+describe('a handoff survives a refresh that rotates the row under it', () => {
+  it('a guard miss with the nonce still on the row re-reads and lands on the row as it is now', async () => {
+    // Begun, with tokens of the same connection kept; a refresh rotated them
+    // while the broker was doing the round-trip, and carried the nonce across.
+    const asRead = row({ tokens: { access_token: 'at-1', refresh_token: 'rt-1' }, pendingNonce: NONCE });
+    const rotated = row({ tokens: { access_token: 'at-2', refresh_token: 'rt-2' }, pendingNonce: NONCE });
+    const db = whereAwareDb({ reads: [asRead, rotated], current: rotated });
+    const vault = new DbSecretsVaultService(db.db, ENC_KEY);
+    await vault.completeManagedConnection({ userId: USER, key: KEY, nonce: NONCE, tokens: { access_token: 'delivered' } });
+    expect(db.updates.map((u) => u.landed)).toEqual([false, true]);
+    const blob = JSON.parse(crypto.decrypt(db.captured.set[1].valueEncrypted as string)) as { tokens?: { access_token: string }; pendingNonce?: string };
+    expect(blob.tokens?.access_token).toBe('delivered');
+    expect(blob.pendingNonce).toBeUndefined();
+  });
+
+  it('a guard miss whose re-read finds the nonce gone is a handoff that already landed: refused', async () => {
+    const asRead = row({ tokens: { access_token: 'at-1' }, pendingNonce: NONCE });
+    const landedAlready = row({ tokens: { access_token: 'delivered' } });
+    const db = whereAwareDb({ reads: [asRead, landedAlready], current: landedAlready });
+    const vault = new DbSecretsVaultService(db.db, ENC_KEY);
+    await expect(
+      vault.completeManagedConnection({ userId: USER, key: KEY, nonce: NONCE, tokens: { access_token: 'again' } }),
+    ).rejects.toThrow('No managed sign-in is waiting for this handoff');
+    expect(db.updates.map((u) => u.landed)).toEqual([false]);
   });
 });
 
@@ -369,6 +418,8 @@ describe('an account erasure removes the managed rows inside its own transaction
     await managedSignInErasure(vault).inTransaction(tx.db, { userId: USER });
     expect(revoker.revoke).toHaveBeenCalledWith({ connectorId: 'microsoft365', scopeSet: 'read' }, { access_token: 'at', refresh_token: 'rt' });
     expect(tx.db.select).toHaveBeenCalledTimes(1);
+    // Locked, not merely read: the lock is what makes a handoff arriving now wait.
+    expect(tx.captured.for).toEqual(['update']);
     expect(tx.db.delete).toHaveBeenCalledTimes(1);
     expect(own.db.select).not.toHaveBeenCalled();
     expect(own.db.delete).not.toHaveBeenCalled();

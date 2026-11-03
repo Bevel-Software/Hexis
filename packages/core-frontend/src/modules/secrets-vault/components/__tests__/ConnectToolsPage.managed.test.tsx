@@ -154,11 +154,12 @@ describe('ConnectToolsPage: skipping a managed connector, as any sign-in row can
     await waitFor(() => expect(screen.getByTestId('connector-microsoft365')).not.toHaveTextContent('Skipped'));
   });
 
-  it('a workspace connection skipped is left out of this agent’s connection and nothing of anyone’s is removed', async () => {
+  it('a workspace connection offers no skip: it is everyone’s, and nothing could take it out of one agent’s connection', async () => {
     connectMock.getConnectPending.mockResolvedValue(listing(workspaceRow()));
     renderPage();
-    fireEvent.click((await card('hubspot')).getByRole('checkbox', { name: /Skip this tool/ }));
-    expect(await (await card('hubspot')).findByText('Skipped')).toBeInTheDocument();
+    const hubspot = await card('hubspot');
+    expect(hubspot.queryByRole('checkbox')).toBeNull();
+    expect(hubspot.queryByText('Skipped')).toBeNull();
     expect(varsMock.deleteAdminVar).not.toHaveBeenCalled();
     expect(varsMock.deleteUserVar).not.toHaveBeenCalled();
   });

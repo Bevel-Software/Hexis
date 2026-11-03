@@ -48,6 +48,8 @@ const REVOKE_TIMEOUT_MS = 10_000;
 const REFRESH_TIMEOUT_MS = 15_000;
 /** How many times a guarded replacement re-reads a row that changed under its revoke before giving up. */
 const REPLACE_ATTEMPTS = 3;
+/** How many times a handoff re-reads a row a refresh rotated under it (the nonce rides along) before refusing. */
+const HANDOFF_ATTEMPTS = 3;
 
 /** `work`, or a rejection once `ms` have passed: a handler that never settles must not hold the vault. */
 async function bounded<T>(work: Promise<T>, ms: number, what: string): Promise<T> {
@@ -754,51 +756,60 @@ export class DbSecretsVaultService implements ISecretsVaultService {
     const key = this.requireKey(input.key);
     const userId = input.userId === null ? null : this.requireUserId(input.userId);
     const where = userId === null ? and(isNull(secrets.userId), eq(secrets.key, key)) : and(eq(secrets.userId, userId), eq(secrets.key, key));
-    const [row] = await this.db.select().from(secrets).where(where).limit(1);
     // Every refusal below is the same words: a caller that can tell "no such
     // sign-in" from "wrong nonce" from "already used" has learned which rows
     // exist, and the handoff route is reachable with the broker secret alone.
     const refused = () => new SecretOAuthError('No managed sign-in is waiting for this handoff');
-    if (!row || row.kind !== 'oauth' || !this.managedRefOf(row.oauthMeta)) throw refused();
-    let blob: OAuthBlob;
-    try {
-      blob = this.readBlob(row.valueEncrypted);
-    } catch {
-      throw refused();
-    }
-    if (!blob.pendingNonce || typeof input.nonce !== 'string' || !timingSafeStringEqual(input.nonce, blob.pendingNonce)) {
-      throw refused();
-    }
     const tokens = input.tokens;
     if (typeof tokens?.access_token !== 'string' || !tokens.access_token) {
       throw new InvalidSecretError('the handoff carries no access token');
     }
-    const meta = { ...((row.oauthMeta ?? {}) as Record<string, unknown>) };
-    // A broker that echoes no `scope` delivered what the sign-in asked for:
-    // the scopes the row was opened with stand in, as `pendingScopes` does
-    // for the code exchange. Stored as unknown, the grant would count as
-    // covering nothing, and the sign-in would read as under-scoped for good.
-    // An EMPTY scope is not "none echoed": it is an empty grant, kept as such.
-    const requested = Array.isArray(meta.scopes) && meta.scopes.length > 0 ? meta.scopes.map(String).join(' ') : undefined;
-    const stored: OAuthTokenSet = {
-      access_token: tokens.access_token,
-      refresh_token: typeof tokens.refresh_token === 'string' ? tokens.refresh_token : undefined,
-      expires_at: typeof tokens.expires_at === 'number' ? tokens.expires_at : undefined,
-      token_type: typeof tokens.token_type === 'string' ? tokens.token_type : undefined,
-      scope: typeof tokens.scope === 'string' ? tokens.scope : requested,
-    };
-    // The nonce is one-time: it leaves with the handoff it was minted for,
-    // so the same handoff presented twice finds nothing to match.
-    const next: OAuthBlob = { tokens: stored };
-    if (typeof input.account === 'string' && input.account.trim()) meta.account = input.account.trim().slice(0, MAX_LABEL_LEN);
-    // Guarded on the ciphertext read above: two handoffs racing for one
-    // nonce cannot both land, whichever the provider sent first wins.
-    const landed = await this.db
-      .update(secrets)
-      .set({ valueEncrypted: this.crypto().encrypt(JSON.stringify(next)), oauthMeta: meta, updatedAt: new Date() })
-      .where(and(eq(secrets.id, row.id), eq(secrets.valueEncrypted, row.valueEncrypted)))
-      .returning({ id: secrets.id });
-    if (Array.isArray(landed) && landed.length === 0) throw refused();
+    // Read, check the nonce, write guarded on what was read; and again when
+    // the write misses. A miss with the nonce still on the row is a refresh
+    // that rotated the row's tokens meanwhile (a refresh carries the nonce
+    // across, see `inFlightOf`), not a second handoff: the broker delivered
+    // these tokens once, and refusing them would lose a valid sign-in for
+    // good. A row whose nonce is gone or changed refuses on the re-read.
+    for (let attempt = 0; ; attempt++) {
+      const [row] = await this.db.select().from(secrets).where(where).limit(1);
+      if (!row || row.kind !== 'oauth' || !this.managedRefOf(row.oauthMeta)) throw refused();
+      let blob: OAuthBlob;
+      try {
+        blob = this.readBlob(row.valueEncrypted);
+      } catch {
+        throw refused();
+      }
+      if (!blob.pendingNonce || typeof input.nonce !== 'string' || !timingSafeStringEqual(input.nonce, blob.pendingNonce)) {
+        throw refused();
+      }
+      const meta = { ...((row.oauthMeta ?? {}) as Record<string, unknown>) };
+      // A broker that echoes no `scope` delivered what the sign-in asked for:
+      // the scopes the row was opened with stand in, as `pendingScopes` does
+      // for the code exchange. Stored as unknown, the grant would count as
+      // covering nothing, and the sign-in would read as under-scoped for good.
+      // An EMPTY scope is not "none echoed": it is an empty grant, kept as such.
+      const requested = Array.isArray(meta.scopes) && meta.scopes.length > 0 ? meta.scopes.map(String).join(' ') : undefined;
+      const stored: OAuthTokenSet = {
+        access_token: tokens.access_token,
+        refresh_token: typeof tokens.refresh_token === 'string' ? tokens.refresh_token : undefined,
+        expires_at: typeof tokens.expires_at === 'number' ? tokens.expires_at : undefined,
+        token_type: typeof tokens.token_type === 'string' ? tokens.token_type : undefined,
+        scope: typeof tokens.scope === 'string' ? tokens.scope : requested,
+      };
+      // The nonce is one-time: it leaves with the handoff it was minted for,
+      // so the same handoff presented twice finds nothing to match.
+      const next: OAuthBlob = { tokens: stored };
+      if (typeof input.account === 'string' && input.account.trim()) meta.account = input.account.trim().slice(0, MAX_LABEL_LEN);
+      // Guarded on the ciphertext read above: two handoffs racing for one
+      // nonce cannot both land, whichever the provider sent first wins.
+      const landed = await this.db
+        .update(secrets)
+        .set({ valueEncrypted: this.crypto().encrypt(JSON.stringify(next)), oauthMeta: meta, updatedAt: new Date() })
+        .where(and(eq(secrets.id, row.id), eq(secrets.valueEncrypted, row.valueEncrypted)))
+        .returning({ id: secrets.id });
+      if (!(Array.isArray(landed) && landed.length === 0)) break;
+      if (attempt + 1 >= HANDOFF_ATTEMPTS) throw refused();
+    }
     this.notifyMutation(userId);
   }
 

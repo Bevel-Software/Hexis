@@ -523,15 +523,19 @@ export function ConnectToolsPage() {
                       busy={wiping.has(signInId(o))}
                       // Include/skip, as every sign-in row has it: skipping a
                       // personal sign-in removes the caller's own token (the
-                      // same wipe as a row's); a workspace connection is
-                      // everyone's, so skipping it only leaves it out of this
-                      // agent's connection and removes nothing.
+                      // same wipe as a row's). A workspace connection is
+                      // everyone's and cannot be "skipped by you": nothing
+                      // takes a shared token out of one agent's connection,
+                      // so the card offers no toggle rather than a hollow one.
                       on={isOn(signInId(o))}
-                      onToggle={() =>
-                        void onToggle(signInId(o), o.authorized && o.managed.tokenScope !== 'shared', async (removed) => {
-                          await deleteUserVar(o.slug, o.varName);
-                          removed();
-                        })
+                      onToggle={
+                        o.managed.tokenScope === 'shared'
+                          ? undefined
+                          : () =>
+                              void onToggle(signInId(o), o.authorized, async (removed) => {
+                                await deleteUserVar(o.slug, o.varName);
+                                removed();
+                              })
                       }
                       onConnect={() => void onAuthorizeTool(o.slug, o.varName)}
                       onDisconnect={() => void onDisconnectManaged(o)}

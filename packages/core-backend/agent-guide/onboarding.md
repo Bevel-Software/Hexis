@@ -50,7 +50,8 @@ base has no area or page of the organisation's own yet, leave the Ask example
 out and say it is still empty, so Contribute is where to start. Keep it under
 about 150 words. If their first message also asks a question, answer it in two
 or three lines above the welcome. Then stop and wait. A reply that names or
-asks for one of the three is that option; any other question is option 1.
+asks for one of the three is that option, and asking to connect a tool is
+Automate; any other question is option 1.
 
 ### 3. Do the option they chose
 
