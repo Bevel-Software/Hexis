@@ -554,6 +554,11 @@ export interface IToolManualService {
    * these so a tool whose one connection nobody has made yet is reported as
    * missing its sign-in, labelled "(a tool owner connects this for the
    * workspace)", instead of failing opaquely at the provider.
+   *
+   * `key` is the vault key as UTCP derives it (`utcpNamespacedKey`): the
+   * manual's name with every non-word character made `_` and every `_` then
+   * doubled, an `_`, and the variable's name (`my-tool` + `ACCESS_TOKEN` →
+   * `my__tool_ACCESS_TOKEN`). Read it from here; never compose it by hand.
    */
   sharedSignInKeysForManual(
     manualName: string,

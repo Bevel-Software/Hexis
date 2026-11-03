@@ -7,6 +7,7 @@ import { pathForTool } from '../../library';
 // Module Map: entries carry utilities and contracts; a component re-export
 // is an import cycle waiting to happen).
 import { ToolLogo } from '../../library/components/ToolLogo';
+import { IncludeToggle } from './IncludeToggle';
 import { canStartSignIn, managedCardState, type ManagedCardState, type ManagedToolOAuth } from '../utils/managed-card-state';
 
 /**
@@ -35,12 +36,21 @@ export interface ManagedConnectorCardProps {
   onDisconnect: () => void;
   /** An owner brings the deployment's own OAuth app in place of the managed one. */
   onOwnApp?: (clientId: string, clientSecret: string) => Promise<void>;
+  /**
+   * The include/skip position, as every sign-in row on the page carries it:
+   * what the agent may use. With `onToggle`, the card shows the same control
+   * the rows do; a skipped card is greyed and offers Include and nothing else.
+   */
+  on?: boolean;
+  onToggle?: () => void;
 }
 
-export function ManagedConnectorCard({ o, busy, onConnect, onDisconnect, onOwnApp }: ManagedConnectorCardProps) {
+export function ManagedConnectorCard({ o, busy, onConnect, onDisconnect, onOwnApp, on = true, onToggle }: ManagedConnectorCardProps) {
   const m = o.managed;
   const state = managedCardState(o);
-  const badge = STATE_BADGE[state];
+  const skipped = onToggle !== undefined && !on;
+  const badge = skipped ? { text: 'Skipped', tone: 'outline' as const } : STATE_BADGE[state];
+  const dim = skipped || state === 'unavailable' || state === 'owner-only';
   // Connect and Reconnect need a way to open a sign-in (the broker, or an
   // owner's own app) and a reader allowed to; Disconnect needs only a
   // stored token the reader may remove. `ownerOnly` is the server's word on
@@ -53,27 +63,39 @@ export function ManagedConnectorCard({ o, busy, onConnect, onDisconnect, onOwnAp
   return (
     <Surface tone="surface" radius="xl" elevation="card" padded data-testid={`connector-${m.connectorId}`}>
       <div className="flex items-center gap-2.5">
-        <ToolLogo slug={o.slug} name={m.displayName} className={cn(state === 'unavailable' || state === 'owner-only' ? 'grayscale' : undefined)} />
+        {onToggle && <IncludeToggle on={on} busy={busy} onChange={onToggle} />}
+        <ToolLogo slug={o.slug} name={m.displayName} className={cn(dim ? 'grayscale' : undefined)} />
         <Link
           to={pathForTool(o.slug)}
           aria-label={`Open ${m.displayName}`}
-          className={cn('truncate text-ui font-semibold hover:underline', state === 'unavailable' || state === 'owner-only' ? 'text-ink-faint' : 'text-ink')}
+          className={cn('truncate text-ui font-semibold hover:underline', dim ? 'text-ink-faint' : 'text-ink')}
         >
           {m.displayName}
         </Link>
         <Badge tone={badge.tone} size="xs" className="shrink-0">
-          {state === 'connected' && m.account ? `Signed in as ${m.account}` : badge.text}
+          {!skipped && state === 'connected' && m.account ? `Signed in as ${m.account}` : badge.text}
         </Badge>
         <span className="ml-auto flex shrink-0 items-center gap-1.5">
-          {canDisconnect && (
-            <Button variant="quiet" size="tiny" disabled={busy} onClick={onDisconnect}>
-              Disconnect
+          {skipped ? (
+            // Put back the way a skipped row is: the box beside the name does
+            // the same, and an unticked box in a greyed card reads as a record
+            // of what happened, not as the way to undo it.
+            <Button variant="outline" size="tiny" disabled={busy} onClick={onToggle}>
+              Include
             </Button>
-          )}
-          {canStart && (
-            <Button variant={state === 'connected' ? 'outline' : 'primary'} size="tiny" disabled={busy} onClick={onConnect}>
-              {state === 'connected' || state === 'needs-reconnect' ? 'Reconnect' : 'Connect'}
-            </Button>
+          ) : (
+            <>
+              {canDisconnect && (
+                <Button variant="quiet" size="tiny" disabled={busy} onClick={onDisconnect}>
+                  Disconnect
+                </Button>
+              )}
+              {canStart && (
+                <Button variant={state === 'connected' ? 'outline' : 'primary'} size="tiny" disabled={busy} onClick={onConnect}>
+                  {state === 'connected' || state === 'needs-reconnect' ? 'Reconnect' : 'Connect'}
+                </Button>
+              )}
+            </>
           )}
         </span>
       </div>
@@ -87,8 +109,14 @@ export function ManagedConnectorCard({ o, busy, onConnect, onDisconnect, onOwnAp
       )}
       <p className="mt-2 text-detail text-ink-faint">
         {shared ? 'One connection for the whole workspace, made by a tool owner.' : 'You connect your own account.'}
-        {!canStartSignIn(o) && ' This deployment is not connected to a connector broker yet; ask your admin.'}
-        {m.ownApp && ' Signing in through your organisation’s own app.'}
+        {/* Why a sign-in cannot start here, each cause in its own words: a
+            workspace connection with an own app pinned is refused that app,
+            which only the owner can remove; no broker is the admin's to fix. */}
+        {!canStartSignIn(o) &&
+          (shared && m.ownApp
+            ? ' This workspace connection has your organisation’s own app pinned, which it cannot use: a tool owner removes the client secret to connect it through the managed connector.'
+            : ' This deployment is not connected to a connector broker yet; ask your admin.')}
+        {m.ownApp && !shared && ' Signing in through your organisation’s own app.'}
       </p>
       {onOwnApp && (
         <div className="mt-2">

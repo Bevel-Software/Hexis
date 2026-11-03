@@ -23,6 +23,7 @@ import {
   type ConnectToolOAuth,
 } from '../services/connect.api';
 import { ManagedConnectorCard } from './ManagedConnectorCard';
+import { IncludeToggle } from './IncludeToggle';
 import { canBringOwnApp, isManagedRow } from '../utils/managed-card-state';
 import {
   isActionable,
@@ -520,6 +521,18 @@ export function ConnectToolsPage() {
                       key={o.key}
                       o={o}
                       busy={wiping.has(signInId(o))}
+                      // Include/skip, as every sign-in row has it: skipping a
+                      // personal sign-in removes the caller's own token (the
+                      // same wipe as a row's); a workspace connection is
+                      // everyone's, so skipping it only leaves it out of this
+                      // agent's connection and removes nothing.
+                      on={isOn(signInId(o))}
+                      onToggle={() =>
+                        void onToggle(signInId(o), o.authorized && o.managed.tokenScope !== 'shared', async (removed) => {
+                          await deleteUserVar(o.slug, o.varName);
+                          removed();
+                        })
+                      }
                       onConnect={() => void onAuthorizeTool(o.slug, o.varName)}
                       onDisconnect={() => void onDisconnectManaged(o)}
                       onOwnApp={
@@ -864,32 +877,6 @@ function ConnectRow(props: RowHeadProps) {
     <Surface tone="surface" radius="lg" elevation="none" padded className="border border-line">
       <ConnectRowHead {...props} />
     </Surface>
-  );
-}
-
-/** Include/skip checkbox for a tool or sign-in row. */
-function IncludeToggle({
-  on,
-  busy,
-  onChange,
-}: {
-  on: boolean;
-  busy: boolean;
-  onChange: () => void;
-}) {
-  const label = on
-    ? 'Skip this tool (removes your saved keys and sign-ins for it)'
-    : 'Include this tool';
-  return (
-    <input
-      type="checkbox"
-      checked={on}
-      disabled={busy}
-      onChange={onChange}
-      title={label}
-      aria-label={label}
-      className="size-3.5 shrink-0 accent-accent disabled:opacity-40"
-    />
   );
 }
 

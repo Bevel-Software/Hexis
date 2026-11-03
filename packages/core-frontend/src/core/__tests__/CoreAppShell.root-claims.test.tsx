@@ -248,6 +248,19 @@ describe('CoreAppShell: a root folder an app claims', () => {
     }
   });
 
+  /* A claim is one top-level folder NAME: a path would never match a file's root segment, so the app would host nothing and nobody would be told. */
+  it.each(['Agents/foo', 'Agents\\foo', '', ' Agents', '..'])('refuses a claim that is not one folder name: %j', (root) => {
+    const bad: AppDef = { id: 'runs', label: 'Runs', path: '/runs', roots: [root], element: <div /> };
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      expect(() => renderShellAt('/workspace', [bad])).toThrow(
+        `The root folder "${root}" claimed by the app "runs" must be a single top-level folder name.`,
+      );
+    } finally {
+      error.mockRestore();
+    }
+  });
+
   it('opens a file in the claiming app when the claim names its root in another case', async () => {
     session.workspace = workspaceOn(AGENT, 'role: coder');
     renderShellAt(`/workspace/main/${AGENT}`, [{ ...agentsApp, roots: ['agents', 'workflows'] }]);

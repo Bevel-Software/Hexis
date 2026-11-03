@@ -28,6 +28,7 @@ import {
   type ManagedTokenRefresher,
   type ManagedTokenRevoker,
   type DeliveredTokenSet,
+  type ManagedRowsWriter,
   InvalidSecretError,
   SecretNotFoundError,
   SecretOAuthError,
@@ -43,6 +44,25 @@ const REFRESH_SKEW_MS = 60_000;
 const TOKEN_REQUEST_TIMEOUT_MS = 10_000;
 /** Upper bound on telling a provider a managed sign-in is over, so a deletion never waits on it. */
 const REVOKE_TIMEOUT_MS = 10_000;
+/** Upper bound on a broker renewing a managed token: past it the stale token is served and the next call asks again. */
+const REFRESH_TIMEOUT_MS = 15_000;
+/** How many times a guarded replacement re-reads a row that changed under its revoke before giving up. */
+const REPLACE_ATTEMPTS = 3;
+
+/** `work`, or a rejection once `ms` have passed: a handler that never settles must not hold the vault. */
+async function bounded<T>(work: Promise<T>, ms: number, what: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${what} did not settle within ${ms}ms`)), ms);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 /** How often a managed sign-in's opening is retried against a row that keeps changing under it. */
 const BEGIN_MANAGED_ATTEMPTS = 3;
 /** How much of a refusing token endpoint's body is read for its error code: an OAuth error object, never a whole error page. */
@@ -279,16 +299,18 @@ export class DbSecretsVaultService implements ISecretsVaultService {
 
     // The caller's row may hold a managed sign-in: its tokens are told to the
     // provider before this value replaces them, as on every replacement.
-    await this.revokeManagedBefore(and(eq(secrets.userId, userId), eq(secrets.key, key)));
     // Upsert on (user_id, key): re-saving a key replaces its value in place.
-    const [row] = await this.db
-      .insert(secrets)
-      .values({ userId, key, kind: 'static', label, valueEncrypted, oauthMeta: null })
-      .onConflictDoUpdate({
-        target: [secrets.userId, secrets.key],
-        set: { kind: 'static', label, valueEncrypted, oauthMeta: null, updatedAt: new Date() },
-      })
-      .returning();
+    const row = await this.revokedReplacement(and(eq(secrets.userId, userId), eq(secrets.key, key)), (guard) =>
+      this.db
+        .insert(secrets)
+        .values({ userId, key, kind: 'static', label, valueEncrypted, oauthMeta: null })
+        .onConflictDoUpdate({
+          target: [secrets.userId, secrets.key],
+          set: { kind: 'static', label, valueEncrypted, oauthMeta: null, updatedAt: new Date() },
+          ...(guard ? { setWhere: guard } : {}),
+        })
+        .returning(),
+    );
     this.notifyMutation(userId);
     return this.toSummary(row);
   }
@@ -305,17 +327,19 @@ export class DbSecretsVaultService implements ISecretsVaultService {
 
     // A managed sign-in under this key loses its tokens here: the provider is
     // told first, as on every replacement.
-    await this.revokeManagedBefore(and(eq(secrets.userId, userId), eq(secrets.key, key)));
-    const [row] = await this.db
-      .insert(secrets)
-      .values({ userId, key, kind: 'oauth', label, valueEncrypted, oauthMeta })
-      .onConflictDoUpdate({
-        target: [secrets.userId, secrets.key],
-        // Replacing an oauth secret's provider config drops any existing tokens
-        // (they belonged to the old client) — the user must re-authorize.
-        set: { kind: 'oauth', label, valueEncrypted, oauthMeta, updatedAt: new Date() },
-      })
-      .returning();
+    const row = await this.revokedReplacement(and(eq(secrets.userId, userId), eq(secrets.key, key)), (guard) =>
+      this.db
+        .insert(secrets)
+        .values({ userId, key, kind: 'oauth', label, valueEncrypted, oauthMeta })
+        .onConflictDoUpdate({
+          target: [secrets.userId, secrets.key],
+          // Replacing an oauth secret's provider config drops any existing tokens
+          // (they belonged to the old client) — the user must re-authorize.
+          set: { kind: 'oauth', label, valueEncrypted, oauthMeta, updatedAt: new Date() },
+          ...(guard ? { setWhere: guard } : {}),
+        })
+        .returning(),
+    );
     this.notifyMutation(userId);
     return this.toSummary(row);
   }
@@ -340,18 +364,20 @@ export class DbSecretsVaultService implements ISecretsVaultService {
     // A shared row that held a managed workspace connection is told to its
     // provider before this value replaces it; the tokens would otherwise go
     // unrevoked with the row's kind.
-    await this.revokeManagedBefore(and(isNull(secrets.userId), eq(secrets.key, key)));
     // Upsert the ONE shared row for this key (user_id NULL). The conflict target
     // is the partial unique index `secrets_shared_key_unq` — hence `targetWhere`.
-    const [row] = await this.db
-      .insert(secrets)
-      .values({ userId: null, key, kind: 'static', label, valueEncrypted, oauthMeta: null })
-      .onConflictDoUpdate({
-        target: secrets.key,
-        targetWhere: isNull(secrets.userId),
-        set: { kind: 'static', label, valueEncrypted, oauthMeta: null, updatedAt: new Date() },
-      })
-      .returning();
+    const row = await this.revokedReplacement(and(isNull(secrets.userId), eq(secrets.key, key)), (guard) =>
+      this.db
+        .insert(secrets)
+        .values({ userId: null, key, kind: 'static', label, valueEncrypted, oauthMeta: null })
+        .onConflictDoUpdate({
+          target: secrets.key,
+          targetWhere: isNull(secrets.userId),
+          set: { kind: 'static', label, valueEncrypted, oauthMeta: null, updatedAt: new Date() },
+          ...(guard ? { setWhere: guard } : {}),
+        })
+        .returning(),
+    );
     this.notifyMutation(null);
     return this.toSummary(row);
   }
@@ -404,7 +430,8 @@ export class DbSecretsVaultService implements ISecretsVaultService {
     return gone;
   }
 
-  async removeManagedRowsOfUser(userId: string): Promise<number> {
+  async removeManagedRowsOfUser(userId: string, within?: ManagedRowsWriter): Promise<number> {
+    if (within) return this.removeManagedRowsLocked(userId, within);
     // Every oauth row of the user whose meta names a managed app. Read
     // first (the managed mark lives in JSON the WHERE cannot see), revoked,
     // then deleted by id; the per-user filter on the delete is what keeps a
@@ -430,16 +457,67 @@ export class DbSecretsVaultService implements ISecretsVaultService {
   }
 
   /**
-   * Revoke, with the provider, the managed sign-ins the given rows hold,
-   * BEFORE they are deleted — once the row is gone there is no token left to
-   * revoke with. Best effort: the delete that follows is the user's decision
-   * and must not hang on a provider; a failure is logged with the key and
-   * never with the token.
+   * The same removal inside a caller's transaction (an account erasure, just
+   * before the user row goes): the rows are LOCKED for the transaction, so a
+   * handoff or a refresh arriving now waits and then finds no row, which is
+   * what makes the revoke final. No guard is needed under the lock; the
+   * revoke stays bounded (see {@link revokeRow}), so the transaction never
+   * waits on a provider longer than that.
    */
-  private async revokeManagedBefore(where: ReturnType<typeof and>): Promise<void> {
-    if (!this.managedRevoker) return;
-    const rows = await this.db.select().from(secrets).where(where);
-    await Promise.all(rows.map((row) => this.revokeRow(row)));
+  private async removeManagedRowsLocked(userId: string, tx: ManagedRowsWriter): Promise<number> {
+    const rows = await tx
+      .select()
+      .from(secrets)
+      .where(and(eq(secrets.userId, userId), eq(secrets.kind, 'oauth')))
+      .for('update');
+    const managed = rows.filter((r) => this.managedRefOf(r.oauthMeta) !== null);
+    if (managed.length === 0) return 0;
+    await Promise.all(managed.map((row) => this.revokeRow(row)));
+    await tx.delete(secrets).where(
+      and(
+        eq(secrets.userId, userId),
+        inArray(
+          secrets.id,
+          managed.map((r) => r.id),
+        ),
+      ),
+    );
+    this.notifyMutation(userId);
+    return managed.length;
+  }
+
+  /**
+   * Replace what `where` names with `write`, a managed sign-in's tokens told
+   * to their provider first (see {@link revokeRow}; best effort, never holding
+   * the user's decision). The write is guarded on the ciphertext the revoke
+   * read (`setWhere`): a refresh or a handoff landing in between has rotated
+   * the tokens, and writing over THOSE unrevoked is the leak the revoke exists
+   * to prevent — as the guarded delete of {@link revokeThenDelete}. A miss
+   * re-reads and goes again, bounded; a row that kept changing is left as it
+   * is and the caller is told. With no revoker wired there is nothing to read
+   * first: one plain write, as every replacement was before managed sign-ins.
+   */
+  private async revokedReplacement<T>(
+    where: ReturnType<typeof and>,
+    write: (guard?: ReturnType<typeof eq>) => Promise<T[]>,
+  ): Promise<T> {
+    if (!this.managedRevoker) return (await write())[0] as T;
+    for (let attempt = 0; attempt < REPLACE_ATTEMPTS; attempt++) {
+      const rows = await this.db.select().from(secrets).where(where);
+      await Promise.all(rows.map((row) => this.revokeRow(row)));
+      // The row as it was read, or no row at all: a conflict with anything
+      // else (a row written meanwhile) is a miss, and the next pass reads it.
+      const guard =
+        rows.length > 0
+          ? inArray(
+              secrets.valueEncrypted,
+              rows.map((row) => row.valueEncrypted),
+            )
+          : eq(secrets.valueEncrypted, '');
+      const written = await write(guard);
+      if (written.length > 0) return written[0] as T;
+    }
+    throw new SecretOAuthError('the sign-in kept changing while being replaced; try again');
   }
 
   private async revokeRow(row: typeof secrets.$inferSelect): Promise<void> {
@@ -450,14 +528,12 @@ export class DbSecretsVaultService implements ISecretsVaultService {
     if (!tokens?.access_token) return;
     // Bounded: the delete that follows is the user's decision, and a revoker
     // that never settles must not hold it.
-    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      await Promise.race([
+      await bounded(
         this.managedRevoker.revoke(ref, { access_token: tokens.access_token, refresh_token: tokens.refresh_token }),
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(new Error(`revocation did not settle within ${REVOKE_TIMEOUT_MS}ms`)), REVOKE_TIMEOUT_MS);
-        }),
-      ]);
+        REVOKE_TIMEOUT_MS,
+        'revocation',
+      );
     } catch (err) {
       // The key and the connector name the sign-in. The error itself stays
       // out: a revoker's message is its own, and this line is the one place a
@@ -467,8 +543,6 @@ export class DbSecretsVaultService implements ISecretsVaultService {
         connector: ref.connectorId,
         failure: err instanceof Error ? err.name : typeof err,
       });
-    } finally {
-      if (timer) clearTimeout(timer);
     }
   }
 
@@ -867,15 +941,18 @@ export class DbSecretsVaultService implements ISecretsVaultService {
     const oauthMeta = this.publicProviderMeta(provider);
     // An owner's own app replacing a managed workspace connection: the
     // connection's tokens are revoked with the provider before they go.
-    await this.revokeManagedBefore(and(isNull(secrets.userId), eq(secrets.key, key)));
-    await this.db
-      .insert(secrets)
-      .values({ userId: null, key, kind: 'oauth', label: null, valueEncrypted, oauthMeta })
-      .onConflictDoUpdate({
-        target: secrets.key,
-        targetWhere: isNull(secrets.userId),
-        set: { kind: 'oauth', valueEncrypted, oauthMeta, updatedAt: new Date() },
-      });
+    await this.revokedReplacement(and(isNull(secrets.userId), eq(secrets.key, key)), (guard) =>
+      this.db
+        .insert(secrets)
+        .values({ userId: null, key, kind: 'oauth', label: null, valueEncrypted, oauthMeta })
+        .onConflictDoUpdate({
+          target: secrets.key,
+          targetWhere: isNull(secrets.userId),
+          set: { kind: 'oauth', valueEncrypted, oauthMeta, updatedAt: new Date() },
+          ...(guard ? { setWhere: guard } : {}),
+        })
+        .returning({ id: secrets.id }),
+    );
     this.notifyMutation(null);
   }
 
@@ -997,17 +1074,20 @@ export class DbSecretsVaultService implements ISecretsVaultService {
     const valueEncrypted = this.crypto().encrypt(JSON.stringify(blob));
     // A managed sign-in on the caller's row (an owner pinned their own app
     // after the person connected through the broker) is replaced by this
-    // start: its tokens are told to the provider first. Tokens carried over
-    // above were minted under THIS configuration, never a managed one.
-    if (existingUserRow && this.managedRefOf(existingUserRow.oauthMeta)) await this.revokeRow(existingUserRow);
-    const [row] = await this.db
-      .insert(secrets)
-      .values({ userId, key, kind: 'oauth', label: shared.label, valueEncrypted, oauthMeta })
-      .onConflictDoUpdate({
-        target: [secrets.userId, secrets.key],
-        set: { kind: 'oauth', valueEncrypted, oauthMeta, updatedAt: new Date() },
-      })
-      .returning();
+    // start: its tokens are told to the provider first, and the write is
+    // guarded on what the revoke read. Tokens carried over above were minted
+    // under THIS configuration, never a managed one.
+    const row = await this.revokedReplacement(and(eq(secrets.userId, userId), eq(secrets.key, key)), (guard) =>
+      this.db
+        .insert(secrets)
+        .values({ userId, key, kind: 'oauth', label: shared.label, valueEncrypted, oauthMeta })
+        .onConflictDoUpdate({
+          target: [secrets.userId, secrets.key],
+          set: { kind: 'oauth', valueEncrypted, oauthMeta, updatedAt: new Date() },
+          ...(guard ? { setWhere: guard } : {}),
+        })
+        .returning(),
+    );
 
     // Build the consent URL exactly as beginOAuth does, from the configuration
     // this start uses, with the requested scopes chosen above.
@@ -1146,7 +1226,13 @@ export class DbSecretsVaultService implements ISecretsVaultService {
         // outage from here, not a dead grant: the stale token is served and
         // the next call asks again.
         if (!this.managedRefresher) return { outcome: 'transient' };
-        const delivered = await this.managedRefresher.refresh(meta.managed, tokens.refresh_token);
+        // Bounded like a revocation: a broker that never answers is an outage
+        // (the stale token is served) and must not hold every resolution.
+        const delivered = await bounded(
+          this.managedRefresher.refresh(meta.managed, tokens.refresh_token),
+          REFRESH_TIMEOUT_MS,
+          'the broker refresh',
+        );
         refreshed = {
           access_token: delivered.access_token,
           refresh_token: delivered.refresh_token,
@@ -1313,18 +1399,21 @@ export class DbSecretsVaultService implements ISecretsVaultService {
     const blob: OAuthBlob = { clientSecret: provider.clientSecret };
     const valueEncrypted = this.crypto().encrypt(JSON.stringify(blob));
     const oauthMeta = this.publicProviderMeta(provider);
-    await this.revokeManagedBefore(and(isNull(secrets.userId), eq(secrets.key, key)));
-    await this.db
-      .insert(secrets)
-      .values({ userId: null, key, kind: 'oauth', label, valueEncrypted, oauthMeta })
-      // Preserve an existing row's label on re-upsert (matches
-      // `putSharedOAuthClientSecret`): the optional input label is only for the
-      // FIRST write, so a later re-registration can't null out an owner label.
-      .onConflictDoUpdate({
-        target: secrets.key,
-        targetWhere: isNull(secrets.userId),
-        set: { kind: 'oauth', valueEncrypted, oauthMeta, updatedAt: new Date() },
-      });
+    await this.revokedReplacement(and(isNull(secrets.userId), eq(secrets.key, key)), (guard) =>
+      this.db
+        .insert(secrets)
+        .values({ userId: null, key, kind: 'oauth', label, valueEncrypted, oauthMeta })
+        // Preserve an existing row's label on re-upsert (matches
+        // `putSharedOAuthClientSecret`): the optional input label is only for the
+        // FIRST write, so a later re-registration can't null out an owner label.
+        .onConflictDoUpdate({
+          target: secrets.key,
+          targetWhere: isNull(secrets.userId),
+          set: { kind: 'oauth', valueEncrypted, oauthMeta, updatedAt: new Date() },
+          ...(guard ? { setWhere: guard } : {}),
+        })
+        .returning({ id: secrets.id }),
+    );
     this.notifyMutation(null);
   }
 

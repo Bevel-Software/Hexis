@@ -10,6 +10,14 @@
  * the same contract without any change to the loader or the tools.
  */
 
+import type { Database } from '../database/index.js';
+
+/**
+ * A drizzle client a caller lends the vault for one operation — its own
+ * transaction, usually — so a removal runs under that caller's lock scope.
+ */
+export type ManagedRowsWriter = Pick<Database, 'select' | 'delete'>;
+
 export type SecretKind = 'static' | 'oauth';
 
 /** A secret as shown in listings — NEVER carries the value or token material. */
@@ -138,6 +146,8 @@ export interface DeliveredTokenSet {
  * managed app's client secret (this deployment never does). Throws
  * {@link SecretOAuthError} with the broker's `providerStatus` on a refusal,
  * so the vault tells a dead grant (400/401 → wipe) from an outage (keep).
+ * The vault bounds the call (15 s): a broker that does not answer by then
+ * is an outage, the stale token is served, and the next call asks again.
  */
 export interface ManagedTokenRefresher {
   refresh(ref: ManagedSignInRef, refreshToken: string): Promise<DeliveredTokenSet>;
@@ -383,8 +393,15 @@ export interface ISecretsVaultService {
     tokens: DeliveredTokenSet;
     account?: string;
   }): Promise<void>;
-  /** Revoke (where the provider allows) and delete every managed sign-in of one user — deprovisioning. */
-  removeManagedRowsOfUser(userId: string): Promise<number>;
+  /**
+   * Revoke (where the provider allows) and delete every managed sign-in of
+   * one user — deprovisioning. With `within`, the same inside the caller's
+   * transaction: the rows are locked until it commits, so a sign-in landing
+   * meanwhile finds no row (an account erasure runs this beside the user
+   * row's deletion). Throws when a row could not be settled, so the caller
+   * never believes the person holds nothing.
+   */
+  removeManagedRowsOfUser(userId: string, within?: ManagedRowsWriter): Promise<number>;
 
   /**
    * Resolve the injectable value for a UTCP variable `key` — the only reader of

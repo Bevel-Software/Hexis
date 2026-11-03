@@ -103,9 +103,10 @@ export function platformInstructions(layout: KbLayout, defaultBranch = ''): stri
  * past it fails before it reaches an agent.
  *
  * 14,400 since the shared rules' own cap rose by 400 (the `__tmp__/` ref);
- * 14,700 since it rose by 300 more (the sentence naming the default branch).
+ * 14,900 since it rose by 500 more (the sentence naming the default branch,
+ * measured with the longest name the platform accepts — see that cap).
  */
-export const INSTRUCTIONS_CAP = 14_700;
+export const INSTRUCTIONS_CAP = 14_900;
 
 /** The one-line marker that replaces everything past the preamble cap. */
 export const PREAMBLE_TRUNCATION_MARKER = `[preamble truncated at ${PREAMBLE_CAP.toLocaleString('en-US')} characters; shorten ${PREAMBLE_FILE}]`;

@@ -41,7 +41,8 @@ search and one read are enough for the examples. Every read below takes
 > Which one are you interested in?
 
 Every name in an example must come from a tool result in this conversation;
-never invent one. With nothing about the person, use the organisation's
+never invent one. On a read-only connection leave Contribute out: offer Ask and
+connecting tools, and say in one line that this connection cannot change pages. With nothing about the person, use the organisation's
 top-level areas and its first useful skill; without their name, say "Hi,
 welcome". When `list_skills` names no released skill, leave the Automate
 example out and say that tools can still be connected. When the knowledge
@@ -76,8 +77,13 @@ after a yes. It goes on a draft (`drafts-and-change-requests`):
 Ask before opening a change request, then give its link: that is where they see
 the change in the app. Say once that the people who look after those pages
 (their owners and writers) approve it in the app with **Approve**, then **Apply
-changes**, and that you cannot do that for them. If a write is refused, say who
-can approve there (`access-control`).
+changes**, and that you cannot do that for them. If a write is refused, follow
+the refusal: offer a draft and a change request only when it says you may
+propose the change; otherwise say that this change cannot be proposed from here.
+Name who approves (`access-control`) only for a change that may be proposed. A
+connection that may not write at all (a read-only connection: its write tools
+refuse and say so) gets Ask, and connecting tools, with a line saying why
+Contribute is not on offer.
 
 **Automate.** Name two or three skills in one line each, pick one with them,
 load it with `get_skill` and run it together. With one released skill, offer

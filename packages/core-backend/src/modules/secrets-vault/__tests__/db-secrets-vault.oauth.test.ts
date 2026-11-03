@@ -430,7 +430,7 @@ describe('DbSecretsVaultService — dead-grant detection on refresh', () => {
   });
 
   it('putSharedOAuthProvider notifies mutation listeners with null (shared → everyone)', async () => {
-    const { db } = makeFakeDb([undefined]); // provider upsert
+    const { db } = makeFakeDb([[{ id: 'shared-row' }]]); // provider upsert, answering the row it wrote
     const svc = new DbSecretsVaultService(db, ENC_KEY);
     const onMutation = vi.fn();
     svc.onMutation(onMutation);

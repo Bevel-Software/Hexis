@@ -45,6 +45,7 @@ function makeFakeDb(queue: unknown[]) {
     chain.from = passthrough();
     chain.returning = passthrough();
     chain.onConflictDoUpdate = passthrough();
+    chain.for = passthrough();
     chain.then = (onF: (v: unknown) => unknown, onR: (e: unknown) => unknown) => Promise.resolve(result).then(onF, onR);
     return chain;
   }
@@ -120,13 +121,32 @@ function whereAwareDb(input: { reads: ReturnType<typeof row>[]; current: ReturnT
       Promise.resolve(landed ? [{ id: input.current.id, userId: input.current.userId, kind: input.current.kind }] : []);
     return chain;
   };
+  // An upsert lands only when its `setWhere` guard binds the row's CURRENT
+  // ciphertext (or carries no guard at all); a miss answers no row, as the
+  // database does when the conflict update's WHERE is false.
+  const inserts: { landed: boolean }[] = [];
+  const insert = () => {
+    const chain: Record<string, unknown> = {};
+    let landed = true;
+    chain.values = (v: Record<string, unknown>) => {
+      captured.values.push(v);
+      return chain;
+    };
+    chain.onConflictDoUpdate = (cfg: { setWhere?: unknown }) => {
+      landed = cfg.setWhere === undefined || binds(cfg.setWhere, input.current.valueEncrypted);
+      inserts.push({ landed });
+      return chain;
+    };
+    chain.returning = () => Promise.resolve(landed ? [input.current] : []);
+    return chain;
+  };
   const db = {
     select: vi.fn(select),
     update: vi.fn(update),
-    insert: vi.fn(),
+    insert: vi.fn(insert),
     delete: vi.fn(del),
   } as unknown as Database;
-  return { db, captured, updates, deletes };
+  return { db, captured, updates, deletes, inserts };
 }
 
 function row(blob: Record<string, unknown>, meta: Record<string, unknown> = MANAGED_META, userId: string | null = USER) {
@@ -299,9 +319,90 @@ describe('a managed sign-in: begin and the handoff', () => {
   });
 });
 
+describe('replacing a managed row is guarded on what its revoke read', () => {
+  const revoker = (): ManagedTokenRevoker => ({ revoke: vi.fn(async () => undefined) });
+  // Every read sees the row as it was; the row IS something else when the
+  // write arrives (a refresh rotated its tokens, a handoff landed).
+  const asRead = row({ tokens: { access_token: 'at-1', refresh_token: 'rt-1' } });
+  const asItIs = row({ tokens: { access_token: 'at-2', refresh_token: 'rt-2' } });
+
+  it('a write that would overwrite tokens rotated since the revoke misses, re-reads, revokes those too, and lands on the row as it is', async () => {
+    const r = revoker();
+    const db = whereAwareDb({ reads: [asRead, asItIs], current: asItIs });
+    const vault = new DbSecretsVaultService(db.db, ENC_KEY);
+    vault.setManagedTokenHandlers({ revoker: r });
+    await vault.putStatic({ userId: USER, key: KEY, value: 'typed-token' });
+    // The first pass revoked the tokens it read and missed; the second read
+    // the rotated ones, revoked them, and its guarded write landed.
+    expect(db.inserts.map((i) => i.landed)).toEqual([false, true]);
+    expect(vi.mocked(r.revoke).mock.calls.map((c) => c[1].access_token)).toEqual(['at-1', 'at-2']);
+  });
+
+  it('a row that keeps changing under the revoke is left as it is, and the caller is told', async () => {
+    const r = revoker();
+    const db = whereAwareDb({ reads: [asRead, asRead, asRead, asRead], current: asItIs });
+    const vault = new DbSecretsVaultService(db.db, ENC_KEY);
+    vault.setManagedTokenHandlers({ revoker: r });
+    await expect(vault.createOAuth({ userId: USER, key: KEY, provider: { ...MANAGED_META, managed: undefined, clientId: 'own-app' } })).rejects.toThrow(
+      /kept changing while being replaced/,
+    );
+    expect(db.inserts.map((i) => i.landed)).toEqual([false, false, false]);
+  });
+
+  it('with no revoker wired the replacement is one plain write, as before managed sign-ins', async () => {
+    const db = whereAwareDb({ reads: [], current: asItIs });
+    await new DbSecretsVaultService(db.db, ENC_KEY).putStatic({ userId: USER, key: KEY, value: 'typed-token' });
+    expect(db.db.select).not.toHaveBeenCalled();
+    expect(db.inserts).toEqual([{ landed: true }]);
+  });
+});
+
+describe('an account erasure removes the managed rows inside its own transaction as well', () => {
+  it('locks, revokes and deletes through the transaction it is handed, touching the vault’s own connection for nothing', async () => {
+    const managed = row({ tokens: { access_token: 'at', refresh_token: 'rt' } });
+    const revoker: ManagedTokenRevoker = { revoke: vi.fn(async () => undefined) };
+    const own = makeFakeDb([]);
+    const vault = new DbSecretsVaultService(own.db, ENC_KEY);
+    vault.setManagedTokenHandlers({ revoker });
+    // The transaction: one locked read of the user's oauth rows, one delete.
+    const tx = makeFakeDb([[managed], undefined]);
+    await managedSignInErasure(vault).inTransaction(tx.db, { userId: USER });
+    expect(revoker.revoke).toHaveBeenCalledWith({ connectorId: 'microsoft365', scopeSet: 'read' }, { access_token: 'at', refresh_token: 'rt' });
+    expect(tx.db.select).toHaveBeenCalledTimes(1);
+    expect(tx.db.delete).toHaveBeenCalledTimes(1);
+    expect(own.db.select).not.toHaveBeenCalled();
+    expect(own.db.delete).not.toHaveBeenCalled();
+  });
+
+  it('a transaction that finds no managed row deletes nothing', async () => {
+    const vault = new DbSecretsVaultService(makeFakeDb([]).db, ENC_KEY);
+    vault.setManagedTokenHandlers({ revoker: { revoke: vi.fn(async () => undefined) } });
+    const tx = makeFakeDb([[row({ clientSecret: 's' }, { ...MANAGED_META, managed: undefined, clientId: 'own' })]]);
+    await managedSignInErasure(vault).inTransaction(tx.db, { userId: USER });
+    expect(tx.db.delete).not.toHaveBeenCalled();
+  });
+});
+
 describe('a managed sign-in: refresh through the broker', () => {
   const expired = { access_token: 'stale', refresh_token: 'rt', expires_at: 1_000 };
   const scopeOf = async () => 'user' as const;
+
+  it('a broker that never answers is an outage: the stale token is served once the bound passes, and nothing is wiped', async () => {
+    vi.useFakeTimers();
+    try {
+      const stored = row({ tokens: expired });
+      const { db, captured } = makeFakeDb([[stored]]);
+      const refresher: ManagedTokenRefresher = { refresh: vi.fn(() => new Promise(() => {})) };
+      const vault = new DbSecretsVaultService(db, ENC_KEY, () => 5_000_000, scopeOf);
+      vault.setManagedTokenHandlers({ refresher });
+      const resolving = vault.resolve(USER, KEY);
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(await resolving).toBe('stale');
+      expect(captured.set).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 
   it('resolve renews an expired token through the refresher and stores what it delivered', async () => {
     const stored = row({ tokens: expired });
@@ -561,7 +662,8 @@ describe('a managed provider is accepted only where a managed sign-in is opened'
   it('an own app replacing a shared managed connection revokes its tokens first', async () => {
     const shared = row({ tokens: { access_token: 'at', refresh_token: 'rt' } }, MANAGED_META, null);
     const revoker: ManagedTokenRevoker = { revoke: vi.fn(async () => undefined) };
-    const { db } = makeFakeDb([[shared], []]);
+    // The row as read before the revoke, then the guarded write answering the row it wrote.
+    const { db } = makeFakeDb([[shared], [{ id: 'shared-row' }]]);
     const vault = new DbSecretsVaultService(db, ENC_KEY);
     vault.setManagedTokenHandlers({ revoker });
     await vault.putSharedOAuthClientSecret({
@@ -593,7 +695,9 @@ describe('an owner’s own app on a managed sign-in: the start runs from the pin
   it('starting over the caller’s managed row revokes the broker’s tokens and carries none of them', async () => {
     const theirs = row({ tokens: { access_token: 'at', refresh_token: 'rt' } });
     const revoker: ManagedTokenRevoker = { revoke: vi.fn(async () => undefined) };
-    const { db, captured } = makeFakeDb([[pinned], [theirs], [{ id: 'row-1' }]]);
+    // The shared row, the caller's row for the tokens it may carry, the caller's
+    // row again as the guarded replacement reads it, then the write's answer.
+    const { db, captured } = makeFakeDb([[pinned], [theirs], [theirs], [{ id: 'row-1' }]]);
     const vault = new DbSecretsVaultService(db, ENC_KEY);
     vault.setManagedTokenHandlers({ revoker });
     await start(vault);

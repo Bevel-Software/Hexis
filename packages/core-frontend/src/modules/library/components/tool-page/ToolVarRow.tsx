@@ -157,7 +157,7 @@ export function ToolVarRow({
     // OAuth kind (a key left from when the variable was static is not one) —
     // or, for a MANAGED sign-in, when a start can be opened from here: there
     // is no secret to store for the broker's app.
-    const ownerReady = variable.managed ? mayStart : variable.adminConfigured && variable.adminKind !== 'static';
+    const ownerReady = variable.managed ? mayStart : variable.adminConfigured && variable.adminKind === 'oauth';
 
     if (variable.authorized && !variable.needsReauth) {
       description = whose;

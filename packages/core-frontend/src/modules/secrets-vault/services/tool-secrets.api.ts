@@ -21,6 +21,8 @@ export interface ToolVarStatus {
   /**
    * What the shared row IS: a sign-in needs an `oauth` one, not a key left
    * from when the variable was static. `null` when there is no shared row.
+   * The server always sends it; a consumer tests for `'oauth'` and never for
+   * "not static", which a missing field would satisfy.
    */
   adminKind?: 'static' | 'oauth' | null;
   /** The caller's own value exists. */

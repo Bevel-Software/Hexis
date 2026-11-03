@@ -142,6 +142,28 @@ describe('ConnectToolsPage: the distribution’s panel at the foot of the page',
   });
 });
 
+describe('ConnectToolsPage: skipping a managed connector, as any sign-in row can be skipped', () => {
+  it('a personal sign-in skipped has its token removed like a row’s, reads Skipped, and comes back with Include', async () => {
+    connectMock.getConnectPending.mockResolvedValue(listing(managedRow({ authorized: true })));
+    renderPage();
+    fireEvent.click((await card('microsoft365')).getByRole('checkbox', { name: /Skip this tool/ }));
+    await waitFor(() => expect(varsMock.deleteUserVar).toHaveBeenCalledWith('microsoft365', 'ACCESS_TOKEN'));
+    expect(varsMock.deleteAdminVar).not.toHaveBeenCalled();
+    expect(await (await card('microsoft365')).findByText('Skipped')).toBeInTheDocument();
+    fireEvent.click((await card('microsoft365')).getByRole('button', { name: 'Include' }));
+    await waitFor(() => expect(screen.getByTestId('connector-microsoft365')).not.toHaveTextContent('Skipped'));
+  });
+
+  it('a workspace connection skipped is left out of this agent’s connection and nothing of anyone’s is removed', async () => {
+    connectMock.getConnectPending.mockResolvedValue(listing(workspaceRow()));
+    renderPage();
+    fireEvent.click((await card('hubspot')).getByRole('checkbox', { name: /Skip this tool/ }));
+    expect(await (await card('hubspot')).findByText('Skipped')).toBeInTheDocument();
+    expect(varsMock.deleteAdminVar).not.toHaveBeenCalled();
+    expect(varsMock.deleteUserVar).not.toHaveBeenCalled();
+  });
+});
+
 describe('ConnectToolsPage: disconnecting a managed sign-in', () => {
   it('a personal sign-in is removed from the caller’s row, announced, and the list fetched again', async () => {
     let answer!: (p: ConnectPending) => void;

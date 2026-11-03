@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { ManagedConnectorCard } from '../ManagedConnectorCard';
 import { managedCardState, type ManagedToolOAuth } from '../../utils/managed-card-state';
@@ -141,5 +141,42 @@ describe('ManagedConnectorCard', () => {
     await waitFor(() => expect(onOwnApp).toHaveBeenCalledWith('own-client', 'own-secret'));
     // The form closes once the save settled.
     await waitFor(() => expect(screen.queryByLabelText('Client id')).toBeNull());
+  });
+
+  it('a workspace connection with an own app pinned says so, not that a broker is missing', () => {
+    renderCard(row({ canWrite: true }, { tokenScope: 'shared', ownApp: true, available: true }));
+    expect(screen.getByText(/own app pinned, which it cannot use/)).toBeInTheDocument();
+    expect(screen.queryByText(/not connected to a connector broker/)).toBeNull();
+    expect(screen.queryByRole('button', { name: /^(?:Connect|Reconnect)$/ })).toBeNull();
+  });
+
+  describe('include/skip, as every sign-in row carries it', () => {
+    it('shows the toggle only when the page offers one, and reports a click', () => {
+      renderCard(row());
+      expect(screen.queryByRole('checkbox')).toBeNull();
+      cleanup();
+      const onToggle = vi.fn();
+      render(
+        <MemoryRouter>
+          <ManagedConnectorCard o={row({ authorized: true })} busy={false} onConnect={vi.fn()} onDisconnect={vi.fn()} on onToggle={onToggle} />
+        </MemoryRouter>,
+      );
+      fireEvent.click(screen.getByRole('checkbox', { name: /Skip this tool/ }));
+      expect(onToggle).toHaveBeenCalledTimes(1);
+      expect(screen.getByRole('button', { name: 'Reconnect' })).toBeInTheDocument();
+    });
+
+    it('a skipped card is greyed, says so, and offers Include and nothing else', () => {
+      const onToggle = vi.fn();
+      render(
+        <MemoryRouter>
+          <ManagedConnectorCard o={row({ authorized: true })} busy={false} onConnect={vi.fn()} onDisconnect={vi.fn()} on={false} onToggle={onToggle} />
+        </MemoryRouter>,
+      );
+      expect(screen.getByText('Skipped')).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /^(?:Connect|Reconnect|Disconnect)$/ })).toBeNull();
+      fireEvent.click(screen.getByRole('button', { name: 'Include' }));
+      expect(onToggle).toHaveBeenCalledTimes(1);
+    });
   });
 });

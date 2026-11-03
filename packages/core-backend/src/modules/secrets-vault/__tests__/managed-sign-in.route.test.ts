@@ -142,6 +142,8 @@ const port: ManagedSignInPort = {
   start,
 };
 const unavailable: ManagedSignInPort = { ...port, available: () => false };
+/** A broker that is up, for a connector this distribution has no card for. */
+const unknownConnector: ManagedSignInPort = { ...port, describe: () => null };
 
 afterEach(async () => {
   start.mockClear();
@@ -168,6 +170,14 @@ describe('POST /api/secrets/tools/:slug/vars/:var/oauth/start on a managed sign-
       returnTo: '/skills-and-tools/connect',
     });
     expect(beginToolOAuthByKey).not.toHaveBeenCalled();
+  });
+
+  it('refuses a connector the distribution does not know, broker or no broker, and never asks the port to start it', async () => {
+    const { base } = await serve({ auth: { userId: 'u1', email: 'a@x.com' }, port: unknownConnector });
+    const res = await startSignIn(base, 'microsoft365', { returnTo: '/skills-and-tools/connect' });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toMatch(/does not offer the connector/);
+    expect(start).not.toHaveBeenCalled();
   });
 
   it('falls back to /connect for an unsafe return path', async () => {
@@ -284,6 +294,12 @@ describe('GET /api/connect/pending with managed sign-ins', () => {
     const [row] = await pending(base);
     expect(row.managed).toMatchObject({ displayName: 'Microsoft 365 sign-in', available: false, permissions: [] });
     expect(row.ownerConfigured).toBe(false);
+  });
+
+  it('a connector the distribution does not know is not startable, though its broker is up', async () => {
+    const { base } = await serve({ auth: { userId: 'u1', email: 'a@x.com' }, port: unknownConnector });
+    const [row] = await pending(base);
+    expect(row.managed).toMatchObject({ displayName: 'Microsoft 365 sign-in', available: false });
   });
 });
 

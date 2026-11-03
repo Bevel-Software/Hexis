@@ -379,6 +379,12 @@ export function rootClaims(apps: readonly AppDef[]): ReadonlyMap<string, string>
   const claims = new Map<string, string>();
   for (const app of apps) {
     for (const root of app.roots ?? []) {
+      // One top-level folder NAME: a path, a blank or a dot entry would be
+      // claimed and never matched (`appHostingPath` reads one segment), so
+      // the app would host nothing and Knowledge would keep the folder.
+      if (!root || root !== root.trim() || root === '.' || root === '..' || /[\\/]/.test(root)) {
+        throw new Error(`The root folder "${root}" claimed by the app "${app.id}" must be a single top-level folder name.`);
+      }
       const key = root.toLowerCase();
       if (coreRoots.has(key)) {
         throw new Error(`The root folder "${root}" is core's own; the app "${app.id}" cannot claim it.`);

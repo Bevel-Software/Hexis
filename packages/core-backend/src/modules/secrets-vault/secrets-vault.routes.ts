@@ -207,7 +207,9 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
       subprocessor: card?.subprocessor ?? '',
       account: (shared ? st?.adminAccount : st?.userAccount) ?? null,
       ownApp: st?.adminBringsOwnApp === true,
-      available: port?.available() === true,
+      // Startable only for a connector this distribution knows: a broker that
+      // is up cannot open a sign-in through a connector it has no card for.
+      available: port?.available() === true && card !== null,
     };
   }
 
@@ -690,6 +692,13 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
           if (!port || !port.available()) {
             return void res.status(409).json({
               error: 'This deployment is not connected to a connector broker yet. Ask your admin to configure it.',
+            });
+          }
+          // The same answer the card gives (`available`): a connector the
+          // distribution does not know cannot be started through its broker.
+          if (!port.describe(ref)) {
+            return void res.status(409).json({
+              error: 'This deployment does not offer the connector this sign-in names. Ask your admin.',
             });
           }
           const shared = signIn.scope === 'admin';

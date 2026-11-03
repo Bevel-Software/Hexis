@@ -44,6 +44,9 @@ function variable(over: Partial<ToolVarStatus>): ToolVarStatus {
     label: null,
     key: 'github_API_KEY',
     adminConfigured: false,
+    // As the server sends it: a shared row's kind follows the variable's, and
+    // there is none without a shared row. A case about a stale row says so.
+    adminKind: over.adminConfigured ? (over.oauth ? 'oauth' : 'static') : null,
     userConfigured: false,
     ...over,
   };

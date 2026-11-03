@@ -100,7 +100,7 @@ Measured the same way, on this change's last commit (after merging `dev` at `75f
 | Server instructions (platform part) | 1,852 | 1,969 | 2,000 |
 | Tool list as served (46 tools; the figures before 0.35.0 counted 41, leaving out the change-request readers and `open_page`) | 15,829 | 17,278 | 17,500 |
 | First contact (`get_agent_guide` with no section) | 19,342 (the whole guide) | 1,061 (`start-here`) | 1,200 |
-| The whole guide (`section: "all"`) | 19,342 | 21,265 | 21,500 |
+| The whole guide (`section: "all"`) | 19,342 | 21,265 (22,500 with the `onboarding` section added after this measurement) | 23,000 |
 | A `read_file` of `AGENTS.md` | 19,342 (the whole guide) | 1,268 (`start-here` and the list) | |
 | One evaluation task | 19,342 | 1,061 to 3,479 | 6,000 |
 | Evaluation facts stated | 27 of 53 | 53 of 53 | all |

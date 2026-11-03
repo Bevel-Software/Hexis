@@ -12,7 +12,7 @@ A `.tool` sign-in variable's `oauth` block SHALL accept `managed: { connectorId,
 - **THEN** the manual is listed, and the variable is reported by `sharedSignInKeysForManual`
 
 ### Requirement: The vault opens a managed sign-in and lands its handoff once
-`beginManagedConnection` SHALL write the row the handoff lands on with a one-time nonce, keeping tokens a managed row already holds and starting clean over a row of any other kind. `completeManagedConnection` SHALL store the tokens only when the nonce matches in constant time, SHALL clear the nonce, SHALL remember the connected account, and SHALL refuse a mismatch, a reuse and a row that is not managed in the same words.
+`beginManagedConnection` SHALL write the row the handoff lands on with a one-time nonce, keeping tokens only when the row already holds the same managed reference (`connectorId` and `scopeSet`), and revoking and starting clean over a managed row with a different reference or a row of any other kind. `completeManagedConnection` SHALL store the tokens only when the nonce matches in constant time, SHALL clear the nonce, SHALL remember the connected account, and SHALL refuse a mismatch, a reuse and a row that is not managed in the same words.
 
 #### Scenario: Handoff round trip
 - **WHEN** a sign-in is begun with nonce N and a handoff arrives with N and a token set
