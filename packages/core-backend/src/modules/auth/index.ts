@@ -33,6 +33,3 @@ import './auth.middleware.js';
 export type { IAccountSwitchGuard } from './account-switch-guard.js';
 export type { AuthService } from './auth.service.js';
 export type { IAccountErasureService } from './account-erasure.service.js';
-// The account admin routes, mounted by the composition root and by another
-// module's security test that drives them end to end.
-export { createAccountRoutes } from './account.routes.js';

@@ -42,9 +42,12 @@ export function managedCardState(o: ManagedToolOAuth): ManagedCardState {
  * would sign the owner in to their own row, which nobody reads for it, so
  * that combination is not offered (the server refuses it too).
  *
- * The one rule for every surface that offers Connect, Reconnect or Sign in
- * on a managed sign-in — the Connect page's card and the tool page's row —
- * so the two cannot offer a start the server would refuse.
+ * The one rule for WHETHER a start can be opened here, shared by every
+ * surface that offers Connect, Reconnect or Sign in on a managed sign-in
+ * (the Connect page's card, the tool page's row). It does not say WHO may
+ * make it: each surface also checks that (`ownerOnly`, `mayAct`), and a
+ * reader of an available workspace connection passes this rule and is
+ * refused the start all the same.
  */
 export function canStartSignIn(o: { managed: ManagedSignIn }): boolean {
   if (o.managed.tokenScope === 'shared') return o.managed.available && !o.managed.ownApp;

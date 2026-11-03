@@ -359,6 +359,16 @@ describe('ToolVarRow: a managed sign-in', () => {
     expect(screen.getByText(/has your own OAuth app pinned/)).toBeInTheDocument();
   });
 
+  it('an own app pinned on a workspace connection can be removed from the row, by a writer only', async () => {
+    const { onChanged } = renderRow(workspace({}, { available: true, ownApp: true }), { canWrite: true });
+    fireEvent.click(screen.getByRole('button', { name: 'Remove our own app' }));
+    await waitFor(() => expect(secretsMock.deleteAdminVar).toHaveBeenCalledWith('github', 'ACCESS_TOKEN'));
+    await waitFor(() => expect(onChanged).toHaveBeenCalled());
+    cleanup();
+    renderRow(workspace({}, { available: true, ownApp: true }), { canWrite: false });
+    expect(screen.queryByRole('button')).toBeNull();
+  });
+
   it('a workspace connection: a reader sees its state and no control, a writer makes and remakes it', () => {
     // Connected by an owner: the reader is told, and offered nothing the server would refuse.
     renderRow(workspace({ authorized: true }), { canWrite: false });

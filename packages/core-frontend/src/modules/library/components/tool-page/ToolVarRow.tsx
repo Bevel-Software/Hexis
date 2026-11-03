@@ -202,13 +202,30 @@ export function ToolVarRow({
       // the missing half is the broker (the admin's), an own app pinned on a
       // workspace connection (the owner's to remove), or the connection is a
       // writer's to make: the row says which.
+      const pinnedOnWorkspace = variable.managed?.ownApp === true && workspaceConnection;
       description = !variable.managed
         ? "The tool owner hasn't finished the sign-in setup yet."
         : !mayAct
           ? whose
-          : variable.managed.ownApp && workspaceConnection
-            ? 'This workspace connection has your own OAuth app pinned. Remove its client secret to connect it through the managed connector.'
+          : pinnedOnWorkspace
+            ? 'This workspace connection has your own OAuth app pinned, which a workspace connection cannot use.'
             : 'This deployment is not connected to a connector broker yet. Ask your admin.';
+      // The one way out of a pinned app on a workspace connection is to
+      // remove it, and this row is the only place that shows the owner it is
+      // there: the control sits beside the words.
+      if (pinnedOnWorkspace && mayAct) {
+        meta.push(
+          <Button
+            key="unpin"
+            size="sm"
+            variant="quiet"
+            disabled={busy}
+            onClick={() => void run(() => deleteAdminVar(slug, variable.name))}
+          >
+            Remove our own app
+          </Button>,
+        );
+      }
       if (!mayEditClientSecret) {
         meta.push(
           <Badge key="chip" tone="neutral">

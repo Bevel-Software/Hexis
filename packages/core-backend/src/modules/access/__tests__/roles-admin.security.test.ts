@@ -6,11 +6,16 @@ import os from 'node:os';
 import express from 'express';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 
-import { NodeFs } from '../../kb-fs/index.js';
+// `NodeFs`, the admin service and the account routes are reached by file on
+// purpose: the kb-fs entry keeps the real disk to the composition root (the
+// one place that constructs it), and the admin and auth entries hold their
+// contracts, not the classes and routers the root wires.
+import { NodeFs } from '../../kb-fs/node-fs.js';
 import { AccessControlService } from '../access-control.service.js';
 import { RolesAdminService } from '../roles-admin.service.js';
-import { AdminAccessService } from '../../admin/index.js';
-import { createAccountRoutes, type AuthService, type IAccountErasureService } from '../../auth/index.js';
+import { AdminAccessService } from '../../admin/admin-access.service.js';
+import { createAccountRoutes } from '../../auth/account.routes.js';
+import type { AuthService, IAccountErasureService } from '../../auth/index.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import type { WorkspaceService } from '../../workspace/index.js';
 import type { WorkflowService } from '../../workflow/index.js';
