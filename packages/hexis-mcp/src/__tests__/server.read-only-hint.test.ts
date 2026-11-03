@@ -163,7 +163,15 @@ describe('hexis-mcp lists the read-only hint the deployment serves', () => {
     hints = { ...BUILT_IN };
     const { client, shutdown } = await start();
     try {
-      expect(await annotationsOf(client)).toEqual({
+      const tools = (await client.listTools()).tools;
+      expect(Object.fromEntries(tools.map((t) => [t.name, t.title]))).toEqual({
+        list_tools: 'List tools',
+        tools_info: 'Tools info',
+        call_tool_chain: 'Call tool chain',
+        read_file: 'Read file',
+        write_file: 'Write file',
+      });
+      expect(Object.fromEntries(tools.map((t) => [t.name, t.annotations]))).toEqual({
         list_tools: { readOnlyHint: true },
         tools_info: { readOnlyHint: true },
         call_tool_chain: { readOnlyHint: false },

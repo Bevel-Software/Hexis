@@ -145,7 +145,15 @@ const annotationsOf = async (client: Client) =>
 describe('the hosted MCP endpoint lists the read-only hint', () => {
   it('on every platform tool and every meta-tool, and no other annotation', async () => {
     const { baseUrl } = await startPlatform();
-    expect(await annotationsOf(await connect(baseUrl))).toEqual({
+    const tools = (await (await connect(baseUrl)).listTools()).tools;
+    expect(Object.fromEntries(tools.map((t) => [t.name, t.title]))).toEqual({
+      list_tools: 'List tools',
+      tools_info: 'Tools info',
+      call_tool_chain: 'Call tool chain',
+      read_file: 'Read file',
+      write_file: 'Write file',
+    });
+    expect(Object.fromEntries(tools.map((t) => [t.name, t.annotations]))).toEqual({
       list_tools: { readOnlyHint: true },
       tools_info: { readOnlyHint: true },
       call_tool_chain: { readOnlyHint: false },

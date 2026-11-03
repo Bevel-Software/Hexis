@@ -133,7 +133,7 @@ export function toListedTool(tool: ProxiedTool): McpTool | null {
     // every client is required to tolerate, so a client without the
     // extension reads the tool exactly as it did before.
     ...(tool.ui ? { _meta: toolUiMeta(tool.ui) } : {}),
-    // Federated connector catalogs require an explicit hint on every tool.
+    // Microsoft's federated connector submission requires a hint on every tool.
     // Unknown effects remain conservative, matching MCP's omitted-field default.
     annotations: { readOnlyHint: tool.readOnly === true },
   };
