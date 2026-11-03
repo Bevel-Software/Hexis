@@ -126,37 +126,53 @@ describe('ConnectToolsPage: the distribution’s panel at the foot of the page',
     renderPage(Panel);
     const enable = await screen.findByRole('button', { name: 'Enable HubSpot' });
     await waitFor(() => expect(connectMock.getConnectPending).toHaveBeenCalledTimes(1));
-    // What the panel enabled is in the next listing.
-    connectMock.getConnectPending.mockResolvedValue(listing(workspaceRow()));
+    // The next listing (what the panel enabled) is held open, so the page's
+    // state WHILE it refetches is observable, not only the state after.
+    let answer!: (p: ConnectPending) => void;
+    connectMock.getConnectPending.mockReturnValue(new Promise<ConnectPending>((resolve) => (answer = resolve)));
     fireEvent.click(enable);
     await waitFor(() => expect(heard).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(connectMock.getConnectPending).toHaveBeenCalledTimes(2));
-    expect(await screen.findByTestId('connector-hubspot')).toBeInTheDocument();
-    // Quietly: the page never dropped to "Loading…" over the list it had.
+    // Quietly: mid-refetch the page has not dropped to "Loading…", and the
+    // panel that asked is still mounted.
     expect(screen.queryByText('Loading…')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Enable HubSpot' })).toBeInTheDocument();
+    answer(listing(workspaceRow()));
+    expect(await screen.findByTestId('connector-hubspot')).toBeInTheDocument();
   });
 });
 
 describe('ConnectToolsPage: disconnecting a managed sign-in', () => {
   it('a personal sign-in is removed from the caller’s row, announced, and the list fetched again', async () => {
-    connectMock.getConnectPending.mockResolvedValueOnce(listing(managedRow())).mockResolvedValue(listing(managedRow({ authorized: false }, { account: null })));
+    let answer!: (p: ConnectPending) => void;
+    connectMock.getConnectPending
+      .mockResolvedValueOnce(listing(managedRow()))
+      .mockReturnValue(new Promise<ConnectPending>((resolve) => (answer = resolve)));
     renderPage();
     fireEvent.click((await card('microsoft365')).getByRole('button', { name: 'Disconnect' }));
     await waitFor(() => expect(varsMock.deleteUserVar).toHaveBeenCalledWith('microsoft365', 'ACCESS_TOKEN'));
     expect(varsMock.deleteAdminVar).not.toHaveBeenCalled();
     await waitFor(() => expect(heard).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(connectMock.getConnectPending).toHaveBeenCalledTimes(2));
+    // Quietly: mid-refetch the card is still on the page and nothing says "Loading…".
+    expect(screen.queryByText('Loading…')).toBeNull();
+    expect(screen.getByTestId('connector-microsoft365')).toBeInTheDocument();
+    answer(listing(managedRow({ authorized: false }, { account: null })));
     // The refetched row: nothing stored any more.
     expect(await (await card('microsoft365')).findByText('Ready to connect')).toBeInTheDocument();
   });
 
-  it('a workspace connection is removed from the shared row, by a writer', async () => {
-    connectMock.getConnectPending.mockResolvedValue(listing(workspaceRow()));
+  it('a workspace connection is removed from the shared row, by a writer, and the list fetched again', async () => {
+    connectMock.getConnectPending
+      .mockResolvedValueOnce(listing(workspaceRow()))
+      .mockResolvedValue(listing({ ...workspaceRow(), authorized: false, managed: { ...workspaceRow().managed!, account: null } }));
     renderPage();
     fireEvent.click((await card('hubspot')).getByRole('button', { name: 'Disconnect' }));
     await waitFor(() => expect(varsMock.deleteAdminVar).toHaveBeenCalledWith('hubspot', 'ACCESS_TOKEN'));
     expect(varsMock.deleteUserVar).not.toHaveBeenCalled();
     await waitFor(() => expect(heard).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(connectMock.getConnectPending).toHaveBeenCalledTimes(2));
+    expect(await (await card('hubspot')).findByText('Ready to connect')).toBeInTheDocument();
   });
 
   it('a disconnect the server refuses is shown, announces nothing, and leaves the card usable', async () => {
