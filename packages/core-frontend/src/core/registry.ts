@@ -1,7 +1,7 @@
 /**
  * The app registry: the contract between the core shell (`CoreAppShell`) and
  * optional (enterprise) modules. The core owns workspace, git, pr, access,
- * auth, workflow/SSE, layout, secrets-vault, tools, toolbar and the admin
+ * auth, version control/SSE, layout, secrets-vault, tools, toolbar and the admin
  * roles page; everything else (chat, connectors, routines, watchlist, voice,
  * embed, review, onboarding, admin LLM/feedback pages) is contributed through
  * an `AppRegistry` instance passed to `<CoreAppShell registry={...} />`.

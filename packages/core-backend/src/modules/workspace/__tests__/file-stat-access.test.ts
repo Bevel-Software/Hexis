@@ -12,7 +12,7 @@ import type { ToolContext } from '../../tool-helpers/tool.contract.js';
 import type { ToolAuth } from '../../tool-auth/tool-auth.middleware.js';
 import { registerWorkspaceTools } from '../workspace.tools.js';
 import { RoutineWritePolicyService } from '../routine-write-policy.js';
-import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
+import { VersionControlHooks } from '../../version-control/version-control-hooks.js';
 import { ToolDescriptionNotes } from '../../workspace/agent-access.gate.js';
 import { SpillStore } from '../spill-store.js';
 import { DocExtractService } from '../file-readers/doc-extract.service.js';
@@ -70,7 +70,7 @@ beforeAll(async () => {
     sessionId,
     abortSignal: signal,
     workspaceService: workspaceService as never,
-    workflowService: {} as never,
+    versionControlService: {} as never,
     events: {} as never,
     getFilesystem: async () => fs,
   });
@@ -90,7 +90,7 @@ beforeAll(async () => {
     new DocExtractService(docCache, new WorkerDocumentExtractor()),
     service,
     testKbContext({ kbDirName: KB }),
-    { recoveryBotEmail: 'recovery-bot@bevel.local', hooks: new WorkflowHooks(), notes: new ToolDescriptionNotes() },
+    { recoveryBotEmail: 'recovery-bot@bevel.local', hooks: new VersionControlHooks(), notes: new ToolDescriptionNotes() },
     new RoutineWritePolicyService(),
     {} as never,
   );

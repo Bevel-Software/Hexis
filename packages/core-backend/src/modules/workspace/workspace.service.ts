@@ -23,7 +23,7 @@ import {
 } from '../../shared/rename-no-replace.js';
 import { GitRunError, type IGitRunner } from '../../shared/git.contract.js';
 import type { KbContext } from '../../shared/kb-context.js';
-import { NodeGitRunner } from '../workflow/index.js';
+import { NodeGitRunner } from '../version-control/index.js';
 import { assertWithinDirectory } from '../../shared/path-containment.js';
 import { assertNoGitInternalsSegment, assertNotGitInternals, hasGitInternalsSegment } from '../../shared/git-internals.js';
 import { isZipNoiseEntry, readZipEntry, zipEntryName, zipEntryNameRefusal, zipEntrySegments } from './zip-entry-rules.js';
@@ -32,13 +32,13 @@ import {
   PathNotFoundError,
   PathTraversalError,
   UnreadableArchiveError,
-  WorkflowValidationError,
+  VersionControlValidationError,
 } from '../../shared/domain-errors.js';
 import { workspaceIdForBranch, branchForWorkspaceId } from '../../shared/workspace-id.js';
 import {
   BranchNotFoundError,
   RemoteBranchGoneError,
-  WorkflowDomainError,
+  VersionControlDomainError,
   isMissingRemoteBranchFailure,
 } from '../../shared/domain-errors.js';
 import { redactSecret, urlQuerySecrets } from '../../shared/redact-secret.js';
@@ -141,10 +141,10 @@ export class FolderTooLargeError extends Error {
  * Lives here rather than in `shared/domain-errors.ts` because the sentence is
  * built by `entryExistsMessage` and that file deliberately imports no VALUE
  * from `@bevel-software/platform-shared`, only a type. It still extends
- * `WorkflowDomainError`, so the routes' `sendError` maps it to 409 with
+ * `VersionControlDomainError`, so the routes' `sendError` maps it to 409 with
  * `{ kind: 'entry-exists', … }` without knowing this class exists.
  */
-export class EntryExistsError extends WorkflowDomainError {
+export class EntryExistsError extends VersionControlDomainError {
   readonly kind = 'entry-exists' as const;
   constructor(readonly entryKind: ExistingEntryKind, readonly destination: string) {
     super(entryExistsMessage(entryKind, destination), 409, {
@@ -202,7 +202,7 @@ async function readForConditionalWrite(absolutePath: string, relativePath: strin
  */
 function assertValidPath(relativePath: string): void {
   const reason = validateRelativePath(relativePath);
-  if (reason) throw new WorkflowValidationError(`Invalid path: ${reason}`);
+  if (reason) throw new VersionControlValidationError(`Invalid path: ${reason}`);
 }
 
 /** Throw the conditional write's 409 unless the file still holds `expectedContent`. */
@@ -1919,7 +1919,7 @@ export class WorkspaceService implements IWorkspaceService {
    * holding both turns would introduce the one shape that can deadlock here
    * (a move waiting on a target whose holder is waiting on the move's other
    * path). A rename onto a path being conditionally written is therefore
-   * outside that guarantee; the workflow lock on the moved path is what
+   * outside that guarantee; the version-control lock on the moved path is what
    * serializes it against the app's own editors.
    */
   async moveEntry(workspaceId: string, oldWsPath: string, newWsPath: string): Promise<void> {
@@ -2023,7 +2023,7 @@ export class WorkspaceService implements IWorkspaceService {
    * two requests from that holder would interleave.
    *
    * The reach of the guarantee, exactly: within this process, one mutation at
-   * a time per resolved path. ACROSS instances the workflow lock row is the
+   * a time per resolved path. ACROSS instances the version-control lock row is the
    * coordinator, and it agrees with this queue only because `PUT /file`
    * canonicalises the path before taking either (see `canonicalRelativePath`);
    * a caller that reaches the service directly with an odd spelling gets the
@@ -2055,7 +2055,7 @@ export class WorkspaceService implements IWorkspaceService {
    * Not re-entrant: take it once, and never around another folder's turn.
    *
    * The reach of the guarantee, like {@link withPathTurn}'s: within this
-   * process, over this process's clones. Across instances the workflow lock
+   * process, over this process's clones. Across instances the version-control lock
    * rows coordinate — the placeholder write takes its own path's lock, as the
    * folder delete takes each file's — and each clone's changes meet in git,
    * as any write into a folder another instance deletes already does.
@@ -2276,7 +2276,7 @@ export class WorkspaceService implements IWorkspaceService {
     assertNoGitInternalsSegment(zipRelativePath);
     await assertNotGitInternals(workspaceDir, zipRelativePath, zipAbsolute);
     if (!zipRelativePath.toLowerCase().endsWith('.zip')) {
-      throw new WorkflowValidationError('Only .zip files can be extracted');
+      throw new VersionControlValidationError('Only .zip files can be extracted');
     }
 
     // Inferred from the NORMALISED archive path, so an archive named without
@@ -2726,7 +2726,7 @@ export class WorkspaceService implements IWorkspaceService {
       // the type and surfacing as a 500. A malformed id (bad percent-escape)
       // decodes to itself, and `%` never passes the branch-name rules, so it
       // lands here as a BranchNameError like any other invalid name.
-      if (err instanceof WorkflowDomainError) throw err;
+      if (err instanceof VersionControlDomainError) throw err;
       const reason = err instanceof Error ? err.message : String(err);
       throw new Error(`Invalid workspace ID "${workspaceId}": ${reason}`);
     }

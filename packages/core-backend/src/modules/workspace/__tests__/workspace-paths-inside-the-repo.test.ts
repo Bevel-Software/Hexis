@@ -8,10 +8,10 @@ import AdmZip from 'adm-zip';
 import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { testKbContext } from '../../../__tests__/kb-context.js';
-import type { IWorkflowService } from '@bevel-software/platform-shared';
+import type { IVersionControlService } from '@bevel-software/platform-shared';
 import { NodeFs } from '../../kb-fs/node-fs.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
-import type { WorkflowEventBus } from '../../workflow/event-bus.js';
+import type { VersionControlEventBus } from '../../version-control/event-bus.js';
 import type { AuthService } from '../../auth/auth.service.js';
 import type { IAdminAccessService } from '../../admin/admin.interface.js';
 import type { ICreatorAccess } from '../../access-model/creator.js';
@@ -76,7 +76,7 @@ async function makeHarness(): Promise<Harness> {
   } as unknown as IAccessControl;
 
   const locked: string[] = [];
-  const workflowService = {
+  const versionControlService = {
     getLock: vi.fn(async () => null),
     acquireLock: vi.fn(async (_w: string, _b: string, p: string) => {
       locked.push(p);
@@ -85,7 +85,7 @@ async function makeHarness(): Promise<Harness> {
     releaseLock: vi.fn(async () => undefined as never),
     releaseLockNoCommit: vi.fn(async () => undefined as never),
     releaseLockUntouched: vi.fn(async () => undefined as never),
-  } as unknown as IWorkflowService;
+  } as unknown as IVersionControlService;
 
   const stubCreatorAccess: ICreatorAccess = {
     planForCreate: async () => null,
@@ -103,8 +103,8 @@ async function makeHarness(): Promise<Harness> {
     createWorkspaceRoutes(
       workspaceService,
       { getUserById: vi.fn(async () => USER) } as unknown as AuthService,
-      workflowService,
-      { emit: vi.fn() } as unknown as WorkflowEventBus,
+      versionControlService,
+      { emit: vi.fn() } as unknown as VersionControlEventBus,
       accessControl,
       testKbContext({ kbDirName: KB }),
       stubCreatorAccess,

@@ -5,7 +5,7 @@ import type { BranchSyncOutcome } from '@bevel-software/platform-shared';
  * Hexis "the repository changed" and Hexis brings the clones it holds up to
  * date. The module owns the HTTP surface, the credential check, the payload
  * parsing and the coalescing; every git operation happens behind the
- * workflow port below, never here.
+ * version-control port below, never here.
  */
 
 /** Which branches a caller asked to sync. `'all'` = every clone Hexis holds. */
@@ -51,8 +51,8 @@ export interface IKbSyncService {
   lastSync(): LastSync | null;
 }
 
-/** The slice of the workflow module a sync drives. */
-export interface SyncWorkflowPort {
+/** The slice of the version-control module a sync drives. */
+export interface SyncVersionControlPort {
   syncWorkspaceFromRemote(workspaceId: string): Promise<BranchSyncOutcome>;
   /**
    * Retire the clone of a branch the host deleted, under the branch-lifecycle

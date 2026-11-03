@@ -42,6 +42,8 @@ import {
   retiredToolMessage,
   needsAuthorizationResult,
   skillPromptText,
+  ONBOARD_PROMPT,
+  promptsForSkills,
   toListedResource,
   toReadResourceResult,
   type McpAppManifest,
@@ -866,17 +868,32 @@ export class McpService {
     // loopback with the caller's key — so the default-branch catalog, access
     // filtering, and progressive disclosure all live ONCE behind that REST
     // surface, never duplicated here. Neither handler needs the tool catalog.
+    // The one prompt that is not a skill is the platform's `onboard`, offered
+    // only on a connection not narrowed to an agent, and only while no skill
+    // takes its name (see `promptsForSkills`).
+    const offerOnboard = agentPath === null;
     server.setRequestHandler(ListPromptsRequestSchema, async () => {
       const skills = await this.fetchSkillList(loopbackBearer);
-      const prompts: Prompt[] = skills.map((s) => ({
-        name: s.name,
-        description: s.description,
-        arguments: [],
-      }));
+      const prompts: Prompt[] = promptsForSkills(skills, offerOnboard);
       return { prompts };
     });
 
     server.setRequestHandler(GetPromptRequestSchema, async (request): Promise<GetPromptResult> => {
+      // The platform's own prompt is served exactly when `prompts/list`
+      // offered it: the connection is not narrowed and no released skill
+      // takes the name — judged on the skill LIST, the same answer the
+      // listing used, never on a read that failed. A workspace's own
+      // `onboard` skill is then read like any other prompt, and a read that
+      // fails is a failed read, not a reason to serve the platform's text.
+      if (offerOnboard && request.params.name === ONBOARD_PROMPT.name) {
+        const released = await this.fetchSkillList(loopbackBearer);
+        if (!released.some((s) => s.name === ONBOARD_PROMPT.name)) {
+          return {
+            description: ONBOARD_PROMPT.description,
+            messages: [{ role: 'user', content: { type: 'text', text: ONBOARD_PROMPT.text } }],
+          };
+        }
+      }
       const started = performance.now();
       const skill = await this.fetchSkill(loopbackBearer, request.params.name);
       // A prompt IS a skill read — the same event `get_skill` produces.

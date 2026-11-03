@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { realDisk } from '../../../../../__tests__/real-disk.js';
-import { NodeGitRunner } from '../../../../workflow/index.js';
+import { NodeGitRunner } from '../../../../version-control/index.js';
 import { renderRolesYaml } from '../../../../access-model/index.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';

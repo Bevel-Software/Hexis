@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { resolveDatabaseUrl, type TenantConfig } from '../core-config.js';
 import { DEFAULT_DB_SCHEMA, assertSchemaName } from '../modules/database/connection.js';
-import { DEFAULT_GIT_TIMEOUT_MS } from '../modules/workflow/git/node-git-runner.js';
+import { DEFAULT_GIT_TIMEOUT_MS } from '../modules/version-control/git/node-git-runner.js';
 import { defaultKbTemplateDir, defaultStarterPacksDir } from '../assets.js';
 import { DEFAULT_GIT_USERNAME } from '../shared/git.contract.js';
 import { deriveTenantSecrets } from './tenant-secrets.js';

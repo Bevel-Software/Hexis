@@ -1,13 +1,13 @@
 import { createHmac } from 'node:crypto';
 import { ACCOUNT_DEACTIVATED_MESSAGE, timingSafeStringEqual } from '../auth/index.js';
 import jwt from 'jsonwebtoken';
-import type { AuthUser, IGitService, IWorkflowService } from '@bevel-software/platform-shared';
+import type { AuthUser, IGitService, IVersionControlService } from '@bevel-software/platform-shared';
 import { suggestionsBranchPrefixFor } from '@bevel-software/platform-shared';
 import { logger } from '../../shared/logging.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { KbContext } from '../../shared/kb-context.js';
 import type { IAccessControl } from '../access/index.js';
-import { changeRequestLink, changeRequestLinkBase } from '../workflow/index.js';
+import { changeRequestLink, changeRequestLinkBase } from '../version-control/index.js';
 import type { FileReaderRegistry } from '../workspace/index.js';
 import type { WriteValidator } from '../kb-fs/index.js';
 import type {
@@ -105,7 +105,7 @@ export class EmbedService implements IEmbedService {
     private readonly workspaceService: EmbedWorkspacePort,
     private readonly accessControl: IAccessControl,
     private readonly authService: EmbedAuthPort,
-    private readonly workflowService: IWorkflowService,
+    private readonly versionControlService: IVersionControlService,
     private readonly gitService: IGitService,
     private readonly accountLinks: IAccountLinkService,
     private readonly readers: FileReaderRegistry,
@@ -320,7 +320,7 @@ export class EmbedService implements IEmbedService {
 
   async acquireLock(token: string): Promise<EmbedLockResult> {
     const { user, wsPath } = await this.requireEditor(token);
-    const result = await this.workflowService.acquireLock(
+    const result = await this.versionControlService.acquireLock(
       this.defaultWorkspaceId(),
       this.kb.defaultBranch,
       wsPath,
@@ -343,19 +343,19 @@ export class EmbedService implements IEmbedService {
     // goes HERE, not only when the view hears the refusal: a frame that is
     // gone, or a host that never delivers the 403, would otherwise leave the
     // file shut to the writers who still have access until the TTL. Letting
-    // go takes no access — the workflow releases only a lock this user holds.
+    // go takes no access — the version-control service releases only a lock this user holds.
     if (!canWrite) {
-      await this.workflowService.releaseLockNoCommit(workspaceId, this.kb.defaultBranch, wsPath, user);
+      await this.versionControlService.releaseLockNoCommit(workspaceId, this.kb.defaultBranch, wsPath, user);
       throw new EmbedAccessError();
     }
-    await this.workflowService.heartbeatLock(workspaceId, this.kb.defaultBranch, wsPath, user);
+    await this.versionControlService.heartbeatLock(workspaceId, this.kb.defaultBranch, wsPath, user);
   }
 
   async cancel(token: string): Promise<void> {
     const claims = this.verifyToken(token);
     const { user } = await this.resolveIdentity(claims);
     if (!user) return;
-    await this.workflowService.releaseLockNoCommit(
+    await this.versionControlService.releaseLockNoCommit(
       this.defaultWorkspaceId(),
       this.kb.defaultBranch,
       this.wsPathFor(claims.repoRelative),
@@ -384,9 +384,9 @@ export class EmbedService implements IEmbedService {
       await this.workspaceService.writeFile(workspaceId, wsPath, content);
       // Release commits + pushes the on-disk bytes through the background
       // queue — the same path the app's file page takes out of edit mode.
-      await this.workflowService.releaseLock(workspaceId, this.kb.defaultBranch, wsPath, user);
+      await this.versionControlService.releaseLock(workspaceId, this.kb.defaultBranch, wsPath, user);
     } catch (err) {
-      await this.workflowService
+      await this.versionControlService
         .releaseLockNoCommit(workspaceId, this.kb.defaultBranch, wsPath, user)
         .catch((cleanupErr) => {
           // Best-effort cleanup failed — say so, so a stuck lock is
@@ -446,11 +446,11 @@ export class EmbedService implements IEmbedService {
     // ORIGIN first: a second proposal finds the branch already pushed, and
     // creating it again would fail as a non-fast-forward push, not as
     // "already exists" — the race between the two is still caught below.
-    // Created through the workflow service, under its branch-lifecycle lock,
+    // Created through the version-control service, under its branch-lifecycle lock,
     // as every branch the app creates is: creating one is the one operation
     // that can bring a "gone" branch back under a retirement's feet.
     if (!(await this.gitService.remoteBranchExists(this.defaultWorkspaceId(), branch))) {
-      await this.workflowService
+      await this.versionControlService
         .createBranch(this.defaultWorkspaceId(), branch, this.kb.defaultBranch)
         .catch((err: unknown) => {
           if (err instanceof Error && /already exists|non-fast-forward|fetch first/i.test(err.message)) return;
@@ -469,7 +469,7 @@ export class EmbedService implements IEmbedService {
       // Scoped to the one path this proposal is about: the suggestions branch
       // is shared by everything this person has proposed, and a bare commit
       // would sweep in another in-flight write of theirs under this message.
-      await this.workflowService.commitChanges(
+      await this.versionControlService.commitChanges(
         workspace.id,
         user,
         `Propose changes to ${claims.repoRelative}`,
@@ -477,7 +477,7 @@ export class EmbedService implements IEmbedService {
       );
     });
     try {
-      const created = await this.workflowService.openChangeRequest(workspace.id, user, {
+      const created = await this.versionControlService.openChangeRequest(workspace.id, user, {
         sourceBranch: branch,
         targetBranch: this.kb.defaultBranch,
         title: `Changes from ${user.name}. Knowledge`,
@@ -531,14 +531,14 @@ export class EmbedService implements IEmbedService {
    */
   private async ensureHoldsLock(workspaceId: string, wsPath: string, user: AuthUser): Promise<void> {
     const branch = this.kb.defaultBranch;
-    const current = await this.workflowService.getLock(workspaceId, branch, wsPath);
+    const current = await this.versionControlService.getLock(workspaceId, branch, wsPath);
     if (current) {
       // A coordination hold grants no write authority, so it is not "ours"
       // for a save even when the id matches.
       if (current.holderUserId === user.id && current.mode !== 'coordination') return;
       throw new EmbedLockedError(current.holderName);
     }
-    const taken = await this.workflowService.acquireLock(workspaceId, branch, wsPath, user);
+    const taken = await this.versionControlService.acquireLock(workspaceId, branch, wsPath, user);
     if (!taken.acquired) throw new EmbedLockedError(taken.lock.holderName);
   }
 
@@ -551,7 +551,7 @@ export class EmbedService implements IEmbedService {
   }
 
   /**
-   * A change request's address, through the same builder the workflow tools
+   * A change request's address, through the same builder the version-control tools
    * use — so a proposal made from a chat and one made by an agent point at
    * the same place, path prefix of a proxied deployment included.
    */

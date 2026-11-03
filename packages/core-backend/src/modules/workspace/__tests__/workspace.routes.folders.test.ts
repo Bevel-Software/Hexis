@@ -6,10 +6,10 @@ import os from 'node:os';
 import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { testKbContext } from '../../../__tests__/kb-context.js';
-import type { FileTreeEntry, IWorkflowService } from '@bevel-software/platform-shared';
+import type { FileTreeEntry, IVersionControlService } from '@bevel-software/platform-shared';
 import { NodeFs } from '../../kb-fs/node-fs.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
-import type { WorkflowEventBus } from '../../workflow/event-bus.js';
+import type { VersionControlEventBus } from '../../version-control/event-bus.js';
 import type { AuthService } from '../../auth/auth.service.js';
 import type { IAdminAccessService } from '../../admin/admin.interface.js';
 import type { ICreatorAccess } from '../../access-model/creator.js';
@@ -65,12 +65,12 @@ async function makeHarness(): Promise<Harness> {
     acquired: true,
     lock: {} as never,
   }));
-  const workflowService = {
+  const versionControlService = {
     getLock: vi.fn(async () => null),
     acquireLock,
     releaseLock,
     releaseLockNoCommit: vi.fn(async () => undefined as never),
-  } as unknown as IWorkflowService;
+  } as unknown as IVersionControlService;
 
   const emit = vi.fn();
   const app = express();
@@ -84,8 +84,8 @@ async function makeHarness(): Promise<Harness> {
     createWorkspaceRoutes(
       workspaceService,
       { getUserById: vi.fn(async () => USER) } as unknown as AuthService,
-      workflowService,
-      { emit } as unknown as WorkflowEventBus,
+      versionControlService,
+      { emit } as unknown as VersionControlEventBus,
       allowAll,
       testKbContext({ kbDirName: KB }),
       stubCreatorAccess,

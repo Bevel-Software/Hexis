@@ -6,11 +6,11 @@ import { testKbContext } from '../../../__tests__/kb-context.js';
 import { NodeFs } from '../../kb-fs/node-fs.js';
 import { PathTraversalError } from '../../../shared/domain-errors.js';
 import { EntryExistsError } from '../workspace.service.js';
-import type { IWorkflowService } from '@bevel-software/platform-shared';
+import type { IVersionControlService } from '@bevel-software/platform-shared';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import type { ICreatorAccess } from '../../access-model/creator.js';
 import type { IAdminAccessService } from '../../admin/admin.interface.js';
-import type { WorkflowEventBus } from '../../workflow/event-bus.js';
+import type { VersionControlEventBus } from '../../version-control/event-bus.js';
 import type { AuthService } from '../../auth/auth.service.js';
 import { createWorkspaceRoutes } from '../workspace.routes.js';
 import type { SkillSaveCheck } from '../workspace.tools.js';
@@ -112,7 +112,7 @@ async function makeHarness(opts: { canRead?: boolean; skillSaveCheck?: SkillSave
     noteAccessFileWritten: () => {},
   } as unknown as ICreatorAccess;
 
-  const workflowService = {
+  const versionControlService = {
     getLock: vi.fn(async () => null),
     acquireLock: vi.fn(async (_w: string, _b: string, p: string) => {
       lockedPaths.push(p);
@@ -125,7 +125,7 @@ async function makeHarness(opts: { canRead?: boolean; skillSaveCheck?: SkillSave
     releaseLockUntouched: vi.fn(async (_w: string, _b: string, p: string) => {
       untouchedPaths.push(p);
     }),
-  } as unknown as IWorkflowService;
+  } as unknown as IVersionControlService;
 
   const authService = { getUserById: vi.fn(async () => USER) } as unknown as AuthService;
   const readable = opts.canRead !== false;
@@ -147,8 +147,8 @@ async function makeHarness(opts: { canRead?: boolean; skillSaveCheck?: SkillSave
     createWorkspaceRoutes(
       workspaceService,
       authService,
-      workflowService,
-      { emit: vi.fn() } as unknown as WorkflowEventBus,
+      versionControlService,
+      { emit: vi.fn() } as unknown as VersionControlEventBus,
       accessControl,
       testKbContext({ kbDirName: KB }),
       stubCreatorAccess,

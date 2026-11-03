@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { NodeGitRunner } from '../../workflow/git/node-git-runner.js';
+import { NodeGitRunner } from '../../version-control/git/node-git-runner.js';
 import { ManagedRepository, MANAGED_REPOSITORY_DIR } from '../managed-repository.js';
 import { RepositorySource, type GitHubAppRepository } from '../repository-source.js';
 

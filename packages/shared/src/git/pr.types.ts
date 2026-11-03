@@ -444,7 +444,7 @@ export type UpdateChangeRequestInput =
 /**
  * The fields of a `PATCH /api/workflow/change-requests/:number` body as the
  * server receives them — any combination, since the body is untrusted JSON.
- * `WorkflowService.updateChangeRequest` checks the shape and refuses what
+ * `VersionControlService.updateChangeRequest` checks the shape and refuses what
  * {@link UpdateChangeRequestInput} rules out with a worded 400.
  */
 export interface UpdateChangeRequestFields {

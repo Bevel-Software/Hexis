@@ -59,10 +59,10 @@ import {
   pluginManifestName,
   renderPluginManifest,
   type AuthUser,
-  type IWorkflowService,
+  type IVersionControlService,
 } from '@bevel-software/platform-shared';
 import { logger } from '../../shared/logging.js';
-import { PushNeedsAgentResolutionError, WorkflowDomainError } from '../../shared/domain-errors.js';
+import { PushNeedsAgentResolutionError, VersionControlDomainError } from '../../shared/domain-errors.js';
 import type { KbContext } from '../../shared/kb-context.js';
 import type { IAdminAccessService } from '../admin/index.js';
 import type { IAccessControl } from '../access/index.js';
@@ -111,7 +111,7 @@ const CATCH_ALL_PACK = 'general';
 export type { ChosenStarterPack, IStarterPackService, StarterPackApplied, StarterPacksAnswer } from './onboarding.contract.js';
 
 /** A refusal the route passes through as its status. */
-export class StarterPackError extends WorkflowDomainError {
+export class StarterPackError extends VersionControlDomainError {
   constructor(message: string, status: number) {
     super(message, status);
     this.name = 'StarterPackError';
@@ -123,7 +123,7 @@ export interface StarterPackServiceDeps {
   packsDir: string;
   kb: KbContext;
   workspaceService: StarterPackWorkspaces;
-  workflow: IWorkflowService;
+  versionControl: IVersionControlService;
   adminAccess: IAdminAccessService;
   /** The claim and the answer (see the module doc). */
   settings: StarterPackSettings;
@@ -423,7 +423,7 @@ export class StarterPackService implements IStarterPackService, FirstRunStarterS
    * renewed at the last moment (see `fence`).
    */
   private async apply(user: AuthUser, pack: StarterPack, lease: Lease): Promise<string[]> {
-    const { kb, workspaceService, workflow, disk } = this.deps;
+    const { kb, workspaceService, versionControl, disk } = this.deps;
     const branch = kb.defaultBranch;
     const ws = await workspaceService.getOrCreateForBranch(branch);
     const basePath = await workspaceService.getWorkspacePath(ws.id);
@@ -434,7 +434,7 @@ export class StarterPackService implements IStarterPackService, FirstRunStarterS
       const writes = await this.plan(user, pack, files, path.join(basePath, kb.kbDirName));
       const fsys = new LockingFilesystem(
         { basePath, contained: true },
-        { workflow, workspaceId: ws.id, branch, user, kbDirName: kb.kbDirName, fileChanges: this.deps.fileChanges },
+        { versionControl, workspaceId: ws.id, branch, user, kbDirName: kb.kbDirName, fileChanges: this.deps.fileChanges },
       );
       let written: string[] = [];
       try {

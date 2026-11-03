@@ -9,8 +9,8 @@ import { NodeFs } from '../../kb-fs/node-fs.js';
 
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { AuthService } from '../../auth/auth.service.js';
-import type { WorkflowService } from '../../workflow/workflow.service.js';
-import type { WorkflowEventBus } from '../../workflow/event-bus.js';
+import type { VersionControlService } from '../../version-control/version-control.service.js';
+import type { VersionControlEventBus } from '../../version-control/event-bus.js';
 import { usersDbDouble } from './users-db-double.js';
 import { AccessControlService } from '../access-control.service.js';
 import {
@@ -317,8 +317,8 @@ describe('Admin write floor at the repository root', () => {
             acquireLock: async () => ({ acquired: true, lock: {} }),
             releaseLock: async () => undefined,
             releaseLockNoCommit: async () => undefined,
-          } as unknown as WorkflowService,
-          { emit: () => {} } as unknown as WorkflowEventBus,
+          } as unknown as VersionControlService,
+          { emit: () => {} } as unknown as VersionControlEventBus,
           usersDbDouble(),
           testKbContext({ kbDirName: KB }),
           new NodeFs(),

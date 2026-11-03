@@ -32,7 +32,7 @@ vi.mock('../../pr/services/pr-cancel.api', () => ({
 
 import { ChangeRequestDialog } from '../components/ChangeRequestDialog';
 import { GitApiError } from '../../git/services/git.api';
-import { EventBusContext, type EventBusContextValue } from '../../workflow/state/event-bus.context';
+import { EventBusContext, type EventBusContextValue } from '../../version-control/state/event-bus.context';
 
 const BRANCH = 'ali.raza/customer-hypotheses';
 const CR = {

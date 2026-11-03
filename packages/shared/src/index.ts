@@ -27,7 +27,7 @@ export * from './git/branchAuthor.js';
 export * from './git/review.types.js';
 export * from './git/legacy-change-request-body.js';
 
-// Workflow — abstraction layer over git/PR/review-workflow. See PLAN.md.
-export * from './workflow/types.js';
-export * from './workflow/interface.js';
-export * from './workflow/events.js';
+// Version control — abstraction layer over git/PR/change-request-review. See PLAN.md.
+export * from './version-control/types.js';
+export * from './version-control/interface.js';
+export * from './version-control/events.js';

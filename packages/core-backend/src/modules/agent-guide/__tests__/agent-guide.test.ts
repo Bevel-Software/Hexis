@@ -192,6 +192,21 @@ describe('the guide is composed from the platform\'s sections', () => {
     expect(guideStartText(without)).toBe(joinGuideSections(without));
   });
 
+  it("refuses a hook that drops or empties the onboarding section, which the platform's onboard prompt points at", async () => {
+    await expect(
+      composeAgentGuide(DEFAULT_KB_LAYOUT, (sections) => sections.filter((s) => s.id !== 'onboarding')),
+    ).rejects.toThrow(/dropped the "onboarding" section, which the platform's `onboard` prompt points at/);
+    await expect(
+      composeAgentGuide(DEFAULT_KB_LAYOUT, (sections) => sections.map((s) => (s.id === 'onboarding' ? { id: s.id, body: ' \n' } : s))),
+    ).rejects.toThrow(/emptied the "onboarding" section/);
+    // Replacing it under the same id is the hook's right: an organisation
+    // ships its own onboarding.
+    const own = await composeAgentGuide(DEFAULT_KB_LAYOUT, (sections) =>
+      sections.map((s) => (s.id === 'onboarding' ? { id: s.id, body: '## Welcome\n\nOur own flow.' } : s)),
+    );
+    expect(own).toContain('Our own flow.');
+  });
+
   it('refuses a hook that drops or empties the shared file rules, which every file tool points at', async () => {
     await expect(
       composeAgentGuide(DEFAULT_KB_LAYOUT, (sections) => sections.filter((s) => s.id !== WORKING_WITH_FILES_SECTION_ID)),

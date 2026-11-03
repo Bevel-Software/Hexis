@@ -8,7 +8,7 @@ import { authFetch } from '../../../lib/api';
 /**
  * Branch + change + working-tree API client. Talks exclusively to
  * `/api/workspace/:id/workflow/*` — the legacy `/git/*` family was retired
- * with the workflow-module migration (see `bevel-platform/PLAN.md`).
+ * with the version-control-module migration (see `bevel-platform/PLAN.md`).
  *
  * Naming inside the frontend still uses git vocabulary (`fetchStatus`,
  * `commit`, `push`) because the engineering glossary says internal symbols

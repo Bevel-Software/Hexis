@@ -102,11 +102,11 @@ function build(opts: Opts = {}) {
     isEmailDomainAllowed: vi.fn(() => opts.emailDomainAllowed ?? true),
     isActive: vi.fn(async () => opts.active ?? true),
   };
-  const workflowService = {
+  const versionControlService = {
     // No live lock: a save takes it. The contention rules themselves are
     // exercised against the real lock in embed.service.lock.test.ts.
     getLock: vi.fn(async () => null),
-    // The suggestions branch is created here, under the workflow's own
+    // The suggestions branch is created here, under the version-control service's own
     // branch-lifecycle lock, never straight through git.
     createBranch: opts.createBranch ?? vi.fn(async () => ({})),
     acquireLock: vi.fn(async () => ({
@@ -135,7 +135,7 @@ function build(opts: Opts = {}) {
     workspaceService as never,
     accessControl as never,
     authService as never,
-    workflowService as never,
+    versionControlService as never,
     gitService as never,
     accountLinks as never,
     createFileReaderRegistry(noDocExtract()),
@@ -144,7 +144,7 @@ function build(opts: Opts = {}) {
     makeRolesYamlWriteValidator(KB),
     opts.resolveNodeId ?? null,
   );
-  return { service, workspaceService, accessControl, authService, workflowService, gitService, accountLinks };
+  return { service, workspaceService, accessControl, authService, versionControlService, gitService, accountLinks };
 }
 
 /** The token a mint produced, decoded — so a test can assert on the claims. */
@@ -494,18 +494,18 @@ describe('EmbedService: bytes', () => {
 
 describe('EmbedService: saving as a writer', () => {
   it('writes to the default branch and releases the lock, which commits', async () => {
-    const { service, workspaceService, workflowService } = build();
+    const { service, workspaceService, versionControlService } = build();
     const { token } = await service.mintForUser({ userId: USER.id, reference: REPO });
     await service.acquireLock(token);
     await service.save(token, 'new text');
-    expect(workflowService.acquireLock).toHaveBeenCalledWith(
+    expect(versionControlService.acquireLock).toHaveBeenCalledWith(
       encodeURIComponent(BRANCH),
       BRANCH,
       WS,
       expect.objectContaining({ id: USER.id }),
     );
     expect(workspaceService.writeFile).toHaveBeenCalledWith(encodeURIComponent(BRANCH), WS, 'new text');
-    expect(workflowService.releaseLock).toHaveBeenCalledWith(
+    expect(versionControlService.releaseLock).toHaveBeenCalledWith(
       encodeURIComponent(BRANCH),
       BRANCH,
       WS,
@@ -526,12 +526,12 @@ describe('EmbedService: saving as a writer', () => {
    * commit to publish.
    */
   it('writes nothing when the viewer no longer holds the lock', async () => {
-    const { service, workspaceService, workflowService } = build({ acquired: false, holderName: 'Bob' });
+    const { service, workspaceService, versionControlService } = build({ acquired: false, holderName: 'Bob' });
     const { token } = await service.mintForUser({ userId: USER.id, reference: REPO });
     await expect(service.save(token, 'x')).rejects.toThrow(EmbedLockedError);
     await expect(service.save(token, 'x')).rejects.toThrow('Bob');
     expect(workspaceService.writeFile).not.toHaveBeenCalled();
-    expect(workflowService.releaseLock).not.toHaveBeenCalled();
+    expect(versionControlService.releaseLock).not.toHaveBeenCalled();
   });
 
   /**
@@ -541,27 +541,27 @@ describe('EmbedService: saving as a writer', () => {
    * have access.
    */
   it('refuses to keep a lock alive for a viewer who lost write access, and releases it', async () => {
-    const { service, accessControl, workflowService } = build();
+    const { service, accessControl, versionControlService } = build();
     const { token } = await service.mintForUser({ userId: USER.id, reference: REPO });
     accessControl.canWrite.mockResolvedValue(false);
     await expect(service.heartbeat(token)).rejects.toThrow(EmbedAccessError);
-    expect(workflowService.heartbeatLock).not.toHaveBeenCalled();
-    expect(workflowService.releaseLockNoCommit).toHaveBeenCalledWith(
+    expect(versionControlService.heartbeatLock).not.toHaveBeenCalled();
+    expect(versionControlService.releaseLockNoCommit).toHaveBeenCalledWith(
       expect.any(String),
       BRANCH,
       `${KB}/${REPO}`,
       expect.objectContaining({ id: USER.id }),
     );
-    expect(workflowService.releaseLock).not.toHaveBeenCalled();
+    expect(versionControlService.releaseLock).not.toHaveBeenCalled();
   });
 
   it('releases the lock WITHOUT committing when the write fails, and rethrows', async () => {
-    const { service, workspaceService, workflowService } = build();
+    const { service, workspaceService, versionControlService } = build();
     workspaceService.writeFile.mockRejectedValueOnce(new Error('disk full'));
     const { token } = await service.mintForUser({ userId: USER.id, reference: REPO });
     await expect(service.save(token, 'x')).rejects.toThrow('disk full');
-    expect(workflowService.releaseLockNoCommit).toHaveBeenCalled();
-    expect(workflowService.releaseLock).not.toHaveBeenCalled();
+    expect(versionControlService.releaseLockNoCommit).toHaveBeenCalled();
+    expect(versionControlService.releaseLock).not.toHaveBeenCalled();
   });
 
   it('refuses Edit and Save to a viewer without write access', async () => {
@@ -594,12 +594,12 @@ describe('EmbedService: saving as a writer', () => {
 
 describe('EmbedService: proposing as a non-writer', () => {
   it('commits to the viewer OWN suggestions branch and opens a change request', async () => {
-    const { service, workspaceService, workflowService } = build({ canWrite: false });
+    const { service, workspaceService, versionControlService } = build({ canWrite: false });
     const { token } = await service.mintForUser({ userId: USER.id, reference: REPO });
     const result = await service.propose(token, 'proposed text');
 
     const branch = 'suggestions/alice-u-1/knowledge';
-    expect(workflowService.createBranch).toHaveBeenCalledWith(encodeURIComponent(BRANCH), branch, BRANCH);
+    expect(versionControlService.createBranch).toHaveBeenCalledWith(encodeURIComponent(BRANCH), branch, BRANCH);
     expect(workspaceService.writeFile).toHaveBeenCalledWith(encodeURIComponent(branch), WS, 'proposed text');
     // The write and its commit run inside the workspace service's own
     // per-path turn — the queue every other write surface takes — so two
@@ -607,7 +607,7 @@ describe('EmbedService: proposing as a non-writer', () => {
     expect(workspaceService.withPathTurn).toHaveBeenCalledWith(encodeURIComponent(branch), WS, expect.any(Function));
     const turn = workspaceService.withPathTurn.mock.invocationCallOrder[0]!;
     expect(workspaceService.writeFile.mock.invocationCallOrder[0]).toBeGreaterThan(turn);
-    expect(workflowService.commitChanges.mock.invocationCallOrder[0]).toBeGreaterThan(turn);
+    expect(versionControlService.commitChanges.mock.invocationCallOrder[0]).toBeGreaterThan(turn);
     /**
      * COMMITTED, and committed BEFORE the request is opened.
      *
@@ -617,7 +617,7 @@ describe('EmbedService: proposing as a non-writer', () => {
      * request has no file changes to approve" about a proposal sitting
      * uncommitted on disk. Found on a real boot, not by a stub.
      */
-    expect(workflowService.commitChanges).toHaveBeenCalledWith(
+    expect(versionControlService.commitChanges).toHaveBeenCalledWith(
       encodeURIComponent(branch),
       expect.objectContaining({ id: USER.id }),
       expect.stringContaining(REPO),
@@ -626,10 +626,10 @@ describe('EmbedService: proposing as a non-writer', () => {
       // in-flight write of theirs in under this message.
       [WS],
     );
-    expect(workflowService.commitChanges.mock.invocationCallOrder[0]).toBeLessThan(
-      workflowService.openChangeRequest.mock.invocationCallOrder[0],
+    expect(versionControlService.commitChanges.mock.invocationCallOrder[0]).toBeLessThan(
+      versionControlService.openChangeRequest.mock.invocationCallOrder[0],
     );
-    expect(workflowService.openChangeRequest).toHaveBeenCalledWith(
+    expect(versionControlService.openChangeRequest).toHaveBeenCalledWith(
       encodeURIComponent(branch),
       expect.objectContaining({ id: USER.id }),
       { sourceBranch: branch, targetBranch: BRANCH, title: 'Changes from Alice. Knowledge' },
@@ -638,10 +638,10 @@ describe('EmbedService: proposing as a non-writer', () => {
   });
 
   it('touches NOTHING on the default branch — no lock, no write there', async () => {
-    const { service, workspaceService, workflowService } = build({ canWrite: false });
+    const { service, workspaceService, versionControlService } = build({ canWrite: false });
     const { token } = await service.mintForUser({ userId: USER.id, reference: REPO });
     await service.propose(token, 'proposed text');
-    expect(workflowService.acquireLock).not.toHaveBeenCalled();
+    expect(versionControlService.acquireLock).not.toHaveBeenCalled();
     expect(workspaceService.writeFile).not.toHaveBeenCalledWith(
       encodeURIComponent(BRANCH),
       expect.anything(),
@@ -653,10 +653,10 @@ describe('EmbedService: proposing as a non-writer', () => {
     const createBranch = vi.fn(async () => {
       throw new Error('a branch named "suggestions/alice-u-1/knowledge" already exists');
     });
-    const { service, workflowService } = build({ canWrite: false, createBranch });
+    const { service, versionControlService } = build({ canWrite: false, createBranch });
     const { token } = await service.mintForUser({ userId: USER.id, reference: REPO });
     await expect(service.propose(token, 'x')).resolves.toMatchObject({ number: 42 });
-    expect(workflowService.openChangeRequest).toHaveBeenCalled();
+    expect(versionControlService.openChangeRequest).toHaveBeenCalled();
   });
 
   it('a second proposal finds the branch on origin and does not try to create it again', async () => {
@@ -666,11 +666,11 @@ describe('EmbedService: proposing as a non-writer', () => {
     const createBranch = vi.fn(async () => {
       throw new Error('git push failed: ! [rejected] suggestions/alice-u-1/knowledge (non-fast-forward)');
     });
-    const { service, workflowService } = build({ canWrite: false, createBranch, remoteBranchExists: true });
+    const { service, versionControlService } = build({ canWrite: false, createBranch, remoteBranchExists: true });
     const { token } = await service.mintForUser({ userId: USER.id, reference: REPO });
     await expect(service.propose(token, 'again')).resolves.toMatchObject({ number: 42 });
     expect(createBranch).not.toHaveBeenCalled();
-    expect(workflowService.openChangeRequest).toHaveBeenCalled();
+    expect(versionControlService.openChangeRequest).toHaveBeenCalled();
   });
 
   /**
@@ -706,16 +706,16 @@ describe('EmbedService: proposing as a non-writer', () => {
     // The same PNG-under-a-markdown-name the save test uses: a proposal is a
     // commit of text, and must not commit text over bytes a Save refuses.
     const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
-    const { service, workspaceService, workflowService } = build({
+    const { service, workspaceService, versionControlService } = build({
       canWrite: false,
       files: { [WS]: png },
     });
     const { token } = await service.mintForUser({ userId: USER.id, reference: REPO });
     await expect(service.propose(token, '# replaced')).rejects.toThrow(EmbedAccessError);
-    expect(workflowService.createBranch).not.toHaveBeenCalled();
+    expect(versionControlService.createBranch).not.toHaveBeenCalled();
     expect(workspaceService.writeFile).not.toHaveBeenCalled();
-    expect(workflowService.commitChanges).not.toHaveBeenCalled();
-    expect(workflowService.openChangeRequest).not.toHaveBeenCalled();
+    expect(versionControlService.commitChanges).not.toHaveBeenCalled();
+    expect(versionControlService.openChangeRequest).not.toHaveBeenCalled();
   });
 });
 
@@ -728,7 +728,7 @@ describe('EmbedService: proposing as a non-writer', () => {
  */
 describe('EmbedService: a switched-off account', () => {
   it('reads, saves and proposes nothing on a token minted for it, and is told why', async () => {
-    const { service, workspaceService, workflowService } = build({ active: false });
+    const { service, workspaceService, versionControlService } = build({ active: false });
     const { token } = await service.mintForUser({ userId: USER.id, reference: REPO });
     for (const call of [
       () => service.loadFile(token),
@@ -744,8 +744,8 @@ describe('EmbedService: a switched-off account', () => {
     }
     expect(workspaceService.readFileBinary).not.toHaveBeenCalled();
     expect(workspaceService.writeFile).not.toHaveBeenCalled();
-    expect(workflowService.acquireLock).not.toHaveBeenCalled();
-    expect(workflowService.commitChanges).not.toHaveBeenCalled();
+    expect(versionControlService.acquireLock).not.toHaveBeenCalled();
+    expect(versionControlService.commitChanges).not.toHaveBeenCalled();
   });
 });
 
@@ -789,24 +789,24 @@ describe('EmbedService: the roles.yaml write gate', () => {
   const VALID = 'roles:\n  Admin:\n    - a@x.eu\n';
 
   it('refuses to save a roles.yaml that would not parse, writing nothing and taking no lock', async () => {
-    const { service, workspaceService, workflowService } = build({ files: { [ROLES]: VALID } });
+    const { service, workspaceService, versionControlService } = build({ files: { [ROLES]: VALID } });
     const { token } = await service.mintForUser({ userId: USER.id, reference: 'roles.yaml' });
     await expect(service.save(token, 'roles: [oops')).rejects.toThrow(RolesYamlInvalidError);
     expect(workspaceService.writeFile).not.toHaveBeenCalled();
-    expect(workflowService.acquireLock).not.toHaveBeenCalled();
-    expect(workflowService.releaseLock).not.toHaveBeenCalled();
+    expect(versionControlService.acquireLock).not.toHaveBeenCalled();
+    expect(versionControlService.releaseLock).not.toHaveBeenCalled();
   });
 
   it('refuses to propose a roles.yaml that would not parse, before any branch is made', async () => {
-    const { service, workspaceService, workflowService } = build({
+    const { service, workspaceService, versionControlService } = build({
       canWrite: false,
       files: { [ROLES]: VALID },
     });
     const { token } = await service.mintForUser({ userId: USER.id, reference: 'roles.yaml' });
     await expect(service.propose(token, 'roles: [oops')).rejects.toThrow(RolesYamlInvalidError);
-    expect(workflowService.createBranch).not.toHaveBeenCalled();
+    expect(versionControlService.createBranch).not.toHaveBeenCalled();
     expect(workspaceService.writeFile).not.toHaveBeenCalled();
-    expect(workflowService.commitChanges).not.toHaveBeenCalled();
+    expect(versionControlService.commitChanges).not.toHaveBeenCalled();
   });
 
   it('saves a roles.yaml that parses, and any other file untouched by the gate', async () => {

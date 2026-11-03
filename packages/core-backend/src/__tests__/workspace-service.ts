@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { NodeGitRunner } from '../modules/workflow/git/node-git-runner.js';
+import { NodeGitRunner } from '../modules/version-control/git/node-git-runner.js';
 import type { IGitRunner } from '../shared/git.contract.js';
 import type { ITreeWalker } from '../shared/fs.contract.js';
 import type { KbContext } from '../shared/kb-context.js';

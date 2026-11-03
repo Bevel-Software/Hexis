@@ -7,7 +7,7 @@ import jwt from 'jsonwebtoken';
 import { AuthService, PasswordChangedMeanwhileError, PasswordRefusedError } from '../auth.service.js';
 import { AccountAdmissionRefusedError, SessionEndedError, type IAccountAdmission } from '../account-admission.js';
 import { hashPassword, verifyPassword } from '../password-hash.js';
-import { RECOVERY_BOT_EMAIL } from '../../workflow/index.js';
+import { RECOVERY_BOT_EMAIL } from '../../version-control/index.js';
 import { DIRECTORY_SYNC_BOT_EMAIL } from '../../access/index.js';
 
 /**

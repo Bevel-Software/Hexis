@@ -117,7 +117,7 @@ async function start(hiddenTools?: HiddenToolSource): Promise<string> {
       getUserById: async (id: string) => (id === ALICE.id ? ALICE : id === BOB.id ? BOB : null),
     } as never,
     workspaceService: { getWorkspacePath: async () => '/tmp/ws' } as never,
-    workflowService: {} as never,
+    versionControlService: {} as never,
     events: {} as never,
     kbDirName: 'knowledge-base',
     creatorAccess: { planForCreate: async () => null, grantInExtractedFile: async () => null, noteAccessFileWritten: () => {} },

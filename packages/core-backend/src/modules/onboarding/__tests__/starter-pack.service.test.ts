@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { DEFAULT_KB_LAYOUT, type AuthUser, type IWorkflowService, type KbLayout } from '@bevel-software/platform-shared';
+import { DEFAULT_KB_LAYOUT, type AuthUser, type IVersionControlService, type KbLayout } from '@bevel-software/platform-shared';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import { NodeFs } from '../../kb-fs/node-fs.js';
 import { WorkspaceMutex } from '../../kb-fs/mutex.js';
@@ -70,7 +70,7 @@ function harness({
       return locks.runAll(keys, fn);
     },
   };
-  const workflow = {
+  const versionControl = {
     acquireLock: vi.fn(async () => ({ acquired: true, lock: { holderName: 'x' } })),
     releaseLock: vi.fn(async () => null),
     releaseLockNoCommit: vi.fn(async () => undefined),
@@ -100,14 +100,14 @@ function harness({
       getWorkspacePath: vi.fn(async () => wsDir),
       hasBootstrappedWorkspace: vi.fn(async () => true),
     } as never,
-    workflow: workflow as unknown as IWorkflowService,
+    versionControl: versionControl as unknown as IVersionControlService,
     adminAccess: { isAdmin: async (email) => admins.includes(email ?? '') },
     settings: settings as never,
     accessControl,
     events,
     choosing: new WorkspaceMutex(),
   });
-  return { svc, store, settings, locks, lockRequests, workflow, events, accessControl, unreadable };
+  return { svc, store, settings, locks, lockRequests, versionControl, events, accessControl, unreadable };
 }
 
 beforeEach(async () => {
@@ -195,7 +195,7 @@ describe('who is asked', () => {
 
 describe('choosing a pack', () => {
   it('adds the pack in ONE commit by the admin, records the choice, and refreshes the tree', async () => {
-    const { svc, store, settings, workflow, events, accessControl } = harness();
+    const { svc, store, settings, versionControl, events, accessControl } = harness();
 
     const applied = await svc.choose(ADMIN, 'sales');
 
@@ -203,17 +203,17 @@ describe('choosing a pack', () => {
     // nothing is written twice; it is released once the choice is recorded.
     expect(settings.recordIfAbsent).toHaveBeenCalledWith('starterPackClaim', expect.stringMatching(/^u-admin \d+$/), ADMIN.id);
     expect(settings.recordIfAbsent.mock.invocationCallOrder[0]!).toBeLessThan(
-      workflow.commitChanges.mock.invocationCallOrder[0]!,
+      versionControl.commitChanges.mock.invocationCallOrder[0]!,
     );
     // The answer is recorded after the commit, and only where none is.
     const answered = settings.recordIfAbsent.mock.calls.findIndex(([key]) => key === 'starterPack');
-    expect(settings.recordIfAbsent.mock.invocationCallOrder[answered]!).toBeGreaterThan(workflow.commitChanges.mock.invocationCallOrder[0]!);
+    expect(settings.recordIfAbsent.mock.invocationCallOrder[answered]!).toBeGreaterThan(versionControl.commitChanges.mock.invocationCallOrder[0]!);
     expect(settings.record).not.toHaveBeenCalled();
     expect(store.starterPackClaim).toBeUndefined();
 
     expect(applied).toEqual({ id: 'sales', name: 'Sales', pages: 2, skills: 2, summary: 'Added 2 pages and 2 skills for Sales.' });
-    expect(workflow.commitChanges).toHaveBeenCalledTimes(1);
-    const [wsId, author, subject, paths] = workflow.commitChanges.mock.calls[0] as unknown as [string, AuthUser, string, string[]];
+    expect(versionControl.commitChanges).toHaveBeenCalledTimes(1);
+    const [wsId, author, subject, paths] = versionControl.commitChanges.mock.calls[0] as unknown as [string, AuthUser, string, string[]];
     expect([wsId, author, subject]).toEqual(['ws-main', ADMIN, 'Add starter pages and skills for Sales']);
     expect(paths).toEqual([
       `${KB}/KnowledgeBase/About us.md`,
@@ -255,9 +255,9 @@ describe('choosing a pack', () => {
   });
 
   it('writes only what is absent: a page made meanwhile is never replaced', async () => {
-    const { svc, workflow } = harness();
+    const { svc, versionControl } = harness();
     // Between the question and the locks, someone writes About us.
-    workflow.acquireLock.mockImplementationOnce(async () => {
+    versionControl.acquireLock.mockImplementationOnce(async () => {
       await put(wsDir, `${KB}/KnowledgeBase/About us.md`, '# Ours\n');
       return { acquired: true, lock: { holderName: 'x' } };
     });
@@ -265,18 +265,18 @@ describe('choosing a pack', () => {
     const applied = await svc.choose(ADMIN, 'sales');
 
     expect(await fs.readFile(path.join(wsDir, KB, 'KnowledgeBase/About us.md'), 'utf8')).toBe('# Ours\n');
-    const paths = (workflow.commitChanges.mock.calls[0] as unknown as [string, AuthUser, string, string[]])[3];
+    const paths = (versionControl.commitChanges.mock.calls[0] as unknown as [string, AuthUser, string, string[]])[3];
     expect(paths).not.toContain(`${KB}/KnowledgeBase/About us.md`);
     expect(applied.pages).toBe(1);
   });
 
   it('leaves a plugin that is already there alone, files and rules', async () => {
     await put(wsDir, `${KB}/Plugins/Sales-Starter/access.md`, '# theirs\n');
-    const { svc, workflow } = harness();
+    const { svc, versionControl } = harness();
 
     const applied = await svc.choose(ADMIN, 'sales');
 
-    const paths = (workflow.commitChanges.mock.calls[0] as unknown as [string, AuthUser, string, string[]])[3];
+    const paths = (versionControl.commitChanges.mock.calls[0] as unknown as [string, AuthUser, string, string[]])[3];
     expect(paths.filter((p) => p.includes('/Plugins/'))).toEqual([]);
     expect(applied).toMatchObject({ pages: 2, skills: 0 });
   });
@@ -285,11 +285,11 @@ describe('choosing a pack', () => {
     // Not at the plugins root: discovery lists it, a folder listing would not.
     await put(wsDir, `${KB}/Plugins/teams/Sales Starter/plugin.json`, '{"name":"sales-starter"}\n');
     await put(wsDir, `${KB}/Plugins/teams/Sales Starter/access.md`, '# theirs\n');
-    const { svc, workflow } = harness();
+    const { svc, versionControl } = harness();
 
     const applied = await svc.choose(ADMIN, 'sales');
 
-    const paths = (workflow.commitChanges.mock.calls[0] as unknown as [string, AuthUser, string, string[]])[3];
+    const paths = (versionControl.commitChanges.mock.calls[0] as unknown as [string, AuthUser, string, string[]])[3];
     expect(paths.filter((p) => p.includes('/Plugins/'))).toEqual([]);
     expect(applied).toMatchObject({ pages: 2, skills: 0 });
   });
@@ -297,39 +297,39 @@ describe('choosing a pack', () => {
   it('writes under the folder names this deployment chose', async () => {
     await fs.rm(path.join(wsDir, KB), { recursive: true });
     await put(wsDir, `${KB}/Wiki/How to get started.md`, '# How to get started\n');
-    const { svc, workflow } = harness({ layout: { ...DEFAULT_KB_LAYOUT, knowledgeBaseDir: 'Wiki', pluginsDir: 'Teams' } });
+    const { svc, versionControl } = harness({ layout: { ...DEFAULT_KB_LAYOUT, knowledgeBaseDir: 'Wiki', pluginsDir: 'Teams' } });
 
     await svc.choose(ADMIN, 'sales');
 
-    const paths = (workflow.commitChanges.mock.calls[0] as unknown as [string, AuthUser, string, string[]])[3];
+    const paths = (versionControl.commitChanges.mock.calls[0] as unknown as [string, AuthUser, string, string[]])[3];
     expect(paths).toContain(`${KB}/Wiki/About us.md`);
     expect(paths).toContain(`${KB}/Teams/sales-starter/skills/forecast/SKILL.md`);
     expect(paths.some((p) => p.includes('KnowledgeBase/') || p.includes('/Plugins/'))).toBe(false);
   });
 
   it('skipping records "none" and writes nothing', async () => {
-    const { svc, store, workflow } = harness();
+    const { svc, store, versionControl } = harness();
 
     expect(await svc.choose(ADMIN, 'none')).toEqual({ id: 'none', name: null, pages: 0, skills: 0, summary: '' });
     expect(store.starterPack).toBe('none');
-    expect(workflow.commitChanges).not.toHaveBeenCalled();
+    expect(versionControl.commitChanges).not.toHaveBeenCalled();
   });
 
   it('is asked once: a second choice is 409, and so is one on a knowledge base with pages', async () => {
-    const { svc, workflow } = harness();
+    const { svc, versionControl } = harness();
     await svc.choose(ADMIN, 'none');
     await expect(svc.choose(ADMIN, 'sales')).rejects.toMatchObject({ status: 409 });
 
     const fresh = harness();
     await put(wsDir, `${KB}/KnowledgeBase/Ours.md`, '# Ours\n');
     await expect(fresh.svc.choose(ADMIN, 'sales')).rejects.toMatchObject({ status: 409 });
-    expect(workflow.commitChanges).not.toHaveBeenCalled();
-    expect(fresh.workflow.commitChanges).not.toHaveBeenCalled();
+    expect(versionControl.commitChanges).not.toHaveBeenCalled();
+    expect(fresh.versionControl.commitChanges).not.toHaveBeenCalled();
   });
 
   it('judges the question under the claim: an answer recorded meanwhile is found, not written over', async () => {
     const store: Record<string, string> = {};
-    const { svc, settings, workflow } = harness({ store });
+    const { svc, settings, versionControl } = harness({ store });
     // Another replica answered `none` and released while this call was on its way to its claim.
     settings.recordIfAbsent.mockImplementationOnce(async (key: string, value: string) => {
       store[key] = value;
@@ -340,16 +340,16 @@ describe('choosing a pack', () => {
     expect(settings.recordIfAbsent.mock.invocationCallOrder[0]!).toBeLessThan(
       settings.reload.mock.invocationCallOrder.find((_, i) => settings.reload.mock.calls[i]![0] === 'starterPack')!,
     );
-    expect(workflow.commitChanges).not.toHaveBeenCalled();
+    expect(versionControl.commitChanges).not.toHaveBeenCalled();
     expect(store.starterPack).toBe('none');
     expect(store.starterPackClaim).toBeUndefined();
   });
 
   it('two quick clicks add the pack once', async () => {
-    const { svc, workflow } = harness();
+    const { svc, versionControl } = harness();
     const results = await Promise.allSettled([svc.choose(ADMIN, 'sales'), svc.choose(ADMIN, 'sales')]);
     expect(results.map((r) => r.status).sort()).toEqual(['fulfilled', 'rejected']);
-    expect(workflow.commitChanges).toHaveBeenCalledTimes(1);
+    expect(versionControl.commitChanges).toHaveBeenCalledTimes(1);
   });
 
   it('two replicas choosing at once add the pack once: the second finds the first’s claim', async () => {
@@ -360,28 +360,28 @@ describe('choosing a pack', () => {
     expect(results.map((r) => r.status).sort()).toEqual(['fulfilled', 'rejected']);
     const refused = results.find((r) => r.status === 'rejected') as PromiseRejectedResult;
     expect(refused.reason).toMatchObject({ status: 409 });
-    expect(one.workflow.commitChanges.mock.calls.length + two.workflow.commitChanges.mock.calls.length).toBe(1);
+    expect(one.versionControl.commitChanges.mock.calls.length + two.versionControl.commitChanges.mock.calls.length).toBe(1);
     expect(store.starterPack).toBe('sales');
     expect(store.starterPackClaim).toBeUndefined();
   });
 
   it('refuses while another admin’s claim is live, and takes over one left by a process that died', async () => {
     const store: Record<string, string> = { starterPackClaim: `u-other ${Date.now()}` };
-    const { svc, workflow } = harness({ store });
+    const { svc, versionControl } = harness({ store });
     await expect(svc.choose(ADMIN, 'sales')).rejects.toMatchObject({ status: 409 });
     await expect(svc.choose(ADMIN, 'sales')).rejects.toThrow(/being added right now/);
-    expect(workflow.commitChanges).not.toHaveBeenCalled();
+    expect(versionControl.commitChanges).not.toHaveBeenCalled();
 
     store.starterPackClaim = `u-other ${Date.now() - CLAIM_TTL_MS - 1}`;
     await expect(svc.choose(ADMIN, 'sales')).resolves.toMatchObject({ id: 'sales' });
-    expect(workflow.commitChanges).toHaveBeenCalledTimes(1);
+    expect(versionControl.commitChanges).toHaveBeenCalledTimes(1);
     expect(store.starterPack).toBe('sales');
   });
 
   it('takes over an expired claim by replacing THAT claim, so two replicas cannot both take it', async () => {
     const stale = `u-other ${Date.now() - CLAIM_TTL_MS - 1}`;
     const store: Record<string, string> = { starterPackClaim: stale };
-    const { svc, settings, workflow } = harness({ store });
+    const { svc, settings, versionControl } = harness({ store });
     // Another replica took the expired claim over between this one's read and its take-over.
     settings.reload.mockImplementation(async (key: string) => {
       const held = store[key] ?? '';
@@ -390,14 +390,14 @@ describe('choosing a pack', () => {
     });
     await expect(svc.choose(ADMIN, 'sales')).rejects.toThrow(/being added right now/);
     expect(settings.swapIfValue).toHaveBeenCalledWith('starterPackClaim', stale, expect.stringMatching(/^u-admin /), ADMIN.id);
-    expect(workflow.commitChanges).not.toHaveBeenCalled();
+    expect(versionControl.commitChanges).not.toHaveBeenCalled();
     expect(store.starterPackClaim).toMatch(/^u-fast /);
   });
 
   it('claims an expired claim whose holder finished and released it meanwhile, rather than refusing', async () => {
     const stale = `u-other ${Date.now() - CLAIM_TTL_MS - 1}`;
     const store: Record<string, string> = { starterPackClaim: stale };
-    const { svc, settings, workflow } = harness({ store });
+    const { svc, settings, versionControl } = harness({ store });
     // Between this replica's read and its take-over, the holder finished and released: the row is gone.
     settings.reload.mockImplementation(async (key: string) => {
       const held = store[key] ?? '';
@@ -407,16 +407,16 @@ describe('choosing a pack', () => {
     await expect(svc.choose(ADMIN, 'sales')).resolves.toMatchObject({ id: 'sales' });
     // The refused first try, the one at the empty row — and the answer itself.
     expect(settings.recordIfAbsent.mock.calls.map(([key]) => key)).toEqual(['starterPackClaim', 'starterPackClaim', 'starterPack']);
-    expect(workflow.commitChanges).toHaveBeenCalledTimes(1);
+    expect(versionControl.commitChanges).toHaveBeenCalledTimes(1);
     expect(store.starterPack).toBe('sales');
   });
 
   it('releases only its own claim: one taken over after it expired is left to its new holder', async () => {
     const store: Record<string, string> = {};
-    const { svc, workflow } = harness({ store });
+    const { svc, versionControl } = harness({ store });
     // While this write was failing — past the fence, in the commit — its
     // claim expired and another replica took it over.
-    workflow.commitChanges.mockImplementationOnce(async () => {
+    versionControl.commitChanges.mockImplementationOnce(async () => {
       store.starterPackClaim = `u-other ${Date.now()}`;
       throw new Error('disk full');
     });
@@ -426,16 +426,16 @@ describe('choosing a pack', () => {
 
   it('checks its claim at the last moment: one taken over mid-write adds nothing, and leaves the answer the new holder gave', async () => {
     const store: Record<string, string> = {};
-    const { svc, settings, workflow } = harness({ store });
+    const { svc, settings, versionControl } = harness({ store });
     // The clone took longer than the claim lives; another replica took the
     // claim over and answered `none` while this one was taking its locks.
-    workflow.acquireLock.mockImplementationOnce(async () => {
+    versionControl.acquireLock.mockImplementationOnce(async () => {
       store.starterPackClaim = 'u-other 1';
       store.starterPack = 'none';
       return { acquired: true, lock: { holderName: 'x' } };
     });
     await expect(svc.choose(ADMIN, 'sales')).rejects.toMatchObject({ status: 409 });
-    expect(workflow.commitChanges).not.toHaveBeenCalled();
+    expect(versionControl.commitChanges).not.toHaveBeenCalled();
     expect(store.starterPack).toBe('none');
     expect(store.starterPackClaim).toBe('u-other 1');
     // Asked the database with the locks held, not before them: the renewal
@@ -445,12 +445,12 @@ describe('choosing a pack', () => {
       .filter((c) => c.key === 'starterPackClaim' && c.next !== null);
     expect(renewals).toHaveLength(1);
     expect(renewals[0]!.expected).toMatch(/^u-admin /);
-    expect(renewals[0]!.at).toBeGreaterThan(workflow.acquireLock.mock.invocationCallOrder[0]!);
+    expect(renewals[0]!.at).toBeGreaterThan(versionControl.acquireLock.mock.invocationCallOrder[0]!);
   });
 
   it('renews its claim as it checks it, so the commit that follows has the whole lease to itself', async () => {
     const store: Record<string, string> = {};
-    const { svc, settings, workflow } = harness({ store });
+    const { svc, settings, versionControl } = harness({ store });
     let claimed = '';
     settings.recordIfAbsent.mockImplementationOnce(async (key: string, value: string) => {
       store[key] = value;
@@ -458,12 +458,12 @@ describe('choosing a pack', () => {
       return true;
     });
     // The work before the commit takes a moment, so a renewal is dated later than the claim.
-    workflow.acquireLock.mockImplementationOnce(async () => {
+    versionControl.acquireLock.mockImplementationOnce(async () => {
       await new Promise((r) => setTimeout(r, 5));
       return { acquired: true, lock: { holderName: 'x' } };
     });
     let claimAtCommit = '';
-    workflow.commitChanges.mockImplementationOnce(async () => {
+    versionControl.commitChanges.mockImplementationOnce(async () => {
       claimAtCommit = store.starterPackClaim!;
       return { sha: 'abc' };
     });
@@ -477,14 +477,14 @@ describe('choosing a pack', () => {
 
   it('releases a renewal whose outcome it never learned: the row is not left closed until it expires', async () => {
     const store: Record<string, string> = {};
-    const { svc, settings, workflow } = harness({ store });
+    const { svc, settings, versionControl } = harness({ store });
     // The renewal reached the database and landed, but its answer did not come back.
     settings.swapIfValue.mockImplementationOnce(async (key: string, expected: string, next: string | null) => {
       if (store[key] === expected && next !== null) store[key] = next;
       throw new Error('connection reset');
     });
     await expect(svc.choose(ADMIN, 'sales')).rejects.toThrow('connection reset');
-    expect(workflow.commitChanges).not.toHaveBeenCalled();
+    expect(versionControl.commitChanges).not.toHaveBeenCalled();
     expect(store.starterPackClaim).toBeUndefined();
     // Open again at once, not in ten minutes.
     await expect(svc.choose(ADMIN, 'sales')).resolves.toMatchObject({ id: 'sales' });
@@ -510,9 +510,9 @@ describe('choosing a pack', () => {
 
   it('never writes its answer over another: a pack added as another replica answered keeps that answer', async () => {
     const store: Record<string, string> = {};
-    const { svc, workflow } = harness({ store });
+    const { svc, versionControl } = harness({ store });
     // The commit landed; in the moment before the record, another replica answered.
-    workflow.commitChanges.mockImplementationOnce(async () => {
+    versionControl.commitChanges.mockImplementationOnce(async () => {
       store.starterPack = 'none';
       return { sha: 'abc' };
     });
@@ -522,7 +522,7 @@ describe('choosing a pack', () => {
   });
 
   it('waits for a plugin creation of the same name, on the lock creations take', async () => {
-    const { svc, locks, lockRequests, workflow } = harness();
+    const { svc, locks, lockRequests, versionControl } = harness();
     let released = false;
     let finishCreating!: () => void;
     const creating = locks.run(
@@ -536,7 +536,7 @@ describe('choosing a pack', () => {
         }),
     );
     const commits: string[] = [];
-    workflow.commitChanges.mockImplementation(async () => {
+    versionControl.commitChanges.mockImplementation(async () => {
       commits.push(released ? 'after the creation released the lock' : 'while the creation held the lock');
       return { sha: 'abc' };
     });
@@ -545,7 +545,7 @@ describe('choosing a pack', () => {
     // The pack has asked for the lock the creation holds, and nothing is
     // committed until that creation lets go.
     await vi.waitFor(() => expect(lockRequests).toEqual(['plugin:sales-starter']));
-    expect(workflow.commitChanges).not.toHaveBeenCalled();
+    expect(versionControl.commitChanges).not.toHaveBeenCalled();
     finishCreating();
     await creating;
     await expect(choosing).resolves.toMatchObject({ id: 'sales' });
@@ -553,7 +553,7 @@ describe('choosing a pack', () => {
   });
 
   it('adds the pack even when recording the choice fails afterwards: the pages close the question', async () => {
-    const { svc, store, workflow, settings } = harness();
+    const { svc, store, versionControl, settings } = harness();
     settings.recordIfAbsent.mockImplementation(async (key: string, value: string) => {
       if (key === 'starterPack') throw new Error('database unreachable');
       if (key in store) return false;
@@ -561,7 +561,7 @@ describe('choosing a pack', () => {
       return true;
     });
     await expect(svc.choose(ADMIN, 'sales')).resolves.toMatchObject({ id: 'sales', pages: 2 });
-    expect(workflow.commitChanges).toHaveBeenCalledTimes(1);
+    expect(versionControl.commitChanges).toHaveBeenCalledTimes(1);
     expect(store.starterPack).toBeUndefined();
     expect(store.starterPackClaim).toBeUndefined();
     expect((await svc.status(ADMIN)).offered).toBe(false);
@@ -577,8 +577,8 @@ describe('choosing a pack', () => {
   });
 
   it('leaves the question open when the commit fails: the claim is taken back', async () => {
-    const { svc, store, settings, workflow } = harness();
-    workflow.commitChanges.mockRejectedValueOnce(new Error('disk full'));
+    const { svc, store, settings, versionControl } = harness();
+    versionControl.commitChanges.mockRejectedValueOnce(new Error('disk full'));
     await expect(svc.choose(ADMIN, 'sales')).rejects.toThrow('disk full');
     expect(settings.recordIfAbsent).toHaveBeenCalledTimes(1);
     expect(settings.swapIfValue).toHaveBeenCalledWith('starterPackClaim', expect.stringMatching(/^u-admin /), null, null);

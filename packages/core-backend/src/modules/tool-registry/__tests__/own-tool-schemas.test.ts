@@ -3,8 +3,8 @@ import express from 'express';
 import { describe, expect, it } from 'vitest';
 import { inputSchemaDefect } from '@bevel-software/platform-mcp-core';
 import { ToolRegistry } from '../tool-registry.js';
-import { registerWorkflowTools } from '../../workflow/agent-tools/workflow.tools.js';
-import { registerChangeRequestReadTools } from '../../workflow/agent-tools/change-request-read.tools.js';
+import { registerVersionControlTools } from '../../version-control/agent-tools/version-control.tools.js';
+import { registerChangeRequestReadTools } from '../../version-control/agent-tools/change-request-read.tools.js';
 import { registerWorkspaceTools } from '../../workspace/workspace.tools.js';
 import { registerSkillsTools } from '../../skills/skills.tools.js';
 import { registerPluginsTools } from '../../plugins/plugins.tools.js';
@@ -58,8 +58,8 @@ const CORE_SERVER_SOURCE = new URL('../../../core/create-core-server.ts', import
 /** Every tool-registering module, by the name the server calls it under. */
 const MODULES: ReadonlyArray<{ name: string; register: (registry: ToolRegistry) => void }> = [
   {
-    name: 'registerWorkflowTools',
-    register: (registry) => registerWorkflowTools(registry, express.Router(), pass, handler, testKbContext(), async () => true, { canRead: async () => true, canReadAtRef: async () => true, canReadBatch: async () => new Map(), canReadBatchAtRef: async () => new Map(), canWrite: async () => true } as never, { recoveryBotEmail: 'recovery@x', hooks: { runAgentRead: async () => undefined }, notes: { onChange: () => undefined } } as never),
+    name: 'registerVersionControlTools',
+    register: (registry) => registerVersionControlTools(registry, express.Router(), pass, handler, testKbContext(), async () => true, { canRead: async () => true, canReadAtRef: async () => true, canReadBatch: async () => new Map(), canReadBatchAtRef: async () => new Map(), canWrite: async () => true } as never, { recoveryBotEmail: 'recovery@x', hooks: { runAgentRead: async () => undefined }, notes: { onChange: () => undefined } } as never),
   },
   {
     name: 'registerChangeRequestReadTools',
