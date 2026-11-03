@@ -149,7 +149,11 @@ export {
 export {
   type SkillSummary,
   type LoadedSkill,
+  type PromptSummary,
   skillPromptText,
+  ONBOARDING_GUIDE_SECTION_ID,
+  ONBOARD_PROMPT,
+  promptsForSkills,
 } from './skills.js';
 
 export {

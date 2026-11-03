@@ -54,6 +54,10 @@ async function setup(deps?: {
   auditRecorder?: IAgentEventRecorder;
   /** The agent connection an OAuth caller arrived through (with `tokenId: null`). */
   connectionId?: string | null;
+  /** The agent the credential connects as; absent = Everything. */
+  agentPath?: string | null;
+  /** Released skills listed beside `rfi` — listed only: `get_skill` answers not-found for them. */
+  listedOnly?: { name: string; description: string; path: string }[];
 }) {
   skillRequests = [];
   const registry = new ToolRegistry();
@@ -115,7 +119,7 @@ async function setup(deps?: {
   app.post('/api/agent/tools/list_skills', (req, res) => {
     const b = (req.body ?? {}) as Record<string, unknown>;
     skillRequests.push({ tool: 'list_skills', body: b });
-    const released = [{ name: 'rfi', description: 'RFI answers', path: 'Plugins/Sales/rfi' }];
+    const released = [{ name: 'rfi', description: 'RFI answers', path: 'Plugins/Sales/rfi' }, ...(deps?.listedOnly ?? [])];
     res.json({
       skills:
         typeof b.branch === 'string'
@@ -213,7 +217,7 @@ async function setup(deps?: {
   );
   lastService = mcp;
   const tokenId = deps?.tokenId === undefined ? 'tok-1' : deps.tokenId;
-  return connectClient(mcp, tokenId, deps?.connectionId ?? null);
+  return connectClient(mcp, tokenId, deps?.connectionId ?? null, deps?.agentPath ?? null);
 }
 
 /** The service `setup` built last — for a test that needs a SECOND request against the same service. */
@@ -226,9 +230,14 @@ let lastService: McpService | undefined;
  * The initialize message is passed so the server carries instructions,
  * exactly as the route's initialize request would.
  */
-async function connectClient(mcp: McpService, tokenId: string | null, connectionId: string | null = null): Promise<Client> {
+async function connectClient(
+  mcp: McpService,
+  tokenId: string | null,
+  connectionId: string | null = null,
+  agentPath: string | null = null,
+): Promise<Client> {
   const server = await mcp.createRequestServer(
-    { userId: 'user-A', tokenId, connectionId, bearer: 'bevel_testkey' },
+    { userId: 'user-A', tokenId, connectionId, agentPath, bearer: 'bevel_testkey' },
     { jsonrpc: '2.0', id: 0, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test-client', version: '0.0.0' } } },
   );
 
@@ -884,7 +893,7 @@ describe('McpService — the Audit log records what an agent calls', () => {
   it('serves prompts from the default branch only, never a draft', async () => {
     const client = await setup();
     const { prompts } = await client.listPrompts();
-    expect(prompts.map((p) => p.name)).toEqual(['rfi']);
+    expect(prompts.map((p) => p.name)).toEqual(['onboard', 'rfi']);
 
     const got = await client.getPrompt({ name: 'rfi' });
     const text = got.messages[0].content.text as string;
@@ -895,6 +904,32 @@ describe('McpService — the Audit log records what an agent calls', () => {
     // harness would have answered with the draft's skill and its notice.
     expect(skillRequests.map((r) => r.tool)).toEqual(['list_skills', 'get_skill']);
     expect(skillRequests.every((r) => r.body.branch === undefined)).toBe(true);
+  });
+
+  it('offers the platform onboard prompt, pointing at the guide section, while no skill takes its name', async () => {
+    const client = await setup();
+    const got = await client.getPrompt({ name: 'onboard' });
+    expect(got.messages[0].content.text).toContain('get_agent_guide({ body: { section: "onboarding" } })');
+  });
+
+  it("serves a workspace's own onboard skill in the platform prompt's place, and never the platform text when reading it fails", async () => {
+    const client = await setup({ listedOnly: [{ name: 'onboard', description: 'Our own onboarding', path: 'Plugins/People/onboard' }] });
+    const { prompts } = await client.listPrompts();
+    // The workspace's skill, in the catalog's own order; the platform's prompt is not added beside it.
+    expect(prompts.map((p) => [p.name, p.description])).toEqual([
+      ['rfi', 'RFI answers'],
+      ['onboard', 'Our own onboarding'],
+    ]);
+    // The skill is listed but its read answers not-found (the harness knows
+    // only `rfi`): the same failed read any prompt gets, never the platform's
+    // onboarding text under the workspace's name.
+    await expect(client.getPrompt({ name: 'onboard' })).rejects.toThrow(/Unknown skill "onboard"/);
+  });
+
+  it('serves a connection narrowed to an agent its skills and nothing beside them', async () => {
+    const client = await setup({ agentPath: 'Agents/support.agent' });
+    expect((await client.listPrompts()).prompts.map((p) => p.name)).toEqual(['rfi']);
+    await expect(client.getPrompt({ name: 'onboard' })).rejects.toThrow(/Unknown skill "onboard"/);
   });
 
   it('records a call refused for a missing sign-in as denied, without running the tool', async () => {

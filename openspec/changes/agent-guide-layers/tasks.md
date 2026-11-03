@@ -28,3 +28,10 @@
 - [x] 5.1 `AGENTS.md` at the root: change behaviour, update the guide in the same pull request
 - [x] 5.2 `docs/configuration.md`: what `get_agent_guide` returns now
 - [x] 5.3 A changeset for core-backend
+
+## 6. Onboarding
+
+- [x] 6.1 `agent-guide/onboarding.md`, its budget, its row in `start-here`, and the whole guide's budget raised to 23,000 (`guide-budget.ts`, design.md)
+- [x] 6.2 The guide's start routes new people to the section; the handshake header does not repeat it (decided 2026-11-02: the benchmark's onboarding runs all reached the section through `start-here`), and a hook may not drop the section (`agent-guide.ts`)
+- [x] 6.3 The platform `onboard` prompt and the section id in mcp-core (`packages/mcp-core/src/skills.ts`), served by the hosted endpoint on a connection not narrowed to an agent (`src/modules/mcp/mcp.service.ts`), with tests
+- [ ] 6.4 The local `hexis-mcp` server offers the prompt too, once a deployment says whether a key is narrowed
