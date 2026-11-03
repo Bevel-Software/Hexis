@@ -126,7 +126,7 @@ describe('ManagedConnectorCard', () => {
     renderCard(row({ authorized: true, ownerOnly: true }, { tokenScope: 'shared', account: 'acme.hubspot.com' }));
     expect(screen.getByText('Connected as acme.hubspot.com')).toBeInTheDocument();
     expect(screen.queryByText('Needs an owner')).toBeNull();
-    expect(screen.queryByRole('button', { name: /Connect|Disconnect/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^(?:Connect|Reconnect|Disconnect)$/ })).toBeNull();
   });
 
   it('an owner can bring the deployment’s own app: the form sends the client id and the secret', async () => {

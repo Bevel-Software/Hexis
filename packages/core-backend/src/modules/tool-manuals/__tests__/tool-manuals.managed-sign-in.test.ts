@@ -64,6 +64,16 @@ describe('a managed sign-in in a .tool', () => {
     ).toThrow(/`variables\[0\]\.oauth\.managed` must be/);
   });
 
+  test('refuses a sign-in that names both `managed` and a `clientId`: one client, not two flows', () => {
+    expect(() =>
+      normalizeToolManual('m', 'Plugins/x/m.tool', manual({
+        name: 'ACCESS_TOKEN',
+        scope: 'user',
+        oauth: { ...ENDPOINTS, clientId: 'own', managed: { connectorId: 'microsoft365', scopeSet: 'read' } },
+      })),
+    ).toThrow(/names both `managed` and a `clientId`/);
+  });
+
   test('a workspace connection: `oauth` on an `admin` variable is allowed only when managed', () => {
     const shared = normalizeToolManual('m', 'Plugins/x/m.tool', manual({
       name: 'ACCESS_TOKEN',

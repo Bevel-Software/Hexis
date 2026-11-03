@@ -409,6 +409,26 @@ describe('a managed sign-in: revoked with the provider before it is deleted', ()
     expect(revoker.revoke).toHaveBeenCalledTimes(1);
   });
 
+  it('a value or an own-app client written over the caller’s managed row revokes its tokens first', async () => {
+    // Every replacement of a row goes through the same guard: a typed value
+    // and a registered client of the caller's own both drop the tokens the
+    // broker delivered, and the provider is told before they go.
+    const managed = row({ tokens: { access_token: 'at', refresh_token: 'rt' } });
+    const revoker: ManagedTokenRevoker = { revoke: vi.fn(async () => undefined) };
+    const typed = makeFakeDb([[managed], [{ ...managed, kind: 'static' }]]);
+    const v1 = new DbSecretsVaultService(typed.db, ENC_KEY);
+    v1.setManagedTokenHandlers({ revoker });
+    await v1.putStatic({ userId: USER, key: KEY, value: 'typed-token' });
+    expect(revoker.revoke).toHaveBeenCalledWith({ connectorId: 'microsoft365', scopeSet: 'read' }, { access_token: 'at', refresh_token: 'rt' });
+
+    vi.mocked(revoker.revoke).mockClear();
+    const own = makeFakeDb([[managed], [managed]]);
+    const v2 = new DbSecretsVaultService(own.db, ENC_KEY);
+    v2.setManagedTokenHandlers({ revoker });
+    await v2.createOAuth({ userId: USER, key: KEY, provider: { ...MANAGED_META, managed: undefined, clientId: 'own-app' } });
+    expect(revoker.revoke).toHaveBeenCalledTimes(1);
+  });
+
   it('erasing the account revokes its managed sign-ins before the rows cascade away with the user', async () => {
     // Erasure deletes the user row and the vault rows go with it (ON DELETE
     // CASCADE); without this step an account erased while still switched on

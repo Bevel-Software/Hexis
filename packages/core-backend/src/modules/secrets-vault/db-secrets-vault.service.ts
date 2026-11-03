@@ -277,6 +277,9 @@ export class DbSecretsVaultService implements ISecretsVaultService {
     const label = this.normaliseLabel(input.label);
     const valueEncrypted = this.crypto().encrypt(input.value);
 
+    // The caller's row may hold a managed sign-in: its tokens are told to the
+    // provider before this value replaces them, as on every replacement.
+    await this.revokeManagedBefore(and(eq(secrets.userId, userId), eq(secrets.key, key)));
     // Upsert on (user_id, key): re-saving a key replaces its value in place.
     const [row] = await this.db
       .insert(secrets)
@@ -300,6 +303,9 @@ export class DbSecretsVaultService implements ISecretsVaultService {
     const valueEncrypted = this.crypto().encrypt(JSON.stringify(blob));
     const oauthMeta = this.publicProviderMeta(provider);
 
+    // A managed sign-in under this key loses its tokens here: the provider is
+    // told first, as on every replacement.
+    await this.revokeManagedBefore(and(eq(secrets.userId, userId), eq(secrets.key, key)));
     const [row] = await this.db
       .insert(secrets)
       .values({ userId, key, kind: 'oauth', label, valueEncrypted, oauthMeta })
@@ -689,13 +695,14 @@ export class DbSecretsVaultService implements ISecretsVaultService {
     // the scopes the row was opened with stand in, as `pendingScopes` does
     // for the code exchange. Stored as unknown, the grant would count as
     // covering nothing, and the sign-in would read as under-scoped for good.
+    // An EMPTY scope is not "none echoed": it is an empty grant, kept as such.
     const requested = Array.isArray(meta.scopes) && meta.scopes.length > 0 ? meta.scopes.map(String).join(' ') : undefined;
     const stored: OAuthTokenSet = {
       access_token: tokens.access_token,
       refresh_token: typeof tokens.refresh_token === 'string' ? tokens.refresh_token : undefined,
       expires_at: typeof tokens.expires_at === 'number' ? tokens.expires_at : undefined,
       token_type: typeof tokens.token_type === 'string' ? tokens.token_type : undefined,
-      scope: typeof tokens.scope === 'string' && tokens.scope.trim() ? tokens.scope : requested,
+      scope: typeof tokens.scope === 'string' ? tokens.scope : requested,
     };
     // The nonce is one-time: it leaves with the handoff it was minted for,
     // so the same handoff presented twice finds nothing to match.
@@ -979,6 +986,11 @@ export class DbSecretsVaultService implements ISecretsVaultService {
       pendingScopes,
     };
     const valueEncrypted = this.crypto().encrypt(JSON.stringify(blob));
+    // A managed sign-in on the caller's row (an owner pinned their own app
+    // after the person connected through the broker) is replaced by this
+    // start: its tokens are told to the provider first. Tokens carried over
+    // above were minted under THIS configuration, never a managed one.
+    if (existingUserRow && this.managedRefOf(existingUserRow.oauthMeta)) await this.revokeRow(existingUserRow);
     const [row] = await this.db
       .insert(secrets)
       .values({ userId, key, kind: 'oauth', label: shared.label, valueEncrypted, oauthMeta })

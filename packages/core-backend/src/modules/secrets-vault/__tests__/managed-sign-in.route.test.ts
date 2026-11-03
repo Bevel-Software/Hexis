@@ -84,11 +84,13 @@ async function serve(opts: {
   const manuals = opts.manuals ?? [PERSONAL];
   const status = opts.status ?? {};
   const beginToolOAuthByKey = vi.fn(async () => ({ id: 'row-1', url: 'https://provider.example/authorize?x=1' }));
+  const putSharedOAuthClientSecret = vi.fn(async () => undefined);
   const secretsVault = {
     statusFor: async (_userId: string, keys: string[]) =>
       keys.map((key) => ({ key, adminConfigured: false, adminKind: null, userConfigured: false, userKind: null, ...status })),
     list: async () => [],
     beginToolOAuthByKey,
+    putSharedOAuthClientSecret,
   } as unknown as Deps['secretsVault'];
   const toolManualService = {
     listAccessible: async () => manuals,
@@ -129,7 +131,7 @@ async function serve(opts: {
   });
   servers.push(httpServer);
   const base = `http://127.0.0.1:${(httpServer.address() as { port: number }).port}`;
-  return { base, beginToolOAuthByKey };
+  return { base, beginToolOAuthByKey, putSharedOAuthClientSecret };
 }
 
 /** The distribution's port, available and answering a URL. */
@@ -282,6 +284,40 @@ describe('GET /api/connect/pending with managed sign-ins', () => {
     const [row] = await pending(base);
     expect(row.managed).toMatchObject({ displayName: 'Microsoft 365 sign-in', available: false, permissions: [] });
     expect(row.ownerConfigured).toBe(false);
+  });
+});
+
+describe('PUT /api/secrets/tools/:slug/vars/:var/oauth/admin on a managed sign-in', () => {
+  const putSecret = (base: string, slug: string, body: unknown) =>
+    fetch(`${base}/api/secrets/tools/${slug}/vars/ACCESS_TOKEN/oauth/admin`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+  it('an owner pins the deployment’s own app: the client id sent with the secret is what the shared row records', async () => {
+    const { base, putSharedOAuthClientSecret } = await serve({ auth: { userId: 'u1', email: 'a@x.com' }, canWrite: true });
+    const res = await putSecret(base, 'microsoft365', { clientSecret: 'own-secret', clientId: ' own-client ' });
+    expect(res.status).toBe(201);
+    expect(putSharedOAuthClientSecret).toHaveBeenCalledWith({
+      key: 'microsoft365_ACCESS_TOKEN',
+      clientSecret: 'own-secret',
+      provider: expect.objectContaining({ clientId: 'own-client', authorizationUrl: PERSONAL.variables[0].oauth.authorizationUrl }),
+    });
+  });
+
+  it('a secret without a client id is refused: the managed app has none, and a pinned row needs its own', async () => {
+    const { base, putSharedOAuthClientSecret } = await serve({ auth: { userId: 'u1', email: 'a@x.com' }, canWrite: true });
+    const res = await putSecret(base, 'microsoft365', { clientSecret: 'own-secret' });
+    expect(res.status).toBe(422);
+    expect(((await res.json()) as { error: string }).error).toMatch(/send its client id with the secret/);
+    expect(putSharedOAuthClientSecret).not.toHaveBeenCalled();
+  });
+
+  it('a reader cannot pin an app on a managed sign-in', async () => {
+    const { base, putSharedOAuthClientSecret } = await serve({ auth: { userId: 'u1', email: 'a@x.com' }, canWrite: false });
+    expect((await putSecret(base, 'microsoft365', { clientSecret: 's', clientId: 'c' })).status).toBe(403);
+    expect(putSharedOAuthClientSecret).not.toHaveBeenCalled();
   });
 });
 
