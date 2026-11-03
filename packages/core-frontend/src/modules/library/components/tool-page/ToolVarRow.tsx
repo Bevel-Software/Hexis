@@ -226,7 +226,9 @@ export function ToolVarRow({
           </Button>,
         );
       }
-      if (!mayEditClientSecret) {
+      // "Not set" is the chip for a row with nothing behind it; a pinned app
+      // is something, and the words beside it already say what.
+      if (!mayEditClientSecret && !pinnedOnWorkspace) {
         meta.push(
           <Badge key="chip" tone="neutral">
             Not set

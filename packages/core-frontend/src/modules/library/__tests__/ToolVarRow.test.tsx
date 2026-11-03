@@ -361,6 +361,8 @@ describe('ToolVarRow: a managed sign-in', () => {
 
   it('an own app pinned on a workspace connection can be removed from the row, by a writer only', async () => {
     const { onChanged } = renderRow(workspace({}, { available: true, ownApp: true }), { canWrite: true });
+    // A pinned app is something, not "Not set".
+    expect(screen.queryByText('Not set')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Remove our own app' }));
     await waitFor(() => expect(secretsMock.deleteAdminVar).toHaveBeenCalledWith('github', 'ACCESS_TOKEN'));
     await waitFor(() => expect(onChanged).toHaveBeenCalled());
