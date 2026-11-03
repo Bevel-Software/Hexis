@@ -6,15 +6,13 @@ import os from 'node:os';
 import express from 'express';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 
-// `NodeFs`, the admin service and the account routes are reached by file on
-// purpose: the kb-fs entry keeps the real disk to the composition root (the
-// one place that constructs it), and the admin and auth entries hold their
-// contracts, not the classes and routers the root wires.
-import { NodeFs } from '../../kb-fs/node-fs.js';
+// Another module's implementation is never constructed here: the real disk,
+// the admin check and the account routes come from the root fixtures that
+// stand in for the composition root, as the entries hold contracts only.
+import { realDisk } from '../../../__tests__/real-disk.js';
+import { realAccountRoutes, realAdminAccess } from '../../../__tests__/account-admin.js';
 import { AccessControlService } from '../access-control.service.js';
 import { RolesAdminService } from '../roles-admin.service.js';
-import { AdminAccessService } from '../../admin/admin-access.service.js';
-import { createAccountRoutes } from '../../auth/account.routes.js';
 import type { AuthService, IAccountErasureService } from '../../auth/index.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import type { WorkspaceService } from '../../workspace/index.js';
@@ -129,11 +127,11 @@ describe('SECURITY: Admin-role removal takes effect on the next request', () => 
     // how the composition root wires it. A second instance would have its own
     // cache and could pass this test while production still served stale
     // verdicts, which is the failure mode worth guarding.
-    access = new AccessControlService(ws, KB, new NodeFs(), [OWNER]);
-    rolesAdmin = new RolesAdminService(ws, stubWorkflow(), access, new NodeFs(), KB, () => DEFAULT_BRANCH, undefined, [
+    access = new AccessControlService(ws, KB, realDisk(), [OWNER]);
+    rolesAdmin = new RolesAdminService(ws, stubWorkflow(), access, realDisk(), KB, () => DEFAULT_BRANCH, undefined, [
       OWNER,
     ]);
-    const adminAccess = new AdminAccessService(access, ws, DEFAULT_BRANCH, [OWNER]);
+    const adminAccess = realAdminAccess(access, ws, DEFAULT_BRANCH, [OWNER]);
 
     const authService = {
       listAccounts: async () => [],
@@ -149,7 +147,7 @@ describe('SECURITY: Admin-role removal takes effect on the next request', () => 
       (req as unknown as { userEmail?: string }).userEmail = req.header('x-test-email') ?? undefined;
       next();
     });
-    app.use('/api', createAccountRoutes(authService, adminAccess, erasure, { runAccountInvited: async () => [], runAccountDeactivated: async () => [] }));
+    app.use('/api', realAccountRoutes(authService, adminAccess, erasure, { runAccountInvited: async () => [], runAccountDeactivated: async () => [] }));
     server = await new Promise<Server>((resolve) => {
       const s = app.listen(0, () => resolve(s));
     });
