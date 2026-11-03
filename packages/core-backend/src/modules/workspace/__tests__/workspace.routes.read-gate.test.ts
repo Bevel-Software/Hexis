@@ -3,7 +3,7 @@ import type { AddressInfo } from 'node:net';
 import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { testKbContext } from '../../../__tests__/kb-context.js';
-import { NodeFs } from '../../kb-fs/node-fs.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
 import type { IVersionControlService } from '@bevel-software/platform-shared';
 import type { IAccessControl } from '../../access/index.js';
 import type { ICreatorAccess } from '../../access-model/index.js';
@@ -97,7 +97,7 @@ async function makeHarness(opts: {
       testKbContext({ kbDirName: KB }),
       stubCreatorAccess,
       { isAdmin: async () => opts.isAdmin === true } as unknown as IAdminAccessService,
-      new NodeFs(),
+      realDisk(),
     ),
   );
   const server = await new Promise<Server>((resolve) => {

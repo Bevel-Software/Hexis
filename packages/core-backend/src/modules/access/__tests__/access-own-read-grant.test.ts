@@ -6,7 +6,7 @@ import os from 'node:os';
 
 import type { WorkspaceService } from '../../workspace/index.js';
 import { AccessControlService } from '../access-control.service.js';
-import { registerAccessFrontmatterExtensions } from '../../access-model/access-grammar.js';
+import { registerAccessFrontmatterExtensions } from '../../access-model/index.js';
 
 const KB = 'knowledge-base';
 
