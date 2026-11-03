@@ -5,8 +5,8 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { DISCOVERY_NOTICE_TOOL, createHexisMcpServer } from '../server.js';
-import type { HexisMcpConfig } from '../config.js';
+import { DISCOVERY_NOTICE_TOOL, createHexisMcpServer } from '../index.js';
+import type { HexisMcpConfig } from '../index.js';
 
 /**
  * INTEGRATION: the bridge ANSWERS FIRST and DISCOVERS AFTER.

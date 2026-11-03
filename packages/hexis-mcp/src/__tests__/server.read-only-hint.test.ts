@@ -5,9 +5,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-import { createHexisMcpServer } from '../server.js';
-import { fetchToolHints } from '../deployment.js';
-import type { HexisMcpConfig } from '../config.js';
+import { createHexisMcpServer, type HexisMcpConfig } from '../index.js';
 
 /**
  * INTEGRATION: the read-only hint as `hexis-mcp` lists it.
@@ -31,6 +29,7 @@ let advertiseHints = true;
 let hintsUnauthorized = false;
 /** How many times the hint route was asked. */
 let hintReads = 0;
+let hintAuthorization: string | undefined;
 /** A local-only `.tool` the deployment hands over, served here with one tool. */
 let localTools: string[] = [];
 
@@ -81,6 +80,7 @@ beforeAll(async () => {
         }
         if (pathname === '/api/agent/tool-hints') {
           hintReads += 1;
+          hintAuthorization = req.headers.authorization;
           if (hintsUnauthorized) return json(401, { error: 'unauthorized' });
           if (hintsUnavailable) return json(503, { error: 'restarting' });
           return hints ? json(200, { tools: hints }) : json(404, {});
@@ -130,6 +130,7 @@ afterEach(() => {
   advertiseHints = true;
   hintsUnauthorized = false;
   hintReads = 0;
+  hintAuthorization = undefined;
   localTools = [];
 });
 
@@ -294,45 +295,59 @@ describe('hexis-mcp lists the read-only hint the deployment serves', () => {
   });
 });
 
-describe('fetchToolHints', () => {
-  const config: HexisMcpConfig = { baseUrl: '', connectionKey: 'bevel_test' };
-
-  it('reads the map with the connection key, keeping only boolean values', async () => {
-    vi.spyOn(console, 'error').mockImplementation(() => {});
+describe('deployment hints through the public MCP listing', () => {
+  it('authenticates the hint read and ignores non-boolean values', async () => {
     hints = { read_file: true, write_file: 'false', grep: 1, list_files: null } as unknown as Record<string, boolean>;
-    const fetchSpy = vi.spyOn(globalThis, 'fetch');
-    expect(await fetchToolHints({ ...config, baseUrl: base })).toEqual({ read_file: true });
-    const [url, init] = fetchSpy.mock.calls[0]!;
-    expect(String(url)).toBe(`${base}/api/agent/tool-hints`);
-    expect((init?.headers as Record<string, string>).Authorization).toBe('Bearer bevel_test');
+    const { client, shutdown } = await start();
+    try {
+      const listed = await annotationsOf(client);
+      expect(listed.read_file).toEqual({ readOnlyHint: true });
+      expect(listed.write_file).toEqual({ readOnlyHint: false });
+      expect(hintAuthorization).toBe('Bearer bevel_test');
+    } finally {
+      await shutdown();
+    }
   });
 
-  it('answers no hints for a deployment without the route, and the previous ones on a transient failure', async () => {
-    vi.spyOn(console, 'error').mockImplementation(() => {});
-    hints = null;
-    expect(await fetchToolHints({ ...config, baseUrl: base }, { read_file: false })).toEqual({});
-    hintsUnavailable = true;
-    expect(await fetchToolHints({ ...config, baseUrl: base }, { read_file: false })).toEqual({ read_file: false });
+  it('clears stale hints when the route disappears, then keeps that conservative result on a transient failure', async () => {
+    hints = { read_file: true };
+    const { client, shutdown } = await start();
+    try {
+      expect((await annotationsOf(client)).read_file).toEqual({ readOnlyHint: true });
+      hints = null;
+      expect((await annotationsOf(client)).read_file).toEqual({ readOnlyHint: false });
+      hintsUnavailable = true;
+      expect((await annotationsOf(client)).read_file).toEqual({ readOnlyHint: false });
+    } finally {
+      await shutdown();
+    }
   });
 
-  it('says a failure once per deployment: one deployment never silences or re-arms another', async () => {
-    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
-    hints = null;
-    const other = base.replace('127.0.0.1', 'localhost');
-    // A success on each first, so what earlier tests logged does not count here.
+  it('reports a failure once per deployment: another deployment never silences or re-arms it', async () => {
     hints = { read_file: true };
-    await fetchToolHints({ ...config, baseUrl: base });
-    await fetchToolHints({ ...config, baseUrl: other });
-    hints = null;
-    await fetchToolHints({ ...config, baseUrl: base });
-    await fetchToolHints({ ...config, baseUrl: base });
-    expect(logged).toHaveBeenCalledTimes(1);
-    await fetchToolHints({ ...config, baseUrl: other });
-    expect(logged).toHaveBeenCalledTimes(2);
-    hints = { read_file: true };
-    await fetchToolHints({ ...config, baseUrl: other });
-    hints = null;
-    await fetchToolHints({ ...config, baseUrl: base });
-    expect(logged).toHaveBeenCalledTimes(2);
+    const first = await start();
+    const second = await start({ baseUrl: base.replace('127.0.0.1', 'localhost') });
+    try {
+      // A successful listing clears any warning remembered by earlier tests.
+      await annotationsOf(first.client);
+      await annotationsOf(second.client);
+      const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+      logged.mockClear();
+      const warnings = () => logged.mock.calls.filter(([message]) => String(message).includes("could not read the deployment's tool hints"));
+      hints = null;
+      await annotationsOf(first.client);
+      await annotationsOf(first.client);
+      expect(warnings()).toHaveLength(1);
+      await annotationsOf(second.client);
+      expect(warnings()).toHaveLength(2);
+      hints = { read_file: true };
+      await annotationsOf(second.client);
+      hints = null;
+      await annotationsOf(first.client);
+      expect(warnings()).toHaveLength(2);
+    } finally {
+      await first.shutdown();
+      await second.shutdown();
+    }
   });
 });

@@ -263,7 +263,7 @@ export function listedTools(
    * deployment serves them (`fetchToolHints`). Joined on here for the same
    * reason as the views: the deployment's tools reach this process through its
    * MCP endpoint, and the UTCP MCP protocol keeps no annotation on the way in.
-   * A tool from a local manual is never in it, and lists no hint.
+   * A tool from a local manual is never in it, and lists a conservative false hint.
    */
   hints: Readonly<Record<string, boolean>> = {},
 ): McpTool[] {

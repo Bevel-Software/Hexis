@@ -6,8 +6,8 @@ import {
   flattenDiscoveredTool,
   toCallToolResult,
   toListedTool,
-} from '../mcp.service.js';
-import type { ProxiedTool } from '../mcp.service.js';
+} from '@bevel-software/platform-mcp-core';
+import type { ProxiedTool } from '@bevel-software/platform-mcp-core';
 
 function utcpTool(name: string, bodyProps: Record<string, unknown>, required: string[] = []): UtcpTool {
   return {
