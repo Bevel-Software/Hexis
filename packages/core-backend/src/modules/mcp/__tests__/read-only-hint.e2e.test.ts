@@ -201,13 +201,13 @@ describe('the hosted MCP endpoint lists the read-only hint', () => {
     expect((await annotationsOf(client)).read_file).toEqual({ readOnlyHint: true });
   });
 
-  it('leaves a tool from a plugin MCP server unannotated, as before', async () => {
+  it('lists a tool from a plugin MCP server with conservative effects', async () => {
     const downstream = await startFakeDownstreamMcpServer();
     stops.push(() => downstream.stop());
     const { baseUrl } = await startPlatform({ downstream });
     const tools = (await (await connect(baseUrl)).listTools()).tools;
     const proxied = tools.find((t) => t.name.endsWith('echo'));
     expect(proxied).toBeDefined();
-    expect(proxied).not.toHaveProperty('annotations');
+    expect(proxied?.annotations).toEqual({ readOnlyHint: false });
   });
 });

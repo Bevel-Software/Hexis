@@ -72,7 +72,7 @@ beforeAll(async () => {
                 description: `the ${manual[1]} local tool`,
                 inputs: { type: 'object', properties: {} },
                 outputs: { type: 'object', properties: {} },
-                // Its author's tag is not the platform's word: it stays unannotated.
+                // Its author's tag cannot establish read-only effects.
                 tags: ['read-only'],
                 tool_call_template: { call_template_type: 'http', http_method: 'POST', url: `${base}/api/never`, content_type: 'application/json' },
               },
@@ -202,14 +202,14 @@ describe('hexis-mcp lists the read-only hint the deployment serves', () => {
     }
   });
 
-  it('lists a deployment without the route as before: platform tools unannotated, meta-tools on their built-in hint', async () => {
+  it('lists a deployment without the route conservatively, keeping meta-tools on their built-in hint', async () => {
     hints = null;
     advertiseHints = false;
     const { client, shutdown } = await start();
     try {
       const listed = await annotationsOf(client);
-      expect(listed.read_file).toBeUndefined();
-      expect(listed.write_file).toBeUndefined();
+      expect(listed.read_file).toEqual({ readOnlyHint: false });
+      expect(listed.write_file).toEqual({ readOnlyHint: false });
       expect(listed.call_tool_chain).toEqual({ readOnlyHint: false });
       expect(listed.list_tools).toEqual({ readOnlyHint: true });
     } finally {
@@ -271,7 +271,7 @@ describe('hexis-mcp lists the read-only hint the deployment serves', () => {
     }
   });
 
-  it('leaves a local `.tool` unannotated, whatever its manual tags it', async () => {
+  it('keeps a local `.tool` conservative, whatever its manual tags it', async () => {
     hints = { ...BUILT_IN, localbox_ping: true };
     localTools = ['localbox'];
     const { client, shutdown } = await start();
@@ -279,7 +279,7 @@ describe('hexis-mcp lists the read-only hint the deployment serves', () => {
       const tools = (await client.listTools()).tools;
       const local = tools.find((t) => t.name === 'localbox_ping');
       expect(local).toBeDefined();
-      expect(local).not.toHaveProperty('annotations');
+      expect(local?.annotations).toEqual({ readOnlyHint: false });
     } finally {
       await shutdown();
     }
