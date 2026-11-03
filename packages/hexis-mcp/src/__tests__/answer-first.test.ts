@@ -230,6 +230,8 @@ describe('the bridge answers its client before discovery finishes', () => {
       const { tools } = await s.client.listTools();
       expect(tools).toHaveLength(1);
       expect(tools[0]!.name).toBe(DISCOVERY_NOTICE_TOOL);
+      expect(tools[0]!.title).toBe('Hexis unavailable');
+      expect(tools[0]!.annotations).toEqual({ readOnlyHint: true });
       expect(tools[0]!.description).toContain('could not load this workspace');
 
       // The same reason on the transport a client's log pane shows.

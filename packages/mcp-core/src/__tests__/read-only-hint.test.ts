@@ -129,6 +129,17 @@ describe("the deployment's override, joined on at listing time", () => {
 });
 
 describe('connector tool discovery includes human-readable titles', () => {
+  it.each([
+    ['getHTTPResponse', 'Get HTTP Response'],
+    ['XMLParser', 'XML Parser'],
+    ['readHTMLDocument', 'Read HTML Document'],
+    ['HTTP', 'HTTP'],
+  ])('separates words in %s while preserving the callable identifier', (name, title) => {
+    const entry = toListedTool(flattenDiscoveredTool('github.', utcpTool(`github.${name}`, [])));
+    expect(entry?.name).toBe(name);
+    expect(entry?.title).toBe(title);
+  });
+
   it('keeps callable identifiers while displaying a readable title', () => {
     const entry = toListedTool(flattenDiscoveredTool('github.', utcpTool('github.list_repos', [])));
     expect(entry?.name).toBe('list_repos');

@@ -9,3 +9,6 @@ MCP tool listings include human-readable display titles and an explicit
 connector submission. Tools with unknown effects advertise `false`, matching
 MCP's default when the hint is omitted. Existing platform hints and administrator
 overrides are preserved. Callable names, arguments, and execution are unchanged.
+The local bridge's discovery-failure notice also includes a title and read-only
+hint. Generated titles separate acronym runs from words while keeping the
+callable identifier intact.
