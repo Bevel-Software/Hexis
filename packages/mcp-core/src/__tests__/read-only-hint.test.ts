@@ -49,21 +49,22 @@ describe('a platform tool lists its read-only hint', () => {
     const untagged = toListedTool({ ...flattenManualTool(utcpTool(`${KB}.read_file`, []), KB), readOnly: undefined })!;
     const { annotations, ...rest } = tagged;
     expect(annotations).toEqual({ readOnlyHint: true });
-    expect(rest).toEqual(untagged);
-    expect(untagged).not.toHaveProperty('annotations');
+    const { annotations: unknownHint, ...unknownRest } = untagged;
+    expect(rest).toEqual(unknownRest);
+    expect(unknownHint).toEqual({ readOnlyHint: false });
   });
 });
 
-describe('a tool from anywhere else lists no annotation, as before', () => {
-  it('leaves a `.tool` manual tool unannotated, even one whose author tagged it read-only', () => {
+describe('a tool with unknown effects lists the conservative MCP default', () => {
+  it('does not trust a third-party manual author\'s read-only tag', () => {
     const entry = toListedTool(flattenManualTool(utcpTool('serper.search', [READ_ONLY_TAG]), KB));
     expect(entry?.name).toBe('serper_search');
-    expect(entry).not.toHaveProperty('annotations');
+    expect(entry?.annotations).toEqual({ readOnlyHint: false });
   });
 
-  it('leaves a directly discovered tool unannotated', () => {
+  it('does not infer that a directly discovered tool is read-only from its name', () => {
     const entry = toListedTool(flattenDiscoveredTool('github.', utcpTool('github.list_repos', [READ_ONLY_TAG])));
-    expect(entry).not.toHaveProperty('annotations');
+    expect(entry?.annotations).toEqual({ readOnlyHint: false });
   });
 });
 
@@ -120,10 +121,23 @@ describe("the deployment's override, joined on at listing time", () => {
     });
   });
 
-  it('never annotates a tool from another manual, whatever its name', () => {
+  it('cannot mark a tool from another manual read-only through a platform override', () => {
     const plugin = flattenManualTool(utcpTool('notion.read_file', [READ_ONLY_TAG]), KB);
-    expect(toListedTool(withReadOnlyOverride(plugin, { notion_read_file: true, read_file: true }))).not.toHaveProperty(
-      'annotations',
-    );
+    expect(toListedTool(withReadOnlyOverride(plugin, { notion_read_file: true, read_file: true }))?.annotations)
+      .toEqual({ readOnlyHint: false });
+  });
+});
+
+describe('connector tool discovery includes human-readable titles', () => {
+  it('keeps callable identifiers while displaying a readable title', () => {
+    const entry = toListedTool(flattenDiscoveredTool('github.', utcpTool('github.list_repos', [])));
+    expect(entry?.name).toBe('list_repos');
+    expect(entry?.title).toBe('List repos');
+  });
+
+  it('also titles meta-tools without changing the runner\'s default effects', () => {
+    const tools = codeModeMetaTools(KB);
+    expect(tools.map(t => t.title)).toEqual(['List tools', 'Tools info', 'Call tool chain']);
+    expect(tools.find(t => t.name === 'call_tool_chain')?.annotations?.readOnlyHint).toBe(false);
   });
 });
