@@ -1347,11 +1347,12 @@ export async function createCoreServices(
   // vault's runs first: a managed sign-in's tokens are revoked with their
   // provider before the user row goes and the vault rows cascade with it.
   // The port's array is held, never copied (see `CorePorts.erasureParticipants`:
-  // the enterprise root fills it AFTER construction), so core's slice goes
-  // into that same array rather than into a snapshot of it.
-  const erasureParticipants = ports.erasureParticipants ?? [];
-  erasureParticipants.unshift(managedSignInErasure(secretsVaultService));
-  const accountErasureService = new AccountErasureService(db, reviewWorkflowService, erasureParticipants);
+  // the enterprise root fills it AFTER construction) and never written to
+  // (a root that rebuilds a graph over the same array would otherwise keep
+  // every past graph's vault slice): core's own slices travel beside it.
+  const accountErasureService = new AccountErasureService(db, reviewWorkflowService, ports.erasureParticipants ?? [], [
+    managedSignInErasure(secretsVaultService),
+  ]);
 
   // MCP (remote agent access). ExternalApiKeyService handles connection-key
   // lifecycle. McpService is a GENERIC, STATELESS proxy: per request it
