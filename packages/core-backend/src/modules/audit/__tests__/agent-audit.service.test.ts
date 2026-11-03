@@ -316,12 +316,17 @@ describe('AgentAuditService: last used is the last recorded call', () => {
       // A page's events carry neither id.
       { keyId: null, connectionId: null, n: 4, last: new Date(NOW) },
     ];
-    const { service } = makeService([events]);
+    const { service, captured } = makeService([events]);
     const last = await service.lastCalls(ALICE.id);
-    expect([...last.entries()]).toEqual([
-      ['k-1', FOUR_DAYS_AGO],
-      ['c-1', NOW - DAY],
-    ]);
+    // A Map compares by its entries, whatever order the database grouped them in.
+    expect(last).toEqual(
+      new Map([
+        ['c-1', NOW - DAY],
+        ['k-1', FOUR_DAYS_AGO],
+      ]),
+    );
+    // Only the asking person's events are read.
+    expect(render(captured.where[0])).toEqual({ sql: '"agent_events"."user_id" = $1', params: [ALICE.id] });
 
     const rows = await listWith({
       connections: [{ connection: connection({ id: 'c-1' }), user: ALICE }],

@@ -1,5 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- the fake drizzle chain below is untyped by design, like its siblings */
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { SQL } from 'drizzle-orm';
+import { PgDialect } from 'drizzle-orm/pg-core';
 import { AgentAuditService } from '../../audit/index.js';
 import type { Database } from '../../database/index.js';
 import type { IExternalApiKeyService } from '../../tool-auth/external-api-key.interface.js';
@@ -21,15 +23,21 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 
-/** A database whose every select resolves to the next queued result, whatever its chain. */
-function fakeDb(queue: unknown[]): Database {
+/**
+ * A database whose every select resolves to the next queued result, whatever
+ * its chain. It applies no `where`, so each one is captured for a test to pin
+ * which rows the read asked for.
+ */
+function fakeDb(queue: unknown[]) {
+  const where: SQL[] = [];
   const chain = (result: unknown): any => {
     const c: any = {};
-    for (const m of ['from', 'where', 'groupBy', 'innerJoin', 'orderBy', 'limit']) c[m] = () => c;
+    for (const m of ['from', 'groupBy', 'innerJoin', 'orderBy', 'limit']) c[m] = () => c;
+    c.where = (w: SQL) => (where.push(w), c);
     c.then = (onF: any, onR: any) => Promise.resolve(result).then(onF, onR);
     return c;
   };
-  return { select: () => chain(queue.shift()) } as unknown as Database;
+  return { db: { select: () => chain(queue.shift()) } as unknown as Database, where };
 }
 
 const summary = (id: string, lastUsedAt: number | null) => ({
@@ -48,8 +56,9 @@ describe('GET /mcp/external-api-keys', () => {
       // Both stamped a minute ago: one by a call four days back and a pull since, one by pulls alone.
       listForUser: vi.fn(async () => [summary('k-called', NOW - 60_000), summary('k-pulled', NOW - 60_000)]),
     } as unknown as IExternalApiKeyService;
+    const fake = fakeDb([[{ keyId: 'k-called', connectionId: null, n: 3, last: new Date(FOUR_DAYS_AGO) }]]);
     const audit = new AgentAuditService(
-      fakeDb([[{ keyId: 'k-called', connectionId: null, n: 3, last: new Date(FOUR_DAYS_AGO) }]]),
+      fake.db,
       keys,
       () => null,
       () => NOW,
@@ -64,5 +73,10 @@ describe('GET /mcp/external-api-keys', () => {
       ['k-called', FOUR_DAYS_AGO],
       ['k-pulled', null],
     ]);
+    // The events read are the signed-in person's alone (the harness signs in as user-A).
+    expect(keys.listForUser).toHaveBeenCalledWith('user-A');
+    expect(fake.where).toHaveLength(1);
+    const { sql, params } = new PgDialect().sqlToQuery(fake.where[0]!);
+    expect({ sql, params }).toEqual({ sql: '"agent_events"."user_id" = $1', params: ['user-A'] });
   });
 });
