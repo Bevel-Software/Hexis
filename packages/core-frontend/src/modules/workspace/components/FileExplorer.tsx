@@ -36,7 +36,7 @@ import {
   PLUGINS_DIR,
   SKILLS_DIR,
   AGENTS_DIR,
-  PIPELINES_DIR,
+  WORKFLOWS_DIR,
 } from '@bevel-software/platform-shared';
 import {
   KNOWLEDGE_UPLOAD_TARGET,
@@ -76,7 +76,10 @@ import { AdminContext } from '../../admin';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { offersManageAccess, fetchFileAccess, fetchProspectiveAccess } from '../../access';
 import {
+  appClaimingRoot,
+  appHostingPath,
   useAppRegistry,
+  useRootClaims,
   type FolderMenuContext,
   type FolderMenuItemDef,
   type FolderMenuTools,
@@ -2232,13 +2235,18 @@ export const CHECKOUT_MISSING_MESSAGE = 'Nothing to show here: the repository ch
  * reserved roots aside, an entry anywhere counts, because a stray top-level
  * folder is folded into Knowledge). A Library tree shows one root
  * (`scope: 'root'`): it is empty when that root is, whatever the notes
- * beside it hold.
+ * beside it hold. A root an app claims is not in Knowledge's tree, so what
+ * it holds does not count there either.
  */
 export function EmptyTreeNotice({ rootPath, scope = 'tree' }: { rootPath: string | null; scope?: 'tree' | 'root' }) {
   const { kbDirName } = useWorkspace();
   const { tree, withheld: listingWithheld } = useMergedWorkspaceTree();
+  const claims = useRootClaims();
   const oneRoot = scope === 'root' && rootPath !== null;
-  const empty = tree !== null && (oneRoot ? !subtreeHasVisibleEntries(tree, rootPath) : !treeHasVisibleEntries(tree, kbDirName));
+  const claimed = (name: string) => appClaimingRoot(claims, name) !== undefined;
+  const empty =
+    tree !== null &&
+    (oneRoot ? !subtreeHasVisibleEntries(tree, rootPath) : !treeHasVisibleEntries(tree, kbDirName, claimed));
   // What was kept out of what THIS notice covers: one root's own count, or
   // the listing's — a Skills tree emptied by the rules says so; a Skills tree
   // that is simply empty beside a withheld Knowledge does not.
@@ -2384,8 +2392,15 @@ export function UploadNotices() {
 // (`checkoutRoot` lives in `../utils/fileTree` — the one lookup every
 // surface that reads the workspace tree goes through.)
 
-export function FileExplorer() {
+/**
+ * The Knowledge app's file tree. With `roots`, the tree of the folder surface
+ * an app mounts for the roots it claims (see `AppDef.roots`): those
+ * top-level folders as sections, in that order, and nothing else of the
+ * knowledge base. Without it, every root no app claims.
+ */
+export function FileExplorer({ roots }: { roots?: readonly string[] } = {}) {
   const { openFilePath, dispatchUpload, kbDirName } = useWorkspace();
+  const claims = useRootClaims();
   const { openFile } = useFileNav();
   const [dragOver, setDragOver] = useState(false);
   // Download is a per-path permission (resolved server-side from the access
@@ -2429,14 +2444,25 @@ export function FileExplorer() {
   // Resolved from the CHECKOUT, not the workspace root, for the same reason
   // the sections are: a pin is a shortcut into the repository, and a path
   // that lands beside it resolves to nothing rather than to a row.
+  //
+  // A pin into a root this tree does not show is not on it either: Knowledge
+  // leaves the claimed roots to their app, a narrowed tree shows its own.
+  const showsPath = useCallback(
+    (path: string) => {
+      const root = path.split('/').filter(Boolean)[1]?.toLowerCase();
+      if (!roots) return appHostingPath(claims, path, kbDirName) === undefined;
+      return root !== undefined && roots.some((r) => r.toLowerCase() === root);
+    },
+    [roots, claims, kbDirName],
+  );
   const pinnedEntries = useMemo(
     () =>
       checkout
         ? pinnedPaths
             .map((p) => findEntryByPath(checkout, p))
-            .filter((e): e is FileTreeEntry => e != null)
+            .filter((e): e is FileTreeEntry => e != null && showsPath(e.relativePath))
         : [],
-    [checkout, pinnedPaths],
+    [checkout, pinnedPaths, showsPath],
   );
 
   // Registry-contributed rows for the Pinned section (rendered below the
@@ -2464,18 +2490,34 @@ export function FileExplorer() {
   // own tree (`SkillsTree`), with these same rows, and a skill file opens on
   // its skill page there.
   //
-  // `Data/`, `Agents/` and `Pipelines/` are rendered when PRESENT but never
+  // `Data/`, `Agents/` and `Workflows/` are rendered when PRESENT but never
   // created by core (see `CORE_REQUIRED_DIRS`) — a deployment that owns the
   // agentic execution layer seeds them, and this reads whatever is there.
+  //
+  // A root an app claims (`AppDef.roots`) is that app's to show: it is left
+  // out here, whether reserved or not, and folds nowhere. A narrowed tree
+  // (`roots`) is the other side of the same claim: its roots, nothing else.
   const sections = useMemo(() => {
     const kids = checkout?.children;
     if (!kids) return null;
     const findDir = (name: string) =>
       kids.find((c) => c.type === 'directory' && c.name === name);
+    const asSection = (name: string): FileTreeEntry | null => {
+      const found = findDir(name);
+      return found ? { ...found, name } : null;
+    };
+    if (roots) {
+      // By name in any case, as a claim is read (see `rootClaims`).
+      const narrowed = roots
+        .map((name) => kids.find((c) => c.type === 'directory' && c.name.toLowerCase() === name.toLowerCase()))
+        .filter((e): e is FileTreeEntry => e !== undefined);
+      return { knowledge: null, roots: narrowed, looseFiles: [] };
+    }
+    const claimed = (name: string) => appClaimingRoot(claims, name) !== undefined;
     const knowledgeBase = findDir(KNOWLEDGE_BASE_DIR);
     const data = findDir(DATA_DIR);
     const agents = findDir(AGENTS_DIR);
-    const pipelines = findDir(PIPELINES_DIR);
+    const workflows = findDir(WORKFLOWS_DIR);
     // Plugins counts toward "is this a split layout?" even though it is never
     // rendered: its presence proves the split just as well as the others, and
     // without it a KB whose only root is Plugins would fail this check, fall
@@ -2483,12 +2525,13 @@ export function FileExplorer() {
     const plugins = findDir(PLUGINS_DIR);
     // Same for Skills: the Library surface renders it, not this explorer.
     const skills = findDir(SKILLS_DIR);
-    if (!knowledgeBase && !data && !agents && !pipelines && !plugins && !skills) return null;
-    // Any other top-level content folder (e.g. a stray `Legal/`) folds into Knowledge.
+    if (!knowledgeBase && !data && !agents && !workflows && !plugins && !skills) return null;
+    // Any other top-level content folder (e.g. a stray `Legal/`) folds into
+    // Knowledge, unless an app claims it.
     const otherDirs = kids.filter(
-      (c) => c.type === 'directory' && !KB_ROOT_DIRS.has(c.name),
+      (c) => c.type === 'directory' && !KB_ROOT_DIRS.has(c.name) && !claimed(c.name),
     );
-    // Present Knowledge, Data, Agents and Pipelines as named roots. Knowledge is
+    // Present Knowledge, Data, Agents and Workflows as named roots. Knowledge is
     // synthetic so it can relabel `KnowledgeBase` and absorb the stray
     // content folders; it reuses KnowledgeBase's own path so file ops on the
     // row still resolve.
@@ -2501,19 +2544,31 @@ export function FileExplorer() {
       : otherDirs.length > 0
         ? { name: 'Knowledge', relativePath: otherDirs[0].relativePath, type: 'directory', children: otherDirs }
         : null;
-    const dataRoot: FileTreeEntry | null = data ? { ...data, name: DATA_DIR } : null;
-    const agentsRoot: FileTreeEntry | null = agents ? { ...agents, name: AGENTS_DIR } : null;
-    const pipelinesRoot: FileTreeEntry | null = pipelines
-      ? { ...pipelines, name: PIPELINES_DIR }
-      : null;
     return {
       knowledge,
-      data: dataRoot,
-      agents: agentsRoot,
-      pipelines: pipelinesRoot,
+      roots: [DATA_DIR, AGENTS_DIR, WORKFLOWS_DIR]
+        .filter((name) => !claimed(name))
+        .map(asSection)
+        .filter((e): e is FileTreeEntry => e !== null),
       looseFiles: kids.filter((c) => c.type === 'file'),
     };
-  }, [checkout]);
+  }, [checkout, roots, claims]);
+
+  // The flat tree of a clone that predates the split, less the roots an app
+  // claims: still the checkout row, with its own path and actions, so a
+  // claim never makes another folder stand in for it.
+  const flatRoot = useMemo(
+    () =>
+      checkout && claims.size > 0
+        ? {
+            ...checkout,
+            children: checkout.children?.filter(
+              (c) => c.type !== 'directory' || appClaimingRoot(claims, c.name) === undefined,
+            ),
+          }
+        : checkout,
+    [checkout, claims],
+  );
 
   const handleDrop = useCallback(
     (e: React.DragEvent) => {
@@ -2522,7 +2577,11 @@ export function FileExplorer() {
       // target — the workspace root, beside the missing folder, where
       // nothing this sidebar shows can ever live. Refused before
       // `preventDefault`, so the browser's own cursor says "not here".
-      if (!checkout) return;
+      //
+      // A narrowed tree has no background folder either: the checkout is not
+      // one of its roots, and a file dropped there would land out of sight.
+      // Its folders' own rows take drops as they do in Knowledge.
+      if (!checkout || roots) return;
       e.preventDefault();
       setDragOver(false);
       // Only handle external file/folder drops at the root level.
@@ -2539,7 +2598,7 @@ export function FileExplorer() {
       const files = Array.from(e.dataTransfer.files);
       if (files.length > 0) dispatchUpload({ kind: 'files', files }, target, KNOWLEDGE_UPLOAD_TARGET);
     },
-    [checkout, dispatchUpload],
+    [checkout, roots, dispatchUpload],
   );
 
   return (
@@ -2561,7 +2620,7 @@ export function FileExplorer() {
       onDragOver={(e) => {
         // Same refusal as the drop: no checkout, no drop target, so no
         // highlight promising one.
-        if (!checkout) return;
+        if (!checkout || roots) return;
         e.preventDefault();
         setDragOver(true);
       }}
@@ -2583,9 +2642,9 @@ export function FileExplorer() {
         {pinnedEntries.map((e) => (
           <FileTreeNode key={`pin:${e.relativePath}`} entry={e} depth={0} collapseChildren />
         ))}
-        {explorerItems.map(({ id, Component }) => (
-          <Component key={id} tree={mergedTree} />
-        ))}
+        {/* Knowledge's own rows (the graph view): not part of a narrowed tree. */}
+        {!roots &&
+          explorerItems.map(({ id, Component }) => <Component key={id} tree={mergedTree} />)}
         <div className="mx-3 my-2 border-t border-line" />
         {!mergedTree ? (
           <div className="px-3 py-4 text-xs text-ink-muted">Loading...</div>
@@ -2598,15 +2657,9 @@ export function FileExplorer() {
             {sections.knowledge && (
               <FileTreeNode entry={sections.knowledge} depth={0} collapseChildren />
             )}
-            {sections.data && (
-              <FileTreeNode entry={sections.data} depth={0} collapseChildren />
-            )}
-            {sections.agents && (
-              <FileTreeNode entry={sections.agents} depth={0} collapseChildren />
-            )}
-            {sections.pipelines && (
-              <FileTreeNode entry={sections.pipelines} depth={0} collapseChildren />
-            )}
+            {sections.roots.map((root) => (
+              <FileTreeNode key={root.relativePath} entry={root} depth={0} collapseChildren />
+            ))}
             {sections.looseFiles.length > 0 && (
               <>
                 <div className="mx-3 my-2 border-t border-line" />
@@ -2622,7 +2675,7 @@ export function FileExplorer() {
           // fallback is a different SHAPE, never a different directory — and
           // it is the ROOT row, not a folder inside one: the workspace
           // directory above it is not something this explorer shows.
-          <FileTreeNode entry={checkout} depth={0} root />
+          <FileTreeNode entry={flatRoot ?? checkout} depth={0} root />
         )}
         {/* Under the (empty) roots, so the hint's "folder above" is on
             screen: Knowledge's own folder is where a first page goes. A tree
@@ -2630,9 +2683,11 @@ export function FileExplorer() {
             folder itself is where a first page goes — and when there is no
             checkout at all the notice says THAT instead, and there is no
             folder to offer. */}
-        <EmptyTreeNotice
-          rootPath={sections ? sections.knowledge?.relativePath ?? null : checkout?.relativePath ?? null}
-        />
+        {!roots && (
+          <EmptyTreeNotice
+            rootPath={sections ? sections.knowledge?.relativePath ?? null : checkout?.relativePath ?? null}
+          />
+        )}
       </div>
     </div>
     </TreeChrome>

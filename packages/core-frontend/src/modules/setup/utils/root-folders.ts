@@ -1,4 +1,4 @@
-import { AGENTS_DIR, DATA_DIR, PIPELINES_DIR, validateKbRootName } from '@bevel-software/platform-shared';
+import { AGENTS_DIR, DATA_DIR, WORKFLOWS_DIR, validateKbRootName } from '@bevel-software/platform-shared';
 
 /**
  * What the repository holds for one configured root folder, judged against
@@ -34,7 +34,7 @@ export function rootFolderState(configured: string, rootFolders: readonly string
   };
 }
 
-const RESERVED_ROOTS = [DATA_DIR, AGENTS_DIR, PIPELINES_DIR].map((name) => name.toLowerCase());
+const RESERVED_ROOTS = [DATA_DIR, AGENTS_DIR, WORKFLOWS_DIR].map((name) => name.toLowerCase());
 
 /**
  * Whether a listed folder may be offered as a root name: one the save would

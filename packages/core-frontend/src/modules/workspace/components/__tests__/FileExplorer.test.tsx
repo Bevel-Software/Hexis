@@ -23,6 +23,7 @@ import type { VersionControlEvent } from '@bevel-software/platform-shared';
 import {
   AppRegistryContext,
   makeRegistry,
+  type AppDef,
   type FolderMenuContext,
   type FolderMenuItemDef,
   type FolderMenuTools,
@@ -200,6 +201,10 @@ interface RenderOptions {
    * empty, which is what every other test in this file renders against.
    */
   folderMenuItems?: FolderMenuItemDef[];
+  /** Apps in the registry — the ones whose `roots` claim top-level folders. */
+  apps?: AppDef[];
+  /** Render the narrowed tree an app mounts for its roots. */
+  roots?: string[];
   /** The workspace id — the encoded branch name, so it decides "protected". */
   workspaceId?: string;
   openFilePath?: string | null;
@@ -285,7 +290,7 @@ function renderExplorer(opts: RenderOptions = {}) {
     // the fixture must not hand out a pair that cannot exist.
     workspaceBranch: decodeURIComponent(opts.workspaceId ?? 'ws-1'),
   });
-  const registry = makeRegistry({ folderMenuItems: opts.folderMenuItems ?? [] });
+  const registry = makeRegistry({ folderMenuItems: opts.folderMenuItems ?? [], apps: opts.apps ?? [] });
   const ui = (ws: WorkspaceContextValue, mine: Map<string, number>) => (
       <MemoryRouter initialEntries={opts.initialEntries ?? ['/']}>
         <AppRegistryContext.Provider value={registry}>
@@ -322,7 +327,7 @@ function renderExplorer(opts: RenderOptions = {}) {
                     mineNumbers: new Set(opts.mineNumbers ?? [...mine.values()]),
                   }}
                 >
-                  <FileExplorer />
+                  <FileExplorer roots={opts.roots} />
                   <LocationProbe />
                 </OpenChangeRequestsContext.Provider>
             </GitContext.Provider>
@@ -1163,6 +1168,17 @@ describe('FileExplorer sections: root folders', () => {
     cleanup();
   });
 
+  /**
+   * The root names on screen, in document order. Knowledge renders open, so
+   * a folder folded into it shows between it and the next section.
+   */
+  const sectionNames = () =>
+    ['Knowledge', 'Data', 'Agents', 'Workflows', 'Pipelines', 'Legal']
+      .map((name) => screen.queryByText(name))
+      .filter((el): el is HTMLElement => el !== null)
+      .sort((a, b) => (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1))
+      .map((el) => el.textContent);
+
   const dir = (name: string): FileTreeEntry => ({
     name,
     relativePath: name,
@@ -1171,23 +1187,111 @@ describe('FileExplorer sections: root folders', () => {
   });
 
   /**
-   * `Data/`, `Agents/` and `Pipelines/` are never created by core — a
+   * `Data/`, `Agents/` and `Workflows/` are never created by core — a
    * deployment that owns the agentic execution layer seeds them. When they ARE
    * there they get their own sections, and in particular must not fold into
    * Knowledge the way a stray content folder does.
    */
-  it('renders Data, Agents and Pipelines as their own sections when present', () => {
+  it('renders Data, Agents and Workflows as their own sections when present, in that order', () => {
     const tree: FileTreeEntry = {
       name: '.',
       relativePath: '.',
       type: 'directory',
-      children: [dir('KnowledgeBase'), dir('Data'), dir('Agents'), dir('Pipelines')],
+      children: [dir('Workflows'), dir('KnowledgeBase'), dir('Agents'), dir('Data')],
     };
     renderExplorer({ fileTree: tree });
-    expect(screen.getByText('Knowledge')).toBeInTheDocument();
-    expect(screen.getByText('Data')).toBeInTheDocument();
-    expect(screen.getByText('Agents')).toBeInTheDocument();
-    expect(screen.getByText('Pipelines')).toBeInTheDocument();
+    expect(sectionNames()).toEqual(['Knowledge', 'Data', 'Agents', 'Workflows']);
+  });
+
+  /** `Pipelines` is not a name core knows: a stray folder like any other. */
+  it('folds a Pipelines folder into Knowledge', () => {
+    const tree: FileTreeEntry = {
+      name: '.',
+      relativePath: '.',
+      type: 'directory',
+      children: [dir('Data'), dir('Pipelines'), dir('KnowledgeBase')],
+    };
+    renderExplorer({ fileTree: tree });
+    expect(sectionNames()).toEqual(['Knowledge', 'Pipelines', 'Data']);
+  });
+
+  const agentsApp = (roots: string[]): AppDef => ({
+    id: 'agents',
+    label: 'Agents',
+    path: '/agents',
+    element: <div />,
+    roots,
+  });
+
+  /**
+   * A root an app claims is that app's to show. Left out of Knowledge
+   * whether core reserves the name or not, and folded nowhere.
+   */
+  it('leaves out the roots an app claims, reserved or not', () => {
+    const tree: FileTreeEntry = {
+      name: '.',
+      relativePath: '.',
+      type: 'directory',
+      children: [dir('KnowledgeBase'), dir('Data'), dir('Agents'), dir('Workflows'), dir('Pipelines'), dir('Legal')],
+    };
+    renderExplorer({ fileTree: tree, apps: [agentsApp(['Agents', 'Workflows', 'Data', 'Pipelines'])] });
+    // The stray folder still folds in; the claimed ones show nowhere.
+    expect(sectionNames()).toEqual(['Knowledge', 'Legal']);
+  });
+
+  /**
+   * A tree with none of core's roots falls back to the flat tree: the
+   * checkout row, with its own path and actions. A claimed root is left out
+   * of it, and no other folder stands in for a Knowledge section.
+   */
+  it('keeps a claimed root out of a tree with none of core’s roots', () => {
+    const tree: FileTreeEntry = {
+      name: '.',
+      relativePath: '.',
+      type: 'directory',
+      children: [dir('Pipelines'), dir('Legal')],
+    };
+    renderExplorer({ fileTree: tree, apps: [agentsApp(['Pipelines'])] });
+    expect(screen.getByText('Legal')).toBeInTheDocument();
+    expect(screen.queryByText('Pipelines')).not.toBeInTheDocument();
+    expect(screen.queryByText('Knowledge')).not.toBeInTheDocument();
+  });
+
+  /** Root names compare case-insensitively, as the layout's do. */
+  it('leaves out a root claimed in another case', () => {
+    const tree: FileTreeEntry = {
+      name: '.',
+      relativePath: '.',
+      type: 'directory',
+      children: [dir('KnowledgeBase'), dir('Agents'), dir('Legal')],
+    };
+    renderExplorer({ fileTree: tree, apps: [agentsApp(['agents', 'LEGAL'])] });
+    expect(sectionNames()).toEqual(['Knowledge']);
+  });
+
+  /** The narrowed tree: its roots, in its order, and nothing else of the knowledge base. */
+  it('shows only its roots when narrowed', () => {
+    const tree: FileTreeEntry = {
+      name: '.',
+      relativePath: '.',
+      type: 'directory',
+      children: [
+        dir('KnowledgeBase'),
+        dir('Data'),
+        dir('Agents'),
+        dir('Workflows'),
+        dir('Legal'),
+        { name: 'roles.yaml', relativePath: 'roles.yaml', type: 'file' },
+      ],
+    };
+    renderExplorer({
+      fileTree: tree,
+      apps: [agentsApp(['Agents', 'Workflows'])],
+      roots: ['Workflows', 'Agents'],
+    });
+    expect(sectionNames()).toEqual(['Workflows', 'Agents']);
+    expect(screen.queryByText('Knowledge')).not.toBeInTheDocument();
+    expect(screen.queryByText('roles.yaml')).not.toBeInTheDocument();
   });
 
   /**
@@ -3169,6 +3273,48 @@ describe('FileExplorer: an empty tree says why', () => {
 
   it('shows nothing while the tree is still loading', () => {
     renderExplorer({ fileTree: null });
+    expect(screen.queryByTestId('tree-empty-notice')).not.toBeInTheDocument();
+  });
+
+  /**
+   * A root an app claims is not in Knowledge's tree, so what it holds does
+   * not make that tree non-empty: the notice and its hint still show.
+   */
+  const hostingApp = (roots: string[]): AppDef => ({
+    id: 'agents',
+    label: 'Agents',
+    path: '/agents',
+    element: <div />,
+    roots,
+  });
+
+  it('says "empty" when the only content is under a claimed root', () => {
+    renderExplorer({
+      fileTree: seeded([], {}, [dirAt(`${KBD}/Agents`, [fileAt(`${KBD}/Agents/Planner.md`)])]),
+      apps: [hostingApp(['Agents'])],
+      workspaceId: 'alice%2Fdraft',
+    });
+    expect(screen.getByTestId('tree-empty-notice')).toHaveTextContent('This knowledge base is empty.');
+    expect(screen.getByTestId('tree-empty-create-hint')).toBeInTheDocument();
+  });
+
+  it('says "empty" for a tree that predates the split whose only folder is claimed', () => {
+    renderExplorer({
+      fileTree: rootedAtCheckout(
+        dirAt('.', [dirAt(KBD, [dirAt(`${KBD}/Pipelines`, [fileAt(`${KBD}/Pipelines/run.workflow`)])])]),
+      ),
+      apps: [hostingApp(['Pipelines'])],
+      workspaceId: 'alice%2Fdraft',
+    });
+    expect(screen.queryByText('Pipelines')).not.toBeInTheDocument();
+    expect(screen.getByTestId('tree-empty-notice')).toHaveTextContent('This knowledge base is empty.');
+    expect(screen.getByTestId('tree-empty-create-hint')).toBeInTheDocument();
+  });
+
+  it('still counts that content when no app claims the root', () => {
+    renderExplorer({
+      fileTree: seeded([], {}, [dirAt(`${KBD}/Agents`, [fileAt(`${KBD}/Agents/Planner.md`)])]),
+    });
     expect(screen.queryByTestId('tree-empty-notice')).not.toBeInTheDocument();
   });
 });

@@ -247,7 +247,7 @@ describe('suggestedPages', () => {
       dir('knowledge-base', [
         dir('knowledge-base/KnowledgeBase', [
           dir('knowledge-base/KnowledgeBase/Data', [page('knowledge-base/KnowledgeBase/Data/rows.md')]),
-          dir('knowledge-base/KnowledgeBase/Pipelines', [page('knowledge-base/KnowledgeBase/Pipelines/run.md')]),
+          dir('knowledge-base/KnowledgeBase/Workflows', [page('knowledge-base/KnowledgeBase/Workflows/run.md')]),
           dir('knowledge-base/KnowledgeBase/Skills', [page('knowledge-base/KnowledgeBase/Skills/x.md')]),
           dir('knowledge-base/KnowledgeBase/Team', [page('knowledge-base/KnowledgeBase/Team/People.md')]),
         ]),
@@ -352,6 +352,14 @@ describe('treeHasVisibleEntries', () => {
   it('reads a tree without the split from the KB clone folder down', () => {
     expect(treeHasVisibleEntries(d('.', [d('kb')]), 'kb')).toBe(false);
     expect(treeHasVisibleEntries(d('.', [d('kb', [f('kb/a.md')])]), 'kb')).toBe(true);
+  });
+
+  it('does not count a hidden root, nor anything in it', () => {
+    const claimed = (name: string) => name.toLowerCase() === 'agents';
+    expect(treeHasVisibleEntries(kb(d('kb/Agents', [f('kb/Agents/a.md')])), 'kb', claimed)).toBe(false);
+    expect(treeHasVisibleEntries(d('.', [d('kb', [d('kb/Agents', [f('kb/Agents/a.md')])])]), 'kb', claimed)).toBe(false);
+    expect(treeHasVisibleEntries(kb(d('kb/Agents', [f('kb/Agents/a.md')]), d('kb/Legal')), 'kb', claimed)).toBe(true);
+    expect(treeHasVisibleEntries(kb(d('kb/Agents', [f('kb/Agents/a.md')])), 'kb')).toBe(true);
   });
 
   it('counts nothing outside the checkout, and nothing when there is no checkout', () => {

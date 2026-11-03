@@ -3,13 +3,13 @@ import type { AddressInfo } from 'node:net';
 import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { testKbContext } from '../../../__tests__/kb-context.js';
-import { NodeFs } from '../../kb-fs/node-fs.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
 import type { IVersionControlService } from '@bevel-software/platform-shared';
-import type { IAccessControl } from '../../access/access-control.interface.js';
-import type { ICreatorAccess } from '../../access-model/creator.js';
-import type { IAdminAccessService } from '../../admin/admin.interface.js';
-import type { VersionControlEventBus } from '../../version-control/event-bus.js';
-import type { AuthService } from '../../auth/auth.service.js';
+import type { IAccessControl } from '../../access/index.js';
+import type { ICreatorAccess } from '../../access-model/index.js';
+import type { IAdminAccessService } from '../../admin/index.js';
+import type { VersionControlEventBus } from '../../version-control/index.js';
+import type { AuthService } from '../../auth/index.js';
 import { createWorkspaceRoutes } from '../workspace.routes.js';
 import type { WorkspaceService, ReadTreeFilter } from '../workspace.service.js';
 
@@ -97,7 +97,7 @@ async function makeHarness(opts: {
       testKbContext({ kbDirName: KB }),
       stubCreatorAccess,
       { isAdmin: async () => opts.isAdmin === true } as unknown as IAdminAccessService,
-      new NodeFs(),
+      realDisk(),
     ),
   );
   const server = await new Promise<Server>((resolve) => {
@@ -201,7 +201,7 @@ describe('read-permission gates on human read routes', () => {
   it('keeps the structural root folders visible even when nothing is readable', async () => {
     // A user with no read grants: the access batch denies everything. The
     // structural top-level folders (KnowledgeBase, Skills, Data, Agents,
-    // Pipelines, Plugins) must still resolve readable (so the explorer renders
+    // Workflows, Plugins) must still resolve readable (so the explorer renders
     // its section view), while their contents stay gated. The retired Tools/
     // root gets NO structural treatment — it is an ordinary (denied) folder.
     h = await makeHarness({ allowFn: () => false });
@@ -211,7 +211,7 @@ describe('read-permission gates on human read routes', () => {
       `${KB}/KnowledgeBase`,
       `${KB}/Data`,
       `${KB}/Agents`,
-      `${KB}/Pipelines`,
+      `${KB}/Workflows`,
       `${KB}/Plugins`,
       `${KB}/Skills`,
       `${KB}/Tools`,
@@ -223,7 +223,7 @@ describe('read-permission gates on human read routes', () => {
     expect(verdict.get(`${KB}/KnowledgeBase`)).toBe(true);
     expect(verdict.get(`${KB}/Data`)).toBe(true);
     expect(verdict.get(`${KB}/Agents`)).toBe(true);
-    expect(verdict.get(`${KB}/Pipelines`)).toBe(true);
+    expect(verdict.get(`${KB}/Workflows`)).toBe(true);
     expect(verdict.get(`${KB}/Plugins`)).toBe(true);
     expect(verdict.get(`${KB}/Skills`)).toBe(true);
     // Retired root: no override, the deny-all batch verdict stands.

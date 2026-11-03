@@ -413,7 +413,7 @@ describe('ManageAccessDialog: a file whose folder governs its access', () => {
 
   it("the server's ruling decides: an overlay-registered kind the server accepts keeps the field", async () => {
     api.fetchFileAccess.mockResolvedValue({ ...binaryView, governedByFolder: undefined });
-    const flow = { name: 'Flow.pipeline', relativePath: `${KB}/Sales/Flow.pipeline`, type: 'file' } as unknown as FileTreeEntry;
+    const flow = { name: 'Flow.workflow', relativePath: `${KB}/Sales/Flow.workflow`, type: 'file' } as unknown as FileTreeEntry;
     render(<ManageAccessDialog entry={flow} onClose={() => {}} onManageAncestor={() => {}} />);
     expect(await screen.findByRole('heading', { name: /On this file/i })).toBeInTheDocument();
     expect(screen.getByPlaceholderText(/Add people, groups, roles or plugins/)).toBeInTheDocument();
