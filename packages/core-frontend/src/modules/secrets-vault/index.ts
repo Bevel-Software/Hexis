@@ -11,3 +11,5 @@ export { useSavedKeyProbe } from './probe/useSavedKeyProbe';
 export { startToolOAuth } from './services/connect.api';
 export { deleteAdminVar, listToolSecrets, setAdminVar, setOAuthClientSecret, setUserVar } from './services/tool-secrets.api';
 export type { ProbeVerdict, ToolSecrets, ToolVarStatus } from './services/tool-secrets.api';
+/** Whether a managed sign-in can be started from here: the one rule the Connect page and the tool page share. */
+export { canStartSignIn } from './utils/managed-card-state';

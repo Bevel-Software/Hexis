@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from 'react';
 import { Badge, Button, ListRow, TextField } from '../../../../shared/components';
-import { startToolOAuth } from '../../../secrets-vault';
+import { canStartSignIn, startToolOAuth } from '../../../secrets-vault';
 import {
   deleteAdminVar,
   setAdminVar,
@@ -140,14 +140,16 @@ export function ToolVarRow({
     const workspaceConnection = variable.managed != null && variable.scope === 'admin';
     const mayAct = !workspaceConnection || canWrite;
     const whose = workspaceConnection ? 'One connection for the whole workspace, made by a tool owner' : 'Each person sets their own';
+    // Whether a sign-in can be STARTED from this row. A managed one answers
+    // to the same rule as the Connect page's card (`canStartSignIn`: the
+    // broker, or an owner's own app on a personal sign-in) and to who may
+    // make it; an ordinary one always offers its caller the flow.
+    const mayStart = variable.managed ? canStartSignIn({ managed: variable.managed }) && mayAct : true;
     // The owner's half is done when a client secret is stored on a row of the
     // OAuth kind (a key left from when the variable was static is not one) —
-    // or, for a MANAGED sign-in, when the deployment can reach its broker or
-    // an owner pinned their own app: there is no secret to store for the
-    // broker's app.
-    const ownerReady = variable.managed
-      ? (variable.managed.available || variable.managed.ownApp) && mayAct
-      : variable.adminConfigured && variable.adminKind !== 'static';
+    // or, for a MANAGED sign-in, when a start can be opened from here: there
+    // is no secret to store for the broker's app.
+    const ownerReady = variable.managed ? mayStart : variable.adminConfigured && variable.adminKind !== 'static';
 
     if (variable.authorized && !variable.needsReauth) {
       description = whose;
@@ -155,8 +157,10 @@ export function ToolVarRow({
       // fact (HubSpot's MCP tools do, and answer REQUIRES_REAUTHORIZATION
       // until the user consents again), a grant can be revoked provider-side,
       // or the owner can rotate the client. The caller needs a way back into
-      // consent that doesn't wait for the scope check to notice.
-      if (mayAct) {
+      // consent that doesn't wait for the scope check to notice. A stored
+      // managed token keeps working while the broker is away; the way back
+      // into consent does not, so the button waits with it.
+      if (mayStart) {
         meta.push(
           <Button key="reconnect" size="sm" variant="quiet" disabled={busy} onClick={() => void signIn()}>
             Reconnect
@@ -175,7 +179,7 @@ export function ToolVarRow({
     } else if (variable.authorized) {
       description = whose;
       meta.push(
-        mayAct ? (
+        mayStart ? (
           <Button key="reauth" size="sm" disabled={busy} onClick={() => void signIn()}>
             Sign in again
           </Button>
@@ -195,13 +199,16 @@ export function ToolVarRow({
     } else {
       // The owner hasn't declared the provider (or hasn't set its secret), so
       // there is nothing for anyone to sign in to yet. For a managed sign-in
-      // the missing half is the broker (the admin's), or the connection is a
+      // the missing half is the broker (the admin's), an own app pinned on a
+      // workspace connection (the owner's to remove), or the connection is a
       // writer's to make: the row says which.
       description = !variable.managed
         ? "The tool owner hasn't finished the sign-in setup yet."
         : !mayAct
           ? whose
-          : 'This deployment is not connected to a connector broker yet. Ask your admin.';
+          : variable.managed.ownApp && workspaceConnection
+            ? 'This workspace connection has your own OAuth app pinned. Remove its client secret to connect it through the managed connector.'
+            : 'This deployment is not connected to a connector broker yet. Ask your admin.';
       if (!mayEditClientSecret) {
         meta.push(
           <Badge key="chip" tone="neutral">

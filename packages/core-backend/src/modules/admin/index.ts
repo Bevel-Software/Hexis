@@ -5,3 +5,5 @@
  * contract; the implementation is wired by the composition root.
  */
 export type { IAdminAccessService } from './admin.interface.js';
+// Reached by other modules' tests; exported here so they stop importing the file.
+export { AdminAccessService } from './admin-access.service.js';

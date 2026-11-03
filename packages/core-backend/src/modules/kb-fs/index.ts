@@ -17,6 +17,7 @@ export type { FileChangeNotifier } from './file-change-notifier.js';
 export { GitGuardedFilesystem } from './git-guarded-filesystem.js';
 export { LockingFilesystem, MoveLockedError, MoveRacedError } from './locking-filesystem.js';
 export { ReadOnlyFilesystem } from './read-only-filesystem.js';
+export { NodeFs } from './node-fs.js';
 export { normalizeRepositoryAddress, sameRepository } from './remote-url.js';
 export { assertInsideRepo, assertKbDirNameFree, assertRepoRootNameFree, assertRepoRootNameFreeArgs, hasControlCharacter, isInsideRepo, normalizePathArgs } from './repo-path.js';
 export type { NormalizePathArgsOptions } from './repo-path.js';

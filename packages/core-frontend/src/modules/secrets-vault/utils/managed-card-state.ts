@@ -41,8 +41,12 @@ export function managedCardState(o: ManagedToolOAuth): ManagedCardState {
  * WORKSPACE connection goes through the broker alone: an owner's own app
  * would sign the owner in to their own row, which nobody reads for it, so
  * that combination is not offered (the server refuses it too).
+ *
+ * The one rule for every surface that offers Connect, Reconnect or Sign in
+ * on a managed sign-in — the Connect page's card and the tool page's row —
+ * so the two cannot offer a start the server would refuse.
  */
-export function canStartSignIn(o: ManagedToolOAuth): boolean {
+export function canStartSignIn(o: { managed: ManagedSignIn }): boolean {
   if (o.managed.tokenScope === 'shared') return o.managed.available && !o.managed.ownApp;
   return o.managed.ownApp || o.managed.available;
 }

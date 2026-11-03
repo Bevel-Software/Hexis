@@ -51,7 +51,7 @@ function statementText(statement: { queryChunks?: unknown[] }): string {
     .join(' ');
 }
 
-function harness(opts: { participants?: IErasureParticipant[] } = {}) {
+function harness(opts: { participants?: IErasureParticipant[]; coreParticipants?: IErasureParticipant[] } = {}) {
   /** Everything the erasure did, in order, as `<verb>:<table>` / lock labels. */
   const order: string[] = [];
   const locked: unknown[][] = [];
@@ -130,12 +130,39 @@ function harness(opts: { participants?: IErasureParticipant[] } = {}) {
       db,
       new ReviewWorkflowService(db, {} as never, {} as never, {} as never),
       opts.participants ?? [],
+      opts.coreParticipants ?? [],
     ),
     order,
     locked,
     lockSql,
   };
 }
+
+describe('AccountErasureService: whose slices run, and in what order', () => {
+  it('runs core’s own slices first, then the port’s array as it is at erasure time — the array held, never copied', async () => {
+    const steps: string[] = [];
+    const slice = (name: string): IErasureParticipant => ({
+      before: async () => {
+        steps.push(`before:${name}`);
+      },
+      inTransaction: async () => {
+        steps.push(`tx:${name}`);
+      },
+    });
+    // The port's array, as a root hands it over: one slice now …
+    const fromPort = [slice('distribution-1')];
+    const h = harness({ participants: fromPort, coreParticipants: [slice('vault')] });
+    // … and one it appends AFTER construction (`CorePorts.erasureParticipants`
+    // promises this works: the array is held by reference). Core's slice is
+    // not in that array, so a root building a second graph over it never
+    // inherits the first graph's vault.
+    fromPort.push(slice('distribution-2'));
+    expect(fromPort).toHaveLength(2);
+
+    await expect(h.svc.eraseUser('u1')).resolves.toBe(true);
+    expect(steps).toEqual(['before:vault', 'before:distribution-1', 'before:distribution-2', 'tx:vault', 'tx:distribution-1', 'tx:distribution-2']);
+  });
+});
 
 describe('AccountErasureService: approvals are rewritten under the approval lock', () => {
   it('takes the every-request lock exclusively, right before it anonymizes them', async () => {

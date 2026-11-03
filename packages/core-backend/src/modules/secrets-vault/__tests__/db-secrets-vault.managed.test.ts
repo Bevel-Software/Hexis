@@ -262,6 +262,18 @@ describe('a managed sign-in: begin and the handoff', () => {
     expect(decryptSet(captured).tokens).toMatchObject({ access_token: 'at', scope: 'Mail.Read offline_access' });
   });
 
+  it('a handoff whose scope is explicitly empty is an empty grant, not a missing one', async () => {
+    const waiting = row({ pendingNonce: NONCE }, { ...MANAGED_META, scopes: ['Mail.Read'] });
+    const { db, captured } = makeFakeDb([[waiting], [{ id: 'row-1' }]]);
+    await new DbSecretsVaultService(db, ENC_KEY).completeManagedConnection({
+      userId: USER,
+      key: KEY,
+      nonce: NONCE,
+      tokens: { access_token: 'at', scope: '' },
+    });
+    expect((decryptSet(captured).tokens as { scope?: string }).scope).toBe('');
+  });
+
   it('refuses a handoff whose nonce is wrong, and a second handoff for a nonce already used', async () => {
     const waiting = row({ pendingNonce: NONCE });
     const wrong = new DbSecretsVaultService(makeFakeDb([[waiting]]).db, ENC_KEY);
@@ -409,6 +421,37 @@ describe('a managed sign-in: revoked with the provider before it is deleted', ()
     expect(revoker.revoke).toHaveBeenCalledTimes(1);
   });
 
+  it('a bulk delete waits one revocation bound for every hung revoker, then deletes', async () => {
+    vi.useFakeTimers();
+    try {
+      const first = row({ tokens: { access_token: 'at-1' } });
+      const second = { ...row({ tokens: { access_token: 'at-2' } }), id: 'row-2', key: 'google_ACCESS_TOKEN' };
+      // A revoker that never settles: the bound is the only way out.
+      const revoker: ManagedTokenRevoker = { revoke: vi.fn(() => new Promise<void>(() => {})) };
+      // The user's rows; the same two re-read for the guarded delete; one answer per delete.
+      const { db } = makeFakeDb([
+        [first, second],
+        [first, second],
+        [{ id: 'row-1', userId: USER, kind: 'oauth' }],
+        [{ id: 'row-2', userId: USER, kind: 'oauth' }],
+      ]);
+      const vault = new DbSecretsVaultService(db, ENC_KEY);
+      vault.setManagedTokenHandlers({ revoker });
+      let settled: number | null = null;
+      const removal = vault.removeManagedRowsOfUser(USER).then((n) => (settled = n));
+      await vi.advanceTimersByTimeAsync(9_999);
+      expect(settled).toBeNull();
+      // ONE bound (the revocations run together), not one per row: a second
+      // row's revocation cannot add a second wait.
+      await vi.advanceTimersByTimeAsync(1);
+      await removal;
+      expect(settled).toBe(2);
+      expect(revoker.revoke).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('a value or an own-app client written over the caller’s managed row revokes its tokens first', async () => {
     // Every replacement of a row goes through the same guard: a typed value
     // and a registered client of the caller's own both drop the tokens the
@@ -479,6 +522,37 @@ describe('a managed provider is accepted only where a managed sign-in is opened'
       provider: { ...MANAGED_META, managed: undefined, clientId: 'own-app' },
     });
     expect(revoker.revoke).toHaveBeenCalledWith({ connectorId: 'microsoft365', scopeSet: 'read' }, { access_token: 'at', refresh_token: 'rt' });
+  });
+});
+
+describe('an owner’s own app on a managed sign-in: the start runs from the pinned client', () => {
+  /** The shared row an owner pinned: the deployment's own client, no managed mark. */
+  const pinned = row({ clientSecret: 'own-secret' }, { ...MANAGED_META, managed: undefined, clientId: 'own-app' }, null);
+  /** The declaration as the route hands it over: a managed sign-in names no client of its own. */
+  const declared = { authorizationUrl: MANAGED_META.authorizationUrl, tokenUrl: MANAGED_META.tokenUrl, clientId: '', scopes: ['Mail.Read'] };
+  const start = (vault: DbSecretsVaultService) =>
+    vault.beginToolOAuthByKey({ userId: USER, key: KEY, redirectUri: 'https://hexis.example/api/secrets/oauth/callback', state: 's', provider: declared });
+
+  it('a declaration without a client id runs with the client id stored on the pinned row', async () => {
+    const { db, captured } = makeFakeDb([[pinned], [], [{ id: 'row-1' }]]);
+    const vault = new DbSecretsVaultService(db, ENC_KEY);
+    const { url } = await start(vault);
+    expect(new URL(url).searchParams.get('client_id')).toBe('own-app');
+    expect(captured.values[0]).toMatchObject({ userId: USER, key: KEY, kind: 'oauth', oauthMeta: expect.objectContaining({ clientId: 'own-app' }) });
+    expect((captured.values[0].oauthMeta as Record<string, unknown>).managed).toBeUndefined();
+  });
+
+  it('starting over the caller’s managed row revokes the broker’s tokens and carries none of them', async () => {
+    const theirs = row({ tokens: { access_token: 'at', refresh_token: 'rt' } });
+    const revoker: ManagedTokenRevoker = { revoke: vi.fn(async () => undefined) };
+    const { db, captured } = makeFakeDb([[pinned], [theirs], [{ id: 'row-1' }]]);
+    const vault = new DbSecretsVaultService(db, ENC_KEY);
+    vault.setManagedTokenHandlers({ revoker });
+    await start(vault);
+    expect(revoker.revoke).toHaveBeenCalledWith({ connectorId: 'microsoft365', scopeSet: 'read' }, { access_token: 'at', refresh_token: 'rt' });
+    const blob = JSON.parse(crypto.decrypt(captured.values[0].valueEncrypted as string)) as { tokens?: unknown; clientSecret?: string };
+    expect(blob.tokens).toBeUndefined();
+    expect(blob.clientSecret).toBe('own-secret');
   });
 });
 

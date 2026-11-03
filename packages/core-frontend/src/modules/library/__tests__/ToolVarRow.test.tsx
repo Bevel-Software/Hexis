@@ -338,6 +338,27 @@ describe('ToolVarRow: a managed sign-in', () => {
     expect(screen.queryByRole('button', { name: 'Sign in' })).toBeNull();
   });
 
+  it('offers a start only where the Connect page would: no Reconnect without a broker, an own app only on a personal sign-in', () => {
+    // A stored token keeps working while the broker is away; the way back
+    // into consent does not, so the row shows the state and no button.
+    renderRow(managed({ authorized: true }, { available: false }));
+    expect(screen.getByText('Signed in')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Reconnect' })).toBeNull();
+    cleanup();
+    renderRow(managed({ authorized: true, needsReauth: true }, { available: false }));
+    expect(screen.getByText('Needs reconnect')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Sign in again' })).toBeNull();
+    cleanup();
+    // An owner's own app stands in for the broker on a personal sign-in …
+    renderRow(managed({}, { available: false, ownApp: true }));
+    expect(screen.getByRole('button', { name: 'Sign in' })).toBeInTheDocument();
+    cleanup();
+    // … and never on a workspace connection, which the server refuses with 422.
+    renderRow(workspace({}, { available: true, ownApp: true }), { canWrite: true });
+    expect(screen.queryByRole('button', { name: 'Sign in' })).toBeNull();
+    expect(screen.getByText(/has your own OAuth app pinned/)).toBeInTheDocument();
+  });
+
   it('a workspace connection: a reader sees its state and no control, a writer makes and remakes it', () => {
     // Connected by an owner: the reader is told, and offered nothing the server would refuse.
     renderRow(workspace({ authorized: true }), { canWrite: false });
