@@ -72,8 +72,10 @@ describe('toListedTool', () => {
     const listed = toListedTool(proxied({ mcpName: 'gmail_send_email' }));
     expect(listed).toEqual({
       name: 'gmail_send_email',
+      title: 'Gmail send email',
       description: 'Call: m.t({})\n\na tool',
       inputSchema: { type: 'object', properties: {} },
+      annotations: { readOnlyHint: false },
     });
   });
 
