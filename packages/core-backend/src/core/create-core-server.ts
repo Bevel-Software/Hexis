@@ -391,6 +391,7 @@ export async function createCoreServer(
     core.internalTokenService,
     core.mcpOAuthProvider,
     core.mcpResourceMetadataUrl,
+    core.agentAuditService,
     core.agentScopeService,
   ));
 

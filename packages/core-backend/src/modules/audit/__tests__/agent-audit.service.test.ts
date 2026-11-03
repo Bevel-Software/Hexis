@@ -250,6 +250,88 @@ describe('AgentAuditService.listPrincipals', () => {
   });
 });
 
+describe('AgentAuditService: last used is the last recorded call', () => {
+  // The stamps move on every signed-in request and token refresh, which a
+  // client sends whenever a chat opens even when it calls nothing. Only a
+  // recorded event says the agent was used.
+  const FOUR_DAYS_AGO = NOW - 4 * DAY;
+
+  function listWith(over: { connections?: unknown[]; keys?: unknown[]; events?: unknown[] }) {
+    return makeService(
+      [[ALICE], over.connections ?? [], over.events ?? [], []],
+      { listForUser: vi.fn(async () => over.keys ?? []) },
+    ).service.listPrincipals({ userId: ALICE.id });
+  }
+
+  it("an agent connection whose stamp is newer than its newest event lists the event's instant", async () => {
+    const [row] = await listWith({
+      connections: [{ connection: connection({ id: 'c-1', lastUsedAt: new Date(NOW - 60 * 60_000) }), user: ALICE }],
+      events: [{ keyId: null, connectionId: 'c-1', n: 21, last: new Date(FOUR_DAYS_AGO) }],
+    });
+    expect(row).toMatchObject({ kind: 'agent', id: 'c-1', eventCount: 21, lastUsedAt: FOUR_DAYS_AGO });
+  });
+
+  it('an agent connection with a stamp but no events lists null', async () => {
+    const [row] = await listWith({
+      connections: [{ connection: connection({ id: 'c-1', lastUsedAt: new Date(NOW - 60_000) }), user: ALICE }],
+    });
+    expect(row).toMatchObject({ kind: 'agent', id: 'c-1', eventCount: 0, lastUsedAt: null });
+  });
+
+  it("a key whose stamp is newer than its newest event lists the event's instant", async () => {
+    const [row] = await listWith({
+      keys: [key({ id: 'k-1', lastUsedAt: NOW - 60_000 })],
+      events: [{ keyId: 'k-1', connectionId: null, n: 2, last: new Date(FOUR_DAYS_AGO) }],
+    });
+    expect(row).toMatchObject({ kind: 'key', id: 'k-1', eventCount: 2, lastUsedAt: FOUR_DAYS_AGO });
+  });
+
+  it('a key with a stamp but no events lists null', async () => {
+    const [row] = await listWith({ keys: [key({ id: 'k-1', lastUsedAt: NOW - 60_000 })] });
+    expect(row).toMatchObject({ kind: 'key', id: 'k-1', eventCount: 0, lastUsedAt: null });
+  });
+
+  it('orders by the newest event, not by the stamp', async () => {
+    const rows = await listWith({
+      connections: [
+        // Stamped a minute ago, last called four days ago.
+        { connection: connection({ id: 'c-chatty', lastUsedAt: new Date(NOW - 60_000) }), user: ALICE },
+        // Stamped two days ago, last called two days ago.
+        { connection: connection({ id: 'c-busy', lastUsedAt: new Date(NOW - 2 * DAY) }), user: ALICE },
+      ],
+      keys: [key({ id: 'k-1', lastUsedAt: NOW - 30_000 })],
+      events: [
+        { keyId: null, connectionId: 'c-chatty', n: 5, last: new Date(FOUR_DAYS_AGO) },
+        { keyId: null, connectionId: 'c-busy', n: 9, last: new Date(NOW - 2 * DAY) },
+        { keyId: 'k-1', connectionId: null, n: 1, last: new Date(NOW - 3 * DAY) },
+      ],
+    });
+    expect(rows.map((r) => r.id)).toEqual(['c-busy', 'k-1', 'c-chatty']);
+  });
+
+  it("lastCalls answers each key's and connection's newest event, the instant the list shows", async () => {
+    const events = [
+      { keyId: 'k-1', connectionId: null, n: 2, last: new Date(FOUR_DAYS_AGO) },
+      { keyId: null, connectionId: 'c-1', n: 3, last: new Date(NOW - DAY) },
+      // A page's events carry neither id.
+      { keyId: null, connectionId: null, n: 4, last: new Date(NOW) },
+    ];
+    const { service } = makeService([events]);
+    const last = await service.lastCalls(ALICE.id);
+    expect([...last.entries()]).toEqual([
+      ['k-1', FOUR_DAYS_AGO],
+      ['c-1', NOW - DAY],
+    ]);
+
+    const rows = await listWith({
+      connections: [{ connection: connection({ id: 'c-1' }), user: ALICE }],
+      keys: [key({ id: 'k-1' })],
+      events,
+    });
+    for (const row of rows) expect(row.lastUsedAt).toBe(last.get(row.id));
+  });
+});
+
 describe('AgentAuditService — a page as a principal', () => {
   const ALICE_ID = '11111111-1111-4111-8111-111111111111';
   const PAGE = 'Dashboards/Roadmap.html';

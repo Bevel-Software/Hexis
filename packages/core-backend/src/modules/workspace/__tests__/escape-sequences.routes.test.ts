@@ -169,7 +169,7 @@ async function startPlatform(): Promise<Platform> {
     publicFrontendUrl: 'http://localhost:5173',
   });
   const stub = {} as never;
-  app.use('/api', createMcpRoutes(service, stub, fakeAuth, fakeAuth, stub, stub, stub, ''));
+  app.use('/api', createMcpRoutes(service, stub, fakeAuth, fakeAuth, stub, stub, stub, '', stub));
   app.use('/api', createManualRoutes(registry, passthrough));
 
   let stopped = false;
