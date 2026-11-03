@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import express from 'express';
 import type { Server } from 'node:http';
 import { createAccountRoutes } from '../account.routes.js';
-import type { AccountInvitedEvent } from '../account-hooks.js';
+import { AccountHooks, type AccountInvitedEvent } from '../account-hooks.js';
 import { AuthService } from '../auth.service.js';
 import { AccountAdmissionRefusedError, AccountChangeRefusedError } from '../account-admission.js';
 import { VersionControlDomainError } from '../../../shared/domain-errors.js';
@@ -41,7 +41,7 @@ const accountHooks = {
   runAccountDeactivated: vi.fn<(event: { userId: string; email: string }) => Promise<string[]>>(async () => []),
 };
 
-function makeApp(opts: { admin: boolean; email?: string }) {
+function makeApp(opts: { admin: boolean; email?: string; hooks?: typeof accountHooks | AccountHooks }) {
   const adminAccess: IAdminAccessService = {
     isAdmin: vi.fn(async () => opts.admin),
   };
@@ -54,7 +54,7 @@ function makeApp(opts: { admin: boolean; email?: string }) {
     req.userEmail = opts.email ?? 'caller@example.com';
     next();
   });
-  app.use('/api', createAccountRoutes(authService, adminAccess, accountErasure, accountHooks));
+  app.use('/api', createAccountRoutes(authService, adminAccess, accountErasure, opts.hooks ?? accountHooks));
   return app;
 }
 
@@ -541,6 +541,26 @@ describe('account routes — switching an account off and on', () => {
       .mockRejectedValueOnce(new Error('users table is still away'));
     expect((await post(base, 'u2/deactivate')).status).toBe(204);
     expect(accountHooks.runAccountDeactivated).toHaveBeenLastCalledWith({ userId: 'u2', email: '' });
+  });
+
+  it('a deactivation listener that throws is logged and skipped: the later listeners run and the switch-off still answers 204', async () => {
+    // The real seam, not the mock: the account is off whether or not a
+    // listener cleaned up after it, and one that fails must not keep the next
+    // from running or turn the admin's answer into an error.
+    const hooks = new AccountHooks();
+    const ran: string[] = [];
+    hooks.onAccountDeactivated(async () => {
+      ran.push('first');
+      throw new Error('the broker is down');
+    });
+    hooks.onAccountDeactivated(async (event) => {
+      ran.push(`second:${event.userId}`);
+      return 'managed-connections';
+    });
+    const base = await listen(makeApp({ admin: true, hooks }));
+    expect((await post(base, 'u2/deactivate')).status).toBe(204);
+    expect(authService.deactivate).toHaveBeenCalledWith('u2');
+    expect(ran).toEqual(['first', 'second:u2']);
   });
 
   it('refuses an admin switching off their own account, so an admin who can sign in always remains', async () => {

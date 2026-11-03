@@ -517,6 +517,21 @@ describe('a managed sign-in: revoked with the provider before it is deleted', ()
     expect(order).toEqual(['revoke', 'write']);
   });
 
+  it('a managed row that keeps changing under the revoke is reported, and an erasure is refused rather than cascading it unrevoked', async () => {
+    const managed = row({ tokens: { access_token: 'at' } });
+    const revoker: ManagedTokenRevoker = { revoke: vi.fn(async () => undefined) };
+    // The user's rows; then, three times, the row re-read and a delete that
+    // misses it (its ciphertext changed since the read, every time).
+    const unsettled = () => makeFakeDb([[managed], [managed], [], [managed], [], [managed], []]);
+    const vault = new DbSecretsVaultService(unsettled().db, ENC_KEY);
+    vault.setManagedTokenHandlers({ revoker });
+    await expect(vault.removeManagedRowsOfUser(USER)).rejects.toThrow(/kept changing while being revoked/);
+
+    const v2 = new DbSecretsVaultService(unsettled().db, ENC_KEY);
+    v2.setManagedTokenHandlers({ revoker });
+    await expect(managedSignInErasure(v2).before({ userId: USER })).rejects.toThrow(/kept changing/);
+  });
+
   it('erasing the account revokes its managed sign-ins before the rows cascade away with the user', async () => {
     // Erasure deletes the user row and the vault rows go with it (ON DELETE
     // CASCADE); without this step an account erased while still switched on

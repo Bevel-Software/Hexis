@@ -11,7 +11,10 @@ import type { ISecretsVaultService } from './secrets-vault.contract.js';
  *
  * `before`, outside the transaction: revocation is best effort and idempotent
  * (a revoked token is deleted here either way, and a second run finds no
- * managed row), and the delete it precedes is the erasure's own.
+ * managed row), and the delete it precedes is the erasure's own. A row the
+ * vault could not settle (its tokens kept changing under the revoke) makes
+ * the vault throw, and the erasure is refused with it: nothing has been
+ * erased, the admin retries, and no row cascades away unrevoked.
  */
 export function managedSignInErasure(vault: Pick<ISecretsVaultService, 'removeManagedRowsOfUser'>): {
   before(target: { userId: string }): Promise<void>;

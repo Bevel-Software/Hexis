@@ -417,6 +417,15 @@ export class DbSecretsVaultService implements ISecretsVaultService {
     if (managed.length === 0) return 0;
     const deleted = await this.revokeThenDelete(and(eq(secrets.userId, userId), inArray(secrets.id, managed.map((r) => r.id))));
     if (deleted.length > 0) this.notifyMutation(userId);
+    // A row the guarded delete could not settle (its tokens kept changing
+    // under the revoke) is still here, unrevoked. The caller is told rather
+    // than left to believe the person holds nothing: an erasure refuses and
+    // is retried, a switch-off logs it and the row is refused on use.
+    if (deleted.length < managed.length) {
+      throw new SecretOAuthError(
+        `${managed.length - deleted.length} managed sign-in(s) kept changing while being revoked and were not removed; try again`,
+      );
+    }
     return deleted.length;
   }
 
