@@ -28,7 +28,7 @@ import {
   type OpenComparisonDetail,
 } from '../../../core/events';
 import { useAppRegistry } from '../../../core/registry';
-import { LockApiError, SELF_HOLD_MESSAGE, useFileLock } from '../../workflow';
+import { LockApiError, SELF_HOLD_MESSAGE, useFileLock } from '../../version-control';
 import { useAuth } from '../../auth';
 import {
   knowledgeSuggestionBranchFor,

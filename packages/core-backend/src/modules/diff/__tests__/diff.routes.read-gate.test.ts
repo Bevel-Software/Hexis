@@ -2,7 +2,7 @@ import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import type { IWorkflowService } from '@bevel-software/platform-shared';
+import type { IVersionControlService } from '@bevel-software/platform-shared';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import type { AuthService } from '../../auth/auth.service.js';
 import type { IDiffService } from '../diff.interface.js';
@@ -46,7 +46,7 @@ async function makeHarness(opts: {
     (req as unknown as { userId: string }).userId = USER.id;
     next();
   });
-  app.use('/api', createDiffRoutes(diffService, authService, {} as unknown as IWorkflowService, accessControl, KB));
+  app.use('/api', createDiffRoutes(diffService, authService, {} as unknown as IVersionControlService, accessControl, KB));
   const server = await new Promise<Server>((resolve) => {
     const s = app.listen(0, () => resolve(s));
   });

@@ -13,7 +13,7 @@ import { AdminAccessService } from '../../admin/admin-access.service.js';
 import { createAccountRoutes } from '../../auth/account.routes.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import type { WorkflowService } from '../../workflow/workflow.service.js';
+import type { VersionControlService } from '../../version-control/version-control.service.js';
 import type { AuthService } from '../../auth/auth.service.js';
 import type { IAccountErasureService } from '../../auth/account-erasure.service.js';
 import type { AuthUser } from '@bevel-software/platform-shared';
@@ -73,7 +73,7 @@ function stubWorkspace(workspaceDir: string): WorkspaceService {
 }
 
 /** Lock/commit stub: the real LockingFilesystem writes the bytes to disk. */
-function stubWorkflow(): WorkflowService {
+function stubVersionControl(): VersionControlService {
   const locks = new Map<string, AuthUser>();
   const row = (h: AuthUser) => ({ holderUserId: h.id, holderName: h.name });
   return {
@@ -90,7 +90,7 @@ function stubWorkflow(): WorkflowService {
     releaseLock: async (_w: string, _b: string, p: string) => void locks.delete(p),
     releaseLockNoCommit: async (_w: string, _b: string, p: string) => void locks.delete(p),
     commitChanges: async () => ({}) as unknown,
-  } as unknown as WorkflowService;
+  } as unknown as VersionControlService;
 }
 
 function close(s: Server): Promise<void> {
@@ -127,7 +127,7 @@ describe('SECURITY: Admin-role removal takes effect on the next request', () => 
     // cache and could pass this test while production still served stale
     // verdicts, which is the failure mode worth guarding.
     access = new AccessControlService(ws, KB, new NodeFs(), [OWNER]);
-    rolesAdmin = new RolesAdminService(ws, stubWorkflow(), access, new NodeFs(), KB, () => DEFAULT_BRANCH, undefined, [
+    rolesAdmin = new RolesAdminService(ws, stubVersionControl(), access, new NodeFs(), KB, () => DEFAULT_BRANCH, undefined, [
       OWNER,
     ]);
     const adminAccess = new AdminAccessService(access, ws, DEFAULT_BRANCH, [OWNER]);

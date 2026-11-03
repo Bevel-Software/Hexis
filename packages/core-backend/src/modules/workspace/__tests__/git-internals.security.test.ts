@@ -7,7 +7,7 @@ import AdmZip from 'adm-zip';
 import express from 'express';
 import { afterEach, beforeEach, describe, expect, it, vi, afterAll } from 'vitest';
 import { testKbContext } from '../../../__tests__/kb-context.js';
-import type { IWorkflowService } from '@bevel-software/platform-shared';
+import type { IVersionControlService } from '@bevel-software/platform-shared';
 import { GIT_INTERNALS_MESSAGE, GitInternalsError } from '../../../shared/domain-errors.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { NodeFs } from '../../kb-fs/node-fs.js';
@@ -20,8 +20,8 @@ import type { ToolAuth } from '../../tool-auth/tool-auth.middleware.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import type { ICreatorAccess } from '../../access-model/creator.js';
 import type { IAdminAccessService } from '../../admin/admin.interface.js';
-import type { WorkflowEventBus } from '../../workflow/event-bus.js';
-import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
+import type { VersionControlEventBus } from '../../version-control/event-bus.js';
+import { VersionControlHooks } from '../../version-control/version-control-hooks.js';
 import { ToolDescriptionNotes } from '../../workspace/agent-access.gate.js';
 import type { AuthService } from '../../auth/auth.service.js';
 import { registerWorkspaceTools } from '../workspace.tools.js';
@@ -178,7 +178,7 @@ afterEach(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
-function makeWorkflow() {
+function makeVersionControl() {
   return {
     getLock: vi.fn(async () => null),
     acquireLock: vi.fn(async () => ({ acquired: true, lock: { holderUserId: USER.id, holderName: USER.name } })),
@@ -244,19 +244,19 @@ async function expectRefused(res: Response, form?: string): Promise<unknown> {
 describe('workspace tools refuse the git folder', () => {
   let server: Server | undefined;
   let baseUrl = '';
-  let workflow: ReturnType<typeof makeWorkflow>;
+  let versionControl: ReturnType<typeof makeVersionControl>;
   let unzipSpy: ReturnType<typeof vi.spyOn>;
   let bootstrappedSpy: ReturnType<typeof vi.spyOn>;
   let getFilesystem: ReturnType<typeof vi.fn>;
 
   beforeEach(async () => {
-    workflow = makeWorkflow();
+    versionControl = makeVersionControl();
     const service = newWorkspaceService(root, 'https://example.invalid/kb.git', testKbContext({ kbDirName: KB }), new NodeFs());
     unzipSpy = vi.spyOn(service, 'unzipFile');
     bootstrappedSpy = vi.spyOn(service, 'hasBootstrappedWorkspace');
     const lockingFs = new LockingFilesystem(
       { basePath: workspaceDir, contained: true },
-      { workflow: workflow as unknown as IWorkflowService, workspaceId: WS, branch: BRANCH, user: USER, kbDirName: KB },
+      { versionControl: versionControl as unknown as IVersionControlService, workspaceId: WS, branch: BRANCH, user: USER, kbDirName: KB },
     );
     getFilesystem = vi.fn(async () => lockingFs);
     const resolve = async (auth: ToolAuth, signal: AbortSignal, sessionId?: string): Promise<ToolContext> => ({
@@ -266,7 +266,7 @@ describe('workspace tools refuse the git folder', () => {
       sessionId,
       abortSignal: signal,
       workspaceService: service,
-      workflowService: workflow as never,
+      versionControlService: versionControl as never,
       events: {} as never,
       getFilesystem,
     });
@@ -286,7 +286,7 @@ describe('workspace tools refuse the git folder', () => {
       new DocExtractService(join(root, 'doc-cache'), new WorkerDocumentExtractor()),
       allowAll,
       testKbContext({ kbDirName: KB }),
-      { recoveryBotEmail: 'recovery-bot@bevel.local', hooks: new WorkflowHooks(), notes: new ToolDescriptionNotes() },
+      { recoveryBotEmail: 'recovery-bot@bevel.local', hooks: new VersionControlHooks(), notes: new ToolDescriptionNotes() },
       new RoutineWritePolicyService(),
       {} as never,
       // Skill check, change gate, uploads, guide, downloads, starter packs, disk: not this harness's business.
@@ -307,8 +307,8 @@ describe('workspace tools refuse the git folder', () => {
     if (server) await new Promise<void>((r) => server!.close(() => r()));
     server = undefined;
     // Nothing reached the lock service, and the git folder is untouched.
-    expect(workflow.acquireLock).not.toHaveBeenCalled();
-    expect(workflow.commitChanges).not.toHaveBeenCalled();
+    expect(versionControl.acquireLock).not.toHaveBeenCalled();
+    expect(versionControl.commitChanges).not.toHaveBeenCalled();
     expect(await snapshotGit()).toBe(gitSnapshot);
   });
 
@@ -421,7 +421,7 @@ describe('workspace tools refuse the git folder', () => {
   it('ordinary paths that merely look alike still work', async () => {
     const res = await call('write_file', { path: `${KB}/.github/workflows/ci.yml`, content: 'on: push\n' });
     expect(res.status).toBe(200);
-    workflow.acquireLock.mockClear();
+    versionControl.acquireLock.mockClear();
   });
 });
 
@@ -430,11 +430,11 @@ describe('workspace tools refuse the git folder', () => {
 describe('workspace routes refuse the git folder', () => {
   let server: Server | undefined;
   let baseUrl = '';
-  let workflow: ReturnType<typeof makeWorkflow>;
+  let versionControl: ReturnType<typeof makeVersionControl>;
   let service: WorkspaceService;
 
   beforeEach(async () => {
-    workflow = makeWorkflow();
+    versionControl = makeVersionControl();
     service = newWorkspaceService(root, 'https://example.invalid/kb.git', testKbContext({ kbDirName: KB }), new NodeFs());
     const app = express();
     app.use(express.json());
@@ -452,8 +452,8 @@ describe('workspace routes refuse the git folder', () => {
       createWorkspaceRoutes(
         service,
         { getUserById: vi.fn(async () => USER) } as unknown as AuthService,
-        workflow as unknown as IWorkflowService,
-        { emit: vi.fn() } as unknown as WorkflowEventBus,
+        versionControl as unknown as IVersionControlService,
+        { emit: vi.fn() } as unknown as VersionControlEventBus,
         allowAll,
         testKbContext({ kbDirName: KB }),
         stubCreatorAccess,
@@ -466,7 +466,7 @@ describe('workspace routes refuse the git folder', () => {
       createDiffRoutes(
         diffService,
         { getUserById: vi.fn(async () => USER) } as unknown as AuthService,
-        workflow as unknown as IWorkflowService,
+        versionControl as unknown as IVersionControlService,
         allowAll,
         KB,
       ),
@@ -477,7 +477,7 @@ describe('workspace routes refuse the git folder', () => {
   afterEach(async () => {
     if (server) await new Promise<void>((r) => server!.close(() => r()));
     server = undefined;
-    expect(workflow.acquireLock).not.toHaveBeenCalled();
+    expect(versionControl.acquireLock).not.toHaveBeenCalled();
     expect(await snapshotGit()).toBe(gitSnapshot);
   });
 
@@ -564,7 +564,7 @@ describe('workspace routes refuse the git folder', () => {
     expect(await res.json()).toEqual({ status: 'deleted', count: 1 });
     await expect(readFile(join(workspaceDir, KB, 'Notes', 'a.md'))).rejects.toMatchObject({ code: 'ENOENT' });
     expect(await readFile(join(upper, 'config'), 'utf8')).toBe('[credential]\n');
-    workflow.acquireLock.mockClear();
+    versionControl.acquireLock.mockClear();
   });
 
   it('an ordinary read and a .github path still work', async () => {
@@ -572,7 +572,7 @@ describe('workspace routes refuse the git folder', () => {
     expect(read.status).toBe(200);
     const write = await json('PUT', `${baseUrl}/api/workspace/${WS}/file?path=${q(`${KB}/.github/ci.yml`)}`, { content: 'on: push\n' });
     expect(write.status).toBe(200);
-    workflow.acquireLock.mockClear();
+    versionControl.acquireLock.mockClear();
   });
 });
 
@@ -742,7 +742,7 @@ describe('the route guard on its own', () => {
     await expectRefused(await fetch(`${baseUrl}/api/workspace/${WS}/access/prospective?from=${git}&toDir=${note}`));
     await expectRefused(await fetch(`${baseUrl}/api/workspace/${WS}/access/prospective?from=${note}&toDir=${git}`));
     // `toDir` is a path wherever it appears; `from` is a BRANCH on the
-    // workflow comparison and is left to the branch-name rule there.
+    // version-control comparison and is left to the branch-name rule there.
     await expectRefused(await fetch(`${baseUrl}/api/workspace/${WS}/anything?toDir=${git}`));
     expect(reached).toBe(0);
     const compare = await fetch(`${baseUrl}/api/workspace/${WS}/workflow/compare?from=${git}`);
@@ -847,10 +847,10 @@ describe('DiffService refuses the git folder on its own', () => {
 
 describe('agent filesystems refuse the git folder on their own', () => {
   it('LockingFilesystem refuses before taking a lock', async () => {
-    const workflow = makeWorkflow();
+    const versionControl = makeVersionControl();
     const lockingFs = new LockingFilesystem(
       { basePath: workspaceDir, contained: true },
-      { workflow: workflow as unknown as IWorkflowService, workspaceId: WS, branch: BRANCH, user: USER, kbDirName: KB },
+      { versionControl: versionControl as unknown as IVersionControlService, workspaceId: WS, branch: BRANCH, user: USER, kbDirName: KB },
     );
     for (const p of Object.values(FILE_FORMS).map(resolved)) {
       await expect(lockingFs.readFile(p)).rejects.toBeInstanceOf(GitInternalsError);
@@ -866,7 +866,7 @@ describe('agent filesystems refuse the git folder on their own', () => {
       await expect(lockingFs.readdir(p)).rejects.toBeInstanceOf(GitInternalsError);
       await expect(lockingFs.mkdir(`${p}/new`)).rejects.toBeInstanceOf(GitInternalsError);
     }
-    expect(workflow.acquireLock).not.toHaveBeenCalled();
+    expect(versionControl.acquireLock).not.toHaveBeenCalled();
     expect(await snapshotGit()).toBe(gitSnapshot);
   });
 
@@ -892,13 +892,13 @@ describe('agent filesystems refuse the git folder on their own', () => {
 
   it('a write through a dangling link into the git folder is refused and creates nothing', async () => {
     await symlink('.git/hooks/post-checkout', join(workspaceDir, KB, 'hook.md'));
-    const workflow = makeWorkflow();
+    const versionControl = makeVersionControl();
     const lockingFs = new LockingFilesystem(
       { basePath: workspaceDir, contained: true },
-      { workflow: workflow as unknown as IWorkflowService, workspaceId: WS, branch: BRANCH, user: USER, kbDirName: KB },
+      { versionControl: versionControl as unknown as IVersionControlService, workspaceId: WS, branch: BRANCH, user: USER, kbDirName: KB },
     );
     await expect(lockingFs.writeFile(`${KB}/hook.md`, '#!/bin/sh\n')).rejects.toBeInstanceOf(GitInternalsError);
-    expect(workflow.acquireLock).not.toHaveBeenCalled();
+    expect(versionControl.acquireLock).not.toHaveBeenCalled();
     expect(await snapshotGit()).toBe(gitSnapshot);
   });
 });

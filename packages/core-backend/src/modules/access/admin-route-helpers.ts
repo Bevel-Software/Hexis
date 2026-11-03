@@ -3,7 +3,7 @@
  * groups-admin.routes) — one error shape, one input-coercion rule, so the two
  * surfaces can't drift apart again.
  *
- * Error shape: a sub-500 `WorkflowDomainError` renders as its own status +
+ * Error shape: a sub-500 `VersionControlDomainError` renders as its own status +
  * message + payload; everything else — a raw error OR a 500-status domain
  * error (e.g. AccessMutationService wraps unexpected raw errors in a 500
  * AccessMutationError, message included) — is an INTERNAL error: logged
@@ -14,7 +14,7 @@
 
 import type express from 'express';
 import { logger } from '../../shared/logging.js';
-import { WorkflowDomainError } from '../../shared/domain-errors.js';
+import { VersionControlDomainError } from '../../shared/domain-errors.js';
 import { domainErrorBody } from '../../shared/http-errors.js';
 
 /** One error shape for every access-family route. */
@@ -22,11 +22,11 @@ export function toHttpError(
   err: unknown,
   logTag: string,
 ): { status: number; body: Record<string, unknown> } {
-  if (err instanceof WorkflowDomainError && err.status < 500) {
+  if (err instanceof VersionControlDomainError && err.status < 500) {
     return { status: err.status, body: domainErrorBody(err) };
   }
   logger(logTag).error('route failure:', { err });
-  const status = err instanceof WorkflowDomainError ? err.status : 500;
+  const status = err instanceof VersionControlDomainError ? err.status : 500;
   return { status, body: { error: 'Internal error.' } };
 }
 
@@ -49,7 +49,7 @@ export function requireNonEmptyString(
   opts?: { trim?: boolean },
 ): string {
   if (typeof value !== 'string' || value.trim() === '') {
-    throw new WorkflowDomainError(`${field} must be a non-empty string`, 400);
+    throw new VersionControlDomainError(`${field} must be a non-empty string`, 400);
   }
   return opts?.trim ? value.trim() : value;
 }

@@ -331,7 +331,7 @@ export class ToolDeleteService {
       // THEN pushes, so a refused push leaves a commit that already removed
       // the file: renaming it back there would leave the working tree dirty
       // against HEAD — re-adding, on the next commit, the very tool this one
-      // deleted, which is the state the workflow layer's own recovery
+      // deleted, which is the state the version-control layer's own recovery
       // misreads (McpServerEditService refuses to touch the tree for the same
       // reason). A probe that itself fails counts as "a commit may exist": the
       // park survives, dot-prefixed and invisible to the scanner, for a person

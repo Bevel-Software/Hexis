@@ -5,7 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import type { WorkflowService } from '../../workflow/workflow.service.js';
+import type { VersionControlService } from '../../version-control/version-control.service.js';
 import type { AuthUser, FileTreeEntry } from '@bevel-software/platform-shared';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { AccessControlService } from '../access-control.service.js';
@@ -61,7 +61,7 @@ function stubWorkspace(workspaceDir: string): WorkspaceService {
   } as unknown as WorkspaceService;
 }
 
-function stubWorkflow() {
+function stubVersionControl() {
   const commits: { summary: string }[] = [];
   // Strict per-path locks — a live row is contended even for the same user,
   // exactly like FileLockService (nesting bugs must fail here too).
@@ -88,7 +88,7 @@ function stubWorkflow() {
       commits.push({ summary });
       return {} as unknown;
     },
-  } as unknown as WorkflowService;
+  } as unknown as VersionControlService;
   return { svc, commits };
 }
 
@@ -105,11 +105,11 @@ describe('GroupsAdminService', () => {
     await write(repo, 'groups.yaml', GROUPS);
     await write(repo, 'access.md', '---\nwrite:\n  - Admin\n---\n');
     const workspace = stubWorkspace(root);
-    const workflow = stubWorkflow();
-    commits = workflow.commits;
+    const versionControl = stubVersionControl();
+    commits = versionControl.commits;
     service = new GroupsAdminService(
       workspace,
-      workflow.svc,
+      versionControl.svc,
       new AccessControlService(workspace as never, KB, new NodeFs()),
       new NodeFs(),
       KB,
@@ -290,18 +290,18 @@ describe('GroupsAdminService', () => {
     function gatedService(): { gated: GroupsAdminService; gatedCommits: { summary: string }[] } {
       const workspace = stubWorkspace(root);
       const access = new AccessControlService(workspace as never, KB, new NodeFs());
-      const workflow = stubWorkflow();
-      const svc = workflow.svc as unknown as Record<string, unknown>;
+      const versionControl = stubVersionControl();
+      const svc = versionControl.svc as unknown as Record<string, unknown>;
       svc.commitChanges = async (ws: string, user: AuthUser, summary: string, onlyPaths: string[] = []) => {
         const rel = onlyPaths.map((p) => p.slice(KB.length + 1));
         const verdicts = await access.canWriteBatch(ws, user.email, rel);
         const denied = rel.find((p) => verdicts.get(p) !== true);
         if (denied) throw new AccessDeniedError({ path: denied, eligibleRoles: [], eligibleUsers: [] });
-        workflow.commits.push({ summary });
+        versionControl.commits.push({ summary });
         return {} as unknown;
       };
-      const gated = new GroupsAdminService(workspace, workflow.svc, access, new NodeFs(), KB, () => DEFAULT_BRANCH);
-      return { gated, gatedCommits: workflow.commits };
+      const gated = new GroupsAdminService(workspace, versionControl.svc, access, new NodeFs(), KB, () => DEFAULT_BRANCH);
+      return { gated, gatedCommits: versionControl.commits };
     }
 
     const SARA_ACCESS = '---\nread:\n  - deny everyone\n  - Sara <sara@x.io>\nwrite:\n  - Sara <sara@x.io>\n---\n';
@@ -388,13 +388,13 @@ describe('GroupsAdminService', () => {
   it('rollback of a failed commit DELETES a file this edit created (no empty artifact)', async () => {
     await fs.rm(path.join(repo, 'groups.yaml'));
     const workspace = stubWorkspace(root);
-    const workflow = stubWorkflow();
-    (workflow.svc as unknown as { commitChanges: unknown }).commitChanges = async () => {
+    const versionControl = stubVersionControl();
+    (versionControl.svc as unknown as { commitChanges: unknown }).commitChanges = async () => {
       throw new Error('commit exploded');
     };
     const svc = new GroupsAdminService(
       workspace,
-      workflow.svc,
+      versionControl.svc,
       new AccessControlService(workspace as never, KB, new NodeFs()),
       new NodeFs(),
       KB,
@@ -408,8 +408,8 @@ describe('GroupsAdminService', () => {
 
   it('a path whose restore failed is released WITHOUT commit (discard, never partial publish)', async () => {
     const workspace = stubWorkspace(root);
-    const workflow = stubWorkflow();
-    const wf = workflow.svc as unknown as {
+    const versionControl = stubVersionControl();
+    const wf = versionControl.svc as unknown as {
       commitChanges: (...a: unknown[]) => Promise<unknown>;
       releaseLock: (...a: unknown[]) => Promise<void>;
       releaseLockNoCommit: (...a: unknown[]) => Promise<void>;
@@ -419,8 +419,8 @@ describe('GroupsAdminService', () => {
     };
     const committingReleases: string[] = [];
     const discardingReleases: string[] = [];
-    const origRelease = wf.releaseLock.bind(workflow.svc);
-    const origNoCommit = wf.releaseLockNoCommit.bind(workflow.svc);
+    const origRelease = wf.releaseLock.bind(versionControl.svc);
+    const origNoCommit = wf.releaseLockNoCommit.bind(versionControl.svc);
     wf.releaseLock = async (...a) => {
       committingReleases.push(a[2] as string);
       return origRelease(...a);
@@ -441,7 +441,7 @@ describe('GroupsAdminService', () => {
     };
     const svc = new GroupsAdminService(
       workspace,
-      workflow.svc,
+      versionControl.svc,
       new AccessControlService(workspace as never, KB, new NodeFs()),
       new NodeFs(),
       KB,
@@ -468,11 +468,11 @@ describe('GroupsAdminService', () => {
     // away. Checked under the lock, the just-created file is seen and retired.
     await fs.rm(path.join(repo, 'groups.yaml'));
     const workspace = stubWorkspace(root);
-    const workflow = stubWorkflow();
-    const wf = workflow.svc as unknown as {
+    const versionControl = stubVersionControl();
+    const wf = versionControl.svc as unknown as {
       acquireLock: (w: string, b: string, p: string, u: AuthUser) => Promise<unknown>;
     };
-    const origAcquire = wf.acquireLock.bind(workflow.svc);
+    const origAcquire = wf.acquireLock.bind(versionControl.svc);
     wf.acquireLock = async (w, b, p, u) => {
       if (p === `${KB}/groups.yaml`) {
         await write(repo, 'groups.yaml', 'groups:\n  Late Team:\n    - late@x.io\n');
@@ -481,7 +481,7 @@ describe('GroupsAdminService', () => {
     };
     const svc = new GroupsAdminService(
       workspace,
-      workflow.svc,
+      versionControl.svc,
       new AccessControlService(workspace as never, KB, new NodeFs()),
       new NodeFs(),
       KB,
@@ -489,7 +489,7 @@ describe('GroupsAdminService', () => {
     );
     expect(await svc.retireManualGroups(ADMIN)).toBe(true);
     await expect(groupsYaml()).rejects.toMatchObject({ code: 'ENOENT' });
-    expect(workflow.commits.some((c) => c.summary.includes('Retire manual groups'))).toBe(true);
+    expect(versionControl.commits.some((c) => c.summary.includes('Retire manual groups'))).toBe(true);
   });
 });
 
@@ -537,7 +537,7 @@ describe('groups roster referencedBy — the mirror of the roles roster attribut
       const workspace = stubWorkspace(root2);
       const svc = new GroupsAdminService(
         workspace,
-        stubWorkflow().svc,
+        stubVersionControl().svc,
         new AccessControlService(workspace as never, KB, new NodeFs()),
         new NodeFs(),
         KB,
@@ -582,7 +582,7 @@ describe('groups roster referencedBy — the mirror of the roles roster attribut
       await write(repo2, 'secret/Plan.md', '---\nread:\n  - deny everyone\n  - Reviewer\n---\n# Plan\n');
       const workspace = stubWorkspace(root2);
       const access = new AccessControlService(workspace as never, KB, new NodeFs());
-      const svc = new GroupsAdminService(workspace, stubWorkflow().svc, access, new NodeFs(), KB, () => DEFAULT_BRANCH);
+      const svc = new GroupsAdminService(workspace, stubVersionControl().svc, access, new NodeFs(), KB, () => DEFAULT_BRANCH);
       const rowsFor = async (email: string) =>
         (await svc.getRoster(email)).groups.find((g) => g.canonical === 'reviewer')!.bareNameResolvesToRole;
 
@@ -619,7 +619,7 @@ describe('groups roster referencedBy — the mirror of the roles roster attribut
       const workspace = stubWorkspace(root2);
       const svc = new GroupsAdminService(
         workspace,
-        stubWorkflow().svc,
+        stubVersionControl().svc,
         new AccessControlService(workspace as never, KB, new NodeFs()),
         new NodeFs(),
         KB,

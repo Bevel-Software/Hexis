@@ -9,7 +9,7 @@ import {
   normalizePathArgs,
   normalizeWorkspacePath,
 } from '../repo-path.js';
-import { WorkflowValidationError } from '../../../shared/domain-errors.js';
+import { VersionControlValidationError } from '../../../shared/domain-errors.js';
 
 const KB = 'knowledge-base';
 
@@ -80,8 +80,8 @@ describe('assertInsideRepo', () => {
     } catch (e) {
       err = e;
     }
-    expect(err).toBeInstanceOf(WorkflowValidationError);
-    const e = err as WorkflowValidationError;
+    expect(err).toBeInstanceOf(VersionControlValidationError);
+    const e = err as VersionControlValidationError;
     expect(e.status).toBe(400);
     // The offending path, the rule, and the exact path to use instead: an
     // agent reading this error can retry without guessing.
@@ -144,8 +144,8 @@ describe('a line break in a path — one name to the gates, two object names to 
     } catch (e) {
       err = e;
     }
-    expect(err).toBeInstanceOf(WorkflowValidationError);
-    const e = err as WorkflowValidationError;
+    expect(err).toBeInstanceOf(VersionControlValidationError);
+    const e = err as VersionControlValidationError;
     expect(e.status).toBe(400);
     expect(e.message).toMatch(/control character/);
     // Never "use this instead": there is no corrected spelling of a name with
@@ -173,7 +173,7 @@ describe('a line break in a path — one name to the gates, two object names to 
   it('refuses every control character, not only the line breaks', () => {
     for (const ch of ['\u0000', '\u0001', '\t', '\n', '\u000B', '\r', '\u001F', '\u007F']) {
       expect(() => normalizeWorkspacePath(`knowledge-base/Docs/a${ch}b.md`, KB), ch).toThrow(
-        WorkflowValidationError,
+        VersionControlValidationError,
       );
     }
   });
@@ -189,8 +189,8 @@ describe('a line break in a path — one name to the gates, two object names to 
     } catch (e) {
       err = e;
     }
-    expect(err).toBeInstanceOf(WorkflowValidationError);
-    const e = err as WorkflowValidationError;
+    expect(err).toBeInstanceOf(VersionControlValidationError);
+    const e = err as VersionControlValidationError;
     // Named as the CONFIGURATION error it is: an operator told their own path
     // was invalid would have nothing to fix.
     expect(e.message).toMatch(/checkout folder name/);

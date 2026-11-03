@@ -13,8 +13,8 @@ import {
   createToolHintsRoutes,
 } from '../index.js';
 import { toolDef } from '../../tool-helpers/index.js';
-import { registerWorkflowTools } from '../../workflow/agent-tools/workflow.tools.js';
-import { registerChangeRequestReadTools } from '../../workflow/agent-tools/change-request-read.tools.js';
+import { registerVersionControlTools } from '../../version-control/agent-tools/version-control.tools.js';
+import { registerChangeRequestReadTools } from '../../version-control/agent-tools/change-request-read.tools.js';
 import { registerWorkspaceTools } from '../../workspace/workspace.tools.js';
 import { registerSkillsTools } from '../../skills/index.js';
 import { registerPluginsTools } from '../../plugins/index.js';
@@ -98,7 +98,7 @@ const INTERNAL_ONLY = new Set(['switch_branch']);
 function platformRegistry(): ToolRegistry {
   const registry = new ToolRegistry();
   const kb = testKbContext();
-  registerWorkflowTools(registry, express.Router(), pass, handler, kb, async () => true);
+  registerVersionControlTools(registry, express.Router(), pass, handler, kb, async () => true);
   registerChangeRequestReadTools(registry, express.Router(), pass, handler, nothing, kb);
   registerWorkspaceTools(
     registry,

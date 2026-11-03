@@ -5,7 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import type { WorkflowService } from '../../workflow/workflow.service.js';
+import type { VersionControlService } from '../../version-control/version-control.service.js';
 import type { AuthUser, FileTreeEntry } from '@bevel-software/platform-shared';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { AccessControlService } from '../access-control.service.js';
@@ -65,7 +65,7 @@ function stubWorkspace(workspaceDir: string): WorkspaceService {
   } as unknown as WorkspaceService;
 }
 
-function stubWorkflow() {
+function stubVersionControl() {
   const commits: { summary: string }[] = [];
   // Strict per-path locks — a live row is contended even for the same user,
   // exactly like FileLockService (nesting bugs must fail here too).
@@ -107,7 +107,7 @@ function stubWorkflow() {
       commits.push({ summary });
       return {} as unknown;
     },
-  } as unknown as WorkflowService;
+  } as unknown as VersionControlService;
   return { svc, commits, acquireCalls };
 }
 
@@ -126,11 +126,11 @@ describe('RolesAdminService — capabilities, group assignment, conversion', () 
     await write(repo, 'groups.yaml', 'groups:\n  GTM Team:\n    - sara@x.io\n');
     await write(repo, 'access.md', '---\nwrite:\n  - Admin\nread:\n  - Product\n---\n');
     const workspace = stubWorkspace(root);
-    const workflow = stubWorkflow();
-    commits = workflow.commits;
+    const versionControl = stubVersionControl();
+    commits = versionControl.commits;
     service = new RolesAdminService(
       workspace,
-      workflow.svc,
+      versionControl.svc,
       new AccessControlService(workspace as never, KB, new NodeFs()),
       new NodeFs(),
       KB,
@@ -212,10 +212,10 @@ describe('RolesAdminService — capabilities, group assignment, conversion', () 
     // that claims no write authority. A write-intent acquire here would fail
     // EVERY manual-mode conversion at lock acquisition.
     const workspace = stubWorkspace(root);
-    const workflow = stubWorkflow();
+    const versionControl = stubVersionControl();
     const svc = new RolesAdminService(
       workspace,
-      workflow.svc,
+      versionControl.svc,
       new AccessControlService(workspace as never, KB, new NodeFs()),
       new NodeFs(),
       KB,
@@ -226,12 +226,12 @@ describe('RolesAdminService — capabilities, group assignment, conversion', () 
     expect(await groupsYaml()).toContain('Product:');
     // The synced file WAS locked (the serialization is real), via coordination;
     // the written files keep their write-gated acquires.
-    expect(workflow.acquireCalls).toContainEqual({
+    expect(versionControl.acquireCalls).toContainEqual({
       path: `${KB}/synced-groups.yaml`,
       coordination: true,
     });
-    expect(workflow.acquireCalls).toContainEqual({ path: `${KB}/roles.yaml`, coordination: false });
-    expect(workflow.acquireCalls).toContainEqual({ path: `${KB}/groups.yaml`, coordination: false });
+    expect(versionControl.acquireCalls).toContainEqual({ path: `${KB}/roles.yaml`, coordination: false });
+    expect(versionControl.acquireCalls).toContainEqual({ path: `${KB}/groups.yaml`, coordination: false });
   });
 
   it('conversion refusals: capability role, group-assigned role, IdP mode', async () => {
@@ -259,8 +259,8 @@ describe('RolesAdminService — capabilities, group assignment, conversion', () 
     // write nothing (committing a groups.yaml group in IdP mode writes a
     // retired file).
     const workspace = stubWorkspace(root);
-    const workflow = stubWorkflow();
-    const wf = workflow.svc as unknown as {
+    const versionControl = stubVersionControl();
+    const wf = versionControl.svc as unknown as {
       acquireLock: (
         w: string,
         b: string,
@@ -269,7 +269,7 @@ describe('RolesAdminService — capabilities, group assignment, conversion', () 
         opts?: { coordination?: boolean },
       ) => Promise<unknown>;
     };
-    const origAcquire = wf.acquireLock.bind(workflow.svc);
+    const origAcquire = wf.acquireLock.bind(versionControl.svc);
     wf.acquireLock = async (w, b, p, u, opts) => {
       if (p === `${KB}/synced-groups.yaml`) {
         // The sync's provisioning push won the race for this lock and landed.
@@ -279,7 +279,7 @@ describe('RolesAdminService — capabilities, group assignment, conversion', () 
     };
     const svc = new RolesAdminService(
       workspace,
-      workflow.svc,
+      versionControl.svc,
       new AccessControlService(workspace as never, KB, new NodeFs()),
       new NodeFs(),
       KB,
@@ -292,19 +292,19 @@ describe('RolesAdminService — capabilities, group assignment, conversion', () 
     // Nothing moved.
     expect(await rolesYaml()).toBe(ROLES);
     expect(await groupsYaml()).not.toContain('Product');
-    expect(workflow.commits).toHaveLength(0);
+    expect(versionControl.commits).toHaveLength(0);
   });
 
   it('a failed conversion with NO pre-existing groups.yaml leaves no groups.yaml behind', async () => {
     await fs.rm(path.join(repo, 'groups.yaml'));
     const workspace = stubWorkspace(root);
-    const workflow = stubWorkflow();
-    (workflow.svc as unknown as { commitChanges: unknown }).commitChanges = async () => {
+    const versionControl = stubVersionControl();
+    (versionControl.svc as unknown as { commitChanges: unknown }).commitChanges = async () => {
       throw new Error('commit exploded');
     };
     const svc = new RolesAdminService(
       workspace,
-      workflow.svc,
+      versionControl.svc,
       new AccessControlService(workspace as never, KB, new NodeFs()),
       new NodeFs(),
       KB,

@@ -1,4 +1,4 @@
-import type { WorkflowDomainError } from './domain-errors.js';
+import type { VersionControlDomainError } from './domain-errors.js';
 
 /**
  * THE response body for a domain refusal: the error's own message, plus
@@ -6,7 +6,7 @@ import type { WorkflowDomainError } from './domain-errors.js';
  * rather than on the prose.
  *
  * The payload is an open `Record<string, unknown>` and deliberately stays
- * that way — `WorkflowValidationError` takes one from its caller — so this
+ * that way — `VersionControlValidationError` takes one from its caller — so this
  * lists no closed set. The discriminator to reach for is `kind`
  * (`path-traversal`, `unreadable-archive`, `no-shared-history`, …), which
  * most refusals carry; beside it they add whatever context that kind needs
@@ -30,7 +30,7 @@ import type { WorkflowDomainError } from './domain-errors.js';
  * workspace routes surface `AccessConfigError`'s message because an admin
  * has to read it — and those differ on purpose, not by drift.
  */
-export function domainErrorBody(err: WorkflowDomainError): Record<string, unknown> {
+export function domainErrorBody(err: VersionControlDomainError): Record<string, unknown> {
   // Payload FIRST, `error` LAST: the message always wins.
   return { ...(err.payload ?? {}), error: err.message };
 }
