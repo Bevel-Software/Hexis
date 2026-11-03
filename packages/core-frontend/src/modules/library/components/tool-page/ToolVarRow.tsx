@@ -29,10 +29,18 @@ import { navigateExternal } from '../../utils/navigate-external';
  *  - Every OTHER sign-in offers its owner the client secret in every state of
  *    the row: "Replace client secret" while one is stored, "Set client secret"
  *    while none is. The secret belongs to the tool, not to the caller's own
- *    sign-in, so whether the owner is signed in has no say in it.
+ *    sign-in, so whether the owner is signed in has no say in it. A MANAGED
+ *    sign-in is the second exception: its client is the broker's, so the row
+ *    offers no secret at all — an owner's own app is brought on the Connect
+ *    page's card, where the client id is asked for beside it.
  *  - Whose problem is it? A user-scope gap is the caller's to fix and always
  *    shows an action. An admin-scope gap is the OWNER's, so a non-writer sees a
- *    chip that explains the state and no button they can't act on.
+ *    chip that explains the state and no button they can't act on. A managed
+ *    WORKSPACE connection (an `admin` variable with a sign-in) is an owner's
+ *    gap in the same way: a reader sees its state and no control.
+ *  - A start is offered only where it can be opened: a managed sign-in follows
+ *    `canStartSignIn` (the broker, or an owner's own app on a personal
+ *    sign-in), the same rule the Connect page's card applies.
  *
  * Secret values are write-only throughout: `type="password"`, held in local
  * state, cleared on save or cancel. Nothing here ever reads a stored value.

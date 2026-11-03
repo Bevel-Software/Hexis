@@ -13,8 +13,10 @@ import type { ISecretsVaultService } from './secrets-vault.contract.js';
  * (a revoked token is deleted here either way, and a second run finds no
  * managed row), and the delete it precedes is the erasure's own. A row the
  * vault could not settle (its tokens kept changing under the revoke) makes
- * the vault throw, and the erasure is refused with it: nothing has been
- * erased, the admin retries, and no row cascades away unrevoked.
+ * the vault throw, and the erasure is refused with it: the account itself is
+ * not erased, the rows already revoked and deleted in this pass stay deleted
+ * (each was told to its provider first), the admin retries, and the retry
+ * finds only what is still to settle — so no row cascades away unrevoked.
  */
 export function managedSignInErasure(vault: Pick<ISecretsVaultService, 'removeManagedRowsOfUser'>): {
   before(target: { userId: string }): Promise<void>;

@@ -86,10 +86,12 @@ describe('ManagedConnectorCard', () => {
     expect(screen.queryByRole('button', { name: 'Disconnect' })).toBeNull();
   });
 
-  it('shows who is connected, with Reconnect and Disconnect', () => {
+  it('shows who is signed in, with Reconnect and Disconnect', () => {
     const onDisconnect = vi.fn();
     renderCard(row({ authorized: true }, { account: 'alice@acme.example' }), { onDisconnect });
-    expect(screen.getByText('Connected as alice@acme.example')).toBeInTheDocument();
+    // "Signed in", never "Connected": the page says Connected only after a real call.
+    expect(screen.getByText('Signed in as alice@acme.example')).toBeInTheDocument();
+    expect(screen.queryByText(/Connected/)).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Disconnect' }));
     expect(onDisconnect).toHaveBeenCalledTimes(1);
     expect(screen.getByRole('button', { name: 'Reconnect' })).toBeInTheDocument();
@@ -110,7 +112,7 @@ describe('ManagedConnectorCard', () => {
 
   it('keeps a stored token usable while the broker is unreachable: Disconnect stays, Reconnect goes', () => {
     renderCard(row({ authorized: true }, { available: false, account: 'alice@acme.example' }));
-    expect(screen.getByText('Connected as alice@acme.example')).toBeInTheDocument();
+    expect(screen.getByText('Signed in as alice@acme.example')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Disconnect' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Reconnect|Connect/ })).toBeNull();
   });
@@ -122,9 +124,9 @@ describe('ManagedConnectorCard', () => {
     expect(screen.queryByRole('button', { name: /Connect/ })).toBeNull();
   });
 
-  it('a workspace connection an owner made reads as connected to a reader, who gets no control over it', () => {
+  it('a workspace connection an owner made reads as signed in to a reader, who gets no control over it', () => {
     renderCard(row({ authorized: true, ownerOnly: true }, { tokenScope: 'shared', account: 'acme.hubspot.com' }));
-    expect(screen.getByText('Connected as acme.hubspot.com')).toBeInTheDocument();
+    expect(screen.getByText('Signed in as acme.hubspot.com')).toBeInTheDocument();
     expect(screen.queryByText('Needs an owner')).toBeNull();
     expect(screen.queryByRole('button', { name: /^(?:Connect|Reconnect|Disconnect)$/ })).toBeNull();
   });

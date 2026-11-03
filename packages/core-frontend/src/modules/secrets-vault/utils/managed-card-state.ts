@@ -22,9 +22,10 @@ export function isManagedRow(o: ConnectToolOAuth): o is ManagedToolOAuth {
  *
  * A stored token is reported as such even while the broker is unreachable:
  * what is stored still works, and the card withholds Connect and Reconnect
- * instead (see `canStartSignIn`). "Connected" means a token is STORED, the
- * same claim every sign-in row on the Connect page makes; a call that works
- * is proved elsewhere.
+ * instead (see `canStartSignIn`). The `connected` state means a token is
+ * STORED, the same claim every sign-in row on the Connect page makes, and the
+ * card says "Signed in" for it; "Connected" is the word for a call that
+ * worked, which is proved elsewhere.
  */
 export type ManagedCardState = 'unavailable' | 'owner-only' | 'ready' | 'connected' | 'needs-reconnect';
 

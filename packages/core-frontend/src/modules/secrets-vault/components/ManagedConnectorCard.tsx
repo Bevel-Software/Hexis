@@ -21,7 +21,10 @@ const STATE_BADGE: Record<ManagedCardState, { text: string; tone: 'ok' | 'wait' 
   unavailable: { text: 'Not available yet', tone: 'outline' },
   'owner-only': { text: 'Needs an owner', tone: 'outline' },
   ready: { text: 'Ready to connect', tone: 'wait' },
-  connected: { text: 'Connected', tone: 'ok' },
+  // "Signed in", not "Connected": the card knows a token is stored, as every
+  // sign-in row on this page does. "Connected" is the one word reserved for
+  // a real call's answer (the key probe), and it is said in one place only.
+  connected: { text: 'Signed in', tone: 'ok' },
   'needs-reconnect': { text: 'Needs reconnect', tone: 'wait' },
 };
 
@@ -59,7 +62,7 @@ export function ManagedConnectorCard({ o, busy, onConnect, onDisconnect, onOwnAp
           {m.displayName}
         </Link>
         <Badge tone={badge.tone} size="xs" className="shrink-0">
-          {state === 'connected' && m.account ? `Connected as ${m.account}` : badge.text}
+          {state === 'connected' && m.account ? `Signed in as ${m.account}` : badge.text}
         </Badge>
         <span className="ml-auto flex shrink-0 items-center gap-1.5">
           {canDisconnect && (
