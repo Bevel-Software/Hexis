@@ -372,6 +372,11 @@ export class DbSecretsVaultService implements ISecretsVaultService {
    * standing rather than deleted blind.
    */
   private async revokeThenDelete(where: ReturnType<typeof and>): Promise<{ id: string; userId: string | null; kind: string }[]> {
+    // No revoker, nothing to read first: one plain delete, as every removal
+    // was before managed sign-ins, and no miss to re-read for.
+    if (!this.managedRevoker) {
+      return this.db.delete(secrets).where(where).returning({ id: secrets.id, userId: secrets.userId, kind: secrets.kind });
+    }
     const gone: { id: string; userId: string | null; kind: string }[] = [];
     for (let attempt = 0; attempt < 3; attempt++) {
       const rows = await this.db.select().from(secrets).where(where);
@@ -485,12 +490,7 @@ export class DbSecretsVaultService implements ISecretsVaultService {
         // A managed sign-in under the namespace is told to its provider
         // before the delete, for the same reason the per-row removals do —
         // and guarded the same way, when a revoker is there to need it.
-        const deleted = this.managedRevoker
-          ? await this.revokeThenDelete(inArray(secrets.id, rows.map((r) => r.id)))
-          : await this.db
-              .delete(secrets)
-              .where(inArray(secrets.id, rows.map((r) => r.id)))
-              .returning({ id: secrets.id, userId: secrets.userId, kind: secrets.kind });
+        const deleted = await this.revokeThenDelete(inArray(secrets.id, rows.map((r) => r.id)));
         gone.push(...deleted);
       }
     } finally {
@@ -684,17 +684,22 @@ export class DbSecretsVaultService implements ISecretsVaultService {
     if (typeof tokens?.access_token !== 'string' || !tokens.access_token) {
       throw new InvalidSecretError('the handoff carries no access token');
     }
+    const meta = { ...((row.oauthMeta ?? {}) as Record<string, unknown>) };
+    // A broker that echoes no `scope` delivered what the sign-in asked for:
+    // the scopes the row was opened with stand in, as `pendingScopes` does
+    // for the code exchange. Stored as unknown, the grant would count as
+    // covering nothing, and the sign-in would read as under-scoped for good.
+    const requested = Array.isArray(meta.scopes) && meta.scopes.length > 0 ? meta.scopes.map(String).join(' ') : undefined;
     const stored: OAuthTokenSet = {
       access_token: tokens.access_token,
       refresh_token: typeof tokens.refresh_token === 'string' ? tokens.refresh_token : undefined,
       expires_at: typeof tokens.expires_at === 'number' ? tokens.expires_at : undefined,
       token_type: typeof tokens.token_type === 'string' ? tokens.token_type : undefined,
-      scope: typeof tokens.scope === 'string' ? tokens.scope : undefined,
+      scope: typeof tokens.scope === 'string' && tokens.scope.trim() ? tokens.scope : requested,
     };
     // The nonce is one-time: it leaves with the handoff it was minted for,
     // so the same handoff presented twice finds nothing to match.
     const next: OAuthBlob = { tokens: stored };
-    const meta = { ...((row.oauthMeta ?? {}) as Record<string, unknown>) };
     if (typeof input.account === 'string' && input.account.trim()) meta.account = input.account.trim().slice(0, MAX_LABEL_LEN);
     // Guarded on the ciphertext read above: two handoffs racing for one
     // nonce cannot both land, whichever the provider sent first wins.

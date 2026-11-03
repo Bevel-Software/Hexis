@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { DbSecretsVaultService } from '../db-secrets-vault.service.js';
+import { managedSignInErasure } from '../managed-sign-in-erasure.js';
 import { SecretOAuthError, type ManagedTokenRefresher, type ManagedTokenRevoker } from '../secrets-vault.contract.js';
 import { TokenCrypto } from '../../../shared/token-crypto.js';
 import type { Database } from '../../database/index.js';
@@ -245,6 +246,22 @@ describe('a managed sign-in: begin and the handoff', () => {
     expect(changed).toEqual([USER]);
   });
 
+  it('a handoff that names no scope is stored as covering what the sign-in asked for, not nothing', async () => {
+    // Stored as unknown, the grant would cover no declared scope: the tool
+    // hidden by the pre-call check, the card on "Needs reconnect", and every
+    // reconnect landing the same way. The code exchange falls back to the
+    // requested scopes; the handoff does the same from the row's declaration.
+    const waiting = row({ pendingNonce: NONCE }, { ...MANAGED_META, scopes: ['Mail.Read', 'offline_access'] });
+    const { db, captured } = makeFakeDb([[waiting], [{ id: 'row-1' }]]);
+    await new DbSecretsVaultService(db, ENC_KEY).completeManagedConnection({
+      userId: USER,
+      key: KEY,
+      nonce: NONCE,
+      tokens: { access_token: 'at', refresh_token: 'rt' },
+    });
+    expect(decryptSet(captured).tokens).toMatchObject({ access_token: 'at', scope: 'Mail.Read offline_access' });
+  });
+
   it('refuses a handoff whose nonce is wrong, and a second handoff for a nonce already used', async () => {
     const waiting = row({ pendingNonce: NONCE });
     const wrong = new DbSecretsVaultService(makeFakeDb([[waiting]]).db, ENC_KEY);
@@ -390,6 +407,19 @@ describe('a managed sign-in: revoked with the provider before it is deleted', ()
     vault.setManagedTokenHandlers({ revoker });
     expect(await vault.removeManagedRowsOfUser(USER)).toBe(1);
     expect(revoker.revoke).toHaveBeenCalledTimes(1);
+  });
+
+  it('erasing the account revokes its managed sign-ins before the rows cascade away with the user', async () => {
+    // Erasure deletes the user row and the vault rows go with it (ON DELETE
+    // CASCADE); without this step an account erased while still switched on
+    // would leave the grant live at the provider.
+    const managed = row({ tokens: { access_token: 'at', refresh_token: 'rt' } });
+    const revoker: ManagedTokenRevoker = { revoke: vi.fn(async () => undefined) };
+    const { db } = makeFakeDb([[managed], [managed], [{ id: 'row-1', userId: USER, kind: 'oauth' }]]);
+    const vault = new DbSecretsVaultService(db, ENC_KEY);
+    vault.setManagedTokenHandlers({ revoker });
+    await managedSignInErasure(vault).before({ userId: USER });
+    expect(revoker.revoke).toHaveBeenCalledWith({ connectorId: 'microsoft365', scopeSet: 'read' }, { access_token: 'at', refresh_token: 'rt' });
   });
 });
 

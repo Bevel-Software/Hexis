@@ -9,11 +9,16 @@ export function isManagedRow(o: ConnectToolOAuth): o is ManagedToolOAuth {
 
 /**
  * The state a managed connector card shows, in the Library's vocabulary:
- *  - unavailable      nothing stored, and no way to open a sign-in from here (the admin's job)
- *  - owner-only       a workspace connection a reader cannot make
- *  - ready            nothing stored yet
  *  - connected        a token is stored (the card adds the account when known)
  *  - needs-reconnect  stored, but it no longer covers what the tool asks for
+ *  - unavailable      nothing stored, and no way to open a sign-in from here (the admin's job)
+ *  - owner-only       nothing stored, and it is a workspace connection a reader cannot make
+ *  - ready            nothing stored yet
+ *
+ * What is STORED comes first, whoever may change it: a workspace connection
+ * an owner made is connected for every reader of the tool, and telling a
+ * reader it "needs an owner" would contradict the tool working for them.
+ * Who may press what is `ownerOnly`'s to decide, on the card.
  *
  * A stored token is reported as such even while the broker is unreachable:
  * what is stored still works, and the card withholds Connect and Reconnect
@@ -24,10 +29,9 @@ export function isManagedRow(o: ConnectToolOAuth): o is ManagedToolOAuth {
 export type ManagedCardState = 'unavailable' | 'owner-only' | 'ready' | 'connected' | 'needs-reconnect';
 
 export function managedCardState(o: ManagedToolOAuth): ManagedCardState {
-  if (!canStartSignIn(o) && !o.authorized) return 'unavailable';
+  if (o.authorized) return o.needsReauth ? 'needs-reconnect' : 'connected';
+  if (!canStartSignIn(o)) return 'unavailable';
   if (o.ownerOnly) return 'owner-only';
-  if (o.authorized && o.needsReauth) return 'needs-reconnect';
-  if (o.authorized) return 'connected';
   return 'ready';
 }
 

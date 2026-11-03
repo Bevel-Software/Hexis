@@ -125,6 +125,7 @@ import {
 import {
   DbSecretsVaultService,
   McpOAuthDiscoveryService,
+  managedSignInErasure,
   registerBevelSecretsVariableLoader,
   type ManagedSignInPort,
 } from '../modules/secrets-vault/index.js';
@@ -1342,11 +1343,13 @@ export async function createCoreServices(
   });
 
   // GDPR erasure path: admin-driven user deletion. The core service erases the
-  // rows it owns; each module contributes its slice as a participant.
+  // rows it owns; each module contributes its slice as a participant. The
+  // vault's runs first: a managed sign-in's tokens are revoked with their
+  // provider before the user row goes and the vault rows cascade with it.
   const accountErasureService = new AccountErasureService(
     db,
     reviewWorkflowService,
-    ports.erasureParticipants ?? [],
+    [managedSignInErasure(secretsVaultService), ...(ports.erasureParticipants ?? [])],
   );
 
   // MCP (remote agent access). ExternalApiKeyService handles connection-key

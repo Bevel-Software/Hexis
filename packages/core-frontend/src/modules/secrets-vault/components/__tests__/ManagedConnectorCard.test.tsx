@@ -47,6 +47,11 @@ describe('the state a managed connector card shows', () => {
     // says so, and withholds the buttons that would need the broker.
     ['connected', row({ authorized: true }, { available: false })],
     ['owner-only', row({ ownerOnly: true })],
+    // What is stored comes before who may change it: a workspace connection
+    // an owner made is connected for its readers too, and one that fell
+    // under-scoped needs a reconnect whoever has to make it.
+    ['connected', row({ authorized: true, ownerOnly: true }, { tokenScope: 'shared' })],
+    ['needs-reconnect', row({ authorized: true, needsReauth: true, ownerOnly: true }, { tokenScope: 'shared' })],
     // An owner's own app makes the deployment's own flow apply: no broker needed.
     ['ready', row({}, { available: false, ownApp: true })],
   ] as const)('%s', (expected, o) => {
@@ -115,6 +120,13 @@ describe('ManagedConnectorCard', () => {
     expect(screen.getByText('Needs an owner')).toBeInTheDocument();
     expect(screen.getByText(/One connection for the whole workspace/)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Connect/ })).toBeNull();
+  });
+
+  it('a workspace connection an owner made reads as connected to a reader, who gets no control over it', () => {
+    renderCard(row({ authorized: true, ownerOnly: true }, { tokenScope: 'shared', account: 'acme.hubspot.com' }));
+    expect(screen.getByText('Connected as acme.hubspot.com')).toBeInTheDocument();
+    expect(screen.queryByText('Needs an owner')).toBeNull();
+    expect(screen.queryByRole('button', { name: /Connect|Disconnect/ })).toBeNull();
   });
 
   it('an owner can bring the deployment’s own app: the form sends the client id and the secret', async () => {

@@ -292,6 +292,79 @@ describe('ToolVarRow: oauth', () => {
   });
 });
 
+describe('ToolVarRow: a managed sign-in', () => {
+  /** A sign-in through a managed connector, as `/secrets/tools` reports it. */
+  const managed = (over: Partial<ToolVarStatus> = {}, card: Partial<NonNullable<ToolVarStatus['managed']>> = {}) =>
+    variable({
+      name: 'ACCESS_TOKEN',
+      scope: 'user',
+      label: 'Microsoft 365 sign-in',
+      oauth: true,
+      adminConfigured: false,
+      managed: {
+        connectorId: 'microsoft365',
+        scopeSet: 'read',
+        tokenScope: 'user',
+        displayName: 'Microsoft 365',
+        icon: 'Mail',
+        description: 'Lets Hexis read your mail.',
+        permissions: ['Read your mail.'],
+        scopeSetLabel: 'Read',
+        dataResidency: 'EU',
+        subprocessor: 'Microsoft',
+        account: null,
+        ownApp: false,
+        available: true,
+        ...card,
+      },
+      ...over,
+    });
+  const workspace = (over: Partial<ToolVarStatus> = {}, card: Partial<NonNullable<ToolVarStatus['managed']>> = {}) =>
+    managed({ scope: 'admin', label: 'HubSpot sign-in', ...over }, { connectorId: 'hubspot', tokenScope: 'shared', ...card });
+
+  it('never offers a writer the client secret: the broker holds the client, and an own app is brought on the Connect page', () => {
+    renderRow(managed(), { canWrite: true, setupKind: 'oauth-manual' });
+    expect(screen.getByRole('button', { name: 'Sign in' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /client secret/ })).toBeNull();
+    cleanup();
+    renderRow(managed({ authorized: true }), { canWrite: true, setupKind: 'oauth-manual' });
+    expect(screen.getByText('Signed in')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /client secret/ })).toBeNull();
+  });
+
+  it('with no broker reachable, says so instead of blaming the owner', () => {
+    renderRow(managed({}, { available: false }));
+    expect(screen.getByText('This deployment is not connected to a connector broker yet. Ask your admin.')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Sign in' })).toBeNull();
+  });
+
+  it('a workspace connection: a reader sees its state and no control, a writer makes and remakes it', () => {
+    // Connected by an owner: the reader is told, and offered nothing the server would refuse.
+    renderRow(workspace({ authorized: true }), { canWrite: false });
+    expect(screen.getByText('Signed in')).toBeInTheDocument();
+    expect(screen.getByText('One connection for the whole workspace, made by a tool owner')).toBeInTheDocument();
+    expect(screen.queryByRole('button')).toBeNull();
+    cleanup();
+    // Not yet connected: the same sentence, and "Not set", not "the owner hasn't finished".
+    renderRow(workspace(), { canWrite: false });
+    expect(screen.getByText('One connection for the whole workspace, made by a tool owner')).toBeInTheDocument();
+    expect(screen.getByText('Not set')).toBeInTheDocument();
+    expect(screen.queryByRole('button')).toBeNull();
+    cleanup();
+    // Under-scoped: the reader learns it needs a reconnect; the owner gets the button.
+    renderRow(workspace({ authorized: true, needsReauth: true }), { canWrite: false });
+    expect(screen.getByText('Needs reconnect')).toBeInTheDocument();
+    expect(screen.queryByRole('button')).toBeNull();
+    cleanup();
+    renderRow(workspace({ authorized: true, needsReauth: true }), { canWrite: true });
+    expect(screen.getByRole('button', { name: 'Sign in again' })).toBeInTheDocument();
+    cleanup();
+    renderRow(workspace(), { canWrite: true });
+    expect(screen.getByRole('button', { name: 'Sign in' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /client secret/ })).toBeNull();
+  });
+});
+
 describe('ToolVarRow: failures', () => {
   it('reports a rejected write through onError and leaves the editor open', async () => {
     secretsMock.setAdminVar.mockRejectedValue(new Error('Forbidden'));

@@ -36,9 +36,11 @@ export function ManagedConnectorCard({ o, busy, onConnect, onDisconnect, onOwnAp
   const badge = STATE_BADGE[state];
   // Connect and Reconnect need a way to open a sign-in (the broker, or an
   // owner's own app) and a reader allowed to; Disconnect needs only a
-  // stored token the reader may remove.
-  const canStart = canStartSignIn(o) && state !== 'owner-only';
-  const canDisconnect = o.authorized && state !== 'owner-only';
+  // stored token the reader may remove. `ownerOnly` is the server's word on
+  // the second part, in every state: a reader sees a workspace connection's
+  // state and none of its controls.
+  const canStart = canStartSignIn(o) && !o.ownerOnly;
+  const canDisconnect = o.authorized && !o.ownerOnly;
   const shared = m.tokenScope === 'shared';
   const [ownAppOpen, setOwnAppOpen] = useState(false);
   return (

@@ -129,29 +129,41 @@ export function ToolVarRow({
   let description: string;
 
   if (variable.oauth) {
-    // An OAuth client secret only exists for a MANUALLY declared provider.
-    const mayEditClientSecret = canWrite && setupKind !== 'oauth-auto';
+    // An OAuth client secret only exists for a MANUALLY declared provider. A
+    // MANAGED sign-in has none to set here either: its client is the broker's,
+    // and an owner who brings the deployment's own app does so on the Connect
+    // page's card, where the client id is asked for beside the secret.
+    const mayEditClientSecret = canWrite && setupKind !== 'oauth-auto' && !variable.managed;
+    // A WORKSPACE connection (a managed sign-in on an `admin` variable) is one
+    // connection for everyone, made and remade by a writer of the tool: a
+    // reader sees its state and no control the server would refuse.
+    const workspaceConnection = variable.managed != null && variable.scope === 'admin';
+    const mayAct = !workspaceConnection || canWrite;
+    const whose = workspaceConnection ? 'One connection for the whole workspace, made by a tool owner' : 'Each person sets their own';
     // The owner's half is done when a client secret is stored on a row of the
     // OAuth kind (a key left from when the variable was static is not one) —
     // or, for a MANAGED sign-in, when the deployment can reach its broker or
     // an owner pinned their own app: there is no secret to store for the
-    // broker's app. A WORKSPACE connection (an `admin` variable) is made by a
-    // writer of the tool; a reader gets no control the server would refuse.
+    // broker's app.
     const ownerReady = variable.managed
-      ? (variable.managed.available || variable.managed.ownApp) && (variable.scope !== 'admin' || canWrite)
+      ? (variable.managed.available || variable.managed.ownApp) && mayAct
       : variable.adminConfigured && variable.adminKind !== 'static';
 
     if (variable.authorized && !variable.needsReauth) {
-      description = 'Each person sets their own';
+      description = whose;
       // Connected is not final: a provider can widen what it grants after the
       // fact (HubSpot's MCP tools do, and answer REQUIRES_REAUTHORIZATION
       // until the user consents again), a grant can be revoked provider-side,
       // or the owner can rotate the client. The caller needs a way back into
       // consent that doesn't wait for the scope check to notice.
+      if (mayAct) {
+        meta.push(
+          <Button key="reconnect" size="sm" variant="quiet" disabled={busy} onClick={() => void signIn()}>
+            Reconnect
+          </Button>,
+        );
+      }
       meta.push(
-        <Button key="reconnect" size="sm" variant="quiet" disabled={busy} onClick={() => void signIn()}>
-          Reconnect
-        </Button>,
         // "Signed in", not "Connected": at ROW level all we know is that a token
         // exists. Whether it still works is the tool-level health line's claim,
         // and it is the only place in the UI allowed to say "Connected" — one
@@ -161,14 +173,20 @@ export function ToolVarRow({
         </Badge>,
       );
     } else if (variable.authorized) {
-      description = 'Each person sets their own';
+      description = whose;
       meta.push(
-        <Button key="reauth" size="sm" disabled={busy} onClick={() => void signIn()}>
-          Sign in again
-        </Button>,
+        mayAct ? (
+          <Button key="reauth" size="sm" disabled={busy} onClick={() => void signIn()}>
+            Sign in again
+          </Button>
+        ) : (
+          <Badge key="chip" tone="wait">
+            Needs reconnect
+          </Badge>
+        ),
       );
     } else if (ownerReady) {
-      description = 'Each person sets their own';
+      description = whose;
       meta.push(
         <Button key="signin" size="sm" disabled={busy} onClick={() => void signIn()}>
           Sign in
@@ -176,8 +194,14 @@ export function ToolVarRow({
       );
     } else {
       // The owner hasn't declared the provider (or hasn't set its secret), so
-      // there is nothing for anyone to sign in to yet.
-      description = "The tool owner hasn't finished the sign-in setup yet.";
+      // there is nothing for anyone to sign in to yet. For a managed sign-in
+      // the missing half is the broker (the admin's), or the connection is a
+      // writer's to make: the row says which.
+      description = !variable.managed
+        ? "The tool owner hasn't finished the sign-in setup yet."
+        : !mayAct
+          ? whose
+          : 'This deployment is not connected to a connector broker yet. Ask your admin.';
       if (!mayEditClientSecret) {
         meta.push(
           <Badge key="chip" tone="neutral">
