@@ -2,7 +2,11 @@ import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Badge, Button, Surface, TextField } from '../../../shared/components';
 import { cn } from '../../../lib/utils';
-import { pathForTool, ToolLogo } from '../../library';
+import { pathForTool } from '../../library';
+// A component is composed from its file, never from a module's entry (the
+// Module Map: entries carry utilities and contracts; a component re-export
+// is an import cycle waiting to happen).
+import { ToolLogo } from '../../library/components/ToolLogo';
 import { canStartSignIn, managedCardState, type ManagedCardState, type ManagedToolOAuth } from '../utils/managed-card-state';
 
 /**
