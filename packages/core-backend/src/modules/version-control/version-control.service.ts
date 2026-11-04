@@ -4917,10 +4917,10 @@ export class VersionControlService implements IVersionControlService {
     try {
       const { stdout } = await execFileAsync(
         'git',
-        ['-C', cwd, 'diff', '--name-only', `origin/${targetBranch}...${sourceBranch}`],
+        ['-C', cwd, 'diff', '-z', '--name-only', `origin/${targetBranch}...${sourceBranch}`],
         { env: { ...process.env }, maxBuffer: 4 * 1024 * 1024 },
       );
-      return stdout.split('\n').map((s) => s.trim()).filter(Boolean);
+      return stdout.split('\0').map((s) => s.trim()).filter(Boolean);
     } catch (err) {
       log.warn('listChangedPathsBetweenBranches failed:', {
         detail: redactTokens(err instanceof Error ? err.message : String(err), this.git.credentials?.token()),

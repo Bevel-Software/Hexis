@@ -2293,11 +2293,15 @@ export class GitService implements IGitService {
     } catch {
       range = ['HEAD', '--not', '--remotes'];
     }
+    // `-z`: NUL-terminated, unquoted names. Without it git quotes a name with
+    // bytes outside ASCII ("h\303\244ndler"), and the quoted string matches no
+    // path in the access tree, so a push touching an umlaut is refused as if
+    // the person had no grant there.
     const { stdout } = await this.git(cwd, [
-      'log', '--name-only', '--pretty=format:', ...range,
+      'log', '-z', '--name-only', '--pretty=format:', ...range,
     ]);
     const set = new Set<string>();
-    for (const line of stdout.split('\n')) {
+    for (const line of stdout.split(/[\0\n]/)) {
       const trimmed = line.trim();
       if (trimmed) set.add(trimmed);
     }

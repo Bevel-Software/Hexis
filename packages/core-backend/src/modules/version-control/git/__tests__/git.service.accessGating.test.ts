@@ -279,6 +279,21 @@ describe('GitService — push gate uses origin/<branch> (not HEAD or working tre
     expect(gateCalls[0].paths).toContain('Knowledge/Foo.md');
   });
 
+  it('gates a file whose name has bytes outside ASCII by its real name', async () => {
+    // git quotes such a name in its listings ("Plugins/h\303\244ndler/...")
+    // unless asked for NUL-terminated output. The quoted string matches no
+    // grant in the access tree, so a person's push of their own skill named
+    // with an umlaut was refused as if they had no grant there.
+    const { svc, repo, calls } = await setupWithOrigin();
+    const skill = 'Plugins/personal-1/skills/händler-rücksendungen/SKILL.md';
+    await commitFile(repo, skill, 'steps\n', 'skill');
+    await svc.push(workspaceId, USER);
+    const gateCalls = calls.filter((c) => c.method === 'canWriteBatchAtRef');
+    expect(gateCalls).toHaveLength(1);
+    expect(gateCalls[0].paths).toContain(skill);
+    expect(gateCalls[0].paths.some((p) => p.startsWith('"'))).toBe(false);
+  });
+
   it('systemAuthorized skips the gate entirely, and the push still lands', async () => {
     // The plugin-provisioning path: its endpoint IS the authorization (any
     // signed-in user may claim an unused name under Plugins/), and the gate
