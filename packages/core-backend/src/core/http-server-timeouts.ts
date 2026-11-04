@@ -9,7 +9,9 @@ import type { Server as HttpServer } from 'node:http';
  * socket the server already closed. The next request it sends there fails
  * with a reset, and a POST with a body (an MCP call among them) is never
  * retried: the client sees a dropped connection or a 502. 120 seconds is
- * longer than every common proxy's pool, so the proxy always lets go first.
+ * longer than the default pools of the proxies above, so with their defaults
+ * the proxy lets go first. A proxy configured with a longer idle pool must be
+ * set below this value, or the same reset returns.
  */
 export const HTTP_KEEP_ALIVE_TIMEOUT_MS = 120_000;
 
