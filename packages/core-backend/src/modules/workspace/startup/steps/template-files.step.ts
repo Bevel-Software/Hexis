@@ -6,10 +6,9 @@ import {
   type KbLayout,
 } from '@bevel-software/platform-shared';
 import { IGNORE_FILENAME, isAbsence, type IFsProbe } from '../../../../shared/fs.contract.js';
-import type { KbContext } from '../../../../shared/kb-context.js';
 import { PREAMBLE_FILE } from '../../../agent-instructions/index.js';
 import { isManagedGuide } from '../../../agent-guide/index.js';
-import { TemplateSource } from './template-source.js';
+import { TemplateSource, type TemplateKb } from './template-source.js';
 import type { KbBranch, OnServerStart, ServerStartContext, StepResult } from '../on-server-start.js';
 import { hasGitInternalsSegment } from '../../../../shared/git-internals.js';
 
@@ -71,7 +70,7 @@ export const GENERATED_FILES: readonly string[] = ['roles.yaml'];
  * The three roots CORE gives a knowledge base: the ontologies, the shared
  * skills, and the plugins that hold tools and link the skills.
  *
- * `Data/`, `Agents/` and `Pipelines/` are deliberately absent. They scaffold
+ * `Data/`, `Agents/` and `Workflows/` are deliberately absent. They scaffold
  * the agentic execution layer, which is not part of this platform — a core
  * deployment that created them would be handing every operator three empty
  * folders it has no feature to fill. A distribution that DOES own that layer
@@ -93,7 +92,7 @@ function coreRequiredDirs(layout: Required<KbLayout>): readonly string[] {
  * the repo being maintained.
  *
  * Deliberately NOT a check against the reserved-root set in `kb-layout.ts`:
- * `Data`, `Agents` and `Pipelines` are all in that set, and they are precisely
+ * `Data`, `Agents` and `Workflows` are all in that set, and they are precisely
  * what a distribution passes here. Being reserved is what makes a name worth
  * claiming — the file tree renders it as its own root instead of folding it
  * into Knowledge — so rejecting reserved names would reject the only real use.
@@ -172,7 +171,7 @@ export class TemplateFilesStep implements OnServerStart {
      * applies the admin's names after this step was built. A snapshot taken
      * here scaffolded `Skills/` beside the `skills/` they had just chosen.
      */
-    private readonly kb: Pick<KbContext, 'layout'>,
+    private readonly kb: TemplateKb,
     private readonly extraRootDirs: readonly string[] = [],
   ) {
     // Validated NOW, so a bad extra fails at boot beside the rest of the

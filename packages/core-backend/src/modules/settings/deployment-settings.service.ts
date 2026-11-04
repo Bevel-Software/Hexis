@@ -325,7 +325,7 @@ export const CORE_SETTINGS: SettingDef[] = [
   {
     /**
      * Whether the server removes, on its own, the branches merged change
-     * requests left behind (`WorkflowService.retireLeftoverMergedBranches`).
+     * requests left behind (`VersionControlService.retireLeftoverMergedBranches`).
      * On unless set to `false`; a blanked field puts the default back. Read
      * at every round, so it applies without a restart. It covers that cleanup
      * only: the removal of a branch when its change request is merged does

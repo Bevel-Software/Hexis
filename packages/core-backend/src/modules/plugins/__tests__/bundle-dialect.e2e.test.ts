@@ -17,7 +17,7 @@ import { PluginLinkIndex } from '../plugin-links.js';
 import { PluginLinksService } from '../plugin-links.service.js';
 import { KbPluginSource } from '../discovery/kb-plugin-source.js';
 import { MarketplaceCompilerService } from '../compile/marketplace-compiler.service.js';
-import { NodeGitRunner } from '../../workflow/git/node-git-runner.js';
+import { NodeGitRunner } from '../../version-control/git/node-git-runner.js';
 
 /**
  * A customer's repository, read as-is: lowercase `skills/` and `plugins/`

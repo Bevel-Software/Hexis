@@ -1,6 +1,6 @@
 import { promises as fs, type Stats } from 'node:fs';
 import path from 'node:path';
-import { PathNotFoundError, WorkflowDomainError, WorkflowValidationError } from '../../shared/domain-errors.js';
+import { PathNotFoundError, VersionControlDomainError, VersionControlValidationError } from '../../shared/domain-errors.js';
 import { assertWithinDirectory } from '../../shared/path-containment.js';
 import { sanitizedPath } from '../../shared/printable.js';
 import { hasControlCharacter, TMP_REF_PREFIX } from '../kb-fs/index.js';
@@ -55,9 +55,9 @@ export const TMP_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 export const TMP_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 
 /** A ref that breaks one of the rules, with the rule named. */
-function invalidRef(ref: string, rule: string): WorkflowValidationError {
+function invalidRef(ref: string, rule: string): VersionControlValidationError {
   const shown = sanitizedPath(ref);
-  return new WorkflowValidationError(`"${shown}" is not a valid tmp ref: ${rule}`, { kind: 'tmp-ref-invalid', path: shown });
+  return new VersionControlValidationError(`"${shown}" is not a valid tmp ref: ${rule}`, { kind: 'tmp-ref-invalid', path: shown });
 }
 
 /**
@@ -97,7 +97,7 @@ function tmpRefFailure(ref: string, err: unknown): Error {
     return invalidRef(ref, 'it goes through a link that cannot be followed (a link that leads back to itself).');
   }
   log.warn('could not read a tmp ref:', { err, ref: shown });
-  return new WorkflowDomainError(`"${shown}" could not be read from the workspace's tmp folder.`, 500, {
+  return new VersionControlDomainError(`"${shown}" could not be read from the workspace's tmp folder.`, 500, {
     kind: 'tmp-ref-unreadable',
     path: shown,
   });

@@ -12,16 +12,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createMcpRoutes } from '../mcp.routes.js';
 import { McpService } from '../mcp.service.js';
-import { SpillStore } from '../../workspace/spill-store.js';
-import { createManualRoutes } from '../../tool-registry/manual.routes.js';
-import { ToolRegistry } from '../../tool-registry/tool-registry.js';
-import { toolDef } from '../../tool-helpers/tool-def.js';
+import { SpillStore } from '../../workspace/index.js';
+import { ToolRegistry, createManualRoutes } from '../../tool-registry/index.js';
+import { toolDef } from '../../tool-helpers/index.js';
 import { DEFAULT_KB_LAYOUT } from '@bevel-software/platform-shared';
 import { platformInstructions } from '../../agent-instructions/index.js';
 import { startFakeDownstreamMcpServer, type FakeDownstreamMcpServer } from './fake-downstream-mcp-server.js';
-import { registerBevelSecretsVariableLoader } from '../../secrets-vault/secrets-variable-loader.js';
-import type { ForcedRefreshOutcome, ISecretsVaultService } from '../../secrets-vault/secrets-vault.contract.js';
-import type { IToolManualService } from '../../tool-manuals/tool-manuals.contract.js';
+import { registerBevelSecretsVariableLoader } from '../../secrets-vault/index.js';
+import type { ForcedRefreshOutcome, ISecretsVaultService } from '../../secrets-vault/index.js';
+import type { IToolManualService } from '../../tool-manuals/index.js';
 import { setLogger } from '../../../shared/logging.js';
 import type { ILogger } from '../../../shared/logger.contract.js';
 import { formatProbeReport, probeFirstCall } from '../first-call-probe.js';
@@ -117,6 +116,8 @@ interface PlatformOptions {
   /** Bind this port — how a "restarted" platform comes back at the same address. */
   port?: number;
   readAgentPreamble?: () => Promise<string | null>;
+  /** The default branch the instructions name, read per request as the composition root wires it. */
+  defaultBranch?: () => string;
   /** Extra manuals the catalog serves each caller (beyond the KB manual). */
   manualsFor?: (bearer: string) => unknown[];
   poolNow?: () => number;
@@ -185,6 +186,7 @@ async function startPlatform(opts: PlatformOptions = {}): Promise<Platform> {
     spillStore: new SpillStore(join(tmpdir(), 'bevel-test-spills')),
     publicFrontendUrl: 'http://localhost:5173',
     readAgentPreamble: opts.readAgentPreamble,
+    defaultBranch: opts.defaultBranch,
     downstreamPool: opts.poolNow ? { now: opts.poolNow } : undefined,
   }, opts.secretsVault, opts.toolManuals);
   const stub = {} as never;
@@ -487,11 +489,28 @@ describe('agent instructions over the real transport', () => {
   it('the initialize result carries the platform text and the preamble body inline', async () => {
     const { baseUrl } = await startPlatform({
       readAgentPreamble: async () => 'Acme builds solar farms.\n\n<!-- private -->Look in Projects/ first.',
+      defaultBranch: () => 'target-company-state',
     });
     const { client } = await connectSdkClient(baseUrl);
     const instructions = client.getInstructions();
-    expect(instructions).toBe(`${platformInstructions(DEFAULT_KB_LAYOUT)}\n\nAcme builds solar farms.\n\nLook in Projects/ first.`);
+    expect(instructions).toBe(
+      `${platformInstructions(DEFAULT_KB_LAYOUT, 'target-company-state')}\n\nAcme builds solar farms.\n\nLook in Projects/ first.`,
+    );
     expect(instructions).not.toContain('private');
+    // The deployment's default branch, by its own name — not `main`.
+    expect(instructions).toContain("This knowledge base's default branch is `target-company-state`");
+  });
+
+  it('a default branch renamed between two initializes is the one the second names', async () => {
+    let branch = 'target-company-state';
+    const { baseUrl } = await startPlatform({ defaultBranch: () => branch });
+    const { client: before } = await connectSdkClient(baseUrl);
+    branch = 'company-state';
+    const { client: after } = await connectSdkClient(baseUrl);
+    expect(after.getInstructions()).toContain("This knowledge base's default branch is `company-state`");
+    expect(after.getInstructions()).not.toContain('target-company-state');
+    // Nothing else moved: the text is the old one with the name swapped.
+    expect(after.getInstructions()).toBe(before.getInstructions()!.replaceAll('target-company-state', 'company-state'));
   });
 
   it('a later initialize on the SAME process after the file changed carries the new text — read per request', async () => {
@@ -651,6 +670,7 @@ describe('proxied third-party MCP servers: a rejected token gets one refresh and
     } as unknown as ISecretsVaultService;
     registerBevelSecretsVariableLoader(vault);
     const toolManuals = {
+      sharedSignInKeysForManual: async () => [],
       userScopedKeysForManual: async (manual: string) =>
         manual === 'notion' ? [{ key: KEY, name: 'ACCESS_TOKEN', label: 'Notion sign-in', oauth: true }] : [],
     } as unknown as IToolManualService;
@@ -768,6 +788,45 @@ describe('proxied third-party MCP servers: a rejected token gets one refresh and
     expect(state.refreshes).toBe(1);
     expect((await vault.statusFor('user-A', [KEY]))[0]?.userAuthorized).toBe(false);
     expect(refreshLines(logs)[0]).toContain('manual=\\"notion\\" user=\\"user-A\\" outcome=rejected');
+  });
+
+  it('a WORKSPACE connection rejected on refresh tells the caller a tool owner has to reconnect it, and does not retry', async () => {
+    quiet();
+    let valid = 'token-1';
+    downstream = await startFakeDownstreamMcpServer({ acceptsToken: (t) => t === valid });
+    // The same sign-in, declared as one shared connection: the manual reports
+    // it under `sharedSignInKeysForManual`, the vault under the owner's row.
+    const state = { token: 'token-1' as string | null, refreshes: 0 };
+    const vault = {
+      resolve: async (_userId: string, key: string) => (key === KEY ? state.token : null),
+      statusFor: async (_userId: string, keys: string[]) =>
+        keys.map((key) => ({ key, adminConfigured: true, adminKind: 'oauth', userConfigured: false, adminAuthorized: state.token !== null })),
+      forceRefresh: async (_userId: string, key: string) => {
+        expect(key).toBe(KEY);
+        state.refreshes += 1;
+        state.token = null;
+        return 'rejected' as const;
+      },
+    } as unknown as ISecretsVaultService;
+    registerBevelSecretsVariableLoader(vault);
+    const toolManuals = {
+      sharedSignInKeysForManual: async (manual: string) =>
+        manual === 'notion' ? [{ key: KEY, name: 'ACCESS_TOKEN', label: 'Notion sign-in' }] : [],
+      userScopedKeysForManual: async () => [],
+    } as unknown as IToolManualService;
+    const { baseUrl } = await startPlatform({ manualsFor: notionManual(downstream), secretsVault: vault, toolManuals });
+    const { client } = await connectSdkClient(baseUrl);
+    await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'one' } });
+
+    valid = 'nothing-valid-any-more';
+
+    const res = await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'two' } });
+    expect(res.isError).toBe(true);
+    expect(toolText(res)).toContain('The workspace connection for "notion" was rejected by the provider and has been disconnected');
+    expect(toolText(res)).toContain('A tool owner has to reconnect it on http://localhost:5173/connect');
+    expect(toolText(res)).not.toContain('Your sign-in');
+    expect(state.refreshes).toBe(1);
+    expect(downstream.executions()).toBe(1); // nothing was retried against a dead workspace grant
   });
 
   it('transient refresh failure: the original error comes back, the token is kept, and a later call tries again', async () => {
@@ -940,6 +999,7 @@ describe('proxied third-party MCP servers: a rejected token gets one refresh and
     const { state, vault } = fakeSignIn('token-1', () => 'refreshed');
     const boom = new Error('catalog read failed\u009b31m\nerror: forged by the manual name\u2028tail');
     const toolManuals = {
+      sharedSignInKeysForManual: async () => [],
       userScopedKeysForManual: async (manual: string) => {
         if (broken) throw boom;
         return manual === 'notion' ? [{ key: KEY, name: 'ACCESS_TOKEN', label: 'Notion sign-in', oauth: true }] : [];
@@ -1061,6 +1121,7 @@ describe('proxied third-party MCP servers: a rejected token gets one refresh and
     } as unknown as ISecretsVaultService;
     registerBevelSecretsVariableLoader(withKind);
     const toolManuals = {
+      sharedSignInKeysForManual: async () => [],
       userScopedKeysForManual: async (manual: string) =>
         manual === 'notion' ? [{ key: KEY, name: 'ACCESS_TOKEN', label: 'Notion key', oauth: false }] : [],
     } as unknown as IToolManualService;

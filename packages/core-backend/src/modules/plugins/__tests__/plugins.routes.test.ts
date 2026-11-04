@@ -9,7 +9,7 @@ import { NodeFs } from '../../kb-fs/node-fs.js';
 import { KbPluginSource } from '../discovery/kb-plugin-source.js';
 
 import { DEFAULT_BRANCH, joinBranchFor } from '@bevel-software/platform-shared';
-import type { ChangeRequest, IWorkflowService } from '@bevel-software/platform-shared';
+import type { ChangeRequest, IVersionControlService } from '@bevel-software/platform-shared';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
@@ -30,7 +30,7 @@ import { testKbContext } from '../../../__tests__/kb-context.js';
  * verdicts), the fail-closed omission of plugins with no verdict at all, and
  * the join flow that rides on plain change requests.
  *
- * The plugin index is REAL over a temp KB; access control and the workflow are
+ * The plugin index is REAL over a temp KB; access control and the version-control service are
  * stubs, because what's under test here is the route's use of them.
  */
 
@@ -137,7 +137,7 @@ async function makeHarness(opts: HarnessOpts = {}) {
     eligibleReaders: async () => ({ restricted: true, roles: ['GTM Team'], users: [OLGA] }),
   } as unknown as IAccessControl;
 
-  const workflow = {
+  const versionControl = {
     listChangeRequestsAuthoredBy: vi.fn(async () => opts.authoredCrs ?? []),
     listChangeRequests: vi.fn(async () => opts.authoredCrs ?? []),
     getChangeRequest: vi.fn(
@@ -147,7 +147,7 @@ async function makeHarness(opts: HarnessOpts = {}) {
     listBranches: vi.fn(async () => []),
     commitChanges: vi.fn(async () => null),
     openChangeRequest: vi.fn(async () => ({ number: 42 })),
-  } as unknown as IWorkflowService;
+  } as unknown as IVersionControlService;
 
   const skillService = { listSkills: async () => opts.skills ?? [] } as unknown as ISkillService;
   const toolService = {
@@ -183,7 +183,7 @@ async function makeHarness(opts: HarnessOpts = {}) {
   // The records half is REAL over an in-memory table, because the route's
   // whole contract now is "write a row, answer, then do the git" — a stub
   // would assert the route called something, not that the row and the change
-  // request are one-to-one. The git it eventually does is the workflow stub
+  // request are one-to-one. The git it eventually does is the version-control service stub
   // above, as it always was.
   const joinRequestStore = new FakeJoinRequestStore();
   // The change requests the store can see are the ones the listing is told
@@ -191,7 +191,7 @@ async function makeHarness(opts: HarnessOpts = {}) {
   // telling the record it names that the request is over.
   for (const c of opts.authoredCrs ?? []) joinRequestStore.changeRequests.set(c.number, c.state);
   const joinRequestJobs = new PluginJoinRequestJobs(joinRequestStore, {
-    workflow,
+    versionControl,
     workspaceService,
     kb: testKbContext({ kbDirName: KB }),
     target: async (pluginKey) => {
@@ -224,7 +224,7 @@ async function makeHarness(opts: HarnessOpts = {}) {
     createPluginsRoutes(
       index,
       accessControl,
-      workflow,
+      versionControl,
       joinRequests,
       joinRequestJobs,
       provision as never,
@@ -241,7 +241,7 @@ async function makeHarness(opts: HarnessOpts = {}) {
     server,
     baseUrl: `http://127.0.0.1:${addr.port}`,
     accessControl,
-    workflow,
+    versionControl,
     workspaceService,
     joinRequests,
     joinRequestJobs,
@@ -516,9 +516,9 @@ describe('/api/plugins routes', () => {
     const h = await makeHarness({ readable: { [ALI]: ['Plugins/Finance/access.md'] } });
     server = h.server;
     // The one thing the endpoint may not do any more is wait for a clone. A
-    // workflow that never settles stands in for one: the answer must arrive
+    // a version-control service that never settles stands in for one: the answer must arrive
     // anyway, and say the request is recorded and not yet carried.
-    (h.workflow.createBranch as ReturnType<typeof vi.fn>).mockReturnValue(new Promise(() => {}));
+    (h.versionControl.createBranch as ReturnType<typeof vi.fn>).mockReturnValue(new Promise(() => {}));
 
     const res = await fetch(`${h.baseUrl}/api/plugins/finance/join-request`, { method: 'POST' });
     expect(res.status).toBe(200);
@@ -526,13 +526,13 @@ describe('/api/plugins routes', () => {
     expect(h.joinRequestStore.all()).toMatchObject([
       { requesterEmail: ALI, pluginKey: 'Finance', status: 'pending', changeRequestNumber: null },
     ]);
-    expect(h.workflow.openChangeRequest).not.toHaveBeenCalled();
+    expect(h.versionControl.openChangeRequest).not.toHaveBeenCalled();
   });
 
   it('join-request: the recorded request is REPORTED as requested before its CR exists', async () => {
     const h = await makeHarness({ readable: { [ALI]: ['Plugins/Finance/access.md'] } });
     server = h.server;
-    (h.workflow.createBranch as ReturnType<typeof vi.fn>).mockReturnValue(new Promise(() => {}));
+    (h.versionControl.createBranch as ReturnType<typeof vi.fn>).mockReturnValue(new Promise(() => {}));
     await fetch(`${h.baseUrl}/api/plugins/finance/join-request`, { method: 'POST' });
 
     // A reload one second after the click. No change request exists — the
@@ -557,7 +557,7 @@ describe('/api/plugins routes', () => {
     // The branch is cut from the FOLDER name, as every join branch before the
     // manifest became the identity was — so none of them is orphaned.
     const branch = joinBranchFor(ALI, 'Finance');
-    expect(h.workflow.createBranch).toHaveBeenCalledWith(wsId, branch, DEFAULT_BRANCH);
+    expect(h.versionControl.createBranch).toHaveBeenCalledWith(wsId, branch, DEFAULT_BRANCH);
     // The write went to the plugin's access.md and added the caller to the
     // BODY's read list (folder rules), leaving the discovery frontmatter alone.
     const write = (h.workspaceService.writeFile as ReturnType<typeof vi.fn>).mock.calls[0];
@@ -566,8 +566,8 @@ describe('/api/plugins routes', () => {
     expect((write[2] as string).indexOf('everyone')).toBeLessThan(
       (write[2] as string).indexOf('Ali Baba'),
     );
-    expect(h.workflow.commitChanges).toHaveBeenCalled();
-    expect(h.workflow.openChangeRequest).toHaveBeenCalledWith(
+    expect(h.versionControl.commitChanges).toHaveBeenCalled();
+    expect(h.versionControl.openChangeRequest).toHaveBeenCalledWith(
       workspaceIdForBranch(branch),
       expect.objectContaining({ email: ALI }),
       expect.objectContaining({
@@ -591,7 +591,7 @@ describe('/api/plugins routes', () => {
     await h.joinRequestJobs.drain();
     const branch = joinBranchFor(ALI, 'teams/GTM');
     expect(branch).not.toBe(joinBranchFor(ALI, 'GTM'));
-    expect(h.workflow.createBranch).toHaveBeenCalledWith(wsId, branch, DEFAULT_BRANCH);
+    expect(h.versionControl.createBranch).toHaveBeenCalledWith(wsId, branch, DEFAULT_BRANCH);
   });
 
   it('join-request adopts an existing open join CR instead of opening a second one', async () => {
@@ -603,8 +603,8 @@ describe('/api/plugins routes', () => {
     const res = await fetch(`${h.baseUrl}/api/plugins/finance/join-request`, { method: 'POST' });
     expect(res.status).toBe(200);
     await h.joinRequestJobs.drain();
-    expect(h.workflow.createBranch).not.toHaveBeenCalled();
-    expect(h.workflow.openChangeRequest).not.toHaveBeenCalled();
+    expect(h.versionControl.createBranch).not.toHaveBeenCalled();
+    expect(h.versionControl.openChangeRequest).not.toHaveBeenCalled();
     // The record ends up pointing at the request that was already there.
     expect(h.joinRequestStore.all()).toMatchObject([{ status: 'opened', changeRequestNumber: 9 }]);
   });
@@ -639,13 +639,13 @@ describe('/api/plugins routes', () => {
     await h.joinRequestJobs.drain();
 
     expect(h.joinRequestStore.all()).toHaveLength(1);
-    expect(h.workflow.openChangeRequest).toHaveBeenCalledTimes(1);
+    expect(h.versionControl.openChangeRequest).toHaveBeenCalledTimes(1);
   });
 
   it('join-request: a failure is recorded, and the listing hands the plugin back with the reason', async () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});
     const h = await makeHarness({ readable: { [ALI]: ['Plugins/Finance/access.md'] } });
-    (h.workflow.openChangeRequest as ReturnType<typeof vi.fn>).mockRejectedValue(
+    (h.versionControl.openChangeRequest as ReturnType<typeof vi.fn>).mockRejectedValue(
       new Error('the remote refused the push'),
     );
     server = h.server;
@@ -670,7 +670,7 @@ describe('/api/plugins routes', () => {
   it('join-request: a click after a failure RETRIES the recorded request rather than recording a second', async () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});
     const h = await makeHarness({ readable: { [ALI]: ['Plugins/Finance/access.md'] } });
-    (h.workflow.openChangeRequest as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+    (h.versionControl.openChangeRequest as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
       new Error('the remote refused the push'),
     );
     server = h.server;
@@ -685,7 +685,7 @@ describe('/api/plugins routes', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].id).toBe(failed.id);
     expect(rows[0]).toMatchObject({ status: 'opened', changeRequestNumber: 42, failureReason: null });
-    expect(h.workflow.openChangeRequest).toHaveBeenCalledTimes(2);
+    expect(h.versionControl.openChangeRequest).toHaveBeenCalledTimes(2);
     error.mockRestore();
   });
 
@@ -706,7 +706,7 @@ describe('/api/plugins routes', () => {
     await h.joinRequestJobs.sweep();
     await h.joinRequestJobs.drain();
 
-    expect(h.workflow.openChangeRequest).toHaveBeenCalledTimes(1);
+    expect(h.versionControl.openChangeRequest).toHaveBeenCalledTimes(1);
     expect(h.joinRequestStore.all()).toMatchObject([{ status: 'opened', changeRequestNumber: 42 }]);
   });
 
@@ -761,7 +761,7 @@ describe('/api/plugins routes', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].id).toBe(answered.id);
     expect(rows[0]).toMatchObject({ status: 'opened', changeRequestNumber: 42 });
-    expect(h.workflow.openChangeRequest).toHaveBeenCalledTimes(1);
+    expect(h.versionControl.openChangeRequest).toHaveBeenCalledTimes(1);
   });
 
   it('an opened record whose request is still open counts, before the open listing knows it', async () => {
@@ -811,7 +811,7 @@ describe('/api/plugins routes', () => {
 
   it('degrades hasRequested to false when the CR lookup throws', async () => {
     const h = await makeHarness({ readable: { [ALI]: ['Plugins/Finance/access.md'] } });
-    (h.workflow.listChangeRequestsAuthoredBy as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+    (h.versionControl.listChangeRequestsAuthoredBy as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
       new Error('gh down'),
     );
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});

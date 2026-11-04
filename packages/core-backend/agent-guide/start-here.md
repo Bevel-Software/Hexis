@@ -45,6 +45,7 @@ a skill on a draft, pass the draft as `branch` to `list_skills` or
 
 | Question | Section |
 |---|---|
+| Someone is new here, asks what this is or what you can do for them, or asks to be onboarded | `onboarding` |
 | What does my agent see when it connects, and how does it find the rest? | `how-agents-find-things` |
 | How is this like Git, and how is it not? Why can't I delete this? | `for-git-users` |
 | What is a plugin, a skill, a tool, a secret, a role, a group? | `glossary` |

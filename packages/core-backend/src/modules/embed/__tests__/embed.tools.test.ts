@@ -57,7 +57,7 @@ async function serve(opts: Opts = {}) {
       ...(caller.tokenId ? { tokenId: caller.tokenId } : {}),
       abortSignal: new AbortController().signal,
       workspaceService: {} as never,
-      workflowService: {} as never,
+      versionControlService: {} as never,
       events: {} as never,
       getFilesystem: async () => {
         throw new Error('open_page reads through readForTool, not the filesystem');

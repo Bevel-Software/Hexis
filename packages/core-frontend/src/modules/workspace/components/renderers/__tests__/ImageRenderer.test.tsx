@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import type { WorkflowEvent } from '@bevel-software/platform-shared';
+import type { VersionControlEvent } from '@bevel-software/platform-shared';
 import {
   WorkspaceContext,
   type WorkspaceContextValue,
@@ -8,7 +8,7 @@ import {
 import {
   EventBusContext,
   type EventBusContextValue,
-} from '../../../../workflow/state/event-bus.context';
+} from '../../../../version-control/state/event-bus.context';
 
 const apiMock = vi.hoisted(() => ({ authFetch: vi.fn() }));
 vi.mock('../../../../../lib/api', () => ({ authFetch: apiMock.authFetch }));
@@ -75,9 +75,9 @@ describe('ImageRenderer', () => {
    * to.
    */
   it('refetches when an image in the workspace changes', async () => {
-    const handlers: ((e: WorkflowEvent) => void)[] = [];
+    const handlers: ((e: VersionControlEvent) => void)[] = [];
     const bus = {
-      subscribe: (_kind: string, handler: (e: WorkflowEvent) => void) => {
+      subscribe: (_kind: string, handler: (e: VersionControlEvent) => void) => {
         handlers.push(handler);
         return () => {};
       },
@@ -109,7 +109,7 @@ describe('ImageRenderer', () => {
           workspaceId: 'ws-1',
           branch: 'ws-1',
           path: 'Knowledge/assets/shot.png',
-        } as unknown as WorkflowEvent),
+        } as unknown as VersionControlEvent),
       ),
     );
 

@@ -70,6 +70,7 @@ block carries public settings only:
 | `pkce` | optional, default on | only `false` means anything |
 | `resource` | optional | the RFC 8707 resource indicator; discovered on an `mcp.json` server |
 | `authParams` | optional | extra fixed parameters, such as Google's `access_type: offline` |
+| `managed` | in place of `clientId` | `{ connectorId, scopeSet }`: the sign-in goes through a connector the platform's distribution manages (its own OAuth app, a broker doing the round-trip). Written by the Connect page when an admin enables such a connector; do not write it by hand. With it, and only with it, the variable may be `scope: admin`: one workspace connection an owner makes, read by every caller |
 
 **Never** a `clientSecret`: a `.tool` with one fails to load, and an `mcp.json`
 server whose entry has one is dropped. The secret is pasted once on the tool's

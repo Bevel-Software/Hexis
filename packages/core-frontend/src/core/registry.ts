@@ -1,7 +1,7 @@
 /**
  * The app registry: the contract between the core shell (`CoreAppShell`) and
  * optional (enterprise) modules. The core owns workspace, git, pr, access,
- * auth, workflow/SSE, layout, secrets-vault, tools, toolbar and the admin
+ * auth, version control/SSE, layout, secrets-vault, tools, toolbar and the admin
  * roles page; everything else (chat, connectors, routines, watchlist, voice,
  * embed, review, onboarding, admin LLM/feedback pages) is contributed through
  * an `AppRegistry` instance passed to `<CoreAppShell registry={...} />`.
@@ -13,11 +13,12 @@
 import {
   createContext,
   useContext,
+  useMemo,
   type ComponentType,
   type ReactElement,
   type ReactNode,
 } from 'react';
-import type { AuthUser, FileTreeEntry } from '@bevel-software/platform-shared';
+import { currentKbLayout, type AuthUser, type FileTreeEntry } from '@bevel-software/platform-shared';
 import type { FileRendererProps } from '../modules/workspace/components/renderers/types';
 import type { CommandAction } from '../modules/toolbar/commands/actions';
 
@@ -339,6 +340,97 @@ export interface AppDef {
   description?: string;
   /** Sort order in the list (core: Knowledge 10, Skills & Tools 20). */
   order?: number;
+  /**
+   * Top-level folders of the knowledge base this app hosts, by name
+   * (`['Agents', 'Workflows', 'Data']`), compared case-insensitively. Core claims none.
+   *
+   * A claimed root leaves the Knowledge explorer, and a file URL under it
+   * (`/workspace/<branch>/<kbDir>/<root>/…`, the URL `kbFileUrl` builds) opens
+   * in THIS app: the shell renders `element` in place of the Knowledge surface
+   * and puts the switcher on this app. The URL space does not change, so every
+   * link to such a file lands here. `element` is then rendered under the
+   * `/workspace/*` route, so it must show its folder surface
+   * (`KnowledgeSurface` with `roots`) for a location it does not route itself.
+   *
+   * Two apps claiming one root is a composition error: the shell throws when
+   * it is mounted, naming the root and both apps. So is claiming a root core
+   * presents itself (the layout's knowledge, skills and plugins folders):
+   * Knowledge and Skills & Tools are built on those and cannot give them up.
+   */
+  roots?: string[];
+}
+
+/**
+ * Which app claims each root folder (see {@link AppDef.roots}), as
+ * `root → app id`. Throws when two apps claim the same root, or when an app
+ * claims one of core's own roots, so a misconfigured registry fails when the
+ * shell mounts, not when someone follows a link.
+ *
+ * Root names compare case-insensitively, as the layout's do: the workspaces
+ * live on case-insensitive filesystems, where `Agents` and `agents` are one
+ * folder. The map is keyed by the lowercased name; read it through
+ * {@link appClaimingRoot}.
+ */
+export function rootClaims(apps: readonly AppDef[]): ReadonlyMap<string, string> {
+  const layout = currentKbLayout();
+  const coreRoots = new Set(
+    [layout.knowledgeBaseDir, layout.skillsDir, layout.pluginsDir].map((n) => n.toLowerCase()),
+  );
+  const claims = new Map<string, string>();
+  for (const app of apps) {
+    for (const root of app.roots ?? []) {
+      // One top-level folder NAME: a path, a blank or a dot entry would be
+      // claimed and never matched (`appHostingPath` reads one segment), so
+      // the app would host nothing and Knowledge would keep the folder.
+      if (!root || root !== root.trim() || root === '.' || root === '..' || /[\\/]/.test(root)) {
+        throw new Error(`The root folder "${root}" claimed by the app "${app.id}" must be a single top-level folder name.`);
+      }
+      const key = root.toLowerCase();
+      if (coreRoots.has(key)) {
+        throw new Error(`The root folder "${root}" is core's own; the app "${app.id}" cannot claim it.`);
+      }
+      const holder = claims.get(key);
+      if (holder !== undefined && holder !== app.id) {
+        throw new Error(`The root folder "${root}" is claimed by two apps: "${holder}" and "${app.id}".`);
+      }
+      claims.set(key, app.id);
+    }
+  }
+  return claims;
+}
+
+/** The app that claims a root folder, by name in any case, or undefined. */
+export function appClaimingRoot(claims: ReadonlyMap<string, string>, root: string): string | undefined {
+  return claims.get(root.toLowerCase());
+}
+
+/**
+ * The app that hosts a workspace-relative path (`<kbDir>/<root>/…`), or
+ * undefined when its root is claimed by none. The one reading of a claim:
+ * the shell routes by it, the explorer hides by it, the file route keeps a
+ * hosted file's URL by it.
+ *
+ * A claim is on a root of the knowledge base, so a path outside the KB clone
+ * (a first segment other than `kbDirName`) is hosted by no app. Until the
+ * workspace has bootstrapped, `kbDirName` is null and the first segment is
+ * taken as the URL `kbFileUrl` builds it, so a pasted link opens in its app
+ * on the first render.
+ */
+export function appHostingPath(
+  claims: ReadonlyMap<string, string>,
+  workspacePath: string,
+  kbDirName: string | null,
+): string | undefined {
+  if (claims.size === 0) return undefined;
+  const [kbDir, root] = workspacePath.split('/').filter(Boolean);
+  if (root === undefined || (kbDirName !== null && kbDir !== kbDirName)) return undefined;
+  return appClaimingRoot(claims, root);
+}
+
+/** {@link rootClaims} for the registry in context. */
+export function useRootClaims(): ReadonlyMap<string, string> {
+  const { apps } = useAppRegistry();
+  return useMemo(() => rootClaims(apps), [apps]);
 }
 
 /**
@@ -372,6 +464,12 @@ export interface ToolbarItemDef {
   id: string;
   node: ReactNode;
   order?: number;
+}
+
+/** What the Connect page tells its distribution panel — see `AppRegistry.connectPanel`. */
+export interface ConnectPanelProps {
+  /** The panel changed what the page lists (enabled or disabled a connector): refetch. */
+  onChanged: () => void;
 }
 
 /** Props for the overlay-provided panel on the Groups settings page. */
@@ -453,6 +551,16 @@ export interface AppRegistry {
    * the page ends with its form, as it always has.
    */
   deploymentPanel?: ComponentType;
+  /**
+   * A panel at the foot of the Connect page ("Connect your tools"). Core's
+   * page lists the sign-ins and keys the reader's tools need, managed
+   * connectors among them once they are enabled; which connectors a
+   * distribution offers, and enabling one in a plugin, is the distribution's
+   * to show. Rendered for every reader (the panel decides what an admin
+   * sees), and told when it changed something so the page refetches.
+   * Absent means the page ends with its lists, as it always has.
+   */
+  connectPanel?: ComponentType<ConnectPanelProps>;
   /**
    * A way to sign in that the DISTRIBUTION runs, offered beside the
    * deployment's own identity provider. See {@link SignInOptionDef}.

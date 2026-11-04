@@ -1,6 +1,6 @@
 /**
  * @bevel-software/platform-core-backend — the open-source core of the Bevel platform:
- * git-backed knowledge workspace, workflow (branches / change requests /
+ * git-backed knowledge workspace, version control (branches / change requests /
  * locks / SSE), skills, tool manuals + registry + auth, secrets vault, access
  * control, diff/backup ledger, code-mode and the remote MCP surface.
  *
@@ -122,7 +122,7 @@ export type { ISessionSink } from './modules/workspace/session-sink.js';
 export type {
   ISystemNoticeSink,
   RecoveryAgentRunner,
-} from './modules/workflow/pending-commits.worker.js';
+} from './modules/version-control/pending-commits.worker.js';
 export type { ILlmUsageMeter } from './modules/tool-auth/llm-usage-meter.js';
 export type { AuthProviderPlugin } from './modules/auth/auth.routes.js';
 export type { IErasureParticipant } from './modules/auth/account-erasure.service.js';
@@ -144,17 +144,17 @@ export {
   type IAccountAdmission,
 } from './modules/auth/account-admission.js';
 export {
-  WorkflowHooks,
+  VersionControlHooks,
   type CommitValidationHook,
   type CommitValidationContext,
   type AgentOperationContext,
   type AgentReadHook,
   type PreWriteHook,
-} from './modules/workflow/workflow-hooks.js';
+} from './modules/version-control/version-control-hooks.js';
 export {
   ChangeRequestHooks,
   type ChangeRequestOpenedEvent,
   type ChangeRequestOpenedHook,
   type ChangeRequestPerson,
   type IChangeRequestHooks,
-} from './modules/workflow/change-request-hooks.js';
+} from './modules/version-control/change-request-hooks.js';

@@ -41,6 +41,7 @@ import {
   resolveKbLayout,
   type KbLayout,
 } from '@bevel-software/platform-shared';
+import { ONBOARDING_GUIDE_SECTION_ID } from '@bevel-software/platform-mcp-core';
 import { agentGuideDir } from '../../assets.js';
 import { sharedFileRulesSection } from '../agent-instructions/index.js';
 
@@ -94,6 +95,19 @@ export type AgentGuideReader = () => Promise<string>;
 export const WORKING_WITH_FILES_SECTION_ID = 'working-with-files';
 
 /**
+ * The sections a hook may neither drop nor empty, because something outside
+ * the guide points an agent at them by id (see `composeAgentGuide`).
+ */
+const REQUIRED_SECTIONS: readonly { id: string; pointedAtBy: string; content: string }[] = Object.freeze([
+  { id: WORKING_WITH_FILES_SECTION_ID, pointedAtBy: 'which every file tool points at', content: 'the rules' },
+  {
+    id: ONBOARDING_GUIDE_SECTION_ID,
+    pointedAtBy: "which the platform's `onboard` prompt points at",
+    content: 'an onboarding flow',
+  },
+]);
+
+/**
  * What to do on a knowledge base nobody has written in yet: the section the
  * `firstRun` note `start_session` answers with points at (see
  * workspace/first-run.ts, which names it by this constant).
@@ -116,6 +130,8 @@ export const WHOLE_GUIDE_SECTION = 'all';
  */
 export const CORE_SECTION_IDS: readonly string[] = Object.freeze([
   START_HERE_SECTION_ID,
+  // Named in mcp-core, where the platform's `/onboard` prompt points at it.
+  ONBOARDING_GUIDE_SECTION_ID,
   'how-agents-find-things',
   'for-git-users',
   'glossary',
@@ -174,9 +190,10 @@ async function readCoreSectionFiles(): Promise<ReadonlyMap<string, string>> {
 /**
  * Core's sections for `layout`: the files, placeholders unrendered, with the
  * shared-rules section computed and in its place. What a distribution's hook
- * is handed.
+ * is handed. `defaultBranch` is the branch the shared rules name (see
+ * {@link AgentGuideContext.defaultBranch}).
  */
-export async function coreAgentGuideSections(layout: KbLayout): Promise<AgentGuideSection[]> {
+export async function coreAgentGuideSections(layout: KbLayout, defaultBranch = ''): Promise<AgentGuideSection[]> {
   coreSectionFiles ??= readCoreSectionFiles();
   let files: ReadonlyMap<string, string>;
   try {
@@ -188,7 +205,7 @@ export async function coreAgentGuideSections(layout: KbLayout): Promise<AgentGui
   }
   return CORE_SECTION_IDS.map((id) =>
     id === WORKING_WITH_FILES_SECTION_ID
-      ? { id, body: sharedFileRulesSection(layout), literal: true }
+      ? { id, body: sharedFileRulesSection(layout, defaultBranch), literal: true }
       : { id, body: files.get(id)! },
   );
 }
@@ -205,8 +222,9 @@ export interface AgentGuideContext {
   /**
    * The knowledge base's default branch, rendered into `{{defaultBranch}}` so
    * the start section names the branch every file tool's `branch` takes for
-   * what is live. Read when the guide is composed: a fresh deployment gets its
-   * branch model from the setup screen after the services are built.
+   * what is live, and named by the shared file rules in the same sentence the
+   * MCP handshake carries. Read when the guide is composed: a fresh deployment
+   * gets its branch model from the setup screen after the services are built.
    */
   defaultBranch?: string;
 }
@@ -239,16 +257,19 @@ export type AgentGuideSectionsReader = () => Promise<RenderedGuideSection[]>;
  * its own under the same id, beside core's or in its place: of two sections
  * under one id the LAST is served, where the FIRST stood, so a distribution
  * overrides core's `start-here` or `html-views` by adding its own and the
- * guide keeps its order (see {@link oneSectionPerId}). ONE exception: the
- * shared file rules ({@link WORKING_WITH_FILES_SECTION_ID}) must come back
- * WITH TEXT IN THEM, as core's or as the hook's own replacement. A client
- * that drops the handshake instructions has the guide as the only place to
- * read the rules — a guide without them would leave agents nothing to read.
- * A hook that drops the section, or hands it back empty, is a composition
- * error, thrown rather than served. Judged on what would be SERVED — the
- * rendered, trimmed body — so a replacement of whitespace is caught like a
- * missing one, rather than passing the check and vanishing with the other
- * empty sections below.
+ * guide keeps its order (see {@link oneSectionPerId}). TWO exceptions, the
+ * sections something outside the guide points an agent at by id
+ * (`REQUIRED_SECTIONS`): the shared file rules
+ * ({@link WORKING_WITH_FILES_SECTION_ID}), which every file tool names — a
+ * client that drops the handshake instructions has the guide as the only
+ * place to read them — and the onboarding section
+ * ({@link ONBOARDING_GUIDE_SECTION_ID}), which the platform's `onboard`
+ * prompt sends an agent to. Each must come back WITH TEXT IN IT, as core's
+ * or as the hook's own replacement. A hook that drops one, or hands it back
+ * empty, is a composition error, thrown rather than served. Judged on what
+ * would be SERVED — the rendered, trimmed body — so a replacement of
+ * whitespace is caught like a missing one, rather than passing the check and
+ * vanishing with the other empty sections below.
  */
 export async function agentGuideSections(
   layout: KbLayout,
@@ -256,7 +277,7 @@ export async function agentGuideSections(
   context: AgentGuideContext = {},
 ): Promise<RenderedGuideSection[]> {
   const resolved = resolveKbLayout(layout);
-  const core = await coreAgentGuideSections(resolved);
+  const core = await coreAgentGuideSections(resolved, context.defaultBranch);
   const sections = withRoutes(oneSectionPerId(hook ? await hook(core, resolved) : core));
   const kbDirName = context.kbDirName?.trim() || DEFAULT_KB_DIR_NAME;
   const defaultBranch = context.defaultBranch?.trim() || UNCONFIGURED_DEFAULT_BRANCH;
@@ -276,12 +297,17 @@ export async function agentGuideSections(
   // One section per id by now (`oneSectionPerId`), so a hook's own version
   // of the rules is what is judged, on what survives the empty-body filter
   // below.
-  const rules = rendered.filter((section) => section.id === WORKING_WITH_FILES_SECTION_ID);
-  if (!rules.some((section) => section.body.length > 0)) {
-    throw new Error(
-      `The agent guide hook ${rules.length === 0 ? 'dropped' : 'emptied'} the "${WORKING_WITH_FILES_SECTION_ID}" ` +
-        'section, which every file tool points at. Keep it, or replace it under the same id with the rules in it.',
-    );
+  // Two sections something outside the guide points at, so a hook may not
+  // take them away: the file tools name the rules, and the platform's
+  // `onboard` prompt sends an agent to the onboarding section by id.
+  for (const required of REQUIRED_SECTIONS) {
+    const found = rendered.filter((section) => section.id === required.id);
+    if (!found.some((section) => section.body.length > 0)) {
+      throw new Error(
+        `The agent guide hook ${found.length === 0 ? 'dropped' : 'emptied'} the "${required.id}" ` +
+          `section, ${required.pointedAtBy}. Keep it, or replace it under the same id with ${required.content} in it.`,
+      );
+    }
   }
   return rendered.filter((section) => section.body.length > 0);
 }

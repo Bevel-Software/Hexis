@@ -1,5 +1,5 @@
 import type { FileChangeNotifier } from '../modules/kb-fs/file-change-notifier.js';
-import type { WorkflowEventBus } from '../modules/workflow/event-bus.js';
+import type { VersionControlEventBus } from '../modules/version-control/event-bus.js';
 import type { KbContext } from '../shared/kb-context.js';
 
 /**
@@ -23,7 +23,7 @@ export interface InvalidatableCatalog {
  * Returns an unsubscribe that detaches all three.
  */
 export function registerCatalogCacheInvalidation(deps: {
-  eventBus: WorkflowEventBus;
+  eventBus: VersionControlEventBus;
   fileChangeNotifier: FileChangeNotifier;
   /**
    * The KB folder inside the workspace (`paths` are workspace-relative), the

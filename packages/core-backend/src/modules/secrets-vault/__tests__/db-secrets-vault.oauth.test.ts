@@ -402,8 +402,35 @@ describe('DbSecretsVaultService — dead-grant detection on refresh', () => {
     expect(await refreshWith({ access_token: 'a', expires_in: 3600, scope: '' })).toBe('');
   });
 
+  it('a consent in flight survives a refresh and a wipe: the verifier and requested scopes stay on the row', async () => {
+    // `beginOAuth` keeps the tokens the row holds beside the verifier it
+    // mints, so a refresh (or a dead grant's wipe) can land while the person
+    // is still at the consent screen. The exchange that follows must still
+    // find what it has to present.
+    const inFlight = () =>
+      sharedRow({
+        id: 'user-row-1',
+        userId: 'user-1',
+        valueEncrypted: crypto.encrypt(JSON.stringify({ tokens: expiredTokens, pendingVerifier: 'v-1', pendingScopes: 'mcp.read mcp.write' })),
+      });
+    const after = async (status: number, body: Record<string, unknown>) => {
+      const { db, captured } = makeFakeDb([[inFlight()], undefined]);
+      const svc = new DbSecretsVaultService(db, ENC_KEY, undefined, userScope);
+      vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(body), { status })));
+      const served = await svc.resolve('user-1', KEY);
+      return { served, stored: JSON.parse(crypto.decrypt(captured.set[0].valueEncrypted)) };
+    };
+    const refreshed = await after(200, { access_token: 'fresh-at', expires_in: 3600 });
+    expect(refreshed.served).toBe('fresh-at');
+    expect(refreshed.stored).toMatchObject({ pendingVerifier: 'v-1', pendingScopes: 'mcp.read mcp.write', tokens: { access_token: 'fresh-at' } });
+    const wiped = await after(400, { error: 'invalid_grant' });
+    expect(wiped.served).toBeNull();
+    expect(wiped.stored.tokens).toBeUndefined();
+    expect(wiped.stored).toMatchObject({ pendingVerifier: 'v-1', pendingScopes: 'mcp.read mcp.write' });
+  });
+
   it('putSharedOAuthProvider notifies mutation listeners with null (shared → everyone)', async () => {
-    const { db } = makeFakeDb([undefined]); // provider upsert
+    const { db } = makeFakeDb([[{ id: 'shared-row' }]]); // provider upsert, answering the row it wrote
     const svc = new DbSecretsVaultService(db, ENC_KEY);
     const onMutation = vi.fn();
     svc.onMutation(onMutation);

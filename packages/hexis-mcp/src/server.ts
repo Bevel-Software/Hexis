@@ -263,7 +263,7 @@ export function listedTools(
    * deployment serves them (`fetchToolHints`). Joined on here for the same
    * reason as the views: the deployment's tools reach this process through its
    * MCP endpoint, and the UTCP MCP protocol keeps no annotation on the way in.
-   * A tool from a local manual is never in it, and lists no hint.
+   * A tool from a local manual is never in it, and lists a conservative false hint.
    */
   hints: Readonly<Record<string, boolean>> = {},
 ): McpTool[] {
@@ -417,10 +417,13 @@ export const DISCOVERY_NOTICE_TOOL = 'hexis_unavailable';
 export function discoveryNoticeTool(reason: string): McpTool {
   return {
     name: DISCOVERY_NOTICE_TOOL,
+    title: 'Hexis unavailable',
     description:
       `hexis-mcp could not load this workspace's tools: ${reason} ` +
       'Fix the cause and restart this server; the same sentence is on its stderr log.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    // This diagnostic only reports the existing discovery failure.
+    annotations: { readOnlyHint: true },
   };
 }
 
@@ -1172,7 +1175,7 @@ export async function createHexisMcpServer(
       if (closed) throw new McpError(ErrorCode.ConnectionClosed, 'hexis-mcp is shutting down.');
       // The hints are read per listing, so an admin's change on the Tools page
       // is in the very next one (see `fetchToolHints`) — from a deployment
-      // that serves them; an older one lists its platform tools unannotated.
+      // that serves them; an older one keeps the conservative false default.
       let listedHints: Record<string, boolean> = {};
       if (toolHintsAdvertised) {
         const read = ++hintReadsStarted;

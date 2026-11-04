@@ -1,18 +1,18 @@
 import { describe, it, expect } from 'vitest';
 import { act, renderHook } from '@testing-library/react';
 import type { ReactNode } from 'react';
-import type { WorkflowEvent } from '@bevel-software/platform-shared';
-import { EventBusContext, type EventBusContextValue } from '../../../workflow/state/event-bus.context';
+import type { VersionControlEvent } from '@bevel-software/platform-shared';
+import { EventBusContext, type EventBusContextValue } from '../../../version-control/state/event-bus.context';
 import { WorkspaceContext } from '../../state/workspace.context';
 import { makeWorkspaceFixture } from '../../__tests__/testFixtures';
 import { useWorkspaceImageResolver } from '../useWorkspaceImageResolver';
 
 function makeFakeBus() {
-  const handlers: Record<string, ((e: WorkflowEvent) => void)[]> = {};
+  const handlers: Record<string, ((e: VersionControlEvent) => void)[]> = {};
   const watched: string[] = [];
-  const bus: EventBusContextValue & { emit(e: WorkflowEvent): void; watched: string[] } = {
+  const bus: EventBusContextValue & { emit(e: VersionControlEvent): void; watched: string[] } = {
     subscribe(kind, handler) {
-      (handlers[kind] ??= []).push(handler as (e: WorkflowEvent) => void);
+      (handlers[kind] ??= []).push(handler as (e: VersionControlEvent) => void);
       return () => {
         handlers[kind] = (handlers[kind] ?? []).filter((h) => h !== handler);
       };
@@ -33,14 +33,14 @@ function makeFakeBus() {
   return bus;
 }
 
-function imageChanged(workspaceId: string, path: string): WorkflowEvent {
+function imageChanged(workspaceId: string, path: string): VersionControlEvent {
   return {
     kind: 'file-changed',
     workspaceId,
     branch: workspaceId,
     path,
     newSha: 'abc123',
-  } as unknown as WorkflowEvent;
+  } as unknown as VersionControlEvent;
 }
 
 function renderResolver(
