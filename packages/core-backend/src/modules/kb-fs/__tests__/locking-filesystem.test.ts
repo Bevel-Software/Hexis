@@ -6,11 +6,7 @@ import type { AuthUser, IVersionControlService } from '@bevel-software/platform-
 import { LocalFilesystem } from '@mastra/core/workspace';
 import { LockingFilesystem } from '../locking-filesystem.js';
 import { PushNeedsAgentResolutionError, VersionControlValidationError } from '../../../shared/domain-errors.js';
-import {
-  makeAgentRolesYamlWriteValidator,
-  RolesYamlInvalidError,
-  RolesYamlNewRoleError,
-} from '../../access-model/index.js';
+import { makeAgentRolesYamlWriteValidator } from '../../access-model/index.js';
 
 /** The clone folder at the workspace root: every path the filesystem mutates lives under it. */
 const KB = 'knowledge-base';
@@ -1258,7 +1254,7 @@ describe('LockingFilesystem — the agent roles.yaml gate covers every op that l
   }
 
   async function expectRefused(op: Promise<unknown>, versionControl: IVersionControlService): Promise<void> {
-    await expect(op).rejects.toBeInstanceOf(RolesYamlNewRoleError);
+    await expect(op).rejects.toMatchObject({ status: 422, payload: { kind: 'roles-yaml-new-role' } });
     expect(versionControl.acquireLock).not.toHaveBeenCalled();
     expect(await fs.readFile(path.join(root, ROLES), 'utf-8')).toBe(CURRENT);
   }
@@ -1321,7 +1317,7 @@ describe('LockingFilesystem — the agent roles.yaml gate covers every op that l
     }
 
     async function expectRefusedUnderLock(op: Promise<unknown>, versionControl: IVersionControlService, locks: number): Promise<void> {
-      await expect(op).rejects.toBeInstanceOf(RolesYamlNewRoleError);
+      await expect(op).rejects.toMatchObject({ status: 422, payload: { kind: 'roles-yaml-new-role' } });
       expect(versionControl.releaseLockUntouched).toHaveBeenCalledTimes(locks);
       expect(versionControl.releaseLockNoCommit).not.toHaveBeenCalled();
       expect(versionControl.releaseLock).not.toHaveBeenCalled();
@@ -1355,7 +1351,7 @@ describe('LockingFilesystem — the agent roles.yaml gate covers every op that l
       // change is validity: the same line appended to the rewritten file breaks it.
       const rewritten = 'roles:\n  Admin:\n    - a@x.eu';
       const versionControl = racingVersionControl(() => fs.writeFile(path.join(root, ROLES), rewritten));
-      await expect(layer(versionControl).appendFile(ROLES, '    - b@x.eu\n')).rejects.toBeInstanceOf(RolesYamlInvalidError);
+      await expect(layer(versionControl).appendFile(ROLES, '    - b@x.eu\n')).rejects.toMatchObject({ status: 422, payload: { kind: 'roles-yaml-invalid' } });
       expect(versionControl.releaseLockUntouched).toHaveBeenCalledTimes(1);
       expect(versionControl.releaseLockNoCommit).not.toHaveBeenCalled();
       expect(await fs.readFile(path.join(root, ROLES), 'utf-8')).toBe(rewritten);

@@ -4,11 +4,10 @@ import jwt from 'jsonwebtoken';
 import type { AuthUser, Change, IGitService, IVersionControlService } from '@bevel-software/platform-shared';
 import { suggestionsBranchPrefixFor } from '@bevel-software/platform-shared';
 import { logger } from '../../shared/logging.js';
-import { commitLanded } from '../../shared/commit-outcome.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { KbContext } from '../../shared/kb-context.js';
 import type { IAccessControl } from '../access/index.js';
-import { changeRequestLink, changeRequestLinkBase } from '../version-control/index.js';
+import { changeRequestLink, changeRequestLinkBase, commitLanded } from '../version-control/index.js';
 import type { FileReaderRegistry } from '../workspace/index.js';
 import type { WriteValidator } from '../kb-fs/index.js';
 import type {

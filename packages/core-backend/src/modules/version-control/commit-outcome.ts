@@ -1,5 +1,5 @@
 import type { Change, FilesChange, IVersionControlService } from '@bevel-software/platform-shared';
-import { PushNeedsAgentResolutionError } from './domain-errors.js';
+import { PushNeedsAgentResolutionError } from '../../shared/domain-errors.js';
 
 /**
  * Announce a landed batch that was committed under file locks, naming only

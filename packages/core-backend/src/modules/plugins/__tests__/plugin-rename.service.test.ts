@@ -6,7 +6,7 @@ import os from 'node:os';
 import { DEFAULT_BRANCH, pluginDisplayNameOf, type AuthUser } from '@bevel-software/platform-shared';
 
 import type { WorkspaceService } from '../../workspace/index.js';
-import { AccessControlService } from '../../access/index.js';
+import { realAccessControl } from '../../../__tests__/real-access.js';
 import { PushNeedsAgentResolutionError } from '../../../shared/domain-errors.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { KbPluginSource } from '../discovery/kb-plugin-source.js';
@@ -58,9 +58,10 @@ describe('PluginRenameService', () => {
   let commits: { summary: string; paths: string[] }[];
   let announced: { paths: string[]; byUser: AuthUser }[];
   let failNextCommit: Error | null;
+  let nullNextCommit: boolean;
   let failWriteMatching: string | null;
   let invalidated: number;
-  let access: AccessControlService;
+  let access: ReturnType<typeof realAccessControl>;
   let svc: PluginRenameService;
 
   const write = async (rel: string, text: string) => {
@@ -77,6 +78,7 @@ describe('PluginRenameService', () => {
     commits = [];
     announced = [];
     failNextCommit = null;
+    nullNextCommit = false;
     failWriteMatching = null;
     walkMock.holeInTheWalk = false;
     invalidated = 0;
@@ -102,6 +104,10 @@ describe('PluginRenameService', () => {
           failNextCommit = null;
           throw err;
         }
+        if (nullNextCommit) {
+          nullNextCommit = false;
+          return null;
+        }
         commits.push({ summary, paths });
         return { sha: 'c0ffee' } as never;
       },
@@ -117,7 +123,7 @@ describe('PluginRenameService', () => {
     await write('Skills/Eng/deploy/access.md', DEPLOY_RULES);
     await write('Skills/Eng/deploy/SKILL.md', '---\ndescription: Ship it.\n---\n');
 
-    access = new AccessControlService(workspaceService, KB_DIR, realDisk());
+    access = realAccessControl(workspaceService, KB_DIR, realDisk());
     const disk = holedDisk();
     svc = new PluginRenameService(workspaceService, driver, access, new KbPluginSource(disk, testKbContext({ kbDirName: KB_DIR })), disk, testKbContext({ kbDirName: KB_DIR }), undefined, () => {
       invalidated += 1;
@@ -417,6 +423,19 @@ describe('PluginRenameService', () => {
     expect(await read('Skills/Eng/deploy/access.md')).toContain('plugin/go-to-market/read');
     expect(invalidated).toBe(1);
     expect(await access.canRead(wsId, member.email, 'Skills/Eng/deploy/SKILL.md')).toBe(true);
+    // The commit landed, so its files are announced once, as the person; the
+    // recovery flow owns the push, not the announcement.
+    expect(announced).toHaveLength(1);
+    expect(announced[0]).toMatchObject({ byUser: manager });
+    expect(announced[0]!.paths).toEqual(
+      expect.arrayContaining([`${KB_DIR}/Plugins/GTM/plugin.json`, `${KB_DIR}/Skills/Eng/deploy/access.md`]),
+    );
+  });
+
+  it('announces nothing when the commit found nothing to commit — no files changed, so no reactor runs', async () => {
+    nullNextCommit = true;
+    await svc.rename(manager, 'gtm', { name: 'go-to-market' });
+    expect(announced).toEqual([]);
   });
 
   it('will not rename a plugin read from an external format — that repository owns its name', async () => {

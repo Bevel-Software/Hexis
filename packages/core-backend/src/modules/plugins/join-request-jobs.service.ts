@@ -6,9 +6,8 @@ import {
 } from '@bevel-software/platform-shared';
 import { DrizzleQueryError } from 'drizzle-orm';
 import { spliceGrant } from '../access-model/index.js';
-import { sanitizeError } from '../version-control/index.js';
+import { commitLanded, sanitizeError } from '../version-control/index.js';
 import { logger } from '../../shared/logging.js';
-import { commitLanded } from '../../shared/commit-outcome.js';
 import { printable } from '../../shared/printable.js';
 import type { KbContext } from '../../shared/kb-context.js';
 import type { WorkspaceService } from '../workspace/index.js';

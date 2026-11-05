@@ -7,6 +7,4 @@ A batch write (`write_files`, `delete_folder`, an applied upload) announces its 
 
 The database pool now listens for an idle connection the server closes (a restart, a forced drop, a terminated backend): the event is logged and the next query opens a fresh connection, where before an unlistened `error` event could end the process.
 
-Module entries gain the exports other modules' suites reach for: `kb-fs` exports `FileChangeNotifier` at runtime, `version-control` exports `GitService` and `VersionControlHooks`, `workspace` exports `createFileReaderRegistry` and the `DocExtractOutcome` type, `access-model` exports `RolesYamlInvalidError` and `RolesYamlNewRoleError`, and `access` exports `AccessControlService`.
-
 For implementers: `IVersionControlService` gains a required method, `announceCommitted(change: FilesChange)`, which every implementation and every strictly typed test double must provide (`FilesChange` is exported from `@bevel-software/platform-shared`). `LockingFilesystemContext.fileChanges` no longer exists, so a constructor that passed it fails to compile: drop the field, the filesystem announces through the service it already holds. `RenameCommitDriver` gains the same method.

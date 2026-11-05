@@ -49,7 +49,7 @@ import {
 } from '@mastra/core/workspace';
 import type { AuthUser, Change, IVersionControlService } from '@bevel-software/platform-shared';
 import { PushNeedsAgentResolutionError } from '../../shared/domain-errors.js';
-import { announceReleased, commitLanded } from '../../shared/commit-outcome.js';
+import { announceReleased, commitLanded } from '../version-control/index.js';
 import { isAbsence } from '../../shared/fs.contract.js';
 import { DestinationTakenError, lstatOrNull, renameNoReplace, takenError } from '../../shared/rename-no-replace.js';
 import { linkedAncestor } from '../../shared/no-link-below.js';

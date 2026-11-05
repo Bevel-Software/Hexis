@@ -8,7 +8,7 @@ import {
   ChangeRequestConflictsError,
   DuplicateChangeRequestError,
 } from '../../shared/domain-errors.js';
-import { commitLanded } from '../../shared/commit-outcome.js';
+import { commitLanded } from '../version-control/index.js';
 import { isAbsence } from '../../shared/fs.contract.js';
 import type { KbContext } from '../../shared/kb-context.js';
 import { spliceGrant } from '../access-model/index.js';

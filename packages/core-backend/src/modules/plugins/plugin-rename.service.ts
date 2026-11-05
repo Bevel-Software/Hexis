@@ -9,7 +9,7 @@ import {
 } from '@bevel-software/platform-shared';
 import type { AuthUser, Change, FilesChange } from '@bevel-software/platform-shared';
 import { PushNeedsAgentResolutionError } from '../../shared/domain-errors.js';
-import { commitLanded } from '../../shared/commit-outcome.js';
+import { commitLanded } from '../version-control/index.js';
 import type { ITreeWalker, WalkListener } from '../../shared/fs.contract.js';
 import type { IAccessControl } from '../access/index.js';
 import {

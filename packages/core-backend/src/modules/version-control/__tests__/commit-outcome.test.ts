@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { commitLanded } from '../commit-outcome.js';
-import { PushNeedsAgentResolutionError, VersionControlValidationError } from '../domain-errors.js';
+import { PushNeedsAgentResolutionError, VersionControlValidationError } from '../../../shared/domain-errors.js';
 
 describe('commitLanded — the one rule for what a committer announces', () => {
   it('a change answered: landed', () => {

@@ -6,7 +6,7 @@ import path from 'node:path';
 import os from 'node:os';
 import type { AuthUser, IVersionControlService } from '@bevel-software/platform-shared';
 import { testKbContext } from '../../../__tests__/kb-context.js';
-import { GitService, VersionControlHooks } from '../../version-control/index.js';
+import { realGitService, realVersionControlHooks } from '../../../__tests__/real-version-control.js';
 import type { WorkspaceService } from '../../workspace/index.js';
 import { LockingFilesystem, MoveLockedError, MoveRacedError, MoveUndoError } from '../locking-filesystem.js';
 import { PushNeedsAgentResolutionError } from '../../../shared/domain-errors.js';
@@ -58,10 +58,10 @@ beforeEach(async () => {
   await git(repo, ['add', '-A']);
   await git(repo, ['commit', '-m', 'seed']);
 
-  const svc = new GitService(
+  const svc = realGitService(
     { getWorkspacePath: async () => root } as unknown as WorkspaceService,
     (() => {
-      const hooks = new VersionControlHooks();
+      const hooks = realVersionControlHooks();
       hooks.onCommitValidation(vi.fn(async () => ({ ok: true, mustFix: [], warnings: [], rawOutput: '' })));
       return hooks;
     })(),

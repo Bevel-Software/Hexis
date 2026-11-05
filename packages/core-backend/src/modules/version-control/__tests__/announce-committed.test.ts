@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { FilesChange } from '@bevel-software/platform-shared';
-import { FileChangeNotifier } from '../../kb-fs/index.js';
+import type { FileChangeNotifier } from '../../kb-fs/index.js';
+import { realFileChangeNotifier } from '../../../__tests__/real-version-control.js';
 import { VersionControlService } from '../version-control.service.js';
 
 /**
@@ -21,7 +22,7 @@ const USER = { id: 'u-1', email: 'ada@example.com', name: 'Ada' } as never;
 
 describe('VersionControlService.announceCommitted', () => {
   it('hands the reactors the paths sorted and without repeats, whatever order the caller had them in', () => {
-    const notifier = new FileChangeNotifier();
+    const notifier = realFileChangeNotifier();
     const heard: FilesChange[] = [];
     notifier.onFilesChanged((change) => heard.push(change));
 

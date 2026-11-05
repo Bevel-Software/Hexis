@@ -51,7 +51,7 @@ import { logger } from '../../shared/logging.js';
 import { type WriteValidator, LockingFilesystem } from '../kb-fs/index.js';
 import type { VersionControlDomainError } from '../../shared/domain-errors.js';
 import { PushNeedsAgentResolutionError } from '../../shared/domain-errors.js';
-import { announceReleased, commitLanded } from '../../shared/commit-outcome.js';
+import { announceReleased, commitLanded } from '../version-control/index.js';
 import { isAbsence } from '../../shared/fs.contract.js';
 import type { AuthUser, IWorkspaceService, IVersionControlService } from '@bevel-software/platform-shared';
 
