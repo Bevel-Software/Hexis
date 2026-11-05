@@ -147,6 +147,19 @@ describe('LockingFilesystem.moveWithEdits', () => {
     }
   });
 
+  it('a moved path whose lock release failed is left out of the announcement; the rest is announced', async () => {
+    (versionControl.releaseLockUntouched as ReturnType<typeof vi.fn>).mockImplementation(async (_w: string, _b: string, p: string) => {
+      if (p === `${KB}/Index.md`) throw new Error('lock store down');
+    });
+    await fsLayer().moveWithEdits(`${KB}/Projects/A`, `${KB}/Topics/Deep/A`, edits(), 'Move A');
+    expect(versionControl.announceCommitted).toHaveBeenCalledTimes(1);
+    const [announced] = (versionControl.announceCommitted as ReturnType<typeof vi.fn>).mock.calls[0] as [{ paths: string[] }];
+    expect(announced.paths).not.toContain(`${KB}/Index.md`);
+    expect(announced.paths).toEqual(
+      expect.arrayContaining([`${KB}/Projects/A/One.md`, `${KB}/Topics/Deep/A/One.md`, `${KB}/Topics/Deep/A/pic.png`]),
+    );
+  });
+
   it('an announcement that throws cannot unwind the landed move: the commit, the files and the rename stay', async () => {
     (versionControl.announceCommitted as ReturnType<typeof vi.fn>).mockImplementation(() => {
       throw new Error('reactor exploded');

@@ -337,6 +337,31 @@ describe('LockingFilesystem.writeFiles — batch with deletes + one batched chan
     expect((versionControl.releaseLock as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0]!).toBeLessThan(announcedAt);
   });
 
+  it('a committed path whose lock release failed is left out of the announcement; the rest is announced after the releases', async () => {
+    const versionControl = makeVersionControl();
+    const release = versionControl.releaseLockNoCommit as ReturnType<typeof vi.fn>;
+    release.mockImplementation(async (_w: string, _b: string, p: string) => {
+      if (p === 'knowledge-base/B.md') throw new Error('lock store down');
+    });
+    const emitted: unknown[] = [];
+    (versionControl.announceCommitted as ReturnType<typeof vi.fn>).mockImplementation((c: unknown) => emitted.push(c));
+    const fsLayer = new LockingFilesystem(
+      { basePath: root, contained: true },
+      { versionControl, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB },
+    );
+    await fsLayer.writeFiles(
+      [
+        { path: 'knowledge-base/A.md', content: 'a' },
+        { path: 'knowledge-base/B.md', content: 'b' },
+      ],
+      'two files',
+    );
+    // B stays locked until TTL and is not announced; A is, after every release call.
+    expect(emitted).toEqual([{ workspaceId: 'ws-feat', branch: 'feat', paths: ['knowledge-base/A.md'], byUser: USER }]);
+    const announcedAt = (versionControl.announceCommitted as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0]!;
+    for (const order of release.mock.invocationCallOrder) expect(order).toBeLessThan(announcedAt);
+  });
+
   it('emits nothing on a no-op commit (clean tree)', async () => {
     const versionControl = makeVersionControl();
     (versionControl.commitChanges as ReturnType<typeof vi.fn>).mockResolvedValue(null);

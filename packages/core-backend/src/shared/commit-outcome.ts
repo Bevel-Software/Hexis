@@ -1,5 +1,22 @@
-import type { Change } from '@bevel-software/platform-shared';
+import type { Change, FilesChange, IVersionControlService } from '@bevel-software/platform-shared';
 import { PushNeedsAgentResolutionError } from './domain-errors.js';
+
+/**
+ * Announce a landed batch that was committed under file locks, naming only
+ * the paths whose lock was given back — the one rule for every committer that
+ * holds locks (the lock-aware filesystem's batches, the admin commit driver).
+ * A path whose release failed stays locked until TTL: a reactor told of it
+ * now could not take it, so it is left out, and its catalogs refresh when
+ * the lock frees. Nothing is announced when no path was released.
+ */
+export function announceReleased(
+  service: Pick<IVersionControlService, 'announceCommitted'>,
+  change: FilesChange,
+  stillHeld: ReadonlySet<string>,
+): void {
+  const paths = change.paths.filter((p) => !stillHeld.has(p));
+  if (paths.length > 0) service.announceCommitted({ ...change, paths });
+}
 
 /**
  * What one call of `commitChanges` came to: the change it answered (null for

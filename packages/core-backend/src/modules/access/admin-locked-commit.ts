@@ -51,7 +51,7 @@ import { logger } from '../../shared/logging.js';
 import { type WriteValidator, LockingFilesystem } from '../kb-fs/index.js';
 import type { VersionControlDomainError } from '../../shared/domain-errors.js';
 import { PushNeedsAgentResolutionError } from '../../shared/domain-errors.js';
-import { commitLanded } from '../../shared/commit-outcome.js';
+import { announceReleased, commitLanded } from '../../shared/commit-outcome.js';
 import { isAbsence } from '../../shared/fs.contract.js';
 import type { AuthUser, IWorkspaceService, IVersionControlService } from '@bevel-software/platform-shared';
 
@@ -247,10 +247,11 @@ export class AdminLockedCommits {
       // own lock (TTL backstop), never the rest.
       const pushRetry = failure instanceof PushNeedsAgentResolutionError;
       const committed: string[] = [];
+      const stillHeld = new Set<string>();
       for (const h of held) {
         const committedClean =
           this.committedCleanPaths.delete(this.cleanKey(workspaceId, h)) && !pushRetry;
-        const wasCommitted = this.committedPaths.delete(this.cleanKey(workspaceId, h));
+        if (this.committedPaths.delete(this.cleanKey(workspaceId, h))) committed.push(h);
         try {
           if (coordination.has(h) || committedClean || unrestored?.has(h)) {
             // Coordination-only hold (see the method doc): `fn` never wrote
@@ -270,12 +271,8 @@ export class AdminLockedCommits {
             // work must be preserved, never discarded).
             await this.deps.versionControlService.releaseLock(workspaceId, this.defaultBranch, h, actor);
           }
-          // Announced only once its lock is really gone: a path whose release
-          // failed stays locked until TTL, and a reactor told of it now could
-          // not take it. Its catalogs refresh when the lock frees, like the
-          // lock itself — nothing is announced twice or early.
-          if (wasCommitted) committed.push(h);
         } catch (releaseErr) {
+          stillHeld.add(h);
           logger(this.deps.logTag).warn(
             `could not release lock on ${h}${pushRetry ? ' (push-retry release)' : ''}; ` +
               'it frees on TTL — continuing with the remaining locks:',
@@ -286,15 +283,14 @@ export class AdminLockedCommits {
       // The reactors hear of the batch once, after its locks are gone (a
       // reactor may take a fresh lock on a changed path), for a commit that
       // landed — pushed, or awaiting the worker's push, which announces
-      // nothing of its own.
-      if (committed.length > 0) {
-        this.deps.versionControlService.announceCommitted({
-          workspaceId,
-          branch: this.defaultBranch,
-          paths: committed,
-          byUser: actor,
-        });
-      }
+      // nothing of its own — and only for the paths whose lock really went
+      // (`announceReleased`: a path whose release failed stays locked until
+      // TTL and is left out).
+      announceReleased(
+        this.deps.versionControlService,
+        { workspaceId, branch: this.defaultBranch, paths: committed, byUser: actor },
+        stillHeld,
+      );
     }
   }
 
