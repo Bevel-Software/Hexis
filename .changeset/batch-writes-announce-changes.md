@@ -5,7 +5,7 @@
 
 A batch write (`write_files`, `delete_folder`, an applied upload) announces its files to the file-change notifier like a single write does. The announcement is the version-control service's (`announceCommitted` on `IVersionControlService`), made by the lock-aware filesystem once its locks are released, so no construction site can leave the notifier out; the lock context's `fileChanges` field is gone. Before, the agent tools' filesystem was built without the notifier and every batch landed silently: catalogs stayed stale for a TTL, the id index was not repaired, and a status set by a batch fired no watcher. The admin batch commits (`AdminLockedCommits`) and the plugin rename announce the same way.
 
-A single-file save is announced at its lock release even when the release's own commit finds the tree clean: the autosave checkpoints land the file's bytes while the lock is held, and before this such a save never reached the reactors.
+Every single-file commit is announced when it lands, the autosave checkpoints included. Before, a save whose bytes a checkpoint had committed was never announced when the release then found the tree clean, and a release whose push needed recovery was announced only once the push went through.
 
 The database pool now listens for an idle connection the server closes (a restart, a forced drop, a terminated backend): the event is logged and the next query opens a fresh connection, where before an unlistened `error` event could end the process.
 

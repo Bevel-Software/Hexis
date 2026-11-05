@@ -89,24 +89,39 @@ function makePending(): PendingCommitsService {
   } as unknown as PendingCommitsService;
 }
 
-function makeGit(overrides: Partial<{
+interface GitBehavior {
   commitFile: Change | null;
   pushBehavior: 'ok' | 'nff' | 'auth-fail';
   pullBehavior: 'ok' | 'fail' | 'conflict';
   pushAfterPullBehavior: 'ok' | 'fail';
   hasUnpushedCommits: boolean;
-}> = {}): GitService {
-  const commitFileResult = overrides.commitFile === undefined ? CHANGE : overrides.commitFile;
-  const pushBehavior = overrides.pushBehavior ?? 'ok';
-  const pullBehavior = overrides.pullBehavior ?? 'ok';
-  const pushAfterPullBehavior = overrides.pushAfterPullBehavior ?? 'ok';
+}
+
+/** The git stub, whose behaviour a test changes in place (`behave`) — the service keeps the one instance it was given. */
+type GitStub = GitService & { behave(next: Partial<GitBehavior>): void };
+
+function makeGit(overrides: Partial<GitBehavior> = {}): GitStub {
+  const b: GitBehavior = {
+    commitFile: CHANGE,
+    pushBehavior: 'ok',
+    pullBehavior: 'ok',
+    pushAfterPullBehavior: 'ok',
+    hasUnpushedCommits: false,
+    ...overrides,
+  };
   let pushCalls = 0;
+  const behave = (next: Partial<GitBehavior>): void => {
+    Object.assign(b, next);
+    pushCalls = 0;
+  };
   return {
-    commitFile: vi.fn().mockResolvedValue(commitFileResult),
+    behave,
+    commitFile: vi.fn().mockImplementation(async () => b.commitFile),
     discardPath: vi.fn().mockResolvedValue(undefined),
-    hasUnpushedCommits: vi.fn().mockResolvedValue(overrides.hasUnpushedCommits ?? false),
+    hasUnpushedCommits: vi.fn().mockImplementation(async () => b.hasUnpushedCommits),
     push: vi.fn().mockImplementation(async () => {
       pushCalls++;
+      const { pushBehavior, pushAfterPullBehavior } = b;
       const phase = pushCalls === 1 ? pushBehavior : pushAfterPullBehavior;
       if (phase === 'nff') {
         throw new Error(
@@ -124,11 +139,11 @@ function makeGit(overrides: Partial<{
       }
     }),
     pull: vi.fn().mockImplementation(async () => {
-      if (pullBehavior === 'fail') throw new Error('git pull failed: merge conflict');
-      if (pullBehavior === 'conflict') throw new PullRebaseConflictError('feat/x', ['foo.md'], 'CONFLICT (content)');
+      if (b.pullBehavior === 'fail') throw new Error('git pull failed: merge conflict');
+      if (b.pullBehavior === 'conflict') throw new PullRebaseConflictError('feat/x', ['foo.md'], 'CONFLICT (content)');
       return { treeChanged: true };
     }),
-  } as unknown as GitService;
+  } as unknown as GitStub;
 }
 
 function makeFacade(
@@ -442,42 +457,44 @@ describe('VersionControlService.runPendingCommit — worker entry point', () => 
     expect(emitSpy).not.toHaveBeenCalled();
   });
 
-  it('announces a hold an autosave checkpoint landed under, once, at its no-op release', async () => {
+  it('an autosave checkpoint announces when it lands; the clean release that follows announces nothing', async () => {
     // The clean tree is the autosave path's normal ending: `commitFileWhileLocked`
-    // committed the file while the lock was held, where no reactor may act on
-    // it, so the checkpoint announced nothing. The release is when the lock is
-    // free, so the save is announced then, once, as the person — the contract
-    // says every single-file save is.
-    const git = makeGit({ commitFile: null, hasUnpushedCommits: false });
-    (git.commitFile as unknown as MockInstance).mockResolvedValueOnce(CHANGE).mockResolvedValueOnce(null);
+    // committed the file while the lock was held. That commit is the one
+    // that landed the bytes, so it is the one announced — once, as the
+    // person; the release then has nothing of its own to announce.
+    const git = makeGit();
     const notifier = realFileChangeNotifier();
     const heard: unknown[] = [];
     notifier.onFilesChanged((change) => void heard.push(change));
     const svc = makeFacade(git, makeFileLocks(USER.id), makePending(), events, notifier);
 
     await svc.commitFileWhileLocked('ws-1', 'feat/x', 'foo.md', USER);
-    expect(heard).toEqual([]);
-    await svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER);
     expect(heard).toEqual([{ workspaceId: 'ws-1', branch: 'feat/x', paths: ['foo.md'], byUser: USER }]);
 
-    // The mark is consumed: a later no-op on the same path announces nothing more.
+    git.behave({ commitFile: null, hasUnpushedCommits: false });
     await svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER);
     expect(heard).toHaveLength(1);
   });
 
-  it('announces nothing on a no-op commit nothing was checkpointed under — a queued retry of a batch hand-off, which the batch announced', async () => {
-    // A locked batch whose push failed enqueued its committed paths; the
-    // worker finds each clean, pushes, and must not announce a second time.
-    const git = makeGit({ commitFile: null, hasUnpushedCommits: true });
+  it('a release commit whose push needs recovery is announced once, when it lands; the clean retry announces nothing', async () => {
+    // The bytes are in the tree the reactors read from the commit on, so the
+    // announcement does not wait for the push. The worker's retry row then
+    // finds a clean tree with the commit unpushed: it pushes, announces nothing.
+    const git = makeGit({ pushBehavior: 'auth-fail', pushAfterPullBehavior: 'fail' });
     const notifier = realFileChangeNotifier();
     const heard: unknown[] = [];
     notifier.onFilesChanged((change) => void heard.push(change));
     const svc = makeFacade(git, makeFileLocks(USER.id), makePending(), events, notifier);
 
-    await svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER);
+    await expect(svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER)).rejects.toBeInstanceOf(
+      PushNeedsAgentResolutionError,
+    );
+    expect(heard).toEqual([{ workspaceId: 'ws-1', branch: 'feat/x', paths: ['foo.md'], byUser: USER }]);
 
-    expect(git.push).toHaveBeenCalledTimes(1);
-    expect(heard).toEqual([]);
+    git.behave({ commitFile: null, hasUnpushedCommits: true, pushBehavior: 'ok', pushAfterPullBehavior: 'ok' });
+    await svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER);
+    expect(git.push).toHaveBeenCalled();
+    expect(heard).toHaveLength(1);
   });
 
   it('STILL pushes on a no-op commit when the branch is ahead of origin (stranded autosave commit)', async () => {
@@ -684,18 +701,15 @@ describe('VersionControlService — git-sync visibility events', () => {
   });
 
   it('emits git-sync-recovered once when a push finally lands, then goes quiet again', async () => {
-    const failing = makeGit({ pushBehavior: 'auth-fail' });
-    const svc = makeFacade(failing, makeFileLocks(USER.id), makePending(), events);
+    const git = makeGit({ pushBehavior: 'auth-fail' });
+    const svc = makeFacade(git, makeFileLocks(USER.id), makePending(), events);
     await svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER).catch(() => undefined);
     expect(kinds()).toEqual(['git-sync-failed']);
 
     // Same service instance — the failing/healthy state is per-workspace and
-    // lives on it, so recovery has to be observed through the same object.
-    const healthy = makeGit();
-    const recovered = makeFacade(healthy, makeFileLocks(USER.id), makePending(), events);
-    Object.assign(svc as unknown as Record<string, unknown>, {
-      git: (recovered as unknown as { git: GitService }).git,
-    });
+    // lives on it, so recovery has to be observed through the same object;
+    // the remote comes back by the stub's behaviour changing.
+    git.behave({ pushBehavior: 'ok' });
 
     await svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER);
     await svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER);
@@ -714,15 +728,11 @@ describe('VersionControlService — git-sync visibility events', () => {
     // callers hand the encoded form (user%2Ffeat). The tracker must treat
     // them as one workspace, or a failure recorded by one caller can never
     // be cleared by the other's success and the banner sticks forever.
-    const svc = makeFacade(
-      makeGit({ pushBehavior: 'auth-fail', pushAfterPullBehavior: 'fail' }),
-      makeFileLocks(USER.id),
-      makePending(),
-      events,
-    );
+    const git = makeGit({ pushBehavior: 'auth-fail', pushAfterPullBehavior: 'fail' });
+    const svc = makeFacade(git, makeFileLocks(USER.id), makePending(), events);
     await svc.runPendingCommit('user%2Ffeat', 'user/feat', 'foo.md', USER).catch(() => undefined);
 
-    Object.assign(svc as unknown as Record<string, unknown>, { git: makeGit() });
+    git.behave({ pushBehavior: 'ok', pushAfterPullBehavior: 'ok' });
     await svc.runPendingCommit('user/feat', 'user/feat', 'foo.md', USER);
 
     const sync = emitSpy.mock.calls
@@ -736,18 +746,20 @@ describe('VersionControlService — git-sync visibility events', () => {
   });
 
   it('tracks workspaces independently — one recovering neither clears nor suppresses another', async () => {
-    const failingGit = () => makeGit({ pushBehavior: 'auth-fail', pushAfterPullBehavior: 'fail' });
-    const svc = makeFacade(failingGit(), makeFileLocks(USER.id), makePending(), events);
+    const failing = { pushBehavior: 'auth-fail', pushAfterPullBehavior: 'fail' } as const;
+    const git = makeGit(failing);
+    const svc = makeFacade(git, makeFileLocks(USER.id), makePending(), events);
 
     // Both workspaces broken.
     await svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER).catch(() => undefined);
+    git.behave(failing);
     await svc.runPendingCommit('ws-2', 'feat/y', 'bar.md', USER).catch(() => undefined);
 
     // ws-1 recovers; ws-2 is still broken and must (a) not be cleared by
     // ws-1's recovery and (b) still announce its own next failure.
-    Object.assign(svc as unknown as Record<string, unknown>, { git: makeGit() });
+    git.behave({ pushBehavior: 'ok', pushAfterPullBehavior: 'ok' });
     await svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER);
-    Object.assign(svc as unknown as Record<string, unknown>, { git: failingGit() });
+    git.behave(failing);
     await svc.runPendingCommit('ws-2', 'feat/y', 'bar.md', USER).catch(() => undefined);
 
     expect(
