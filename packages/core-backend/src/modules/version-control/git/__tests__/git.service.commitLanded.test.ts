@@ -65,6 +65,25 @@ describe('GitService reports every commit it lands through onCommitLanded', () =
     expect(heard()).toEqual([{ workspaceId: WS, branch: 'main', paths: [`${KB}/A.md`], byUser: USER }]);
   });
 
+  it('commit: every file of a new folder, and both ends of a rename — the commit, not the status listing, names them', async () => {
+    await write('Folder/one.md', '1\n');
+    await write('Folder/two.md', '2\n');
+    await git.commit(WS, USER, { summary: 'add a folder' });
+    expect(heard().map((c) => c.paths)).toEqual([[`${KB}/Folder/one.md`, `${KB}/Folder/two.md`]]);
+
+    landed.length = 0;
+    await runGit(repo, ['mv', 'Old.md', 'New.md']);
+    await git.commit(WS, USER, { summary: 'rename' });
+    expect(heard().map((c) => c.paths)).toEqual([[`${KB}/New.md`, `${KB}/Old.md`]]);
+  });
+
+  it('commitChanges without a scope: both ends of a rename', async () => {
+    await runGit(repo, ['mv', 'Old.md', 'Moved.md']);
+    await write('K.md', 'k\n');
+    await git.commitChanges(WS, USER, 'move and add');
+    expect(heard().map((c) => c.paths)).toEqual([[`${KB}/K.md`, `${KB}/Moved.md`, `${KB}/Old.md`]]);
+  });
+
   it('commitFile: the file named, once', async () => {
     await write('B.md', 'b\n');
     await git.commitFile(WS, USER, `${KB}/B.md`);

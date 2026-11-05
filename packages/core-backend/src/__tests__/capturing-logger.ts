@@ -17,8 +17,13 @@ export interface CapturedLine {
 export function capturingLogger(): { logger: ILogger; lines: CapturedLine[] } {
   const lines: CapturedLine[] = [];
   const make = (bindings: LogFields): ILogger => {
-    const line = (level: CapturedLine['level']) => (message: string, fields: LogFields = {}) =>
-      void lines.push({ level, message, fields: { ...bindings, ...fields } });
+    const line = (level: CapturedLine['level']) => (message: string, fields: LogFields = {}) => {
+      // Like the production sink, the child's `module` is the logger's own and
+      // a call cannot rename it; every other field a call passes wins.
+      const folded: LogFields = { ...bindings, ...fields };
+      if (bindings.module !== undefined) folded.module = bindings.module;
+      lines.push({ level, message, fields: folded });
+    };
     return {
       debug: line('debug'),
       info: line('info'),

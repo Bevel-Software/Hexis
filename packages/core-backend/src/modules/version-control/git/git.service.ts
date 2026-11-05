@@ -363,6 +363,18 @@ export class GitService implements IGitService {
   }
 
   /**
+   * The files the commit at HEAD changed, repo-relative, read from the commit
+   * itself rather than from the status listing that preceded it: every file
+   * of a new folder (status shows the folder), both ends of a rename (status
+   * shows one entry). A read that fails must not lose the report, so callers
+   * fall back to what they knew before the commit.
+   */
+  private async committedPaths(cwd: string): Promise<string[]> {
+    const { stdout } = await this.git(cwd, ['diff-tree', '--root', '--no-commit-id', '--name-only', '--no-renames', '-r', '-z', 'HEAD']);
+    return stdout.split('\0').filter(Boolean);
+  }
+
+  /**
    * The credentials the runner authenticates with — for the services above
    * this one that scrub a message git or the host echoed a token into.
    */
@@ -1101,8 +1113,9 @@ export class GitService implements IGitService {
       }
       await this.git(cwd, args);
       // The commit exists from here on: reported now, before the attribution
-      // read, which can fail without unmaking it.
-      this.landed(workspaceId, branch, user, touched);
+      // read, which can fail without unmaking it — with the files the commit
+      // holds, or the status listing if even that read fails.
+      this.landed(workspaceId, branch, user, await this.committedPaths(cwd).catch(() => touched));
 
       const { stdout } = await this.git(cwd, [
         'log',
@@ -1268,8 +1281,9 @@ export class GitService implements IGitService {
         '-m', subject,
       ]);
       // The commit exists from here on: reported now, before the attribution
-      // read, which can fail without unmaking it.
-      this.landed(workspaceId, branch, user, [repoRelativePath]);
+      // read, which can fail without unmaking it — with the files the commit
+      // holds (the one path, as it was staged), or that path if the read fails.
+      this.landed(workspaceId, branch, user, await this.committedPaths(cwd).catch(() => [repoRelativePath]));
 
       const { stdout } = await this.git(cwd, [
         'log',
@@ -1407,8 +1421,10 @@ export class GitService implements IGitService {
       // committed" and restore their pre-edit bytes, which here would publish
       // a compensating revert of a commit that DID land. The attribution read
       // is best-effort; on failure fall back to what we already know.
-      // The commit exists: report it (the hooks run isolated, so this cannot throw).
-      this.landed(workspaceId, branch, user, touched);
+      // The commit exists: report it, with the files it holds — both ends of a
+      // rename, every file of a new folder — or the scoped status listing if
+      // that read fails. Neither the read nor the hooks can throw here.
+      this.landed(workspaceId, branch, user, await this.committedPaths(cwd).catch(() => touched));
       let sha = '';
       let authorName = user.name;
       let authorEmail = user.email;

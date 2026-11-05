@@ -84,11 +84,13 @@ export interface FilesChange {
   /**
    * Workspace-relative paths the commit touched (≥1; sorted, no path twice —
    * the notifier shapes them so). A reactor that writes one acquires its lock
-   * like any writer: a batch's committer releases its locks right after the
-   * commit (the lock-aware filesystem's acquire retries cover that moment); an
-   * autosave checkpoint is announced under the editor's lock, held while the
-   * person edits, so that write waits for the path's next announcement — the
-   * release commit, when it carries new bytes. A reactor re-reads what it is
+   * like any writer: a batch's committer releases its locks once the commit
+   * and its push are done (the lock-aware filesystem's acquire retries cover
+   * the usual push; a slower one leaves the writer to skip); an autosave
+   * checkpoint is announced under the editor's lock, held while the person
+   * edits. Either way a writer that could not lock treats it as "not now" and
+   * catches up on the path's next announcement — the release commit when it
+   * carries new bytes, the file's next change. A reactor re-reads what it is
    * told of, so a path named without a change costs it one read, never a
    * wrong answer.
    */

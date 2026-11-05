@@ -24,14 +24,17 @@
  * layer's reservation. A listener that only reads (the catalogs) is
  * unaffected by locks. A listener that WRITES an announced path acquires its
  * lock like any writer, and two cases differ: a batch's committer (the
- * lock-aware filesystem, the admin commit driver) releases its locks right
- * after the commit, and the lock-aware filesystem's acquire retries cover that
- * moment; an editor's autosave checkpoint is announced while the editor's own
- * lock is held, for as long as the person keeps editing, so a write to that
- * path cannot be made then. The editor's release commit announces the path
- * again when it carries new bytes; a release that finds nothing new does not,
- * and such a write waits for the file's next change — as it did before this
- * release, when a checkpoint was not announced at all.
+ * lock-aware filesystem, the admin commit driver) releases its locks once the
+ * commit AND its push are done — the lock-aware filesystem's acquire retries
+ * (three, two seconds apart) cover the usual push, and a push that outlasts
+ * them leaves the writer to skip; an editor's autosave checkpoint is announced
+ * while the editor's own lock is held, for as long as the person keeps
+ * editing, so a write to that path cannot be made then. In both cases the
+ * path's next announcement — the editor's release commit when it carries new
+ * bytes, the next change to the file — is when such a writer catches up; a
+ * writer that skips must therefore treat "could not lock" as "not now", as the
+ * id-repair already does. Before this release neither case was announced at
+ * all.
  *
  * Every listener is invoked inside try/catch — a throwing subscriber must never
  * fail the commit that triggered it (mirrors the SSE bus's per-subscriber
