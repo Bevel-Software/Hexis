@@ -14,8 +14,9 @@ export { EventDelivery, createEventAccess } from './events-delivery.js';
 export type { ChangeRequestFacts, EventAccess, EventViewer, IEventDelivery } from './events-delivery.js';
 // Reached by other modules; exported here so they stop importing the files.
 export { NodeGitRunner } from './git/node-git-runner.js';
+export { GitService } from './git/git.service.js';
 export { RECOVERY_BOT_EMAIL } from './recovery-bot.js';
 export type { IChangeRequestReviewService } from './change-request-review/change-request-review.interface.js';
 export { sanitizeError } from './sanitize-error.js';
-export type { VersionControlHooks } from './version-control-hooks.js';
+export { VersionControlHooks } from './version-control-hooks.js';
 export type { VersionControlService } from './version-control.service.js';

@@ -10,7 +10,7 @@ import {
   makeAgentRolesYamlWriteValidator,
   RolesYamlInvalidError,
   RolesYamlNewRoleError,
-} from '../../access-model/roles-yaml-guard.js';
+} from '../../access-model/index.js';
 
 /** The clone folder at the workspace root: every path the filesystem mutates lives under it. */
 const KB = 'knowledge-base';

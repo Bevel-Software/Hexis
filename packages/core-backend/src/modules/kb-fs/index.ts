@@ -13,7 +13,8 @@ export { TMP_REF_PREFIX, assertTmpRefsTaken, isTmpRef, tmpRefReadOnlyRefusal } f
 export { BevelIgnoreStack } from './bevel-ignore.js';
 export { assertValidBranchName, assertValidRelativePath, isBranchAuthoredBy, isOwnSuggestionsBranch } from './branch-name.js';
 export { ORIGIN_FETCH_REFSPEC, SAFE_IMPLICIT_FETCH_ARGS, cloneCredentialArgs, cloneCredentialConfigArgs, cloneTrackingConfigArgs, credentialHelperValue } from './clone-config.js';
-export type { FileChangeNotifier } from './file-change-notifier.js';
+export { FileChangeNotifier } from './file-change-notifier.js';
+export { NodeFs } from './node-fs.js';
 export { GitGuardedFilesystem } from './git-guarded-filesystem.js';
 export { LockingFilesystem, MoveLockedError, MoveRacedError } from './locking-filesystem.js';
 export { ReadOnlyFilesystem } from './read-only-filesystem.js';

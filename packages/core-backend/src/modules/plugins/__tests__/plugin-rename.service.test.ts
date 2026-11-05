@@ -1,13 +1,13 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { NodeFs } from '../../kb-fs/node-fs.js';
+import { NodeFs } from '../../kb-fs/index.js';
 import type { TreeWalkOptions, WalkListener, WalkResult } from '../../../shared/fs.contract.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { DEFAULT_BRANCH, pluginDisplayNameOf, type AuthUser } from '@bevel-software/platform-shared';
 
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import { AccessControlService } from '../../access/access-control.service.js';
+import type { WorkspaceService } from '../../workspace/index.js';
+import { AccessControlService } from '../../access/index.js';
 import { PushNeedsAgentResolutionError } from '../../../shared/domain-errors.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { KbPluginSource } from '../discovery/kb-plugin-source.js';

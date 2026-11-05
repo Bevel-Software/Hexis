@@ -2,10 +2,9 @@ import { PushNeedsAgentResolutionError } from '../../../shared/domain-errors.js'
 import jwt from 'jsonwebtoken';
 import { createHmac } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
-import { createFileReaderRegistry } from '../../workspace/file-readers/file-reader.registry.js';
-import type { DocExtractOutcome, DocExtractService } from '../../workspace/file-readers/doc-extract.service.js';
-import { makeRolesYamlWriteValidator, RolesYamlInvalidError } from '../../access-model/roles-yaml-guard.js';
-import { ACCOUNT_DEACTIVATED_MESSAGE } from '../../auth/account-admission.js';
+import { createFileReaderRegistry, type DocExtractOutcome, type DocExtractService } from '../../workspace/index.js';
+import { makeRolesYamlWriteValidator, RolesYamlInvalidError } from '../../access-model/index.js';
+import { ACCOUNT_DEACTIVATED_MESSAGE } from '../../auth/index.js';
 import { testKbContext, TEST_BRANCH_MODEL } from '../../../__tests__/kb-context.js';
 import { EmbedService, type EmbedConfig } from '../embed.service.js';
 import {

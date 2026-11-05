@@ -6,9 +6,8 @@ import path from 'node:path';
 import os from 'node:os';
 import type { AuthUser, IVersionControlService } from '@bevel-software/platform-shared';
 import { testKbContext } from '../../../__tests__/kb-context.js';
-import { GitService } from '../../version-control/git/git.service.js';
-import { VersionControlHooks } from '../../version-control/version-control-hooks.js';
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
+import { GitService, VersionControlHooks } from '../../version-control/index.js';
+import type { WorkspaceService } from '../../workspace/index.js';
 import { LockingFilesystem, MoveLockedError, MoveRacedError, MoveUndoError } from '../locking-filesystem.js';
 import { PushNeedsAgentResolutionError } from '../../../shared/domain-errors.js';
 

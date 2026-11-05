@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { FilesChange } from '@bevel-software/platform-shared';
-import { FileChangeNotifier } from '../../kb-fs/file-change-notifier.js';
+import { FileChangeNotifier } from '../../kb-fs/index.js';
 import { VersionControlService } from '../version-control.service.js';
 
 /**

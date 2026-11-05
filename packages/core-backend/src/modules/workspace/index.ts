@@ -43,6 +43,8 @@ export { SpillStore } from './spill-store.js';
  * builds its own the same way.
  */
 export { DocExtractService } from './file-readers/doc-extract.service.js';
+export type { DocExtractOutcome } from './file-readers/doc-extract.service.js';
+export { createFileReaderRegistry } from './file-readers/file-reader.registry.js';
 export type { IDocumentExtractor } from './file-readers/document-extractor.contract.js';
 export { WorkerDocumentExtractor } from './file-readers/extract-in-worker.js';
 /**
