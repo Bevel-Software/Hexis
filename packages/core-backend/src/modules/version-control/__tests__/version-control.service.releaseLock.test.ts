@@ -4,8 +4,10 @@ import type { AuthUser, Change } from '@bevel-software/platform-shared';
 import type { GitService } from '../git/git.service.js';
 import type { PullRequestService } from '../git/pull-request.service.js';
 import type { IChangeRequestReviewService } from '../change-request-review/change-request-review.interface.js';
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import type { IAccessControl } from '../../access/access-control.interface.js';
+import type { WorkspaceService } from '../../workspace/index.js';
+import type { IAccessControl } from '../../access/index.js';
+import type { FileChangeNotifier } from '../../kb-fs/index.js';
+import { realFileChangeNotifier } from '../../../__tests__/real-version-control.js';
 import { FileLockService } from '../file-lock.service.js';
 import { PendingCommitsService } from '../pending-commits.service.js';
 import { VersionControlEventBus } from '../event-bus.js';
@@ -134,6 +136,7 @@ function makeFacade(
   locks: FileLockService,
   pending: PendingCommitsService,
   events: VersionControlEventBus,
+  fileChanges?: FileChangeNotifier,
 ): VersionControlService {
   return new VersionControlService(
     {} as unknown as Database,
@@ -147,6 +150,7 @@ function makeFacade(
     testKbContext(),
     openChangeGate(),
     events,
+    fileChanges,
   );
 }
 
@@ -435,6 +439,24 @@ describe('VersionControlService.runPendingCommit — worker entry point', () => 
 
     expect(git.commitFile).toHaveBeenCalledTimes(1);
     expect(git.push).not.toHaveBeenCalled();
+    expect(emitSpy).not.toHaveBeenCalled();
+  });
+
+  it('announces the save on a no-op commit all the same — autosave checkpoints landed the bytes under the hold', async () => {
+    // The clean tree is the autosave path's normal ending: `commitFileWhileLocked`
+    // committed the file while the lock was held, where no reactor may act on
+    // it. The release is when the lock is free, so the save is announced then,
+    // once, as the person — the contract says every single-file save is.
+    const git = makeGit({ commitFile: null, hasUnpushedCommits: false });
+    const notifier = realFileChangeNotifier();
+    const heard: unknown[] = [];
+    notifier.onFilesChanged((change) => void heard.push(change));
+    const svc = makeFacade(git, makeFileLocks(USER.id), makePending(), events, notifier);
+
+    await svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER);
+
+    expect(heard).toEqual([{ workspaceId: 'ws-1', branch: 'feat/x', paths: ['foo.md'], byUser: USER }]);
+    // Still no `file-changed`: there is no new sha for clients to fetch.
     expect(emitSpy).not.toHaveBeenCalled();
   });
 

@@ -224,8 +224,10 @@ export interface IVersionControlService {
   /**
    * Tell the in-process reactors (catalog invalidation, id-repair, a
    * deployment's own listeners) that `commitChanges` landed these files. The
-   * service announces every single-file save itself, once its commit is pushed
-   * and its lock released; a batch it cannot: `commitChanges` runs while the
+   * service announces every single-file save itself, once its lock is released
+   * and its commit pushed — at the release even when the release's own commit
+   * finds the tree clean, because the autosave checkpoints land a file's bytes
+   * under the hold; a batch it cannot: `commitChanges` runs while the
    * caller still holds every file's lock, and a reactor may take a fresh lock
    * on a changed path, so the CALLER announces, after its locks are released
    * — once per batch, with the batch's scope (every path it wrote or deleted;

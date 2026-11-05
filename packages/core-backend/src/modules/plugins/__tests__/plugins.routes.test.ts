@@ -5,16 +5,16 @@ import path from 'node:path';
 import os from 'node:os';
 import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { NodeFs } from '../../kb-fs/node-fs.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
 import { KbPluginSource } from '../discovery/kb-plugin-source.js';
 
 import { DEFAULT_BRANCH, joinBranchFor } from '@bevel-software/platform-shared';
 import type { ChangeRequest, IVersionControlService } from '@bevel-software/platform-shared';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import type { IAccessControl } from '../../access/access-control.interface.js';
-import type { ISkillService, SkillSummary } from '../../skills/skills.contract.js';
-import type { IToolManualService, ToolManualSummary } from '../../tool-manuals/tool-manuals.contract.js';
+import type { WorkspaceService } from '../../workspace/index.js';
+import type { IAccessControl } from '../../access/index.js';
+import type { ISkillService, SkillSummary } from '../../skills/index.js';
+import type { IToolManualService, ToolManualSummary } from '../../tool-manuals/index.js';
 import { PluginIndexService } from '../plugins.service.js';
 import { createPluginCreationRoutes, createPluginsRoutes } from '../plugins.routes.js';
 import type { JoinRequestsService } from '../join-requests.service.js';
@@ -163,7 +163,7 @@ async function makeHarness(opts: HarnessOpts = {}) {
       skillService,
       toolService,
       testKbContext({ kbDirName: KB }),
-      new KbPluginSource(new NodeFs(), testKbContext({ kbDirName: KB })),
+      new KbPluginSource(realDisk(), testKbContext({ kbDirName: KB })),
     );
 
   const email = opts.email === undefined ? ALI : opts.email;

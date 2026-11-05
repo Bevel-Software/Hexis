@@ -1,12 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { NodeFs } from '../../kb-fs/node-fs.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import type { VersionControlService } from '../../version-control/version-control.service.js';
+import type { WorkspaceService } from '../../workspace/index.js';
+import type { VersionControlService } from '../../version-control/index.js';
 import type { AuthUser } from '@bevel-software/platform-shared';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { PushNeedsAgentResolutionError } from '../../../shared/domain-errors.js';
@@ -168,8 +168,8 @@ describe('UserAccessRemovalService', () => {
 
   const read = (rel: string) => fs.readFile(path.join(repo, rel), 'utf-8');
 
-  function build(versionControl = stubVersionControl(), owners: string[] = ['owner@x.io'], disk: ITreeWalker = new NodeFs()) {
-    const access = new AccessControlService(workspace as never, KB, new NodeFs());
+  function build(versionControl = stubVersionControl(), owners: string[] = ['owner@x.io'], disk: ITreeWalker = realDisk()) {
+    const access = new AccessControlService(workspace as never, KB, realDisk());
     return {
       versionControl,
       service: new UserAccessRemovalService(workspace, versionControl.svc, access, disk, KB, () => DEFAULT_BRANCH, undefined, owners),
@@ -357,7 +357,7 @@ describe('UserAccessRemovalService', () => {
   });
 
   it('refuses to commit a partial cleanup when a folder cannot be listed', async () => {
-    const real = new NodeFs();
+    const real = realDisk();
     const holey = {
       walkKb: async (...args: Parameters<ITreeWalker['walkKb']>) => {
         const result = await real.walkKb(...args);

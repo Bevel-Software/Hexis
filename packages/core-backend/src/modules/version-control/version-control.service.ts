@@ -1790,11 +1790,19 @@ export class VersionControlService implements IVersionControlService {
       // which is exactly how a diverged workspace ends up stuck forever.
       // So: if the branch is ahead of its remote-tracking ref, push (with
       // the same cooperative recovery, so a conflicting divergence throws
-      // and the worker's ladder takes over). Nothing to emit either way —
+      // and the worker's ladder takes over). No `file-changed` either way —
       // there's no new sha.
       if (await this.git.hasUnpushedCommits(workspaceId)) {
         await this.pushWithRecovery(workspaceId, branch, targetPath, user, opts);
       }
+      // A clean tree at release does not mean nothing landed under the hold:
+      // the autosave checkpoints (`commitFileWhileLocked`) commit a file's
+      // bytes while the lock is still held, where no reactor may act on the
+      // path. The release is the moment the lock is free, so the save is
+      // announced here whether the bytes landed in this commit or in a
+      // checkpoint before it — the contract on `announceCommitted` promises
+      // every single-file save, and this is the path that used to break it.
+      this.announceCommitted({ workspaceId, branch, paths: [targetPath], byUser: user });
       return;
     }
     await this.pushWithRecovery(workspaceId, branch, targetPath, user, opts);

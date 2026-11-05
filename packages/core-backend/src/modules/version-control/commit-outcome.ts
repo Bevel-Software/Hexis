@@ -6,8 +6,9 @@ import { PushNeedsAgentResolutionError } from '../../shared/domain-errors.js';
  * the paths whose lock was given back — the one rule for every committer that
  * holds locks (the lock-aware filesystem's batches, the admin commit driver).
  * A path whose release failed stays locked until TTL: a reactor told of it
- * now could not take it, so it is left out, and its catalogs refresh when
- * the lock frees. Nothing is announced when no path was released.
+ * now could not take it, so it is left out. Lock expiry notifies nothing, so
+ * that path's catalogs fall back to their own TTL — what every catalog did
+ * before batches announced. Nothing is announced when no path was released.
  */
 export function announceReleased(
   service: Pick<IVersionControlService, 'announceCommitted'>,
