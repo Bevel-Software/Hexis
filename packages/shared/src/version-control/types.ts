@@ -81,11 +81,14 @@ export interface FilesChange {
   workspaceId: string;
   branch: string;
   /**
-   * Workspace-relative paths the change covers (≥1; sorted for batches): a
-   * single save names its one path; a batch names every path it wrote or
-   * deleted — its scope — which may include a path whose bytes were already
-   * as committed. A reactor re-reads what it is told of, so a path named
-   * without a change costs it one read, never a wrong answer.
+   * Workspace-relative paths the change covers (≥1; sorted, no path twice —
+   * the service shapes them so): a single save names its one path; a batch
+   * names every path it wrote or deleted — its scope — which may include a
+   * path whose bytes were already committed. A batch committed under file
+   * locks names only the paths whose lock was given back: a path whose
+   * release failed stays locked until TTL and is not announced, since a
+   * reactor could not take it. A reactor re-reads what it is told of, so a
+   * path named without a change costs it one read, never a wrong answer.
    */
   paths: string[];
   /** Who the change was committed as — a reacting write (id-repair) acts as the same user. */

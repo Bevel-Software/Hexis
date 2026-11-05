@@ -1272,7 +1272,9 @@ export class VersionControlService implements IVersionControlService {
    * single-file write.
    */
   announceCommitted(change: FilesChange): void {
-    this.fileChanges?.emit(change);
+    // The contract's shape (sorted, no path twice) is made here, at the one
+    // emitter, so no caller has to remember it.
+    this.fileChanges?.emit({ ...change, paths: [...new Set(change.paths)].sort() });
   }
 
   listChangesForFile(workspaceId: string, path: string, limit?: number): Promise<Change[]> {

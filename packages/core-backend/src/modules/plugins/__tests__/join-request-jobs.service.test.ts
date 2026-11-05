@@ -157,6 +157,9 @@ describe('PluginJoinRequestJobs', () => {
     );
     await handoff.jobs.start(pendingRow(handoff.store));
     expect(handoff.versionControl.announceCommitted).toHaveBeenCalledTimes(1);
+    // …and the run records the failure, in words that carry no credential.
+    expect(handoff.store.all()).toMatchObject([{ status: 'failed' }]);
+    expect(handoff.store.all()[0]!.failureReason).toMatch(/push|rebase|non-fast-forward/i);
 
     // A commit that landed is announced like every other landed commit: once,
     // with the access file it wrote, on the request's branch, as the requester.

@@ -8,7 +8,7 @@ import { DrizzleQueryError } from 'drizzle-orm';
 import { spliceGrant } from '../access-model/index.js';
 import { sanitizeError } from '../version-control/index.js';
 import { logger } from '../../shared/logging.js';
-import { PushNeedsAgentResolutionError } from '../../shared/domain-errors.js';
+import { commitLanded } from '../../shared/commit-outcome.js';
 import { printable } from '../../shared/printable.js';
 import type { KbContext } from '../../shared/kb-context.js';
 import type { WorkspaceService } from '../workspace/index.js';
@@ -608,10 +608,10 @@ export class PluginJoinRequestJobs {
       try {
         change = await versionControl.commitChanges(ws.id, user, `Request access to ${target.displayName}`);
       } catch (err) {
-        if (err instanceof PushNeedsAgentResolutionError) announce();
+        if (commitLanded({ threw: err })) announce();
         throw err;
       }
-      if (change) announce();
+      if (commitLanded({ change })) announce();
     }
     // The last gate, and the one that matters most: everything above is
     // idempotent and reusable — a branch, a commit on it — but a change

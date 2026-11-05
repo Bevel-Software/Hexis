@@ -9,6 +9,7 @@ import {
 } from '@bevel-software/platform-shared';
 import type { AuthUser, Change, FilesChange } from '@bevel-software/platform-shared';
 import { PushNeedsAgentResolutionError } from '../../shared/domain-errors.js';
+import { commitLanded } from '../../shared/commit-outcome.js';
 import type { ITreeWalker, WalkListener } from '../../shared/fs.contract.js';
 import type { IAccessControl } from '../access/index.js';
 import {
@@ -244,7 +245,7 @@ export class PluginRenameService {
     // that follows a landed commit may unwind it.
     const paths = writes.map((w) => w.rel);
     const announce = () =>
-      this.commits.announceCommitted({ workspaceId: wsId, branch: this.kb.defaultBranch, paths: [...paths].sort(), byUser: user });
+      this.commits.announceCommitted({ workspaceId: wsId, branch: this.kb.defaultBranch, paths, byUser: user });
     let change: Change | null = null;
     try {
       for (const w of writes) await this.workspaceService.writeFile(wsId, w.rel, w.text);
@@ -260,7 +261,7 @@ export class PluginRenameService {
       // since the tree DID change, every cache keyed on the old identity is
       // dropped before the error goes up, exactly as on success.
       if (err instanceof PushNeedsAgentResolutionError) {
-        announce();
+        if (commitLanded({ threw: err })) announce();
         this.noteChanged(wsId);
       } else {
         for (const w of writes) {
@@ -269,7 +270,7 @@ export class PluginRenameService {
       }
       throw err;
     }
-    if (change) announce();
+    if (commitLanded({ change })) announce();
     this.noteChanged(wsId);
     // Exactly what was persisted, read back through the shared rule — the
     // response and the file can never say two different things.

@@ -49,6 +49,7 @@ import {
 } from '@mastra/core/workspace';
 import type { AuthUser, Change, IVersionControlService } from '@bevel-software/platform-shared';
 import { PushNeedsAgentResolutionError } from '../../shared/domain-errors.js';
+import { commitLanded } from '../../shared/commit-outcome.js';
 import { isAbsence } from '../../shared/fs.contract.js';
 import { DestinationTakenError, lstatOrNull, renameNoReplace, takenError } from '../../shared/rename-no-replace.js';
 import { linkedAncestor } from '../../shared/no-link-below.js';
@@ -640,7 +641,7 @@ export class LockingFilesystem extends GitGuardedFilesystem {
     // envelope: the catch above restores bytes and undoes the rename for a
     // commit that failed, and nothing that follows a landed commit may unwind
     // it (see `writeFiles`).
-    if (change) versionControl.announceCommitted({ workspaceId, branch, paths: scope, byUser: user });
+    if (commitLanded({ change })) versionControl.announceCommitted({ workspaceId, branch, paths: scope, byUser: user });
     return change;
   }
 
@@ -991,7 +992,7 @@ export class LockingFilesystem extends GitGuardedFilesystem {
         );
         // The commit exists, so it is announced like any other, once: the
         // worker's later push makes no new commit and announces nothing.
-        versionControl.announceCommitted({ workspaceId, branch, paths: [...touched].sort(), byUser: user });
+        versionControl.announceCommitted({ workspaceId, branch, paths: touched, byUser: user });
         throw err;
       }
       // A write or the commit threw — nothing of THIS batch should land.
@@ -1038,11 +1039,10 @@ export class LockingFilesystem extends GitGuardedFilesystem {
     // batch, not once per file. After the release, because a subscriber may
     // take a fresh lock on a changed path (id-repair does). A no-op commit
     // (clean tree) changed nothing, so it announces nothing.
-    if (change) {
+    if (commitLanded({ change })) {
       // `touched` = caller paths + any creator-grant seeds that landed in the
-      // same commit — the exact set this batch may have touched, sorted as
-      // the announcement's contract says (seeds land in write order).
-      versionControl.announceCommitted({ workspaceId, branch, paths: [...touched].sort(), byUser: user });
+      // same commit — the exact set this batch may have touched.
+      versionControl.announceCommitted({ workspaceId, branch, paths: touched, byUser: user });
     }
     return change;
   }

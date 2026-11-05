@@ -51,6 +51,7 @@ import { logger } from '../../shared/logging.js';
 import { type WriteValidator, LockingFilesystem } from '../kb-fs/index.js';
 import type { VersionControlDomainError } from '../../shared/domain-errors.js';
 import { PushNeedsAgentResolutionError } from '../../shared/domain-errors.js';
+import { commitLanded } from '../../shared/commit-outcome.js';
 import { isAbsence } from '../../shared/fs.contract.js';
 import type { AuthUser, IWorkspaceService, IVersionControlService } from '@bevel-software/platform-shared';
 
@@ -290,7 +291,7 @@ export class AdminLockedCommits {
         this.deps.versionControlService.announceCommitted({
           workspaceId,
           branch: this.defaultBranch,
-          paths: committed.sort(),
+          paths: committed,
           byUser: actor,
         });
       }
@@ -330,9 +331,12 @@ export class AdminLockedCommits {
       // lock until TTL for a commit there is nothing left to make).
       for (const f of files) this.committedCleanPaths.add(this.cleanKey(workspaceId, this.wsRel(f.repoRel)));
       // And announced after the release — unless the tree was already clean
-      // and nothing was committed.
-      if (change) for (const f of files) this.committedPaths.add(this.cleanKey(workspaceId, this.wsRel(f.repoRel)));
+      // and nothing was committed (`commitLanded`, the one rule for this).
+      if (commitLanded({ change })) for (const f of files) this.committedPaths.add(this.cleanKey(workspaceId, this.wsRel(f.repoRel)));
     } catch (err) {
+      // A commit that landed but could not be pushed is announced like any
+      // other once the locks go — the same rule, applied to what was thrown.
+      if (commitLanded({ threw: err })) for (const f of files) this.committedPaths.add(this.cleanKey(workspaceId, this.wsRel(f.repoRel)));
       // POST-commit failure: the commit landed and only the PUSH needs help
       // (thrown "with the commit intact"). The bytes on disk match the landed
       // commit — restoring pre-edit bytes here would publish a compensating
@@ -341,8 +345,6 @@ export class AdminLockedCommits {
       // will be resolved" and the pending-commit ladder retries the push.
       if (err instanceof PushNeedsAgentResolutionError) {
         logger(logTag).warn('commit landed but the push needs resolution — edit saved; publishing will be retried');
-        // The commit exists, so it is announced like any other once the locks go.
-        for (const f of files) this.committedPaths.add(this.cleanKey(workspaceId, this.wsRel(f.repoRel)));
         throw err;
       }
       const unrestored = new Set<string>();

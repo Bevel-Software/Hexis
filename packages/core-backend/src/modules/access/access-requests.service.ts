@@ -7,8 +7,8 @@ import {
 import {
   ChangeRequestConflictsError,
   DuplicateChangeRequestError,
-  PushNeedsAgentResolutionError,
 } from '../../shared/domain-errors.js';
+import { commitLanded } from '../../shared/commit-outcome.js';
 import { isAbsence } from '../../shared/fs.contract.js';
 import type { KbContext } from '../../shared/kb-context.js';
 import { spliceGrant } from '../access-model/index.js';
@@ -210,10 +210,10 @@ export class AccessRequestsService {
           `Request ${LEVEL_LABEL[level].toLowerCase()} access to ${itemName}`,
         );
       } catch (err) {
-        if (err instanceof PushNeedsAgentResolutionError) announce();
+        if (commitLanded({ threw: err })) announce();
         throw err;
       }
-      if (change) announce();
+      if (commitLanded({ change })) announce();
     }
 
     try {

@@ -224,10 +224,13 @@ describe('POST /workspace/:id/access/request', () => {
 
     // The commit landed but its push needs help: announced once, before the
     // typed hand-off goes up to the route.
-    (h.versionControl.commitChanges as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
-      new PushNeedsAgentResolutionError(branch, FOLDER_RULES, 'non-fast-forward', 'rebase failed'),
-    );
-    await post(`${h.base}/${LIVE_WS}/access/request`, folderBody);
+    const handoffError = new PushNeedsAgentResolutionError(branch, FOLDER_RULES, 'non-fast-forward', 'rebase failed');
+    (h.versionControl.commitChanges as ReturnType<typeof vi.fn>).mockRejectedValueOnce(handoffError);
+    const handoff = await post(`${h.base}/${LIVE_WS}/access/request`, folderBody);
+    // The typed error reaches the caller with its own status: the route maps
+    // a domain error to the status it carries, never to a generic 500.
+    expect(handoff.status).toBe(handoffError.status);
+    expect(handoff.status).toBeLessThan(500);
     expect(h.versionControl.announceCommitted).toHaveBeenCalledTimes(2);
   });
 

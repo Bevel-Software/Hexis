@@ -4,7 +4,7 @@ import jwt from 'jsonwebtoken';
 import type { AuthUser, Change, IGitService, IVersionControlService } from '@bevel-software/platform-shared';
 import { suggestionsBranchPrefixFor } from '@bevel-software/platform-shared';
 import { logger } from '../../shared/logging.js';
-import { PushNeedsAgentResolutionError } from '../../shared/domain-errors.js';
+import { commitLanded } from '../../shared/commit-outcome.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { KbContext } from '../../shared/kb-context.js';
 import type { IAccessControl } from '../access/index.js';
@@ -486,12 +486,13 @@ export class EmbedService implements IEmbedService {
         );
       });
     } catch (err) {
-      // The commit landed and only its push needs help (the typed hand-off):
-      // announced like any landed commit, once, before the error goes up.
-      if (err instanceof PushNeedsAgentResolutionError) announce();
+      // A commit that landed and only needs its push (the typed hand-off) is
+      // announced like any landed commit, once, before the error goes up —
+      // `commitLanded` is the one rule for which outcomes those are.
+      if (commitLanded({ threw: err })) announce();
       throw err;
     }
-    if (change) announce();
+    if (commitLanded({ change })) announce();
     try {
       const created = await this.versionControlService.openChangeRequest(workspace.id, user, {
         sourceBranch: branch,
