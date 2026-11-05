@@ -49,7 +49,6 @@ import {
 } from '@mastra/core/workspace';
 import type { AuthUser, Change, IVersionControlService } from '@bevel-software/platform-shared';
 import { PushNeedsAgentResolutionError } from '../../shared/domain-errors.js';
-import { announceReleased, commitLanded } from '../version-control/index.js';
 import { isAbsence } from '../../shared/fs.contract.js';
 import { DestinationTakenError, lstatOrNull, renameNoReplace, takenError } from '../../shared/rename-no-replace.js';
 import { linkedAncestor } from '../../shared/no-link-below.js';
@@ -503,10 +502,7 @@ export class LockingFilesystem extends GitGuardedFilesystem {
     // coordinate and name nothing committed, so they go back untouched —
     // enqueued, a later write under those folders would be this move's.
     let scope: string[] = [];
-    // Answers the paths it could NOT release: each stays locked until TTL, and
-    // a landed commit is announced without it (see `announceReleased`).
-    const release = async (mode: 'untouched' | 'enqueue'): Promise<Set<string>> => {
-      const stillHeld = new Set<string>();
+    const release = async (mode: 'untouched' | 'enqueue'): Promise<void> => {
       for (const p of acquired) {
         try {
           if (mode === 'enqueue' && scope.includes(p)) await versionControl.releaseLock(workspaceId, branch, p, user);
@@ -514,11 +510,9 @@ export class LockingFilesystem extends GitGuardedFilesystem {
           else if (dirtyLeft.has(p)) await versionControl.releaseLockNoCommit(workspaceId, branch, p, user);
           else await versionControl.releaseLockUntouched(workspaceId, branch, p, user);
         } catch (releaseErr) {
-          stillHeld.add(p);
           log.warn(`lock release failed for "${p}" during moveWithEdits:`, { err: releaseErr });
         }
       }
-      return stillHeld;
     };
     for (const p of paths) {
       let holderName: string | null = null;
@@ -578,10 +572,6 @@ export class LockingFilesystem extends GitGuardedFilesystem {
     // Done in this order, and undone in the reverse one.
     let moved = false;
     const written: { path: string; lockAt: string; before: Buffer | null }[] = [];
-    let change: Change | null = null;
-    // The paths whose release failed once the commit landed: left out of the
-    // announcement, since each stays locked until TTL.
-    let stillHeld = new Set<string>();
     try {
       await this.moveNoReplace(src, dest);
       moved = true;
@@ -602,16 +592,14 @@ export class LockingFilesystem extends GitGuardedFilesystem {
           ...edits.map((e) => e.path),
         ]),
       ].sort();
-      change = await versionControl.commitChanges(workspaceId, user, summary, scope);
-      stillHeld = await release('untouched');
+      const change = await versionControl.commitChanges(workspaceId, user, summary, scope);
+      await release('untouched');
+      return change;
     } catch (err) {
       if (err instanceof PushNeedsAgentResolutionError) {
         // The commit landed; only its push needs help. Releasing with a commit
-        // arms the pending-commits worker's push retry (see `writeFiles`). The
-        // commit is announced here, once: the worker's later push announces
-        // nothing (no new commit), and the reactors read the working tree.
-        const held = await release('enqueue');
-        announceReleased(versionControl, { workspaceId, branch, paths: scope, byUser: user }, held);
+        // arms the pending-commits worker's push retry (see `writeFiles`).
+        await release('enqueue');
         throw err;
       }
       for (const w of written.reverse()) {
@@ -645,12 +633,6 @@ export class LockingFilesystem extends GitGuardedFilesystem {
       await release('untouched');
       throw err;
     }
-    // Announced once the locks are gone, and OUTSIDE the commit's failure
-    // envelope: the catch above restores bytes and undoes the rename for a
-    // commit that failed, and nothing that follows a landed commit may unwind
-    // it (see `writeFiles`).
-    if (commitLanded({ change })) announceReleased(versionControl, { workspaceId, branch, paths: scope, byUser: user }, stillHeld);
-    return change;
   }
 
   /**
@@ -786,12 +768,9 @@ export class LockingFilesystem extends GitGuardedFilesystem {
     //     still queued — a discard would silently destroy that landed save,
     //     and an enqueue would re-attribute its queued row to THIS user and
     //     reset its retry ladder.
-    //     Answers the paths it could NOT release: each stays locked until TTL,
-    //     and a landed commit is announced without it (`announceReleased`).
     const releaseAll = async (
       modeOf: (p: string) => 'discard' | 'enqueue' | 'untouched',
-    ): Promise<Set<string>> => {
-      const stillHeld = new Set<string>();
+    ): Promise<void> => {
       for (const p of acquired) {
         try {
           const mode = modeOf(p);
@@ -803,11 +782,9 @@ export class LockingFilesystem extends GitGuardedFilesystem {
             await versionControl.releaseLockUntouched(workspaceId, branch, p, user);
           }
         } catch (releaseErr) {
-          stillHeld.add(p);
           log.warn(`lock release failed for "${p}" during writeFiles:`, { err: releaseErr });
         }
       }
-      return stillHeld;
     };
 
     // Acquire every lock before committing a single byte (fail-closed).
@@ -1000,13 +977,9 @@ export class LockingFilesystem extends GitGuardedFilesystem {
         // releaseAll), and `touched` is never empty here (the commit that
         // just landed had to have paths in scope).
         const committed = new Set(touched);
-        const held = await releaseAll((p) =>
+        await releaseAll((p) =>
           committed.has(p) ? 'enqueue' : failedSeedDiscards.has(p) ? 'discard' : 'untouched',
         );
-        // The commit exists, so it is announced like any other, once — for
-        // the paths whose lock went: the worker's later push makes no new
-        // commit and announces nothing.
-        announceReleased(versionControl, { workspaceId, branch, paths: touched, byUser: user }, held);
         throw err;
       }
       // A write or the commit threw — nothing of THIS batch should land.
@@ -1043,22 +1016,13 @@ export class LockingFilesystem extends GitGuardedFilesystem {
     // bytes. A seed lock whose write no-op'd (or fully restored itself)
     // releases untouched: it was never this batch's to discard OR enqueue.
     const committed = new Set(touched);
-    const held = await releaseAll((p) =>
+    await releaseAll((p) =>
       committed.has(p) || failedSeedDiscards.has(p) ? 'discard' : 'untouched',
     );
-    // This batch path commits via `commitChanges`, NOT the per-file queue, so
-    // the service's own post-commit announcement (`runPendingCommit`) never
-    // runs for it — announce here, with the WHOLE batch as one event, so an
-    // expensive subscriber (id-repair rebuilds the id index) reacts once per
-    // batch, not once per file. After the release, because a subscriber may
-    // take a fresh lock on a changed path (id-repair does). A no-op commit
-    // (clean tree) changed nothing, so it announces nothing.
-    if (commitLanded({ change })) {
-      // `touched` = caller paths + any creator-grant seeds that landed in the
-      // same commit — the exact set this batch may have touched, minus a path
-      // whose lock could not be given back.
-      announceReleased(versionControl, { workspaceId, branch, paths: touched, byUser: user }, held);
-    }
+    // The commit, if one landed, was reported by the git layer as it landed
+    // (`VersionControlHooks.onCommitLanded`) with the paths it committed —
+    // `touched` plus any creator-grant seed in the same commit. Nothing to
+    // announce here.
     return change;
   }
 

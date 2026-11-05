@@ -4,7 +4,8 @@ import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import type { AuthUser, IVersionControlService } from '@bevel-software/platform-shared';
+import type { AuthUser, FilesChange, IVersionControlService } from '@bevel-software/platform-shared';
+import type { VersionControlHooks } from '../../version-control/index.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import { realGitService, realVersionControlHooks } from '../../../__tests__/real-version-control.js';
 import type { WorkspaceService } from '../../workspace/index.js';
@@ -58,13 +59,14 @@ beforeEach(async () => {
   await git(repo, ['add', '-A']);
   await git(repo, ['commit', '-m', 'seed']);
 
+  landed = [];
+  hooks = realVersionControlHooks();
+  hooks.onCommitValidation(vi.fn(async () => ({ ok: true, mustFix: [], warnings: [], rawOutput: '' })));
+  // What the git layer reports landing — the one place every commit is announced from.
+  hooks.onCommitLanded((change) => landed.push(change));
   const svc = realGitService(
     { getWorkspacePath: async () => root } as unknown as WorkspaceService,
-    (() => {
-      const hooks = realVersionControlHooks();
-      hooks.onCommitValidation(vi.fn(async () => ({ ok: true, mustFix: [], warnings: [], rawOutput: '' })));
-      return hooks;
-    })(),
+    hooks,
     testKbContext({ kbDirName: KB }),
   );
   lockedPaths = new Set();
@@ -77,7 +79,6 @@ beforeEach(async () => {
     releaseLockNoCommit: vi.fn(async () => undefined),
     releaseLockUntouched: vi.fn(async () => undefined),
     commitChanges: vi.fn((w: string, u: AuthUser, s: string, paths?: string[]) => svc.commitChanges(w, u, s, paths)),
-    announceCommitted: vi.fn(),
   } as unknown as IVersionControlService;
 });
 
@@ -103,6 +104,11 @@ const edits = () => [
   { path: `${KB}/Index.md`, lockAt: `${KB}/Index.md`, content: '[one](Topics/Deep/A/One.md)\n' },
 ];
 
+/** Every commit the git layer landed, as the hook heard it (paths as git named them; the notifier is what sorts). */
+let landed: FilesChange[] = [];
+let hooks: VersionControlHooks;
+const heard = () => landed.map((c) => ({ ...c, paths: [...c.paths].sort() }));
+
 describe('LockingFilesystem.moveWithEdits', () => {
   it('lands the folder move and every edit as ONE commit that git reads as renames', async () => {
     const before = (await git(repo, ['rev-list', '--count', 'HEAD'])).trim();
@@ -123,48 +129,33 @@ describe('LockingFilesystem.moveWithEdits', () => {
     expect(await read('Topics/Deep/A/One.md')).toContain('../../../NodeTypes/Task.md');
     // The binary moved byte for byte.
     expect([...(await fs.readFile(path.join(repo, 'Topics/Deep/A/pic.png')))]).toEqual([0x89, 0x50, 0x4e, 0x47, 0, 1, 2, 3]);
-    // Announced ONCE, after the commit, with every path the commit named at
-    // both ends — and after the locks were given back.
-    expect(versionControl.announceCommitted).toHaveBeenCalledTimes(1);
-    expect(versionControl.announceCommitted).toHaveBeenCalledWith({
-      workspaceId: WS,
-      branch: 'feature-test',
-      byUser: USER,
-      paths: [
-        `${KB}/Index.md`,
-        `${KB}/Projects/A/One.md`,
-        `${KB}/Projects/A/Two.md`,
-        `${KB}/Projects/A/pic.png`,
-        `${KB}/Topics/Deep/A/One.md`,
-        `${KB}/Topics/Deep/A/Two.md`,
-        `${KB}/Topics/Deep/A/pic.png`,
-      ],
-    });
-    const announcedAt = (versionControl.announceCommitted as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0]!;
-    for (const order of (versionControl.releaseLockUntouched as ReturnType<typeof vi.fn>).mock.invocationCallOrder) {
-      expect(order).toBeLessThan(announcedAt);
-    }
+    // The git layer reported the ONE commit, with every path it named at both
+    // ends — the one place any commit is announced from.
+    expect(heard()).toEqual([
+      {
+        workspaceId: WS,
+        branch: 'feature-test',
+        byUser: USER,
+        paths: [
+          `${KB}/Index.md`,
+          `${KB}/Projects/A/One.md`,
+          `${KB}/Projects/A/Two.md`,
+          `${KB}/Projects/A/pic.png`,
+          `${KB}/Topics/Deep/A/One.md`,
+          `${KB}/Topics/Deep/A/Two.md`,
+          `${KB}/Topics/Deep/A/pic.png`,
+        ],
+      },
+    ]);
   });
 
-  it('a moved path whose lock release failed is left out of the announcement; the rest is announced', async () => {
-    (versionControl.releaseLockUntouched as ReturnType<typeof vi.fn>).mockImplementation(async (_w: string, _b: string, p: string) => {
-      if (p === `${KB}/Index.md`) throw new Error('lock store down');
-    });
-    await fsLayer().moveWithEdits(`${KB}/Projects/A`, `${KB}/Topics/Deep/A`, edits(), 'Move A');
-    expect(versionControl.announceCommitted).toHaveBeenCalledTimes(1);
-    const [announced] = (versionControl.announceCommitted as ReturnType<typeof vi.fn>).mock.calls[0] as [{ paths: string[] }];
-    expect(announced.paths).not.toContain(`${KB}/Index.md`);
-    expect(announced.paths).toEqual(
-      expect.arrayContaining([`${KB}/Projects/A/One.md`, `${KB}/Topics/Deep/A/One.md`, `${KB}/Topics/Deep/A/pic.png`]),
-    );
-  });
-
-  it('an announcement that throws cannot unwind the landed move: the commit, the files and the rename stay', async () => {
-    (versionControl.announceCommitted as ReturnType<typeof vi.fn>).mockImplementation(() => {
+  it('a reactor that throws cannot unwind the landed move: the hook runs isolated, the commit, the files and the rename stay', async () => {
+    hooks.onCommitLanded(() => {
       throw new Error('reactor exploded');
     });
     const before = (await git(repo, ['rev-list', '--count', 'HEAD'])).trim();
-    await expect(fsLayer().moveWithEdits(`${KB}/Projects/A`, `${KB}/Topics/Deep/A`, edits(), 'Move A')).rejects.toThrow('reactor exploded');
+    await fsLayer().moveWithEdits(`${KB}/Projects/A`, `${KB}/Topics/Deep/A`, edits(), 'Move A');
+    expect(landed).toHaveLength(1);
     expect((await git(repo, ['rev-list', '--count', 'HEAD'])).trim()).toBe(String(Number(before) + 1));
     expect((await git(repo, ['status', '--porcelain'])).trim()).toBe('');
     expect(await read('Index.md')).toBe('[one](Topics/Deep/A/One.md)\n');
@@ -201,7 +192,7 @@ describe('LockingFilesystem.moveWithEdits', () => {
     expect(released(versionControl.releaseLockUntouched)).toEqual([`${KB}/Index.md`, `${KB}/Projects/A`, `${KB}/Projects/A/One.md`]);
     expect(versionControl.releaseLockNoCommit).not.toHaveBeenCalled();
     expect(versionControl.releaseLock).not.toHaveBeenCalled();
-    expect(versionControl.announceCommitted).not.toHaveBeenCalled();
+    expect(landed).toEqual([]);
     expect(await read('Index.md')).toBe('[one](Projects/A/One.md)\n');
   }, 20_000);
 
@@ -226,7 +217,7 @@ describe('LockingFilesystem.moveWithEdits', () => {
     expect(await read('Index.md')).toBe('[one](Projects/A/One.md)\n');
     expect(versionControl.releaseLockNoCommit).not.toHaveBeenCalled();
     expect(released(versionControl.releaseLockUntouched).length).toBeGreaterThan(0);
-    expect(versionControl.announceCommitted).not.toHaveBeenCalled();
+    expect(landed).toEqual([]);
   });
 
   it('a move that fails and cannot be undone releases every lock with the discard, and says both', async () => {
@@ -247,7 +238,7 @@ describe('LockingFilesystem.moveWithEdits', () => {
     expect(discarded).toContain(`${KB}/Topics/Deep/A/One.md`);
     expect(discarded).toContain(`${KB}/Index.md`);
     // A failed commit announces nothing.
-    expect(versionControl.announceCommitted).not.toHaveBeenCalled();
+    expect(landed).toEqual([]);
   });
 
   it('a commit that landed but could not be pushed enqueues the committed paths only; the folder locks go back untouched', async () => {
@@ -276,29 +267,25 @@ describe('LockingFilesystem.moveWithEdits', () => {
     expect(enqueued).not.toContain(`${KB}/Projects/A`);
     expect(enqueued).not.toContain(`${KB}/Topics/Deep/A`);
     expect(untouched).toEqual([`${KB}/Projects/A`, `${KB}/Topics/Deep/A`]);
-    // The commit landed, so it is announced — once, with the committed scope,
-    // after every lock went back (enqueued or untouched); the worker's later
-    // push announces nothing of its own.
-    const announce = versionControl.announceCommitted as ReturnType<typeof vi.fn>;
-    expect(announce).toHaveBeenCalledTimes(1);
-    expect(announce).toHaveBeenCalledWith({
-      workspaceId: WS,
-      branch: 'feature-test',
-      byUser: USER,
-      paths: [
-        `${KB}/Index.md`,
-        `${KB}/Projects/A/One.md`,
-        `${KB}/Projects/A/Two.md`,
-        `${KB}/Projects/A/pic.png`,
-        `${KB}/Topics/Deep/A/One.md`,
-        `${KB}/Topics/Deep/A/Two.md`,
-        `${KB}/Topics/Deep/A/pic.png`,
-      ],
-    });
-    const announcedAt = announce.mock.invocationCallOrder[0]!;
-    for (const fn of [versionControl.releaseLock, versionControl.releaseLockUntouched]) {
-      for (const order of (fn as ReturnType<typeof vi.fn>).mock.invocationCallOrder) expect(order).toBeLessThan(announcedAt);
-    }
+    // The commit landed, so the git layer reported it — once, with the
+    // committed scope; the worker's later push makes no new commit and
+    // reports nothing more.
+    expect(heard()).toEqual([
+      {
+        workspaceId: WS,
+        branch: 'feature-test',
+        byUser: USER,
+        paths: [
+          `${KB}/Index.md`,
+          `${KB}/Projects/A/One.md`,
+          `${KB}/Projects/A/Two.md`,
+          `${KB}/Projects/A/pic.png`,
+          `${KB}/Topics/Deep/A/One.md`,
+          `${KB}/Topics/Deep/A/Two.md`,
+          `${KB}/Topics/Deep/A/pic.png`,
+        ],
+      },
+    ]);
   });
 
   it('locks every file of a moved folder at its old and its new path', async () => {

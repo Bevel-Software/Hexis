@@ -1801,7 +1801,7 @@ describe('VersionControlService.openChangeRequest — tells the change-request l
     const svc = new VersionControlService(
       db, git, prs, makeChangeRequestReview(), workspaces, access,
       makeFileLockService(), makePendingCommits(), testKbContext(), openChangeGate(),
-      { emit: vi.fn() } as unknown as VersionControlEventBus, undefined, undefined, hooks, accounts,
+      { emit: vi.fn() } as unknown as VersionControlEventBus, undefined, hooks, accounts,
     );
     return { svc, run, prs, access, accounts, values };
   }

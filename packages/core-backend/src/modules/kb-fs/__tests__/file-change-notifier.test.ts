@@ -18,12 +18,13 @@ describe('FileChangeNotifier', () => {
     const b = vi.fn();
     notifier.onFilesChanged(a);
     notifier.onFilesChanged(b);
-    const c = change(['x/Tools/a.tool', 'x/Knowledge/B.md']);
-    notifier.emit(c);
+    notifier.emit(change(['x/Tools/a.tool', 'x/Knowledge/B.md']));
+    // Both hear the one change, shaped: paths sorted.
+    const shaped = change(['x/Knowledge/B.md', 'x/Tools/a.tool']);
     expect(a).toHaveBeenCalledTimes(1);
-    expect(a).toHaveBeenCalledWith(c);
+    expect(a).toHaveBeenCalledWith(shaped);
     expect(b).toHaveBeenCalledTimes(1);
-    expect(b).toHaveBeenCalledWith(c);
+    expect(b).toHaveBeenCalledWith(shaped);
   });
 
   it('a throwing listener never blocks the others (commit isolation)', () => {
@@ -47,5 +48,13 @@ describe('FileChangeNotifier', () => {
     unsubscribe();
     notifier.emit(change(['x/A.md']));
     expect(listener).not.toHaveBeenCalled();
+  });
+
+  it('hands every listener the paths sorted and unique: the shape of the contract is made here, once', () => {
+    const notifier = new FileChangeNotifier();
+    const heard: FilesChange[] = [];
+    notifier.onFilesChanged((c) => heard.push(c));
+    notifier.emit(change(['x/B.md', 'x/A.md', 'x/B.md']));
+    expect(heard).toEqual([change(['x/A.md', 'x/B.md'])]);
   });
 });

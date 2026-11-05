@@ -48,7 +48,6 @@ import type {
   DeleteBranchResult,
   FileApproval,
   FileLock,
-  FilesChange,
   FolderChangeRequest,
   FolderChangeRequestRemoval,
   IVersionControlService,
@@ -84,7 +83,6 @@ import { canonicalFileIdentity } from '../../shared/canonical-file-identity.js';
 import type { PendingCommitsService } from './pending-commits.service.js';
 import type { VersionControlEventBus } from './event-bus.js';
 import { describeSyncFailure, sanitizeError } from './sanitize-error.js';
-import type { FileChangeNotifier } from '../kb-fs/index.js';
 import { VersionControlHooks } from './version-control-hooks.js';
 import {
   ChangeRequestHooks,
@@ -305,13 +303,6 @@ export class VersionControlService implements IVersionControlService {
      * boot the composition root always wires one.
      */
     private readonly events?: VersionControlEventBus,
-    /**
-     * In-process post-commit hook (distinct from the SSE `events` bus): fires
-     * after a file's change is committed + pushed so backend services (catalog
-     * invalidation, id-repair) react without the per-file TTL wait. Optional,
-     * like `events`.
-     */
-    private readonly fileChanges?: FileChangeNotifier,
     /**
      * Version-control lifecycle-hook registry (see `version-control-hooks.ts`). PUBLIC so
      * the composition root registers module-owned behavior against it
@@ -1265,18 +1256,6 @@ export class VersionControlService implements IVersionControlService {
     return change;
   }
 
-  /**
-   * The post-commit announcement for a batch (see the interface): the caller
-   * of `commitChanges` says when its locks are gone, and the reactors hear of
-   * the whole batch once. Same hook `runPendingCommit` fires for every
-   * single-file write.
-   */
-  announceCommitted(change: FilesChange): void {
-    // The contract's shape (sorted, no path twice) is made here, at the one
-    // emitter, so no caller has to remember it.
-    this.fileChanges?.emit({ ...change, paths: [...new Set(change.paths)].sort() });
-  }
-
   listChangesForFile(workspaceId: string, path: string, limit?: number): Promise<Change[]> {
     return this.git.logForFile(workspaceId, path, limit);
   }
@@ -1639,12 +1618,6 @@ export class VersionControlService implements IVersionControlService {
         byUserId: user.id,
         byUserName: user.name,
       });
-      // A landed commit is announced by whoever landed it, when it lands: the
-      // checkpoint's bytes are in the tree now, pushed or not, and a release
-      // that later finds the tree clean has nothing of its own to announce.
-      // The hold is still the editor's; a listener that needs this path's
-      // lock treats it as it treats any lock another session holds.
-      this.announceCommitted({ workspaceId, branch, paths: [targetPath], byUser: user });
     }
     return change;
   }
@@ -1801,18 +1774,11 @@ export class VersionControlService implements IVersionControlService {
       if (await this.git.hasUnpushedCommits(workspaceId)) {
         await this.pushWithRecovery(workspaceId, branch, targetPath, user, opts);
       }
-      // Nothing landed here, so nothing is announced here: whatever this hold
-      // committed — an autosave checkpoint, a batch's hand-off whose retry
-      // this row is — was announced by the commit that landed it.
+      // Nothing landed here, so nothing is announced: the git layer reports
+      // each commit as it lands (an autosave checkpoint, a batch whose push
+      // retry this row is), and this row made none.
       return;
     }
-    // Post-commit, post-lock-release: the one chokepoint every single-file
-    // release converges on. Announced when the commit LANDS, before the push:
-    // the bytes are in the tree the reactors read whether the push goes
-    // through, needs the recovery ladder, or lands on a later retry — and
-    // that retry finds a clean tree and announces nothing, so one commit is
-    // one announcement.
-    this.announceCommitted({ workspaceId, branch, paths: [targetPath], byUser: user });
     await this.pushWithRecovery(workspaceId, branch, targetPath, user, opts);
     this.events?.emit({
       kind: 'file-changed',

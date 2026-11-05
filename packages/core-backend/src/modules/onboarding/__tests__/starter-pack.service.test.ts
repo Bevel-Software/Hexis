@@ -76,7 +76,6 @@ function harness({
     releaseLockNoCommit: vi.fn(async () => undefined),
     releaseLockUntouched: vi.fn(async () => undefined),
     commitChanges: vi.fn(async () => ({ sha: 'abc' })),
-    announceCommitted: vi.fn(),
   };
   const events = { emit: vi.fn() };
   /**

@@ -345,6 +345,24 @@ export class GitService implements IGitService {
   }
 
   /**
+   * Every commit this service lands is reported here, once, to the hooks the
+   * composition root registered (`VersionControlHooks.onCommitLanded`): a
+   * single-file commit, a batch, a merge. Paths go out workspace-relative, as
+   * the notifier's contract has them. The hooks run isolated, so a reactor can
+   * neither fail nor unwind the commit it hears of. This is the ONE place a
+   * commit is announced from — a new way of committing reports here or it is
+   * not announced at all, which a test pins.
+   */
+  private landed(workspaceId: string, branch: string, user: AuthUser, repoRelativePaths: readonly string[]): void {
+    this.hooks.commitLanded({
+      workspaceId,
+      branch,
+      paths: repoRelativePaths.map((p) => `${this.kbDirName}/${p}`),
+      byUser: user,
+    });
+  }
+
+  /**
    * The credentials the runner authenticates with — for the services above
    * this one that scrub a message git or the host echoed a token into.
    */
@@ -1092,6 +1110,7 @@ export class GitService implements IGitService {
 
       // The commit may have changed roles.yaml or access.md — drop cached state.
       this.accessControl?.invalidate(workspaceId);
+      this.landed(workspaceId, branch, user, touched);
 
       return {
         sha: sha?.trim() ?? '',
@@ -1254,6 +1273,7 @@ export class GitService implements IGitService {
       ]);
       const [sha, authorName, authorEmail, subj, committedAt] = stdout.split('\x00');
       this.accessControl?.invalidate(workspaceId);
+      this.landed(workspaceId, branch, user, [repoRelativePath]);
       return {
         sha: sha?.trim() ?? '',
         authorName: authorName ?? '',
@@ -1383,6 +1403,8 @@ export class GitService implements IGitService {
       // committed" and restore their pre-edit bytes, which here would publish
       // a compensating revert of a commit that DID land. The attribution read
       // is best-effort; on failure fall back to what we already know.
+      // The commit exists: report it (the hooks run isolated, so this cannot throw).
+      this.landed(workspaceId, branch, user, touched);
       let sha = '';
       let authorName = user.name;
       let authorEmail = user.email;
@@ -1811,8 +1833,11 @@ export class GitService implements IGitService {
     opts: { subject: string; body: string; publish?: (ops: ReservedPushOps) => Promise<void> },
     resolvedPaths: string[],
   ): Promise<MergeIntoBranchOutcome> {
+    // What this merge brings onto the branch: the index holds the merged tree.
+    const { stdout: merged } = await this.git(cwd, ['diff', '--cached', '--name-only', '-z']);
     await this.git(cwd, ['commit', `--author=${user.name} <${user.email}>`, '-m', opts.subject, '-m', opts.body]);
     this.accessControl?.invalidate(workspaceId);
+    this.landed(workspaceId, branch, user, merged.split('\0').filter(Boolean));
     // The publish runs here, inside the reservation the merge was made in,
     // over this checkout's own push and pull-rebase (the merge kept as a
     // merge) — the caller's policy, the git layer's moves. Whatever it
@@ -2142,6 +2167,7 @@ export class GitService implements IGitService {
           '-m', commit.body,
         ]);
         const { stdout: sha } = await this.git(cwd, ['rev-parse', 'HEAD']);
+        this.landed(baseWorkspaceId, targetBranch, user, staged.trim().split('\n').filter(Boolean));
 
         try {
           await this.git(cwd, ['push', 'origin', `HEAD:refs/heads/${targetBranch}`]);

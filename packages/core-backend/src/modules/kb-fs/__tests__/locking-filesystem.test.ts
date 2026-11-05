@@ -38,7 +38,6 @@ function makeVersionControl(): IVersionControlService {
     getLock: vi.fn(),
     commitFileWhileLocked: vi.fn(),
     commitChanges: vi.fn().mockResolvedValue({}),
-    announceCommitted: vi.fn(),
   } as unknown as IVersionControlService;
 }
 
@@ -210,7 +209,7 @@ describe('LockingFilesystem — every mutating op runs acquire → super → rel
   });
 });
 
-describe('LockingFilesystem.writeFiles — batch with deletes + one batched change event', () => {
+describe('LockingFilesystem.writeFiles — batch with deletes', () => {
   let root: string;
 
   beforeEach(async () => {
@@ -221,13 +220,11 @@ describe('LockingFilesystem.writeFiles — batch with deletes + one batched chan
     await fs.rm(root, { recursive: true, force: true });
   });
 
-  it('locks writes AND deletes, applies both, announces ONE batch through the version-control service — with no notifier handed in', async () => {
+  it('locks writes AND deletes, applies both, returns the commit', async () => {
     await fs.mkdir(path.join(root, 'knowledge-base/Tools'), { recursive: true });
     await fs.writeFile(path.join(root, 'knowledge-base/Tools/old.tool'), '{}');
 
     const versionControl = makeVersionControl();
-    const emitted: unknown[] = [];
-    (versionControl.announceCommitted as ReturnType<typeof vi.fn>).mockImplementation((c: unknown) => emitted.push(c));
     const fsLayer = new LockingFilesystem(
       { basePath: root, contained: true },
       {
@@ -250,24 +247,14 @@ describe('LockingFilesystem.writeFiles — batch with deletes + one batched chan
     expect(await fs.readFile(path.join(root, 'knowledge-base/Tools/new.tool'), 'utf-8')).toContain('http');
     await expect(fs.access(path.join(root, 'knowledge-base/Tools/old.tool'))).rejects.toThrow();
     expect(change).toEqual({});
-    // ONE event carrying the whole batch (sorted), attributed to the user.
-    expect(emitted).toHaveLength(1);
-    expect(emitted[0]).toMatchObject({
-      workspaceId: 'ws-feat',
-      branch: 'feat',
-      paths: ['knowledge-base/Tools/new.tool', 'knowledge-base/Tools/old.tool'],
-      byUser: USER,
-    });
   });
 
-  it('a failing commit releases every lock WITHOUT committing and emits nothing', async () => {
+  it('a failing commit releases every lock WITHOUT committing', async () => {
     await fs.mkdir(path.join(root, 'knowledge-base/Tools'), { recursive: true });
     await fs.writeFile(path.join(root, 'knowledge-base/Tools/old.tool'), '{}');
 
     const versionControl = makeVersionControl();
     (versionControl.commitChanges as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('push exploded'));
-    const emitted: unknown[] = [];
-    (versionControl.announceCommitted as ReturnType<typeof vi.fn>).mockImplementation((c: unknown) => emitted.push(c));
     const fsLayer = new LockingFilesystem(
       { basePath: root, contained: true },
       {
@@ -289,11 +276,10 @@ describe('LockingFilesystem.writeFiles — batch with deletes + one batched chan
     // Every acquired path goes through the NO-COMMIT release — which is what
     // discards the uncommitted bytes (write reverted, delete restored) in the
     // real VersionControlService via git.discardPath. The committing release must
-    // never run, and no change event fires for a failed batch.
+    // never run.
     expect(versionControl.releaseLockNoCommit).toHaveBeenCalledWith('ws-feat', 'feat', 'knowledge-base/Tools/new.tool', USER);
     expect(versionControl.releaseLockNoCommit).toHaveBeenCalledWith('ws-feat', 'feat', 'knowledge-base/Tools/old.tool', USER);
     expect(versionControl.releaseLock).not.toHaveBeenCalled();
-    expect(emitted).toHaveLength(0);
   });
 
   it('a POST-commit push failure releases WITH commit-on-release (arms the worker retry), never the discard path', async () => {
@@ -308,8 +294,6 @@ describe('LockingFilesystem.writeFiles — batch with deletes + one batched chan
     (versionControl.commitChanges as ReturnType<typeof vi.fn>).mockRejectedValue(
       new PushNeedsAgentResolutionError('feat', 'knowledge-base/A.md', 'non-fast-forward', 'rebase failed'),
     );
-    const emitted: unknown[] = [];
-    (versionControl.announceCommitted as ReturnType<typeof vi.fn>).mockImplementation((c: unknown) => emitted.push(c));
     const fsLayer = new LockingFilesystem(
       { basePath: root, contained: true },
       {
@@ -326,54 +310,6 @@ describe('LockingFilesystem.writeFiles — batch with deletes + one batched chan
 
     expect(versionControl.releaseLock).toHaveBeenCalledWith('ws-feat', 'feat', 'knowledge-base/A.md', USER);
     expect(versionControl.releaseLockNoCommit).not.toHaveBeenCalled();
-    // The commit LANDED, so it is announced — once, after the release; the
-    // worker's later push announces nothing of its own.
-    expect(emitted).toEqual([{ workspaceId: 'ws-feat', branch: 'feat', paths: ['knowledge-base/A.md'], byUser: USER }]);
-    const announcedAt = (versionControl.announceCommitted as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0]!;
-    expect((versionControl.releaseLock as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0]!).toBeLessThan(announcedAt);
-  });
-
-  it('a committed path whose lock release failed is left out of the announcement; the rest is announced after the releases', async () => {
-    const versionControl = makeVersionControl();
-    const release = versionControl.releaseLockNoCommit as ReturnType<typeof vi.fn>;
-    release.mockImplementation(async (_w: string, _b: string, p: string) => {
-      if (p === 'knowledge-base/B.md') throw new Error('lock store down');
-    });
-    const emitted: unknown[] = [];
-    (versionControl.announceCommitted as ReturnType<typeof vi.fn>).mockImplementation((c: unknown) => emitted.push(c));
-    const fsLayer = new LockingFilesystem(
-      { basePath: root, contained: true },
-      { versionControl, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB },
-    );
-    await fsLayer.writeFiles(
-      [
-        { path: 'knowledge-base/A.md', content: 'a' },
-        { path: 'knowledge-base/B.md', content: 'b' },
-      ],
-      'two files',
-    );
-    // B stays locked until TTL and is not announced; A is, after every release call.
-    expect(emitted).toEqual([{ workspaceId: 'ws-feat', branch: 'feat', paths: ['knowledge-base/A.md'], byUser: USER }]);
-    const announcedAt = (versionControl.announceCommitted as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0]!;
-    for (const order of release.mock.invocationCallOrder) expect(order).toBeLessThan(announcedAt);
-  });
-
-  it('emits nothing on a no-op commit (clean tree)', async () => {
-    const versionControl = makeVersionControl();
-    (versionControl.commitChanges as ReturnType<typeof vi.fn>).mockResolvedValue(null);
-    const emitted: unknown[] = [];
-    (versionControl.announceCommitted as ReturnType<typeof vi.fn>).mockImplementation((c: unknown) => emitted.push(c));
-    const fsLayer = new LockingFilesystem(
-      { basePath: root, contained: true },
-      {
-        versionControl,
-        workspaceId: 'ws-feat',
-        branch: 'feat',
-        user: USER, kbDirName: KB,
-      },
-    );
-    await fsLayer.writeFiles([{ path: 'knowledge-base/A.md', content: 'same' }], 'noop');
-    expect(emitted).toHaveLength(0);
   });
 });
 
@@ -740,8 +676,6 @@ describe('LockingFilesystem — creator read grants on creation', () => {
       wsRelPath: 'knowledge-base/KnowledgeBase/Mine/access.md',
       apply: (current: string) => current, // grant already present → no-op
     });
-    const emitted: { paths: string[] }[] = [];
-    (versionControl.announceCommitted as ReturnType<typeof vi.fn>).mockImplementation((c: { paths: string[] }) => emitted.push(c));
     const fsLayer = new LockingFilesystem(
       { basePath: root, contained: true },
       {
@@ -760,7 +694,6 @@ describe('LockingFilesystem — creator read grants on creation', () => {
     // ...but the commit is scoped to the caller's path only.
     const commitPaths = (versionControl.commitChanges as ReturnType<typeof vi.fn>).mock.calls[0][3];
     expect(commitPaths).toEqual(['knowledge-base/KnowledgeBase/Mine/doc.md']);
-    expect(emitted[0].paths).toEqual(['knowledge-base/KnowledgeBase/Mine/doc.md']);
     // The seeded file is untouched.
     expect(await fs.readFile(path.join(root, 'knowledge-base/KnowledgeBase/Mine/access.md'), 'utf-8')).toBe(
       seedContent,

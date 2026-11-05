@@ -56,7 +56,6 @@ describe('PluginRenameService', () => {
   let root: string;
   let repo: string;
   let commits: { summary: string; paths: string[] }[];
-  let announced: { paths: string[]; byUser: AuthUser }[];
   let failNextCommit: Error | null;
   /** What each workspace-relative path last read as when it was committed — the driver's picture of the tree. */
   let committed: Map<string, string>;
@@ -79,7 +78,6 @@ describe('PluginRenameService', () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-rename-'));
     repo = path.join(root, wsId, KB_DIR);
     commits = [];
-    announced = [];
     failNextCommit = null;
     failWriteMatching = null;
     committed = new Map();
@@ -121,7 +119,6 @@ describe('PluginRenameService', () => {
         commits.push({ summary, paths });
         return { sha: 'c0ffee' } as never;
       },
-      announceCommitted: (change: { paths: string[]; byUser: AuthUser }) => void announced.push(change),
     };
 
     await write('roles.yaml', 'roles:\n  Admin:\n    - admin@x.io\n');
@@ -151,7 +148,7 @@ describe('PluginRenameService', () => {
     };
     const svcOverHole = new PluginRenameService(
       { getWorkspacePath: async (id: string) => path.join(root, id) } as unknown as WorkspaceService,
-      { commitChanges: async () => { throw new Error('must not commit'); }, announceCommitted: () => undefined },
+      { commitChanges: async () => { throw new Error('must not commit'); } },
       access,
       holed,
       realDisk(),
@@ -170,9 +167,6 @@ describe('PluginRenameService', () => {
     await svc.rename(manager, 'gtm', { displayName: 'Go To Market' });
     expect((await manifest()).displayName).toBe('Go To Market');
     expect(commits).toHaveLength(1);
-    // The landed commit is announced once, with the paths it wrote, as the person.
-    expect(announced).toHaveLength(1);
-    expect(announced[0]).toMatchObject({ paths: commits[0]!.paths, byUser: manager });
     // The same hole still refuses an identifier change.
     await expect(svc.rename(manager, 'gtm', { name: 'go-to-market' })).rejects.toMatchObject({ status: 503 });
   });
@@ -185,7 +179,7 @@ describe('PluginRenameService', () => {
     };
     const svcOverHole = new PluginRenameService(
       { getWorkspacePath: async (id: string) => path.join(root, id) } as unknown as WorkspaceService,
-      { commitChanges: async () => { throw new Error('must not commit'); }, announceCommitted: () => undefined },
+      { commitChanges: async () => { throw new Error('must not commit'); } },
       access,
       holed,
       realDisk(),
@@ -372,8 +366,6 @@ describe('PluginRenameService', () => {
     expect(await read('Plugins/GTM/plugin.json')).toBe(GTM_MANIFEST);
     expect(await read('Skills/Eng/deploy/access.md')).toBe(DEPLOY_RULES);
     expect(invalidated).toBe(0);
-    // A refused commit landed nothing, so nothing is announced.
-    expect(announced).toEqual([]);
 
     await svc.rename(manager, 'gtm', { name: 'go-to-market' });
     expect((await manifest()).name).toBe('go-to-market');
@@ -435,23 +427,15 @@ describe('PluginRenameService', () => {
     expect(await read('Skills/Eng/deploy/access.md')).toContain('plugin/go-to-market/read');
     expect(invalidated).toBe(1);
     expect(await access.canRead(wsId, member.email, 'Skills/Eng/deploy/SKILL.md')).toBe(true);
-    // The commit landed, so its files are announced once, as the person; the
-    // recovery flow owns the push, not the announcement.
-    expect(announced).toHaveLength(1);
-    expect(announced[0]).toMatchObject({ byUser: manager });
-    expect(announced[0]!.paths).toEqual(
-      expect.arrayContaining([`${KB_DIR}/Plugins/GTM/plugin.json`, `${KB_DIR}/Skills/Eng/deploy/access.md`]),
-    );
   });
 
-  it('announces nothing when the rename changes no bytes — a clean tree has nothing to commit, so no reactor runs', async () => {
+  it('changes no bytes when the manifest already reads as the rename writes it — a clean tree, nothing to commit', async () => {
     // The manifest already reads exactly as the rename will write it.
     const asWritten = `${JSON.stringify({ name: 'gtm', version: '1.0.0', displayName: 'GTM' }, null, 2)}\n`;
     await write('Plugins/GTM/plugin.json', asWritten);
     await svc.rename(manager, 'gtm', { displayName: 'GTM' });
     expect(await read('Plugins/GTM/plugin.json')).toBe(asWritten);
     expect(commits).toEqual([]);
-    expect(announced).toEqual([]);
   });
 
   it('will not rename a plugin read from an external format — that repository owns its name', async () => {

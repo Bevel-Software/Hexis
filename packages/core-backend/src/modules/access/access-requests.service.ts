@@ -8,7 +8,6 @@ import {
   ChangeRequestConflictsError,
   DuplicateChangeRequestError,
 } from '../../shared/domain-errors.js';
-import { commitLanded } from '../version-control/index.js';
 import { isAbsence } from '../../shared/fs.contract.js';
 import type { KbContext } from '../../shared/kb-context.js';
 import { spliceGrant } from '../access-model/index.js';
@@ -196,24 +195,11 @@ export class AccessRequestsService {
       });
     if (onBranch !== spliced.text) {
       await workspaceService.writeFile(ws.id, wsRulesPath, spliced.text);
-      // A landed commit is announced like every other, once (see
-      // `IVersionControlService.announceCommitted`): this write holds no file
-      // lock, so the reactors may act on it at once. A clean tree announces
-      // nothing; a commit that landed but could not be pushed (the typed
-      // hand-off) is announced before the error goes up.
-      const announce = () => versionControl.announceCommitted({ workspaceId: ws.id, branch, paths: [wsRulesPath], byUser: user });
-      let change: Awaited<ReturnType<IVersionControlService['commitChanges']>>;
-      try {
-        change = await versionControl.commitChanges(
-          ws.id,
-          user,
-          `Request ${LEVEL_LABEL[level].toLowerCase()} access to ${itemName}`,
-        );
-      } catch (err) {
-        if (commitLanded({ threw: err })) announce();
-        throw err;
-      }
-      if (commitLanded({ change })) announce();
+      await versionControl.commitChanges(
+        ws.id,
+        user,
+        `Request ${LEVEL_LABEL[level].toLowerCase()} access to ${itemName}`,
+      );
     }
 
     try {

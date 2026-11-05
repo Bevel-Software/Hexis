@@ -6,8 +6,6 @@ import type { PullRequestService } from '../git/pull-request.service.js';
 import type { IChangeRequestReviewService } from '../change-request-review/change-request-review.interface.js';
 import type { WorkspaceService } from '../../workspace/index.js';
 import type { IAccessControl } from '../../access/index.js';
-import type { FileChangeNotifier } from '../../kb-fs/index.js';
-import { realFileChangeNotifier } from '../../../__tests__/real-version-control.js';
 import { FileLockService } from '../file-lock.service.js';
 import { PendingCommitsService } from '../pending-commits.service.js';
 import { VersionControlEventBus } from '../event-bus.js';
@@ -151,7 +149,6 @@ function makeFacade(
   locks: FileLockService,
   pending: PendingCommitsService,
   events: VersionControlEventBus,
-  fileChanges?: FileChangeNotifier,
 ): VersionControlService {
   return new VersionControlService(
     {} as unknown as Database,
@@ -165,7 +162,6 @@ function makeFacade(
     testKbContext(),
     openChangeGate(),
     events,
-    fileChanges,
   );
 }
 
@@ -455,46 +451,6 @@ describe('VersionControlService.runPendingCommit — worker entry point', () => 
     expect(git.commitFile).toHaveBeenCalledTimes(1);
     expect(git.push).not.toHaveBeenCalled();
     expect(emitSpy).not.toHaveBeenCalled();
-  });
-
-  it('an autosave checkpoint announces when it lands; the clean release that follows announces nothing', async () => {
-    // The clean tree is the autosave path's normal ending: `commitFileWhileLocked`
-    // committed the file while the lock was held. That commit is the one
-    // that landed the bytes, so it is the one announced — once, as the
-    // person; the release then has nothing of its own to announce.
-    const git = makeGit();
-    const notifier = realFileChangeNotifier();
-    const heard: unknown[] = [];
-    notifier.onFilesChanged((change) => void heard.push(change));
-    const svc = makeFacade(git, makeFileLocks(USER.id), makePending(), events, notifier);
-
-    await svc.commitFileWhileLocked('ws-1', 'feat/x', 'foo.md', USER);
-    expect(heard).toEqual([{ workspaceId: 'ws-1', branch: 'feat/x', paths: ['foo.md'], byUser: USER }]);
-
-    git.behave({ commitFile: null, hasUnpushedCommits: false });
-    await svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER);
-    expect(heard).toHaveLength(1);
-  });
-
-  it('a release commit whose push needs recovery is announced once, when it lands; the clean retry announces nothing', async () => {
-    // The bytes are in the tree the reactors read from the commit on, so the
-    // announcement does not wait for the push. The worker's retry row then
-    // finds a clean tree with the commit unpushed: it pushes, announces nothing.
-    const git = makeGit({ pushBehavior: 'auth-fail', pushAfterPullBehavior: 'fail' });
-    const notifier = realFileChangeNotifier();
-    const heard: unknown[] = [];
-    notifier.onFilesChanged((change) => void heard.push(change));
-    const svc = makeFacade(git, makeFileLocks(USER.id), makePending(), events, notifier);
-
-    await expect(svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER)).rejects.toBeInstanceOf(
-      PushNeedsAgentResolutionError,
-    );
-    expect(heard).toEqual([{ workspaceId: 'ws-1', branch: 'feat/x', paths: ['foo.md'], byUser: USER }]);
-
-    git.behave({ commitFile: null, hasUnpushedCommits: true, pushBehavior: 'ok', pushAfterPullBehavior: 'ok' });
-    await svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER);
-    expect(git.push).toHaveBeenCalled();
-    expect(heard).toHaveLength(1);
   });
 
   it('STILL pushes on a no-op commit when the branch is ahead of origin (stranded autosave commit)', async () => {

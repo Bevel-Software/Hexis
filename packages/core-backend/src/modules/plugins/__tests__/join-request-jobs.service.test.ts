@@ -1,4 +1,3 @@
-import { PushNeedsAgentResolutionError } from '../../../shared/domain-errors.js';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { DEFAULT_BRANCH, joinBranchFor } from '@bevel-software/platform-shared';
 import { DrizzleQueryError } from 'drizzle-orm';
@@ -30,7 +29,6 @@ function harness(over: Partial<JoinRequestJobsDeps> = {}, sharedStore?: FakeJoin
     createBranch: vi.fn(async () => ({ name: 'x', isDefault: false, isProtected: false })),
     listBranches: vi.fn(async () => [] as { name: string }[]),
     commitChanges: vi.fn(async () => null),
-    announceCommitted: vi.fn(),
     openChangeRequest: vi.fn(async () => ({ number: 42 })),
   };
   const workspaceService = {
@@ -132,48 +130,6 @@ describe('PluginJoinRequestJobs', () => {
     expect(h.versionControl.commitChanges).not.toHaveBeenCalled();
     // Still opens the request: the branch carries the proposal either way.
     expect(h.versionControl.openChangeRequest).toHaveBeenCalledTimes(1);
-  });
-
-  it('announces the landed grant commit once, as the requester; a clean tree announces nothing', async () => {
-    // The grant is already on the branch: the splice no-ops, nothing is
-    // written or committed, nothing is announced.
-    const clean = harness();
-    clean.workspaceService.readFile.mockResolvedValue(`---\nread:\n  - everyone\n---\nread:\n  - Ali Baba <ali@bevel.software>\n`);
-    await clean.jobs.start(pendingRow(clean.store));
-    expect(clean.versionControl.commitChanges).not.toHaveBeenCalled();
-    expect(clean.versionControl.announceCommitted).not.toHaveBeenCalled();
-
-    // The splice changed the file but the commit found the tree clean (null): no announcement.
-    const quiet = harness();
-    await quiet.jobs.start(pendingRow(quiet.store));
-    expect(quiet.versionControl.commitChanges).toHaveBeenCalled();
-    expect(quiet.versionControl.announceCommitted).not.toHaveBeenCalled();
-
-    // The commit landed but its push needs help: announced once before the
-    // typed hand-off goes up and the run records its failure.
-    const handoff = harness();
-    handoff.versionControl.commitChanges.mockRejectedValueOnce(
-      new PushNeedsAgentResolutionError(joinBranchFor(ALI, 'Finance'), `${KB}/Plugins/Finance/access.md`, 'non-fast-forward', 'rebase failed'),
-    );
-    await handoff.jobs.start(pendingRow(handoff.store));
-    expect(handoff.versionControl.announceCommitted).toHaveBeenCalledTimes(1);
-    // …and the run records the failure, in words that carry no credential.
-    expect(handoff.store.all()).toMatchObject([{ status: 'failed' }]);
-    expect(handoff.store.all()[0]!.failureReason).toMatch(/push|rebase|non-fast-forward/i);
-
-    // A commit that landed is announced like every other landed commit: once,
-    // with the access file it wrote, on the request's branch, as the requester.
-    const h = harness();
-    h.versionControl.commitChanges.mockResolvedValueOnce({ sha: 'abc' } as never);
-    await h.jobs.start(pendingRow(h.store));
-    const branch = joinBranchFor(ALI, 'Finance');
-    expect(h.versionControl.announceCommitted).toHaveBeenCalledTimes(1);
-    expect(h.versionControl.announceCommitted).toHaveBeenCalledWith({
-      workspaceId: workspaceIdForBranch(branch),
-      branch,
-      paths: [`${KB}/Plugins/Finance/access.md`],
-      byUser: expect.objectContaining({ email: ALI }),
-    });
   });
 
   it('records a failure in the words the git work used, with credentials stripped', async () => {

@@ -30,7 +30,6 @@ import type {
   DeleteBranchResult,
   FileApproval,
   FileLock,
-  FilesChange,
   FolderChangeRequest,
   FolderChangeRequestRemoval,
   MergeBranchOutcome,
@@ -221,20 +220,6 @@ export interface IVersionControlService {
     summary: string,
     onlyPaths?: string[],
   ): Promise<Change | null>;
-  /**
-   * Tell the in-process reactors (catalog invalidation, id-repair, a
-   * deployment's own listeners) that `commitChanges` landed these files. The
-   * service announces every single-file commit itself when it lands — the
-   * release's commit, before its push, and each autosave checkpoint under the
-   * hold — so a release that finds the tree clean announces nothing; a batch
-   * it cannot: `commitChanges` runs while the
-   * caller still holds every file's lock, and a reactor may take a fresh lock
-   * on a changed path, so the CALLER announces, after its locks are released
-   * — once per batch, with the batch's scope (every path it wrote or deleted;
-   * see `FilesChange.paths`), never for a commit that returned null. The lock-aware filesystem does this for every batch
-   * it commits; a caller that commits a batch some other way owes the same.
-   */
-  announceCommitted(change: FilesChange): void;
   /** Per-file history. Newest first; clamps to ≤ 100 entries. */
   listChangesForFile(workspaceId: string, path: string, limit?: number): Promise<Change[]>;
   /**

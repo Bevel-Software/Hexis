@@ -7,9 +7,8 @@ import {
   pluginDisplayNameOf,
   pluginManifestName,
 } from '@bevel-software/platform-shared';
-import type { AuthUser, Change, FilesChange } from '@bevel-software/platform-shared';
+import type { AuthUser } from '@bevel-software/platform-shared';
 import { PushNeedsAgentResolutionError } from '../../shared/domain-errors.js';
-import { commitLanded } from '../version-control/index.js';
 import type { ITreeWalker, WalkListener } from '../../shared/fs.contract.js';
 import type { IAccessControl } from '../access/index.js';
 import {
@@ -33,14 +32,9 @@ export class PluginRenameError extends Error {
   }
 }
 
-/**
- * The one commit the rename lands as — a scoped batch, pushed — and its
- * announcement to the file-change reactors once it has landed (see
- * `IVersionControlService.announceCommitted`, which the service satisfies).
- */
+/** The one commit the rename lands as — a scoped batch, pushed. */
 export interface RenameCommitDriver {
-  commitChanges(workspaceId: string, user: AuthUser, summary: string, onlyPaths: string[]): Promise<Change | null>;
-  announceCommitted(change: FilesChange): void;
+  commitChanges(workspaceId: string, user: AuthUser, summary: string, onlyPaths: string[]): Promise<unknown>;
 }
 
 export interface RenameResult {
@@ -239,20 +233,17 @@ export class PluginRenameService {
     // Writes and commit share ONE failure envelope: whichever of them fails,
     // the working tree goes back to what origin has — a half-written batch
     // is as much a split principal as a refused commit.
-    // The rename holds no file locks (the protected-branch gate on the commit
-    // is its guard), so a landed commit is announced to the file-change
-    // reactors right after it — outside the failure envelope, as nothing
-    // that follows a landed commit may unwind it.
-    const paths = writes.map((w) => w.rel);
-    const announce = () =>
-      this.commits.announceCommitted({ workspaceId: wsId, branch: this.kb.defaultBranch, paths, byUser: user });
-    let change: Change | null = null;
     try {
       for (const w of writes) await this.workspaceService.writeFile(wsId, w.rel, w.text);
       const summary = identifierChanges
         ? `Rename plugin ${plugin.name} to ${nextName}`
         : `Rename plugin ${plugin.name}: display name`;
-      change = await this.commits.commitChanges(wsId, user, summary, paths);
+      await this.commits.commitChanges(
+        wsId,
+        user,
+        summary,
+        writes.map((w) => w.rel),
+      );
     } catch (err) {
       // One failure is NOT a failed commit: the commit landed locally and only
       // the push did not (the typed hand-off the version-control service throws). Restoring
@@ -261,7 +252,6 @@ export class PluginRenameService {
       // since the tree DID change, every cache keyed on the old identity is
       // dropped before the error goes up, exactly as on success.
       if (err instanceof PushNeedsAgentResolutionError) {
-        if (commitLanded({ threw: err })) announce();
         this.noteChanged(wsId);
       } else {
         for (const w of writes) {
@@ -270,7 +260,6 @@ export class PluginRenameService {
       }
       throw err;
     }
-    if (commitLanded({ change })) announce();
     this.noteChanged(wsId);
     // Exactly what was persisted, read back through the shared rule — the
     // response and the file can never say two different things.

@@ -146,7 +146,6 @@ async function makeHarness(opts: HarnessOpts = {}) {
     createBranch: vi.fn(async () => ({ name: 'x', isDefault: false, isProtected: false })),
     listBranches: vi.fn(async () => []),
     commitChanges: vi.fn(async () => null),
-    announceCommitted: vi.fn(),
     openChangeRequest: vi.fn(async () => ({ number: 42 })),
   } as unknown as IVersionControlService;
 

@@ -91,7 +91,6 @@ function stubVersionControl(): VersionControlService {
     releaseLock: async (_w: string, _b: string, p: string) => void locks.delete(p),
     releaseLockNoCommit: async (_w: string, _b: string, p: string) => void locks.delete(p),
     commitChanges: async () => ({}) as unknown,
-    announceCommitted: () => undefined,
   } as unknown as VersionControlService;
 }
 

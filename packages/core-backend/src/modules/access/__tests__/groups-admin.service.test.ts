@@ -88,7 +88,6 @@ function stubVersionControl() {
       commits.push({ summary });
       return {} as unknown;
     },
-    announceCommitted: () => undefined,
   } as unknown as VersionControlService;
   return { svc, commits };
 }

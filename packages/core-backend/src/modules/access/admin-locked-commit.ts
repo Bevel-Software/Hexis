@@ -51,7 +51,6 @@ import { logger } from '../../shared/logging.js';
 import { type WriteValidator, LockingFilesystem } from '../kb-fs/index.js';
 import type { VersionControlDomainError } from '../../shared/domain-errors.js';
 import { PushNeedsAgentResolutionError } from '../../shared/domain-errors.js';
-import { announceReleased, commitLanded } from '../version-control/index.js';
 import { isAbsence } from '../../shared/fs.contract.js';
 import type { AuthUser, IWorkspaceService, IVersionControlService } from '@bevel-software/platform-shared';
 
@@ -89,17 +88,6 @@ export class AdminLockedCommits {
    * workspaces can't cross-talk.
    */
   private readonly committedCleanPaths = new Set<string>();
-
-  /**
-   * The paths whose batch commit LANDED while their locks are held — pushed,
-   * or awaiting the worker's push. `withFileLocks` announces exactly these to
-   * the file-change reactors once the locks are released, the way the
-   * lock-aware filesystem announces its batches (the service's own
-   * announcement covers single-file writes only; see
-   * `IVersionControlService.announceCommitted`). A no-op commit marks
-   * nothing. Keyed like `committedCleanPaths`.
-   */
-  private readonly committedPaths = new Set<string>();
 
   constructor(private readonly deps: LockedCommitDeps) {}
 
@@ -246,12 +234,9 @@ export class AdminLockedCommits {
       // Failures there log + continue so one bad enqueue strands at most its
       // own lock (TTL backstop), never the rest.
       const pushRetry = failure instanceof PushNeedsAgentResolutionError;
-      const committed: string[] = [];
-      const stillHeld = new Set<string>();
       for (const h of held) {
         const committedClean =
           this.committedCleanPaths.delete(this.cleanKey(workspaceId, h)) && !pushRetry;
-        if (this.committedPaths.delete(this.cleanKey(workspaceId, h))) committed.push(h);
         try {
           if (coordination.has(h) || committedClean || unrestored?.has(h)) {
             // Coordination-only hold (see the method doc): `fn` never wrote
@@ -272,7 +257,6 @@ export class AdminLockedCommits {
             await this.deps.versionControlService.releaseLock(workspaceId, this.defaultBranch, h, actor);
           }
         } catch (releaseErr) {
-          stillHeld.add(h);
           logger(this.deps.logTag).warn(
             `could not release lock on ${h}${pushRetry ? ' (push-retry release)' : ''}; ` +
               'it frees on TTL — continuing with the remaining locks:',
@@ -280,17 +264,6 @@ export class AdminLockedCommits {
           );
         }
       }
-      // The reactors hear of the batch once, after its locks are gone (a
-      // reactor may take a fresh lock on a changed path), for a commit that
-      // landed — pushed, or awaiting the worker's push, which announces
-      // nothing of its own — and only for the paths whose lock really went
-      // (`announceReleased`: a path whose release failed stays locked until
-      // TTL and is left out).
-      announceReleased(
-        this.deps.versionControlService,
-        { workspaceId, branch: this.defaultBranch, paths: committed, byUser: actor },
-        stillHeld,
-      );
     }
   }
 
@@ -320,19 +293,13 @@ export class AdminLockedCommits {
           await workspaceService.writeFile(workspaceId, this.wsRel(f.repoRel), f.content);
         }
       }
-      const change = await versionControlService.commitChanges(workspaceId, actor, summary, files.map((f) => this.wsRel(f.repoRel)));
+      await versionControlService.commitChanges(workspaceId, actor, summary, files.map((f) => this.wsRel(f.repoRel)));
       // Commit landed AND pushed — the tree at these paths is clean. Mark
       // them so withFileLocks releases them WITHOUT enqueueing a release
       // commit (see the module doc — an enqueue failure would strand the
       // lock until TTL for a commit there is nothing left to make).
       for (const f of files) this.committedCleanPaths.add(this.cleanKey(workspaceId, this.wsRel(f.repoRel)));
-      // And announced after the release — unless the tree was already clean
-      // and nothing was committed (`commitLanded`, the one rule for this).
-      if (commitLanded({ change })) for (const f of files) this.committedPaths.add(this.cleanKey(workspaceId, this.wsRel(f.repoRel)));
     } catch (err) {
-      // A commit that landed but could not be pushed is announced like any
-      // other once the locks go — the same rule, applied to what was thrown.
-      if (commitLanded({ threw: err })) for (const f of files) this.committedPaths.add(this.cleanKey(workspaceId, this.wsRel(f.repoRel)));
       // POST-commit failure: the commit landed and only the PUSH needs help
       // (thrown "with the commit intact"). The bytes on disk match the landed
       // commit — restoring pre-edit bytes here would publish a compensating
