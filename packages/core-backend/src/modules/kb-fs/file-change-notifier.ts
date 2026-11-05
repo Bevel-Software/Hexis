@@ -1,7 +1,8 @@
 /**
- * One in-process notification fired AFTER a set of file changes is committed +
- * pushed (post-lock-release), so backend services can react to KB writes without
- * the per-file TTL wait. Distinct from the SSE `VersionControlEventBus`, which fans
+ * One in-process notification fired AFTER a set of file changes is committed
+ * (post-lock-release) — pushed, or landed with its push still owed to the
+ * pending-commits worker, which announces nothing more — so backend services
+ * can react to KB writes without the per-file TTL wait. Distinct from the SSE `VersionControlEventBus`, which fans
  * scoped events to browser sessions; this is an unscoped, server-side domain hook.
  *
  * BATCHED by design: a single-file save emits `paths: [p]`, a batch write

@@ -1,3 +1,4 @@
+import { PushNeedsAgentResolutionError } from '../../../shared/domain-errors.js';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import express from 'express';
@@ -220,6 +221,14 @@ describe('POST /workspace/:id/access/request', () => {
       paths: [FOLDER_RULES],
       byUser: expect.objectContaining({ email: RITA.email }),
     });
+
+    // The commit landed but its push needs help: announced once, before the
+    // typed hand-off goes up to the route.
+    (h.versionControl.commitChanges as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new PushNeedsAgentResolutionError(branch, FOLDER_RULES, 'non-fast-forward', 'rebase failed'),
+    );
+    await post(`${h.base}/${LIVE_WS}/access/request`, folderBody);
+    expect(h.versionControl.announceCommitted).toHaveBeenCalledTimes(2);
   });
 
   it("names the person, the level, the path and the note in the description", async () => {

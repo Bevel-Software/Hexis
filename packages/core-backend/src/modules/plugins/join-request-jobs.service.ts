@@ -8,6 +8,7 @@ import { DrizzleQueryError } from 'drizzle-orm';
 import { spliceGrant } from '../access-model/index.js';
 import { sanitizeError } from '../version-control/index.js';
 import { logger } from '../../shared/logging.js';
+import { PushNeedsAgentResolutionError } from '../../shared/domain-errors.js';
 import { printable } from '../../shared/printable.js';
 import type { KbContext } from '../../shared/kb-context.js';
 import type { WorkspaceService } from '../workspace/index.js';
@@ -597,12 +598,20 @@ export class PluginJoinRequestJobs {
       // replaced, and it left recorded requests owed forever.
       await stillOurs();
       await workspaceService.writeFile(ws.id, accessPath, spliced.text);
-      const change = await versionControl.commitChanges(ws.id, user, `Request access to ${target.displayName}`);
       // A landed commit is announced like every other, once (see
       // `IVersionControlService.announceCommitted`): no file lock is held
       // here, so the reactors may act on it at once. A clean tree announces
-      // nothing — the splice that no-oped above commits nothing.
-      if (change) versionControl.announceCommitted({ workspaceId: ws.id, branch, paths: [accessPath], byUser: user });
+      // nothing; a commit that landed but could not be pushed (the typed
+      // hand-off) is announced before the error goes up.
+      const announce = () => versionControl.announceCommitted({ workspaceId: ws.id, branch, paths: [accessPath], byUser: user });
+      let change: Awaited<ReturnType<typeof versionControl.commitChanges>>;
+      try {
+        change = await versionControl.commitChanges(ws.id, user, `Request access to ${target.displayName}`);
+      } catch (err) {
+        if (err instanceof PushNeedsAgentResolutionError) announce();
+        throw err;
+      }
+      if (change) announce();
     }
     // The last gate, and the one that matters most: everything above is
     // idempotent and reusable — a branch, a commit on it — but a change

@@ -1,9 +1,10 @@
 import { createHmac } from 'node:crypto';
 import { ACCOUNT_DEACTIVATED_MESSAGE, timingSafeStringEqual } from '../auth/index.js';
 import jwt from 'jsonwebtoken';
-import type { AuthUser, IGitService, IVersionControlService } from '@bevel-software/platform-shared';
+import type { AuthUser, Change, IGitService, IVersionControlService } from '@bevel-software/platform-shared';
 import { suggestionsBranchPrefixFor } from '@bevel-software/platform-shared';
 import { logger } from '../../shared/logging.js';
+import { PushNeedsAgentResolutionError } from '../../shared/domain-errors.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { KbContext } from '../../shared/kb-context.js';
 import type { IAccessControl } from '../access/index.js';
@@ -464,25 +465,33 @@ export class EmbedService implements IEmbedService {
     // The workspace service's own per-path turn is that queue — the one the
     // app's file routes take around a write whose decision spans more than
     // one call — and the write inside takes the same turn, re-entrantly.
-    const change = await this.workspaceService.withPathTurn(workspace.id, wsPath, async () => {
-      await this.workspaceService.writeFile(workspace.id, wsPath, content);
-      // Scoped to the one path this proposal is about: the suggestions branch
-      // is shared by everything this person has proposed, and a bare commit
-      // would sweep in another in-flight write of theirs under this message.
-      return this.versionControlService.commitChanges(
-        workspace.id,
-        user,
-        `Propose changes to ${claims.repoRelative}`,
-        [wsPath],
-      );
-    });
     // A landed commit is announced like every other, once (see
     // `IVersionControlService.announceCommitted`) — after the turn is given
     // back, since a reactor may write to the same path and must not do so
     // inside this proposal's turn. A clean tree announces nothing.
-    if (change) {
+    const announce = () =>
       this.versionControlService.announceCommitted({ workspaceId: workspace.id, branch, paths: [wsPath], byUser: user });
+    let change: Change | null;
+    try {
+      change = await this.workspaceService.withPathTurn(workspace.id, wsPath, async () => {
+        await this.workspaceService.writeFile(workspace.id, wsPath, content);
+        // Scoped to the one path this proposal is about: the suggestions branch
+        // is shared by everything this person has proposed, and a bare commit
+        // would sweep in another in-flight write of theirs under this message.
+        return this.versionControlService.commitChanges(
+          workspace.id,
+          user,
+          `Propose changes to ${claims.repoRelative}`,
+          [wsPath],
+        );
+      });
+    } catch (err) {
+      // The commit landed and only its push needs help (the typed hand-off):
+      // announced like any landed commit, once, before the error goes up.
+      if (err instanceof PushNeedsAgentResolutionError) announce();
+      throw err;
     }
+    if (change) announce();
     try {
       const created = await this.versionControlService.openChangeRequest(workspace.id, user, {
         sourceBranch: branch,

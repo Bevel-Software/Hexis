@@ -228,8 +228,8 @@ export interface IVersionControlService {
    * and its lock released; a batch it cannot: `commitChanges` runs while the
    * caller still holds every file's lock, and a reactor may take a fresh lock
    * on a changed path, so the CALLER announces, after its locks are released
-   * — once per batch, with every path the commit touched, never for a commit
-   * that returned null. The lock-aware filesystem does this for every batch
+   * — once per batch, with the batch's scope (every path it wrote or deleted;
+   * see `FilesChange.paths`), never for a commit that returned null. The lock-aware filesystem does this for every batch
    * it commits; a caller that commits a batch some other way owes the same.
    */
   announceCommitted(change: FilesChange): void;

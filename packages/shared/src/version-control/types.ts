@@ -80,7 +80,13 @@ export type ChangeInput = ShareChangesRequest;
 export interface FilesChange {
   workspaceId: string;
   branch: string;
-  /** Workspace-relative paths committed in this change (≥1; sorted for batches). */
+  /**
+   * Workspace-relative paths the change covers (≥1; sorted for batches): a
+   * single save names its one path; a batch names every path it wrote or
+   * deleted — its scope — which may include a path whose bytes were already
+   * as committed. A reactor re-reads what it is told of, so a path named
+   * without a change costs it one read, never a wrong answer.
+   */
   paths: string[];
   /** Who the change was committed as — a reacting write (id-repair) acts as the same user. */
   byUser: AuthUser;

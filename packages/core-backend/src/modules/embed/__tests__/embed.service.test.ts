@@ -1,3 +1,4 @@
+import { PushNeedsAgentResolutionError } from '../../../shared/domain-errors.js';
 import jwt from 'jsonwebtoken';
 import { createHmac } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
@@ -596,6 +597,16 @@ describe('EmbedService: saving as a writer', () => {
 describe('EmbedService: proposing as a non-writer', () => {
   it('announces the landed proposal commit once, after its turn, as the viewer; a clean tree announces nothing', async () => {
     const { service, workspaceService, versionControlService } = build({ canWrite: false });
+    // The turn's exit is observed: `turnExit` fires when the turn's callback
+    // has settled, so an announcement made inside the callback would come
+    // before it and fail the order check below.
+    const turnExit = vi.fn();
+    const realTurn = workspaceService.withPathTurn.getMockImplementation()!;
+    workspaceService.withPathTurn.mockImplementation(async (id: string, p: string, op: () => Promise<unknown>) => {
+      const result = await realTurn(id, p, op);
+      turnExit();
+      return result;
+    });
     const { token } = await service.mintForUser({ userId: USER.id, reference: REPO });
     await service.propose(token, 'proposed text');
     const branch = 'suggestions/alice-u-1/knowledge';
@@ -611,13 +622,22 @@ describe('EmbedService: proposing as a non-writer', () => {
     expect(versionControlService.announceCommitted.mock.invocationCallOrder[0]).toBeGreaterThan(
       versionControlService.commitChanges.mock.invocationCallOrder[0]!,
     );
-    const turnSettled = await workspaceService.withPathTurn.mock.results[0]!.value;
-    expect(turnSettled).toEqual({ sha: 'deadbee' });
+    expect(versionControlService.announceCommitted.mock.invocationCallOrder[0]).toBeGreaterThan(
+      turnExit.mock.invocationCallOrder[0]!,
+    );
 
     // Nothing new on the branch: no announcement.
     versionControlService.commitChanges.mockResolvedValueOnce(null);
     await service.propose(token, 'proposed text');
     expect(versionControlService.announceCommitted).toHaveBeenCalledTimes(1);
+
+    // The commit landed but its push needs help: announced once, before the
+    // typed hand-off goes up to the caller.
+    versionControlService.commitChanges.mockRejectedValueOnce(
+      new PushNeedsAgentResolutionError(branch, WS, 'non-fast-forward', 'rebase failed'),
+    );
+    await expect(service.propose(token, 'proposed text')).rejects.toBeInstanceOf(PushNeedsAgentResolutionError);
+    expect(versionControlService.announceCommitted).toHaveBeenCalledTimes(2);
   });
 
   it('commits to the viewer OWN suggestions branch and opens a change request', async () => {
