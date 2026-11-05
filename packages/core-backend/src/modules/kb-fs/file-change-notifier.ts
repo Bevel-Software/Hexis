@@ -10,27 +10,23 @@
  * id-repair rebuilds the id index) handle a whole batch off one rebuild instead
  * of N back-to-back ones.
  *
- * Emitted from the two post-commit chokepoints (`VersionControlService.runPendingCommit`
- * for single-file writes, `LockingFilesystem.writeFiles` for batches).
+ * Only the version-control service emits here: for a single-file write from
+ * `runPendingCommit`, and for a batch through `announceCommitted`, which the
+ * lock-aware filesystem calls once its locks are released. The notifier is
+ * never handed to a filesystem or a caller — a construction site that could
+ * leave it out is one whose batches would announce nothing.
  *
  * Every listener is invoked inside try/catch — a throwing subscriber must never
  * fail the commit that triggered it (mirrors the SSE bus's per-subscriber
  * isolation). Firing is fire-and-forget; a listener that needs to write files
  * (id-repair) does so on its own, after the locks have already been released.
  */
-import type { AuthUser } from '@bevel-software/platform-shared';
+import type { FilesChange } from '@bevel-software/platform-shared';
 import { logger } from '../../shared/logging.js';
 
 const log = logger('file-change');
 
-export interface FilesChange {
-  workspaceId: string;
-  branch: string;
-  /** Workspace-relative paths committed in this change (≥1; sorted for batches). */
-  paths: string[];
-  /** Who the change was committed as — a reacting write (id-repair) acts as the same user. */
-  byUser: AuthUser;
-}
+export type { FilesChange };
 
 export type FilesChangedListener = (change: FilesChange) => void;
 

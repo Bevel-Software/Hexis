@@ -57,6 +57,7 @@ describe('PluginRenameService', () => {
   let root: string;
   let repo: string;
   let commits: { summary: string; paths: string[] }[];
+  let announced: { paths: string[]; byUser: AuthUser }[];
   let failNextCommit: Error | null;
   let failWriteMatching: string | null;
   let invalidated: number;
@@ -75,6 +76,7 @@ describe('PluginRenameService', () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-rename-'));
     repo = path.join(root, wsId, KB_DIR);
     commits = [];
+    announced = [];
     failNextCommit = null;
     failWriteMatching = null;
     walkMock.holeInTheWalk = false;
@@ -102,7 +104,9 @@ describe('PluginRenameService', () => {
           throw err;
         }
         commits.push({ summary, paths });
+        return { sha: 'c0ffee' } as never;
       },
+      announceCommitted: (change: { paths: string[]; byUser: AuthUser }) => void announced.push(change),
     };
 
     await write('roles.yaml', 'roles:\n  Admin:\n    - admin@x.io\n');
@@ -132,7 +136,7 @@ describe('PluginRenameService', () => {
     };
     const svcOverHole = new PluginRenameService(
       { getWorkspacePath: async (id: string) => path.join(root, id) } as unknown as WorkspaceService,
-      { commitChanges: async () => { throw new Error('must not commit'); } },
+      { commitChanges: async () => { throw new Error('must not commit'); }, announceCommitted: () => undefined },
       access,
       holed,
       new NodeFs(),
@@ -151,6 +155,9 @@ describe('PluginRenameService', () => {
     await svc.rename(manager, 'gtm', { displayName: 'Go To Market' });
     expect((await manifest()).displayName).toBe('Go To Market');
     expect(commits).toHaveLength(1);
+    // The landed commit is announced once, with the paths it wrote, as the person.
+    expect(announced).toHaveLength(1);
+    expect(announced[0]).toMatchObject({ paths: commits[0]!.paths, byUser: manager });
     // The same hole still refuses an identifier change.
     await expect(svc.rename(manager, 'gtm', { name: 'go-to-market' })).rejects.toMatchObject({ status: 503 });
   });
@@ -163,7 +170,7 @@ describe('PluginRenameService', () => {
     };
     const svcOverHole = new PluginRenameService(
       { getWorkspacePath: async (id: string) => path.join(root, id) } as unknown as WorkspaceService,
-      { commitChanges: async () => { throw new Error('must not commit'); } },
+      { commitChanges: async () => { throw new Error('must not commit'); }, announceCommitted: () => undefined },
       access,
       holed,
       new NodeFs(),

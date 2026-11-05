@@ -49,7 +49,6 @@ import {
 } from '@mastra/core/workspace';
 import type { AuthUser, Change, IVersionControlService } from '@bevel-software/platform-shared';
 import { PushNeedsAgentResolutionError } from '../../shared/domain-errors.js';
-import type { FileChangeNotifier } from './file-change-notifier.js';
 import { isAbsence } from '../../shared/fs.contract.js';
 import { DestinationTakenError, lstatOrNull, renameNoReplace, takenError } from '../../shared/rename-no-replace.js';
 import { linkedAncestor } from '../../shared/no-link-below.js';
@@ -167,12 +166,6 @@ export interface LockingFilesystemContext {
    * when the destination is a path the validator's `appliesTo` claims.
    */
   validateWrite?: WriteValidator;
-  /**
-   * Post-commit hook for the BATCH `writeFiles` path (which commits via
-   * `commitChanges` and so skips `runPendingCommit`'s emit). Single-file ops
-   * emit through the queue instead, so they don't need this. Optional.
-   */
-  fileChanges?: FileChangeNotifier;
   /**
    * Optional creator read-grant planner (see `modules/access/creator-access`).
    * When present, a write/mkdir that starts a NEW FOLDER directly under one
@@ -579,6 +572,7 @@ export class LockingFilesystem extends GitGuardedFilesystem {
     // Done in this order, and undone in the reverse one.
     let moved = false;
     const written: { path: string; lockAt: string; before: Buffer | null }[] = [];
+    let change: Change | null = null;
     try {
       await this.moveNoReplace(src, dest);
       moved = true;
@@ -599,15 +593,16 @@ export class LockingFilesystem extends GitGuardedFilesystem {
           ...edits.map((e) => e.path),
         ]),
       ].sort();
-      const change = await versionControl.commitChanges(workspaceId, user, summary, scope);
+      change = await versionControl.commitChanges(workspaceId, user, summary, scope);
       await release('untouched');
-      if (change) this.lockContext.fileChanges?.emit({ workspaceId, branch, paths: scope, byUser: user });
-      return change;
     } catch (err) {
       if (err instanceof PushNeedsAgentResolutionError) {
         // The commit landed; only its push needs help. Releasing with a commit
-        // arms the pending-commits worker's push retry (see `writeFiles`).
+        // arms the pending-commits worker's push retry (see `writeFiles`). The
+        // commit is announced here, once: the worker's later push announces
+        // nothing (no new commit), and the reactors read the working tree.
         await release('enqueue');
+        versionControl.announceCommitted({ workspaceId, branch, paths: scope, byUser: user });
         throw err;
       }
       for (const w of written.reverse()) {
@@ -641,6 +636,12 @@ export class LockingFilesystem extends GitGuardedFilesystem {
       await release('untouched');
       throw err;
     }
+    // Announced once the locks are gone, and OUTSIDE the commit's failure
+    // envelope: the catch above restores bytes and undoes the rename for a
+    // commit that failed, and nothing that follows a landed commit may unwind
+    // it (see `writeFiles`).
+    if (change) versionControl.announceCommitted({ workspaceId, branch, paths: scope, byUser: user });
+    return change;
   }
 
   /**
@@ -988,6 +989,9 @@ export class LockingFilesystem extends GitGuardedFilesystem {
         await releaseAll((p) =>
           committed.has(p) ? 'enqueue' : failedSeedDiscards.has(p) ? 'discard' : 'untouched',
         );
+        // The commit exists, so it is announced like any other, once: the
+        // worker's later push makes no new commit and announces nothing.
+        versionControl.announceCommitted({ workspaceId, branch, paths: touched, byUser: user });
         throw err;
       }
       // A write or the commit threw — nothing of THIS batch should land.
@@ -1027,15 +1031,17 @@ export class LockingFilesystem extends GitGuardedFilesystem {
     await releaseAll((p) =>
       committed.has(p) || failedSeedDiscards.has(p) ? 'discard' : 'untouched',
     );
-    // This batch path commits via `commitChanges`, NOT the per-file queue, so it
-    // skips `runPendingCommit`'s emit — fire the post-commit hook here with the
-    // WHOLE batch as one event, so an expensive subscriber (id-repair rebuilds the
-    // id index) reacts once per batch, not once per file. A no-op commit (clean
-    // tree) changed nothing, so it emits nothing.
+    // This batch path commits via `commitChanges`, NOT the per-file queue, so
+    // the service's own post-commit announcement (`runPendingCommit`) never
+    // runs for it — announce here, with the WHOLE batch as one event, so an
+    // expensive subscriber (id-repair rebuilds the id index) reacts once per
+    // batch, not once per file. After the release, because a subscriber may
+    // take a fresh lock on a changed path (id-repair does). A no-op commit
+    // (clean tree) changed nothing, so it announces nothing.
     if (change) {
       // `touched` = caller paths + any creator-grant seeds that landed in the
       // same commit — the exact set this batch may have touched.
-      this.lockContext.fileChanges?.emit({ workspaceId, branch, paths: touched, byUser: user });
+      versionControl.announceCommitted({ workspaceId, branch, paths: touched, byUser: user });
     }
     return change;
   }

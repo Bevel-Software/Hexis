@@ -42,6 +42,7 @@ function makeVersionControl(): IVersionControlService {
     getLock: vi.fn(),
     commitFileWhileLocked: vi.fn(),
     commitChanges: vi.fn().mockResolvedValue({}),
+    announceCommitted: vi.fn(),
   } as unknown as IVersionControlService;
 }
 
@@ -224,12 +225,13 @@ describe('LockingFilesystem.writeFiles — batch with deletes + one batched chan
     await fs.rm(root, { recursive: true, force: true });
   });
 
-  it('locks writes AND deletes, applies both, emits ONE batched onFilesChanged', async () => {
+  it('locks writes AND deletes, applies both, announces ONE batch through the version-control service — with no notifier handed in', async () => {
     await fs.mkdir(path.join(root, 'knowledge-base/Tools'), { recursive: true });
     await fs.writeFile(path.join(root, 'knowledge-base/Tools/old.tool'), '{}');
 
     const versionControl = makeVersionControl();
     const emitted: unknown[] = [];
+    (versionControl.announceCommitted as ReturnType<typeof vi.fn>).mockImplementation((c: unknown) => emitted.push(c));
     const fsLayer = new LockingFilesystem(
       { basePath: root, contained: true },
       {
@@ -237,7 +239,6 @@ describe('LockingFilesystem.writeFiles — batch with deletes + one batched chan
         workspaceId: 'ws-feat',
         branch: 'feat',
         user: USER, kbDirName: KB,
-        fileChanges: { emit: (c: unknown) => emitted.push(c) } as never,
       },
     );
 
@@ -270,6 +271,7 @@ describe('LockingFilesystem.writeFiles — batch with deletes + one batched chan
     const versionControl = makeVersionControl();
     (versionControl.commitChanges as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('push exploded'));
     const emitted: unknown[] = [];
+    (versionControl.announceCommitted as ReturnType<typeof vi.fn>).mockImplementation((c: unknown) => emitted.push(c));
     const fsLayer = new LockingFilesystem(
       { basePath: root, contained: true },
       {
@@ -277,7 +279,6 @@ describe('LockingFilesystem.writeFiles — batch with deletes + one batched chan
         workspaceId: 'ws-feat',
         branch: 'feat',
         user: USER, kbDirName: KB,
-        fileChanges: { emit: (c: unknown) => emitted.push(c) } as never,
       },
     );
 
@@ -312,6 +313,7 @@ describe('LockingFilesystem.writeFiles — batch with deletes + one batched chan
       new PushNeedsAgentResolutionError('feat', 'knowledge-base/A.md', 'non-fast-forward', 'rebase failed'),
     );
     const emitted: unknown[] = [];
+    (versionControl.announceCommitted as ReturnType<typeof vi.fn>).mockImplementation((c: unknown) => emitted.push(c));
     const fsLayer = new LockingFilesystem(
       { basePath: root, contained: true },
       {
@@ -319,7 +321,6 @@ describe('LockingFilesystem.writeFiles — batch with deletes + one batched chan
         workspaceId: 'ws-feat',
         branch: 'feat',
         user: USER, kbDirName: KB,
-        fileChanges: { emit: (c: unknown) => emitted.push(c) } as never,
       },
     );
 
@@ -329,13 +330,18 @@ describe('LockingFilesystem.writeFiles — batch with deletes + one batched chan
 
     expect(versionControl.releaseLock).toHaveBeenCalledWith('ws-feat', 'feat', 'knowledge-base/A.md', USER);
     expect(versionControl.releaseLockNoCommit).not.toHaveBeenCalled();
-    expect(emitted).toHaveLength(0);
+    // The commit LANDED, so it is announced — once, after the release; the
+    // worker's later push announces nothing of its own.
+    expect(emitted).toEqual([{ workspaceId: 'ws-feat', branch: 'feat', paths: ['knowledge-base/A.md'], byUser: USER }]);
+    const announcedAt = (versionControl.announceCommitted as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0]!;
+    expect((versionControl.releaseLock as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0]!).toBeLessThan(announcedAt);
   });
 
   it('emits nothing on a no-op commit (clean tree)', async () => {
     const versionControl = makeVersionControl();
     (versionControl.commitChanges as ReturnType<typeof vi.fn>).mockResolvedValue(null);
     const emitted: unknown[] = [];
+    (versionControl.announceCommitted as ReturnType<typeof vi.fn>).mockImplementation((c: unknown) => emitted.push(c));
     const fsLayer = new LockingFilesystem(
       { basePath: root, contained: true },
       {
@@ -343,7 +349,6 @@ describe('LockingFilesystem.writeFiles — batch with deletes + one batched chan
         workspaceId: 'ws-feat',
         branch: 'feat',
         user: USER, kbDirName: KB,
-        fileChanges: { emit: (c: unknown) => emitted.push(c) } as never,
       },
     );
     await fsLayer.writeFiles([{ path: 'knowledge-base/A.md', content: 'same' }], 'noop');
@@ -715,6 +720,7 @@ describe('LockingFilesystem — creator read grants on creation', () => {
       apply: (current: string) => current, // grant already present → no-op
     });
     const emitted: { paths: string[] }[] = [];
+    (versionControl.announceCommitted as ReturnType<typeof vi.fn>).mockImplementation((c: { paths: string[] }) => emitted.push(c));
     const fsLayer = new LockingFilesystem(
       { basePath: root, contained: true },
       {
@@ -723,7 +729,6 @@ describe('LockingFilesystem — creator read grants on creation', () => {
         branch: 'feat',
         user: USER, kbDirName: KB,
         creatorAccess,
-        fileChanges: { emit: (c: { paths: string[] }) => emitted.push(c) } as never,
       },
     );
     await fsLayer.writeFiles([{ path: 'knowledge-base/KnowledgeBase/Mine/doc.md', content: 'body' }], 'batch');

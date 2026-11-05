@@ -52,6 +52,7 @@ describe('createSyncedGroupsCommitter.persist — post-commit push failures', ()
       hasQueuedCommit,
       hasUnpushedCommits,
       commitChanges: vi.fn(async () => ({})),
+      announceCommitted: vi.fn(),
       ...versionControlOverrides,
     } as unknown as IVersionControlService;
     const accessControl = { invalidate: vi.fn() } as unknown as AccessControlService;

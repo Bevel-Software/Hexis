@@ -89,6 +89,7 @@ function stubVersionControl(opts: { failCommit?: boolean; pushNeedsResolution?: 
       if (opts.pushNeedsResolution) throw new PushNeedsAgentResolutionError(DEFAULT_BRANCH, paths[0], 'diverged', 'rebase failed');
       return {} as unknown;
     },
+    announceCommitted: () => undefined,
   } as unknown as VersionControlService;
   return { svc, commits, locks };
 }

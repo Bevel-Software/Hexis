@@ -131,6 +131,7 @@ async function makeHarness(
     // Write-free: the lock-aware filesystem writes to disk; this just commits the
     // dirty tree. Not exercised by these route tests (no rename), but kept honest.
     commitChanges: vi.fn(async () => ({})),
+    announceCommitted: vi.fn(),
   } as unknown as VersionControlService;
 
   const eventBus = { emit: vi.fn() } as unknown as VersionControlEventBus;
