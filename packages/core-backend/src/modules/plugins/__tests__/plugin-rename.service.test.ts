@@ -58,16 +58,19 @@ describe('PluginRenameService', () => {
   let commits: { summary: string; paths: string[] }[];
   let announced: { paths: string[]; byUser: AuthUser }[];
   let failNextCommit: Error | null;
-  let nullNextCommit: boolean;
+  /** What each workspace-relative path last read as when it was committed — the driver's picture of the tree. */
+  let committed: Map<string, string>;
   let failWriteMatching: string | null;
   let invalidated: number;
   let access: ReturnType<typeof realAccessControl>;
   let svc: PluginRenameService;
 
+  // A seed is a committed file: what origin has before the rename runs.
   const write = async (rel: string, text: string) => {
     const abs = path.join(repo, rel);
     await fs.mkdir(path.dirname(abs), { recursive: true });
     await fs.writeFile(abs, text);
+    committed.set(`${KB_DIR}/${rel}`, text);
   };
   const read = (rel: string) => fs.readFile(path.join(repo, rel), 'utf-8');
   const manifest = async () => JSON.parse(await read('Plugins/GTM/plugin.json'));
@@ -78,8 +81,8 @@ describe('PluginRenameService', () => {
     commits = [];
     announced = [];
     failNextCommit = null;
-    nullNextCommit = false;
     failWriteMatching = null;
+    committed = new Map();
     walkMock.holeInTheWalk = false;
     invalidated = 0;
     const workspaceService = {
@@ -104,10 +107,17 @@ describe('PluginRenameService', () => {
           failNextCommit = null;
           throw err;
         }
-        if (nullNextCommit) {
-          nullNextCommit = false;
-          return null;
+        // Git's rule: a tree whose files all read as they were last committed
+        // has nothing to commit, and the service is answered null.
+        let changed = false;
+        for (const p of paths) {
+          const now = await fs.readFile(path.join(root, wsId, p), 'utf-8');
+          if (now !== committed.get(p)) {
+            changed = true;
+            committed.set(p, now);
+          }
         }
+        if (!changed) return null;
         commits.push({ summary, paths });
         return { sha: 'c0ffee' } as never;
       },
@@ -432,9 +442,13 @@ describe('PluginRenameService', () => {
     );
   });
 
-  it('announces nothing when the commit found nothing to commit — no files changed, so no reactor runs', async () => {
-    nullNextCommit = true;
-    await svc.rename(manager, 'gtm', { name: 'go-to-market' });
+  it('announces nothing when the rename changes no bytes — a clean tree has nothing to commit, so no reactor runs', async () => {
+    // The manifest already reads exactly as the rename will write it.
+    const asWritten = `${JSON.stringify({ name: 'gtm', version: '1.0.0', displayName: 'GTM' }, null, 2)}\n`;
+    await write('Plugins/GTM/plugin.json', asWritten);
+    await svc.rename(manager, 'gtm', { displayName: 'GTM' });
+    expect(await read('Plugins/GTM/plugin.json')).toBe(asWritten);
+    expect(commits).toEqual([]);
     expect(announced).toEqual([]);
   });
 
