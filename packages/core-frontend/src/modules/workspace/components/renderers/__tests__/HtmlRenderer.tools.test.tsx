@@ -6,7 +6,6 @@ import { GitContext, type GitContextValue } from '../../../../git';
 import { clearToken, setToken } from '../../../../../lib/api';
 import { WorkspaceContext, type WorkspaceContextValue } from '../../../state/workspace.context';
 import { sha256Hex } from '@bevel-software/platform-shared';
-import { ALLOWED_PAGE_KEY_PREFIX, rememberedDigests } from '../pageConsentMemory';
 import { frameChannel, stubServer } from './pageToolsHarness';
 
 /**
@@ -23,6 +22,14 @@ const CARD = "You're allowing changes using your account. Do you want to allow t
 
 const workspace = { workspaceId: 'main', kbDirName: 'knowledge-base' } as unknown as WorkspaceContextValue;
 const git = { status: { branch: 'main' } } as unknown as GitContextValue;
+/** Where the browser keeps an Allow: one entry per digest, holding when it was allowed. */
+const ALLOWED_PAGE_KEY_PREFIX = 'bevel.htmlPage.allowedWrite.';
+/** The digests stored in localStorage, least recently allowed first: read through the storage API, as another tab would. */
+const rememberedDigests = (): string[] =>
+  Array.from({ length: window.localStorage.length }, (_, i) => window.localStorage.key(i)!)
+    .filter((key) => key.startsWith(ALLOWED_PAGE_KEY_PREFIX) && Number.isFinite(Number(window.localStorage.getItem(key))))
+    .sort((a, b) => Number(window.localStorage.getItem(a)) - Number(window.localStorage.getItem(b)))
+    .map((key) => key.slice(ALLOWED_PAGE_KEY_PREFIX.length));
 
 /**
  * The page on the app's file page: in the app, with the file page's provider.

@@ -36,15 +36,6 @@ function entries(storage: Storage): Entry[] {
   return found.sort((a, b) => a.at - b.at);
 }
 
-/** The digests this browser remembers an Allow for, least recently allowed first. */
-export function rememberedDigests(): string[] {
-  try {
-    return entries(window.localStorage).map((e) => e.digest);
-  } catch {
-    return [];
-  }
-}
-
 /** Whether the viewer allowed a page with this digest in this browser. */
 export function isRemembered(digest: string): boolean {
   try {

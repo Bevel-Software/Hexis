@@ -12,7 +12,7 @@ import {
 import { GitContext, type GitContextValue } from '../../../../git';
 import { WorkspaceContext, type WorkspaceContextValue } from '../../../state/workspace.context';
 import { sha256Hex } from '@bevel-software/platform-shared';
-import { ALLOWED_PAGE_KEY_PREFIX, rememberedDigests } from '../pageConsentMemory';
+import { ALLOWED_PAGE_KEY_PREFIX } from '../pageConsentMemory';
 import { frameChannel, stubServer } from './pageToolsHarness';
 
 /**
@@ -118,8 +118,12 @@ const write = (requestId: string) => ({ type: 'bevel.tool.call', requestId, fn: 
 const CARD = "You're allowing changes using your account. Do you want to allow that?";
 const SOURCE = '<button onclick="bevel.tools.callTool(\'edit_file\', {})">Edit</button>';
 
-/** The digests this browser remembers an Allow for. */
-const remembered = rememberedDigests;
+/** The digests stored in localStorage, least recently allowed first: read through the storage API, as another tab would. */
+const remembered = (): string[] =>
+  Array.from({ length: window.localStorage.length }, (_, i) => window.localStorage.key(i)!)
+    .filter((key) => key.startsWith(ALLOWED_PAGE_KEY_PREFIX) && Number.isFinite(Number(window.localStorage.getItem(key))))
+    .sort((a, b) => Number(window.localStorage.getItem(a)) - Number(window.localStorage.getItem(b)))
+    .map((key) => key.slice(ALLOWED_PAGE_KEY_PREFIX.length));
 /** Every raw memory entry in storage, well-formed or not. */
 const storedEntries = (): string[] =>
   Array.from({ length: window.localStorage.length }, (_, i) => window.localStorage.key(i)!).filter((key) => key.startsWith(ALLOWED_PAGE_KEY_PREFIX));

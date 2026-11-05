@@ -1,11 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ALLOWED_PAGE_KEY_PREFIX, ALLOWED_PAGES_MAX, isRemembered, remember, rememberedDigests } from '../pageConsentMemory';
+import { ALLOWED_PAGE_KEY_PREFIX, ALLOWED_PAGES_MAX, isRemembered, remember } from '../pageConsentMemory';
 
 /**
  * The browser's memory of the pages its viewer allowed to write: one
  * `localStorage` entry per digest, the 500 most recently allowed, and nothing
  * at all when the browser will not store.
  */
+/** The digests stored in localStorage, least recently allowed first: read through the storage API, as another tab would. */
+const rememberedDigests = (): string[] =>
+  Array.from({ length: window.localStorage.length }, (_, i) => window.localStorage.key(i)!)
+    .filter((key) => key.startsWith(ALLOWED_PAGE_KEY_PREFIX) && Number.isFinite(Number(window.localStorage.getItem(key))))
+    .sort((a, b) => Number(window.localStorage.getItem(a)) - Number(window.localStorage.getItem(b)))
+    .map((key) => key.slice(ALLOWED_PAGE_KEY_PREFIX.length));
+
 describe('pageConsentMemory', () => {
   beforeEach(() => window.localStorage.clear());
   afterEach(() => vi.restoreAllMocks());
@@ -70,6 +77,8 @@ describe('pageConsentMemory', () => {
     expect(isRemembered('a1')).toBe(false);
     expect(() => remember('a1')).not.toThrow();
     expect(isRemembered('a1')).toBe(false);
+    // Unblocked again, the storage holds nothing of that Allow.
+    vi.restoreAllMocks();
     expect(rememberedDigests()).toEqual([]);
   });
 
