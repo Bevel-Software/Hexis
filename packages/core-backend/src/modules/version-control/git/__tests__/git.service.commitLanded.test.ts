@@ -84,10 +84,38 @@ describe('GitService reports every commit it lands through onCommitLanded', () =
     expect(heard().map((c) => c.paths)).toEqual([[`${KB}/K.md`, `${KB}/Moved.md`, `${KB}/Old.md`]]);
   });
 
-  it('commitFile: the file named, once', async () => {
+  it('commitFile: the file named, once — a non-ASCII name verbatim', async () => {
     await write('B.md', 'b\n');
     await git.commitFile(WS, USER, `${KB}/B.md`);
-    expect(heard()).toEqual([{ workspaceId: WS, branch: 'main', paths: [`${KB}/B.md`], byUser: USER }]);
+    await write('Ünïcode ñ.md', 'ü\n');
+    await git.commitFile(WS, USER, `${KB}/Ünïcode ñ.md`);
+    expect(heard().map((c) => c.paths)).toEqual([[`${KB}/B.md`], [`${KB}/Ünïcode ñ.md`]]);
+  });
+
+  it('a commit is reported with the paths known before it when the read of its files fails', async () => {
+    const real = new NodeGitRunner();
+    const diffTreeFails: IGitRunner = {
+      defaultTimeoutMs: real.defaultTimeoutMs,
+      credentials: real.credentials,
+      run: ((cwd: string, args: string[], opts?: unknown) =>
+        args[0] === 'diff-tree' ? Promise.reject(new Error('diff-tree unavailable')) : real.run(cwd, args, opts as never)) as IGitRunner['run'],
+    };
+    const hooks = new VersionControlHooks();
+    hooks.onCommitValidation(vi.fn(async () => ({ ok: true, mustFix: [], warnings: [], rawOutput: '' })));
+    const heardHere: FilesChange[] = [];
+    hooks.onCommitLanded((change) => heardHere.push(change));
+    const fragile = new GitService(stubWorkspaceService({ [WS]: path.join(root, WS) }), hooks, testKbContext({ kbDirName: KB }), undefined, null, diffTreeFails);
+
+    await write('L.md', 'l\n');
+    await fragile.commit(WS, USER, { summary: 'add L' });
+    await write('M.md', 'm\n');
+    await write('N.md', 'n\n');
+    await fragile.commitChanges(WS, USER, 'add M and N', [`${KB}/M.md`, `${KB}/N.md`]);
+    await write('O.md', 'o\n');
+    await fragile.commitFile(WS, USER, `${KB}/O.md`);
+
+    // The status listing stands in: the files are still named, the report still made.
+    expect(heardHere.map((c) => [...c.paths].sort())).toEqual([[`${KB}/L.md`], [`${KB}/M.md`, `${KB}/N.md`], [`${KB}/O.md`]]);
   });
 
   it('commitChanges: exactly the scoped dirty set — a dirty path outside the scope stays out', async () => {
