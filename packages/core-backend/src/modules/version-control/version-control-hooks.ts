@@ -1,4 +1,5 @@
 import type { AuthUser, FilesChange, ValidationReport } from '@bevel-software/platform-shared';
+import { callFireAndForget, type FireAndForgetListener } from '../../shared/fire-and-forget.js';
 import { logger } from '../../shared/logging.js';
 
 const log = logger('version-control');
@@ -10,7 +11,14 @@ const log = logger('version-control');
  * composition root, right after `createCoreServices` returns. Core registers
  * none, so a core-only deployment runs every hook point as a no-op.
  *
- * Three hook kinds, with deliberately different failure semantics:
+ * Four hook kinds, with deliberately different failure semantics:
+ *
+ *   - `commitLanded` — INFORMATIONAL. Runs in `GitService` right after each
+ *     commit it lands (a save, an autosave checkpoint, a batch, a merge, a
+ *     `commit_change`), with the commit's workspace-relative paths and the
+ *     person. The one place a commit is reported from; the composition root
+ *     hands it to the file-change notifier. A hook that throws, or whose
+ *     promise rejects, is logged and can neither fail nor unwind the commit.
  *
  *   - `commitValidation` — ADVISORY. Runs at commit time in `GitService`
  *     (`commit` / `commitFile`), exactly where the injected `IKbValidator`
@@ -90,8 +98,9 @@ export type PreWriteHook = (ctx: AgentOperationContext) => Promise<void>;
  * checkpoint, a batch, a merge, a `commit_change` — when it lands: pushed, or
  * awaiting its push. The one place a commit is reported from, so no committer
  * can be forgotten; the composition root hands it to the file-change notifier.
+ * Fire-and-forget: a hook may answer a promise, which nobody awaits.
  */
-export type CommitLandedHook = (change: FilesChange) => void;
+export type CommitLandedHook = FireAndForgetListener<FilesChange>;
 
 /**
  * The registry instance. ONE per composition (created in
@@ -124,16 +133,13 @@ export class VersionControlHooks {
   }
 
   /**
-   * Report a landed commit to every hook, each isolated: a reactor that throws
-   * is logged and cannot fail — or unwind — the commit it was told of.
+   * Report a landed commit to every hook, each isolated: a reactor that throws,
+   * or whose promise rejects, is logged and cannot fail — or unwind — the
+   * commit it was told of.
    */
   commitLanded(change: FilesChange): void {
     for (const hook of this.commitLandedHooks) {
-      try {
-        hook(change);
-      } catch (err) {
-        log.error('a commit-landed hook threw:', { err });
-      }
+      callFireAndForget(hook, change, log, 'a commit-landed hook failed:');
     }
   }
 

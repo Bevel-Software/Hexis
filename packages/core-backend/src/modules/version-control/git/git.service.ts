@@ -1100,6 +1100,9 @@ export class GitService implements IGitService {
         args.push('-m', req.description.trim());
       }
       await this.git(cwd, args);
+      // The commit exists from here on: reported now, before the attribution
+      // read, which can fail without unmaking it.
+      this.landed(workspaceId, branch, user, touched);
 
       const { stdout } = await this.git(cwd, [
         'log',
@@ -1110,7 +1113,6 @@ export class GitService implements IGitService {
 
       // The commit may have changed roles.yaml or access.md — drop cached state.
       this.accessControl?.invalidate(workspaceId);
-      this.landed(workspaceId, branch, user, touched);
 
       return {
         sha: sha?.trim() ?? '',
@@ -1265,6 +1267,9 @@ export class GitService implements IGitService {
         `--author=${user.name} <${user.email}>`,
         '-m', subject,
       ]);
+      // The commit exists from here on: reported now, before the attribution
+      // read, which can fail without unmaking it.
+      this.landed(workspaceId, branch, user, [repoRelativePath]);
 
       const { stdout } = await this.git(cwd, [
         'log',
@@ -1273,7 +1278,6 @@ export class GitService implements IGitService {
       ]);
       const [sha, authorName, authorEmail, subj, committedAt] = stdout.split('\x00');
       this.accessControl?.invalidate(workspaceId);
-      this.landed(workspaceId, branch, user, [repoRelativePath]);
       return {
         sha: sha?.trim() ?? '',
         authorName: authorName ?? '',
@@ -1834,7 +1838,9 @@ export class GitService implements IGitService {
     resolvedPaths: string[],
   ): Promise<MergeIntoBranchOutcome> {
     // What this merge brings onto the branch: the index holds the merged tree.
-    const { stdout: merged } = await this.git(cwd, ['diff', '--cached', '--name-only', '-z']);
+    // NUL-delimited and with renames as a delete plus an add, so every path is
+    // named verbatim, both ends of a rename included.
+    const { stdout: merged } = await this.git(cwd, ['diff', '--cached', '--name-only', '--no-renames', '-z']);
     await this.git(cwd, ['commit', `--author=${user.name} <${user.email}>`, '-m', opts.subject, '-m', opts.body]);
     this.accessControl?.invalidate(workspaceId);
     this.landed(workspaceId, branch, user, merged.split('\0').filter(Boolean));
@@ -2149,8 +2155,10 @@ export class GitService implements IGitService {
         // finalize the row (a transient database fault between the push and the
         // update) has one, and it is the only place its file list survives — so
         // it is looked for rather than assumed absent (cubic P2 on #347).
-        const { stdout: staged } = await this.git(cwd, ['diff', '--cached', '--name-only']);
-        if (staged.trim() === '') {
+        // NUL-delimited and with renames as a delete plus an add, so every path
+        // the merge touches is named verbatim, both ends of a rename included.
+        const { stdout: staged } = await this.git(cwd, ['diff', '--cached', '--name-only', '--no-renames', '-z']);
+        if (staged === '') {
           const { stdout: sha } = await this.git(cwd, ['rev-parse', 'HEAD']);
           await this.git(cwd, ['merge', '--abort']).catch(() => undefined);
           const own =
@@ -2167,10 +2175,13 @@ export class GitService implements IGitService {
           '-m', commit.body,
         ]);
         const { stdout: sha } = await this.git(cwd, ['rev-parse', 'HEAD']);
-        this.landed(baseWorkspaceId, targetBranch, user, staged.trim().split('\n').filter(Boolean));
 
         try {
           await this.git(cwd, ['push', 'origin', `HEAD:refs/heads/${targetBranch}`]);
+          // This merge commit is provisional until its push lands: a rejected
+          // push resets the checkout and the next attempt commits anew. So it
+          // is reported here, once, for the attempt that landed on the target.
+          this.landed(baseWorkspaceId, targetBranch, user, staged.split('\0').filter(Boolean));
           this.accessControl?.invalidate(baseWorkspaceId);
           // A commit of this request's own, with the subject the reader verifies.
           return { kind: 'merged' as const, sha: sha.trim(), mergeCommit: sha.trim() };

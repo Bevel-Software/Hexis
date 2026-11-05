@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { sql } from 'drizzle-orm';
 import { closeDb, createDb } from '../connection.js';
 import { setLogger } from '../../../shared/logging.js';
-import type { ILogger, LogFields } from '../../../shared/logger.contract.js';
+import { capturingLogger } from '../../../__tests__/capturing-logger.js';
 import { PG_ADMIN_URL, PG_TEST_TIMEOUT, withPgAdmin } from '../../../__tests__/pg-scratch.js';
 
 /**
@@ -20,13 +20,8 @@ describe.skipIf(!PG_ADMIN_URL)('a pooled connection the server terminates', () =
   it(
     'is logged with the error, and the next query succeeds on a new connection',
     async () => {
-      const lines: { level: string; message: string; fields: LogFields }[] = [];
-      const capture = (bindings: LogFields = {}): ILogger => {
-        const line = (level: string) => (message: string, fields: LogFields = {}) =>
-          void lines.push({ level, message, fields: { ...bindings, ...fields } });
-        return { debug: line('debug'), info: line('info'), warn: line('warn'), error: line('error'), child: (m) => capture({ ...bindings, ...m }) };
-      };
-      const previous = setLogger(capture());
+      const { logger: capturing, lines } = capturingLogger();
+      const previous = setLogger(capturing);
       const db = createDb(PG_ADMIN_URL!);
       try {
         const backendPid = async () => Number((await db.execute(sql`select pg_backend_pid() as pid`)).rows[0]!.pid);

@@ -83,11 +83,14 @@ export interface FilesChange {
   branch: string;
   /**
    * Workspace-relative paths the commit touched (≥1; sorted, no path twice —
-   * the notifier shapes them so). The committer may still hold these paths'
-   * locks for the moment it takes to release them: a reactor that writes one
-   * acquires its lock like any writer, and the lock-aware filesystem's acquire
-   * retries cover that window. A reactor re-reads what it is told of, so a
-   * path named without a change costs it one read, never a wrong answer.
+   * the notifier shapes them so). A reactor that writes one acquires its lock
+   * like any writer: a batch's committer releases its locks right after the
+   * commit (the lock-aware filesystem's acquire retries cover that moment); an
+   * autosave checkpoint is announced under the editor's lock, held while the
+   * person edits, so that write waits for the path's next announcement — the
+   * release commit, when it carries new bytes. A reactor re-reads what it is
+   * told of, so a path named without a change costs it one read, never a
+   * wrong answer.
    */
   paths: string[];
   /** Who the change was committed as — a reacting write (id-repair) acts as the same user. */

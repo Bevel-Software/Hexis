@@ -21,24 +21,32 @@
  * Paths are workspace-relative, sorted and unique: `emit` shapes them.
  *
  * TIMING. The announcement is made when the commit lands, inside the git
- * layer's reservation; a committer that holds file locks (the lock-aware
- * filesystem's batches, an editor's autosave checkpoint) still holds them for
- * the moment it takes to release them. A listener that writes an announced
- * path acquires its lock like any writer, and the lock-aware filesystem's
- * acquire retries cover that window; a listener that only reads is unaffected.
+ * layer's reservation. A listener that only reads (the catalogs) is
+ * unaffected by locks. A listener that WRITES an announced path acquires its
+ * lock like any writer, and two cases differ: a batch's committer (the
+ * lock-aware filesystem, the admin commit driver) releases its locks right
+ * after the commit, and the lock-aware filesystem's acquire retries cover that
+ * moment; an editor's autosave checkpoint is announced while the editor's own
+ * lock is held, for as long as the person keeps editing, so a write to that
+ * path cannot be made then. The editor's release commit announces the path
+ * again when it carries new bytes; a release that finds nothing new does not,
+ * and such a write waits for the file's next change — as it did before this
+ * release, when a checkpoint was not announced at all.
  *
  * Every listener is invoked inside try/catch — a throwing subscriber must never
  * fail the commit that triggered it (mirrors the SSE bus's per-subscriber
  * isolation). Firing is fire-and-forget.
  */
 import type { FilesChange } from '@bevel-software/platform-shared';
+import { callFireAndForget, type FireAndForgetListener } from '../../shared/fire-and-forget.js';
 import { logger } from '../../shared/logging.js';
 
 const log = logger('file-change');
 
 export type { FilesChange };
 
-export type FilesChangedListener = (change: FilesChange) => void;
+/** Fire-and-forget: a listener may answer a promise, which nobody awaits; a rejection is logged like a throw. */
+export type FilesChangedListener = FireAndForgetListener<FilesChange>;
 
 export class FileChangeNotifier {
   private readonly listeners = new Set<FilesChangedListener>();
@@ -49,17 +57,13 @@ export class FileChangeNotifier {
     return () => this.listeners.delete(listener);
   }
 
-  /** Fan a change out to every listener — paths sorted and unique, nothing for an empty set; isolate + log each so one can't break the commit. */
+  /** Fan a change out to every listener — paths sorted and unique, nothing for an empty set; each isolated (a throw or a rejection is logged) so one can't break the commit. */
   emit(change: FilesChange): void {
     const paths = [...new Set(change.paths)].sort();
     if (paths.length === 0) return;
     const shaped: FilesChange = { ...change, paths };
     for (const listener of this.listeners) {
-      try {
-        listener(shaped);
-      } catch (err) {
-        log.error('listener threw:', { err });
-      }
+      callFireAndForget(listener, shaped, log, 'a file-change listener failed:');
     }
   }
 }

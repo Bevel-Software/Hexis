@@ -5,10 +5,12 @@ import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import type { AuthUser } from '@bevel-software/platform-shared';
-import type { WorkspaceService } from '../../../workspace/workspace.service.js';
+import type { AuthUser, FilesChange } from '@bevel-software/platform-shared';
+import type { WorkspaceService } from '../../../workspace/index.js';
+import type { IGitRunner } from '../../../../shared/git.contract.js';
 import { VersionControlHooks } from '../../version-control-hooks.js';
 import { GitService } from '../git.service.js';
+import { NodeGitRunner } from '../node-git-runner.js';
 import { mergeCommitSubject } from '../merge-commit.js';
 
 const execFileAsync = promisify(execFile);
@@ -117,6 +119,81 @@ describe('GitService.mergeChangeRequest', () => {
     const log = await gitOut(verify, ['log', '-1', '--format=%an <%ae>%n%s']);
     expect(log).toContain('Alice <alice@example.com>');
     expect(log).toContain('Add feature (#1)');
+  });
+
+  describe('reports the merge it lands through onCommitLanded, once, with every path it brought in', () => {
+    const KB = 'knowledge-base';
+    const sorted = (changes: FilesChange[]) => changes.map((c) => ({ ...c, paths: [...c.paths].sort() }));
+    function listening(baseWsId: string, baseRepo: string, runner?: IGitRunner) {
+      const hooks = new VersionControlHooks();
+      const landed: FilesChange[] = [];
+      hooks.onCommitLanded((change) => landed.push(change));
+      const git = new GitService(stubWorkspaceService(baseWsId, baseRepo), hooks, testKbContext(), undefined, null, runner);
+      return { git, landed };
+    }
+
+    it('names both ends of a rename and a non-ASCII name verbatim, after the push landed', async () => {
+      const { upstream, baseWsId, baseRepo } = await seed(root, { 'base.md': 'base\n', 'keep.md': 'keep\n' });
+      await pushFeatureBranch(root, upstream, 'alice/rename', async (dir) => {
+        await runGit(dir, ['mv', 'base.md', 'renamed.md']);
+        await fs.writeFile(path.join(dir, 'Ünïcode ñ.md'), 'ü\n');
+      });
+      const { git, landed } = listening(baseWsId, baseRepo);
+
+      const result = await git.mergeChangeRequest(baseWsId, 'alice/rename', BASE, { subject: 'Rename (#2)', body: '' }, USER);
+
+      expect(result.kind).toBe('merged');
+      expect(sorted(landed)).toEqual([
+        { workspaceId: baseWsId, branch: BASE, byUser: USER, paths: [`${KB}/base.md`, `${KB}/renamed.md`, `${KB}/Ünïcode ñ.md`] },
+      ]);
+    });
+
+    it('reports nothing when there was nothing to merge', async () => {
+      const { upstream, baseWsId, baseRepo } = await seed(root, { 'base.md': 'base\n' });
+      await pushFeatureBranch(root, upstream, 'alice/add', async (dir) => {
+        await fs.writeFile(path.join(dir, 'feature.md'), 'new content\n');
+      });
+      const { git, landed } = listening(baseWsId, baseRepo);
+      await git.mergeChangeRequest(baseWsId, 'alice/add', BASE, { subject: 'Add (#3)', body: '' }, USER);
+      expect(landed).toHaveLength(1);
+
+      // Again: the target already holds the source; no commit, no report.
+      const again = await git.mergeChangeRequest(baseWsId, 'alice/add', BASE, { subject: 'Add (#3)', body: '' }, USER);
+      expect(again.kind).toBe('merged');
+      expect(landed).toHaveLength(1);
+    });
+
+    it('reports once when the first push is rejected and the retry lands — the attempt that was reset away is not announced', async () => {
+      const { upstream, seedDir, baseWsId, baseRepo } = await seed(root, { 'base.md': 'base\n' });
+      await pushFeatureBranch(root, upstream, 'alice/add', async (dir) => {
+        await fs.writeFile(path.join(dir, 'feature.md'), 'new content\n');
+      });
+      // A runner like the real one, except that just before the first push a
+      // teammate's commit lands on the target, so that push is rejected and
+      // the merge is redone on the new tip.
+      const real = new NodeGitRunner();
+      let pushes = 0;
+      const racing: IGitRunner = {
+        defaultTimeoutMs: real.defaultTimeoutMs,
+        credentials: real.credentials,
+        run: (async (cwd: string, args: string[], opts?: unknown) => {
+          if (args[0] === 'push' && pushes++ === 0) {
+            await fs.writeFile(path.join(seedDir, 'teammate.md'), 'meanwhile\n');
+            await runGit(seedDir, ['add', '-A']);
+            await runGit(seedDir, ['commit', '-m', 'teammate']);
+            await runGit(seedDir, ['push', 'origin', BASE]);
+          }
+          return real.run(cwd, args, opts as never);
+        }) as IGitRunner['run'],
+      };
+      const { git, landed } = listening(baseWsId, baseRepo, racing);
+
+      const result = await git.mergeChangeRequest(baseWsId, 'alice/add', BASE, { subject: 'Add (#4)', body: '' }, USER);
+
+      expect(result.kind).toBe('merged');
+      expect(pushes).toBe(2);
+      expect(sorted(landed)).toEqual([{ workspaceId: baseWsId, branch: BASE, byUser: USER, paths: [`${KB}/feature.md`] }]);
+    });
   });
 
   // cubic P1 on #347. When the target already contains the source there is

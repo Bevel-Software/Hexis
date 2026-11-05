@@ -4,8 +4,10 @@ import os from 'node:os';
 import path from 'node:path';
 import type { FilesChange } from '@bevel-software/platform-shared';
 import { testKbContext } from '../../../../__tests__/kb-context.js';
+import type { IGitRunner } from '../../../../shared/git.contract.js';
 import { VersionControlHooks } from '../../version-control-hooks.js';
 import { GitService } from '../git.service.js';
+import { NodeGitRunner } from '../node-git-runner.js';
 import { gitOut, runGit, stubWorkspaceService } from './git-test-helpers.js';
 
 /**
@@ -103,13 +105,41 @@ describe('GitService reports every commit it lands through onCommitLanded', () =
     expect(heard()).toEqual([{ workspaceId: WS, branch: 'main', paths: [`${KB}/F.md`, `${KB}/Old.md`], byUser: USER }]);
   });
 
-  it('a hook that throws is isolated: the commit stands and the other hooks still hear of it', async () => {
+  it('a commit is reported even when the attribution read after it fails — the commit exists, so the reactors hear of it', async () => {
+    // A runner like the real one, except that `git log` fails: what a disk or
+    // process fault between the commit and its attribution read looks like.
+    const real = new NodeGitRunner();
+    const logFails: IGitRunner = {
+      defaultTimeoutMs: real.defaultTimeoutMs,
+      credentials: real.credentials,
+      run: ((cwd: string, args: string[], opts?: unknown) =>
+        args[0] === 'log' ? Promise.reject(new Error('git log unavailable')) : real.run(cwd, args, opts as never)) as IGitRunner['run'],
+    };
+    const hooks = new VersionControlHooks();
+    hooks.onCommitValidation(vi.fn(async () => ({ ok: true, mustFix: [], warnings: [], rawOutput: '' })));
+    const heardHere: FilesChange[] = [];
+    hooks.onCommitLanded((change) => heardHere.push(change));
+    const fragile = new GitService(stubWorkspaceService({ [WS]: path.join(root, WS) }), hooks, testKbContext({ kbDirName: KB }), undefined, null, logFails);
+    const before = Number(await gitOut(repo, ['rev-list', '--count', 'HEAD']));
+
+    await write('I.md', 'i\n');
+    await expect(fragile.commitFile(WS, USER, `${KB}/I.md`)).rejects.toThrow('git log unavailable');
+    await write('J.md', 'j\n');
+    await expect(fragile.commit(WS, USER, { summary: 'add J' })).rejects.toThrow('git log unavailable');
+
+    // Both commits landed, and both were reported before the read that failed.
+    expect(Number(await gitOut(repo, ['rev-list', '--count', 'HEAD']))).toBe(before + 2);
+    expect(heardHere.map((c) => c.paths)).toEqual([[`${KB}/I.md`], [`${KB}/J.md`]]);
+  });
+
+  it('a hook that throws, or whose promise rejects, is isolated: the commit stands and the other hooks still hear of it', async () => {
     const hooks = new VersionControlHooks();
     hooks.onCommitValidation(vi.fn(async () => ({ ok: true, mustFix: [], warnings: [], rawOutput: '' })));
     const others: FilesChange[] = [];
     hooks.onCommitLanded(() => {
       throw new Error('reactor exploded');
     });
+    hooks.onCommitLanded(async () => Promise.reject(new Error('reactor exploded later')));
     hooks.onCommitLanded((change) => others.push(change));
     const loud = new GitService(stubWorkspaceService({ [WS]: path.join(root, WS) }), hooks, testKbContext({ kbDirName: KB }));
 

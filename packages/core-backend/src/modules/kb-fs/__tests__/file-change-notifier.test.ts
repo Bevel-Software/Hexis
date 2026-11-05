@@ -39,6 +39,16 @@ describe('FileChangeNotifier', () => {
     expect(after).toHaveBeenCalledOnce();
   });
 
+  it('a listener whose promise rejects is isolated too — the rejection is caught, the others heard', async () => {
+    const notifier = new FileChangeNotifier();
+    const after = vi.fn();
+    notifier.onFilesChanged(async () => Promise.reject(new Error('boom, later')));
+    notifier.onFilesChanged(after);
+    expect(() => notifier.emit(change(['x/A.md']))).not.toThrow();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(after).toHaveBeenCalledOnce();
+  });
+
   it('an empty path list emits nothing; unsubscribe stops delivery', () => {
     const notifier = new FileChangeNotifier();
     const listener = vi.fn();

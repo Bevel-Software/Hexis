@@ -11,7 +11,7 @@ import {
   type Database,
 } from '../connection.js';
 import { setLogger } from '../../../shared/logging.js';
-import type { ILogger, LogFields } from '../../../shared/logger.contract.js';
+import { capturingLogger } from '../../../__tests__/capturing-logger.js';
 
 /**
  * Pools here are never connected: `pg.Pool` opens nothing until a query is
@@ -33,13 +33,8 @@ describe('an idle connection the server closes', () => {
   it('is logged, with the error, and let go — the pool has a listener, so the event cannot end the process', () => {
     // A capturing logger stands in for the process's: the warning is the
     // behaviour under test, not a side effect to tolerate.
-    const lines: { level: string; message: string; fields: LogFields }[] = [];
-    const capture = (bindings: LogFields = {}): ILogger => {
-      const line = (level: string) => (message: string, fields: LogFields = {}) =>
-        void lines.push({ level, message, fields: { ...bindings, ...fields } });
-      return { debug: line('debug'), info: line('info'), warn: line('warn'), error: line('error'), child: (m) => capture({ ...bindings, ...m }) };
-    };
-    const previous = setLogger(capture());
+    const { logger: capturing, lines } = capturingLogger();
+    const previous = setLogger(capturing);
     try {
       const db = createDb(URL);
       opened.push(db);
