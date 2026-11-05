@@ -1,10 +1,9 @@
 import jwt from 'jsonwebtoken';
 import { createHmac } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
-import { createFileReaderRegistry } from '../../workspace/file-readers/file-reader.registry.js';
-import type { DocExtractOutcome, DocExtractService } from '../../workspace/file-readers/doc-extract.service.js';
-import { makeRolesYamlWriteValidator, RolesYamlInvalidError } from '../../access-model/roles-yaml-guard.js';
-import { ACCOUNT_DEACTIVATED_MESSAGE } from '../../auth/account-admission.js';
+import { realFileReaders } from '../../../__tests__/real-readers.js';
+import { makeRolesYamlWriteValidator } from '../../access-model/index.js';
+import { ACCOUNT_DEACTIVATED_MESSAGE } from '../../auth/index.js';
 import { testKbContext, TEST_BRANCH_MODEL } from '../../../__tests__/kb-context.js';
 import { EmbedService, type EmbedConfig } from '../embed.service.js';
 import {
@@ -52,19 +51,6 @@ interface Opts {
   remoteBranchExists?: boolean;
   config?: Partial<EmbedConfig>;
   resolveNodeId?: ((id: string) => Promise<string | null>) | null;
-}
-
-/**
- * The extraction service the reader registry takes, typed against its
- * contract: no test here reads a document-format file, and one that did
- * would get this typed refusal, not a silent empty text.
- */
-function noDocExtract(): DocExtractService {
-  const extract = async (): Promise<DocExtractOutcome> => ({
-    ok: false,
-    message: 'this suite reads no document-format file',
-  });
-  return { extract } satisfies Pick<DocExtractService, 'extract'> as DocExtractService;
 }
 
 function build(opts: Opts = {}) {
@@ -138,7 +124,7 @@ function build(opts: Opts = {}) {
     versionControlService as never,
     gitService as never,
     accountLinks as never,
-    createFileReaderRegistry(noDocExtract()),
+    realFileReaders(),
     // The real gate: the property under test is that an embed write cannot
     // put on disk what the app's editor would refuse.
     makeRolesYamlWriteValidator(KB),
@@ -791,7 +777,7 @@ describe('EmbedService: the roles.yaml write gate', () => {
   it('refuses to save a roles.yaml that would not parse, writing nothing and taking no lock', async () => {
     const { service, workspaceService, versionControlService } = build({ files: { [ROLES]: VALID } });
     const { token } = await service.mintForUser({ userId: USER.id, reference: 'roles.yaml' });
-    await expect(service.save(token, 'roles: [oops')).rejects.toThrow(RolesYamlInvalidError);
+    await expect(service.save(token, 'roles: [oops')).rejects.toMatchObject({ status: 422, payload: { kind: 'roles-yaml-invalid' } });
     expect(workspaceService.writeFile).not.toHaveBeenCalled();
     expect(versionControlService.acquireLock).not.toHaveBeenCalled();
     expect(versionControlService.releaseLock).not.toHaveBeenCalled();
@@ -803,7 +789,7 @@ describe('EmbedService: the roles.yaml write gate', () => {
       files: { [ROLES]: VALID },
     });
     const { token } = await service.mintForUser({ userId: USER.id, reference: 'roles.yaml' });
-    await expect(service.propose(token, 'roles: [oops')).rejects.toThrow(RolesYamlInvalidError);
+    await expect(service.propose(token, 'roles: [oops')).rejects.toMatchObject({ status: 422, payload: { kind: 'roles-yaml-invalid' } });
     expect(versionControlService.createBranch).not.toHaveBeenCalled();
     expect(workspaceService.writeFile).not.toHaveBeenCalled();
     expect(versionControlService.commitChanges).not.toHaveBeenCalled();

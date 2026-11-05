@@ -6,13 +6,13 @@ import { joinBranchFor, type IVersionControlService } from '@bevel-software/plat
 
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { testKbContext, TEST_BRANCH_MODEL } from '../../../__tests__/kb-context.js';
-import type { AuthService } from '../../auth/auth.service.js';
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
+import type { AuthService } from '../../auth/index.js';
+import type { WorkspaceService } from '../../workspace/index.js';
 import type { IAccessControl } from '../access-control.interface.js';
 import type { IAccessRequestLifecycle } from '../access-requests.contract.js';
 import { createAccessRequestRoutes } from '../access-requests.routes.js';
 import { ChangeRequestConflictsError } from '../../../shared/domain-errors.js';
-import { pendingProposals } from '../../plugins/join-proposals.js';
+import { pendingProposals } from '../../plugins/index.js';
 
 /**
  * Asking for Can edit or Owner on an item, and what the editors then see.

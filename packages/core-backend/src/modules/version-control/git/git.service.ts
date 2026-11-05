@@ -345,6 +345,36 @@ export class GitService implements IGitService {
   }
 
   /**
+   * Every commit this service lands is reported here, once, to the hooks the
+   * composition root registered (`VersionControlHooks.onCommitLanded`): a
+   * single-file commit, a batch, a merge. Paths go out workspace-relative, as
+   * the notifier's contract has them. The hooks run isolated, so a reactor can
+   * neither fail nor unwind the commit it hears of. This is the ONE place a
+   * commit is announced from — a new way of committing reports here or it is
+   * not announced at all, which a test pins.
+   */
+  private landed(workspaceId: string, branch: string, user: AuthUser, repoRelativePaths: readonly string[]): void {
+    this.hooks.commitLanded({
+      workspaceId,
+      branch,
+      paths: repoRelativePaths.map((p) => `${this.kbDirName}/${p}`),
+      byUser: user,
+    });
+  }
+
+  /**
+   * The files the commit at HEAD changed, repo-relative, read from the commit
+   * itself rather than from the status listing that preceded it: every file
+   * of a new folder (status shows the folder), both ends of a rename (status
+   * shows one entry). A read that fails must not lose the report, so callers
+   * fall back to what they knew before the commit.
+   */
+  private async committedPaths(cwd: string): Promise<string[]> {
+    const { stdout } = await this.git(cwd, ['diff-tree', '--root', '--no-commit-id', '--name-only', '--no-renames', '-r', '-z', 'HEAD']);
+    return stdout.split('\0').filter(Boolean);
+  }
+
+  /**
    * The credentials the runner authenticates with — for the services above
    * this one that scrub a message git or the host echoed a token into.
    */
@@ -1082,6 +1112,10 @@ export class GitService implements IGitService {
         args.push('-m', req.description.trim());
       }
       await this.git(cwd, args);
+      // The commit exists from here on: reported now, before the attribution
+      // read, which can fail without unmaking it — with the files the commit
+      // holds, or the status listing if even that read fails.
+      this.landed(workspaceId, branch, user, await this.committedPaths(cwd).catch(() => touched));
 
       const { stdout } = await this.git(cwd, [
         'log',
@@ -1246,6 +1280,10 @@ export class GitService implements IGitService {
         `--author=${user.name} <${user.email}>`,
         '-m', subject,
       ]);
+      // The commit exists from here on: reported now, before the attribution
+      // read, which can fail without unmaking it — with the files the commit
+      // holds (the one path, as it was staged), or that path if the read fails.
+      this.landed(workspaceId, branch, user, await this.committedPaths(cwd).catch(() => [repoRelativePath]));
 
       const { stdout } = await this.git(cwd, [
         'log',
@@ -1383,6 +1421,10 @@ export class GitService implements IGitService {
       // committed" and restore their pre-edit bytes, which here would publish
       // a compensating revert of a commit that DID land. The attribution read
       // is best-effort; on failure fall back to what we already know.
+      // The commit exists: report it, with the files it holds — both ends of a
+      // rename, every file of a new folder — or the scoped status listing if
+      // that read fails. Neither the read nor the hooks can throw here.
+      this.landed(workspaceId, branch, user, await this.committedPaths(cwd).catch(() => touched));
       let sha = '';
       let authorName = user.name;
       let authorEmail = user.email;
@@ -1811,8 +1853,13 @@ export class GitService implements IGitService {
     opts: { subject: string; body: string; publish?: (ops: ReservedPushOps) => Promise<void> },
     resolvedPaths: string[],
   ): Promise<MergeIntoBranchOutcome> {
+    // What this merge brings onto the branch: the index holds the merged tree.
+    // NUL-delimited and with renames as a delete plus an add, so every path is
+    // named verbatim, both ends of a rename included.
+    const { stdout: merged } = await this.git(cwd, ['diff', '--cached', '--name-only', '--no-renames', '-z']);
     await this.git(cwd, ['commit', `--author=${user.name} <${user.email}>`, '-m', opts.subject, '-m', opts.body]);
     this.accessControl?.invalidate(workspaceId);
+    this.landed(workspaceId, branch, user, merged.split('\0').filter(Boolean));
     // The publish runs here, inside the reservation the merge was made in,
     // over this checkout's own push and pull-rebase (the merge kept as a
     // merge) — the caller's policy, the git layer's moves. Whatever it
@@ -2124,8 +2171,10 @@ export class GitService implements IGitService {
         // finalize the row (a transient database fault between the push and the
         // update) has one, and it is the only place its file list survives — so
         // it is looked for rather than assumed absent (cubic P2 on #347).
-        const { stdout: staged } = await this.git(cwd, ['diff', '--cached', '--name-only']);
-        if (staged.trim() === '') {
+        // NUL-delimited and with renames as a delete plus an add, so every path
+        // the merge touches is named verbatim, both ends of a rename included.
+        const { stdout: staged } = await this.git(cwd, ['diff', '--cached', '--name-only', '--no-renames', '-z']);
+        if (staged === '') {
           const { stdout: sha } = await this.git(cwd, ['rev-parse', 'HEAD']);
           await this.git(cwd, ['merge', '--abort']).catch(() => undefined);
           const own =
@@ -2145,6 +2194,10 @@ export class GitService implements IGitService {
 
         try {
           await this.git(cwd, ['push', 'origin', `HEAD:refs/heads/${targetBranch}`]);
+          // This merge commit is provisional until its push lands: a rejected
+          // push resets the checkout and the next attempt commits anew. So it
+          // is reported here, once, for the attempt that landed on the target.
+          this.landed(baseWorkspaceId, targetBranch, user, staged.split('\0').filter(Boolean));
           this.accessControl?.invalidate(baseWorkspaceId);
           // A commit of this request's own, with the subject the reader verifies.
           return { kind: 'merged' as const, sha: sha.trim(), mergeCommit: sha.trim() };

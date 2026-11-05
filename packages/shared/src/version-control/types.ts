@@ -14,6 +14,7 @@
  * inputs, conflict-resolution payloads) live here directly.
  */
 
+import type { AuthUser } from '../auth/types.js';
 import type {
   BranchInfo,
   CommitAttribution,
@@ -64,6 +65,40 @@ export type Change = CommitAttribution;
  * forced single-path scope).
  */
 export type ChangeInput = ShareChangesRequest;
+
+/**
+ * A set of files committed as one change — pushed, or landed locally with its
+ * push still owed to the pending-commits worker — as the git service reports
+ * it (`VersionControlHooks.onCommitLanded`) and the file-change notifier hands
+ * it to the in-process reactors (catalog invalidation, id-repair, a
+ * deployment's own listeners) when it lands. A reactor reads the working
+ * tree, which carries the commit either way; the later push makes no new
+ * commit and is not announced again. One announcement per commit: a
+ * single-file save names its one path, a batch every path it committed, a
+ * merge every path it brought in — so a reactor that does expensive work per
+ * announcement does it once per batch.
+ */
+export interface FilesChange {
+  workspaceId: string;
+  branch: string;
+  /**
+   * Workspace-relative paths the commit touched (≥1; sorted, no path twice —
+   * the notifier shapes them so). A reactor that writes one acquires its lock
+   * like any writer: a batch's committer releases its locks once the commit's
+   * push has gone through or been handed off to the recovery worker (the
+   * lock-aware filesystem's acquire retries cover the usual push; a slower one
+   * leaves the writer to skip); an autosave
+   * checkpoint is announced under the editor's lock, held while the person
+   * edits. Either way a writer that could not lock treats it as "not now" and
+   * catches up on the path's next announcement — the release commit when it
+   * carries new bytes, the file's next change. A reactor re-reads what it is
+   * told of, so a path named without a change costs it one read, never a
+   * wrong answer.
+   */
+  paths: string[];
+  /** Who the change was committed as — a reacting write (id-repair) acts as the same user. */
+  byUser: AuthUser;
+}
 
 // ── File locks (new — no git counterpart) ────────────────────────────────────
 

@@ -83,7 +83,6 @@ import { canonicalFileIdentity } from '../../shared/canonical-file-identity.js';
 import type { PendingCommitsService } from './pending-commits.service.js';
 import type { VersionControlEventBus } from './event-bus.js';
 import { describeSyncFailure, sanitizeError } from './sanitize-error.js';
-import type { FileChangeNotifier } from '../kb-fs/index.js';
 import { VersionControlHooks } from './version-control-hooks.js';
 import {
   ChangeRequestHooks,
@@ -304,13 +303,6 @@ export class VersionControlService implements IVersionControlService {
      * boot the composition root always wires one.
      */
     private readonly events?: VersionControlEventBus,
-    /**
-     * In-process post-commit hook (distinct from the SSE `events` bus): fires
-     * after a file's change is committed + pushed so backend services (catalog
-     * invalidation, id-repair) react without the per-file TTL wait. Optional,
-     * like `events`.
-     */
-    private readonly fileChanges?: FileChangeNotifier,
     /**
      * Version-control lifecycle-hook registry (see `version-control-hooks.ts`). PUBLIC so
      * the composition root registers module-owned behavior against it
@@ -1777,11 +1769,14 @@ export class VersionControlService implements IVersionControlService {
       // which is exactly how a diverged workspace ends up stuck forever.
       // So: if the branch is ahead of its remote-tracking ref, push (with
       // the same cooperative recovery, so a conflicting divergence throws
-      // and the worker's ladder takes over). Nothing to emit either way —
+      // and the worker's ladder takes over). No `file-changed` either way —
       // there's no new sha.
       if (await this.git.hasUnpushedCommits(workspaceId)) {
         await this.pushWithRecovery(workspaceId, branch, targetPath, user, opts);
       }
+      // Nothing landed here, so nothing is announced: the git layer reports
+      // each commit as it lands (an autosave checkpoint, a batch whose push
+      // retry this row is), and this row made none.
       return;
     }
     await this.pushWithRecovery(workspaceId, branch, targetPath, user, opts);
@@ -1794,9 +1789,6 @@ export class VersionControlService implements IVersionControlService {
       byUserId: user.id,
       byUserName: user.name,
     });
-    // Post-commit, post-lock-release: the one chokepoint every single-file write
-    // converges on. Backend reactors (catalog invalidation, id-repair) hook here.
-    this.fileChanges?.emit({ workspaceId, branch, paths: [targetPath], byUser: user });
   }
 
   /**

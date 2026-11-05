@@ -6,11 +6,7 @@ import type { AuthUser, IVersionControlService } from '@bevel-software/platform-
 import { LocalFilesystem } from '@mastra/core/workspace';
 import { LockingFilesystem } from '../locking-filesystem.js';
 import { PushNeedsAgentResolutionError, VersionControlValidationError } from '../../../shared/domain-errors.js';
-import {
-  makeAgentRolesYamlWriteValidator,
-  RolesYamlInvalidError,
-  RolesYamlNewRoleError,
-} from '../../access-model/roles-yaml-guard.js';
+import { makeAgentRolesYamlWriteValidator } from '../../access-model/index.js';
 
 /** The clone folder at the workspace root: every path the filesystem mutates lives under it. */
 const KB = 'knowledge-base';
@@ -213,7 +209,7 @@ describe('LockingFilesystem — every mutating op runs acquire → super → rel
   });
 });
 
-describe('LockingFilesystem.writeFiles — batch with deletes + one batched change event', () => {
+describe('LockingFilesystem.writeFiles — batch with deletes', () => {
   let root: string;
 
   beforeEach(async () => {
@@ -224,12 +220,11 @@ describe('LockingFilesystem.writeFiles — batch with deletes + one batched chan
     await fs.rm(root, { recursive: true, force: true });
   });
 
-  it('locks writes AND deletes, applies both, emits ONE batched onFilesChanged', async () => {
+  it('locks writes AND deletes, applies both, returns the commit', async () => {
     await fs.mkdir(path.join(root, 'knowledge-base/Tools'), { recursive: true });
     await fs.writeFile(path.join(root, 'knowledge-base/Tools/old.tool'), '{}');
 
     const versionControl = makeVersionControl();
-    const emitted: unknown[] = [];
     const fsLayer = new LockingFilesystem(
       { basePath: root, contained: true },
       {
@@ -237,7 +232,6 @@ describe('LockingFilesystem.writeFiles — batch with deletes + one batched chan
         workspaceId: 'ws-feat',
         branch: 'feat',
         user: USER, kbDirName: KB,
-        fileChanges: { emit: (c: unknown) => emitted.push(c) } as never,
       },
     );
 
@@ -253,23 +247,14 @@ describe('LockingFilesystem.writeFiles — batch with deletes + one batched chan
     expect(await fs.readFile(path.join(root, 'knowledge-base/Tools/new.tool'), 'utf-8')).toContain('http');
     await expect(fs.access(path.join(root, 'knowledge-base/Tools/old.tool'))).rejects.toThrow();
     expect(change).toEqual({});
-    // ONE event carrying the whole batch (sorted), attributed to the user.
-    expect(emitted).toHaveLength(1);
-    expect(emitted[0]).toMatchObject({
-      workspaceId: 'ws-feat',
-      branch: 'feat',
-      paths: ['knowledge-base/Tools/new.tool', 'knowledge-base/Tools/old.tool'],
-      byUser: USER,
-    });
   });
 
-  it('a failing commit releases every lock WITHOUT committing and emits nothing', async () => {
+  it('a failing commit releases every lock WITHOUT committing', async () => {
     await fs.mkdir(path.join(root, 'knowledge-base/Tools'), { recursive: true });
     await fs.writeFile(path.join(root, 'knowledge-base/Tools/old.tool'), '{}');
 
     const versionControl = makeVersionControl();
     (versionControl.commitChanges as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('push exploded'));
-    const emitted: unknown[] = [];
     const fsLayer = new LockingFilesystem(
       { basePath: root, contained: true },
       {
@@ -277,7 +262,6 @@ describe('LockingFilesystem.writeFiles — batch with deletes + one batched chan
         workspaceId: 'ws-feat',
         branch: 'feat',
         user: USER, kbDirName: KB,
-        fileChanges: { emit: (c: unknown) => emitted.push(c) } as never,
       },
     );
 
@@ -292,11 +276,10 @@ describe('LockingFilesystem.writeFiles — batch with deletes + one batched chan
     // Every acquired path goes through the NO-COMMIT release — which is what
     // discards the uncommitted bytes (write reverted, delete restored) in the
     // real VersionControlService via git.discardPath. The committing release must
-    // never run, and no change event fires for a failed batch.
+    // never run.
     expect(versionControl.releaseLockNoCommit).toHaveBeenCalledWith('ws-feat', 'feat', 'knowledge-base/Tools/new.tool', USER);
     expect(versionControl.releaseLockNoCommit).toHaveBeenCalledWith('ws-feat', 'feat', 'knowledge-base/Tools/old.tool', USER);
     expect(versionControl.releaseLock).not.toHaveBeenCalled();
-    expect(emitted).toHaveLength(0);
   });
 
   it('a POST-commit push failure releases WITH commit-on-release (arms the worker retry), never the discard path', async () => {
@@ -311,7 +294,6 @@ describe('LockingFilesystem.writeFiles — batch with deletes + one batched chan
     (versionControl.commitChanges as ReturnType<typeof vi.fn>).mockRejectedValue(
       new PushNeedsAgentResolutionError('feat', 'knowledge-base/A.md', 'non-fast-forward', 'rebase failed'),
     );
-    const emitted: unknown[] = [];
     const fsLayer = new LockingFilesystem(
       { basePath: root, contained: true },
       {
@@ -319,7 +301,6 @@ describe('LockingFilesystem.writeFiles — batch with deletes + one batched chan
         workspaceId: 'ws-feat',
         branch: 'feat',
         user: USER, kbDirName: KB,
-        fileChanges: { emit: (c: unknown) => emitted.push(c) } as never,
       },
     );
 
@@ -329,25 +310,6 @@ describe('LockingFilesystem.writeFiles — batch with deletes + one batched chan
 
     expect(versionControl.releaseLock).toHaveBeenCalledWith('ws-feat', 'feat', 'knowledge-base/A.md', USER);
     expect(versionControl.releaseLockNoCommit).not.toHaveBeenCalled();
-    expect(emitted).toHaveLength(0);
-  });
-
-  it('emits nothing on a no-op commit (clean tree)', async () => {
-    const versionControl = makeVersionControl();
-    (versionControl.commitChanges as ReturnType<typeof vi.fn>).mockResolvedValue(null);
-    const emitted: unknown[] = [];
-    const fsLayer = new LockingFilesystem(
-      { basePath: root, contained: true },
-      {
-        versionControl,
-        workspaceId: 'ws-feat',
-        branch: 'feat',
-        user: USER, kbDirName: KB,
-        fileChanges: { emit: (c: unknown) => emitted.push(c) } as never,
-      },
-    );
-    await fsLayer.writeFiles([{ path: 'knowledge-base/A.md', content: 'same' }], 'noop');
-    expect(emitted).toHaveLength(0);
   });
 });
 
@@ -714,7 +676,6 @@ describe('LockingFilesystem — creator read grants on creation', () => {
       wsRelPath: 'knowledge-base/KnowledgeBase/Mine/access.md',
       apply: (current: string) => current, // grant already present → no-op
     });
-    const emitted: { paths: string[] }[] = [];
     const fsLayer = new LockingFilesystem(
       { basePath: root, contained: true },
       {
@@ -723,7 +684,6 @@ describe('LockingFilesystem — creator read grants on creation', () => {
         branch: 'feat',
         user: USER, kbDirName: KB,
         creatorAccess,
-        fileChanges: { emit: (c: { paths: string[] }) => emitted.push(c) } as never,
       },
     );
     await fsLayer.writeFiles([{ path: 'knowledge-base/KnowledgeBase/Mine/doc.md', content: 'body' }], 'batch');
@@ -734,7 +694,6 @@ describe('LockingFilesystem — creator read grants on creation', () => {
     // ...but the commit is scoped to the caller's path only.
     const commitPaths = (versionControl.commitChanges as ReturnType<typeof vi.fn>).mock.calls[0][3];
     expect(commitPaths).toEqual(['knowledge-base/KnowledgeBase/Mine/doc.md']);
-    expect(emitted[0].paths).toEqual(['knowledge-base/KnowledgeBase/Mine/doc.md']);
     // The seeded file is untouched.
     expect(await fs.readFile(path.join(root, 'knowledge-base/KnowledgeBase/Mine/access.md'), 'utf-8')).toBe(
       seedContent,
@@ -1228,7 +1187,7 @@ describe('LockingFilesystem — the agent roles.yaml gate covers every op that l
   }
 
   async function expectRefused(op: Promise<unknown>, versionControl: IVersionControlService): Promise<void> {
-    await expect(op).rejects.toBeInstanceOf(RolesYamlNewRoleError);
+    await expect(op).rejects.toMatchObject({ status: 422, payload: { kind: 'roles-yaml-new-role' } });
     expect(versionControl.acquireLock).not.toHaveBeenCalled();
     expect(await fs.readFile(path.join(root, ROLES), 'utf-8')).toBe(CURRENT);
   }
@@ -1291,7 +1250,7 @@ describe('LockingFilesystem — the agent roles.yaml gate covers every op that l
     }
 
     async function expectRefusedUnderLock(op: Promise<unknown>, versionControl: IVersionControlService, locks: number): Promise<void> {
-      await expect(op).rejects.toBeInstanceOf(RolesYamlNewRoleError);
+      await expect(op).rejects.toMatchObject({ status: 422, payload: { kind: 'roles-yaml-new-role' } });
       expect(versionControl.releaseLockUntouched).toHaveBeenCalledTimes(locks);
       expect(versionControl.releaseLockNoCommit).not.toHaveBeenCalled();
       expect(versionControl.releaseLock).not.toHaveBeenCalled();
@@ -1325,7 +1284,7 @@ describe('LockingFilesystem — the agent roles.yaml gate covers every op that l
       // change is validity: the same line appended to the rewritten file breaks it.
       const rewritten = 'roles:\n  Admin:\n    - a@x.eu';
       const versionControl = racingVersionControl(() => fs.writeFile(path.join(root, ROLES), rewritten));
-      await expect(layer(versionControl).appendFile(ROLES, '    - b@x.eu\n')).rejects.toBeInstanceOf(RolesYamlInvalidError);
+      await expect(layer(versionControl).appendFile(ROLES, '    - b@x.eu\n')).rejects.toMatchObject({ status: 422, payload: { kind: 'roles-yaml-invalid' } });
       expect(versionControl.releaseLockUntouched).toHaveBeenCalledTimes(1);
       expect(versionControl.releaseLockNoCommit).not.toHaveBeenCalled();
       expect(await fs.readFile(path.join(root, ROLES), 'utf-8')).toBe(rewritten);

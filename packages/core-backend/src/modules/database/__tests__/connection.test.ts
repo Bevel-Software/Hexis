@@ -10,6 +10,8 @@ import {
   getDb,
   type Database,
 } from '../connection.js';
+import { setLogger } from '../../../shared/logging.js';
+import { capturingLogger } from '../../../__tests__/capturing-logger.js';
 
 /**
  * Pools here are never connected: `pg.Pool` opens nothing until a query is
@@ -25,6 +27,34 @@ const searchPath = (db: Database): string | undefined =>
 const opened: Database[] = [];
 afterEach(async () => {
   await Promise.all(opened.splice(0).map((db) => closeDb(db)));
+});
+
+describe('an idle connection the server closes', () => {
+  it('is logged, with the error, and let go — the pool has a listener, so the event cannot end the process', () => {
+    // A capturing logger stands in for the process's: the warning is the
+    // behaviour under test, not a side effect to tolerate.
+    const { logger: capturing, lines } = capturingLogger();
+    const previous = setLogger(capturing);
+    try {
+      const db = createDb(URL);
+      opened.push(db);
+      // `pg.Pool` emits an idle client's failure on itself; without a listener
+      // Node throws the event. The terminated-backend error is what a server
+      // restart or a forced drop sends to every idle client.
+      const terminated = Object.assign(new Error('terminating connection due to administrator command'), { code: '57P01' });
+      expect(db.$client.listenerCount('error')).toBe(1);
+      expect(() => db.$client.emit('error', terminated)).not.toThrow();
+      expect(lines).toEqual([
+        {
+          level: 'warn',
+          message: 'an idle database connection was closed by the server; the next query opens a new one:',
+          fields: { module: 'database', err: terminated },
+        },
+      ]);
+    } finally {
+      setLogger(previous);
+    }
+  });
 });
 
 describe('schema per knowledge base', () => {

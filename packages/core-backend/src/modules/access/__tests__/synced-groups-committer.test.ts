@@ -4,9 +4,9 @@ import path from 'node:path';
 import os from 'node:os';
 
 import type { AuthUser, IVersionControlService } from '@bevel-software/platform-shared';
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
+import type { WorkspaceService } from '../../workspace/index.js';
 import type { AccessControlService } from '../access-control.service.js';
-import type { VersionControlEventBus } from '../../version-control/event-bus.js';
+import type { VersionControlEventBus } from '../../version-control/index.js';
 import { createSyncedGroupsCommitter } from '../synced-groups-committer.js';
 import { PushNeedsAgentResolutionError, VersionControlValidationError } from '../../../shared/domain-errors.js';
 

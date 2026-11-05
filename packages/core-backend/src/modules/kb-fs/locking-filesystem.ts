@@ -49,7 +49,6 @@ import {
 } from '@mastra/core/workspace';
 import type { AuthUser, Change, IVersionControlService } from '@bevel-software/platform-shared';
 import { PushNeedsAgentResolutionError } from '../../shared/domain-errors.js';
-import type { FileChangeNotifier } from './file-change-notifier.js';
 import { isAbsence } from '../../shared/fs.contract.js';
 import { DestinationTakenError, lstatOrNull, renameNoReplace, takenError } from '../../shared/rename-no-replace.js';
 import { linkedAncestor } from '../../shared/no-link-below.js';
@@ -167,12 +166,6 @@ export interface LockingFilesystemContext {
    * when the destination is a path the validator's `appliesTo` claims.
    */
   validateWrite?: WriteValidator;
-  /**
-   * Post-commit hook for the BATCH `writeFiles` path (which commits via
-   * `commitChanges` and so skips `runPendingCommit`'s emit). Single-file ops
-   * emit through the queue instead, so they don't need this. Optional.
-   */
-  fileChanges?: FileChangeNotifier;
   /**
    * Optional creator read-grant planner (see `modules/access/creator-access`).
    * When present, a write/mkdir that starts a NEW FOLDER directly under one
@@ -601,7 +594,6 @@ export class LockingFilesystem extends GitGuardedFilesystem {
       ].sort();
       const change = await versionControl.commitChanges(workspaceId, user, summary, scope);
       await release('untouched');
-      if (change) this.lockContext.fileChanges?.emit({ workspaceId, branch, paths: scope, byUser: user });
       return change;
     } catch (err) {
       if (err instanceof PushNeedsAgentResolutionError) {
@@ -1027,16 +1019,10 @@ export class LockingFilesystem extends GitGuardedFilesystem {
     await releaseAll((p) =>
       committed.has(p) || failedSeedDiscards.has(p) ? 'discard' : 'untouched',
     );
-    // This batch path commits via `commitChanges`, NOT the per-file queue, so it
-    // skips `runPendingCommit`'s emit — fire the post-commit hook here with the
-    // WHOLE batch as one event, so an expensive subscriber (id-repair rebuilds the
-    // id index) reacts once per batch, not once per file. A no-op commit (clean
-    // tree) changed nothing, so it emits nothing.
-    if (change) {
-      // `touched` = caller paths + any creator-grant seeds that landed in the
-      // same commit — the exact set this batch may have touched.
-      this.lockContext.fileChanges?.emit({ workspaceId, branch, paths: touched, byUser: user });
-    }
+    // The commit, if one landed, was reported by the git layer as it landed
+    // (`VersionControlHooks.onCommitLanded`) with the paths it committed —
+    // `touched` plus any creator-grant seed in the same commit. Nothing to
+    // announce here.
     return change;
   }
 

@@ -1,13 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { NodeFs } from '../../kb-fs/node-fs.js';
-import type { TreeWalkOptions, WalkListener, WalkResult } from '../../../shared/fs.contract.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { DEFAULT_BRANCH, pluginDisplayNameOf, type AuthUser } from '@bevel-software/platform-shared';
 
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import { AccessControlService } from '../../access/access-control.service.js';
+import type { WorkspaceService } from '../../workspace/index.js';
+import { realAccessControl } from '../../../__tests__/real-access.js';
 import { PushNeedsAgentResolutionError } from '../../../shared/domain-errors.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { KbPluginSource } from '../discovery/kb-plugin-source.js';
@@ -16,22 +15,22 @@ import { testKbContext } from '../../../__tests__/kb-context.js';
 
 // The one walk of the checkout, with a switch that makes it report a hole —
 // the way a folder it cannot list would — to every listener on it. The
-// walk is injected, so the switch is a disk that lies, not a module mock.
+// walk is injected, so the switch is a disk that lies, not a module mock:
+// the real disk the shared fixture hands out, its walk wrapped.
 const walkMock = { holeInTheWalk: false };
-class HoledFs extends NodeFs {
-  override async walkKb(
-    root: string,
-    listeners: readonly WalkListener[],
-    options?: Omit<TreeWalkOptions, 'skip'>,
-  ): Promise<WalkResult> {
-    const result = await super.walkKb(root, listeners, options);
+function holedDisk(): ReturnType<typeof realDisk> {
+  const disk = realDisk();
+  const walkKb = disk.walkKb.bind(disk);
+  disk.walkKb = async (root, listeners, options) => {
+    const result = await walkKb(root, listeners, options);
     if (walkMock.holeInTheWalk) {
       const err = Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
       for (const l of listeners) await l.onHole?.('KnowledgeBase/Notes', err);
       result.holes.push('KnowledgeBase/Notes');
     }
     return result;
-  }
+  };
+  return disk;
 }
 
 /**
@@ -58,15 +57,19 @@ describe('PluginRenameService', () => {
   let repo: string;
   let commits: { summary: string; paths: string[] }[];
   let failNextCommit: Error | null;
+  /** What each workspace-relative path last read as when it was committed — the driver's picture of the tree. */
+  let committed: Map<string, string>;
   let failWriteMatching: string | null;
   let invalidated: number;
-  let access: AccessControlService;
+  let access: ReturnType<typeof realAccessControl>;
   let svc: PluginRenameService;
 
+  // A seed is a committed file: what origin has before the rename runs.
   const write = async (rel: string, text: string) => {
     const abs = path.join(repo, rel);
     await fs.mkdir(path.dirname(abs), { recursive: true });
     await fs.writeFile(abs, text);
+    committed.set(`${KB_DIR}/${rel}`, text);
   };
   const read = (rel: string) => fs.readFile(path.join(repo, rel), 'utf-8');
   const manifest = async () => JSON.parse(await read('Plugins/GTM/plugin.json'));
@@ -77,6 +80,7 @@ describe('PluginRenameService', () => {
     commits = [];
     failNextCommit = null;
     failWriteMatching = null;
+    committed = new Map();
     walkMock.holeInTheWalk = false;
     invalidated = 0;
     const workspaceService = {
@@ -101,7 +105,19 @@ describe('PluginRenameService', () => {
           failNextCommit = null;
           throw err;
         }
+        // Git's rule: a tree whose files all read as they were last committed
+        // has nothing to commit, and the service is answered null.
+        let changed = false;
+        for (const p of paths) {
+          const now = await fs.readFile(path.join(root, wsId, p), 'utf-8');
+          if (now !== committed.get(p)) {
+            changed = true;
+            committed.set(p, now);
+          }
+        }
+        if (!changed) return null;
         commits.push({ summary, paths });
+        return { sha: 'c0ffee' } as never;
       },
     };
 
@@ -114,8 +130,8 @@ describe('PluginRenameService', () => {
     await write('Skills/Eng/deploy/access.md', DEPLOY_RULES);
     await write('Skills/Eng/deploy/SKILL.md', '---\ndescription: Ship it.\n---\n');
 
-    access = new AccessControlService(workspaceService, KB_DIR, new NodeFs());
-    const disk = new HoledFs();
+    access = realAccessControl(workspaceService, KB_DIR, realDisk());
+    const disk = holedDisk();
     svc = new PluginRenameService(workspaceService, driver, access, new KbPluginSource(disk, testKbContext({ kbDirName: KB_DIR })), disk, testKbContext({ kbDirName: KB_DIR }), undefined, () => {
       invalidated += 1;
     });
@@ -125,7 +141,7 @@ describe('PluginRenameService', () => {
   it('refuses to claim a name against a listing with a hole in it — an unreadable folder may hold that very plugin', async () => {
     // Discovery as the walker reports it when a folder exists but could not
     // be read: the plugins it did see, plus the hole.
-    const real = new KbPluginSource(new NodeFs(), testKbContext({ kbDirName: KB_DIR }));
+    const real = new KbPluginSource(realDisk(), testKbContext({ kbDirName: KB_DIR }));
     const holed = {
       dialect: 'kb',
       discover: async (root: string) => ({ ...(await real.discover(root)), unreadable: ['Plugins/Hidden'] }),
@@ -135,7 +151,7 @@ describe('PluginRenameService', () => {
       { commitChanges: async () => { throw new Error('must not commit'); } },
       access,
       holed,
-      new NodeFs(),
+      realDisk(),
       testKbContext({ kbDirName: KB_DIR }),
     );
     await expect(svcOverHole.rename(manager, 'gtm', { name: 'go-to-market' })).rejects.toMatchObject({
@@ -156,7 +172,7 @@ describe('PluginRenameService', () => {
   });
 
   it('tells a NON-manager nothing about the tree — a holed discovery is still just "unknown plugin" to them', async () => {
-    const real = new KbPluginSource(new NodeFs(), testKbContext({ kbDirName: KB_DIR }));
+    const real = new KbPluginSource(realDisk(), testKbContext({ kbDirName: KB_DIR }));
     const holed = {
       dialect: 'kb',
       discover: async (root: string) => ({ ...(await real.discover(root)), unreadable: ['Plugins/Hidden'] }),
@@ -166,7 +182,7 @@ describe('PluginRenameService', () => {
       { commitChanges: async () => { throw new Error('must not commit'); } },
       access,
       holed,
-      new NodeFs(),
+      realDisk(),
       testKbContext({ kbDirName: KB_DIR }),
     );
     const refusal = await svcOverHole.rename(member, 'gtm', { name: 'go-to-market' }).catch((e: unknown) => e);
@@ -270,7 +286,7 @@ describe('PluginRenameService', () => {
       expect(await read('Skills/Eng/deploy/access.md')).toBe(DEPLOY_RULES);
       // The three answers that must never diverge: the rename's, the
       // discovery source's, and the shared reader's over the file itself.
-      const { plugins } = await new KbPluginSource(new NodeFs(), testKbContext({ kbDirName: KB_DIR })).discover(repo);
+      const { plugins } = await new KbPluginSource(realDisk(), testKbContext({ kbDirName: KB_DIR })).discover(repo);
       const found = plugins.find((p) => p.folder === 'Plugins/GTM')!;
       expect([found.name, found.displayName]).toEqual([result.name, result.displayName]);
       expect(pluginDisplayNameOf(JSON.parse(await read('Plugins/GTM/plugin.json')))).toBe(result.displayName);
@@ -411,6 +427,15 @@ describe('PluginRenameService', () => {
     expect(await read('Skills/Eng/deploy/access.md')).toContain('plugin/go-to-market/read');
     expect(invalidated).toBe(1);
     expect(await access.canRead(wsId, member.email, 'Skills/Eng/deploy/SKILL.md')).toBe(true);
+  });
+
+  it('changes no bytes when the manifest already reads as the rename writes it — a clean tree, nothing to commit', async () => {
+    // The manifest already reads exactly as the rename will write it.
+    const asWritten = `${JSON.stringify({ name: 'gtm', version: '1.0.0', displayName: 'GTM' }, null, 2)}\n`;
+    await write('Plugins/GTM/plugin.json', asWritten);
+    await svc.rename(manager, 'gtm', { displayName: 'GTM' });
+    expect(await read('Plugins/GTM/plugin.json')).toBe(asWritten);
+    expect(commits).toEqual([]);
   });
 
   it('will not rename a plugin read from an external format — that repository owns its name', async () => {

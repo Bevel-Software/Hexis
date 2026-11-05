@@ -1024,6 +1024,10 @@ export async function createCoreServices(
   // id-repair keeps the id namespace collision-free. Subscribers are registered
   // below, once the reacting services exist.
   const fileChangeNotifier = new FileChangeNotifier();
+  // Every commit the git service lands — a save, an autosave checkpoint, a
+  // batch, a merge, a `commit_change` — reaches the notifier through this one
+  // registration, and nothing else emits on it (a test pins both).
+  versionControlHooks.onCommitLanded((change) => fileChangeNotifier.emit(change));
   // Who tells the reviewers of an opened change request: the composition root
   // of a distribution registers its listener here, after this returns (see
   // `ChangeRequestHooks`).
@@ -1040,7 +1044,6 @@ export async function createCoreServices(
     kb,
     changeGate,
     eventBus,
-    fileChangeNotifier,
     // Exposed as `versionControlService.hooks` — the SAME instance GitService and
     // the agent-access gate consult, so a deployment's registrations against
     // it reach every hook point.
@@ -1254,7 +1257,6 @@ export async function createCoreServices(
     pluginSource,
     pluginLocks: pluginProvisionService,
     events: eventBus,
-    fileChanges: fileChangeNotifier,
     // Its own lock: one starter-pack choice at a time, a concern no other
     // service's mutex serialises.
     choosing: new WorkspaceMutex(),

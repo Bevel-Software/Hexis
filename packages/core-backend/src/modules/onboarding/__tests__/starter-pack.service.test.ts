@@ -4,8 +4,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { DEFAULT_KB_LAYOUT, type AuthUser, type IVersionControlService, type KbLayout } from '@bevel-software/platform-shared';
 import { testKbContext } from '../../../__tests__/kb-context.js';
-import { NodeFs } from '../../kb-fs/node-fs.js';
-import { WorkspaceMutex } from '../../kb-fs/mutex.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
+import { WorkspaceMutex } from '../../kb-fs/index.js';
 import { KbPluginSource } from '../../plugins/index.js';
 import { CLAIM_TTL_MS, StarterPackError, StarterPackService, commitSubjectOf, summaryOf } from '../starter-pack.service.js';
 
@@ -92,8 +92,8 @@ function harness({
   const svc = new StarterPackService({
     packsDir,
     kb,
-    disk: new NodeFs(),
-    pluginSource: new KbPluginSource(new NodeFs(), kb),
+    disk: realDisk(),
+    pluginSource: new KbPluginSource(realDisk(), kb),
     pluginLocks,
     workspaceService: {
       getOrCreateForBranch: vi.fn(async () => ({ id: 'ws-main' })),

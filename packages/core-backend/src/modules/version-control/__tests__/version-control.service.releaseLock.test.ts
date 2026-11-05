@@ -4,14 +4,14 @@ import type { AuthUser, Change } from '@bevel-software/platform-shared';
 import type { GitService } from '../git/git.service.js';
 import type { PullRequestService } from '../git/pull-request.service.js';
 import type { IChangeRequestReviewService } from '../change-request-review/change-request-review.interface.js';
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import type { IAccessControl } from '../../access/access-control.interface.js';
+import type { WorkspaceService } from '../../workspace/index.js';
+import type { IAccessControl } from '../../access/index.js';
 import { FileLockService } from '../file-lock.service.js';
 import { PendingCommitsService } from '../pending-commits.service.js';
 import { VersionControlEventBus } from '../event-bus.js';
 import { VersionControlService, syncConflictMessage } from '../version-control.service.js';
 import { openChangeGate } from '../../../__tests__/open-change-gate.js';
-import type { Database } from '../../database/connection.js';
+import type { Database } from '../../database/index.js';
 import {
   PullRebaseConflictError,
   PullRebaseConflictError,
@@ -87,24 +87,39 @@ function makePending(): PendingCommitsService {
   } as unknown as PendingCommitsService;
 }
 
-function makeGit(overrides: Partial<{
+interface GitBehavior {
   commitFile: Change | null;
   pushBehavior: 'ok' | 'nff' | 'auth-fail';
   pullBehavior: 'ok' | 'fail' | 'conflict';
   pushAfterPullBehavior: 'ok' | 'fail';
   hasUnpushedCommits: boolean;
-}> = {}): GitService {
-  const commitFileResult = overrides.commitFile === undefined ? CHANGE : overrides.commitFile;
-  const pushBehavior = overrides.pushBehavior ?? 'ok';
-  const pullBehavior = overrides.pullBehavior ?? 'ok';
-  const pushAfterPullBehavior = overrides.pushAfterPullBehavior ?? 'ok';
+}
+
+/** The git stub, whose behaviour a test changes in place (`behave`) — the service keeps the one instance it was given. */
+type GitStub = GitService & { behave(next: Partial<GitBehavior>): void };
+
+function makeGit(overrides: Partial<GitBehavior> = {}): GitStub {
+  const b: GitBehavior = {
+    commitFile: CHANGE,
+    pushBehavior: 'ok',
+    pullBehavior: 'ok',
+    pushAfterPullBehavior: 'ok',
+    hasUnpushedCommits: false,
+    ...overrides,
+  };
   let pushCalls = 0;
+  const behave = (next: Partial<GitBehavior>): void => {
+    Object.assign(b, next);
+    pushCalls = 0;
+  };
   return {
-    commitFile: vi.fn().mockResolvedValue(commitFileResult),
+    behave,
+    commitFile: vi.fn().mockImplementation(async () => b.commitFile),
     discardPath: vi.fn().mockResolvedValue(undefined),
-    hasUnpushedCommits: vi.fn().mockResolvedValue(overrides.hasUnpushedCommits ?? false),
+    hasUnpushedCommits: vi.fn().mockImplementation(async () => b.hasUnpushedCommits),
     push: vi.fn().mockImplementation(async () => {
       pushCalls++;
+      const { pushBehavior, pushAfterPullBehavior } = b;
       const phase = pushCalls === 1 ? pushBehavior : pushAfterPullBehavior;
       if (phase === 'nff') {
         throw new Error(
@@ -122,11 +137,11 @@ function makeGit(overrides: Partial<{
       }
     }),
     pull: vi.fn().mockImplementation(async () => {
-      if (pullBehavior === 'fail') throw new Error('git pull failed: merge conflict');
-      if (pullBehavior === 'conflict') throw new PullRebaseConflictError('feat/x', ['foo.md'], 'CONFLICT (content)');
+      if (b.pullBehavior === 'fail') throw new Error('git pull failed: merge conflict');
+      if (b.pullBehavior === 'conflict') throw new PullRebaseConflictError('feat/x', ['foo.md'], 'CONFLICT (content)');
       return { treeChanged: true };
     }),
-  } as unknown as GitService;
+  } as unknown as GitStub;
 }
 
 function makeFacade(
@@ -642,18 +657,15 @@ describe('VersionControlService — git-sync visibility events', () => {
   });
 
   it('emits git-sync-recovered once when a push finally lands, then goes quiet again', async () => {
-    const failing = makeGit({ pushBehavior: 'auth-fail' });
-    const svc = makeFacade(failing, makeFileLocks(USER.id), makePending(), events);
+    const git = makeGit({ pushBehavior: 'auth-fail' });
+    const svc = makeFacade(git, makeFileLocks(USER.id), makePending(), events);
     await svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER).catch(() => undefined);
     expect(kinds()).toEqual(['git-sync-failed']);
 
     // Same service instance — the failing/healthy state is per-workspace and
-    // lives on it, so recovery has to be observed through the same object.
-    const healthy = makeGit();
-    const recovered = makeFacade(healthy, makeFileLocks(USER.id), makePending(), events);
-    Object.assign(svc as unknown as Record<string, unknown>, {
-      git: (recovered as unknown as { git: GitService }).git,
-    });
+    // lives on it, so recovery has to be observed through the same object;
+    // the remote comes back by the stub's behaviour changing.
+    git.behave({ pushBehavior: 'ok' });
 
     await svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER);
     await svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER);
@@ -672,15 +684,11 @@ describe('VersionControlService — git-sync visibility events', () => {
     // callers hand the encoded form (user%2Ffeat). The tracker must treat
     // them as one workspace, or a failure recorded by one caller can never
     // be cleared by the other's success and the banner sticks forever.
-    const svc = makeFacade(
-      makeGit({ pushBehavior: 'auth-fail', pushAfterPullBehavior: 'fail' }),
-      makeFileLocks(USER.id),
-      makePending(),
-      events,
-    );
+    const git = makeGit({ pushBehavior: 'auth-fail', pushAfterPullBehavior: 'fail' });
+    const svc = makeFacade(git, makeFileLocks(USER.id), makePending(), events);
     await svc.runPendingCommit('user%2Ffeat', 'user/feat', 'foo.md', USER).catch(() => undefined);
 
-    Object.assign(svc as unknown as Record<string, unknown>, { git: makeGit() });
+    git.behave({ pushBehavior: 'ok', pushAfterPullBehavior: 'ok' });
     await svc.runPendingCommit('user/feat', 'user/feat', 'foo.md', USER);
 
     const sync = emitSpy.mock.calls
@@ -694,18 +702,20 @@ describe('VersionControlService — git-sync visibility events', () => {
   });
 
   it('tracks workspaces independently — one recovering neither clears nor suppresses another', async () => {
-    const failingGit = () => makeGit({ pushBehavior: 'auth-fail', pushAfterPullBehavior: 'fail' });
-    const svc = makeFacade(failingGit(), makeFileLocks(USER.id), makePending(), events);
+    const failing = { pushBehavior: 'auth-fail', pushAfterPullBehavior: 'fail' } as const;
+    const git = makeGit(failing);
+    const svc = makeFacade(git, makeFileLocks(USER.id), makePending(), events);
 
     // Both workspaces broken.
     await svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER).catch(() => undefined);
+    git.behave(failing);
     await svc.runPendingCommit('ws-2', 'feat/y', 'bar.md', USER).catch(() => undefined);
 
     // ws-1 recovers; ws-2 is still broken and must (a) not be cleared by
     // ws-1's recovery and (b) still announce its own next failure.
-    Object.assign(svc as unknown as Record<string, unknown>, { git: makeGit() });
+    git.behave({ pushBehavior: 'ok', pushAfterPullBehavior: 'ok' });
     await svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER);
-    Object.assign(svc as unknown as Record<string, unknown>, { git: failingGit() });
+    git.behave(failing);
     await svc.runPendingCommit('ws-2', 'feat/y', 'bar.md', USER).catch(() => undefined);
 
     expect(

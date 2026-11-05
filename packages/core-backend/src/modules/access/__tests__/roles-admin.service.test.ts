@@ -1,12 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { NodeFs } from '../../kb-fs/node-fs.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import type { VersionControlService } from '../../version-control/version-control.service.js';
-import type { VersionControlEventBus } from '../../version-control/event-bus.js';
+import type { WorkspaceService } from '../../workspace/index.js';
+import type { VersionControlService } from '../../version-control/index.js';
+import type { VersionControlEventBus } from '../../version-control/index.js';
 import type { FileTreeEntry, VersionControlEventPayload } from '@bevel-software/platform-shared';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { AccessControlService } from '../access-control.service.js';
@@ -168,10 +168,10 @@ describe('RolesAdminService', () => {
     repo = path.join(workspaceDir, KB);
     await write(repo, 'roles.yaml', ROLES);
     ws = stubWorkspace(workspaceDir);
-    access = new AccessControlService(ws, KB, new NodeFs());
+    access = new AccessControlService(ws, KB, realDisk());
     versionControl = stubVersionControl();
     bus = stubEventBus();
-    svc = new RolesAdminService(ws, versionControl.svc, access, new NodeFs(), KB, () => DEFAULT_BRANCH, bus.bus, [
+    svc = new RolesAdminService(ws, versionControl.svc, access, realDisk(), KB, () => DEFAULT_BRANCH, bus.bus, [
       'recovery-admin@example.com',
     ]);
   });
@@ -193,7 +193,7 @@ describe('RolesAdminService', () => {
     // `DEFAULT_BRANCH` and froze it — every roles route then failed branch
     // validation with `Invalid branch name "": empty name` until a restart.
     let branch = '';
-    const late = new RolesAdminService(ws, versionControl.svc, access, new NodeFs(), KB, () => branch, bus.bus);
+    const late = new RolesAdminService(ws, versionControl.svc, access, realDisk(), KB, () => branch, bus.bus);
     branch = DEFAULT_BRANCH;
     const roster = await late.getRoster(ADMIN.email);
     expect(roster.map((r) => r.canonical)).toEqual(['admin', 'sales']);
@@ -257,7 +257,7 @@ describe('RolesAdminService', () => {
     const corrupt = 'roles:\n  Admin:\n    - a@x.eu\n  Admin:\n    - b@x.eu\n';
     await write(repo, 'roles.yaml', corrupt);
     access.invalidate(WS);
-    const adminless = new RolesAdminService(ws, versionControl.svc, access, new NodeFs(), KB, () => DEFAULT_BRANCH, bus.bus);
+    const adminless = new RolesAdminService(ws, versionControl.svc, access, realDisk(), KB, () => DEFAULT_BRANCH, bus.bus);
     // 409, not 500: the route helper hides >=500 bodies behind a generic
     // message, and this break-glass refusal must reach the operator verbatim.
     await expect(adminless.recover(ADMIN)).rejects.toMatchObject({
@@ -572,8 +572,8 @@ describe('roster referencedBy under group shadowing', () => {
     svc = new RolesAdminService(
       ws,
       stubVersionControl().svc,
-      new AccessControlService(ws, KB, new NodeFs()),
-      new NodeFs(),
+      new AccessControlService(ws, KB, realDisk()),
+      realDisk(),
       KB,
       () => DEFAULT_BRANCH,
       stubEventBus().bus,
@@ -630,8 +630,8 @@ describe('Admin fixed members — the deployment admin', () => {
     return new RolesAdminService(
       ws,
       versionControl.svc,
-      new AccessControlService(ws, KB, new NodeFs()),
-      new NodeFs(),
+      new AccessControlService(ws, KB, realDisk()),
+      realDisk(),
       KB,
       () => DEFAULT_BRANCH,
       stubEventBus().bus,

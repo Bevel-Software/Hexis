@@ -1,11 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { NodeFs } from '../../kb-fs/node-fs.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import type { VersionControlService } from '../../version-control/version-control.service.js';
+import type { WorkspaceService } from '../../workspace/index.js';
+import type { VersionControlService } from '../../version-control/index.js';
 import type { AuthUser, FileTreeEntry } from '@bevel-software/platform-shared';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { AccessControlService } from '../access-control.service.js';
@@ -131,8 +131,8 @@ describe('RolesAdminService — capabilities, group assignment, conversion', () 
     service = new RolesAdminService(
       workspace,
       versionControl.svc,
-      new AccessControlService(workspace as never, KB, new NodeFs()),
-      new NodeFs(),
+      new AccessControlService(workspace as never, KB, realDisk()),
+      realDisk(),
       KB,
       () => DEFAULT_BRANCH,
     );
@@ -216,8 +216,8 @@ describe('RolesAdminService — capabilities, group assignment, conversion', () 
     const svc = new RolesAdminService(
       workspace,
       versionControl.svc,
-      new AccessControlService(workspace as never, KB, new NodeFs()),
-      new NodeFs(),
+      new AccessControlService(workspace as never, KB, realDisk()),
+      realDisk(),
       KB,
       () => DEFAULT_BRANCH,
     );
@@ -280,8 +280,8 @@ describe('RolesAdminService — capabilities, group assignment, conversion', () 
     const svc = new RolesAdminService(
       workspace,
       versionControl.svc,
-      new AccessControlService(workspace as never, KB, new NodeFs()),
-      new NodeFs(),
+      new AccessControlService(workspace as never, KB, realDisk()),
+      realDisk(),
       KB,
       () => DEFAULT_BRANCH,
     );
@@ -305,8 +305,8 @@ describe('RolesAdminService — capabilities, group assignment, conversion', () 
     const svc = new RolesAdminService(
       workspace,
       versionControl.svc,
-      new AccessControlService(workspace as never, KB, new NodeFs()),
-      new NodeFs(),
+      new AccessControlService(workspace as never, KB, realDisk()),
+      realDisk(),
       KB,
       () => DEFAULT_BRANCH,
     );
