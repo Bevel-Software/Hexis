@@ -12,9 +12,12 @@
  *
  * Only the version-control service emits here: for a single-file write from
  * `runPendingCommit`, and for a batch through `announceCommitted`, which the
- * lock-aware filesystem calls once its locks are released. The notifier is
- * never handed to a filesystem or a caller — a construction site that could
- * leave it out is one whose batches would announce nothing.
+ * lock-aware filesystem calls once its locks are released — as does every
+ * other committer that lands a change outside it (the admin commit driver,
+ * the plugin rename, the access- and join-request splices, a proposal from an
+ * embedded page). The notifier is never handed to a filesystem or a caller —
+ * a construction site that could leave it out is one whose batches would
+ * announce nothing.
  *
  * Every listener is invoked inside try/catch — a throwing subscriber must never
  * fail the commit that triggered it (mirrors the SSE bus's per-subscriber

@@ -144,6 +144,7 @@ export interface JoinRequestJobsDeps {
     | 'createBranch'
     | 'listBranches'
     | 'commitChanges'
+    | 'announceCommitted'
     | 'openChangeRequest'
     | 'listChangeRequestsAuthoredBy'
   >;
@@ -596,7 +597,12 @@ export class PluginJoinRequestJobs {
       // replaced, and it left recorded requests owed forever.
       await stillOurs();
       await workspaceService.writeFile(ws.id, accessPath, spliced.text);
-      await versionControl.commitChanges(ws.id, user, `Request access to ${target.displayName}`);
+      const change = await versionControl.commitChanges(ws.id, user, `Request access to ${target.displayName}`);
+      // A landed commit is announced like every other, once (see
+      // `IVersionControlService.announceCommitted`): no file lock is held
+      // here, so the reactors may act on it at once. A clean tree announces
+      // nothing — the splice that no-oped above commits nothing.
+      if (change) versionControl.announceCommitted({ workspaceId: ws.id, branch, paths: [accessPath], byUser: user });
     }
     // The last gate, and the one that matters most: everything above is
     // idempotent and reusable — a branch, a commit on it — but a change

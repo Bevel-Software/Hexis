@@ -67,9 +67,12 @@ export type Change = CommitAttribution;
 export type ChangeInput = ShareChangesRequest;
 
 /**
- * A set of files committed and pushed as one change, as the version-control
+ * A set of files committed as one change — pushed, or landed locally with its
+ * push still owed to the pending-commits worker — as the version-control
  * service announces it to the in-process reactors (catalog invalidation,
  * id-repair, a deployment's own listeners) once the files' locks are released.
+ * A reactor reads the working tree, which carries the commit either way; the
+ * later push makes no new commit and is not announced again.
  * One announcement per commit: a single-file save names its one path, a batch
  * names every path it committed, so a reactor that does expensive work per
  * announcement does it once per batch.

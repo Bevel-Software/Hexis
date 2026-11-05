@@ -464,18 +464,25 @@ export class EmbedService implements IEmbedService {
     // The workspace service's own per-path turn is that queue — the one the
     // app's file routes take around a write whose decision spans more than
     // one call — and the write inside takes the same turn, re-entrantly.
-    await this.workspaceService.withPathTurn(workspace.id, wsPath, async () => {
+    const change = await this.workspaceService.withPathTurn(workspace.id, wsPath, async () => {
       await this.workspaceService.writeFile(workspace.id, wsPath, content);
       // Scoped to the one path this proposal is about: the suggestions branch
       // is shared by everything this person has proposed, and a bare commit
       // would sweep in another in-flight write of theirs under this message.
-      await this.versionControlService.commitChanges(
+      return this.versionControlService.commitChanges(
         workspace.id,
         user,
         `Propose changes to ${claims.repoRelative}`,
         [wsPath],
       );
     });
+    // A landed commit is announced like every other, once (see
+    // `IVersionControlService.announceCommitted`) — after the turn is given
+    // back, since a reactor may write to the same path and must not do so
+    // inside this proposal's turn. A clean tree announces nothing.
+    if (change) {
+      this.versionControlService.announceCommitted({ workspaceId: workspace.id, branch, paths: [wsPath], byUser: user });
+    }
     try {
       const created = await this.versionControlService.openChangeRequest(workspace.id, user, {
         sourceBranch: branch,

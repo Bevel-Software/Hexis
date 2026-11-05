@@ -264,6 +264,29 @@ describe('LockingFilesystem.moveWithEdits', () => {
     expect(enqueued).not.toContain(`${KB}/Projects/A`);
     expect(enqueued).not.toContain(`${KB}/Topics/Deep/A`);
     expect(untouched).toEqual([`${KB}/Projects/A`, `${KB}/Topics/Deep/A`]);
+    // The commit landed, so it is announced — once, with the committed scope,
+    // after every lock went back (enqueued or untouched); the worker's later
+    // push announces nothing of its own.
+    const announce = versionControl.announceCommitted as ReturnType<typeof vi.fn>;
+    expect(announce).toHaveBeenCalledTimes(1);
+    expect(announce).toHaveBeenCalledWith({
+      workspaceId: WS,
+      branch: 'feature-test',
+      byUser: USER,
+      paths: [
+        `${KB}/Index.md`,
+        `${KB}/Projects/A/One.md`,
+        `${KB}/Projects/A/Two.md`,
+        `${KB}/Projects/A/pic.png`,
+        `${KB}/Topics/Deep/A/One.md`,
+        `${KB}/Topics/Deep/A/Two.md`,
+        `${KB}/Topics/Deep/A/pic.png`,
+      ],
+    });
+    const announcedAt = announce.mock.invocationCallOrder[0]!;
+    for (const fn of [versionControl.releaseLock, versionControl.releaseLockUntouched]) {
+      for (const order of (fn as ReturnType<typeof vi.fn>).mock.invocationCallOrder) expect(order).toBeLessThan(announcedAt);
+    }
   });
 
   it('locks every file of a moved folder at its old and its new path', async () => {

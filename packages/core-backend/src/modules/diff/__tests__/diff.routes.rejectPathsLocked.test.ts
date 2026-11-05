@@ -56,7 +56,12 @@ async function makeHarness(overrides: {
     overrides.commit?.();
     return { sha: 'abc', summary } as never;
   });
-  const versionControl = { acquireLock, releaseLockNoCommit, commitChanges, announceCommitted: () => undefined } as unknown as IVersionControlService;
+  // Recorded like the locks and the commit, so the test pins that the
+  // reverted batch is announced once, with its paths, after every release.
+  const announceCommitted = vi.fn((change: { paths: string[] }) => {
+    calls.push(`announce:${change.paths.join(',')}`);
+  });
+  const versionControl = { acquireLock, releaseLockNoCommit, commitChanges, announceCommitted } as unknown as IVersionControlService;
 
   const revertPlan = vi.fn(async (_ws: string, paths: string[]) => ({
     workspaceDir,
@@ -87,13 +92,15 @@ describe('rejectPathsLocked', () => {
       'knowledge-base/added.md',
     ]);
 
-    // All locks first (sorted), ONE commit, then per-path release (no per-file commit).
+    // All locks first (sorted), ONE commit, then per-path release (no per-file
+    // commit), then ONE announcement of the reverted batch, after every release.
     expect(h.calls).toEqual([
       'acquire:knowledge-base/a.md:true',
       'acquire:knowledge-base/added.md:true',
       'commit:Revert agent changes (2 files)',
       'releaseNoCommit:knowledge-base/a.md',
       'releaseNoCommit:knowledge-base/added.md',
+      'announce:knowledge-base/a.md,knowledge-base/added.md',
     ]);
     // Disk: baseline restored, agent-added file gone.
     expect(await fs.readFile(path.join(h.workspaceDir, 'knowledge-base/a.md'), 'utf-8')).toBe('baseline\n');

@@ -117,6 +117,7 @@ function build(opts: Opts = {}) {
     releaseLock: vi.fn(async () => undefined),
     releaseLockNoCommit: vi.fn(async () => undefined),
     commitChanges: vi.fn(async () => ({ sha: 'deadbee' })),
+    announceCommitted: vi.fn(),
     openChangeRequest: opts.openChangeRequest ?? vi.fn(async () => ({ number: 42 })),
   };
   const gitService = {
@@ -593,6 +594,32 @@ describe('EmbedService: saving as a writer', () => {
 });
 
 describe('EmbedService: proposing as a non-writer', () => {
+  it('announces the landed proposal commit once, after its turn, as the viewer; a clean tree announces nothing', async () => {
+    const { service, workspaceService, versionControlService } = build({ canWrite: false });
+    const { token } = await service.mintForUser({ userId: USER.id, reference: REPO });
+    await service.propose(token, 'proposed text');
+    const branch = 'suggestions/alice-u-1/knowledge';
+    expect(versionControlService.announceCommitted).toHaveBeenCalledTimes(1);
+    expect(versionControlService.announceCommitted).toHaveBeenCalledWith({
+      workspaceId: encodeURIComponent(branch),
+      branch,
+      paths: [WS],
+      byUser: expect.objectContaining({ id: USER.id }),
+    });
+    // After the commit, and outside the per-path turn: a reactor may write to
+    // the same path, and must not do so inside this proposal's turn.
+    expect(versionControlService.announceCommitted.mock.invocationCallOrder[0]).toBeGreaterThan(
+      versionControlService.commitChanges.mock.invocationCallOrder[0]!,
+    );
+    const turnSettled = await workspaceService.withPathTurn.mock.results[0]!.value;
+    expect(turnSettled).toEqual({ sha: 'deadbee' });
+
+    // Nothing new on the branch: no announcement.
+    versionControlService.commitChanges.mockResolvedValueOnce(null);
+    await service.propose(token, 'proposed text');
+    expect(versionControlService.announceCommitted).toHaveBeenCalledTimes(1);
+  });
+
   it('commits to the viewer OWN suggestions branch and opens a change request', async () => {
     const { service, workspaceService, versionControlService } = build({ canWrite: false });
     const { token } = await service.mintForUser({ userId: USER.id, reference: REPO });

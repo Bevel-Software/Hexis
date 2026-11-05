@@ -991,7 +991,7 @@ export class LockingFilesystem extends GitGuardedFilesystem {
         );
         // The commit exists, so it is announced like any other, once: the
         // worker's later push makes no new commit and announces nothing.
-        versionControl.announceCommitted({ workspaceId, branch, paths: touched, byUser: user });
+        versionControl.announceCommitted({ workspaceId, branch, paths: [...touched].sort(), byUser: user });
         throw err;
       }
       // A write or the commit threw — nothing of THIS batch should land.
@@ -1040,8 +1040,9 @@ export class LockingFilesystem extends GitGuardedFilesystem {
     // (clean tree) changed nothing, so it announces nothing.
     if (change) {
       // `touched` = caller paths + any creator-grant seeds that landed in the
-      // same commit — the exact set this batch may have touched.
-      versionControl.announceCommitted({ workspaceId, branch, paths: touched, byUser: user });
+      // same commit — the exact set this batch may have touched, sorted as
+      // the announcement's contract says (seeds land in write order).
+      versionControl.announceCommitted({ workspaceId, branch, paths: [...touched].sort(), byUser: user });
     }
     return change;
   }

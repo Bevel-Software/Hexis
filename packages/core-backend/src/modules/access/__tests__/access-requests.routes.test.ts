@@ -87,6 +87,7 @@ async function makeHarness(opts: HarnessOpts = {}) {
       return { name, isDefault: false, isProtected: false };
     }),
     commitChanges: vi.fn(async () => null),
+    announceCommitted: vi.fn(),
     openChangeRequest: vi.fn(async (_ws: string, _u: unknown, input: unknown) => {
       opened.push(input);
       return { number: 77 };
@@ -194,6 +195,31 @@ describe('POST /workspace/:id/access/request', () => {
     expect(h.written.map((w) => w.path)).toEqual([FOLDER_RULES]);
     expect(h.written[0].text).toContain('owner:');
     expect(h.written[0].text).toContain(RITA.email);
+  });
+
+  it('announces the landed grant commit once, as the requester; a clean tree announces nothing', async () => {
+    // The harness's commit answers null (nothing new on the branch): no announcement.
+    const quiet = await makeHarness();
+    server = quiet.server;
+    await post(`${quiet.base}/${LIVE_WS}/access/request`, folderBody);
+    expect(quiet.versionControl.announceCommitted).not.toHaveBeenCalled();
+    await new Promise<void>((r) => server!.close(() => r()));
+
+    // A commit that landed is announced like every other landed commit: once,
+    // with the rules file it wrote, on the request's branch, as the person.
+    const h = await makeHarness();
+    server = h.server;
+    (h.versionControl.commitChanges as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ sha: 'abc' });
+    const res = await post(`${h.base}/${LIVE_WS}/access/request`, folderBody);
+    expect(res.status).toBe(200);
+    const branch = joinBranchFor(RITA.email, FOLDER);
+    expect(h.versionControl.announceCommitted).toHaveBeenCalledTimes(1);
+    expect(h.versionControl.announceCommitted).toHaveBeenCalledWith({
+      workspaceId: workspaceIdForBranch(branch),
+      branch,
+      paths: [FOLDER_RULES],
+      byUser: expect.objectContaining({ email: RITA.email }),
+    });
   });
 
   it("names the person, the level, the path and the note in the description", async () => {

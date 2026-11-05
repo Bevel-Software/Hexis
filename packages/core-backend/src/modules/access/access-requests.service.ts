@@ -195,11 +195,16 @@ export class AccessRequestsService {
       });
     if (onBranch !== spliced.text) {
       await workspaceService.writeFile(ws.id, wsRulesPath, spliced.text);
-      await versionControl.commitChanges(
+      const change = await versionControl.commitChanges(
         ws.id,
         user,
         `Request ${LEVEL_LABEL[level].toLowerCase()} access to ${itemName}`,
       );
+      // A landed commit is announced like every other, once (see
+      // `IVersionControlService.announceCommitted`): this write holds no file
+      // lock, so the reactors may act on it at once. A clean tree announces
+      // nothing.
+      if (change) versionControl.announceCommitted({ workspaceId: ws.id, branch, paths: [wsRulesPath], byUser: user });
     }
 
     try {
