@@ -6,7 +6,7 @@ import { GitContext, type GitContextValue } from '../../../../git';
 import { clearToken, setToken } from '../../../../../lib/api';
 import { WorkspaceContext, type WorkspaceContextValue } from '../../../state/workspace.context';
 import { sha256Hex } from '@bevel-software/platform-shared';
-import { ALLOWED_PAGES_KEY } from '../pageConsentMemory';
+import { rememberedDigests } from '../pageConsentMemory';
 import { frameChannel, stubServer } from './pageToolsHarness';
 
 /**
@@ -150,13 +150,13 @@ describe('the consent card on the file page', () => {
     fireEvent.click(await screen.findByRole('button', { name: "Don't allow" }));
     await waitFor(() => expect(frame.replies.at(-1)).toEqual({ type: 'bevel.tool.response', requestId: 'w1', ok: false, error: 'denied', code: 'denied' }));
     expect(server.mcp).toEqual([]);
-    expect(window.localStorage.getItem(ALLOWED_PAGES_KEY)).toBeNull();
+    expect(rememberedDigests()).toEqual([]);
 
     frame.post({ type: 'bevel.tool.call', requestId: 'w2', fn: 'callTool', args: ['edit_file', {}] });
     fireEvent.click(await screen.findByRole('button', { name: 'Allow' }));
     await waitFor(() => expect(frame.replies.at(-1)).toMatchObject({ requestId: 'w2', ok: true }));
     // The digest of the source the renderer received, not of the document it built.
-    expect(JSON.parse(window.localStorage.getItem(ALLOWED_PAGES_KEY)!)).toEqual([sha256Hex('<h1>Roadmap</h1>')]);
+    expect(rememberedDigests()).toEqual([sha256Hex('<h1>Roadmap</h1>')]);
 
     // Reload the page: a new view, a new frame window, and no card for the same source.
     fireEvent.click(screen.getByTitle('Reload preview'));
@@ -201,7 +201,7 @@ describe('the consent card on the file page', () => {
     expect(await screen.findByText(CARD)).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Allow' }));
     await waitFor(() => expect(changed.replies.at(-1)).toMatchObject({ requestId: 'w2', ok: true }));
-    expect(JSON.parse(window.localStorage.getItem(ALLOWED_PAGES_KEY)!)).toEqual([
+    expect(rememberedDigests()).toEqual([
       sha256Hex('<h1>Roadmap</h1>'),
       sha256Hex('<h1>Roadmap!</h1>'),
     ]);

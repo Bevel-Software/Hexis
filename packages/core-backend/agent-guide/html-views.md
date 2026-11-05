@@ -113,7 +113,8 @@ under it and the buttons Don't allow and Allow. Allow runs the call, and every
 later writing call of the page view runs without asking. The browser
 remembers an Allow for the page's exact content, so the same page asks nothing
 on a later view in that browser. Any change to the content asks again, as does
-another browser. Don't allow runs nothing and rejects
+another browser, a browser that will not store, and a page past the 500 most
+recently allowed: never rely on an Allow being kept. Don't allow runs nothing and rejects
 the call with `denied` (`error.message` and `error.code` are both
 `'denied'`). It is never remembered: the next writing call asks again. The
 card is the app's, outside the frame: the page cannot draw, dismiss or answer

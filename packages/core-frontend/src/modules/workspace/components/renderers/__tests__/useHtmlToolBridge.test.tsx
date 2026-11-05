@@ -12,7 +12,7 @@ import {
 import { GitContext, type GitContextValue } from '../../../../git';
 import { WorkspaceContext, type WorkspaceContextValue } from '../../../state/workspace.context';
 import { sha256Hex } from '@bevel-software/platform-shared';
-import { ALLOWED_PAGES_KEY } from '../pageConsentMemory';
+import { ALLOWED_PAGE_KEY_PREFIX, rememberedDigests } from '../pageConsentMemory';
 import { frameChannel, stubServer } from './pageToolsHarness';
 
 /**
@@ -119,7 +119,7 @@ const CARD = "You're allowing changes using your account. Do you want to allow t
 const SOURCE = '<button onclick="bevel.tools.callTool(\'edit_file\', {})">Edit</button>';
 
 /** The digests this browser remembers an Allow for. */
-const remembered = (): string[] => JSON.parse(window.localStorage.getItem(ALLOWED_PAGES_KEY) ?? '[]');
+const remembered = rememberedDigests;
 
 beforeEach(() => window.localStorage.clear());
 
@@ -273,12 +273,16 @@ describe('useHtmlToolBridge through a renderer of its own', () => {
     // the same storage, so a storage refusing everything signs nobody in).
     const real = window.localStorage;
     const refuse = (key: string) => {
-      if (key === ALLOWED_PAGES_KEY) throw new DOMException('The quota has been exceeded.', 'QuotaExceededError');
+      if (key.startsWith(ALLOWED_PAGE_KEY_PREFIX)) throw new DOMException('The quota has been exceeded.', 'QuotaExceededError');
     };
     vi.spyOn(window, 'localStorage', 'get').mockReturnValue({
       getItem: (key: string) => (refuse(key), real.getItem(key)),
       setItem: (key: string, value: string) => (refuse(key), real.setItem(key, value)),
       removeItem: (key: string) => real.removeItem(key),
+      key: (i: number) => real.key(i),
+      get length() {
+        return real.length;
+      },
     } as unknown as Storage);
     const { frame, nextView } = mount('file page');
     frame.post(write('w1'));
@@ -296,7 +300,7 @@ describe('useHtmlToolBridge through a renderer of its own', () => {
     fireEvent.click(await screen.findByRole('button', { name: "Don't allow" }));
     await waitFor(() => expect(frame.replies.at(-1)).toEqual({ type: 'bevel.tool.response', requestId: 'w1', ok: false, error: 'denied', code: 'denied' }));
     expect(server.mcp).toEqual([]);
-    expect(window.localStorage.getItem(ALLOWED_PAGES_KEY)).toBeNull();
+    expect(remembered()).toEqual([]);
     frame.post(write('w2'));
     expect(await screen.findByText(CARD)).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: "Don't allow" }));

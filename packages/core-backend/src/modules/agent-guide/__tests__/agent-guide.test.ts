@@ -495,6 +495,9 @@ describe('the HTML views section', () => {
     expect(text).toContain('**Reading runs at once; writing asks first.**');
     expect(text).toContain('"You\'re allowing changes using your account. Do you want to allow that?"');
     expect(text).toContain("the buttons Don't allow and Allow");
+    expect(text).toContain("remembers an Allow for the page's exact content");
+    // pageConsentMemory.ts keeps 500 and keeps nothing where storage fails.
+    expect(text).toContain('never rely on an Allow being kept');
     expect(text).not.toContain('wants to write to the knowledge base');
     expect(text).not.toContain('Allow while open');
     expect(text).toContain('rejects the call with `denied`');
