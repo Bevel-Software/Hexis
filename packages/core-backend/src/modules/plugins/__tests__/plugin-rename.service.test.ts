@@ -372,6 +372,8 @@ describe('PluginRenameService', () => {
     expect(await read('Plugins/GTM/plugin.json')).toBe(GTM_MANIFEST);
     expect(await read('Skills/Eng/deploy/access.md')).toBe(DEPLOY_RULES);
     expect(invalidated).toBe(0);
+    // A refused commit landed nothing, so nothing is announced.
+    expect(announced).toEqual([]);
 
     await svc.rename(manager, 'gtm', { name: 'go-to-market' });
     expect((await manifest()).name).toBe('go-to-market');
