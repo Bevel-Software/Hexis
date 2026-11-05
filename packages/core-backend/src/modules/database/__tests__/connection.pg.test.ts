@@ -33,7 +33,12 @@ describe.skipIf(!PG_ADMIN_URL)('a pooled connection the server terminates', () =
         // The query's client now idles in the pool; the server ends it.
         const first = await backendPid();
         const noticed = new Promise<void>((resolve) => db.$client.once('error', () => resolve()));
-        await withPgAdmin((admin) => admin.query('select pg_terminate_backend($1)', [first]));
+        // The signal is checked before the wait: a backend that was not
+        // terminated would otherwise surface as a timeout, not as the cause.
+        const { rows } = await withPgAdmin((admin) =>
+          admin.query<{ pg_terminate_backend: boolean }>('select pg_terminate_backend($1)', [first]),
+        );
+        expect(rows[0]?.pg_terminate_backend).toBe(true);
         await noticed;
 
         const second = await backendPid();
