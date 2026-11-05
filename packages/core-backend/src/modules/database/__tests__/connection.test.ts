@@ -10,6 +10,8 @@ import {
   getDb,
   type Database,
 } from '../connection.js';
+import { setLogger } from '../../../shared/logging.js';
+import type { ILogger, LogFields } from '../../../shared/logger.contract.js';
 
 /**
  * Pools here are never connected: `pg.Pool` opens nothing until a query is
@@ -28,15 +30,35 @@ afterEach(async () => {
 });
 
 describe('an idle connection the server closes', () => {
-  it('is logged and let go — the pool has a listener, so the event cannot end the process', () => {
-    const db = createDb(URL);
-    opened.push(db);
-    // `pg.Pool` emits an idle client's failure on itself; without a listener
-    // Node throws the event. The terminated-backend error is what a server
-    // restart or a forced drop sends to every idle client.
-    const terminated = Object.assign(new Error('terminating connection due to administrator command'), { code: '57P01' });
-    expect(db.$client.listenerCount('error')).toBe(1);
-    expect(() => db.$client.emit('error', terminated)).not.toThrow();
+  it('is logged, with the error, and let go — the pool has a listener, so the event cannot end the process', () => {
+    // A capturing logger stands in for the process's: the warning is the
+    // behaviour under test, not a side effect to tolerate.
+    const lines: { level: string; message: string; fields: LogFields }[] = [];
+    const capture = (bindings: LogFields = {}): ILogger => {
+      const line = (level: string) => (message: string, fields: LogFields = {}) =>
+        void lines.push({ level, message, fields: { ...bindings, ...fields } });
+      return { debug: line('debug'), info: line('info'), warn: line('warn'), error: line('error'), child: (m) => capture({ ...bindings, ...m }) };
+    };
+    const previous = setLogger(capture());
+    try {
+      const db = createDb(URL);
+      opened.push(db);
+      // `pg.Pool` emits an idle client's failure on itself; without a listener
+      // Node throws the event. The terminated-backend error is what a server
+      // restart or a forced drop sends to every idle client.
+      const terminated = Object.assign(new Error('terminating connection due to administrator command'), { code: '57P01' });
+      expect(db.$client.listenerCount('error')).toBe(1);
+      expect(() => db.$client.emit('error', terminated)).not.toThrow();
+      expect(lines).toEqual([
+        {
+          level: 'warn',
+          message: 'an idle database connection was closed by the server; the next query opens a new one:',
+          fields: { module: 'database', err: terminated },
+        },
+      ]);
+    } finally {
+      setLogger(previous);
+    }
   });
 });
 
