@@ -182,7 +182,7 @@ describe('the html-views guide section agrees with the renderer', () => {
     expect(flat).toContain("Don't allow runs nothing and rejects the call with `denied`");
     expect(flat).toContain("It is never remembered: the next writing call asks again.");
     // The browser's memory: by the page's exact content, asked again on any change.
-    expect(flat).toContain("The browser remembers an Allow for the page's exact content, so the same page asks nothing on a later view in that browser. Any change to the content asks again, as does another browser, a browser that will not store, and content past the 500 most recently allowed: never rely on an Allow being kept.");
+    expect(flat).toContain("The browser remembers an Allow for the page's exact content, so the same page asks nothing on a later view in that browser. Content it has not allowed asks again, such as an edited page, as does another browser, a browser that will not store, and content past the 500 most recently allowed: never rely on an Allow being kept.");
     // A page reaches platform tools only.
     expect(flat).toContain("A page reaches platform tools only: no tool of a `.tool` manual or a plugin's MCP server is listed to a page or callable from it, directly or in a chain. Such a call rejects as an unknown tool.");
     expect(flat).not.toContain('wants to write');

@@ -1,7 +1,7 @@
 /**
  * Which pages this browser's viewer allowed to write: the SHA-256 digests of
  * the pages' sources. A page whose source hashes to one of them asks nothing;
- * any change to its source is a digest not here, and asks once more. Kept per
+ * a source whose digest is not here, an edit included, asks once more. Kept per
  * browser and deployment, like the frame's height, and never a deny: Don't
  * allow stores nothing.
  *
