@@ -41,7 +41,8 @@ export interface HtmlToolBridgeOptions {
   /**
    * The page's source as the renderer received it, the HTML its view's
    * document is built from. An Allow is remembered by its SHA-256 digest, so
-   * a source allowed before asks no more in this browser and any other asks.
+   * a source whose digest this browser still keeps asks no more; any other
+   * (an edit, an evicted digest, a browser that will not store) asks.
    */
   source: string;
 }
