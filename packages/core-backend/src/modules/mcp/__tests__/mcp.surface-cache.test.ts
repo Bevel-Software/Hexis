@@ -488,6 +488,65 @@ describe('McpService — retained heap of warm clients of one catalog', () => {
   });
 });
 
+describe("McpService — a page reaches the platform's tools only", () => {
+  const PAGE = 'Dashboards/Roadmap.html';
+  /** A `.tool` manual the person may read, listed by their catalog beside the platform manual. */
+  async function withToolManual() {
+    let minted = 0;
+    const h = await harness({ mint: () => `minted-${++minted}` });
+    h.state.extraManuals = [lateManual(h.state.base)];
+    const asPage = () => connect(h.mcp, { tokenId: null, bearer: 'eyJ.session', page: PAGE });
+    const asAgent = () => connect(h.mcp, { tokenId: null, bearer: 'eyJ.session' });
+    return { ...h, asPage, asAgent };
+  }
+  const names = async (client: Client) => (await client.listTools()).tools.map((t) => t.name);
+
+  it("lists the platform's tools to a page and the .tool manual's too to the person's agent, each from its own cached surface", async () => {
+    const { state, asPage, asAgent } = await withToolManual();
+    // The person's agent first, so a page served from the person's cache would list the manual's tool.
+    const agentTools = await names(await asAgent());
+    expect(agentTools).toContain('late_manual_late_arrival');
+    expect(state.builds).toBe(1);
+
+    const pageTools = await names(await asPage());
+    expect(pageTools).toContain('read_file');
+    expect(pageTools).toContain('edit_file');
+    expect(pageTools).toContain('call_tool_chain');
+    expect(pageTools.some((n) => n.includes('late_arrival'))).toBe(false);
+    // A page's surface is built without the person's catalog: the platform manual alone.
+    expect(state.builds).toBe(1);
+
+    // And the reverse: after the page warmed its own, the agent still gets the person's.
+    expect(await names(await asAgent())).toContain('late_manual_late_arrival');
+    expect(await names(await asPage())).not.toContain('late_manual_late_arrival');
+    expect(state.builds).toBe(1);
+  });
+
+  it('answers a page that calls the .tool manual\'s tool as unknown, in a chain too, while platform tools keep working', async () => {
+    const { state, asPage, asAgent } = await withToolManual();
+    const page = await asPage();
+    const direct = await page.callTool({ name: 'late_manual_late_arrival', arguments: {} });
+    expect(direct.isError).toBe(true);
+    expect(JSON.stringify(direct.content)).toContain('Unknown tool \\"late_manual_late_arrival\\"');
+    const chained = await page.callTool({ name: 'call_tool_chain', arguments: { code: 'return await late_manual.late_arrival({});' } });
+    expect(chained.isError).toBe(true);
+    expect(state.calls).toEqual([]);
+
+    expect(payload(await readFile(page, 'KnowledgeBase/Foo.md'))).toMatchObject({ tool: 'read_file', path: 'KnowledgeBase/Foo.md' });
+    const platformChain = await page.callTool({
+      name: 'call_tool_chain',
+      arguments: { code: "return await KNOWLEDGE_BASE.edit_file({ body: { path: 'KnowledgeBase/Bar.md' } });" },
+    });
+    expect(platformChain.isError).toBeFalsy();
+    expect(state.calls.map((c) => c.tool)).toEqual(['read_file', 'edit_file']);
+
+    // The same person's agent calls it.
+    const agent = await asAgent();
+    expect((await agent.callTool({ name: 'late_manual_late_arrival', arguments: {} })).isError).toBeFalsy();
+    expect((await agent.callTool({ name: 'call_tool_chain', arguments: { code: 'return await late_manual.late_arrival({});' } })).isError).toBeFalsy();
+  });
+});
+
 describe("McpService — a page's calls in the Audit log", () => {
   const PAGE = 'Dashboards/Roadmap.html';
 

@@ -1,5 +1,5 @@
 import { useRef } from 'react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import {
@@ -11,6 +11,8 @@ import {
 } from '..';
 import { GitContext, type GitContextValue } from '../../../../git';
 import { WorkspaceContext, type WorkspaceContextValue } from '../../../state/workspace.context';
+import { sha256Hex } from '@bevel-software/platform-shared';
+import { ALLOWED_PAGES_KEY } from '../pageConsentMemory';
 import { frameChannel, stubServer } from './pageToolsHarness';
 
 /**
@@ -31,9 +33,9 @@ const workspace = { workspaceId: 'main', kbDirName: 'knowledge-base' } as unknow
 const git = { status: { branch: 'main' } } as unknown as GitContextValue;
 
 /** A downstream renderer: its own frame and document, the controller's bridge. */
-function OtherHtmlRenderer({ viewKey }: { viewKey: number }) {
+function OtherHtmlRenderer({ viewKey, path, source }: { viewKey: number; path: string; source: string }) {
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
-  const { toolBridge, cards } = useHtmlToolBridge({ iframeRef, filePath: PATH, viewKey });
+  const { toolBridge, cards } = useHtmlToolBridge({ iframeRef, filePath: path, viewKey, source });
   // The document carries the identity the controller minted for it, as the
   // real runtime does (`buildSandboxedHtml` with this `toolBridge`).
   const srcDoc = `${toolBridge.tools ? 'with tools' : 'without tools'} documentId="${toolBridge.documentId}"`;
@@ -47,7 +49,13 @@ function OtherHtmlRenderer({ viewKey }: { viewKey: number }) {
 
 type Where = 'file page' | 'elsewhere' | 'embed';
 
-function mount(where: Where, opts: { openFilePage?: (path: string) => void; openInPlatform?: () => void } = {}) {
+function mount(
+  where: Where,
+  opts: { openFilePage?: (path: string) => void; openInPlatform?: () => void; path?: string; page?: string; source?: string } = {},
+) {
+  const path = opts.path ?? PATH;
+  const page = opts.page ?? PAGE;
+  let source = opts.source ?? SOURCE;
   const surface: RendererSurface = {
     kbDirName: 'knowledge-base',
     openLink: () => undefined,
@@ -60,21 +68,20 @@ function mount(where: Where, opts: { openFilePage?: (path: string) => void; open
     offersDownload: false,
   };
   const tree = (viewKey: number) => {
+    const view = <OtherHtmlRenderer viewKey={viewKey} path={path} source={source} />;
     const renderer = opts.openInPlatform ? (
-      <OpenPageInPlatformContext.Provider value={opts.openInPlatform}>
-        <OtherHtmlRenderer viewKey={viewKey} />
-      </OpenPageInPlatformContext.Provider>
+      <OpenPageInPlatformContext.Provider value={opts.openInPlatform}>{view}</OpenPageInPlatformContext.Provider>
     ) : (
-      <OtherHtmlRenderer viewKey={viewKey} />
+      view
     );
     // A page-tools provider on the embed too: a surface never gets tools, whatever is above it.
     const placed =
       where === 'embed' ? (
-        <PageToolsContext.Provider value={{ pagePath: PAGE }}>
+        <PageToolsContext.Provider value={{ pagePath: page }}>
           <RendererSurfaceContext.Provider value={surface}>{renderer}</RendererSurfaceContext.Provider>
         </PageToolsContext.Provider>
       ) : where === 'file page' ? (
-        <PageToolsContext.Provider value={{ pagePath: PAGE }}>{renderer}</PageToolsContext.Provider>
+        <PageToolsContext.Provider value={{ pagePath: page }}>{renderer}</PageToolsContext.Provider>
       ) : (
         renderer
       );
@@ -95,10 +102,12 @@ function mount(where: Where, opts: { openFilePage?: (path: string) => void; open
     /**
      * The renderer's view ends (a reload, a rebuilt document) while its
      * frame stays. Answers a channel for the NEW document; the one taken
-     * before still posts as the old document.
+     * before still posts as the old document. A `nextSource` is the page's
+     * source after an edit; without one the new view shows the same source.
      */
-    nextView: () => {
+    nextView: (nextSource?: string) => {
       viewKey += 1;
+      if (nextSource !== undefined) source = nextSource;
       result.rerender(tree(viewKey));
       return frameChannel(iframe);
     },
@@ -106,7 +115,13 @@ function mount(where: Where, opts: { openFilePage?: (path: string) => void; open
 }
 
 const write = (requestId: string) => ({ type: 'bevel.tool.call', requestId, fn: 'callTool', args: ['edit_file', {}] });
-const CARD = 'Roadmap wants to write to the knowledge base';
+const CARD = "You're allowing changes using your account. Do you want to allow that?";
+const SOURCE = '<button onclick="bevel.tools.callTool(\'edit_file\', {})">Edit</button>';
+
+/** The digests this browser remembers an Allow for. */
+const remembered = (): string[] => JSON.parse(window.localStorage.getItem(ALLOWED_PAGES_KEY) ?? '[]');
+
+beforeEach(() => window.localStorage.clear());
 
 afterEach(() => {
   cleanup();
@@ -173,36 +188,121 @@ describe('useHtmlToolBridge through a renderer of its own', () => {
     expect(server.mcp).toEqual(['read_file']);
   });
 
-  it('asks once for ten writes at once; Allow answers all ten and holds for the view; a new view asks again', async () => {
+  it('asks once for ten writes at once, in the plain sentence with the path under it and two buttons', async () => {
     const server = stubServer();
-    const { frame, nextView } = mount('file page');
+    const { frame } = mount('file page');
     for (let i = 0; i < 10; i += 1) frame.post(write(`w${i}`));
     expect(await screen.findByText(CARD)).toBeTruthy();
     expect(screen.getByText(PAGE)).toBeTruthy();
-    expect(screen.getAllByRole('button', { name: 'Allow while open' })).toHaveLength(1);
+    const dialog = screen.getByRole('dialog');
+    const labels = [...dialog.querySelectorAll('button')].map((b) => b.textContent?.trim()).filter((t) => t === "Don't allow" || t === 'Allow');
+    expect(labels).toEqual(["Don't allow", 'Allow']);
+    expect(screen.getAllByRole('button', { name: 'Allow' })).toHaveLength(1);
     expect(server.mcp).toEqual([]);
 
-    fireEvent.click(screen.getByRole('button', { name: 'Allow while open' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Allow' }));
     await waitFor(() => expect(frame.replies).toHaveLength(10));
     expect(frame.replies.every((r) => r.ok === true)).toBe(true);
 
     frame.post(write('w10'));
     await waitFor(() => expect(frame.replies.at(-1)).toMatchObject({ requestId: 'w10', ok: true }));
     expect(screen.queryByText(CARD)).toBeNull();
+  });
+
+  it('remembers an Allow by the digest of the page\'s source: a later view of the same source asks nothing', async () => {
+    const server = stubServer();
+    const { frame, nextView } = mount('file page');
+    frame.post(write('w1'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Allow' }));
+    await waitFor(() => expect(frame.replies.at(-1)).toMatchObject({ requestId: 'w1', ok: true }));
+    expect(remembered()).toEqual([sha256Hex(SOURCE)]);
 
     const next = nextView();
-    next.post(write('w11'));
+    next.post(write('w2'));
+    await waitFor(() => expect(next.replies.at(-1)).toMatchObject({ requestId: 'w2', ok: true }));
+    expect(screen.queryByText(CARD)).toBeNull();
+    expect(server.mcp).toEqual(['edit_file', 'edit_file']);
+
+    // A new mount, as a reload or a navigation back is.
+    cleanup();
+    const reloaded = mount('file page');
+    reloaded.frame.post(write('w3'));
+    await waitFor(() => expect(reloaded.frame.replies.at(-1)).toMatchObject({ requestId: 'w3', ok: true }));
+    expect(screen.queryByText(CARD)).toBeNull();
+  });
+
+  it('asks again when one character of the source changed; Allow keeps both digests', async () => {
+    stubServer();
+    const { frame, nextView } = mount('file page');
+    frame.post(write('w1'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Allow' }));
+    await waitFor(() => expect(frame.replies.at(-1)).toMatchObject({ ok: true }));
+
+    const edited = `${SOURCE} `;
+    const next = nextView(edited);
+    next.post(write('w2'));
+    expect(await screen.findByText(CARD)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Allow' }));
+    await waitFor(() => expect(next.replies.at(-1)).toMatchObject({ requestId: 'w2', ok: true }));
+    expect(remembered()).toEqual([sha256Hex(SOURCE), sha256Hex(edited)]);
+
+    // Changed back: that digest is still stored.
+    const reverted = nextView(SOURCE);
+    reverted.post(write('w3'));
+    await waitFor(() => expect(reverted.replies.at(-1)).toMatchObject({ requestId: 'w3', ok: true }));
+    expect(screen.queryByText(CARD)).toBeNull();
+  });
+
+  it('remembers by content, not path: the same source at another path asks nothing', async () => {
+    stubServer();
+    const first = mount('file page');
+    first.frame.post(write('w1'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Allow' }));
+    await waitFor(() => expect(first.frame.replies.at(-1)).toMatchObject({ ok: true }));
+    cleanup();
+
+    const copy = mount('file page', { path: 'knowledge-base/Dashboards/Copy.html', page: 'Dashboards/Copy.html' });
+    copy.frame.post(write('w2'));
+    await waitFor(() => expect(copy.frame.replies.at(-1)).toMatchObject({ requestId: 'w2', ok: true }));
+    expect(screen.queryByText(CARD)).toBeNull();
+  });
+
+  it('asks on every view in a browser that cannot store, with no error shown', async () => {
+    stubServer();
+    // A storage that throws on the memory's key (the app's own sign-in reads
+    // the same storage, so a storage refusing everything signs nobody in).
+    const real = window.localStorage;
+    const refuse = (key: string) => {
+      if (key === ALLOWED_PAGES_KEY) throw new DOMException('The quota has been exceeded.', 'QuotaExceededError');
+    };
+    vi.spyOn(window, 'localStorage', 'get').mockReturnValue({
+      getItem: (key: string) => (refuse(key), real.getItem(key)),
+      setItem: (key: string, value: string) => (refuse(key), real.setItem(key, value)),
+      removeItem: (key: string) => real.removeItem(key),
+    } as unknown as Storage);
+    const { frame, nextView } = mount('file page');
+    frame.post(write('w1'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Allow' }));
+    await waitFor(() => expect(frame.replies.at(-1)).toMatchObject({ requestId: 'w1', ok: true }));
+    const next = nextView();
+    next.post(write('w2'));
     expect(await screen.findByText(CARD)).toBeTruthy();
   });
 
-  it('Deny answers denied and runs nothing; the next write asks again', async () => {
+  it("Don't allow answers denied, runs nothing and stores nothing; the next write asks again, in this view and the next", async () => {
     const server = stubServer();
-    const { frame } = mount('file page');
+    const { frame, nextView } = mount('file page');
     frame.post(write('w1'));
-    fireEvent.click(await screen.findByRole('button', { name: 'Deny' }));
+    fireEvent.click(await screen.findByRole('button', { name: "Don't allow" }));
     await waitFor(() => expect(frame.replies.at(-1)).toEqual({ type: 'bevel.tool.response', requestId: 'w1', ok: false, error: 'denied', code: 'denied' }));
     expect(server.mcp).toEqual([]);
+    expect(window.localStorage.getItem(ALLOWED_PAGES_KEY)).toBeNull();
     frame.post(write('w2'));
+    expect(await screen.findByText(CARD)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: "Don't allow" }));
+    await waitFor(() => expect(frame.replies.at(-1)).toMatchObject({ requestId: 'w2', code: 'denied' }));
+    const next = nextView();
+    next.post(write('w3'));
     expect(await screen.findByText(CARD)).toBeTruthy();
   });
 
@@ -243,7 +343,7 @@ describe('useHtmlToolBridge through a renderer of its own', () => {
     const server = stubServer();
     const { frame, nextView } = mount('file page');
     frame.post({ type: 'bevel.tool.call', requestId: 'c1', fn: 'callToolChain', args: ['return 1'] });
-    fireEvent.click(await screen.findByRole('button', { name: 'Allow while open' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Allow' }));
     await waitFor(() => expect(frame.replies).toEqual([expect.objectContaining({ requestId: 'c1', ok: true })]));
 
     frame.post(write('w1'));

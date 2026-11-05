@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
 import { useFileNav } from '../../routing/kb-routes';
 import { useRendererSurface } from './rendererSurface';
+import { sha256Hex } from '@bevel-software/platform-shared';
 import { Button, Dialog } from '../../../../shared/components';
 import {
   PageConsent,
@@ -11,6 +12,7 @@ import {
   useOpenPageInPlatform,
   usePageTools,
 } from './htmlToolBridge';
+import { isRemembered, remember } from './pageConsentMemory';
 
 /**
  * The card the app shows over a page, outside its frame: the page cannot draw,
@@ -36,6 +38,12 @@ export interface HtmlToolBridgeOptions {
    * consent across it.
    */
   viewKey: unknown;
+  /**
+   * The page's source as the renderer received it, the HTML its view's
+   * document is built from. An Allow is remembered by its SHA-256 digest, so
+   * the same source asks no more in this browser and any change asks again.
+   */
+  source: string;
 }
 
 export interface HtmlToolBridgeResult {
@@ -66,7 +74,7 @@ function newDocumentId(): string {
  * passes its frame, its file and its view key, builds its document with
  * `toolBridge`, and renders `cards` — it holds no bridge logic of its own.
  */
-export function useHtmlToolBridge({ iframeRef, filePath, viewKey }: HtmlToolBridgeOptions): HtmlToolBridgeResult {
+export function useHtmlToolBridge({ iframeRef, filePath, viewKey, source }: HtmlToolBridgeOptions): HtmlToolBridgeResult {
   const { openFilePage } = useFileNav();
   const surface = useRendererSurface();
   // The viewer's tools, for a page on a host that provides them (the file
@@ -79,7 +87,8 @@ export function useHtmlToolBridge({ iframeRef, filePath, viewKey }: HtmlToolBrid
   const [card, setCard] = useState<PageCard | null>(null);
   const cardRef = useRef<PageCard | null>(null);
   // The viewer's answer about this page's writes holds for one VIEW of it: a
-  // new frame document (a reload, a saved edit, another file) asks again.
+  // new frame document (a reload, a saved edit, another file) asks again,
+  // unless the browser remembers an Allow for that document's exact source.
   const consentRef = useRef<PageConsent | null>(null);
   // Which document this view's is: an identity minted per `viewKey` — for
   // every view, tools or not, since a page without tools still asks
@@ -97,9 +106,14 @@ export function useHtmlToolBridge({ iframeRef, filePath, viewKey }: HtmlToolBrid
     return newDocumentId();
   }, [viewKey]);
   const documentIdRef = useRef(documentId);
+  // What the browser remembers an Allow by: the SHA-256 of the page's exact
+  // source, current in the same commit as the document built from it.
+  const digest = useMemo(() => sha256Hex(source), [source]);
+  const digestRef = useRef(digest);
   useLayoutEffect(() => {
     documentIdRef.current = documentId;
-  }, [documentId]);
+    digestRef.current = digest;
+  }, [documentId, digest]);
 
   /** Show one of the app's cards over the page and resolve with the viewer's answer. A card already up answers this ask too. */
   const showCard = useCallback((kind: PageCard['kind']): Promise<boolean | null> => {
@@ -189,7 +203,14 @@ export function useHtmlToolBridge({ iframeRef, filePath, viewKey }: HtmlToolBrid
         });
         return;
       }
-      consentRef.current ??= new PageConsent(() => showCard('write'));
+      if (!consentRef.current) {
+        // The view's consent remembers by the source this view was built from.
+        const viewDigest = digestRef.current;
+        consentRef.current = new PageConsent(() => showCard('write'), {
+          remembered: () => isRemembered(viewDigest),
+          remember: () => remember(viewDigest),
+        });
+      }
       void answerToolCall(call, toolsClient, consentRef.current).then(reply);
     }
     window.addEventListener('message', onToolMessage);
@@ -212,15 +233,15 @@ export function useHtmlToolBridge({ iframeRef, filePath, viewKey }: HtmlToolBrid
       <Dialog
         open={card?.kind === 'write'}
         onClose={() => closeCard(false)}
-        title={`${pageName(filePath)} wants to write to the knowledge base`}
+        title="You're allowing changes using your account. Do you want to allow that?"
         size="md"
         footer={
           <>
             <Button variant="outline" onClick={() => closeCard(false)}>
-              Deny
+              Don't allow
             </Button>
             <Button variant="primary" onClick={() => closeCard(true)}>
-              Allow while open
+              Allow
             </Button>
           </>
         }
