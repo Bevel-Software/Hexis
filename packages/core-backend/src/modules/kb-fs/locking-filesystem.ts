@@ -572,6 +572,7 @@ export class LockingFilesystem extends GitGuardedFilesystem {
     // Done in this order, and undone in the reverse one.
     let moved = false;
     const written: { path: string; lockAt: string; before: Buffer | null }[] = [];
+    let change: Change | null = null;
     try {
       await this.moveNoReplace(src, dest);
       moved = true;
@@ -592,16 +593,16 @@ export class LockingFilesystem extends GitGuardedFilesystem {
           ...edits.map((e) => e.path),
         ]),
       ].sort();
-      const change = await versionControl.commitChanges(workspaceId, user, summary, scope);
+      change = await versionControl.commitChanges(workspaceId, user, summary, scope);
       await release('untouched');
-      // Announced after the release, like every batch (see `writeFiles`).
-      if (change) versionControl.announceCommitted({ workspaceId, branch, paths: scope, byUser: user });
-      return change;
     } catch (err) {
       if (err instanceof PushNeedsAgentResolutionError) {
         // The commit landed; only its push needs help. Releasing with a commit
-        // arms the pending-commits worker's push retry (see `writeFiles`).
+        // arms the pending-commits worker's push retry (see `writeFiles`). The
+        // commit is announced here, once: the worker's later push announces
+        // nothing (no new commit), and the reactors read the working tree.
         await release('enqueue');
+        versionControl.announceCommitted({ workspaceId, branch, paths: scope, byUser: user });
         throw err;
       }
       for (const w of written.reverse()) {
@@ -635,6 +636,12 @@ export class LockingFilesystem extends GitGuardedFilesystem {
       await release('untouched');
       throw err;
     }
+    // Announced once the locks are gone, and OUTSIDE the commit's failure
+    // envelope: the catch above restores bytes and undoes the rename for a
+    // commit that failed, and nothing that follows a landed commit may unwind
+    // it (see `writeFiles`).
+    if (change) versionControl.announceCommitted({ workspaceId, branch, paths: scope, byUser: user });
+    return change;
   }
 
   /**
@@ -982,6 +989,9 @@ export class LockingFilesystem extends GitGuardedFilesystem {
         await releaseAll((p) =>
           committed.has(p) ? 'enqueue' : failedSeedDiscards.has(p) ? 'discard' : 'untouched',
         );
+        // The commit exists, so it is announced like any other, once: the
+        // worker's later push makes no new commit and announces nothing.
+        versionControl.announceCommitted({ workspaceId, branch, paths: touched, byUser: user });
         throw err;
       }
       // A write or the commit threw — nothing of THIS batch should land.

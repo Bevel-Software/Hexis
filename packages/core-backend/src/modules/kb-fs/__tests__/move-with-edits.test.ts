@@ -124,6 +124,42 @@ describe('LockingFilesystem.moveWithEdits', () => {
     expect(await read('Topics/Deep/A/One.md')).toContain('../../../NodeTypes/Task.md');
     // The binary moved byte for byte.
     expect([...(await fs.readFile(path.join(repo, 'Topics/Deep/A/pic.png')))]).toEqual([0x89, 0x50, 0x4e, 0x47, 0, 1, 2, 3]);
+    // Announced ONCE, after the commit, with every path the commit named at
+    // both ends — and after the locks were given back.
+    expect(versionControl.announceCommitted).toHaveBeenCalledTimes(1);
+    expect(versionControl.announceCommitted).toHaveBeenCalledWith({
+      workspaceId: WS,
+      branch: 'feature-test',
+      byUser: USER,
+      paths: [
+        `${KB}/Index.md`,
+        `${KB}/Projects/A/One.md`,
+        `${KB}/Projects/A/Two.md`,
+        `${KB}/Projects/A/pic.png`,
+        `${KB}/Topics/Deep/A/One.md`,
+        `${KB}/Topics/Deep/A/Two.md`,
+        `${KB}/Topics/Deep/A/pic.png`,
+      ],
+    });
+    const announcedAt = (versionControl.announceCommitted as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0]!;
+    for (const order of (versionControl.releaseLockUntouched as ReturnType<typeof vi.fn>).mock.invocationCallOrder) {
+      expect(order).toBeLessThan(announcedAt);
+    }
+  });
+
+  it('an announcement that throws cannot unwind the landed move: the commit, the files and the rename stay', async () => {
+    (versionControl.announceCommitted as ReturnType<typeof vi.fn>).mockImplementation(() => {
+      throw new Error('reactor exploded');
+    });
+    const before = (await git(repo, ['rev-list', '--count', 'HEAD'])).trim();
+    await expect(fsLayer().moveWithEdits(`${KB}/Projects/A`, `${KB}/Topics/Deep/A`, edits(), 'Move A')).rejects.toThrow('reactor exploded');
+    expect((await git(repo, ['rev-list', '--count', 'HEAD'])).trim()).toBe(String(Number(before) + 1));
+    expect((await git(repo, ['status', '--porcelain'])).trim()).toBe('');
+    expect(await read('Index.md')).toBe('[one](Topics/Deep/A/One.md)\n');
+    expect(await read('Topics/Deep/A/One.md')).toContain('../../../NodeTypes/Task.md');
+    await expect(fs.access(path.join(repo, 'Projects/A'))).rejects.toThrow();
+    // Every lock had already been given back untouched; nothing was discarded.
+    expect(versionControl.releaseLockNoCommit).not.toHaveBeenCalled();
   });
 
   it('a single file moved with edits is one commit with a rename', async () => {
@@ -153,6 +189,7 @@ describe('LockingFilesystem.moveWithEdits', () => {
     expect(released(versionControl.releaseLockUntouched)).toEqual([`${KB}/Index.md`, `${KB}/Projects/A`, `${KB}/Projects/A/One.md`]);
     expect(versionControl.releaseLockNoCommit).not.toHaveBeenCalled();
     expect(versionControl.releaseLock).not.toHaveBeenCalled();
+    expect(versionControl.announceCommitted).not.toHaveBeenCalled();
     expect(await read('Index.md')).toBe('[one](Projects/A/One.md)\n');
   }, 20_000);
 
@@ -177,6 +214,7 @@ describe('LockingFilesystem.moveWithEdits', () => {
     expect(await read('Index.md')).toBe('[one](Projects/A/One.md)\n');
     expect(versionControl.releaseLockNoCommit).not.toHaveBeenCalled();
     expect(released(versionControl.releaseLockUntouched).length).toBeGreaterThan(0);
+    expect(versionControl.announceCommitted).not.toHaveBeenCalled();
   });
 
   it('a move that fails and cannot be undone releases every lock with the discard, and says both', async () => {
@@ -196,6 +234,8 @@ describe('LockingFilesystem.moveWithEdits', () => {
     expect(discarded).toContain(`${KB}/Projects/A`);
     expect(discarded).toContain(`${KB}/Topics/Deep/A/One.md`);
     expect(discarded).toContain(`${KB}/Index.md`);
+    // A failed commit announces nothing.
+    expect(versionControl.announceCommitted).not.toHaveBeenCalled();
   });
 
   it('a commit that landed but could not be pushed enqueues the committed paths only; the folder locks go back untouched', async () => {

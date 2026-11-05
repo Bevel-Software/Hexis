@@ -330,7 +330,11 @@ describe('LockingFilesystem.writeFiles — batch with deletes + one batched chan
 
     expect(versionControl.releaseLock).toHaveBeenCalledWith('ws-feat', 'feat', 'knowledge-base/A.md', USER);
     expect(versionControl.releaseLockNoCommit).not.toHaveBeenCalled();
-    expect(emitted).toHaveLength(0);
+    // The commit LANDED, so it is announced — once, after the release; the
+    // worker's later push announces nothing of its own.
+    expect(emitted).toEqual([{ workspaceId: 'ws-feat', branch: 'feat', paths: ['knowledge-base/A.md'], byUser: USER }]);
+    const announcedAt = (versionControl.announceCommitted as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0]!;
+    expect((versionControl.releaseLock as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0]!).toBeLessThan(announcedAt);
   });
 
   it('emits nothing on a no-op commit (clean tree)', async () => {

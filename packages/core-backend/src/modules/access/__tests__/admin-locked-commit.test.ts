@@ -19,6 +19,8 @@ const ACTOR: AuthUser = { id: 'u-1', email: 'admin@x.io', name: 'Admin' } as Aut
 
 function makeHarness(opts: {
   commitError?: Error;
+  /** The commit finds a clean tree and answers null: nothing landed. */
+  commitNoop?: boolean;
   releaseLockError?: Error;
 }) {
   const files = new Map<string, string>();
@@ -58,8 +60,9 @@ function makeHarness(opts: {
     }),
     commitChanges: vi.fn(async () => {
       if (opts.commitError) throw opts.commitError;
-      return {};
+      return opts.commitNoop ? null : {};
     }),
+    announceCommitted: vi.fn(),
   } as unknown as IVersionControlService;
 
   const locked = new AdminLockedCommits({
@@ -72,8 +75,14 @@ function makeHarness(opts: {
     contendedSubject: 'Things',
   });
 
-  return { locked, locks, files, releaseLockCalls, releaseNoCommitCalls };
+  return { locked, locks, files, releaseLockCalls, releaseNoCommitCalls, versionControlService };
 }
+
+/** The write both admin files get in the tests below. */
+const TWO_FILES = [
+  { repoRel: 'groups.yaml', content: 'groups: {}\n', original: null },
+  { repoRel: 'roles.yaml', content: 'roles: {}\n', original: 'roles:\n' },
+];
 
 describe('AdminLockedCommits.withFileLocks — release semantics', () => {
   it('SUCCESS: batch-committed paths release via releaseLockNoCommit — a broken enqueue cannot strand them', async () => {
@@ -97,8 +106,60 @@ describe('AdminLockedCommits.withFileLocks — release semantics', () => {
       expect(h.locks.size).toBe(0); // ZERO held locks
       expect(h.releaseNoCommitCalls.sort()).toEqual([`${KB}/groups.yaml`, `${KB}/roles.yaml`]);
       expect(h.releaseLockCalls).toEqual([]); // the queue was never touched
+      // The batch is announced ONCE, with both committed paths, after every lock was released.
+      const announce = h.versionControlService.announceCommitted as ReturnType<typeof vi.fn>;
+      expect(announce).toHaveBeenCalledTimes(1);
+      expect(announce).toHaveBeenCalledWith({ workspaceId: WS, branch: BRANCH, paths: [`${KB}/groups.yaml`, `${KB}/roles.yaml`], byUser: ACTOR });
+      const announcedAt = announce.mock.invocationCallOrder[0]!;
+      for (const order of (h.versionControlService.releaseLockNoCommit as ReturnType<typeof vi.fn>).mock.invocationCallOrder) {
+        expect(order).toBeLessThan(announcedAt);
+      }
     } finally {
       warn.mockRestore();
+    }
+  });
+
+  it('a commit that found the tree clean announces nothing; a commit that failed announces nothing', async () => {
+    const noop = makeHarness({ commitNoop: true });
+    await noop.locked.withFileLocks(WS, ACTOR, ['groups.yaml', 'roles.yaml'], async () => {
+      await noop.locked.writeAndCommitLocked(WS, ACTOR, TWO_FILES, 'nothing new');
+    });
+    expect(noop.versionControlService.announceCommitted).not.toHaveBeenCalled();
+    expect(noop.locks.size).toBe(0);
+
+    const failed = makeHarness({ commitError: new Error('commit exploded') });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      await expect(
+        failed.locked.withFileLocks(WS, ACTOR, ['groups.yaml', 'roles.yaml'], async () => {
+          await failed.locked.writeAndCommitLocked(WS, ACTOR, TWO_FILES, 'doomed');
+        }),
+      ).rejects.toThrow(/commit exploded/);
+    } finally {
+      warn.mockRestore();
+    }
+    expect(failed.versionControlService.announceCommitted).not.toHaveBeenCalled();
+    expect(failed.locks.size).toBe(0);
+  });
+
+  it('a commit that landed but could not be pushed is announced once, after the push-retry release', async () => {
+    const h = makeHarness({ commitError: new PushNeedsAgentResolutionError(BRANCH, `${KB}/roles.yaml`, 'non-fast-forward', 'rebase failed') });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      await expect(
+        h.locked.withFileLocks(WS, ACTOR, ['groups.yaml', 'roles.yaml'], async () => {
+          await h.locked.writeAndCommitLocked(WS, ACTOR, TWO_FILES, 'landed, unpushed');
+        }),
+      ).rejects.toBeInstanceOf(PushNeedsAgentResolutionError);
+    } finally {
+      warn.mockRestore();
+    }
+    const announce = h.versionControlService.announceCommitted as ReturnType<typeof vi.fn>;
+    expect(announce).toHaveBeenCalledTimes(1);
+    expect(announce).toHaveBeenCalledWith({ workspaceId: WS, branch: BRANCH, paths: [`${KB}/groups.yaml`, `${KB}/roles.yaml`], byUser: ACTOR });
+    const announcedAt = announce.mock.invocationCallOrder[0]!;
+    for (const order of (h.versionControlService.releaseLock as ReturnType<typeof vi.fn>).mock.invocationCallOrder) {
+      expect(order).toBeLessThan(announcedAt);
     }
   });
 
