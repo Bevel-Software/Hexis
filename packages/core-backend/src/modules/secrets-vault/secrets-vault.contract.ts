@@ -10,6 +10,14 @@
  * the same contract without any change to the loader or the tools.
  */
 
+import type { Database } from '../database/index.js';
+
+/**
+ * A drizzle client a caller lends the vault for one operation — its own
+ * transaction, usually — so a removal runs under that caller's lock scope.
+ */
+export type ManagedRowsWriter = Pick<Database, 'select' | 'delete'>;
+
 export type SecretKind = 'static' | 'oauth';
 
 /** A secret as shown in listings — NEVER carries the value or token material. */
@@ -45,6 +53,20 @@ export interface SecretConfigStatus {
   adminConfigured: boolean;
   userConfigured: boolean;
   /**
+   * How the SHARED row is stored, or `null` when there is none. A `.tool` can be
+   * edited to turn a plain key into an OAuth variable (or back) while the old row
+   * survives, and the two kinds are not interchangeable: an OAuth flow reads the
+   * client secret off an `oauth` row and `resolve` reads a value off a `static`
+   * one. A caller that asks "is this set up?" has to mean "set up AS THE KIND THE
+   * MANUAL NOW DECLARES", or it offers an Authorize the flow will refuse.
+   *
+   * Required, not optional: "the field was left out" and "there is no row" have
+   * to be the same answer, or a caller that trusts it cannot be strict.
+   */
+  adminKind: SecretKind | null;
+  /** How the CALLER's own row is stored, or `null` when they have none. Same reason. */
+  userKind: SecretKind | null;
+  /**
    * For an OAuth-backed per-user row: whether the caller has completed sign-in (a
    * token exists). `undefined` for static rows / when the caller has no row. Lets
    * the pre-check treat "row present but not authorized" as still-missing.
@@ -58,7 +80,35 @@ export interface SecretConfigStatus {
    * required scopes have grown.
    */
   grantedScopes?: string;
+  /**
+   * For an OAuth-backed SHARED row (a managed connector enabled as a workspace
+   * connection): whether an admin has completed the sign-in. `undefined` when
+   * the shared row is static or absent — the shared row of an ordinary tool
+   * sign-in holds the client secret, never tokens, so this is false there.
+   */
+  adminAuthorized?: boolean;
+  /** The shared row's granted scopes, when it holds tokens. Same rule as `grantedScopes`. */
+  adminGrantedScopes?: string;
+  /** The connected account on the caller's row, when the row remembers one. */
+  userAccount?: string;
+  /** The connected account on the shared row, when it remembers one. */
+  adminAccount?: string;
+  /**
+   * The shared row is an OAuth client of the OWNER's (a `clientId`, no managed
+   * mark). For an ordinary sign-in that is simply its registration; for a
+   * variable declared managed it means an owner replaced the managed app with
+   * the deployment's own, and the ordinary flow applies. `undefined` when the
+   * shared row is static or absent.
+   */
+  adminBringsOwnApp?: boolean;
 }
+
+/**
+ * A declared sign-in's public provider configuration, as the tool file reads it:
+ * everything but the secret (only the owner's shared row holds it) and the
+ * public-client flag (a declared client is confidential by definition).
+ */
+export type DeclaredOAuthProvider = Omit<OAuthProviderConfig, 'clientSecret' | 'publicClient'>;
 
 /**
  * How a secret is provisioned — mirrors `ToolVariableScope` in the tool-manuals
@@ -69,10 +119,94 @@ export type SecretScope = 'admin' | 'user';
 /** Resolves a UTCP-namespaced key (`<manual>_<VAR>`) to its provisioning scope. */
 export type VariableScopeResolver = (key: string) => Promise<SecretScope>;
 
+/**
+ * A sign-in made through Bevel's managed OAuth app for a connector: the
+ * tokens arrived from the broker, and renewing them goes back through it.
+ * Redeclared here (the vault takes no import from managed-connectors) in the
+ * same way `SecretScope` mirrors the tool-manuals contract.
+ */
+export interface ManagedSignInRef {
+  connectorId: string;
+  scopeSet: string;
+}
+
+/** The token set a broker refresh or handoff delivers — what the vault stores. */
+export interface DeliveredTokenSet {
+  access_token: string;
+  refresh_token?: string;
+  /** Epoch ms; absent when the provider gave no lifetime. */
+  expires_at?: number;
+  token_type?: string;
+  /** Space-delimited scopes granted, or the requested ones when the provider echoed none. */
+  scope?: string;
+}
+
+/**
+ * Renews a managed sign-in's tokens through the broker, which holds the
+ * managed app's client secret (this deployment never does). Throws
+ * {@link SecretOAuthError} with the broker's `providerStatus` on a refusal,
+ * so the vault tells a dead grant (400/401 → wipe) from an outage (keep).
+ * The vault bounds the call (15 s): a broker that does not answer by then
+ * is an outage, the stale token is served, and the next call asks again.
+ */
+export interface ManagedTokenRefresher {
+  refresh(ref: ManagedSignInRef, refreshToken: string): Promise<DeliveredTokenSet>;
+}
+
+/**
+ * Tells the provider a managed sign-in's tokens are no longer wanted, where
+ * the provider offers a way (Google, HubSpot; Microsoft has none). Best
+ * effort: a failure is logged without token material and the local delete
+ * proceeds — the tokens are gone from here either way.
+ */
+export interface ManagedTokenRevoker {
+  revoke(ref: ManagedSignInRef, tokens: { access_token: string; refresh_token?: string }): Promise<void>;
+}
+
+/** What the Connect page shows for a managed sign-in, from the connector it belongs to. */
+export interface ManagedSignInCard {
+  displayName: string;
+  /** A lucide icon name. */
+  icon: string;
+  /** One line: what connecting lets Hexis do. */
+  description: string;
+  /** Plain-language permissions of the scope set. */
+  permissions: string[];
+  scopeSetLabel: string;
+  dataResidency: string;
+  subprocessor: string;
+}
+
+/**
+ * The distribution's side of a managed sign-in: it knows the connectors
+ * (their names, permissions, data notes) and how to open a sign-in through
+ * the broker. Core asks it two things and otherwise treats the resulting
+ * row like any other OAuth sign-in. Absent, a managed sign-in is listed as
+ * waiting on the deployment and cannot be started.
+ */
+export interface ManagedSignInPort {
+  /** Whether sign-ins can be started here at all (a broker is configured). */
+  available(): boolean;
+  /** The card for a sign-in, or null for a connector this distribution does not know. */
+  describe(ref: ManagedSignInRef): ManagedSignInCard | null;
+  /**
+   * Open a sign-in for `key` and answer the provider URL to send the browser
+   * to. `userId` null is a workspace (shared) connection, which the route
+   * allows only to a writer of the tool. `returnTo` is a same-origin path on
+   * this deployment the browser lands on afterwards.
+   */
+  start(input: { userId: string | null; key: string; ref: ManagedSignInRef; returnTo: string }): Promise<{ url: string }>;
+}
+
 /** Non-secret OAuth provider config the user supplies when registering an oauth secret. */
 export interface OAuthProviderConfig {
   authorizationUrl: string;
   tokenUrl: string;
+  /**
+   * The OAuth client. A managed sign-in (`managed` set) has none of its own,
+   * since the client is the broker's: the vault stores `''` whatever a caller
+   * sends. Every other sign-in requires a non-empty value.
+   */
   clientId: string;
   /** Kept out of listings; stored encrypted alongside the tokens. */
   clientSecret?: string;
@@ -93,6 +227,10 @@ export interface OAuthProviderConfig {
    * server's canonical URL).
    */
   resource?: string;
+  /** Set on a managed sign-in: the broker does the round-trip and the refresh. `clientId` is then `''`. */
+  managed?: ManagedSignInRef;
+  /** The connected account, as the broker reported it (an email, a portal name). Shown on the card. */
+  account?: string;
 }
 
 export interface CreateOAuthSecretInput {
@@ -102,7 +240,47 @@ export interface CreateOAuthSecretInput {
   provider: OAuthProviderConfig;
 }
 
+/** Secrets stored under one manual's name, counted — never a value, never whose. */
+export interface NamespaceSecretCount {
+  /** Typed values and shared client secrets. */
+  keys: number;
+  /** Per-user OAuth rows — somebody signed in (or started to). */
+  signIns: number;
+}
+
+/**
+ * Whether a vault key belongs to the namespace `prefix` (`utcpNamespacePrefix`).
+ *
+ * A bare `startsWith` is not enough: namespacing doubles every underscore, so
+ * manual `foo`'s prefix `foo_` is also the start of manual `foo_bar`'s
+ * `foo__bar_`. A remainder starting with `_` therefore belongs to a longer
+ * name.
+ *
+ * `_X` IS a legal variable name, so `foo` declaring `_bar_KEY` stores under
+ * `foo__bar_KEY` — the very key `foo_bar` declaring `KEY` stores under. The
+ * UTCP encoding makes those one row with two honest claimants, and no rule
+ * applied to the key can tell them apart. This predicate therefore answers NO
+ * for every `_`-leading remainder, with no exception for a declaring manual:
+ * the only thing it is used for is counting and WIPING a whole namespace, and
+ * an ambiguous row left standing is recoverable where one wrongly deleted is
+ * not. (Establishing that no colliding manual exists is not an option either
+ * — the tool catalog omits what it could not read, so its silence is not
+ * proof.)
+ */
+export function isKeyInNamespace(key: string, prefix: string): boolean {
+  if (!key.startsWith(prefix)) return false;
+  const rest = key.slice(prefix.length);
+  return rest.length > 0 && !rest.startsWith('_');
+}
+
 export interface ISecretsVaultService {
+  /** Count every user's secrets under one namespace prefix — see {@link isKeyInNamespace}. */
+  countNamespace(prefix: string): Promise<NamespaceSecretCount>;
+  /**
+   * Delete every secret under one namespace prefix — the shared rows and every
+   * user's. What deleting a tool wipes; returns what it removed.
+   */
+  removeNamespace(prefix: string): Promise<NamespaceSecretCount>;
   /** The caller's secrets (values omitted). */
   list(userId: string): Promise<SecretSummary[]>;
   /** One secret's summary, or null if it isn't the caller's. */
@@ -132,8 +310,10 @@ export interface ISecretsVaultService {
   /**
    * Set the confidential client secret + provider config for a tool's OAuth-backed
    * variable, on the SHARED row (`user_id NULL`) for `key`. The provider meta is
-   * stored ALONGSIDE the secret so a later `.tool` edit can't redirect it. Owner-
-   * gated by the route (write access on the `.tool`).
+   * stored ALONGSIDE the secret as a record of the save; a sign-in follows the
+   * declaration as the tool file reads when it starts (`beginToolOAuthByKey`'s
+   * `provider`), not this copy. Owner-gated by the route (write access on the
+   * `.tool`).
    */
   putSharedOAuthClientSecret(input: {
     key: string;
@@ -158,16 +338,26 @@ export interface ISecretsVaultService {
    */
   getSharedOAuthProvider(key: string): Promise<OAuthProviderConfig | null>;
   /**
-   * Provision (if needed) the caller's per-user oauth row for `key` from the SHARED
-   * row's stored provider meta + client secret, then build the consent URL. 409 if
-   * the owner hasn't set the client secret. Returns the provisioned row's id (to
-   * sign into the callback state) and the consent url.
+   * Provision (if needed) the caller's per-user oauth row for `key` and build the
+   * consent URL. 409 if the owner hasn't set the client secret. Returns the
+   * provisioned row's id (to sign into the callback state) and the consent url.
    *
-   * `scopes`, when given, are the permissions to REQUEST on the consent screen —
-   * supplied by the caller from the live tool file so a scope added there takes
-   * effect without the owner re-entering the secret. Only the requested scopes
-   * follow the tool file; the client id, addresses, and secret are still read from
-   * the owner-set shared row. Omitted → the shared row's stored scopes are used.
+   * Where the provider configuration comes from depends on who registered the
+   * client, and each kind of sign-in has exactly one source:
+   *   - `provider` given — a DECLARED sign-in: the client id, endpoints, PKCE,
+   *     resource and authorize params are the declaration as the tool file reads
+   *     now, handed over by the caller. They are validated as the client-secret
+   *     save validates them (https, no private or local address) before anything
+   *     is written or built, and they are what the caller's row records, so the
+   *     token exchange and later refreshes of this grant use the configuration
+   *     the consent was given for. The shared row contributes the client secret
+   *     only, and must hold one.
+   *   - `provider` absent — a client the platform registered itself (dynamic
+   *     client registration): nothing in a file describes it, so the shared
+   *     row's stored configuration is used.
+   *
+   * `scopes`, when given, are the permissions to REQUEST on the consent screen
+   * (the live tool file's); omitted → the provider configuration's own scopes.
    */
   beginToolOAuthByKey(input: {
     userId: string;
@@ -175,7 +365,43 @@ export interface ISecretsVaultService {
     redirectUri: string;
     state: string;
     scopes?: string[];
+    provider?: DeclaredOAuthProvider;
   }): Promise<{ id: string; url: string }>;
+
+  // --- Managed sign-ins (tokens arrive from the broker, not from a code exchange here) ---
+  /**
+   * Open a managed sign-in: write (or keep) the row the handoff will land on,
+   * remembering the one-time `nonce` the broker must echo. `userId` null is
+   * the SHARED row (a workspace connection). Existing tokens survive, so a
+   * reconnect that is abandoned leaves the old connection working.
+   */
+  beginManagedConnection(input: {
+    userId: string | null;
+    key: string;
+    provider: OAuthProviderConfig;
+    nonce: string;
+  }): Promise<void>;
+  /**
+   * Land the broker's handoff: the row's pending nonce must match (constant
+   * time), or the handoff is refused as a replay or a stray. Stores the
+   * tokens, clears the nonce, remembers the account.
+   */
+  completeManagedConnection(input: {
+    userId: string | null;
+    key: string;
+    nonce: string;
+    tokens: DeliveredTokenSet;
+    account?: string;
+  }): Promise<void>;
+  /**
+   * Revoke (where the provider allows) and delete every managed sign-in of
+   * one user — deprovisioning. With `within`, the same inside the caller's
+   * transaction: the rows are locked until it commits, so a sign-in landing
+   * meanwhile finds no row (an account erasure runs this beside the user
+   * row's deletion). Throws when a row could not be settled, so the caller
+   * never believes the person holds nothing.
+   */
+  removeManagedRowsOfUser(userId: string, within?: ManagedRowsWriter): Promise<number>;
 
   /**
    * Resolve the injectable value for a UTCP variable `key` — the only reader of
@@ -183,7 +409,26 @@ export interface ISecretsVaultService {
    * token (refreshed on demand). Returns null when missing or not-yet-authorized.
    */
   resolve(userId: string, key: string): Promise<string | null>;
+
+  /**
+   * Refresh the caller's OAuth token for `key` NOW, ignoring its stored expiry —
+   * for when a downstream server has just rejected the token (401 /
+   * `invalid_token`), which outranks whatever lifetime it was issued with.
+   * Callers own the pacing (the MCP proxy allows one per user+manual per
+   * minute); this method refreshes every time it is asked.
+   */
+  forceRefresh(userId: string, key: string): Promise<ForcedRefreshOutcome>;
 }
+
+/**
+ * What a {@link ISecretsVaultService.forceRefresh} did:
+ *   - `refreshed` — fresh tokens are stored; a retry will use them.
+ *   - `rejected` — the grant is dead (provider 400/401, or no refresh token):
+ *     the token set was wiped, client secret kept; the user must re-authorize.
+ *   - `transient` — network/timeout/5xx: tokens kept, a later call tries again.
+ *   - `skipped` — nothing to refresh (no such OAuth row, or not signed in).
+ */
+export type ForcedRefreshOutcome = 'refreshed' | 'rejected' | 'transient' | 'skipped';
 
 /** Thrown when input fails validation. Routes map to 422. */
 export class InvalidSecretError extends Error {
@@ -267,4 +512,54 @@ export function missingScopes(required: string[] | undefined, granted: string | 
 
 export function scopesCovered(required: string[] | undefined, granted: string | undefined): boolean {
   return missingScopes(required, granted).length === 0;
+}
+
+/** Why a caller's own value for a per-user variable is not ready yet; see {@link userSecretGap}. */
+export type UserSecretGap = 'missing' | 'wrong-kind' | 'unauthorized' | 'under-scoped';
+
+/**
+ * Whether the CALLER's own value for a per-user variable is ready, and if not,
+ * why: the one rule the MCP proxy hides a tool by and `list_tool_setup` reports
+ * from, so the two cannot disagree. `null` when it is ready.
+ *
+ * - `missing`: no row at all, so it needs a value or a sign-in.
+ * - `wrong-kind`: a row of the OTHER kind than the manual now declares. A
+ *   `.tool` edited from an OAuth sign-in to a plain key (or back) leaves the
+ *   old row behind, and serving a token where a key is declared fails
+ *   opaquely at the provider. The credential has to be set up again.
+ * - `unauthorized`: an OAuth row with no token yet: registered, sign-in not
+ *   completed. Fail closed: anything but a confirmed `true` counts.
+ * - `under-scoped`: a token granted fewer scopes than the tool now declares,
+ *   so the call would fail at the provider; it needs signing in again.
+ */
+export function userSecretGap(
+  declared: { oauth: boolean; oauthScopes?: string[] },
+  status: Pick<SecretConfigStatus, 'userConfigured' | 'userAuthorized' | 'grantedScopes'> & { userKind?: SecretKind | null } | undefined,
+): UserSecretGap | null {
+  if (!status?.userConfigured) return 'missing';
+  const declaredKind: SecretKind = declared.oauth ? 'oauth' : 'static';
+  if (status.userKind && status.userKind !== declaredKind) return 'wrong-kind';
+  if (declared.oauth && status.userAuthorized !== true) return 'unauthorized';
+  if (declared.oauth && !scopesCovered(declared.oauthScopes, status.grantedScopes)) return 'under-scoped';
+  return null;
+}
+
+/**
+ * Is the stored row the KIND the manual now declares — i.e. would the thing the
+ * UI is about to offer actually work?
+ *
+ * A `.tool` can be edited to turn a plain key into an OAuth variable, or back,
+ * and the row set for the previous shape survives the edit. The two are not
+ * interchangeable: `beginToolOAuthByKey` refuses a `static` shared row, and
+ * `resolve` hands an OAuth row's ACCESS TOKEN to a variable whose consumer
+ * wants the value. So "a row exists" is never "this variable is set up", and
+ * every surface that asks the second question pairs the presence flag with the
+ * kind rather than re-deriving the rule.
+ */
+export function configuredAs(
+  want: SecretKind,
+  present: boolean | undefined,
+  stored: SecretKind | null | undefined,
+): boolean {
+  return present === true && stored === want;
 }

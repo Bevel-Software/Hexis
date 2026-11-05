@@ -1,9 +1,9 @@
 /**
  * Per-run write restriction for background/routine agents.
  *
- * The ontology-session gate ({@link ../workflow/session-ontology.service}) bounds
- * WHICH ontology a run may write; this narrower gate bounds WHAT KIND of file a
- * run may write, by extension. It exists for the `watchlist_check` routine, which is
+ * The agent-access gate ({@link ./agent-access.gate}) lets a deployment decide
+ * WHETHER a run may write a path at all; this narrower gate bounds WHAT KIND of
+ * file a run may write, by extension. It exists for the `watchlist_check` routine, which is
  * allowed to refresh dashboard views (`.html`) but must never touch the
  * knowledge-graph nodes (`.md`) or any other file — a hard, code-level guarantee
  * rather than a prompt request (a prompt-only rule has already proven insufficient).
@@ -11,12 +11,11 @@
  * Keyed by the agent run's `sessionId` (the background agent passes its run id as
  * the session id, which the internal token then carries onto every loopback tool
  * call as `ctx.sessionId`). A restriction lives only for the duration of one
- * in-process run, so the store is a plain in-memory map — no durability needed,
- * unlike the ontology touched-set which must survive restarts and span the MCP
- * proxy. The executor sets the restriction before streaming and clears it after.
+ * in-process run, so the store is a plain in-memory map — no durability needed.
+ * The executor sets the restriction before streaming and clears it after.
  */
 
-import { ToolError } from '../tool-helpers/tool.contract.js';
+import { ToolError } from '../tool-helpers/index.js';
 
 export interface IRoutineWritePolicy {
   /**
@@ -34,12 +33,6 @@ export interface IRoutineWritePolicy {
    * always passes — so this is a no-op for every non-restricted caller.
    */
   assertPathWritable(sessionId: string | undefined, wsPath: string): void;
-  /**
-   * Throw a 403 `ToolError` when the session is restricted at all — for write
-   * tools with no single target path to check (arbitrary shell), which a
-   * restricted run must not be able to use as a write bypass.
-   */
-  assertUnrestricted(sessionId: string | undefined): void;
 }
 
 export class RoutineWritePolicyService implements IRoutineWritePolicy {
@@ -66,14 +59,5 @@ export class RoutineWritePolicyService implements IRoutineWritePolicy {
         'Knowledge-graph nodes and other files are read-only for this routine.',
       403,
     );
-  }
-
-  assertUnrestricted(sessionId: string | undefined): void {
-    if (sessionId && this.restrictions.has(sessionId)) {
-      throw new ToolError(
-        'This run is restricted to writing dashboard views only, so shell commands (which could write any file) are disabled.',
-        403,
-      );
-    }
   }
 }

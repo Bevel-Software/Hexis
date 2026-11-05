@@ -13,6 +13,7 @@ import {
 import { useMediaQuery } from '../hooks/useMediaQuery';
 import { NARROW_QUERY } from '../breakpoints';
 import { useModalLayer } from '../../../shared/components/useModalLayer';
+import { HEADER_BAND, HEADER_COLUMN_TOP, SIDEBAR_HEADER_TESTID } from '../../../shared/theme/header';
 
 /**
  * The `aria-controls` target for the top bar's toggle, which renders in a
@@ -28,6 +29,61 @@ export const SIDEBAR_DRAWER_MAX_WIDTH = '24rem';
 
 const FOCUSABLE_SELECTOR =
   'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+/**
+ * The sidebar's ROW GRID — the horizontal inset every row in this column sits
+ * on, the tree rows above and the footer rows below alike (proto:684-693,
+ * `FileExplorer`'s `ROW_CLASS`, `PluginsSidebar`'s `rowClass`).
+ *
+ * Exported because "the same inset" only holds if it is ONE declaration. It
+ * was several, and the two rows at the bottom of the column drifted off it —
+ * the change-request dock sat 4px right of the tree it hangs under, which is
+ * the sort of thing nobody can name and everybody can see.
+ */
+export const SIDEBAR_ROW_INSET = 'px-2.5';
+
+/**
+ * How far a change request's content sits inside its row, so that it starts
+ * under the word "Change" in the CHANGE REQUESTS header above it: that row's
+ * own caret slot (`w-3`, 12px) plus its own gap (`gap-[7px]`), both in
+ * `git/components/PullRequestsForMe`. The two numbers are the header's, and
+ * this constant is only correct for children of THAT row — a parent with a
+ * different caret would need its own.
+ *
+ * It is emphatically NOT the tree's indent. `FileExplorer` spends a wider
+ * caret (`w-3.5`) and a narrower gap (`gap-1.5`), and steps its children by
+ * `10 + depth * 13` (proto:3561), which is a depth ladder rather than an
+ * alignment — a file there does not start under its folder's name and is not
+ * trying to. Only the horizontal INSET (`SIDEBAR_ROW_INSET`) is shared by
+ * both; what a row does inside that inset is its own.
+ *
+ * An indent INSIDE the row, deliberately, rather than a larger inset written
+ * instead of it. The row still carries `SIDEBAR_ROW_INSET` and so still moves
+ * with the grid — whereas one value holding the inset and the indent added
+ * together would keep its own counsel the day the inset changes, and the
+ * child rows would drift off the header that moved without them. It also
+ * keeps the row spanning the full column, hover and focus ring included.
+ */
+export const SIDEBAR_CHILD_INDENT = 'pl-[19px]';
+
+/**
+ * The footer group's geometry: one hairline off whatever the surface was
+ * holding, then its rows on the sidebar's own vertical rhythm.
+ *
+ * It lives HERE rather than on the rows because nowhere else knows all of
+ * them. The rows arrive through the `footer` slot from different modules —
+ * the Library's setup reminder, the change-request dock — and each bringing a
+ * margin and a border of its own is precisely how they ended up pressed
+ * together under two hairlines with no gap between them.
+ *
+ * `empty:hidden` is load-bearing. Both rows decide for THEMSELVES whether
+ * they have anything to say (nothing needs setup; nothing is waiting on you),
+ * and on the ordinary day both render nothing. React cannot tell the slot
+ * that — an element that renders null is still an element — so the emptiness
+ * is read off the DOM instead: no children, no rule, no space.
+ */
+const SIDEBAR_FOOTER_SLOT =
+  'mt-2 flex flex-none flex-col gap-1.5 border-t border-line pt-2 empty:hidden';
 
 /**
  * The app's nav spine — the prototype's `.side` + `.resizer` + `.side-inner`
@@ -55,9 +111,10 @@ export function SidebarFrame({
   children,
   label,
   header,
+  footer,
 }: {
   children: ReactNode;
-  /** Names the region and its resize handle, e.g. `Library plugins`. */
+  /** Names the region and its resize handle, e.g. `Library navigation`. */
   label: string;
   /**
    * Pinned above `children`, outside whatever list the surface is holding.
@@ -70,6 +127,20 @@ export function SidebarFrame({
    * not know that, and the next thing to go there costs no edit here.
    */
   header?: ReactNode;
+  /**
+   * Pinned below `children`, outside whatever list the surface is holding —
+   * the same slot as `header`, at the other end. Both surfaces pass the
+   * change-request dock, which is what makes it one queue in one place
+   * across Knowledge and Skills & Tools; the frame does not know that.
+   *
+   * Unlike `header` this slot is a GROUP: it is the one end of the column
+   * that holds more than one thing, so the frame draws the rule above it and
+   * spaces whatever is inside it (`SIDEBAR_FOOTER_SLOT`). What the rows must
+   * still bring themselves is the inset — `SIDEBAR_ROW_INSET`, on the row
+   * rather than on the group, so a row's hover and focus still span the full
+   * column the way a tree row's does.
+   */
+  footer?: ReactNode;
 }) {
   // `narrow` comes off the store rather than straight off `viewportNarrow`
   // below, because the store is where it lands in the same write as
@@ -269,16 +340,67 @@ export function SidebarFrame({
         }}
       >
         {/* proto:104 — `padding:16px 14px 18px`, and an explicit width so the
-            column does not reflow while the frame animates to zero. */}
+            column does not reflow while the frame animates to zero.
+
+            The prototype's 16px TOP is the one number of the three that did
+            not survive: it used to stand in for half of the sidebar header
+            row's height, with the slot's own content supplying the rest, and
+            a height nobody could name is a height the page beside it could
+            not match. `HEADER_COLUMN_TOP` replaces it with 12px — the offset
+            the page column already opened on — and the band below is the
+            same height on both sides, which is what puts the two rows on one
+            line. */}
         <div
-          className="flex h-full flex-col px-3.5 pt-4 pb-[18px]"
+          // Named, because it is where the sidebar's row grid starts: every
+          // row's inset is this padding plus its own, and the test that holds
+          // the footer rows on that grid needs to know where to stop adding.
+          data-sidebar-column
+          className={cn('flex h-full flex-col px-3.5 pb-[18px]', HEADER_COLUMN_TOP)}
           style={{
             width: narrow ? SIDEBAR_DRAWER_WIDTH : width,
             maxWidth: narrow ? SIDEBAR_DRAWER_MAX_WIDTH : undefined,
           }}
         >
-          {header}
+          {/* The sidebar's header row, on the shared band — the left half of
+              the seam under the toolbar; the page's title bar is the right
+              half.
+
+              The band is spent on a header that DRAWS, and on nothing else.
+              It used to be keyed on whether the surface DECLARED one, on the
+              theory that a row coming and going with the connect-your-agent
+              pill would pull the nav up by the band's height the moment
+              onboarding finished. It does pull it up — onto the page title's
+              own band, which is where the nav's first row belongs. What the
+              old rule actually bought was an empty 48px strip above "Company
+              Context" and above the "Everything" lens, for everyone who had
+              finished setting the product up.
+
+              Settings passes no header at all and gets no band, because it
+              has no title bar on the other side of the seam to hold a line
+              with. Knowledge and the Library pass a pill that empties itself,
+              and get the band back the day it has something to say.
+
+              `empty:hidden` rather than a check in React, for the same reason
+              the footer group below uses it: an element that renders null is
+              still an element, so "did this header draw anything" is a
+              question only the DOM can answer. Which makes it the header's
+              business to leave NOTHING here when it has nothing — see
+              `ConnectAgentPill`, whose dismissal receipt goes to the body
+              rather than into this row. */}
+          {header !== undefined && (
+            <div
+              data-testid={SIDEBAR_HEADER_TESTID}
+              className={cn(HEADER_BAND, 'w-full empty:hidden')}
+            >
+              {header}
+            </div>
+          )}
           {children}
+          {footer && (
+            <div data-sidebar-footer className={SIDEBAR_FOOTER_SLOT}>
+              {footer}
+            </div>
+          )}
         </div>
       </aside>
 

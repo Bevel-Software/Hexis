@@ -1,0 +1,206 @@
+import { useCallback, useEffect, useRef } from 'react';
+import { useLocation } from 'react-router-dom';
+import { KNOWLEDGE_BASE_DIR, type FileTreeEntry } from '@bevel-software/platform-shared';
+import { useWorkspace } from '../state/workspace.context';
+import { WorkspaceApiError } from '../services/workspace.api';
+import { branchFromPathname, useFileNav } from '../routing/kb-routes';
+import { useMergedWorkspaceTree } from './useMergedWorkspaceTree';
+import { pathExistsInTree } from '../utils/fileTree';
+import { useKnowledgeWriteTarget } from './useKnowledgeWriteTarget';
+
+/**
+ * What "New page" writes: a title, so the page is a page from its first save,
+ * and a blank line under it for the cursor to land on.
+ */
+export const NEW_PAGE_CONTENT = '# Untitled\n\n';
+
+/** `Untitled.md` for the first page, `Untitled N.md` after it. */
+export function untitledPagePath(folder: string, n: number): string {
+  return n === 1 ? `${folder}/Untitled.md` : `${folder}/Untitled ${n}.md`;
+}
+
+/**
+ * The first number, from `from` on, whose untitled name the tree does not
+ * already hold — a second New page makes a second page rather than reusing
+ * the first one's name.
+ */
+function freeUntitledNumber(tree: FileTreeEntry | null, folder: string, from = 1): number {
+  let n = from;
+  while (pathExistsInTree(tree, untitledPagePath(folder, n))) n++;
+  return n;
+}
+
+/**
+ * How many names New page tries before it gives up. The tree it picks from
+ * can be a moment behind (a teammate or an agent creating pages too), so a
+ * refusal moves on to the next name; a handful covers any real race.
+ */
+const NEW_PAGE_ATTEMPTS = 5;
+
+/**
+ * The exclusive create's "that name is taken": 409, for a file that exists
+ * now — or one somebody holds the lock on, which is a page being made there.
+ */
+function isNameTaken(err: unknown): boolean {
+  return err instanceof WorkspaceApiError && err.status === 409;
+}
+
+/**
+ * A refusal to write there: 403. Access rules and a protected branch's gate
+ * both answer it, so it is only a cue to ask again where the person may
+ * write — the fresh answer tells the two apart. Never shown either way.
+ */
+function isRefused(err: unknown): boolean {
+  return err instanceof WorkspaceApiError && err.status === 403;
+}
+
+export interface CreatePage {
+  /**
+   * The Knowledge folder, or null while there is nowhere safe to create a
+   * page: before the workspace has bootstrapped, and while the workspace on
+   * screen is not yet the branch the URL names.
+   */
+  knowledgeRoot: string | null;
+  /**
+   * Create `Untitled.md` (or the next free `Untitled N.md`) in `pageFolder`
+   * and open it in edit mode. Resolves with the path, or with null when a
+   * write was refused and there is nowhere left to try: a fresh check found
+   * nowhere the person may write, or the refusal was not about the folder
+   * (New page then disappears; there is nothing to say). Rejects, for any
+   * failure but a refusal, with an Error whose message is ready to show
+   * ("Couldn’t create the page: …").
+   */
+  createPage(): Promise<string | null>;
+  /**
+   * The Knowledge folder New page writes to (`useKnowledgeWriteTarget`): the
+   * Knowledge folder itself when the person may write it, else the folder of
+   * the page on screen, else the first they may write in file tree order.
+   * Null until the first check answers and when there is nowhere —
+   * everything that offers New page hides it while this is null. A later
+   * check (a tree or page change, a switch) keeps the last folder up until
+   * it answers, so nothing flickers; `createPage` asks again before writing
+   * when that answer is not for the page and branch on screen.
+   */
+  pageFolder: string | null;
+  /** Whether that check has answered, so a list can wait for it rather than flash. */
+  pageFolderSettled: boolean;
+}
+
+/**
+ * "New page", shared by everything that offers it — the Get set up list and
+ * the command menu — so both pick names the same way and neither can ever
+ * overwrite a page. It writes where the person may write (`pageFolder`),
+ * and a refused write asks again rather than showing who may write there.
+ *
+ * The create is EXCLUSIVE (`ifAbsent`): the name comes from the tree on
+ * screen, which may not yet show a page someone else just made, and a plain
+ * write would replace that page with an empty one. The page opens through
+ * `openWorkspacePath(path, { edit: true })`, which the viewer honours the way
+ * an Edit click is honoured — lock, fresh read and all.
+ *
+ * The caller owns how it says "busy" and where it shows a failure: the
+ * column keeps it on its step, the menu reopens with it.
+ */
+export function useCreatePage(): CreatePage {
+  const { kbDirName, createFile, workspaceBranch } = useWorkspace();
+  const { tree } = useMergedWorkspaceTree();
+  const { openWorkspacePath } = useFileNav();
+  const { pathname } = useLocation();
+  // Where the page would be WRITTEN against where it would OPEN. `createFile`
+  // writes to the workspace on screen (`workspaceBranch`), while the page
+  // opens on the branch the URL names; mid-switch those differ, the URL
+  // already naming the destination. A page made in that gap lands on the
+  // branch the person just left, and the viewer then looks for it on the new
+  // one and finds nothing. So there is no folder to create in until the two
+  // agree. No branch in the URL (the Library) means the workspace on screen
+  // is the destination, as `openWorkspacePath` reads it.
+  const destination = branchFromPathname(pathname) ?? workspaceBranch;
+  const ready = kbDirName !== null && workspaceBranch !== null && destination === workspaceBranch;
+  const knowledgeRoot = ready ? `${kbDirName}/${KNOWLEDGE_BASE_DIR}` : null;
+
+  // Where the person may write is asked of the workspace on screen whatever
+  // the URL says, so the list and the menu know it mid-switch too; only the
+  // create waits for the two to agree.
+  const {
+    folder: pageFolder,
+    settled: pageFolderSettled,
+    recheck,
+    resolve,
+    withdraw,
+  } = useKnowledgeWriteTarget(kbDirName !== null ? `${kbDirName}/${KNOWLEDGE_BASE_DIR}` : null);
+
+  // What a create was started on. A switch of branch while it waits (for a
+  // recheck, for a refused attempt) would otherwise let it write to the
+  // workspace it captured and open the page back on the branch just left;
+  // after every wait it checks it is still where it started, and stops if
+  // not. The page it may have made by then stays where it was made.
+  const liveKey = `${workspaceBranch}\n${destination}`;
+  const live = useRef(liveKey);
+  useEffect(() => {
+    live.current = liveKey;
+  }, [liveKey]);
+
+  const createPage = useCallback(async (): Promise<string | null> => {
+    if (!knowledgeRoot || !pageFolderSettled) {
+      throw new Error('Couldn’t create the page: the workspace is still loading.');
+    }
+    const startedOn = liveKey;
+    const moved = (): boolean => live.current !== startedOn;
+    // The folder for the page and branch on screen now (`resolve`): the last
+    // answer when it is about them, else asked again — never a folder shown
+    // for a page just left during the check's debounce.
+    let folder = await resolve();
+    if (moved()) return null;
+    // Folders a write was refused in, this create: each refusal asks again,
+    // and a fresh answer naming one of these says the refusal is not about
+    // the folder.
+    // Every folder this loop writes comes from `resolve` or a refusal's
+    // `recheck`, both answered for the page and branch on screen when they
+    // return (see `useKnowledgeWriteTarget`).
+    const refused = new Set<string>();
+    while (folder) {
+      let n = freeUntitledNumber(tree, folder);
+      let path = untitledPagePath(folder, n);
+      for (let attempt = 1; ; attempt++) {
+        if (moved()) return null;
+        try {
+          await createFile(path, NEW_PAGE_CONTENT, { ifAbsent: true });
+          // Made, but the person has moved on: it is not opened over them.
+          if (moved()) return path;
+          openWorkspacePath(path, { edit: true });
+          return path;
+        } catch (err) {
+          if (isNameTaken(err) && attempt < NEW_PAGE_ATTEMPTS) {
+            n = freeUntitledNumber(tree, folder, n + 1);
+            path = untitledPagePath(folder, n);
+            continue;
+          }
+          // A refusal is never shown: who may write where is nobody's business
+          // here. Access changed since the check, so ask again and move on to
+          // the next folder they may write — or, with none, New page is gone.
+          if (isRefused(err)) {
+            refused.add(folder);
+            const next = await recheck();
+            if (moved()) return null;
+            if (next && !refused.has(next)) {
+              folder = next;
+              break;
+            }
+            // The check still says they may write where they were refused:
+            // the branch, not the folder, said no, and no folder here would
+            // take the page. New page goes rather than fail on every click.
+            if (next) withdraw();
+            return null;
+          }
+          // And should any other failure name who may write, that goes too.
+          const msg = (err instanceof Error ? err.message : String(err)).replace(/\s*Eligible:[\s\S]*$/, '');
+          throw new Error(`Couldn’t create the page: ${msg}`, { cause: err });
+        }
+      }
+    }
+    // Nowhere to write: the fresh answer has hidden New page, which says it.
+    return null;
+  }, [knowledgeRoot, liveKey, pageFolderSettled, resolve, recheck, withdraw, tree, createFile, openWorkspacePath]);
+
+  return { knowledgeRoot, createPage, pageFolder, pageFolderSettled };
+}

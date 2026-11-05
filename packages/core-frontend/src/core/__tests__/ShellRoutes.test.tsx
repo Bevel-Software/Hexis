@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, within } from '@testing-library/react';
-import { MemoryRouter, useLocation } from 'react-router-dom';
+import { MemoryRouter, useLocation, useNavigationType } from 'react-router-dom';
 import { ShellRoutes } from '../CoreAppShell';
 import type { AppDef } from '../registry';
 
@@ -23,6 +23,17 @@ vi.mock('../../modules/secrets-vault/services/tool-secrets.api', () => ({
   setOAuthClientSecret: vi.fn(async () => {}),
   deleteAdminVar: vi.fn(async () => {}),
   deleteUserVar: vi.fn(async () => {}),
+}));
+// The change-request address opens the request by number; the fetch is
+// stubbed so the route can render without a network, and the view is the
+// stand-in below — the route table is what is under test.
+vi.mock('../../modules/git/services/pr.api', () => ({
+  getPullRequest: vi.fn(async (num: number) => ({ number: num, title: `Request `, author: { login: 'bot' } })),
+  listPullRequestsForMe: vi.fn(async () => []),
+  listMyPullRequests: vi.fn(async () => []),
+}));
+vi.mock('../../modules/change-requests/components/ChangeRequestDialog', () => ({
+  ChangeRequestDialog: ({ cr }: { cr: { number: number } }) => <div data-testid="cr-dialog">{cr.number}</div>,
 }));
 
 /** Exposes the router's current pathname so redirects can be asserted. */
@@ -126,5 +137,58 @@ describe('ShellRoutes', () => {
     renderAt('/workspace/main');
     expect(screen.queryByRole('navigation', { name: 'Settings' })).toBeNull();
     expect(screen.getByTestId('knowledge-surface')).toBeInTheDocument();
+  });
+});
+
+describe('ShellRoutes — the change-request address', () => {
+  // The link the backend builds for every change request. It used to fall
+  // into the catch-all and land on Knowledge with nothing open.
+  it('opens the request at /change-requests/<number> instead of redirecting', async () => {
+    renderAt('/change-requests/276');
+    expect(screen.getByTestId('pathname')).toHaveTextContent(/^\/change-requests\/276$/);
+    expect(await screen.findByTestId('cr-dialog')).toHaveTextContent('276');
+    expect(screen.queryByTestId('knowledge-surface')).not.toBeInTheDocument();
+  });
+});
+
+describe('ShellRoutes — /connect', () => {
+  /** The whole address, and how the router got there. */
+  function AddressProbe() {
+    const { pathname, search, hash } = useLocation();
+    return (
+      <>
+        <div data-testid="address">{pathname + search + hash}</div>
+        <div data-testid="navigation">{useNavigationType()}</div>
+      </>
+    );
+  }
+
+  function renderConnect(path: string) {
+    return render(
+      <MemoryRouter initialEntries={[path]}>
+        <ShellRoutes apps={apps} />
+        <AddressProbe />
+      </MemoryRouter>,
+    );
+  }
+
+  // The server keeps handing out `/connect` — MCP consent (`?oauth=`), tool
+  // sign-in returns (`#authorized`, `#error=`) — and each of those depends on
+  // what rides along, so the redirect must carry the query AND the fragment.
+  it.each([
+    ['/connect', '/skills-and-tools/connect'],
+    ['/connect?oauth=abc&x=1#authorized=1', '/skills-and-tools/connect?oauth=abc&x=1#authorized=1'],
+    ['/connect#error=Nope.', '/skills-and-tools/connect#error=Nope.'],
+    ['/connect?from=agent', '/skills-and-tools/connect?from=agent'],
+  ])('sends %s to %s inside Skills & Tools', (from, to) => {
+    renderConnect(from);
+    expect(screen.getByTestId('address').textContent).toBe(to);
+    expect(screen.getByTestId('skills-surface')).toBeInTheDocument();
+  });
+
+  // Back must not land on an address that only bounces forward again.
+  it('replaces the history entry rather than pushing one', () => {
+    renderConnect('/connect?oauth=abc');
+    expect(screen.getByTestId('navigation')).toHaveTextContent('REPLACE');
   });
 });

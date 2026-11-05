@@ -1,9 +1,39 @@
 import type { Request, Response, NextFunction } from 'express';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('mcp-auth');
 import { InvalidTokenError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
-import type { AuthService } from '../auth/auth.service.js';
-import type { IExternalApiKeyService } from '../tool-auth/external-api-key.interface.js';
+import type { AuthService } from '../auth/index.js';
+import { ACCOUNT_DEACTIVATED_MESSAGE, AccountDeactivatedError, AuthBackendError } from '../auth/index.js';
+import type { IExternalApiKeyService, InternalTokenService } from '../tool-auth/index.js';
+import { rejectConnectionKey } from '../tool-auth/index.js';
 import type { BevelOAuthProvider } from './oauth/bevel-oauth-provider.js';
-import '../tool-auth/external-api-key.interface.js'; // Express Request augmentation (req.externalApiKeyId)
+import '../tool-auth/index.js'; // Express Request augmentation (req.externalApiKeyId)
+import '../audit/index.js'; // Express Request augmentation (req.agentConnectionId)
+
+/** Which of the four credentials below an MCP request was authenticated with. */
+export type McpCallerKind = 'key' | 'oauth' | 'internal' | 'session';
+
+declare global {
+  // eslint-disable-next-line @typescript-eslint/no-namespace
+  namespace Express {
+    interface Request {
+      /**
+       * The kind of credential the MCP auth middleware admitted the request
+       * with. Only a `session` — the person signed in to the app — may name
+       * the page its call comes from (`X-Bevel-Page`).
+       */
+      mcpCallerKind?: McpCallerKind;
+      /**
+       * The agent configuration the MCP caller's credential connects as — a key's
+       * `api_tokens.agent_path`, an agent connection's
+       * `agent_connections.agent_path`, or the one an exchanged grant
+       * carries. Unset is Everything.
+       */
+      mcpAgentPath?: string;
+    }
+  }
+}
 
 /**
  * Auth middleware for the MCP endpoint. Accepts any of:
@@ -13,23 +43,38 @@ import '../tool-auth/external-api-key.interface.js'; // Express Request augmenta
  *   2. An MCP OAuth access token (Bearer `bevel-mcp_…`) — issued by our own
  *      authorization server after the /connect consent flow, resolved via
  *      BevelOAuthProvider.
- *   3. A regular JWT — same shape the web app uses. Lets a logged-in user
+ *   3. An internal token (Bearer `<tenant>-int_…`) — minted server-side only
+ *      (the per-request loopback bearer `createRequestServer` mints, the
+ *      /mcp/local-token exchange). The
+ *      local MCP server (hexis-mcp) exchanges its OAuth grant for one and
+ *      then uses it EVERYWHERE a connection key goes — the agent REST surface
+ *      already accepts it, and refusing it here made OAuth-mode hexis-mcp
+ *      fail at exactly one hop: registering this endpoint as its remote
+ *      manual. Accepting it adds no new mint path — only this server creates
+ *      them, always for an already-verified user. Only the `externalProxy`
+ *      shape is accepted: a plain in-process internal token is the loopback
+ *      surface's credential and must not double as an MCP caller.
+ *   4. A regular JWT — same shape the web app uses. Lets a logged-in user
  *      hit the MCP endpoint from their browser if we ever need it
  *      (e.g. an in-app debugger). Keeps the surface from forking.
  *
- * The middleware **must** run before the MCP transport handler — the
- * transport pulls `req.userId` to populate the session row at `initialize`.
+ * The middleware **must** run before the MCP transport handler — every
+ * request's server is built from `req.userId` (there is no session row to
+ * carry it; the endpoint is stateless per request).
  *
  * Failures return 401 with a `WWW-Authenticate` challenge carrying
  * `resource_metadata` (RFC 9728) so an OAuth-capable MCP client discovers our
- * authorization server and starts the flow, while clients configured with a
- * key simply prompt for it.
+ * authorization server and starts the flow — EXCEPT a bearer shaped like a
+ * connection key that does not verify: that caller configured a key, so it
+ * gets a plain `invalid_token` answer and no sign-in invitation (see
+ * `connection-key-rejection.ts`).
  */
 export function createMcpAuthMiddleware(
   authService: AuthService,
   externalApiKeyService: IExternalApiKeyService,
   oauthProvider: BevelOAuthProvider,
   resourceMetadataUrl: string,
+  internalTokens: InternalTokenService,
 ) {
   const wwwAuthenticate = `Bearer realm="bevel-mcp", resource_metadata="${resourceMetadataUrl}"`;
   const unauthorized = (res: Response, error: string) => {
@@ -65,18 +110,21 @@ export function createMcpAuthMiddleware(
         // `externalApiKeyId` unset and are not metered.
         const resolved = await externalApiKeyService.verifyAndLoadToken(token);
         if (!resolved) {
-          unauthorized(res, 'Invalid or revoked connection key');
+          const switchedOff = (await externalApiKeyService.isKeyOfSwitchedOffAccount?.(token)) ?? false;
+          rejectConnectionKey(res, { switchedOff });
           return;
         }
         req.userId = resolved.user.id;
         req.userEmail = resolved.user.email;
         req.externalApiKeyId = resolved.tokenId;
+        if (resolved.agentPath) req.mcpAgentPath = resolved.agentPath;
+        req.mcpCallerKind = 'key';
         next();
         return;
       } catch (err) {
         // A DB error during verification is a 500, not a 401 — the caller's
         // credentials may be valid; we just can't check them right now.
-        console.error('[mcp-auth] connection-key verification failed:', err);
+        log.error('connection-key verification failed:', { err });
         res.status(500).json({ error: 'Authentication backend unavailable' });
         return;
       }
@@ -91,6 +139,15 @@ export function createMcpAuthMiddleware(
         const info = await oauthProvider.verifyAccessToken(token);
         req.userId = String(info.extra?.userId ?? '');
         req.userEmail = String(info.extra?.userEmail ?? '');
+        // The agent behind the grant, for the Audit log. A token minted
+        // before connections existed carries none; the call then runs
+        // unattributed rather than refused.
+        if (typeof info.extra?.connectionId === 'string') {
+          req.agentConnectionId = info.extra.connectionId;
+        }
+        if (typeof info.extra?.agentPath === 'string' && info.extra.agentPath) {
+          req.mcpAgentPath = info.extra.agentPath;
+        }
         if (!req.userId) {
           unauthorized(res, 'Invalid access token');
           return;
@@ -99,7 +156,7 @@ export function createMcpAuthMiddleware(
         if (err instanceof InvalidTokenError) {
           unauthorized(res, 'Invalid, expired, or revoked access token');
         } else {
-          console.error('[mcp-auth] OAuth token verification failed:', err);
+          log.error('OAuth token verification failed:', { err });
           res.status(500).json({ error: 'Authentication backend unavailable' });
         }
         return;
@@ -107,6 +164,93 @@ export function createMcpAuthMiddleware(
       // Outside the try so a synchronous throw from a downstream handler isn't
       // misclassified as a token-verification failure (and doesn't try to write
       // a second response).
+      req.mcpCallerKind = 'oauth';
+      next();
+      return;
+    }
+
+    // Internal token — server-minted, shape-routed like the branches above so
+    // it never reaches jsonwebtoken. `verify` returns null for invalid or
+    // expired ones (a clean 401); the user row is loaded so `req.userEmail`
+    // carries the same truth every other branch provides — the tool handlers
+    // downstream resolve access against it.
+    //
+    // ONLY the `externalProxy` shape is admitted: that claim marks the
+    // loopback identity of an external caller (the per-request bearer
+    // `createRequestServer` mints, the /mcp/local-token exchange), which is
+    // the one internal-token kind that has any business arriving here as an
+    // MCP client. A plain in-process internal token — the per-run credential
+    // the agent factory mints for its own code-mode client — is a
+    // loopback-surface credential, and accepting it would let it drive the
+    // MCP endpoint (createRequestServer would even mint it a fresh
+    // externalProxy bearer, upgrading it).
+    if (internalTokens.looksLikeInternalToken(token)) {
+      // `verify` answers null for the invalid/expired cases it can see coming,
+      // but a malformed token of plausible shape can still THROW from inside
+      // it (e.g. `timingSafeEqual` on same-length strings whose byte lengths
+      // differ). That is the caller's bad token, not a backend failure — 401,
+      // never a 500 or an unhandled throw into the error handler.
+      let claim: ReturnType<InternalTokenService['verify']>;
+      try {
+        claim = internalTokens.verify(token);
+      } catch {
+        claim = null;
+      }
+      if (!claim || claim.externalProxy !== true) {
+        unauthorized(res, 'Invalid or expired internal token');
+        return;
+      }
+      let user;
+      let active = false;
+      try {
+        user = await authService.getUserById(claim.userId);
+        if (user) active = await authService.isActive(user.id);
+      } catch (err) {
+        log.error('internal-token user lookup failed:', { err });
+        res.status(500).json({ error: 'Authentication backend unavailable' });
+        return;
+      }
+      if (!user) {
+        unauthorized(res, 'Invalid or expired internal token');
+        return;
+      }
+      if (!active) {
+        unauthorized(res, ACCOUNT_DEACTIVATED_MESSAGE);
+        return;
+      }
+      req.userId = user.id;
+      req.userEmail = user.email;
+      // The local server's exchanged grant names its agent connection (see
+      // InternalTokenClaim.connectionId). The token itself is stateless and
+      // lives up to five hours, so the connection is asked on every request
+      // whether it still admits the agent — revoking the agent must reach
+      // this path as surely as it reaches the grant's own tokens. The use is
+      // stamped too (throttled, off the request's path), so the Audit log's
+      // "last used" follows the local server's calls, not only its sign-ins.
+      // Carried on the request so those calls are logged under the agent.
+      // The same read answers what the connection is made as NOW: a
+      // re-consent changes the row, not the token, so the row's choice is
+      // the one served, never the one the token was minted with.
+      if (claim.connectionId) {
+        let live: { agentPath: string | null } | null;
+        try {
+          live = await oauthProvider.liveConnectionChoice(claim.connectionId);
+        } catch (err) {
+          log.error('agent-connection check failed:', { err });
+          res.status(500).json({ error: 'Authentication backend unavailable' });
+          return;
+        }
+        if (!live) {
+          unauthorized(res, 'Access for this agent was revoked');
+          return;
+        }
+        oauthProvider.noteConnectionUse(claim.connectionId);
+        req.agentConnectionId = claim.connectionId;
+        if (live.agentPath) req.mcpAgentPath = live.agentPath;
+      } else if (claim.agentPath) {
+        req.mcpAgentPath = claim.agentPath;
+      }
+      req.mcpCallerKind = 'internal';
       next();
       return;
     }
@@ -114,13 +258,21 @@ export function createMcpAuthMiddleware(
     // JWT path — same logic as `createAuthMiddleware` in modules/auth, kept
     // duplicated rather than imported because that one writes its own 401
     // body shape and we want the WWW-Authenticate header set.
+    let session: { userId: string; email: string };
     try {
-      const { userId, email } = authService.verifyToken(token);
-      req.userId = userId;
-      req.userEmail = email;
-      next();
-    } catch {
-      unauthorized(res, 'Invalid or expired token');
+      session = await authService.resolveSession(token);
+    } catch (err) {
+      if (err instanceof AuthBackendError) {
+        log.error('session account lookup failed:', { err: err.cause });
+        res.status(500).json({ error: 'Authentication backend unavailable' });
+        return;
+      }
+      unauthorized(res, err instanceof AccountDeactivatedError ? err.message : 'Invalid or expired token');
+      return;
     }
+    req.userId = session.userId;
+    req.userEmail = session.email;
+    req.mcpCallerKind = 'session';
+    next();
   };
 }

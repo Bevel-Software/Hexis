@@ -1,0 +1,135 @@
+/**
+ * The FileReader contract: ONE interface every read-path consumer goes
+ * through, with per-extension implementations picked by a single registry
+ * lookup — the same shape as the frontend's renderer registry.
+ *
+ * Adding a file format is ONE new reader entry in `createFileReaderRegistry`
+ * (file-reader.registry.ts). The three consumers — `read_file`, `grep` and the
+ * write-refusal in workspace.tools.ts — dispatch through `readerFor` and never
+ * branch on extensions themselves.
+ */
+import { fileExtension } from './doc-extract.types.js';
+import { sanitizedPath } from '../../../shared/printable.js';
+
+/**
+ * What reading a file produces, before the tool layer shapes it for MCP:
+ * text (the honest `[extracted text of …]` marker is ALREADY prepended for
+ * extractions, so line numbers match between read_file and grep), an image
+ * payload (the tool layer wraps it in the `McpImageResult` sentinel), or a
+ * refusal — legacy formats, oversized images, unreadable binary, corrupt
+ * documents — whose message is returned as the file's text content.
+ */
+export type ReadResult =
+  | { kind: 'text'; text: string }
+  | { kind: 'image'; data: string; mimeType: string; note: string }
+  | { kind: 'refusal'; message: string };
+
+/**
+ * `path` as interpolated into a ONE-LINE notice or refusal: line breaks are
+ * shown as escapes rather than obeyed (the rule `extractionMarker` uses too),
+ * so a filename cannot forge extra output lines. The rule itself lives in
+ * `shared/printable`, because the missing-path refusals (`not-found.ts`) need
+ * the same one and the shared layer is the only one both can reach.
+ */
+export const displayPath = sanitizedPath;
+
+/**
+ * Any text interpolated into a ONE-LINE notice — a path, or an extractor's
+ * own failure message, which quotes bytes from the file and can therefore
+ * carry CR/LF of the document's choosing.
+ */
+export const oneLine = displayPath;
+
+/**
+ * What a file IS, as the binary capability contract names it in a refusal:
+ * `text` (the text tools own it), `document` (read_file extracts it; the
+ * legacy .doc/.ppt/.xls count too), `image`, `archive`, or any other `binary`.
+ */
+export type FileKind = 'text' | 'document' | 'image' | 'archive' | 'binary';
+
+/** Where a read came from: the workspace whose file it is. A document reader reports a failed extraction there. */
+export interface ReadOrigin {
+  workspaceId: string;
+}
+
+/** A per-format file reader. Register implementations in `createFileReaderRegistry`. */
+export interface FileReader {
+  /** The extensions this reader owns — lowercase, with the dot. Empty for the default (fallback) reader. */
+  readonly extensions: readonly string[];
+  /**
+   * Read `bytes` (read at `path`) into what the read tools return. Must not
+   * throw for bad file content. `origin`, when the caller has one, is the
+   * workspace the read happened in.
+   */
+  read(bytes: Buffer, path: string, origin?: ReadOrigin): Promise<ReadResult>;
+  /**
+   * Text `grep` may search, or null when there is nothing (cheaply) searchable.
+   * Default readers: the decoded text content (TextReader; null on NUL bytes) /
+   * absent = never greppable this way (ImageReader; DocumentReader, whose
+   * remembered extraction grep asks for through `cachedRead` — cold
+   * extraction is grep's call, under its per-walk budget).
+   */
+  greppableText?(bytes: Buffer, path: string): Promise<string | null>;
+  /** May the agent TEXT-editing tools (write_file/write_files/edit_file) touch this file? */
+  readonly textEditable: boolean;
+  /** The kind this reader's extensions name — what a `binary_not_writable` refusal reports. */
+  readonly fileKind: FileKind;
+  /**
+   * The MIME type this reader's extensions name for `path` — what `file_stat`
+   * reports as `mime` — or undefined when it names none (the fallback reader
+   * on an unknown extension; stat then sniffs the content).
+   */
+  mimeFor?(path: string): string | undefined;
+  /**
+   * Format-specific copy for the write-refusal thrown when `textEditable` is
+   * false (see `assertNotDocumentEdit` in workspace.tools.ts). Absent = the
+   * generic extracted-text/round-trip explanation.
+   */
+  editRefusal?(path: string): string;
+  /**
+   * Refusal for OVERWRITING what this file ALREADY holds, or null to allow.
+   * Consulted only when `textEditable` is true: that answer covers the
+   * FORMAT, this one covers the CONTENT. The fallback reader needs it because
+   * an extensionless file may hold anything — `read_file` refuses binary
+   * content, and a write gate that did not ask would let an agent overwrite
+   * bytes it was never allowed to see.
+   */
+  editRefusalForExisting?(bytes: Buffer, path: string): string | null;
+}
+
+/**
+ * Extension → reader, with a default fallback (the text reader). Built once
+ * per deployment by `createFileReaderRegistry`; `readerFor` is the ONE lookup
+ * every consumer routes through.
+ */
+export class FileReaderRegistry {
+  private readonly byExtension = new Map<string, FileReader>();
+
+  constructor(
+    readers: readonly FileReader[],
+    private readonly fallback: FileReader,
+  ) {
+    for (const reader of readers) {
+      for (const raw of reader.extensions) {
+        // Lookups arrive lowercased (`fileExtension`), so a key stored with any
+        // other casing could never match and its reader would silently fall back
+        // to the default — routing a .PDF-registered reader nowhere.
+        const ext = raw.toLowerCase();
+        // Duplicate claims fail LOUDLY: were the later registration to win
+        // silently, adding a format could disable an existing reader.
+        if (this.byExtension.has(ext)) throw new Error(`two file readers claim the extension "${ext}"`);
+        this.byExtension.set(ext, reader);
+      }
+    }
+  }
+
+  /** Every extension some reader claims (lowercase, with the dot); the fallback owns the rest. */
+  ownedExtensions(): string[] {
+    return [...this.byExtension.keys()];
+  }
+
+  /** The reader owning `path`'s extension (lowercased by `fileExtension`), or the fallback. */
+  readerFor(path: string): FileReader {
+    return this.byExtension.get(fileExtension(path)) ?? this.fallback;
+  }
+}

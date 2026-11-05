@@ -8,7 +8,7 @@
  * folding (`collapseUnchanged`) that only change boxes need.
  */
 
-import { computeDiff } from '../../workspace/utils/diff';
+import { computeDiff } from '../../workspace';
 
 export interface DiffLine {
   kind: 'same' | 'removed' | 'added';

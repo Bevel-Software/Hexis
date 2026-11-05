@@ -1,49 +1,38 @@
 import { useContext, useEffect, useState } from 'react';
 import { Navigate } from 'react-router-dom';
-import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
+import { DEFAULT_BRANCH, KNOWLEDGE_BASE_DIR } from '@bevel-software/platform-shared';
 import { isPublicDemo } from '../../../core/bootstrap';
-import { KB_ROUTE_PREFIX, kbFileUrl } from '../../workspace/routing/kb-routes';
-import { WorkspaceContext } from '../../workspace/state/workspace.context';
-import { takePostLoginRedirect } from '../../auth/services/sso';
-import { useOnboarding } from '../state/onboarding';
-import { WELCOME_PATH } from '../paths';
+import { KB_ROUTE_PREFIX, WorkspaceContext, kbFileUrl } from '../../workspace';
+import { takePostLoginRedirect } from '../../auth';
 
 /**
  * The public demo's front door is its guided tour, not an empty file tree:
  * a first-time visitor landing on the bare domain has no idea what they are
  * looking at, and this page exists to tell them. Demo-branch content
- * knowledge, deliberately — the file is seeded on the demo workspace, and
- * this constant lives only on the public-demo branch.
+ * knowledge, deliberately — the file is seeded on the demo workspace's
+ * knowledge root, and this constant lives only on the public-demo branch.
  */
-const DEMO_HOME_FILE = 'KnowledgeBase/Start here.md';
+const DEMO_HOME_FILE = 'Start here.md';
 
 /**
- * Where `/` lands. For everyone, forever: Knowledge — except the ONE visit
- * where an account is brand new (`users.onboarding_done` false, and never
- * greeted in this browser), which lands on the welcome page instead.
+ * Where `/` lands: Knowledge, for everyone, brand-new accounts included.
  *
- * Deliberately only the root route: a deep link is an intention, and
- * onboarding must never hijack one. Whoever skips the welcome is reminded by
- * the sidebar pill, not by the router.
+ * There is no automatic welcome page. Choosing where the knowledge lives is
+ * the one step that has to come before the app (the setup gate asks it);
+ * connecting an agent can wait, and it waits in plain sight — the sidebar's
+ * Connect your agent pill and the Get set up list both lead to the welcome
+ * page, and neither takes over the screen on the way in.
  *
  * A deep link that came through SSO arrives HERE rather than at itself — the
  * OAuth round-trip returns to a fixed callback URL, which scrubs to `/`
  * (see `consumeSsoCallback`) — so the link's intention survives as the stash
- * `startSsoLogin` left behind. An existing account goes straight to it; a
- * brand-new one is still greeted first, and the welcome page's Done returns
- * to the link instead of the usual shelf (the `returnTo` state below).
+ * `startSsoLogin` left behind, and it outranks Knowledge.
  *
- * `useOnboarding` is provider-tolerant, so `ShellRoutes` stays renderable
- * without the full stack (its own documented property); providerless or
- * signed out this is exactly the old `<Navigate to={KB_ROUTE_PREFIX}>`.
- *
- * The redirect carries `greeting`, and it is the ONLY navigation that does:
- * arriving here because you just signed in is a different event from opening
- * the same page from the sidebar, and the page needs to tell them apart to
- * know whether it is a ceremony or a page. See `WelcomePage`.
+ * On the public demo (`isPublicDemo()`), and only there, a bare `/` lands on
+ * the Start here page instead of the tree. A carried deep link still wins —
+ * it is an intention, the tour is a default.
  */
 export function RootLanding() {
-  const { shouldWelcome } = useOnboarding();
   // Read tolerantly, not via useWorkspace(): this component's documented
   // property is that it renders providerless (tests, bare ShellRoutes), and
   // only the demo-home redirect needs the workspace at all.
@@ -56,6 +45,7 @@ export function RootLanding() {
   // only the run that found something writes.
   useEffect(() => {
     const returnTo = takePostLoginRedirect();
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- the one-shot take described above; it settles in one extra render
     setStash((s) => s ?? { returnTo });
   }, []);
 
@@ -63,15 +53,17 @@ export function RootLanding() {
   // after would put the wrong page in the history.
   if (stash === null) return null;
 
-  if (shouldWelcome) {
-    return <Navigate to={WELCOME_PATH} state={{ greeting: true, returnTo: stash.returnTo }} replace />;
-  }
   if (stash.returnTo) return <Navigate to={stash.returnTo} replace />;
   if (isPublicDemo()) {
     // Hold for the workspace context rather than landing somewhere else and
     // correcting — kbDirName resolves within the first round-trip.
     if (kbDirName === null) return null;
-    return <Navigate to={kbFileUrl(DEFAULT_BRANCH, `${kbDirName}/${DEMO_HOME_FILE}`)} replace />;
+    return (
+      <Navigate
+        to={kbFileUrl(DEFAULT_BRANCH, `${kbDirName}/${KNOWLEDGE_BASE_DIR}/${DEMO_HOME_FILE}`)}
+        replace
+      />
+    );
   }
   return <Navigate to={KB_ROUTE_PREFIX} replace />;
 }

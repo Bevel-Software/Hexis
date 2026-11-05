@@ -1,11 +1,11 @@
 import type { PullRequestDetail } from '@bevel-software/platform-shared';
 import { authFetch } from '../../../lib/api';
-import { handleApiResponse } from '../../git/services/git.api';
+import { handleApiResponse } from '../../git';
 
 /**
  * Fetch the full PR detail (metadata + file diffs). `fresh` bypasses the
  * backend's 30s detail cache — use from event-driven refreshes (post-merge,
- * post-comment, post-open-change-request) but leave off for user-triggered
+ * post-edit, post-open-change-request) but leave off for user-triggered
  * navigation.
  */
 export async function fetchPrDetail(

@@ -1,12 +1,14 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { NodeFs } from '../../kb-fs/node-fs.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
+import { parse as parseYaml } from 'yaml';
 
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import { AccessControlService } from '../access-control.service.js';
 import { AccessMutationService, AccessMutationError } from '../access-mutation.service.js';
-import type { Principal } from '../access-splice.js';
+import type { Principal } from '../../access-model/access-splice.js';
 
 const KB = 'knowledge-base';
 const WS = 'ws-mut-1';
@@ -29,6 +31,7 @@ function stubWorkspace(workspaceDir: string): WorkspaceService {
     getWorkspacePath: async () => workspaceDir,
     getOrCreateForBranch: async () => ({}) as unknown,
     readFile: async (_id: string, wsRel: string) => fs.readFile(resolve(wsRel), 'utf-8'),
+    readFileBinary: async (_id: string, wsRel: string) => fs.readFile(resolve(wsRel)),
     writeFile: async (_id: string, wsRel: string, content: string) => {
       const abs = resolve(wsRel);
       await fs.mkdir(path.dirname(abs), { recursive: true });
@@ -57,7 +60,7 @@ describe('AccessMutationService', () => {
     await write(repo, 'roles.yaml', ROLES_YAML);
     await write(repo, 'access.md', '---\nwrite:\n  - Admin\n---\n# Root\n');
     const ws = stubWorkspace(workspaceDir);
-    access = new AccessControlService(ws, KB);
+    access = new AccessControlService(ws, KB, new NodeFs());
     mutation = new AccessMutationService(ws, access, KB);
   });
 
@@ -80,11 +83,21 @@ describe('AccessMutationService', () => {
     expect(text).toContain('# Sales folder');
   });
 
-  it('kbPrincipals surfaces the built-in Everyone plugin alongside declared roles', async () => {
-    const { plugins } = await access.kbPrincipals(WS);
-    expect(plugins).toContain('Everyone');
-    expect(plugins).toContain('Admin');
-    expect(plugins).toContain('Product Team');
+  it('kbPrincipals (REAL service): roles lists ROLE principals only, groups separately', async () => {
+    // Through the real resolver — the route-level tests stub this method,
+    // which is exactly how the every-group-listed-as-a-role bug hid.
+    await write(repo, 'groups.yaml', 'groups:\n  GTM Team:\n    - pat@x.io\n  Admin:\n    - shadow@x.io\n');
+    access.invalidate(WS);
+    const { roles, groups } = await access.kbPrincipals(WS);
+    expect(roles).toContain('Everyone');
+    expect(roles).toContain('Admin');
+    expect(roles).toContain('Product Team');
+    // NO group ever appears under roles — not even one shadowing a role name;
+    // and each role appears exactly once (the alias key must not double it).
+    expect(roles).not.toContain('GTM Team');
+    expect(roles.filter((r) => r === 'Admin')).toHaveLength(1);
+    expect(roles.filter((r) => r === 'Product Team')).toHaveLength(1);
+    expect(groups.sort()).toEqual(['Admin', 'GTM Team']);
   });
 
   it('grant everyone read makes the folder publicly readable (read: everyone)', async () => {
@@ -109,6 +122,48 @@ describe('AccessMutationService', () => {
     const text = await fs.readFile(path.join(repo, 'New/access.md'), 'utf-8');
     expect(text).toContain('owner:');
     expect(text).toContain('Newbie <newbie@example.com>');
+  });
+
+  it("a skill folder's first grant creates its access.md beside the plugin's, and both rules resolve", async () => {
+    // The skill page's Share opens the dialog on the SKILL folder — the same
+    // folder-grant path as anywhere else. The plugin's own rule is untouched,
+    // and the resolver reads the two at their depths as it does any nesting.
+    await write(repo, 'Plugins/newsroom/access.md', '---\nread:\n  - Product Team\n---\n# Newsroom\n');
+    await write(repo, 'Plugins/newsroom/skills/newsletter/SKILL.md', '# Newsletter\n');
+    const skillAccess = path.join(repo, 'Plugins/newsroom/skills/newsletter/access.md');
+    await expect(fs.readFile(skillAccess, 'utf-8')).rejects.toThrow();
+
+    // The folder rules (the access.md BODY, after the frontmatter) as a
+    // verb → entries map, so each grant is checked under its own verb rather
+    // than anywhere in the file.
+    const skillRules = async (): Promise<Record<string, string[]>> => {
+      const text = await fs.readFile(skillAccess, 'utf-8');
+      const m = /^---\n[\s\S]*?\n---\n([\s\S]*)$/.exec(text);
+      expect(m).not.toBeNull();
+      return parseYaml(m![1]) as Record<string, string[]>;
+    };
+
+    const r = await mutation.grant(WS, 'folder', 'Plugins/newsroom/skills/newsletter', 'write', felix);
+    access.invalidate(WS);
+
+    expect(r).toEqual({ changed: true, editPath: 'Plugins/newsroom/skills/newsletter/access.md' });
+    expect((await skillRules()).write).toEqual(['Newbie <newbie@example.com>']);
+    expect(await fs.readFile(path.join(repo, 'Plugins/newsroom/access.md'), 'utf-8')).not.toContain(
+      'newbie@example.com',
+    );
+    // The skill-level grant holds on the skill, not on the rest of the plugin…
+    const skillMd = 'Plugins/newsroom/skills/newsletter/SKILL.md';
+    expect(await access.canWrite(WS, 'newbie@example.com', skillMd)).toBe(true);
+    expect(await access.canWrite(WS, 'newbie@example.com', 'Plugins/newsroom/README.md')).toBe(false);
+    // …and the plugin-level rule still reaches into the skill folder.
+    expect(await access.canRead(WS, 'felix@example.com', skillMd)).toBe(true);
+
+    // A second grant edits the file it created rather than starting another.
+    const second = await mutation.grant(WS, 'folder', 'Plugins/newsroom/skills/newsletter', 'download', felix);
+    expect(second).toEqual({ changed: true, editPath: 'Plugins/newsroom/skills/newsletter/access.md' });
+    const rules = await skillRules();
+    expect(rules.write).toEqual(['Newbie <newbie@example.com>']);
+    expect(rules.download).toEqual(['Newbie <newbie@example.com>']);
   });
 
   it('grant on a FILE edits the node frontmatter, NOT the folder (no sibling leak)', async () => {
@@ -294,13 +349,62 @@ describe('AccessMutationService', () => {
       // Admin write on an access.md comes from the hardcoded rescue, which a
       // `deny` entry cannot shadow. denyHere must detect the deny had no effect,
       // roll the file back, and refuse — never report a no-op success.
+      // (A subfolder's access.md: at the root the Admin write floor refuses the
+      // deny up front instead — see access-control.admin-root-floor.test.ts.)
+      await write(repo, 'Sales/access.md', '---\nwrite:\n  - Admin\n---\n# Sales folder\n');
       const admin: Principal = { kind: 'user', email: 'razvan@bevel.software', displayName: 'Razvan' };
-      await expect(mutation.denyHere(WS, 'file', 'access.md', admin)).rejects.toMatchObject({
+      await expect(mutation.denyHere(WS, 'file', 'Sales/access.md', admin)).rejects.toMatchObject({
         status: 409,
       });
       // The access.md is unchanged (rolled back) — admin still writes it.
       access.invalidate(WS);
-      expect(await access.canWrite(WS, 'razvan@bevel.software', 'access.md')).toBe(true);
+      expect(await access.canWrite(WS, 'razvan@bevel.software', 'Sales/access.md')).toBe(true);
+    });
+
+    it('GROUP deny with a VANISHED group succeeds even when a same-named ROLE keeps its grants', async () => {
+      // The false-negative this pins: a role named Product Team exists, so the
+      // service matches the GROUP's revoke/deny 'exact' — it strips and denies
+      // only `group/Product Team`. The post-write effectiveness assert must
+      // judge the SAME exact identity: with the group vanished, an
+      // alias-tolerant check would read the role's surviving bare and role/
+      // grants as the group still having access, roll back a fully effective
+      // deny, and answer 409 deny-ineffective.
+      await write(
+        repo,
+        'Sales/access.md',
+        // The group/ grant is the (now vanished) GROUP's; the bare and role/
+        // grants are the same-named ROLE's. No groups.yaml — the group is gone.
+        '---\nwrite:\n  - group/Product Team\n  - Product Team\n  - role/Product Team\n---\n# Sales folder\n',
+      );
+      access.invalidate(WS);
+
+      const r = await mutation.denyHere(WS, 'folder', 'Sales', { kind: 'role', role: 'group/Product Team' });
+      expect(r.changed).toBe(true);
+      access.invalidate(WS);
+
+      const text = await fs.readFile(path.join(repo, 'Sales/access.md'), 'utf-8');
+      // The group's grant became a deny...
+      expect(text).toContain('deny group/Product Team');
+      // ...and the ROLE's own grants were never touched.
+      expect(text).toMatch(/^ {2}- Product Team$/m);
+      expect(text).toContain('role/Product Team');
+      expect(text).not.toContain('deny Product Team');
+      expect(text).not.toContain('deny role/Product Team');
+      // The role still resolves its grant.
+      const roleSources = await access.grantSources(WS, 'folder', 'Sales', {
+        kind: 'role',
+        role: 'role/Product Team',
+      });
+      expect(roleSources.write).toEqual([{ kind: 'direct' }]);
+      // The group's exact token holds nothing anymore.
+      const groupSources = await access.grantSources(
+        WS,
+        'folder',
+        'Sales',
+        { kind: 'role', role: 'group/Product Team' },
+        { tokenMatch: 'exact' },
+      );
+      expect(groupSources).toEqual({});
     });
 
     it('is a no-op (changed:false) when the principal is already fully denied here', async () => {
@@ -435,5 +539,141 @@ describe('AccessMutationService', () => {
       const parent = await fs.readFile(path.join(repo, 'Sales/access.md'), 'utf-8');
       expect(parent).not.toContain('alice@example.com');
     });
+  });
+});
+
+
+// The grant/revoke x collided/uncollided cases, end-to-end through the REAL
+// resolver (kbPrincipals decides who owns the bare name) — the token-kind family.
+describe('token-kind family — role-first revoke, exact-token grant (real resolver)', () => {
+  let root: string;
+  let repo: string;
+  let access: AccessControlService;
+  let mutation: AccessMutationService;
+
+  const roleP: Principal = { kind: 'role', role: 'role/Product Team' }; // the ROLE, explicit
+  const bareP: Principal = { kind: 'role', role: 'Product Team' }; // the bare name (always the role here)
+  const groupP: Principal = { kind: 'role', role: 'group/Product Team' }; // the GROUP, explicit
+
+  beforeEach(async () => {
+    root = await mkTmpRoot();
+    const workspaceDir = path.join(root, WS);
+    repo = path.join(workspaceDir, KB);
+    await fs.mkdir(repo, { recursive: true });
+    await write(repo, 'roles.yaml', ROLES_YAML);
+    await write(repo, 'access.md', '---\nwrite:\n  - Admin\n---\n');
+    const ws = stubWorkspace(workspaceDir);
+    access = new AccessControlService(ws, KB, new NodeFs());
+    mutation = new AccessMutationService(ws, access, KB);
+  });
+
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  /** Collision on = a GROUP named "Product Team" exists beside the role. */
+  async function collide(on: boolean): Promise<void> {
+    if (on) {
+      await write(repo, 'groups.yaml', 'groups:\n  Product Team:\n    - pat@x.io\n  Design:\n    - dee@x.io\n');
+    }
+    access.invalidate(WS);
+  }
+
+  it('GRANT collided: the group grant lands even though the role is already granted', async () => {
+    await collide(true);
+    await write(repo, 'Sales/access.md', '---\nwrite:\n  - Product Team\n  - role/Product Team\n---\n');
+    const r = await mutation.grant(WS, 'folder', 'Sales', 'write', groupP);
+    expect(r.changed).toBe(true); // exact-token idempotency: group/ is a different principal
+    const text = await fs.readFile(path.join(repo, 'Sales/access.md'), 'utf-8');
+    expect(text.split('\n')).toContain('  - group/Product Team');
+    // The group member now resolves write through group/.
+    access.invalidate(WS);
+    expect(await access.canWrite(WS, 'pat@x.io', 'Sales/Deal.md')).toBe(true);
+  });
+
+  it('GRANT uncollided: same-spelling grants stay idempotent', async () => {
+    await collide(false);
+    await write(repo, 'Sales/access.md', '---\nwrite:\n  - role/Product Team\n---\n');
+    const r = await mutation.grant(WS, 'folder', 'Sales', 'write', roleP);
+    expect(r.changed).toBe(false);
+  });
+
+  it("REVOKE on a model-load failure: a ROLE revoke stays exact and keeps the bare token", async () => {
+    await collide(true);
+    await write(repo, 'Sales/access.md', '---\nwrite:\n  - Product Team\n  - role/Product Team\n---\n');
+    // A failed load answers empty principal lists: nothing says who owns the bare name.
+    vi.spyOn(access, 'kbPrincipals').mockResolvedValue({ roles: [], groups: [], plugins: [] } as never);
+    const r = await mutation.revoke(WS, 'folder', 'Sales', roleP, 'admin@x');
+    expect(r.changed).toBe(true);
+    const text = await fs.readFile(path.join(repo, 'Sales/access.md'), 'utf-8');
+    expect(text).not.toContain('role/Product Team');
+    expect(text.split('\n')).toContain('  - Product Team');
+  });
+
+  it("REVOKE collided: revoking the ROLE strips its bare and role/ spellings, never the group's", async () => {
+    await collide(true);
+    await write(
+      repo,
+      'Sales/access.md',
+      '---\nwrite:\n  - Product Team\n  - role/Product Team\n  - group/Product Team\n---\n',
+    );
+    const r = await mutation.revoke(WS, 'folder', 'Sales', roleP, 'admin@x');
+    expect(r.changed).toBe(true);
+    const text = await fs.readFile(path.join(repo, 'Sales/access.md'), 'utf-8');
+    expect(text).not.toContain('role/Product Team');
+    expect(text.split('\n')).not.toContain('  - Product Team');
+    expect(text.split('\n')).toContain('  - group/Product Team'); // the GROUP's token survives
+    access.invalidate(WS);
+    expect(await access.canWrite(WS, 'pat@x.io', 'Sales/Deal.md')).toBe(true);
+    expect(await access.canWrite(WS, 'felix@example.com', 'Sales/Deal.md')).toBe(false);
+  });
+
+  it("REVOKE collided: revoking the GROUP strips group/ only — the bare name is the role's", async () => {
+    await collide(true);
+    await write(
+      repo,
+      'Sales/access.md',
+      '---\nwrite:\n  - Product Team\n  - role/Product Team\n  - group/Product Team\n---\n',
+    );
+    const r = await mutation.revoke(WS, 'folder', 'Sales', groupP, 'admin@x');
+    expect(r.changed).toBe(true);
+    const text = await fs.readFile(path.join(repo, 'Sales/access.md'), 'utf-8');
+    expect(text).not.toContain('group/Product Team');
+    expect(text.split('\n')).toContain('  - Product Team');
+    expect(text).toContain('- role/Product Team');
+    access.invalidate(WS);
+    expect(await access.canWrite(WS, 'felix@example.com', 'Sales/Deal.md')).toBe(true);
+    expect(await access.canWrite(WS, 'pat@x.io', 'Sales/Deal.md')).toBe(false);
+  });
+
+  it('REVOKE: a group no role shares a name with strips group/ AND its legacy bare spelling', async () => {
+    await collide(true);
+    await write(repo, 'Sales/access.md', '---\nwrite:\n  - Design\n  - group/Design\n---\n');
+    const r = await mutation.revoke(WS, 'folder', 'Sales', { kind: 'role', role: 'group/Design' }, 'admin@x');
+    expect(r.changed).toBe(true);
+    const text = await fs.readFile(path.join(repo, 'Sales/access.md'), 'utf-8');
+    expect(text).not.toContain('Design');
+    access.invalidate(WS);
+    expect(await access.canWrite(WS, 'dee@x.io', 'Sales/Deal.md')).toBe(false);
+  });
+
+  it('REVOKE uncollided: revoking the role strips BOTH spellings (legacy bare cleanup)', async () => {
+    await collide(false);
+    await write(repo, 'Sales/access.md', '---\nwrite:\n  - Product Team\n  - role/Product Team\n---\n');
+    const r = await mutation.revoke(WS, 'folder', 'Sales', roleP, 'admin@x');
+    expect(r.changed).toBe(true);
+    const text = await fs.readFile(path.join(repo, 'Sales/access.md'), 'utf-8');
+    expect(text).not.toContain('Product Team');
+    access.invalidate(WS);
+    expect(await access.canWrite(WS, 'felix@example.com', 'Sales/Deal.md')).toBe(false);
+  });
+
+  it('REVOKE uncollided: a bare revoke also strips both spellings', async () => {
+    await collide(false);
+    await write(repo, 'Sales/access.md', '---\nwrite:\n  - Product Team\n  - role/Product Team\n---\n');
+    const r = await mutation.revoke(WS, 'folder', 'Sales', bareP, 'admin@x');
+    expect(r.changed).toBe(true);
+    const text = await fs.readFile(path.join(repo, 'Sales/access.md'), 'utf-8');
+    expect(text).not.toContain('Product Team'); // both spellings are the role
   });
 });

@@ -9,26 +9,43 @@ import { createToolHandlerFactory } from '../tool-handler.js';
 import { createManualRoutes } from '../../tool-registry/manual.routes.js';
 import { registerWorkspaceTools } from '../../workspace/workspace.tools.js';
 import { RoutineWritePolicyService } from '../../workspace/routine-write-policy.js';
-import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
+import { VersionControlHooks } from '../../version-control/version-control-hooks.js';
+import { ToolDescriptionNotes } from '../../workspace/agent-access.gate.js';
 import { SpillStore } from '../../workspace/spill-store.js';
+import { DocExtractService, WorkerDocumentExtractor } from '../../workspace/index.js';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 
 const WS = 'target-company-state';
 let recorded: unknown[][] = [];
+/** Workspace-relative targets the stub archive holds; each is offered to the tool's write guard. */
+let archiveEntries: string[] = [];
 
 const externalApiKeyService = { verifyAndLoadToken: async () => null } as never;
 const authService = { getUserById: async (id: string) => ({ id, email: 'e@x', name: 'N' }) } as never;
 const workspaceService = {
   getOrCreateForUser: async () => ({ id: WS }),
   getWorkspacePath: async () => '/tmp/ws',
-  unzipFile: async (ws: string, p: string, d?: string) => {
+  unzipFile: async (ws: string, p: string, d?: string, guardWrite?: (target: string) => Promise<void>) => {
     recorded.push(['unzip', ws, p, d]);
-    return { extracted: [p], skipped: [] };
+    if (archiveEntries.length === 0) return { extracted: [p], skipped: [] };
+    // Mirrors the real extraction: a guard refusal skips that entry with its message.
+    const extracted: string[] = [];
+    const skipped: { path: string; reason: string }[] = [];
+    for (const target of archiveEntries) {
+      try {
+        await guardWrite?.(target);
+        extracted.push(target);
+      } catch (err) {
+        skipped.push({ path: target, reason: (err as Error).message });
+      }
+    }
+    return { extracted, skipped };
   },
   readFile: async () => {
     throw new Error('no such file');
   },
 } as never;
-const workflowService = {} as never;
+const versionControlService = {} as never;
 const events = {} as never;
 const accessControl = {
   canRead: async () => true,
@@ -41,19 +58,18 @@ let httpServer: HttpServer | undefined;
 async function start(): Promise<string> {
   const registry = new ToolRegistry();
   const toolAuth = createToolAuthMiddleware(externalApiKeyService, internalToken);
-  const resolve = createToolContextResolver({ authService, workspaceService, workflowService, events, kbDirName: 'knowledge-base', creatorAccess: { planForCreate: async () => null, grantInExtractedFile: async () => null, noteAccessFileWritten: () => {} } });
+  const resolve = createToolContextResolver({ authService, workspaceService, versionControlService, events, kbDirName: 'knowledge-base', creatorAccess: { planForCreate: async () => null, grantInExtractedFile: async () => null, noteAccessFileWritten: () => {} } });
   const th = createToolHandlerFactory(resolve);
   const router = express.Router();
   // NOTE (core split): this suite used to register the search, feedback and
   // kb (citation) tools alongside the workspace tools. Those registrations —
   // and their web_search / submit_feedback / cite_kb_node cases — moved to
   // the enterprise repo with their modules; core registers only core tools.
-  registerWorkspaceTools(registry, router, toolAuth, th, new SpillStore('/tmp/bevel-test-spills'), accessControl, 'knowledge-base', {
-    service: {} as never,
-    enabled: false, // ontology boundary not under test here
-    kbDirName: 'knowledge-base',
+  registerWorkspaceTools(registry, router, toolAuth, th, new SpillStore('/tmp/bevel-test-spills'), new DocExtractService('/tmp/bevel-test-doc-extract', new WorkerDocumentExtractor()), accessControl, testKbContext(), {
+    // No hook registered: the agent-access gate refuses nothing here.
     recoveryBotEmail: 'recovery-bot@bevel.local',
-    hooks: new WorkflowHooks(),
+    hooks: new VersionControlHooks(),
+    notes: new ToolDescriptionNotes(),
   }, new RoutineWritePolicyService(), {} as never /* sessionSink — start_session not exercised here */);
   router.use(createManualRoutes(registry, toolAuth));
 
@@ -72,6 +88,7 @@ const post = (url: string, body: unknown = {}) =>
 
 beforeEach(() => {
   recorded = [];
+  archiveEntries = [];
 });
 afterEach(async () => {
   if (httpServer) await new Promise<void>((r) => httpServer!.close(() => r()));
@@ -79,11 +96,25 @@ afterEach(async () => {
 });
 
 describe('Phase 4 tools (core subset)', () => {
-  it('unzip calls workspaceService.unzipFile with the context workspace', async () => {
+  it('unzip calls workspaceService.unzipFile with the context workspace, on the repository path', async () => {
     const base = await start();
     const res = await post(`${base}/api/agent/tools/unzip`, { path: 'a.zip', branch: WS });
     expect(res.status).toBe(200);
-    expect(recorded).toContainEqual(['unzip', WS, 'a.zip', undefined]);
+    // The archive is named without the clone-folder prefix; the normaliser
+    // places it inside the checkout, and THAT is the path the service is given.
+    expect(recorded).toContainEqual(['unzip', WS, 'knowledge-base/a.zip', undefined]);
+  });
+
+  it('unzip never extracts a roles.yaml — extraction bypasses the filesystem gate that checks it', async () => {
+    archiveEntries = ['knowledge-base/KnowledgeBase/notes.md', 'knowledge-base/roles.yaml'];
+    const base = await start();
+    const res = await post(`${base}/api/agent/tools/unzip`, { path: 'knowledge-base/a.zip', branch: WS });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { extracted: string[]; skipped: { path: string; reason: string }[] };
+    expect(body.extracted).toEqual(['knowledge-base/KnowledgeBase/notes.md']);
+    expect(body.skipped).toEqual([
+      { path: 'knowledge-base/roles.yaml', reason: expect.stringContaining('roles.yaml is never extracted') },
+    ]);
   });
 
   it('the registered core tool appears in the internal manual', async () => {

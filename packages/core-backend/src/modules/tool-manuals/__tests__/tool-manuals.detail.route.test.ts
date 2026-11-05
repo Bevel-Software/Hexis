@@ -4,13 +4,19 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import express from 'express';
 import { afterEach, describe, expect, it, test, vi } from 'vitest';
+import { NodeFs } from '../../kb-fs/node-fs.js';
+import { KbPluginSource } from '../../plugins/discovery/kb-plugin-source.js';
+
+/** The one disk, as production wires it: the service and its discovery read the same one. */
+const disk = new NodeFs();
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { createToolManualsBrowserRoutes } from '../tool-manuals.routes.js';
 import { ToolManualService } from '../tool-manuals.service.js';
-import { workspaceIdForBranch } from '../../workspace/workspace.service.js';
+import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import type { IToolManualService, ToolManualDetail } from '../tool-manuals.contract.js';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 
 /**
  * `GET /api/tools/:slug` — the browser tool page's detail read. Two halves:
@@ -28,6 +34,7 @@ const DETAIL: ToolManualDetail = {
   type: 'inline',
   description: 'Read and write GitHub issues and PRs.',
   capabilities: [{ name: 'create_issue', description: 'Open an issue in a repo.' }],
+  hiddenTools: [],
 };
 
 let httpServer: HttpServer | undefined;
@@ -160,7 +167,7 @@ describe('ToolManualService.getDetail — capabilities + access', () => {
     canReadBatch: async (_w: string, _e: string, paths: string[]) => new Map(paths.map((p) => [p, false])),
   } as unknown as IAccessControl;
 
-  const svc = (access: IAccessControl = allowAll) => new ToolManualService(workspaceService, access, KB_DIR);
+  const svc = (access: IAccessControl = allowAll) => new ToolManualService(workspaceService, access, testKbContext({ kbDirName: KB_DIR }), disk, new KbPluginSource(disk, testKbContext({ kbDirName: KB_DIR })));
 
   /** Write one `.tool` into a fresh temp KB and return the service over it. */
   async function withTool(file: string, content: string): Promise<void> {
@@ -196,6 +203,62 @@ describe('ToolManualService.getDetail — capabilities + access', () => {
         { name: 'create_issue', description: 'Open an issue in a repo.' },
         { name: 'list_prs', description: null },
       ],
+    });
+  });
+
+  /**
+   * The tool page's half of the marker. The finding comes from the MCP proxy,
+   * which is the only thing that loads a connected server's tools; what this
+   * endpoint decides is WHO sees it — the people who may write the `.tool`,
+   * and nobody else.
+   */
+  describe('a tool of this server hidden for an invalid schema', () => {
+    const HIDDEN = {
+      manual: 'remote',
+      name: 'remote_srv_query',
+      path: '/properties/value/anyOf/0/required/0',
+      reason: 'must be a string',
+      marker:
+        'Hidden from agents: its schema is invalid at /properties/value/anyOf/0/required/0 (must be a string).',
+    };
+
+    const writer = (allowed: boolean): IAccessControl =>
+      ({
+        canRead: async () => true,
+        canReadBatch: async (_w: string, _e: string, paths: string[]) => new Map(paths.map((p) => [p, true])),
+        canWrite: async () => allowed,
+      }) as unknown as IAccessControl;
+
+    test('is reported to a caller who may write the tool', async () => {
+      await withTool('remote.tool', JSON.stringify({ name: 'remote', type: 'mcp', url: 'https://mcp.example.com/mcp' }));
+      const service = svc(writer(true));
+      service.setHiddenTools({ hiddenFor: (manual) => (manual === 'remote' ? [HIDDEN] : []) });
+      expect((await service.getDetail('owner@x.eu', 'remote'))?.hiddenTools).toEqual([HIDDEN]);
+    });
+
+    test('is withheld from a caller who may only read it', async () => {
+      await withTool('remote.tool', JSON.stringify({ name: 'remote', type: 'mcp', url: 'https://mcp.example.com/mcp' }));
+      const service = svc(writer(false));
+      service.setHiddenTools({ hiddenFor: () => [HIDDEN] });
+      expect((await service.getDetail('reader@x.eu', 'remote'))?.hiddenTools).toEqual([]);
+    });
+
+    test('is empty, and costs no write check, when the server is healthy', async () => {
+      await withTool('remote.tool', JSON.stringify({ name: 'remote', type: 'mcp', url: 'https://mcp.example.com/mcp' }));
+      const canWrite = vi.fn(async () => true);
+      const service = svc({
+        canRead: async () => true,
+        canReadBatch: async (_w: string, _e: string, paths: string[]) => new Map(paths.map((p) => [p, true])),
+        canWrite,
+      } as unknown as IAccessControl);
+      service.setHiddenTools({ hiddenFor: () => [] });
+      expect((await service.getDetail('owner@x.eu', 'remote'))?.hiddenTools).toEqual([]);
+      expect(canWrite).not.toHaveBeenCalled();
+    });
+
+    test('is empty when no MCP surface has loaded a server yet', async () => {
+      await withTool('remote.tool', JSON.stringify({ name: 'remote', type: 'mcp', url: 'https://mcp.example.com/mcp' }));
+      expect((await svc().getDetail('owner@x.eu', 'remote'))?.hiddenTools).toEqual([]);
     });
   });
 

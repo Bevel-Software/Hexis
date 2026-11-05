@@ -1,4 +1,12 @@
 import type { HexisMcpConfig } from './config.js';
+import { renewConnectionKeyNow } from './renewal.js';
+import {
+  NOT_AVAILABLE_TO_CONNECTION,
+  connectionWireOf,
+  parseMcpAppManifest,
+  type ConnectionScopeWire,
+  type McpAppManifest,
+} from '@bevel-software/platform-mcp-core';
 
 /**
  * The REST surface this server reads before it can serve anything. Everything
@@ -10,35 +18,137 @@ import type { HexisMcpConfig } from './config.js';
 /** Bounded so a wedged deployment fails startup with a message instead of hanging a client. */
 const FETCH_TIMEOUT_MS = 15_000;
 
-export class DeploymentError extends Error {}
+export class DeploymentError extends Error {
+  /**
+   * The HTTP status, when the deployment answered with one. Carried so a
+   * caller can tell "this deployment does not have that endpoint" (404) from
+   * "the network is having a moment" — the catalog poller stops for the first
+   * and keeps trying through the second.
+   */
+  constructor(
+    message: string,
+    readonly status?: number,
+  ) {
+    super(message);
+  }
+}
+
+/**
+ * The deployment refused what the connection does not load: a connection
+ * made as an agent configuration that cannot be used (gone, unreadable, invalid)
+ * loads nothing, and says so in the refusal's own sentence. Not a permission
+ * problem — told apart from one, so a discovery read of such a connection
+ * answers "nothing" rather than failing the server.
+ */
+export class NotAvailableToConnectionError extends DeploymentError {
+  constructor(readonly sentence: string) {
+    super(sentence, 403);
+  }
+}
+
+/**
+ * A key-mode 401: the deployment refused the connection key itself. Stated
+ * plainly and with no sign-in step — a browser sign-in cannot repair a key, so
+ * a rejected key ends the process, and a fetch that otherwise degrades
+ * quietly (the agent instructions) lets this one through. The trailing
+ * parenthesis exists because Claude Code shows a failed stdio server only as
+ * "failed"; the person needs to know where this text went. `<name>` stays
+ * literal: this process cannot know what the client named it.
+ */
+export class ConnectionKeyRejectedError extends DeploymentError {
+  constructor(deployment: string) {
+    super(
+      `The connection key was rejected by ${deployment}. Mint a new one in External agent access. ` +
+        '(Claude Code hides this message; run `claude mcp get <name>` or start the command in a terminal to see it.)',
+    );
+  }
+}
 
 async function getJson(
   url: string,
-  init: RequestInit & { label: string },
+  init: RequestInit & { label: string; renew?: () => Promise<string> },
 ): Promise<unknown> {
-  let res: Response;
-  try {
-    res = await fetch(url, { ...init, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
-  } catch (err) {
-    throw new DeploymentError(
-      `Could not reach ${init.label} at ${url}: ${err instanceof Error ? err.message : String(err)}`,
-    );
+  const { renew, label, ...request } = init;
+  const attempt = async (freshBearer?: string): Promise<Response> => {
+    const headers = freshBearer
+      ? { ...(request.headers as Record<string, string>), Authorization: `Bearer ${freshBearer}` }
+      : request.headers;
+    try {
+      return await fetch(url, { ...request, headers, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+    } catch (err) {
+      throw new DeploymentError(
+        `Could not reach ${label} at ${url}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  };
+  let res = await attempt();
+  const authed = 'Authorization' in ((request.headers ?? {}) as Record<string, unknown>);
+  // OAuth mode's mid-run 401: the internal token expired, and one refresh →
+  // re-exchange (that is all `renew` does) earns exactly ONE retry. A second
+  // 401 means the authorization itself is gone — revoked, or the account lost
+  // access — which no amount of refreshing fixes, so it propagates below.
+  // 401 only: a 403 is a permission answer about a live credential.
+  let retried = false;
+  if (res.status === 401 && authed && renew) {
+    // The discarded response's body is drained before the retry replaces it —
+    // an unread body pins its connection (and, kept long enough, its memory)
+    // for as long as the runtime cares to wait.
+    await res.body?.cancel().catch(() => {});
+    res = await attempt(await renew());
+    retried = true;
+  }
+  if (res.status === 401 && authed && !renew) {
+    await res.body?.cancel().catch(() => {});
+    // The deployment, not the endpoint label: the key is the deployment's to
+    // reject. Every URL here is `<baseUrl>/api/…`, and nothing after the base
+    // adds another `/api/`.
+    throw new ConnectionKeyRejectedError(url.slice(0, url.lastIndexOf('/api/')));
+  }
+  if (res.status === 403 && authed) {
+    // A refusal of what the connection does not load — a connection made as
+    // an agent configuration that cannot be used — is the deployment's own answer,
+    // with its code and sentence, not a permission problem with the credential.
+    const refusal = (await res
+      .clone()
+      .json()
+      .catch(() => null)) as { error?: unknown; code?: unknown } | null;
+    if (refusal?.code === NOT_AVAILABLE_TO_CONNECTION && typeof refusal.error === 'string') {
+      await res.body?.cancel().catch(() => {});
+      throw new NotAvailableToConnectionError(refusal.error);
+    }
   }
   if (res.status === 401 || res.status === 403) {
-    // Only a request that actually carried the key can blame the key: the
+    // Only a request that actually carried the credential can blame it: the
     // config endpoint is unauthenticated, so its 401/403 is something else
     // (an SSO gate, a proxy) answering in the deployment's place.
-    const authed = 'Authorization' in ((init.headers ?? {}) as Record<string, unknown>);
     throw new DeploymentError(
-      authed
-        ? `The connection key was rejected by ${init.label} (HTTP ${res.status}). ` +
-            'Mint a fresh one from the profile menu → External agent access.'
-        : `${init.label} refused access (HTTP ${res.status}) to a request that carries no credentials — ` +
-            'an SSO gate or proxy may be intercepting the deployment. Check that --url points at the workspace itself.',
+      !authed
+        ? `${label} refused access (HTTP ${res.status}) to a request that carries no credentials — ` +
+            'an SSO gate or proxy may be intercepting the deployment. Check that --url points at the workspace itself.'
+        : renew
+          ? res.status === 403
+            ? // A 403 is a PERMISSION answer about a live credential — the
+              // sign-in worked, the account simply may not do this. Telling
+              // the person to re-authorize would send them through a browser
+              // round trip that changes nothing.
+              `${label} denied access (HTTP 403): your signed-in account does not have permission for this. ` +
+                'The sign-in itself is valid — ask a workspace admin for access; signing in again will not change the answer.'
+            : `Your sign-in was rejected by ${label} (HTTP 401)${retried ? ' even after refreshing it' : ''} — ` +
+                'the authorization may have been revoked. Re-authorize by restarting hexis-mcp and signing in through your browser again.'
+          : // Key mode's 401 was thrown above; what remains is a 403 — a
+            // permission answer about a key that verified.
+            `${label} denied access (HTTP 403) to this connection key. ` +
+            'The key itself is valid — ask a workspace admin for access; minting a new key will not change the answer.',
+      res.status,
     );
   }
   if (!res.ok) {
-    throw new DeploymentError(`${init.label} returned HTTP ${res.status} from ${url}.`);
+    // Drained before it is thrown away, exactly as the 401 paths above do. The
+    // catalog check asks again on every call while it fails, so a deployment that is
+    // 502-ing through a redeploy would otherwise leave one undrained body —
+    // and the connection it pins — behind on every poll for the duration.
+    await res.body?.cancel().catch(() => {});
+    throw new DeploymentError(`${label} returned HTTP ${res.status} from ${url}.`, res.status);
   }
   // A 200 that is not JSON is a proxy or SPA fallback answering in the
   // deployment's place (a login page, a catch-all index.html). That is a
@@ -48,10 +158,72 @@ async function getJson(
     return await res.json();
   } catch {
     throw new DeploymentError(
-      `${init.label} at ${url} answered with something that is not JSON — ` +
+      `${label} at ${url} answered with something that is not JSON — ` +
         'a proxy or login page may be intercepting the deployment. Check that --url points at the workspace itself.',
     );
   }
+}
+
+/**
+ * The `renew` a request should consult, if the config carries one. It routes
+ * through `renewal.ts`'s SINGLE-FLIGHT — never `config.renewConnectionKey`
+ * directly — because the refresh token rotates: two racing renewals (startup's
+ * `Promise.all` fetches, or concurrent mid-run tool calls) would have the
+ * loser present a just-retired refresh token and kill the sign-in. The shared
+ * flight also updates `config.connectionKey`, so every LATER request carries
+ * the fresh token without each call site re-threading it.
+ */
+function renewer(config: HexisMcpConfig): (() => Promise<string>) | undefined {
+  if (!config.renewConnectionKey) return undefined;
+  return () => renewConnectionKeyNow(config);
+}
+
+/** What one read of `/api/config` tells this process about a deployment. */
+export interface ResolvedDeployment {
+  /** The deployment's own MCP endpoint (see {@link resolveMcpUrl}). */
+  mcpUrl: string;
+  /**
+   * Whether the deployment serves `GET /api/agent/instructions` and sends
+   * instructions on its own handshakes. Absent on an older deployment, and
+   * absence is the ONLY signal: probing the route instead would hit the JWT
+   * mounts an unknown `/api/*` path falls through to, which answer 401, and
+   * `getJson` reads a 401 as an expired sign-in.
+   */
+  agentInstructions: boolean;
+  /**
+   * Whether the deployment serves `GET /api/agent/catalog-revision`, so this
+   * process can notice a manual or a skill changing under a live connection.
+   * Absent on an older deployment, and — like `agentInstructions` — absence is
+   * the ONLY signal: probing the route instead would hit the JWT mounts an
+   * unknown `/api/*` path falls through to, which answer 401, and a poller
+   * would report a dead credential for a route that is merely not there.
+   */
+  catalogRevision: boolean;
+  /**
+   * Whether the deployment serves `GET /api/agent/tool-hints`, the read-only
+   * hint of every platform tool. Absent on an older deployment and, as above,
+   * absence is the ONLY signal: that deployment answers the unknown route with
+   * 401, and an OAuth config reads a 401 as an expired token — it would
+   * refresh its sign-in on every `tools/list`.
+   */
+  toolHints: boolean;
+}
+
+/**
+ * Everything this process learns from the deployment's config, in ONE fetch:
+ * the MCP endpoint and whether agent instructions are available. The two
+ * consumers that only need the endpoint keep {@link resolveMcpUrl}.
+ */
+export async function resolveDeployment(config: HexisMcpConfig): Promise<ResolvedDeployment> {
+  const body = (await getJson(`${config.baseUrl}/api/config`, {
+    label: 'the deployment config',
+  })) as { mcpUrl?: unknown; agentInstructions?: unknown; catalogRevision?: unknown; toolHints?: unknown };
+  return {
+    mcpUrl: mcpUrlFromConfig(config, body),
+    agentInstructions: body?.agentInstructions === true,
+    catalogRevision: body?.catalogRevision === true,
+    toolHints: body?.toolHints === true,
+  };
 }
 
 /**
@@ -66,11 +238,16 @@ async function getJson(
  * Falls back to the guess when the field is absent, which is how a deployment
  * older than that field looks. The frontend's `configureMcpUrl()` degrades the
  * same way, for the same reason.
+ *
+ * A wrapper over {@link resolveDeployment}: same fetch, one field. Kept as a
+ * public export because the CLI consumes it as a plain string.
  */
 export async function resolveMcpUrl(config: HexisMcpConfig): Promise<string> {
-  const body = (await getJson(`${config.baseUrl}/api/config`, {
-    label: 'the deployment config',
-  })) as { mcpUrl?: unknown };
+  return (await resolveDeployment(config)).mcpUrl;
+}
+
+/** The endpoint validation behind {@link resolveMcpUrl}, on an already-fetched config body. */
+function mcpUrlFromConfig(config: HexisMcpConfig, body: { mcpUrl?: unknown }): string {
   const advertised = typeof body?.mcpUrl === 'string' ? body.mcpUrl.trim() : '';
   if (!advertised) {
     console.error(
@@ -113,20 +290,65 @@ export async function resolveMcpUrl(config: HexisMcpConfig): Promise<string> {
   return parsed.toString();
 }
 
+/**
+ * What every connected agent is told at session start, as the deployment
+ * composes it: the platform header plus the admin's `mcp-description.md`.
+ * Passed verbatim as this server's own `instructions`, so a client connected
+ * here receives exactly what one connected to the hosted endpoint receives.
+ *
+ * Throws only a {@link ConnectionKeyRejectedError}: a dead key fails startup
+ * anyway (the manual fetches beside this one need it), and it must say so in
+ * its own words rather than as a degraded-instructions notice. Otherwise the
+ * text is worth having and not worth failing over: a network error, a non-2xx
+ * answer or a body without an `instructions` string logs one line and
+ * resolves to `undefined`, and the server starts without instructions, as it
+ * did before the deployment could send any.
+ */
+export async function fetchAgentInstructions(config: HexisMcpConfig): Promise<string | undefined> {
+  try {
+    const body = (await getJson(`${config.baseUrl}/api/agent/instructions`, {
+      label: 'the agent instructions',
+      headers: { Authorization: `Bearer ${config.connectionKey}` },
+      renew: renewer(config),
+    })) as { instructions?: unknown };
+    if (typeof body?.instructions !== 'string') {
+      console.error(
+        '[hexis-mcp] the deployment answered the agent instructions request without an "instructions" string; ' +
+          'sessions start without them.',
+      );
+      return undefined;
+    }
+    return body.instructions;
+  } catch (err) {
+    if (err instanceof ConnectionKeyRejectedError) throw err;
+    console.error(
+      `[hexis-mcp] could not fetch the agent instructions: ${err instanceof Error ? err.message : String(err)}; ` +
+        'sessions start without them.',
+    );
+    return undefined;
+  }
+}
+
 /** One `.tool` manual as `GET /api/agent/all-tools` returns it. */
 export type RawManual = Record<string, unknown> & { name?: unknown };
 
 /**
- * Every manual the caller can read, local-only ones included.
+ * Every manual the caller can read, local-only ones included — and, for a
+ * connection made as an agent configuration, the agent it is narrowed to as the
+ * deployment says it (`connection`), which words this server's refusals and
+ * its listing; absent for Everything.
  *
  * `?remote=false` is the opt-in the REST surface already documents for "a
  * locally installed MCP server" — the default excludes local-only manuals
  * precisely because the hosted proxy cannot run them.
  */
-export async function fetchAllManuals(config: HexisMcpConfig): Promise<RawManual[]> {
+export async function fetchAllManuals(
+  config: HexisMcpConfig,
+): Promise<{ manuals: RawManual[]; connection?: ConnectionScopeWire }> {
   const body = (await getJson(`${config.baseUrl}/api/agent/all-tools?remote=false`, {
     label: 'the tool manual list',
     headers: { Authorization: `Bearer ${config.connectionKey}` },
+    renew: renewer(config),
   })) as { manuals?: unknown };
   // Shape drift is loud, not empty: an `[]` here would let the server start,
   // log success, and quietly serve none of the local-only tools it exists for.
@@ -135,24 +357,49 @@ export async function fetchAllManuals(config: HexisMcpConfig): Promise<RawManual
       'The tool manual list did not have the expected shape (no "manuals" array) — is --url pointing at a Hexis deployment?',
     );
   }
-  return body.manuals as RawManual[];
+  const connection = connectionWireOf(body);
+  return { manuals: body.manuals as RawManual[], ...(connection ? { connection } : {}) };
+}
+
+
+/** What this server needs to know about one local-only manual beyond its name. */
+export interface LocalManualInfo {
+  /**
+   * How the manual is ADDRESSED on the deployment's REST surface — the key for
+   * the variable-resolution route. Distinct from the manual's UTCP `name`,
+   * which is the namespace its `${VAR}` refs are keyed by; they coincide for a
+   * `.tool` file but not necessarily for every source.
+   */
+  slug: string;
+  /** The manual's declaring file in the knowledge base, e.g. `Plugins/<folder>/mcp.json`. */
+  path: string;
 }
 
 /**
- * The names of the manuals that only work locally — the ones this server exists
- * to add. Asking the deployment (rather than inferring from the two list
- * variants) keeps the definition of "local-only" in the one place that owns it.
+ * The manuals that only work locally — the ones this server exists to add.
+ * Asking the deployment (rather than inferring from the two list variants)
+ * keeps the definition of "local-only" in the one place that owns it.
  */
-export async function fetchLocalOnlyManuals(config: HexisMcpConfig): Promise<Map<string, string>> {
-  const body = (await getJson(`${config.baseUrl}/api/agent/tools/list_local_tools`, {
-    label: 'the local-only tool list',
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${config.connectionKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: '{}',
-  })) as { tools?: unknown };
+export async function fetchLocalOnlyManuals(config: HexisMcpConfig): Promise<Map<string, LocalManualInfo>> {
+  let body: { tools?: unknown };
+  try {
+    body = (await getJson(`${config.baseUrl}/api/agent/tools/list_local_tools`, {
+      label: 'the local-only tool list',
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${config.connectionKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: '{}',
+      renew: renewer(config),
+    })) as { tools?: unknown };
+  } catch (err) {
+    // A connection that loads nothing (its agent configuration gone, unreadable or
+    // invalid) has no local-only tools, and the deployment's answer says so
+    // with the sentence the manual list carries too: not a failed discovery.
+    if (err instanceof NotAvailableToConnectionError) return new Map();
+    throw err;
+  }
   // Same loudness as `fetchAllManuals`: losing this list silently is losing
   // exactly the tools this server exists to add.
   if (!Array.isArray(body?.tools)) {
@@ -161,18 +408,169 @@ export async function fetchLocalOnlyManuals(config: HexisMcpConfig): Promise<Map
     );
   }
   const tools = body.tools;
-  // name → KB path of its declaration. The path is what locates the PLUGIN a
-  // stdio server belongs to (`Plugins/<folder>/mcp.json`), which is what gets
-  // materialized locally before the server can spawn.
-  const manuals = new Map<string, string>();
+  // UTCP name → { slug, path }. The path locates the PLUGIN a stdio server
+  // belongs to (`Plugins/<folder>/mcp.json`), which is what gets materialized
+  // locally before the server can spawn; the slug addresses the manual when
+  // asking the deployment to resolve the variables it declares.
+  const manuals = new Map<string, LocalManualInfo>();
   for (const t of tools) {
     const name = (t as { name?: unknown })?.name;
     const path = (t as { path?: unknown })?.path;
+    const slug = (t as { slug?: unknown })?.slug;
     if (typeof name === 'string' && name.length > 0) {
-      manuals.set(name, typeof path === 'string' ? path : '');
+      manuals.set(name, {
+        // An older deployment predates `slug` on this listing; for a `.tool`
+        // the two are equal, so falling back to the name keeps this server
+        // working against one rather than silently resolving nothing.
+        slug: typeof slug === 'string' && slug.length > 0 ? slug : name,
+        path: typeof path === 'string' ? path : '',
+      });
     }
   }
   return manuals;
+}
+
+/**
+ * A deployment that does not serve `GET /api/agent/catalog-revision` — an
+ * older build than this package. Thrown once, by the first poll, so the
+ * watcher can stop for good instead of asking every few seconds forever.
+ */
+export class CatalogRevisionUnsupportedError extends DeploymentError {}
+
+/** What `GET /api/agent/catalog-revision` says: the revision, and the agent the connection is narrowed to, if any. */
+export interface CatalogState {
+  revision: string;
+  connection?: ConnectionScopeWire;
+}
+
+/**
+ * The fingerprint of THIS caller's released catalog: every tool manual and
+ * every skill the deployment's default branch serves them, as one opaque
+ * string. It changes exactly when that set changes, so two equal readings mean
+ * there is nothing to re-register. With it, the agent the connection is
+ * narrowed to as the deployment says it (`connection`; absent for
+ * Everything) — read once at startup for the handshake, which cannot wait for
+ * discovery, from the same answer that seeds the catalog watch's baseline.
+ *
+ * Opaque on purpose: what goes into it is the deployment's business, and this
+ * process compares it for equality and nothing else.
+ */
+export async function fetchCatalogState(config: HexisMcpConfig): Promise<CatalogState> {
+  let body: unknown;
+  try {
+    body = await getJson(`${config.baseUrl}/api/agent/catalog-revision`, {
+      label: 'the catalog revision',
+      headers: { Authorization: `Bearer ${config.connectionKey}` },
+      renew: renewer(config),
+    });
+  } catch (err) {
+    // A 404 is the one answer that will not change on the next try: this
+    // deployment predates the route. Everything else — a blip, a 502, a
+    // restart — is worth asking again for.
+    if (err instanceof DeploymentError && err.status === 404) {
+      throw new CatalogRevisionUnsupportedError(
+        'This deployment does not report a catalog revision, so tools and skills added to it ' +
+          'will not appear here until this server is restarted.',
+        404,
+      );
+    }
+    throw err;
+  }
+  const revision = (body as { revision?: unknown })?.revision;
+  if (typeof revision !== 'string' || revision.length === 0) {
+    // Shape drift is not a change: a poller that read an absent field as a new
+    // revision would re-register the remote manual on every single poll.
+    throw new DeploymentError('The catalog revision response carried no "revision" string.');
+  }
+  const connection = connectionWireOf(body);
+  return { revision, ...(connection ? { connection } : {}) };
+}
+
+/** The revision alone — what the catalog watch compares on every poll. */
+export async function fetchCatalogRevision(config: HexisMcpConfig): Promise<string> {
+  return (await fetchCatalogState(config)).revision;
+}
+
+/** What a resolution attempt produced, and whether it actually succeeded. */
+export interface LocalToolVariables {
+  /**
+   * Whether the deployment answered. FALSE for a network blip, a refusal, or a
+   * deployment predating the route — distinct from "answered, nothing set",
+   * because only a real answer is worth caching.
+   */
+  ok: boolean;
+  values: Record<string, string>;
+}
+
+/**
+ * The variables one LOCAL manual declares, resolved by the deployment.
+ *
+ * The request names the MANUAL, never a variable: the deployment re-reads the
+ * `.tool` file and resolves exactly what that file declares, so the knowledge
+ * base is the allowlist and this process cannot widen it. What comes back is
+ * scoped to one manual's namespace and goes straight into that manual's tool
+ * invocations — see `localVariableLoader`.
+ *
+ * A failure is NOT fatal — except a rejected connection key, which is thrown
+ * so the tool call reports it plainly instead of running without secrets. A manual may declare variables that are simply unset,
+ * the deployment may be an older build without the route, and either way the
+ * tool should still be offered and fail with its own error message rather than
+ * being absent from the toolset. So the caller gets `ok: false` and an empty
+ * map — and, because it is `ok: false`, the caller knows not to cache it.
+ */
+export async function fetchLocalToolVariables(
+  config: HexisMcpConfig,
+  slug: string,
+): Promise<LocalToolVariables> {
+  try {
+    const body = (await getJson(
+      `${config.baseUrl}/api/agent/local-tools/${encodeURIComponent(slug)}/variables`,
+      {
+        label: `the variables for local tool "${slug}"`,
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${config.connectionKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: '{}',
+        renew: renewer(config),
+      },
+    )) as { variables?: unknown; missing?: unknown };
+    const vars = body?.variables;
+    if (!vars || typeof vars !== 'object' || Array.isArray(vars)) {
+      // A 200 whose shape we do not recognise is protocol drift, not an unset
+      // secret. Saying so is the difference between an operator debugging their
+      // vault and an operator debugging a version mismatch.
+      console.error(
+        `[hexis-mcp] the deployment answered for local tool "${slug}" without a "variables" object — ` +
+          'its secrets will not resolve. Check that the deployment is new enough to serve this route.',
+      );
+      return { ok: false, values: {} };
+    }
+    if (Array.isArray(body.missing) && body.missing.length > 0) {
+      console.error(
+        `[hexis-mcp] local tool "${slug}" has unset variables: ${body.missing.join(', ')} — ` +
+          'set them on the deployment (Secrets), or the tool will run without them.',
+      );
+    }
+    // Null-prototype, so a variable named `__proto__` or `constructor` is an
+    // ordinary own property rather than a write to the prototype. A `.tool` may
+    // declare any `[A-Za-z0-9_]+` name, and those two are both valid names.
+    const out: Record<string, string> = Object.create(null) as Record<string, string>;
+    for (const [k, v] of Object.entries(vars as Record<string, unknown>)) {
+      if (typeof v === 'string') out[k] = v;
+    }
+    return { ok: true, values: out };
+  } catch (err) {
+    // A dead key is not a missing secret: the call fails with the plain
+    // sentence instead of running without its credentials.
+    if (err instanceof ConnectionKeyRejectedError) throw err;
+    console.error(
+      `[hexis-mcp] could not resolve variables for local tool "${slug}": ` +
+        `${err instanceof Error ? err.message : String(err)}`,
+    );
+    return { ok: false, values: {} };
+  }
 }
 
 /** A skill as the catalog lists it, and one loaded in full. Shapes mirror the KB tools. */
@@ -189,5 +587,162 @@ export async function callKbTool(
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(args),
+    renew: renewer(config),
   });
 }
+
+const NO_APPS: McpAppManifest = { tools: {}, resources: [] };
+
+/**
+ * Statuses that say the manifest route is definitely not there. A 403 is not
+ * among them: it is this identity's authorisation RIGHT NOW, which a
+ * permission change can restore without any catalog revision, so a view
+ * already served is kept rather than turned off for good.
+ */
+const MANIFEST_GONE = new Set([404, 410]);
+
+/**
+ * The deployment's MCP Apps: which of its tools carry a `ui://` view, and the
+ * views themselves.
+ *
+ * The local server bridges a host to a deployment over HTTP. It discovers the
+ * tools as UTCP manuals, and a UTCP manual has nowhere to carry a view — so
+ * the metadata has to arrive as data, keyed by tool name, and the view's HTML
+ * has to arrive with it (this server answers `resources/read` itself).
+ *
+ * DEGRADES TO NOTHING, loudly but harmlessly. A deployment that predates the
+ * route 404s; one behind a proxy may answer HTML. Either way the right outcome
+ * is NO apps: every tool is still listed and still callable, `resources/list`
+ * answers an empty list (this server declares the capability unconditionally,
+ * since a later catalog refresh may bring a view), and a host shows the
+ * tool's text answer —
+ * which is exactly what a host without the extension does anyway. Advertising
+ * a `resourceUri` this server could not serve would be worse than advertising
+ * none: the host would preload a failure and show an empty frame where the
+ * text used to be.
+ *
+ * `previous` is what a TRANSIENT failure answers — the manifest already
+ * being served, on a catalog refresh. A refresh that hit a deployment
+ * mid-redeploy (a 5xx, a dropped connection, a proxy's error page) must not
+ * turn every view off until the next catalog change: the refresh is marked
+ * applied either way, so nothing would read the manifest again.
+ *
+ * A DEFINITE answer replaces it, though, because the same "applied either
+ * way" would otherwise keep a removed view advertised indefinitely: a
+ * manifest that reads as empty, and a route that answers 404/410 (gone) or
+ * 403 (this identity may not have it), all turn the views off.
+ */
+export async function fetchMcpApps(
+  config: HexisMcpConfig,
+  previous: McpAppManifest = NO_APPS,
+): Promise<McpAppManifest> {
+  try {
+    const body = await getJson(`${config.baseUrl}/api/agent/mcp-app`, {
+      label: 'the MCP App manifest',
+      headers: { Authorization: `Bearer ${config.connectionKey}` },
+      renew: renewer(config),
+    });
+    // The top-level shape is checked HERE, before parsing: the parser answers
+    // an empty manifest for anything it does not recognise, which is right for
+    // a bad entry and wrong for a wrong document — a proxy's `{}` or another
+    // protocol's answer would otherwise turn every view off without a word.
+    const shape = body as { tools?: unknown; resources?: unknown } | null;
+    if (
+      !shape ||
+      typeof shape !== 'object' ||
+      Array.isArray(shape) ||
+      !shape.tools ||
+      typeof shape.tools !== 'object' ||
+      Array.isArray(shape.tools) ||
+      !Array.isArray(shape.resources)
+    ) {
+      throw new Error('the answer is not an MCP App manifest (expected { tools: {…}, resources: […] })');
+    }
+    return parseMcpAppManifest(body);
+  } catch (err) {
+    // A 401 HERE is not a dead key: this fetch runs right after a discovery
+    // the same key just passed, and a deployment from before this route may
+    // answer an unknown `/api/agent/…` address with 401 rather than 404. A
+    // dead key fails the discovery, where it belongs; this route is optional
+    // and answers "no apps" like any other refusal of it.
+    if (err instanceof ConnectionKeyRejectedError) {
+      console.error(
+        '[hexis-mcp] the deployment answered the MCP App manifest route with 401; ' +
+          'treating it as a deployment without the route (tools render as text).',
+      );
+      return NO_APPS;
+    }
+    const reason = err instanceof Error ? err.message : String(err);
+    const definite = err instanceof DeploymentError && MANIFEST_GONE.has(err.status ?? 0);
+    const kept = definite ? NO_APPS : previous;
+    console.error(
+      `[hexis-mcp] could not read the deployment's MCP App manifest (${reason}); ` +
+        (kept.resources.length
+          ? 'keeping the views read before.'
+          : 'tools that would render a view will answer with their text instead.'),
+    );
+    return kept;
+  }
+}
+
+/**
+ * The read-only hint of every platform tool and every code-mode meta-tool, as
+ * the deployment has them now: its built-in value, or an admin's override.
+ *
+ * Read per LISTING rather than once: an admin who flips a hint on the Tools
+ * page expects the next `tools/list` to carry it, and the tool discovery this
+ * server registered at startup goes through the deployment's MCP endpoint,
+ * whose `annotations` the UTCP MCP protocol drops on the way in. One small
+ * read, beside the catalog check a listing already awaits.
+ *
+ * Asked only of a deployment that advertises the route (`toolHints` in
+ * `/api/config`, see {@link ResolvedDeployment}). Never fatal, and never
+ * louder than once per kind of failure and deployment: a route that answers
+ * 404 anyway is treated as absent, and the right listing for it is the one an
+ * older deployment gets — no hints at all. A transient failure keeps `previous`, the
+ * hints already served, so a deployment mid-redeploy does not flip every hint
+ * off for one listing.
+ */
+export async function fetchToolHints(
+  config: HexisMcpConfig,
+  previous: Readonly<Record<string, boolean>> = {},
+): Promise<Record<string, boolean>> {
+  try {
+    const body = await getJson(`${config.baseUrl}/api/agent/tool-hints`, {
+      label: 'the tool hints',
+      headers: { Authorization: `Bearer ${config.connectionKey}` },
+      renew: renewer(config),
+    });
+    const tools = (body as { tools?: unknown } | null)?.tools;
+    if (!tools || typeof tools !== 'object' || Array.isArray(tools)) {
+      throw new Error('the answer is not a tool-hint map (expected { tools: { <name>: true | false } })');
+    }
+    // Own properties (`fromEntries`), so no tool name reaches the prototype.
+    const hints = Object.fromEntries(
+      Object.entries(tools as Record<string, unknown>).filter(([, value]) => typeof value === 'boolean'),
+    ) as Record<string, boolean>;
+    lastToolHintsFailure.delete(config.baseUrl);
+    return hints;
+  } catch (err) {
+    // A rejected key is the discovery's to report, as for the app manifest.
+    const gone = err instanceof ConnectionKeyRejectedError || (err instanceof DeploymentError && MANIFEST_GONE.has(err.status ?? 0));
+    const kept = gone ? {} : { ...previous };
+    const reason = err instanceof Error ? err.message : String(err);
+    const key = gone ? 'gone' : reason;
+    if (lastToolHintsFailure.get(config.baseUrl) !== key) {
+      lastToolHintsFailure.set(config.baseUrl, key);
+      console.error(
+        `[hexis-mcp] could not read the deployment's tool hints (${reason}); ` +
+          (Object.keys(kept).length ? 'keeping the hints read before.' : 'tools are listed without a read-only hint.'),
+      );
+    }
+    return kept;
+  }
+}
+
+/**
+ * The last tool-hint failure logged, per deployment, so a failing route is said
+ * once rather than per listing — and one deployment's failure or recovery
+ * never silences or re-arms another's.
+ */
+const lastToolHintsFailure = new Map<string, string>();

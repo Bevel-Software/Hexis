@@ -1,0 +1,136 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { LibraryToastProvider } from '../state/toast';
+import type { LibraryItem } from '../state/library-data';
+
+/**
+ * The link picker: offers what is not yet in the plugin, links on click, and
+ * turns the server's "you may edit the plugin but not the skill" refusal into
+ * the request path — never deciding that client-side.
+ */
+
+const api = vi.hoisted(() => ({
+  linkSkill: vi.fn(),
+  requestSkillAccess: vi.fn(),
+}));
+vi.mock('../services/plugins.api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../services/plugins.api')>()),
+  linkSkill: api.linkSkill,
+}));
+vi.mock('../services/library.api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../services/library.api')>()),
+  requestSkillAccess: api.requestSkillAccess,
+}));
+
+import { NeedsSkillWriteError } from '../services/plugins.api';
+import { LinkSkillPanel } from '../components/LinkSkillPanel';
+
+const OK = { state: 'ok' as const, text: 'Ready' };
+const items: LibraryItem[] = [
+  { kind: 'skill', id: 'deploy', name: 'deploy', description: 'Ship it.', owned: false, canWrite: false, plugin: null, shared: true, plugins: [], path: 'Skills/Eng/deploy', status: OK },
+  { kind: 'skill', id: 'outreach', name: 'outreach', description: '', owned: true, canWrite: true, plugin: 'GTM', plugins: [{ name: 'GTM', linked: false, granted: true }], path: 'Plugins/GTM/skills/outreach', status: OK },
+  { kind: 'skill', id: 'pitch', name: 'pitch', description: 'Sales pitch.', owned: false, canWrite: false, plugin: 'Sales', plugins: [{ name: 'Sales', linked: false, granted: true }], path: 'Plugins/Sales/skills/pitch', status: OK },
+  { kind: 'integration', id: 'notion', name: 'Notion', description: '', owned: false, canWrite: false, plugin: 'GTM', path: 'Plugins/GTM/mcp.json', status: OK },
+  // A skill whose SKILL.md still declares the old governance keys. The cast
+  // is the point: `lifecycle` is no longer part of `LibraryItem`, and a server
+  // that still sends it must not change what the picker offers.
+  { kind: 'skill', id: 'legacy', name: 'legacy', description: 'Old but readable.', owned: false, canWrite: false, plugin: null, shared: true, plugins: [], path: 'Skills/Eng/legacy', status: OK, lifecycle: 'retired' } as LibraryItem,
+];
+
+function renderPanel() {
+  const onLinked = vi.fn();
+  render(
+    <LibraryToastProvider>
+      <LinkSkillPanel plugin="GTM" items={items} onLinked={onLinked} />
+    </LibraryToastProvider>,
+  );
+  return { onLinked };
+}
+
+beforeEach(() => {
+  api.linkSkill.mockReset();
+  api.requestSkillAccess.mockReset();
+});
+
+describe('LinkSkillPanel', () => {
+  it('offers released skills not already in the plugin — never tools, never its own', () => {
+    renderPanel();
+    expect(screen.getByText('deploy')).toBeInTheDocument();
+    expect(screen.getByText('pitch')).toBeInTheDocument();
+    expect(screen.queryByText('outreach')).not.toBeInTheDocument();
+    expect(screen.queryByText('Notion')).not.toBeInTheDocument();
+  });
+
+  /**
+   * The picker used to hide skills declaring `metadata.lifecycle: retired`,
+   * mirroring a server refusal that no longer exists. Lifecycle is the
+   * authors' business now: the list offers every readable skill, and the key
+   * is ignored rather than acted on.
+   */
+  it('offers a skill whose frontmatter still says retired, like any other', () => {
+    renderPanel();
+    expect(screen.getByText('legacy')).toBeInTheDocument();
+  });
+
+  it('narrows by the search box', () => {
+    renderPanel();
+    fireEvent.change(screen.getByLabelText('Search skills to link'), { target: { value: 'pit' } });
+    expect(screen.queryByText('deploy')).not.toBeInTheDocument();
+    expect(screen.getByText('pitch')).toBeInTheDocument();
+  });
+
+  it('links by the skill\'s path and reports back', async () => {
+    api.linkSkill.mockResolvedValue({ root: 'Skills/Eng/deploy', skills: ['Skills/Eng/deploy'] });
+    const { onLinked } = renderPanel();
+    fireEvent.click(screen.getAllByRole('button', { name: 'Link' })[0]);
+    await waitFor(() => expect(api.linkSkill).toHaveBeenCalledWith('GTM', 'Skills/Eng/deploy'));
+    await waitFor(() => expect(onLinked).toHaveBeenCalled());
+  });
+
+  it('says it is linking while the commit is in flight — a greyed button reads as a freeze', async () => {
+    let settle: (v: { root: string; skills: string[] }) => void = () => undefined;
+    api.linkSkill.mockReturnValue(new Promise((resolve) => (settle = resolve)));
+    const { onLinked } = renderPanel();
+    fireEvent.click(screen.getAllByRole('button', { name: 'Link' })[0]);
+    // The clicked row says what is happening; the others wait, still saying Link.
+    const linking = await screen.findByRole('button', { name: 'Linking…' });
+    expect(linking).toBeDisabled();
+    for (const other of screen.getAllByRole('button', { name: 'Link' })) expect(other).toBeDisabled();
+    // A disabled button drops focus, so the word is ALSO in a live region
+    // that assistive tech reads out — and it clears once the link lands.
+    expect(screen.getByRole('status', { name: 'Link progress' })).toHaveTextContent('Linking deploy…');
+
+    settle({ root: 'Skills/Eng/deploy', skills: ['Skills/Eng/deploy'] });
+    await waitFor(() => expect(onLinked).toHaveBeenCalled());
+    expect(screen.getByRole('status', { name: 'Link progress' })).toHaveTextContent('');
+  });
+
+  it('turns the server\'s needs-skill-write refusal into a request, and says when it is sent', async () => {
+    api.linkSkill.mockRejectedValue(new NeedsSkillWriteError('Skills/Eng/deploy'));
+    api.requestSkillAccess.mockResolvedValue({ number: 7 });
+    const { onLinked } = renderPanel();
+    fireEvent.click(screen.getAllByRole('button', { name: 'Link' })[0]);
+    const request = await screen.findByRole('button', { name: 'Request write access' });
+    expect(onLinked).not.toHaveBeenCalled();
+    fireEvent.click(request);
+    await waitFor(() => expect(api.requestSkillAccess).toHaveBeenCalledWith('deploy'));
+    expect(await screen.findByText('Requested')).toBeInTheDocument();
+  });
+
+  it('announces a write-access request as a request, never as a link', async () => {
+    api.linkSkill.mockRejectedValue(new NeedsSkillWriteError('Skills/Eng/deploy'));
+    let settle: (v: { number: number }) => void = () => undefined;
+    api.requestSkillAccess.mockReturnValue(new Promise((resolve) => (settle = resolve)));
+    renderPanel();
+    fireEvent.click(screen.getAllByRole('button', { name: 'Link' })[0]);
+    fireEvent.click(await screen.findByRole('button', { name: 'Request write access' }));
+    // The same live region, the right words for THIS operation.
+    expect(await screen.findByRole('button', { name: 'Requesting…' })).toBeDisabled();
+    expect(screen.getByRole('status', { name: 'Link progress' })).toHaveTextContent('Requesting write access to deploy…');
+    expect(screen.getByRole('status', { name: 'Link progress' })).not.toHaveTextContent('Linking');
+
+    settle({ number: 7 });
+    expect(await screen.findByText('Requested')).toBeInTheDocument();
+    expect(screen.getByRole('status', { name: 'Link progress' })).toHaveTextContent('');
+  });
+});

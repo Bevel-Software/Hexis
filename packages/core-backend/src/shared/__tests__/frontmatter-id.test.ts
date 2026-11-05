@@ -123,6 +123,11 @@ describe('setFrontmatterField (shared, line-based)', () => {
     expect(out).toBe('---\nid: weather2\nname: weather\n---\n{"type":"http"}\n');
   });
 
+  test('fills an EMPTY block without leaving a blank line before the closing fence', () => {
+    const out = setFrontmatterField('---\n---\n# Body\n', 'id', 'fresh');
+    expect(out).toBe('---\nid: fresh\n---\n# Body\n');
+  });
+
   test('creates a frontmatter block when the file has none', () => {
     const out = setFrontmatterField('{"type":"http","url":"https://x/m"}', 'id', 'tool_x');
     expect(out).toBe('---\nid: tool_x\n---\n{"type":"http","url":"https://x/m"}');

@@ -1,7 +1,19 @@
 import express from 'express';
+import { randomUUID } from 'node:crypto';
+import { logger } from '../../shared/logging.js';
+import { printable } from '../../shared/printable.js';
+
+const log = logger('accounts');
+import type { AuthUser } from '@bevel-software/platform-shared';
 import type { AuthService } from './auth.service.js';
-import type { IAccountErasureService } from './account-erasure.service.js';
-import type { IAdminAccessService } from '../admin/admin.interface.js';
+import type { IAccountHooks } from './account-hooks.js';
+import { AccountAdmissionRefusedError, AccountChangeRefusedError } from './account-admission.js';
+import { erasedAccountId, type IAccountErasureService } from './account-erasure.service.js';
+import type { IAdminAccessService } from '../admin/index.js';
+import type { UserAccessRemovalService } from '../access/index.js';
+import { sendError } from '../access/index.js';
+import { VersionControlDomainError } from '../../shared/domain-errors.js';
+import { canonicalEmail } from '../../shared/email-identity.js';
 import './auth.middleware.js'; // Express Request augmentation
 
 /**
@@ -9,14 +21,35 @@ import './auth.middleware.js'; // Express Request augmentation
  * page): list accounts, create/reset password accounts, and permanently
  * erase one (the GDPR Art. 17 path — hard-deletes the user's personal data
  * and anonymizes their audit rows; overlays contribute their slices via
- * {@link AccountErasureService}'s participants). Gated per request by
+ * {@link AccountErasureService}'s participants), optionally removing the
+ * address from roles, groups and access rules too
+ * ({@link UserAccessRemovalService}). Gated per request by
  * {@link IAdminAccessService} — the Admin role in `roles.yaml`, plus the env
  * bootstrap admin (always-admin, see AdminAccessService).
  */
 export function createAccountRoutes(
-  authService: AuthService,
+  authService: Pick<
+    AuthService,
+    | 'listAccounts'
+    | 'createAccount'
+    | 'createAccountWithoutPassword'
+    | 'createAccountWithStartingPassword'
+    | 'getUserById'
+    | 'deactivate'
+    | 'reactivate'
+    | 'isOwnerEmail'
+    | 'assertDeletable'
+  >,
   adminAccess: IAdminAccessService,
   accountErasure: Pick<IAccountErasureService, 'eraseUser'>,
+  /**
+   * Who tells an invited person, and who cleans up after an account is
+   * switched off (see {@link IAccountHooks}); core registers nobody for
+   * either. A distribution registers what it holds for a person elsewhere
+   * (its managed-connector sign-ins, say) where it builds that.
+   */
+  accountHooks: Pick<IAccountHooks, 'runAccountInvited' | 'runAccountDeactivated'>,
+  accessRemoval?: Pick<UserAccessRemovalService, 'report' | 'assertRemovable' | 'remove' | 'filesNaming'>,
 ): express.Router {
   const router = express.Router();
 
@@ -28,36 +61,217 @@ export function createAccountRoutes(
     next();
   };
 
-  // GET /api/admin/accounts — id, email, name, whether a password is set.
+  // GET /api/admin/accounts — id, email, name, whether a password hash is
+  // stored, whether the account is the env bootstrap admin, and whether it is
+  // an owner (and, if so, whether it may be deleted).
   router.get('/admin/accounts', requireAdmin, async (_req, res) => {
     res.json({ accounts: await authService.listAccounts() });
   });
 
-  // POST /api/admin/accounts { email, name?, password } — create an account
+  // POST /api/admin/accounts { email, name?, password? } — create an account
   // (or reset the password of an existing one; upsert-by-email is deliberate,
-  // see AuthService.createAccount).
+  // see AuthService.createAccount). Without a password the account is for
+  // single sign-on: the person finds it waiting when they first sign in.
+  // With `keepExistingPassword: true` (an invite's starting password) the
+  // password goes only to a new account or a switched-on one with none; the
+  // reply's `passwordSet` says whether it did, and `deactivated` whether a
+  // refusal was because the account is switched off.
   router.post('/admin/accounts', requireAdmin, async (req, res) => {
-    const { email, name, password } = req.body as {
+    const { email, name, password, keepExistingPassword } = req.body as {
       email?: string;
       name?: string;
-      password?: string;
+      password?: unknown;
+      keepExistingPassword?: unknown;
     };
-    if (!email || !password) {
-      res.status(400).json({ error: 'email and password are required' });
+    if (!email) {
+      res.status(400).json({ error: 'email is required' });
+      return;
+    }
+    // Absent means single sign-on; anything else that is not text is a mistake, not that.
+    if (password !== undefined && typeof password !== 'string') {
+      res.status(400).json({ error: 'password must be a string' });
+      return;
+    }
+    // Fail closed: anything but a boolean is a mistake, never "overwrite".
+    if (keepExistingPassword !== undefined && typeof keepExistingPassword !== 'boolean') {
+      res.status(400).json({ error: 'keepExistingPassword must be a boolean' });
+      return;
+    }
+    if (keepExistingPassword === true && typeof password !== 'string') {
+      res.status(400).json({ error: 'keepExistingPassword needs a password' });
+      return;
+    }
+    // Another admin setting an owner's password could then sign in as the
+    // owner. The owner sets their own on the Account page; an owner account
+    // without a password (restoring one, say; an empty one counts as none,
+    // as in createAccount) is still created here. An invite's starting
+    // password is a password too: the owner is invited by nobody.
+    if (
+      password &&
+      authService.isOwnerEmail(email) &&
+      canonicalEmail(email) !== canonicalEmail(req.userEmail ?? '')
+    ) {
+      res.status(400).json({ error: "The owner's password can't be set by another admin; the owner sets it on their Account page." });
       return;
     }
     try {
+      // A NEW account is an invitation, and the deployment's listeners say
+      // how the person was told (`notified`): the answer the admin reads is
+      // true to what happened, so the dialog can say "emailed" or hand over
+      // the link. An account that was already there is not invited again.
+      const invited = async (account: AuthUser, created: boolean, passwordSet: boolean): Promise<string[]> => {
+        if (!created) return [];
+        // The inviting admin, by name when their account can be read. The
+        // account is already made: a failed read falls back to the identity
+        // the request carries rather than answering an error a retry could
+        // not make good (the account is not new the second time).
+        const requester = { id: req.userId ?? '', email: req.userEmail ?? '', name: '' };
+        const by = req.userId
+          ? await authService.getUserById(req.userId).catch((err: unknown) => {
+              log.warn('the inviting admin could not be read; the invite names them by address:', { err });
+              return null;
+            })
+          : null;
+        return accountHooks.runAccountInvited({
+          account: { id: account.id, email: account.email, name: account.name },
+          invitedBy: by ?? requester,
+          passwordSet,
+        });
+      };
+      if (keepExistingPassword === true && typeof password === 'string') {
+        const { user, created, passwordSet, deactivated } = await authService.createAccountWithStartingPassword(email, password);
+        const notified = await invited(user, created, passwordSet);
+        res.status(201).json({ ...user, passwordSet, deactivated, notified });
+        return;
+      }
+      if (!password) {
+        const { user, created } = await authService.createAccountWithoutPassword(email, name);
+        const notified = await invited(user, created, false);
+        res.status(201).json({ ...user, notified });
+        return;
+      }
+      // Set or reset password: an account that is here already, or one an
+      // admin makes with a password from the API. Not an invitation the
+      // listeners are told of: the dialog that invites never sends this form.
       const user = await authService.createAccount(email, name, password);
       res.status(201).json(user);
     } catch (error) {
       const msg = error instanceof Error ? error.message : 'Unknown error';
+      // The deployment has no place for the account (a seat limit, say): the
+      // port's own words, as a refusal rather than a malformed request.
+      // `kind` tells it apart from `requireAdmin`'s 403, which a caller must
+      // not read as "no seat left".
+      if (error instanceof AccountAdmissionRefusedError) {
+        res.status(403).json({ error: msg, kind: 'admission' });
+        return;
+      }
       res.status(400).json({ error: msg });
     }
   });
 
-  // DELETE /api/admin/accounts/:userId — permanent erasure (moved from the
-  // enterprise admin router with the split-repair: deleting accounts is core
-  // platform functionality, not an enterprise extra).
+  // POST /api/admin/accounts/:userId/deactivate — switch an account off. It
+  // keeps its row, history and place in roles and groups; nothing it holds
+  // signs in any more (see AuthService.isActive). An admin's own account is
+  // refused, so whoever does this is still an admin who is on afterwards —
+  // the deployment is never left with no admin able to sign in.
+  router.post('/admin/accounts/:userId/deactivate', requireAdmin, async (req, res) => {
+    const userId = String(req.params.userId);
+    if (userId === req.userId) {
+      res.status(400).json({ error: 'You cannot switch off your own account. Ask another admin.' });
+      return;
+    }
+    try {
+      // Read before the switch, so the listeners get the address the account
+      // had; the row keeps it either way, so a failed read is tried once more
+      // after the switch, and never costs the switch-off itself.
+      let target = await authService.getUserById(userId).catch(() => undefined);
+      if (!(await authService.deactivate(userId))) {
+        res.status(404).json({ error: 'No such user' });
+        return;
+      }
+      log.info('account audit:', { action: 'deactivate', actorUserId: req.userId, targetUserId: userId });
+      if (!target) target = await authService.getUserById(userId).catch(() => undefined);
+      if (!target) {
+        log.warn('account deactivated, but its address could not be read for the listeners', { targetUserId: userId });
+      }
+      // What the account HELD elsewhere — the sign-ins it made to outside
+      // systems — is let go of now rather than left to lapse. Awaited, so
+      // the admin's answer means it: a listener that fails is logged by the
+      // seam and never fails the switch-off that already happened.
+      await accountHooks.runAccountDeactivated({ userId, email: target?.email ?? '' });
+      res.status(204).end();
+    } catch (error) {
+      if (error instanceof AccountChangeRefusedError) {
+        res.status(400).json({ error: error.message });
+        return;
+      }
+      // The address's switch lock is held by a change still being saved (an
+      // invite's promotion committing roles.yaml, say): the 409 the lock
+      // promises, with its words, so the admin tries again rather than
+      // reading an outage.
+      if (error instanceof VersionControlDomainError) {
+        res.status(error.status).json({ error: error.message, ...(error.payload ?? {}) });
+        return;
+      }
+      log.error('switching an account off failed:', { err: error });
+      res.status(500).json({ error: 'Could not switch this account off' });
+    }
+  });
+
+  // POST /api/admin/accounts/:userId/reactivate — switch it back on, if the
+  // deployment has room: the admission port is asked, as for a new account
+  // (a host that sells seats answers from its plan; 403 with its words and
+  // `kind: 'admission'`).
+  router.post('/admin/accounts/:userId/reactivate', requireAdmin, async (req, res) => {
+    const userId = String(req.params.userId);
+    try {
+      if (!(await authService.reactivate(userId))) {
+        res.status(404).json({ error: 'No such user' });
+        return;
+      }
+      log.info('account audit:', { action: 'reactivate', actorUserId: req.userId, targetUserId: userId });
+      res.status(204).end();
+    } catch (error) {
+      if (error instanceof AccountAdmissionRefusedError) {
+        res.status(403).json({ error: error.message, kind: 'admission' });
+        return;
+      }
+      log.error('switching an account on failed:', { err: error });
+      res.status(500).json({ error: 'Could not switch this account on' });
+    }
+  });
+
+  // GET /api/admin/accounts/:userId/references — how many places in the
+  // knowledge base name this account's address (roles, groups, access rules,
+  // file grants) and whether removing them is allowed. Feeds the delete
+  // confirmation; the counts never include the address itself.
+  router.get('/admin/accounts/:userId/references', requireAdmin, async (req, res) => {
+    if (!accessRemoval) {
+      res.status(404).json({ error: 'Not available' });
+      return;
+    }
+    try {
+      const user = await authService.getUserById(String(req.params.userId));
+      if (!user) {
+        res.status(404).json({ error: 'No such user' });
+        return;
+      }
+      // The ACTING admin's address, not the target's: `unwritable` answers
+      // "which of these files can *you* not clean up?".
+      res.json(await accessRemoval.report(user.email, req.userEmail ?? ''));
+    } catch (err) {
+      sendError(res, err, 'accounts');
+    }
+  });
+
+  // DELETE /api/admin/accounts/:userId[?removeFromAccess=1] — permanent
+  // erasure (moved from the enterprise admin router with the split-repair:
+  // deleting accounts is core platform functionality, not an enterprise
+  // extra). With `removeFromAccess`, the address is also removed from
+  // roles.yaml, group files and every access rule in ONE commit, AFTER the
+  // erasure: a failed commit never un-deletes the account, it reports the
+  // files that still name the user (200 + `accessRemoval`) so the admin can
+  // fix them. Without it, the account is deleted as before (204).
   router.delete('/admin/accounts/:userId', requireAdmin, async (req, res) => {
     const userId = String(req.params.userId);
     // Self-erasure would delete the account authorizing the request mid-flight
@@ -67,24 +281,97 @@ export function createAccountRoutes(
       res.status(400).json({ error: 'You cannot erase your own account. Ask another admin.' });
       return;
     }
+    const flag = String(req.query.removeFromAccess ?? '');
+    const removeFromAccess = accessRemoval !== undefined && (flag === '1' || flag === 'true');
+
+    // Captured BEFORE erasure (the row is gone after) and held only in memory
+    // for the removal below — never logged, never returned.
+    let email: string | null = null;
+    let actor: AuthUser | null = null;
     try {
-      const erased = await accountErasure.eraseUser(userId);
+      const user = await authService.getUserById(userId);
+      if (!user) {
+        res.status(404).json({ error: 'No such user' });
+        return;
+      }
+      // An owner who could not sign back in afterwards is refused for every
+      // caller, whether or not the access option is ticked.
+      authService.assertDeletable(user.email);
+      if (removeFromAccess) email = user.email;
+    } catch (err) {
+      if (err instanceof AccountChangeRefusedError) {
+        res.status(400).json({ error: err.message });
+        return;
+      }
+      log.error('looking up the account to erase failed:', { err });
+      res.status(500).json({ error: 'Failed to erase user' });
+      return;
+    }
+    if (removeFromAccess && email !== null) {
+      try {
+        // The existing guards: the deployment owner and the last Admin are
+        // refused up front, before anything is erased.
+        await accessRemoval!.assertRemovable(email);
+        actor = (req.userId ? await authService.getUserById(req.userId) : null) ?? {
+          id: req.userId ?? 'unknown',
+          email: req.userEmail ?? 'unknown',
+          name: req.userEmail ?? 'unknown',
+        };
+      } catch (err) {
+        sendError(res, err, 'accounts');
+        return;
+      }
+    }
+
+    const erasureId = randomUUID();
+    try {
+      const erased = removeFromAccess
+        ? await accountErasure.eraseUser(userId, { erasureId })
+        : await accountErasure.eraseUser(userId);
       // Accountability record for the destructive path: WHO erased WHOM, by
       // id only — the target's email must not outlive the erasure in logs.
-      console.log(
-        '[accounts] erasure audit:',
-        JSON.stringify({ action: 'erase-user', actorUserId: req.userId, targetUserId: userId, erased }),
-      );
+      log.info('erasure audit:', { action: 'erase-user', actorUserId: req.userId, targetUserId: userId, erased });
       if (!erased) {
         res.status(404).json({ error: 'No such user' });
         return;
       }
-      res.status(204).end();
     } catch (err) {
-      console.error('[accounts] user erasure failed:', err);
+      log.error('user erasure failed:', { err });
       res.status(500).json({ error: 'Failed to erase user' });
+      return;
+    }
+
+    if (!removeFromAccess || email === null || actor === null) {
+      res.status(204).end();
+      return;
+    }
+    const accountId = erasedAccountId(erasureId);
+    try {
+      const result = await accessRemoval!.remove(actor, email, accountId);
+      log.info('erasure audit:', { action: 'remove-from-access', actorUserId: req.userId, account: accountId, files: result.removedFrom.length });
+      res.json({ erased: true, accessRemoval: { ok: true, ...result } });
+    } catch (err) {
+      // `remove` throws only before its commit lands, so nothing was removed.
+      log.error(`removing erased account ${accountId} from access files failed: ${errorText(err)}`);
+      // null, not []: an unreadable scan is no proof that no file names them.
+      let stillNamedIn: string[] | null = null;
+      try {
+        stillNamedIn = await accessRemoval!.filesNaming(email);
+      } catch (scanErr) {
+        log.warn(`could not list the files still naming erased account ${accountId}: ${errorText(scanErr)}`);
+      }
+      const message =
+        err instanceof VersionControlDomainError && err.status < 500
+          ? err.message
+          : 'The change to roles, groups and access rules could not be committed.';
+      res.json({ erased: true, accessRemoval: { ok: false, error: message, removedFrom: [], stillNamedIn } });
     }
   });
 
   return router;
+}
+
+/** An error's message as one escaped log token — never a raw stack. */
+function errorText(err: unknown): string {
+  return printable(err instanceof Error ? err.message : String(err));
 }

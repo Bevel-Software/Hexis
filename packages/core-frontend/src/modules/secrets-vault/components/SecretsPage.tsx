@@ -1,9 +1,8 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Badge, Banner, Button, Surface, TextField } from '../../../shared/components';
 import { PageShell } from '../../../shared/components/PageShell';
-import { pathForTool } from '../../library/routes/library-paths';
-import { ToolLogo } from '../../library/components/ToolLogo';
+import { pathForTool, readOAuthFragment, ToolLogo } from '../../library';
 import {
   listSecrets,
   createOAuthSecret,
@@ -29,43 +28,60 @@ import { ToolSecretsPanel } from './ToolSecretsPanel';
  * say `Connected` / `Set` / `Needs …` in the same grammar, and everything sits
  * on the shared components rather than hand-rolled borders.
  */
-/**
- * The OAuth-callback outcome carried in the URL fragment
- * (`#authorized` / `#error=<message>`), or null when there is none.
- * `URLSearchParams` already percent-decodes, so the value is used as-is (a
- * second `decodeURIComponent` would corrupt messages containing `%`).
- */
-function readHashOutcome(): { kind: 'authorized' | 'error'; text: string } | null {
-  const hash = window.location.hash.replace(/^#/, '');
-  if (!hash) return null;
-  const params = new URLSearchParams(hash);
-  if (params.has('authorized')) return { kind: 'authorized', text: 'Authorization complete.' };
-  if (params.has('error'))
-    return { kind: 'error', text: params.get('error') || 'Authorization failed.' };
-  return null;
-}
-
 export function SecretsPage() {
   const [tools, setTools] = useState<ToolSecrets[]>([]);
   const [secrets, setSecrets] = useState<SecretSummary[]>([]);
   const [loading, setLoading] = useState(true);
+  /** A refetch is in flight over a list that is already on screen. */
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Read ONCE, synchronously, before the fragment is stripped below. Kept in
-  // its own slot (not the API `error` above) so the initial refresh() — whose
-  // success path clears the API error — can't race the outcome away.
-  const [oauthOutcome] = useState(readHashOutcome);
+  // The OAuth-callback outcome carried in the fragment (`#authorized` /
+  // `#error=<message>`), read ONCE, synchronously, with the Library's reader
+  // before the fragment is stripped below. Kept in its own slot (not the API
+  // `error` above) so the initial refresh() — whose success path clears the
+  // API error — can't race the outcome away.
+  const [oauthOutcome] = useState(readOAuthFragment);
 
-  const refresh = useCallback(async () => {
-    setLoading(true);
+  /**
+   * Which load is allowed to publish. Saving two rows in quick succession
+   * starts two refetches, and the first can answer last: its list still says
+   * the second variable needs a key, so the row that was just saved flips back
+   * to `Needs a key` and stays there. The same newest-wins rule the probe
+   * itself follows, for the same reason — a late answer describing an earlier
+   * state is worse than no answer.
+   */
+  const loadSeq = useRef(0);
+
+  /**
+   * @param quiet keep the panels on screen while they refetch.
+   *
+   * The loud refresh drops the page to "Loading…", which UNMOUNTS every panel
+   * — and a panel row holds the verdict of the probe its own save just
+   * started. Nothing persists a verdict, so a loud refetch after a save throws
+   * away the only copy of the answer the save was waiting for. Same fix
+   * `useToolPage` made for the tool page, for the same reason.
+   */
+  const refresh = useCallback(async (quiet = false) => {
+    const mine = ++loadSeq.current;
+    if (!quiet) setLoading(true);
+    setRefreshing(true);
     try {
       const [t, s] = await Promise.all([listToolSecrets(), listSecrets()]);
+      if (loadSeq.current !== mine) return;
       setTools(t);
       setSecrets(s);
       setError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      // Inside the guard too: an older load failing after a newer one
+      // succeeded would raise an alert about a request nobody is waiting on.
+      if (loadSeq.current === mine) setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setLoading(false);
+      // `loading` is the FIRST paint's spinner, and only the newest load may
+      // take it down — an orphan clearing it would uncover an empty page.
+      if (loadSeq.current === mine) {
+        setLoading(false);
+        setRefreshing(false);
+      }
     }
   }, []);
 
@@ -80,8 +96,8 @@ export function SecretsPage() {
 
   // A live API error wins over the (historical) callback outcome; otherwise
   // the callback error stays visible even after the list load succeeds.
-  const shownError = error ?? (oauthOutcome?.kind === 'error' ? oauthOutcome.text : null);
-  const notice = oauthOutcome?.kind === 'authorized' ? oauthOutcome.text : null;
+  const shownError = error ?? (oauthOutcome?.kind === 'error' ? oauthOutcome.message : null);
+  const notice = oauthOutcome?.kind === 'authorized' ? 'Authorization complete.' : null;
 
   const oauthSecrets = secrets.filter((s) => s.kind === 'oauth');
 
@@ -106,8 +122,18 @@ export function SecretsPage() {
   return (
     <PageShell
       title="Secrets"
+      // The header's Refresh is QUIET, like the refetch a save triggers: a loud
+      // one drops the page to "Loading…", which unmounts the panel holding the
+      // verdict of a probe still in flight and throws away the only copy of it.
+      // Disabling the button is the feedback instead — the list it would
+      // replace with a spinner is already on screen.
       actions={
-        <Button variant="quiet" size="sm" disabled={loading} onClick={() => void refresh()}>
+        <Button
+          variant="quiet"
+          size="sm"
+          disabled={loading || refreshing}
+          onClick={() => void refresh(true)}
+        >
           Refresh
         </Button>
       }
@@ -163,7 +189,7 @@ export function SecretsPage() {
                   </Badge>
                 )}
               </div>
-                <ToolSecretsPanel tool={tool} onChanged={() => void refresh()} />
+                <ToolSecretsPanel tool={tool} onChanged={() => void refresh(true)} />
               </Surface>
             </li>
           ))}
@@ -193,7 +219,10 @@ export function SecretsPage() {
                     {`\${${s.key}}`}
                   </code>
                   <Badge tone={s.authorized ? 'ok' : 'wait'} size="xs" className="shrink-0">
-                    {s.authorized ? 'Connected' : 'Needs your sign-in'}
+                    {/* "Signed in", not "Connected": a stored token is the whole
+                        of what this page knows, and only a probe that called the
+                        provider may claim the connection works. */}
+                    {s.authorized ? 'Signed in' : 'Needs your sign-in'}
                   </Badge>
                   <span className="ml-auto flex shrink-0 items-center gap-1.5">
                     <Button variant="outline" size="tiny" onClick={() => void onAuthorize(s.id)}>
@@ -233,6 +262,9 @@ function OAuthSecretForm({ onSaved, onError }: { onSaved: () => void; onError: (
   const [clientId, setClientId] = useState('');
   const [clientSecret, setClientSecret] = useState('');
   const [scopes, setScopes] = useState('');
+  // On by default: MCP-spec providers require PKCE, and one that doesn't
+  // implement it ignores the extra parameters — off is the rare exception.
+  const [pkce, setPkce] = useState(true);
   const [busy, setBusy] = useState(false);
 
   const submit = async () => {
@@ -246,6 +278,7 @@ function OAuthSecretForm({ onSaved, onError }: { onSaved: () => void; onError: (
           clientId: clientId.trim(),
           clientSecret: clientSecret.trim() || undefined,
           scopes: scopes.split(/[\s,]+/).filter(Boolean),
+          pkce,
         },
       });
       onSaved();
@@ -286,6 +319,10 @@ function OAuthSecretForm({ onSaved, onError }: { onSaved: () => void; onError: (
       <Field label="Scopes (space or comma separated)">
         <TextField className="w-full" value={scopes} onChange={(e) => setScopes(e.target.value)} />
       </Field>
+      <label className="flex items-center gap-2 text-detail text-ink-muted">
+        <input type="checkbox" checked={pkce} onChange={(e) => setPkce(e.target.checked)} />
+        PKCE (S256) — required by MCP servers; harmless for providers that ignore it
+      </label>
       <p className="text-detail text-ink-muted">
         Save first, then click “Sign in” on the secret to complete the flow.
       </p>

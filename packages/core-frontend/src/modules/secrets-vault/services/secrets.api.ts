@@ -22,6 +22,8 @@ export interface OAuthProviderConfig {
   scopes?: string[];
   /** Extra static params appended to the authorization request (e.g. `audience`). */
   authParams?: Record<string, string>;
+  /** PKCE (S256) on the authorization-code flow — what MCP-spec providers require. */
+  pkce?: boolean;
 }
 
 async function unwrap(res: Response, fallback: string): Promise<never> {

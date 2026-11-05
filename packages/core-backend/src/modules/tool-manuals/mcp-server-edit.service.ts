@@ -1,18 +1,18 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {
-  DEFAULT_BRANCH,
   HEXIS_EXTENSION_NS,
-  PLUGINS_DIR,
   PLUGIN_MANIFEST_FILE,
   PLUGIN_MCP_FILE,
   type AuthUser,
 } from '@bevel-software/platform-shared';
-import { workspaceIdForBranch, type WorkspaceService } from '../workspace/workspace.service.js';
+import type { WorkspaceService } from '../workspace/index.js';
+import type { KbContext } from '../../shared/kb-context.js';
 import { validatedVariables } from './mcp-json-discovery.js';
 import { assertSafeFetchUrl } from '../../shared/ssrf.js';
 import { containsVariableReference, findReservedVariableRef } from '../../shared/variable-refs.js';
-import type { IAccessControl } from '../access/access-control.interface.js';
+import type { IAccessControl } from '../access/index.js';
+import type { IFsProbe } from '../../shared/fs.contract.js';
 import type { IToolManualService, ToolVariable } from './tool-manuals.contract.js';
 
 /**
@@ -125,10 +125,21 @@ export class McpServerEditService {
     private readonly commits: CommitDriver,
     private readonly accessControl: IAccessControl,
     private readonly toolManuals: IToolManualService,
-    private readonly kbDirName: string,
+    private readonly kb: KbContext,
+    private readonly disk: IFsProbe,
   ) {}
 
-  /** The merged view of one server, or null when unknown/unreadable (indistinguishable, fail closed). */
+  private get kbDirName(): string {
+    return this.kb.kbDirName;
+  }
+
+  /**
+   * The merged view of one server, or null when unknown — including when
+   * `mcp.json` is absent, is not a JSON object, or has no object entry for it
+   * (indistinguishable, fail closed). A missing or malformed manifest only
+   * leaves the extension fields empty. A filesystem failure reading either
+   * file is not "unknown" and propagates.
+   */
   async getServer(userEmail: string, slug: string): Promise<McpServerView | null> {
     const located = await this.locate(userEmail, slug);
     if (!located) return null;
@@ -173,10 +184,19 @@ export class McpServerEditService {
     const servers = mcp.mcpServers as Record<string, unknown>;
     if (!(name in servers)) throw new McpServerEditError('No such server.', 404);
 
-    if (write.transport !== 'streamable-http' && write.transport !== 'sse' && write.transport !== 'stdio') {
-      // Persisting an unknown transport would save an entry discovery then
-      // refuses — an unusable server with no error at the moment it was made.
-      throw new McpServerEditError(`Unknown transport "${String(write.transport)}".`, 422);
+    if (write.transport !== 'streamable-http' && write.transport !== 'stdio') {
+      // Persisting a transport discovery refuses would save an entry that
+      // vanishes from the catalog the moment it is written — an unusable
+      // server with no error at the moment it was made. `sse` is refused BY
+      // NAME with the fix spelled out, because the pinned MCP client has no
+      // sse transport; an EXISTING sse entry stays readable here, so it can
+      // be edited to `streamable-http` rather than being stranded.
+      throw new McpServerEditError(
+        write.transport === 'sse'
+          ? 'The MCP client has no `sse` transport — declare the server as `streamable-http` if it supports it.'
+          : `Unknown transport "${String(write.transport)}".`,
+        422,
+      );
     }
     // The EFFECTIVE value of every field, PATCH-over-stored (see
     // McpServerWrite): `undefined` keeps what the files already say, a
@@ -208,7 +228,8 @@ export class McpServerEditService {
       throw new McpServerEditError(
         'The `variables` declaration is malformed — each entry needs a unique, non-reserved ' +
           'alphanumeric/underscore name, a scope of `admin` or `user`, and any `oauth` block must sit ' +
-          'on a `user`-scoped variable with valid https provider URLs and a client id.',
+          'on a `user`-scoped variable with a client id and never a client secret; its provider URLs are ' +
+          'optional (discovered from the server) but must be valid https URLs, both or neither, when given.',
         422,
       );
     }
@@ -347,7 +368,7 @@ export class McpServerEditService {
     // COMMIT must not — the pending-commit pipeline may already have created
     // a local commit before the push refused, and rewriting the working tree
     // to pre-edit bytes would leave it dirty AGAINST that commit, a state the
-    // workflow layer's own pull-rebase recovery then misreads. Commit-stage
+    // version-control layer's own pull-rebase recovery then misreads. Commit-stage
     // failures propagate as-is and the pipeline's recovery owns the cleanup.
     const [mcpBefore, manifestBefore] = await Promise.all([
       fs.readFile(mcpAbs, 'utf8').catch(() => null),
@@ -366,9 +387,9 @@ export class McpServerEditService {
     // One folder-scoped commit, ungated beyond the caller's own write access —
     // both files or neither. The catalog cache is stale the moment it lands.
     await this.commits.runPendingCommit(
-      workspaceIdForBranch(DEFAULT_BRANCH),
-      DEFAULT_BRANCH,
-      `${this.kbDirName}/${PLUGINS_DIR}/${folder}`,
+      this.kb.defaultWorkspaceId(),
+      this.kb.defaultBranch,
+      `${this.kbDirName}/${this.kb.layout.pluginsDir}/${folder}`,
       user,
     );
     this.toolManuals.invalidate();
@@ -389,7 +410,7 @@ export class McpServerEditService {
     return {
       folder,
       name: found.name,
-      wsId: workspaceIdForBranch(DEFAULT_BRANCH),
+      wsId: this.kb.defaultWorkspaceId(),
       mcpJsonPath: found.path,
     };
   }
@@ -400,15 +421,15 @@ export class McpServerEditService {
     mcpAbs: string;
     manifestAbs: string;
   }> {
-    const wsId = workspaceIdForBranch(DEFAULT_BRANCH);
-    await this.workspaceService.getOrCreateForBranch(DEFAULT_BRANCH);
+    const wsId = this.kb.defaultWorkspaceId();
+    await this.workspaceService.getOrCreateForBranch(this.kb.defaultBranch);
     const wsDir = await this.workspaceService.getWorkspacePath(wsId);
-    const pluginDir = path.join(wsDir, this.kbDirName, PLUGINS_DIR, folder);
+    const pluginDir = path.join(wsDir, this.kbDirName, this.kb.layout.pluginsDir, folder);
     const mcpAbs = path.join(pluginDir, PLUGIN_MCP_FILE);
     const manifestAbs = path.join(pluginDir, PLUGIN_MANIFEST_FILE);
     return {
-      mcp: await readJson(mcpAbs),
-      manifest: await readJson(manifestAbs),
+      mcp: await this.disk.readJsonObject(mcpAbs),
+      manifest: await this.disk.readJsonObject(manifestAbs),
       mcpAbs,
       manifestAbs,
     };
@@ -419,16 +440,5 @@ export class McpServerEditService {
     const servers = (ns as Record<string, unknown> | undefined)?.mcpServers;
     const entry = (servers as Record<string, unknown> | undefined)?.[name];
     return entry && typeof entry === 'object' ? (entry as Record<string, unknown>) : {};
-  }
-}
-
-async function readJson(p: string): Promise<Record<string, unknown> | null> {
-  try {
-    const parsed: unknown = JSON.parse(await fs.readFile(p, 'utf-8'));
-    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
-      ? (parsed as Record<string, unknown>)
-      : null;
-  } catch {
-    return null;
   }
 }

@@ -1,11 +1,19 @@
 #!/usr/bin/env node
+// First, so that it runs before every other import's module body (see the file).
+import './stdout-guard.js';
 import { readFileSync } from 'node:fs';
+import os from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { ConfigError, USAGE, resolveConfig } from './config.js';
-import { DeploymentError } from './deployment.js';
-import { createHexisMcpServer } from './server.js';
+import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
+import { ConfigError, USAGE, resolveConfig, type HexisMcpConfig } from './config.js';
+import { DeploymentError, resolveMcpUrl } from './deployment.js';
+import { holdInitialize, identityLine } from './handshake.js';
+import { OAuthError, establishOAuthConfig } from './oauth.js';
+import { guessAgentFromAncestry } from './parent-process.js';
+import { preflight } from './preflight.js';
+import { beginOrderlyExit, makeExitAfterShutdown, type ShutdownHolder } from './teardown.js';
 
 /**
  * stdio is the protocol channel: anything written to stdout that is not a
@@ -33,16 +41,142 @@ async function main(): Promise<void> {
     return;
   }
 
-  const config = resolveConfig(argv, process.env);
-  const server = await createHexisMcpServer(config, packageVersion());
-  await server.connect(new StdioServerTransport());
+  // RUNTIME PREFLIGHT, before anything native is imported. `server.js` pulls
+  // in @utcp/code-mode, which imports the `isolated-vm` addon at module level:
+  // on a Node major that addon has no binary for, that import dies with an
+  // ERR_DLOPEN_FAILED stack trace before a single line of ours runs, and the
+  // client shows only that the server failed. One sentence and a non-zero exit
+  // instead — which is also why `server.js` is imported DYNAMICALLY below and
+  // why this sits after `--help`/`--version`, the two things worth answering
+  // on any runtime.
+  // `requireNativeSandbox`: here, unlike for an embedding host, a sandbox that
+  // does not even resolve is a crash one statement away — the import below
+  // pulls in code-mode, whose module-level `isolated-vm` import would throw
+  // ERR_MODULE_NOT_FOUND as a stack trace instead of a sentence.
+  const unsupported = preflight({ requireNativeSandbox: true });
+  if (unsupported) {
+    process.stderr.write(`${unsupported}\n`);
+    process.exitCode = 1;
+    return;
+  }
+  const { createHexisMcpServer } = await import('./server.js');
+
+  const resolved = resolveConfig(argv, process.env);
+  // Deterministic teardown, on every way an MCP client lets go of us: stdin
+  // EOF/close (the client hung up), SIGINT, SIGTERM. Killing this process
+  // does NOT kill its grandchildren on Windows — only the transports' close()
+  // inside `shutdown()` does — and an orphaned stdio server keeps its cwd
+  // inside the materialized plugin root, holding it hostage (EBUSY) for every
+  // later instance. So the spawned servers must die WITH this process, not be
+  // left to a stdin-pipe EOF cascade that observably leaks.
+  //
+  // Installed BEFORE anything that can take a while — the browser sign-in
+  // as much as `createHexisMcpServer` — because the children spawn DURING the
+  // create, and a client that hangs up (or a Ctrl+C) mid-startup used to land
+  // in a window with no handler at all, leaving exactly the orphans the
+  // teardown exists to prevent. Until the handle exists there is nothing
+  // reachable to close — the UTCP client lives inside the create call — so an
+  // early let-go only RECORDS the request (plus a bounded force-exit, for a
+  // create that never resolves); the moment create resolves, main() sees it
+  // and shuts the freshly built handle down immediately. The states live in
+  // teardown.ts, where the unit tests can reach them.
+  const holder: ShutdownHolder = { shutdown: null, exitRequested: false, exiting: false };
+  const exitAfterShutdown = makeExitAfterShutdown(holder);
+  process.stdin.on('end', exitAfterShutdown);
+  process.stdin.on('close', exitAfterShutdown);
+  process.on('SIGINT', exitAfterShutdown);
+  process.on('SIGTERM', exitAfterShutdown);
+
+  let config: HexisMcpConfig;
+  let transport: Transport;
+  if (resolved.connectionKey !== undefined) {
+    // Key mode: autonomous, exactly the pre-OAuth behavior.
+    config = { baseUrl: resolved.baseUrl, connectionKey: resolved.connectionKey };
+    transport = new StdioServerTransport();
+  } else {
+    // No key = browser sign-in, AS THE AGENT THAT IS RUNNING US. The agent
+    // names itself in the `initialize` request — the client's first message
+    // — so the transport starts now and that request is held while the
+    // sign-in runs with the name in hand; the server built afterwards gets
+    // the held messages replayed (see handshake.ts). A client that hangs up
+    // before saying anything is a let-go like any other: nothing to sign
+    // in for.
+    const stdio = new StdioServerTransport();
+    // The transport learns of a hang-up only through its own close(); stdin's
+    // EOF is what actually says the client is gone, so the hold listens for
+    // it too, or a client that dies before its first message would leave the
+    // hold waiting forever (and only the force-exit would end the process).
+    const hangUp = new Promise<void>((resolve) => {
+      process.stdin.once('end', () => resolve());
+      process.stdin.once('close', () => resolve());
+    });
+    const handshake = await holdInitialize(stdio, { hangUp });
+    if (holder.exitRequested) {
+      await stdio.close().catch(() => {});
+      return;
+    }
+    transport = handshake.transport;
+    // A client that named itself to nobody gets a guess from the process
+    // tree, so the Audit log shows an agent rather than the local server.
+    // The guess is a guess; the line below says so where the client logs it.
+    const agent = handshake.agent ?? (await guessAgentFromAncestry());
+    process.stderr.write(`${identityLine(agent, os.hostname(), packageVersion())}\n`);
+    try {
+      // Discovery starts from the deployment's OWN MCP endpoint; `/api/config`
+      // is unauthenticated, so resolving it needs no credential — which is
+      // the point: none exists yet.
+      const mcpUrl = await resolveMcpUrl({ baseUrl: resolved.baseUrl, connectionKey: '' });
+      config = await establishOAuthConfig(resolved.baseUrl, mcpUrl, {
+        noOpen: resolved.noOpen,
+        agent,
+      });
+    } catch (err) {
+      // The transport is already reading stdin, and a flowing stdin keeps the
+      // event loop — and so this dead-on-arrival process — alive after the
+      // failure is printed. Close it, so the failure exits as it did when the
+      // sign-in ran before any transport existed.
+      await stdio.close().catch(() => {});
+      throw err;
+    }
+  }
+
+  try {
+    const { server, shutdown } = await createHexisMcpServer(config, packageVersion());
+    holder.shutdown = shutdown;
+    if (holder.exitRequested) {
+      // The client let go while we were starting up: close what was just built
+      // — children included — and leave, without ever connecting the transport.
+      // Through the same bounded path the handler uses: a hung close must not
+      // keep the children alive forever.
+      beginOrderlyExit(holder);
+      return;
+    }
+    await server.connect(transport);
+  } catch (err) {
+    // Startup failed with the let-go listeners already armed. They must not
+    // stay that way: the signal handlers alone would hold this dead-on-arrival
+    // process open forever, and a later hang-up would exit 0 over a failure.
+    // Close whatever was built — children included — and let the rejection
+    // reach main().catch, which reports it. The status is recorded HERE, not
+    // only there, so a let-go racing this very failure already sees it.
+    process.exitCode = 1;
+    process.stdin.off('end', exitAfterShutdown);
+    process.stdin.off('close', exitAfterShutdown);
+    process.off('SIGINT', exitAfterShutdown);
+    process.off('SIGTERM', exitAfterShutdown);
+    await holder.shutdown?.();
+    // In browser sign-in mode the transport was started before any of this;
+    // a stdin still flowing would hold the failed process open (see above).
+    await transport.close().catch(() => {});
+    throw err;
+  }
 }
 
 main().catch((err: unknown) => {
   // A startup failure the person can act on (bad URL, dead key, unreachable
   // deployment) prints its own message and nothing else; an unexpected one
   // keeps its stack, because that is a bug report.
-  if (err instanceof ConfigError || err instanceof DeploymentError) {
+  if (err instanceof ConfigError || err instanceof DeploymentError || err instanceof OAuthError) {
     process.stderr.write(`${err.message}\n`);
   } else {
     console.error(err);

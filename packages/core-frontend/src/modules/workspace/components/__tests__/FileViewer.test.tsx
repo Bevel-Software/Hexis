@@ -1,9 +1,14 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, waitFor, act, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, Routes, Route, useLocation, useNavigationType } from 'react-router-dom';
 import { useEffect, useState } from 'react';
-import type { BranchInfo, WorkingTreeStatus } from '@bevel-software/platform-shared';
+import { PAGE_HEADER_TESTID } from '../../../../shared/theme/header';
+import type {
+  BranchInfo,
+  FileTreeEntry,
+  WorkingTreeStatus,
+} from '@bevel-software/platform-shared';
 
 // Mock the access API before importing the component tree — useFileAccess
 // fires a fetch in an effect on mount, and we don't want real network in tests.
@@ -33,7 +38,9 @@ vi.mock('../../../access/api', () => ({
 // real endpoints. In these tests we just need the acquire to succeed so the
 // save flow can finish; lock contention paths are exercised in lock-specific
 // tests, not here.
-vi.mock('../../../workflow/services/lock.api', () => ({
+vi.mock('../../../version-control/services/lock.api', async (importOriginal) => ({
+  // The sentences (SELF_HOLD_MESSAGE, EDITING_ENDED_MESSAGE) stay real.
+  ...(await importOriginal<typeof import('../../../version-control/services/lock.api')>()),
   acquireLock: vi.fn(async () => ({
     acquired: true,
     lock: {
@@ -48,7 +55,7 @@ vi.mock('../../../workflow/services/lock.api', () => ({
   })),
   heartbeatLock: vi.fn(async () => ({})),
   checkpointLockedFile: vi.fn(async () => null),
-  releaseLock: vi.fn(async () => null),
+  releaseLock: vi.fn(async (): Promise<void> => {}),
   getLock: vi.fn(async () => null),
   LockApiError: class LockApiError extends Error {
     readonly status: number;
@@ -81,6 +88,9 @@ vi.mock('../../../change-requests/services/change-requests.api', () => ({
   listOpenChangeRequests: vi.fn(async () => []),
   listMyChangeRequests: myCrsMock,
   readFileOnBranch: readBranchMock,
+  // No fork point: the change boxes fall back to the default branch, which is
+  // what these tests diff against.
+  readFileAtForkPoint: vi.fn(async () => ({ content: null, forkSha: null })),
 }));
 
 // The access sheet is a 1200-line dialog with its own suite and its own
@@ -98,8 +108,8 @@ vi.mock('../../../access/components/ManageAccessDialog', () => ({
 // `recordActivity`, which has no other visible effect (it resets a timer), so
 // there is no way to assert the scroll→lock wiring without a spy on it.
 const lockActivity = vi.hoisted(() => ({ recordActivity: vi.fn() }));
-vi.mock('../../../workflow/hooks/useFileLock', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../../../workflow/hooks/useFileLock')>();
+vi.mock('../../../version-control/hooks/useFileLock', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../version-control/hooks/useFileLock')>();
   const { useCallback } = await import('react');
   return {
     ...actual,
@@ -118,15 +128,36 @@ vi.mock('../../../workflow/hooks/useFileLock', async (importOriginal) => {
   };
 });
 
+// The starter-pack question the empty state asks a new knowledge base's
+// admin. Not offered unless a test says so.
+const starterPacksMock = vi.hoisted(() => ({
+  fetchStarterPacks: vi.fn(async () => ({ offered: false, chosen: null, packs: [], chosenPack: null }) as unknown),
+  chooseStarterPack: vi.fn(async () => ({}) as unknown),
+}));
+vi.mock('../../../onboarding/services/starter-packs.api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../onboarding/services/starter-packs.api')>()),
+  ...starterPacksMock,
+}));
+
 import { FileViewer } from '../FileViewer';
 // The lock API is mocked above; import the mocked fns so individual tests can
 // override the acquire outcome (e.g. a 403 on enter-edit).
-import { acquireLock as acquireLockMock, LockApiError } from '../../../workflow/services/lock.api';
+import {
+  acquireLock as acquireLockMock,
+  getLock as getLockMock,
+  releaseLock as releaseLockMock,
+  LockApiError,
+  SELF_HOLD_MESSAGE,
+} from '../../../version-control/services/lock.api';
 import { WorkspaceContext, type WorkspaceContextValue } from '../../state/workspace.context';
 import { GitContext, type GitContextValue } from '../../../git/state/git.context';
 import { ReviewContext, type ReviewContextValue } from '../../../review/state/review.context';
 import { AuthContext, type AuthContextValue } from '../../../auth/state/auth.context';
 import { OpenChangeRequestsContext } from '../../state/open-change-requests.context';
+import { OPEN_COMPARISON_EVENT } from '../../../../core/events';
+import { AppRegistryContext, makeRegistry, type FileRendererDef } from '../../../../core/registry';
+import { Dialog } from '../../../../shared/components';
+import type { FileRendererProps } from '../renderers';
 
 let injectPendingFromTest: ((value?: string) => void) | null = null;
 
@@ -148,12 +179,15 @@ const fetchFileHistoryMock = vi.fn(async () => [
   },
 ]);
 
-function makeGit(status: WorkingTreeStatus): GitContextValue {
+function makeGit(
+  status: WorkingTreeStatus | null,
+  availability: GitContextValue['availability'] = 'ready',
+): GitContextValue {
   const branches: BranchInfo[] = [];
   return {
     status,
     branches,
-    availability: 'ready',
+    availability,
     lastError: null,
     refreshStatus: async () => null,
     refreshBranches: async () => {},
@@ -168,22 +202,60 @@ function makeGit(status: WorkingTreeStatus): GitContextValue {
   };
 }
 
+/**
+ * Where the router currently stands. Opening a page from the empty state is
+ * navigation — the URL is the observable contract, and this makes it
+ * assertable without a route tree.
+ */
+function LocationEcho() {
+  const location = useLocation();
+  const navigationType = useNavigationType();
+  return (
+    <>
+      <div data-testid="location">{location.pathname}</div>
+      <div data-testid="location-search">{location.search}</div>
+      <div data-testid="navigation-type">{navigationType}</div>
+      <div data-testid="location-state">{JSON.stringify(location.state ?? null)}</div>
+    </>
+  );
+}
+
 function ViewerHarness({
   initialContent = 'Base content',
   pendingValue = 'Agent version',
   branch = 'alice/draft',
+  routeBranch,
   filePath = 'knowledge-base/Knowledge/Foo.md',
   kbDirName = 'knowledge-base',
+  fileTree = null,
   addTab,
   changeRequests = [],
   authUser = null,
   captureTyped = false,
+  gitAvailability = 'ready',
+  routeState,
+  routePath,
+  workspaceBranch = 'main',
+  onSaveFile,
+  routeSearch,
+  renderers,
 }: {
   initialContent?: string;
+  /** What git reports about itself; the history views need `'ready'`. */
+  gitAvailability?: GitContextValue['availability'];
   pendingValue?: string;
-  branch?: string;
-  filePath?: string;
+  /** `null` = git status has not loaded (or failed) — there is no branch yet. */
+  branch?: string | null;
+  /**
+   * The branch the URL names, when it differs from the one git status reports
+   * — i.e. mid-switch, before the workspace has caught up.
+   */
+  routeBranch?: string;
+  /** `null` means nothing is open — the viewer's empty state. */
+  filePath?: string | null;
   kbDirName?: string | null;
+  /** What the explorer holds; the empty state draws its suggestions from it. */
+  fileTree?: FileTreeEntry | null;
   addTab?: WorkspaceContextValue['addTab'];
   /** Open change requests touching `filePath`. */
   changeRequests?: { number: number; title: string; who: string }[];
@@ -195,6 +267,22 @@ function ViewerHarness({
    * tests keep the historical no-op.
    */
   captureTyped?: boolean;
+  /**
+   * Router state on the entry the viewer opens under. Given (or with
+   * `routePath`), the URL names the file the way `openWorkspacePath` builds
+   * it — `/workspace/<branch>/<path>` — instead of the bare branch.
+   */
+  routeState?: unknown;
+  /** The file the URL names, when it is not the open one. */
+  routePath?: string;
+  /** The branch the workspace is on, as the workspace state reports it. */
+  workspaceBranch?: string | null;
+  /** Observes every write the viewer asks the workspace to make. */
+  onSaveFile?: (relativePath: string, content: string) => void;
+  /** The query the entry opens with, e.g. `?fullscreen=1`. */
+  routeSearch?: string;
+  /** Renderers a deployment registers, as the enterprise overlay's `.html` one. */
+  renderers?: FileRendererDef[];
 }) {
   const [openFileContent, setOpenFileContent] = useState(initialContent);
   const [savedContent, setSavedContent] = useState(initialContent);
@@ -210,18 +298,23 @@ function ViewerHarness({
   }, [pendingValue]);
 
   const effectiveSaved = captureTyped ? savedContent : openFileContent;
-  const tab = {
-    path: filePath,
-    content: openFileContent,
-    savedContent: effectiveSaved,
-    isDirty: false,
-    pendingFileContent,
-  };
+  const tab = filePath
+    ? {
+        path: filePath,
+        content: openFileContent,
+        savedContent: effectiveSaved,
+        isDirty: false,
+        pendingFileContent,
+      }
+    : null;
   const workspace: WorkspaceContextValue = {
     workspaceId: 'ws-1',
     kbDirName,
-    fileTree: null,
-    openTabs: [tab],
+    fileTree,
+    bootstrapError: null,
+    workspaceBranch,
+    retryBootstrap: () => {},
+    openTabs: tab ? [tab] : [],
     activeTab: tab,
     dirtyTabFilenames: [],
     openFilePath: filePath,
@@ -230,8 +323,8 @@ function ViewerHarness({
     hasUnsavedFileChanges: false,
     pendingFileContent,
     setActiveTabContent: captureTyped ? (v: string) => setOpenFileContent(v) : () => {},
-    uploadError: null,
-    uploadNotice: null,
+    uploadErrors: new Map(),
+    uploadNotices: new Map(),
     clearUploadNotice: () => {},
     isUploading: false,
     uploadProgress: null,
@@ -245,7 +338,7 @@ function ViewerHarness({
     activateTab: () => {},
     reorderTab: () => {},
     closeAllTabs: () => {},
-    hydrateTabs: async () => ({ surviving: [], dropped: [], denied: [] }),
+    hydrateTabs: async () => ({ surviving: [], dropped: [], denied: [], superseded: false }),
     createFile: async () => {},
     createDirectory: async () => {},
     unzipHere: async () => ({ extracted: 0, skipped: [], destination: '' }),
@@ -254,7 +347,8 @@ function ViewerHarness({
     clearUploadError: () => {},
     deleteEntry: async () => {},
     moveEntry: async () => {},
-    saveFile: async (_relativePath: string, content: string) => {
+    saveFile: async (relativePath: string, content: string) => {
+      onSaveFile?.(relativePath, content);
       setOpenFileContent(content);
       setSavedContent(content);
     },
@@ -292,15 +386,18 @@ function ViewerHarness({
     login: async () => {},
     logout: () => {},
   };
-  return (
-    <MemoryRouter>
+  // Rendered UNDER the real route shape, so `:branch` resolves the way it does
+  // in the app — the empty state's suggestions compare it against git status
+  // before offering to navigate.
+  const urlBranch = routeBranch ?? branch ?? 'alice/draft';
+  const tree = (
       <AuthContext.Provider value={auth}>
         <WorkspaceContext.Provider value={workspace}>
-          <GitContext.Provider value={makeGit(makeStatus(branch))}>
+          <GitContext.Provider value={makeGit(branch ? makeStatus(branch) : null, gitAvailability)}>
             <ReviewContext.Provider value={review}>
                 <OpenChangeRequestsContext.Provider
                   value={{
-                    paths: new Set(changeRequests.length ? [filePath] : []),
+                    paths: new Set(changeRequests.length && filePath ? [filePath] : []),
                     minePaths: new Map(),
                     mineNumbers: new Set<number>(),
                     forPath: (p) =>
@@ -321,12 +418,42 @@ function ViewerHarness({
                     Inject pending
                   </button>
                   <FileViewer />
+                  <LocationEcho />
                 </OpenChangeRequestsContext.Provider>
             </ReviewContext.Provider>
           </GitContext.Provider>
         </WorkspaceContext.Provider>
       </AuthContext.Provider>
+  );
+  const routed = (
+    <MemoryRouter
+      initialEntries={[
+        routeSearch !== undefined
+          ? {
+              pathname: `/workspace/${encodeURIComponent(urlBranch)}`,
+              search: routeSearch,
+              state: routeState ?? null,
+            }
+          : routeState !== undefined || routePath !== undefined
+          ? {
+              pathname: `/workspace/${encodeURIComponent(urlBranch)}/${(routePath ?? filePath ?? '')
+                .split('/')
+                .map(encodeURIComponent)
+                .join('/')}`,
+              state: routeState ?? null,
+            }
+          : `/workspace/${encodeURIComponent(urlBranch)}`,
+      ]}
+    >
+      <Routes>
+        <Route path="/workspace/:branch/*" element={tree} />
+      </Routes>
     </MemoryRouter>
+  );
+  return renderers ? (
+    <AppRegistryContext.Provider value={makeRegistry({ renderers })}>{routed}</AppRegistryContext.Provider>
+  ) : (
+    routed
   );
 }
 
@@ -341,6 +468,10 @@ describe('FileViewer', () => {
       owners: EMPTY_ELIGIBLE,
     };
     accessMock.fetchFileAccess.mockClear();
+    // mockClear keeps the implementation: a test that parks the lookup
+    // in flight would park every test after it.
+    accessMock.fetchFileAccess.mockImplementation(async () => accessMock.result);
+    readBranchMock.mockImplementation(async () => '');
     // Restore the default "acquire succeeds" behaviour so a per-test 403
     // override doesn't leak into the next test.
     vi.mocked(acquireLockMock).mockImplementation(async () => ({
@@ -355,6 +486,41 @@ describe('FileViewer', () => {
         expiresAt: new Date(Date.now() + 60_000).toISOString(),
       },
     }));
+  });
+
+  /**
+   * The seam, in the page that broke it.
+   *
+   * `HeaderAlignment.test.tsx` measures the band's HEIGHT and checks that a
+   * document column opens on it. This checks the thing only the real page can
+   * say: that the file page actually hands its title bar to that slot. It
+   * used to render `<EditorTabs />` above `<KbPageHeader>` inside the column,
+   * so the title bar opened 54px below the sidebar header row it is supposed
+   * to line up with — at every width, unaffected by collapsing or resizing the
+   * sidebar, and invisible to a suite in which no test rendered the header
+   * anywhere near a tab strip. Staging found it; this is what would have.
+   *
+   * Structural, not measured: happy-dom has no layout engine, so "nothing is
+   * drawn above the band" is the checkable form of "the band's top edge is
+   * the column's top edge".
+   */
+  it('opens the document column with the title bar, above the tab strip', async () => {
+    render(<ViewerHarness initialContent="Base content" />);
+
+    const band = await screen.findByTestId(PAGE_HEADER_TESTID);
+    // The harness opens one tab, so the strip really is rendered — without it
+    // this test would pass on the broken code too.
+    const tabs = screen.getByRole('tablist', { name: 'Open files' });
+
+    // Nothing above the band inside its column — the checkable form of "its
+    // top edge is the column's top edge".
+    expect(band.previousElementSibling).toBeNull();
+    // And the strip did not leave the column to get there; it went below the
+    // title. One column still holds the title, the tabs and the text
+    // (proto:700-705) — this only changed the order inside it.
+    const column = band.parentElement!;
+    expect(column.contains(tabs)).toBe(true);
+    expect(band.compareDocumentPosition(tabs) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it('immediately enters review mode when pending arrives on a clean file', async () => {
@@ -514,6 +680,23 @@ describe('FileViewer', () => {
     expect(accessMock.fetchFileAccess).not.toHaveBeenCalled();
   });
 
+  // View-only routes (legacy Office, ODF) render a no-preview note — there is
+  // no editing surface behind an Edit click, so neither Edit nor Propose may
+  // be offered, even on a draft branch where editing is otherwise free.
+  it('offers no Edit or Propose on a legacy .doc — the no-preview note has no editing surface', async () => {
+    render(<ViewerHarness initialContent="" filePath="knowledge-base/old/memo.doc" />);
+    expect(await screen.findByText(/legacy Word format/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Edit' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Propose changes' })).not.toBeInTheDocument();
+  });
+
+  it('offers no Edit or Propose on an OpenDocument file — same view-only route, ODF-honest copy', async () => {
+    render(<ViewerHarness initialContent="" filePath="knowledge-base/docs/spec.odt" />);
+    expect(await screen.findByText(/No preview for OpenDocument files yet/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Edit' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Propose changes' })).not.toBeInTheDocument();
+  });
+
   // Bug B regression: the hook must strip the kbDirName prefix before
   // querying the backend, otherwise deeper access.md grants silently miss
   // and the editor falsely shows read-only. Exercised on a protected
@@ -549,8 +732,8 @@ describe('FileViewer', () => {
   // fix that 403 was swallowed (console.warn only) and the click just flickered
   // "Loading…" then reverted to "Edit" with no explanation. Now the refusal is
   // surfaced in the save-error banner so the user understands the file is
-  // read-only to them. (Distinct from lock contention, which the "Locked by X"
-  // banner already covers.)
+  // read-only to them. (Distinct from someone else editing, which the "X is
+  // editing this page" banner already covers.)
   it('surfaces an access-denied 403 on enter-edit instead of silently reverting', async () => {
     // Force the access lookup to fail → useFileAccess default-allows →
     // canWrite=true → the Edit button renders on a protected branch.
@@ -579,6 +762,117 @@ describe('FileViewer', () => {
     expect(screen.getByText(/Eligible: Admin/i)).toBeInTheDocument();
     // And we did NOT flip into edit mode — no editable textbox appeared.
     expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+  });
+
+  // Someone else has the page open for editing: the reader is told who, in
+  // plain words, and Edit says the same on hover.
+  it('says who is editing a page someone else has open', async () => {
+    vi.mocked(getLockMock).mockResolvedValueOnce({
+      branch: 'alice/draft',
+      path: 'knowledge-base/Knowledge/Foo.md',
+      holderUserId: 'u2',
+      holderName: 'Dana Lee',
+      acquiredAt: new Date().toISOString(),
+      lastHeartbeatAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    render(<ViewerHarness initialContent="Base content" />);
+
+    const banner = await screen.findByText(/is editing this page\. You can edit it when they finish\./);
+    expect(banner).toHaveTextContent('Dana Lee is editing this page. You can edit it when they finish.');
+    expect(screen.queryByText(/Locked/)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Edit' })).toHaveAttribute('title', 'Dana Lee is editing this page');
+  });
+
+  // The hold is the viewer's own — another tab, a closed browser whose hold
+  // has not expired yet, their agent saving. Clicking Edit says so, never
+  // "<their own name> is editing this page", and once the hold is gone the
+  // notice leaves by itself and Edit works without a reload.
+  it('says a page held by the viewer is theirs, and gives Edit back when the hold ends', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      vi.mocked(acquireLockMock).mockResolvedValueOnce({
+        acquired: false,
+        lock: {
+          branch: 'alice/draft',
+          path: 'knowledge-base/Knowledge/Foo.md',
+          holderUserId: 'u-juan',
+          holderName: 'Juan V.',
+          acquiredAt: new Date().toISOString(),
+          lastHeartbeatAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 10_000).toISOString(),
+        },
+      });
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      render(
+        <ViewerHarness
+          initialContent="Base content"
+          authUser={{ id: 'u-juan', email: 'juan@example.com', name: 'Juan V.' }}
+        />,
+      );
+
+      await user.click(await screen.findByRole('button', { name: 'Edit' }));
+
+      const banner = await screen.findByText(SELF_HOLD_MESSAGE);
+      expect(banner).toHaveTextContent(
+        'You have this page open for editing somewhere else, in another tab or through your agent. You can edit it here in a moment.',
+      );
+      expect(screen.queryByText(/Juan V\./)).not.toBeInTheDocument();
+      expect(screen.queryByText(/is editing this page/)).not.toBeInTheDocument();
+      const edit = screen.getByRole('button', { name: 'Edit' });
+      expect(edit).toBeDisabled();
+      expect(edit).toHaveAttribute('title', SELF_HOLD_MESSAGE);
+
+      // The hold expires; the re-check finds the page free.
+      vi.mocked(getLockMock).mockResolvedValue(null);
+      await act(async () => { await vi.advanceTimersByTimeAsync(11_500); });
+
+      await waitFor(() => expect(screen.queryByText(SELF_HOLD_MESSAGE)).not.toBeInTheDocument());
+      expect(screen.getByRole('button', { name: 'Edit' })).toBeEnabled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // Closing a tab mid-edit: the browser still warns while there is unsaved
+  // text (the page's `beforeunload` guard), and a clean editor does not
+  // warn. Once the person accepts and the page goes (`pagehide`), the hold
+  // is released at once with a keep-alive request, and the unsaved text is
+  // not written on the way out.
+  it('warns before closing a tab with unsaved text, then gives the page back without saving it', async () => {
+    const user = userEvent.setup();
+    const saved: string[] = [];
+    render(
+      <ViewerHarness
+        initialContent="Base content"
+        captureTyped
+        onSaveFile={(_path, content) => saved.push(content)}
+      />,
+    );
+    await user.click(await screen.findByRole('button', { name: 'Edit' }));
+    const textarea = await screen.findByRole('textbox');
+
+    const tryToClose = () => {
+      const event = new Event('beforeunload', { cancelable: true });
+      window.dispatchEvent(event);
+      return event.defaultPrevented;
+    };
+    // Nothing typed yet: the tab closes without a warning.
+    expect(tryToClose()).toBe(false);
+
+    await user.type(textarea, ' and a new line');
+    // Unsaved text: the browser asks first, as today.
+    await waitFor(() => expect(tryToClose()).toBe(true));
+
+    vi.mocked(releaseLockMock).mockClear();
+    await act(async () => { window.dispatchEvent(new Event('pagehide')); });
+
+    expect(releaseLockMock).toHaveBeenCalledTimes(1);
+    expect(releaseLockMock).toHaveBeenCalledWith(
+      'ws-1', 'alice/draft', 'knowledge-base/Knowledge/Foo.md', undefined, { keepalive: true },
+    );
+    // No write of the unsaved text happened on the way out.
+    expect(saved).toEqual([]);
   });
 
   // WP1 regression. The document column moved: the viewer pane used to be
@@ -626,17 +920,200 @@ describe('FileViewer', () => {
     expect(screen.queryByRole('button', { name: 'Compare' })).not.toBeInTheDocument();
   });
 
-  it('opens Version history from ⋯ and offers a way back to the document', async () => {
+  it('opens Version history from the clock-arrow beside Edit and offers a way back to the document', async () => {
     const user = userEvent.setup();
     render(<ViewerHarness initialContent="historic" />);
 
-    await user.click(screen.getByRole('button', { name: 'More actions' }));
-    await user.click(screen.getByRole('menuitem', { name: /Version history/ }));
+    // ONE clock: the prose pane bar carries it beside Edit, and the header
+    // stands down (`historyInPane`) rather than offering a second.
+    await user.click(screen.getByRole('button', { name: 'Version history' }));
 
     const back = await screen.findByRole('button', { name: /Back to the document/ });
     await user.click(back);
     // The document is back, and so is its Edit affordance.
     expect(await screen.findByRole('button', { name: 'Edit' })).toBeInTheDocument();
+    // The Back button unmounted with the log. Keyboard focus lands on the
+    // bar's clock, the same handoff the header's pressed clock makes, rather
+    // than falling to `document`.
+    expect(screen.getByRole('button', { name: 'Version history' })).toHaveFocus();
+  });
+
+  /**
+   * Opening the log unmounts the editor. Coming back re-mounts it from its
+   * seed, while the buffer Send reads still holds the newer keystrokes: the
+   * page would show one text and submit another. So the clock goes away for
+   * exactly as long as a draft is open, the rule the skill page applies.
+   */
+  it('withdraws Version history while the editor is open, and returns it on Done', async () => {
+    const user = userEvent.setup();
+    render(<ViewerHarness initialContent="draft me" />);
+
+    expect(screen.getByRole('button', { name: 'Version history' })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Edit' }));
+    await screen.findByRole('button', { name: 'Done' });
+    expect(screen.queryByRole('button', { name: 'Version history' })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Done' }));
+    expect(await screen.findByRole('button', { name: 'Version history' })).toBeInTheDocument();
+  });
+
+  /**
+   * The chat's "View full comparison" link lands whenever the agent answers,
+   * and `availability` starts 'loading' until the first status poll returns.
+   * The comparison is not gated on the log's availability: the panel asks git
+   * itself and reports what it gets. Cancelling the tab here instead dropped
+   * the click with nothing on screen to say so.
+   */
+  it('opens the comparison a chat link asks for before git has answered, and keeps it through a failed poll', async () => {
+    const { rerender } = render(<ViewerHarness initialContent="compared" gitAvailability="loading" />);
+
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent(OPEN_COMPARISON_EVENT, {
+          detail: { path: 'knowledge-base/Knowledge/Foo.md', fromBranch: 'main', toBranch: 'alice/draft' },
+        }),
+      );
+    });
+    expect(await screen.findByRole('button', { name: /Back to the document/ })).toBeInTheDocument();
+    expect(screen.getByText('Compare versions')).toBeInTheDocument();
+
+    // A poll fails while the comparison is up. It stays up: the reader asked
+    // for it, and only the log closes when git stops answering.
+    rerender(<ViewerHarness initialContent="compared" gitAvailability="error" />);
+    expect(screen.getByRole('button', { name: /Back to the document/ })).toBeInTheDocument();
+    expect(screen.getByText('Compare versions')).toBeInTheDocument();
+  });
+
+  /**
+   * The comparison outliving `historyAvailable` is the case where the focus
+   * handoff has no clock to hand back to: both are withdrawn while git is
+   * silent. Leaving the comparison then would drop focus on `document`, the
+   * one outcome the handoff exists to prevent, so the document's own title is
+   * named last. Found by cubic on #135.
+   */
+  it('lands focus on the document title when leaving a comparison git cannot back with a clock', async () => {
+    const user = userEvent.setup();
+    render(<ViewerHarness initialContent="compared" gitAvailability="error" />);
+
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent(OPEN_COMPARISON_EVENT, {
+          detail: { path: 'knowledge-base/Knowledge/Foo.md', fromBranch: 'main', toBranch: 'alice/draft' },
+        }),
+      );
+    });
+    const back = await screen.findByRole('button', { name: /Back to the document/ });
+    // Neither clock is on screen to catch the focus.
+    expect(screen.queryByRole('button', { name: 'Version history' })).not.toBeInTheDocument();
+
+    await user.click(back);
+    expect(screen.queryByRole('button', { name: /Back to the document/ })).not.toBeInTheDocument();
+    const title = screen.getByRole('heading', { level: 1, name: 'Foo' });
+    expect(document.activeElement).toBe(title);
+    expect(document.activeElement).not.toBe(document.body);
+  });
+
+  // With the log open the column goes full-bleed and the header carries the
+  // clock, pressed. Clicking it again is the other way back.
+  /**
+   * `availability` is re-derived from a POLLED status call, so one failed
+   * poll flips it off and the next good one flips it back. If `activeTab`
+   * survived that on 'history', the column would stay full-bleed with no
+   * panel in it (a bare document, no pane card, no way back but the next
+   * poll), and then put the log back over the file the moment git recovered.
+   * Found by cubic on #134; the skill page already had the rule.
+   */
+  it('puts the document back when git stops answering mid-read, and does not reopen the log when it recovers', async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(<ViewerHarness initialContent="historic" />);
+
+    await user.click(screen.getByRole('button', { name: 'Version history' }));
+    await screen.findByRole('button', { name: /Back to the document/ });
+
+    // A poll fails: the log goes, and the document is back in its pane card
+    // with its Edit, not stranded full-bleed.
+    rerender(<ViewerHarness initialContent="historic" gitAvailability="error" />);
+    expect(screen.queryByRole('button', { name: /Back to the document/ })).not.toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'Edit' })).toBeInTheDocument();
+    expect(screen.getByTestId('file-pane-card')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Version history' })).not.toBeInTheDocument();
+
+    // The next poll succeeds. The file is still what is on screen, and the
+    // clock is back, unpressed.
+    rerender(<ViewerHarness initialContent="historic" gitAvailability="ready" />);
+    expect(screen.queryByRole('button', { name: /Back to the document/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Edit' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Version history' })).toBeInTheDocument();
+  });
+
+  /**
+   * The log stands in for the document, in the document's PLACE.
+   *
+   * It used to take the full-bleed contract — right about the height it
+   * needs, wrong about everything else: the column went with it, so the title
+   * ran into the pane's left edge and the timeline started flush against it,
+   * and going to history and coming back moved every row on the page.
+   * `panel` is the reading view's column with full-bleed's height, so the
+   * frame is the SAME frame and the assertion can say so without naming a
+   * single measurement.
+   */
+  it('keeps the document column when the log takes the place of the document', async () => {
+    const user = userEvent.setup();
+    render(<ViewerHarness initialContent="historic" />);
+
+    const frameOf = () =>
+      [...(screen.getByTestId('kb-document-shell').firstElementChild as HTMLElement).classList]
+        // The measure, the side margins and the offset the band opens on —
+        // everything that decides WHERE the column is. What the two modes are
+        // allowed to differ on is how the box below is sized: a document
+        // scrolls and ends on the bottom rhythm, a panel fills the pane.
+        .filter((cls) => /^(mx-auto|w-full|max-w-|px-|pt-|max-\[900px\]:px-)/.test(cls))
+        .sort();
+
+    const reading = frameOf();
+    // Non-empty, or the filter has stopped matching anything and the two
+    // empty lists below would agree about nothing.
+    expect(reading).toContain('max-w-[880px]');
+    expect(reading).toContain('px-[40px]');
+
+    await user.click(screen.getByRole('button', { name: 'Version history' }));
+    await screen.findByRole('button', { name: /Back to the document/ });
+    expect(screen.getByTestId('kb-document-shell').getAttribute('data-variant')).toBe('panel');
+    expect(frameOf()).toEqual(reading);
+
+    // The title is in that column, not beside it — the clipping Juan saw was
+    // a heading with no margin to stand on.
+    const column = screen.getByTestId('kb-document-shell').firstElementChild as HTMLElement;
+    expect(column).toContainElement(screen.getByRole('heading', { level: 1 }));
+    // So are the tab strip and the log itself.
+    expect(column).toContainElement(screen.getByRole('tablist', { name: 'Open files' }));
+    expect(column).toContainElement(screen.getByText(/Timeline:/));
+
+    // …and back: nothing about the frame moved.
+    await user.click(screen.getByRole('button', { name: /Back to the document/ }));
+    expect(await screen.findByRole('button', { name: 'Edit' })).toBeInTheDocument();
+    expect(frameOf()).toEqual(reading);
+  });
+
+  it('closes Version history from the pressed clock in the header', async () => {
+    const user = userEvent.setup();
+    render(<ViewerHarness initialContent="historic" />);
+
+    await user.click(screen.getByRole('button', { name: 'Version history' }));
+    await screen.findByRole('button', { name: /Back to the document/ });
+    // The pane bar's clock unmounted with the bar; focus lands on the
+    // header's pressed clock rather than falling to `document`.
+    const pressed = screen.getByRole('button', { name: 'Version history' });
+    expect(pressed).toHaveAttribute('aria-pressed', 'true');
+    expect(document.activeElement).toBe(pressed);
+
+    await user.click(pressed);
+    expect(screen.queryByRole('button', { name: /Back to the document/ })).not.toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'Edit' })).toBeInTheDocument();
+    // And back: the header's clock hid again, so focus lands on the bar's.
+    const paneClock = screen.getByRole('button', { name: 'Version history' });
+    expect(paneClock).not.toHaveAttribute('aria-pressed', 'true');
+    expect(document.activeElement).toBe(paneClock);
   });
 
   it('shares the file itself from Share, and the parent folder from the chevron', async () => {
@@ -653,6 +1130,37 @@ describe('FileViewer', () => {
     // folder's own row in the tree, beside the children it governs.
     await user.click(screen.getByRole('button', { name: 'More sharing options' }));
     expect(screen.queryByRole('menuitem', { name: /whole folder/i })).not.toBeInTheDocument();
+  });
+
+  it("calls a folder's access.md Who has access, says what it governs, and opens the folder's Manage access", async () => {
+    const user = userEvent.setup();
+    render(
+      <ViewerHarness
+        initialContent="read: everyone"
+        filePath="knowledge-base/KnowledgeBase/Legal/access.md"
+      />,
+    );
+
+    const h1 = await screen.findByRole('heading', { level: 1 });
+    expect(h1).toHaveTextContent('Who has access');
+    expect(h1).toHaveAttribute('title', 'access.md');
+    expect(screen.getByRole('note')).toHaveTextContent(
+      'This file controls who can see and change Legal. Change it with Manage access.',
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Manage access' }));
+    expect(
+      await screen.findByRole('dialog', {
+        name: 'Manage access: directory knowledge-base/KnowledgeBase/Legal',
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it('says nothing about access on an ordinary page', async () => {
+    render(<ViewerHarness initialContent="plain" />);
+    await screen.findByRole('heading', { level: 1 });
+    expect(screen.queryByText(/This file controls who can see and change/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Manage access' })).not.toBeInTheDocument();
   });
 
   // ── WP5: the rail ──
@@ -691,6 +1199,110 @@ describe('FileViewer', () => {
     expect(
       await screen.findByRole('dialog', { name: /Change request: Tighten the wording/ }),
     ).toBeInTheDocument();
+  });
+
+  /**
+   * "Waiting on you and N others" counts the people who can APPROVE — the
+   * write: grants — not the owner: list. A file written by Bob and Carl (plus
+   * the inherited Admin role) with no owners must not tell Bob he is the only
+   * one it waits on.
+   */
+  it('counts the other approvers from the write grants, not the owners', async () => {
+    accessMock.result = {
+      canWrite: true,
+      canOwner: false,
+      eligible: {
+        roles: ['Admin'],
+        users: [
+          { name: 'Bob', email: 'bob@example.com' },
+          { name: 'Carl', email: 'carl@example.com' },
+        ],
+      },
+      owners: EMPTY_ELIGIBLE,
+    };
+    // The proposal must actually differ from the file, or the box reads
+    // "Already up to date" and has no verdict to wait on.
+    readBranchMock.mockImplementation((async (branch: string) =>
+      branch.startsWith('suggestions/') ? 'proposed' : 'current') as never);
+    render(
+      <ViewerHarness
+        initialContent="contested"
+        branch="target-company-state"
+        authUser={{ id: 'u-bob', email: 'bob@example.com', name: 'Bob' }}
+        changeRequests={[{ number: 33, title: 'Tighten the wording', who: 'Ali Raza' }]}
+      />,
+    );
+
+    expect(await screen.findByText('Waiting on you and 2 others')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Approve' })).toBeInTheDocument();
+  });
+
+  /**
+   * A failed access lookup default-allows with an EMPTY grant list. That list
+   * is not the approver set, so the box must not claim "Waiting on you".
+   */
+  it('makes no waiting-on claim when the approver grants never loaded', async () => {
+    accessMock.fetchFileAccess.mockRejectedValueOnce(new Error('network down'));
+    readBranchMock.mockImplementation((async (branch: string) =>
+      branch.startsWith('suggestions/') ? 'proposed' : 'current') as never);
+    render(
+      <ViewerHarness
+        initialContent="contested"
+        branch="target-company-state"
+        authUser={{ id: 'u-bob', email: 'bob@example.com', name: 'Bob' }}
+        changeRequests={[{ number: 33, title: 'Tighten the wording', who: 'Ali Raza' }]}
+      />,
+    );
+
+    expect(await screen.findByText('You can decide this.')).toBeInTheDocument();
+    expect(screen.queryByText(/Waiting on you/)).not.toBeInTheDocument();
+  });
+
+  /**
+   * Switching files keeps the PREVIOUS file's grants in the access hook until
+   * the next lookup answers — which is why the "and N others" count is gated on
+   * `!access.loading`. The "Waiting on …" line is the same hazard: it names
+   * people, and naming the OUTGOING file's owners over the incoming file's box
+   * is a false statement about who decides this change. Mid-lookup it has to
+   * fall back to the anonymous wording.
+   */
+  it('never names the previous file’s owners while the next lookup is in flight', async () => {
+    accessMock.result = {
+      canWrite: false,
+      canOwner: false,
+      eligible: { roles: ['Docs'], users: [] },
+      owners: { roles: ['Docs'], users: [] },
+    };
+    readBranchMock.mockImplementation((async (branch: string) =>
+      branch.startsWith('suggestions/') ? 'proposed' : 'current') as never);
+    // The outgoing file's only job is to be the file we switch AWAY from,
+    // leaving its owners behind in the hook. It renders a box of its own —
+    // nothing is asserted on that one.
+    const { rerender } = render(
+      <ViewerHarness
+        initialContent="outgoing"
+        branch="target-company-state"
+        filePath="knowledge-base/Knowledge/Other.md"
+        changeRequests={[{ number: 34, title: 'Tighten the wording', who: 'Ali Raza' }]}
+      />,
+    );
+    await waitFor(() => expect(accessMock.fetchFileAccess).toHaveBeenCalled());
+
+    // The incoming file's lookup never answers, so the box renders for the
+    // whole of the in-flight window.
+    accessMock.fetchFileAccess.mockImplementation(() => new Promise(() => {}));
+    rerender(
+      <ViewerHarness
+        initialContent="incoming"
+        branch="target-company-state"
+        filePath="knowledge-base/Knowledge/Foo.md"
+        changeRequests={[{ number: 34, title: 'Tighten the wording', who: 'Ali Raza' }]}
+      />,
+    );
+
+    expect(await screen.findByText(/proposed a change/)).toBeInTheDocument();
+    expect(screen.getByText('Waiting on the owners')).toBeInTheDocument();
+    expect(screen.queryByText('Waiting on Docs')).not.toBeInTheDocument();
   });
 
   it('says nothing on a file nobody has proposed a change to', () => {
@@ -883,6 +1495,37 @@ describe('FileViewer: proposing a change without write access', () => {
     expect(proposeMock).not.toHaveBeenCalled();
   });
 
+  /**
+   * The seeded case is where the clock did real damage: the editor re-mounts
+   * from `proposeSeed` on the way back from the log, while `proposeBufferRef`
+   * still holds the newer keystrokes — the old text on screen, the new text
+   * sent. No clock while a proposal is open.
+   */
+  it('withdraws Version history while a proposal is open, and returns it on Discard', async () => {
+    denyWrite();
+    myCrsMock.mockResolvedValue([
+      { number: 12, state: 'open', branch: 'suggestions/reader-u9/knowledge' },
+    ]);
+    readBranchMock.mockResolvedValue('first proposed paragraph');
+    const user = userEvent.setup();
+    render(
+      <ViewerHarness
+        initialContent="official"
+        branch="target-company-state"
+        authUser={reader}
+        captureTyped
+      />,
+    );
+
+    expect(await screen.findByRole('button', { name: 'Version history' })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Propose changes' }));
+    await screen.findByRole('textbox');
+    expect(screen.queryByRole('button', { name: 'Version history' })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Discard' }));
+    expect(await screen.findByRole('button', { name: 'Version history' })).toBeInTheDocument();
+  });
+
   it('discard walks away without sending anything', async () => {
     denyWrite();
     const user = userEvent.setup();
@@ -906,5 +1549,918 @@ describe('FileViewer: proposing a change without write access', () => {
     // permission stripe with it (removed for readers everywhere).
     expect(await screen.findByRole('button', { name: 'Propose changes' })).toBeInTheDocument();
     expect(screen.queryByText(/You don't have permission to edit/i)).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * NOTHING OPEN. The first thing most people see in Knowledge, and for a long
+ * time it told them to go and ask an assistant a question — three canned ones
+ * about a "process landscape" that only rendered at all on a deployment with a
+ * chat surface registered, and that sent someone looking at a knowledge base
+ * away from the pages it holds. It offers those pages now.
+ */
+describe('FileViewer: nothing open', () => {
+  /** The workspace root the API returns, wrapping whatever the checkout holds. */
+  const workspace = (checkout: FileTreeEntry): FileTreeEntry => ({
+    name: '.',
+    relativePath: '.',
+    type: 'directory',
+    children: [checkout],
+  });
+
+  const CHECKOUT: FileTreeEntry = {
+    name: 'knowledge-base',
+    relativePath: 'knowledge-base',
+    type: 'directory',
+    children: [
+      {
+        name: 'KnowledgeBase',
+        relativePath: 'knowledge-base/KnowledgeBase',
+        type: 'directory',
+        children: [
+          {
+            name: 'Onboarding',
+            relativePath: 'knowledge-base/KnowledgeBase/Onboarding',
+            type: 'directory',
+            children: [
+              {
+                name: 'Day one.md',
+                relativePath: 'knowledge-base/KnowledgeBase/Onboarding/Day one.md',
+                type: 'file',
+              },
+            ],
+          },
+          {
+            name: 'Handbook.md',
+            relativePath: 'knowledge-base/KnowledgeBase/Handbook.md',
+            type: 'file',
+          },
+          {
+            name: 'logo.png',
+            relativePath: 'knowledge-base/KnowledgeBase/logo.png',
+            type: 'file',
+          },
+        ],
+      },
+      {
+        name: 'Plugins',
+        relativePath: 'knowledge-base/Plugins',
+        type: 'directory',
+        children: [
+          {
+            name: 'SKILL.md',
+            relativePath: 'knowledge-base/Plugins/team-a/SKILL.md',
+            type: 'file',
+          },
+        ],
+      },
+      { name: 'access.md', relativePath: 'knowledge-base/access.md', type: 'file' },
+    ],
+  };
+
+  const TREE = workspace(CHECKOUT);
+
+  /**
+   * The strays that sat beside the checkout on core-staging. Nothing here is
+   * the repository, so nothing here is ever offered as a page.
+   */
+  const STRAYS: FileTreeEntry[] = [
+    {
+      name: 'KnowledgeBase',
+      relativePath: 'KnowledgeBase',
+      type: 'directory',
+      children: [{ name: 'Planted.md', relativePath: 'KnowledgeBase/Planted.md', type: 'file' }],
+    },
+    { name: 'Stray.md', relativePath: 'Stray.md', type: 'file' },
+  ];
+
+  it('does not send the reader off to an assistant', async () => {
+    render(<ViewerHarness filePath={null} fileTree={TREE} />);
+    await screen.findByRole('heading', { name: /Open a page/ });
+    expect(document.body.textContent).not.toMatch(/assistant/i);
+  });
+
+  it('offers the pages nearest the top of the knowledge tree', async () => {
+    render(<ViewerHarness filePath={null} fileTree={TREE} />);
+    // Shallowest first, and the extension is not part of the name.
+    const shallow = await screen.findByRole('button', { name: /Handbook/ });
+    // One level down, labelled with the folder that tells two like-named
+    // pages apart.
+    const deeper = screen.getByRole('button', { name: /Day one/ });
+    expect(deeper).toHaveTextContent('Onboarding');
+    // "Nearest the top" is an ORDER, not just a membership: the top-level page
+    // renders before the one a folder down, and a regression to depth-first
+    // would flip exactly this.
+    expect(
+      shallow.compareDocumentPosition(deeper) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it('offers nothing that is not a document', async () => {
+    render(<ViewerHarness filePath={null} fileTree={TREE} />);
+    await screen.findByRole('button', { name: /Handbook/ });
+    // An image is not a page; `Plugins/` belongs to Skills & Tools and is not a
+    // browsing destination here; the loose root files configure the
+    // deployment rather than saying anything.
+    expect(screen.queryByRole('button', { name: /logo/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /SKILL/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /access/ })).toBeNull();
+  });
+
+  /**
+   * NAVIGATES, the same as clicking the file in the explorer — the URL is the
+   * canonical record of what is open, so refresh/share/back land on the page
+   * rather than on the empty state, and a failed load surfaces where every
+   * other open's does.
+   */
+  it('navigates to the page it suggested', async () => {
+    const addTab = vi.fn(async () => true);
+    render(<ViewerHarness filePath={null} fileTree={TREE} addTab={addTab} />);
+    await userEvent.click(await screen.findByRole('button', { name: /Handbook/ }));
+    expect(screen.getByTestId('location')).toHaveTextContent(
+      /\/workspace\/.*\/knowledge-base\/KnowledgeBase\/Handbook\.md$/,
+    );
+    // Through the route, not around it.
+    expect(addTab).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Navigation needs a branch, and git status arrives asynchronously. Until it
+   * does, a suggestion click would silently do nothing — so the buttons wait,
+   * visibly, instead of pretending to work.
+   */
+  it('waits for the branch before offering to open anything', async () => {
+    render(<ViewerHarness filePath={null} fileTree={TREE} branch={null} />);
+    expect(await screen.findByRole('button', { name: /Handbook/ })).toBeDisabled();
+  });
+
+  /**
+   * Mid-switch, git status still reports the branch being LEFT while the URL
+   * already names the new one. Navigating on the stale value would send the
+   * reader back to the branch they just left, so the offer waits — the same
+   * "branch matches the route" test `FileRoute` makes before acting.
+   */
+  it('does not offer to open on the branch it is switching away from', async () => {
+    render(
+      <ViewerHarness filePath={null} fileTree={TREE} branch="alice/draft" routeBranch="main" />,
+    );
+    expect(await screen.findByRole('button', { name: /Handbook/ })).toBeDisabled();
+  });
+
+  /**
+   * A branch name may legitimately contain a percent sign. The router hands
+   * path params over already decoded, so decoding again would read this branch
+   * as `my branch`, match nothing, and disable the offers permanently for a
+   * deployment on it.
+   */
+  it('offers pages on a branch whose name contains a percent sign', async () => {
+    render(<ViewerHarness filePath={null} fileTree={TREE} branch="my%20branch" />);
+    expect(await screen.findByRole('button', { name: /Handbook/ })).toBeEnabled();
+  });
+
+  /**
+   * The strays on core-staging put a `KnowledgeBase/` beside the checkout.
+   * The offer is the checkout's, so they change nothing — and when the
+   * checkout itself is gone there is nothing to offer, rather than whatever
+   * was written next to it.
+   */
+  it('offers the same pages with strays beside the checkout, and none without one', async () => {
+    const { unmount } = render(
+      <ViewerHarness
+        filePath={null}
+        fileTree={{ ...TREE, children: [...STRAYS, CHECKOUT] }}
+      />,
+    );
+    expect(await screen.findByRole('button', { name: /Handbook/ })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Planted/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /Stray/ })).toBeNull();
+    unmount();
+
+    render(<ViewerHarness filePath={null} fileTree={{ ...TREE, children: STRAYS }} />);
+    await screen.findByRole('heading', { name: /Open a page/ });
+    expect(screen.queryByRole('button', { name: /Planted/ })).toBeNull();
+    expect(screen.getByText('Pick anything from the file tree.')).toBeInTheDocument();
+  });
+
+  /** A knowledge base with nothing in it has nothing to suggest, and says so. */
+  it('promises nothing when there is nothing to open', async () => {
+    render(<ViewerHarness filePath={null} fileTree={null} />);
+    await screen.findByRole('heading', { name: /Open a page/ });
+    expect(screen.getByText('Pick anything from the file tree.')).toBeInTheDocument();
+  });
+
+  /**
+   * A clone that predates the `KnowledgeBase/` split has no named roots to
+   * scope to — the whole tree is the knowledge, and reading none of it because
+   * a folder is missing would be the wrong answer.
+   */
+  it('reads the whole tree when there are no named roots', async () => {
+    render(
+      <ViewerHarness
+        filePath={null}
+        fileTree={workspace({
+          name: 'knowledge-base',
+          relativePath: 'knowledge-base',
+          type: 'directory',
+          children: [
+            { name: 'Charter.md', relativePath: 'knowledge-base/Charter.md', type: 'file' },
+          ],
+        })}
+      />,
+    );
+    expect(await screen.findByRole('button', { name: /Charter/ })).toBeInTheDocument();
+  });
+});
+
+/**
+ * "What does your team do?" stands where the empty state would, for exactly
+ * as long as the server offers it, and hands back to the empty state with a
+ * line saying what was added.
+ */
+describe('FileViewer: the starter-pack question', () => {
+  // A fresh sign-in per test: the starter answer is kept per signed-in user.
+  const admin = () => ({ id: 'u-admin', email: 'ada@example.com', name: 'Ada' });
+  const PACKS = [
+    { id: 'engineering', name: 'Engineering', description: 'How you build.', order: 1 },
+    { id: 'sales', name: 'Sales', description: 'What you sell.', order: 2 },
+  ];
+  // The pack lands on the default branch, so the question is asked there —
+  // the branch the test setup pins as the default.
+  const DEFAULT = 'target-company-state';
+
+  afterEach(() => {
+    starterPacksMock.fetchStarterPacks.mockReset().mockResolvedValue({
+      offered: false,
+      chosen: null,
+      packs: [],
+      chosenPack: null,
+    });
+  });
+
+  it('replaces the empty state while it is offered', async () => {
+    starterPacksMock.fetchStarterPacks.mockResolvedValue({ offered: true, chosen: null, packs: PACKS, chosenPack: null });
+    render(<ViewerHarness filePath={null} authUser={admin()} workspaceBranch={DEFAULT} />);
+    expect(await screen.findByRole('heading', { name: 'What does your team do?' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Engineering' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: /Open a page/ })).toBeNull();
+  });
+
+  it('is not there when it is not offered — a member, or a question already answered', async () => {
+    render(<ViewerHarness filePath={null} authUser={admin()} workspaceBranch={DEFAULT} />);
+    await waitFor(() => expect(starterPacksMock.fetchStarterPacks).toHaveBeenCalled());
+    expect(await screen.findByRole('heading', { name: /Open a page/ })).toBeInTheDocument();
+    expect(screen.queryByText('What does your team do?')).toBeNull();
+  });
+
+  it('is not asked on another branch, where the pack would not land, even while it is offered', async () => {
+    starterPacksMock.fetchStarterPacks.mockResolvedValue({ offered: true, chosen: null, packs: PACKS, chosenPack: null });
+    render(<ViewerHarness filePath={null} authUser={admin()} workspaceBranch="alice/draft" />);
+    expect(await screen.findByRole('heading', { name: /Open a page/ })).toBeInTheDocument();
+    expect(screen.queryByText('What does your team do?')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Engineering' })).toBeNull();
+  });
+
+  it('waits for the branch to be known rather than asking on a guess, showing neither state meanwhile', async () => {
+    starterPacksMock.fetchStarterPacks.mockResolvedValue({ offered: true, chosen: null, packs: PACKS, chosenPack: null });
+    render(<ViewerHarness filePath={null} authUser={admin()} workspaceBranch={null} />);
+    await waitFor(() => expect(starterPacksMock.fetchStarterPacks).toHaveBeenCalled());
+    expect(screen.queryByText('What does your team do?')).toBeNull();
+    expect(screen.queryByRole('heading', { name: /Open a page/ })).toBeNull();
+  });
+
+  it('shows no reading empty state before the server has answered: the question must not flash in after it', async () => {
+    let answer!: (a: unknown) => void;
+    starterPacksMock.fetchStarterPacks.mockImplementation(() => new Promise((resolve) => (answer = resolve)));
+    render(<ViewerHarness filePath={null} authUser={admin()} workspaceBranch={DEFAULT} />);
+    await waitFor(() => expect(starterPacksMock.fetchStarterPacks).toHaveBeenCalled());
+    expect(screen.queryByRole('heading', { name: /Open a page/ })).toBeNull();
+    expect(screen.queryByText('What does your team do?')).toBeNull();
+    answer({ offered: true, chosen: null, packs: PACKS, chosenPack: null });
+    expect(await screen.findByRole('heading', { name: 'What does your team do?' })).toBeInTheDocument();
+  });
+
+  it('after a choice, says what was added above the ordinary empty state', async () => {
+    starterPacksMock.fetchStarterPacks
+      .mockResolvedValueOnce({ offered: true, chosen: null, packs: PACKS, chosenPack: null })
+      .mockResolvedValue({ offered: false, chosen: 'sales', packs: PACKS, chosenPack: null });
+    starterPacksMock.chooseStarterPack.mockResolvedValue({
+      id: 'sales',
+      name: 'Sales',
+      pages: 6,
+      skills: 37,
+      summary: 'Added 6 pages and 37 skills for Sales.',
+    });
+    render(<ViewerHarness filePath={null} authUser={admin()} workspaceBranch={DEFAULT} />);
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Sales' }));
+
+    expect(await screen.findByRole('status')).toHaveTextContent('Added 6 pages and 37 skills for Sales.');
+    expect(screen.getByRole('heading', { name: /Open a page/ })).toBeInTheDocument();
+    expect(screen.queryByText('What does your team do?')).toBeNull();
+  });
+});
+
+/**
+ * Opening a page straight into the editor, asked for by the navigation
+ * (`openWorkspacePath(path, { edit: true })` → router state `startEditing`).
+ * It goes through the same lock-then-reload as the Edit button, happens once,
+ * and the request is taken off the history entry so a refresh or a Back
+ * opens the page for reading.
+ */
+describe('FileViewer: opening straight into the editor', () => {
+  const NEW_PAGE = 'knowledge-base/KnowledgeBase/Untitled.md';
+
+  afterEach(() => {
+    accessMock.result = {
+      canWrite: true,
+      canOwner: false,
+      eligible: { roles: ['Admin'], users: [] },
+      owners: EMPTY_ELIGIBLE,
+    };
+    vi.mocked(acquireLockMock).mockClear();
+  });
+
+  it('enters edit mode once, caret under the title, and clears the request', async () => {
+    const user = userEvent.setup();
+    vi.mocked(acquireLockMock).mockClear();
+    render(
+      <ViewerHarness
+        initialContent={'# Untitled\n\n'}
+        filePath={NEW_PAGE}
+        // Another key on the same entry survives the clean-up.
+        routeState={{ startEditing: true, rawFile: true }}
+      />,
+    );
+
+    const textarea = (await screen.findByRole('textbox')) as HTMLTextAreaElement;
+    expect(textarea.value).toBe('# Untitled\n\n');
+    expect(textarea).toHaveFocus();
+    expect(textarea.selectionStart).toBe(textarea.value.length);
+    expect(screen.getByTestId('location-state')).toHaveTextContent('{"rawFile":true}');
+    expect(screen.getByTestId('location')).toHaveTextContent('/workspace/alice%2Fdraft/knowledge-base/KnowledgeBase/Untitled.md');
+    expect(acquireLockMock).toHaveBeenCalledTimes(1);
+
+    // Done is Done: with the request gone, nothing puts the editor back.
+    await user.click(screen.getByRole('button', { name: 'Done' }));
+    await waitFor(() => expect(screen.queryByRole('textbox')).not.toBeInTheDocument());
+    await act(async () => {});
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+    expect(acquireLockMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('still opens the editor once the path URL has been swapped for the node-id URL', async () => {
+    // `FileRoute` canonicalises a node's path URL to its id URL, sometimes
+    // before the bytes land: the URL then names the id, and the request
+    // carries the path it was made for.
+    render(
+      <ViewerHarness
+        initialContent={'# Untitled\n\n'}
+        filePath={NEW_PAGE}
+        routePath="untitled_page"
+        routeState={{ startEditing: true, startEditingPath: NEW_PAGE }}
+      />,
+    );
+    expect(await screen.findByRole('textbox')).toBeInTheDocument();
+    expect(screen.getByTestId('location-state')).toHaveTextContent('null');
+    expect(acquireLockMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves the caret alone on a later Edit by hand when the request was turned away', async () => {
+    const user = userEvent.setup();
+    // The request's enter-edit is refused by the lock …
+    vi.mocked(acquireLockMock).mockRejectedValueOnce(
+      new LockApiError(403, 'You don\'t have permission to write to this page.', {
+        access: { path: NEW_PAGE, eligibleRoles: ['Admin'], eligibleUsers: [] },
+      }),
+    );
+    render(
+      <ViewerHarness
+        initialContent={'# Long page\n\nA long body.'}
+        filePath={NEW_PAGE}
+        routeState={{ startEditing: true }}
+      />,
+    );
+    await waitFor(() => expect(screen.getByTestId('location-state')).toHaveTextContent('null'));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Edit' })).toBeEnabled());
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+
+    // … so the Edit the reader then clicks is theirs, not the request's: the
+    // caret is not sent to the end of the page, scrolling them away.
+    const setSelectionRange = vi.spyOn(HTMLTextAreaElement.prototype, 'setSelectionRange');
+    try {
+      await user.click(screen.getByRole('button', { name: 'Edit' }));
+      await screen.findByRole('textbox');
+      await act(async () => {});
+      expect(setSelectionRange).not.toHaveBeenCalled();
+    } finally {
+      setSelectionRange.mockRestore();
+    }
+  });
+
+  it('opens for reading when the navigation asked for nothing', async () => {
+    render(<ViewerHarness initialContent="# Notes" filePath={NEW_PAGE} routePath={NEW_PAGE} />);
+    expect(await screen.findByRole('button', { name: 'Edit' })).toBeEnabled();
+    await act(async () => {});
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+    expect(acquireLockMock).not.toHaveBeenCalled();
+  });
+
+  it('leaves another file alone: the request is for the file the URL names', async () => {
+    render(
+      <ViewerHarness
+        initialContent="# Foo"
+        filePath="knowledge-base/KnowledgeBase/Foo.md"
+        routePath={NEW_PAGE}
+        routeState={{ startEditing: true }}
+      />,
+    );
+    await screen.findByRole('button', { name: 'Edit' });
+    await act(async () => {});
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+    expect(acquireLockMock).not.toHaveBeenCalled();
+    // Still pending, for when that file opens.
+    expect(screen.getByTestId('location-state')).toHaveTextContent('{"startEditing":true}');
+  });
+
+  it('consumes the request without editing a file the reader cannot write', async () => {
+    accessMock.result = {
+      canWrite: false,
+      canOwner: false,
+      eligible: { roles: ['Admin'], users: [] },
+      owners: EMPTY_ELIGIBLE,
+    };
+    render(
+      <ViewerHarness
+        initialContent="official"
+        branch="target-company-state"
+        filePath={NEW_PAGE}
+        routeState={{ startEditing: true }}
+      />,
+    );
+    await waitFor(() => expect(screen.getByTestId('location-state')).toHaveTextContent('null'));
+    expect(screen.getByRole('button', { name: 'Propose changes' })).toBeInTheDocument();
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+    expect(acquireLockMock).not.toHaveBeenCalled();
+  });
+});
+
+// ── Full screen ───────────────────────────────────────────────────────────
+// The view is the host's: a renderer registered by a deployment (the
+// enterprise overlay's `.html` one) gets it without knowing it exists, so
+// every case below runs through registry stubs that know nothing about it.
+describe('FileViewer full screen', () => {
+  const mounts = { count: 0 };
+
+  /** A renderer with its own state, that counts its mounts. */
+  function CountingRenderer({ onSave, readOnly }: FileRendererProps) {
+    const [scratch, setScratch] = useState('');
+    const [dialogOpen, setDialogOpen] = useState(false);
+    useEffect(() => {
+      mounts.count += 1;
+    }, []);
+    return (
+      <div data-testid="stub-renderer">
+        <input aria-label="Scratch" value={scratch} onChange={(e) => setScratch(e.target.value)} />
+        <button type="button" onClick={() => void onSave(`saved:${scratch}`)} disabled={readOnly}>
+          Stub save
+        </button>
+        <button type="button" onClick={() => setDialogOpen(true)}>
+          Open stub dialog
+        </button>
+        <Dialog open={dialogOpen} onClose={() => setDialogOpen(false)} title="Stub dialog">
+          A dialog over the view
+        </Dialog>
+        <iframe title="Stub page" />
+      </div>
+    );
+  }
+
+  const stubFor = (...extensions: string[]): FileRendererDef[] => [
+    { extensions, Component: CountingRenderer },
+  ];
+
+  afterEach(() => {
+    mounts.count = 0;
+  });
+
+  const readPane = () => screen.getByTestId('stub-renderer').closest('[data-read-pane]') as HTMLElement;
+  const header = () => screen.getByTestId(PAGE_HEADER_TESTID);
+  const paneCard = () => screen.queryByTestId('file-pane-card');
+
+  it.each([
+    ['Markdown', 'knowledge-base/Knowledge/Foo.md'],
+    ['text', 'knowledge-base/Knowledge/notes.txt'],
+  ])('offers Full screen in the pane bar for a prose file (%s)', async (_kind, filePath) => {
+    render(<ViewerHarness filePath={filePath} renderers={stubFor('.md', '.txt')} />);
+    const card = await screen.findByTestId('file-pane-card');
+    expect(within(card).getByRole('button', { name: 'Full screen' })).toBeInTheDocument();
+    expect(within(header()).queryByRole('button', { name: 'Full screen' })).toBeNull();
+  });
+
+  it.each([
+    ['HTML', 'knowledge-base/Dashboards/Roadmap.html'],
+    ['PDF', 'knowledge-base/Docs/Guide.pdf'],
+    ['tool', 'knowledge-base/Tools/search.tool'],
+    ['spreadsheet', 'knowledge-base/Data/Sheet.xlsx'],
+    ['CSV', 'knowledge-base/Data/rows.csv'],
+    ['image', 'knowledge-base/Assets/diagram.png'],
+  ])('offers Full screen in the page header for a full-bleed file (%s)', async (_kind, filePath) => {
+    render(
+      <ViewerHarness
+        filePath={filePath}
+        renderers={stubFor('.html', '.pdf', '.tool', '.xlsx', '.csv', '.png')}
+      />,
+    );
+    await screen.findByTestId('stub-renderer');
+    expect(within(header()).getByRole('button', { name: 'Full screen' })).toBeInTheDocument();
+    expect(paneCard()).toBeNull();
+    expect(screen.getAllByRole('button', { name: 'Full screen' })).toHaveLength(1);
+  });
+
+  it('offers Full screen in edit mode too', async () => {
+    const user = userEvent.setup();
+    render(<ViewerHarness />);
+    await user.click(await screen.findByRole('button', { name: 'Edit' }));
+    await screen.findByRole('button', { name: 'Done' });
+    expect(within(screen.getByTestId('file-pane-card')).getByRole('button', { name: 'Full screen' })).toBeInTheDocument();
+  });
+
+  it('enters by replacing the entry with ?fullscreen=1, and leaves by taking it off again', async () => {
+    const user = userEvent.setup();
+    render(<ViewerHarness filePath="knowledge-base/Dashboards/Roadmap.html" renderers={stubFor('.html')} />);
+    await screen.findByTestId('stub-renderer');
+    expect(screen.getByTestId('location-search').textContent).toBe('');
+
+    await user.click(screen.getByRole('button', { name: 'Full screen' }));
+    expect(screen.getByTestId('location-search').textContent).toBe('?fullscreen=1');
+    expect(screen.getByTestId('navigation-type').textContent).toBe('REPLACE');
+    expect(readPane()).toHaveAttribute('data-full-screen');
+    expect(readPane()).toHaveClass('fixed', 'inset-0', 'z-40', 'bg-canvas');
+    // The entry control gives way to the exit control.
+    expect(screen.queryByRole('button', { name: 'Full screen' })).toBeNull();
+
+    await user.click(screen.getByRole('button', { name: 'Exit full screen' }));
+    expect(screen.getByTestId('location-search').textContent).toBe('');
+    expect(screen.getByTestId('navigation-type').textContent).toBe('REPLACE');
+    expect(readPane()).not.toHaveAttribute('data-full-screen');
+    expect(readPane()).not.toHaveClass('fixed');
+    expect(screen.getByRole('button', { name: 'Full screen' })).toBeInTheDocument();
+  });
+
+  it("gives way to an agent update that waits for the reader's answer", async () => {
+    render(<ViewerHarness renderers={stubFor('.md')} routeSearch="?fullscreen=1" pendingValue="agent replacement" />);
+    await screen.findByTestId('stub-renderer');
+    expect(screen.getByRole('button', { name: 'Exit full screen' })).toBeInTheDocument();
+
+    await act(async () => {
+      injectPendingFromTest?.();
+    });
+
+    // Accept and Reject sit in the shell the filled view covered: the view
+    // gives way, and the entry is taken off the URL as a manual exit would.
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Exit full screen' })).toBeNull());
+    expect(screen.getByTestId('location-search').textContent).toBe('');
+    expect(await screen.findByText(/Previewing agent's changes/i)).toBeInTheDocument();
+  });
+
+  it('keeps the rest of the query when it enters and leaves', async () => {
+    const user = userEvent.setup();
+    render(
+      <ViewerHarness
+        filePath="knowledge-base/Dashboards/Roadmap.html"
+        renderers={stubFor('.html')}
+        routeSearch="?trace=1"
+      />,
+    );
+    await screen.findByTestId('stub-renderer');
+    await user.click(screen.getByRole('button', { name: 'Full screen' }));
+    expect(screen.getByTestId('location-search').textContent).toBe('?trace=1&fullscreen=1');
+    await user.click(screen.getByRole('button', { name: 'Exit full screen' }));
+    expect(screen.getByTestId('location-search').textContent).toBe('?trace=1');
+  });
+
+  it('opens filling the window when the URL carries ?fullscreen=1, from the first render', () => {
+    render(
+      <ViewerHarness
+        filePath="knowledge-base/Dashboards/Roadmap.html"
+        renderers={stubFor('.html')}
+        routeSearch="?fullscreen=1"
+      />,
+    );
+    // No waitFor: the first commit is already the filling view, so the
+    // app's chrome is never painted around it.
+    expect(readPane()).toHaveAttribute('data-full-screen');
+    expect(readPane()).toHaveClass('fixed', 'inset-0');
+    expect(screen.getByRole('button', { name: 'Exit full screen' })).toBeInTheDocument();
+  });
+
+  it('does not remount the renderer across the toggle: its state survives both ways', async () => {
+    const user = userEvent.setup();
+    render(<ViewerHarness renderers={stubFor('.md')} />);
+    await screen.findByTestId('stub-renderer');
+    await user.type(screen.getByLabelText('Scratch'), 'unsaved');
+    expect(mounts.count).toBe(1);
+
+    await user.click(screen.getByRole('button', { name: 'Full screen' }));
+    expect(readPane()).toHaveAttribute('data-full-screen');
+    expect(screen.getByLabelText('Scratch')).toHaveValue('unsaved');
+
+    await user.click(screen.getByRole('button', { name: 'Exit full screen' }));
+    expect(screen.getByLabelText('Scratch')).toHaveValue('unsaved');
+    expect(mounts.count).toBe(1);
+  });
+
+  // The pane leaving the shell's flow collapses the shell's scroll, so the
+  // reader's place is carried by hand: into the pane's own scroller on the
+  // way in, back into the shell's on the way out. It is measured against the
+  // document's BODY, because the two views put a different distance above it:
+  // on the page the body starts below the card's bar (here 144px into the
+  // shell's content), filling the window it starts below the pane's padding
+  // (40px). happy-dom lays nothing out, so that geometry is given.
+  it('keeps the reader\'s place in a prose document across entry and exit, measured at the text', async () => {
+    const user = userEvent.setup();
+    render(<ViewerHarness renderers={stubFor('.md')} />);
+    await screen.findByTestId('stub-renderer');
+    const shell = screen.getByTestId('kb-document-shell');
+    const pane = readPane();
+    const body = pane.querySelector('[data-file-pane-body]') as HTMLElement;
+    const BODY_ON_PAGE = 144;
+    const BODY_FILLING = 40;
+    const rect = (top: number) => ({ top, left: 0, right: 0, bottom: 0, width: 0, height: 0, x: 0, y: top, toJSON: () => ({}) });
+    vi.spyOn(shell, 'getBoundingClientRect').mockImplementation(() => rect(0) as DOMRect);
+    vi.spyOn(pane, 'getBoundingClientRect').mockImplementation(() => rect(0) as DOMRect);
+    vi.spyOn(body, 'getBoundingClientRect').mockImplementation(
+      () =>
+        rect(
+          pane.hasAttribute('data-full-screen')
+            ? BODY_FILLING - pane.scrollTop
+            : BODY_ON_PAGE - shell.scrollTop,
+        ) as DOMRect,
+    );
+
+    // 300px into the text.
+    shell.scrollTop = BODY_ON_PAGE + 300;
+    await user.click(screen.getByRole('button', { name: 'Full screen' }));
+    expect(readPane()).toBe(pane);
+    expect(pane.scrollTop).toBe(BODY_FILLING + 300);
+
+    // Read on to 500px into the text, then leave: the shell lands on the same line.
+    pane.scrollTop = BODY_FILLING + 500;
+    await user.click(screen.getByRole('button', { name: 'Exit full screen' }));
+    expect(pane).not.toHaveAttribute('data-full-screen');
+    expect(shell.scrollTop).toBe(BODY_ON_PAGE + 500);
+  });
+
+  // A column that wraps differently puts every later line at a different
+  // height, and no carried offset survives that (staging: Section 24 came
+  // back as Section 30). So the text keeps the page's width to the pixel.
+  it('lays the text out at the width it had on the page', async () => {
+    const user = userEvent.setup();
+    render(<ViewerHarness renderers={stubFor('.md')} />);
+    await screen.findByTestId('stub-renderer');
+    const card = screen.getByTestId('file-pane-card');
+    vi.spyOn(card, 'getBoundingClientRect').mockImplementation(
+      () => ({ top: 0, left: 0, right: 0, bottom: 0, width: 752, height: 0, x: 0, y: 0, toJSON: () => ({}) }) as DOMRect,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Full screen' }));
+    expect(card.style.maxWidth).toBe('752px');
+    // The edges go transparent, not away: the box is as wide as it was.
+    expect(card).toHaveClass('border-transparent');
+    expect(card).not.toHaveClass('border-0');
+
+    await user.click(screen.getByRole('button', { name: 'Exit full screen' }));
+    expect(card.style.maxWidth).toBe('');
+  });
+
+  it('opened by URL, with no page to match, takes the column\'s content width', () => {
+    render(<ViewerHarness renderers={stubFor('.md')} routeSearch="?fullscreen=1" />);
+    const card = screen.getByTestId('file-pane-card');
+    expect(card).toHaveClass('mx-auto', 'max-w-[800px]');
+    expect(card.style.maxWidth).toBe('');
+  });
+
+  it('keeps an edit unsaved across the toggle, and Ctrl+S saves it while filling the window', async () => {
+    const user = userEvent.setup();
+    const saved: string[] = [];
+    render(
+      <ViewerHarness
+        initialContent="Base content"
+        captureTyped
+        onSaveFile={(_path, content) => saved.push(content)}
+      />,
+    );
+    await user.click(await screen.findByRole('button', { name: 'Edit' }));
+    const textarea = await screen.findByRole('textbox');
+    await user.type(textarea, ' and more');
+
+    await user.click(screen.getByRole('button', { name: 'Full screen' }));
+    expect(screen.getByRole('textbox')).toBe(textarea);
+    expect(textarea).toHaveValue('Base content and more');
+
+    textarea.focus();
+    await user.keyboard('{Control>}s{/Control}');
+    await waitFor(() => expect(saved).toEqual(['Base content and more']));
+
+    await user.click(screen.getByRole('button', { name: 'Exit full screen' }));
+    expect(screen.getByRole('textbox')).toBe(textarea);
+  });
+
+  it('draws a prose document alone: its reading column centred, no card edges, no bar', async () => {
+    const user = userEvent.setup();
+    render(<ViewerHarness renderers={stubFor('.md')} />);
+    await screen.findByTestId('stub-renderer');
+    await user.click(screen.getByRole('button', { name: 'Full screen' }));
+
+    const card = screen.getByTestId('file-pane-card');
+    expect(card).toHaveClass('mx-auto', 'max-w-[800px]', 'border-transparent');
+    expect(card).not.toHaveClass('shadow-card');
+    // The bar (the file's name and its actions) is withdrawn.
+    expect(within(card).queryByText('Foo.md')).toBeNull();
+    expect(within(card).queryByRole('button', { name: 'Version history' })).toBeNull();
+    expect(readPane()).toHaveClass('fixed', 'inset-0', 'overflow-auto');
+  });
+
+  it('sizes a full-bleed renderer to the viewport', async () => {
+    render(
+      <ViewerHarness
+        filePath="knowledge-base/Docs/Guide.pdf"
+        renderers={stubFor('.pdf')}
+        routeSearch="?fullscreen=1"
+      />,
+    );
+    expect(readPane()).toHaveClass('fixed', 'inset-0', 'flex', 'flex-col');
+    expect(readPane()).not.toHaveClass('min-h-0');
+  });
+
+  it('pins the exit control to the top right, above the renderer', () => {
+    render(
+      <ViewerHarness
+        filePath="knowledge-base/Dashboards/Roadmap.html"
+        renderers={stubFor('.html')}
+        routeSearch="?fullscreen=1"
+      />,
+    );
+    const exit = screen.getByRole('button', { name: 'Exit full screen' });
+    expect(exit).toHaveAttribute('aria-keyshortcuts', 'Escape');
+    // Fixed to the viewport, so the renderer's own scroll cannot take it away,
+    // and on a layer above the surface (z-40) the renderer sits in.
+    expect(exit).toHaveClass('fixed', 'top-3', 'right-3', 'z-[41]');
+    // Inside the filling surface, after the renderer: on top in paint order too.
+    expect(readPane()).toContainElement(exit);
+    expect(
+      screen.getByTestId('stub-renderer').compareDocumentPosition(exit) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  // The control that was pressed is withdrawn by the switch, so focus would
+  // otherwise fall to the body each way and the next Tab restart at the top.
+  it.each([
+    ['prose, from the pane bar', 'knowledge-base/Knowledge/Foo.md'],
+    ['full-bleed, from the page header', 'knowledge-base/Dashboards/Roadmap.html'],
+  ])('moves focus to the exit control on entry and back to Full screen on exit (%s)', async (_kind, filePath) => {
+    const user = userEvent.setup();
+    render(<ViewerHarness filePath={filePath} renderers={stubFor('.md', '.html')} />);
+    await screen.findByTestId('stub-renderer');
+
+    await user.click(screen.getByRole('button', { name: 'Full screen' }));
+    expect(screen.getByRole('button', { name: 'Exit full screen' })).toHaveFocus();
+
+    await user.click(screen.getByRole('button', { name: 'Exit full screen' }));
+    expect(screen.getByRole('button', { name: 'Full screen' })).toHaveFocus();
+  });
+
+  it('moves focus into the view when the URL opens it, and to Full screen when it is left', async () => {
+    const user = userEvent.setup();
+    render(
+      <ViewerHarness
+        filePath="knowledge-base/Dashboards/Roadmap.html"
+        renderers={stubFor('.html')}
+        routeSearch="?fullscreen=1"
+      />,
+    );
+    expect(screen.getByRole('button', { name: 'Exit full screen' })).toHaveFocus();
+
+    await user.keyboard('{Escape}');
+    expect(readPane()).not.toHaveAttribute('data-full-screen');
+    expect(screen.getByRole('button', { name: 'Full screen' })).toHaveFocus();
+  });
+
+  it('leaves focus in the renderer when the reader is working there', async () => {
+    const user = userEvent.setup();
+    render(<ViewerHarness renderers={stubFor('.md')} />);
+    await screen.findByTestId('stub-renderer');
+    await user.click(screen.getByRole('button', { name: 'Full screen' }));
+
+    await user.click(screen.getByLabelText('Scratch'));
+    await user.keyboard('{Escape}');
+    expect(readPane()).not.toHaveAttribute('data-full-screen');
+    expect(screen.getByLabelText('Scratch')).toHaveFocus();
+  });
+
+  it('leaves on Escape, but a dialog opened on top takes Escape first', async () => {
+    const user = userEvent.setup();
+    render(
+      <ViewerHarness
+        filePath="knowledge-base/Dashboards/Roadmap.html"
+        renderers={stubFor('.html')}
+        routeSearch="?fullscreen=1"
+      />,
+    );
+    await user.click(screen.getByRole('button', { name: 'Open stub dialog' }));
+    expect(screen.getByRole('dialog', { name: 'Stub dialog' })).toBeInTheDocument();
+
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('dialog', { name: 'Stub dialog' })).toBeNull();
+    expect(screen.getByTestId('location-search').textContent).toBe('?fullscreen=1');
+    expect(readPane()).toHaveAttribute('data-full-screen');
+
+    await user.keyboard('{Escape}');
+    expect(screen.getByTestId('location-search').textContent).toBe('');
+    expect(readPane()).not.toHaveAttribute('data-full-screen');
+    expect(mounts.count).toBe(1);
+  });
+});
+
+// An Escape pressed with focus inside a page's frame never reaches the app;
+// the frame posts it (`bevel.key`, see `htmlSandbox.ts`) and the view treats
+// it as the key it is — through the same modal layer order.
+describe('FileViewer full screen: Escape from inside a page', () => {
+  function StubPage() {
+    const [dialogOpen, setDialogOpen] = useState(false);
+    return (
+      <div data-testid="stub-renderer">
+        <button type="button" onClick={() => setDialogOpen(true)}>
+          Open stub dialog
+        </button>
+        <Dialog open={dialogOpen} onClose={() => setDialogOpen(false)} title="Stub dialog">
+          A card over the page
+        </Dialog>
+        <iframe title="Stub page" />
+      </div>
+    );
+  }
+
+  const renderFilling = () =>
+    render(
+      <ViewerHarness
+        filePath="knowledge-base/Dashboards/Roadmap.html"
+        renderers={[{ extensions: ['.html'], Component: StubPage }]}
+        routeSearch="?fullscreen=1"
+      />,
+    );
+  const frameWindow = () => (screen.getByTitle('Stub page') as HTMLIFrameElement).contentWindow!;
+  const postFrom = (source: MessageEventSource | null, data: unknown = { type: 'bevel.key', key: 'Escape' }) =>
+    act(() => {
+      window.dispatchEvent(new MessageEvent('message', { data, source }));
+    });
+  const search = () => screen.getByTestId('location-search').textContent;
+
+  it('leaves on an Escape the page hands up', () => {
+    renderFilling();
+    postFrom(frameWindow());
+    expect(search()).toBe('');
+  });
+
+  it('lets a card over the page take the handed-up Escape first, then leaves on the next', async () => {
+    const user = userEvent.setup();
+    renderFilling();
+    await user.click(screen.getByRole('button', { name: 'Open stub dialog' }));
+
+    postFrom(frameWindow());
+    expect(screen.queryByRole('dialog', { name: 'Stub dialog' })).toBeNull();
+    expect(search()).toBe('?fullscreen=1');
+
+    postFrom(frameWindow());
+    expect(search()).toBe('');
+  });
+
+  it('ignores the message from a window that is not a frame in the view, and any other key', () => {
+    renderFilling();
+    const stranger = document.createElement('iframe');
+    document.body.appendChild(stranger);
+    try {
+      postFrom(stranger.contentWindow);
+      postFrom(null);
+      postFrom(frameWindow(), { type: 'bevel.key', key: 'Enter' });
+      postFrom(frameWindow(), { type: 'bevel.navigate', href: 'Escape' });
+      expect(search()).toBe('?fullscreen=1');
+    } finally {
+      stranger.remove();
+    }
+  });
+
+  // The command menu and the single-key commands refuse to open while a modal
+  // is up (`[aria-modal="true"]`); the filling view is one, so Ctrl+K cannot
+  // open the menu unseen in the covered header.
+  it('is modal while it fills the window, and only then', async () => {
+    const user = userEvent.setup();
+    renderFilling();
+    const pane = screen.getByTestId('stub-renderer').closest('[data-read-pane]');
+    expect(document.querySelector('[aria-modal="true"]')).toBe(pane);
+    expect(screen.getByRole('dialog', { name: 'Roadmap.html, full screen' })).toBe(pane);
+
+    await user.click(screen.getByRole('button', { name: 'Exit full screen' }));
+    expect(document.querySelector('[aria-modal="true"]')).toBeNull();
   });
 });

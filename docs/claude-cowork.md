@@ -1,0 +1,111 @@
+# Skills in Cowork and claude.ai
+
+Claude Code and Codex install the platform's skills as native plugins from a
+git remote. Cowork and claude.ai cannot: they accept marketplaces only from
+GitHub, or from a GitHub Enterprise Server that your Claude organization has
+registered. The platform answers as one, so those surfaces can install the
+same marketplace. Each person gets the marketplace compiled for exactly what
+they may read.
+
+## What you need
+
+- A Claude **Team or Enterprise** plan. Registering a GitHub Enterprise Server
+  is an Owner action in Claude's admin settings and is not offered on personal
+  plans.
+- The platform reachable from the internet over HTTPS (Anthropic's servers
+  fetch the marketplace from it).
+- `SECRETS_ENC_KEY` set, since the registration credentials are stored sealed.
+
+## Register the platform once (an Owner of your Claude organization)
+
+1. In the platform, open **Deployment** and find the **Marketplace** section
+   (it is also on the first-run setup screen, as an optional step you can
+   skip). Open **Register this deployment with Claude**: it shows generated
+   credentials: hostname, App ID, Client ID, client secret, webhook secret and
+   private key.
+2. In Claude, open **Admin settings → Claude Code**, scroll to **Self-hosted
+   infrastructure**, and choose **Add manually** beside GitHub Enterprise.
+   Paste the fields from step 1. Any display name will do, port 443 is right,
+   and read replicas stay empty. Choose **Add configuration** to save them.
+
+3. Back in the Marketplace section, choose **Mark as registered**. Until an
+   admin does, **External agent access** shows people a notice that an admin
+   has to configure the marketplace instead of the steps below.
+
+The webhook URL Claude generates can be ignored. Rotate the credentials from
+the same section if they are ever exposed; the Owner then re-enters them.
+Rotating does not unmark the registration.
+
+Registering connects the platform to your Claude organization, not to any
+person: every person, the Owner included, connects their own account before
+they can add the marketplace.
+
+## Add the marketplace (every person)
+
+1. Connect your account. Claude does not prompt for this, and its
+   **Connect to GitHub** button signs in to github.com, which is not it.
+   Owners can open Claude's **Admin settings → GitHub**, choose **Connect**,
+   and under GitHub instance pick the registered platform instead of
+   github.com. Everyone else opens **claude.ai/code**, chooses **Select
+   repository**, and then **Connect to URL** in the repository picker to select
+   the registered platform. You do not need to start a Claude Code task; this
+   is only where Claude exposes the connection. You land on the platform's
+   sign-in: approve, and you are back in Claude.
+2. Copy the marketplace URL from **External agent access → Marketplaces**.
+   It is the same URL Claude Code clones.
+3. In Cowork (or claude.ai), open **Customize → Plugins**, then **Add → Add
+   marketplace**, paste the URL and choose **Sync**.
+4. Syncing lists the plugins, it installs none of them. Open **Discover** and
+   choose **Add** on **Hexis all** for everything you may read in one plugin
+   (every skill, and the knowledge base as an MCP server), or single plugins
+   for a subset. **Update** in Claude pulls what changed.
+5. Add the connector. Installing the plugin does not connect its MCP server:
+   open the plugin's **tools and data sources** list and the `hexis` row reads
+   **Not added**. Choose **Add for your team**, which opens Claude's **Add
+   custom connector** dialog with the name and URL already filled in, then
+   **Continue**, and approve the sign-in on the platform. The step worked when
+   the row no longer reads **Not added**. Without organization-admin rights in
+   Claude you are offered the connector for yourself instead, which works the
+   same for you; ask an admin to add it for the team.
+
+Your connection appears under **Marketplaces → Your Claude connections**,
+where you can disconnect it. Disconnecting stops updates; connecting again
+from Claude resumes them. "Repository not found" or "GitHub access is
+required" on the marketplace means Claude has no usable connection for your
+account: step 1 has not happened, or the connection it made was since
+disconnected here. Connect again from step 1; if that does not take, the
+server log says why (below).
+
+A connector that will not attach is a different failure from a marketplace
+that will not sync, and the two are worth telling apart: the marketplace is
+fetched by Claude's servers over git, while the connector opens an MCP session
+against the platform's `/api/mcp` endpoint. If the row falls back to **Not
+added** after you approve, or the dialog says the server could not be reached,
+check the URL the dialog filled in — it has to be the platform's public HTTPS
+address, the same one the marketplace is served from, with `/api/mcp` on the
+end. A deployment reached on a second domain, or through a proxy that does not
+forward that path, is the usual cause. Remove the connector in Claude and add
+it again to re-run the sign-in. If approving never lands you back in Claude at
+all, that is the account connection in step 1, not the connector.
+
+The same steps are a six-screen walkthrough on the **External agent access**
+page in the app, identical for admins and everyone else once the deployment is
+marked registered. The registration half lives in **Deployment → Marketplace**
+and ends on the same connector step.
+
+## When connecting does not take
+
+Approving on the platform and landing back in Claude proves the browser
+half. Claude's servers then exchange a code with the platform, and Claude
+shows nothing when that exchange is refused. The platform's server log
+does: every refused step is a line starting with `[github-facade]` naming
+the check that failed, such as a client secret that no longer matches the
+registration.
+
+## Limits
+
+- Marketplaces added by an Owner for the whole organization, and Claude's
+  automatic sync, are not supported yet. Each person adds the marketplace from
+  their own settings.
+- The marketplace contains what you may read at the time Claude fetches it.
+  Access changes reach Claude at the next update.

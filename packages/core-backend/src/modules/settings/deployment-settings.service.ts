@@ -1,8 +1,22 @@
-import { eq, inArray } from 'drizzle-orm';
-import type { Database } from '../database/connection.js';
-import { deploymentSettings } from '../database/core-schema.js';
-import { validateBranchModel } from '@bevel-software/platform-shared';
+import { and, eq, inArray } from 'drizzle-orm';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('settings');
+import type { Database } from '../database/index.js';
+import { deploymentSettings } from '../database/index.js';
+import {
+  DEFAULT_KB_LAYOUT,
+  type KbLayout,
+  validateBranchModel,
+  validateKbLayout,
+  validateKbRootName,
+} from '@bevel-software/platform-shared';
+import { createHmac } from 'node:crypto';
 import { TokenCrypto } from '../../shared/token-crypto.js';
+import { assertKbDirNameFree, hasControlCharacter } from '../kb-fs/index.js';
+import { parseRetentionWindow } from '../audit/index.js';
+import { normalizeIssuerUrl } from './oidc-check.js';
+import { GIT_MODES, isGitMode } from './repository-source.js';
 
 /**
  * A setting an admin may set from the setup screen instead of the environment.
@@ -13,9 +27,20 @@ import { TokenCrypto } from '../../shared/token-crypto.js';
  */
 export interface SettingDef {
   key: string;
-  envVar: string;
+  /**
+   * The environment variable that still WINS over a stored row, when there is
+   * one — see {@link DeploymentSettingsService}.
+   *
+   * Absent for the knowledge-base layout (the three root folders and the agent
+   * guide's file name): those are entered in the app and nowhere else. They had
+   * variables once; a deployment that still sets one gets its value imported
+   * into the saved setting on the first boot after the upgrade, and the
+   * variable ignored from then on (see
+   * {@link DeploymentSettingsService.importLegacyLayoutEnv}).
+   */
+  envVar?: string;
   /** Which block of the setup screen it belongs to. */
-  section: 'knowledge-base' | 'sign-in';
+  section: 'knowledge-base' | 'sign-in' | 'audit';
   secret?: boolean;
   /** Applied on save; the message is shown against the field. */
   validate?(value: string): string | null;
@@ -25,6 +50,36 @@ export interface SettingDef {
    * was copied into a service at construction is not.
    */
   restartToApply?: boolean;
+  /**
+   * A blank field on save CLEARS the stored value, putting the default back.
+   * The rule everywhere else is that blank means "leave it alone" — a stray
+   * Enter must not unconfigure a repository — and that stays the rule; this
+   * is for a setting whose readers already treat "unset" as its default, so
+   * clearing it is the one way back to that default and never a loss.
+   */
+  blankMeansDefault?: boolean;
+  /**
+   * What an UNSET setting already means to the code that reads it — the
+   * layout's defaults, the pointer consent's "on unless turned off".
+   *
+   * Only `restartToApply` settings need it, and only for one question: saving
+   * a value the deployment is ALREADY running on changes nothing, so it owes
+   * no restart. Without it, ticking a box that was ticked all along, or typing
+   * `AGENTS.md` into a field that was showing `AGENTS.md`, tells the admin to
+   * restart for a change that never happened.
+   */
+  unsetMeans?: string;
+  /**
+   * Written by the deployment itself, at the end of a flow that PROVED the
+   * value, and never taken from a save. What a GitHub App was given when it
+   * was registered, and which installation of it the admin was shown to
+   * hold, are facts somebody established; accepted from a form they would
+   * be claims, and the claim "installation 42 is mine" is one that reaches
+   * another organisation's repositories. A save that names one is refused,
+   * the setup screen is not told about it, and its value is read like any
+   * other's (the environment first), so an operator can still pin it.
+   */
+  internal?: boolean;
 }
 
 /**
@@ -41,13 +96,72 @@ export const validateHttpsRemote = (value: string): string | null => {
   } catch {
     return 'Enter a full URL, e.g. https://github.com/acme/knowledge-base.git';
   }
-  return parsed.protocol === 'https:' ? null : 'The URL must start with https://';
+  if (parsed.protocol !== 'https:') return 'The URL must start with https://';
+  // Userinfo would ride into git's argv on every call, visible in process
+  // listings — the KB startup refuses such a URL, so saving one only defers the
+  // failure to the next boot.
+  if (parsed.username || parsed.password) {
+    return 'Remove the username and token from the URL — enter the token in its own field.';
+  }
+  return null;
 };
 
 /**
  * The core catalogue. Order is the order the setup screen renders them in.
  */
+/**
+ * What the `retireMergedBranches` value in effect means: on, unless it says
+ * off. The page saves only `true` or `false`; the environment variable is
+ * typed by a person, so `0`, `off` and `no` (any case) mean off too, and
+ * anything else — unset included — leaves the cleanup on.
+ */
+export function retireMergedBranchesOn(raw: string): boolean {
+  return !/^(false|0|off|no)$/i.test(raw.trim());
+}
+
+/**
+ * The `toolReadOnlyOverrides` setting read as a map, or null when it is not
+ * one: a JSON object whose keys are tool names (MCP's name grammar) and whose
+ * values are booleans. Blank is no override at all.
+ */
+export function parseToolReadOnlyOverrides(raw: string): Record<string, boolean> | null {
+  if (!raw.trim()) return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+  const entries = Object.entries(parsed as Record<string, unknown>);
+  for (const [name, value] of entries) {
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(name) || typeof value !== 'boolean') return null;
+  }
+  // Built with `fromEntries`, which defines own properties: assigning into a
+  // plain object would send a valid name like `__proto__` to its prototype.
+  return Object.fromEntries(entries) as Record<string, boolean>;
+}
+
 export const CORE_SETTINGS: SettingDef[] = [
+  {
+    /**
+     * Which way the deployment is given its repository (see
+     * `RepositorySource`). Unset on a deployment configured before there was
+     * a choice, which is read as `token` when it has an address or a token,
+     * and as nothing chosen when it has neither.
+     *
+     * Restart-to-apply on a deployment that is running: its working copies
+     * were cloned from the repository it had, and they are brought into line
+     * with another one by the startup phase, at a moment when nobody is
+     * using them. The save that completes first-run setup runs that phase
+     * itself, and owes no restart.
+     */
+    key: 'gitMode',
+    envVar: 'GIT_MODE',
+    section: 'knowledge-base',
+    validate: (v) => (isGitMode(v) ? null : `Choose one of: ${GIT_MODES.join(', ')}.`),
+    restartToApply: true,
+  },
   {
     key: 'kbRepoUrl',
     envVar: 'KB_REPO_URL',
@@ -70,20 +184,119 @@ export const CORE_SETTINGS: SettingDef[] = [
     validate: (v) =>
       /^[A-Za-z0-9._-]+$/.test(v) ? null : 'Use only letters, digits, dot, underscore or hyphen.',
   },
+
+  /**
+   * A repository on GitHub, reached through a GitHub App (see
+   * `modules/github-app/`).
+   *
+   * THE REPOSITORY is the admin's to choose, among those the installation
+   * reaches, and is saved like any setting: a name the installation does not
+   * reach fails the connection check, since the only token presented to
+   * GitHub is the installation's.
+   *
+   * EVERYTHING ELSE is internal: the app's identity and keys, as GitHub
+   * issued them when the app was registered, and the installation, as
+   * GitHub confirmed the admin holds it. Each has a variable, so whoever
+   * operates the deployment can supply an app they registered themselves,
+   * and a host serving many deployments can supply one app for all of them.
+   */
+  {
+    key: 'githubRepository',
+    envVar: 'GITHUB_APP_REPOSITORY',
+    section: 'knowledge-base',
+    validate: (v) =>
+      /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\/[A-Za-z0-9._-]+$/.test(v) && !v.endsWith('.git')
+        ? null
+        : 'Name the repository as owner/name.',
+  },
+  { key: 'githubAppId', envVar: 'GITHUB_APP_ID', section: 'knowledge-base', internal: true, validate: (v) => (/^\d+$/.test(v) ? null : 'The app id is a number.') },
+  { key: 'githubAppSlug', envVar: 'GITHUB_APP_SLUG', section: 'knowledge-base', internal: true, validate: (v) => (/^[A-Za-z0-9-]+$/.test(v) ? null : 'The app slug is letters, digits and hyphens.') },
+  { key: 'githubAppPrivateKey', envVar: 'GITHUB_APP_PRIVATE_KEY', section: 'knowledge-base', internal: true, secret: true },
+  { key: 'githubAppClientId', envVar: 'GITHUB_APP_CLIENT_ID', section: 'knowledge-base', internal: true },
+  { key: 'githubAppClientSecret', envVar: 'GITHUB_APP_CLIENT_SECRET', section: 'knowledge-base', internal: true, secret: true },
+  {
+    /**
+     * Put in front of the state every round trip to GitHub carries, by a
+     * host that serves several deployments behind ONE app: GitHub sends the
+     * browser back to the one address registered for the app, and the host
+     * reads this to know which deployment to hand it to. Never stored.
+     */
+    key: 'githubAppStateTag',
+    envVar: 'GITHUB_APP_STATE_TAG',
+    section: 'knowledge-base',
+    internal: true,
+    validate: (v) => (/^[a-z0-9-]{1,63}$/.test(v) ? null : 'Lowercase letters, digits and hyphens.'),
+  },
+  { key: 'githubInstallationId', envVar: 'GITHUB_APP_INSTALLATION_ID', section: 'knowledge-base', internal: true, validate: (v) => (/^\d+$/.test(v) ? null : 'The installation id is a number.') },
+  /** Whose account the installation is on, as GitHub names it: shown, never trusted. */
+  { key: 'githubInstallationAccount', section: 'knowledge-base', internal: true },
+  /**
+   * The repositories the person who connected the installation could PUSH
+   * to with their own GitHub account, one `owner/name` a line, as GitHub
+   * listed them when they connected. The deployment may be pointed at one
+   * of these and at nothing else the installation reaches.
+   */
+  { key: 'githubRepositoriesPermitted', section: 'knowledge-base', internal: true },
   {
     key: 'kbDirName',
     envVar: 'KB_DIR_NAME',
     section: 'knowledge-base',
     // Joined with workspace paths, so a separator or `..` would let it escape
-    // the workspace directory.
+    // the workspace directory — and a control character would be PREFIXED onto
+    // every path, where a line break is a separator to git's `cat-file
+    // --batch` and would make the normaliser emit a path it refuses from a
+    // caller (see `hasControlCharacter`).
     validate: (v) =>
       v && v !== '.' && v !== '..' && !v.includes('/') && !v.includes('\\')
-        ? null
+        ? hasControlCharacter(v)
+          ? 'Use a single folder name — no line breaks or other invisible characters.'
+          : null
         : 'Use a single folder name — no slashes.',
     // Copied into a dozen services when they are constructed. A running server
     // keeps the name it started with.
     restartToApply: true,
   },
+
+  /**
+   * The KB layout: the three root folders a deployment may rename so hexis can
+   * read a repository laid out by someone else (`skills/` and `plugins/` in
+   * lowercase, say). The agent guide's name is not among them any more: the
+   * guide is served by the platform as `AGENTS.md` everywhere, and a name a
+   * deployment saved for the written guide is ignored.
+   * Restart-to-apply like the branch model — the names are applied once at boot
+   * through `configureKbLayout` and served to the browser once by
+   * `/api/config`. Each has a default, so an unset field means the default, not
+   * an unconfigured deployment. Checked as a TRIO in `save`: the three must
+   * differ, and one field alone cannot see the other three.
+   *
+   * NO `envVar`, on any of the three. Layout is deployment configuration that is
+   * entered once in the app; the three that used to be environment-driven are
+   * imported into their saved setting on the first boot after the upgrade
+   * ({@link DeploymentSettingsService.importLegacyLayoutEnv}) so nothing
+   * silently reverts to the defaults.
+   */
+  {
+    key: 'knowledgeBaseDir',
+    section: 'knowledge-base',
+    validate: validateKbRootName,
+    restartToApply: true,
+    unsetMeans: DEFAULT_KB_LAYOUT.knowledgeBaseDir,
+  },
+  {
+    key: 'skillsDir',
+    section: 'knowledge-base',
+    validate: validateKbRootName,
+    restartToApply: true,
+    unsetMeans: DEFAULT_KB_LAYOUT.skillsDir,
+  },
+  {
+    key: 'pluginsDir',
+    section: 'knowledge-base',
+    validate: validateKbRootName,
+    restartToApply: true,
+    unsetMeans: DEFAULT_KB_LAYOUT.pluginsDir,
+  },
+
 
   /**
    * The branch model. Both are restart-to-apply and could not be otherwise:
@@ -109,9 +322,46 @@ export const CORE_SETTINGS: SettingDef[] = [
     restartToApply: true,
   },
 
+  {
+    /**
+     * Whether the server removes, on its own, the branches merged change
+     * requests left behind (`VersionControlService.retireLeftoverMergedBranches`).
+     * On unless set to `false`; a blanked field puts the default back. Read
+     * at every round, so it applies without a restart. It covers that cleanup
+     * only: the removal of a branch when its change request is merged does
+     * not ask it.
+     */
+    key: 'retireMergedBranches',
+    envVar: 'RETIRE_MERGED_BRANCHES',
+    section: 'knowledge-base',
+    blankMeansDefault: true,
+    unsetMeans: 'true',
+    validate: (v) => (v === 'true' || v === 'false' ? null : 'Either true or false.'),
+  },
+
+  {
+    /**
+     * The credential a git host's webhook or a pipeline presents to
+     * `POST /api/sync` (see `modules/kb-sync/`). Deployment-level on purpose:
+     * a person's connection key would stop the pipeline the day they leave.
+     * Optional — without it the endpoint only admits an admin's own session.
+     * Read per request, so it applies without a restart.
+     */
+    key: 'kbSyncSecret',
+    envVar: 'KB_SYNC_SECRET',
+    section: 'knowledge-base',
+    secret: true,
+    // The same floor `sync-auth.ts` enforces at request time (which is what
+    // covers a secret set through the environment); this one just says so
+    // before the save.
+    validate: (v) =>
+      v.trim().length >= 16 ? null : 'Use at least 16 characters — a random string is best.',
+  },
+
   /**
-   * Single sign-on. Restart-to-apply because the provider is built once at boot
-   * and pushed into the auth plugin array the server mounts from.
+   * Single sign-on. Applies without a restart: the OIDC provider is mounted
+   * once at boot but reads these on every probe and sign-in, advertising
+   * itself only while issuer, client id and secret are all set.
    */
   {
     key: 'oidcIssuerUrl',
@@ -124,32 +374,27 @@ export const CORE_SETTINGS: SettingDef[] = [
         return 'Enter the issuer URL, e.g. https://login.microsoftonline.com/<tenant>/v2.0';
       }
     },
-    restartToApply: true,
   },
   {
     key: 'oidcClientId',
     envVar: 'OIDC_CLIENT_ID',
     section: 'sign-in',
-    restartToApply: true,
   },
   {
     key: 'oidcClientSecret',
     envVar: 'OIDC_CLIENT_SECRET',
     section: 'sign-in',
     secret: true,
-    restartToApply: true,
   },
   {
     key: 'oidcScopes',
     envVar: 'OIDC_SCOPES',
     section: 'sign-in',
-    restartToApply: true,
   },
   {
     key: 'oidcProviderLabel',
     envVar: 'OIDC_PROVIDER_LABEL',
     section: 'sign-in',
-    restartToApply: true,
   },
   {
     // Belongs with SSO because SSO is what makes it load-bearing: sign-in
@@ -160,14 +405,125 @@ export const CORE_SETTINGS: SettingDef[] = [
     section: 'sign-in',
     restartToApply: true,
   },
+
+  {
+    /**
+     * How long the Audit log keeps an agent's events: a number of days, or
+     * — blank, zero, negative — forever. Read at every prune, so it applies
+     * without a restart. The window's rule lives with the audit service and
+     * is applied here on save and there on every read, so the environment
+     * variable is held to exactly what the Deployment page is. A blanked
+     * field clears the stored value, which is how "forever" is chosen back.
+     */
+    key: 'auditRetentionDays',
+    envVar: 'AUDIT_RETENTION_DAYS',
+    section: 'audit',
+    blankMeansDefault: true,
+    validate: (v) =>
+      parseRetentionWindow(v) === null ? 'Enter a whole number of days, or 0 to keep events forever.' : null,
+  },
+
+  {
+    /**
+     * The read-only hints an admin set on the Tools page, overriding a
+     * platform tool's or a code-mode meta-tool's built-in one: a JSON map from
+     * tool name to `true`/`false`. Written by the Tools page's admin route
+     * alone (see `modules/tool-registry/read-only-hints.ts`), which also judges
+     * the NAMES against the catalog; here only the shape is. Internal: not a
+     * field of the setup screen. A blank clears it, which is every tool back
+     * on its built-in value.
+     */
+    key: 'toolReadOnlyOverrides',
+    section: 'knowledge-base',
+    internal: true,
+    blankMeansDefault: true,
+    validate: (v) => (parseToolReadOnlyOverrides(v) === null ? 'A map from tool name to true or false.' : null),
+  },
+
+  {
+    /**
+     * Which starter pack the first admin chose for a new knowledge base — a
+     * pack's id, or `none` for "I'll start from scratch" — written once, by
+     * the deployment, when the choice landed (see
+     * `modules/onboarding/starter-pack.service.ts`). Its presence is what
+     * retires the "What does your team do?" card for good; its value is what
+     * the first-page prompt and the agent's first-run note follow. Internal:
+     * a fact about what happened, not something the setup screen offers.
+     */
+    key: 'starterPack',
+    section: 'knowledge-base',
+    internal: true,
+    validate: (v) => (/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(v) ? null : 'A starter pack id is lowercase letters, digits and hyphens.'),
+  },
+  {
+    /**
+     * The claim an admin holds while their starter-pack choice is being
+     * written: `<user id> <epoch ms>`, inserted only if absent so two replicas
+     * cannot both write, and released once the choice is recorded. A claim
+     * nobody released in time is a process that died mid-write and is taken
+     * over (see `starter-pack.service.ts`). Internal, like the choice.
+     */
+    key: 'starterPackClaim',
+    section: 'knowledge-base',
+    internal: true,
+    validate: (v) => (/^\S+ \d+$/.test(v) ? null : 'A claim is a user id and a time.'),
+  },
 ];
+
+/**
+ * The environment variables the KB layout USED to be read from, and the
+ * settings they now live in. Referenced only by
+ * {@link DeploymentSettingsService.importLegacyLayoutEnv} — nothing else may
+ * read them, or they would be back to being a second source of truth. The
+ * guide's file name is deliberately absent: it never had a variable, so there
+ * is nothing to import.
+ */
+export const LEGACY_LAYOUT_ENV_VARS: Readonly<Record<string, string>> = Object.freeze({
+  knowledgeBaseDir: 'KB_KNOWLEDGE_BASE_DIR',
+  skillsDir: 'KB_SKILLS_DIR',
+  pluginsDir: 'KB_PLUGINS_DIR',
+});
+
+/**
+ * Whether the single sign-on configuration in effect is known to work:
+ * `verified` (the provider accepted its credentials, or someone signed in with
+ * it), `unverified` (configured, never proven — sign in once to confirm), or
+ * `not-configured` (no issuer, application id and secret to prove), or
+ * `unrecordable` (configured, but SECRETS_ENC_KEY is unset — see
+ * {@link DeploymentSettingsService.oidcVerification}).
+ */
+export type OidcVerificationState = 'verified' | 'unverified' | 'not-configured' | 'unrecordable';
+
+/** What a record can say about one set of values. */
+export type OidcRecordState = 'verified' | 'unverified';
+
+/** The three values a verification is about. Scopes, label and domains are not among them. */
+export interface OidcCredentials {
+  issuerUrl: string;
+  clientId: string;
+  clientSecret: string;
+}
+
+/**
+ * The rows holding verification records: ONE PER SET OF VALUES, keyed
+ * `oidcVerification:<fingerprint>`. Not settings — nobody types them — so they
+ * have no catalogue entry, are never described or loaded, and `prune` leaves
+ * them be.
+ *
+ * A row per fingerprint rather than one shared row is what makes concurrent
+ * writers safe without a lock: a sign-in finishing through a provider built
+ * from OLD values records those old values under their own key, and can never
+ * overwrite what a save (or another replica) recorded about the new ones.
+ */
+const OIDC_VERIFICATION_PREFIX = 'oidcVerification:';
 
 /** Where a resolved value came from, which is what the UI renders as its status. */
 export type SettingSource = 'env' | 'stored' | 'unset';
 
 export interface ResolvedSetting {
   key: string;
-  envVar: string;
+  /** Omitted for a setting no environment variable can override. */
+  envVar?: string;
   section: SettingDef['section'];
   source: SettingSource;
   /** Omitted entirely for secrets — `configured` is all a client ever learns. */
@@ -189,6 +545,14 @@ export interface ResolvedSetting {
  *  - and "why is it not using my env var" never becomes a question, because
  *    the answer is always "it is".
  *
+ * ONE EXCEPTION, and it is a setting-by-setting one rather than a hole in the
+ * rule: a definition with no {@link SettingDef.envVar} has no variable to be
+ * outranked by. That is the knowledge-base layout — the three root folders and
+ * the agent guide's file name — which is deployment configuration entered once
+ * in the app. The three variables it used to read are imported into their saved
+ * settings on the first boot after the upgrade ({@link
+ * DeploymentSettingsService.importLegacyLayoutEnv}) and ignored after that.
+ *
  * Values are cached in memory after {@link load}. Reads happen on every clone
  * and every git call, and a database round-trip there would be a tax on the
  * hot path for data that changes about twice in a deployment's life.
@@ -199,6 +563,10 @@ export interface ResolvedSetting {
  * the knowledge-base connection, written once during first-run setup, on a
  * deployment that has nothing to serve until it is. Nobody is mid-session on a
  * second replica at that moment.
+ *
+ * The single sign-on settings are the first to bend that: they apply live, so
+ * on a multi-replica deployment an OIDC change reaches only the replica that
+ * served the save until the others restart.
  *
  * It stops being acceptable the moment a setting is something an operator
  * changes on a live multi-replica deployment. Adding one means adding
@@ -211,11 +579,23 @@ export class DeploymentSettingsService {
   private stored = new Map<string, string>();
   private readonly crypto: TokenCrypto | null;
 
+  /**
+   * The environment the env-first layer reads. The process's own for a
+   * single-tenant deployment; a host serving several knowledge bases hands
+   * each graph one built from its tenant record, so a variable set on the
+   * host process can never leak into every tenant, and a record's values
+   * behave exactly as environment-pinned ones do (they win over the setup
+   * screen and the screen shows them as such).
+   */
+  private readonly env: NodeJS.ProcessEnv;
+
   constructor(
     private readonly db: Database,
-    secretsEncKey: string,
+    private readonly secretsEncKey: string,
     defs: SettingDef[] = CORE_SETTINGS,
+    options: { env?: NodeJS.ProcessEnv } = {},
   ) {
+    this.env = options.env ?? process.env;
     for (const def of defs) this.defs.set(def.key, def);
     // No key configured means secrets cannot be stored — surfaced when someone
     // tries, rather than pretended away by writing plaintext.
@@ -234,9 +614,7 @@ export class DeploymentSettingsService {
       if (!this.defs.has(row.key)) continue; // a setting this build no longer has
       if (row.encrypted) {
         if (!this.crypto) {
-          console.warn(
-            `[settings] "${row.key}" is stored encrypted but SECRETS_ENC_KEY is unset — ignoring it.`,
-          );
+          log.warn(`"${row.key}" is stored encrypted but SECRETS_ENC_KEY is unset — ignoring it.`);
           continue;
         }
         try {
@@ -245,7 +623,7 @@ export class DeploymentSettingsService {
           // A rotated or mistyped key. Loud, and skipped rather than fatal:
           // one unreadable setting must not stop the server from booting into
           // the screen where it can be fixed.
-          console.error(`[settings] could not decrypt "${row.key}" — is SECRETS_ENC_KEY correct?`);
+          log.error(`could not decrypt "${row.key}" — is SECRETS_ENC_KEY correct?`);
         }
         continue;
       }
@@ -261,16 +639,86 @@ export class DeploymentSettingsService {
   resolve(key: string): string {
     const def = this.defs.get(key);
     if (!def) return '';
-    const fromEnv = (process.env[def.envVar] ?? '').trim();
+    const fromEnv = def.envVar ? (this.env[def.envVar] ?? '').trim() : '';
     if (fromEnv) return fromEnv;
     return (this.stored.get(key) ?? '').trim();
+  }
+
+  /**
+   * The KB layout in effect: each root from the environment, else the stored
+   * row, else its default. The composition root applies this once at boot.
+   */
+  resolveKbLayout(): Required<KbLayout> {
+    return {
+      knowledgeBaseDir: this.resolve('knowledgeBaseDir') || DEFAULT_KB_LAYOUT.knowledgeBaseDir,
+      skillsDir: this.resolve('skillsDir') || DEFAULT_KB_LAYOUT.skillsDir,
+      pluginsDir: this.resolve('pluginsDir') || DEFAULT_KB_LAYOUT.pluginsDir,
+      agentsFile: DEFAULT_KB_LAYOUT.agentsFile,
+    };
+  }
+
+  /**
+   * Import the retired layout environment variables into their saved settings,
+   * ONCE, on a deployment that still sets them.
+   *
+   * The three roots were environment-first until this release. Simply dropping
+   * the variables would put such a deployment back on `KnowledgeBase/`,
+   * `Skills/` and `Plugins/` at its next boot — against a repository laid out
+   * under other names, which is a knowledge base that scaffolds three empty
+   * folders and imports nothing. So on the first boot after the upgrade each
+   * still-set variable's value becomes the saved setting, and the log says the
+   * variable can be removed.
+   *
+   * Only where nothing is saved. A saved value is the admin's own answer,
+   * entered in the app, and it wins — with a warning, because a variable that
+   * no longer does anything is exactly the kind of thing someone later reads
+   * as the reason for a name. Equal values say nothing: there is nothing to
+   * tell anyone about.
+   *
+   * Called before `configureKbLayout`, so the boot that imports also RUNS on
+   * the imported names rather than on the defaults.
+   */
+  async importLegacyLayoutEnv(): Promise<void> {
+    for (const [key, envVar] of Object.entries(LEGACY_LAYOUT_ENV_VARS)) {
+      const fromEnv = (this.env[envVar] ?? '').trim();
+      if (!fromEnv) continue;
+      const saved = (this.stored.get(key) ?? '').trim();
+      if (saved) {
+        if (saved !== fromEnv) {
+          log.warn(
+            `${envVar} is ignored — the saved setting ("${saved}") wins. Remove the variable.`,
+          );
+        }
+        continue;
+      }
+      // Validated like any save: a variable holding something no folder may be
+      // called is a misconfiguration, and importing it would move the failure
+      // to the first write into a folder nobody can name.
+      const problem = validateKbRootName(fromEnv);
+      if (problem) {
+        log.warn(`${envVar} ("${fromEnv}") is not a usable folder name (${problem}) — not imported.`);
+        continue;
+      }
+      await this.db
+        .insert(deploymentSettings)
+        .values({ key, value: fromEnv, encrypted: false, updatedBy: null })
+        .onConflictDoUpdate({
+          target: deploymentSettings.key,
+          set: { value: fromEnv, encrypted: false, updatedBy: null, updatedAt: new Date() },
+        });
+      this.stored.set(key, fromEnv);
+      log.info(`Imported ${envVar} ("${fromEnv}") into the saved setting — the variable can be removed.`);
+    }
   }
 
   /** Where {@link resolve} got its answer — what the setup screen labels the field with. */
   sourceOf(key: string): SettingSource {
     const def = this.defs.get(key);
     if (!def) return 'unset';
-    if ((process.env[def.envVar] ?? '').trim()) return 'env';
+    // A setting with no variable can never read `env`, whatever the process
+    // environment happens to hold — which is what makes the layout fields
+    // editable in the app on a deployment that still sets the old variables.
+    if (def.envVar && (this.env[def.envVar] ?? '').trim()) return 'env';
     return (this.stored.get(key) ?? '').trim() ? 'stored' : 'unset';
   }
 
@@ -280,11 +728,11 @@ export class DeploymentSettingsService {
    * replace it, which is all anyone needs to finish setup.
    */
   describe(): ResolvedSetting[] {
-    return this.definitions.map((def) => {
+    return this.definitions.filter((def) => !def.internal).map((def) => {
       const source = this.sourceOf(def.key);
       const base = {
         key: def.key,
-        envVar: def.envVar,
+        ...(def.envVar ? { envVar: def.envVar } : {}),
         section: def.section,
         source,
         configured: source !== 'unset',
@@ -303,17 +751,151 @@ export class DeploymentSettingsService {
    * A setting whose environment variable is set is REFUSED rather than silently
    * stored, because storing it would write a row that can never take effect and
    * leave the screen implying otherwise.
+   *
+   * `restartRequired` is this service's view: some restart-to-apply setting
+   * changed. It cannot know what the caller then applies to the running
+   * process, so `restartKeys` names the settings behind it — the setup route
+   * leaves out the folder names and the branch model when the save that
+   * completes setup has just applied them, and reports only what remains.
    */
   async save(
     entries: Record<string, string>,
     updatedBy: string | null,
-  ): Promise<{ restartRequired: boolean }> {
+    /** Set by {@link record} alone: the batch is the deployment's own, and may name internal settings. */
+    by: 'admin' | 'deployment' = 'admin',
+  ): Promise<{ restartRequired: boolean; restartKeys: string[] }> {
+    const { toWrite, toClear } = this.plan(entries, by);
+
+    /** The settings this save changed that a running server cannot pick up. */
+    const restartKeys: string[] = [];
+    // A blanked blank-means-default setting: its row goes, and its readers
+    // are back on the default from the next read.
+    for (const key of toClear) await this.clear(key);
+    for (const { key, value, def } of toWrite) {
+      // Compared against the EFFECTIVE value: a setting that was unset was
+      // already running on whatever its readers make of "unset" — the layout
+      // roots on their defaults, the pointer consent on — so saving that same
+      // answer changes nothing a restart would pick up.
+      const effective = this.resolve(key) || def.unsetMeans || '';
+      if (def.restartToApply && effective !== value) restartKeys.push(key);
+      const encrypted = def.secret === true;
+      const stored = encrypted ? this.crypto!.encrypt(value) : value;
+      await this.db
+        .insert(deploymentSettings)
+        .values({ key, value: stored, encrypted, updatedBy })
+        .onConflictDoUpdate({
+          target: deploymentSettings.key,
+          set: { value: stored, encrypted, updatedBy, updatedAt: new Date() },
+        });
+      this.stored.set(key, value);
+    }
+
+    // A token saved here is in effect at once: the git runner's credentials
+    // read `resolve('gitToken')` on every call, so nothing is published to
+    // the process environment and no restart is needed.
+    return { restartRequired: restartKeys.length > 0, restartKeys };
+  }
+
+  /**
+   * What {@link resolve} would answer for each key AFTER saving `entries` —
+   * validated by exactly the rules `save` applies, and throwing the same
+   * {@link SettingsValidationError}, but writing nothing. It is how a caller
+   * checks the values a save would put in effect (the repository connection)
+   * before letting the save happen.
+   */
+  resolveAfter(entries: Record<string, string>): (key: string) => string {
+    const { toWrite, toClear } = this.plan(entries);
+    return (key) =>
+      toClear.includes(key) ? '' : (toWrite.find((w) => w.key === key)?.value ?? this.resolve(key));
+  }
+
+  /**
+   * Store what the DEPLOYMENT established, internal settings included: the
+   * end of a flow that proved each value (see `SettingDef.internal`). The
+   * same validation, the same encryption, the same refusal of a setting the
+   * environment pins. Never reachable from a request body: the setup routes
+   * call {@link save}.
+   */
+  async record(entries: Record<string, string>, updatedBy: string | null): Promise<void> {
+    await this.save(entries, updatedBy, 'deployment');
+  }
+
+  /**
+   * {@link record} one value ONLY IF NOTHING IS THERE, and say whether it was
+   * this call that put it there. The row is the claim for a flow that must
+   * happen once across every replica (the starter-pack choice): the insert
+   * yields to a row already there, so of two replicas claiming at once the
+   * database lets exactly one through. Validated as `record` is; a blank
+   * value is no claim (it would be a clear) and answers false.
+   */
+  async recordIfAbsent(key: string, value: string, updatedBy: string | null): Promise<boolean> {
+    const write = this.plan({ [key]: value }, 'deployment').toWrite.find((w) => w.key === key);
+    if (!write) return false;
+    const encrypted = write.def.secret === true;
+    const stored = encrypted ? this.crypto!.encrypt(write.value) : write.value;
+    const inserted = await this.db
+      .insert(deploymentSettings)
+      .values({ key, value: stored, encrypted, updatedBy })
+      .onConflictDoNothing({ target: deploymentSettings.key })
+      .returning({ key: deploymentSettings.key });
+    if (inserted.length === 0) return false;
+    this.stored.set(key, write.value);
+    return true;
+  }
+
+  /**
+   * Replace a plain setting's value ONLY IF it still reads `expected` —
+   * with `next`, or with nothing when `next` is null — and say whether it
+   * was this call that did it. One statement, so of two replicas acting on
+   * what they both read, the database lets exactly one through: the other
+   * finds the value gone or changed and answers false. For the claim flows
+   * that {@link recordIfAbsent} opens: taking over a claim that expired, and
+   * releasing one's own without touching a successor's. Plain settings only;
+   * `next` is validated as {@link record} would.
+   */
+  async swapIfValue(key: string, expected: string, next: string | null, updatedBy: string | null): Promise<boolean> {
+    const def = this.defs.get(key);
+    if (!def || def.secret) return false;
+    const same = and(eq(deploymentSettings.key, key), eq(deploymentSettings.value, expected));
+    if (next === null) {
+      const gone = await this.db.delete(deploymentSettings).where(same).returning({ key: deploymentSettings.key });
+      if (gone.length === 0) return false;
+      this.stored.delete(key);
+      return true;
+    }
+    const write = this.plan({ [key]: next }, 'deployment').toWrite.find((w) => w.key === key);
+    if (!write) return false;
+    const swapped = await this.db
+      .update(deploymentSettings)
+      .set({ value: write.value, updatedBy, updatedAt: new Date() })
+      .where(same)
+      .returning({ key: deploymentSettings.key });
+    if (swapped.length === 0) return false;
+    this.stored.set(key, write.value);
+    return true;
+  }
+
+  /** Validate a batch and return the writes (and the clears) it amounts to; throws on any problem. */
+  private plan(
+    entries: Record<string, string>,
+    by: 'admin' | 'deployment' = 'admin',
+  ): {
+    toWrite: { key: string; value: string; def: SettingDef }[];
+    toClear: string[];
+  } {
     const problems: Record<string, string> = {};
     const toWrite: { key: string; value: string; def: SettingDef }[] = [];
+    const toClear: string[] = [];
 
     for (const [key, raw] of Object.entries(entries)) {
       const def = this.defs.get(key);
       if (!def) {
+        problems[key] = 'Unknown setting.';
+        continue;
+      }
+      if (def.internal && by !== 'deployment') {
+        // Said the way an unknown setting is: what the deployment keeps for
+        // itself is not the form's to name, or to learn the names of.
         problems[key] = 'Unknown setting.';
         continue;
       }
@@ -325,7 +907,12 @@ export class DeploymentSettingsService {
       // An empty field means "leave it alone", not "erase it". Clearing a
       // setting is not something the setup screen offers, and treating a blank
       // input as a delete would let a stray Enter unconfigure a deployment.
-      if (!value) continue;
+      // The one exception is a setting that SAYS a blank is its default (see
+      // `SettingDef.blankMeansDefault`): for it a blank clears the stored row.
+      if (!value) {
+        if (def.blankMeansDefault) toClear.push(key);
+        continue;
+      }
       const problem = def.validate?.(value);
       if (problem) {
         problems[key] = problem;
@@ -356,28 +943,59 @@ export class DeploymentSettingsService {
       if (problem) problems.protectedBranches = problem;
     }
 
-    if (Object.keys(problems).length > 0) throw new SettingsValidationError(problems);
-
-    let restartRequired = false;
-    for (const { key, value, def } of toWrite) {
-      if (def.restartToApply && this.resolve(key) !== value) restartRequired = true;
-      const encrypted = def.secret === true;
-      const stored = encrypted ? this.crypto!.encrypt(value) : value;
-      await this.db
-        .insert(deploymentSettings)
-        .values({ key, value: stored, encrypted, updatedBy })
-        .onConflictDoUpdate({
-          target: deploymentSettings.key,
-          set: { value: stored, encrypted, updatedBy, updatedAt: new Date() },
-        });
-      this.stored.set(key, value);
+    // The layout trio is the other cross-field rule: three folder names that
+    // must all differ. Judged on the layout this save WOULD produce, with the
+    // default standing in for anything neither written nor stored — so
+    // renaming one folder to what another is already called is refused
+    // whichever of the two the save names.
+    const layoutKeys = ['knowledgeBaseDir', 'skillsDir', 'pluginsDir'] as const;
+    if (toWrite.some((w) => (layoutKeys as readonly string[]).includes(w.key))) {
+      const effective = (key: (typeof layoutKeys)[number]) =>
+        toWrite.find((w) => w.key === key)?.value || this.resolve(key) || DEFAULT_KB_LAYOUT[key];
+      const problem = validateKbLayout({
+        knowledgeBaseDir: effective('knowledgeBaseDir'),
+        skillsDir: effective('skillsDir'),
+        pluginsDir: effective('pluginsDir'),
+      });
+      // Against the field being written — the first one in the batch — since
+      // any of the three could be the one that collides.
+      if (problem) {
+        const first = toWrite.find((w) => (layoutKeys as readonly string[]).includes(w.key))!;
+        problems[first.key] = problem;
+      }
     }
 
-    // The git token is consumed through the environment (the credential helper
-    // reads `$GITHUB_TOKEN` at call time, so it never appears in argv). Putting
-    // it there is what makes a token saved here work without a restart.
-    this.syncGitTokenEnv();
-    return { restartRequired };
+    // The checkout folder and the layout are the third cross-field rule: the
+    // folder the repository is cloned into may not share a name with any of
+    // the repository's own roots, or every path under that root would be read
+    // as the checkout itself (see `assertKbDirNameFree`). Judged on what this
+    // save would put in effect, like the two rules above, and here rather than
+    // only at boot because setup applies a saved layout to the running process
+    // without a restart — a save that gets through would take effect at once.
+    const collisionKeys = ['kbDirName', ...layoutKeys] as const;
+    if (toWrite.some((w) => (collisionKeys as readonly string[]).includes(w.key))) {
+      const effective = (key: (typeof collisionKeys)[number]) =>
+        toWrite.find((w) => w.key === key)?.value ||
+        this.resolve(key) ||
+        (key === 'kbDirName' ? 'knowledge-base' : DEFAULT_KB_LAYOUT[key]);
+      try {
+        assertKbDirNameFree(effective('kbDirName'), {
+          knowledgeBaseDir: effective('knowledgeBaseDir'),
+          skillsDir: effective('skillsDir'),
+          pluginsDir: effective('pluginsDir'),
+          agentsFile: DEFAULT_KB_LAYOUT.agentsFile,
+        });
+      } catch (err) {
+        // Against the field this save is writing — the checkout name when that
+        // is what moved, else the first layout field in the batch — since
+        // either side of the collision could be the one the operator typed.
+        const first = toWrite.find((w) => (collisionKeys as readonly string[]).includes(w.key))!;
+        problems[first.key] = err instanceof Error ? err.message : String(err);
+      }
+    }
+
+    if (Object.keys(problems).length > 0) throw new SettingsValidationError(problems);
+    return { toWrite, toClear };
   }
 
   /** Drop stored rows for settings this build no longer defines. */
@@ -385,22 +1003,123 @@ export class DeploymentSettingsService {
     const known = [...this.defs.keys()];
     if (known.length === 0) return;
     const rows = await this.db.select({ key: deploymentSettings.key }).from(deploymentSettings);
-    const orphans = rows.map((r) => r.key).filter((k) => !known.includes(k));
+    const orphans = rows
+      .map((r) => r.key)
+      .filter((k) => !known.includes(k) && !k.startsWith(OIDC_VERIFICATION_PREFIX));
     if (orphans.length > 0) {
       await this.db.delete(deploymentSettings).where(inArray(deploymentSettings.key, orphans));
     }
   }
 
+  /** The single sign-on values in effect, issuer normalized the way the provider uses it. */
+  resolveOidcCredentials(): OidcCredentials {
+    return {
+      issuerUrl: normalizeIssuerUrl(this.resolve('oidcIssuerUrl')),
+      clientId: this.resolve('oidcClientId'),
+      clientSecret: this.resolve('oidcClientSecret'),
+    };
+  }
+
   /**
-   * Publish the resolved git token as `GITHUB_TOKEN`, the name the credential
-   * helper and every redaction path already read. Only when the environment did
-   * not supply one — otherwise this would overwrite the operator's value with
-   * a stored fallback, inverting the precedence everything else here obeys.
+   * Whether the single sign-on configuration IN EFFECT is verified.
+   *
+   * The record names the values it was made about by a keyed digest, so it
+   * speaks only for those: a changed issuer, application id or secret —
+   * through a save or through the environment — reads as unverified until it
+   * is proven again, with nothing to remember to reset. The secret itself is
+   * never stored here, and a digest keyed with the secrets key cannot be
+   * checked against a guess without that key.
+   *
+   * WHICH IS WHY THERE IS NO RECORD WITHOUT THAT KEY: keyed with a public
+   * constant, the digest of a public issuer and application id would let
+   * anyone who can read `deployment_settings` (a backup, a replica, a dump)
+   * confirm guesses of the secret offline. A salt stored beside it would be
+   * read along with it. So with SECRETS_ENC_KEY unset nothing is recorded and
+   * a configured deployment reads `unrecordable`.
+   *
+   * Read from the database, not the in-memory cache: unlike the settings, this
+   * changes on a live deployment (every first sign-in), and a sign-in on one
+   * replica must show as Verified on the others.
    */
-  syncGitTokenEnv(): void {
-    if (this.sourceOf('gitToken') !== 'stored') return;
-    const token = this.resolve('gitToken');
-    if (token) process.env.GITHUB_TOKEN = token;
+  async oidcVerification(): Promise<OidcVerificationState> {
+    const current = this.resolveOidcCredentials();
+    if (!current.issuerUrl || !current.clientId || !current.clientSecret) return 'not-configured';
+    if (!this.secretsEncKey) return 'unrecordable';
+    return this.oidcVerificationOf(current);
+  }
+
+  /** What is recorded about one set of single sign-on values — `unverified` when nothing is. */
+  async oidcVerificationOf(credentials: OidcCredentials): Promise<OidcRecordState> {
+    if (!this.secretsEncKey) return 'unverified';
+    const key = this.oidcVerificationKey(credentials);
+    const rows = await this.db
+      .select({ key: deploymentSettings.key, value: deploymentSettings.value })
+      .from(deploymentSettings)
+      .where(eq(deploymentSettings.key, key));
+    return rows.some((row) => row.key === key && row.value === 'verified') ? 'verified' : 'unverified';
+  }
+
+  /**
+   * Record what is known about one set of single sign-on values.
+   *
+   * ONLY EVER UPGRADES, atomically: `verified` overwrites, `unverified` only
+   * fills an empty slot. The same values cannot stop being proven by an
+   * inconclusive answer — an overlapping check that could not reach the token
+   * endpoint says nothing against the sign-in that worked.
+   *
+   * Records about values no longer in effect are left in place rather than
+   * swept: they are inert (nothing reads a key the current values do not hash
+   * to), and a sweep racing a save on another replica could delete the record
+   * of the values that end up in effect.
+   */
+  async recordOidcVerification(state: OidcRecordState, credentials: OidcCredentials): Promise<void> {
+    // No secrets key, no record: see oidcVerification().
+    if (!this.secretsEncKey) return;
+    const key = this.oidcVerificationKey(credentials);
+    const insert = this.db
+      .insert(deploymentSettings)
+      .values({ key, value: state, encrypted: false, updatedBy: null });
+    if (state === 'unverified') {
+      await insert.onConflictDoNothing({ target: deploymentSettings.key });
+      return;
+    }
+    await insert.onConflictDoUpdate({
+      target: deploymentSettings.key,
+      set: { value: state, encrypted: false, updatedBy: null, updatedAt: new Date() },
+    });
+  }
+
+  private oidcVerificationKey(credentials: OidcCredentials): string {
+    // JSON-encoded, so no issuer, id or secret containing the separator can
+    // make two different tuples hash alike.
+    const tuple = JSON.stringify([
+      normalizeIssuerUrl(credentials.issuerUrl),
+      credentials.clientId,
+      credentials.clientSecret,
+    ]);
+    const fingerprint = createHmac('sha256', `hexis-oidc-verification:${this.secretsEncKey}`)
+      .update(tuple)
+      .digest('hex');
+    return `${OIDC_VERIFICATION_PREFIX}${fingerprint}`;
+  }
+
+  /**
+   * One plain (never sealed) setting as the DATABASE has it now, taken into
+   * this replica's cache on the way: for the rare setting a running
+   * deployment writes, so a replica that did not serve the write still
+   * answers with it. The environment still wins, as in {@link resolve}.
+   */
+  async reload(key: string): Promise<string> {
+    const def = this.defs.get(key);
+    if (!def || def.secret) return this.resolve(key);
+    const rows = await this.db
+      .select({ value: deploymentSettings.value, encrypted: deploymentSettings.encrypted })
+      .from(deploymentSettings)
+      .where(eq(deploymentSettings.key, key));
+    const row = rows.find((r) => !r.encrypted);
+    if (row) this.stored.set(key, row.value);
+    else this.stored.delete(key);
+    return this.resolve(key);
   }
 
   /** Remove one stored row (used by tests and by `prune`). */

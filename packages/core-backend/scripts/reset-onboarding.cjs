@@ -6,9 +6,10 @@
  * Done is one-way over the API on purpose — "not onboarded again" is not a
  * state a user can be put in — so this is the DB-side undo, for development.
  *
- * IMPORTANT: this only resets the server half. The one-time greeting is
- * remembered per-browser in localStorage, so the welcome page will NOT
- * reappear until that is cleared too. Run this in the browser console:
+ * IMPORTANT: this only resets the server half. The Get set up list's notes
+ * (guide read, list closed) are remembered per-browser in localStorage, so
+ * the list will NOT reappear until those are cleared too. Run this in the
+ * browser console:
  *
  *   Object.keys(localStorage)
  *     .filter(k => k.startsWith('bevel.onboarding.'))
@@ -50,7 +51,7 @@ client
       return;
     }
     console.log(`Server: ${email} is onboarding again.`);
-    console.log('Browser: also clear the greeting, or only the pill comes back —');
+    console.log('Browser: also clear the Get set up notes, or only the pill comes back —');
     console.log(
       "  Object.keys(localStorage).filter(k=>k.startsWith('bevel.onboarding.')).forEach(k=>localStorage.removeItem(k))",
     );

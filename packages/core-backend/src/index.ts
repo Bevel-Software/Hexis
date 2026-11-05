@@ -1,6 +1,6 @@
 /**
  * @bevel-software/platform-core-backend — the open-source core of the Bevel platform:
- * git-backed knowledge workspace, workflow (branches / change requests /
+ * git-backed knowledge workspace, version control (branches / change requests /
  * locks / SSE), skills, tool manuals + registry + auth, secrets vault, access
  * control, diff/backup ledger, code-mode and the remote MCP surface.
  *
@@ -17,22 +17,77 @@
  * Finer-grained internals are available via the `./modules/*` subpath exports.
  */
 
-export { CoreConfig } from './core-config.js';
+export { CoreConfig, resolveDatabaseUrl, type TenantConfig, type ProcessConfig } from './core-config.js';
+// Serving several knowledge bases from one process — see docs/multi-tenant.md.
+export * from './tenancy/index.js';
 export { createCoreServices, type CoreServices } from './core/create-core-services.js';
 export {
   createCoreServer,
   type ServerExtensions,
   type ToolSurfaceCtx,
 } from './core/create-core-server.js';
-export { noopRecoveryAgent, type CorePorts } from './core/core-ports.js';
+export { noopRecoveryAgent, type AgentScopeCollaborators, type CorePorts } from './core/core-ports.js';
+// Logging: the contract, the slot a shell installs its sink into, and the
+// tagged-logger lookup every module logs through. See shared/logging.ts.
+export { setLogger, logger, createConsoleLogger } from './shared/logging.js';
+export type { ILogger, LogFields } from './shared/logger.contract.js';
+// The shutdown sequence a shell's signal handlers call, and the lease-loop
+// handle type `CoreServices.commitWorker` carries.
+export {
+  createShutdown,
+  startCore,
+  stopCore,
+  withStartupTask,
+  type BootableCore,
+  type CoreStopDeps,
+  type ShutdownDeps,
+  type ShutdownOptions,
+  type StopCoreOptions,
+  type LeaseLoopHandle,
+  type LeasedWorker,
+} from './core/lifecycle.js';
 
-// Packaged assets (migrations/, kb-template/) + the migration runners.
-export { coreMigrationsDir, defaultKbTemplateDir } from './assets.js';
+// Packaged assets (migrations/, kb-template/, agent-guide/, starter-packs/) + the migration runners.
+export { agentGuideDir, coreMigrationsDir, defaultKbTemplateDir, defaultStarterPacksDir } from './assets.js';
 export {
   runCoreMigrations,
   runEnterpriseMigrations,
+  runPiiEncryptionBackfill,
+  // The same backfill for an overlay's own sealed columns: its spec goes to
+  // `runEnterpriseMigrations`, or to `runPiiBackfill` under a lock of its own.
+  runPiiBackfill,
+  type PiiBackfillExecutor,
+  type PiiBackfillSpec,
+  type PiiBackfillTable,
+  type PiiBlindIndex,
 } from './modules/database/migrate.js';
-export { getDb, type Database } from './modules/database/connection.js';
+export {
+  getDb,
+  createDb,
+  closeDb,
+  dbSchemaOf,
+  piiKeysOf,
+  assertSchemaName,
+  DEFAULT_DB_SCHEMA,
+  type Database,
+  type DbOptions,
+} from './modules/database/connection.js';
+
+// PII column encryption (see shared/column-crypto.ts). The key belongs to the
+// database handle (`createDb(url, { piiKey })`), so an overlay seals its own
+// schema's columns by declaring them `encryptedText` / `blindIndexText` and
+// running on the handle the composition root built. `derivePiiKeys` and
+// `piiKeysOf` are for code that handles the stored form itself: SQL written
+// by hand, or a process that reads a knowledge base's tables without a handle
+// of this package's.
+export {
+  encryptedText,
+  blindIndexText,
+  derivePiiKeys,
+  isEncryptedBlob,
+  PII_CIPHERTEXT_PREFIX,
+  type PiiKeys,
+} from './shared/column-crypto.js';
 
 // Build identity surfaced by GET /api/health.
 export { GIT_SHA, resolveGitSha } from './version.js';
@@ -49,21 +104,57 @@ export {
 export type {
   IExternalApiKeyService,
   ExternalApiKeySummary,
+  AdminExternalApiKeySummary,
 } from './modules/tool-auth/external-api-key.interface.js';
 
 // Key port/seam types an overlay implements.
+// SyncedGroupsWriter is a CLASS — exported by VALUE so an overlay can
+// construct one; the seam types (including the writer's deps) stay type-only.
+export { SyncedGroupsWriter } from './modules/access/synced-groups-writer.js';
+export type {
+  SyncedGroupsSource,
+  SyncedGroupRecord,
+  SyncedGroupMember,
+  SyncedGroupsWriteResult,
+  SyncedGroupsWriterDeps,
+} from './modules/access/synced-groups-writer.js';
 export type { ISessionSink } from './modules/workspace/session-sink.js';
 export type {
   ISystemNoticeSink,
   RecoveryAgentRunner,
-} from './modules/workflow/pending-commits.worker.js';
+} from './modules/version-control/pending-commits.worker.js';
 export type { ILlmUsageMeter } from './modules/tool-auth/llm-usage-meter.js';
 export type { AuthProviderPlugin } from './modules/auth/auth.routes.js';
 export type { IErasureParticipant } from './modules/auth/account-erasure.service.js';
 export {
-  WorkflowHooks,
+  alwaysWritable,
+  READ_ONLY_CODE,
+  type IWriteAccess,
+  type WriteAccessVerdict,
+} from './modules/write-access/write-access.js';
+export {
+  AccountAdmissionRefusedError,
+  AccountDeactivatedError,
+  AccountChangeRefusedError,
+  AuthBackendError,
+  ACCOUNT_DEACTIVATED_MESSAGE,
+  admitEveryone,
+  type AccountAdmissionVerdict,
+  type AccountProvisionReason,
+  type IAccountAdmission,
+} from './modules/auth/account-admission.js';
+export {
+  VersionControlHooks,
   type CommitValidationHook,
   type CommitValidationContext,
+  type AgentOperationContext,
+  type AgentReadHook,
   type PreWriteHook,
-  type PreWriteContext,
-} from './modules/workflow/workflow-hooks.js';
+} from './modules/version-control/version-control-hooks.js';
+export {
+  ChangeRequestHooks,
+  type ChangeRequestOpenedEvent,
+  type ChangeRequestOpenedHook,
+  type ChangeRequestPerson,
+  type IChangeRequestHooks,
+} from './modules/version-control/change-request-hooks.js';

@@ -1,0 +1,341 @@
+import type { Server as HttpServer } from 'node:http';
+import express from 'express';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ToolRegistry } from '../../tool-registry/tool-registry.js';
+import { InternalTokenService } from '../../tool-auth/internal-token.service.js';
+import { createToolAuthMiddleware } from '../../tool-auth/tool-auth.middleware.js';
+import { keyOrSessionAuth } from '../../tool-auth/key-or-session.middleware.js';
+import { createAuthMiddleware } from '../../auth/auth.middleware.js';
+import { DEFAULT_KB_LAYOUT, validateKbLayout } from '@bevel-software/platform-shared';
+import { testKbContext } from '../../../__tests__/kb-context.js';
+import { CLIENT_SHORT_CUT, TOOL_DESCRIPTION_CAP, clientVisibleLength } from '../../tool-registry/description-length.js';
+import { GUIDE_FIRST_SENTENCE } from '../../tool-registry/guide-first.js';
+import { registerPluginsTools, CREATE_PLUGIN, myPluginDef, myPluginDescription } from '../plugins.tools.js';
+import { createPluginCreationRoutes } from '../plugins.routes.js';
+import { PluginProvisionError } from '../plugin-provision.service.js';
+import type { IAgentScopeResolver } from '../../agent-scope/index.js';
+import { agentFile, agentScopeOver, inMemoryKb } from '../../agent-scope/__tests__/in-memory-kb.js';
+
+/**
+ * The plugin tools are DESCRIPTIONS of the app's own creation endpoints.
+ * Two things to hold: the definitions point at those endpoints and are in
+ * every surface's catalog; and the endpoints admit an agent's connection
+ * key through the key-or-session gate exactly as they admit a session —
+ * one implementation, whoever knocks.
+ */
+
+const ALICE = { id: 'user-alice', email: 'alice@x.com', name: 'Alice' };
+
+/** `my_plugin` as the catalog lists it for `layout`, on the external surface. */
+async function listedMyPlugin(layout = DEFAULT_KB_LAYOUT): Promise<{ description: string }> {
+  const registry = new ToolRegistry();
+  registerPluginsTools(registry, testKbContext({ layout }));
+  const listed = (await registry.listExternal({ userEmail: ALICE.email })).find((t) => t.name === 'my_plugin');
+  expect(listed, 'my_plugin is not in the external catalog').toBeDefined();
+  return listed as { description: string };
+}
+
+/** The rule, in the words a client must be handed before any cut. */
+const RULE = [
+  'personal plugin',
+  'their own skills and tools',
+  'they go under the knowledge root',
+  'ask where under the knowledge root',
+  'restricted so only they can read it',
+  'never write it here, even if asked',
+];
+
+describe('the tool definitions', () => {
+  it('describe the creation endpoints, and reach every surface', async () => {
+    expect((CREATE_PLUGIN.tool_call_template as { url: string }).url).toBe('${API_URL}/api/plugins');
+    expect((myPluginDef(DEFAULT_KB_LAYOUT).tool_call_template as { url: string }).url).toBe(
+      '${API_URL}/api/plugins/personal',
+    );
+    const registry = new ToolRegistry();
+    registerPluginsTools(registry, testKbContext());
+    for (const tools of [await registry.listExternal({ userEmail: ALICE.email }), await registry.listInternal({ userEmail: ALICE.email })]) {
+      expect(tools.map((t) => t.name)).toEqual(expect.arrayContaining(['my_plugin', 'create_plugin']));
+    }
+  });
+});
+
+/**
+ * What `my_plugin` TELLS an agent. A personal plugin holds its owner's skills
+ * and tools; nothing under the plugins root is in the knowledge graph and a
+ * personal plugin is readable only by its owner, so a note filed there is
+ * never found as knowledge again. The old description opened by calling the
+ * folder "their personal space in the knowledge base", which read as an
+ * invitation to file one. Pinned here because the text IS the change: nothing
+ * refuses such a write, before or after (see the last test in this block).
+ */
+describe('what my_plugin tells an agent about the personal plugin', () => {
+  it('states the rule, naming this deployment\'s knowledge root', async () => {
+    const { description } = await listedMyPlugin();
+    expect(description).toContain("The caller's personal plugin: their own skills and tools");
+    expect(description).toContain('Notes, knowledge and other documents do NOT go here; they go under the knowledge root.');
+    expect(description).toContain('The knowledge root here is `KnowledgeBase/`.');
+    // A private request gets a QUESTION and the restrictable folder, never the
+    // personal plugin — not even when the user asks for it outright.
+    expect(description).toContain('ask where under the knowledge root it should go');
+    expect(description).toContain('restricted so only they can read it');
+    expect(description).toContain('never write it here, even if asked');
+    // The name the app shows, and none of the three phrases that sent agents here.
+    for (const retired of ['personal space', 'private space', 'own space']) {
+      expect(description, retired).not.toContain(retired);
+    }
+  });
+
+  it('names a RENAMED knowledge root, and never the default one', async () => {
+    const renamed = { knowledgeBaseDir: 'Docs', skillsDir: 'Abilities', pluginsDir: 'Extensions' };
+    const { description } = await listedMyPlugin(renamed);
+    expect(description).toContain('The knowledge root here is `Docs/`.');
+    expect(description).not.toContain('KnowledgeBase');
+  });
+
+  /**
+   * The save that completes first-run setup applies the names the admin just
+   * chose IN THAT REQUEST, with no restart, so a description built once at
+   * registration would go on naming a folder the deployment no longer has.
+   * Rewritten in place, which is why both surfaces see it: they hold the same
+   * object.
+   */
+  it('follows a layout applied after registration, on both surfaces', async () => {
+    const registry = new ToolRegistry();
+    const kb = testKbContext();
+    registerPluginsTools(registry, kb);
+    kb.applyLayout({ knowledgeBaseDir: 'Docs', skillsDir: 'Abilities', pluginsDir: 'Extensions' });
+    for (const tools of [await registry.listExternal(), await registry.listInternal()]) {
+      const description = tools.find((t) => t.name === 'my_plugin')!.description!;
+      expect(description).toContain('The knowledge root here is `Docs/`.');
+      expect(description).not.toContain('KnowledgeBase');
+    }
+  });
+
+  /**
+   * claude.ai cuts a tool description near `CLIENT_SHORT_CUT` characters, and
+   * it counts from the guide-first sentence the registry puts in front of every
+   * listed tool. So the rule has to be inside that window of the text A CLIENT
+   * IS HANDED, with the `skillsDir` mechanics — which the guide states in full
+   * anyway — as what a short client loses instead.
+   */
+  it(`states the whole rule within the first ${CLIENT_SHORT_CUT} characters a client is handed`, async () => {
+    for (const layout of [DEFAULT_KB_LAYOUT, { knowledgeBaseDir: 'Docs', skillsDir: 'Abilities', pluginsDir: 'Extensions' }]) {
+      const { description } = await listedMyPlugin(layout);
+      expect(description.startsWith(`${GUIDE_FIRST_SENTENCE} `), 'the opener is counted too').toBe(true);
+      const cut = description.slice(0, CLIENT_SHORT_CUT);
+      const root = layout.knowledgeBaseDir;
+      for (const phrase of [...RULE, `The knowledge root here is \`${root}/\`.`]) {
+        expect(cut, `"${phrase}" falls past the ${CLIENT_SHORT_CUT}-character cut`).toContain(phrase);
+      }
+    }
+  });
+
+  /**
+   * A folder name may run to 255 bytes. The root is named once, after the rule,
+   * so even the longest name a deployment can choose leaves the whole rule
+   * inside the cut and the whole text inside the cap.
+   */
+  it('keeps the rule inside the cut, and the text inside the cap, for the longest root name', async () => {
+    const longest = { knowledgeBaseDir: 'K'.repeat(255), skillsDir: 'Skills', pluginsDir: 'Plugins' };
+    expect(validateKbLayout(longest), 'the name is one a deployment may choose').toBeNull();
+    const listed = await listedMyPlugin(longest);
+    const cut = listed.description.slice(0, CLIENT_SHORT_CUT);
+    for (const phrase of RULE) {
+      expect(cut, `"${phrase}" falls past the ${CLIENT_SHORT_CUT}-character cut`).toContain(phrase);
+    }
+    expect(listed.description).toContain(`The knowledge root here is \`${longest.knowledgeBaseDir}/\`.`);
+    expect(clientVisibleLength({ name: 'my_plugin', description: listed.description })).toBeLessThanOrEqual(
+      TOOL_DESCRIPTION_CAP,
+    );
+  });
+
+  /** Only the description changed: the call an agent makes is the call it made. */
+  it('keeps its endpoint, inputs, outputs and tags exactly as they were', () => {
+    const def = myPluginDef(DEFAULT_KB_LAYOUT);
+    expect((def.tool_call_template as { url: string; http_method: string }).url).toBe('${API_URL}/api/plugins/personal');
+    expect((def.tool_call_template as { http_method: string }).http_method).toBe('POST');
+    // The flat inputs are wrapped under `body` by `toolDef`; `my_plugin` takes
+    // none, so the envelope is optional too and `my_plugin({})` is a call
+    // that matches (see `bodyEnvelope`).
+    expect(def.inputs).toEqual({
+      type: 'object',
+      properties: { body: { type: 'object', properties: {}, additionalProperties: false } },
+      additionalProperties: false,
+    });
+    expect(Object.keys((def.outputs as { properties: Record<string, unknown> }).properties)).toEqual([
+      'path',
+      'skillsDir',
+      'folder',
+      'name',
+      'displayName',
+      'created',
+    ]);
+    expect(def.tags).toEqual(['plugins', 'skills', 'write']);
+    // Byte-identical on every layout but the description.
+    const renamed = myPluginDef({ knowledgeBaseDir: 'Docs', skillsDir: 'Abilities', pluginsDir: 'Extensions' });
+    expect({ ...renamed, description: '' }).toEqual({ ...def, description: '' });
+    expect(renamed.description).not.toBe(def.description);
+  });
+
+  /** A layout given with untrimmed names is read the way every other reader reads it. */
+  it('reads the layout through the same resolver the rest of the platform uses', () => {
+    expect(myPluginDescription({ knowledgeBaseDir: '  Docs  ', skillsDir: 'Skills', pluginsDir: 'Plugins' })).toContain(
+      '`Docs/`',
+    );
+  });
+});
+
+describe('the creation endpoints behind the key-or-session gate', () => {
+  const ensurePersonalPlugin = vi.fn(async (user: { id: string }) => ({
+    folder: `personal-${user.id}`,
+    path: `Plugins/personal-${user.id}`,
+    skillsDir: `Plugins/personal-${user.id}/skills`,
+    name: `personal-${user.id}`,
+    created: true,
+  }));
+  const createPlugin = vi.fn(async (_user: unknown, name: string, parent?: string) => {
+    const folder = parent ? `${parent}/${name}` : name;
+    return { folder, path: `Plugins/${folder}`, skillsDir: `Plugins/${folder}/skills`, name: name.toLowerCase(), created: true };
+  });
+
+  let httpServer: HttpServer | undefined;
+
+  const externalApiKeyService = {
+    looksLikeExternalApiKey: (t: string) => typeof t === 'string' && t.startsWith('bevel_'),
+    verifyAndLoadToken: async (t: string) =>
+      t === 'bevel_alice'
+        ? { user: ALICE, tokenId: 'tok-a' }
+        : t === 'bevel_alice_agent'
+          ? { user: ALICE, tokenId: 'tok-b', agentPath: 'Agents/plugin-maker.agent' }
+          : null,
+  } as never;
+  const authService = {
+    getUserById: async (id: string) => (id === ALICE.id ? ALICE : null),
+    // A session is accepted only for an account that is on; Alice's is.
+    resolveSession: async (t: string) => {
+      if (t !== 'session-alice') throw new Error('bad token');
+      return { userId: ALICE.id, email: ALICE.email };
+    },
+  } as never;
+
+  async function start(agentScope?: Pick<IAgentScopeResolver, 'resolve'>): Promise<string> {
+    const internalToken = new InternalTokenService({ secret: 'test-secret' });
+    const app = express();
+    app.use(express.json());
+    app.use(
+      '/api',
+      keyOrSessionAuth({
+        sessionAuth: createAuthMiddleware(authService),
+        toolAuth: createToolAuthMiddleware(externalApiKeyService, internalToken),
+        isToolCredential: (t) => internalToken.looksLikeInternalToken(t) || externalApiKeyService.looksLikeExternalApiKey(t),
+      }),
+      createPluginCreationRoutes({ ensurePersonalPlugin, createPlugin } as never, async (req) =>
+        req.userId ? ((await (authService as { getUserById(id: string): Promise<unknown> }).getUserById(req.userId)) as never) : null,
+        agentScope,
+      ),
+    );
+    httpServer = await new Promise<HttpServer>((r) => {
+      const s = app.listen(0, () => r(s));
+    });
+    return `http://127.0.0.1:${(httpServer.address() as { port: number }).port}`;
+  }
+
+  afterEach(async () => {
+    if (httpServer) await new Promise<void>((r) => httpServer!.close(() => r()));
+    httpServer = undefined;
+    vi.clearAllMocks();
+  });
+
+  const post = (base: string, path: string, body: unknown, bearer: string) =>
+    fetch(`${base}${path}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${bearer}` },
+      body: JSON.stringify(body),
+    });
+
+  it("a connection key reaches the same endpoint a session does, as the same person", async () => {
+    const base = await start();
+    const byKey = await post(base, '/api/plugins', { name: 'GTM', parent: 'Teams' }, 'bevel_alice');
+    expect(byKey.status).toBe(201);
+    expect(await byKey.json()).toEqual({
+      folder: 'Teams/GTM',
+      path: 'Plugins/Teams/GTM',
+      skillsDir: 'Plugins/Teams/GTM/skills',
+      name: 'gtm',
+      created: true,
+    });
+    expect(createPlugin).toHaveBeenLastCalledWith(expect.objectContaining({ id: ALICE.id }), 'GTM', 'Teams');
+
+    const bySession = await post(base, '/api/plugins', { name: 'Ops' }, 'session-alice');
+    expect(bySession.status).toBe(201);
+    expect(createPlugin).toHaveBeenLastCalledWith(expect.objectContaining({ id: ALICE.id }), 'Ops', undefined);
+  });
+
+  it("my_plugin's endpoint ensures the caller's own personal plugin for a key holder", async () => {
+    const base = await start();
+    const res = await post(base, '/api/plugins/personal', {}, 'bevel_alice');
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ path: 'Plugins/personal-user-alice', skillsDir: 'Plugins/personal-user-alice/skills' });
+    expect(ensurePersonalPlugin).toHaveBeenCalledWith(expect.objectContaining({ id: ALICE.id }));
+  });
+
+  it("refuses a bad key and a bad session alike, and passes the service's refusal through with its status", async () => {
+    const base = await start();
+    expect((await post(base, '/api/plugins', { name: 'X' }, 'bevel_nobody')).status).toBe(401);
+    expect((await post(base, '/api/plugins', { name: 'X' }, 'session-nobody')).status).toBe(401);
+    createPlugin.mockRejectedValueOnce(new PluginProvisionError('There is no folder "Nope" under Plugins/.', 404));
+    const refused = await post(base, '/api/plugins', { name: 'X', parent: 'Nope' }, 'bevel_alice');
+    expect(refused.status).toBe(404);
+    expect(await refused.json()).toEqual({ error: 'There is no folder "Nope" under Plugins/.' });
+  });
+
+  it('refuses an agent call whose arguments do not match the tool, before anything is provisioned', async () => {
+    // These two routes ARE the tools, so they check a call against what the
+    // tools declare, as every route-hosted tool does. `my_plugin` takes no
+    // arguments; `create_plugin` takes a non-empty `name` and an optional `parent`.
+    myPluginDef(DEFAULT_KB_LAYOUT);
+    const base = await start();
+    const stray = await post(base, '/api/plugins/personal', { unexpected: 1 }, 'bevel_alice');
+    expect(stray.status).toBe(400);
+    const strayBody = (await stray.json()) as { kind: string; error: string };
+    expect(strayBody.kind).toBe('arguments-do-not-match');
+    expect(strayBody.error).toContain('"unexpected" is not an argument of this tool.');
+    expect(strayBody.error.split('\n').pop()).toBe('Call: KNOWLEDGE_BASE.my_plugin({})');
+    expect(ensurePersonalPlugin).not.toHaveBeenCalled();
+
+    const empty = await post(base, '/api/plugins', { name: '' }, 'bevel_alice');
+    expect(empty.status).toBe(400);
+    expect(((await empty.json()) as { error: string }).error).toContain(
+      '"name" must be at least 1 character(s) long, but 0 was given.',
+    );
+    expect(createPlugin).not.toHaveBeenCalled();
+  });
+
+  it("refuses a connection made as an .agent that does not list the tool, by name, before anything is provisioned", async () => {
+    // The agent lists `my_plugin` only. These routes are not hosted by
+    // `toolHandler`, so they make its connection-scope check themselves.
+    const kb = inMemoryKb(
+      { 'Agents/plugin-maker.agent': agentFile('name: Plugin maker\nplatformTools: [my_plugin]') },
+      { reader: ALICE.email },
+    );
+    const base = await start(agentScopeOver(kb));
+    const refused = await post(base, '/api/plugins', { name: 'GTM' }, 'bevel_alice_agent');
+    expect(refused.status).toBe(403);
+    expect(await refused.json()).toEqual({
+      error: expect.stringContaining('The tool "create_plugin" is not available to this connection'),
+      code: 'not_available_to_connection',
+    });
+    expect(createPlugin).not.toHaveBeenCalled();
+
+    // The tool it lists is served; a key made as Everything and a session are untouched.
+    expect((await post(base, '/api/plugins/personal', {}, 'bevel_alice_agent')).status).toBe(200);
+    expect((await post(base, '/api/plugins', { name: 'Ops' }, 'bevel_alice')).status).toBe(201);
+    expect((await post(base, '/api/plugins', { name: 'Fin' }, 'session-alice')).status).toBe(201);
+  });
+
+  it('a narrowed connection with no scope resolver wired loads nothing, never Everything', async () => {
+    const base = await start();
+    expect((await post(base, '/api/plugins/personal', {}, 'bevel_alice_agent')).status).toBe(403);
+    expect(ensurePersonalPlugin).not.toHaveBeenCalled();
+  });
+});

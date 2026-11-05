@@ -1,7 +1,11 @@
 import { describe, test, expect } from 'vitest';
+import { UtcpClientConfigSerializer } from '@utcp/sdk';
 import {
   BevelSecretsVariableLoader,
+  DEFAULT_SECRETS_SCOPE,
+  bevelSecretsLoaderConfig,
   registerBevelSecretsVariableLoader,
+  unregisterBevelSecretsVariableLoader,
 } from '../secrets-variable-loader.js';
 import type { ISecretsVaultService } from '../secrets-vault.contract.js';
 
@@ -50,5 +54,41 @@ describe('BevelSecretsVariableLoader', () => {
     registerBevelSecretsVariableLoader(fakeVault('unreachable', { m_X: 'y' }));
     const loader = new BevelSecretsVariableLoader('');
     expect(await loader.get('m_X')).toBeNull();
+  });
+
+  test('two knowledge bases in one process resolve the same user and key from their own vaults', async () => {
+    // One process, two vaults, one user id in each (ids are only unique
+    // within a knowledge base): a loader reads the vault registered under
+    // ITS scope, and a scope nobody registered resolves nothing.
+    registerBevelSecretsVariableLoader(fakeVault('user-1', { weather_WEATHER_KEY: 'sk-acme' }), 'acme');
+    registerBevelSecretsVariableLoader(fakeVault('user-1', { weather_WEATHER_KEY: 'sk-globex' }), 'globex');
+    expect(await new BevelSecretsVariableLoader('user-1', 'acme').get('weather_WEATHER_KEY')).toBe('sk-acme');
+    expect(await new BevelSecretsVariableLoader('user-1', 'globex').get('weather_WEATHER_KEY')).toBe('sk-globex');
+    expect(await new BevelSecretsVariableLoader('user-1', 'nobody').get('weather_WEATHER_KEY')).toBeNull();
+  });
+
+  test('the descriptor round-trips the scope through the serializer registry', async () => {
+    registerBevelSecretsVariableLoader(fakeVault('user-1', { weather_WEATHER_KEY: 'sk-acme' }), 'acme');
+    const config = new UtcpClientConfigSerializer().validateDict({
+      variables: {},
+      load_variables_from: [bevelSecretsLoaderConfig('user-1', 'acme')],
+    });
+    const [loader] = config.load_variables_from as BevelSecretsVariableLoader[];
+    expect(loader.scope).toBe('acme');
+    expect(await loader.get('weather_WEATHER_KEY')).toBe('sk-acme');
+    // Without a scope the descriptor names the single knowledge base's.
+    const [plain] = new UtcpClientConfigSerializer().validateDict({
+      variables: {},
+      load_variables_from: [bevelSecretsLoaderConfig('user-1')],
+    }).load_variables_from as BevelSecretsVariableLoader[];
+    expect(plain.scope).toBe(DEFAULT_SECRETS_SCOPE);
+  });
+
+  test('unregistering a scope makes its loaders resolve nothing', async () => {
+    registerBevelSecretsVariableLoader(fakeVault('user-1', { weather_WEATHER_KEY: 'sk-acme' }), 'evicted');
+    const loader = new BevelSecretsVariableLoader('user-1', 'evicted');
+    expect(await loader.get('weather_WEATHER_KEY')).toBe('sk-acme');
+    unregisterBevelSecretsVariableLoader('evicted');
+    expect(await loader.get('weather_WEATHER_KEY')).toBeNull();
   });
 });

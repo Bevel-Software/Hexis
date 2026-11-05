@@ -1,6 +1,18 @@
 import type { JsonSchema, Tool as UtcpTool } from '@utcp/sdk';
+import type { ConnectionScope } from '../agent-scope/index.js';
 
 export type { JsonSchema, UtcpTool };
+
+/**
+ * Whether a tool declares that it writes: the `write` tag `toolDef` puts on
+ * every tool declared `write: true`. The one test of that declaration — it
+ * decides both a tool's built-in read-only hint and whether a read-scoped
+ * caller is shown the tool, so a tool cannot be a reader in one and a writer
+ * in the other.
+ */
+export function declaresWrite(tool: Pick<UtcpTool, 'tags'>): boolean {
+  return (tool.tags ?? []).includes('write');
+}
 
 /**
  * Per-request context handed to a `ToolProvider` when the manual is built, so a
@@ -12,6 +24,12 @@ export interface ToolManualContext {
   userEmail?: string;
   /** The requesting user's id, when it could be resolved (for per-user gating). */
   userId?: string;
+  /**
+   * What the requesting connection may load, when it was made as an agent configuration
+   * file (`modules/agent-scope`): a provider that names skills or connectors
+   * in its description names only those. Absent is Everything.
+   */
+  connectionScope?: ConnectionScope;
 }
 
 /**

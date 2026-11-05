@@ -47,6 +47,54 @@ export async function listFiles(workspaceId: string): Promise<FileTreeEntry> {
   return res.json();
 }
 
+/**
+ * The URL that serves a workspace file's bytes, `GET /api/workspace/:id/file/raw`.
+ *
+ * One builder for every consumer (the document renderers' fetches, the file
+ * tree's Download, and the `<img>` tags the markdown pipeline emits), so the
+ * route's shape lives in one place. `workspaceId` is already the URL-encoded
+ * branch (see `getOrCreateWorkspace`) and is used verbatim; the path is
+ * encoded as one query value, so `#`, `?`, `%` and spaces in a file name
+ * round-trip.
+ *
+ * - `download` asks for `Content-Disposition: attachment`, which the backend
+ *   gates on the per-path `download:` verb.
+ * - `version` is a cache key appended as `&v=`; `0` or undefined adds nothing,
+ *   so the URL stays stable (and browser-cacheable) until the file is known to
+ *   have changed. See `useImageRevision`.
+ * - `ref` asks for the file AS IT WAS at that save (a commit sha) instead of
+ *   the working tree, and `side: 'before'` for the version just before it —
+ *   what Version history's preview pane and its "Download this version" read,
+ *   and the only thing the save that deleted a file can show. The backend
+ *   refuses a save outside the viewed branch's history and never falls back to
+ *   today's bytes, so a `ref` that goes wrong is an error, not a stale answer.
+ */
+export function rawFileUrl(
+  workspaceId: string,
+  relativePath: string,
+  options: {
+    download?: boolean;
+    version?: number;
+    ref?: string | null;
+    side?: 'after' | 'before';
+  } = {},
+): string {
+  let url = `/api/workspace/${workspaceId}/file/raw?path=${encodeURIComponent(relativePath)}`;
+  if (options.download) url += '&download=1';
+  if (options.version) url += `&v=${options.version}`;
+  // Absence, not falsiness: `ref: ''` is a BUG at the call site, and omitting
+  // it would quietly answer with today's working-tree bytes under a caller
+  // that asked for a past version. Sent as it is, the backend's own 400 says
+  // so.
+  if (options.ref != null) {
+    url += `&ref=${encodeURIComponent(options.ref)}`;
+    // `side` only means anything next to a ref — the backend refuses it on its
+    // own — so it is appended only here, and only when it is not the default.
+    if (options.side === 'before') url += '&side=before';
+  }
+  return url;
+}
+
 export async function readFile(workspaceId: string, relativePath: string): Promise<string> {
   // `_` cache-bust query parameter. The backend already sends
   // `Cache-Control: no-store` on this route, but intermediate CDNs /
@@ -62,20 +110,46 @@ export async function readFile(workspaceId: string, relativePath: string): Promi
   return data.content;
 }
 
+/**
+ * An `allowed-tools` entry in a saved SKILL.md that looks like a platform tool
+ * but names none the saver can see. Advisory: the save already happened.
+ */
+export interface SkillToolWarning {
+  entry: string;
+  message: string;
+  /** The closest tool name, in the entry's own spelling, when one is near. */
+  suggestion?: string;
+}
+
+export interface WriteFileResult {
+  /** Present only for a skill file whose `allowed-tools` names unknown platform tools. */
+  warnings?: SkillToolWarning[];
+}
+
 export async function writeFile(
   workspaceId: string,
   relativePath: string,
   content: string,
-  options?: { ifAbsent?: boolean },
-): Promise<void> {
+  options?: { ifAbsent?: boolean; ifMatch?: string },
+): Promise<WriteFileResult> {
   const res = await authFetch(`/api/workspace/${workspaceId}/file?path=${encodeURIComponent(relativePath)}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     // `ifAbsent` asks the backend for an exclusive create — a 409 instead of
-    // a silent replace when the target already exists.
-    body: JSON.stringify(options?.ifAbsent ? { content, ifAbsent: true } : { content }),
+    // a silent replace when the target already exists. `ifMatch` is the same
+    // 409 for an UPDATE: the bytes the caller last read, so a save composed
+    // from a stale snapshot is refused instead of erasing someone else's.
+    body: JSON.stringify({
+      content,
+      ...(options?.ifAbsent ? { ifAbsent: true } : {}),
+      ...(options?.ifMatch !== undefined ? { ifMatch: options.ifMatch } : {}),
+    }),
   });
   if (!res.ok) throw await toApiError(res);
+  // The write succeeded whatever the body says; an unreadable body only
+  // means there is nothing to add to it.
+  const body = (await res.json().catch(() => null)) as { warnings?: unknown } | null;
+  return Array.isArray(body?.warnings) ? { warnings: body.warnings as SkillToolWarning[] } : {};
 }
 
 /**

@@ -53,6 +53,8 @@ interface ResizableThreePaneLayoutProps {
    * see `SidebarFrame`'s `header`.
    */
   sidebarHeader?: ReactNode;
+  /** Pinned below the sidebar pane's own content — see `SidebarFrame`'s `footer`. */
+  sidebarFooter?: ReactNode;
   // Legacy named slots, kept as a convenience/compat signature (converted to
   // the same pane list internally with the historical sizing defaults).
   explorer?: ReactNode;
@@ -65,6 +67,7 @@ export function ResizableThreePaneLayout({
   panes,
   onController,
   sidebarHeader,
+  sidebarFooter,
   explorer,
   viewer,
   chat,
@@ -199,7 +202,7 @@ export function ResizableThreePaneLayout({
         {header}
         <div className="flex flex-1 min-h-0">
         {sidebarPane && (
-          <SidebarFrame label="File explorer" header={sidebarHeader}>
+          <SidebarFrame label="File explorer" header={sidebarHeader} footer={sidebarFooter}>
             {sidebarPane.node}
           </SidebarFrame>
         )}

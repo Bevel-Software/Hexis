@@ -1,36 +1,123 @@
 import express from 'express';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('secrets');
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
-import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import {
   InvalidSecretError,
   SecretNotFoundError,
   SecretOAuthError,
   scopesCovered,
   missingScopes,
+  configuredAs,
+  type DeclaredOAuthProvider,
   type ISecretsVaultService,
+  type ManagedSignInPort,
+  type SecretConfigStatus,
 } from './secrets-vault.contract.js';
-import type { IToolManualService, ToolManualSummary, ToolVariable } from '../tool-manuals/tool-manuals.contract.js';
+import type { IToolManualService, ToolManualSummary, ToolVariable } from '../tool-manuals/index.js';
+import type { IConnectionProbeService } from '../connection-probe/index.js';
 import { utcpNamespacedKey } from '../../shared/utcp-namespace.js';
-import type { IAccessControl } from '../access/access-control.interface.js';
-import { workspaceIdForBranch } from '../workspace/workspace.service.js';
-import '../auth/auth.middleware.js'; // Express Request augmentation (req.userId / req.userEmail)
+import type { IAccessControl } from '../access/index.js';
+import type { KbContext } from '../../shared/kb-context.js';
+import { resolveConnectionScope, type IAgentScopeResolver } from '../agent-scope/index.js';
+import '../auth/index.js'; // Express Request augmentation (req.userId / req.userEmail)
 
 export interface SecretsVaultRoutesDeps {
   secretsVault: ISecretsVaultService;
+  /**
+   * Resolves what a connection made as an agent configuration loads, so the connect
+   * page can list only the tools the chosen agent would reach (`?agent=`).
+   * Optional: a construction without one answers such a request as a
+   * connection that loads nothing — a narrowing that cannot be read is never
+   * read as Everything.
+   */
+  agents?: Pick<IAgentScopeResolver, 'resolve'>;
+  /** The released branch's clone — where the `.tool` files the access verdicts are read from live. */
+  kb: Pick<KbContext, 'defaultWorkspaceId'>;
   /** Source of `.tool` manuals + their declared variable scopes (default-branch catalog). */
   toolManualService: IToolManualService;
   /** Gates who may set a tool's ADMIN (shared) secrets — writers of the `.tool` file. */
   accessControl: IAccessControl;
+  /**
+   * Verdicts of the last credential PROBE per tool — what makes the difference
+   * between "a key is stored" and "the key works" visible to the UI.
+   */
+  connectionProbe: IConnectionProbeService;
   /** HMAC secret for signing the OAuth `state` (reuse the connector state secret). */
   stateSecret: string;
   /** Public base URL of THIS backend — builds the OAuth redirect URI. */
   publicBackendUrl: string;
   /** Public base URL of the SPA — where the OAuth callback lands the browser. */
   publicFrontendUrl: string;
+  /**
+   * The distribution's managed sign-in port, read per request (the overlay
+   * binds it after boot). Absent or null: a managed sign-in is listed as
+   * waiting on the deployment, and starting one is refused with that reason.
+   */
+  managedSignIns?: () => ManagedSignInPort | null;
+}
+
+/**
+ * The card a managed sign-in renders as on the Connect page, as `/connect/pending`
+ * and `/secrets/tools` report it beside the ordinary fields.
+ */
+interface ManagedSignInView {
+  connectorId: string;
+  scopeSet: string;
+  /** Who the connection belongs to: each person, or the workspace. */
+  tokenScope: 'user' | 'shared';
+  displayName: string;
+  icon: string;
+  description: string;
+  permissions: string[];
+  scopeSetLabel: string;
+  dataResidency: string;
+  subprocessor: string;
+  /** The connected account the row remembers, for "Connected as …". */
+  account: string | null;
+  /** The owner replaced the managed app with the deployment's own (the ordinary flow then applies). */
+  ownApp: boolean;
+  /** Sign-ins through the broker can be started on this deployment. */
+  available: boolean;
 }
 
 function redirectUriFor(publicBackendUrl: string): string {
   return `${publicBackendUrl}/api/secrets/oauth/callback`;
+}
+
+/**
+ * What of a declared sign-in is its provider configuration — ONE reading, for
+ * the client-secret save (which stores it as a record) and the sign-in start
+ * (which runs from it). `null` while the declaration has no endpoints: it named
+ * only its client id and the server's metadata could not complete it.
+ */
+function declaredProvider(variable: ToolVariable): DeclaredOAuthProvider | null {
+  const oauth = variable.oauth;
+  if (!oauth?.authorizationUrl || !oauth.tokenUrl) return null;
+  return {
+    authorizationUrl: oauth.authorizationUrl,
+    tokenUrl: oauth.tokenUrl,
+    // A managed sign-in declares no client of its own (the broker's app is
+    // the client); the one route that pins a provider requires an owner's.
+    clientId: oauth.clientId ?? '',
+    scopes: oauth.scopes,
+    // Static authorize params (e.g. Google's `access_type=offline`) so the
+    // provider returns a refresh token.
+    authParams: oauth.authParams,
+    // PKCE unless the declaration opted out; the resource indicator when the
+    // server (or the declaration) names one.
+    pkce: oauth.pkce !== false,
+    resource: oauth.resource,
+  };
+}
+
+/** Why a declared sign-in has no endpoints — the discovery's own reason when it gave one. */
+function endpointsUnknown(manual: ToolManualSummary): string {
+  const why = manual.setup?.reason;
+  return why
+    ? `The sign-in endpoints for this server aren't known yet: ${why}.`
+    : "The sign-in endpoints for this server aren't known yet — declare `authorizationUrl` and `tokenUrl` on the sign-in variable.";
 }
 
 /**
@@ -69,16 +156,16 @@ export function isSafeReturnPath(returnTo: unknown): returnTo is string {
  * `req.userId` — secrets are private per user. Mounted behind the JWT middleware.
  */
 export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.Router {
-  const { secretsVault, toolManualService, accessControl } = deps;
+  const { secretsVault, toolManualService, accessControl, connectionProbe, kb } = deps;
   const router = express.Router();
   // A FUNCTION, not a constant. Routers are constructed at boot, and on a
   // deployment configured through the setup screen the branch model does not
-  // exist yet at that moment — `DEFAULT_BRANCH` is still ''. The live binding
-  // updates when setup applies the model, but only reads INSIDE a function
+  // exist yet at that moment — the default branch is still ''. The context
+  // learns it when setup applies the model, but only reads INSIDE a function
   // body see it; a construction-time capture would keep handing an empty
   // workspace id to the access resolver until the next restart ("Invalid
   // workspace ID" on every /secrets/tools call).
-  const defaultWs = () => workspaceIdForBranch(DEFAULT_BRANCH);
+  const defaultWs = () => kb.defaultWorkspaceId();
 
   // The vault key = the exact key UTCP looks the var up under (doubles underscores
   // in the manual namespace), so storage and resolution agree for snake_case ids.
@@ -96,13 +183,43 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
     return variable ? { manual, variable } : null;
   }
 
+  /**
+   * The card for a managed sign-in, or null for an ordinary one. Built from
+   * the variable (which connector), the port (what the connector is) and
+   * the row (whose account, whether an owner brought their own app).
+   */
+  function managedView(v: ToolVariable, st: SecretConfigStatus | undefined): ManagedSignInView | null {
+    const ref = v.oauth?.managed;
+    if (!ref) return null;
+    const port = deps.managedSignIns?.() ?? null;
+    const card = port?.describe(ref) ?? null;
+    const shared = v.scope === 'admin';
+    return {
+      connectorId: ref.connectorId,
+      scopeSet: ref.scopeSet,
+      tokenScope: shared ? 'shared' : 'user',
+      displayName: card?.displayName ?? v.label ?? ref.connectorId,
+      icon: card?.icon ?? 'Plug',
+      description: card?.description ?? '',
+      permissions: card?.permissions ?? [],
+      scopeSetLabel: card?.scopeSetLabel ?? ref.scopeSet,
+      dataResidency: card?.dataResidency ?? '',
+      subprocessor: card?.subprocessor ?? '',
+      account: (shared ? st?.adminAccount : st?.userAccount) ?? null,
+      ownApp: st?.adminBringsOwnApp === true,
+      // Startable only for a connector this distribution knows: a broker that
+      // is up cannot open a sign-in through a connector it has no card for.
+      available: port?.available() === true && card !== null,
+    };
+  }
+
   router.get('/secrets', async (req, res) => {
     const userId = req.userId;
     if (!userId) return void res.status(401).json({ error: 'Not authenticated' });
     try {
       res.json({ secrets: await secretsVault.list(userId) });
     } catch (err) {
-      console.error('[secrets] list failed:', err);
+      log.error('list failed:', { err });
       res.status(500).json({ error: 'Internal error' });
     }
   });
@@ -189,8 +306,16 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
     if (!userId || !email) return void res.status(401).json({ error: 'Not authenticated' });
     try {
       const pathFilter = typeof req.query.path === 'string' ? req.query.path : null;
-      let manuals = await toolManualService.listAccessible(email);
-      if (pathFilter) manuals = manuals.filter((m) => m.path === pathFilter);
+      // The Library page's spine, so it carries the refused files too: one
+      // unparseable `.tool` costs the page that tool and nothing else, and the
+      // page can say which file and why instead of rendering a gap. Narrowed
+      // by `?path=` exactly as the manuals are — the editor sidebar asking
+      // about one file gets that file's verdict, valid or not.
+      // One scan, one access pass, one snapshot: `tools` and `invalid` cannot
+      // disagree about which files the workspace held.
+      const { tools: allManuals, invalid: allInvalid } = await toolManualService.listAccessibleCatalog(email);
+      const manuals = pathFilter ? allManuals.filter((m) => m.path === pathFilter) : allManuals;
+      const invalid = pathFilter ? allInvalid.filter((i) => i.path === pathFilter) : allInvalid;
 
       const allKeys = manuals.flatMap((m) => (m.variables ?? []).map((v) => varKey(m.name, v.name)));
       const status = await secretsVault.statusFor(userId, allKeys);
@@ -208,85 +333,164 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
             const key = varKey(m.name, v.name);
             const st = statusByKey.get(key);
             const isOAuth = v.oauth != null;
-            const authorized = isOAuth ? (st?.userAuthorized ?? false) : undefined;
+            // A SHARED sign-in (a managed workspace connection) is authorized
+            // when the shared row holds tokens — one connection for everyone.
+            const shared = isOAuth && v.scope === 'admin';
+            const authorized = isOAuth ? ((shared ? st?.adminAuthorized : st?.userAuthorized) ?? false) : undefined;
             // For an OAuth var: which declared permissions the token doesn't cover,
             // so the panel can say WHAT it works for and what it doesn't. Only
             // meaningful once authorized (an unauthorized var has no token at all).
-            const missing = isOAuth && authorized ? missingScopes(v.oauth?.scopes, st?.grantedScopes) : [];
+            const granted = shared ? st?.adminGrantedScopes : st?.grantedScopes;
+            const missing = isOAuth && authorized ? missingScopes(v.oauth?.scopes, granted) : [];
+            const managed = managedView(v, st);
             return {
               name: v.name,
               scope: v.scope,
               label: v.label ?? null,
               key,
               adminConfigured: st?.adminConfigured ?? false,
+              // What the owner's row IS, so a surface can tell a client of the
+              // OAuth kind from a key left from when the variable was static.
+              adminKind: st?.adminKind ?? null,
               userConfigured: st?.userConfigured ?? false,
               oauth: isOAuth,
               authorized,
               needsReauth: isOAuth && authorized === true && missing.length > 0,
               missingScopes: missing,
+              ...(managed ? { managed } : {}),
             };
           }),
         })),
       );
-      res.json({ tools });
+      res.json({ tools, invalid });
     } catch (err) {
-      console.error('[secrets] list tools failed:', err);
+      log.error('list tools failed:', { err });
       res.status(500).json({ error: 'Internal error' });
     }
   });
 
   // The aggregated "connect your tools" view for a single user: every accessible
-  // tool with ONLY its per-user (`user`-scoped) variables and whether the caller
-  // has set each, plus the caller's OAuth secrets and their authorized state. This
-  // is the surface an external-agent user lands on from the needs-authorization
-  // link — it shows exactly what THEY must provide, never the admin/shared items.
+  // tool with the variables still standing between the caller and using it, plus
+  // the caller's OAuth secrets and their authorized state. This is the surface an
+  // external-agent user lands on from the needs-authorization link.
+  //
+  // It reports the WORKSPACE-scoped (`admin`) values too, and not because the
+  // reader can always set them: the Library's plugin banner COUNTS an integration
+  // that needs one, so a page that left them out told the reader four things
+  // needed setup and then showed two. An `admin` value the caller may not write
+  // is flagged `ownerOnly` — the page greys it and names who has to act — and one
+  // that is already set is nobody's outstanding work, so it is dropped. What is
+  // not relaxed is readability: the listing is still built from `listAccessible`,
+  // so a tool the caller may not read is named here in no state at all.
+  //
+  // `?agent=<path>` — the consent step's "Connect as" choice — narrows the
+  // listing to what a connection made as that agent configuration would load, by the
+  // ONE answer every agent surface asks (`ConnectionScope.allowsConnector`,
+  // applied after the read gate exactly as the tool listing applies it). A
+  // sign-in the connection will never reach is not on a page about what the
+  // connection needs. Absent, the listing is Everything's, as it always was.
   router.get('/connect/pending', async (req, res) => {
     const userId = req.userId;
     const email = req.userEmail;
     if (!userId || !email) return void res.status(401).json({ error: 'Not authenticated' });
     try {
-      const manuals = await toolManualService.listAccessible(email);
-      const allKeys = manuals.flatMap((m) =>
-        (m.variables ?? []).filter((v) => v.scope === 'user').map((v) => varKey(m.name, v.name)),
-      );
+      const agentPath = typeof req.query.agent === 'string' && req.query.agent.trim() !== '' ? req.query.agent : null;
+      const scope = await resolveConnectionScope(deps.agents, email, agentPath);
+      const manuals = (await toolManualService.listAccessible(email)).filter((m) => scope.allowsConnector(m.path));
+      // BOTH tiers now — the workspace values are reported as well, so their
+      // stored state has to be asked for.
+      const allKeys = manuals.flatMap((m) => (m.variables ?? []).map((v) => varKey(m.name, v.name)));
       const status = await secretsVault.statusFor(userId, allKeys);
       const statusByKey = new Map(status.map((s) => [s.key, s]));
+      // Who may set a tool's workspace values — writers of its `.tool` file, the
+      // same verdict the admin write route enforces. Resolved once per manual
+      // because both the key rows and the sign-in rows ask it.
+      const canWriteBySlug = new Map(
+        await Promise.all(
+          manuals.map(
+            async (m) =>
+              [m.slug, await accessControl.canWrite(defaultWs(), email, m.path)] as const,
+          ),
+        ),
+      );
 
       const tools = manuals
-        .map((m) => ({
-          slug: m.slug,
-          name: m.name,
-          path: m.path,
-          type: m.type,
-          // Plain (non-OAuth) per-user vars render as key inputs under "Keys".
-          variables: (m.variables ?? [])
-            .filter((v) => v.scope === 'user' && !v.oauth)
-            .map((v) => {
-              const key = varKey(m.name, v.name);
-              return {
-                name: v.name,
-                label: v.label ?? null,
-                key,
-                configured: statusByKey.get(key)?.userConfigured ?? false,
-              };
-            }),
-        }))
-        // Only surface tools that actually have per-user items to configure.
+        .map((m) => {
+          const canWrite = canWriteBySlug.get(m.slug) ?? false;
+          return {
+            slug: m.slug,
+            name: m.name,
+            path: m.path,
+            type: m.type,
+            canWrite,
+            // Plain (non-OAuth) vars render as key rows under "Keys".
+            variables: (m.variables ?? [])
+              .filter((v) => !v.oauth)
+              .map((v) => {
+                const key = varKey(m.name, v.name);
+                const st = statusByKey.get(key);
+                return {
+                  name: v.name,
+                  label: v.label ?? null,
+                  key,
+                  scope: v.scope,
+                  // "Is there a value this caller's agent would resolve?" — the
+                  // workspace's for an `admin` var, the caller's own for a `user`
+                  // one. A row of the WRONG KIND does not count: this var is not
+                  // oauth, so an `oauth` row left behind by an earlier `.tool`
+                  // edit holds a token set where `resolve` wants a value, and
+                  // calling that configured hides the key nobody has set.
+                  configured:
+                    v.scope === 'admin'
+                      ? configuredAs('static', st?.adminConfigured, st?.adminKind)
+                      : configuredAs('static', st?.userConfigured, st?.userKind),
+                  ownerOnly: v.scope === 'admin' && !canWrite,
+                };
+              })
+              // A workspace value already set is outstanding for nobody. The
+              // caller's own vars stay listed once set, because this page is also
+              // where they replace one.
+              .filter((v) => v.scope !== 'admin' || !v.configured),
+          };
+        })
+        // Only surface tools that actually have something to show.
         .filter((t) => t.variables.length > 0);
 
       // OAuth-backed per-user vars render as Authorize buttons under "Sign-ins".
       // Keyed by slug+var (the caller's row may not exist yet), with authorized
       // state from the oauth-aware status.
-      const toolOAuth = manuals.flatMap((m) =>
-        (m.variables ?? [])
-          .filter((v) => v.scope === 'user' && v.oauth)
+      const toolOAuth = manuals.flatMap((m) => {
+        const canWrite = canWriteBySlug.get(m.slug) ?? false;
+        return (m.variables ?? [])
+          // Every per-user sign-in, plus a managed WORKSPACE connection (the
+          // one `admin`-scoped sign-in there is): listed for everyone who can
+          // read the tool, since everyone calls through it, with Connect
+          // offered to the writers who can make it.
+          .filter((v) => v.oauth && (v.scope === 'user' || v.oauth.managed))
           .map((v) => {
             const st = statusByKey.get(varKey(m.name, v.name));
-            const authorized = st?.userAuthorized ?? false;
+            const managed = managedView(v, st);
+            const shared = v.scope === 'admin';
+            const authorized = (shared ? st?.adminAuthorized : st?.userAuthorized) ?? false;
             // Signed in, but the token's granted scopes no longer cover what the
             // tool declares → surface as needing re-authorization, not as connected.
             const needsReauth =
-              authorized && !scopesCovered(v.oauth?.scopes, st?.grantedScopes);
+              authorized && !scopesCovered(v.oauth?.scopes, shared ? st?.adminGrantedScopes : st?.grantedScopes);
+            // On an oauth var the ADMIN row is the provider registration — the
+            // client secret — without which nobody's Authorize can work. It is a
+            // workspace value like any other, so it carries the same flag. It
+            // must be an OAUTH row: `beginToolOAuthByKey` refuses a static one,
+            // so a shared key left over from before this var was made OAuth
+            // would otherwise light up Authorize with nothing behind it.
+            //
+            // A MANAGED sign-in needs no registration here — the broker holds
+            // it — so it is configured when the deployment can reach a broker,
+            // when an owner replaced the managed app with their own, or when a
+            // token is already stored (nothing is outstanding for a connection
+            // that works, whatever the broker is doing).
+            const ownerConfigured = managed
+              ? managed.ownApp || managed.available || authorized
+              : configuredAs('oauth', st?.adminConfigured, st?.adminKind);
             return {
               slug: m.slug,
               varName: v.name,
@@ -295,24 +499,34 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
               label: v.label ?? null,
               authorized,
               needsReauth,
+              ownerConfigured,
+              // Not the caller's to do: an ordinary sign-in waiting on a
+              // registration the caller may not write, or a managed WORKSPACE
+              // connection seen by someone who may not write the tool. A
+              // managed personal sign-in is always the caller's own, broker or
+              // no broker.
+              ownerOnly: managed ? shared && !canWrite : !ownerConfigured && !canWrite,
+              ...(managed ? { managed, canWrite } : {}),
             };
-          }),
-      );
+          });
+      });
 
       // Standalone sign-ins = oauth secrets the user registered directly on the
       // Secrets page. A TOOL sign-in provisions a per-user row in the same
       // table (keyed `<manual>_<VAR>`), so exclude every tool-var key here or
       // an authorized tool sign-in would render twice — once as a toolOAuth
-      // row and again as a "standalone" one.
+      // row and again as a "standalone" one. They belong to no connector, so
+      // a connection narrowed to an agent's connectors has nothing to do with
+      // them: listed for Everything only.
       const toolOAuthKeys = new Set(toolOAuth.map((o) => o.key));
-      const secrets = await secretsVault.list(userId);
+      const secrets = scope.isEverything() ? await secretsVault.list(userId) : [];
       const oauth = secrets
         .filter((s) => s.kind === 'oauth' && !toolOAuthKeys.has(s.key))
         .map((s) => ({ id: s.id, key: s.key, label: s.label, authorized: s.authorized ?? false }));
 
       res.json({ tools, oauth, toolOAuth });
     } catch (err) {
-      console.error('[secrets] connect/pending failed:', err);
+      log.error('connect/pending failed:', { err });
       res.status(500).json({ error: 'Internal error' });
     }
   });
@@ -361,6 +575,10 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
         value: body.value,
         label: body.label,
       });
+      // No probe here, and nothing to invalidate: a verdict is never stored, so
+      // saving a key cannot leave a stale one behind. The caller follows this
+      // with an explicit check, which keeps the save fast and gives the UI a
+      // "Testing…" state to show instead of a frozen dialog.
       res.status(201).json({ secret });
     } catch (err) {
       mapError(err, res, 'set user var');
@@ -369,8 +587,8 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
 
   // Set the confidential client secret for a tool's OAuth-backed variable — the
   // ONLY place the secret is provided. Requires WRITE on the `.tool`. The provider
-  // config comes from the variable's own `oauth` declaration (stored WITH the
-  // secret so a later `.tool` edit can't redirect it).
+  // config of the variable's own `oauth` declaration is stored with the secret as
+  // a record of the save; a sign-in start reads the declaration afresh.
   router.put('/secrets/tools/:slug/vars/:var/oauth/admin', async (req, res) => {
     const userId = req.userId;
     const email = req.userEmail;
@@ -384,20 +602,28 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
       if (!(await accessControl.canWrite(defaultWs(), email, found.manual.path))) {
         return void res.status(403).json({ error: 'You need write access to this tool to set its client secret.' });
       }
+      // A declaration that names only its client id is completed from the
+      // server's OAuth metadata. When that didn't happen, storing the secret
+      // with a provider that has no endpoints would leave every sign-in failing
+      // later with a far less specific error than the catalog's own.
+      const provider = declaredProvider(found.variable);
+      if (!provider) return void res.status(422).json({ error: endpointsUnknown(found.manual) });
       const clientSecret = (req.body ?? {}).clientSecret;
+      // A managed sign-in names no client of its own; an owner who brings
+      // the deployment's own app ("use our own app") supplies its id here
+      // with the secret, and the pinned row then runs the ordinary flow:
+      // this deployment's redirect URI, a direct token exchange and refresh.
+      const ownClientId = typeof (req.body ?? {}).clientId === 'string' ? (req.body.clientId as string).trim() : '';
+      const clientId = provider.clientId || ownClientId;
+      if (!clientId) {
+        return void res.status(422).json({
+          error: 'This sign-in goes through the managed connector. To use your own OAuth app instead, send its client id with the secret.',
+        });
+      }
       await secretsVault.putSharedOAuthClientSecret({
         key: varKey(found.manual.name, found.variable.name),
         clientSecret,
-        provider: {
-          authorizationUrl: found.variable.oauth.authorizationUrl,
-          tokenUrl: found.variable.oauth.tokenUrl,
-          clientId: found.variable.oauth.clientId,
-          scopes: found.variable.oauth.scopes,
-          // Static authorize params (e.g. Google's `access_type=offline`) so the
-          // provider returns a refresh token — stored with the secret so a later
-          // `.tool` edit can't redirect the flow.
-          authParams: found.variable.oauth.authParams,
-        },
+        provider: { ...provider, clientId },
       });
       res.status(201).json({ ok: true });
     } catch (err) {
@@ -415,12 +641,81 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
     const email = req.userEmail;
     if (!userId || !email) return void res.status(401).json({ error: 'Not authenticated' });
     try {
-      const found = await findManualVar(email, req.params.slug, req.params.var);
-      if (!found) return void res.status(404).json({ error: 'Tool or variable not found' });
-      if (!found.variable.oauth) {
-        return void res.status(422).json({ error: 'This variable is not an OAuth sign-in.' });
+      // Two sources, one per kind of sign-in. A DECLARED one follows its tool
+      // file as it reads now — never the catalog's scan, which can be a refresh
+      // behind the file, and never the copy the client-secret save stored. A
+      // client the platform registered itself (oauth-auto) is described by no
+      // file: the catalog's discovery surfaced it, and its stored row is the
+      // only description of it there is.
+      const [live, catalog] = await Promise.all([
+        toolManualService.liveDeclaration(email, req.params.slug, req.params.var),
+        findManualVar(email, req.params.slug, req.params.var),
+      ]);
+      // The file is there but its declaration is refused as it reads now (an
+      // http:// or private endpoint, say): the parser's reason is the answer,
+      // and neither a catalog still holding the earlier version nor the stored
+      // row stands in for it. Nothing is sent anywhere.
+      if (live?.refused) return void res.status(422).json({ error: live.refused });
+      const manual = live?.manual ?? catalog?.manual;
+      if (!manual || (!live?.variable && !catalog)) {
+        return void res.status(404).json({ error: 'Tool or variable not found' });
       }
-      const key = varKey(found.manual.name, found.variable.name);
+      const key = varKey(manual.name, req.params.var);
+      const declared = live?.variable?.oauth ? live.variable : null;
+      const registered =
+        !declared && catalog?.manual.setup?.kind === 'oauth-auto' && catalog.variable.oauth ? catalog.variable : null;
+      const signIn = declared ?? registered;
+      // No sign-in in the file and none the platform registered: whatever the
+      // shared row still holds is not used.
+      if (!signIn?.oauth) {
+        throw new SecretOAuthError("This tool's owner hasn't finished setting this up");
+      }
+      const returnTo: unknown = (req.body ?? {}).returnTo;
+      // A MANAGED sign-in goes through the broker — unless an owner pinned the
+      // deployment's own app on the shared row, in which case the ordinary
+      // flow below applies exactly as for a file-declared client. Read from
+      // the LIVE declaration like everything else here.
+      const ref = signIn.oauth.managed;
+      if (ref) {
+        const [st] = await secretsVault.statusFor(userId, [key]);
+        // An owner's own app runs the ordinary flow, whose tokens land on the
+        // caller's own row. A WORKSPACE connection reads the shared row, so
+        // the two cannot meet: that combination is refused here rather than
+        // signing an owner in to a row nobody reads.
+        if (st?.adminBringsOwnApp === true && signIn.scope === 'admin') {
+          return void res.status(422).json({
+            error: 'A workspace connection cannot use your own OAuth app yet. Remove the client secret to connect it through the managed connector.',
+          });
+        }
+        if (st?.adminBringsOwnApp !== true) {
+          const port = deps.managedSignIns?.() ?? null;
+          if (!port || !port.available()) {
+            return void res.status(409).json({
+              error: 'This deployment is not connected to a connector broker yet. Ask your admin to configure it.',
+            });
+          }
+          // The same answer the card gives (`available`): a connector the
+          // distribution does not know cannot be started through its broker.
+          if (!port.describe(ref)) {
+            return void res.status(409).json({
+              error: 'This deployment does not offer the connector this sign-in names. Ask your admin.',
+            });
+          }
+          const shared = signIn.scope === 'admin';
+          if (shared && !(await accessControl.canWrite(defaultWs(), email, manual.path))) {
+            return void res.status(403).json({ error: 'Only a writer of this tool can connect its workspace account.' });
+          }
+          const { url } = await port.start({
+            userId: shared ? null : userId,
+            key,
+            ref,
+            returnTo: isSafeReturnPath(returnTo) ? returnTo : '/connect',
+          });
+          return void res.json({ url });
+        }
+      }
+      const provider = declared ? declaredProvider(declared) : undefined;
+      if (provider === null) return void res.status(422).json({ error: endpointsUnknown(manual) });
       // Provision the caller's oauth row (from the owner-set secret) FIRST — its id
       // is what the un-authed callback keys on. Pass an empty state placeholder; we
       // sign the real state below with the returned id and swap it into the URL, so
@@ -430,17 +725,16 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
         key,
         redirectUri: redirectUriFor(deps.publicBackendUrl),
         state: '',
-        // Request the permissions the tool file declares RIGHT NOW (not the frozen
-        // copy on the owner-set row), so adding a scope to the `.tool` takes effect
-        // on the next sign-in. The secret/clientId/addresses stay owner-pinned.
-        scopes: found.variable.oauth.scopes,
+        // Request the permissions the tool file declares RIGHT NOW, so adding a
+        // scope takes effect on the next sign-in.
+        scopes: signIn.oauth.scopes,
+        provider,
       });
       // The return path is signed INTO the state (HMAC-SHA256) rather than kept
       // in a query param or a cookie: the callback arrives un-authenticated from
       // the provider, so the state is the only thing it can trust. An absent or
       // unsafe `returnTo` falls back to the legacy `'connect'` marker, which
       // keeps a body-less start byte-identical to what it produced before.
-      const returnTo: unknown = (req.body ?? {}).returnTo;
       const state = signState(deps.stateSecret, {
         u: userId,
         i: id,
@@ -486,6 +780,30 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
     }
   });
 
+  /**
+   * Probe one tool's credential NOW and return the verdict.
+   *
+   * A POST because it has an effect on the world — it makes a real
+   * authenticated call to the provider — and because browsers and proxies are
+   * free to cache a GET, which for a freshness check would defeat the point.
+   *
+   * A probe outcome is never an HTTP error: a rejected credential is a
+   * successful check that found a problem, so it comes back 200 with
+   * `status: 'failed'`. Only a tool that can't be found or read 404s.
+   */
+  router.post('/secrets/tools/:slug/check', async (req, res) => {
+    const userId = req.userId;
+    const email = req.userEmail;
+    if (!userId || !email) return void res.status(401).json({ error: 'Not authenticated' });
+    try {
+      const verdict = await connectionProbe.probe(userId, email, req.params.slug);
+      if (!verdict) return void res.status(404).json({ error: 'Tool not found' });
+      res.json({ verdict });
+    } catch (err) {
+      mapError(err, res, 'check tool connection');
+    }
+  });
+
   return router;
 }
 
@@ -522,8 +840,23 @@ export function createSecretsVaultPublicRoutes(deps: SecretsVaultRoutesDeps): ex
       await secretsVault.completeOAuth(state.u, state.i, code, redirectUriFor(deps.publicBackendUrl));
       back(`authorized=${encodeURIComponent(state.i)}`, dest);
     } catch (err) {
-      console.error('[secrets] oauth callback failed:', err instanceof Error ? err.message : String(err));
-      back(`error=${encodeURIComponent('Authorization failed. Check the provider configuration and try again.')}`, dest);
+      log.error('oauth callback failed:', { err });
+      // A provider's REFUSAL (the vault's error carrying the provider's HTTP
+      // status) names the provider's error code and Hexis's own sentence for
+      // it — the one thing the person on the Connect page (or the agent they
+      // paste it to) can act on: a client the provider does not accept, a
+      // refused authorization code. Nothing of the provider's text is in it.
+      // Every other failure stays the generic line: a transport error quotes
+      // what fetch said, which is not a provider's word.
+      const refusal = err instanceof SecretOAuthError && err.providerStatus !== undefined ? err.message : null;
+      back(
+        `error=${encodeURIComponent(
+          refusal
+            ? `Authorization failed. ${refusal}`
+            : 'Authorization failed. Check the provider configuration and try again.',
+        )}`,
+        dest,
+      );
     }
   });
 
@@ -534,7 +867,7 @@ function mapError(err: unknown, res: express.Response, op: string): void {
   if (err instanceof InvalidSecretError) return void res.status(422).json({ error: err.message });
   if (err instanceof SecretNotFoundError) return void res.status(404).json({ error: err.message });
   if (err instanceof SecretOAuthError) return void res.status(409).json({ error: err.message });
-  console.error(`[secrets] ${op} failed:`, err);
+  log.error(`${op} failed:`, { err });
   res.status(500).json({ error: 'Internal error' });
 }
 

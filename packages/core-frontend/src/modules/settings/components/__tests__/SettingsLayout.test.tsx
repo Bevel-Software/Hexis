@@ -111,6 +111,7 @@ describe('SettingsLayout', () => {
     const links = within(nav()).getAllByRole('link');
     expect(links.map((l) => l.textContent)).toEqual([
       'External agent access',
+      'Audit log',
       'Secrets',
       'Browse available tools',
       'Account',
@@ -176,20 +177,20 @@ describe('SettingsLayout', () => {
   it('renders with no AdminContext at all, as a non-admin', () => {
     expect(() => renderAt('/secrets', { withAdminContext: false })).not.toThrow();
     expect(within(nav()).queryByText('Admin only')).toBeNull();
-    expect(within(nav()).queryByRole('link', { name: 'Roles & Members' })).toBeNull();
+    expect(within(nav()).queryByRole('link', { name: 'App roles' })).toBeNull();
   });
 
   it('hides the admin section from a non-admin', () => {
     renderAt('/secrets', { isAdmin: false });
     expect(within(nav()).queryByText('Admin only')).toBeNull();
-    expect(within(nav()).queryByRole('link', { name: 'Roles & Members' })).toBeNull();
+    expect(within(nav()).queryByRole('link', { name: 'App roles' })).toBeNull();
     expect(within(nav()).queryByRole('link', { name: 'User accounts' })).toBeNull();
   });
 
   it('shows the admin section to an admin', () => {
     renderAt('/secrets', { isAdmin: true });
     expect(within(nav()).getByText('Admin only')).toBeInTheDocument();
-    expect(within(nav()).getByRole('link', { name: 'Roles & Members' })).toBeInTheDocument();
+    expect(within(nav()).getByRole('link', { name: 'App roles' })).toBeInTheDocument();
     expect(within(nav()).getByRole('link', { name: 'User accounts' })).toBeInTheDocument();
   });
 
@@ -205,12 +206,12 @@ describe('SettingsLayout', () => {
   it('grows the admin section when isAdmin flips true after mount', () => {
     const { rerender } = renderAt('/secrets', { isAdmin: false });
     const navBefore = nav();
-    expect(within(navBefore).queryByRole('link', { name: 'Roles & Members' })).toBeNull();
+    expect(within(navBefore).queryByRole('link', { name: 'App roles' })).toBeNull();
 
     rerender(withAdmin(true, routerTree('/secrets')));
 
     expect(nav()).toBe(navBefore);
-    expect(within(nav()).getByRole('link', { name: 'Roles & Members' })).toBeInTheDocument();
+    expect(within(nav()).getByRole('link', { name: 'App roles' })).toBeInTheDocument();
   });
 
   describe('narrow windows', () => {
@@ -242,7 +243,7 @@ describe('SettingsLayout', () => {
       renderAt('/secrets');
       expect(document.getElementById(SIDEBAR_DOM_ID)).toBeNull();
       expect(noNav()).not.toBeNull();
-      expect(within(nav()).getAllByRole('link')).toHaveLength(4);
+      expect(within(nav()).getAllByRole('link')).toHaveLength(5);
       vi.unstubAllGlobals();
     });
   });

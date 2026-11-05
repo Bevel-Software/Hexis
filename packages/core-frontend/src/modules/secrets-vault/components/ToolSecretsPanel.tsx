@@ -11,6 +11,9 @@ import {
   deleteUserVar,
 } from '../services/tool-secrets.api';
 import { startToolOAuth } from '../services/connect.api';
+import { SavedKeyProbeResult } from '../probe/SavedKeyProbeResult';
+import { useSavedKeyProbe, type SavedKeyProbe } from '../probe/useSavedKeyProbe';
+import { announceToolCredentialsChanged } from '../../../core/events';
 
 /**
  * Configure one tool's secrets, split by who provisions each variable:
@@ -23,15 +26,48 @@ import { startToolOAuth } from '../services/connect.api';
  * because a person arrives here FROM a card or a tool page that used those
  * words, and the fix-it surface must not describe the same state differently.
  * Values are write-only throughout: fields start empty, saving replaces.
+ *
+ * Every save here is followed by the manual's health check, and the answer
+ * lands on the row that was saved (`SavedKeyProbeResult`). The vault used to
+ * store a value and stop, which made it the quietest place in the app to
+ * install a key the provider would refuse.
  */
 export function ToolSecretsPanel({ tool, onChanged }: { tool: ToolSecrets; onChanged: () => void }) {
   const adminVars = tool.variables.filter((v) => v.scope === 'admin');
   const userVars = tool.variables.filter((v) => v.scope === 'user');
 
+  /**
+   * ONE probe for the whole panel, shared by every row.
+   *
+   * That is what a probe is: a single call carrying the tool's whole
+   * credential set, not a test of one `${VAR}`. Giving each row its own would
+   * leave the admin key's row still saying `Connected` after the user key
+   * below it changed the very credentials that answer was about.
+   *
+   * The slug is not merely WHAT to call: it is part of the identity of every
+   * answer the hook holds. This panel is not always remounted when the tool
+   * under it changes — the workspace's `.tool` renderer swaps `tool` on a
+   * mounted panel — and the hook is where that is handled, so no host of this
+   * component has to remember to key it.
+   */
+  const probe = useSavedKeyProbe(tool.slug);
+
+  /**
+   * Every write in this panel funnels through here, which is why the Library
+   * is told from the panel rather than from each of its three hosts (the
+   * Secrets page, the `.tool` editor's sidebar, and whatever mounts it next):
+   * a host that forgot would leave the cards and the plugin banners reading
+   * the state from before the save until a browser reload.
+   */
+  const changed = () => {
+    announceToolCredentialsChanged();
+    onChanged();
+  };
+
   if (tool.variables.length === 0) {
     return (
       <div className="flex flex-col gap-3">
-        <SetupBanner setup={tool.setup} />
+        <SetupBanner setup={tool.setup} declared={tool.variables.some((v) => v.oauth)} />
         {tool.setup?.kind !== 'oauth-manual' && (
           <p className="text-detail text-ink-muted">
             {tool.setup?.kind === 'open' ? (
@@ -51,7 +87,7 @@ export function ToolSecretsPanel({ tool, onChanged }: { tool: ToolSecrets; onCha
 
   return (
     <div className="flex flex-col gap-3.5">
-      <SetupBanner setup={tool.setup} />
+      <SetupBanner setup={tool.setup} declared={tool.variables.some((v) => v.oauth)} />
       {adminVars.length > 0 && (
         <VarPlugin
           title="Set by the tool owner"
@@ -62,7 +98,8 @@ export function ToolSecretsPanel({ tool, onChanged }: { tool: ToolSecrets; onCha
           configured={(v) => v.adminConfigured}
           onSave={(v, value) => setAdminVar(tool.slug, v.name, value)}
           onDelete={(v) => deleteAdminVar(tool.slug, v.name)}
-          onChanged={onChanged}
+          onChanged={changed}
+          probe={probe}
         />
       )}
       {userVars.length > 0 && (
@@ -80,7 +117,8 @@ export function ToolSecretsPanel({ tool, onChanged }: { tool: ToolSecrets; onCha
           configured={(v) => v.userConfigured}
           onSave={(v, value) => setUserVar(tool.slug, v.name, value)}
           onDelete={(v) => deleteUserVar(tool.slug, v.name)}
-          onChanged={onChanged}
+          onChanged={changed}
+          probe={probe}
         />
       )}
     </div>
@@ -95,21 +133,30 @@ function Chip({ children }: { children: React.ReactNode }) {
 }
 
 /**
- * When a `type: mcp` server needs sign-in that auto-discovery COULDN'T set up
- * (typically the provider has no dynamic client registration — e.g. Google),
- * the tool would otherwise look like it needs nothing. Make the required manual
- * setup explicit, and surface the discovery `reason` so the admin knows why.
+ * When a `type: mcp` server needs a sign-in with an owner-registered OAuth app
+ * (auto-discovery couldn't register one — Google, HubSpot — or the declaration
+ * already names a client id), the tool would otherwise look like it needs
+ * nothing until the owner finishes. Make the remaining step explicit, and
+ * surface the discovery `reason` so the admin knows what still blocks it.
  * The `open` / `oauth-auto` cases need no banner — they're either self-evident
  * (a sign-in variable appears below) or nothing-to-do.
  */
-function SetupBanner({ setup }: { setup: ToolSetup | null }) {
+function SetupBanner({ setup, declared }: { setup: ToolSetup | null; declared: boolean }) {
   if (setup?.kind !== 'oauth-manual') return null;
   return (
     <Banner tone="wait" role="status">
-      <span className="font-semibold">Sign-in setup needed.</span> This server needs users to sign
-      in, but Bevel couldn&apos;t set that up automatically. A tool writer must register an OAuth
-      client with the provider, declare it in the <Chip>.tool</Chip> file&apos;s{' '}
-      <Chip>variables</Chip> block, then set its client secret here.
+      <span className="font-semibold">Sign-in setup needed.</span>{' '}
+      {declared ? (
+        <>The sign-in is declared — a tool writer sets its client secret here to finish.</>
+      ) : (
+        <>
+          This server needs users to sign in, but Bevel couldn&apos;t set that up automatically. A
+          tool writer must register an OAuth app with the provider and declare its client id on a
+          user-scoped sign-in variable — under <Chip>Edit server</Chip> on the tool&apos;s page for
+          an MCP server, or in the <Chip>.tool</Chip> file&apos;s <Chip>variables</Chip> block —
+          then set its client secret here.
+        </>
+      )}
       {setup.reason && <em className="mt-1 block text-detail">{setup.reason}</em>}
     </Banner>
   );
@@ -126,6 +173,7 @@ function VarPlugin({
   onSave,
   onDelete,
   onChanged,
+  probe,
 }: {
   title: string;
   hint: string;
@@ -138,6 +186,8 @@ function VarPlugin({
   onSave: (v: ToolVarStatus, value: string) => Promise<void>;
   onDelete: (v: ToolVarStatus) => Promise<void>;
   onChanged: () => void;
+  /** The panel's one probe — both groups of rows share it. */
+  probe: SavedKeyProbe;
 }) {
   return (
     <div>
@@ -146,7 +196,14 @@ function VarPlugin({
       <ul className="flex flex-col gap-1.5">
         {vars.map((v) =>
           v.oauth ? (
-            <OAuthVarRow key={v.name} v={v} slug={slug} ownerCanWrite={ownerCanWrite} onChanged={onChanged} />
+            <OAuthVarRow
+              key={v.name}
+              v={v}
+              slug={slug}
+              ownerCanWrite={ownerCanWrite}
+              onChanged={onChanged}
+              probe={probe}
+            />
           ) : (
             <VarRow
               key={v.name}
@@ -156,6 +213,7 @@ function VarPlugin({
               onSave={(value) => onSave(v, value)}
               onDelete={() => onDelete(v)}
               onChanged={onChanged}
+              probe={probe}
             />
           ),
         )}
@@ -171,6 +229,7 @@ function VarRow({
   onSave,
   onDelete,
   onChanged,
+  probe,
 }: {
   v: ToolVarStatus;
   editable: boolean;
@@ -178,23 +237,38 @@ function VarRow({
   onSave: (value: string) => Promise<void>;
   onDelete: () => Promise<void>;
   onChanged: () => void;
+  /** Shared with the panel's other rows; it answers for whichever saved last. */
+  probe: SavedKeyProbe;
 }) {
   const [value, setValue] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const run = async (fn: () => Promise<void>) => {
+  /**
+   * @param saved a value was WRITTEN, so there is something to test. A delete
+   *   goes through here too and has nothing to prove — it only orphans
+   *   whatever the last probe was about to say, since that described a value
+   *   this row no longer holds.
+   */
+  const run = async (fn: () => Promise<void>, saved = false) => {
     setBusy(true);
     setError(null);
     try {
       await fn();
+      // Stored and cleared first; the probe cannot fail or delay any of this.
       setValue('');
       onChanged();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+      return;
     } finally {
       setBusy(false);
     }
+    // Outside the try: a probe's trouble is never reported as the save's, and
+    // the save is already done by the time either is decided. Naming the
+    // variable moves the panel's shared answer onto THIS row.
+    if (saved) probe.probeSaved(v.name);
+    else probe.forget();
   };
 
   return (
@@ -233,12 +307,16 @@ function VarRow({
             variant="primary"
             size="sm"
             disabled={busy || !value}
-            onClick={() => void run(() => onSave(value))}
+            onClick={() => void run(() => onSave(value), true)}
           >
             Save
           </Button>
         </div>
       )}
+      {/* What the provider made of the value just saved here. Only on the row
+          that asked: the answer is the tool's, and the newest save is the only
+          place it is still current. */}
+      {probe.subject === v.name && <SavedKeyProbeResult probe={probe} className="mt-1.5" />}
       {error && (
         <p role="alert" className="mt-1 text-detail text-danger">
           {error}
@@ -265,11 +343,14 @@ function OAuthVarRow({
   slug,
   ownerCanWrite,
   onChanged,
+  probe,
 }: {
   v: ToolVarStatus;
   slug: string;
   ownerCanWrite: boolean;
   onChanged: () => void;
+  /** Shared with the panel's other rows; it answers for whichever saved last. */
+  probe: SavedKeyProbe;
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -297,9 +378,14 @@ function OAuthVarRow({
       onChanged();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+      return;
     } finally {
       setBusy(false);
     }
+    // Also a credential change: a replaced client secret can invalidate the
+    // tokens minted under the old one, so the tool's health is now unknown and
+    // worth testing — the same rule the tool page's rows follow.
+    probe.probeSaved(v.name);
   };
 
   return (
@@ -311,10 +397,13 @@ function OAuthVarRow({
           size="xs"
           className="shrink-0"
         >
+          {/* "Signed in", not "Connected": at variable level all we know is that
+              a token is stored. Only the tool page runs a probe, and only a
+              probe may claim the connection works. */}
           {v.needsReauth
             ? 'Needs signing in again'
             : v.authorized
-              ? 'Connected'
+              ? 'Signed in'
               : 'Needs your sign-in'}
         </Badge>
         <Button
@@ -369,6 +458,8 @@ function OAuthVarRow({
           </div>
         </div>
       )}
+      {/* What the provider made of the client secret just saved here. */}
+      {probe.subject === v.name && <SavedKeyProbeResult probe={probe} className="mt-1.5" />}
       {error && (
         <p role="alert" className="mt-1 text-detail text-danger">
           {error}

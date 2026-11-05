@@ -1,0 +1,13 @@
+id: sales
+name: Sales
+description: "Pages about what you sell and who buys it, and skills for calls, deals, pipeline and the forecast."
+order: 2
+firstPagePrompt: |
+  Using our Hexis knowledge base, fill in the Customers page in Knowledge for our sales team: who buys from us, the problem we solve for them, who is a good fit and who isn't, and two or three customers we're proud of. Ask me for anything you don't know, then save it.
+suggestedPages:
+  - "About us"
+  - "Customers"
+  - "Pricing"
+  - "Objections"
+  - "How we sell"
+  - "Glossary"

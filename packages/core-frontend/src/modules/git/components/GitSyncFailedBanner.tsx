@@ -1,0 +1,205 @@
+import { useCallback, useContext, useState } from 'react';
+import { AlertTriangle, CloudOff } from 'lucide-react';
+import { useEventBusSubscription, canonicalizeWorkspaceId } from '../../version-control';
+import { useWorkspace, WorkspaceContext, useFileNav } from '../../workspace';
+
+/**
+ * The files a remote sync could not reconcile, each a link that opens it.
+ * Its own component so the navigation hook is only mounted for the conflict
+ * case — the push-failure banner has nothing to open.
+ *
+ * The paths arrive repo-relative; opening one needs the workspace's KB folder
+ * name, which the context holds as null until the workspace has bootstrapped.
+ * A conflict event can arrive before that fetch answers, so until the name is
+ * known the files are listed as text — never as links to `null/<path>`.
+ */
+function ConflictFiles({ paths }: { paths: string[] }) {
+  const { kbDirName } = useWorkspace();
+  const { openWorkspacePath } = useFileNav();
+  return (
+    <ul className="mt-1 ml-5 flex flex-wrap gap-x-3 gap-y-0.5">
+      {paths.map((p) => (
+        <li key={p}>
+          {kbDirName ? (
+            <button
+              type="button"
+              className="font-mono underline underline-offset-2 hover:text-ink"
+              onClick={() => openWorkspacePath(`${kbDirName}/${p}`)}
+            >
+              {p}
+            </button>
+          ) : (
+            <span className="font-mono">{p}</span>
+          )}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/**
+ * The same files as text. For a banner about a branch other than the one in
+ * the address bar: a link opens the path in the CURRENT workspace, which
+ * would be the wrong branch's copy.
+ */
+function ConflictFileNames({ paths }: { paths: string[] }) {
+  return (
+    <ul className="mt-1 ml-5 flex flex-wrap gap-x-3 gap-y-0.5">
+      {paths.map((p) => (
+        <li key={p}>
+          <span className="font-mono">{p}</span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/**
+ * Shown when a commit landed locally but could not be pushed to the remote.
+ *
+ * The save itself is fine and is NOT rolled back — the commit is on the
+ * server's disk and the retry paths keep running — so this is a warning, not
+ * an error state, and nothing here blocks the user. It exists because the
+ * failure is otherwise completely invisible: pushes happen behind saves, the
+ * one path that does surface an error only reaches a still-mounted editor, and
+ * a deployment with a broken git credential therefore looks perfectly healthy
+ * while every commit stacks up locally. One self-hosted install ran two days
+ * and 136 commits that way.
+ *
+ * Deliberately not addressed to the author: every cause of a failing push —
+ * an expired token, a revoked repo grant, an unreachable host — is an operator
+ * concern, and there is nothing the person writing a page can do about it. So
+ * the copy tells them their work is safe and points whoever can act at the
+ * logs, rather than explaining git.
+ *
+ * Clears on `git-sync-recovered`, which the backend emits when a push
+ * succeeds after failing. No dismiss control, same as `PullNeededBanner`: the
+ * condition is real until the server says otherwise, and the next failing save
+ * would re-raise it anyway.
+ *
+ * `workspaceId` names the branch's workspace when the surface is about a
+ * branch other than the focused one — the change-request view shows its
+ * SOURCE branch's banner, and watches that workspace so its events arrive.
+ * Without it the banner follows the workspace in the address bar.
+ */
+export function GitSyncFailedBanner({ workspaceId: forWorkspaceId }: { workspaceId?: string } = {}) {
+  // Optional context: the change-request view can be mounted (and tested)
+  // outside a workspace, and names its workspace itself.
+  const focusedId = useContext(WorkspaceContext)?.workspaceId ?? null;
+  const workspaceId = forWorkspaceId ?? focusedId;
+  // Local state (`workspace.id`) is URL-encoded (`user%2Ffeat`); event ids
+  // arrive URL-decoded (`user/feat`, Express auto-decodes `req.params.id`).
+  // Comparing them raw drops every event on a slashed feature branch — the
+  // exact silent-failure symptom this banner exists to surface — so both
+  // sides are canonicalised, the same way every other SSE consumer does.
+  const canonId = workspaceId ? canonicalizeWorkspaceId(workspaceId) : null;
+  // One record PER workspace, keyed by canonical id. FileViewer is mounted at
+  // a catch-all route and is NOT keyed by workspace, so this component
+  // survives every branch switch: a single record would let branch B's
+  // failure overwrite branch A's, hiding A's unresolved state on return. The
+  // render gate below shows only the focused workspace's record.
+  //
+  // Known limit, accepted deliberately: SSE events are focus-scoped, so a
+  // recovery that happens while the user is on another branch never arrives —
+  // a retained record can be stale on return until that branch's next push
+  // settles it (failures re-emit on every attempt, recoveries on the next
+  // transition). The alternative — clearing on switch — hides real, still-
+  // broken state, which is the exact failure mode this PR exists to fix.
+  const [failures, setFailures] = useState<
+    ReadonlyMap<string, { branch: string; reason: string; conflictedPaths?: string[] }>
+  >(new Map());
+
+  useEventBusSubscription(
+    'git-sync-failed',
+    useCallback(
+      (e) => {
+        // The bus already filters to the focused workspace, but a focus change
+        // races with in-flight events — checking here keeps another branch's
+        // failure from being recorded under this one's key.
+        if (!canonId || canonicalizeWorkspaceId(e.workspaceId) !== canonId) return;
+        setFailures((prev) =>
+          new Map(prev).set(canonId, {
+            branch: e.branch,
+            reason: e.reason,
+            conflictedPaths: e.conflictedPaths,
+          }),
+        );
+      },
+      [canonId],
+    ),
+  );
+
+  useEventBusSubscription(
+    'git-sync-recovered',
+    useCallback(
+      (e) => {
+        if (!canonId || canonicalizeWorkspaceId(e.workspaceId) !== canonId) return;
+        setFailures((prev) => {
+          if (!prev.has(canonId)) return prev;
+          const next = new Map(prev);
+          next.delete(canonId);
+          return next;
+        });
+      },
+      [canonId],
+    ),
+  );
+
+  const failure = canonId ? failures.get(canonId) : undefined;
+  if (!failure) return null;
+
+  // A remote-sync CONFLICT is the one failure an author can act on, not only
+  // an operator: the same file changed here and on the git host. Automatic
+  // recovery is already running; if it does not clear, the person decides.
+  // Different copy, and the files themselves, each a link.
+  if (failure.conflictedPaths && failure.conflictedPaths.length > 0) {
+    // Shown for a branch other than the one in view (the change-request
+    // dialog's source branch), the files are names, not links — they open in
+    // that branch's workspace, so the copy says to go there first.
+    const elsewhere =
+      Boolean(forWorkspaceId) && (!focusedId || canonicalizeWorkspaceId(focusedId) !== canonId);
+    return (
+      <div
+        role="alert"
+        className="px-3 py-1.5 bg-sunken border-b border-line text-xs text-ink shrink-0"
+      >
+        <div className="flex items-center gap-2">
+          <AlertTriangle size={13} className="shrink-0" />
+          <span className="flex-1">
+            These pages were changed both here and on your git host. Hexis is trying to combine
+            them. If this notice stays,{' '}
+            {elsewhere ? (
+              <>
+                switch to <span className="font-mono font-semibold">{failure.branch}</span>, open each one
+                there, keep the content you want, and save.
+              </>
+            ) : (
+              'open each one, keep the content you want, and save.'
+            )}
+          </span>
+        </div>
+        {elsewhere ? (
+          <ConflictFileNames paths={failure.conflictedPaths} />
+        ) : (
+          <ConflictFiles paths={failure.conflictedPaths} />
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div
+      role="alert"
+      className="px-3 py-1.5 bg-sunken border-b border-line text-xs text-ink shrink-0"
+    >
+      <div className="flex items-center gap-2">
+        <CloudOff size={13} className="shrink-0" />
+        <span className="flex-1">
+          Changes on <span className="font-mono font-semibold">{failure.branch}</span> are saved
+          here but aren’t reaching your git host. An administrator should check the server logs.
+        </span>
+      </div>
+      <div className="mt-1 ml-5 text-ink-muted break-words">{failure.reason}</div>
+    </div>
+  );
+}

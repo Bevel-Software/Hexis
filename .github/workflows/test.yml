@@ -4,6 +4,11 @@ on:
   push:
     branches: [main, dev]
   pull_request:
+  # Lets another workflow run this suite as a gate on its own trigger, on the
+  # exact commit it is about to act on. Nothing calls it today — the image
+  # publish that did was removed — but a release or deploy workflow that needs
+  # "only tested commits ship" should call this rather than restate the suite.
+  workflow_call:
 
 jobs:
   test:
@@ -15,22 +20,50 @@ jobs:
     # permission is ever flipped back to read/write in settings.
     permissions:
       contents: read
+    # A real Postgres for the tests that are about what the database ends up
+    # holding (`*.pg.test.ts`, today the personal-data backfill): they skip
+    # without `TEST_DATABASE_URL`, so this is what makes them run at all. The
+    # same major the compose file ships, pinned by digest for the reason the
+    # actions below are. The password guards nothing: the server lives for
+    # this job, on the runner, and each test works in a database it creates.
+    services:
+      postgres:
+        image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    # Actions are pinned to reviewed commit SHAs (release tag alongside each):
+    # this suite is what says a commit is good, so a moved or compromised tag
+    # must not be able to tamper with the workspace that decides that.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
         with:
           version: 10
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          # 22 is the minimum for isolated-vm@6, which is a transitive dep of
-          # @utcp/code-mode and won't compile against Node 20's V8 headers
-          # (missing `v8::SourceLocation`). engines pins >=22 <23 (native ABI).
+          # The version this repo's own image ships. 22 is also the minimum for
+          # isolated-vm@6, a transitive dep of @utcp/code-mode that won't compile
+          # against Node 20's V8 headers (missing `v8::SourceLocation`). The
+          # PUBLISHED local server supports more than this one major — see the
+          # `hexis-mcp` job below, which is where that range is tested.
           node-version: 22
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
+
+      # The grep tool searches with ripgrep, and its suites (and the boot
+      # check's) run the real binary. Installed only when the runner image
+      # does not already carry it.
+      - run: command -v rg || (sudo apt-get update && sudo apt-get install -y --no-install-recommends ripgrep)
 
       # Licence policy gate. Fails on any dependency that offers no permissive
       # licence (GPL/AGPL/SSPL/…) or declares one we have not classified, so a
@@ -41,7 +74,35 @@ jobs:
 
       - run: pnpm build
 
-      - run: pnpm test
+      # `pnpm build` already typechecks the packages whose build IS `tsc`
+      # (shared, mcp-core, core-backend, hexis-mcp). Three are not covered by
+      # it: core-frontend and apps/server have no build step, and apps/web
+      # builds with vite, which does not typecheck. A type error in any of
+      # those reached dev unnoticed until someone ran tsc locally. After
+      # `pnpm build` so the cross-package `dist/` types it resolves exist.
+      - run: pnpm typecheck
+
+      # `pnpm test` is `pnpm -r run test`, and a recursive run prefixes every
+      # child line with its package ("packages/core-backend test: …"). Vitest's
+      # built-in GitHub Actions reporter prints `::error file=…` annotations,
+      # but a workflow command only counts at the start of a line — so a failing
+      # test left nothing but "Process completed with exit code 1", and the job
+      # log that names it needs admin rights. Hiding the prefix turns every
+      # failure into a public annotation on the check.
+      - run: pnpm -r --reporter-hide-prefix run test
+        env:
+          TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+
+      # The one real-browser suite (`packages/core-frontend/browser`): the
+      # handle under an HTML page's frame is dragged with a real pointer over
+      # a real sandboxed frame in Chromium — a frame is its own document and
+      # would take the pointer the moment a drag crossed into it, which is
+      # what the handle's pointer capture prevents, and which the unit suites'
+      # happy-dom cannot answer (Round-Trip Through the Real Intermediary).
+      # Its own step, after the unit suites, so a browser that fails to
+      # install is its own failure and not a red unit run.
+      - run: pnpm --filter @bevel-software/platform-core-frontend exec playwright install --with-deps chromium
+      - run: pnpm --filter @bevel-software/platform-core-frontend run test:browser
 
       # Design-system ratchet. The UI is migrating onto semantic tokens, so a
       # hard ban would fail against the remaining ~520 off-system call sites.
@@ -52,3 +113,86 @@ jobs:
       # Tailwind emits no rule for an unknown utility, so a stale class is a
       # no-op rather than a build error.
       - run: pnpm ds:check
+
+  # Lint ratchet. `eslint .` does not pass on the whole repo yet, so running
+  # it would fail every pull request and say nothing about the one at hand.
+  # This lints only the files the pull request touches and fails when any of
+  # them comes out with more ESLint problems than it had at the merge base; a
+  # new file must lint clean. See scripts/lint-ratchet.mjs. Pull requests only:
+  # a push has no base to compare against, and its pull request already ran.
+  lint:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # The merge base and the base branch's history, for the "before" counts.
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+        with:
+          version: 10
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # The ratchet decides whether a pull request may merge, so its own tests
+      # run first: a broken ratchet must not pass everything.
+      - run: pnpm test:scripts
+
+      - run: pnpm lint:check --base "origin/${{ github.base_ref }}"
+
+  # The local MCP server is the one thing in this repo that runs on OTHER
+  # PEOPLE'S machines, at whatever Node they happen to have — so "it works on
+  # the version we build the image with" says nothing about it. Its supported
+  # range is exactly the Node majors `isolated-vm` publishes a prebuilt binary
+  # for (`SUPPORTED_NODE_MAJORS` in packages/hexis-mcp/src/preflight.ts); a
+  # major without one would compile C++ on the user's laptop, which is the
+  # failure the range exists to prevent rather than a version we support. This
+  # matrix is therefore the evidence behind the `engines` field, and
+  # `supported-node.test.ts` fails if the two ever disagree.
+  hexis-mcp:
+    name: hexis-mcp (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      # WHICH majors still work is this job's entire output, so one failing
+      # must not cancel the other and leave that unanswered.
+      fail-fast: false
+      matrix:
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+        with:
+          version: 10
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ matrix.node }}
+          cache: pnpm
+
+      # Installing is itself part of what this job checks: `isolated-vm`'s
+      # install script downloads a prebuilt binary when one matches this ABI
+      # and falls back to a C++ compile when none does, so a major that lost
+      # its binary shows up here as a long, fragile step before any test runs.
+      - run: pnpm install --frozen-lockfile
+
+      # Only what the package under test needs. Its workspace dependency is
+      # consumed as built `dist/`, and the rest of the monorepo (the web app,
+      # the API server) is covered by the job above on the version its image
+      # actually ships.
+      - run: pnpm --filter "@bevel-software/hexis-mcp^..." run build
+
+      - run: >-
+          pnpm --filter @bevel-software/platform-mcp-core
+          --filter @bevel-software/hexis-mcp
+          --reporter-hide-prefix run test

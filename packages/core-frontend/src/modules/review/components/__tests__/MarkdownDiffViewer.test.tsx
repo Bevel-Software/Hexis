@@ -103,6 +103,37 @@ describe('MarkdownDiffViewer', () => {
       await userEvent.click(screen.getByText('the process'));
       expect(onOpenNodeId).toHaveBeenCalledWith('order-intake');
     });
+
+    it("carry the target the caller resolves: the new tab's address, target=_blank, rel=noopener", () => {
+      const nodeIdLinkTarget = vi.fn(() => ({ href: '/workspace/main/order-intake', newTab: true }));
+      render(
+        <MarkdownDiffViewer payload={withIdLink} onOpenNodeId={vi.fn()} nodeIdLinkTarget={nodeIdLinkTarget} />,
+      );
+      const link = screen.getByRole('link', { name: 'the process' });
+      expect(nodeIdLinkTarget).toHaveBeenCalledWith('order-intake');
+      expect(link).toHaveAttribute('href', '/workspace/main/order-intake');
+      expect(link).toHaveAttribute('target', '_blank');
+      expect(link).toHaveAttribute('rel', 'noopener');
+    });
+  });
+
+  it("gives a file link the target the caller resolves, and follows a click through the caller", async () => {
+    const onOpenFile = vi.fn();
+    const fileLinkTarget = vi.fn(() => ({ href: '/workspace/main/Knowledge/Plan.md', newTab: true }));
+    render(
+      <MarkdownDiffViewer
+        payload={payload('Nothing\n', 'See [the plan](Plan.md)\n')}
+        onOpenFile={onOpenFile}
+        fileLinkTarget={fileLinkTarget}
+      />,
+    );
+    const link = screen.getByRole('link', { name: 'the plan' });
+    expect(fileLinkTarget).toHaveBeenCalledWith('Plan.md');
+    expect(link).toHaveAttribute('href', '/workspace/main/Knowledge/Plan.md');
+    expect(link).toHaveAttribute('target', '_blank');
+    expect(link).toHaveAttribute('rel', 'noopener');
+    await userEvent.click(link);
+    expect(onOpenFile).toHaveBeenCalledWith('Plan.md');
   });
 
   it('escapes spaces in link destinations so KB links resolve', () => {
@@ -153,5 +184,69 @@ describe('MarkdownDiffViewer', () => {
       />,
     );
     expect(screen.getByText('visible body text')).toBeInTheDocument();
+  });
+
+  /**
+   * The per-fragment image rule. The caller's resolver serves the checked-out
+   * tree, which is the truth for the unchanged and the added side and a lie
+   * for the removed side of a replaced screenshot.
+   */
+  describe('images', () => {
+    const resolveImage = (src: string) => ({ src: `/raw/${src}`, path: `KB/${src}` });
+
+    it('serves an unchanged image through the resolver', () => {
+      render(
+        <MarkdownDiffViewer
+          payload={payload('![Same](same.png)\n', '![Same](same.png)\n')}
+          resolveImage={resolveImage}
+        />,
+      );
+      expect(screen.getByRole('img', { name: 'Same' })).toHaveAttribute('src', '/raw/same.png');
+    });
+
+    it('serves an added image through the resolver', () => {
+      render(
+        <MarkdownDiffViewer
+          payload={payload('text\n', 'text\n\n![Added](added.png)\n')}
+          resolveImage={resolveImage}
+        />,
+      );
+      expect(screen.getByRole('img', { name: 'Added' })).toHaveAttribute('src', '/raw/added.png');
+    });
+
+    it('names a removed image instead of fetching it', () => {
+      const { container } = render(
+        <MarkdownDiffViewer
+          payload={payload('![Old](old.png)\n', 'text\n')}
+          resolveImage={resolveImage}
+        />,
+      );
+      expect(
+        screen.getByRole('img', { name: /Baseline image not shown: KB\/old.png/ }),
+      ).toBeInTheDocument();
+      expect(container.querySelector('img')).toBeNull();
+    });
+
+    it('names every workspace image when no resolver is supplied (another revision, not this tree)', () => {
+      const { container } = render(
+        <MarkdownDiffViewer payload={payload('![Old](old.png)\n', '![New](new.png)\n')} />,
+      );
+      expect(screen.getByRole('img', { name: /Baseline image not shown: old.png/ })).toBeInTheDocument();
+      expect(screen.getByRole('img', { name: /Image not shown: new.png/ })).toBeInTheDocument();
+      expect(container.querySelector('img')).toBeNull();
+    });
+
+    it('passes an external image through on either side, resolver or not', () => {
+      const external = payload(
+        '![Old](https://cdn.example.com/old.png)\n',
+        '![New](https://cdn.example.com/new.png)\n',
+      );
+      for (const resolver of [undefined, resolveImage]) {
+        const { unmount } = render(<MarkdownDiffViewer payload={external} resolveImage={resolver} />);
+        expect(screen.getByRole('img', { name: 'Old' })).toHaveAttribute('src', 'https://cdn.example.com/old.png');
+        expect(screen.getByRole('img', { name: 'New' })).toHaveAttribute('src', 'https://cdn.example.com/new.png');
+        unmount();
+      }
+    });
   });
 });

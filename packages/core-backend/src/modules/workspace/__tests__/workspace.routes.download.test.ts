@@ -1,15 +1,19 @@
-import type { Server } from 'node:http';
+import { get as httpGet, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import type { IWorkflowService } from '@bevel-software/platform-shared';
+import { testKbContext } from '../../../__tests__/kb-context.js';
+import { NodeFs } from '../../kb-fs/node-fs.js';
+import { PathTraversalError } from '../../../shared/domain-errors.js';
+import type { IVersionControlService } from '@bevel-software/platform-shared';
 import type { IAccessControl } from '../../access/access-control.interface.js';
-import type { WorkflowEventBus } from '../../workflow/event-bus.js';
+import type { VersionControlEventBus } from '../../version-control/event-bus.js';
 import type { AuthService } from '../../auth/auth.service.js';
-import { AccessConfigError } from '../../access/access-errors.js';
+import { AccessConfigError } from '../../access-model/access-errors.js';
 import type { IAdminAccessService } from '../../admin/admin.interface.js';
 import { createWorkspaceRoutes } from '../workspace.routes.js';
-import type { ICreatorAccess } from '../../access/creator-access.js';
+import { createAuthMiddleware, AUTH_COOKIE_NAME } from '../../auth/auth.middleware.js';
+import type { ICreatorAccess } from '../../access-model/creator.js';
 import { FolderTooLargeError, type WorkspaceService } from '../workspace.service.js';
 
 const stubCreatorAccess: ICreatorAccess = {
@@ -35,13 +39,18 @@ const stubCreatorAccess: ICreatorAccess = {
 const USER_ID = 'user-1';
 const USER = { id: USER_ID, email: 'alice@example.com', name: 'Alice' };
 const WORKSPACE_ID = 'target-company-state';
+const KB = 'knowledge-base';
 const FILE_BYTES = Buffer.from('hello world');
 const ZIP_BYTES = Buffer.from('PK\x03\x04 fake-zip-bytes');
+/** The one token the stubbed auth service accepts, for the real-middleware cases. */
+const COOKIE_TOKEN = 'cookie-session-token';
 
 interface Harness {
   server: Server;
   baseUrl: string;
   canDownload: ReturnType<typeof vi.fn>;
+  canReadBatch: ReturnType<typeof vi.fn>;
+  canDownloadBatch: ReturnType<typeof vi.fn>;
   canWrite: ReturnType<typeof vi.fn>;
   createFolderZip: ReturnType<typeof vi.fn>;
 }
@@ -51,20 +60,33 @@ async function makeHarness(opts: {
   folderZip?: () => Promise<Buffer> | Buffer;
   /** When set, canDownload rejects with this error instead of returning a bool. */
   canDownloadError?: Error;
+  /**
+   * Mount the real auth middleware (Bearer, else the `bevel_token` cookie)
+   * instead of the userId shim. For the cases about how an `<img>`, which
+   * sends no Authorization header, gets through.
+   */
+  realAuth?: boolean;
 }): Promise<Harness> {
   const canDownload = vi.fn(async () => {
     if (opts.canDownloadError) throw opts.canDownloadError;
     return opts.canDownload;
   });
   const canWrite = vi.fn();
+  // The /file/raw route now read-gates before the download gate; these tests
+  // exercise the download verb, so reads pass.
+  const canReadBatch = vi.fn(async (_w: string, _e: string, paths: string[]) => new Map(paths.map((p) => [p, true])));
+  // Every entry of a folder is judged for download too; by default each gets
+  // the folder's own verdict.
+  const canDownloadBatch = vi.fn(async (_w: string, _e: string, paths: string[]) =>
+    new Map(paths.map((p) => [p, opts.canDownload])),
+  );
   const accessControl: IAccessControl = {
     canWrite,
     canWriteBatch: vi.fn(),
-    // The /file/raw route now read-gates before the download gate; these tests
-    // exercise the download verb, so reads pass.
     canRead: vi.fn(async () => true),
-    canReadBatch: vi.fn(async (_w: string, _e: string, paths: string[]) => new Map(paths.map((p) => [p, true]))),
+    canReadBatch,
     canDownload,
+    canDownloadBatch,
     eligibleWriters: vi.fn(),
     eligibleWriterEmails: vi.fn(),
     invalidate: vi.fn(),
@@ -91,28 +113,39 @@ async function makeHarness(opts: {
 
   const authServiceMock: Partial<AuthService> = {
     getUserById: vi.fn(async () => USER),
+    verifyToken: vi.fn((token: string) => {
+      if (token !== COOKIE_TOKEN) throw new Error('bad token');
+      return { userId: USER_ID, email: USER.email };
+    }) as unknown as AuthService['verifyToken'],
   };
+  // A session is accepted only for an account that is on; this one is.
+  authServiceMock.resolveSession = vi.fn(async (token: string) => authServiceMock.verifyToken!(token));
   const authService = authServiceMock as AuthService;
 
-  const workflowService = {} as unknown as IWorkflowService;
-  const eventBus = {} as unknown as WorkflowEventBus;
+  const versionControlService = {} as unknown as IVersionControlService;
+  const eventBus = {} as unknown as VersionControlEventBus;
 
   const app = express();
   app.use(express.json());
-  app.use('/api', (req, _res, next) => {
-    (req as any).userId = USER_ID;
-    next();
-  });
+  if (opts.realAuth) {
+    app.use('/api', createAuthMiddleware(authService));
+  } else {
+    app.use('/api', (req, _res, next) => {
+      (req as any).userId = USER_ID;
+      next();
+    });
+  }
   app.use('/api', createWorkspaceRoutes(
     workspaceService,
     authService,
-    workflowService,
+    versionControlService,
     eventBus,
     accessControl,
-    'knowledge-base',
+    testKbContext({ kbDirName: KB }),
     stubCreatorAccess,
     // Not exercised here — only `.bevelignore`'s tree visibility consults it.
     { isAdmin: async () => false } as unknown as IAdminAccessService,
+    new NodeFs(),
   ));
 
   const server = await new Promise<Server>((resolve) => {
@@ -128,7 +161,7 @@ async function makeHarness(opts: {
     throw new Error(`Unexpected server.address() shape: ${JSON.stringify(addr)}`);
   }
   const port = (addr as AddressInfo).port;
-  return { server, baseUrl: `http://127.0.0.1:${port}`, canDownload, canWrite, createFolderZip };
+  return { server, baseUrl: `http://127.0.0.1:${port}`, canDownload, canReadBatch, canDownloadBatch, canWrite, createFolderZip };
 }
 
 async function closeServer(server: Server): Promise<void> {
@@ -193,7 +226,7 @@ describe('GET /workspace/:id/file/raw — ?download=1 gated on Download role', (
     // malformed) and we don't catch it, the async rejection bubbles past
     // Express and the request hangs (or 500s without the helpful
     // config-error payload). The route should surface the
-    // WorkflowDomainError shape — same JSON the per-path /access endpoint
+    // VersionControlDomainError shape — same JSON the per-path /access endpoint
     // returns when it hits the same exception — so the operator can see
     // which access.md file is broken.
     const configErr = new AccessConfigError([
@@ -239,6 +272,69 @@ describe('GET /workspace/:id/file/raw — ?download=1 gated on Download role', (
   });
 });
 
+/**
+ * What makes a markdown image a plain `<img>`: the tag carries only the auth
+ * cookie, and the response is cacheable by that one browser, revalidated with
+ * an ETag, and never stored by a shared cache.
+ */
+describe('GET /workspace/:id/file/raw — caching and cookie auth, for the <img> tags a page emits', () => {
+  let h: Harness | null = null;
+  afterEach(async () => { if (h) await closeServer(h.server); h = null; });
+
+  const inlineUrl = (base: string) =>
+    `${base}/api/workspace/${WORKSPACE_ID}/file/raw?path=${encodeURIComponent('Knowledge/assets/shot.png')}`;
+
+  it('marks an inline response private and revalidated: a shared cache never stores it, a browser asks before reusing it', async () => {
+    h = await makeHarness({ canDownload: false });
+    const res = await fetch(inlineUrl(h.baseUrl));
+    expect(res.status).toBe(200);
+    expect(res.headers.get('cache-control')).toBe('private, no-cache');
+  });
+
+  it('marks a download the same way', async () => {
+    h = await makeHarness({ canDownload: true });
+    const res = await fetch(`${inlineUrl(h.baseUrl)}&download=1`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('cache-control')).toBe('private, no-cache');
+  });
+
+  it('answers 304 with no body to a matching If-None-Match, so a revisited page costs no bytes', async () => {
+    h = await makeHarness({ canDownload: false });
+    const first = await fetch(inlineUrl(h.baseUrl));
+    const etag = first.headers.get('etag');
+    expect(etag).toBeTruthy();
+    // A plain client for the revalidation. Node's `fetch` adds
+    // `Cache-Control: no-cache` to any conditional request, and Express
+    // honours that by answering in full; a browser revalidating an <img>
+    // sends the If-None-Match alone (or with `max-age=0` on a reload).
+    const again = await new Promise<{ status: number; bytes: number }>((resolve, reject) => {
+      httpGet(inlineUrl(h!.baseUrl), { headers: { 'If-None-Match': etag! } }, (res) => {
+        let bytes = 0;
+        res.on('data', (chunk: Buffer) => { bytes += chunk.length; });
+        res.on('end', () => resolve({ status: res.statusCode ?? 0, bytes }));
+        res.on('error', reject);
+      }).on('error', reject);
+    });
+    expect(again.status).toBe(304);
+    expect(again.bytes).toBe(0);
+  });
+
+  it('serves a request that carries only the bevel_token cookie, the way an <img> asks', async () => {
+    h = await makeHarness({ canDownload: false, realAuth: true });
+    const res = await fetch(inlineUrl(h.baseUrl), {
+      headers: { cookie: `${AUTH_COOKIE_NAME}=${COOKIE_TOKEN}` },
+    });
+    expect(res.status).toBe(200);
+    expect(Buffer.from(await res.arrayBuffer()).equals(FILE_BYTES)).toBe(true);
+  });
+
+  it('refuses the same request with no credential at all', async () => {
+    h = await makeHarness({ canDownload: false, realAuth: true });
+    const res = await fetch(inlineUrl(h.baseUrl));
+    expect(res.status).toBe(401);
+  });
+});
+
 describe('GET /workspace/:id/folder/zip — gated on Download role', () => {
   let h: Harness | null = null;
   afterEach(async () => { if (h) await closeServer(h.server); h = null; });
@@ -251,14 +347,56 @@ describe('GET /workspace/:id/folder/zip — gated on Download role', () => {
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toBe('application/zip');
     expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+    // The archive holds one caller's verdicts, so a shared cache never keeps it.
+    expect(res.headers.get('cache-control')).toBe('private, no-store');
     const dispo = res.headers.get('content-disposition');
     expect(dispo).toBeTruthy();
     expect(dispo).toContain('attachment');
     expect(dispo).toContain(`filename*=UTF-8''${encodeURIComponent('Sales.zip')}`);
     const buf = Buffer.from(await res.arrayBuffer());
     expect(buf.equals(ZIP_BYTES)).toBe(true);
+    // The access decision and the zip are made on the SAME path: the
+    // unprefixed request is placed inside the repository first, the download
+    // verb is resolved on its repo-relative form, and the service is handed the
+    // repository path it was judged as.
     expect(h.canDownload).toHaveBeenCalledWith(WORKSPACE_ID, USER.email, 'Knowledge/Sales');
-    expect(h.createFolderZip).toHaveBeenCalledWith(WORKSPACE_ID, 'Knowledge/Sales');
+    expect(h.createFolderZip.mock.calls[0]!.slice(0, 2)).toEqual([WORKSPACE_ID, `${KB}/Knowledge/Sales`]);
+  });
+
+  it('judges every file the zip would pack: unreadable ones and undownloadable ones are left out', async () => {
+    h = await makeHarness({ canDownload: true });
+    // What the service finds under the folder; the route's filter decides.
+    const found = ['Knowledge/Sales/open.md', 'Knowledge/Sales/hidden.md', 'Knowledge/Sales/no-save.md'];
+    h.canReadBatch.mockImplementation(async (_w: string, _e: string, paths: string[]) =>
+      new Map(paths.map((p) => [p, p !== 'Knowledge/Sales/hidden.md'])),
+    );
+    h.canDownloadBatch.mockImplementation(async (_w: string, _e: string, paths: string[]) =>
+      new Map(paths.map((p) => [p, p !== 'Knowledge/Sales/no-save.md'])),
+    );
+    let packed: ReadonlySet<string> | null = null;
+    h.createFolderZip.mockImplementation(
+      async (_id: string, _p: string, include: (paths: string[]) => Promise<ReadonlySet<string>>) => {
+        packed = await include(found);
+        return ZIP_BYTES;
+      },
+    );
+
+    const res = await fetch(
+      `${h.baseUrl}/api/workspace/${WORKSPACE_ID}/folder/zip?path=${encodeURIComponent('Knowledge/Sales')}&download=1`,
+    );
+
+    expect(res.status).toBe(200);
+    expect([...packed!]).toEqual(['Knowledge/Sales/open.md']);
+    // Read first, then download on what is readable: a file the caller may
+    // not see is never asked about for download, so nothing about it is
+    // computed or counted.
+    expect(h.canReadBatch).toHaveBeenCalledWith(WORKSPACE_ID, USER.email, found);
+    expect(h.canDownloadBatch).toHaveBeenCalledWith(WORKSPACE_ID, USER.email, [
+      'Knowledge/Sales/open.md',
+      'Knowledge/Sales/no-save.md',
+    ]);
+    // The count covers the readable file left out, not the hidden one.
+    expect(res.headers.get('x-withheld-files')).toBe('1');
   });
 
   it('user without Download role gets 403 and no zip is built', async () => {
@@ -296,15 +434,26 @@ describe('GET /workspace/:id/folder/zip — gated on Download role', () => {
     expect(body.error).toContain('524288000');
   });
 
-  it('maps Path traversal detected to 403', async () => {
+  it('maps a traversal refusal to 403 — by its TYPE, not by its wording', async () => {
     h = await makeHarness({
       canDownload: true,
-      folderZip: async () => { throw new Error('Path traversal detected'); },
+      folderZip: async () => { throw new PathTraversalError(); },
     });
+    const res = await fetch(
+      `${h.baseUrl}/api/workspace/${WORKSPACE_ID}/folder/zip?path=${encodeURIComponent(`${KB}/Knowledge/Sales`)}&download=1`,
+    );
+    expect(res.status).toBe(403);
+  });
+
+  it('refuses a climbing path itself, before the access check or the service', async () => {
+    h = await makeHarness({ canDownload: true });
     const res = await fetch(
       `${h.baseUrl}/api/workspace/${WORKSPACE_ID}/folder/zip?path=${encodeURIComponent('../escape')}&download=1`,
     );
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toContain('outside the knowledge base repository');
+    expect(h.canDownload).not.toHaveBeenCalled();
+    expect(h.createFolderZip).not.toHaveBeenCalled();
   });
 
   it('maps Not a directory to 400 (user pointed at a file)', async () => {

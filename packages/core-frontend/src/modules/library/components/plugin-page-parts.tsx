@@ -1,11 +1,14 @@
-import { useState, type ReactNode } from 'react';
+import { useId, useState, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import { Funnel, RotateCw, Trash2 } from 'lucide-react';
+import { useAdmin } from '../../admin';
 import { cn } from '../../../lib/utils';
 import { Banner, Button, Dialog, IconButton } from '../../../shared/components';
 import { pathForPluginsIndex } from '../routes/library-paths';
 import type { LibraryItem } from '../state/library-data';
+import { linkedHomeOf } from '../utils/status';
 import { removeLibraryItem } from '../services/library.api';
+import { unlinkSkill } from '../services/plugins.api';
 import { LibraryCard } from './LibraryCard';
 
 /**
@@ -18,17 +21,30 @@ import { LibraryCard } from './LibraryCard';
  * promise drift the first time either is touched.
  */
 
-/** `All plugins › {name}` — the page's place in the Library, and the way back. */
-export function PluginBreadcrumb({ name }: { name: string }) {
+/**
+ * `Everything ›` — the page's place in the Library, and the way back.
+ *
+ * It belongs ON the page's title band, as the band's leading item, and not in
+ * a row above it. A row above the band pushes the title bar down off the line
+ * the sidebar's header row holds, which is the seam `shared/theme/header`
+ * exists to keep — and the seam is the first thing anyone sees below the
+ * toolbar.
+ *
+ * The trail stops SHORT of the current page for the same reason: the `<h1>`
+ * standing beside it IS the current page, and a crumb repeating the heading
+ * it sits next to says the name twice on one line. That also makes the trail
+ * a fixed width, so it never competes with the title for the row's space.
+ */
+export function PluginBreadcrumb() {
   return (
-    <nav aria-label="Breadcrumb" className="flex items-center gap-1.5 text-detail text-ink-faint">
+    <nav
+      aria-label="Breadcrumb"
+      className="flex flex-none items-center gap-1.5 text-detail text-ink-faint"
+    >
       <Link to={pathForPluginsIndex()} className="rounded-xs hover:text-ink">
-        All plugins
+        Everything
       </Link>
       <span aria-hidden="true">›</span>
-      <span aria-current="page" className="truncate text-ink-muted">
-        {name}
-      </span>
     </nav>
   );
 }
@@ -109,10 +125,24 @@ export function PluginSection({
 export function CardGrid({
   items,
   onOpen,
+  onShare,
   onRemove,
+  canRemove,
+  linkedIn,
+  linkedRoots,
 }: {
   items: LibraryItem[];
   onOpen(item: LibraryItem): void;
+  /**
+   * Open Manage access on a SKILL's own folder — the skill page's `Share`,
+   * from the card's `…` menu. Absent: no card carries a menu.
+   *
+   * Only skills are offered it, and the card's props enforce that: access to a
+   * tool is decided at the plugin that carries it, so a tool has no rules of
+   * its own to open. A PROPOSED skill is left out too — its folder is on a
+   * change request's branch and does not exist on the one the dialog reads.
+   */
+  onShare?(item: LibraryItem): void;
   /**
    * The manager's "remove from this place". Present only when the caller
    * runs the page the grid is on — the pages decide that, not the grid.
@@ -120,6 +150,30 @@ export function CardGrid({
    * card is one <button>, and a button inside a button is not HTML.
    */
   onRemove?(item: LibraryItem): void;
+  /**
+   * Per item, whether the verb would succeed — a link into a plugin whose
+   * links live in an external format cannot be removed here. Absent: every
+   * item. A verb the server would refuse is not offered.
+   */
+  canRemove?(item: LibraryItem): boolean;
+  /**
+   * The plugin whose page this grid is on. With it, a card whose membership in
+   * that plugin is by LINK wears the Linked pill, naming on hover the folder
+   * the item actually lives in.
+   *
+   * Absent on every surface that is not one plugin's page: your own space has
+   * no manifest to link from, and a gallery card belongs to as many plugins as
+   * it belongs to — there is no "this plugin" for it to be linked from.
+   */
+  linkedIn?: string;
+  /**
+   * That plugin's `linkedRoots` — the folders its manifest names. The pill's
+   * tooltip names the root a card came in through, and only the manifest
+   * knows which root that is (see `linkedHomeOf`). Absent or empty when the
+   * summary has not arrived, which the tooltip degrades around rather than
+   * waiting for.
+   */
+  linkedRoots?: readonly string[];
 }) {
   return (
     <div
@@ -129,22 +183,33 @@ export function CardGrid({
       )}
     >
       {items.map((item) => {
-        // The change-request number is part of the key, not decoration: two
-        // people can propose a skill of the same name into different plugins,
-        // and until one of them merges neither is in the catalog to collide
-        // with — so the name alone is not yet unique.
-        const key = `${item.kind}:${item.id}:${item.pending?.changeRequestNumber ?? ''}`;
+        // The change-request number AND the declaration's path are part of the
+        // key, not decoration. A released item's id is unique because the
+        // catalog refuses a collision; a PROPOSAL has been refused nothing yet.
+        // Two people can propose the same name into different plugins, and one
+        // request can add `weather.tool` to two plugin folders at once — same
+        // id, same request number, and the path is what tells them apart.
+        const key = item.pending
+          ? `${item.kind}:${item.id}:${item.pending.changeRequestNumber}:${item.path}`
+          : `${item.kind}:${item.id}`;
         // The flavor badge names the DECLARATION file — which file an owner
         // edits — not the transport: a `.tool` manual whose call template is
         // `type: mcp` still edits as a UTCP manual, so the path suffix is the
         // authoritative signal, not the tool's `type` metadata.
+        // Whether THIS card carries a `…`, which the remove overlay below has
+        // to know: both are corner controls on the same card, and two things
+        // pinned to the same corner is one thing you cannot click.
+        const menued = item.kind === 'skill' && !!onShare && !item.pending;
         const kindProps =
           item.kind === 'integration'
             ? ({
                 kind: 'integration',
                 flavor: item.path.endsWith('/mcp.json') ? 'mcp' : 'utcp',
               } as const)
-            : ({ kind: 'skill' } as const);
+            : ({
+                kind: 'skill',
+                onShare: menued ? () => onShare!(item) : undefined,
+              } as const);
         const card = (
           <LibraryCard
             key={key}
@@ -155,6 +220,9 @@ export function CardGrid({
             owned={item.owned}
             status={item.status}
             version={item.version}
+            // Null (inline, or no plugin in question) has to become `undefined`
+            // — the prop is "there is a folder to name", and `null` is not it.
+            linkedHome={(linkedIn ? linkedHomeOf(item, linkedIn, linkedRoots) : null) ?? undefined}
             pending={
               item.pending && {
                 authorName: item.pending.authorName,
@@ -166,14 +234,14 @@ export function CardGrid({
         );
         // A pending proposal is not IN the place yet — there is nothing to
         // remove; declining it lives with the review.
-        if (!onRemove || item.pending) return card;
+        if (!onRemove || item.pending || (canRemove && !canRemove(item))) return card;
         return (
           // `grid`, not a plain block: the wrapper takes the card's place as
           // the grid item, and only a grid (or flex) container stretches its
           // child the way the outer grid stretched the bare card — without it
           // the <button> shrinks to its content and the overlay floats in the
           // leftover width, off the card's own edge.
-          <div key={key} className="group/removable relative grid">
+          <div key={key} className="group/removable relative grid min-w-0">
             {card}
             <button
               type="button"
@@ -181,8 +249,12 @@ export function CardGrid({
               title={`Remove ${item.name}`}
               onClick={() => onRemove(item)}
               className={cn(
-                'absolute right-1.5 top-1.5 rounded-sm border border-line bg-surface p-1 text-ink-faint',
+                'absolute top-1.5 rounded-sm border border-line bg-surface p-1 text-ink-faint',
                 'opacity-0 transition-opacity hover:text-danger focus-visible:opacity-100 group-hover/removable:opacity-100',
+                // The overflow `…` keeps the corner — that is where every menu
+                // in this product lives — so Remove steps left of it on a card
+                // that has one, and keeps the corner on a card that does not.
+                menued ? 'right-8' : 'right-1.5',
               )}
             >
               <Trash2 size={13} />
@@ -198,16 +270,24 @@ export function CardGrid({
  * The "are you sure" a removal deserves: deleting a skill or tool from a
  * plugin takes it from EVERYONE in the plugin, not from a personal shelf, and
  * there is no undo shortcut — the content survives only in git history.
+ *
+ * A LINKED skill is the other case: it lives elsewhere and the plugin only
+ * points at it, so "remove" means unlink — the manifest entry and the
+ * plugin's grant go, the skill stays where it is. Sending a link through the
+ * delete path would delete a shared skill (or be refused by its own rules).
  */
 export function RemoveLibraryItemDialog({
   item,
   place,
+  linked = false,
   onClose,
   onRemoved,
 }: {
   item: LibraryItem;
   /** Where it is being removed from, for the copy: a plugin name, or "your space". */
   place: string;
+  /** The item is in `place` by LINK — remove the link, not the item. `place` is then the plugin. */
+  linked?: boolean;
   onClose(): void;
   /** Fired after the delete lands; the host page reloads and says so. */
   onRemoved(): void;
@@ -220,7 +300,8 @@ export function RemoveLibraryItemDialog({
     setBusy(true);
     setError(null);
     try {
-      await removeLibraryItem(item.path);
+      if (linked) await unlinkSkill(place, item.path);
+      else await removeLibraryItem(item.path);
       onRemoved();
       onClose();
     } catch (err) {
@@ -235,7 +316,7 @@ export function RemoveLibraryItemDialog({
     <Dialog
       open
       onClose={onClose}
-      title={`Remove ${item.name}?`}
+      title={linked ? `Unlink ${item.name}?` : `Remove ${item.name}?`}
       size="md"
       busy={busy}
       footer={
@@ -244,15 +325,17 @@ export function RemoveLibraryItemDialog({
             Cancel
           </Button>
           <Button variant="danger" onClick={() => void remove()} disabled={busy}>
-            {busy ? 'Removing…' : 'Remove'}
+            {busy ? (linked ? 'Unlinking…' : 'Removing…') : linked ? 'Unlink' : 'Remove'}
           </Button>
         </>
       }
     >
       <p className="text-ui text-ink-muted">
-        {item.kind === 'skill'
-          ? `This deletes the skill and its files from ${place}. Everyone here loses it the next time their agent connects.`
-          : `This deletes the tool and its connection settings from ${place}. Skills here that need it will ask for setup again.`}
+        {linked
+          ? `This removes the link from ${place}. The skill itself stays where it lives; ${place}'s members stop seeing it here.`
+          : item.kind === 'skill'
+            ? `This deletes the skill and its files from ${place}. Everyone here loses it the next time their agent connects.`
+            : `This deletes the tool and its connection settings from ${place}. Skills here that need it will ask for setup again.`}
       </p>
       {error && (
         <Banner tone="danger" role="alert" className="mt-3">
@@ -274,19 +357,37 @@ export function PluginItemSections({
   skillItems,
   toolItems,
   onOpen,
+  onShare,
   onRemove,
+  canRemove,
   emptySkills,
   emptyTools = 'No tools yet.',
   hideEmpty = false,
   skillControls,
   skillControlsActive = false,
+  linkedIn,
+  linkedRoots,
 }: {
   skillItems: LibraryItem[];
   toolItems: LibraryItem[];
   onOpen(item: LibraryItem): void;
+  /** See {@link CardGrid} — the skill cards' `Share`. Tools never get one. */
+  onShare?(item: LibraryItem): void;
   /** See {@link CardGrid} — present only when the caller manages this place. */
   onRemove?(item: LibraryItem): void;
-  emptySkills: string;
+  /** See {@link CardGrid}. */
+  canRemove?(item: LibraryItem): boolean;
+  /** See {@link CardGrid} — the plugin a card can be linked FROM. */
+  linkedIn?: string;
+  /** See {@link CardGrid} — that plugin's linked roots, for the pill's tooltip. */
+  linkedRoots?: readonly string[];
+  /**
+   * A plain sentence, or an `EmptySkillsNudge`. A string still gets the band's
+   * standard paragraph; a node is trusted to bring its own — the nudge carries
+   * an absolutely-placed arrow, and wrapping it in a second `<p>` would nest
+   * flow content inside phrasing content.
+   */
+  emptySkills: ReactNode;
   emptyTools?: string;
   /**
    * Filter / refresh for the Skills band only. Tools deliberately gets none
@@ -316,9 +417,21 @@ export function PluginItemSections({
           controlsActive={skillControlsActive}
         >
           {skillItems.length === 0 ? (
-            <p className="text-ui text-ink-faint">{emptySkills}</p>
+            typeof emptySkills === 'string' ? (
+              <p className="text-ui text-ink-faint">{emptySkills}</p>
+            ) : (
+              emptySkills
+            )
           ) : (
-            <CardGrid items={skillItems} onOpen={onOpen} onRemove={onRemove} />
+            <CardGrid
+              items={skillItems}
+              onOpen={onOpen}
+              onShare={onShare}
+              onRemove={onRemove}
+              canRemove={canRemove}
+              linkedIn={linkedIn}
+              linkedRoots={linkedRoots}
+            />
           )}
         </PluginSection>
       )}
@@ -328,7 +441,14 @@ export function PluginItemSections({
           {toolItems.length === 0 ? (
             <p className="text-ui text-ink-faint">{emptyTools}</p>
           ) : (
-            <CardGrid items={toolItems} onOpen={onOpen} onRemove={onRemove} />
+            <CardGrid
+              items={toolItems}
+              onOpen={onOpen}
+              onRemove={onRemove}
+              canRemove={canRemove}
+              linkedIn={linkedIn}
+              linkedRoots={linkedRoots}
+            />
           )}
         </PluginSection>
       )}
@@ -343,6 +463,175 @@ export function PluginItemSections({
  */
 export function PageNote({ children }: { children: ReactNode }) {
   return <div className="py-16 text-center text-ui text-ink-faint">{children}</div>;
+}
+
+/**
+ * A hand-drawn arrow, chalk on the wall — the mark an empty page makes toward
+ * the control that fills it. Decorative on purpose: the sentence beside it
+ * carries the meaning, so the drawing is `aria-hidden`, takes no pointer, and
+ * inherits `currentColor` so it stays as faint as the ink around it.
+ */
+export function ChalkArrow({ className }: { className?: string }) {
+  // Colons stripped: `url(#…)` fragment references are unreliable with them.
+  const filterId = `chalk-${useId().replace(/[^a-zA-Z0-9_-]/g, '')}`;
+  return (
+    <svg
+      data-testid="chalk-arrow"
+      className={className}
+      aria-hidden="true"
+      focusable="false"
+      viewBox="0 0 88 72"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <defs>
+        {/* What makes the line chalk instead of vector: a slow noise bends the
+            stroke the way a hand does, a fine noise frays its edge the way a
+            wall's tooth does, and a mid noise thins the ink where the chalk
+            skipped. Displacement can push ~2px past the paths, hence the
+            widened filter region. */}
+        <filter id={filterId} x="-15%" y="-15%" width="130%" height="130%">
+          <feTurbulence type="fractalNoise" baseFrequency="0.04" numOctaves="1" seed="3" result="wobble" />
+          <feDisplacementMap in="SourceGraphic" in2="wobble" scale="2.5" result="bent" />
+          <feTurbulence type="fractalNoise" baseFrequency="0.8" numOctaves="2" seed="11" result="grit" />
+          <feDisplacementMap in="bent" in2="grit" scale="1.4" result="rough" />
+          <feTurbulence type="fractalNoise" baseFrequency="0.3" numOctaves="3" seed="5" result="dust" />
+          <feColorMatrix
+            in="dust"
+            type="matrix"
+            values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 0.7 0.55"
+            result="patch"
+          />
+          <feComposite in="rough" in2="patch" operator="in" />
+        </filter>
+      </defs>
+      <g filter={`url(#${filterId})`}>
+        {/* One loose curve from the words up toward the `+` — tip stays at
+            (76,11), which is what the call sites' offsets aim — plus a short
+            second pass beside the shaft, the stroke a hand goes over twice. */}
+        <path strokeWidth="2.5" d="M6 66 C 30 63, 53 51, 67 32 C 71 26, 74 19, 76 11" />
+        <path strokeWidth="1.5" opacity="0.5" d="M17 64 C 34 61, 49 52.5, 61 40" />
+        {/* The head as two separate flicks, not a joined V: drawn strokes
+            land past each other at the tip, they do not meet in a corner. */}
+        <path strokeWidth="2.5" d="M64 18 Q 70.5 14, 76.4 10.6" />
+        <path strokeWidth="2.5" d="M79.6 24.6 Q 78.1 17.5, 76 10.7" />
+      </g>
+    </svg>
+  );
+}
+
+/**
+ * The inline verb inside an empty state's sentence — underlined, ink-strong
+ * against the faint prose around it, and a real `<button>` because it acts
+ * rather than navigates. One component so every empty state's doorway looks
+ * like the same kind of doorway.
+ */
+export function EmptyStateAction({
+  children,
+  onClick,
+}: {
+  children: ReactNode;
+  onClick(): void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      // The same focus ring as `Button`/`IconButton`: an inline action is
+      // still a stop on the keyboard's path, and the underline alone does not
+      // say "you are here".
+      className="rounded-xs font-semibold text-ink underline underline-offset-2 hover:text-ink-muted focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink-muted"
+    >
+      {children}
+    </button>
+  );
+}
+
+/**
+ * Where the nudge's arrow sits so its TIP lands on the `+` icon-button's
+ * centre: from the column's right edge that centre sits behind the `⋯` button
+ * and two flex gaps (~54px), constant on every page that renders
+ * `PageActions` — Share sits on the far side of `+`, so its presence moves
+ * nothing.
+ *
+ * A named constant because these offsets are TUNED, together with the tip the
+ * `ChalkArrow` paths aim at (76,11 in its 88×72 viewBox): change the
+ * `PageActions` row — button size, gap, order — and this is the one place the
+ * aim gets re-tuned, rather than a magic literal scattered per call site.
+ */
+const ARROW_AT_PAGE_ACTIONS_PLUS =
+  'pointer-events-none absolute -top-[74px] right-[45px] h-[68px] w-[84px] text-ink-faint';
+
+/**
+ * The empty Skills band as a doorway instead of a dead end. The sentence
+ * names the fact and hands over a button that DOES the thing — the same thing
+ * the title row's `+` does — while a chalk arrow points up at that `+`, so
+ * the page itself teaches where "add" lives. No separate tour, no overlay:
+ * the arrow exists only because this component only renders when the band is
+ * empty, and it leaves the moment the first skill arrives.
+ *
+ * The arrow overlaps the band heading on its way up. That is intended — it is
+ * background, not layout: absolutely placed, `pointer-events-none`, and faint
+ * enough to read as a margin note rather than a fourth piece of chrome.
+ */
+export function EmptySkillsNudge({
+  lead,
+  actionLabel,
+  tail,
+  agentOnly,
+  arrow = true,
+  onAction,
+}: {
+  /** The fact: "No skills yet." */
+  lead: string;
+  /** The doorway's words, e.g. "Add the first skill". */
+  actionLabel: string;
+  /** The rest of the sentence — usually pointing at the agent as the other door. */
+  tail: string;
+  /**
+   * The whole sentence a non-admin reads instead — same fact, agent door only.
+   * Written out rather than assembled from `lead` + `tail`, because `tail` is
+   * a continuation (", or ask your agent…") and cannot stand on its own.
+   */
+  agentOnly: string;
+  /**
+   * Whether the chalk arrow may be drawn. The arrow's aim is a fixed offset
+   * from THIS component to the title row's `+`, so it only tells the truth
+   * when nothing sits between them — a page that knows a banner intervenes
+   * (join requests, integration attention) passes false and keeps the
+   * sentence, which needs no geometry to be right.
+   */
+  arrow?: boolean;
+  /** Exactly what the title row's `+` does. One intent, two doors. */
+  onAction(): void;
+}) {
+  const { isAdmin, isAdminLoading = false } = useAdmin();
+
+  // While the admin verdict is still in flight, say only the fact. Committing
+  // to either door — the inline action or "ask your agent" — would flip the
+  // sentence (and the arrow) in front of the reader the moment the verdict
+  // lands, and the fact is the one part that is true either way.
+  if (isAdminLoading) return <p className="text-ui text-ink-faint">{lead}</p>;
+
+  // Starting a skill in place is an administrator's affordance — the add
+  // dialogs already refuse the empty-file half to everyone else. So the
+  // doorway, link and chalk arrow both, is admin-only. The band still states
+  // the fact and names the agent, which IS the door a non-admin has: the
+  // title row's `+` stays where it was for them, just without a mark
+  // pointing at it.
+  if (!isAdmin) return <p className="text-ui text-ink-faint">{agentOnly}</p>;
+
+  return (
+    <div className="relative">
+      {arrow && <ChalkArrow className={ARROW_AT_PAGE_ACTIONS_PLUS} />}
+      <p className="text-ui text-ink-faint">
+        {lead} <EmptyStateAction onClick={onAction}>{actionLabel}</EmptyStateAction>
+        {tail}
+      </p>
+    </div>
+  );
 }
 
 /**

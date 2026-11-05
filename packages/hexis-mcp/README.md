@@ -7,10 +7,24 @@ A workspace already publishes a hosted MCP endpoint, and for most tools that is 
 This command closes that gap by being where those tools actually are, without giving up anything the hosted endpoint gives you.
 
 ```bash
-npx @bevel-software/hexis-mcp --url https://your-workspace.example --key bevel_…
+npx @bevel-software/hexis-mcp --url https://your-workspace.example
 ```
 
-Mint the key from the profile menu → **External agent access**.
+**Needs Node 22.13+ or 24.** Those are the versions this server's sandbox (`isolated-vm`) publishes a prebuilt binary for; on any other one it would compile C++ on your machine, so the command refuses with one sentence instead. Select one with `nvm install 22`, or point your MCP client's `"command"` at that version's `npx` — the absolute path, with the `-y @bevel-software/hexis-mcp` arguments unchanged (`node` will not do: it would read `-y` as its own option).
+
+Once it is signed in, the server answers a client's `initialize` immediately and discovers your workspace's tools in the background, so a run that downloads the package and every plugin does not trip a client's handshake timeout. (The one exception is the first keyless run of an agent: the server holds that client's `initialize` while you sign in through the browser, so nothing is answered until you have — the credential is cached afterwards and every later start is immediate.) `tools/list` waits for that discovery and then answers normally; if it fails, the failure arrives as a tool named `hexis_unavailable` whose description says why, and on stderr — the process stays up rather than disappearing.
+
+**The toolset tracks the workspace.** A skill added, changed or removed on the workspace's default branch is in this server's very next `prompts/list` — prompts are read from the workspace on every request. A tool manual added, changed or removed reaches this server without a restart, when the connection is next USED: whenever a tool call finishes or a client lists the tools, the server compares the workspace's catalog fingerprint with the one it registered — at most once every two seconds however busy the connection is, so a burst of calls costs one small read. On a connection in use that puts the change here within ten seconds of the commit — unless a tool call is still running, which holds the refresh for as long as that call runs, to a limit of fifteen seconds (the first caveat below). A listing runs a check and waits for it, so what you are handed is never a list a refresh is halfway through replacing; inside the two-second window it is answered from what the last check confirmed rather than from a fresh read — up to two of those ten seconds are that window alone. After a call, the change lands once that call finishes, so a new tool is callable from the call after that one. While the connection is IDLE the server asks the workspace nothing about its catalog and holds nothing open beyond the one MCP session it serves tools through — no catalog timer, no parked request — so a laptop nobody is using costs the workspace nothing more than being connected, and it catches up at its next use. (The one thing a browser-signed-in server does on its own clock is renew its own sign-in shortly before it expires — a single request every few hours, and nothing to do with the catalog.) When the catalog has moved, the server re-registers the workspace's tools **and its local-only servers** (`local: true`, or a `type: "stdio"` command — those are fetched to your disk again and their child process is restarted by the re-registration), then sends the MCP tool-list-changed and prompt-list-changed notifications. A client that honours those notifications re-lists on its own; one that caches the list it was given at connect time has to be asked to re-list, or reconnected. Two caveats: a refresh waits for a tool call that is still running before it re-registers, but only for fifteen seconds — a change committed mid-call lands after that call finishes, and a call that outlasts the wait has the re-registration happen underneath it instead, which is deliberate: one wedged call must not hold the toolset stale for as long as it cares to run; and a workspace older than this package cannot report its catalog at all, which the server says once on stderr before keeping the toolset it started with.
+
+## Signing in
+
+Two ways in, and whether you pass a key decides:
+
+**No key (the default)** — the command opens your browser to sign in to the workspace, the same sign-in the web UI uses. The sign-in belongs to the agent that runs the server: it learns which one from the MCP handshake and registers with the workspace as, say, "Claude Code · local server on your-machine", which is how it appears on the workspace's Audit log page — and what you revoke there. Each agent on a machine signs in once, as itself; the credential that keeps it signed in lands in `~/.hexis/oauth/`, readable only by you, so later runs skip the browser. On a machine with no display, `--no-open` (or `HEXIS_NO_BROWSER=1`) prints the sign-in URL instead of opening anything — follow it from any browser. Browser sign-in needs a deployment at least as new as this package; against an older one the command says so, and a connection key still works there.
+
+**With a key** — `--key bevel_…` (or `HEXIS_CONNECTION_KEY`) skips the browser entirely: the right mode for CI, pipelines, and anywhere nobody is present to sign in. Mint one from the profile menu → **External agent access**.
+
+Either way, the credential authenticates *this process* and nothing else changes: tools still execute where they always did, and the workspace's Secrets Vault stays on the server.
 
 ## In Claude Code
 
@@ -29,6 +43,8 @@ Mint the key from the profile menu → **External agent access**.
 }
 ```
 
+Leave `HEXIS_CONNECTION_KEY` out and the first start opens your browser to sign in instead; after that the stored sign-in carries every start.
+
 ## What you get
 
 Everything the hosted endpoint serves — the knowledge-base tools, your plugins' `.tool` integrations, and your skills as slash commands — **plus** the local-only tools. `call_tool_chain` here runs over the merged set, so one script can read a page from the workspace and hand it to a tool running on your laptop.
@@ -39,24 +55,24 @@ This is the part worth understanding, because it decides which tools work.
 
 A UTCP tool's `${VAR}` placeholders are filled in **by whichever process holds the client**. This server registers the deployment's own MCP endpoint as a single manual, so every remote tool still *executes on the server* — and keeps resolving its variables from the Secrets Vault there. A shared API key an admin set once, or a Notion sign-in someone completed on the Connect page, keeps working exactly as it does today. Nothing pulls those values onto your machine.
 
-Local-only tools are the exception, necessarily: they run here, so their variables resolve here, from this process's environment. Put them in the `env` block of the MCP client config that launches the command:
+Local-only tools are the exception, necessarily: they run here, so their variables have to be here too. They are resolved from the **same Secrets Vault**, through one deliberately narrow route, and this is the boundary worth knowing:
 
-```json
-"env": {
-  "HEXIS_URL": "https://your-workspace.example",
-  "HEXIS_CONNECTION_KEY": "bevel_…",
-  "mytool_API_KEY": "…"
-}
-```
+- **The request names a manual, never a variable.** This process asks the workspace to resolve *what `mytool` declares*; the workspace re-reads that `.tool` file and answers with exactly those variables. The knowledge base is the allowlist, and nothing this process sends can widen it.
+- **Only `remote: false` manuals resolve here.** A remote tool's credentials are used on the server and are refused by this route — moving them onto a laptop would be a wider exposure than the tool they unlock.
+- **Values are never returned to an agent.** They are substituted into a tool invocation and go no further. An agent calls `git.push(...)`; it never sees the token that made the push work.
+- **A browser session cannot use this route.** It answers the machine credential this process holds — a connection key, or the internal token a browser sign-in exchanges for — and refuses a web-UI session outright. Signed-in users in the web UI get the Secrets page, which is write-only. Both ways of running this command can therefore resolve a local tool's variables; neither lets a person read one back.
 
-The name is the UTCP-namespaced form: the `id` from the `.tool` file, an underscore, then the variable it references. UTCP sanitizes the id first — every character that is not a letter, digit or underscore becomes `_`, and then every `_` is **doubled** — so a plain alphanumeric id keeps the simple shape (`mytool` + `API_KEY` → `mytool_API_KEY`), while `my-tool` or `my_tool` + `API_KEY` both become `my__tool_API_KEY`. There is no way to read a Secrets Vault value from here, and that is deliberate: a vault secret arriving on a laptop is a wider exposure than the one tool it unlocks.
+So: set a local tool's variables on the workspace's Secrets page, like any other tool's. Nothing has to be placed on each machine.
+
+The environment still works as a fallback for tools provisioned the old way. Put the value in the `env` block of the MCP client config that launches the command, under the UTCP-namespaced name — the `id` from the `.tool` file, an underscore, then the variable. UTCP sanitizes the id first: every character that is not a letter, digit or underscore becomes `_`, then every `_` is **doubled**, so `mytool` + `API_KEY` → `mytool_API_KEY`, while `my-tool` or `my_tool` + `API_KEY` both become `my__tool_API_KEY`. (Two manuals whose ids differ only in `-` versus `_` therefore share a namespace; the workspace refuses the second, and this process refuses to resolve either.)
 
 ## Options
 
 | Flag | Environment | Meaning |
 |---|---|---|
 | `-u, --url` | `HEXIS_URL` | Workspace base URL |
-| `-k, --key` | `HEXIS_CONNECTION_KEY` | Connection key from External agent access |
+| `-k, --key` | `HEXIS_CONNECTION_KEY` | Connection key from External agent access; omit to sign in through your browser |
+| `--no-open` | `HEXIS_NO_BROWSER` | Print the sign-in URL instead of opening a browser |
 | `-h, --help` | | Usage |
 
 The MCP endpoint itself is not a setting: the server asks the deployment for it (`/api/config`), so a workspace behind a proxy or on a second domain is handled without you configuring anything twice. Older deployments that do not advertise it fall back to `<url>/api/mcp`, with a warning on stderr.
@@ -65,9 +81,16 @@ The MCP endpoint itself is not a setting: the server asks the deployment for it 
 
 Diagnostics go to **stderr** (stdout carries the protocol), and MCP clients surface them as server logs.
 
-- *"The connection key was rejected"* — the key was revoked or belongs to another workspace. Mint a new one.
+- **The client says `npx` (or `ENOENT`) was not found** — the client was launched from the Dock, the Start menu or a desktop icon, so it was started by the window server rather than by a login shell and never read the profile that put Homebrew's or nvm's `npx` on PATH. Cursor and Claude Desktop on macOS are the usual pair. Run `which npx` in a terminal (`where.exe npx` in PowerShell) and use the full path it prints as `"command"` (on Windows, double each backslash or use forward slashes — the field is JSON); the `args` stay as they are. If the client then reports `env: node: No such file or directory`, that `npx` is a script starting with `#!/usr/bin/env node` and the same PATH gap now hides `node` — add the folder the path names to the client's `"env"`, keeping the system folders after it, because the first-run sign-in opens your browser through them: `{ "PATH": "/that/folder:/usr/local/bin:/usr/bin:/bin" }`. (Running the same configuration from a terminal-launched client works, which is what makes this look like a broken config rather than a missing PATH.)
+- *"hexis-mcp runs on Node 22.13+ or 24"* — this process is on some other version (a nightly or an `rc` of a supported one counts as another version: no binary was published for an ABI that was not settled yet). The sandbox is a native module with no prebuilt binary there, and building it would be a C++ compile on your machine. `nvm install 22`, or set `"command"` to a supported version's `npx` — a GUI-launched client cannot be fixed by switching versions in a terminal, because it never reads that shell.
+- *"hexis-mcp could not load its native sandbox"* — the Node major is supported but the binary will not load: usually an install that was copied between machines or architectures. Reinstall (`npx -y` again, or delete `node_modules` and install) on the machine that runs it.
+- **The only tool listed is `hexis_unavailable`** — discovery failed after the handshake; its description carries the reason, and the same sentence is in the server's stderr log. The server stays connected on purpose, so the reason reaches you instead of the client reporting that it died. Fix the cause and restart it.
+- *"The connection key was rejected"* — the key is invalid or revoked, or belongs to another workspace. Mint a new one in External agent access. The process exits instead of offering a browser sign-in. Claude Code shows only that the server failed; `claude mcp get <name>` or running the command in a terminal shows the message.
+- *"Your sign-in was rejected"* / *"could not be refreshed"* — the workspace revoked the sign-in, or it expired. Restart the command to sign in through your browser again.
+- *"This deployment is too old for browser sign-in"* — the workspace predates the sign-in exchange. Upgrade it, or pass a connection key.
 - **A local tool is missing from the list** — it registered but failed; the log names it and why. A tool whose local server is not running is the usual cause.
-- **A local tool is listed but its calls fail on credentials** — its `${VAR}` is not in this process's environment. See above; note the namespaced prefix, with `-`/`_` in the tool id becoming `__`.
+- **A local tool is listed but its calls fail on credentials** — its variable is not set on the workspace's Secrets page, and not in this process's environment either. The log names which variables came back unset. If you are using the environment fallback, note the namespaced prefix, with `-`/`_` in the tool id becoming `__`.
+- **The log says two manuals share a namespace, or have nested ones** — neither resolves until one is renamed (shared), or a variable of the shorter manual whose name starts with `_` is avoided (nested).
 - **A tool is missing entirely** — the workspace hides tools whose per-user credentials you have not set up yet, on key-authenticated sessions. Configure it on the workspace's Connect page.
 
 ## Licence

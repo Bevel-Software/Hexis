@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import { Boxes, CircleUserRound, KeyRound, Lock, SlidersHorizontal, Users } from 'lucide-react';
+import { Boxes, CircleUserRound, KeyRound, Lock, ScrollText, SlidersHorizontal, Users, UsersRound } from 'lucide-react';
 import { useAppRegistry, type AdminMenuItem } from '../../core/registry';
 
 /**
@@ -19,8 +19,9 @@ import { useAppRegistry, type AdminMenuItem } from '../../core/registry';
  * Connected apps, feedback, LLM configuration, …) is registry-contributed —
  * see the enterprise shell's `adminMenuItems`. The `order` values interleave
  * the two lists to reproduce the historical row order. In THIS repo the
- * registry is empty (`makeRegistry({})`), so the menu is these six rows and no
- * more; the enterprise app gets all thirteen.
+ * registry is empty (`makeRegistry({})`), so the menu is these rows plus the
+ * core modules' own action rows the shell merges in (git's "Ask before
+ * deleting branches", while it applies); the enterprise app gets all thirteen.
  *
  * Skills & Tools is deliberately NOT here. It is an APP (see `CORE_APPS` in
  * CoreAppShell), and apps belong to the app switcher — which already lists it
@@ -32,7 +33,11 @@ import { useAppRegistry, type AdminMenuItem } from '../../core/registry';
  * to one. The closures said the same thing twice — where the row goes, and how
  * to go there — and only the second half was legible to anything that was not
  * a click. The `dialog` and `onSelect` contracts on {@link AdminMenuItem} stay
- * fully supported for registry-contributed rows.
+ * fully supported for rows that arrive through the registry — and not every
+ * such row is the enterprise shell's: `CoreAppShell` merges core modules' own
+ * action rows into `registry.adminMenuItems` (git's "Ask before deleting
+ * branches", an `onSelect` row with no `path`, which therefore never reaches
+ * the settings nav).
  */
 export const CORE_MENU_ITEMS: AdminMenuItem[] = [
   {
@@ -41,6 +46,16 @@ export const CORE_MENU_ITEMS: AdminMenuItem[] = [
     icon: <KeyRound size={15} />,
     label: 'External agent access',
     path: '/external-agent-access',
+  },
+  {
+    // Everyone's row, not an admin's: each person sees their own agents and
+    // keys and what those called; admins see every account on the same page.
+    // It replaced the admin-only Connection keys row.
+    id: 'audit-log',
+    order: 45,
+    icon: <ScrollText size={15} />,
+    label: 'Audit log',
+    path: '/audit-log',
   },
   {
     id: 'secrets',
@@ -76,8 +91,16 @@ export const CORE_MENU_ITEMS: AdminMenuItem[] = [
     section: 'admin',
     order: 10,
     icon: <Users size={15} />,
-    label: 'Roles & Members',
+    label: 'App roles',
     path: '/roles-and-members',
+  },
+  {
+    id: 'directory-groups',
+    section: 'admin',
+    order: 15,
+    icon: <UsersRound size={15} />,
+    label: 'Groups & Members',
+    path: '/directory-groups',
   },
   {
     id: 'user-accounts',
@@ -101,9 +124,9 @@ export const CORE_MENU_ITEMS: AdminMenuItem[] = [
  *
  * The consequence is a rule worth having: a settings page reaches the nav by
  * having a row, and a settings page with no way to navigate to it is the
- * original bug. `/connect` is outside this set for that reason — it is a flow
- * page with no row, an OAuth landing target whose agent-connect mode has
- * somebody else blocked on a Finish button.
+ * original bug. "Connect your tools" is outside this set for that reason — it
+ * is a flow page with no row, an OAuth landing target whose agent-connect mode
+ * has somebody else blocked on a Finish button — and lives in Skills & Tools.
  */
 export const SETTINGS_NAV_PATHS: readonly string[] = CORE_MENU_ITEMS.map(
   (item) => item.path,

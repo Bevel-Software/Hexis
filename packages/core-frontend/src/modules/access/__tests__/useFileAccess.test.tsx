@@ -218,6 +218,53 @@ describe('useFileAccess', () => {
     expect(apiMock.fetchFileAccess).not.toHaveBeenCalled();
   });
 
+  // Switching files must not leak the PREVIOUS file's verdicts into the new
+  // lookup's in-flight window: both canWrite and canDownload reset to null
+  // (optimistic) the moment the new request starts.
+  it('resets canWrite/canDownload to null while a new file lookup is in flight', async () => {
+    apiMock.fetchFileAccess.mockResolvedValueOnce({
+      canWrite: false,
+      canDownload: false,
+      eligible: { roles: ['Admin'], users: [] },
+      owners: { roles: [], users: [] },
+    });
+    // The second file's request stays pending until we resolve it.
+    let resolveSecond!: (v: unknown) => void;
+    apiMock.fetchFileAccess.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveSecond = resolve;
+        }),
+    );
+
+    const { result, rerender } = renderHook(
+      ({ path }: { path: string }) => useFileAccess(path, PROTECTED),
+      {
+        wrapper: withWorkspace(makeWorkspace()),
+        initialProps: { path: 'knowledge-base/Knowledge/First.md' },
+      },
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.canWrite).toBe(false);
+    expect(result.current.canDownload).toBe(false);
+
+    rerender({ path: 'knowledge-base/Knowledge/Second.md' });
+    // In flight for the SECOND file: the first file's hard "no" must not show.
+    expect(result.current.loading).toBe(true);
+    expect(result.current.canWrite).toBeNull();
+    expect(result.current.canDownload).toBeNull();
+
+    resolveSecond({
+      canWrite: true,
+      canDownload: true,
+      eligible: { roles: [], users: [] },
+      owners: { roles: [], users: [] },
+    });
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.canWrite).toBe(true);
+    expect(result.current.canDownload).toBe(true);
+  });
+
   // Branch still loading: hold canWrite=null so the caller stays optimistic
   // (editor editable) until we know which gate applies. Don't fire the API
   // yet because we'd be guessing.

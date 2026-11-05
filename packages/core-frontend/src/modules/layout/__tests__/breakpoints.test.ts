@@ -2,7 +2,12 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { NARROW_PX, NARROW_QUERY, TOOLBAR_STACK_QUERY } from '../breakpoints';
+import {
+  NARROW_PX,
+  NARROW_QUERY,
+  SETUP_COLUMN_HIDDEN_QUERY,
+  TOOLBAR_STACK_QUERY,
+} from '../breakpoints';
 
 const SRC_DIR = join(dirname(fileURLToPath(import.meta.url)), '../../..');
 
@@ -23,6 +28,7 @@ describe('narrow-layout source parity', () => {
     expect(NARROW_PX).toBe(900);
     expect(NARROW_QUERY).toBe(`(max-width: ${NARROW_PX}px)`);
     expect(TOOLBAR_STACK_QUERY).toBe('(max-width: 767px)');
+    expect(SETUP_COLUMN_HIDDEN_QUERY).toBe('(max-width: 900px)');
   });
 
   it('keeps the JS breakpoint aligned with the existing 900px Tailwind variants', () => {

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, renderHook, screen, cleanup, waitFor } from '@testing-library/react';
+import { act, render, screen, cleanup } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { AuthContext } from '../../auth/state/auth.context';
@@ -17,14 +17,19 @@ import { POST_LOGIN_REDIRECT_KEY } from '../../auth/services/sso';
 import { WELCOME_PATH } from '../paths';
 import { resetOnboardingForTests } from '../state/onboarding';
 import { configureMcpUrl } from '../../../shared/mcp';
-import { setSidebarCollapsed, useSidebar } from '../../layout/state/sidebar';
+import { SidebarFrame } from '../../layout/components/SidebarFrame';
+import { SIDEBAR_HEADER_TESTID } from '../../../shared/theme/header';
+import { AGENT_RECHECK_MS } from '../state/agent-connection';
+import type { AgentConnection } from '../services/agent-connection.api';
+import { EventBusContext, type EventBusContextValue } from '../../version-control/state/event-bus.context';
+import { DEFAULT_BRANCH, type VersionControlEvent, type VersionControlEventPayload } from '@bevel-software/platform-shared';
 
 /**
  * The onboarding contract, end to end on the client:
  *
- *  - `/` redirects to the welcome page ONCE, on an account the server says is
- *    not onboarded — and never hijacks anything after that first greeting.
- *  - the pill outlives the redirect: it stays until × or Done, exactly two.
+ *  - `/` never redirects to the welcome page; it lands on Knowledge (or a
+ *    carried deep link), even for an account that is not onboarded.
+ *  - the pill is the reminder: it stays until × or Done, exactly two.
  *  - Done concludes (server write + navigation); the skip link and the copy
  *    button conclude NOTHING — leaving and copying are not promises.
  */
@@ -40,6 +45,17 @@ vi.mock('../../../lib/api', () => ({ authFetch: authFetchMock }));
 // Public-demo flag — default off, flipped by the demo-home tests below.
 const bootstrapMock = vi.hoisted(() => ({ isPublicDemo: vi.fn(() => false) }));
 vi.mock('../../../core/bootstrap', () => ({ isPublicDemo: bootstrapMock.isPublicDemo }));
+
+/**
+ * The agent-connection question has its own seam, so the page's one ask never
+ * shows up in `authFetch` — every assertion above about what DID or did NOT
+ * reach the server stays about the onboarding write alone. Default: nobody
+ * has connected yet.
+ */
+const { fetchAgentConnectionMock } = vi.hoisted(() => ({
+  fetchAgentConnectionMock: vi.fn<() => Promise<AgentConnection>>(),
+}));
+vi.mock('../services/agent-connection.api', () => ({ fetchAgentConnection: fetchAgentConnectionMock }));
 
 /**
  * The `RequestInit` of a recorded `authFetch` call.
@@ -58,38 +74,17 @@ const newUser = () => authValue({ user: { id: 'u1', email: 'juan@bevel.software'
 /** The same account after the server has recorded the onboarding as done. */
 const doneUser = () => authValue({ user: { id: 'u1', email: 'juan@bevel.software', name: 'Juan Viera', onboardingDone: true } });
 
-/** Reads the sidebar store the way a component would. */
-function sidebarState() {
-  return renderHook(() => useSidebar()).result.current;
-}
-
-/** Where we are, whether we got here by being greeted, and any carried link. */
+/** Where we are. */
 function LocationProbe() {
-  const { pathname, state } = useLocation();
-  const s = state as { greeting?: boolean; returnTo?: string | null } | null;
-  return (
-    <>
-      <div data-testid="pathname">{pathname}</div>
-      <div data-testid="greeting">{String(s?.greeting === true)}</div>
-      <div data-testid="returnTo">{s?.returnTo ?? ''}</div>
-    </>
-  );
+  return <div data-testid="pathname">{useLocation().pathname}</div>;
 }
-
-/** The welcome page as the first-sign-in redirect leaves it: greeted. */
-const greeted = { pathname: WELCOME_PATH, state: { greeting: true } };
 
 /**
  * Render `ui` inside the three contexts the onboarding actually reads — a
  * router at `route`, an auth context holding `auth`, and the toast provider —
- * plus the location probe every redirect assertion below looks at. `route`
- * takes a location object when a test needs to arrive as the greeting does.
+ * plus the location probe every redirect assertion below looks at.
  */
-function mount(
-  ui: React.ReactNode,
-  auth = newUser(),
-  route: string | { pathname: string; state?: unknown } = '/',
-) {
+function mount(ui: React.ReactNode, auth = newUser(), route = '/') {
   return render(
     <MemoryRouter initialEntries={[route]}>
       <AuthContext.Provider value={auth}>
@@ -113,6 +108,7 @@ const landingRoutes = (
 beforeEach(() => {
   resetOnboardingForTests();
   authFetchMock.mockClear();
+  fetchAgentConnectionMock.mockReset().mockResolvedValue({ connected: false });
   bootstrapMock.isPublicDemo.mockReturnValue(false);
   sessionStorage.clear();
 });
@@ -144,17 +140,15 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe('RootLanding: the one-time greeting', () => {
-  it('sends a brand-new account to the welcome page', () => {
+/**
+ * `/` never sends anyone to the welcome page — not even a brand-new account.
+ * Choosing where the knowledge lives is the only step before the app;
+ * connecting an agent waits in the pill and the Get set up list.
+ */
+describe('RootLanding', () => {
+  it('sends a brand-new account straight to Knowledge, not the welcome page', () => {
     mount(landingRoutes);
-    expect(screen.getByTestId('pathname')).toHaveTextContent(WELCOME_PATH);
-  });
-
-  // The flag the page reads to know this arrival is a ceremony rather than a
-  // visit — the sidebar collapse hangs off it, and only this navigation sets it.
-  it('marks the automatic redirect as a greeting', () => {
-    mount(landingRoutes);
-    expect(screen.getByTestId('greeting')).toHaveTextContent('true');
+    expect(screen.getByTestId('pathname')).toHaveTextContent('/workspace');
   });
 
   it('sends everyone the server marked done straight to Knowledge', () => {
@@ -162,10 +156,13 @@ describe('RootLanding: the one-time greeting', () => {
     expect(screen.getByTestId('pathname')).toHaveTextContent('/workspace');
   });
 
-  // Optional-field semantics: an ABSENT flag (old fixture, cached session)
-  // must never resurrect the welcome flow. Only an explicit false onboards.
-  it('treats a missing flag as done, not as new', () => {
-    mount(landingRoutes, authValue());
+  it('lands signed out (or providerless) on Knowledge too', () => {
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        {landingRoutes}
+        <LocationProbe />
+      </MemoryRouter>,
+    );
     expect(screen.getByTestId('pathname')).toHaveTextContent('/workspace');
   });
 
@@ -184,13 +181,11 @@ describe('RootLanding: the one-time greeting', () => {
     expect(sessionStorage.getItem(POST_LOGIN_REDIRECT_KEY)).toBeNull();
   });
 
-  it('greets a brand-new account first, handing the link to the welcome page', () => {
+  it('sends a brand-new account to the stashed deep link as well', () => {
     const DEEP = '/workspace/main/knowledge-base/KnowledgeBase/Start here.md';
     sessionStorage.setItem(POST_LOGIN_REDIRECT_KEY, DEEP);
     mount(landingRoutes);
-    expect(screen.getByTestId('pathname')).toHaveTextContent(WELCOME_PATH);
-    expect(screen.getByTestId('greeting')).toHaveTextContent('true');
-    expect(screen.getByTestId('returnTo')).toHaveTextContent(DEEP);
+    expect(screen.getByTestId('pathname')).toHaveTextContent(DEEP);
   });
 
   it('discards a stash that is not an in-app path — never an off-site redirect', () => {
@@ -221,41 +216,45 @@ describe('RootLanding: the one-time greeting', () => {
       </MemoryRouter>,
     );
     // Percent-encoded: `kbFileUrl` encodes each segment, and the router keeps
-    // the pathname exactly as navigated.
+    // the pathname exactly as navigated. The branch is whatever the test
+    // setup configured, read live, as the component reads it.
     expect(screen.getByTestId('pathname')).toHaveTextContent(
-      '/workspace/target-company-state/knowledge-base/KnowledgeBase/Start%20here.md',
+      `/workspace/${encodeURIComponent(DEFAULT_BRANCH)}/knowledge-base/KnowledgeBase/Start%20here.md`,
     );
   });
 
   it('public demo: a carried deep link still beats the tour', () => {
     bootstrapMock.isPublicDemo.mockReturnValue(true);
-    const DEEP = '/workspace/main/knowledge-base/Groups/Sales/create-sales-deck/SKILL.md';
+    const DEEP = '/workspace/main/knowledge-base/Plugins/Sales/create-sales-deck/SKILL.md';
     sessionStorage.setItem(POST_LOGIN_REDIRECT_KEY, DEEP);
     mount(landingRoutes, doneUser());
     expect(screen.getByTestId('pathname')).toHaveTextContent(DEEP);
   });
 
-  it('greets ONCE: after the welcome page has been seen, / goes to Knowledge', async () => {
+  /**
+   * The SSO callback scrubs its URL behind the router's back, so the router
+   * still matches `/auth/<key>/callback` — which the shell routes here. The
+   * carried link must survive that path just the same.
+   */
+  it('lands an /auth/* callback on the stashed deep link', () => {
+    const DEEP = '/workspace/main/knowledge-base/KnowledgeBase/Start here.md';
+    sessionStorage.setItem(POST_LOGIN_REDIRECT_KEY, DEEP);
     mount(
       <Routes>
-        <Route path="/" element={<RootLanding />} />
-        <Route path={WELCOME_PATH} element={<WelcomePage />} />
-        <Route path="/workspace" element={<div>knowledge</div>} />
+        <Route path="/auth/*" element={<RootLanding />} />
+        <Route path="*" element={<div>elsewhere</div>} />
       </Routes>,
+      newUser(),
+      '/auth/microsoft/callback',
     );
-    // Landed on the real page, which marks `welcomed` on mount.
-    await screen.findByRole('heading', { name: /Welcome, Juan/ });
-    cleanup();
-    // A fresh visit to `/` — same account, same browser.
-    mount(landingRoutes);
-    expect(screen.getByTestId('pathname')).toHaveTextContent('/workspace');
+    expect(screen.getByTestId('pathname')).toHaveTextContent(DEEP);
   });
 });
 
 describe('WelcomePage', () => {
-  // Default: the ordinary visit, from the sidebar pill. The greeting — the
-  // one-time redirect — is the special case, and says so at each call site.
-  const mountPage = (auth = newUser(), route: string | typeof greeted = WELCOME_PATH) =>
+  // Every arrival is a visit — from the sidebar pill, the Get set up list or
+  // a typed URL; nothing navigates here on its own.
+  const mountPage = (auth = newUser()) =>
     mount(
       <Routes>
         <Route path={WELCOME_PATH} element={<WelcomePage />} />
@@ -263,7 +262,7 @@ describe('WelcomePage', () => {
         <Route path="/skills-and-tools/yours" element={<div>your plugin</div>} />
       </Routes>,
       auth,
-      route,
+      WELCOME_PATH,
     );
 
   it('addresses the person by first name', () => {
@@ -272,40 +271,14 @@ describe('WelcomePage', () => {
   });
 
   /**
-   * The entrance must BEGIN on a painted frame. A CSS animation runs on the
-   * document timeline whether or not the browser is producing frames, so an
-   * animation attached at mount can elapse entirely during a cold boot and
-   * never be seen — the bug that made this page "just appear" at every
-   * duration we tried. Held invisible first, animating second.
+   * Nobody is greeted any more, so the page simply exists: no hold, no fade,
+   * and the nav it was opened from stays exactly where it is.
    */
-  it('starts its entrance on a painted frame, not at mount', async () => {
-    mountPage(newUser(), greeted);
-    const title = screen.getByRole('heading', { name: 'Welcome, Juan' });
-    const body = screen.getByText(/company’s shared library/).parentElement!;
-    // An inline style, deliberately — a utility class would depend on Tailwind
-    // having compiled it, and that is exactly what failed silently before.
-    expect(title.style.opacity).toBe('0');
-    expect(body.style.opacity).toBe('0');
-    await waitFor(() => {
-      expect(title.className).toContain('animate-onboarding-greeting');
-      expect(body.className).toContain('animate-onboarding-body');
-    });
-    // …and never both at once: held invisible and animating would fight.
-    expect(title.style.opacity).toBe('');
-    expect(body.style.opacity).toBe('');
-  });
-
-  /**
-   * Being welcomed happens once. Opening the same page from the pill later is
-   * a visit, and a 2.6s arrival every time you come back to copy your MCP
-   * snippet is a page you learn to dread — so there is no hold and no fade,
-   * only the page.
-   */
-  it('does not replay the entrance when you open it from the pill', () => {
+  it('appears as it is, with no entrance to play', () => {
     mountPage();
     const title = screen.getByRole('heading', { name: 'Welcome, Juan' });
     expect(title.style.opacity).toBe('');
-    expect(title.className).not.toContain('animate-onboarding-greeting');
+    expect(title.className).not.toContain('animate-onboarding');
   });
 
   // However the sign-in record spells it. The page addressed to one person is
@@ -320,73 +293,126 @@ describe('WelcomePage', () => {
     expect(screen.getByRole('heading', { name: 'Welcome, there' })).toBeInTheDocument();
   });
 
-  /**
-   * The nav gets out of the way for the greeting and STAYS out — there is no
-   * restore. Putting it back meant leaving a screen with no nav and arriving
-   * at one where the nav had opened itself, which is the app rearranging a
-   * page you asked for. Whether the sidebar shows is the toolbar toggle's to
-   * say, and after the greeting it says whatever it said last.
-   */
-  it('collapses the sidebar for the greeting, without animating it', () => {
-    setSidebarCollapsed(false);
-    mountPage(newUser(), greeted);
-    expect(sidebarState()).toMatchObject({ collapsed: true, instant: true });
-  });
-
-  it('leaves it collapsed when you go to your own plugin', async () => {
-    setSidebarCollapsed(false);
-    mountPage(newUser(), greeted);
-    await userEvent.click(screen.getByRole('button', { name: /Go to your skills/ }));
-    expect(screen.getByTestId('pathname')).toHaveTextContent('/skills-and-tools/yours');
-    expect(sidebarState().collapsed).toBe(true);
-  });
-
-  it('leaves it collapsed after Done too', async () => {
-    setSidebarCollapsed(false);
-    mountPage(newUser(), greeted);
-    await userEvent.click(screen.getByRole('button', { name: 'Done' }));
-    expect(sidebarState().collapsed).toBe(true);
-  });
-
-  /**
-   * The one case where the nav is showing on the way out: you opened it
-   * yourself while you were here. The page collapses once, on arrival, and
-   * never touches the store again — so your gesture is the last word.
-   */
-  it('respects a sidebar you opened yourself while reading the page', async () => {
-    setSidebarCollapsed(false);
-    mountPage(newUser(), greeted);
-    expect(sidebarState().collapsed).toBe(true);
-    setSidebarCollapsed(false); // …the toolbar toggle, from the user's hand
-    await userEvent.click(screen.getByRole('button', { name: 'Done' }));
-    expect(sidebarState().collapsed).toBe(false);
-  });
-
-  it('leaves it collapsed for someone who arrived that way', () => {
-    setSidebarCollapsed(true);
-    const { unmount } = mountPage(newUser(), greeted);
-    expect(sidebarState().collapsed).toBe(true);
-    unmount();
-    expect(sidebarState().collapsed).toBe(true);
-  });
-
-  // Reached from the pill it is a page, not a ceremony: the nav it was just
-  // clicked in stays exactly where it is.
-  it('leaves the sidebar alone when you open it from the pill', () => {
-    setSidebarCollapsed(false);
-    const { unmount } = mountPage();
-    expect(sidebarState().collapsed).toBe(false);
-    unmount();
-    expect(sidebarState().collapsed).toBe(false);
-  });
-
   it('shows one snippet at a time, following the picker', async () => {
     mountPage();
-    // Claude default: the bare URL.
+    // Claude default: the bare hosted URL, not a config.
     expect(screen.getByText(/\/api\/mcp$/)).toBeInTheDocument();
     expect(screen.queryByText(/mcpServers/)).toBeNull();
-    await userEvent.click(screen.getByRole('radio', { name: 'Cursor & Others' }));
-    expect(screen.getByText(/mcpServers/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('radio', { name: 'Desktop agents' }));
+    expect(screen.getByText(/@bevel-software\/hexis-mcp/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('radio', { name: 'Other tools' }));
+    expect(screen.getByText(/skills-tools-knowledge/)).toBeInTheDocument();
+  });
+
+  /**
+   * ChatGPT renamed Apps & Connectors to Plugins, and a one-line path with the
+   * old names stranded people. The steps are numbered, in the order the
+   * settings are actually walked, and each renamed thing is named both ways
+   * so either build of ChatGPT reads right.
+   */
+  it('walks ChatGPT as numbered steps naming both the current and the previous page', async () => {
+    mountPage();
+    await userEvent.click(screen.getByRole('radio', { name: 'ChatGPT' }));
+    const steps = screen.getAllByRole('listitem').map((li) => li.textContent);
+    expect(steps).toEqual([
+      'Open Settings in ChatGPT.',
+      'Open Plugins (called Apps & Connectors in older versions).',
+      'Turn on Developer Mode (under Advanced in older versions).',
+      'Go back and choose Create (or Add).',
+      'Name it “Skills, Tools and Knowledge”.',
+      'Paste the address below, then save.',
+    ]);
+    // An ordered list, so the numbers are real rather than typed into the text.
+    expect(screen.getByRole('list').tagName).toBe('OL');
+    // The other options keep their one-paragraph hint.
+    await userEvent.click(screen.getByRole('radio', { name: 'Claude' }));
+    expect(screen.queryByRole('list')).toBeNull();
+  });
+
+  /**
+   * "A JSON config" told a business user nothing. The Other tools option
+   * says where it goes, and gives the bare address too — many tools take a
+   * URL and nothing else — each with its own copy button.
+   */
+  it('tells Other tools where the configuration goes, and offers the bare address too', async () => {
+    configureMcpUrl('https://kb.acme.com/api/mcp');
+    const writeText = stubClipboard();
+    mountPage();
+    await userEvent.click(screen.getByRole('radio', { name: 'Other tools' }));
+    expect(
+      screen.getByText(
+        'For any other AI tool that supports MCP servers. Open the tool’s settings, find MCP servers (also called connectors or integrations), choose add, and paste this configuration. If the tool asks for an address only, paste this instead:',
+      ),
+    ).toBeInTheDocument();
+
+    const address = screen.getByText('https://kb.acme.com/api/mcp');
+    const config = screen.getByText(/mcpServers/);
+    // The address first — the hint ends on "paste this instead:" — then the JSON.
+    expect(address.compareDocumentPosition(config) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(config.textContent).toContain('https://kb.acme.com/api/mcp');
+
+    await userEvent.click(screen.getByRole('button', { name: 'Copy address' }));
+    expect(writeText).toHaveBeenLastCalledWith('https://kb.acme.com/api/mcp');
+    await userEvent.click(screen.getByRole('button', { name: 'Copy' }));
+    expect(writeText).toHaveBeenLastCalledWith(config.textContent);
+  });
+
+  it('shows the separate address block on Other tools alone', async () => {
+    mountPage();
+    expect(screen.queryByRole('button', { name: 'Copy address' })).toBeNull();
+    await userEvent.click(screen.getByRole('radio', { name: 'ChatGPT' }));
+    expect(screen.queryByRole('button', { name: 'Copy address' })).toBeNull();
+    await userEvent.click(screen.getByRole('radio', { name: 'Desktop agents' }));
+    expect(screen.queryByRole('button', { name: 'Copy address' })).toBeNull();
+  });
+
+  /**
+   * The default: Claude, which is what most people arriving here already use
+   * and the one connection that is a single click. The button and the hosted
+   * address are both on screen before anything is clicked.
+   */
+  it('defaults to Claude: its install button and the hosted address, without a click', () => {
+    configureMcpUrl('https://kb.acme.com/api/mcp');
+    mountPage();
+    expect(screen.getByRole('radio', { name: 'Claude' })).toHaveAttribute('aria-checked', 'true');
+    expect(screen.getByRole('link', { name: 'Add to Claude' })).toBeInTheDocument();
+    expect(screen.getByText('https://kb.acme.com/api/mcp')).toBeInTheDocument();
+  });
+
+  /**
+   * Desktop agents is no longer the default, but its snippet is still the
+   * keyless local-server config: the local server opens the browser to sign
+   * in on first run, so the config carries no key at all.
+   */
+  it('offers Desktop agents the keyless hexis-mcp config', async () => {
+    mountPage();
+    await userEvent.click(screen.getByRole('radio', { name: 'Desktop agents' }));
+    const snippet = screen.getByText(/mcpServers/).textContent!;
+    expect(snippet).toContain('@bevel-software/hexis-mcp');
+    // Keyless = interactive sign-in: no key env at all, not a placeholder —
+    // the server opens the browser on first run.
+    expect(snippet).not.toContain('HEXIS_CONNECTION_KEY');
+    // The hint says how identity arrives instead: browser sign-in on first run.
+    expect(screen.getByText(/your browser opens so you can sign in/)).toBeInTheDocument();
+  });
+
+  /**
+   * The two ways this snippet fails on a machine where it is otherwise
+   * right: the wrong Node major, and a client launched from the Dock, which
+   * was started by the window server and so never read the shell profile
+   * that put `npx` on PATH (Cursor and Claude Desktop on macOS). The fix for
+   * the second is an absolute path, which is specific to one machine — so it
+   * belongs in the hint and NOT in the snippet, which has to stay right for
+   * every reader whose PATH was fine all along.
+   */
+  it('warns Desktop agents about Node and PATH, leaving the snippet on bare npx', async () => {
+    mountPage();
+    await userEvent.click(screen.getByRole('radio', { name: 'Desktop agents' }));
+    expect(screen.getByText(/Needs Node 22\.13\+ or 24/)).toBeInTheDocument();
+    expect(screen.getByText(/cannot see your shell’s PATH/)).toBeInTheDocument();
+    expect(screen.getByText(/run `which npx` in a terminal/)).toBeInTheDocument();
+    const snippet = screen.getByText(/mcpServers/).textContent!;
+    expect(JSON.parse(snippet).mcpServers['skills-tools-knowledge'].command).toBe('npx');
   });
 
   /**
@@ -394,16 +420,20 @@ describe('WelcomePage', () => {
    * only client with a documented install link, and it appears only when
    * Anthropic could actually reach this deployment — see `canDeepLink`. The
    * copy block stays either way; it is the route that always works.
+   *
+   * Every case still selects the Claude option explicitly, although it is
+   * the default: the link belongs to that option, and the cases say so.
    */
   describe('the Add to Claude link', () => {
-    it('offers one-click connect on a reachable deployment', () => {
+    it('offers one-click connect on a reachable deployment', async () => {
       configureMcpUrl('https://kb.acme.com/api/mcp');
       mountPage();
+      await userEvent.click(screen.getByRole('radio', { name: 'Claude' }));
       const link = screen.getByRole('link', { name: 'Add to Claude' });
       const href = new URL(link.getAttribute('href')!);
       expect(href.origin + href.pathname).toBe('https://claude.ai/customize/connectors');
       expect(href.searchParams.get('connectorUrl')).toBe('https://kb.acme.com/api/mcp');
-      expect(href.searchParams.get('connectorName')).toBe('Hexis — kb.acme.com');
+      expect(href.searchParams.get('connectorName')).toBe('Skills, Tools and Knowledge — kb.acme.com');
     });
 
     /**
@@ -411,9 +441,10 @@ describe('WelcomePage', () => {
      * claude.ai cannot reach. A dead button on the first screen a self-hoster
      * sees reads as a broken product.
      */
-    it('offers nothing to click on a localhost deployment', () => {
+    it('offers nothing to click on a localhost deployment', async () => {
       configureMcpUrl('http://localhost:3001/api/mcp');
       mountPage();
+      await userEvent.click(screen.getByRole('radio', { name: 'Claude' }));
       expect(screen.queryByRole('link', { name: 'Add to Claude' })).toBeNull();
       // …and the route that always works is still there.
       expect(screen.getByText('http://localhost:3001/api/mcp')).toBeInTheDocument();
@@ -424,26 +455,62 @@ describe('WelcomePage', () => {
      * employee who cannot change deployment config; naming an env var at them
      * is noise. The settings page, whose reader plausibly can, says it there.
      */
-    it('does not lecture a new employee about deployment config', () => {
+    it('does not lecture a new employee about deployment config', async () => {
       configureMcpUrl('http://localhost:3001/api/mcp');
       mountPage();
+      await userEvent.click(screen.getByRole('radio', { name: 'Claude' }));
       expect(screen.queryByText(/PUBLIC_BACKEND_URL/)).toBeNull();
     });
 
     it('belongs to Claude alone', async () => {
       configureMcpUrl('https://kb.acme.com/api/mcp');
       mountPage();
+      await userEvent.click(screen.getByRole('radio', { name: 'Claude' }));
       expect(screen.getByRole('link', { name: 'Add to Claude' })).toBeInTheDocument();
       await userEvent.click(screen.getByRole('radio', { name: 'ChatGPT' }));
       expect(screen.queryByRole('link', { name: 'Add to Claude' })).toBeNull();
-      await userEvent.click(screen.getByRole('radio', { name: 'Cursor & Others' }));
+      await userEvent.click(screen.getByRole('radio', { name: 'Desktop agents' }));
+      expect(screen.queryByRole('link', { name: 'Add to Claude' })).toBeNull();
+      await userEvent.click(screen.getByRole('radio', { name: 'Other tools' }));
       expect(screen.queryByRole('link', { name: 'Add to Claude' })).toBeNull();
     });
 
-    // Opening claude.ai must not hand it a handle on this window.
-    it('opens in a new tab safely', () => {
+    /**
+     * ChatGPT gets its own button, on its own option only. It cannot prefill
+     * anything — ChatGPT has no such link — so it opens the settings pane and
+     * the hint beside it spells out the name to type, which is what stops a
+     * dozen employees each inventing their own.
+     */
+    it('offers Add to ChatGPT on the ChatGPT option alone, with the name to type', async () => {
       configureMcpUrl('https://kb.acme.com/api/mcp');
       mountPage();
+      // The default — Claude — carries no ChatGPT button.
+      expect(screen.queryByRole('link', { name: 'Add to ChatGPT' })).toBeNull();
+      await userEvent.click(screen.getByRole('radio', { name: 'Desktop agents' }));
+      expect(screen.queryByRole('link', { name: 'Add to ChatGPT' })).toBeNull();
+      await userEvent.click(screen.getByRole('radio', { name: 'ChatGPT' }));
+      const link = screen.getByRole('link', { name: 'Add to ChatGPT' });
+      expect(link).toHaveAttribute('href', 'https://chatgpt.com/#settings');
+      expect(link).toHaveAttribute('target', '_blank');
+      expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+      expect(screen.getByText(/Skills, Tools and Knowledge/)).toBeInTheDocument();
+      // …and the URL to paste is still the copy block.
+      expect(screen.getByText('https://kb.acme.com/api/mcp')).toBeInTheDocument();
+    });
+
+    it('offers no ChatGPT button on a localhost deployment either', async () => {
+      configureMcpUrl('http://localhost:3001/api/mcp');
+      mountPage();
+      await userEvent.click(screen.getByRole('radio', { name: 'ChatGPT' }));
+      expect(screen.queryByRole('link', { name: 'Add to ChatGPT' })).toBeNull();
+      expect(screen.getByText('http://localhost:3001/api/mcp')).toBeInTheDocument();
+    });
+
+    // Opening claude.ai must not hand it a handle on this window.
+    it('opens in a new tab safely', async () => {
+      configureMcpUrl('https://kb.acme.com/api/mcp');
+      mountPage();
+      await userEvent.click(screen.getByRole('radio', { name: 'Claude' }));
       const link = screen.getByRole('link', { name: 'Add to Claude' });
       expect(link).toHaveAttribute('target', '_blank');
       expect(link).toHaveAttribute('rel', 'noopener noreferrer');
@@ -454,9 +521,10 @@ describe('WelcomePage', () => {
      * what the copy block shows a human must be the same string, or one of
      * them is lying.
      */
-    it('hands Claude exactly the URL the copy block shows', () => {
+    it('hands Claude exactly the URL the copy block shows', async () => {
       configureMcpUrl('https://kb.acme.com/api/mcp');
       mountPage();
+      await userEvent.click(screen.getByRole('radio', { name: 'Claude' }));
       const href = new URL(
         screen.getByRole('link', { name: 'Add to Claude' }).getAttribute('href')!,
       );
@@ -470,7 +538,8 @@ describe('WelcomePage', () => {
     const writeText = stubClipboard();
     mountPage();
     await userEvent.click(screen.getByRole('button', { name: 'Copy' }));
-    expect(writeText).toHaveBeenCalledWith(expect.stringContaining('/api/mcp'));
+    // The default snippet is Claude's: the hosted URL itself.
+    expect(writeText).toHaveBeenCalledWith(expect.stringMatching(/\/api\/mcp$/));
     // Copying is not Done: no server write, no navigation.
     expect(authFetchMock).not.toHaveBeenCalled();
     expect(screen.getByTestId('pathname')).toHaveTextContent(WELCOME_PATH);
@@ -509,9 +578,17 @@ describe('WelcomePage', () => {
     const group = screen.getByRole('radiogroup', { name: 'Your agent' });
     const options = screen.getAllByRole('radio');
     expect(group).toContainElement(options[0]!);
-    expect(options.map((o) => o.getAttribute('aria-checked'))).toEqual(['true', 'false', 'false']);
-    await userEvent.click(screen.getByRole('radio', { name: 'ChatGPT' }));
+    // Claude and ChatGPT lead; Claude is the default.
+    expect(options.map((o) => o.textContent)).toEqual(['Claude', 'ChatGPT', 'Desktop agents', 'Other tools']);
+    expect(options.map((o) => o.getAttribute('aria-checked'))).toEqual([
+      'true',
+      'false',
+      'false',
+      'false',
+    ]);
+    await userEvent.click(screen.getByRole('radio', { name: 'Desktop agents' }));
     expect(screen.getAllByRole('radio').map((o) => o.getAttribute('aria-checked'))).toEqual([
+      'false',
       'false',
       'true',
       'false',
@@ -521,7 +598,7 @@ describe('WelcomePage', () => {
   /**
    * `role="radiogroup"` is a promise about the keyboard, not just a label for
    * a screen reader: arrows select, and selection follows focus. The plugin
-   * wraps, because three options in a row have no edge worth stopping at.
+   * wraps, because four options in a row have no edge worth stopping at.
    */
   it('drives the picker with the arrow keys, wrapping at both ends', async () => {
     mountPage();
@@ -532,14 +609,18 @@ describe('WelcomePage', () => {
     await userEvent.keyboard('{ArrowRight}');
     expect(checked()).toHaveAccessibleName('ChatGPT');
     expect(checked()).toHaveFocus();
+    await userEvent.keyboard('{ArrowDown}');
+    expect(checked()).toHaveAccessibleName('Desktop agents');
+    await userEvent.keyboard('{ArrowRight}');
+    expect(checked()).toHaveAccessibleName('Other tools');
 
     // Off the end and round to the first.
-    await userEvent.keyboard('{ArrowRight}{ArrowRight}');
+    await userEvent.keyboard('{ArrowRight}');
     expect(checked()).toHaveAccessibleName('Claude');
 
     // And backwards past the start, to the last.
     await userEvent.keyboard('{ArrowLeft}');
-    expect(checked()).toHaveAccessibleName('Cursor & Others');
+    expect(checked()).toHaveAccessibleName('Other tools');
   });
 
   // Roving tabindex: the picker is ONE tab stop, not one per client.
@@ -547,6 +628,7 @@ describe('WelcomePage', () => {
     mountPage();
     expect(screen.getAllByRole('radio').map((o) => o.getAttribute('tabindex'))).toEqual([
       '0',
+      '-1',
       '-1',
       '-1',
     ]);
@@ -562,24 +644,6 @@ describe('WelcomePage', () => {
   });
 
   /**
-   * A deep link that survived the SSO round-trip retargets BOTH exits: the
-   * greeting concluded by discarding the page someone was sent would cost
-   * them the reason they came. The skip label says where it now goes.
-   */
-  it('keeps a carried deep link: Done lands on it, and the skip link says so', async () => {
-    const DEEP = '/workspace/main/knowledge-base/KnowledgeBase/Start here.md';
-    const arrivedWithLink = { pathname: WELCOME_PATH, state: { greeting: true, returnTo: DEEP } };
-    mountPage(newUser(), arrivedWithLink);
-    expect(screen.getByRole('button', { name: /Continue to your link/ })).toBeInTheDocument();
-    await userEvent.click(screen.getByRole('button', { name: 'Done' }));
-    expect(authFetchMock).toHaveBeenCalledWith(
-      '/api/auth/onboarding-done',
-      expect.objectContaining({ method: 'POST' }),
-    );
-    expect(screen.getByTestId('pathname')).toHaveTextContent(DEEP);
-  });
-
-  /**
    * `AppRegistry.welcomeExit` moves where a new person starts. WHERE that is,
    * is a property of the product: core sends them to their own skills shelf,
    * because on a core deployment that is the product and a fresh knowledge
@@ -591,12 +655,7 @@ describe('WelcomePage', () => {
    * default: the seam must be invisible to a deployment that does not use it.
    */
   describe('welcomeExit', () => {
-    const mountWithExit = (
-      welcomeExit: { path: string; label: string } | undefined,
-      // Same shape `mount` accepts — `typeof greeted` would pin `state` to
-      // `{ greeting: boolean }` and reject the deep-link case below.
-      route: string | { pathname: string; state?: unknown } = greeted,
-    ) =>
+    const mountWithExit = (welcomeExit: { path: string; label: string } | undefined) =>
       mount(
         <AppRegistryContext.Provider value={{ ...EMPTY_REGISTRY, welcomeExit }}>
           <Routes>
@@ -606,7 +665,7 @@ describe('WelcomePage', () => {
           </Routes>
         </AppRegistryContext.Provider>,
         newUser(),
-        route,
+        WELCOME_PATH,
       );
 
     it('sends both exits to the configured destination', async () => {
@@ -634,21 +693,170 @@ describe('WelcomePage', () => {
       await userEvent.click(screen.getByRole('button', { name: 'Done' }));
       expect(screen.getByTestId('pathname')).toHaveTextContent('/skills-and-tools/yours');
     });
+  });
+});
 
-    /**
-     * A deep link still outranks it. Someone who followed a link is owed that
-     * link, and no amount of deployment configuration may eat an intention.
-     */
-    it('does not override a carried deep link', async () => {
-      const DEEP = '/workspace/main/knowledge-base/KnowledgeBase/Start here.md';
-      mountWithExit(
-        { path: '/skills-and-tools/yours', label: 'Go to your skills' },
-        { pathname: WELCOME_PATH, state: { greeting: true, returnTo: DEEP } },
-      );
-      expect(screen.getByRole('button', { name: /Continue to your link/ })).toBeInTheDocument();
-      await userEvent.click(screen.getByRole('button', { name: 'Done' }));
-      expect(screen.getByTestId('pathname')).toHaveTextContent(DEEP);
+/**
+ * A stand-in for the tab's event stream: what the server would push, pushed
+ * by the test.
+ */
+function fakeBus() {
+  const handlers = new Map<string, Set<(e: VersionControlEvent) => void>>();
+  const value: EventBusContextValue = {
+    subscribe: (kind, handler) => {
+      const set = handlers.get(kind) ?? new Set();
+      set.add(handler as (e: VersionControlEvent) => void);
+      handlers.set(kind, set);
+      return () => set.delete(handler as (e: VersionControlEvent) => void);
+    },
+    setFocus: () => {},
+    watchWorkspace: () => () => {},
+  };
+  const emit = (event: VersionControlEventPayload) => {
+    act(() => {
+      for (const h of handlers.get(event.kind) ?? []) {
+        h({ id: 1, ts: new Date().toISOString(), ...event } as VersionControlEvent);
+      }
     });
+  };
+  return { value, emit, listening: (kind: string) => (handlers.get(kind)?.size ?? 0) > 0 };
+}
+
+const ARRIVED: VersionControlEventPayload = {
+  kind: 'agent-connected',
+  forUserId: 'u1',
+  client: 'Claude',
+  agentKind: 'agent',
+  at: '2026-10-07T12:00:00.000Z',
+};
+
+/**
+ * "Did it work?" answered on the page: a quiet waiting line that turns into
+ * a plain "Connected" the moment the server says the agent's first call
+ * landed — and that conclusion does what Done does to the onboarding, once.
+ * The page asks once on arrival and listens from then on; it never asks on
+ * a timer.
+ */
+describe('WelcomePage: is your agent connected?', () => {
+  const mountPage = (auth = newUser(), bus = fakeBus()) => {
+    const rendered = mount(
+      <EventBusContext.Provider value={bus.value}>
+        <Routes>
+          <Route path={WELCOME_PATH} element={<WelcomePage />} />
+        </Routes>
+      </EventBusContext.Provider>,
+      auth,
+      WELCOME_PATH,
+    );
+    return { ...rendered, bus };
+  };
+
+  /** Calls to the onboarding write — the one `markDone` makes. */
+  const doneWrites = () =>
+    authFetchMock.mock.calls.filter((c) => (c as unknown[])[0] === '/api/auth/onboarding-done').length;
+
+  /** Let the pending answer land. */
+  const settle = () => act(async () => {});
+
+  afterEach(() => {
+    vi.useRealTimers();
+    Reflect.deleteProperty(document, 'hidden');
+  });
+
+  it('waits quietly, turns green when the server says the agent arrived, and concludes once', async () => {
+    const { bus } = mountPage();
+    await settle();
+    // One live region, the same element in both states, so the change is announced.
+    const status = screen.getByText('Waiting for your agent…').closest('[role="status"]') as HTMLElement;
+    expect(status).toHaveAttribute('aria-live', 'polite');
+    expect(fetchAgentConnectionMock).toHaveBeenCalledTimes(1);
+    expect(doneWrites()).toBe(0);
+    expect(bus.listening('agent-connected')).toBe(true);
+
+    bus.emit(ARRIVED);
+    expect(status).toHaveTextContent('Connected. Your agent reached this knowledge base.');
+    expect(status).not.toHaveTextContent('Waiting');
+    expect(doneWrites()).toBe(1);
+    expect(fetchInit(0)?.body).toBe(JSON.stringify({ userId: 'u1' }));
+
+    // Connected is final: nothing more is asked, and no second conclusion.
+    bus.emit(ARRIVED);
+    await settle();
+    expect(fetchAgentConnectionMock).toHaveBeenCalledTimes(1);
+    expect(doneWrites()).toBe(1);
+  });
+
+  it("stays waiting on another account's agent", async () => {
+    const { bus } = mountPage();
+    await settle();
+    bus.emit({ ...ARRIVED, forUserId: 'u2' });
+    expect(screen.getByText('Waiting for your agent…')).toBeInTheDocument();
+    expect(doneWrites()).toBe(0);
+  });
+
+  it('shows the green state straight away for an agent connected before you arrived', async () => {
+    fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'Claude' });
+    mountPage();
+    // Before the first answer the line is empty, never a flash of "Waiting".
+    expect(screen.queryByText('Waiting for your agent…')).not.toBeInTheDocument();
+    await settle();
+    expect(screen.getByText('Connected. Your agent reached this knowledge base.')).toBeInTheDocument();
+    expect(doneWrites()).toBe(1);
+    expect(fetchAgentConnectionMock).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * Someone who finished the onboarding and came back to copy a snippet is
+   * waiting on nothing: no ask, no listening, no "Waiting" line, no second
+   * conclusion.
+   */
+  it('asks nothing for an account that already finished the onboarding', async () => {
+    fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'Claude' });
+    const { bus } = mountPage(doneUser());
+    await settle();
+    expect(fetchAgentConnectionMock).not.toHaveBeenCalled();
+    expect(bus.listening('agent-connected')).toBe(false);
+    expect(screen.queryByText('Waiting for your agent…')).not.toBeInTheDocument();
+    expect(doneWrites()).toBe(0);
+  });
+
+  /**
+   * A failed ask reads as "not yet", and nothing retries it on a timer: the
+   * event says when it changes, and a return to the tab asks again — once
+   * per {@link AGENT_RECHECK_MS} at most — for an agent that connected
+   * while the stream was down.
+   */
+  it('reads a failed ask as "not yet", never retries on a timer, and asks again on a return to the tab', async () => {
+    vi.useFakeTimers();
+    fetchAgentConnectionMock.mockRejectedValueOnce(new Error('503')).mockResolvedValue({ connected: false });
+    mountPage();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(fetchAgentConnectionMock).toHaveBeenCalledTimes(1);
+    expect(screen.getByText('Waiting for your agent…')).toBeInTheDocument();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(AGENT_RECHECK_MS * 10);
+    });
+    expect(fetchAgentConnectionMock).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      window.dispatchEvent(new Event('focus'));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(fetchAgentConnectionMock).toHaveBeenCalledTimes(2);
+    expect(doneWrites()).toBe(0);
+  });
+
+  it('stops listening when you leave the page', async () => {
+    const { unmount, bus } = mountPage();
+    await settle();
+    unmount();
+    expect(bus.listening('agent-connected')).toBe(false);
+    bus.emit(ARRIVED);
+    expect(doneWrites()).toBe(0);
   });
 });
 
@@ -666,9 +874,6 @@ describe('ConnectAgentPill', () => {
     mountPill();
     await userEvent.click(screen.getByRole('button', { name: 'Connect your agent' }));
     expect(screen.getByTestId('pathname')).toHaveTextContent(WELCOME_PATH);
-    // …as a plain visit. The pill opens the page; it does not re-run the
-    // first-sign-in ceremony that folds the nav it lives in away.
-    expect(screen.getByTestId('greeting')).toHaveTextContent('false');
   });
 
   it('renders nothing once the server says done', () => {
@@ -709,6 +914,47 @@ describe('ConnectAgentPill', () => {
     mountPill();
     await userEvent.click(screen.getByRole('button', { name: /^Dismiss/ }));
     expect(JSON.parse(String(fetchInit()?.body))).toEqual({ userId: 'u1' });
+  });
+
+  /**
+   * The pill fills `SidebarFrame`'s header band, which is spent on a header
+   * that DRAWS and collapses (`empty:hidden`) for one that does not. "Does
+   * not" is read off the DOM — an element that renders null is still an
+   * element — so a pill with nothing to say has to leave the row literally
+   * empty, and its dismissal receipt goes to the body rather than sitting in
+   * the band invisibly holding 48px open above "Company Context".
+   *
+   * Both halves in one test on purpose: an empty row that had lost the
+   * announcement with it would pass the first assertion and be a regression.
+   */
+  it('leaves the header band empty once onboarding is done, and still says so out loud', async () => {
+    mount(
+      <SidebarFrame label="Library navigation" header={<ConnectAgentPill />}>
+        <nav>Company Context</nav>
+      </SidebarFrame>,
+      newUser(),
+      '/skills-and-tools',
+    );
+    const band = screen.getByTestId(SIDEBAR_HEADER_TESTID);
+    expect(band).not.toBeEmptyDOMElement();
+
+    await userEvent.click(screen.getByRole('button', { name: /^Dismiss/ }));
+
+    expect(band).toBeEmptyDOMElement();
+    expect(
+      screen.getAllByRole('status').some((r) => /Reminder dismissed/.test(r.textContent ?? '')),
+    ).toBe(true);
+  });
+
+  it('leaves it empty for an account that was already done', () => {
+    mount(
+      <SidebarFrame label="Library navigation" header={<ConnectAgentPill />}>
+        <nav>Company Context</nav>
+      </SidebarFrame>,
+      doneUser(),
+      '/skills-and-tools',
+    );
+    expect(screen.getByTestId(SIDEBAR_HEADER_TESTID)).toBeEmptyDOMElement();
   });
 
   /**

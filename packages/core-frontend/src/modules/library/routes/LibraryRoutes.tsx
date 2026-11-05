@@ -1,15 +1,23 @@
 import { Navigate, Route, Routes, useLocation, useParams } from 'react-router-dom';
 import { LibraryToastProvider } from '../state/toast';
 import { LibraryProvider, useLibrary } from '../state/library-data';
-import { useWorkspace } from '../../workspace/state/workspace.context';
+import { useWorkspace } from '../../workspace';
 import { LibraryLayout } from '../components/LibraryLayout';
 import { LibraryPage } from '../components/LibraryPage';
 import { PluginPage } from '../components/PluginPage';
-import { PluginsIndexPage } from '../components/PluginsIndexPage';
 import { PersonalPluginPage } from '../components/PersonalPluginPage';
+import { TeamRoute } from '../components/TeamRoute';
 import { WelcomePage } from '../../onboarding/components/WelcomePage';
 import { WorkspaceItemRoute } from './WorkspaceItemRoute';
-import { decodePluginSegment, LIBRARY_ROOT, pathForPlugin, urlForItemFile, urlForSkillFile } from './library-paths';
+import { ConnectToolsPage } from '../../secrets-vault';
+import {
+  CONNECT_TOOLS_SEGMENT,
+  decodePluginSegment,
+  LIBRARY_ROOT,
+  pathForPlugin,
+  urlForLibraryItem,
+  urlForSkillFile,
+} from './library-paths';
 
 /**
  * The Skills & Tools surface — everything under `/skills-and-tools/*`.
@@ -32,27 +40,39 @@ export function LibraryRoutes() {
       <LibraryProvider>
         <Routes>
           <Route element={<LibraryLayout />}>
-            {/* The Library OPENS on its plugins. A plugin is where skills and
-                tools live and who they are for, so the index of them is the
-                orienting view; the undifferentiated card grid is a lens on
-                the same catalog and keeps its own row and URL below. */}
-            <Route index element={<PluginsIndexPage />} />
+            {/* The Library OPENS on Everything: plugins, skills and tools, the
+                whole catalog with the library-wide search — or, for an admin
+                whose catalog is still empty, the creator welcome in its place
+                (see `LibraryPage`). `everything` is the same page at the URL
+                it used to have, so older links still land. */}
+            <Route index element={<LibraryPage filter={{ kind: 'all' }} />} />
+            <Route path="everything" element={<Navigate to={LIBRARY_ROOT} replace />} />
 
-            {/* The whole catalog as cards, with the library-wide search. */}
-            <Route path="everything" element={<LibraryPage filter={{ kind: 'all' }} />} />
+            {/* A team's lens — what one group from the access rules can use.
+                The name is a route param; the page decides whether the
+                team is known. */}
+            <Route path="teams/:group" element={<TeamRoute />} />
 
             {/* The connect-your-agent welcome — inside the layout, so the
                 sidebar (and the pill's selected state) is on screen with it.
-                Auto-reached once, on first sign-in (see `RootLanding`);
-                reachable forever through the pill and by URL. */}
+                Never reached automatically (see `RootLanding`): opened from
+                the pill, the Get set up list and by URL. */}
             <Route path="welcome" element={<WelcomePage />} />
+
+            {/* Connect your tools — inside the layout for the same reason as
+                the welcome page: the sidebar, its toggle and the selected tab
+                come with it. It has no sidebar row, so none is lit. Both of
+                its modes live here, agent-connect (`?oauth=`) included; the
+                shell's `/connect` redirects here for every link the server
+                hands out. */}
+            <Route path={CONNECT_TOOLS_SEGMENT} element={<ConnectToolsPage />} />
 
             <Route path="owned" element={<LibraryPage filter={{ kind: 'owned' }} />} />
 
             {/* `yours` is a PLUGIN page, not a gallery filter — the items in no
-                folder, given the same page the folders get. The sidebar still
-                lights it through the `ungrouped` filter, so the URL and the
-                selection stay the pair they were. */}
+                folder, given the same page the folders get. It has no nav row
+                (your own space is not a group); it is reached from its row on
+                Everything, the welcome page and by URL. */}
             <Route path="yours" element={<PersonalPluginPage />} />
 
             {/* A plugin is a PLACE: `plugins/:plugin` is a real page with a real
@@ -138,9 +158,11 @@ function LegacyToolRedirect() {
   const tool = data.items.find((i) => i.kind === 'integration' && i.id === decoded);
   if (kbDirName === null) return null;
   if (tool) {
-    return (
-      <Navigate to={{ pathname: urlForItemFile(kbDirName, tool.path), hash: location.hash }} replace />
-    );
+    // `urlForLibraryItem` adds `?server=<slug>` for an mcp.json-declared tool —
+    // several servers share the declaring file, so the file URL alone would
+    // bounce to the plugin page. The `#…` fragment rides AFTER the query, so
+    // the OAuth outcome and the disambiguator coexist on the one URL.
+    return <Navigate to={`${urlForLibraryItem(kbDirName, tool)}${location.hash}`} replace />;
   }
   if (data.loading) return null;
   return <Navigate to={LIBRARY_ROOT} replace />;

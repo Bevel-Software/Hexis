@@ -22,10 +22,36 @@ declare global {
 export interface ExternalApiKeySummary {
   id: string;
   label: string;
+  /**
+   * What the key was minted AS — `key` for one a person created by hand,
+   * another kind for one a flow minted on their behalf (a Claude link).
+   * Stored with the row; the label is the person's to edit and proves nothing.
+   */
+  kind: string;
   createdAt: number;
   lastUsedAt: number | null;
   revokedAt: number | null;
+  /**
+   * Who ended it, once `revokedAt` is set: the owner themselves, or an admin
+   * from the deployment overview. Null while live (and on rows revoked
+   * before this was recorded, which read as the owner's doing).
+   */
+  revokedBy: RevokedBy | null;
+  /**
+   * When the owner deleted the key for good from their own pages. Such a
+   * key is absent from the owner's listings and shown to admins as deleted;
+   * its row stays so the Audit log's events keep their principal.
+   */
+  deletedAt: number | null;
+  /**
+   * The agent configuration the key connects as (a repo-relative knowledge-base
+   * path), or null for Everything — chosen when the key was minted.
+   */
+  agentPath: string | null;
 }
+
+/** Who revoked a key: its owner, or an admin acting across the deployment. */
+export type RevokedBy = 'owner' | 'admin';
 
 /**
  * Result of minting a new connection key. `plaintext` is shown to the user
@@ -35,6 +61,52 @@ export interface ExternalApiKeySummary {
 export interface MintedExternalApiKey {
   plaintext: string;
   summary: ExternalApiKeySummary;
+}
+
+/**
+ * One row of the admin "Connection keys" overview: a key summary plus the
+ * account it belongs to. Deployment-wide, so unlike {@link ExternalApiKeySummary}
+ * the owner is not implied by the caller.
+ */
+export interface AdminExternalApiKeySummary extends ExternalApiKeySummary {
+  user: {
+    id: string;
+    email: string;
+    name: string;
+  };
+}
+
+/** The kind of a key a person creates by hand. */
+export const DEFAULT_KEY_KIND = 'key';
+
+/**
+ * How the plaintext of one kind of key is spelled: the prefix the outside
+ * world sees (and that routes the bearer back here), and the shape of the
+ * random part after it. `base64url` is the platform's own — 43 characters
+ * from a 32-byte draw. `github-token` is what a GitHub OAuth token looks
+ * like after its `gho_`: letters and digits only, 40 of them, so a consumer
+ * that validates the shape of a GitHub token (they are documented as
+ * alphanumeric) keeps it. Both hash the same way; the shape is only what a
+ * client is shown.
+ */
+export interface KeyKindSpec {
+  prefix: string;
+  shape?: 'base64url' | 'github-token';
+}
+
+/**
+ * How a key is minted. `kind` names one of the kinds the service was built
+ * with, each of which carries its own spelling (the tenant's prefix for the
+ * default kind, a GitHub-shaped token for a Claude link); an unknown kind is
+ * refused, since nothing would route its bearer back.
+ */
+export interface MintOptions {
+  kind?: string;
+  /**
+   * The agent configuration the key connects as, already checked to be one the
+   * owner may choose (`IAgentScopeResolver.choosable`). Absent: Everything.
+   */
+  agentPath?: string;
 }
 
 /**
@@ -59,7 +131,7 @@ export interface IExternalApiKeyService {
    * plaintext is **only** returned here — there is no read path that can
    * surface it again.
    */
-  mint(userId: string, label: string): Promise<MintedExternalApiKey>;
+  mint(userId: string, label: string, options?: MintOptions): Promise<MintedExternalApiKey>;
 
   /**
    * Resolve a plaintext token to the owning user. Returns null when the
@@ -76,10 +148,26 @@ export interface IExternalApiKeyService {
    */
   verifyAndLoadToken(
     plaintext: string,
-  ): Promise<{ tokenId: string; user: AuthUser } | null>;
+  ): Promise<{ tokenId: string; user: AuthUser; agentPath?: string | null } | null>;
+
+  /**
+   * For a key {@link verifyAndLoadToken} refused: whether it is a live key
+   * whose account an admin switched off — the one refusal its holder must
+   * not be told to mint a new key over (they cannot; the account is off).
+   * Asked only on the refusal path, so a working key costs nothing more.
+   * Optional: without it every refused key is reported as invalid.
+   */
+  isKeyOfSwitchedOffAccount?(plaintext: string): Promise<boolean>;
 
   /** Active + revoked tokens for the user, newest-first. */
   listForUser(userId: string): Promise<ExternalApiKeySummary[]>;
+
+  /**
+   * The account a key belongs to, live or revoked, or null when no such key
+   * exists. The ownership check behind a per-key read or revoke that is
+   * offered to owners and admins alike (the Audit log's).
+   */
+  ownerOf(id: string): Promise<string | null>;
 
   /**
    * Mark a token revoked. Idempotent — revoking an already-revoked token
@@ -89,11 +177,31 @@ export interface IExternalApiKeyService {
   revoke(id: string, userId: string): Promise<void>;
 
   /**
-   * Permanently delete a token row, dropping its audit trail. Only permitted
-   * on an already-revoked token — an active key must be disconnected first,
-   * so a live agent's access is never yanked by a single click. Throws
-   * TokenNotFoundError if the token doesn't belong to the user, and
-   * TokenStillActiveError if it hasn't been revoked yet.
+   * Every token on the deployment, active and revoked, with its owner —
+   * the admin overview. Ordered by owner email, then newest-first, so the
+   * caller can group per account without re-sorting.
+   */
+  listForDeployment(): Promise<AdminExternalApiKeySummary[]>;
+
+  /**
+   * Admin revoke: mark a token revoked WITHOUT scoping by owner, recording
+   * `revokedBy: 'admin'` so the owner's page can say it was taken rather than
+   * disconnected. Same idempotency as {@link revoke}; throws
+   * TokenNotFoundError when no such token exists. Only reachable through an
+   * admin-gated route — the per-user route must keep using {@link revoke}.
+   */
+  revokeAny(id: string): Promise<void>;
+
+  /**
+   * Delete a token for good, from the owner's point of view: it leaves their
+   * listings and can never be used or reconnected. The row itself stays,
+   * marked deleted, so the Audit log keeps the key's events under their
+   * principal — a log its subject could erase would not be one. Only
+   * permitted on an already-revoked token — an active key must be
+   * disconnected first, so a live agent's access is never yanked by a single
+   * click. Throws TokenNotFoundError if the token doesn't belong to the user
+   * (or is already deleted), and TokenStillActiveError if it hasn't been
+   * revoked yet.
    */
   remove(id: string, userId: string): Promise<void>;
 }

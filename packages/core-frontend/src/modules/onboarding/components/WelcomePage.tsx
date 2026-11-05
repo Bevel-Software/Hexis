@@ -1,36 +1,33 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { useLocation, useNavigate } from 'react-router-dom';
+import { useEffect, useRef, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Check, Copy, X } from 'lucide-react';
 import { cn } from '../../../lib/utils';
 import { Button, IconButton } from '../../../shared/components';
-import { useAuth } from '../../auth/state/auth.context';
-import { useLibraryToast } from '../../library/state/toast.context';
-import { copyToClipboard, COPY_FAILED_TOAST } from '../../library/utils/clipboard';
-import { pathForLibraryFilter } from '../../library/routes/library-paths';
+import { useAuth } from '../../auth';
+import { useLibraryToast, copyToClipboard, COPY_FAILED_TOAST, pathForLibraryFilter, displayFirstName } from '../../library';
 import { useAppRegistry } from '../../../core/registry';
-import { displayFirstName } from '../../library/utils/personal-plugin';
-import { setSidebarCollapsed } from '../../layout/state/sidebar';
-import { ClaudeInstallLink, mcpEndpointUrl } from '../../../shared/mcp';
+import { ChatGptInstallLink, ClaudeInstallLink, mcpEndpointUrl } from '../../../shared/mcp';
 import { AGENT_CLIENTS, type AgentClient } from '../agent-clients';
 import { useOnboarding } from '../state/onboarding';
+import { useAgentConnection } from '../state/agent-connection';
 
 /**
- * The welcome page — the first thing a new account sees, once.
+ * The welcome page: how to connect your agent.
  *
  * Three beats and nothing else (prototype `renderWelcome`): your name (so the
  * page is addressed, not broadcast), one sentence of what this place is, and
- * the single action the account still needs. It arrives in two movements —
- * the greeting, then everything else — and the client picker re-renders in
- * place, so neither ever replays as blinking.
+ * the single action the account still needs. The client picker re-renders in
+ * place.
  *
- * Mounting marks `welcomed`: the auto-redirect here happens on the FIRST
- * sign-in only. The page itself stays reachable forever — the sidebar pill
- * and a typed URL both land here — but the app never drags anyone back.
+ * Nobody is sent here: `/` lands on Knowledge (see `RootLanding`), so every
+ * arrival is a visit — no entrance to play, no sidebar to fold away, no
+ * carried link to honour. The page is reached from the sidebar pill, the Get
+ * set up list and by URL, and stays reachable after the onboarding is done.
  *
  * "Done" concludes; it does not copy. A button whose word and act disagree
  * teaches people not to read buttons — the copy lives ON the snippet block,
  * and "Go to your skills →" is the honest exit for someone who leaves
- * without connecting (it ends the redirect, never the pill).
+ * without connecting (it concludes nothing; the pill stays).
  */
 export function WelcomePage() {
   const { user } = useAuth();
@@ -38,128 +35,13 @@ export function WelcomePage() {
   const toast = useLibraryToast();
   const navigate = useNavigate();
   const [clientId, setClientId] = useState<AgentClient['id']>('claude');
-  const [copied, setCopied] = useState<'idle' | 'ok' | 'fail'>('idle');
-
-  // Once, on arrival — this is what makes the welcome redirect one-time.
-  const { markWelcomed } = onboarding;
-  useEffect(() => {
-    markWelcomed();
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- identity changes per render (bound closure); the act is idempotent per account
-  }, []);
-
-  /**
-   * How you got here. The automatic redirect at first sign-in is the ONE
-   * navigation that sets it (see `RootLanding`); the sidebar pill and a typed
-   * URL do not. Everything ceremonial on this page hangs off this flag.
-   */
-  const routeState = useLocation().state as { greeting?: boolean; returnTo?: string | null } | null;
-  const greeting = routeState?.greeting === true;
-  /**
-   * Where the person was actually GOING when the sign-in interrupted them — a
-   * deep link that survived the SSO round-trip (see `RootLanding`). Present
-   * only on the greeting arrival, and it retargets both exits: a welcome that
-   * concluded by discarding the page someone was sent is a greeting that cost
-   * them the reason they came.
-   */
-  const returnTo = greeting ? (routeState?.returnTo ?? null) : null;
-
-  /**
-   * The entrance — and it belongs to the greeting alone.
-   *
-   * Being welcomed happens once. Opening the same page later from the pill is
-   * a visit, and a 2.6s arrival every time you check your MCP snippet is a
-   * page you learn to dread. So anyone who did not arrive by the sign-in
-   * redirect starts ENTERED: no hold, no fade, the page simply exists.
-   *
-   * When it DOES play, it waits for a frame the browser actually paints. A CSS
-   * animation runs on the document timeline, which advances in wall clock time
-   * whether or not frames are being produced. This page mounts at the end of a
-   * cold boot — the auth round trip, the router, the library shell — and if the
-   * main thread is still busy when React inserts this DOM, the whole 2.2s can
-   * elapse before the first paint. The animation does not look fast, it is
-   * simply over by the time anyone sees it, and the page "just appears". No
-   * timing value can be tuned out of that; the animation has to START on a
-   * live frame.
-   *
-   * Two frames, not one: the first proves the browser is rendering again, the
-   * second is the one the animation begins on. Until then the content is held
-   * invisible, so the first painted state is the animation's own first state
-   * rather than a flash of the finished page.
-   *
-   * Reduced motion also starts entered — the `motion-safe:` animations are
-   * inert for them anyway, so a hold would be a blank page and nothing else.
-   * `matchMedia` is optional-chained because jsdom has none.
-   */
-  const [entered, setEntered] = useState(
-    () => !greeting || (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false),
-  );
-  useEffect(() => {
-    if (entered) return;
-    let inner = 0;
-    const outer = requestAnimationFrame(() => {
-      inner = requestAnimationFrame(() => setEntered(true));
-    });
-    return () => {
-      cancelAnimationFrame(outer);
-      cancelAnimationFrame(inner);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- an arrival-time decision, settled at mount
-  }, []);
-  /**
-   * An INLINE STYLE, not a `motion-safe:opacity-0` utility — and the reason is
-   * scar tissue. Tailwind scans this package through a node_modules symlink
-   * (`apps/web/src/index.css`), and a class first written mid-session is not
-   * always compiled, so the hold silently did nothing and the page painted
-   * fully formed. An entrance animation must not be hostage to whether the
-   * stylesheet noticed a new class name.
-   */
-  const hold = entered ? undefined : ({ opacity: 0 } as const);
-  /**
-   * The animation classes go on ONLY for the greeting. `entered` alone is not
-   * enough: a pill visit starts entered, so carrying the class would replay
-   * the whole arrival on a page somebody deliberately navigated to.
-   */
-  const arriving = greeting && entered;
-
-  /**
-   * The nav gets out of the way for the greeting — and STAYS out.
-   *
-   * There is no restore, and that is the decision rather than an omission.
-   * Putting it back on the way out meant Done handed you a page you did not
-   * ask to have rearranged: you left a screen with no nav and arrived at one
-   * where the nav had opened itself. Whether the sidebar is showing is a thing
-   * you say with the toolbar toggle, and after the greeting it says whatever
-   * it said last — collapsed, unless you opened it yourself while you were
-   * here, in which case it stays open and this code never touches it again.
-   *
-   * Only for the greeting, so opening this page from the pill later never
-   * rearranges the window around a page you deliberately navigated to.
-   *
-   * A LAYOUT effect, and that is the whole difference between "the nav is not
-   * here" and "the nav flinched". `useEffect` runs after the browser paints,
-   * so the first frame showed a full sidebar and the second began folding it
-   * away — a flash of a thing you were never meant to see. Layout effects run
-   * before paint: React re-renders synchronously, and the sidebar's width is
-   * already zero in the only frame that is ever drawn. `instant` covers the
-   * rest: there is nothing to transition from, and nobody gestured at it.
-   *
-   * The layout and this page mount in the same commit (`LibraryRoutes` — the
-   * welcome route is a child of `LibraryLayout`, and neither is lazy), which
-   * is what makes "before paint" mean before the sidebar's first paint too.
-   */
-  useLayoutEffect(() => {
-    if (!greeting) return;
-    setSidebarCollapsed(true, true);
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- an arrival-time decision: how you got here cannot change while you are here
-  }, []);
 
   const client = AGENT_CLIENTS.find((c) => c.id === clientId) ?? AGENT_CLIENTS[0]!;
   // The deployment's own address, not the browser's — see `shared/mcp`.
   const mcpUrl = mcpEndpointUrl();
   const snippet = client.snip(mcpUrl);
-  // Capitalized by the same function that spells the plugin heading — "Welcome,
-  // juan" over a sidebar reading "Juan's Plugin" is the app misspelling someone
-  // to their face on the one page addressed to them.
+  // Capitalized here rather than at the call site — "Welcome, juan" is the app
+  // misspelling someone to their face on the one page addressed to them.
   const firstName = displayFirstName(user?.name) || 'there';
 
   const radios = useRef<(HTMLButtonElement | null)[]>([]);
@@ -174,7 +56,7 @@ export function WelcomePage() {
    * Selection FOLLOWS focus, which is the pattern's default for a plugin this
    * cheap to change — picking a client re-renders one snippet, nothing is
    * submitted, so there is no cost to arriving on an option and no reason to
-   * make people confirm. Wraps at both ends: three options in a row have no
+   * make people confirm. Wraps at both ends: four options in a row have no
    * meaningful edge to stop at.
    *
    * Paired with the roving `tabIndex` below — one stop for the whole plugin,
@@ -194,34 +76,9 @@ export function WelcomePage() {
     radios.current[next]?.focus();
   }
 
-  // One timer, cleared before it is replaced: a second copy inside the 1.5s
-  // window would otherwise inherit the FIRST copy's expiry and blank the
-  // checkmark almost immediately.
-  const resetTimer = useRef<number | undefined>(undefined);
-  useEffect(() => () => window.clearTimeout(resetTimer.current), []);
-
-  /**
-   * Copy the snippet currently on screen, and say so — as a checkmark for
-   * anyone watching and as a live-region announcement for anyone not. A
-   * failure is reported, never swallowed: the toast names the alternative
-   * (select the text) instead of leaving a button that silently did nothing.
-   */
-  async function copySnippet() {
-    const ok = await copyToClipboard(snippet);
-    if (!ok) toast(COPY_FAILED_TOAST, 'danger');
-    window.clearTimeout(resetTimer.current);
-    // Back to idle FIRST, so a repeat copy is a real state change and the
-    // live region announces it again — setting 'ok' over 'ok' is a no-op that
-    // says nothing to a screen reader.
-    setCopied('idle');
-    window.setTimeout(() => setCopied(ok ? 'ok' : 'fail'), 0);
-    resetTimer.current = window.setTimeout(() => setCopied('idle'), 1500);
-  }
-
   // Both exits land in the same place. Whether you connected an agent or
   // walked past it, where you want to be next is somewhere you can start —
-  // by default your own shelf, not the whole company's catalog. A deep link
-  // still outranks it: someone who followed a link is owed that link.
+  // by default your own shelf, not the whole company's catalog.
   //
   // `welcomeExit` lets a distribution move that destination, because WHERE a
   // new person should start is a property of the product. A deployment built
@@ -231,7 +88,31 @@ export function WelcomePage() {
   const { welcomeExit } = useAppRegistry();
   const defaultExit = { path: pathForLibraryFilter({ kind: 'ungrouped' }), label: 'Go to your skills' };
   const exit = welcomeExit ?? defaultExit;
-  const exitTo = returnTo ?? exit.path;
+
+  /**
+   * The answer to "did it work?", without having to go and check.
+   *
+   * The server says so the moment an agent makes its first call — which
+   * every client does on connecting — through the `agent-connected` event
+   * this page listens for; it asks once on arrival, and again on a return to
+   * the tab, never on a timer. Connecting IS the onboarding, so it concludes
+   * it: the pill goes and the Get set up step ticks, without asking for Done
+   * as well. Once per visit — `markDone` drops its optimism again when the
+   * server refuses, and a refusal must not turn into a request on every
+   * render.
+   *
+   * Only while the onboarding is open: someone who finished it and came back
+   * to copy a snippet is waiting on nothing. A connection this session has
+   * already seen still shows.
+   */
+  const { showPill, markDone } = onboarding;
+  const agent = useAgentConnection({ enabled: showPill });
+  const concluded = useRef(false);
+  useEffect(() => {
+    if (!agent.connected || concluded.current) return;
+    concluded.current = true;
+    if (showPill) markDone();
+  }, [agent.connected, showPill, markDone]);
 
   /**
    * Conclude the onboarding and leave. The toast says where the setup went,
@@ -241,33 +122,13 @@ export function WelcomePage() {
   function done() {
     onboarding.markDone();
     toast('Done. Reopen the setup any time from your profile menu → External agent access.');
-    navigate(exitTo);
+    navigate(exit.path);
   }
 
   return (
-    /* Two beats, not one. The greeting arrives on its own and is allowed to be
-       read; the rest of the page follows once it has landed. A single fade over
-       everything made the name and the setup instructions one event, and the
-       name is the point of the page. Both timings live in `index.css` — see
-       the note there on why they are named rather than arbitrary values.
-
-       On the ELEMENTS rather than the page, because the page re-renders every
-       time the client picker changes: a CSS animation on a surviving element
-       does not restart, so the beats play once, on arrival, and switching
-       between Claude and Cursor never reads as blinking. `motion-safe:` means
-       `prefers-reduced-motion` gets both beats at once, immediately — `both`
-       fill is what keeps them visible when the animation never runs. */
     <div className="mx-auto mt-[11vh] max-w-[440px]">
-      <h1
-        className={cn(
-          'text-display font-bold',
-          arriving && 'motion-safe:animate-onboarding-greeting',
-        )}
-        style={hold}
-      >
-        Welcome, {firstName}
-      </h1>
-      <div className={cn(arriving && 'motion-safe:animate-onboarding-body')} style={hold}>
+      <h1 className="text-display font-bold">Welcome, {firstName}</h1>
+      <div>
         <p className="mt-3 text-lede text-ink-muted">
           This is your company’s shared library of the skills, tools and knowledge your AI
           agents work from. Connect your agent once and access the skills and tools you need in
@@ -315,49 +176,58 @@ export function WelcomePage() {
           ))}
         </div>
 
-        <p className="mt-2.5 text-meta leading-normal text-ink-faint">{client.hint}</p>
+        {Array.isArray(client.hint) ? (
+          <ol className="mt-2.5 list-decimal space-y-0.5 pl-5 text-meta leading-normal text-ink-faint">
+            {client.hint.map((step) => (
+              <li key={step}>{step}</li>
+            ))}
+          </ol>
+        ) : (
+          <p className="mt-2.5 text-meta leading-normal text-ink-faint">{client.hint}</p>
+        )}
 
-        {/* Claude only, because Claude is the only client with an install
-            link — and it renders nothing at all when this deployment is one
-            Anthropic could not reach, rather than offering a shortcut that
-            dead-ends. No `showHint`: the reader here is a new employee, and
-            naming an env var they cannot change is noise. The copy block
-            below is the route that always works. */}
+        {/* The web assistants only: Claude's link prefills the connector,
+            ChatGPT's opens the settings pane it is created in. Both render
+            nothing at all when this deployment is one their vendor could not
+            reach, rather than offering a shortcut that dead-ends. No
+            `showHint`: the reader here is a new employee, and naming an env
+            var they cannot change is noise. The copy block below is the route
+            that always works. */}
         {client.id === 'claude' && <ClaudeInstallLink mcpUrl={mcpUrl} className="mt-3.5" />}
+        {client.id === 'chatgpt' && <ChatGptInstallLink mcpUrl={mcpUrl} className="mt-3.5" />}
 
-        {/* The copy rides the block it copies. */}
-        <div className="relative mt-3.5">
-          <div
-            className={cn(
-              'overflow-x-auto rounded-lg border border-line bg-sunken py-2.5 pl-3 pr-10',
-              'font-mono text-detail text-ink',
-              snippet.includes('\n') ? 'whitespace-pre' : 'whitespace-nowrap',
-            )}
-          >
-            {snippet}
-          </div>
-          <IconButton
-            size={24}
-            aria-label="Copy"
-            title="Copy"
-            onClick={() => void copySnippet()}
-            className="absolute right-2 top-2"
-          >
-            {copied === 'ok' ? (
-              <Check size={13} className="text-ok" />
-            ) : copied === 'fail' ? (
-              <X size={13} className="text-danger" />
-            ) : (
-              <Copy size={13} />
-            )}
-          </IconButton>
-          {/* The icon's answer, said out loud for anyone not watching it. */}
-          <span role="status" aria-live="polite" className="sr-only">
-            {copied === 'ok' ? 'Copied' : copied === 'fail' ? 'Copy failed' : ''}
-          </span>
-        </div>
+        {/* Other tools: the hint ends on "paste this instead:", so the bare
+            address comes first, then the configuration it points back to.
+            Many tools take a URL and nothing else. */}
+        {client.id === 'other' && (
+          <SnippetBlock value={mcpUrl} copyLabel="Copy address" className="mt-3.5" />
+        )}
 
-        <div className="mt-5 flex items-center gap-4">
+        {/* Keyed by client, so a checkmark earned on one option does not
+            linger on the next option's snippet. */}
+        <SnippetBlock key={client.id} value={snippet} copyLabel="Copy" className="mt-3.5" />
+
+        {/* Quiet while it waits — a dot and a line, not a spinner demanding
+            attention while someone is busy in another window — and plain
+            about it when the agent arrives. Empty until the first answer is
+            in, so someone already connected never sees "Waiting" flash past.
+            The region exists from the start: a live region that appears
+            together with its text is often not announced at all. */}
+        <p role="status" aria-live="polite" className="mt-3.5 flex min-h-5 items-center gap-2 text-detail">
+          {agent.connected ? (
+            <>
+              <Check size={13} aria-hidden className="flex-none text-ok" />
+              <span className="text-ok">Connected. Your agent reached this knowledge base.</span>
+            </>
+          ) : agent.settled ? (
+            <>
+              <span aria-hidden className="size-1.5 flex-none rounded-full bg-wait-dot motion-safe:animate-pulse" />
+              <span className="text-ink-faint">Waiting for your agent…</span>
+            </>
+          ) : null}
+        </p>
+
+        <div className="mt-4 flex items-center gap-4">
           <Button
             variant="primary"
             onClick={done}
@@ -366,20 +236,93 @@ export function WelcomePage() {
             Done
           </Button>
           {/* The same destination Done goes to — one value drives both exits,
-              so they cannot drift apart. Ordinarily that is wherever the
-              deployment says a new person should start (core: your own shelf
-              — "your skills" over "your library", since the library is the
-              whole company's); when a deep link brought you here, both exits
-              keep its promise instead, and the label says so. */}
+              so they cannot drift apart: wherever the deployment says a new
+              person should start (core: your own shelf — "your skills" over
+              "your library", since the library is the whole company's). */}
           <button
             type="button"
-            onClick={() => navigate(exitTo)}
+            onClick={() => navigate(exit.path)}
             className="text-detail text-ink-faint transition-colors hover:text-ink"
           >
-            {returnTo ? 'Continue to your link →' : `${exit.label} →`}
+            {exit.label} →
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+/**
+ * One snippet and the button that copies it — the copy rides the block it
+ * copies. Its own component so a tab can carry two (Other tools shows the
+ * bare address AND the configuration), each with its own checkmark.
+ *
+ * Copying says so as a checkmark for anyone watching and as a live-region
+ * announcement for anyone not. A failure is reported, never swallowed: the
+ * toast names the alternative (select the text) instead of leaving a button
+ * that silently did nothing.
+ */
+function SnippetBlock({
+  value,
+  copyLabel,
+  className,
+}: {
+  value: string;
+  /** The button's accessible name — distinct per block when a tab has two. */
+  copyLabel: string;
+  className?: string;
+}) {
+  const toast = useLibraryToast();
+  const [copied, setCopied] = useState<'idle' | 'ok' | 'fail'>('idle');
+
+  // One timer, cleared before it is replaced: a second copy inside the 1.5s
+  // window would otherwise inherit the FIRST copy's expiry and blank the
+  // checkmark almost immediately.
+  const resetTimer = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(resetTimer.current), []);
+
+  async function copy() {
+    const ok = await copyToClipboard(value);
+    if (!ok) toast(COPY_FAILED_TOAST, 'danger');
+    window.clearTimeout(resetTimer.current);
+    // Back to idle FIRST, so a repeat copy is a real state change and the
+    // live region announces it again — setting 'ok' over 'ok' is a no-op that
+    // says nothing to a screen reader.
+    setCopied('idle');
+    window.setTimeout(() => setCopied(ok ? 'ok' : 'fail'), 0);
+    resetTimer.current = window.setTimeout(() => setCopied('idle'), 1500);
+  }
+
+  return (
+    <div className={cn('relative', className)}>
+      <div
+        className={cn(
+          'overflow-x-auto rounded-lg border border-line bg-sunken py-2.5 pl-3 pr-10',
+          'font-mono text-detail text-ink',
+          value.includes('\n') ? 'whitespace-pre' : 'whitespace-nowrap',
+        )}
+      >
+        {value}
+      </div>
+      <IconButton
+        size={24}
+        aria-label={copyLabel}
+        title={copyLabel}
+        onClick={() => void copy()}
+        className="absolute right-2 top-2"
+      >
+        {copied === 'ok' ? (
+          <Check size={13} className="text-ok" />
+        ) : copied === 'fail' ? (
+          <X size={13} className="text-danger" />
+        ) : (
+          <Copy size={13} />
+        )}
+      </IconButton>
+      {/* The icon's answer, said out loud for anyone not watching it. */}
+      <span role="status" aria-live="polite" className="sr-only">
+        {copied === 'ok' ? 'Copied' : copied === 'fail' ? 'Copy failed' : ''}
+      </span>
     </div>
   );
 }

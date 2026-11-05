@@ -105,6 +105,27 @@ describe('CoreConfig — the deployment owner', () => {
     expect(new CoreConfig().secretsEncKey).toBe('kToAi8FXWDpDn3A6yQ/60O39bv05N7XzVOIu/0CJrFc=');
   });
 
+  /**
+   * A wrong-length key fails at BOOT, blaming the variable that supplied it.
+   * The length check used to live only inside `TokenCrypto`'s consumers,
+   * which blame `SECRETS_ENC_KEY` by default — right for the common case,
+   * a lie to a legacy deployment whose key arrives through the fallback
+   * chain. Validating here, where the winning name is known, is what makes
+   * the downstream default safe.
+   */
+  it('refuses a wrong-length key at boot, naming SECRETS_ENC_KEY when that supplied it', () => {
+    process.env.SECRETS_ENC_KEY = Buffer.alloc(30).toString('base64'); // 40 chars → 30 bytes
+    expect(() => new CoreConfig()).toThrow(/SECRETS_ENC_KEY must decode to 32 bytes \(got 30\)/);
+  });
+
+  it('blames the legacy variable when the wrong-length key came through the fallback chain', () => {
+    delete process.env.SECRETS_ENC_KEY;
+    process.env.SHAREPOINT_TOKEN_ENC_KEY = Buffer.alloc(30).toString('base64');
+    expect(() => new CoreConfig()).toThrow(
+      /SHAREPOINT_TOKEN_ENC_KEY must decode to 32 bytes \(got 30\)/,
+    );
+  });
+
   it('ignores a leftover SEED_ADMIN_EMAILS instead of failing on it', () => {
     // The variable is gone, not renamed. An operator upgrading with a stale
     // value in their env should boot, not hit an unknown-key error.

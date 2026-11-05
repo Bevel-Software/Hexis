@@ -13,9 +13,6 @@ vi.mock('../services/roles.api', async (importOriginal) => {
     fetchRoles: vi.fn(),
     addMember: vi.fn(),
     removeMember: vi.fn(),
-    createRole: vi.fn(),
-    deleteRole: vi.fn(),
-    renameRole: vi.fn(),
   };
 });
 vi.mock('../../access/api', async (importOriginal) => {
@@ -27,6 +24,8 @@ const ENGINEERING: RoleRosterEntry = {
   canonical: 'engineering',
   displayName: 'Engineering',
   members: [],
+  groups: [],
+  capability: null,
   isAdmin: false,
   referencedBy: [],
 };
@@ -55,7 +54,8 @@ beforeEach(() => {
   vi.mocked(suggestPrincipals)
     .mockReset()
     .mockResolvedValue({
-      plugins: [],
+      roles: [],
+      groups: [],
       people: [{ name: 'Alice', email: 'alice@example.com' }],
       peopleWithheld: false,
     });
@@ -66,7 +66,7 @@ describe('AdminRolesPage: add-member autocomplete', () => {
     const user = userEvent.setup();
     renderPage();
 
-    const input = await screen.findByRole('textbox', { name: 'Member email' });
+    const input = await screen.findByRole('combobox', { name: 'Member email' });
     await user.type(input, 'al');
 
     // The suggest fetch is debounced 200ms; wait for the list to materialise.

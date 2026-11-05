@@ -1,13 +1,18 @@
-import { randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('mcp');
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
   ListPromptsRequestSchema,
   GetPromptRequestSchema,
+  ListResourcesRequestSchema,
+  ReadResourceRequestSchema,
   McpError,
   ErrorCode,
+  isInitializeRequest,
   type CallToolResult,
   type Tool as McpTool,
   type Prompt,
@@ -18,39 +23,75 @@ import '@utcp/mcp'; // side effect: registers the 'mcp' protocol (native MCP-ser
 import {
   UtcpClientConfigSerializer,
   CallTemplateSerializer,
+  UtcpManualSchema,
   type CallTemplate,
   type Tool as UtcpTool,
 } from '@utcp/sdk';
 import { CodeModeUtcpClient } from '@utcp/code-mode';
 import {
-  CODE_MODE_META_TOOLS,
+  codeModeMetaTools,
   META_TOOL_NAMES,
   dispatchMetaTool,
   dispatchToolCall,
   registerManual,
+  installSessionRecovery,
   flattenManualTool,
   toListedTool,
+  withReadOnlyOverride,
   toolError,
+  retiredToolMessage,
   needsAuthorizationResult,
   skillPromptText,
+  ONBOARD_PROMPT,
+  promptsForSkills,
+  toListedResource,
+  toReadResourceResult,
+  type McpAppManifest,
   type ProxiedTool,
   type SkillSummary,
   type LoadedSkill,
 } from '@bevel-software/platform-mcp-core';
-import { bevelSecretsLoaderConfig } from '../secrets-vault/index.js';
-import { scopesCovered, type ISecretsVaultService } from '../secrets-vault/secrets-vault.contract.js';
-import { EXTERNAL_KB_MANUAL_NAME } from '../tool-manuals/tool-manuals.contract.js';
-import type { IToolManualService } from '../tool-manuals/tool-manuals.contract.js';
-import type { SpillStore } from '../workspace/spill-store.js';
+import type { KbLayout } from '@bevel-software/platform-shared';
+import { bevelSecretsLoaderConfig, type ForcedRefreshOutcome, type ISecretsVaultService, scopesCovered, userSecretGap } from '../secrets-vault/index.js';
+import { EXTERNAL_KB_MANUAL_NAME } from '../tool-manuals/index.js';
+import type { IToolManualService } from '../tool-manuals/index.js';
+import type { SpillStore } from '../workspace/index.js';
+import type { HiddenToolSource } from '../../shared/hidden-tools.js';
 import { seedBevelHostedManualVars } from '../../shared/utcp-namespace.js';
-import type { McpSessionStore } from './mcp-session-store.js';
-import type { InternalTokenService } from '../tool-auth/internal-token.service.js';
+import type { InternalTokenService } from '../tool-auth/index.js';
+import { RequestAudit, type IAgentEventRecorder, type RecordedPrincipal } from '../audit/index.js';
 import { ManualFailureMemo } from './manual-failure-memo.js';
+import { DownstreamPool, POOL_KEY_SEPARATOR, type DownstreamPoolOptions, type Lease } from './downstream-pool.js';
+import { SurfaceLogThrottle } from './surface-log-throttle.js';
+import { ToolSchemaGuard, type ScreenedHiddenTool } from './tool-schema-guard.js';
+import { DownstreamRefreshGuard, isDownstreamTokenRejection } from './downstream-token-refresh.js';
+import { SurfaceCache, type SurfaceCacheOptions } from './surface-cache.js';
+import { SharedDefinitions } from './shared-definitions.js';
+import { currentRequest, runInRequest, type McpRequestContext } from './request-context.js';
+import { printable } from '../../shared/printable.js';
+import {
+  composeAgentInstructions,
+  prefixToolDescription,
+  PREFIXED_TOOLS,
+  type AgentPreambleReader,
+  type ComposedAgentInstructions,
+} from '../agent-instructions/index.js';
+import { guideFirstDescription } from '../tool-registry/index.js';
+import {
+  CONNECTION_META_KEY,
+  connectionRefusal,
+  connectionWireOf,
+  describeConnection,
+  type ConnectionScopeWire,
+} from '@bevel-software/platform-mcp-core';
+
+// Still offered from here, as this module's tests and callers learnt it.
+export { CONNECTION_META_KEY };
 
 /**
  * Configuration for the loopback proxy. `loopbackBaseUrl` is the backend's own
  * address (`http://127.0.0.1:<port>`) and `manualName` is BOTH the UTCP manual
- * namespace the per-session client registers under AND the prefix its `${VAR}`
+ * namespace the per-request client registers under AND the prefix its `${VAR}`
  * placeholders resolve through (`<manualName>_API_URL` / `_CONNECTION_KEY`).
  */
 export interface McpProxyOptions {
@@ -60,163 +101,556 @@ export interface McpProxyOptions {
   spillStore: SpillStore;
   /** Public web address of the frontend, for the needs-authorization setup link. */
   publicFrontendUrl: string;
+  /**
+   * Reads `mcp-description.md` on the default branch with platform rights
+   * (see modules/agent-instructions). Called on every request that needs it
+   * (an `initialize`, or a `tools/list` for the tool prefix), so an edit
+   * reaches the next request without a restart. Optional so constructions
+   * that never exercise it (tests) keep working: without it every request
+   * carries the platform header alone.
+   */
+  readAgentPreamble?: AgentPreambleReader;
+  /**
+   * The layout in effect, read per request: the shared file rules spell the
+   * root folders and platform files by the names a deployment saved, and the
+   * setup save applies a layout without a restart. A GETTER, so nothing
+   * snapshots the pre-setup default. Absent, the rules use the default
+   * layout. The guide is `AGENTS.md` either way.
+   */
+  kbLayout?: () => KbLayout;
+  /**
+   * The default branch in effect, read per request: the shared file rules
+   * name it as the branch people read. A GETTER for the same reason as the
+   * layout. Absent, the rules name no branch.
+   */
+  defaultBranch?: () => string;
+  /** Bounds of the downstream (`mcp.json`) connection pool; defaults are 4h idle / 5000 entries. */
+  downstreamPool?: Pick<DownstreamPoolOptions<unknown>, 'idleTtlMs' | 'maxEntries' | 'now'>;
+  /**
+   * Bounds of the cache of built tool surfaces (see {@link SurfaceCache});
+   * defaults are 1h idle / 500 entries. `maxEntries: 0` builds per request.
+   */
+  surfaceCache?: SurfaceCacheOptions;
+  /**
+   * The scope this knowledge base's secrets vault was registered under (see
+   * `secrets-variable-loader.ts`), so the UTCP clients built here resolve a
+   * caller's `${VAR}`s from that vault and no other's. Default: the single
+   * knowledge base's.
+   */
+  secretsScope?: string;
+  /**
+   * The deployment's read-only overrides, by tool name, read per listing so an
+   * admin's change on the Tools page is in the next `tools/list`. Joined on
+   * here, at listing time, for the platform tools and the code-mode meta-tools
+   * alike: the platform tools' BUILT-IN hint arrives as the manual's
+   * `read-only` tag, in a surface that is cached across requests, so an
+   * override baked into it would outlive the toggle that set it. Absent, every
+   * tool lists its built-in hint.
+   */
+  readOnlyOverrides?: () => Promise<Readonly<Record<string, boolean>>>;
+}
+
+/** Who a request is from — everything the proxy needs, resolved from that request's own bearer. */
+export interface McpCaller {
+  userId: string;
+  /** The connection-key id (per-key metering rides on it), or null for an OAuth/JWT bearer. */
+  tokenId: string | null;
+  /**
+   * The agent connection behind an OAuth bearer (or the local server's
+   * exchanged grant), or null. With `tokenId`, the two ways a call is
+   * attributed in the Audit log; a request with neither records nothing.
+   */
+  connectionId?: string | null;
+  /**
+   * The agent configuration the caller's credential connects as (a connection
+   * key's, or an agent connection's), or null for Everything. It rides the
+   * request's loopback identity, so every agent surface behind the loopback
+   * narrows to that agent's scope (`modules/agent-scope`); here it only keys
+   * the surface and words the handshake.
+   */
+  agentPath?: string | null;
+  /** The raw bearer the request carried. */
+  bearer: string;
+  /**
+   * The scope the caller's credential grants. Every external credential is
+   * write-scoped today; carried so a surface built for one scope can never
+   * serve the other once a read-scoped key exists. Absent = `write`.
+   */
+  scope?: 'read' | 'write';
+  /**
+   * The knowledge-base path of the HTML page whose script made this request,
+   * as the person signed in to the app. The route accepts it from a session
+   * caller only. Its calls are recorded in the Audit log under the page.
+   */
+  page?: string | null;
 }
 
 /**
  * Upper bound on one `loopbackJson` round-trip (manual list, skill fetch) so a
- * hung loopback can't stall `createSession`. Generous: these endpoints answer
- * in milliseconds; only a wedged process ever comes near it.
+ * hung loopback can't stall a request. Generous: these endpoints answer in
+ * milliseconds; only a wedged process ever comes near it.
  */
 const LOOPBACK_TIMEOUT_MS = 15_000;
 
 /**
- * Lifetime of the internal token minted as an OAuth/JWT session's loopback
- * bearer. Longer than the session store's 4h idle eviction (see
- * `DEFAULT_IDLE_TTL_MS` in mcp-session-store.ts) so the credential is not the
- * first thing to die under a session's normal lifecycle. A continuously-active
- * session CAN outlive it — its tool calls then fail at the loopback and the
- * client recovers by re-initializing, which mints a fresh token.
+ * Lifetime of the internal token minted as an OAuth/JWT request's loopback
+ * bearer. A request only needs it for as long as it runs, but one `tools/call`
+ * can legitimately run for a long time (`ask`, a long `call_tool_chain`), so
+ * the lifetime is generous rather than tight.
+ *
+ * Exported because `POST /api/mcp/local-token` (mcp.routes.ts) performs the
+ * same OAuth-access-token → internal-token exchange for the LOCAL MCP server,
+ * and must mint the exact same shape and lifetime — one constant, two
+ * consumers, so the two bridges can never drift apart.
  */
-const MCP_LOOPBACK_TOKEN_TTL_MS = 5 * 60 * 60 * 1000;
+export const MCP_LOOPBACK_TOKEN_TTL_MS = 5 * 60 * 60 * 1000;
 
 const callTemplateSerializer = new CallTemplateSerializer();
 
+/** What one request's tool calls run against: its UTCP client and the flattened catalog. */
+interface RequestSurface {
+  client: CodeModeUtcpClient;
+  tools: ProxiedTool[];
+  /**
+   * Pooled manuals the caller may use but whose tools could not be put on the
+   * surface because the caller's sign-in for them is missing or broken AND no
+   * tool definitions were ever discovered for them in this process. A call to
+   * one of their tools is answered with the /connect link, not "Unknown tool".
+   */
+  unavailable: UnavailableManual[];
+  /**
+   * Registered (rewritten, `utcpManualName`) name → catalog name, for every
+   * pooled manual of the caller's. A tool carries the registered name; the
+   * credential catalog (`userScopedKeysForManual`) keys by the catalog name.
+   * They differ only when the name holds a non-word character (`my-server`).
+   */
+  catalogNames: ReadonlyMap<string, string>;
+  /**
+   * The tools this request's load took OFF the surface for an invalid schema,
+   * by the name an agent would have called them by. Carried on the surface
+   * rather than read back out of the guard: it is this caller's own load, so a
+   * call answered from it cannot answer about a schema some other caller's
+   * connection was shown.
+   */
+  hidden: ReadonlyMap<string, ScreenedHiddenTool>;
+  /**
+   * A manual other than the knowledge base's failed to load for a reason that
+   * may clear by itself within the minute — a token refresh that has not
+   * settled. Such a surface is cached only briefly, so the manual is tried
+   * again as soon as its refresh policy allows.
+   *
+   * A manual that failed for any other reason (a variable no one has set, a
+   * server that does not answer, a definition that does not parse) does NOT
+   * shorten the surface's life: on a knowledge base where one `.tool` is
+   * broken that would rebuild every person's client every minute. What mends
+   * such a manual reaches the cache another way — a secret set evicts the
+   * clients built without it, an edited `.tool` is a new catalog revision —
+   * and a server that was merely down is tried again on the person's next
+   * build, at the latest after an hour unused.
+   */
+  degraded: boolean;
+  /**
+   * The agent the catalog was narrowed to, as `all-tools` reported it —
+   * absent for Everything. A call to a tool not on a narrowed surface is
+   * refused by name and agent rather than as unknown, and a connection whose
+   * agent configuration cannot be used is served nothing, with the sentence that says
+   * why.
+   */
+  connection?: ConnectionScopeWire;
+}
+
 /**
- * The MCP server is a GENERIC proxy over the UTCP tool surface. It owns no tool
- * logic: per MCP session it stands up a `UtcpClient` pointed at the backend's
- * own `GET /api/agent/utcp` manual (over loopback, authenticated with the
- * caller's connection key), discovers every tool, and re-exposes each one to
- * the MCP client. A tool call is dispatched straight back through the same REST
- * endpoint the tool's UTCP `tool_call_template` names — so the agent logic,
+ * The `connection` a loopback answer (`all-tools`, `catalog-revision`)
+ * carries, as a field to spread: validated at the boundary by the MCP
+ * core's reader (HTTP loses the type), and absent for Everything.
+ */
+function connectionOf(body: unknown): { connection?: ConnectionScopeWire } {
+  const connection = connectionWireOf(body);
+  return connection ? { connection } : {};
+}
+
+/**
+ * How long a surface missing a manual that failed is kept (see
+ * {@link RequestSurface.degraded}): the refresh policy's window, so the
+ * manual is retried as soon as a refresh may have settled.
+ */
+const DEGRADED_SURFACE_MAX_AGE_MS = 60_000;
+
+/**
+ * What the platform-hosted manuals' `${CONNECTION_KEY}` is seeded with when a
+ * cached client is built. Never sent anywhere: the variable is replaced by a
+ * getter that reads the bearer of the request a call belongs to (see
+ * {@link bindRequestBearer}).
+ */
+const REQUEST_BEARER_PLACEHOLDER = 'request-bearer';
+
+/** A manual off the surface for want of a sign-in — see {@link RequestSurface.unavailable}. */
+interface UnavailableManual {
+  /** The name as registered (`utcpManualName`): tools of it are `<utcpName>_<tool>` on the wire. */
+  utcpName: string;
+}
+
+/**
+ * How a pooled manual's calls are served: lease its pooled connection, and —
+ * when a call fails — decide whether a token refresh warrants one retry
+ * ({@link RETRY_WITH_REFRESHED_TOKEN}) or which error the caller gets.
+ */
+interface DownstreamRoute {
+  acquire: () => Promise<Lease<PooledDownstream>>;
+  afterFailure: (err: unknown) => Promise<unknown>;
+}
+
+/**
+ * What a failed downstream operation turned out to be, for the code that has
+ * to decide more than "retry or throw" — see {@link McpService.attachDownstream}.
+ */
+type DownstreamFailure =
+  | { retry: true }
+  /** `credentialTransient`: a token rejection whose refresh could not be settled (network, 5xx, or the once-a-minute guard), so the very next call should try again rather than being written off. */
+  | { retry: false; error: unknown; credentialTransient: boolean };
+
+/** The {@link DownstreamRoute.afterFailure} answer that means "refreshed — retry once". */
+const RETRY_WITH_REFRESHED_TOKEN = Symbol('retry-with-refreshed-token');
+
+/**
+ * What attaching one pooled manual to a request came to. `retryable`: do not
+ * remember this failure (it may clear on its own within the minute).
+ * `signInMissing`: the caller has no usable sign-in for the manual and this
+ * process has never seen its tools — the manual goes on the request's
+ * {@link RequestSurface.unavailable} list so a call still gets the sign-in link.
+ */
+type DownstreamAttachResult =
+  | { ok: true }
+  | { ok: false; error: string; retryable?: boolean; signInMissing?: boolean };
+
+/** One pooled downstream connection: a client holding one `mcp` manual, named so it can be deregistered. */
+interface PooledDownstream {
+  /** Owns its own `mcp` protocol instance, so its sessions are its alone and `close()` ends exactly them. */
+  client: CodeModeUtcpClient;
+}
+
+/**
+ * The MCP server is a GENERIC, STATELESS proxy over the UTCP tool surface. It
+ * owns no tool logic and no session: every HTTP request gets its own MCP
+ * `Server`, built from that request's bearer. When the request needs tools it
+ * uses the caller's `UtcpClient` — pointed at the backend's own
+ * `GET /api/agent/all-tools` catalog (over loopback, authenticated as the
+ * caller, so ACL filtering lives ONCE behind the REST surface), every tool
+ * discovered — and re-exposes each one to the MCP client. A tool call is dispatched straight back through the same
+ * REST endpoint the tool's UTCP `tool_call_template` names — so the agent logic,
  * thread continuity, and per-key token metering all live ONCE behind that REST
  * endpoint (`AgentAskService` for `ask`), never duplicated here.
+ *
+ * The client is built once per person, caller kind, key scope and catalog
+ * revision, and reused until one of those changes (see {@link SurfaceCache}):
+ * the revision is the fingerprint `hexis-mcp` already polls, so a `.tool`
+ * added, edited or put out of the caller's reach is a new revision and a new
+ * build, while a note saved anywhere is not. A secret changing evicts the
+ * person's clients (a shared one, everyone's). Building cost a full catalog
+ * fetch and discovery per request, which on a slow knowledge base was the
+ * difference between an answer and a client's discovery timeout.
+ *
+ * A cached client carries no request's bearer. Each request brings its own,
+ * through the request context (see `request-context.ts`): the
+ * platform-hosted manuals read it at call time, so a connection key's metering
+ * and audit stay its own, a revoked key fails on its next request while the
+ * person's client stays warm for their other key, and a token minted for one
+ * request never has to outlive it. The cache holds references and nothing the
+ * process could not rebuild, so a restart between two requests is still
+ * undetectable by the client: the first request after it rebuilds.
+ *
+ * Tool definitions are held once for every client that discovered the same
+ * ones (see {@link SharedDefinitions}), so hundreds of warm clients of one
+ * catalog cost one catalog's worth of schemas and descriptions.
+ *
+ * The one exception to "nothing between requests" is proxied third-party MCP
+ * servers (`mcp` manuals): those are session-ful by nature, so their
+ * connections live in a {@link DownstreamPool} keyed by (user, manual) — lazy,
+ * single-flight, idle-evicted, bounded, and healed by session recovery. Losing
+ * any of it costs a reconnect, never correctness.
  *
  * Dispatch always uses `callToolStreaming`, which is uniform across tool kinds:
  * a plain `http` tool yields exactly one chunk (its final result, emitted as
  * the tool result with no progress), while a `streamable_http` tool yields many
- * (the all-but-last become `notifications/progress`, the last is the result).
- * Because of that, adding — or later upgrading a tool to streaming — never
- * touches this file.
+ * (the all-but-last become `notifications/progress` on the request's own
+ * response stream, the last is the result).
  *
  * Auth note: `/api/agent/*` accepts connection keys and internal tokens only.
- * Connection-key sessions pass the caller's own key through to the loopback;
- * OAuth/JWT sessions can't (their bearer would 401 there), so `createSession`
- * mints a least-privilege internal token for the resolved user and uses THAT
- * as the session's loopback bearer instead.
+ * Connection-key requests pass the caller's own key through to the loopback;
+ * OAuth/JWT requests can't (their bearer would 401 there), so the proxy mints a
+ * least-privilege internal token for the resolved user and uses THAT as the
+ * request's loopback bearer instead.
  */
 export class McpService {
   // Circuit breaker for manuals whose credentials just failed — see the memo.
+  // Retry policy, not session state: it survives the move to statelessness.
   private readonly manualFailures = new ManualFailureMemo();
+  private readonly surfaceLog = new SurfaceLogThrottle();
+  // One forced token refresh per (user, manual) per minute — see downstream-token-refresh.
+  private readonly tokenRefreshes: DownstreamRefreshGuard<ForcedRefreshOutcome | 'rejected-shared'>;
+  /**
+   * The tools each pooled manual last advertised, by manual definition. A
+   * downstream can only be asked what its tools are over a connection, and a
+   * caller whose sign-in is missing or broken has no connection — so their
+   * tools would silently vanish from the surface, and a call would answer
+   * "Unknown tool" instead of "sign in again on /connect". These definitions
+   * keep the manual on the surface for such a caller; the call-time credential
+   * check then answers with the link, and an interactive client is sent back
+   * through authorization. Definitions, never credentials or results. Keyed
+   * by catalog name — one entry per manual, replaced when the manual is next
+   * discovered — and used only while the manual's definition is the one the
+   * tools were discovered from, so an edited `mcp.json` never serves the old
+   * server's tools.
+   */
+  private readonly knownDownstreamTools = new Map<string, { definition: string; tools: UtcpTool[] }>();
 
   /**
-   * Invalidate remembered manual failures — wired to the secrets vault's
-   * mutation listener, so a just-repaired credential is retried on the very
-   * next session build. `null` = a shared secret changed (affects everyone).
+   * The JSON Schema check on connected tools, and the memory of what it found.
+   * Process-wide rather than per request, because a schema's validity is a
+   * property of the server and not of the caller — and because the point of
+   * remembering is that the check runs when a server's tools are loaded, not
+   * once per request and never on a tool call. See {@link ToolSchemaGuard}.
    */
-  clearManualFailures(userId: string | null): void {
-    if (userId === null) this.manualFailures.clearAll();
-    else this.manualFailures.clearUser(userId);
-  }
+  private readonly toolSchemas = new ToolSchemaGuard();
+
+  // The downstream connection pool for `mcp` manuals — see the class doc.
+  private readonly downstream: DownstreamPool<PooledDownstream>;
+
+  // Built surfaces, per caller and catalog revision — see the class doc.
+  private readonly surfaces: SurfaceCache<RequestSurface>;
+
+  // Tool definitions shared by every surface that discovered the same ones.
+  private readonly definitions = new SharedDefinitions();
 
   constructor(
-    private readonly sessionStore: McpSessionStore,
     private readonly opts: McpProxyOptions,
     // The vault + manual catalog, used to check a caller's per-user credentials
     // before dispatching a tool. Optional so existing constructions/tests that
     // don't exercise the check keep working (the check is skipped when absent).
     private readonly secretsVault?: ISecretsVaultService,
     private readonly toolManuals?: IToolManualService,
-    // Mints the loopback bearer for OAuth/JWT sessions (see class doc).
-    // Optional for the same test-compat reason; without it those sessions
+    // Mints the loopback bearer for OAuth/JWT requests (see class doc).
+    // Optional for the same test-compat reason; without it those requests
     // fall back to the old pass-through (and 401 at the loopback hop).
     private readonly internalTokens?: InternalTokenService,
     // Revokes an MCP OAuth access token (BevelOAuthProvider.revokeByAccessToken)
-    // — the reset that sends an interactive session back through the browser
+    // — the reset that sends an interactive client back through the browser
     // authorization when one of its TOOL sign-ins breaks. Optional: without
     // it, broken sign-ins surface only as the /connect link in the result.
     private readonly revokeOAuthAccess?: (bearer: string) => Promise<void>,
-  ) {}
-
-  /**
-   * Subscribe to store-driven evictions (idle-TTL sweep, size-cap eviction) so
-   * the route layer can drop its transport mirror. Returns an unsubscribe fn.
-   */
-  onSessionEvicted(listener: (sessionId: string) => void): () => void {
-    return this.sessionStore.onEvict(listener);
+    // The Audit log's recorder: every tool call, skill read and meta-tool run
+    // of a request that arrived with a key or an agent connection goes
+    // through it. Optional like the others; without it nothing is recorded.
+    private readonly auditRecorder?: IAgentEventRecorder,
+    /**
+     * The MCP Apps this deployment serves — the views a tool's `_meta` names
+     * and `resources/list` / `resources/read` answer for.
+     *
+     * Optional, and absence is a real state rather than a test convenience:
+     * with no manifest the endpoint declares no `resources` capability and
+     * every tool is listed exactly as before, which is also what a
+     * deployment whose packaged view could not be read must look like. A
+     * `resourceUri` advertised without a resource behind it would have a
+     * host preload a failure and show an empty frame.
+     */
+    private readonly mcpApps?: { manifest(): Promise<McpAppManifest> },
+  ) {
+    this.downstream = new DownstreamPool<PooledDownstream>({
+      ...opts.downstreamPool,
+      // Since @utcp/sdk 1.2.0 a client closes only the protocol instances it
+      // created, and @utcp/mcp registers as a factory — so this closes exactly
+      // this entry's MCP sessions and touches no other client's.
+      dispose: (entry) => entry.client.close(),
+    });
+    // Paced on the pool's clock, so a test that moves one moves both.
+    this.tokenRefreshes = new DownstreamRefreshGuard(undefined, opts.downstreamPool?.now);
+    this.surfaces = new SurfaceCache<RequestSurface>(opts.surfaceCache);
   }
 
   /**
-   * Build a fresh per-session (transport, server) pair. Async because tool
-   * discovery (a loopback round-trip authenticated with `bearer`) happens here,
-   * before the server is returned, so `tools/list` is ready the moment the
-   * client asks. The route awaits this, then `server.connect(transport)`.
+   * A secret changed — wired to the secrets vault's mutation listener.
+   * `null` = a shared secret changed (affects everyone).
+   *
+   * Three things were built from the old value: remembered manual failures (so
+   * a just-repaired credential is retried on the very next request), pooled
+   * downstream connections (dialed and discovered with the old credential),
+   * and cached surfaces (whose tools, and whose list of manuals waiting on a
+   * sign-in, were decided with it). All are dropped; the next request
+   * rebuilds whatever it needs.
    */
-  async createSession(
-    userId: string,
-    tokenId: string | null,
-    bearer: string,
-    onSessionInitialized: (sessionId: string) => void,
-  ): Promise<{ transport: StreamableHTTPServerTransport; server: Server }> {
+  onSecretsChanged(userId: string | null): void {
+    this.forgetStaleRefreshWindows(userId);
+    if (userId === null) {
+      this.manualFailures.clearAll();
+      this.downstream.closeAll();
+      this.surfaces.clear();
+      return;
+    }
+    this.manualFailures.clearUser(userId);
+    const mine = (key: string) => key.startsWith(`${userId}${POOL_KEY_SEPARATOR}`);
+    this.downstream.evictWhere(mine);
+    this.surfaces.evictWhere(mine);
+  }
+
+  /**
+   * A credential changed, so a refresh window that FAILED to produce one no
+   * longer describes anything: a token the user has just re-authorized (or an
+   * admin has just re-keyed) must be tried on the very next rejection, not sit
+   * out the remainder of a minute earned by the credential it replaced.
+   *
+   * Only settled, non-`refreshed` windows are forgotten. A refresh of our own
+   * is itself a secrets mutation, and clearing on that would hand a provider
+   * that keeps minting tokens the downstream keeps refusing one refresh per
+   * call — precisely the loop the once-a-minute guard exists to bound. An
+   * in-flight attempt (no outcome yet) is left alone for the same reason: it
+   * may be the very refresh that raised this notification.
+   */
+  private forgetStaleRefreshWindows(userId: string | null): void {
+    const mine = (key: string) => userId === null || key.startsWith(`${userId}${POOL_KEY_SEPARATOR}`);
+    this.tokenRefreshes.clearWhere(
+      (key, outcome) => mine(key) && outcome !== undefined && outcome !== 'refreshed',
+    );
+  }
+
+  /**
+   * Build the MCP `Server` for ONE request. The route connects it to a fresh
+   * stateless transport, lets it answer, and closes both with the response.
+   *
+   * Cheap by construction: nothing is fetched up front except what the
+   * request's own messages need. The agent instructions are read only when the
+   * request carries an `initialize` (the only place they ride); the tool
+   * surface is looked up on the first handler that needs it — the caller's
+   * cached one, or a fresh build — and shared by every message of the request
+   * (a JSON-RPC batch).
+   */
+  async createRequestServer(caller: McpCaller, messages: unknown): Promise<Server> {
+    const { userId, tokenId, bearer } = caller;
+    const connectionId = caller.connectionId ?? null;
+    const page = caller.page ?? null;
     // The loopback surface (`/api/agent/*`) accepts connection keys and
-    // internal tokens only. A connection-key session passes the caller's own
-    // key through (per-key metering rides on it); an OAuth/JWT session's
+    // internal tokens only. A connection-key request passes the caller's own
+    // key through (per-key metering rides on it); an OAuth/JWT request's
     // bearer would 401 there, so mint a least-privilege internal token for
     // the resolved user instead — flagged `externalProxy` so the tool-auth
     // verifier resolves it to `source: 'external'`: the caller IS an external
     // agent and must be treated like one (admitted to `start_session`/`ask`,
-    // refused from internal-only tools). TTL covers the session store's 4h
-    // idle eviction — an evicted session re-initializes and re-mints.
+    // refused from internal-only tools).
+    // The agent the connection was made as rides that token too, so the
+    // surfaces behind the loopback narrow to its scope; a connection key
+    // carries its own.
+    const agentPath = caller.agentPath || null;
     const loopbackBearer =
       tokenId == null && this.internalTokens
-        ? this.internalTokens.mint({ userId, externalProxy: true }, MCP_LOOPBACK_TOKEN_TTL_MS)
+        ? this.internalTokens.mint(
+            { userId, externalProxy: true, ...(agentPath ? { agentPath } : {}) },
+            MCP_LOOPBACK_TOKEN_TTL_MS,
+          )
         : bearer;
 
-    // The list of manuals this caller gets: the KB manual + each `.tool` they
-    // can read. Fetched over loopback with the caller's key, so ACL filtering
-    // lives ONCE behind the REST surface.
-    const manuals = await this.fetchManualTemplates(loopbackBearer);
-    const client = await this.buildClient(loopbackBearer, userId, manuals);
-    const tools = await this.discoverTools(client, manuals, userId);
-    // Confirms the MCP session was built for a connecting client (vs. an
-    // in-process agent code-mode client, which never runs createSession) and
-    // how many tools discovery yielded before listing/filtering.
-    console.log(
-      `[mcp] createSession: user=${userId} tokenId=${tokenId ?? 'none'} — ` +
-        `discovered ${tools.length} tool(s) across ${manuals.length} manual(s)`,
-    );
+    let instructions: Promise<ComposedAgentInstructions> | undefined;
+    const agentInstructions = () => (instructions ??= this.composeAgentInstructions());
+    // What a narrowed connection is told about itself at the handshake: the
+    // agent it is connected as, or why it loads nothing. Read off the catalog
+    // revision (cheap), not the surface (a full discovery). Everything is
+    // told nothing new, so its handshake is exactly what it was.
+    const connectionLine = async (): Promise<string | null> =>
+      agentPath ? describeConnection((await this.fetchCatalogRevision(loopbackBearer)).connection) : null;
+    // The Audit log's view of this request — only when the request can be
+    // attributed to a key, an agent connection or a page. The catalog names
+    // it classifies pooled tools by are the surface's, which is looked up
+    // lazily below, so it reads them through a holder the surface fills in.
+    const catalogNamesHolder: { current: ReadonlyMap<string, string> } = { current: new Map() };
+    const principal: RecordedPrincipal | null =
+      tokenId != null
+        ? { kind: 'key', id: tokenId }
+        : connectionId
+          ? { kind: 'agent', id: connectionId }
+          : page
+            ? { kind: 'page', path: page }
+            : null;
+    const audit =
+      this.auditRecorder && principal
+        ? new RequestAudit(this.auditRecorder, userId, principal, {
+            kbManualName: EXTERNAL_KB_MANUAL_NAME,
+            catalogNames: () => catalogNamesHolder.current,
+            loadSkills: () =>
+              this.fetchSkillList(loopbackBearer).then((skills) =>
+                skills.flatMap((s) => (s.path ? [{ name: s.name, path: s.path }] : [])),
+              ),
+          })
+        : null;
+    // What this request brings to a client it shares with the person's other
+    // requests: its own loopback bearer and its own audit. Every handler that
+    // reaches the client runs inside it.
+    const ctx: McpRequestContext = { loopbackBearer, audit };
+    const inRequest = <T>(fn: () => Promise<T>): Promise<T> => runInRequest(ctx, fn);
+    let surface: Promise<RequestSurface> | undefined;
+    const requestSurface = () =>
+      (surface ??= inRequest(() => this.surfaceFor(caller, loopbackBearer)).then((found) => {
+        catalogNamesHolder.current = found.catalogNames;
+        return found;
+      }));
 
-    const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: () => randomUUID(),
-      onsessioninitialized: (sessionId) => {
-        this.sessionStore.create(sessionId, userId, tokenId);
-        onSessionInitialized(sessionId);
-      },
-      onsessionclosed: (sessionId) => {
-        this.sessionStore.delete(sessionId);
-      },
-    });
-
+    const initializing = (Array.isArray(messages) ? messages : [messages]).some((m) => isInitializeRequest(m));
+    const handshakeInstructions = async (): Promise<string> => {
+      const [{ instructions: text }, line] = await Promise.all([agentInstructions(), connectionLine()]);
+      return line ? `${text}\n\n${line}` : text;
+    };
+    // The deployment's MCP Apps, read once per request. Declaring the
+    // `resources` capability is what permits the two handlers below, and a
+    // deployment with no view must not declare it — a client would then list
+    // resources and be told the method does not exist.
+    const apps = this.mcpApps ? await this.mcpApps.manifest().catch(() => null) : null;
+    const servesApps = (apps?.resources.length ?? 0) > 0;
     const server = new Server(
       { name: 'bevel-mcp', version: '0.1.0' },
-      { capabilities: { tools: {}, prompts: {} } },
+      {
+        capabilities: {
+          tools: {},
+          prompts: {},
+          // Resources exist here for ONE purpose: serving the MCP App views
+          // the tools carry. The knowledge base's own files are not
+          // resources — they are what the file TOOLS read, under the access
+          // rules, which a resource listing has no way to express.
+          ...(servesApps ? { resources: {} } : {}),
+        },
+        // `instructions` rides the initialize result; clients that honour it
+        // place the text in the model's system prompt without the model acting.
+        ...(initializing ? { instructions: await handshakeInstructions() } : {}),
+      },
     );
 
-    server.setRequestHandler(ListToolsRequestSchema, async () => {
+    server.setRequestHandler(ListToolsRequestSchema, async () => inRequest(async () => {
+      const [{ tools, catalogNames, connection }, { toolPrefix }, readOnly] = await Promise.all([
+        requestSurface(),
+        agentInstructions(),
+        // A failed read lists the built-in hints rather than no listing at all.
+        this.opts.readOnlyOverrides?.().catch((err: unknown) => {
+          log.warn('tools/list: could not read the read-only overrides; listing built-in hints.', { err });
+          return undefined;
+        }),
+      ]);
+      // A connection whose agent configuration cannot be used is served NOTHING — not
+      // Everything — and the one sentence saying why rides the listing's
+      // `_meta` (the handshake carries it too).
+      if (connection?.unavailable) {
+        return { tools: [], _meta: { [CONNECTION_META_KEY]: connection.unavailable } };
+      }
       // A discovered tool whose name collides with a meta-tool would be
       // listed but never callable (the dispatcher routes the name to the
       // meta-tool first), so drop it from the listing entirely.
       let listed = tools.filter((t) => !META_TOOL_NAMES.has(t.mcpName));
-      // Connection-key sessions are autonomous pipelines — nobody is present
+      // Connection-key callers are autonomous pipelines — nobody is present
       // to complete a sign-in mid-run, so register ONLY the tools whose
       // per-user credentials are already satisfied. Interactive (OAuth/JWT)
-      // sessions keep the full listing: their caller can configure a tool on
+      // callers keep the full listing: they can configure a tool on
       // /connect when the call-time check points them there.
       if (tokenId != null) {
         const ready = await Promise.all(
           // A per-tool check that throws must NOT reject the whole list (which
           // would blank every tool) — fail that one tool closed and move on.
           listed.map((t) =>
-            this.missingUserSecrets(userId, t).then(
+            this.missingUserSecrets(userId, catalogNames.get(t.manualName) ?? t.manualName).then(
               (missing) => missing.length === 0,
               () => false,
             ),
@@ -231,86 +665,243 @@ export class McpService {
       const seen = new Set(META_TOOL_NAMES);
       const dropped: string[] = [];
       const direct: McpTool[] = [];
+      const examplePool: ProxiedTool[] = [];
       for (const t of listed) {
-        const entry = toListedTool(t); // logs its own reason on a name/schema drop
+        // The MCP App view this tool's result renders in, by tool name. Not
+        // part of the UTCP manual the tool was discovered from (UTCP has no
+        // place for it), so it is joined on here — the one point where a
+        // discovered tool becomes a listing entry.
+        const ui = apps && Object.hasOwn(apps.tools, t.mcpName) ? apps.tools[t.mcpName] : undefined;
+        // An admin's override of a platform tool's hint, read for THIS listing.
+        const hinted = withReadOnlyOverride(t, readOnly);
+        const entry = toListedTool(ui ? { ...hinted, ui } : hinted); // logs its own reason on a name/schema drop
         if (!entry) {
           dropped.push(t.mcpName);
           continue;
         }
+        // Kept for the worked example in the meta-tool descriptions: it must
+        // be derived from the tools THIS caller actually gets, not from the
+        // whole catalog, or a connection-key caller is shown an example naming
+        // a credential-gated tool the filter above just removed from its
+        // listing — a copied call that cannot work.
+        //
+        // BEFORE the duplicate drop below, on purpose. A tool dropped from the
+        // LISTING for sharing its name with another is still in the catalog a
+        // chain dispatches to, so the chain sees two tools under one name and
+        // refuses the call as ambiguous. The example has to know about both to
+        // steer clear of either (`chainExample` skips a name two tools share);
+        // shown only the survivor, it took that name for a safe one.
+        examplePool.push(t);
         if (seen.has(entry.name)) {
           dropped.push(`${entry.name} (duplicate)`);
           continue;
         }
         seen.add(entry.name);
-        direct.push(entry);
+        // The four knowledge-base tools carry the purpose prefix: the one
+        // pre-call channel every client shows the model, for the clients that
+        // drop the handshake's `instructions`. Applied AFTER the credential
+        // filter above, so a connection-key caller's listing carries it too.
+        // Every other tool, meta-tools included, keeps its description as is.
+        direct.push(
+          PREFIXED_TOOLS.has(entry.name)
+            ? { ...entry, description: prefixToolDescription(toolPrefix, entry.description) }
+            : entry,
+        );
       }
+      // The meta-tools' examples name the namespace THIS endpoint registers the
+      // knowledge-base tools under, and a tool this caller is really served, so
+      // a chain copied out of the description runs. Built here rather than held
+      // as a constant: the local MCP server registers the same tools under a
+      // different name, and one fixed example is necessarily wrong on one of the
+      // two surfaces.
+      //
+      // What a chain does with a failure, a large result or an image is
+      // stated once, in the shared rules — in the guide and in the handshake
+      // instructions — and not on the chain itself (an EMPTY pointer is how
+      // `mcp-core` is told the rules are served elsewhere). Like every tool of
+      // the platform's own, each meta-tool opens with the one sentence saying
+      // what to do before any of them, which is where those rules are. The
+      // registry puts the sentence on the tools it lists; the meta-tools are
+      // built here, so here it is.
+      const metaTools = codeModeMetaTools(EXTERNAL_KB_MANUAL_NAME, examplePool, {
+        sharedRulesPointer: '',
+        ...(readOnly ? { readOnly } : {}),
+      }).map((tool) => ({ ...tool, description: guideFirstDescription(tool.description) }));
       // Log only when a tool was dropped (name/schema/duplicate) — that's the
       // anomaly worth surfacing, since a downstream client would otherwise hide
-      // it by rejecting the whole response. The steady-state served count is
-      // already visible once per session in the createSession log above.
+      // it by rejecting the whole response.
       if (dropped.length) {
-        console.warn(
-          `[mcp] tools/list: serving ${CODE_MODE_META_TOOLS.length + direct.length} tool(s); ` +
+        log.warn(
+          `tools/list: serving ${metaTools.length + direct.length} tool(s); ` +
             `dropped ${dropped.length} non-listable: ${dropped.join(', ')}`,
         );
       }
       return {
         // Code-mode meta-tools first, then every validated direct tool.
-        tools: [...CODE_MODE_META_TOOLS, ...direct],
+        tools: [...metaTools, ...direct],
       };
-    });
+    }));
 
-    server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
-      if (META_TOOL_NAMES.has(request.params.name)) {
-        return this.dispatchMetaTool(client, request.params.name, request.params.arguments ?? {});
+    // The MCP App views. Registered only when this deployment serves one, so
+    // the handlers and the declared capability agree.
+    if (servesApps && apps) {
+      server.setRequestHandler(ListResourcesRequestSchema, async () => ({
+        resources: apps.resources.map((r) => toListedResource(r)),
+      }));
+      server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+        const resource = apps.resources.find((r) => r.uri === request.params.uri);
+        if (!resource) {
+          throw new McpError(
+            ErrorCode.InvalidParams,
+            `No resource at ${request.params.uri}. This endpoint serves the MCP App views its tools ` +
+              `name and nothing else: ${apps.resources.map((r) => r.uri).join(', ')}.`,
+          );
+        }
+        return toReadResourceResult(resource);
+      });
+    }
+
+    server.setRequestHandler(CallToolRequestSchema, async (request, extra) => inRequest(async () => {
+      const { client: shared, tools, unavailable, catalogNames, hidden: hiddenTools, connection } = await requestSurface();
+      // Nothing is callable on a connection that loads nothing, meta-tools
+      // included: every call is answered with the reason.
+      if (connection?.unavailable) return toolError(connection.unavailable);
+      // The person's client, as this request uses it: every call it makes —
+      // a chain's too, which comes back from the isolate outside any async
+      // context — carries this request's bearer and audit.
+      const client = requestView(shared, ctx);
+      const toolName = request.params.name;
+      const args = request.params.arguments ?? {};
+      if (META_TOOL_NAMES.has(toolName)) {
+        // A meta-tool is the platform's own; its inner tool calls (a chain's)
+        // are recorded one by one through the instrumented client.
+        const run = () => this.dispatchMetaTool(client, toolName, args);
+        return audit ? audit.call(toolName, args, run, isErrorResult) : run();
       }
-      const proxied = tools.find((t) => t.mcpName === request.params.name);
-      if (!proxied) {
-        return toolError(`Unknown tool "${request.params.name}".`);
-      }
-      // Stop before running a tool whose personal (user-scoped) credentials the
-      // caller hasn't provided — return a setup link instead of a blank-credential
-      // request that would fail opaquely at the provider.
-      const needsAuth = await this.checkUserSecrets(userId, proxied);
-      if (needsAuth) {
+      /**
+       * The needs-authorization answer, when the caller's sign-in for the
+       * manual registered as `utcpName` is missing or broken; `null` to
+       * proceed. Stops before running a tool whose personal (user-scoped)
+       * credentials the caller hasn't provided — a setup link instead of a
+       * blank-credential request that would fail opaquely at the provider.
+       * The credential catalog keys manuals by their CATALOG name; a tool
+       * carries the registered (rewritten) one, so it is translated back.
+       */
+      const needsAuthorization = async (utcpName: string): Promise<CallToolResult | null> => {
+        const needsAuth = await this.checkUserSecrets(userId, toolName, catalogNames.get(utcpName) ?? utcpName);
+        if (!needsAuth) return null;
         // A sign-in that EXISTS but is broken (expired grant, abandoned
-        // consent, missing scopes) on an interactive OAuth session: revoke the
+        // consent, missing scopes) on an interactive OAuth caller: revoke the
         // agent's own grant too. Its next request then 401s, its refresh
         // fails, and it re-runs the browser authorization — landing the user
         // on /connect where the broken sign-in shows as not-connected, to
         // re-authorize or deselect. Never-configured tools keep the plain
         // link (revoking for those would loop on every poke at a tool the
-        // user simply hasn't set up). Connection-key sessions have no grant
+        // user simply hasn't set up). Connection-key callers have no grant
         // to reset; the revoke no-ops on non-OAuth bearers anyway.
         if (needsAuth.brokenSignIn && tokenId == null && this.revokeOAuthAccess) {
           try {
             await this.revokeOAuthAccess(bearer);
           } catch (err) {
-            console.warn('[mcp] failed to reset the session grant for re-auth:', err);
+            log.warn('failed to reset the caller grant for re-auth:', { err });
           }
         }
         return needsAuth.result;
+      };
+      const proxied = tools.find((t) => t.mcpName === toolName);
+      if (!proxied) {
+        // A tool this process hid for an invalid schema: say that, rather than
+        // "Unknown tool" about a tool the agent has every reason to think
+        // exists. The place and the reason are deliberately NOT here — they are
+        // for the people who manage the server, who are the only ones who can
+        // act on them.
+        const hidden = hiddenTools.get(toolName);
+        if (hidden) {
+          // The UTCP name, as every other audit path records a tool: the
+          // flattened agent name loses the server segment of a multi-segment
+          // `<manual>.<server>.<tool>`, and an audit trail that names a
+          // different tool than the rest of the trail is worse than none.
+          if (audit) await audit.denied(hidden.utcpName, args);
+          return toolError(
+            `The "${toolName}" tool is hidden from agents because its schema is invalid, so it cannot be ` +
+              `called. The people who manage its server can see the place in the schema and the reason, on ` +
+              `the tool's page in Hexis and through \`list_tool_setup\`.`,
+          );
+        }
+        // Not on the surface — but if the name belongs to a manual that is off
+        // it only because this caller's sign-in is gone (and nothing in this
+        // process has seen its tools yet), the honest answer is the sign-in
+        // link, exactly as if the tool were listed. Longest matching prefix:
+        // manual names may themselves contain underscores.
+        const owner = unavailable
+          .filter((m) => toolName.startsWith(`${m.utcpName}_`))
+          .sort((a, b) => b.utcpName.length - a.utcpName.length)[0];
+        const answer = owner ? await needsAuthorization(owner.utcpName) : null;
+        if (answer && owner && audit) {
+          await audit.denied(`${owner.utcpName}.${toolName.slice(owner.utcpName.length + 1)}`, args);
+        }
+        // On a narrowed connection, a tool off the surface is one its agent
+        // does not load: refused by name and agent, never "unknown" — the tool
+        // may well exist, for this person, on another connection.
+        return (
+          answer ??
+          toolError(
+            retiredToolMessage(toolName) ??
+              (connection ? connectionRefusal(toolName, connection) : `Unknown tool "${toolName}".`),
+          )
+        );
       }
-      return this.dispatch(client, proxied, request, extra);
-    });
+      const needsAuth = await needsAuthorization(proxied.manualName);
+      if (needsAuth) {
+        if (audit) await audit.denied(proxied.utcpName, args);
+        return needsAuth;
+      }
+      // A tool with an MCP App view answers structured content too — the
+      // view reads its fields from there.
+      const structured = apps !== null && Object.hasOwn(apps.tools, proxied.mcpName);
+      const run = () => this.dispatch(client, proxied, request, extra, structured);
+      return audit ? audit.call(proxied.utcpName, args, run, isErrorResult) : run();
+    }));
 
     // Prompts = skills. Each skill becomes a user-callable prompt (slash command
     // in MCP clients). Backed by the same skill endpoints the tools use, over
     // loopback with the caller's key — so the default-branch catalog, access
     // filtering, and progressive disclosure all live ONCE behind that REST
-    // surface, never duplicated here.
+    // surface, never duplicated here. Neither handler needs the tool catalog.
+    // The one prompt that is not a skill is the platform's `onboard`, offered
+    // only on a connection not narrowed to an agent, and only while no skill
+    // takes its name (see `promptsForSkills`).
+    const offerOnboard = agentPath === null;
     server.setRequestHandler(ListPromptsRequestSchema, async () => {
       const skills = await this.fetchSkillList(loopbackBearer);
-      const prompts: Prompt[] = skills.map((s) => ({
-        name: s.name,
-        description: s.description,
-        arguments: [],
-      }));
+      const prompts: Prompt[] = promptsForSkills(skills, offerOnboard);
       return { prompts };
     });
 
     server.setRequestHandler(GetPromptRequestSchema, async (request): Promise<GetPromptResult> => {
+      // The platform's own prompt is served exactly when `prompts/list`
+      // offered it: the connection is not narrowed and no released skill
+      // takes the name — judged on the skill LIST, the same answer the
+      // listing used, never on a read that failed. A workspace's own
+      // `onboard` skill is then read like any other prompt, and a read that
+      // fails is a failed read, not a reason to serve the platform's text.
+      if (offerOnboard && request.params.name === ONBOARD_PROMPT.name) {
+        const released = await this.fetchSkillList(loopbackBearer);
+        if (!released.some((s) => s.name === ONBOARD_PROMPT.name)) {
+          return {
+            description: ONBOARD_PROMPT.description,
+            messages: [{ role: 'user', content: { type: 'text', text: ONBOARD_PROMPT.text } }],
+          };
+        }
+      }
+      const started = performance.now();
       const skill = await this.fetchSkill(loopbackBearer, request.params.name);
+      // A prompt IS a skill read — the same event `get_skill` produces.
+      audit?.emit(
+        { kind: 'skill', manual: skill?.path ?? null, name: request.params.name },
+        skill ? 'ok' : 'error',
+        Math.round(performance.now() - started),
+      );
       if (!skill) {
         throw new McpError(ErrorCode.InvalidParams, `Unknown skill "${request.params.name}".`);
       }
@@ -320,7 +911,187 @@ export class McpService {
       };
     });
 
-    return { transport, server };
+    return server;
+  }
+
+  /**
+   * Record that the person viewing `page` refused it a call: the page asked to
+   * write, the app asked them, and they answered Deny. Nothing ran, so the
+   * call never reached this server as a `tools/call`; the app reports it here
+   * so the Audit log shows the page's attempt beside its allowed calls.
+   *
+   * The tool is named the way the page named it (its MCP name) and recorded
+   * the way that call would have been: through the person's surface, which
+   * the page's earlier calls have normally left warm.
+   */
+  async recordPageRefusal(
+    caller: Pick<McpCaller, 'userId' | 'bearer' | 'scope'>,
+    page: string,
+    toolName: string,
+    args: Record<string, unknown>,
+  ): Promise<void> {
+    if (!this.auditRecorder) return;
+    const { userId } = caller;
+    const loopbackBearer = this.internalTokens
+      ? this.internalTokens.mint({ userId, externalProxy: true }, MCP_LOOPBACK_TOKEN_TTL_MS)
+      : caller.bearer;
+    let catalogNames: ReadonlyMap<string, string> = new Map();
+    const audit = new RequestAudit(this.auditRecorder, userId, { kind: 'page', path: page }, {
+      kbManualName: EXTERNAL_KB_MANUAL_NAME,
+      catalogNames: () => catalogNames,
+      loadSkills: () =>
+        this.fetchSkillList(loopbackBearer).then((skills) =>
+          skills.flatMap((s) => (s.path ? [{ name: s.name, path: s.path }] : [])),
+        ),
+    });
+    const ctx: McpRequestContext = { loopbackBearer, audit };
+    await runInRequest(ctx, async () => {
+      let utcpName = toolName;
+      if (!META_TOOL_NAMES.has(toolName)) {
+        const surface = await this.surfaceFor({ ...caller, tokenId: null }, loopbackBearer);
+        catalogNames = surface.catalogNames;
+        utcpName =
+          surface.tools.find((t) => t.mcpName === toolName)?.utcpName ?? surface.hidden.get(toolName)?.utcpName ?? toolName;
+      }
+      await audit.denied(utcpName, args, 'refused');
+    });
+  }
+
+  /**
+   * The caller's tool surface: the one cached for their catalog revision, or
+   * a fresh build that is then cached.
+   *
+   * The key is the person, the kind of caller (a connection key, or a person
+   * through OAuth or their session — the latter two reach the same loopback
+   * identity), the credential's scope, and the catalog revision. The revision
+   * is asked for on every request, with the request's own bearer, so it is
+   * the caller's CURRENT catalog that picks the surface: a manual released,
+   * edited or put out of their reach moves it, and the request builds anew.
+   *
+   * When the revision cannot be read the request builds a surface of its own
+   * and keeps it to itself — the per-request behaviour this replaced, never a
+   * surface it cannot tell is current.
+   */
+  private async surfaceFor(caller: McpCaller, loopbackBearer: string): Promise<RequestSurface> {
+    const { userId, tokenId } = caller;
+    const { revision } = await this.fetchCatalogRevision(loopbackBearer);
+    if (revision === null) return this.buildSurface(userId, tokenId, loopbackBearer, 'uncached');
+    // The agent the connection was made as is part of the key: two
+    // connections of one person made as different agents are two surfaces.
+    // (The revision already moves when the agent's FILE changes — it carries
+    // the file's digest — so an edit is a new build at the next request.)
+    // Everything adds nothing, and keeps the key it always had.
+    const key = [
+      userId,
+      tokenId != null ? 'key' : 'person',
+      caller.scope ?? 'write',
+      revision,
+      ...(caller.agentPath ? [caller.agentPath] : []),
+    ].join(POOL_KEY_SEPARATOR);
+    const { value } = await this.surfaces.get(
+      key,
+      () => this.buildSurface(userId, tokenId, loopbackBearer, 'miss'),
+      (built) => (built.degraded ? DEGRADED_SURFACE_MAX_AGE_MS : undefined),
+    );
+    return value;
+  }
+
+  /**
+   * The caller's catalog revision (`GET /api/agent/catalog-revision`, the one
+   * `hexis-mcp` polls), read with their bearer; null when it cannot be read.
+   * With it, the agent the caller's connection is narrowed to, when it is.
+   * A deployment or a test that does not serve the route answers 404, which
+   * is not worth a line in the log; anything else is.
+   */
+  private async fetchCatalogRevision(
+    bearer: string,
+  ): Promise<{ revision: string | null; connection?: ConnectionScopeWire }> {
+    try {
+      const res = await fetch(`${this.opts.loopbackBaseUrl}/api/agent/catalog-revision`, {
+        headers: { Authorization: `Bearer ${bearer}` },
+        signal: AbortSignal.timeout(LOOPBACK_TIMEOUT_MS),
+      });
+      if (!res.ok) {
+        if (res.status !== 404) log.warn(`catalog-revision loopback failed: HTTP ${res.status}; building this request's surface uncached`);
+        return { revision: null };
+      }
+      const body = (await res.json()) as { revision?: unknown; connection?: unknown };
+      return {
+        revision: typeof body.revision === 'string' && body.revision ? body.revision : null,
+        ...connectionOf(body),
+      };
+    } catch (err) {
+      log.warn("catalog-revision loopback threw; building this request's surface uncached:", { err });
+      return { revision: null };
+    }
+  }
+
+  /**
+   * Build a tool surface: catalog over loopback, a UTCP client, every manual
+   * registered (pooled for `mcp` ones), tools flattened, definitions shared.
+   *
+   * Runs inside the request that asked for it, whose bearer the knowledge
+   * base's discovery reads; the client it builds keeps none of it.
+   *
+   * Logs one line with the time each half took and whether it was a cache
+   * miss, so a build is measured rather than assumed, and a log that shows
+   * one line for two requests shows the second was served warm.
+   */
+  private async buildSurface(
+    userId: string,
+    tokenId: string | null,
+    loopbackBearer: string,
+    cache: 'miss' | 'uncached',
+  ): Promise<RequestSurface> {
+    const started = performance.now();
+    // The list of manuals this caller gets: the KB manual + each `.tool` they
+    // can read. Fetched over loopback with the caller's key, so ACL filtering
+    // lives ONCE behind the REST surface.
+    const { manuals, connection } = await this.fetchManualTemplates(loopbackBearer);
+    const catalogMs = performance.now() - started;
+    const client = await this.buildClient(userId, manuals);
+    const discovered = await this.discoverTools(client, manuals, userId);
+    // After discovery, which renames each template in place to the name it
+    // registered under: that is the name the repository keys it by.
+    const rawTemplates = new Map(manuals.map((m) => [utcpManualName(m), m] as const));
+    await this.definitions.share(client, rawTemplates);
+    // Chain calls are audited per request, by whichever request makes them.
+    RequestAudit.instrumentChainCalls(client, () => currentRequest()?.audit);
+    const tools = this.definitions.listing(discovered.tools);
+    const totalMs = performance.now() - started;
+    // Per user: on a shape change or once per interval, never per request —
+    // see SurfaceLogThrottle for why both halves matter.
+    const decision = this.surfaceLog.decide(userId, { tools: tools.length, manuals: manuals.length });
+    if (decision.log) {
+      log.info(
+        // Both ids come from the request (an identity provider's subject, a
+        // connection key's id), so neither is interpolated raw — see printable.
+        `request surface: user=${printable(userId)} tokenId=${tokenId ? printable(tokenId) : 'none'} cache=${cache} — ` +
+          `${tools.length} tool(s) across ${manuals.length} manual(s) in ${totalMs.toFixed(0)}ms ` +
+          `(catalog ${catalogMs.toFixed(0)}ms, registration ${(totalMs - catalogMs).toFixed(0)}ms)` +
+          (decision.suppressed > 0 ? ` [+${decision.suppressed} identical rebuild(s) since last line]` : ''),
+      );
+    }
+    return { ...discovered, client, tools, ...(connection ? { connection } : {}) };
+  }
+
+  /**
+   * The instructions and tool prefix. A reader failure (a disk fault; ENOENT
+   * is not one, the reader answers null for that) falls back to the header
+   * alone and the fixed prefix line with a logged warning: a request never
+   * fails over its preamble.
+   */
+  private async composeAgentInstructions(): Promise<ComposedAgentInstructions> {
+    const layout = this.opts.kbLayout?.();
+    const defaultBranch = this.opts.defaultBranch?.();
+    const read = this.opts.readAgentPreamble;
+    if (!read) return composeAgentInstructions(null, layout, defaultBranch);
+    try {
+      return composeAgentInstructions(await read(), layout, defaultBranch);
+    } catch (err) {
+      log.warn('could not read mcp-description.md; this request gets the platform text alone:', { err });
+      return composeAgentInstructions(null, layout, defaultBranch);
+    }
   }
 
   /** Loopback GET of the default-branch skill catalog (via the `list_skills` tool). */
@@ -343,10 +1114,9 @@ export class McpService {
    * The ONE loopback round-trip: fetch `path` on our own REST surface with the
    * caller's bearer, parse JSON. Failures are logged under `label` (never the
    * bearer) and degrade to null — a loopback hiccup must not throw into the
-   * MCP session. GET when `json` is absent, POST with a JSON body when present.
-   * Bounded: a hung loopback (e.g. mid-restart) must not block `createSession`
-   * or a prompts handler indefinitely; a timeout aborts and degrades to null
-   * like any other failure.
+   * MCP request. GET when `json` is absent, POST with a JSON body when present.
+   * Bounded: a hung loopback (e.g. mid-restart) must not block a request
+   * indefinitely; a timeout aborts and degrades to null like any other failure.
    */
   private async loopbackJson(bearer: string, path: string, label: string, json?: unknown): Promise<unknown> {
     try {
@@ -359,12 +1129,12 @@ export class McpService {
         signal: AbortSignal.timeout(LOOPBACK_TIMEOUT_MS),
       });
       if (!res.ok) {
-        console.error(`[mcp] ${label} loopback failed: HTTP ${res.status} ${await res.text().catch(() => '')}`);
+        log.error(`${label} loopback failed: HTTP ${res.status} ${await res.text().catch(() => '')}`);
         return null;
       }
       return await res.json();
     } catch (err) {
-      console.error(`[mcp] ${label} loopback threw:`, err instanceof Error ? err.message : err);
+      log.error(`${label} loopback threw:`, { err });
       return null;
     }
   }
@@ -379,14 +1149,16 @@ export class McpService {
    * validated into `CallTemplate`s at the boundary. The KB manual is guaranteed
    * present (a fallback covers an unavailable endpoint); a user manual that
    * fails validation is dropped + logged so one bad `.tool` can't break the
-   * session. HTTP transport loses the `CallTemplate` type, so we re-validate the
+   * request. HTTP transport loses the `CallTemplate` type, so we re-validate the
    * received JSON even though the producing endpoint already validated it.
    */
-  private async fetchManualTemplates(bearer: string): Promise<CallTemplate[]> {
+  private async fetchManualTemplates(
+    bearer: string,
+  ): Promise<{ manuals: CallTemplate[]; connection?: ConnectionScopeWire }> {
     // This is the REMOTE proxy, so ask for remote-capable manuals only — local-only
     // `.tool`s are surfaced instead via the `list_local_tools` tool in the KB manual.
     const body = (await this.loopbackJson(bearer, '/api/agent/all-tools?remote=true', 'all-tools')) as
-      | { manuals?: unknown }
+      | { manuals?: unknown; connection?: unknown }
       | null;
     const rawManuals: unknown[] = Array.isArray(body?.manuals) ? body.manuals : [];
 
@@ -400,12 +1172,12 @@ export class McpService {
       } catch (err) {
         const name = String((raw as { name?: unknown })?.name ?? '');
         if (isKb) throw err; // the KB manual must be valid — the core toolset depends on it
-        console.warn(`[mcp] skipping manual "${name}": ${err instanceof Error ? err.message : String(err)}`);
+        log.warn(`skipping manual "${name}": ${err instanceof Error ? err.message : String(err)}`);
       }
     }
     // Always include the KB manual, even if `all-tools` was unavailable/regressed.
     if (!hasKb) out.unshift(this.kbManualTemplate());
-    return out;
+    return { manuals: out, ...connectionOf(body) };
   }
 
   /** The KB manual's discovery template — the fallback if `all-tools` is unavailable. */
@@ -421,83 +1193,497 @@ export class McpService {
   }
 
   /**
-   * One `CodeModeUtcpClient` per session. Reserved `API_URL`/`CONNECTION_KEY` are
+   * One `CodeModeUtcpClient` per surface. Reserved `API_URL`/`CONNECTION_KEY` are
    * seeded (namespaced) ONLY for Bevel-hosted manuals — the KB manual and inline
    * `.tool` sub-manuals, whose discovery template targets the loopback (`${API_URL}`).
    * Third-party http/mcp `.tool`s point at arbitrary user URLs, so we must NOT seed
    * them the caller's bearer: a malicious `.tool` referencing `${CONNECTION_KEY}`
    * would otherwise exfiltrate the caller's token to its own endpoint. Tool
    * `${SECRET}` refs resolve lazily via the per-user `bevel-secrets` loader.
+   *
+   * `CONNECTION_KEY` is seeded as a placeholder and bound to the request
+   * context (see {@link bindRequestBearer}): the client is shared by the
+   * person's requests, and each call carries the bearer of the request it
+   * belongs to.
+   *
+   * Not `close()`d: a client holds no connection of its own (its `mcp`
+   * manuals route to the pool, so its own `mcp` protocol instance never opens
+   * a session), and dropping the reference is the whole teardown.
    */
-  private async buildClient(
-    bearer: string,
-    userId: string,
-    manuals: CallTemplate[],
-  ): Promise<CodeModeUtcpClient> {
-    // Bevel-hosted manuals (KB + inline `.tool` sub-manuals, discovery url
-    // `${API_URL}/…`) get the loopback creds; third-party `.tool` URLs are never
-    // seeded so the bearer can't leak. Same rule the in-process agent factory uses.
-    const variables = seedBevelHostedManualVars(manuals, this.opts.loopbackBaseUrl, bearer);
-    const config = new UtcpClientConfigSerializer().validateDict({
-      variables,
-      load_variables_from: [bevelSecretsLoaderConfig(userId)],
-    });
-    return CodeModeUtcpClient.create(process.cwd(), config);
+  private async buildClient(userId: string, manuals: CallTemplate[]): Promise<CodeModeUtcpClient> {
+    const variables = seedBevelHostedManualVars(manuals, this.opts.loopbackBaseUrl, REQUEST_BEARER_PLACEHOLDER);
+    const client = await CodeModeUtcpClient.create(
+      process.cwd(),
+      utcpClientConfig(userId, variables, this.opts.secretsScope),
+    );
+    bindRequestBearer(client);
+    return client;
   }
 
   /**
-   * Register EVERY manual on the client, then flatten each discovered tool into
-   * the proxy's advertised shape. A failure registering a user `.tool` is
-   * isolated (logged + skipped) so one broken manual never breaks the session;
-   * the KB manual failing is fatal (the core toolset is unusable).
+   * Register EVERY manual for this request, then flatten each discovered tool
+   * into the proxy's advertised shape. Manuals register concurrently — they are
+   * independent, and a request pays for the slowest one rather than the sum. A
+   * failure registering a user `.tool` is isolated (logged + skipped) so one
+   * broken manual never breaks the request; the KB manual failing is fatal (the
+   * core toolset is unusable).
    *
-   * Failures are memoized per (user, manual) for a few minutes (see
-   * {@link ManualFailureMemo}): sessions rebuild constantly, and a manual with
-   * a broken credential (expired OAuth, revoked key) would otherwise re-dial
-   * its provider on every single build.
+   * `mcp` manuals never dial from here: they are attached from the downstream
+   * pool (see {@link attachDownstream}).
+   *
+   * Failures are memoized per (user, manual definition) for a few minutes (see
+   * {@link ManualFailureMemo}): a surface is rebuilt when its catalog
+   * revision or the caller's secrets change (see {@link RequestSurface.degraded}), and a manual with a broken credential (expired OAuth, revoked key) would
+   * otherwise re-dial its provider on every single one. The definition's
+   * fingerprint is part of the key, so a manual edited after a failure (a
+   * corrected `mcp.json` URL) is tried on the very next request.
    */
   private async discoverTools(
     client: CodeModeUtcpClient,
     manuals: CallTemplate[],
     userId: string,
-  ): Promise<ProxiedTool[]> {
+  ): Promise<{
+    tools: ProxiedTool[];
+    unavailable: UnavailableManual[];
+    catalogNames: Map<string, string>;
+    hidden: Map<string, ScreenedHiddenTool>;
+    degraded: boolean;
+  }> {
+    const routes = new Map<string, DownstreamRoute>();
+    // A manual left off this surface for a failure (see RequestSurface.degraded).
+    let degraded = false;
+    const unavailable: UnavailableManual[] = [];
+    // Taken BEFORE a single manual is registered, so it ranks this load by the
+    // freshness of what it is about to read — see ToolSchemaGuard.beginLoad.
+    const loadId = this.toolSchemas.beginLoad();
+    const catalogNames = new Map<string, string>();
     for (const m of manuals) {
-      const isKb = m.name === EXTERNAL_KB_MANUAL_NAME;
-      const name = String(m.name);
-      if (!isKb) {
-        const recent = this.manualFailures.recentFailure(userId, name);
-        if (recent !== undefined) {
-          console.warn(`[mcp] skipping manual "${name}" (recent failure, not retried): ${recent}`);
-          continue;
-        }
-      }
-      // Captured BEFORE the awaited attempt: if a secrets change clears the
-      // memo while registration is in flight, the stale failure from the OLD
-      // credential must not resurrect an entry the clear removed.
-      const generation = this.manualFailures.currentGeneration;
-      // `registerManual` never throws: a discovery/network failure and a
-      // validation failure both come back as `{ ok: false }`, because the retry
-      // policy — this memo — is ours, not the shared layer's.
-      const result = await registerManual(client, m);
-      if (!result.ok) {
-        if (isKb) throw new Error(`Bevel tool discovery failed: ${result.error}`);
-        this.manualFailures.recordFailure(userId, name, result.error, generation);
-        console.warn(`[mcp] skipping manual "${name}": ${result.error}`);
-      } else if (!isKb) {
-        this.manualFailures.clear(userId, name);
-      }
+      if (m.call_template_type === 'mcp') catalogNames.set(utcpManualName(m), String(m.name));
     }
+    // Every manual's catalog name, which is how the owner-facing surfaces know
+    // it. `catalogNames` above is the credential catalog's map and covers `mcp`
+    // manuals only; the schema check is about the tools of every connected
+    // server, so it needs the whole list. Taken HERE, before registration:
+    // registering a manual renames the template in place, so `m.name` read
+    // afterwards is the rewritten identifier and `my-server` would be recorded
+    // as `my_server` — a name no tool page ever looks up.
+    // Keyed by the rewritten name, which two manuals can share (the collision
+    // handled below): the KB manual's entry is the one that stays, since it is
+    // the one that is registered when a `.tool` collides with it.
+    const manualCatalogNames = new Map<string, string>();
+    for (const m of manuals) {
+      const rewritten = utcpManualName(m);
+      if (manualCatalogNames.get(rewritten) === EXTERNAL_KB_MANUAL_NAME) continue;
+      manualCatalogNames.set(rewritten, String(m.name));
+    }
+    // The shared layer rewrites every manual name (`[^\w]` → `_`) and tools
+    // route by the rewritten prefix, so two manuals whose names rewrite to one
+    // identifier would silently share it. Sequential registration used to
+    // throw "already registered" for the second; concurrent registration
+    // (below) would let both pass the shared layer's pre-check, one
+    // overwriting the other in the repository while `routes` kept whichever
+    // resolved last — tools/list from one server, tools/call to the other.
+    // Decided here, over the whole list, before anything is registered: every
+    // manual in a colliding group fails with a message naming the others. The
+    // KB manual always keeps its name — a `.tool` colliding with it fails,
+    // the KB manual does not.
+    const byRewrittenName = new Map<string, string[]>();
+    for (const m of manuals) {
+      const rewritten = utcpManualName(m);
+      byRewrittenName.set(rewritten, [...(byRewrittenName.get(rewritten) ?? []), String(m.name)]);
+    }
+    const outcomes = await Promise.all(
+      manuals.map(async (m) => {
+        const isKb = m.name === EXTERNAL_KB_MANUAL_NAME;
+        const name = String(m.name);
+        // Both taken before registration, which renames the template in place.
+        const rewritten = utcpManualName(m);
+        const siblings = (byRewrittenName.get(rewritten) ?? []).filter((s) => s !== name);
+        // A collision is a property of the LIST, not of this manual's
+        // definition, so the memo key carries the siblings: the moment one is
+        // renamed away, the key changes and the survivor is tried on the very
+        // next request instead of sitting out the memo's TTL.
+        const memoKey =
+          `${name}${POOL_KEY_SEPARATOR}${templateFingerprint(m)}` +
+          (siblings.length > 0 ? `${POOL_KEY_SEPARATOR}collides:${[...siblings].sort().join(',')}` : '');
+        if (!isKb) {
+          const recent = this.manualFailures.recentFailure(userId, memoKey);
+          if (recent !== undefined) {
+            log.warn(`skipping manual "${name}" (recent failure, not retried): ${recent}`);
+            return { isKb, ok: true as const };
+          }
+        }
+        // Begun BEFORE the awaited attempt: if a secrets change (or a
+        // concurrent success of this same manual) clears the memo while
+        // registration is in flight, the stale failure must not resurrect an
+        // entry the clear removed.
+        const generation = this.manualFailures.beginAttempt();
+        try {
+          // Neither path throws: a discovery/network failure and a validation
+          // failure both come back as `{ ok: false }`, because the retry
+          // policy — this memo — is ours, not the shared layer's.
+          const result: DownstreamAttachResult =
+            !isKb && siblings.length > 0
+              ? {
+                  ok: false,
+                  error:
+                    `manual name "${name}" rewrites to "${rewritten}", the same identifier as ` +
+                    `${siblings.map((s) => `"${s}"`).join(', ')} — rename one; a colliding manual is not registered`,
+                }
+              : m.call_template_type === 'mcp'
+                ? await this.attachDownstream(client, m, userId, routes)
+                : await registerManual(client, m);
+          if (!result.ok) {
+            if (isKb) return { isKb, ok: false as const, error: result.error };
+            // A failure the manual may recover from on its own schedule (a
+            // token refresh that hasn't settled) is reported but NOT
+            // remembered: the memo's five minutes would outlast the refresh
+            // policy's one and hold the manual down after the provider is back.
+            if (!result.retryable) this.manualFailures.recordFailure(userId, memoKey, result.error, generation);
+            if (result.signInMissing) unavailable.push({ utcpName: rewritten });
+            else if (result.retryable) degraded = true;
+            log.warn(`skipping manual "${name}": ${result.error}`);
+          } else if (!isKb) {
+            this.manualFailures.clear(userId, memoKey);
+          }
+        } finally {
+          this.manualFailures.endAttempt(generation);
+        }
+        return { isKb, ok: true as const };
+      }),
+    );
+    const kbFailure = outcomes.find((o) => o.isKb && !o.ok);
+    if (kbFailure && !kbFailure.ok) throw new Error(`Bevel tool discovery failed: ${kbFailure.error}`);
+    if (routes.size > 0) routeToDownstream(client, routes);
     const utcpTools = await client.getTools();
-    return utcpTools.map((tool: UtcpTool) => flattenManualTool(tool, EXTERNAL_KB_MANUAL_NAME));
+    const flattened = utcpTools.map((tool: UtcpTool) => flattenManualTool(tool, EXTERNAL_KB_MANUAL_NAME));
+    const { tools, hidden } = await this.hideInvalidSchemas(client, flattened, manualCatalogNames, userId, loadId);
+    return { tools, unavailable, catalogNames, hidden, degraded };
   }
 
   /**
-   * Run one tool call through `callToolStreaming` with a one-chunk lookahead:
-   * every chunk except the last becomes a progress notification, the last is
-   * the result. Continuity is the caller's: a tool that supports it (e.g.
-   * `ask`) returns its `sessionId` in the result verbatim, and the caller
-   * echoes it back per the tool's own schema — the proxy never rewrites args.
+   * Check the input schema of every tool the servers just advertised, and take
+   * the invalid ones OFF the client's tool repository.
+   *
+   * The repository is the single place `tools/list`, `list_tools`/`tools_info`
+   * and the TypeScript interfaces `call_tool_chain` generates are all built
+   * from, so removing a tool here removes it from all three — which is what
+   * "not offered to agents" has to mean. Its siblings are untouched: the check
+   * is per tool, so one bad schema costs that tool and nothing else of the
+   * server.
+   *
+   * A client would otherwise drop such a tool itself, silently, and the agent
+   * would be left without it and without a reason. Hidden here, the reason
+   * reaches the people who manage the server (see {@link ToolSchemaGuard}).
    */
+  private async hideInvalidSchemas(
+    client: CodeModeUtcpClient,
+    tools: ProxiedTool[],
+    catalogNames: ReadonlyMap<string, string>,
+    userId: string,
+    loadId: number,
+  ): Promise<{ tools: ProxiedTool[]; hidden: Map<string, ScreenedHiddenTool> }> {
+    const byManual = new Map<string, ProxiedTool[]>();
+    // EVERY manual of this surface is screened, including the ones that
+    // advertised nothing. A server that removed its last invalid tool, and one
+    // whose tools never loaded at all (a sign-in that has gone), both come
+    // through here with an empty group — and an empty group is what clears the
+    // marker. Screening only the groups that have tools would leave the tool
+    // page, `list_tool_setup` and the hidden-tool answer on a call all
+    // reporting a defect this process can no longer see.
+    for (const manual of catalogNames.values()) byManual.set(manual, []);
+    for (const tool of tools) {
+      const manual = catalogNames.get(tool.manualName) ?? tool.manualName;
+      byManual.set(manual, [...(byManual.get(manual) ?? []), tool]);
+    }
+    const found = this.toolSchemas.screen(userId, loadId, byManual);
+    const hidden = new Map<string, ScreenedHiddenTool>();
+    for (const tool of found.values()) hidden.set(tool.name, tool);
+    if (found.size === 0) return { tools, hidden };
+    for (const utcpName of found.keys()) {
+      await client.config.tool_repository.removeTool(utcpName);
+    }
+    // Logged every time rather than throttled: a hidden tool is the one thing
+    // about this surface that a person has to act on, and it is rare.
+    log.warn(
+      `hiding ${found.size} connected tool(s) whose input schema is not valid JSON Schema: ` +
+        `${[...found.values()].map((t) => `${t.name} (${t.path}: ${t.reason})`).join(', ')}`,
+    );
+    return { tools: tools.filter((tool) => !found.has(tool.utcpName)), hidden };
+  }
+
+  /** The schema findings the owner-facing surfaces report — see {@link ToolSchemaGuard}. */
+  get hiddenTools(): HiddenToolSource {
+    return this.toolSchemas;
+  }
+
+  /**
+   * Make one `mcp` manual's tools part of this request's client, backed by the
+   * pooled connection for (user, manual).
+   *
+   * The pooled client's discovered tools are copied into the request client's
+   * repository — so `tools/list`, `list_tools`/`tools_info` and the TypeScript
+   * interfaces `call_tool_chain` generates all see them exactly as if they had
+   * been registered here — and `routes` records that calls to this manual go to
+   * the pool. The route re-acquires at CALL time rather than holding the pooled
+   * client, so an entry evicted between discovery and the call is transparently
+   * re-created instead of used after its connection was closed. Each use holds
+   * a pool lease only for its own duration, so the pool never closes a
+   * connection an operation is still using.
+   */
+  private async attachDownstream(
+    client: CodeModeUtcpClient,
+    template: CallTemplate,
+    userId: string,
+    routes: Map<string, DownstreamRoute>,
+  ): Promise<DownstreamAttachResult> {
+    const key = downstreamPoolKey(userId, template);
+    // The catalog name, which is what the manual's per-user variables are keyed by.
+    const catalogName = String(template.name ?? '');
+    const manualName = utcpManualName(template);
+    const definition = templateFingerprint(template);
+    const acquire = () => this.downstream.acquire(key, () => this.connectDownstream(userId, template));
+    const afterFailure = (err: unknown) => this.afterDownstreamFailure(userId, catalogName, key, err);
+    const attach = async (tools: UtcpTool[]) => {
+      await client.config.tool_repository.saveManual({ ...template, name: manualName }, UtcpManualSchema.parse({ tools }));
+      routes.set(manualName, { acquire, afterFailure });
+    };
+    // Set when the handshake failed on a credential the provider may yet
+    // renew: the caller must NOT remember that as a dead manual (see below).
+    let credentialTransient = false;
+    try {
+      let lease: Lease<PooledDownstream>;
+      try {
+        lease = await acquire();
+      } catch (err) {
+        // A connection dialed with a token the server refuses fails right here,
+        // at the handshake — the same refresh-and-retry applies.
+        const verdict = await this.classifyDownstreamFailure(userId, catalogName, key, err);
+        if (!verdict.retry) {
+          credentialTransient = verdict.credentialTransient;
+          throw verdict.error;
+        }
+        lease = await acquire();
+      }
+      let tools: UtcpTool[];
+      try {
+        tools = (await lease.value.client.getTools()).filter((t) => t.name.startsWith(`${manualName}.`));
+      } finally {
+        lease.release();
+      }
+      this.knownDownstreamTools.set(catalogName, { definition, tools });
+      await attach(tools);
+      return { ok: true };
+    } catch (err) {
+      const error = err instanceof Error ? err.message : String(err);
+      // No connection because this CALLER has no usable sign-in for the manual
+      // (never signed in, or the grant was just found dead and wiped): the
+      // manual is not broken, the sign-in is. Keep its tools on the surface
+      // from what the downstream last advertised, so a call answers with the
+      // sign-in link — and never remember the failure, since re-authorizing is
+      // one visit to /connect away and the next attempt costs no network.
+      if (await this.signInMissing(userId, catalogName)) {
+        const known = this.knownDownstreamTools.get(catalogName);
+        if (known && known.definition === definition) {
+          await attach(known.tools);
+          return { ok: true };
+        }
+        return { ok: false, error, retryable: true, signInMissing: true };
+      }
+      // `retryable` keeps a transient credential failure out of the caller's
+      // five-minute failure memo: the refresh-and-retry policy for a rejected
+      // token is one minute, and a memo entry would silently outlast it.
+      return { ok: false, error, retryable: credentialTransient };
+    }
+  }
+
+  /** Whether the caller's sign-in for the manual named `catalogName` is missing or broken — a check that must never throw here. */
+  private async signInMissing(userId: string, catalogName: string): Promise<boolean> {
+    try {
+      return (await this.missingUserSecrets(userId, catalogName)).length > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Create one pooled downstream connection: a client registering just this
+   * manual.
+   *
+   * `@utcp/mcp` (1.2.0+) registers its protocol as a FACTORY, so this client
+   * gets an `mcp` protocol instance of its own: the session it opens lives in
+   * that instance, is reachable from no other client, and ends with
+   * `client.close()`. That is what makes a pool entry per (user, server) an
+   * actual isolation boundary — two users with byte-identical server
+   * definitions still never share a connection — with nothing reached into.
+   *
+   * SESSION RECOVERY is installed on the pooled client: a downstream server
+   * that restarts (or expires a session) answers our next call with the spec's
+   * 404/`-32001`, and recovery re-registers in place and retries once. It is
+   * deliberately clear of {@link ManualFailureMemo}: that memo is a circuit
+   * breaker for manuals whose REGISTRATION failed, so a recovery neither
+   * consults it nor records into it.
+   *
+   * A registration that fails closes the client it built (ending whatever the
+   * attempt opened) and throws, so the pool caches nothing and the caller's
+   * memo records the failure.
+   */
+  private async connectDownstream(userId: string, template: CallTemplate): Promise<PooledDownstream> {
+    // Third-party manuals are never seeded loopback credentials (see
+    // `buildClient`), so a pooled client carries no request-scoped bearer.
+    const client = await CodeModeUtcpClient.create(process.cwd(), utcpClientConfig(userId, {}, this.opts.secretsScope));
+    // Our own copy: registration renames the template in place, and recovery
+    // re-registers from exactly what discovery used.
+    const own = structuredClone(template);
+    const manualName = utcpManualName(own);
+    installSessionRecovery(client, { manualTemplate: (name) => (name === manualName ? own : undefined) });
+    const result = await registerManual(client, own);
+    if (!result.ok) {
+      await client.close().catch(() => {});
+      throw new Error(result.error);
+    }
+    return { client };
+  }
+
+  /**
+   * A pooled manual's operation failed: may it be retried with a refreshed
+   * token? Answers {@link RETRY_WITH_REFRESHED_TOKEN} when so, otherwise the
+   * error the caller should see.
+   *
+   * Only a token rejection (401 / `invalid_token`) qualifies. Then the
+   * caller's OAuth token for this manual is refreshed once, ignoring its
+   * stored expiry, and:
+   *   - refreshed → the pooled connection (dialed with the dead token) is
+   *     dropped and the operation retried once, on a fresh one;
+   *   - rejected → the grant is gone and the vault has wiped it; the caller is
+   *     told to re-authorize on /connect, where it now shows as not connected;
+   *   - transient, or no refresh allowed / possible → the original error.
+   */
+  private async afterDownstreamFailure(
+    userId: string,
+    manualName: string,
+    poolKey: string,
+    err: unknown,
+  ): Promise<unknown> {
+    const verdict = await this.classifyDownstreamFailure(userId, manualName, poolKey, err);
+    return verdict.retry ? RETRY_WITH_REFRESHED_TOKEN : verdict.error;
+  }
+
+  /** {@link afterDownstreamFailure}, keeping the one distinction its symbol-or-error answer drops. */
+  private async classifyDownstreamFailure(
+    userId: string,
+    manualName: string,
+    poolKey: string,
+    err: unknown,
+  ): Promise<DownstreamFailure> {
+    if (!isDownstreamTokenRejection(err)) return { retry: false, error: err, credentialTransient: false };
+    const outcome = await this.refreshDownstreamToken(userId, manualName);
+    if (outcome === 'refreshed') {
+      // The vault's mutation signal evicts this user's connections too; doing it
+      // here as well keeps the retry correct whether or not that is wired.
+      this.downstream.evictWhere((k) => k === poolKey);
+      return { retry: true };
+    }
+    if (outcome === 'rejected' || outcome === 'rejected-shared') {
+      // The connection was dialed with a grant that no longer exists; the
+      // vault's mutation signal drops it too, this keeps the next request
+      // honest whether or not that is wired.
+      this.downstream.evictWhere((k) => k === poolKey);
+      return {
+        retry: false,
+        credentialTransient: false,
+        error: new Error(
+          outcome === 'rejected-shared'
+            ? `The workspace connection for "${manualName}" was rejected by the provider and has been disconnected. ` +
+              `A tool owner has to reconnect it on ${this.opts.publicFrontendUrl}/connect; then run the tool again.`
+            : `Your sign-in for "${manualName}" was rejected and has been disconnected. ` +
+              `Re-authorize it on ${this.opts.publicFrontendUrl}/connect, then run the tool again.`,
+        ),
+      };
+    }
+    // The token stands and so does the call's own error. Whether the NEXT
+    // call may try again depends on why: a refresh that failed transiently, or
+    // one the window refused, will be worth attempting shortly — while
+    // "nothing here to refresh" (no vault, no OAuth variable, no stored token)
+    // is a standing condition, and the failure memo should hold the manual
+    // down exactly as it does for any other broken credential.
+    const mayRecoverSoon = outcome === 'transient' || outcome === 'guarded';
+    return { retry: false, error: err, credentialTransient: mayRecoverSoon };
+  }
+
+  /**
+   * Force-refresh the caller's OAuth token(s) for `manualName`, at most once per
+   * (user, manual) per minute. Logs ONE line per attempt — manual, user,
+   * outcome, never token material.
+   *
+   * `'guarded'` when the window refused this one (a refresh just ran, or is
+   * running, for this pair); `undefined` when there was nothing to refresh at
+   * all: no vault wired, or no OAuth variable on the manual. The two are not
+   * the same thing to the caller — see {@link classifyDownstreamFailure}.
+   */
+  private async refreshDownstreamToken(
+    userId: string,
+    manualName: string,
+  ): Promise<ForcedRefreshOutcome | 'rejected-shared' | 'guarded' | undefined> {
+    const vault = this.secretsVault;
+    if (!vault || !this.toolManuals || !manualName) return undefined;
+    let keys: string[];
+    let sharedKeys = new Set<string>();
+    try {
+      // Every sign-in the manual declares: the caller's own, and a workspace
+      // connection every caller resolves (the vault's forceRefresh reads the
+      // shared row for an admin-scoped key, as resolve does).
+      const [own, shared] = await Promise.all([
+        this.toolManuals.userScopedKeysForManual(manualName),
+        this.toolManuals.sharedSignInKeysForManual(manualName),
+      ]);
+      keys = [...own.filter((v) => v.oauth).map((v) => v.key), ...shared.map((v) => v.key)];
+      sharedKeys = new Set(shared.map((v) => v.key));
+    } catch (err) {
+      // The error's own message is caller-controlled as well (it quotes the
+      // manual, and may quote a provider's reply), and a raw Error handed to
+      // the logger renders its message and stack verbatim — so it goes through
+      // the same escaper rather than travelling as an object.
+      log.warn(
+        `downstream token refresh: could not read the variables of manual=${printable(manualName)}: ` +
+          printable(err instanceof Error ? err.message : String(err)),
+      );
+      return undefined;
+    }
+    if (keys.length === 0) return undefined;
+    const attempt = this.tokenRefreshes.run(`${userId}${POOL_KEY_SEPARATOR}${manualName}`, async () => {
+      const outcomes: ForcedRefreshOutcome[] = [];
+      // A dead WORKSPACE connection is told apart from a dead personal one:
+      // the caller cannot repair it, a writer of the tool can, and the words
+      // the caller gets have to say so.
+      let rejectedShared = false;
+      for (const key of keys) {
+        // A vault fault is not a verdict on the grant: keep the token, try later.
+        const result = await vault.forceRefresh(userId, key).catch((): ForcedRefreshOutcome => 'transient');
+        if (result === 'rejected' && sharedKeys.has(key)) rejectedShared = true;
+        outcomes.push(result);
+      }
+      const outcome: ForcedRefreshOutcome | 'rejected-shared' = outcomes.includes('rejected')
+        ? rejectedShared
+          ? 'rejected-shared'
+          : 'rejected'
+        : outcomes.includes('transient')
+          ? 'transient'
+          : outcomes.includes('refreshed')
+            ? 'refreshed'
+            : 'skipped';
+      if (outcome !== 'skipped') {
+        // Both values reach the log from outside (a catalog name, an identity
+        // provider's id), so both are escaped: one event stays one line.
+        log.info(
+          `downstream token refresh: manual=${printable(manualName)} user=${printable(userId)} outcome=${outcome}`,
+        );
+      }
+      return outcome;
+    });
+    return attempt ? await attempt : 'guarded';
+  }
+
   /**
    * If the tool declares per-user credentials the caller hasn't set, return a
    * needs-authorization result (naming the tool + a setup link); otherwise null
@@ -509,19 +1695,20 @@ export class McpService {
    */
   private async checkUserSecrets(
     userId: string,
-    tool: ProxiedTool,
+    toolName: string,
+    manualName: string,
   ): Promise<{ result: CallToolResult; brokenSignIn: boolean } | null> {
-    const missing = await this.missingUserSecrets(userId, tool);
+    const missing = await this.missingUserSecrets(userId, manualName);
     if (missing.length === 0) return null;
     return {
       result: needsAuthorizationResult(
-        tool.mcpName,
+        toolName,
         missing.map((v) => v.label ?? v.name),
         `${this.opts.publicFrontendUrl}/connect`,
       ),
       // At least one missing item is a sign-in the caller already HAS a row
       // for (dead grant, abandoned consent, or missing scopes) — the state
-      // that warrants resetting an interactive session for re-auth, as
+      // that warrants resetting an interactive client for re-auth, as
       // opposed to a tool the caller never set up at all.
       brokenSignIn: missing.some((v) => v.brokenSignIn),
     };
@@ -530,52 +1717,57 @@ export class McpService {
   /**
    * The per-user variables of `tool`'s manual the caller has NOT satisfied.
    * Shared by the call-time needs-authorization check above and the
-   * listing-time filter for connection-key sessions (which registers only
+   * listing-time filter for connection-key callers (which registers only
    * ready tools). Empty when the vault/manual services aren't wired or the
    * manual declares no per-user credential.
    */
   private async missingUserSecrets(
     userId: string,
-    tool: ProxiedTool,
+    manualName: string,
   ): Promise<{ name: string; label?: string | null; brokenSignIn: boolean }[]> {
-    if (!this.secretsVault || !this.toolManuals || !tool.manualName) return [];
-    const userVars = await this.toolManuals.userScopedKeysForManual(tool.manualName);
-    if (userVars.length === 0) return [];
-    const status = await this.secretsVault.statusFor(
-      userId,
-      userVars.map((v) => v.key),
-    );
+    if (!this.secretsVault || !this.toolManuals || !manualName) return [];
+    const [userVars, sharedSignIns] = await Promise.all([
+      this.toolManuals.userScopedKeysForManual(manualName),
+      this.toolManuals.sharedSignInKeysForManual(manualName),
+    ]);
+    if (userVars.length === 0 && sharedSignIns.length === 0) return [];
+    const status = await this.secretsVault.statusFor(userId, [
+      ...userVars.map((v) => v.key),
+      ...sharedSignIns.map((v) => v.key),
+    ]);
     const statusMap = new Map(status.map((s) => [s.key, s]));
     const missing: { name: string; label?: string | null; brokenSignIn: boolean }[] = [];
-    for (const v of userVars) {
+    // A WORKSPACE sign-in (a managed connector enabled as one shared
+    // connection) is nobody's personal credential, but a tool whose one
+    // connection has not been made — or no longer covers what the tool
+    // declares — fails just as opaquely at the provider. Reported like a
+    // personal one, with words that say whose job it is; never a "broken
+    // sign-in" of the caller's, since there is nothing of theirs to reset.
+    for (const v of sharedSignIns) {
       const st = statusMap.get(v.key);
+      const connected = st?.adminAuthorized === true && scopesCovered(v.oauthScopes, st.adminGrantedScopes);
+      if (!connected) {
+        missing.push({ name: v.name, label: `${v.label ?? v.name} (a tool owner connects this for the workspace)`, brokenSignIn: false });
+      }
+    }
+    for (const v of userVars) {
+      // The one readiness rule `list_tool_setup` reports from (`userSecretGap`).
       // A sign-in the caller already HAS a row for but that isn't (or is no
-      // longer) usable: dead/wiped grant, abandoned consent, missing scopes.
-      const brokenSignIn = Boolean(v.oauth && st?.userConfigured);
-      if (!st?.userConfigured) {
-        missing.push({ name: v.name, label: v.label, brokenSignIn }); // no row at all → needs a value / sign-in
-        continue;
-      }
-      // An OAuth-backed var whose row exists but has no token yet is NOT ready —
-      // the user has registered but not completed sign-in. Fail closed: anything
-      // other than a confirmed `true` (including a non-oauth row → undefined)
-      // counts as not-yet-authorized.
-      if (v.oauth && st.userAuthorized !== true) {
-        missing.push({ name: v.name, label: v.label, brokenSignIn });
-        continue;
-      }
-      // An OAuth-backed var the user signed in for, but whose token was granted
-      // fewer scopes than the tool now declares, is ALSO not ready — the call would
-      // otherwise fail opaquely at the provider. Compare the live required scopes
-      // against the token's recorded granted scopes; an under-scoped (or unknown)
-      // token needs re-authorization.
-      if (v.oauth && !scopesCovered(v.oauthScopes, st.grantedScopes)) {
-        missing.push({ name: v.name, label: v.label, brokenSignIn });
-      }
+      // longer) usable is a broken sign-in: abandoned consent, missing scopes.
+      const gap = userSecretGap(v, statusMap.get(v.key));
+      if (gap) missing.push({ name: v.name, label: v.label, brokenSignIn: gap === 'unauthorized' || gap === 'under-scoped' });
     }
     return missing;
   }
 
+  /**
+   * Run one tool call through `callToolStreaming` with a one-chunk lookahead:
+   * every chunk except the last becomes a progress notification — sent on THIS
+   * request's own response stream — and the last is the result. Continuity is
+   * the caller's: a tool that supports it (e.g. `ask`) returns its `sessionId`
+   * in the result verbatim, and the caller echoes it back per the tool's own
+   * schema — the proxy never rewrites args.
+   */
   private async dispatch(
     client: CodeModeUtcpClient,
     tool: ProxiedTool,
@@ -583,25 +1775,31 @@ export class McpService {
     // `sendNotification` typed loosely (`any`) so a `notifications/progress`
     // payload without a `progressToken` is accepted — same approach the prior
     // handler used; the strict ServerNotification type requires the token.
-    extra: { sessionId?: string; sendNotification: (n: any) => Promise<void> },
+    extra: { sendNotification: (n: any) => Promise<void> },
+    structured = false,
   ): Promise<CallToolResult> {
     const progressToken = request.params._meta?.progressToken;
-    return dispatchToolCall(client, tool, request.params.arguments ?? {}, (progress, message) =>
-      extra.sendNotification({
-        method: 'notifications/progress',
-        params: {
-          ...(progressToken !== undefined ? { progressToken } : {}),
-          progress,
-          message,
-        },
-      }),
+    return dispatchToolCall(
+      client,
+      tool,
+      request.params.arguments ?? {},
+      (progress, message) =>
+        extra.sendNotification({
+          method: 'notifications/progress',
+          params: {
+            ...(progressToken !== undefined ? { progressToken } : {}),
+            progress,
+            message,
+          },
+        }),
+      { structured },
     );
   }
 
   /**
    * Handle a code-mode meta-tool. The shared implementation reflects on this
-   * session's client, so `list_tools`/`tools_info` describe exactly the catalog
-   * this session discovered and `call_tool_chain` runs in that client's
+   * request's client, so `list_tools`/`tools_info` describe exactly the catalog
+   * this request discovered and `call_tool_chain` runs in that client's
    * isolated-vm — resolving over loopback with the caller's key. The workspace
    * spill store is passed in so an oversized chain result comes back as a
    * `read_file`-able ref rather than a wall of JSON.
@@ -613,6 +1811,176 @@ export class McpService {
   ): Promise<CallToolResult> {
     return dispatchMetaTool(client, name, args, this.opts.spillStore);
   }
+}
+
+/** Whether a tool result is the tool saying it failed — what the Audit log records as `error`. */
+function isErrorResult(result: CallToolResult): boolean {
+  return result.isError === true;
+}
+
+/**
+ * The UTCP client config for `userId`: the given variables, plus the per-user
+ * `bevel-secrets` loader that resolves every `${SECRET}` ref lazily. Shared by
+ * request clients and pooled downstream clients, so both resolve a manual's
+ * variables through exactly the same tiers.
+ */
+function utcpClientConfig(userId: string, variables: Record<string, string>, secretsScope?: string) {
+  return new UtcpClientConfigSerializer().validateDict({
+    variables,
+    load_variables_from: [bevelSecretsLoaderConfig(userId, secretsScope)],
+  });
+}
+
+/**
+ * The name a manual is registered under. `UtcpClient.registerManual` rewrites
+ * every non-word character to `_`, and tool names are prefixed with the result,
+ * so routing has to key on the same rewrite.
+ */
+function utcpManualName(template: CallTemplate): string {
+  return String(template.name ?? '').replace(/[^\w]/g, '_');
+}
+
+/**
+ * The pool key for (user, manual). The template's fingerprint is part of it, so
+ * an edited `mcp.json` (new URL, new headers) gets a new connection rather than
+ * the one dialed for the old definition, which simply idles out. Hashed: the
+ * template can carry credentials and the key must stay log-safe.
+ */
+function downstreamPoolKey(userId: string, template: CallTemplate): string {
+  return [userId, utcpManualName(template), templateFingerprint(template)].join(POOL_KEY_SEPARATOR);
+}
+
+/** A short, log-safe hash of a manual's whole definition: changes whenever the definition does. */
+function templateFingerprint(template: CallTemplate): string {
+  return createHash('sha256').update(JSON.stringify(template)).digest('hex').slice(0, 16);
+}
+
+/**
+ * Route tool calls for pooled manuals to their pooled client, in place on the
+ * request client. Both entry points are wrapped — `callToolStreaming` is the
+ * MCP dispatch path, `callTool` is what `call_tool_chain` bridges every
+ * in-isolate tool function to — so the two can never disagree. Every other
+ * manual's calls go through the request client unchanged.
+ *
+ * Each routed call holds its pool lease until the call ends — for a stream,
+ * until the consumer finishes or abandons it (`for await` returns the
+ * generator, which runs the `finally`).
+ *
+ * No guard is re-installed over this wrapper, and none is needed: a routed call
+ * is made on the POOLED client, which had the guards installed on it when its
+ * own manual was registered (`registerManual`). Nothing in this module checks a
+ * call or shapes its failure — it forwards the call and returns the answer.
+ *
+ * A call the downstream refuses for its token (401 / `invalid_token`) goes to
+ * the route's `afterFailure`, which may refresh the token and ask for ONE retry
+ * on a fresh connection. Retrying is safe for the same reason session recovery
+ * is: authentication is decided before the request reaches a tool, so the
+ * refused attempt ran nothing.
+ */
+function routeToDownstream(client: CodeModeUtcpClient, routes: ReadonlyMap<string, DownstreamRoute>): void {
+  const callTool = client.callTool.bind(client);
+  const callToolStreaming = client.callToolStreaming.bind(client);
+  const routeOf = (toolName: string) => routes.get(toolName.split('.')[0] ?? '');
+
+  client.callTool = async function routedCallTool(toolName: string, toolArgs: Record<string, unknown>) {
+    const route = routeOf(toolName);
+    if (!route) return callTool(toolName, toolArgs);
+    const once = async () => {
+      const lease = await route.acquire();
+      try {
+        return await lease.value.client.callTool(toolName, toolArgs);
+      } finally {
+        lease.release();
+      }
+    };
+    try {
+      return await once();
+    } catch (err) {
+      const next = await route.afterFailure(err);
+      if (next !== RETRY_WITH_REFRESHED_TOKEN) throw next;
+      // Exactly one retry: whatever it produces is what the caller sees.
+      return await once();
+    }
+  };
+  client.callToolStreaming = async function* routedCallToolStreaming(
+    toolName: string,
+    toolArgs: Record<string, unknown>,
+  ): AsyncGenerator<unknown, void, unknown> {
+    const route = routeOf(toolName);
+    if (!route) {
+      yield* callToolStreaming(toolName, toolArgs);
+      return;
+    }
+    const once = async function* () {
+      const lease = await route.acquire();
+      try {
+        yield* lease.value.client.callToolStreaming(toolName, toolArgs);
+      } finally {
+        lease.release();
+      }
+    };
+    let yielded = false;
+    try {
+      for await (const chunk of once()) {
+        yielded = true;
+        yield chunk;
+      }
+      return;
+    } catch (err) {
+      // A stream that already produced output was accepted — a rejection can
+      // only come before the first chunk, and replaying would duplicate output.
+      if (yielded) throw err;
+      const next = await route.afterFailure(err);
+      if (next !== RETRY_WITH_REFRESHED_TOKEN) throw next;
+    }
+    yield* once();
+  };
+}
+
+/**
+ * The person's shared client as ONE request uses it: a view whose `callTool`
+ * runs inside that request's context, and which is otherwise the client
+ * itself (the prototype), so its repository, protocols and routing are the
+ * shared ones.
+ *
+ * `callTool` is the entry `call_tool_chain` bridges every in-isolate tool
+ * call to, and those calls come back from isolated-vm's callback queue with
+ * no async context of their own: without the view they would run as no
+ * request at all, with no bearer and no audit. The direct path
+ * (`callToolStreaming`) runs in the request's handler and needs nothing
+ * more.
+ */
+function requestView(client: CodeModeUtcpClient, ctx: McpRequestContext): CodeModeUtcpClient {
+  const view = Object.create(client) as CodeModeUtcpClient;
+  view.callTool = (toolName: string, toolArgs: Record<string, unknown>) =>
+    runInRequest(ctx, () => client.callTool(toolName, toolArgs));
+  return view;
+}
+
+/**
+ * Make every platform-hosted manual's `${CONNECTION_KEY}` the bearer of the
+ * request a call belongs to.
+ *
+ * The UTCP client substitutes a tool's `${VAR}`s each time the tool is
+ * called, from `config.variables` first — so a getter there is read at call
+ * time, never at build time. A call outside any request has no bearer to
+ * send, and is refused here rather than sent with the placeholder.
+ */
+function bindRequestBearer(client: CodeModeUtcpClient): void {
+  const variables = client.config.variables ?? {};
+  for (const [key, value] of Object.entries(variables)) {
+    if (!key.endsWith('_CONNECTION_KEY') || value !== REQUEST_BEARER_PLACEHOLDER) continue;
+    Object.defineProperty(variables, key, {
+      enumerable: true,
+      configurable: false,
+      get: () => {
+        const request = currentRequest();
+        if (!request) throw new Error('A platform tool was called outside an MCP request, so there is no bearer to call it with.');
+        return request.loopbackBearer;
+      },
+    });
+  }
+  client.config.variables = variables;
 }
 
 /**

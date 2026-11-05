@@ -1,6 +1,7 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
-import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { describe, it, expect, vi, beforeEach, afterEach, type MockInstance } from 'vitest';
+import { useContext } from 'react';
+import { render, screen, fireEvent, waitFor, act, within } from '@testing-library/react';
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import {
   WorkspaceContext,
   type WorkspaceContextValue,
@@ -8,8 +9,8 @@ import {
 import { AuthContext, type AuthContextValue } from '../../auth/state/auth.context';
 import { GitContext, type GitContextValue } from '../../git/state/git.context';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
-import type { PullRequestSummary, WorkflowEvent } from '@bevel-software/platform-shared';
-import { EventBusContext, type EventBusContextValue } from '../../workflow/state/event-bus.context';
+import type { PullRequestSummary, VersionControlEvent } from '@bevel-software/platform-shared';
+import { EventBusContext, type EventBusContextValue } from '../../version-control/state/event-bus.context';
 import type { ToolSecrets } from '../../secrets-vault/services/tool-secrets.api';
 import type { LibraryContextValue } from '../state/library-data';
 
@@ -26,13 +27,37 @@ const apiMock = vi.hoisted(() => ({
   approvePrFile: vi.fn(),
   getOrCreateWorkspace: vi.fn(),
   writeFile: vi.fn(),
+  listSkillAccessRequests: vi.fn(async (): Promise<unknown[]> => []),
 }));
+/**
+ * The props the page last handed its reading pane — so a test can drive a
+ * callback the pane only reaches through an HTML page's frame (Open in the
+ * platform). The pane itself renders as it always does.
+ */
+const paneProps = vi.hoisted(() => ({
+  last: null as null | { onOpenInPlatform?: () => void; linkHome?: { path: string; branch: string } },
+}));
+vi.mock('../components/skill-page/SkillFilePane', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../components/skill-page/SkillFilePane')>();
+  return {
+    SkillFilePane: (props: Parameters<typeof real.SkillFilePane>[0]) => {
+      paneProps.last = props;
+      return real.SkillFilePane(props);
+    },
+  };
+});
+
 vi.mock('../services/library.api', () => ({
   defaultWorkspaceId: () => 'target-company-state',
   getSkill: apiMock.getSkill,
   getSkillFile: apiMock.getSkillFile,
   proposeChange: apiMock.proposeChange,
   listSkills: vi.fn(),
+  // The write-access request surface: nothing pending, nothing asked — unless
+  // a test puts a request on it.
+  listSkillAccessRequests: apiMock.listSkillAccessRequests,
+  reconcileSkillAccessRequest: vi.fn(async () => false),
+  requestSkillAccess: vi.fn(async () => ({ number: 1 })),
   // Real behaviour, not a stub: the page resolves the caller's own request by
   // this branch name, so a `vi.fn()` returning undefined would quietly disable
   // the very lookup these tests are checking.
@@ -51,6 +76,9 @@ vi.mock('../../change-requests/services/change-requests.api', () => ({
   listOpenChangeRequests: vi.fn(async () => []),
   listMyChangeRequests: vi.fn(async () => []),
   readFileOnBranch: apiMock.readFileOnBranch,
+  // No fork point: the change boxes fall back to the default branch, which is
+  // what these tests diff against.
+  readFileAtForkPoint: vi.fn(async () => ({ content: null, forkSha: null })),
 }));
 vi.mock('../../pr/services/pr-merge.api', () => ({ mergePullRequest: apiMock.mergePullRequest }));
 vi.mock('../../pr/services/pr-cancel.api', () => ({
@@ -62,10 +90,78 @@ vi.mock('../../pr/services/pr-detail.api', () => ({ fetchPrDetail: apiMock.fetch
 vi.mock('../../pr/services/pr-approvals.api', () => ({ approvePrFile: apiMock.approvePrFile }));
 
 // Keep the markdown pipeline (mermaid etc.) out of this test — the stub renders
-// the raw source so assertions can see the body text.
+// the raw source so assertions can see the body text, plus probes for the
+// wiring the page hands the view: a click on a link (another file, and a
+// section of this one), where the page says such a link leads, and what
+// the image resolver answers for a picture beside the file.
 vi.mock('../../workspace/components/renderers/KbMarkdownView', () => ({
-  KbMarkdownView: ({ source }: { source: string }) => <div data-testid="md-view">{source}</div>,
+  KbMarkdownView: ({
+    source,
+    onOpenFile,
+    fileLinkTarget,
+    onOpenNodeId,
+    nodeIdLinkTarget,
+    resolveImage,
+  }: {
+    source: string;
+    onOpenFile: (href: string) => void;
+    fileLinkTarget?: (href: string) => unknown;
+    onOpenNodeId?: (id: string) => void;
+    nodeIdLinkTarget?: (id: string) => unknown;
+    resolveImage?: (src: string) => unknown;
+  }) => (
+    <div data-testid="md-view">
+      {source}
+      <h2 id="steps">Steps</h2>
+      <button type="button" onClick={() => onOpenFile('Some%20File.md')}>
+        link-probe
+      </button>
+      <button type="button" onClick={() => onOpenFile('SKILL.md#steps')}>
+        section-probe
+      </button>
+      <button type="button" onClick={() => onOpenNodeId?.('newsletter#steps')}>
+        self-id-probe
+      </button>
+      <button type="button" onClick={() => onOpenNodeId?.('plan-node#goal')}>
+        other-id-probe
+      </button>
+      <span data-testid="other-id-target-probe">
+        {JSON.stringify(nodeIdLinkTarget ? nodeIdLinkTarget('plan-node#goal') : 'no-target')}
+      </span>
+      <span data-testid="self-id-target-probe">
+        {JSON.stringify(nodeIdLinkTarget ? nodeIdLinkTarget('newsletter#steps') : 'no-target')}
+      </span>
+      <span data-testid="link-target-probe">
+        {JSON.stringify(fileLinkTarget ? fileLinkTarget('Some%20File.md') : 'no-target')}
+      </span>
+      <span data-testid="section-target-probe">
+        {JSON.stringify(fileLinkTarget ? fileLinkTarget('SKILL.md#steps') : 'no-target')}
+      </span>
+      <span data-testid="image-probe">
+        {JSON.stringify(resolveImage ? resolveImage('./assets/shot.png') : 'no-resolver')}
+      </span>
+    </div>
+  ),
 }));
+
+// The HTML renderer's frame and cards are its own suite's business; this
+// stand-in shows what the page hands it — the page-tool bridge, and the path
+// a page's calls would be recorded under.
+// The context is read through the module's entry point at RENDER time: the
+// entry point itself imports this renderer, so importing it inside the
+// factory would wait on its own result.
+vi.mock('../../workspace/components/renderers/HtmlRenderer', () => {
+  return {
+    HtmlRenderer: ({ filePath }: { filePath: string }) => {
+      const tools = useContext(PageToolsContext);
+      return (
+        <div data-testid="html-view" data-file={filePath}>
+          {tools ? tools.pagePath : 'no tools'}
+        </div>
+      );
+    },
+  };
+});
 
 // The file bar's Edit-or-Propose decision asks the per-file access resolver.
 // Default here is the READER's answer (`canWrite: false`) so the proposing
@@ -77,11 +173,17 @@ const accessMock = vi.hoisted(() => ({
     owners: { roles: [], users: [] },
   },
   fetchFileAccess: vi.fn(),
+  // The Manage-access dialog's own calls — Share opens the real dialog.
+  grantAccess: vi.fn(),
+  suggestPrincipals: vi.fn(),
 }));
 accessMock.fetchFileAccess.mockImplementation(async () => accessMock.result);
-vi.mock('../../access/api', () => ({
+vi.mock('../../access/api', async (importOriginal) => ({
+  ...(await importOriginal<object>()),
   fetchFileAccess: accessMock.fetchFileAccess,
   fetchFileAccessBatch: vi.fn(async () => ({ results: {} })),
+  grantAccess: accessMock.grantAccess,
+  suggestPrincipals: accessMock.suggestPrincipals,
 }));
 
 // The page reads the catalog through `useLibrary()`. Mocking the hook rather
@@ -93,7 +195,11 @@ vi.mock('../state/library-data', () => ({
 }));
 
 import { SkillPage } from '../components/skill-page/SkillPage';
+import { PageToolsContext } from '../../workspace';
 import { LibraryToastProvider } from '../state/toast';
+import { expectTitleRowSpansTheDocumentColumn } from './title-row-actions';
+import { PAGE_HEADER_TESTID } from '../../../shared/theme/header';
+import { expectTitleKeepsItsInk } from '../../../__tests__/title-ink-room';
 
 const workspace = {
   workspaceId: 'target-company-state',
@@ -177,7 +283,13 @@ const foreignCr = {
   url: '',
 } as unknown as PullRequestSummary;
 
-function libraryValue(owned: boolean, crs: PullRequestSummary[] = [], mine: number[] = []): LibraryContextValue {
+function libraryValue(
+  owned: boolean,
+  crs: PullRequestSummary[] = [],
+  mine: number[] = [],
+  /** Write on SKILL.md — defaults to `owned`: an owner writes. */
+  canWrite: boolean = owned,
+): LibraryContextValue {
   return {
     crs,
     myCrNumbers: new Set(mine),
@@ -188,6 +300,7 @@ function libraryValue(owned: boolean, crs: PullRequestSummary[] = [], mine: numb
         name: 'newsletter',
         description: skillSummary.description,
         owned,
+        canWrite,
         plugin: null,
         path: skillSummary.path,
         status: { state: 'ok', text: '' },
@@ -197,6 +310,8 @@ function libraryValue(owned: boolean, crs: PullRequestSummary[] = [], mine: numb
     tools: [slackTool],
     allowedToolsBySkill: new Map([['newsletter', ['slack_post_message']]]),
     ownedSkills: owned ? new Set(['newsletter']) : new Set<string>(),
+    writableSkills: canWrite ? new Set(['newsletter']) : new Set<string>(),
+    ownedTools: new Set<string>(),
     loading: false,
     error: null,
     reload: () => {},
@@ -214,15 +329,18 @@ function libraryValue(owned: boolean, crs: PullRequestSummary[] = [], mine: numb
  * is itself worth asserting.
  */
 function makeFakeBus() {
-  const handlers: Record<string, ((e: WorkflowEvent) => void)[]> = {};
-  const bus: EventBusContextValue & { emit(e: WorkflowEvent): void } = {
+  const handlers: Record<string, ((e: VersionControlEvent) => void)[]> = {};
+  const bus: EventBusContextValue & { emit(e: VersionControlEvent): void } = {
     subscribe(kind, handler) {
-      (handlers[kind] ??= []).push(handler as (e: WorkflowEvent) => void);
+      (handlers[kind] ??= []).push(handler as (e: VersionControlEvent) => void);
       return () => {
         handlers[kind] = (handlers[kind] ?? []).filter((h) => h !== handler);
       };
     },
     setFocus() {},
+    watchWorkspace() {
+      return () => {};
+    },
     emit(e) {
       (handlers[e.kind] ?? []).forEach((h) => h(e));
     },
@@ -240,17 +358,76 @@ function renderPage(
   library?: Partial<LibraryContextValue>,
   /** Props the canonical /workspace mount passes; the legacy route passes none. */
   pageProps?: { provisional?: boolean },
+  /** Git state — overridden to test what the page does when there is no log. */
+  gitValue: GitContextValue = git,
+  /** Workspace state — overridden to test the page before the KB dir is known. */
+  workspaceValue: WorkspaceContextValue = workspace,
 ) {
   libraryMock.value = { ...libraryValue(owned, crs, mine), ...library };
-  return render(
+  return render(harness(bus, gitValue, routerState, pageProps, workspaceValue));
+}
+
+/** Where a link out of the page took the router: the Knowledge app's path. */
+function NavigatedTo() {
+  const location = useLocation();
+  return (
+    <>
+      <div data-testid="navigated-to">{location.pathname}</div>
+      <div data-testid="navigated-raw-file">
+        {String((location.state as { rawFile?: boolean } | null)?.rawFile === true)}
+      </div>
+    </>
+  );
+}
+
+/**
+ * Wait for the page to stop loading before driving it.
+ *
+ * The reading pane is the LAST thing to arrive: it needs the skill detail
+ * (which is also what puts the second tab on screen) and then the file's bytes
+ * off the default branch. Waiting on a TAB instead can resolve earlier —
+ * `findByRole('tab', …)` is satisfied by the SKILL.md tab, which renders
+ * before either of those lands.
+ *
+ * Why the keyboard tests use it: `jumps to the first and last file with Home
+ * and End` was seen failing in full-suite runs on a loaded machine, never in
+ * isolation (0 in 20 runs). The cause was NOT established — a deliberately
+ * delayed detail load does not reproduce it, and the same runs on the
+ * unmodified file were too few to tell the two versions apart. What is certain
+ * is that both keyboard tests were driving the tablist while several requests
+ * were still in flight, and they are about arrow keys, not about loading. So
+ * they start from a settled page. If the flake outlives this, the cause is
+ * somewhere else and this at least stops the tablist tests from being where it
+ * is hunted.
+ */
+async function settled() {
+  await screen.findByTestId('md-view');
+}
+
+/**
+ * The provider tree `renderPage` mounts, as a value — so a test can hand the
+ * SAME tree back to `rerender` with a different git state and watch the page
+ * react WITHOUT remounting it. Remounting would reset the very state
+ * (`historyOpen`) those tests are about, and pass whatever the page did.
+ */
+function harness(
+  bus: EventBusContextValue,
+  gitValue: GitContextValue,
+  routerState?: Record<string, unknown>,
+  pageProps?: { provisional?: boolean },
+  workspaceValue: WorkspaceContextValue = workspace,
+  /** The fragment the page's address arrives with, e.g. `#steps`. */
+  hash = '',
+) {
+  return (
     <MemoryRouter
       initialEntries={[
-        { pathname: '/skills-and-tools/skills/newsletter', state: routerState ?? null },
+        { pathname: '/skills-and-tools/skills/newsletter', hash, state: routerState ?? null },
       ]}
     >
       <AuthContext.Provider value={auth}>
-        <WorkspaceContext.Provider value={workspace}>
-          <GitContext.Provider value={git}>
+        <WorkspaceContext.Provider value={workspaceValue}>
+          <GitContext.Provider value={gitValue}>
           <EventBusContext.Provider value={bus}>
             {/* The real toast provider: the success message IS the page's
                 report that the merge landed, so a stubbed-out toast would
@@ -261,13 +438,15 @@ function renderPage(
                   path="/skills-and-tools/skills/:name"
                   element={<SkillPage {...(pageProps ?? {})} />}
                 />
+                <Route path="/workspace/*" element={<NavigatedTo />} />
+                <Route path="/skills-and-tools/connect" element={<NavigatedTo />} />
               </Routes>
             </LibraryToastProvider>
           </EventBusContext.Provider>
           </GitContext.Provider>
         </WorkspaceContext.Provider>
       </AuthContext.Provider>
-    </MemoryRouter>,
+    </MemoryRouter>
   );
 }
 
@@ -283,6 +462,27 @@ allowed-tools: [slack_post_message]
 # Newsletter drafter
 Collect the news and draft the letter.`;
 const RAW_BRANCH = RAW_MAIN.replace('draft the letter', 'ship the letter');
+
+/**
+ * The node id of the file in the pane, as the backend answers it for the
+ * default branch (`resolve-path`): SKILL.md is the node `newsletter`, and
+ * no other file of the skill is a node. Every other request goes to the real
+ * fetch, as it always has.
+ */
+let resolvePathSpy: MockInstance<typeof fetch>;
+beforeEach(() => {
+  const realFetch = globalThis.fetch;
+  resolvePathSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const url = String(input);
+    if (!url.includes('/resolve-path?')) return realFetch(input, init);
+    return url.includes(encodeURIComponent('knowledge-base/Skills/newsletter/SKILL.md'))
+      ? new Response(JSON.stringify({ id: 'newsletter' }), { status: 200 })
+      : new Response('{}', { status: 404 });
+  });
+});
+afterEach(() => {
+  resolvePathSpy.mockRestore();
+});
 
 beforeEach(() => {
   apiMock.getSkill.mockReset().mockResolvedValue(skillDetail);
@@ -308,6 +508,7 @@ beforeEach(() => {
         isApproved: false,
         approvedBy: [],
         eligibleApprovers: { roles: ['Newsroom'], users: [] },
+        inMergeGate: true,
       },
     ],
   });
@@ -320,6 +521,58 @@ beforeEach(() => {
 });
 
 describe('SkillPage', () => {
+  // Straight to the page's address inside Skills & Tools — `/connect` is only
+  // the redirect kept for links the server hands out.
+  it('opens Connect your tools at its own address from the integrations section', async () => {
+    renderPage(false);
+    expect(await screen.findByText('slack')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Connect/ }));
+    expect(await screen.findByTestId('navigated-to')).toHaveTextContent(/^\/skills-and-tools\/connect$/);
+  });
+
+  it("opens a page of the skill on the Knowledge file page in a new tab, not back on this page, for Open in the platform", async () => {
+    const open = vi
+      .spyOn(window, 'open')
+      .mockImplementation(() => ({ opener: window }) as unknown as Window);
+    try {
+      renderPage(true);
+      await settled();
+      expect(paneProps.last?.onOpenInPlatform).toBeTypeOf('function');
+      act(() => paneProps.last!.onOpenInPlatform!());
+      // The file page's own address on the default branch — the query is what
+      // makes the item route show the file route rather than this skill page
+      // again, since a new tab carries no router state.
+      expect(open).toHaveBeenCalledTimes(1);
+      expect(open).toHaveBeenCalledWith(
+        `/workspace/${encodeURIComponent(DEFAULT_BRANCH)}/knowledge-base/Skills/newsletter/SKILL.md?as=file`,
+        '_blank',
+      );
+      // And this tab stayed on the skill page.
+      expect(screen.queryByTestId('navigated-to')).toBeNull();
+      expect(screen.getByRole('heading', { name: 'newsletter' })).toBeInTheDocument();
+    } finally {
+      open.mockRestore();
+    }
+  });
+
+  /**
+   * The skill page is the platform: a page of the skill gets its tools here,
+   * as on its file page, and under the path the file page would record —
+   * the knowledge-base path, never the skill-relative tab name.
+   */
+  it.each([
+    ['the Skills/ root', 'Skills/newsletter'],
+    ['a plugin', 'Plugins/Engineering/skills/newsletter'],
+  ])('answers an HTML page’s tools under its knowledge-base path, for a skill under %s', async (_, path) => {
+    apiMock.getSkill.mockResolvedValue({ ...skillDetail, path, files: [`${path}/view.html`] });
+    apiMock.getSkillFile.mockResolvedValue('<script>bevel.tools.requireTools()</script>');
+    renderPage(false);
+    fireEvent.click(await screen.findByRole('tab', { name: /view\.html/ }));
+    const page = await screen.findByTestId('html-view');
+    expect(page).toHaveAttribute('data-file', 'view.html');
+    expect(page).toHaveTextContent(new RegExp(`^${path}/view\\.html$`));
+  });
+
   it('loads the skill and shows its name, needed integrations and files', async () => {
     renderPage(false);
 
@@ -327,7 +580,9 @@ describe('SkillPage', () => {
     expect(apiMock.getSkill).toHaveBeenCalledWith('newsletter');
 
     // Needed integration derived from allowed-tools, with its connection state.
-    expect(screen.getByText('slack')).toBeInTheDocument();
+    // Its own load, not the heading's: awaited, or a slow runner sees the
+    // heading before the integrations have resolved.
+    expect(await screen.findByText('slack')).toBeInTheDocument();
     expect(screen.getByText('Needs your sign-in')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Connect/ })).toBeInTheDocument();
 
@@ -345,6 +600,26 @@ describe('SkillPage', () => {
     expect(screen.getByTestId('md-view').textContent).toContain('name: newsletter');
     // The description is no longer repeated above the pane.
     expect(screen.queryByText('Drafts the Friday newsletter for review.')).toBeNull();
+  });
+
+  /**
+   * The third page in the comparison. The criterion names the plugin page and
+   * this one as the two controls the tool page's title row is measured
+   * against, and they agree only because neither wraps its band in a column
+   * narrower than the layout's — which is exactly what the tool page did.
+   * Asserted here so the day this page grows its own `max-w`, it is this test
+   * that says the row it holds is a control no longer.
+   */
+  it('runs its title row to the shared document column', async () => {
+    renderPage(false);
+    await screen.findByRole('heading', { name: 'newsletter' });
+    expectTitleRowSpansTheDocumentColumn();
+  });
+
+  it('keeps the tails of its title: it truncates, with room for its ink', async () => {
+    renderPage(false);
+    await screen.findByRole('heading', { name: 'newsletter' });
+    expectTitleKeepsItsInk(screen.getByTestId(PAGE_HEADER_TESTID));
   });
 
   it('marks the open tab selected and loads a bundled file on click', async () => {
@@ -371,7 +646,8 @@ describe('SkillPage', () => {
    */
   it('moves selection AND focus with the arrow keys', async () => {
     renderPage(false);
-    const skillTab = await screen.findByRole('tab', { name: /SKILL\.md/ });
+    await settled();
+    const skillTab = screen.getByRole('tab', { name: /SKILL\.md/ });
     const sourcesTab = screen.getByRole('tab', { name: /sources\.yaml/ });
 
     skillTab.focus();
@@ -387,7 +663,8 @@ describe('SkillPage', () => {
 
   it('jumps to the first and last file with Home and End', async () => {
     renderPage(false);
-    const skillTab = await screen.findByRole('tab', { name: /SKILL\.md/ });
+    await settled();
+    const skillTab = screen.getByRole('tab', { name: /SKILL\.md/ });
     const sourcesTab = screen.getByRole('tab', { name: /sources\.yaml/ });
 
     skillTab.focus();
@@ -452,20 +729,36 @@ describe('SkillPage', () => {
     );
   });
 
-  it('shows the Owner badge to an owner. But never access', async () => {
+  it('shows the Owner badge to an owner', async () => {
     renderPage(true);
     await screen.findByRole('heading', { name: 'newsletter' });
 
     expect(screen.getByText('Owner')).toBeInTheDocument();
-    // A skill inherits its plugin folder's rules; the plugin's Share panel is the
-    // one place they are decided, for owner and non-owner alike.
-    expect(screen.queryByRole('button', { name: 'Manage access' })).toBeNull();
   });
 
   it('hides the Owner badge from non-owners', async () => {
     renderPage(false);
     await screen.findByRole('heading', { name: 'newsletter' });
 
+    expect(screen.queryByText('Owner')).toBeNull();
+  });
+
+  /**
+   * The pill is ownership; the editor-side verbs are write. A writer who is
+   * not in the `owner:` grant — an Admin by role — loses the pill and keeps
+   * every one of them: the dock, and the verdict on someone else's change.
+   */
+  it('hides the Owner badge from a writer who is not an owner, and keeps their editor affordances', async () => {
+    const writer = libraryValue(false, [foreignCr], [], true);
+    renderPage(false, [foreignCr], [], makeFakeBus(), undefined, {
+      items: writer.items,
+      writableSkills: writer.writableSkills,
+    });
+
+    expect(
+      await screen.findByRole('complementary', { name: 'Change requests for this skill' }),
+    ).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'Approve' })).toBeInTheDocument();
     expect(screen.queryByText('Owner')).toBeNull();
   });
 
@@ -541,6 +834,83 @@ describe('SkillPage', () => {
     expect(apiMock.proposeChange).not.toHaveBeenCalled();
   });
 
+  it('a save whose allowed-tools name unknown platform tools lands, and says so in the status area', async () => {
+    accessMock.result = {
+      canWrite: true,
+      eligible: { roles: [], users: [] },
+      owners: { roles: [], users: [] },
+    };
+    apiMock.getOrCreateWorkspace.mockResolvedValue({
+      workspace: { id: 'target-company-state', kbDirName: 'knowledge-base' },
+    });
+    apiMock.writeFile.mockResolvedValue({
+      warnings: [
+        {
+          entry: 'hubspot.serch',
+          message: '"hubspot.serch" in allowed-tools is not a tool you can use here. Did you mean "hubspot.search"?',
+          suggestion: 'hubspot.search',
+        },
+      ],
+    });
+    renderPage(true);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    const box = await screen.findByRole('textbox', { name: 'Edit SKILL.md' });
+    fireEvent.change(box, { target: { value: '---\nallowed-tools: Bash hubspot.serch\n---\n' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    // Never a block: the save still closes the editor and confirms.
+    expect(await screen.findByText(/Saved: the skill now reads with your change/)).toBeInTheDocument();
+    const status = (await screen.findByText('Some tools this skill lists are not available')).closest('[role="status"]');
+    expect(status).not.toBeNull();
+    expect(within(status as HTMLElement).getByText(/Did you mean "hubspot.search"/)).toBeInTheDocument();
+    expect(screen.queryByRole('textbox', { name: 'Edit SKILL.md' })).toBeNull();
+  });
+
+  it('warnings the skill already carries show on open, before any save', async () => {
+    // A manual retired after the skill was written: nobody saved anything, so
+    // the only way the page can know is from the skill it loads.
+    apiMock.getSkill.mockResolvedValue({
+      ...skillDetail,
+      warnings: [{ entry: 'legacy_crm', message: '"legacy_crm" in allowed-tools is not a tool you can use here.' }],
+    });
+    renderPage(true);
+
+    const status = (await screen.findByText('Some tools this skill lists are not available')).closest('[role="status"]');
+    expect(status).not.toBeNull();
+    expect(within(status as HTMLElement).getByText(/"legacy_crm" in allowed-tools/)).toBeInTheDocument();
+  });
+
+  it('saving a bundled file leaves the loaded warnings in place', async () => {
+    // Only a SKILL.md save has an answer about allowed-tools. A bundled file's
+    // save answers with none, and taking that for "none" would clear a banner
+    // that is about the skill, not about sources.yaml.
+    accessMock.result = {
+      canWrite: true,
+      eligible: { roles: [], users: [] },
+      owners: { roles: [], users: [] },
+    };
+    apiMock.getOrCreateWorkspace.mockResolvedValue({
+      workspace: { id: 'target-company-state', kbDirName: 'knowledge-base' },
+    });
+    apiMock.writeFile.mockResolvedValue({});
+    apiMock.getSkill.mockResolvedValue({
+      ...skillDetail,
+      warnings: [{ entry: 'legacy_crm', message: '"legacy_crm" in allowed-tools is not a tool you can use here.' }],
+    });
+    renderPage(true);
+    await screen.findByText('Some tools this skill lists are not available');
+
+    fireEvent.click(screen.getByRole('tab', { name: 'sources.yaml' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    const box = await screen.findByRole('textbox', { name: 'Edit sources.yaml' });
+    fireEvent.change(box, { target: { value: 'watchlist:\n  - topic: robotics\n' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    expect(await screen.findByText(/Saved: the skill now reads with your change/)).toBeInTheDocument();
+    expect(screen.getByText('Some tools this skill lists are not available')).toBeInTheDocument();
+  });
+
   it('arriving with startEditing in router state opens the editor without a click', async () => {
     // The creation hand-off: NewSkillPanel navigates here with the flag, so
     // the person who just made an empty skill lands with the cursor in it.
@@ -594,7 +964,7 @@ describe('SkillPage', () => {
     expect(screen.getByTestId('file-pane-card')).toBeInTheDocument();
     expect(screen.getByText('Loading…')).toBeInTheDocument();
     expect(panel).toHaveAttribute('aria-busy', 'true');
-    expect(screen.getByRole('button', { name: /All skills & tools/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Everything/ })).toBeInTheDocument();
 
     await act(async () => {
       resolveSkill(skillDetail);
@@ -833,7 +1203,7 @@ describe('SkillPage: deciding on a change', () => {
     renderPage(true, [foreignCr]);
 
     const approve = await screen.findByRole('button', { name: 'Approve' });
-    expect(screen.getByText('You decide. You own this.')).toBeInTheDocument();
+    expect(screen.getByText('You can decide this.')).toBeInTheDocument();
 
     fireEvent.click(approve);
 
@@ -861,12 +1231,14 @@ describe('SkillPage: deciding on a change', () => {
           isApproved: false,
           approvedBy: [],
           eligibleApprovers: { roles: ['Newsroom'], users: [] },
+          inMergeGate: true,
         },
         {
           path: 'Skills/newsletter/sources.yaml',
           isApproved: false,
           approvedBy: [],
           eligibleApprovers: { roles: [], users: [] },
+          inMergeGate: false,
         },
       ],
     });
@@ -1122,5 +1494,462 @@ describe('SkillPage: deciding on a change', () => {
 
     fireEvent.click(withdraw);
     await waitFor(() => expect(apiMock.cancelPullRequest).toHaveBeenCalledWith(7));
+  });
+
+  /**
+   * A skill is a file in the repository, and this page is the ONLY surface it
+   * has: the shell routes every default-branch `Plugins/` URL here
+   * (`isLibraryLocation`) and the Knowledge tree does not list `Plugins/` at
+   * all, so a Version history button missing here means the git log for every
+   * skill in the deployment is unreachable — the audit trail the product is
+   * sold on, available for Knowledge pages and for nothing else. The button
+   * is the clock-arrow beside Edit in the file bar, the same placement the
+   * Knowledge pane uses.
+   */
+  describe('version history', () => {
+    it('opens the log for the file on screen, at its workspace path', async () => {
+      renderPage(false);
+
+      fireEvent.click(await screen.findByRole('button', { name: 'Version history' }));
+
+      // The path the panel asks git about is the workspace-relative one the
+      // Knowledge viewer would hand it — kbDirName included. Getting this
+      // wrong asks about a file that does not exist and reports an empty
+      // history for one that does.
+      expect(
+        await screen.findByText('Timeline: knowledge-base/Skills/newsletter/SKILL.md'),
+      ).toBeInTheDocument();
+      expect(screen.getByText('Version history: SKILL.md')).toBeInTheDocument();
+
+      // And there is a way back, because history is not in the URL.
+      fireEvent.click(screen.getByRole('button', { name: 'Back to the file' }));
+      expect(await screen.findByTestId('md-view')).toBeInTheDocument();
+      // The activated Back button unmounts with history. Hand keyboard focus
+      // to the replacement clock instead of letting it fall to the document.
+      expect(screen.getByRole('button', { name: 'Version history' })).toHaveFocus();
+    });
+
+    /**
+     * The file bar leaves with the file, and the clock with it; the history
+     * view draws the same clock pressed beside its Back link, so the control
+     * that opened the view is still on screen and is the other way back.
+     */
+    it('keeps a pressed clock on screen while the log is open, and it closes the log', async () => {
+      renderPage(false);
+
+      fireEvent.click(await screen.findByRole('button', { name: 'Version history' }));
+      await screen.findByText(/^Timeline:/);
+
+      const pressed = screen.getByRole('button', { name: 'Version history' });
+      expect(pressed).toHaveAttribute('aria-pressed', 'true');
+      // The bar's clock unmounted with the bar; a keyboard user's focus lands
+      // on the pressed clock, not on `document`.
+      expect(document.activeElement).toBe(pressed);
+
+      fireEvent.click(pressed);
+      expect(screen.queryByText(/^Timeline:/)).toBeNull();
+      expect(await screen.findByTestId('md-view')).toBeInTheDocument();
+      const paneClock = screen.getByRole('button', { name: 'Version history' });
+      expect(paneClock).not.toHaveAttribute('aria-pressed', 'true');
+      // And back again: the pressed clock unmounted with the log.
+      expect(document.activeElement).toBe(paneClock);
+    });
+
+    it('does not follow you to another file of the skill', async () => {
+      renderPage(false);
+
+      fireEvent.click(await screen.findByRole('button', { name: 'Version history' }));
+      await screen.findByText('Timeline: knowledge-base/Skills/newsletter/SKILL.md');
+
+      // A tab switch is a switch of file, and history is a lens on ONE file.
+      // Carrying it across would show the previous file's log under the new
+      // file's heading.
+      fireEvent.click(screen.getByRole('tab', { name: 'sources.yaml' }));
+      expect(screen.queryByText(/^Timeline:/)).toBeNull();
+
+      // And it does not come BACK on the way home. Keying the open flag to
+      // the file it was opened for is not enough on its own: returning to
+      // that tab then reopens a log nobody asked for a second time, which is
+      // how you land on history when you meant to read the file.
+      fireEvent.click(screen.getByRole('tab', { name: 'SKILL.md' }));
+      expect(screen.queryByText(/^Timeline:/)).toBeNull();
+      expect(await screen.findByTestId('md-view')).toBeInTheDocument();
+    });
+
+    /**
+     * `SkillFileEditor` holds the draft in its own state, so swapping it out
+     * for the history panel throws away whatever was typed, with no warning
+     * and no way back. The menu is withdrawn for exactly as long as that is
+     * true.
+     */
+    it('is withdrawn while the editor is open, so a draft cannot be discarded', async () => {
+      accessMock.result = {
+        canWrite: true,
+        eligible: { roles: [], users: [] },
+        owners: { roles: [], users: [] },
+      };
+      renderPage(true);
+
+      fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+      await screen.findByRole('textbox', { name: /Edit SKILL\.md/ });
+      expect(screen.queryByRole('button', { name: 'Version history' })).toBeNull();
+
+      // It comes back the moment the draft is gone.
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+      expect(await screen.findByRole('button', { name: 'Version history' })).toBeInTheDocument();
+    });
+
+    /**
+     * `availability` is re-derived from a POLLED status call, so one failed
+     * poll flips it to `error` and the next good one flips it back. If the
+     * open flag survived that, the log would reappear over the file minutes
+     * after the reader had gone back to reading.
+     */
+    it('closes for good when git stops answering mid-read', async () => {
+      const bus = makeFakeBus();
+      const { rerender } = renderPage(false, [], [], bus);
+      fireEvent.click(await screen.findByRole('button', { name: 'Version history' }));
+      await screen.findByText(/^Timeline:/);
+
+      // A poll fails: the log goes away, and so does its trigger.
+      rerender(harness(bus, { ...git, availability: 'error' } as GitContextValue));
+      expect(screen.queryByText(/^Timeline:/)).toBeNull();
+
+      // The next poll succeeds. The file is still what is on screen.
+      rerender(harness(bus, git));
+      expect(await screen.findByTestId('md-view')).toBeInTheDocument();
+      expect(screen.queryByText(/^Timeline:/)).toBeNull();
+      expect(screen.getByRole('button', { name: 'Version history' })).toBeInTheDocument();
+    });
+
+    it('has no trigger at all when git cannot answer', async () => {
+      renderPage(false, [], [], makeFakeBus(), undefined, undefined, undefined, {
+        ...git,
+        availability: 'loading',
+      } as GitContextValue);
+
+      // No log means no button — a clock that opens onto nothing is worse
+      // than none.
+      expect(await screen.findByRole('heading', { name: 'newsletter' })).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Version history' })).toBeNull();
+    });
+  });
+});
+
+/**
+ * Links and images in the rendered file. The view is stubbed above, so its
+ * probes stand in for a click on a link and for the pipeline's `<img>`; what
+ * is under test is what the PAGE hands the view.
+ */
+describe('SkillPage: links and images in the file', () => {
+  const SOME_FILE_URL = `/workspace/${encodeURIComponent(DEFAULT_BRANCH)}/knowledge-base/Skills/newsletter/Some%20File.md`;
+
+  it('opens a link to another file in a new tab, as the file it names, on the default branch', async () => {
+    // Decoded: the page used to resolve the href undecoded, so a link written
+    // `Some File.md` opened `Some%20File.md`, a file that is not there. And a
+    // NEW TAB: a link inside a file never navigates away from it. The git
+    // status names another branch, so the default branch is the page's doing.
+    const open = vi
+      .spyOn(window, 'open')
+      .mockImplementation(() => ({ opener: window }) as unknown as Window);
+    try {
+      renderPage(false, [], [], makeFakeBus(), undefined, undefined, undefined, {
+        ...git,
+        status: { ...git.status!, branch: 'alice/draft' },
+      });
+      await settled();
+      fireEvent.click(screen.getByRole('button', { name: 'link-probe' }));
+      expect(open).toHaveBeenCalledTimes(1);
+      expect(open).toHaveBeenCalledWith(SOME_FILE_URL, '_blank');
+      expect(screen.queryByTestId('navigated-to')).toBeNull();
+      expect(screen.getByRole('heading', { name: 'newsletter' })).toBeInTheDocument();
+    } finally {
+      open.mockRestore();
+    }
+  });
+
+  it("hands the view each link's target: another file a new tab, this file's section this tab", async () => {
+    renderPage(false);
+    await settled();
+    // The same answer the click follows, so the anchor's href, target and rel
+    // agree with it (a middle-click goes where the click goes).
+    expect(JSON.parse(screen.getByTestId('link-target-probe').textContent ?? 'null')).toEqual({
+      href: SOME_FILE_URL,
+      newTab: true,
+    });
+    expect(JSON.parse(screen.getByTestId('section-target-probe').textContent ?? 'null')).toEqual({
+      href: '/skills-and-tools/skills/newsletter#steps',
+      newTab: false,
+    });
+  });
+
+  it('follows a link to a section of the file on screen by scrolling to its heading, in this tab', async () => {
+    const open = vi.spyOn(window, 'open');
+    // The page's address has no heading scroll of its own, so the click is
+    // what scrolls: the heading the fragment names comes into view, and the
+    // page neither opens a tab nor navigates.
+    const original = Element.prototype.scrollIntoView;
+    const scrolled: string[] = [];
+    Element.prototype.scrollIntoView = function (this: Element) {
+      scrolled.push(this.id);
+    };
+    try {
+      renderPage(false);
+      await settled();
+      fireEvent.click(screen.getByRole('button', { name: 'section-probe' }));
+      expect(scrolled).toEqual(['steps']);
+      expect(open).not.toHaveBeenCalled();
+      expect(screen.queryByTestId('navigated-to')).toBeNull();
+      expect(screen.getByRole('heading', { name: 'newsletter' })).toBeInTheDocument();
+    } finally {
+      open.mockRestore();
+      Element.prototype.scrollIntoView = original;
+    }
+  });
+
+  it("follows an id-link to this skill's own heading by scrolling the pane, in this tab", async () => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => ({ opener: window }) as unknown as Window);
+    const original = Element.prototype.scrollIntoView;
+    const scrolled: string[] = [];
+    Element.prototype.scrollIntoView = function (this: Element) {
+      scrolled.push(this.id);
+    };
+    try {
+      renderPage(false);
+      await settled();
+      // The anchor's own answer agrees: a section of this page, not a new tab.
+      await waitFor(() =>
+        expect(JSON.parse(screen.getByTestId('self-id-target-probe').textContent ?? 'null')).toEqual({
+          href: '/skills-and-tools/skills/newsletter#steps',
+          newTab: false,
+        }),
+      );
+      fireEvent.click(screen.getByRole('button', { name: 'self-id-probe' }));
+      expect(scrolled).toEqual(['steps']);
+      expect(open).not.toHaveBeenCalled();
+      expect(screen.queryByTestId('navigated-to')).toBeNull();
+      // Another node is still a new tab.
+      fireEvent.click(screen.getByRole('button', { name: 'other-id-probe' }));
+      expect(open).toHaveBeenCalledWith(`/workspace/${encodeURIComponent(DEFAULT_BRANCH)}/plan-node#goal`, '_blank');
+      expect(screen.getByRole('heading', { name: 'newsletter' })).toBeInTheDocument();
+    } finally {
+      open.mockRestore();
+      Element.prototype.scrollIntoView = original;
+    }
+  });
+
+  // The pane renders the default branch's file whatever is checked out, so
+  // an id in it names a node there: with a draft checked out, the click and
+  // the anchor both open the default branch's node, not the draft's.
+  it("opens another node on the default branch, where the file was read, while a draft is checked out", async () => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => ({ opener: window }) as unknown as Window);
+    try {
+      renderPage(false, [], [], makeFakeBus(), undefined, undefined, undefined, {
+        ...git,
+        status: { ...git.status!, branch: 'alice/draft' },
+      });
+      await settled();
+      fireEvent.click(screen.getByRole('button', { name: 'other-id-probe' }));
+      expect(open).toHaveBeenCalledTimes(1);
+      expect(open).toHaveBeenCalledWith(`/workspace/${encodeURIComponent(DEFAULT_BRANCH)}/plan-node#goal`, '_blank');
+      expect(JSON.parse(screen.getByTestId('other-id-target-probe').textContent ?? 'null')).toEqual({
+        href: `/workspace/${encodeURIComponent(DEFAULT_BRANCH)}/plan-node#goal`,
+        newTab: true,
+      });
+      expect(screen.queryByTestId('navigated-to')).toBeNull();
+    } finally {
+      open.mockRestore();
+    }
+  });
+
+  // A section link's own address — where a middle-click or a modified click
+  // on it goes — is this page plus the heading. Arriving there scrolls to it,
+  // so the new tab lands where the plain click does.
+  it('scrolls to the heading its address names when it arrives with a fragment', async () => {
+    const original = Element.prototype.scrollIntoView;
+    const scrolled: string[] = [];
+    Element.prototype.scrollIntoView = function (this: Element) {
+      scrolled.push(this.id);
+    };
+    try {
+      libraryMock.value = libraryValue(false, [], []);
+      render(harness(makeFakeBus(), git, undefined, undefined, workspace, '#steps'));
+      await settled();
+      await waitFor(() => expect(scrolled).toContain('steps'));
+    } finally {
+      Element.prototype.scrollIntoView = original;
+    }
+  });
+
+  it("names the file's real home for an HTML page's links: its workspace path, on the default branch", async () => {
+    renderPage(false, [], [], makeFakeBus(), undefined, undefined, undefined, {
+      ...git,
+      status: { ...git.status!, branch: 'alice/draft' },
+    });
+    await settled();
+    expect(paneProps.last?.linkHome).toEqual({
+      path: 'knowledge-base/Skills/newsletter/SKILL.md',
+      branch: DEFAULT_BRANCH,
+    });
+  });
+
+  it("serves a relative image from the default branch's workspace, under the skill folder", async () => {
+    renderPage(false);
+    await settled();
+    expect(JSON.parse(screen.getByTestId('image-probe').textContent ?? 'null')).toEqual({
+      src: `/api/workspace/${encodeURIComponent(DEFAULT_BRANCH)}/file/raw?path=knowledge-base%2FSkills%2Fnewsletter%2Fassets%2Fshot.png`,
+      path: 'knowledge-base/Skills/newsletter/assets/shot.png',
+    });
+  });
+
+  it('hands the view no resolver before the workspace has named its KB dir', async () => {
+    renderPage(false, [], [], makeFakeBus(), undefined, undefined, undefined, git, {
+      workspaceId: 'target-company-state',
+      kbDirName: null,
+    } as unknown as WorkspaceContextValue);
+    await settled();
+    expect(screen.getByTestId('image-probe').textContent).toBe('"no-resolver"');
+  });
+});
+
+/**
+ * Share manages the SKILL's folder: the real Manage-access dialog (not a stub
+ * — the grant it sends is the point), pinned to the default branch, on the
+ * folder the skill lives in whether or not a plugin holds it.
+ */
+describe('SkillPage: Share', () => {
+  const MAIN = encodeURIComponent(DEFAULT_BRANCH);
+  /** Enough of the resolver's answer for the dialog to render and to grant. */
+  const FOLDER_VIEW = {
+    canRead: true,
+    canWrite: true,
+    canDownload: false,
+    canOwner: false,
+    eligible: { roles: [], users: [] },
+    readers: { restricted: true, roles: [], users: [] },
+    owners: { roles: [], users: [] },
+    downloaders: { roles: [], users: [] },
+    sources: {},
+  };
+
+  beforeEach(() => {
+    accessMock.result = FOLDER_VIEW as typeof accessMock.result;
+    accessMock.fetchFileAccess.mockClear();
+    accessMock.grantAccess.mockReset().mockResolvedValue(FOLDER_VIEW);
+    accessMock.suggestPrincipals.mockReset().mockResolvedValue({
+      roles: [],
+      groups: ['GTM Team'],
+      people: [],
+      peopleWithheld: false,
+    });
+    apiMock.listSkillAccessRequests.mockReset().mockResolvedValue([]);
+  });
+
+  it('a standalone skill offers Share, and it opens Manage access on the skill folder', async () => {
+    renderPage(false);
+    await settled();
+    expect(screen.queryByRole('dialog')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Share' }));
+
+    expect(await screen.findByRole('dialog', { name: 'Manage access' })).toBeInTheDocument();
+    await waitFor(() =>
+      expect(accessMock.fetchFileAccess).toHaveBeenCalledWith(MAIN, 'Skills/newsletter', 'folder'),
+    );
+  });
+
+  it("a plugin-bundled skill offers Share on ITS folder, not the plugin's", async () => {
+    const path = 'Plugins/newsroom/skills/newsletter';
+    apiMock.getSkill.mockResolvedValue({ ...skillDetail, path, files: [`${path}/sources.yaml`] });
+    renderPage(false, [], [], makeFakeBus(), undefined, {
+      items: libraryValue(false).items.map((i) => ({ ...i, path, plugin: 'newsroom' })),
+      skills: [{ ...skillSummary, path }],
+    });
+    await settled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Share' }));
+
+    expect(await screen.findByRole('dialog', { name: 'Manage access' })).toBeInTheDocument();
+    await waitFor(() =>
+      expect(accessMock.fetchFileAccess).toHaveBeenCalledWith(MAIN, path, 'folder'),
+    );
+    expect(accessMock.fetchFileAccess).not.toHaveBeenCalledWith(
+      expect.anything(),
+      'Plugins/newsroom',
+      'folder',
+    );
+  });
+
+  it('a grant from Share is the ordinary FOLDER grant on the skill folder — the one that creates access.md', async () => {
+    // The backend half — the first folder grant writes `access.md`, later ones
+    // edit it — is `access-mutation.service.test.ts`. What the page owns is
+    // sending THAT request: kind folder, the skill's folder, the default
+    // branch. The path goes out workspace-relative, as from every other
+    // surface; the grant route strips the KB dir.
+    renderPage(true);
+    await settled();
+    fireEvent.click(screen.getByRole('button', { name: 'Share' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Manage access' });
+
+    fireEvent.change(await screen.findByPlaceholderText(/add people, groups, roles or plugins/i), {
+      target: { value: 'gtm' },
+    });
+    fireEvent.click(await screen.findByRole('button', { name: /GTM Team/ }));
+    fireEvent.click(within(dialog).getByRole('button', { name: /^Share$/ }));
+
+    await waitFor(() =>
+      expect(accessMock.grantAccess).toHaveBeenCalledWith(
+        MAIN,
+        expect.objectContaining({
+          path: 'knowledge-base/Skills/newsletter',
+          kind: 'folder',
+          principal: { kind: 'group', group: 'GTM Team' },
+        }),
+      ),
+    );
+  });
+
+  it("the access-requests banner's Manage access still opens the same, single dialog", async () => {
+    apiMock.listSkillAccessRequests.mockResolvedValue([
+      {
+        number: 3,
+        branch: 'access/olga/newsletter',
+        requesterName: 'Olga Martin',
+        createdAt: new Date().toISOString(),
+        proposals: [
+          {
+            verb: 'write',
+            id: 'olga@x.com',
+            principal: { kind: 'user', email: 'olga@x.com', displayName: 'Olga Martin' },
+            label: 'Olga Martin',
+          },
+        ],
+      },
+    ]);
+    renderPage(true);
+    await settled();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Manage access' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Manage access' });
+    await waitFor(() =>
+      expect(accessMock.fetchFileAccess).toHaveBeenCalledWith(MAIN, 'Skills/newsletter', 'folder'),
+    );
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Done' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+
+    // The other door, onto the same dialog — never a second one.
+    fireEvent.click(screen.getByRole('button', { name: 'Share' }));
+    await screen.findByRole('dialog', { name: 'Manage access' });
+    expect(screen.getAllByRole('dialog')).toHaveLength(1);
+  });
+
+  it('offers no Share before the KB dir is known. There is no folder path to hand over yet', async () => {
+    renderPage(false, [], [], makeFakeBus(), undefined, undefined, undefined, git, {
+      workspaceId: 'target-company-state',
+      kbDirName: null,
+    } as unknown as WorkspaceContextValue);
+    await settled();
+    expect(screen.queryByRole('button', { name: 'Share' })).toBeNull();
   });
 });

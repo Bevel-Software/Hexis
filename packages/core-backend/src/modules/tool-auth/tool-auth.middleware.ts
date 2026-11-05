@@ -1,7 +1,16 @@
 import type { Request, Response, NextFunction, RequestHandler } from 'express';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('tools');
 import type { IExternalApiKeyService } from './external-api-key.interface.js';
-import type { AuthService } from '../auth/auth.service.js';
-import { InternalTokenService } from './internal-token.service.js';
+import type { AuthService } from '../auth/index.js';
+import { ACCOUNT_DEACTIVATED_MESSAGE, AuthBackendError } from '../auth/index.js';
+import type { InternalTokenService } from './internal-token.service.js';
+import {
+  INVALID_CONNECTION_KEY_CHALLENGE,
+  INVALID_CONNECTION_KEY_MESSAGE,
+  SWITCHED_OFF_CONNECTION_KEY_CHALLENGE,
+} from './connection-key-rejection.js';
 
 /**
  * What the `toolAuth` middleware resolves a bearer to, before the per-call
@@ -30,6 +39,21 @@ export interface ToolAuth {
    * never carries it and must name the branch explicitly.
    */
   focusedBranch?: string;
+  /**
+   * The agent connection an `externalProxy` token stands in for — the local
+   * server's exchanged grant names one (see `InternalTokenClaim.connectionId`).
+   * Only that grant carries it: the hosted proxy's own loopback tokens do
+   * not, and a connection key has a `tokenId` instead. What the REST audit
+   * recorder attributes a direct tool call to.
+   */
+  connectionId?: string;
+  /**
+   * The agent configuration an EXTERNAL caller's connection was made as — a
+   * connection key's `api_tokens.agent_path`, or the one an `externalProxy`
+   * token carries for an agent connection. Absent is Everything. Every agent
+   * surface resolves it to the connection's scope (`modules/agent-scope`).
+   */
+  agentPath?: string;
   /** Always `'write'` now (the middleware sets it for both internal + external — neither credential carries scope). The read path is dormant until consumer agents are removed. */
   scope: 'read' | 'write';
 }
@@ -49,8 +73,7 @@ const WWW_AUTH = 'Bearer realm="bevel-tools"';
  * Gate that admits ONLY in-process callers (those bearing an internal HMAC
  * token). Mount it AFTER `toolAuth` on every internal-only surface — the
  * internal tool catalog and the routes of tools registered with
- * `registerInternalTool` but NOT `registerExternalTool` (e.g. `execute_command`,
- * `switch_branch`, the `sharepoint_*` reads). `toolAuth` alone is not enough:
+ * `registerInternalTool` but NOT `registerExternalTool` (e.g. `switch_branch`, the `sharepoint_*` reads). `toolAuth` alone is not enough:
  * an external connection key authenticates successfully, so without this gate it
  * could invoke an internal-only route directly by guessing its name. The route
  * MUST stay mounted (our own agent reaches it over the same loopback HTTP), so
@@ -67,10 +90,10 @@ export const requireInternalSource: RequestHandler = (req, res, next) => {
 
 /**
  * Mirror of `requireInternalSource` for surfaces that must admit ONLY external
- * callers. `start_session` mints a fresh chat thread as the caller's
- * ontology-session id; an internal (in-process agent) token already carries
- * its run's `sessionId`, so letting it mint a new thread mid-run would
- * silently reset the one-ontology-per-conversation boundary.
+ * callers. `start_session` mints a fresh chat thread as the caller's session
+ * id; an internal (in-process agent) token already carries its run's
+ * `sessionId`, so letting it mint a new thread mid-run would silently split
+ * one conversation in two.
  *
  * "External" is decided by the VERIFIER, not by which credential shape
  * authenticated: a `bevel_…` connection key resolves external, and so does an
@@ -88,10 +111,23 @@ export const requireExternalSource: RequestHandler = (req, res, next) => {
   next();
 };
 
-/** Outcome of verifying a bearer token — either a normalized identity or a status+message to surface. */
+/**
+ * Outcome of verifying a bearer token — either a normalized identity or a
+ * status+message to surface. `challenge` overrides the default
+ * `WWW-Authenticate` value on a 401 (a rejected connection key answers with
+ * its own plain `invalid_token` challenge).
+ */
 export type VerifyResult =
   | { ok: true; auth: ToolAuth }
-  | { ok: false; status: number; message: string };
+  | { ok: false; status: number; message: string; challenge?: string };
+
+/**
+ * A live agent connection's current "Connect as" choice, or null when it is
+ * gone or revoked — what `BevelOAuthProvider.liveConnectionChoice` answers.
+ */
+export interface ConnectionChoices {
+  liveConnectionChoice(connectionId: string): Promise<{ agentPath: string | null } | null>;
+}
 
 /**
  * The framework-agnostic verify core: bearer token (the value AFTER `Bearer `) →
@@ -105,6 +141,23 @@ export type VerifyResult =
 export function createTokenVerifier(
   externalApiKeyService: IExternalApiKeyService,
   internalTokenService: InternalTokenService,
+  /**
+   * Whether the account an internal token was minted for is still on. An
+   * internal token carries only a user id and lives up to an hour (longer
+   * for the MCP loopback), so without this a switched-off account's running
+   * agent would keep working until it expired. Connection keys need no
+   * second look: their lookup reads the account. Every deployment passes
+   * it; absent, internal tokens are judged on their signature alone.
+   */
+  accounts?: Pick<AuthService, 'isActive'>,
+  /**
+   * Where an `externalProxy` token that names an agent connection reads the
+   * connection's CURRENT choice: the token outlives a re-consent, so the
+   * agent it was minted with may no longer be the one chosen. A
+   * connection no longer live (revoked, deleted) refuses the token. Absent,
+   * the token's own choice stands.
+   */
+  connections?: ConnectionChoices,
 ): (token: string | undefined) => Promise<VerifyResult> {
   const missing = { ok: false as const, status: 401, message: 'A connection key or internal token is required' };
   return async (token) => {
@@ -119,17 +172,50 @@ export function createTokenVerifier(
     if (internalTokenService.looksLikeInternalToken(token)) {
       const claim = internalTokenService.verify(token);
       if (!claim) return { ok: false, status: 401, message: 'Invalid or expired internal token' };
+      if (accounts && !(await accounts.isActive(claim.userId))) {
+        return { ok: false, status: 401, message: ACCOUNT_DEACTIVATED_MESSAGE };
+      }
+      let agentPath = claim.agentPath;
+      if (claim.externalProxy && claim.connectionId && connections) {
+        const live = await connections.liveConnectionChoice(claim.connectionId);
+        // A revoked connection's token is dead here too, as it is at the MCP endpoint.
+        if (!live) return { ok: false, status: 401, message: 'Access for this agent was revoked' };
+        agentPath = live.agentPath ?? undefined;
+      }
       return claim.externalProxy
-        ? { ok: true, auth: { source: 'external', userId: claim.userId, scope: 'write' } }
+        ? {
+            ok: true,
+            auth: {
+              source: 'external',
+              userId: claim.userId,
+              ...(claim.connectionId ? { connectionId: claim.connectionId } : {}),
+              ...(agentPath ? { agentPath } : {}),
+              scope: 'write',
+            },
+          }
         : { ok: true, auth: { source: 'internal', userId: claim.userId, sessionId: claim.sessionId, focusedBranch: claim.focusedBranch, scope: 'write' } };
     }
 
     // External API key → external caller. (verifyAndLoadToken may throw → propagates → caller maps to 500.)
     if (externalApiKeyService.looksLikeExternalApiKey(token)) {
       const resolved = await externalApiKeyService.verifyAndLoadToken(token);
-      return resolved
-        ? { ok: true, auth: { source: 'external', userId: resolved.user.id, tokenId: resolved.tokenId, scope: 'write' } }
-        : { ok: false, status: 401, message: 'Invalid or revoked connection key' };
+      if (resolved) {
+        return {
+          ok: true,
+          auth: {
+            source: 'external',
+            userId: resolved.user.id,
+            tokenId: resolved.tokenId,
+            ...(resolved.agentPath ? { agentPath: resolved.agentPath } : {}),
+            scope: 'write',
+          },
+        };
+      }
+      // A live key of a switched-off account is told so, not sent to mint another.
+      if (await externalApiKeyService.isKeyOfSwitchedOffAccount?.(token)) {
+        return { ok: false, status: 401, message: ACCOUNT_DEACTIVATED_MESSAGE, challenge: SWITCHED_OFF_CONNECTION_KEY_CHALLENGE };
+      }
+      return { ok: false, status: 401, message: INVALID_CONNECTION_KEY_MESSAGE, challenge: INVALID_CONNECTION_KEY_CHALLENGE };
     }
 
     return missing;
@@ -145,8 +231,10 @@ export function createTokenVerifier(
 export function createToolAuthMiddleware(
   externalApiKeyService: IExternalApiKeyService,
   internalTokenService: InternalTokenService,
+  accounts?: Pick<AuthService, 'isActive'>,
+  connections?: ConnectionChoices,
 ): RequestHandler {
-  const verify = createTokenVerifier(externalApiKeyService, internalTokenService);
+  const verify = createTokenVerifier(externalApiKeyService, internalTokenService, accounts, connections);
   return async (req: Request, res: Response, next: NextFunction) => {
     const header = req.headers.authorization;
     if (!header || !header.toLowerCase().startsWith('bearer ')) {
@@ -158,14 +246,14 @@ export function createToolAuthMiddleware(
     try {
       const result = await verify(token);
       if (!result.ok) {
-        if (result.status === 401) res.setHeader('WWW-Authenticate', WWW_AUTH);
+        if (result.status === 401) res.setHeader('WWW-Authenticate', result.challenge ?? WWW_AUTH);
         res.status(result.status).json({ error: result.message });
         return;
       }
       req.toolAuth = result.auth;
       next();
     } catch (err) {
-      console.error('[tools] connection-key verification failed:', err);
+      log.error('connection-key verification failed:', { err });
       res.status(500).json({ error: 'Authentication backend unavailable' });
     }
   };
@@ -185,9 +273,10 @@ export function createToolAuthMiddleware(
 export function createManualAuthMiddleware(
   externalApiKeyService: IExternalApiKeyService,
   internalTokenService: InternalTokenService,
-  authService: AuthService,
+  authService: Pick<AuthService, 'isActive' | 'resolveSession'>,
+  connections?: ConnectionChoices,
 ): RequestHandler {
-  const verify = createTokenVerifier(externalApiKeyService, internalTokenService);
+  const verify = createTokenVerifier(externalApiKeyService, internalTokenService, authService, connections);
   return async (req: Request, res: Response, next: NextFunction) => {
     const header = req.headers.authorization;
     if (!header || !header.toLowerCase().startsWith('bearer ')) {
@@ -202,27 +291,36 @@ export function createManualAuthMiddleware(
       try {
         const result = await verify(token);
         if (!result.ok) {
-          if (result.status === 401) res.setHeader('WWW-Authenticate', WWW_AUTH);
+          if (result.status === 401) res.setHeader('WWW-Authenticate', result.challenge ?? WWW_AUTH);
           res.status(result.status).json({ error: result.message });
           return;
         }
         req.toolAuth = result.auth;
         next();
       } catch (err) {
-        console.error('[tools] connection-key verification failed:', err);
+        log.error('connection-key verification failed:', { err });
         res.status(500).json({ error: 'Authentication backend unavailable' });
       }
       return;
     }
 
     // Otherwise treat the bearer as a browser session JWT.
+    let userId: string;
     try {
-      const { userId } = authService.verifyToken(token);
-      req.toolAuth = { source: 'session', userId, scope: 'write' };
-      next();
-    } catch {
+      ({ userId } = await authService.resolveSession(token));
+    } catch (err) {
+      // The account could not be looked up: an outage, not a verdict on the
+      // session, and a 401 would sign a valid caller out over it.
+      if (err instanceof AuthBackendError) {
+        log.error('session account lookup failed:', { err: err.cause });
+        res.status(500).json({ error: 'Authentication backend unavailable' });
+        return;
+      }
       res.setHeader('WWW-Authenticate', WWW_AUTH);
       res.status(401).json({ error: 'Invalid or expired token' });
+      return;
     }
+    req.toolAuth = { source: 'session', userId, scope: 'write' };
+    next();
   };
 }

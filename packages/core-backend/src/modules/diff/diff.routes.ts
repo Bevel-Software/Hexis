@@ -1,22 +1,20 @@
 import express from 'express';
-import type { AuthUser, IWorkflowService } from '@bevel-software/platform-shared';
+import type { AuthUser, IVersionControlService } from '@bevel-software/platform-shared';
 import type { IDiffService } from './diff.interface.js';
-import type { AuthService } from '../auth/auth.service.js';
-import type { IAccessControl } from '../access/access-control.interface.js';
-import { toKbRelative, resolveReadableMap } from '../access/kb-read-filter.js';
-import { WorkflowDomainError, WorkflowValidationError } from '../workflow/workflow.errors.js';
-import { LockingFilesystem } from '../workflow/locking-filesystem.js';
-import { branchForWorkspaceId } from '../workspace/workspace.service.js';
-import '../auth/auth.middleware.js';
+import type { AuthService } from '../auth/index.js';
+import type { IAccessControl } from '../access/index.js';
+import { canReadWorkspacePath, toKbRelative, resolveReadableMap } from '../access-model/index.js';
+import { VersionControlDomainError, VersionControlValidationError } from '../../shared/domain-errors.js';
+import { domainErrorBody } from '../../shared/http-errors.js';
+import { LockingFilesystem } from '../kb-fs/index.js';
+import { branchForWorkspaceId } from '../../shared/workspace-id.js';
+import '../auth/index.js';
 
 function toHttpError(
   err: unknown,
 ): { status: number; body: Record<string, unknown> } {
-  if (err instanceof WorkflowDomainError) {
-    return {
-      status: err.status,
-      body: { error: err.message, ...(err.payload ?? {}) },
-    };
+  if (err instanceof VersionControlDomainError) {
+    return { status: err.status, body: domainErrorBody(err) };
   }
   const message = err instanceof Error ? err.message : 'Unknown error';
   return { status: 500, body: { error: message } };
@@ -41,10 +39,11 @@ function toHttpError(
  * the first disk mutation, so a restore can never race a concurrent editor.
  */
 export async function rejectPathsLocked(
-  workflowService: IWorkflowService,
+  versionControlService: IVersionControlService,
   diffService: IDiffService,
   workspaceId: string,
   user: AuthUser,
+  kbDirName: string,
   paths: string[],
 ): Promise<void> {
   if (paths.length === 0) return;
@@ -54,7 +53,7 @@ export async function rejectPathsLocked(
   if (total === 0) return;
   const lockingFs = new LockingFilesystem(
     { basePath: plan.workspaceDir, contained: true },
-    { workflow: workflowService, workspaceId, branch, user },
+    { versionControl: versionControlService, workspaceId, branch, user, kbDirName },
   );
   try {
     await lockingFs.writeFiles(
@@ -72,7 +71,7 @@ export async function rejectPathsLocked(
     const reason = contended
       ? `"${contended[1]}" is being edited by ${contended[2]}`
       : raw.replace(/\.\s*$/, '');
-    throw new WorkflowValidationError(
+    throw new VersionControlValidationError(
       `Couldn't revert: ${reason}. No changes were committed — try again when the files are free.`,
     );
   }
@@ -89,7 +88,7 @@ export async function rejectPathsLocked(
 export function createDiffRoutes(
   diffService: IDiffService,
   authService: AuthService,
-  workflowService: IWorkflowService,
+  versionControlService: IVersionControlService,
   accessControl: IAccessControl,
   kbDirName: string,
 ): express.Router {
@@ -137,10 +136,14 @@ export function createDiffRoutes(
   }
 
   /** Read gate for a single change path (mirrors GET /review/file). Returns true to proceed. */
-  async function canReadPath(workspaceId: string, email: string, pathParam: string): Promise<boolean> {
-    const rel = toKbRelative(pathParam, kbDirName);
-    // Non-KB paths (toKbRelative → null) carry no read rules and pass.
-    return rel === null || (await accessControl.canRead(workspaceId, email, rel));
+  function canReadPath(workspaceId: string, email: string, pathParam: string): Promise<boolean> {
+    return canReadWorkspacePath(
+      (w, e, p) => accessControl.canRead(w, e, p),
+      workspaceId,
+      email,
+      kbDirName,
+      pathParam,
+    );
   }
 
   router.get('/workspace/:id/review', async (req, res) => {
@@ -265,7 +268,7 @@ export function createDiffRoutes(
           current?.changes.map((c) => c.path) ?? [],
         );
       }
-      await rejectPathsLocked(workflowService, diffService, req.params.id, user, paths);
+      await rejectPathsLocked(versionControlService, diffService, req.params.id, user, kbDirName, paths);
       res.json({ session: await diffService.currentSession(req.params.id) });
     } catch (err) {
       const { status, body } = toHttpError(err);

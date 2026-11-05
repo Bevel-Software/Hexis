@@ -1,0 +1,512 @@
+import { DEFAULT_KB_LAYOUT } from '@bevel-software/platform-shared';
+import { describe, expect, it } from 'vitest';
+import { mergeGroupsIntoRoles, parseRolesYaml } from '../../access-model/index.js';
+import { sharedFileRulesSection } from '../../agent-instructions/index.js';
+import {
+  CORE_SECTION_IDS,
+  PLATFORM_GUIDE_SEPARATOR,
+  WORKING_WITH_FILES_SECTION_ID,
+  agentGuideSections,
+  composeAgentGuide,
+  coreAgentGuideSections,
+  guideStartText,
+  isAgentGuidePath,
+  isManagedGuide,
+  joinGuideSections,
+  withPlatformGuideAppended,
+  type AgentGuideSection,
+} from '../agent-guide.js';
+
+/**
+ * The guide is text the code owns, composed from sections when an agent asks
+ * for it. What is pinned here: that every section is there and in order, that
+ * the layout's names are rendered into it, that a distribution's hook shapes
+ * it, and what the guide says on the points agents have actually got wrong.
+ */
+
+/** The section of `guide` whose heading line starts with `heading`, up to the next heading of the same or a higher level. */
+function section(guide: string, heading: string): string {
+  const lines = guide.split('\n');
+  const at = lines.findIndex((line) => line.startsWith(heading));
+  expect(at, `the guide has no "${heading}" section`).toBeGreaterThan(-1);
+  const level = /^#+/.exec(heading)![0].length;
+  const body: string[] = [];
+  for (const line of lines.slice(at + 1)) {
+    if (new RegExp(`^#{1,${level}} `).test(line)) break;
+    body.push(line);
+  }
+  return body.join('\n');
+}
+
+describe('the guide is composed from the platform\'s sections', () => {
+  it('carries every core section, in order, the shared rules computed in their place', async () => {
+    const sections = await coreAgentGuideSections(DEFAULT_KB_LAYOUT);
+    expect(sections.map((s) => s.id)).toEqual(CORE_SECTION_IDS);
+    const rules = sections.find((s) => s.id === WORKING_WITH_FILES_SECTION_ID)!;
+    expect(rules.body).toBe(sharedFileRulesSection(DEFAULT_KB_LAYOUT, ''));
+    expect(rules.literal).toBe(true);
+    // Every section begins with its heading, so the guide reads as one document.
+    for (const s of sections) expect(s.body.startsWith('## '), s.id).toBe(true);
+    // The order of the composed guide is the order of the sections — pinned
+    // exactly above by the id list, and by the join test below, which equates
+    // the composed guide with the sections joined.
+    const guide = await composeAgentGuide(DEFAULT_KB_LAYOUT);
+    expect(guide.endsWith('\n')).toBe(true);
+    expect(guide.endsWith('\n\n')).toBe(false);
+  });
+
+  it('renders the deployment\'s own root names and leaves no placeholder behind', async () => {
+    const guide = await composeAgentGuide({ knowledgeBaseDir: 'Docs', skillsDir: 'Abilities', pluginsDir: 'Extensions' });
+    expect(guide).toContain('Extensions/<Plugin>/plugin.json');
+    expect(guide).toContain('`Docs/`');
+    expect(guide).toContain('`Abilities/`');
+    expect(guide).not.toContain('{{');
+    expect(guide).not.toContain('KnowledgeBase/');
+    // The shared rules are rendered once, by the code that builds them, and
+    // never passed through the renderer again: a folder literally named like a
+    // placeholder comes out as the folder it is.
+    const odd = await composeAgentGuide({ ...DEFAULT_KB_LAYOUT, knowledgeBaseDir: '{{skillsDir}}', skillsDir: 'Playbooks' });
+    expect(odd).toContain(sharedFileRulesSection({ ...DEFAULT_KB_LAYOUT, knowledgeBaseDir: '{{skillsDir}}', skillsDir: 'Playbooks' }, ''));
+  });
+
+  it('says it is served, not written, and names the one file it is read as', async () => {
+    const guide0 = await composeAgentGuide(DEFAULT_KB_LAYOUT);
+    const start = section(guide0, '## Start here').replace(/\s+/g, ' ');
+    expect(start).toContain('`get_agent_guide({ body: { section: "all" } })` returns the whole guide');
+    // By id, not by heading: the section shows an AGENTS.md snippet whose own `##` heading sits in a code fence.
+    const finding = (await agentGuideSections(DEFAULT_KB_LAYOUT)).find((s) => s.id === 'how-agents-find-things')!.body.replace(/\s+/g, ' ');
+    expect(finding).toContain('`read_file` on `AGENTS.md` returns that file first, then the start of this guide');
+    expect(finding).toContain('never copy this guide into either: the platform serves it');
+    // The old header, which proved a file on disk was the platform's, is gone
+    // from the served text — or every read would look like a stale copy.
+    expect(isManagedGuide(await composeAgentGuide(DEFAULT_KB_LAYOUT))).toBe(false);
+    // One name on every deployment: a name saved for the written guide changes nothing.
+    const stale = await composeAgentGuide({ ...DEFAULT_KB_LAYOUT, agentsFile: 'HEXIS.md' });
+    expect(stale).not.toContain('HEXIS.md');
+    expect(stale).toBe(await composeAgentGuide(DEFAULT_KB_LAYOUT));
+    // And points at the preamble first, before the platform mechanics.
+    const guide = await composeAgentGuide(DEFAULT_KB_LAYOUT);
+    expect(guide.indexOf('mcp-description.md')).toBeLessThan(guide.indexOf('## Directory Structure'));
+    // One line ending throughout, whatever the checkout wrote the files with.
+    expect(guide).not.toContain('\r');
+  });
+
+  it('serves the guide as sections with titles, the whole being the sections joined', async () => {
+    const sections = await agentGuideSections(DEFAULT_KB_LAYOUT);
+    expect(sections.map((s) => s.id)).toEqual(CORE_SECTION_IDS);
+    expect(sections.find((s) => s.id === 'start-here')!.title).toBe('Start here');
+    expect(sections.find((s) => s.id === 'where-a-new-file-goes')!.title).toBe('Where a new file goes');
+    expect(sections.find((s) => s.id === 'skills')!.title).toContain('Skills (`Skills/');
+    expect(joinGuideSections(sections)).toBe(await composeAgentGuide(DEFAULT_KB_LAYOUT));
+    // A heading closed with its own run of `#` is titled without it, and a
+    // section that opens with no heading is titled by its id.
+    const added = await agentGuideSections(DEFAULT_KB_LAYOUT, (all) => [
+      ...all,
+      { id: 'custom', body: '## Custom ##\n\nX.\n' },
+      { id: 'bare', body: 'No heading here.\n' },
+    ]);
+    expect(added.find((s) => s.id === 'custom')!.title).toBe('Custom');
+    expect(added.find((s) => s.id === 'bare')!.title).toBe('bare');
+  });
+
+  /**
+   * A distribution's hook sees the sections and returns the sections. The
+   * three things it can do — append, replace by id, drop — each with its
+   * placeholders rendered like core's own, and the computed section left as
+   * it was built.
+   */
+  it('lets a distribution append, replace and drop sections by id, rendering its text like core\'s', async () => {
+    const hook = (sections: readonly AgentGuideSection[]) => [
+      ...sections
+        .filter((s) => s.id !== 'conventions')
+        .map((s) => (s.id === 'glossary' ? { ...s, body: '## Words used here\n\nAsk the graph.\n' } : s)),
+      { id: 'knowledge-graph', body: '## Knowledge graph\n\nNodes live under `{{knowledgeBaseDir}}/<Ontology>/Knowledge/`.\n' },
+    ];
+    const guide = await composeAgentGuide({ ...DEFAULT_KB_LAYOUT, knowledgeBaseDir: 'Docs' }, hook);
+    expect(guide).not.toContain('## Conventions');
+    expect(section(guide, '## Words used here')).toContain('Ask the graph.');
+    expect(section(guide, '## Words used here')).not.toContain('Plugin');
+    expect(guide.trimEnd().endsWith('Nodes live under `Docs/<Ontology>/Knowledge/`.')).toBe(true);
+    expect(guide).toContain(sharedFileRulesSection({ ...DEFAULT_KB_LAYOUT, knowledgeBaseDir: 'Docs' }, ''));
+    // An async hook is awaited, and the layout it is handed is the resolved one.
+    const seen: string[] = [];
+    await composeAgentGuide({ knowledgeBaseDir: ' Docs ', skillsDir: 'Skills', pluginsDir: 'Plugins' }, async (sections, layout) => {
+      seen.push(layout.knowledgeBaseDir, layout.agentsFile);
+      return sections;
+    });
+    expect(seen).toEqual(['Docs', 'AGENTS.md']);
+  });
+
+  it('routes the start section to a section a distribution adds, when that section says what it answers', async () => {
+    const hook = (sections: readonly AgentGuideSection[]) => [
+      ...sections,
+      { id: 'graph-rules', body: '## Graph rules\n\nNodes carry an id.\n', asks: 'How is a graph node written? Which | fields?' },
+      { id: 'quiet', body: '## Quiet\n\nNot routed.\n' },
+      // Already in the table: no second row.
+      { id: 'tools', body: '## Tools again\n\nA second copy.\n', asks: 'When can I use a tool?' },
+    ];
+    const start = (await agentGuideSections(DEFAULT_KB_LAYOUT, hook)).find((s) => s.id === 'start-here')!.body;
+    const rows = start.split('\n').filter((line) => line.startsWith('|'));
+    // After the table's last row, with a `|` in the question escaped.
+    expect(rows.at(-1)).toBe('| How is a graph node written? Which \\| fields? | `graph-rules` |');
+    expect(start).not.toContain('`quiet`');
+    expect(rows.filter((line) => line.endsWith('| `tools` |'))).toHaveLength(1);
+    // Core's own guide is left as it was.
+    const core = (await agentGuideSections(DEFAULT_KB_LAYOUT)).find((s) => s.id === 'start-here')!.body;
+    expect(core).not.toContain('graph-rules');
+  });
+
+  it('serves a distribution\'s own version of a core section in core\'s place, when the hook adds it under the same id', async () => {
+    const hook = (sections: readonly AgentGuideSection[]) => [
+      ...sections,
+      // The enterprise way: its own sections appended, two of them under core ids.
+      { id: 'html-views', body: '## Pages, our way\n\nOurs.\n' },
+      { id: 'start-here', body: '## Start here\n\nOurs first.\n\n| Question | Section |\n|---|---|\n| Pages? | `html-views` |\n' },
+      { id: 'graph', body: '## Graph\n\nNodes.\n', asks: 'How is the graph written?' },
+    ];
+    const sections = await agentGuideSections(DEFAULT_KB_LAYOUT, hook);
+    const core = await agentGuideSections(DEFAULT_KB_LAYOUT);
+    // One section per id, each where core's stood, the hook's text in it.
+    expect(sections.map((s) => s.id)).toEqual([...core.map((s) => s.id), 'graph']);
+    expect(sections.find((s) => s.id === 'html-views')!.body).toBe('## Pages, our way\n\nOurs.');
+    const start = sections.find((s) => s.id === 'start-here')!.body;
+    expect(start.startsWith('## Start here\n\nOurs first.')).toBe(true);
+    // The overriding start section is the one routed to: a row for the added section lands in ITS table.
+    expect(start).toContain('| How is the graph written? | `graph` |');
+    expect(start).not.toContain('`for-git-users`');
+    // The whole guide carries the override once, and never core's text under that id.
+    const guide = joinGuideSections(sections);
+    expect(guide.match(/^## Pages, our way$/gm)).toHaveLength(1);
+    expect(guide).not.toContain('## HTML views');
+  });
+
+  it('answers a read of AGENTS.md with the start section and every section by id, not the whole guide', async () => {
+    const sections = await agentGuideSections(DEFAULT_KB_LAYOUT, undefined, { defaultBranch: 'main' });
+    const text = guideStartText(sections);
+    const start = sections.find((s) => s.id === 'start-here')!;
+    expect(text.startsWith(start.body)).toBe(true);
+    for (const s of sections) expect(text).toContain(`- \`${s.id}\`: ${s.title}`);
+    expect(text).not.toContain(sections.find((s) => s.id === 'access-control')!.body);
+    // A guide a distribution left without a start section is answered whole.
+    const without = sections.filter((s) => s.id !== 'start-here');
+    expect(guideStartText(without)).toBe(joinGuideSections(without));
+  });
+
+  it("refuses a hook that drops or empties the onboarding section, which the platform's onboard prompt points at", async () => {
+    await expect(
+      composeAgentGuide(DEFAULT_KB_LAYOUT, (sections) => sections.filter((s) => s.id !== 'onboarding')),
+    ).rejects.toThrow(/dropped the "onboarding" section, which the platform's `onboard` prompt points at/);
+    await expect(
+      composeAgentGuide(DEFAULT_KB_LAYOUT, (sections) => sections.map((s) => (s.id === 'onboarding' ? { id: s.id, body: ' \n' } : s))),
+    ).rejects.toThrow(/emptied the "onboarding" section/);
+    // Replacing it under the same id is the hook's right: an organisation
+    // ships its own onboarding.
+    const own = await composeAgentGuide(DEFAULT_KB_LAYOUT, (sections) =>
+      sections.map((s) => (s.id === 'onboarding' ? { id: s.id, body: '## Welcome\n\nOur own flow.' } : s)),
+    );
+    expect(own).toContain('Our own flow.');
+  });
+
+  it('refuses a hook that drops or empties the shared file rules, which every file tool points at', async () => {
+    await expect(
+      composeAgentGuide(DEFAULT_KB_LAYOUT, (sections) => sections.filter((s) => s.id !== WORKING_WITH_FILES_SECTION_ID)),
+    ).rejects.toThrow(/dropped the "working-with-files" section/);
+    // Handing it back with nothing in it is the same loss: judged on the
+    // text that would be served, so whitespace counts as nothing.
+    for (const body of ['', '  \n\n']) {
+      await expect(
+        composeAgentGuide(DEFAULT_KB_LAYOUT, (sections) =>
+          sections.map((s) => (s.id === WORKING_WITH_FILES_SECTION_ID ? { id: s.id, body } : s)),
+        ),
+      ).rejects.toThrow(/emptied the "working-with-files" section/);
+    }
+    // The id twice, one empty and one with the rules: judged over every
+    // section under the id, so the one with text satisfies it.
+    const twice = await composeAgentGuide(DEFAULT_KB_LAYOUT, (sections) => [
+      { id: WORKING_WITH_FILES_SECTION_ID, body: '' },
+      ...sections,
+    ]);
+    expect(twice).toContain(sharedFileRulesSection(DEFAULT_KB_LAYOUT, ''));
+    // Replacing it under the same id is the hook's right.
+    const replaced = await composeAgentGuide(DEFAULT_KB_LAYOUT, (sections) =>
+      sections.map((s) => (s.id === WORKING_WITH_FILES_SECTION_ID ? { id: s.id, body: '## Working with files\n\nOurs.\n' } : s)),
+    );
+    expect(section(replaced, '## Working with files')).toContain('Ours.');
+  });
+
+  it('names the checkout folder this deployment uses, so the paths it shows are the paths the tools take', async () => {
+    const guide = await composeAgentGuide(DEFAULT_KB_LAYOUT, undefined, { kbDirName: 'repo' });
+    expect(guide).toContain('repository as the `repo/` folder');
+    expect(guide).toContain('`repo/KnowledgeBase/Foo.md`');
+    expect(guide).not.toContain('knowledge-base/');
+    expect(guide).not.toContain('{{kbDirName}}');
+    // Core's own default when none is given.
+    expect(await composeAgentGuide(DEFAULT_KB_LAYOUT)).toContain('`knowledge-base/KnowledgeBase/Foo.md`');
+  });
+
+  it('puts the knowledge base\'s own file first, then a separator, then the guide — and nothing before the guide when the file is empty', () => {
+    const joined = withPlatformGuideAppended('# Acme\r\n\r\nWrite tickets in the present tense.\r\n\r\n', 'THE GUIDE\n');
+    expect(joined).toBe(`# Acme\n\nWrite tickets in the present tense.\n\n${PLATFORM_GUIDE_SEPARATOR}\n\nTHE GUIDE\n`);
+    expect(PLATFORM_GUIDE_SEPARATOR.startsWith('---\n')).toBe(true);
+    // A file with nothing in it has nothing to put first.
+    expect(withPlatformGuideAppended('', 'THE GUIDE\n')).toBe('THE GUIDE\n');
+    expect(withPlatformGuideAppended('\n\n', 'THE GUIDE\n')).toBe('THE GUIDE\n');
+    // Their whitespace is markdown and stays: indentation is code, two
+    // trailing spaces are a hard break.
+    expect(withPlatformGuideAppended('    code\nline  \nnext\n', 'THE GUIDE\n')).toBe(
+      `    code\nline  \nnext\n\n${PLATFORM_GUIDE_SEPARATOR}\n\nTHE GUIDE\n`,
+    );
+  });
+
+  it('answers at AGENTS.md in the repository root, and nowhere else', () => {
+    expect(isAgentGuidePath('AGENTS.md')).toBe(true);
+    expect(isAgentGuidePath('/AGENTS.md')).toBe(true);
+    expect(isAgentGuidePath('Handbook/AGENTS.md')).toBe(false);
+    expect(isAgentGuidePath('agents.md')).toBe(false);
+    expect(isAgentGuidePath('HEXIS.md')).toBe(false);
+    expect(isAgentGuidePath('')).toBe(false);
+  });
+
+  it('recognises a copy an earlier release wrote to disk by its header line, and nothing else', () => {
+    // The header as every release wrote it: a blockquote under the title.
+    expect(isManagedGuide('# Knowledge base\n\n> **This file is managed by the platform.** It lives at…\n')).toBe(true);
+    expect(isManagedGuide('# Company Knowledge graph\n\nThis is a git-backed knowledge graph.\n\n> **This file is managed by the platform.** Every server restart\n> replaces it.\n')).toBe(true);
+    expect(isManagedGuide('# Acme conventions\n\nThis file is managed by us.\n')).toBe(false);
+    // The organisation's own note that QUOTES the platform's sentence in its
+    // body is theirs: the sentence is not in a header blockquote near the top.
+    expect(isManagedGuide('# On the old guide\n\nThe platform used to write a file that opened with **This file is managed by the platform.** and refreshed it.\n')).toBe(false);
+    const deep = `# Notes\n${'\n'.repeat(20)}> **This file is managed by the platform.** (quoted from the old guide)\n`;
+    expect(isManagedGuide(deep)).toBe(false);
+  });
+});
+
+/**
+ * What the guide says on the points agents have got wrong. Pinned on the
+ * served text, so a section that is dropped or rewritten fails here rather
+ * than in a deployment.
+ */
+describe('what the guide tells an agent', () => {
+  /**
+   * The placement rule. A tester's agent filed a ticket into a plugin folder
+   * and explained itself: it had found no convention saying where tickets go,
+   * and Plugins was where it already held write rights.
+   */
+  it('says where a new file goes, named for the deployment\'s roots', async () => {
+    const guide = await composeAgentGuide({ knowledgeBaseDir: 'Docs', skillsDir: 'Abilities', pluginsDir: 'Extensions' });
+    const placement = section(guide, '## Where a new file goes');
+    expect(placement).toContain('`Docs/`');
+    expect(placement).toContain('`Abilities/`');
+    expect(placement).toContain('Extensions/<Plugin>/skills/<skill>/SKILL.md');
+    expect(placement).toContain('Extensions/<Plugin>/software.bevel.hexis/tools/');
+    for (const kind of ['notes', 'reports', 'tickets', 'mcp.json', 'plugin.json']) {
+      expect(placement, kind).toContain(kind);
+    }
+    expect(placement).toMatch(/never holds a document/);
+    expect(placement).toMatch(/\bask\b/);
+  });
+
+  /**
+   * The personal plugin, where the placement rule was being read backwards.
+   * Nothing under the plugins root is in the knowledge graph, and a personal
+   * plugin is readable only by its owner — so a note filed there is never found
+   * as knowledge again, by anyone. Agents asked to "save this for me" were
+   * taking "a personal space" as the place to put it.
+   */
+  it('says a personal plugin holds only skills and tools, and what to do when a user wants a note private', async () => {
+    const guide = await composeAgentGuide({ knowledgeBaseDir: 'Docs', skillsDir: 'Abilities', pluginsDir: 'Extensions' });
+    const placement = section(guide, '## Where a new file goes').replace(/\s+/g, ' ');
+    expect(placement).toContain("A personal plugin holds only its owner's skills and tools");
+    expect(placement).toContain('Extensions/personal-<id>/');
+    // A skill's own bundled files are part of the skill and stay welcome, so the
+    // rule does not deter an agent from writing a COMPLETE skill.
+    expect(placement).toContain("each skill's own files");
+    expect(placement).toContain("in that skill's folder");
+    expect(placement).toContain('never a note or any other document');
+    // A private request gets a question and the restrictable folder, in the
+    // deployment's own root name.
+    expect(placement).toContain('ask where under `Docs/` it should go');
+    expect(placement).toContain('restricted so only they can read it');
+    // And when the user insists, the agent declines, says why, and offers again.
+    expect(placement).toContain('If they insist on the personal plugin, decline');
+    expect(placement).toContain('only they would ever find it, and never where the organisation looks for knowledge');
+    expect(placement).toContain('offer a place under `Docs/` again');
+    // Nothing tells the agent to move or flag documents already filed there.
+    expect(placement).not.toMatch(/\bmove (them|it|any)\b/);
+  });
+
+  /**
+   * Every agent-facing mention of the folder calls it the "personal plugin" —
+   * the name the app itself shows. The three phrases the guide used instead are
+   * what an agent matched "keep this private" against, so they are pinned out
+   * of the WHOLE guide rather than out of one section.
+   */
+  it('calls the folder the "personal plugin" everywhere, and no longer a "space"', async () => {
+    for (const layout of [DEFAULT_KB_LAYOUT, { knowledgeBaseDir: 'Docs', skillsDir: 'Abilities', pluginsDir: 'Extensions' }]) {
+      const guide = await composeAgentGuide(layout);
+      for (const retired of ['personal space', 'private space', 'own space']) {
+        expect(guide, retired).not.toContain(retired);
+      }
+      const plugins = 'pluginsDir' in layout ? layout.pluginsDir : DEFAULT_KB_LAYOUT.pluginsDir;
+      // The four places that introduce it: the `my_plugin` bullet, the sentence
+      // on moving a skill, the placement rule, and the `everyone` note.
+      const prose = guide.replace(/\s+/g, ' ');
+      expect(prose).toContain(`\`my_plugin\`: the user's personal plugin, \`${plugins}/personal-<id>/\`, created on first use.`);
+      expect(prose).toContain('A skill moves from a personal plugin to a shared one by moving its folder.');
+      expect(prose).toContain("A person's private skill goes in their personal plugin");
+      expect(prose).toContain(
+        `A person's personal plugin (\`${plugins}/personal-<id>/\`) grants its owner access and denies \`everyone\` outright`,
+      );
+    }
+  });
+
+  it('says that roles are pre-set and a "new role" is usually a group', async () => {
+    const prose = section(await composeAgentGuide(DEFAULT_KB_LAYOUT), '### Roles are pre-set').replace(/\s+/g, ' ');
+    expect(prose).toContain('A role in `roles.yaml` is an app role');
+    expect(prose).toContain('**Agents never create roles.**');
+    expect(prose).toContain('**Is it really a group?**');
+    expect(prose).toContain('**What to do instead.**');
+    expect(prose).toContain('add people to existing roles, and use a GROUP for a task- or team-scoped set of people');
+  });
+
+  it('describes delete_branch where it says what happens to a draft', async () => {
+    const text = section(await composeAgentGuide(DEFAULT_KB_LAYOUT), '### When a draft goes away');
+    const prose = text.replace(/\s+/g, ' ');
+    expect(prose).toContain('`delete_branch`');
+    expect(prose).toContain('Only its author');
+    expect(prose).toContain('`dryRun: true`');
+    expect(prose).toContain('`discardUnmerged: true`');
+    expect(prose).toContain('that proposes nothing is closed by the delete');
+    expect(prose).toContain('its author can withdraw it, or an Admin can decline it, in the app');
+    expect(prose).toContain('`lastCommit`');
+  });
+
+  it('documents giving a role to a group, with an example that parses as a valid roles.yaml', async () => {
+    const text = section(await composeAgentGuide(DEFAULT_KB_LAYOUT), '### Giving a role to a group');
+    const prose = text.replace(/\s+/g, ' ');
+    expect(prose).toContain('`- group:<Name>`');
+    expect(prose).toContain('case- and whitespace-insensitively against the active group source');
+    expect(prose).toContain('validation error');
+    expect(prose).toContain("removes the role's contribution for everyone in the group");
+    expect(prose).toContain('`deny role/Reviewer`');
+    expect(prose).toContain('A group under `Admin` makes every member a full admin');
+    // A change request cannot carry a roles.yaml edit, so the guide says who
+    // changes roles and where, and never walks an agent through drafting one.
+    expect(prose).toContain('Only an Admin changes `roles.yaml`');
+    expect(prose).toContain('Do not propose one');
+    for (const tool of ['create_branch', 'commit_change', 'open_change_request']) {
+      expect(prose).not.toContain(`\`${tool}\``);
+    }
+    const example = /```yaml\n([\s\S]*?)```/.exec(text)?.[1] ?? '';
+    expect(example).toContain('- group:Platform Team');
+    const parsed = parseRolesYaml(example);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const groups = new Map([['platform team', { displayName: 'Platform Team', emails: new Set(['pat@example.com']) }]]);
+    expect(mergeGroupsIntoRoles(parsed.index, groups, 'groups.yaml')).toEqual([]);
+    expect(parsed.index.byEmail.get('pat@example.com')?.has('reviewer')).toBe(true);
+    expect(parsed.index.byEmail.get('pat@example.com')?.has('role/admin')).toBe(false);
+  });
+});
+
+/**
+ * The HTML views section: what an agent writing a live page is told about the
+ * frame. Its link rules are pinned against the renderer by core-frontend's
+ * `htmlViewsGuide.test.ts`, which reads the same file; what is pinned here is
+ * that it is served like every other section and that a distribution may
+ * reshape it.
+ */
+describe('the HTML views section', () => {
+  it('is served on its own, inside the whole guide, titled "HTML views"', async () => {
+    const sections = await agentGuideSections(DEFAULT_KB_LAYOUT);
+    const html = sections.find((s) => s.id === 'html-views')!;
+    expect(html.title).toBe('HTML views');
+    expect(html.body).not.toContain('{{');
+    expect(await composeAgentGuide(DEFAULT_KB_LAYOUT)).toContain(html.body);
+    // After the tool manuals, before the conventions.
+    const ids = sections.map((s) => s.id);
+    expect(ids.indexOf('html-views')).toBe(ids.indexOf('tool-manuals') + 1);
+  });
+
+  it('describes the frame, the members core puts on window.bevel, and a fragment that scrolls the page', async () => {
+    const text = section(await composeAgentGuide(DEFAULT_KB_LAYOUT), '## HTML views').replace(/\s+/g, ' ');
+    expect(text).toContain('**No network.**');
+    expect(text).toContain('**Inline scripts and styles only.**');
+    expect(text).toContain('**Scripts run as ES modules**');
+    expect(text).toContain('**No browser storage.**');
+    expect(text).toContain('**No host navigation.**');
+    expect(text).toContain('`window.bevel.openNode(href)`');
+    expect(text).toContain('`window.bevel.navigate(href)`');
+    expect(text).toContain('`window.bevel.branch` — the branch the page is viewed on');
+    expect(text).toContain('A distribution may add data members of its own to `window.bevel`');
+    expect(text).toContain('**A bare fragment scrolls the page.**');
+    // Rendered for the deployment's layout like every other section.
+    const docs = section(await composeAgentGuide({ ...DEFAULT_KB_LAYOUT, knowledgeBaseDir: 'Docs' }), '## HTML views');
+    expect(docs).toContain('/workspace/main/Docs/Alice.md');
+  });
+
+  // A dashboard that painted one "Loading…" line and then swapped in the whole
+  // board read as broken on a cold load (2026-10-20). These rules are what
+  // agents write pages from; the reference page under them is run by
+  // core-frontend's `liveDataReferencePage.test.ts`.
+  it('tells page authors how a page loads live data without changing shape', async () => {
+    const text = section(await composeAgentGuide(DEFAULT_KB_LAYOUT), '## HTML views').replace(/\s+/g, ' ');
+    expect(text).toContain('### Live data: a page that stays still while it loads');
+    expect(text).toContain('**Render the final page shell in the markup, before any data.**');
+    expect(text).toContain('The loading treatment — placeholder rows, `aria-busy="true"` — sits **inside** the data regions.');
+    expect(text).toContain('**Publish one consistent dataset at a time.**');
+    expect(text).toContain('Until then show no counts, no cards and no empty columns');
+    expect(text).toContain('**Refresh keeps the current board.**');
+    expect(text).toContain('**A failed read fails the whole load, visibly.**');
+    expect(text).toContain('offer a Retry button that runs the same load again');
+    expect(text).toContain('**Read in bounded parallel once the paths are known.**');
+    expect(text).toContain('**Load with `callTool`, not `callToolChain`.**');
+    expect(text).toContain("**The reads are the viewer's own.**");
+    expect(text).toContain('**Link to what the tools named by the path they answered.**');
+    expect(text).toContain('Never put the checkout folder in front of a path a tool answered: it is already there.');
+    expect(text).toContain('plain HTML and one inline script, no build step and no framework');
+    // The rule names the deployment's own checkout folder; the page links on its branch by the tool's path.
+    const docs = section(await composeAgentGuide(DEFAULT_KB_LAYOUT, undefined, { kbDirName: 'kb' }), '## HTML views');
+    expect(docs.replace(/\s+/g, ' ')).toContain('starts with the checkout folder, `kb/Data/Tickets/A.md`');
+    // Each segment of the tool's path encoded on its own, so a name carrying `#` stays a name.
+    expect(docs).toContain(
+      "link.href = '/workspace/' + encodeURIComponent(BRANCH) + '/' + ticket.path.split('/').map(encodeURIComponent).join('/');",
+    );
+    expect(docs).not.toContain('{{');
+  });
+
+  it('documents window.bevel.tools: its four functions, the null check, the consent rule and requireTools with its card', async () => {
+    const text = section(await composeAgentGuide(DEFAULT_KB_LAYOUT), '## HTML views').replace(/\s+/g, ' ');
+    for (const member of [
+      '`window.bevel.tools.searchTools(query)`',
+      '`window.bevel.tools.toolsInfo(names)`',
+      '`window.bevel.tools.callTool(name, args)`',
+      '`window.bevel.tools.callToolChain(code)`',
+      '`window.bevel.requireTools()`',
+    ]) {
+      expect(text).toContain(member);
+    }
+    expect(text).toContain('`window.bevel.tools` is `null` wherever tools are not available');
+    expect(text).toContain('Check it before every use');
+    // The skill page answers a page's tools as the file page does
+    // (htmlToolBridge.ts's host list): the guide says so, and never that a
+    // skill page leaves `tools` null.
+    expect(text).toContain("on the app's file page and on a skill's page");
+    expect(text).not.toMatch(/on a skill page and in any preview/);
+    expect(text).toContain('**Reading runs at once; writing asks first.**');
+    expect(text).toContain('"<page name> wants to write to the knowledge base"');
+    expect(text).toContain('Allow while open and Deny');
+    expect(text).toContain('rejects the call with `denied`');
+    expect(text).toContain('"<page name> uses tools that are only available in the platform"');
+    expect(text).toContain('Continue without tools and Open in the platform');
+  });
+
+  it('lets a distribution replace the section or drop it', async () => {
+    const replaced = await composeAgentGuide(DEFAULT_KB_LAYOUT, (sections) =>
+      sections.map((s) => (s.id === 'html-views' ? { id: s.id, body: '## HTML views\n\nOurs, graph-aware.\n' } : s)),
+    );
+    expect(section(replaced, '## HTML views').trim()).toBe('Ours, graph-aware.');
+    const dropped = await agentGuideSections(DEFAULT_KB_LAYOUT, (sections) => sections.filter((s) => s.id !== 'html-views'));
+    expect(dropped.map((s) => s.id)).not.toContain('html-views');
+    expect(joinGuideSections(dropped)).not.toContain('## HTML views');
+  });
+});

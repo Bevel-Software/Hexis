@@ -38,7 +38,13 @@ function renderSection(configuredCount = 2) {
   const onError = vi.fn();
   render(
     <MemoryRouter>
-      <McpServerSection slug="vendor" configuredCount={configuredCount} onSaved={onSaved} onError={onError} />
+      <McpServerSection
+        slug="vendor"
+        reloadSignal={0}
+        configuredCount={configuredCount}
+        onSaved={onSaved}
+        onError={onError}
+      />
     </MemoryRouter>,
   );
   return { onSaved, onError };
@@ -134,5 +140,100 @@ describe('McpServerSection', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Rename anyway' }));
     await waitFor(() => expect(apiMock.putMcpServer).toHaveBeenCalledTimes(1));
     expect(apiMock.putMcpServer.mock.calls[0]![1]).toMatchObject({ newName: 'vendor_eu' });
+  });
+
+  it('shows everything the two files store: headers, variables, and a declared sign-in', async () => {
+    // What mcp.json + plugin.json say is what the reader sees — no opening
+    // either file to learn what is configured.
+    apiMock.getMcpServer.mockResolvedValue({
+      ...VIEW,
+      canWrite: false,
+      description: 'Vendor CRM',
+      variables: [
+        { name: 'VENDOR_KEY', scope: 'user' },
+        {
+          name: 'SIGNIN',
+          scope: 'user',
+          label: 'Vendor sign-in',
+          oauth: { clientId: 'app-1', scopes: ['crm.read'], pkce: false },
+        },
+      ],
+    });
+    renderSection();
+    expect(await screen.findByText('X-V: 2')).toBeInTheDocument();
+    expect(screen.getByText('Authorization: Bearer ${VENDOR_KEY}')).toBeInTheDocument();
+    expect(screen.getByText('Vendor CRM')).toBeInTheDocument();
+    expect(screen.getByText('${SIGNIN}')).toBeInTheDocument();
+    expect(screen.getByText('app-1')).toBeInTheDocument();
+    expect(screen.getByText('Endpoints: discovered from the server')).toBeInTheDocument();
+    expect(screen.getByText('Scopes: crm.read')).toBeInTheDocument();
+    expect(screen.getByText('PKCE: off')).toBeInTheDocument();
+  });
+
+  it('declares a sign-in on a user variable: client id only, endpoints discovered, header pre-filled', async () => {
+    apiMock.getMcpServer.mockResolvedValue({
+      ...VIEW,
+      authHeaders: {},
+      variables: [{ name: 'HUBSPOT_TOKEN', scope: 'user' }],
+    });
+    renderSection();
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit server' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Variable 1 OAuth sign-in' }));
+    // The header the token needs appears where the writer can see and change it.
+    expect(screen.getByRole('textbox', { name: /Auth headers/ })).toHaveValue(
+      'Authorization: Bearer ${HUBSPOT_TOKEN}',
+    );
+    fireEvent.change(screen.getByRole('textbox', { name: 'Variable 1 client id' }), {
+      target: { value: ' app-1 ' },
+    });
+    fireEvent.change(screen.getByRole('textbox', { name: 'Variable 1 scopes' }), {
+      target: { value: 'crm.read crm.write' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(apiMock.putMcpServer).toHaveBeenCalledTimes(1));
+    const write = apiMock.putMcpServer.mock.calls[0]![1];
+    expect(write).toMatchObject({
+      authHeaders: { Authorization: 'Bearer ${HUBSPOT_TOKEN}' },
+      variables: [
+        { name: 'HUBSPOT_TOKEN', scope: 'user', oauth: { clientId: 'app-1', scopes: ['crm.read', 'crm.write'] } },
+      ],
+    });
+    // Exactly what the file will store: no endpoints (discovered), no
+    // `pkce` (on is the default — only an opt-out is written).
+    expect(write.variables[0].oauth).not.toHaveProperty('authorizationUrl');
+    expect(write.variables[0].oauth).not.toHaveProperty('pkce');
+  });
+
+  it('sends hand-entered endpoints and the PKCE opt-out exactly as the file will store them', async () => {
+    apiMock.getMcpServer.mockResolvedValue({
+      ...VIEW,
+      variables: [{ name: 'SIGNIN', scope: 'user', oauth: { clientId: 'app-1' } }],
+    });
+    renderSection();
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit server' }));
+    // An Authorization header already exists — nothing is pre-filled over it.
+    expect(screen.getByRole('textbox', { name: /Auth headers/ })).toHaveValue('Authorization: Bearer ${VENDOR_KEY}');
+    fireEvent.click(screen.getByRole('radio', { name: 'Variable 1 endpoints by hand' }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Variable 1 authorization URL' }), {
+      target: { value: 'https://p.example/auth' },
+    });
+    fireEvent.change(screen.getByRole('textbox', { name: 'Variable 1 token URL' }), {
+      target: { value: 'https://p.example/token' },
+    });
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Variable 1 PKCE' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(apiMock.putMcpServer).toHaveBeenCalledTimes(1));
+    expect(apiMock.putMcpServer.mock.calls[0]![1].variables).toEqual([
+      {
+        name: 'SIGNIN',
+        scope: 'user',
+        oauth: {
+          authorizationUrl: 'https://p.example/auth',
+          tokenUrl: 'https://p.example/token',
+          clientId: 'app-1',
+          pkce: false,
+        },
+      },
+    ]);
   });
 });

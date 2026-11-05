@@ -1,8 +1,14 @@
 import { describe, expect, it, vi } from 'vitest';
+import { PgDialect } from 'drizzle-orm/pg-core';
+import type { SQL } from 'drizzle-orm';
 import type { Database } from '../../database/connection.js';
 import type { CoreConfig } from '../../../core-config.js';
-import { AuthService } from '../auth.service.js';
-import { hashPassword } from '../password-hash.js';
+import jwt from 'jsonwebtoken';
+import { AuthService, PasswordChangedMeanwhileError, PasswordRefusedError } from '../auth.service.js';
+import { AccountAdmissionRefusedError, SessionEndedError, type IAccountAdmission } from '../account-admission.js';
+import { hashPassword, verifyPassword } from '../password-hash.js';
+import { RECOVERY_BOT_EMAIL } from '../../version-control/index.js';
+import { DIRECTORY_SYNC_BOT_EMAIL } from '../../access/index.js';
 
 /**
  * Minimal drizzle chain stub (same idiom as the secrets-vault tests): each
@@ -69,26 +75,124 @@ const ROW = {
   email: 'alice@example.com',
   name: 'Alice',
   avatarUrl: null,
+  // NOT NULL with a default in the schema: a row read back from the database
+  // always has a boolean here, so the fixture carries one rather than letting
+  // every asserted payload read `undefined`.
+  onboardingDone: false,
+  sessionVersion: 0,
 };
+
+/** What a password change's conditional write hands back: the row, one session generation on. */
+const CHANGED = [{ ...ROW, sessionVersion: 1 }];
 
 describe('AuthService.loginWithPassword — env bootstrap admin', () => {
   const config = makeConfig({ adminEmail: 'root@example.com', adminPassword: 'sup3r-secret' });
 
   it('signs in the env admin and upserts their user row', async () => {
-    const { db } = makeFakeDb([[{ ...ROW, email: 'root@example.com', name: 'root' }]]);
+    // Two queued results: the lookup every login now performs, then the upsert.
+    const { db } = makeFakeDb([[], [{ ...ROW, email: 'root@example.com', name: 'root' }]]);
     const svc = new AuthService(db, config);
     const result = await svc.loginWithPassword('Root@Example.com', 'sup3r-secret');
     expect(result.user.email).toBe('root@example.com');
     expect(result.token.length).toBeGreaterThan(20);
   });
 
-  it('rejects the admin email with a wrong password (and does not fall back oddly)', async () => {
-    // Wrong env password → falls through to the DB path; no row → refused.
+  it('rejects the admin email with a wrong password', async () => {
     const { db } = makeFakeDb([[]]);
     const svc = new AuthService(db, config);
     await expect(svc.loginWithPassword('root@example.com', 'wrong')).rejects.toThrow(
       'Invalid credentials',
     );
+  });
+
+  // The generic "Invalid credentials" only hides the configured admin email if
+  // the WORK is generic too. The decoy hash equalises the scrypt half for
+  // every address; this pins the database half, which a branch that answered
+  // the admin's address without a lookup would otherwise leave one round trip
+  // shorter than every other address's — visible to repeated timing.
+  it('does the same lookup for a wrong password whichever address it is for', async () => {
+    const attempts = ['root@example.com', 'nobody@example.com', 'alice@example.com'];
+    const counts: number[] = [];
+    for (const email of attempts) {
+      const { db } = makeFakeDb([[]]);
+      await expect(
+        new AuthService(db, config).loginWithPassword(email, 'wrong'),
+      ).rejects.toThrow('Invalid credentials');
+      counts.push(vi.mocked(db.select).mock.calls.length);
+    }
+    expect(counts).toEqual([1, 1, 1]);
+  });
+
+  // The environment password is this account's only credential, so a hash on
+  // its row is not a second one. Such a hash can exist without anyone
+  // planting it today: it may pre-date the rule that refuses to write one, or
+  // belong to an ordinary account that only later became `ADMIN_EMAIL`. If it
+  // still signed in, rotating `ADMIN_PASSWORD` would leave the old credential
+  // working — precisely what refusing the write was meant to prevent.
+  it('refuses a stored hash on the deployment admin row', async () => {
+    const passwordHash = await hashPassword('planted-password');
+    const { db, captured } = makeFakeDb([[{ ...ROW, email: 'root@example.com', passwordHash }]]);
+    const svc = new AuthService(db, config);
+    await expect(svc.loginWithPassword('root@example.com', 'planted-password')).rejects.toThrow(
+      'Invalid credentials',
+    );
+    // The row IS read — every email takes the same lookup, so that this one
+    // cannot be picked out by how long a wrong password takes — but its hash
+    // is not what the answer is drawn from. Nothing is written either way.
+    expect(vi.mocked(db.select)).toHaveBeenCalledTimes(1);
+    expect(captured.set).toHaveLength(0);
+    expect(captured.values).toHaveLength(0);
+  });
+
+  // The refusal is a rule about this login, not a deletion of the row — which
+  // is why it is safe. Hand the identity back to the app by unsetting
+  // `ADMIN_PASSWORD` and its stored password works again, the same way
+  // `isEnvAdmin` stops being reported.
+  it('accepts that same stored hash once ADMIN_PASSWORD is unset', async () => {
+    const passwordHash = await hashPassword('planted-password');
+    const { db } = makeFakeDb([[{ ...ROW, email: 'root@example.com', passwordHash }]]);
+    const svc = new AuthService(
+      db,
+      makeConfig({ adminEmail: 'root@example.com', adminPassword: '' }),
+    );
+    const result = await svc.loginWithPassword('root@example.com', 'planted-password');
+    expect(result.user.email).toBe('root@example.com');
+    expect(result.user.isEnvAdmin).toBe(false);
+  });
+
+  /**
+   * With password sign-in switched off, `ADMIN_PASSWORD` is a credential
+   * nothing accepts: reporting the account as the environment's admin would
+   * send its owner to a login method the deployment does not offer.
+   */
+  it('is not reported as the env admin when password login is disabled', async () => {
+    const { db } = makeFakeDb([[{ ...ROW, email: 'root@example.com' }]]);
+    const svc = new AuthService(
+      db,
+      makeConfig({ adminEmail: 'root@example.com', adminPassword: 'sup3r-secret', loginPasswordEnabled: false }),
+    );
+    const accounts = await svc.listAccounts();
+    expect(accounts.find((a) => a.email === 'root@example.com')?.isEnvAdmin).toBe(false);
+  });
+
+  // Not reported, but still that account: a hash stored for it while sign-in
+  // is off would be a credential the row is never meant to carry.
+  it('still refuses to store a password for the env admin while password login is disabled', async () => {
+    const cfg = makeConfig({ adminEmail: 'root@example.com', adminPassword: 'sup3r-secret', loginPasswordEnabled: false });
+    const { db: forCreate, captured } = makeFakeDb([[]]);
+    await expect(
+      new AuthService(forCreate, cfg).createAccount('root@example.com', 'Root', 'a-long-enough-password'),
+    ).rejects.toThrow('set in the deployment environment');
+    const { db: forChange, captured: capturedByChange } = makeFakeDb([
+      [{ ...ROW, email: 'root@example.com', passwordHash: null }],
+    ]);
+    await expect(
+      new AuthService(forChange, cfg).changePassword(ROW.id, undefined, 'a-long-enough-password'),
+    ).rejects.toThrow('set in the deployment environment');
+    for (const writes of [captured, capturedByChange]) {
+      expect(writes.set).toHaveLength(0);
+      expect(writes.values).toHaveLength(0);
+    }
   });
 
   it('is disabled entirely when either env var is empty', async () => {
@@ -184,17 +288,390 @@ describe('AuthService.createAccount / changePassword', () => {
       new AuthService(wrong.db, makeConfig()).changePassword('user-1', 'not-it', 'new-password-1'),
     ).rejects.toThrow('Current password is incorrect');
 
-    const right = makeFakeDb([[{ ...ROW, passwordHash }], undefined]);
+    const right = makeFakeDb([[{ ...ROW, passwordHash }], CHANGED]);
     await expect(
       new AuthService(right.db, makeConfig()).changePassword('user-1', 'old-password', 'new-password-1'),
-    ).resolves.toBeUndefined();
+    ).resolves.toMatchObject({ token: expect.any(String) });
   });
 
   it('changePassword lets an SSO-only account set its first password without one', async () => {
-    const { db, captured } = makeFakeDb([[{ ...ROW, passwordHash: null }], undefined]);
+    const { db, captured } = makeFakeDb([[{ ...ROW, passwordHash: null }], CHANGED]);
     await new AuthService(db, makeConfig()).changePassword('user-1', undefined, 'first-password');
     const set = captured.set[0] as { passwordHash: string };
     expect(set.passwordHash.startsWith('scrypt:')).toBe(true);
+  });
+
+  // The system-account guard sits on EVERY password write, not only the
+  // invite's starting password: a bot holding a hash could sign in.
+  it.each([RECOVERY_BOT_EMAIL, DIRECTORY_SYNC_BOT_EMAIL])(
+    'createAccount refuses a password for the platform account %s, writing nothing',
+    async (email) => {
+      const { db } = makeFakeDb([]);
+      await expect(
+        new AuthService(db, makeConfig()).createAccount(email, undefined, 'brand-new-pass'),
+      ).rejects.toThrow('System accounts cannot be given a password');
+      expect(db.insert).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([RECOVERY_BOT_EMAIL, DIRECTORY_SYNC_BOT_EMAIL])(
+    'changePassword refuses the platform account %s, writing nothing',
+    async (email) => {
+      const { db } = makeFakeDb([[{ ...ROW, email, passwordHash: null }]]);
+      await expect(
+        new AuthService(db, makeConfig()).changePassword('user-1', undefined, 'first-password'),
+      ).rejects.toThrow('System accounts cannot be given a password');
+      expect(db.update).not.toHaveBeenCalled();
+    },
+  );
+});
+
+describe('AuthService.createAccountWithStartingPassword — an invite never replaces a password', () => {
+  it('sets it in ONE upsert that writes only over an account with no password that is switched on', async () => {
+    const { db, captured } = makeFakeDb([[{ ...ROW, passwordHash: 'scrypt:x' }]]);
+    const result = await new AuthService(db, makeConfig()).createAccountWithStartingPassword(
+      'Alice@Example.com',
+      'starting-pass-1',
+    );
+    expect(result.passwordSet).toBe(true);
+    expect(result.user.email).toBe('alice@example.com');
+    const conflict = captured.conflict[0] as { set: { passwordHash: string; name?: string }; setWhere: unknown };
+    expect(conflict.set.passwordHash.startsWith('scrypt:')).toBe(true);
+    // The test and the write are one statement: the guard rides on the upsert,
+    // and writes only where there is no password AND the account is on.
+    const guard = new PgDialect().sqlToQuery(conflict.setWhere as SQL);
+    expect(guard.sql).toBe('("users"."password_hash" is null and "users"."deactivated_at" is null)');
+    expect(guard.params).toEqual([]);
+    expect(conflict.set.name).toBeUndefined();
+    expect(db.select).not.toHaveBeenCalled();
+  });
+
+  it('leaves an account the guard refused as it was, and says so', async () => {
+    // The upsert's guard refused the row (it has a password now): nothing returned, the row is read back.
+    const { db, captured } = makeFakeDb([[], [{ ...ROW, passwordHash: 'scrypt:own', deactivatedAt: null }]]);
+    const result = await new AuthService(db, makeConfig()).createAccountWithStartingPassword(
+      'alice@example.com',
+      'starting-pass-1',
+    );
+    expect(result.passwordSet).toBe(false);
+    expect(result.deactivated).toBe(false);
+    expect(result.user.email).toBe('alice@example.com');
+    expect(captured.set).toEqual([]);
+  });
+
+  it('tells a switched-off account apart from one with its own password', async () => {
+    const { db } = makeFakeDb([[], [{ ...ROW, passwordHash: null, deactivatedAt: new Date('2026-09-01T00:00:00Z') }]]);
+    const result = await new AuthService(db, makeConfig()).createAccountWithStartingPassword(
+      'alice@example.com',
+      'starting-pass-1',
+    );
+    expect(result).toMatchObject({ passwordSet: false, deactivated: true });
+  });
+
+  it.each([RECOVERY_BOT_EMAIL, DIRECTORY_SYNC_BOT_EMAIL])(
+    'refuses the platform account %s, writing nothing',
+    async (email) => {
+      const { db } = makeFakeDb([]);
+      await expect(
+        new AuthService(db, makeConfig()).createAccountWithStartingPassword(email, 'starting-pass-1'),
+      ).rejects.toThrow('System accounts cannot be given a password');
+      expect(db.insert).not.toHaveBeenCalled();
+      expect(db.select).not.toHaveBeenCalled();
+    },
+  );
+
+  it('leaves the deployment admin to the environment password, writing nothing', async () => {
+    const { db } = makeFakeDb([[{ ...ROW, email: 'root@example.com' }]]);
+    const result = await new AuthService(
+      db,
+      makeConfig({ adminEmail: 'root@example.com', adminPassword: 'sup3r-secret' }),
+    ).createAccountWithStartingPassword('root@example.com', 'starting-pass-1');
+    expect(result.passwordSet).toBe(false);
+    expect(db.insert).not.toHaveBeenCalled();
+  });
+
+  it('enforces the password policy', async () => {
+    const { db } = makeFakeDb([]);
+    await expect(
+      new AuthService(db, makeConfig()).createAccountWithStartingPassword('alice@example.com', 'short'),
+    ).rejects.toThrow(/at least/);
+  });
+});
+
+/**
+ * The three kinds of account that reach the Account page's password change,
+ * and what separates them.
+ *
+ * The reported bug was "an administrator cannot change their password", and
+ * the first two cases pin down that ROLE is not the dividing line: the Admin
+ * role lives in `roles.yaml` and is read by `IAdminAccessService` for the
+ * admin routes — it never reaches this service, so an Admin-role account is
+ * the same row as a business user's and takes byte-identical paths here. The
+ * real divide is the DEPLOYMENT admin, whose password is in the environment.
+ */
+describe('AuthService.changePassword — the three account kinds', () => {
+  const ENV_ADMIN = { adminEmail: 'root@example.com', adminPassword: 'sup3r-secret' };
+
+  // (a) an Admin-role account and (b) a business user: same table, same code.
+  // Parameterised deliberately — one body proves the two are not distinguished
+  // rather than two bodies that could drift apart.
+  for (const kind of [
+    { label: 'an Admin-role account', email: 'admin-role@example.com', id: 'user-admin' },
+    { label: 'a business user', email: 'bob@example.com', id: 'user-bob' },
+  ]) {
+    describe(kind.label, () => {
+      const row = async () => ({
+        ...ROW,
+        id: kind.id,
+        email: kind.email,
+        passwordHash: await hashPassword('old-password'),
+      });
+
+      it('refuses a wrong current password', async () => {
+        const { db } = makeFakeDb([[await row()]]);
+        await expect(
+          new AuthService(db, makeConfig(ENV_ADMIN)).changePassword(
+            kind.id,
+            'not-it',
+            'new-password-1',
+          ),
+        ).rejects.toThrow('Current password is incorrect');
+      });
+
+      it('refuses an omitted current password once one is set', async () => {
+        const { db } = makeFakeDb([[await row()]]);
+        await expect(
+          new AuthService(db, makeConfig(ENV_ADMIN)).changePassword(
+            kind.id,
+            undefined,
+            'new-password-1',
+          ),
+        ).rejects.toThrow('Current password is incorrect');
+      });
+
+      it('applies the same password policy', async () => {
+        const { db } = makeFakeDb([[await row()]]);
+        await expect(
+          new AuthService(db, makeConfig(ENV_ADMIN)).changePassword(kind.id, 'old-password', 'short'),
+        ).rejects.toThrow(/at least/);
+      });
+
+      it('stores a new hash for the right current password', async () => {
+        const { db, captured } = makeFakeDb([[await row()], CHANGED]);
+        await new AuthService(db, makeConfig(ENV_ADMIN)).changePassword(
+          kind.id,
+          'old-password',
+          'new-password-1',
+        );
+        const set = captured.set[0] as { passwordHash: string };
+        expect(set.passwordHash.startsWith('scrypt:')).toBe(true);
+        // The stored hash is the NEW password and no longer the old one, so
+        // the next sign-in behaves the way the tester expected.
+        expect(await verifyPassword('new-password-1', set.passwordHash)).toBe(true);
+        expect(await verifyPassword('old-password', set.passwordHash)).toBe(false);
+      });
+
+      it('is not flagged as the deployment admin', async () => {
+        const { db } = makeFakeDb([[await row()]]);
+        const user = await new AuthService(db, makeConfig(ENV_ADMIN)).getUserById(kind.id);
+        expect(user?.isEnvAdmin).toBe(false);
+      });
+    });
+  }
+
+  // (c) the deployment admin. Its password is the environment's, so a stored
+  // hash would not replace it — it would ADD a credential that also signs in,
+  // outlives rotating ADMIN_PASSWORD, and then makes every later attempt that
+  // types the environment password as the current one fail against the stray
+  // hash. Refused in the service, not only hidden on the page.
+  describe('the deployment admin', () => {
+    const rootRow = { ...ROW, id: 'user-root', email: 'root@example.com', passwordHash: null };
+
+    it('is refused, and nothing is written', async () => {
+      const { db, captured } = makeFakeDb([[rootRow], undefined]);
+      await expect(
+        new AuthService(db, makeConfig(ENV_ADMIN)).changePassword(
+          'user-root',
+          'sup3r-secret',
+          'new-password-1',
+        ),
+      ).rejects.toThrow(/set in the deployment environment/);
+      expect(captured.set).toHaveLength(0);
+    });
+
+    it('is refused without a current password too — the no-hash path no longer lets a session holder plant one', async () => {
+      const { db, captured } = makeFakeDb([[rootRow], undefined]);
+      await expect(
+        new AuthService(db, makeConfig(ENV_ADMIN)).changePassword(
+          'user-root',
+          undefined,
+          'new-password-1',
+        ),
+      ).rejects.toThrow(/cannot be changed here/);
+      expect(captured.set).toHaveLength(0);
+    });
+
+    it('is refused even once a hash exists, and the refusal names the real reason', async () => {
+      const passwordHash = await hashPassword('planted-password');
+      const { db } = makeFakeDb([[{ ...rootRow, passwordHash }], undefined]);
+      await expect(
+        new AuthService(db, makeConfig(ENV_ADMIN)).changePassword(
+          'user-root',
+          'planted-password',
+          'short',
+        ),
+        // Refused BEFORE the policy check: being sent to pick a longer password
+        // would be a lie about why the change cannot happen.
+      ).rejects.toThrow(/deployment environment/);
+    });
+
+    it('carries the flag to the client without any part of the credential', async () => {
+      const { db } = makeFakeDb([[rootRow]]);
+      const user = await new AuthService(db, makeConfig(ENV_ADMIN)).getUserById('user-root');
+      expect(user?.isEnvAdmin).toBe(true);
+      // The whole shape, pinned the way listAccounts pins its own: these keys
+      // and no others, so a column added to `users` cannot reach the browser
+      // by being spread in, and one that is dropped is noticed here.
+      expect(Object.keys(user ?? {}).sort()).toEqual([
+        'avatarUrl',
+        'email',
+        'id',
+        'isEnvAdmin',
+        'name',
+        'onboardingDone',
+      ]);
+      expect(user?.onboardingDone).toBe(false);
+      expect(JSON.stringify(user)).not.toContain('sup3r-secret');
+    });
+
+    // The Account page is not the only way to a stored hash: any admin can aim
+    // "Set password" (POST /api/admin/accounts → createAccount) at this email.
+    // A hash planted there would be exactly the second credential the
+    // self-service refusal exists to prevent, so it is refused at the service.
+    it("is refused an admin's Set password too, and nothing is written", async () => {
+      const { db, captured } = makeFakeDb([[rootRow]]);
+      await expect(
+        new AuthService(db, makeConfig(ENV_ADMIN)).createAccount(
+          // Canonicalised first: a differently-cased ADMIN_EMAIL is the same
+          // identity and must not slip past the check.
+          'Root@Example.com',
+          'Root',
+          'planted-password',
+        ),
+      ).rejects.toThrow(/set in the deployment environment/);
+      expect(captured.values).toHaveLength(0);
+      expect(captured.conflict).toHaveLength(0);
+    });
+
+    it("is refused before the policy check, so the admin is told the real reason", async () => {
+      const { db } = makeFakeDb([[rootRow]]);
+      await expect(
+        new AuthService(db, makeConfig(ENV_ADMIN)).createAccount('root@example.com', 'Root', 'short'),
+      ).rejects.toThrow(/deployment environment/);
+    });
+
+    it('takes an admin-set password again once ADMIN_PASSWORD is unset', async () => {
+      const { db, captured } = makeFakeDb([[rootRow]]);
+      await new AuthService(
+        db,
+        makeConfig({ adminEmail: 'root@example.com', adminPassword: '' }),
+      ).createAccount('root@example.com', 'Root', 'ordinary-password');
+      expect((captured.values[0] as { passwordHash: string }).passwordHash.startsWith('scrypt:')).toBe(
+        true,
+      );
+    });
+
+    it('is an ordinary account — form and all — while ADMIN_PASSWORD is unset', async () => {
+      const passwordHash = await hashPassword('old-password');
+      const config = makeConfig({ adminEmail: 'root@example.com', adminPassword: '' });
+      const flagged = await new AuthService(
+        makeFakeDb([[{ ...rootRow, passwordHash }]]).db,
+        config,
+      ).getUserById('user-root');
+      expect(flagged?.isEnvAdmin).toBe(false);
+
+      const { db, captured } = makeFakeDb([[{ ...rootRow, passwordHash }], CHANGED]);
+      await new AuthService(db, config).changePassword('user-root', 'old-password', 'new-password-1');
+      expect((captured.set[0] as { passwordHash: string }).passwordHash.startsWith('scrypt:')).toBe(
+        true,
+      );
+    });
+  });
+});
+
+/**
+ * A password change ends the sessions opened before it. The real-Postgres
+ * half (`password-change-sessions.pg.test.ts`) proves it end to end; these
+ * pin the service's side without a database.
+ */
+describe('AuthService.changePassword — the sessions opened before it', () => {
+  const ON = { deactivatedAt: null };
+
+  it('refuses a session issued before the change, and accepts the token the change hands back', async () => {
+    const passwordHash = await hashPassword('old-password');
+    const { db } = makeFakeDb([
+      [{ ...ROW, passwordHash }], // sign-in
+      [{ ...ROW, passwordHash }], // the change reads the row...
+      CHANGED, // ...and writes it one generation on
+      [{ ...ON, ...CHANGED[0] }], // the old token's lookup...
+      [{ ...ON, ...CHANGED[0] }], // ...and the new one's: a session is never answered from the cache
+    ]);
+    const svc = new AuthService(db, makeConfig());
+    const before = await svc.loginWithPassword('alice@example.com', 'old-password');
+    const { token } = await svc.changePassword('user-1', 'old-password', 'new-password-1');
+    // Named, and worded for the person: the middleware shows these words
+    // where a bare "invalid token" would leave them guessing.
+    const ended = svc.resolveSession(before.token);
+    await expect(ended).rejects.toBeInstanceOf(SessionEndedError);
+    await expect(ended).rejects.toThrow(/password was changed after this session was opened/);
+    await expect(svc.resolveSession(token)).resolves.toEqual({ userId: ROW.id, email: ROW.email });
+  });
+
+  it('refuses a wrong current password as a refusal the caller is told, not a fault', async () => {
+    const passwordHash = await hashPassword('old-password');
+    const { db } = makeFakeDb([[{ ...ROW, passwordHash }]]);
+    const refused = new AuthService(db, makeConfig()).changePassword('user-1', 'not-it', 'new-password-1');
+    await expect(refused).rejects.toBeInstanceOf(PasswordRefusedError);
+    await expect(refused).rejects.toThrow('Current password is incorrect');
+  });
+
+  it('reads the account row for every session it resolves, whatever the cache holds', async () => {
+    // Another replica's password change is only visible in the row, so a
+    // session answered from the cache would outlive it by up to 30 seconds.
+    const live = [{ ...ON, ...ROW }];
+    const { db } = makeFakeDb([live, live, live]);
+    const svc = new AuthService(db, makeConfig());
+    const token = jwt.sign({ userId: ROW.id, email: ROW.email, sv: 0 }, 'test-jwt-secret', { expiresIn: '7d' });
+    const select = vi.mocked(db.select);
+
+    await svc.resolveSession(token);
+    expect(select).toHaveBeenCalledTimes(1);
+    // The cache now holds the account; isActive may use it...
+    await expect(svc.isActive(ROW.id)).resolves.toBe(true);
+    expect(select).toHaveBeenCalledTimes(1);
+    // ...but a session never does.
+    await svc.resolveSession(token);
+    expect(select).toHaveBeenCalledTimes(2);
+    await svc.resolveSession(token);
+    expect(select).toHaveBeenCalledTimes(3);
+  });
+
+  it('keeps a token issued before sessions had generations while the password never changed', async () => {
+    const { db } = makeFakeDb([[{ ...ON, ...ROW }]]);
+    const legacy = jwt.sign({ userId: ROW.id, email: ROW.email }, 'test-jwt-secret', { expiresIn: '7d' });
+    await expect(new AuthService(db, makeConfig()).resolveSession(legacy)).resolves.toEqual({
+      userId: ROW.id,
+      email: ROW.email,
+    });
+  });
+
+  it('is refused, in words, when another session changed the password between the read and the write', async () => {
+    const passwordHash = await hashPassword('old-password');
+    // The conditional write finds the row no longer at the generation read.
+    const { db } = makeFakeDb([[{ ...ROW, passwordHash }], []]);
+    const refused = new AuthService(db, makeConfig()).changePassword('user-1', 'old-password', 'new-password-1');
+    await expect(refused).rejects.toBeInstanceOf(PasswordChangedMeanwhileError);
+    await expect(refused).rejects.toThrow(/changed from another session.*nothing was changed/);
   });
 });
 
@@ -213,6 +690,104 @@ describe('AuthService.listAccounts', () => {
       ['bob@example.com', false],
     ]);
     expect(JSON.stringify(accounts)).not.toContain('scrypt:');
+  });
+
+  it('marks the env admin with and without a stored hash, independently of hasPassword', async () => {
+    const passwordHash = await hashPassword('pw-longer-than-8');
+    const rows = [
+      { ...ROW, id: 'root-hashed', email: 'root@example.com', passwordHash, createdAt: new Date() },
+      { ...ROW, id: 'user-2', email: 'bob@example.com', passwordHash, createdAt: new Date() },
+      { ...ROW, id: 'user-3', email: 'sso@example.com', passwordHash: null, createdAt: new Date() },
+    ];
+    const config = makeConfig({ adminEmail: 'root@example.com', adminPassword: 'sup3r-secret' });
+
+    const withHash = await new AuthService(makeFakeDb([rows]).db, config).listAccounts();
+    // Sorted by email in-process: the email column is ciphertext in the
+    // database, so the listing orders itself after decrypting.
+    expect(withHash.map((a) => [a.email, a.hasPassword, a.isEnvAdmin])).toEqual([
+      ['bob@example.com', true, false],
+      ['root@example.com', true, true],
+      ['sso@example.com', false, false],
+    ]);
+
+    const noHashRows = [{ ...rows[0], passwordHash: null }];
+    const withoutHash = await new AuthService(makeFakeDb([noHashRows]).db, config).listAccounts();
+    expect(withoutHash.map((a) => [a.hasPassword, a.isEnvAdmin])).toEqual([[false, true]]);
+
+    // Neither the hash nor the environment password ever leaves the service.
+    const json = JSON.stringify([...withHash, ...withoutHash]);
+    expect(json).not.toContain('scrypt:');
+    expect(json).not.toContain('sup3r-secret');
+    for (const account of [...withHash, ...withoutHash]) {
+      expect(Object.keys(account).sort()).toEqual(
+        ['createdAt', 'deactivatedAt', 'email', 'hasPassword', 'id', 'isEnvAdmin', 'isOwner', 'isSystem', 'name', 'ownerCanBeDeleted'],
+      );
+    }
+  });
+
+  it('is not the env admin while ADMIN_PASSWORD is unset (SSO-only deployment)', async () => {
+    const rows = [{ ...ROW, email: 'root@example.com', passwordHash: null, createdAt: new Date() }];
+    const config = makeConfig({ adminEmail: 'root@example.com', adminPassword: '' });
+    const accounts = await new AuthService(makeFakeDb([rows]).db, config).listAccounts();
+    expect(accounts[0].isEnvAdmin).toBe(false);
+  });
+});
+
+describe('AuthService — the owner', () => {
+  // A deployment with a server-held owner password (self-hosted) and one
+  // without (the cloud's configuration: `adminPassword: ''`).
+  const WITH_PASSWORD = makeConfig({ adminEmail: 'root@example.com', adminPassword: 'sup3r-secret' });
+  const WITHOUT_PASSWORD = makeConfig({ adminEmail: 'root@example.com', adminPassword: '' });
+
+  it('recognises the owner by address alone, with or without ADMIN_PASSWORD, compared canonically', () => {
+    for (const config of [WITH_PASSWORD, WITHOUT_PASSWORD]) {
+      const svc = new AuthService(makeFakeDb([]).db, config);
+      expect(svc.isOwnerEmail('root@example.com')).toBe(true);
+      expect(svc.isOwnerEmail('  Root@Example.COM ')).toBe(true);
+      expect(svc.isOwnerEmail('alice@example.com')).toBe(false);
+      expect(svc.isOwnerEmail('')).toBe(false);
+      expect(svc.isOwnerEmail({ evil: true } as unknown as string)).toBe(false);
+      expect(svc.isOwnerEmail(undefined as unknown as string)).toBe(false);
+    }
+  });
+
+  it('has no owner when ADMIN_EMAIL is unset, so a blank address is never one', () => {
+    const svc = new AuthService(makeFakeDb([]).db, makeConfig({ adminEmail: '', adminPassword: '' }));
+    expect(svc.isOwnerEmail('')).toBe(false);
+    expect(svc.isOwnerEmail('root@example.com')).toBe(false);
+  });
+
+  it("refuses to delete the owner's account unless they can sign back in with the server's password", () => {
+    const refusal = "The owner's account can't be deleted: they would have no way to sign in.";
+    // The cloud: no server-held password.
+    expect(() => new AuthService(makeFakeDb([]).db, WITHOUT_PASSWORD).assertDeletable('root@example.com')).toThrow(refusal);
+    // A password the server holds, but password sign-in is switched off.
+    const passwordOff = makeConfig({ adminEmail: 'root@example.com', adminPassword: 'sup3r-secret', loginPasswordEnabled: false });
+    expect(() => new AuthService(makeFakeDb([]).db, passwordOff).assertDeletable('Root@example.com')).toThrow(refusal);
+    // Self-hosted with ADMIN_PASSWORD and password sign-in on: allowed, as today.
+    expect(() => new AuthService(makeFakeDb([]).db, WITH_PASSWORD).assertDeletable('root@example.com')).not.toThrow();
+    // Anyone else, on either deployment.
+    for (const config of [WITH_PASSWORD, WITHOUT_PASSWORD]) {
+      expect(() => new AuthService(makeFakeDb([]).db, config).assertDeletable('alice@example.com')).not.toThrow();
+    }
+  });
+
+  it('the accounts list says who the owner is and whether their account may be deleted', async () => {
+    const rows = [
+      { ...ROW, email: 'root@example.com', passwordHash: null, createdAt: new Date() },
+      { ...ROW, id: 'user-2', email: 'alice@example.com', passwordHash: null, createdAt: new Date() },
+    ];
+    const pick = (a: { email: string; isOwner: boolean; ownerCanBeDeleted: boolean }) => [a.email, a.isOwner, a.ownerCanBeDeleted];
+    const withPassword = await new AuthService(makeFakeDb([rows]).db, WITH_PASSWORD).listAccounts();
+    expect(withPassword.map(pick)).toEqual([
+      ['alice@example.com', false, false],
+      ['root@example.com', true, true],
+    ]);
+    const withoutPassword = await new AuthService(makeFakeDb([rows]).db, WITHOUT_PASSWORD).listAccounts();
+    expect(withoutPassword.map(pick)).toEqual([
+      ['alice@example.com', false, false],
+      ['root@example.com', true, false],
+    ]);
   });
 });
 
@@ -240,6 +815,44 @@ describe('AuthService — the SSO domain allow-list', () => {
     ).rejects.toThrow(/domain is not allowed/i);
   });
 
+  /**
+   * One rule per sign-in. A provider that decided for itself who may enter
+   * (an invitation, a claimed domain) is not overruled by a list the admin
+   * set for the deployment's own provider; the plan still has its say.
+   */
+  it('is not laid on top of a provider that decided admission itself', async () => {
+    const { db } = makeFakeDb([[{ ...ROW, email: 'invited@gmail.com', name: 'Invited' }]]);
+    const out = await new AuthService(db, config).loginWithSso('invited@gmail.com', 'Invited', {
+      admittedByProvider: true,
+    });
+    expect(out.user.email).toBe('invited@gmail.com');
+  });
+
+  it('still asks the plan about someone the provider admitted', async () => {
+    const asked: Array<[string, string]> = [];
+    const plan: IAccountAdmission = {
+      canProvision: async (email, reason) => {
+        asked.push([email, reason]);
+        return { ok: false, message: 'No seat left on this plan' };
+      },
+    };
+    const { db } = makeFakeDb([[]]);
+    await expect(
+      new AuthService(db, config, plan).loginWithSso('invited@gmail.com', 'Invited', { admittedByProvider: true }),
+    ).rejects.toBeInstanceOf(AccountAdmissionRefusedError);
+    expect(asked).toEqual([['invited@gmail.com', 'sso']]);
+    expect(vi.mocked(db.insert)).not.toHaveBeenCalled();
+  });
+
+  it('governs a provider that says nothing, or says it did not decide', async () => {
+    for (const opts of [undefined, {}, { admittedByProvider: false }]) {
+      const { db } = makeFakeDb([[]]);
+      await expect(new AuthService(db, config).loginWithSso('someone@gmail.com', 'Someone', opts)).rejects.toThrow(
+        /domain is not allowed/i,
+      );
+    }
+  });
+
   it('admits a subdomain of an allowed domain', async () => {
     const { db } = makeFakeDb([[{ ...ROW, email: 'eu@eu.bevel.software', name: 'EU' }]]);
     const out = await new AuthService(db, config).loginWithSso('eu@eu.bevel.software', 'EU');
@@ -264,11 +877,70 @@ describe('AuthService — the SSO domain allow-list', () => {
       adminEmail: 'root@gmail.com',
       adminPassword: 'sup3r-secret',
     });
-    const { db } = makeFakeDb([[{ ...ROW, email: 'root@gmail.com', name: 'root' }]]);
+    const { db } = makeFakeDb([[], [{ ...ROW, email: 'root@gmail.com', name: 'root' }]]);
     const out = await new AuthService(db, outsideConfig).loginWithPassword(
       'root@gmail.com',
       'sup3r-secret',
     );
     expect(out.user.email).toBe('root@gmail.com');
+  });
+});
+
+describe('AuthService — the account admission port', () => {
+  const refusing: IAccountAdmission = {
+    canProvision: async () => ({ ok: false, message: 'No seat left on this plan' }),
+  };
+  const asked: Array<[string, string]> = [];
+  const recording: IAccountAdmission = {
+    canProvision: async (email, reason) => {
+      asked.push([email, reason]);
+      return { ok: true };
+    },
+  };
+
+  it('refuses a first SSO sign-in the port turns down, and inserts nothing', async () => {
+    // The lookup for an existing row answers empty: this is a new address (once per attempt).
+    const { db } = makeFakeDb([[], []]);
+    const svc = new AuthService(db, makeConfig(), refusing);
+    await expect(svc.loginWithSso('new@example.com', 'New')).rejects.toBeInstanceOf(AccountAdmissionRefusedError);
+    await expect(svc.loginWithSso('new@example.com', 'New')).rejects.toThrow('No seat left on this plan');
+    expect(vi.mocked(db.insert)).not.toHaveBeenCalled();
+  });
+
+  it('refuses an admin creating an account the port turns down, before any hash is stored', async () => {
+    const { db } = makeFakeDb([[]]);
+    const svc = new AuthService(db, makeConfig(), refusing);
+    await expect(svc.createAccount('new@example.com', 'New', 'a-long-enough-password')).rejects.toThrow(
+      'No seat left on this plan',
+    );
+    expect(vi.mocked(db.insert)).not.toHaveBeenCalled();
+  });
+
+  it('never asks about an address that already has an account, so a refusal cannot lock anyone out', async () => {
+    asked.length = 0;
+    const { db } = makeFakeDb([[{ id: ROW.id }], [ROW]]);
+    const svc = new AuthService(db, makeConfig(), refusing);
+    const { user } = await svc.loginWithSso('alice@example.com', 'Alice');
+    expect(user.email).toBe('alice@example.com');
+  });
+
+  it('names the path a new account arrives by, and admits when the port says so', async () => {
+    asked.length = 0;
+    const { db } = makeFakeDb([[], [ROW], [], [ROW]]);
+    const svc = new AuthService(db, makeConfig(), recording);
+    await svc.loginWithSso('alice@example.com', 'Alice');
+    await svc.createAccount('alice@example.com', 'Alice', 'a-long-enough-password');
+    expect(asked).toEqual([
+      ['alice@example.com', 'sso'],
+      ['alice@example.com', 'admin-create'],
+    ]);
+  });
+
+  it('admits everyone by default, without a lookup', async () => {
+    const { db } = makeFakeDb([[ROW]]);
+    const svc = new AuthService(db, makeConfig());
+    const { user } = await svc.loginWithSso('alice@example.com', 'Alice');
+    expect(user.email).toBe('alice@example.com');
+    expect(vi.mocked(db.select)).not.toHaveBeenCalled();
   });
 });

@@ -2,9 +2,12 @@ import { describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import { InvalidGrantError, InvalidScopeError, InvalidTokenError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
 import type { OAuthClientInformationFull } from '@modelcontextprotocol/sdk/shared/auth.js';
-import { BevelOAuthProvider } from '../oauth/bevel-oauth-provider.js';
+import type { SQL } from 'drizzle-orm';
+import { PgDialect } from 'drizzle-orm/pg-core';
+import { BevelOAuthProvider, agentKeyFor } from '../oauth/bevel-oauth-provider.js';
 import { signAuthRequest, verifyAuthRequest } from '../oauth/oauth-state.js';
 import type { Database } from '../../database/connection.js';
+import { agentConnections, oauthTokens } from '../../database/schema.js';
 
 const STATE_SECRET = 'test-state-secret';
 const PREFIX = 'bevel-mcp_';
@@ -12,9 +15,19 @@ const FRONTEND = 'https://app.example.com';
 
 /** Same fake drizzle chain as external-api-key.service.test.ts: every
  * chainable method returns the chain, the chain is thenable, and each
- * db.insert/select/update pops the next queued result. */
+ * db.insert/select/update pops the next queued result. What the provider
+ * WRITES and WHERE it writes it are captured too — `set`, `values`, the
+ * `update` target and every `where` predicate (rendered to SQL by
+ * {@link render}) — so a test can pin the row a statement lands on, not
+ * merely that a statement ran. */
 function makeFakeDb(queue: any[]) {
-  const captured: { values: any[]; set: any[] } = { values: [], set: [] };
+  const captured: {
+    values: any[];
+    set: any[];
+    where: SQL[];
+    updateTargets: unknown[];
+    onConflict: any[];
+  } = { values: [], set: [], where: [], updateTargets: [], onConflict: [] };
 
   function nextChain() {
     const result = queue.shift();
@@ -26,11 +39,13 @@ function makeFakeDb(queue: any[]) {
       });
     chain.values = passthrough((a) => captured.values.push(a[0]));
     chain.set = passthrough((a) => captured.set.push(a[0]));
-    chain.where = passthrough();
+    chain.where = passthrough((a) => captured.where.push(a[0]));
     chain.limit = passthrough();
     chain.innerJoin = passthrough();
+    chain.leftJoin = passthrough();
     chain.from = passthrough();
     chain.returning = passthrough();
+    chain.onConflictDoNothing = passthrough((a) => captured.onConflict.push(a[0]));
     chain.then = (onF: any, onR: any) => Promise.resolve(result).then(onF, onR);
     return chain;
   }
@@ -38,21 +53,40 @@ function makeFakeDb(queue: any[]) {
   const db = {
     insert: vi.fn(() => nextChain()),
     select: vi.fn(() => nextChain()),
-    update: vi.fn(() => nextChain()),
+    update: vi.fn((table: unknown) => {
+      captured.updateTargets.push(table);
+      return nextChain();
+    }),
+    // The mint-time prune of expired token rows; nothing here queues for it.
+    delete: vi.fn(() => nextChain()),
   } as unknown as Database;
+  // A transaction is the same fake, so the queue is consumed in statement
+  // order whether or not a statement ran inside one; what ran inside one is
+  // pinned by the call count.
+  (db as unknown as { transaction: unknown }).transaction = vi.fn(async (fn: (tx: Database) => Promise<unknown>) => fn(db));
 
   return { db, captured };
 }
 
-function makeProvider(queue: any[] = []) {
-  const { db, captured } = makeFakeDb(queue);
-  const provider = new BevelOAuthProvider({
+/** A captured predicate as the SQL it would send, with its parameters. */
+function render(fragment: SQL): { sql: string; params: unknown[] } {
+  const q = new PgDialect().sqlToQuery(fragment);
+  return { sql: q.sql, params: q.params };
+}
+
+function providerDeps(db: Database) {
+  return {
     db,
     crypto: null,
     stateSecret: STATE_SECRET,
     publicFrontendUrl: FRONTEND,
     tokenPrefix: PREFIX,
-  });
+  };
+}
+
+function makeProvider(queue: unknown[] = []) {
+  const { db, captured } = makeFakeDb(queue);
+  const provider = new BevelOAuthProvider(providerDeps(db));
   return { provider, captured, db };
 }
 
@@ -183,7 +217,15 @@ describe('BevelOAuthProvider', () => {
       clientId: 'client-1', userId: 'user-1', redirectUri: 'https://agent.example.com/callback',
       scope: 'mcp', resource: null,
     };
-    const { provider, captured } = makeProvider([[consumed] /* update.returning */, undefined /* insert */]);
+    const { provider, captured } = makeProvider([
+      [consumed] /* update.returning */,
+      undefined /* prune: expired tokens */,
+      undefined /* prune: expired codes */,
+      [{ clientName: 'Claude' }] /* the client's registration */,
+      [] /* no live agent connection yet for (user, "claude") */,
+      [{ id: 'conn-1' }] /* connection insert.returning */,
+      undefined /* token insert */,
+    ]);
 
     const tokens = await provider.exchangeAuthorizationCode(
       CLIENT, 'the-code', undefined, 'https://agent.example.com/callback',
@@ -194,13 +236,49 @@ describe('BevelOAuthProvider', () => {
     expect(tokens.refresh_token!.startsWith(`${PREFIX}r_`)).toBe(true);
     expect(tokens.expires_in).toBe(3600);
     expect(tokens.scope).toBe('mcp');
-    // The token row stores hashes of exactly what was returned.
-    expect(captured.values[0]).toMatchObject({
+    // A first mint for (user, agent) makes the durable agent connection,
+    // keyed by the client's folded name and snapshotting the name shown…
+    expect(captured.values[0]).toEqual({ userId: 'user-1', clientId: 'client-1', clientName: 'Claude', agentKey: 'claude' });
+    // …looked up by that key, so a later registration of "Claude" by this
+    // person lands on the same row instead of making a sixth one.
+    // (where[0] consumed the code, [1]/[2] are the prunes, [3] read the client.)
+    expect(render(captured.where[4])).toMatchObject({ params: ['user-1', 'claude'] });
+    expect(render(captured.where[4]).sql).toMatch(/"agent_connections"."agent_key" = \$2/);
+    // …and the token row stores hashes of exactly what was returned, bound to it.
+    expect(captured.values[1]).toMatchObject({
       accessTokenHash: sha256(tokens.access_token),
       refreshTokenHash: sha256(tokens.refresh_token!),
       clientId: 'client-1',
       userId: 'user-1',
+      connectionId: 'conn-1',
     });
+  });
+
+  it('a mint that loses the race for the first connection re-reads the winner instead of failing', async () => {
+    const consumed = { clientId: 'client-1', userId: 'user-1', redirectUri: 'https://agent.example.com/callback', scope: null, resource: null };
+    const { provider, captured } = makeProvider([
+      [consumed],
+      undefined, undefined, /* prunes */
+      [{ clientName: 'Claude' }],
+      [] /* no live connection at first look */,
+      [] /* insert: ON CONFLICT DO NOTHING returned no row */,
+      [{ id: 'conn-winner' }] /* the re-read finds the other mint's row */,
+      undefined /* token insert */,
+    ]);
+    await provider.exchangeAuthorizationCode(CLIENT, 'the-code', undefined, 'https://agent.example.com/callback');
+    expect(captured.values[1]).toMatchObject({ connectionId: 'conn-winner' });
+    // The insert really did stand down on the conflict — on the live-agent
+    // index, not any other — rather than the fake merely answering "no row".
+    expect(captured.onConflict).toHaveLength(1);
+    expect(captured.onConflict[0].target).toEqual([agentConnections.userId, agentConnections.agentKey]);
+    expect(render(captured.onConflict[0].where).sql).toMatch(/"revoked_at" is null/);
+  });
+
+  it('keys a connection by the folded client name, so re-registrations of one agent share a row; a nameless client keys by its id', () => {
+    expect(agentKeyFor('Claude', 'c-1')).toBe('claude');
+    expect(agentKeyFor('  Claude Code ', 'c-2')).toBe('claude code');
+    expect(agentKeyFor(null, 'c-3')).toBe('c-3');
+    expect(agentKeyFor('   ', 'c-4')).toBe('c-4');
   });
 
   it('exchangeAuthorizationCode rejects a spent/unknown code and a redirect_uri mismatch', async () => {
@@ -214,38 +292,362 @@ describe('BevelOAuthProvider', () => {
     ).rejects.toBeInstanceOf(InvalidGrantError);
   });
 
-  it('exchangeRefreshToken rotates (revokes old row, mints new pair) and only narrows scope', async () => {
+  it('exchangeRefreshToken rotates (retires the old row, mints a new pair) and only narrows scope', async () => {
     const oldRow = {
-      clientId: 'client-1', userId: 'user-1', scope: 'mcp extra', resource: null,
+      clientId: 'client-1', userId: 'user-1', connectionId: 'conn-1', scope: 'mcp extra', resource: null,
       refreshExpiresAt: new Date(Date.now() + 60_000),
     };
-    const { provider } = makeProvider([[oldRow] /* revoke.returning */, undefined /* insert */]);
+    const { provider, captured, db } = makeProvider([
+      [oldRow] /* the row behind the hash, for this client */,
+      [{ id: 'conn-1' }] /* the token's connection, still live */,
+      undefined, undefined, /* prunes — on the pool, before the transaction */
+      [oldRow] /* retire.returning — inside the transaction with the mint */,
+      undefined /* token insert */,
+      [] /* the (throttled) use stamp's first-use claim, after the commit: stamped before */,
+      undefined /* the ordinary use stamp */,
+    ]);
     const tokens = await provider.exchangeRefreshToken(CLIENT, 'bevel-mcp_r_old', ['mcp']);
+    // The consume and the mint landed in one transaction.
+    expect((db as unknown as { transaction: ReturnType<typeof vi.fn> }).transaction).toHaveBeenCalledTimes(1);
     expect(tokens.scope).toBe('mcp');
+    // Read by hash AND client first, judged, and only then consumed.
+    expect(render(captured.where[0]).sql).toMatch(/"oauth_tokens"."refresh_token_hash" = .* and "oauth_tokens"."client_id" = /);
+    // The old row is RETIRED, not revoked: its access token keeps working for
+    // its own hour, so a runner still holding it is not cut off by a refresh
+    // another runner made. Only a fresh row is retired — one already rotated
+    // or revoked is the replay path's business.
+    expect(Object.keys(captured.set[0])).toEqual(['rotatedAt']);
+    expect(render(captured.where[4]).sql).toMatch(/"oauth_tokens"."revoked_at" is null and "oauth_tokens"."rotated_at" is null/);
+    // A refresh STAYS on its token's connection: one connection spans every
+    // token the agent holds, nothing is looked up by (user, agent) and no
+    // second row is inserted for it.
+    expect(captured.values).toHaveLength(1);
+    expect(captured.values[0]).toMatchObject({ connectionId: 'conn-1' });
+    // The liveness check is a read of THAT connection, live rows only…
+    expect((db as any).select).toHaveBeenCalledTimes(2);
+    expect(render(captured.where[1])).toMatchObject({ params: ['conn-1'] });
+    expect(render(captured.where[1]).sql).toMatch(/"agent_connections"."revoked_at" is null/);
+    // …and the use is stamped separately, off the refresh's own path: the
+    // first-use claim, then (stamped before) the ordinary stamp.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(captured.updateTargets).toEqual([oauthTokens, agentConnections, agentConnections]);
+    expect(Object.keys(captured.set[1])).toEqual(['lastUsedAt']);
+    // The refresh's prune — on the pool, before the transaction opened —
+    // keeps a retired row for its access hour plus the reuse grace (it can
+    // still verify and be replayed until then) and removes it after: the
+    // third term of the delete, cut off 61 minutes ago.
+    const prune = captured.where.map(render).find((w) => /"oauth_tokens"."rotated_at" < /.test(w.sql));
+    expect(prune, 'the refresh prunes retired rows').toBeDefined();
+    // Third statement: after the read and the liveness check, before the retire.
+    expect(render(captured.where[2]).sql).toMatch(/"oauth_tokens"."rotated_at" < /);
+    // The dialect renders a Date parameter as its ISO string.
+    const rotatedCutoff = new Date(prune!.params.at(-1) as string | Date);
+    expect(Date.now() - rotatedCutoff.getTime()).toBeGreaterThanOrEqual(61 * 60_000);
+    expect(Date.now() - rotatedCutoff.getTime()).toBeLessThan(61 * 60_000 + 5_000);
 
-    // Widening is refused.
-    await expect(
-      makeProvider([[oldRow]]).provider.exchangeRefreshToken(CLIENT, 'bevel-mcp_r_old', ['mcp', 'admin']),
-    ).rejects.toBeInstanceOf(InvalidScopeError);
+    // Widening is refused — invalid_scope to the client, in the log like
+    // every other refusal, and BEFORE anything is consumed: the same token
+    // still refreshes with the scope it was granted.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const widening = makeProvider([[oldRow]]);
+      await expect(
+        widening.provider.exchangeRefreshToken(CLIENT, 'bevel-mcp_r_old', ['mcp', 'admin']),
+      ).rejects.toBeInstanceOf(InvalidScopeError);
+      expect(warn).toHaveBeenCalledWith(expect.stringMatching(/refresh refused: requested scope exceeds the originally granted scope/), expect.anything());
+      expect(widening.captured.updateTargets).toEqual([]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
 
-    // Unknown/already-rotated refresh token.
-    await expect(
-      makeProvider([[]]).provider.exchangeRefreshToken(CLIENT, 'bevel-mcp_r_gone'),
-    ).rejects.toBeInstanceOf(InvalidGrantError);
+  it('exchangeRefreshToken honours the loser of a rotation race once: read fresh, retired under it, replayed', async () => {
+    // Two refreshes of one fresh token at the same instant. Both read it
+    // fresh; one retire lands, the other matches nothing — and is then the
+    // loser of a double refresh, replayable within the grace like any other.
+    const oldRow = {
+      clientId: 'client-1', userId: 'user-1', connectionId: 'conn-1', scope: 'mcp', resource: null,
+      refreshExpiresAt: new Date(Date.now() + 60_000), revokedAt: null, rotatedAt: null,
+    };
+    const info = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const { provider, captured } = makeProvider([
+      [oldRow] /* read fresh */,
+      [{ id: 'conn-1' }] /* its connection, live */,
+      undefined, undefined, /* prunes — before the transaction */
+      [] /* the retire matches nothing: rotated under this request */,
+      [{ ...oldRow, rotatedAt: new Date() }] /* the replay consumes it */,
+      undefined /* token insert */,
+      [] /* first-use claim, after the commit */,
+      undefined /* the ordinary use stamp */,
+    ]);
+    try {
+      const tokens = await provider.exchangeRefreshToken(CLIENT, 'bevel-mcp_r_old');
+      expect(tokens.refresh_token).toMatch(/^bevel-mcp_r_/);
+      expect(captured.values).toHaveLength(1);
+      expect(Object.keys(captured.set[0])).toEqual(['rotatedAt']);
+      expect(Object.keys(captured.set[1])).toEqual(['revokedAt']);
+      expect(info).toHaveBeenCalledWith(expect.stringMatching(/refresh replayed 0 s after its rotation/), expect.anything());
+    } finally {
+      info.mockRestore();
+    }
+  });
+
+  it('a retired pair\'s access token verifies until its own expiry, and dies with a revoke like any other', async () => {
+    // Rotation sets `rotated_at` and leaves `revoked_at` null, and the
+    // verification predicate asks about `revoked_at` and `expires_at` only:
+    // so a runner still holding the old pair is served for the rest of its
+    // hour. The same predicate is what a revoke, a sign-out or a connection
+    // revoke then falsify, since all of those set `revoked_at` (or the
+    // connection's), none of which this change touched.
+    const row = {
+      id: 't-1', clientId: 'client-1', connectionId: 'conn-1', scope: 'mcp', resource: null,
+      expiresAt: new Date(Date.now() + 30 * 60_000), userId: 'user-1', userEmail: 'u@x.io',
+    };
+    const { provider, captured } = makeProvider([[row], undefined /* touch */, [] /* claim lost */, undefined /* stamp */]);
+    const info = await provider.verifyAccessToken('bevel-mcp_live');
+    expect(info.clientId).toBe('client-1');
+    const verify = render(captured.where[0]).sql;
+    expect(verify).toMatch(/"oauth_tokens"."revoked_at" is null/);
+    expect(verify).toMatch(/"oauth_tokens"."expires_at" > /);
+    expect(verify).toMatch(/"agent_connections"."revoked_at" is null/);
+    expect(verify).not.toMatch(/rotated_at/);
+  });
+
+  /** A row the rotation did not match, as the replay path then reads it. */
+  const rotatedRow = (ago: number) => ({
+    clientId: 'client-1', userId: 'user-1', connectionId: 'conn-1', scope: 'mcp', resource: null,
+    refreshExpiresAt: new Date(Date.now() + 60_000),
+    revokedAt: null,
+    rotatedAt: new Date(Date.now() - ago),
+  });
+
+  it('exchangeRefreshToken honours a refresh token rotated within the reuse grace once more — the loser of a double refresh gets a pair too', async () => {
+    // Claude's hosted apps refresh proactively and reactively, and a
+    // scheduled task refreshes beside the chat that shares its connector:
+    // the same token arrives twice. The second arrival, 10 s after the first
+    // rotated it, is answered with a fresh pair on the same connection rather
+    // than the invalid_grant a client reads as "re-authorize".
+    const info = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const { provider, captured } = makeProvider([
+      [rotatedRow(10_000)] /* the row behind the hash: retired 10 s ago */,
+      [{ id: 'conn-1' }] /* its connection, live */,
+      undefined, undefined, /* prunes — before the transaction */
+      [rotatedRow(10_000)] /* the replay consumes it — inside the transaction with the mint */,
+      undefined /* token insert */,
+      [] /* first-use claim, after the commit */,
+      undefined /* the ordinary use stamp */,
+    ]);
+    try {
+      const tokens = await provider.exchangeRefreshToken(CLIENT, 'bevel-mcp_r_old');
+      expect(tokens.refresh_token).toMatch(/^bevel-mcp_r_/);
+      expect(captured.values).toHaveLength(1);
+      expect(captured.values[0]).toMatchObject({ connectionId: 'conn-1', userId: 'user-1' });
+      // Honoured ONCE: the replay revokes the retired row in the statement
+      // that admits it — by hash AND client, unrevoked, rotated within the
+      // grace — so a third presentation finds nothing, and another client's
+      // token is never honoured. Never retired again: no `rotatedAt` write.
+      expect(Object.keys(captured.set[0])).toEqual(['revokedAt']);
+      expect(captured.set.flatMap((s) => Object.keys(s))).not.toContain('rotatedAt');
+      expect(render(captured.where[4]).sql).toMatch(
+        /"oauth_tokens"."refresh_token_hash" = .* and "oauth_tokens"."client_id" = .* and "oauth_tokens"."revoked_at" is null and "oauth_tokens"."rotated_at" > /,
+      );
+      // Said once the pair is minted, not before the checks that could still refuse.
+      expect(info).toHaveBeenCalledWith(expect.stringMatching(/refresh replayed 10 s after its rotation, within the reuse grace; a fresh pair is minted/), expect.anything());
+    } finally {
+      info.mockRestore();
+    }
+  });
+
+  it.each([
+    ['unknown to this client', [[]], /refresh refused: unknown refresh token for this client/],
+    ['revoked', [[{ ...rotatedRow(10_000), rotatedAt: null, revokedAt: new Date() }]], /refresh refused: refresh token revoked/],
+    ['rotated past the grace', [[rotatedRow(120_000)]], /refresh refused: refresh token rotated 120 s ago, past the 60 s reuse grace/],
+    ['already replayed once', [[{ ...rotatedRow(10_000), revokedAt: new Date() }]], /refresh refused: refresh token rotated 10 s ago and already replayed once, or revoked since/],
+    [
+      'rotated and replayed by concurrent requests between the read and the consume',
+      [[{ ...rotatedRow(0), rotatedAt: null }], [{ id: 'conn-1' }], undefined, undefined, /* prunes */ [] /* retire misses */, [] /* replay misses too */],
+      /refresh refused: refresh token rotated or revoked by a concurrent request/,
+    ],
+  ])('exchangeRefreshToken refuses a refresh token that is %s, mints nothing, and says why in the log', async (_what, queue, said) => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const { provider, captured } = makeProvider([...queue]);
+      await expect(provider.exchangeRefreshToken(CLIENT, 'bevel-mcp_r_old')).rejects.toBeInstanceOf(InvalidGrantError);
+      expect(captured.values).toHaveLength(0);
+      // The reason is in the log, never the token.
+      expect(warn).toHaveBeenCalledWith(expect.stringMatching(said), expect.anything());
+      expect(JSON.stringify(warn.mock.calls)).not.toContain('bevel-mcp_r_old');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('exchangeRefreshToken logs the two refusals that come after a token was accepted: expired, and its agent revoked', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const expired = { ...rotatedRow(0), rotatedAt: null, refreshExpiresAt: new Date(Date.now() - 1_000) };
+      await expect(makeProvider([[expired]]).provider.exchangeRefreshToken(CLIENT, 'bevel-mcp_r_old')).rejects.toBeInstanceOf(InvalidGrantError);
+      expect(warn).toHaveBeenLastCalledWith(expect.stringMatching(/refresh refused: refresh token expired/), expect.anything());
+
+      const live = { ...rotatedRow(0), rotatedAt: null };
+      await expect(makeProvider([[live], [] /* its connection: revoked or gone */]).provider.exchangeRefreshToken(CLIENT, 'bevel-mcp_r_old')).rejects.toBeInstanceOf(InvalidGrantError);
+      expect(warn).toHaveBeenLastCalledWith(expect.stringMatching(/refresh refused: access for this agent was revoked/), expect.anything());
+      expect(JSON.stringify(warn.mock.calls)).not.toContain('bevel-mcp_r_old');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('exchangeRefreshToken refuses a token whose agent connection was revoked, minting nothing', async () => {
+    // The race a revoke cannot otherwise win: the refresh consumed its old
+    // token a moment before the revoke landed. Looking the connection up
+    // afresh would find none live and make a new one; staying on the token's
+    // own connection finds it revoked and stops.
+    const oldRow = {
+      clientId: 'client-1', userId: 'user-1', connectionId: 'conn-1', scope: 'mcp', resource: null,
+      refreshExpiresAt: new Date(Date.now() + 60_000),
+    };
+    const { provider, captured } = makeProvider([[oldRow], [] /* connection revoked or gone */]);
+    await expect(provider.exchangeRefreshToken(CLIENT, 'bevel-mcp_r_old')).rejects.toBeInstanceOf(InvalidGrantError);
+    expect(captured.values).toHaveLength(0);
+    expect(captured.onConflict).toHaveLength(0);
+  });
+
+  it('exchangeRefreshToken places a token from before connections existed under one, as a first mint would', async () => {
+    const oldRow = {
+      clientId: 'client-1', userId: 'user-1', connectionId: null, scope: 'mcp', resource: null,
+      refreshExpiresAt: new Date(Date.now() + 60_000),
+    };
+    const { provider, captured } = makeProvider([
+      [oldRow] /* the row behind the hash: no connection to check */,
+      // Placed under a connection BEFORE the transaction, as a first mint would place it.
+      [{ clientName: 'Claude' }],
+      [] /* no live connection */,
+      [{ id: 'conn-new' }] /* connection insert.returning */,
+      undefined, undefined, /* prunes — before the transaction */
+      [oldRow] /* retire.returning */,
+      undefined /* token insert */,
+    ]);
+    await provider.exchangeRefreshToken(CLIENT, 'bevel-mcp_r_old');
+    expect(captured.values[0]).toEqual({ userId: 'user-1', clientId: 'client-1', clientName: 'Claude', agentKey: 'claude' });
+    expect(captured.values[1]).toMatchObject({ connectionId: 'conn-new' });
   });
 
   it('verifyAccessToken resolves a live token to AuthInfo carrying the Bevel user', async () => {
     const row = {
-      id: 'tok-row-1', clientId: 'client-1', scope: 'mcp', resource: null,
+      id: 'tok-row-1', clientId: 'client-1', connectionId: 'conn-1', scope: 'mcp', resource: null,
       expiresAt: new Date(Date.now() + 60_000), userId: 'user-1', userEmail: 'alice@example.com',
     };
-    const { provider } = makeProvider([[row] /* select */, undefined /* lastUsedAt touch */]);
+    const { provider, captured } = makeProvider([
+      [row] /* select */,
+      undefined /* token lastUsedAt touch */,
+      [] /* the connection's first-use claim: stamped before */,
+      undefined /* connection lastUsedAt touch */,
+      [row] /* a second verify a moment later */,
+      undefined /* its token touch — and NO second connection touch */,
+    ]);
 
     const info = await provider.verifyAccessToken('bevel-mcp_live');
 
     expect(info.clientId).toBe('client-1');
     expect(info.scopes).toEqual(['mcp']);
-    expect(info.extra).toMatchObject({ userId: 'user-1', userEmail: 'alice@example.com' });
+    // The agent connection rides along, for the auth middleware to bind.
+    expect(info.extra).toMatchObject({ userId: 'user-1', userEmail: 'alice@example.com', connectionId: 'conn-1' });
+    // The lookup admits a token only while its connection is unrevoked — or
+    // has none to be revoked (a token from before connections existed).
+    const lookup = render(captured.where[0]).sql;
+    expect(lookup).toMatch(/"oauth_tokens"."connection_id" is null or "agent_connections"."revoked_at" is null/);
+    // Both "last used" marks are touched: the token's row, and THIS token's
+    // agent connection.
+    await new Promise((r) => setTimeout(r, 0));
+    // The connection's stamp is two statements: the first-use claim (its
+    // id, and never stamped), then — stamped before — the ordinary stamp.
+    expect(captured.updateTargets).toEqual([oauthTokens, agentConnections, agentConnections]);
+    expect(captured.set.map((s) => Object.keys(s))).toEqual([['lastUsedAt'], ['lastUsedAt'], ['lastUsedAt']]);
+    expect(render(captured.where[1])).toMatchObject({ params: ['tok-row-1'] });
+    expect(render(captured.where[2])).toMatchObject({ params: ['conn-1'] });
+    expect(render(captured.where[2]).sql).toMatch(/"agent_connections"."id" = \$1 and "agent_connections"."last_used_at" is null/);
+    expect(render(captured.where[3])).toMatchObject({ params: ['conn-1'] });
+    expect(render(captured.where[3]).sql).toMatch(/"agent_connections"."id" = \$1/);
+    // The connection's stamp is throttled: a verify a moment later touches
+    // the token row again but not the connection — a minute has not passed.
+    await provider.verifyAccessToken('bevel-mcp_live');
+    await new Promise((r) => setTimeout(r, 0));
+    expect(captured.updateTargets).toEqual([oauthTokens, agentConnections, agentConnections, oauthTokens]);
+  });
+
+  /**
+   * The FIRST stamp of a connection is the agent arriving — what the
+   * onboarding waits for — so the owner is told, once: the claim that took
+   * the row from never-used to now is the one that announces, and it is
+   * the only statement that run makes. A connection stamped before loses
+   * the claim, is stamped the ordinary way, and nobody is told.
+   */
+  it('announces an agent connection to its owner on its first use, and never again', async () => {
+    const row = {
+      id: 'tok-row-1', clientId: 'client-1', connectionId: 'conn-1', scope: 'mcp', resource: null,
+      expiresAt: new Date(Date.now() + 60_000), userId: 'user-1', userEmail: 'alice@example.com',
+    };
+    const events = { emit: vi.fn() };
+    const fresh = makeProvider([
+      [row],
+      undefined /* token touch */,
+      [{ userId: 'user-1', client: 'Claude' }] /* the claim: this request took the first stamp */,
+    ]);
+    const freshProvider = new BevelOAuthProvider({ ...providerDeps(fresh.db), events });
+    await freshProvider.verifyAccessToken('bevel-mcp_live');
+    await new Promise((r) => setTimeout(r, 0));
+    expect(events.emit).toHaveBeenCalledTimes(1);
+    expect(events.emit).toHaveBeenCalledWith({
+      kind: 'agent-connected',
+      forUserId: 'user-1',
+      client: 'Claude',
+      agentKind: 'agent',
+      at: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
+    });
+    // The claim WAS the stamp: no second write for the winner.
+    expect(fresh.captured.updateTargets).toEqual([oauthTokens, agentConnections]);
+
+    const used = makeProvider([
+      [row],
+      undefined,
+      [] /* the claim lost: stamped before (or by a racing request) */,
+      undefined /* the ordinary stamp */,
+    ]);
+    const usedEvents = { emit: vi.fn() };
+    await new BevelOAuthProvider({ ...providerDeps(used.db), events: usedEvents }).verifyAccessToken('bevel-mcp_live');
+    await new Promise((r) => setTimeout(r, 0));
+    expect(usedEvents.emit).not.toHaveBeenCalled();
+    expect(used.captured.updateTargets).toEqual([oauthTokens, agentConnections, agentConnections]);
+  });
+
+  it('revokeToken (RFC 7009) ends the agent connection once no live token remains on it, as the owner\'s doing', async () => {
+    const { provider, captured } = makeProvider([
+      [{ connectionId: 'conn-1' }] /* the revoked pair's row */,
+      [{ live: 0 }] /* nothing else live on the connection */,
+      undefined /* connection close */,
+    ]);
+    await provider.revokeToken(CLIENT, { token: 'bevel-mcp_r_old', token_type_hint: 'refresh_token' });
+    expect(captured.updateTargets).toEqual([oauthTokens, agentConnections]);
+    // "Live" excludes a retired row: its successor is the live token, and a
+    // sign-out must not keep the connection open on a refresh token nobody
+    // can use any more.
+    expect(render(captured.where[1]).sql).toMatch(/"oauth_tokens"."revoked_at" is null and "oauth_tokens"."rotated_at" is null/);
+    expect(captured.set[1]).toMatchObject({ revokedBy: 'owner' });
+    expect(captured.set[1].revokedAt).toBeInstanceOf(Date);
+    expect(render(captured.where[2])).toMatchObject({ params: ['conn-1'] });
+    expect(render(captured.where[2]).sql).toMatch(/"agent_connections"."revoked_at" is null/);
+
+    // Another live pair on the connection (the agent signed in twice): the
+    // connection stays.
+    const busy = makeProvider([[{ connectionId: 'conn-1' }], [{ live: 1 }]]);
+    await busy.provider.revokeToken(CLIENT, { token: 'bevel-mcp_r_other' });
+    expect(busy.captured.updateTargets).toEqual([oauthTokens]);
+
+    // An unknown or foreign token revokes nothing and touches no connection.
+    const unknown = makeProvider([[]]);
+    await unknown.provider.revokeToken(CLIENT, { token: 'bevel-mcp_r_gone' });
+    expect(unknown.captured.updateTargets).toEqual([oauthTokens]);
   });
 
   it('verifyAccessToken throws InvalidTokenError for unknown/revoked/expired tokens', async () => {

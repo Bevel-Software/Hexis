@@ -1,0 +1,435 @@
+import { and, count, desc, eq, isNotNull, isNull, lt, max, min, or, type SQL } from 'drizzle-orm';
+import { logger } from '../../shared/logging.js';
+import type { Database } from '../database/index.js';
+import { agentConnections, agentEvents, externalApiKeys, oauthTokens, users } from '../database/index.js';
+import type { IExternalApiKeyService } from '../tool-auth/index.js';
+import {
+  AuditPrincipalNotFoundError,
+  InvalidCursorError,
+  isUuid,
+  pagePrincipalId,
+  parsePagePrincipalId,
+  parseRetentionWindow,
+  type AgentEventInput,
+  type AgentEventPage,
+  type AgentEventView,
+  type AgentUse,
+  type AuditPrincipal,
+  type AuditPrincipalRef,
+  type AuditScope,
+  type IAgentAuditService,
+  type IAgentConnectionStatus,
+  type IAgentEventRecorder,
+} from './audit.contract.js';
+
+const log = logger('audit');
+
+/** The most events one page may carry; the routes clamp to it. */
+export const MAX_EVENT_PAGE = 200;
+
+/** How often, at most, one process sweeps events past the retention window. */
+const PRUNE_INTERVAL_MS = 60 * 60_000;
+
+/**
+ * The Audit log: the write half the MCP proxy records through, and the read
+ * and revoke half its page is built on.
+ *
+ * Writes are fire-and-forget by contract — a tool result must never wait on,
+ * or fail over, its own bookkeeping. Retention is enforced opportunistically
+ * on the write path (one sweep per process per hour, piggybacked on an
+ * insert), the same way the OAuth tables prune themselves on mint: no
+ * scheduler, and a deployment that records nothing has nothing to sweep.
+ *
+ * Connection keys are read through the key service rather than joined here,
+ * so their summary shape (kind, revoked-by, …) has exactly one definition.
+ */
+export class AgentAuditService implements IAgentAuditService, IAgentEventRecorder, IAgentConnectionStatus {
+  private lastPruneAt = 0;
+
+  constructor(
+    private readonly db: Database,
+    private readonly keys: Pick<IExternalApiKeyService, 'listForUser' | 'listForDeployment' | 'ownerOf'>,
+    /** Read per sweep, so a changed setting applies without a restart; null = keep forever. */
+    private readonly retentionDays: () => number | null,
+    private readonly now: () => number = Date.now,
+  ) {}
+
+  record(event: AgentEventInput): void {
+    this.db
+      .insert(agentEvents)
+      .values({
+        userId: event.userId,
+        keyId: event.principal.kind === 'key' ? event.principal.id : null,
+        connectionId: event.principal.kind === 'agent' ? event.principal.id : null,
+        pagePath: event.principal.kind === 'page' ? event.principal.path : null,
+        kind: event.kind,
+        manual: event.manual,
+        name: event.name,
+        outcome: event.outcome,
+        durationMs: event.durationMs,
+        at: new Date(this.now()),
+      })
+      .then(
+        () => this.maybePrune(),
+        (err) => log.warn('recording an agent event failed:', { err }),
+      );
+  }
+
+  /**
+   * Sweep events older than the retention window — at most once per hour per
+   * process, best-effort, never awaited by a caller. A deployment that keeps
+   * events forever sweeps nothing.
+   */
+  private async maybePrune(): Promise<void> {
+    const now = this.now();
+    if (now - this.lastPruneAt < PRUNE_INTERVAL_MS) return;
+    this.lastPruneAt = now;
+    const days = this.retentionDays();
+    if (days === null) return;
+    const cutoff = new Date(now - days * 24 * 60 * 60_000);
+    try {
+      await this.db.delete(agentEvents).where(lt(agentEvents.at, cutoff));
+    } catch (err) {
+      log.warn('agent-event prune failed (non-fatal):', { err });
+    }
+  }
+
+  async listPrincipals(scope: AuditScope): Promise<AuditPrincipal[]> {
+    const mine = scope === 'all' ? null : scope.userId;
+    const [keyRows, connectionRows, countRows, pageRows] = await Promise.all([
+      mine === null ? this.keys.listForDeployment() : this.keysForUser(mine),
+      this.db
+        .select({
+          connection: agentConnections,
+          user: { id: users.id, email: users.email, name: users.name },
+        })
+        .from(agentConnections)
+        .innerJoin(users, eq(agentConnections.userId, users.id))
+        .where(mine === null ? undefined : eq(agentConnections.userId, mine))
+        // Not by email: that column is randomized ciphertext, and ORDER BY
+        // on it is noise. The sort below orders by email in-process.
+        .orderBy(desc(agentConnections.connectedAt)),
+      this.db
+        .select({ keyId: agentEvents.keyId, connectionId: agentEvents.connectionId, n: count() })
+        .from(agentEvents)
+        .where(mine === null ? undefined : eq(agentEvents.userId, mine))
+        .groupBy(agentEvents.keyId, agentEvents.connectionId),
+      // A page has no row of its own: it is every event recorded under one
+      // person and one path, so its "created" is its first call and its
+      // "last used" its latest.
+      this.db
+        .select({
+          userId: agentEvents.userId,
+          pagePath: agentEvents.pagePath,
+          n: count(),
+          first: min(agentEvents.at),
+          last: max(agentEvents.at),
+          user: { id: users.id, email: users.email, name: users.name },
+        })
+        .from(agentEvents)
+        .innerJoin(users, eq(agentEvents.userId, users.id))
+        .where(and(isNotNull(agentEvents.pagePath), mine === null ? undefined : eq(agentEvents.userId, mine)))
+        .groupBy(agentEvents.userId, agentEvents.pagePath, users.id, users.email, users.name),
+    ]);
+
+    const counts = new Map<string, number>();
+    for (const row of countRows) {
+      const id = row.keyId ?? row.connectionId;
+      if (id) counts.set(id, Number(row.n));
+    }
+
+    const principals: AuditPrincipal[] = [
+      ...keyRows.map((k) => ({
+        kind: 'key' as const,
+        id: k.id,
+        label: k.label,
+        keyKind: k.kind,
+        createdAt: k.createdAt,
+        lastUsedAt: k.lastUsedAt,
+        revokedAt: k.revokedAt,
+        revokedBy: k.revokedBy,
+        deletedAt: k.deletedAt,
+        eventCount: counts.get(k.id) ?? 0,
+        user: k.user,
+        agentPath: k.agentPath ?? null,
+      })),
+      ...connectionRows.map(({ connection: c, user }) => ({
+        kind: 'agent' as const,
+        id: c.id,
+        label: c.clientName ?? 'Unnamed agent',
+        createdAt: c.connectedAt.getTime(),
+        lastUsedAt: c.lastUsedAt ? c.lastUsedAt.getTime() : null,
+        revokedAt: c.revokedAt ? c.revokedAt.getTime() : null,
+        revokedBy: (c.revokedBy as 'owner' | 'admin' | null) ?? null,
+        eventCount: counts.get(c.id) ?? 0,
+        user,
+        agentPath: c.agentPath ?? null,
+      })),
+      ...pageRows.flatMap((r) =>
+        r.pagePath
+          ? [
+              {
+                kind: 'page' as const,
+                id: pagePrincipalId(r.userId, r.pagePath),
+                label: r.pagePath,
+                createdAt: toMs(r.first),
+                lastUsedAt: r.last ? toMs(r.last) : null,
+                // A page cannot be revoked: it acts only while its viewer has it open.
+                revokedAt: null,
+                revokedBy: null,
+                eventCount: Number(r.n),
+                user: r.user,
+              },
+            ]
+          : [],
+      ),
+    ];
+    // Per account (by email), live before revoked, most recently used first,
+    // newest first among the never-used — the order the page shows without
+    // re-sorting, and the one the Connection keys overview had.
+    principals.sort((a, b) => {
+      const byEmail = a.user.email.localeCompare(b.user.email);
+      if (byEmail !== 0) return byEmail;
+      const aRevoked = a.revokedAt !== null;
+      const bRevoked = b.revokedAt !== null;
+      if (aRevoked !== bRevoked) return aRevoked ? 1 : -1;
+      const byUse = (b.lastUsedAt ?? 0) - (a.lastUsedAt ?? 0);
+      return byUse !== 0 ? byUse : b.createdAt - a.createdAt;
+    });
+    return principals;
+  }
+
+  /** One person's keys, with the owner attached the way the deployment listing attaches it. */
+  private async keysForUser(userId: string) {
+    const [keys, [user]] = await Promise.all([
+      this.keys.listForUser(userId),
+      this.db
+        .select({ id: users.id, email: users.email, name: users.name })
+        .from(users)
+        .where(eq(users.id, userId))
+        .limit(1),
+    ]);
+    if (!user) return [];
+    return keys.map((k) => ({ ...k, user }));
+  }
+
+  async ownerOf(principal: AuditPrincipalRef): Promise<string | null> {
+    if (principal.kind === 'page') {
+      // The person is in the id; the page exists for them once it has called something.
+      const page = parsePagePrincipalId(principal.id);
+      if (!page) return null;
+      const [row] = await this.db
+        .select({ id: agentEvents.id })
+        .from(agentEvents)
+        .where(and(eq(agentEvents.userId, page.userId), eq(agentEvents.pagePath, page.path)))
+        .limit(1);
+      return row ? page.userId : null;
+    }
+    if (principal.kind === 'agent') {
+      const [row] = await this.db
+        .select({ userId: agentConnections.userId })
+        .from(agentConnections)
+        .where(eq(agentConnections.id, principal.id))
+        .limit(1);
+      return row?.userId ?? null;
+    }
+    // A key is the key service's to answer for, like every other read of one.
+    return this.keys.ownerOf(principal.id);
+  }
+
+  async listEvents(
+    principal: AuditPrincipalRef,
+    page: { before?: string; limit: number },
+  ): Promise<AgentEventPage> {
+    const limit = Math.max(1, Math.min(MAX_EVENT_PAGE, Math.floor(page.limit)));
+    const byPrincipal = principalFilter(principal);
+    // Keyset on (at, id): a page boundary between two events at the same
+    // instant is still a boundary, and a row inserted while the reader pages
+    // never shifts what the next page returns.
+    const cursor = page.before ? parseCursor(page.before) : null;
+    if (page.before && !cursor) throw new InvalidCursorError();
+    const after: SQL | undefined = cursor
+      ? or(
+          lt(agentEvents.at, cursor.at),
+          and(eq(agentEvents.at, cursor.at), lt(agentEvents.id, cursor.id)),
+        )
+      : undefined;
+    // The total is counted on the FIRST page only: a reader paging back
+    // through a busy principal's history would otherwise pay a full count of
+    // the same number on every step, for a figure the page already holds.
+    const [rows, totals] = await Promise.all([
+      this.db
+        .select({
+          id: agentEvents.id,
+          kind: agentEvents.kind,
+          manual: agentEvents.manual,
+          name: agentEvents.name,
+          outcome: agentEvents.outcome,
+          at: agentEvents.at,
+        })
+        .from(agentEvents)
+        .where(and(byPrincipal, after))
+        .orderBy(desc(agentEvents.at), desc(agentEvents.id))
+        .limit(limit + 1),
+      cursor ? null : this.db.select({ total: count() }).from(agentEvents).where(byPrincipal),
+    ]);
+    const hasMore = rows.length > limit;
+    const pageRows = hasMore ? rows.slice(0, limit) : rows;
+    const events: AgentEventView[] = pageRows.map((r) => ({
+      id: r.id,
+      kind: r.kind as AgentEventView['kind'],
+      manual: r.manual,
+      name: r.name,
+      outcome: r.outcome as AgentEventView['outcome'],
+      at: r.at.getTime(),
+    }));
+    const last = pageRows[pageRows.length - 1];
+    return {
+      events,
+      total: totals ? Number(totals[0]?.total ?? 0) : null,
+      nextCursor: hasMore && last ? formatCursor(last.at, last.id) : null,
+    };
+  }
+
+  /**
+   * Whether one person's agent has reached the platform yet — what the
+   * onboarding asks once on arrival (the `agent-connected` event the stamp
+   * paths emit tells it the moment it changes). Two single-row reads on the
+   * per-user indexes, never a scan of the event log.
+   *
+   * Read from the `last_used_at` stamps, not from `agent_events`: an agent
+   * stamps its connection (or key) on its FIRST authenticated request — the
+   * `initialize` / `tools/list` every client sends straight after connecting
+   * — while an event is written only once it calls a tool, which may be
+   * never. The stamps are also outside the retention sweep, so "connected"
+   * cannot quietly turn back into "waiting" when old events are pruned.
+   *
+   * Live rows only: an agent its owner disconnected, or an admin revoked, is
+   * not a connected agent, whatever it did before. The key's columns are read
+   * here rather than through the key service because the service has no
+   * single-row read and this question needs only two columns of one row.
+   */
+  async lastAgentUse(userId: string): Promise<AgentUse | null> {
+    const [[agent], [key]] = await Promise.all([
+      this.db
+        .select({ client: agentConnections.clientName, at: agentConnections.lastUsedAt })
+        .from(agentConnections)
+        .where(
+          and(
+            eq(agentConnections.userId, userId),
+            isNull(agentConnections.revokedAt),
+            isNotNull(agentConnections.lastUsedAt),
+          ),
+        )
+        .orderBy(desc(agentConnections.lastUsedAt))
+        .limit(1),
+      this.db
+        .select({ client: externalApiKeys.label, at: externalApiKeys.lastUsedAt })
+        .from(externalApiKeys)
+        .where(
+          and(
+            eq(externalApiKeys.userId, userId),
+            isNull(externalApiKeys.revokedAt),
+            isNotNull(externalApiKeys.lastUsedAt),
+          ),
+        )
+        .orderBy(desc(externalApiKeys.lastUsedAt))
+        .limit(1),
+    ]);
+    const uses = [
+      agent?.at ? { at: agent.at, client: agent.client ?? 'Unnamed agent', kind: 'agent' as const } : null,
+      key?.at ? { at: key.at, client: key.client, kind: 'key' as const } : null,
+    ].filter((u): u is AgentUse => u !== null);
+    if (uses.length === 0) return null;
+    return uses.reduce((newest, u) => (u.at.getTime() > newest.at.getTime() ? u : newest));
+  }
+
+  async revokeConnection(id: string, by: 'owner' | 'admin', ownerUserId?: string): Promise<void> {
+    const scope = ownerUserId
+      ? and(eq(agentConnections.id, id), eq(agentConnections.userId, ownerUserId))!
+      : eq(agentConnections.id, id);
+    await this.db.transaction(async (tx) => {
+      const revoked = await tx
+        .update(agentConnections)
+        .set({ revokedAt: new Date(this.now()), revokedBy: by })
+        .where(and(scope, isNull(agentConnections.revokedAt)))
+        .returning({ id: agentConnections.id });
+      if (revoked.length === 0) {
+        // Already revoked stays idempotent; out of scope or unknown throws —
+        // the same split `ExternalApiKeyService.markRevoked` makes.
+        const [existing] = await tx
+          .select({ id: agentConnections.id })
+          .from(agentConnections)
+          .where(scope)
+          .limit(1);
+        if (!existing) throw new AuditPrincipalNotFoundError();
+        return;
+      }
+      // Every live token of the connection, access and refresh alike: the
+      // agent's next request 401s, its refresh fails, and re-authorizing —
+      // through the browser, as a person — is the only way back in.
+      await tx
+        .update(oauthTokens)
+        .set({ revokedAt: new Date(this.now()) })
+        .where(and(eq(oauthTokens.connectionId, id), isNull(oauthTokens.revokedAt)));
+    });
+  }
+}
+
+/** `<epoch ms>.<uuid>` — the page's opaque-enough cursor. */
+function formatCursor(at: Date, id: string): string {
+  return `${at.getTime()}.${id}`;
+}
+
+/**
+ * The cursor back into its parts, or null for anything this service did not
+ * issue: the id must be a uuid (the column is one, and Postgres refuses to
+ * compare it with anything else) and the instant a whole number of epoch
+ * milliseconds a `timestamp` can hold.
+ */
+/** The events of one principal. A page id that names no page matches nothing. */
+function principalFilter(principal: AuditPrincipalRef): SQL {
+  if (principal.kind === 'key') return eq(agentEvents.keyId, principal.id);
+  if (principal.kind === 'agent') return eq(agentEvents.connectionId, principal.id);
+  const page = parsePagePrincipalId(principal.id);
+  if (!page) return isNull(agentEvents.id);
+  return and(eq(agentEvents.userId, page.userId), eq(agentEvents.pagePath, page.path))!;
+}
+
+/** An aggregate's timestamp, which a driver may hand back as a Date or as the text Postgres sent. */
+function toMs(value: Date | string | null): number {
+  if (value === null) return 0;
+  return value instanceof Date ? value.getTime() : new Date(value).getTime();
+}
+
+function parseCursor(raw: string): { at: Date; id: string } | null {
+  const dot = raw.indexOf('.');
+  if (dot < 0) return null;
+  const msText = raw.slice(0, dot);
+  const id = raw.slice(dot + 1);
+  if (!/^\d{1,15}$/.test(msText) || !isUuid(id)) return null;
+  return { at: new Date(Number(msText)), id };
+}
+
+/** The last invalid setting value warned about, so a standing misconfiguration is said once, not once per prune. */
+let warnedInvalidRetention: string | null = null;
+
+/**
+ * The retention window the service runs on, in days — or null to keep
+ * events forever, which is what a blank, zero or negative setting means. A
+ * value that is not a window at all is kept-forever too, said out loud once:
+ * the Deployment page shows an environment value as the one in effect and
+ * would otherwise be the only place claiming a window nobody is keeping.
+ */
+export function retentionDaysFrom(raw: string): number | null {
+  const window = parseRetentionWindow(raw);
+  if (window === 'forever') return null;
+  if (window !== null) return window.days;
+  if (raw !== warnedInvalidRetention) {
+    warnedInvalidRetention = raw;
+    log.warn(
+      `auditRetentionDays is "${raw}", which is not a whole number of days — keeping events forever until it is fixed.`,
+    );
+  }
+  return null;
+}

@@ -1,0 +1,136 @@
+import { createContext, useCallback, useContext, useState } from 'react';
+import { Download } from 'lucide-react';
+import { Button } from '../../../../shared/components';
+import { useRendererFileRef, useRendererWorkspaceId } from './rendererWorkspace';
+import { useRendererSurface } from './rendererSurface';
+import { rawFileUrl } from '../../services/workspace.api';
+import { downloadViaBlob } from './downloadFile';
+
+/**
+ * The open file's resolved `download:` permission, provided by FileViewer
+ * from the access lookup it already performs (null = unknown/in flight —
+ * treated optimistically, like the editor; the backend stays the
+ * authoritative gate either way). A context rather than a renderer prop so
+ * the renderer contract stays permission-agnostic.
+ */
+export const CanDownloadContext = createContext<boolean | null>(null);
+
+/**
+ * The document viewers' way out of the browser. Every office-document viewer
+ * here is a REDUCTION — a pptx becomes an outline, an xlsx grid gets capped,
+ * a legacy `.doc` is not rendered at all — so each one offers the original
+ * bytes alongside its own rendering.
+ *
+ * Same endpoint and `?download=1` shape as the file tree's context-menu
+ * Download (see `FileExplorer.handleDownload`): the backend resolves the
+ * per-path `download:` access verb and sets Content-Disposition; a 403
+ * surfaces in the error text below rather than being preflighted away.
+ */
+export function DownloadFileButton({
+  filePath,
+  size = 'tiny',
+  label = 'Download',
+  pending = false,
+}: {
+  filePath: string;
+  /** `sm` where the download is the page's main affordance (pptx outline). */
+  size?: 'tiny' | 'sm';
+  /**
+   * What the button says. `Download` beside a rendering that is already on
+   * screen; the change-request dialog names the VERSION instead ("Download
+   * the proposed file"), because there the bytes are the only thing on offer
+   * and which branch they come from is the whole question.
+   */
+  label?: string;
+  /**
+   * WHICH bytes this button is for is not settled yet.
+   *
+   * Only Version history sets it, and only because the save it shows may be
+   * the one that DELETED the file — in which case "this version" is the side
+   * BEFORE the save, which is known only once the patch has come back. A click
+   * before then would ask for the after side of a deleting save and get a 404
+   * for a version the reader can see listed. Idle for a fraction of a second
+   * is the honest answer; a wrong download is not.
+   */
+  pending?: boolean;
+}) {
+  const workspaceId = useRendererWorkspaceId();
+  /**
+   * A past save, when Version history mounted this. "Download this version"
+   * has to deliver the bytes of THAT save — for the save that deleted the
+   * file, the ones just before it — and the whole of that is which URL the
+   * download reads, under the same `download:` verb as any other.
+   */
+  const fileRef = useRendererFileRef();
+  /**
+   * The save as PRIMITIVES, hoisted out of the object so the read effect can
+   * depend on exactly what it reads. Depending on `fileRef` itself would put
+   * a context object in the dependency list.
+   */
+  const versionRef = fileRef?.ref ?? null;
+  const versionSide = fileRef?.side;
+  const surface = useRendererSurface();
+  const canDownload = useContext(CanDownloadContext);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const fileName = filePath.slice(filePath.lastIndexOf('/') + 1);
+
+  const handleDownload = useCallback(async () => {
+    if (!workspaceId || busy || pending) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const outcome = await downloadViaBlob(
+        rawFileUrl(workspaceId, filePath, {
+          download: true,
+          ref: versionRef,
+          side: versionSide,
+        }),
+        fileName,
+      );
+      if (!outcome.ok) {
+        setError(`Download failed (HTTP ${outcome.status})`);
+        return;
+      }
+    } catch (err) {
+      console.error('[DownloadFileButton] download failed:', err);
+      setError(err instanceof Error ? err.message : 'Download failed.');
+    } finally {
+      setBusy(false);
+    }
+  }, [workspaceId, busy, pending, filePath, fileName, versionRef, versionSide]);
+
+  // A surface that has no download route draws no download control — see
+  // `offersDownload`. After the hooks, never before them.
+  if (surface && !surface.offersDownload) return null;
+
+  return (
+    <span className="inline-flex items-center gap-2">
+      {error && (
+        <span role="alert" className="text-detail text-danger">
+          {error}
+        </span>
+      )}
+      <Button
+        variant="outline"
+        size={size}
+        leadingIcon={<Download size={size === 'sm' ? 14 : 12} />}
+        onClick={() => void handleDownload()}
+        // Disabled on a hard "no" about PERMISSION — while that lookup is in
+        // flight the button stays optimistic, mirroring the editor; a wrong
+        // guess is still caught by the backend's own gate on the raw endpoint.
+        // `pending` is a different kind of unknown: not who may have the
+        // bytes, but which bytes, and guessing there downloads the wrong file
+        // (or nothing at all).
+        disabled={busy || pending || canDownload === false}
+        title={
+          canDownload === false
+            ? 'You do not have download permission for this file.'
+            : `Download ${fileName}`
+        }
+      >
+        {busy ? 'Downloading…' : label}
+      </Button>
+    </span>
+  );
+}

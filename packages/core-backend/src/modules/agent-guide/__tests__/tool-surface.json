@@ -1,0 +1,514 @@
+{
+  "apply_file_upload": {
+    "servedTo": [
+      "MCP",
+      "in-app agent"
+    ],
+    "arguments": [
+      "body.all",
+      "body.branch (required)",
+      "body.destination (required)",
+      "body.mode: create | overwrite | update",
+      "body.sessionId",
+      "body.token (required)"
+    ]
+  },
+  "branch_status": {
+    "servedTo": [
+      "MCP",
+      "in-app agent"
+    ],
+    "arguments": [
+      "body.base",
+      "body.branch (required)",
+      "body.sessionId"
+    ]
+  },
+  "call_tool_chain": {
+    "servedTo": [
+      "MCP"
+    ],
+    "arguments": [
+      "code (required)",
+      "max_output_size",
+      "timeout"
+    ]
+  },
+  "commit_change": {
+    "servedTo": [
+      "MCP",
+      "in-app agent"
+    ],
+    "arguments": [
+      "body.branch (required)",
+      "body.description",
+      "body.summary (required)"
+    ]
+  },
+  "compare_file": {
+    "servedTo": [
+      "MCP",
+      "in-app agent"
+    ],
+    "arguments": [
+      "body.at",
+      "body.branch (required)",
+      "body.from",
+      "body.path (required)",
+      "body.sessionId",
+      "body.to"
+    ]
+  },
+  "copy_file": {
+    "servedTo": [
+      "MCP",
+      "in-app agent"
+    ],
+    "arguments": [
+      "body.branch (required)",
+      "body.dest (required)",
+      "body.dryRun",
+      "body.sessionId",
+      "body.src (required)"
+    ]
+  },
+  "create_branch": {
+    "servedTo": [
+      "MCP",
+      "in-app agent"
+    ],
+    "arguments": [
+      "body.branch (required)",
+      "body.name (required)"
+    ]
+  },
+  "create_plugin": {
+    "servedTo": [
+      "MCP",
+      "in-app agent"
+    ],
+    "arguments": [
+      "body.name (required)",
+      "body.parent"
+    ]
+  },
+  "delete_branch": {
+    "servedTo": [
+      "MCP",
+      "in-app agent"
+    ],
+    "arguments": [
+      "body.discardUnmerged",
+      "body.dryRun",
+      "body.name (required)"
+    ]
+  },
+  "delete_file": {
+    "servedTo": [
+      "MCP",
+      "in-app agent"
+    ],
+    "arguments": [
+      "body.branch (required)",
+      "body.path (required)",
+      "body.sessionId"
+    ]
+  },
+  "delete_folder": {
+    "servedTo": [
+      "MCP",
+      "in-app agent"
+    ],
+    "arguments": [
+      "body.branch (required)",
+      "body.confirm",
+      "body.dryRun",
+      "body.path (required)",
+      "body.sessionId"
+    ]
+  },
+  "edit_file": {
+    "servedTo": [
+      "MCP",
+      "in-app agent"
+    ],
+    "arguments": [
+      "body.branch (required)",
+      "body.new_string (required)",
+      "body.old_string (required)",
+      "body.path (required)",
+      "body.replace_all",
+      "body.sessionId"
+    ]
+  },
+  "file_stat": {
+    "servedTo": [
+      "MCP",
+      "in-app agent"
+    ],
+    "arguments": [
+      "body.branch (required)",
+      "body.explainAccess",
+      "body.path (required)",
+      "body.sessionId"
+    ]
+  },
+  "get_agent_guide": {
+    "servedTo": [
+      "MCP",
+      "in-app agent"
+    ],
+    "arguments": [
+      "body.section"
+    ]
+  },
+  "get_change_request": {
+    "servedTo": [
+      "MCP",
+      "in-app agent"
+    ],
+    "arguments": [
+      "body.number (required)"
+    ]
+  },
+  "get_skill": {
+    "servedTo": [
+      "MCP",
+      "in-app agent"
+    ],
+    "arguments": [
+      "body.branch",
+      "body.file",
+      "body.name (required)",
+      "body.version"
+    ]
+  },
+  "grep": {
+    "servedTo": [
+      "MCP",
+      "in-app agent"
+    ],
+    "arguments": [
+      "body.branch (required)",
+      "body.ignore_case",
+      "body.max_results",
+      "body.path",
+      "body.pattern (required)",
+      "body.sessionId"
+    ]
+  },
+  "list_branches": {
+    "servedTo": [
+      "MCP",
+      "in-app agent"
+    ],
+    "arguments": []
+  },
+  "list_change_request_files": {
+    "servedTo": [
+      "MCP",
+      "in-app agent"
+    ],
+    "arguments": [
+      "body.include: patches",
+      "body.number (required)",
+      "body.page",
+      "body.per_page"
+    ]
+  },
+  "list_change_request_reviews": {
+    "servedTo": [
+      "MCP",
+      "in-app agent"
+    ],
+    "arguments": [
+      "body.number (required)",
+      "body.page",
+      "body.per_page"
+    ]
+  },
+  "list_change_requests": {
+    "servedTo": [
+      "MCP",
+      "in-app agent"
+    ],
+    "arguments": [
+      "body.author",
+      "body.base",
+      "body.head",
+      "body.page",
+      "body.per_page",
+      "body.state: open | closed | all"
+    ]
+  },
+  "list_file_changes": {
+    "servedTo": [
+      "MCP",
+      "in-app agent"
+    ],
+    "arguments": [
+      "body.branch (required)",
+      "body.limit",
+      "body.path (required)",
+      "body.sessionId"
+    ]
+  },
+  "list_files": {
+    "servedTo": [
+      "MCP",
+      "in-app agent"
+    ],
+    "arguments": [
+      "body.branch (required)",
+      "body.path",
+      "body.sessionId"
+    ]
+  },
+  "list_local_tools": {
+    "servedTo": [
+      "MCP",
+      "in-app agent"
+    ],
+    "arguments": []
+  },
+  "list_skills": {
+    "servedTo": [
+      "MCP",
+      "in-app agent"
+    ],
+    "arguments": [
+      "body.branch"
+    ]
+  },
+  "list_tool_setup": {
+    "servedTo": [
+      "MCP",
+      "in-app agent"
+    ],
+    "arguments": [
+      "body.branch"
+    ]
+  },
+  "list_tools": {
+    "servedTo": [
+      "MCP"
+    ],
+    "arguments": []
+  },
+  "merge_branch": {
+    "servedTo": [
+      "MCP",
+      "in-app agent"
+    ],
+    "arguments": [
+      "body.source (required)",
+      "body.target (required)"
+    ]
+  },
+  "mkdir": {
+    "servedTo": [
+      "MCP",
+      "in-app agent"
+    ],
+    "arguments": [
+      "body.branch (required)",
+      "body.path (required)",
+      "body.sessionId"
+    ]
+  },
+  "move_file": {
+    "servedTo": [
+      "MCP",
+      "in-app agent"
+    ],
+    "arguments": [
+      "body.branch (required)",
+      "body.confirm",
+      "body.dest (required)",
+      "body.dryRun",
+      "body.rewriteLinks",
+      "body.sessionId",
+      "body.src (required)"
+    ]
+  },
+  "my_plugin": {
+    "servedTo": [
+      "MCP",
+      "in-app agent"
+    ],
+    "arguments": []
+  },
+  "open_change_request": {
+    "servedTo": [
+      "MCP",
+      "in-app agent"
+    ],
+    "arguments": [
+      "body.description",
+      "body.include: patches | all-paths",
+      "body.sourceBranch (required)",
+      "body.targetBranch (required)",
+      "body.title (required)"
+    ]
+  },
+  "open_page": {
+    "servedTo": [
+      "MCP"
+    ],
+    "arguments": [
+      "body.heading",
+      "body.path (required)",
+      "body.sessionId"
+    ]
+  },
+  "read_file": {
+    "servedTo": [
+      "MCP",
+      "in-app agent"
+    ],
+    "arguments": [
+      "body.branch (required)",
+      "body.limit",
+      "body.offset",
+      "body.path (required)",
+      "body.sessionId"
+    ]
+  },
+  "read_file_at": {
+    "servedTo": [
+      "MCP",
+      "in-app agent"
+    ],
+    "arguments": [
+      "body.at (required)",
+      "body.branch (required)",
+      "body.path (required)",
+      "body.sessionId"
+    ]
+  },
+  "request_file_download": {
+    "servedTo": [
+      "MCP",
+      "in-app agent"
+    ],
+    "arguments": [
+      "body.branch (required)",
+      "body.paths (required)",
+      "body.sessionId"
+    ]
+  },
+  "request_file_upload": {
+    "servedTo": [
+      "MCP",
+      "in-app agent"
+    ],
+    "arguments": []
+  },
+  "save_file": {
+    "servedTo": [
+      "MCP",
+      "in-app agent"
+    ],
+    "arguments": [
+      "body.branch (required)",
+      "body.path (required)"
+    ]
+  },
+  "share_current_branch": {
+    "servedTo": [
+      "MCP",
+      "in-app agent"
+    ],
+    "arguments": [
+      "body.branch (required)"
+    ]
+  },
+  "start_session": {
+    "servedTo": [
+      "MCP"
+    ],
+    "arguments": []
+  },
+  "switch_branch": {
+    "servedTo": [
+      "in-app agent"
+    ],
+    "arguments": [
+      "body.branch (required)"
+    ]
+  },
+  "tools_info": {
+    "servedTo": [
+      "MCP"
+    ],
+    "arguments": [
+      "tool_names (required)"
+    ]
+  },
+  "unzip": {
+    "servedTo": [
+      "MCP",
+      "in-app agent"
+    ],
+    "arguments": [
+      "body.branch (required)",
+      "body.destination",
+      "body.path (required)",
+      "body.sessionId"
+    ]
+  },
+  "update_branch": {
+    "servedTo": [
+      "MCP",
+      "in-app agent"
+    ],
+    "arguments": [
+      "body.branch (required)",
+      "body.from",
+      "body.resolutions",
+      "body.resolutions[].choose: ours | theirs | delete",
+      "body.resolutions[].content",
+      "body.resolutions[].path (required)",
+      "body.sessionId"
+    ]
+  },
+  "update_change_request": {
+    "servedTo": [
+      "MCP",
+      "in-app agent"
+    ],
+    "arguments": [
+      "body.appendDescription",
+      "body.description",
+      "body.number (required)",
+      "body.title"
+    ]
+  },
+  "write_file": {
+    "servedTo": [
+      "MCP",
+      "in-app agent"
+    ],
+    "arguments": [
+      "body.branch (required)",
+      "body.content (required)",
+      "body.mode: create | overwrite | update",
+      "body.path (required)",
+      "body.sessionId"
+    ]
+  },
+  "write_files": {
+    "servedTo": [
+      "MCP",
+      "in-app agent"
+    ],
+    "arguments": [
+      "body.branch (required)",
+      "body.files (required)",
+      "body.files[].content (required)",
+      "body.files[].path (required)",
+      "body.mode: create | overwrite | update",
+      "body.sessionId"
+    ]
+  }
+}

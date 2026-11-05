@@ -1,88 +1,229 @@
 import express from 'express';
+import { inArray } from 'drizzle-orm';
+import { logger } from '../../shared/logging.js';
+import { printable } from '../../shared/printable.js';
+
+// The audit lines this file writes have always carried their own tags —
+// `access.grant`, `access.revoke` and their sub-cases — so each keeps it.
+const grantLog = logger('access.grant');
+const revokeLog = logger('access.revoke');
 import type { AuthUser } from '@bevel-software/platform-shared';
-import { isProtectedBranch, DEFAULT_BRANCH } from '@bevel-software/platform-shared';
+import {
+  pluginManifestName,
+  FOLDER_GOVERNS_ACCESS_KIND,
+} from '@bevel-software/platform-shared';
 import type {
   IAccessControl,
   GrantPrincipal,
   GrantSources,
 } from './access-control.interface.js';
-import type { WorkspaceService } from '../workspace/workspace.service.js';
-import { branchForWorkspaceId, workspaceIdForBranch } from '../workspace/workspace.service.js';
-import type { AuthService } from '../auth/auth.service.js';
-import type { WorkflowService } from '../workflow/workflow.service.js';
-import type { WorkflowEventBus } from '../workflow/event-bus.js';
-import { WorkflowDomainError } from '../workflow/workflow.errors.js';
-import { AccessDeniedError } from './access-errors.js';
+import type { WorkspaceService } from '../workspace/index.js';
+import type { KbContext } from '../../shared/kb-context.js';
+import type { ITreeWalker } from '../../shared/fs.contract.js';
+import { branchForWorkspaceId } from '../../shared/workspace-id.js';
+import type { AuthService, IAccountSwitchGuard } from '../auth/index.js';
+import type { VersionControlService, VersionControlEventBus } from '../version-control/index.js';
+import { VersionControlDomainError } from '../../shared/domain-errors.js';
+import { AccessDeniedError } from '../access-model/index.js';
 import {
   AccessMutationService,
   AccessMutationError,
   accessMdPathForFolder,
+  assertFileCarriesAccessRules,
+  fileCarriesAccessRules,
+  governingFolderOf,
   type TargetKind,
 } from './access-mutation.service.js';
-import { canonicalRoleName, EVERYONE_CANONICAL, type Verb } from './access-control.service.js';
+import {
+  canonicalRoleName,
+  EVERYONE_CANONICAL,
+  PLUGIN_TOKEN_PREFIX,
+  PLUGIN_TOKEN_VERBS,
+  ROLE_TOKEN_PREFIX,
+  GROUP_TOKEN_PREFIX,
+  splitPrincipalToken,
+  type PluginTokenVerb,
+  type Principal,
+  type Verb,
+} from '../access-model/index.js';
 import { listAccessDeclarationsUnder } from './access-declarations.js';
-import { RolesAdminService, RolesAdminError } from './roles-admin.service.js';
-import type { Principal } from './access-splice.js';
-import type { Database } from '../database/connection.js';
-import { users } from '../database/schema.js';
-import '../auth/auth.middleware.js';
+import { emailsInView, holderPrincipals, labelAccountHolders, resolveAccessView } from './access-view.js';
+import type { AccessView, LabelledAccessView } from './access-view.js';
+import { toHttpError as sharedToHttpError, requireNonEmptyString as sharedRequireNonEmptyString } from './admin-route-helpers.js';
+import { RolesAdminService } from './roles-admin.service.js';
+import type { Database } from '../database/index.js';
+import { users } from '../database/index.js';
+import { canonicalEmail } from '../../shared/email-identity.js';
+import '../auth/index.js';
 
 /** Verbs the share UI may grant. Verbs are independent — `download` is grantable on its own. */
 const GRANTABLE_VERBS = new Set<string>(['read', 'write', 'owner', 'download']);
 
-function toHttpError(
-  err: unknown,
-): { status: number; body: Record<string, unknown> } {
-  if (err instanceof WorkflowDomainError) {
-    return { status: err.status, body: { error: err.message, ...(err.payload ?? {}) } };
-  }
-  const message = err instanceof Error ? err.message : 'Unknown error';
-  return { status: 500, body: { error: message } };
+/** Shared access-family error shape (see admin-route-helpers): typed domain
+ *  errors render themselves; anything else is logged and answered generically
+ *  — a raw `err.message` never leaks through a 500. */
+function toHttpError(err: unknown): { status: number; body: Record<string, unknown> } {
+  return sharedToHttpError(err, 'access');
+}
+
+/** Shared non-empty-string coercion; 400s render as RolesAdminError-family. */
+function requireNonEmptyString(value: unknown, field: string): string {
+  return sharedRequireNonEmptyString(value, field);
 }
 
 /**
- * Coerce a request-body field that must be a non-empty string. Rejects arrays,
- * objects, numbers, null — anything `String()` would silently stringify into a
- * bogus role name / email (`[object Object]`, `"a,b"`) — with a 400 instead of
- * persisting garbage. Returns the raw string (untrimmed; the service trims).
+ * Is this the "the folder governs this file" refusal? It is the one mutation
+ * failure that is guaranteed to have written nothing — it is thrown as the
+ * file is read — so the lock it holds must be released without discarding the
+ * path (see `withEditLock`).
  */
-function requireNonEmptyString(value: unknown, field: string): string {
-  if (typeof value !== 'string' || value.trim() === '') {
-    throw new RolesAdminError(`${field} must be a non-empty string`, 400);
-  }
-  return value;
+function isFolderGovernsRefusal(err: unknown): boolean {
+  return (
+    err instanceof AccessMutationError &&
+    err.payload?.kind === FOLDER_GOVERNS_ACCESS_KIND
+  );
 }
 
 export function createAccessRoutes(
   accessControl: IAccessControl,
   workspaceService: WorkspaceService,
   authService: AuthService,
-  workflowService: WorkflowService,
-  eventBus: WorkflowEventBus,
+  /** Auth's switch-off coordination, for the invite's promotion (`ifActive`). */
+  switchGuard: IAccountSwitchGuard,
+  versionControlService: VersionControlService,
+  eventBus: VersionControlEventBus,
   db: Database,
-  kbDirName: string,
+  kb: KbContext,
+  /** The composition root's walk, for the roles admin's reference scan. */
+  disk: ITreeWalker,
+  /** This deployment's configured admins — the break-glass recovery roster. */
+  recoveryAdmins: readonly string[] = [],
 ): express.Router {
   const router = express.Router({ mergeParams: true });
+  const { kbDirName } = kb;
   const mutation = new AccessMutationService(workspaceService, accessControl, kbDirName);
   const rolesAdmin = new RolesAdminService(
     workspaceService,
-    workflowService,
+    versionControlService,
     accessControl,
+    disk,
     kbDirName,
-    () => DEFAULT_BRANCH,
+    () => kb.defaultBranch,
     eventBus,
+    recoveryAdmins,
   );
 
-  // Roles (plugins) are authoritative on the DEFAULT branch — the Roles admin
-  // screen only ever edits roles.yaml there. Resolve the plugin list from the
-  // default-branch workspace so the share dialog suggests (and the grant route
-  // accepts) the same roles the Roles screen manages, regardless of which branch
-  // the caller is viewing. People stay branch-local (the caller's own workspace).
-  const defaultBranchPlugins = async (): Promise<string[]> => {
-    await workspaceService.getOrCreateForBranch(DEFAULT_BRANCH);
-    const { plugins } = await accessControl.kbPrincipals(workspaceIdForBranch(DEFAULT_BRANCH));
-    return plugins;
+  // Roles and groups are authoritative on the DEFAULT branch — the Roles
+  // admin screen only ever edits roles.yaml there, and the ACTIVE group
+  // source (IdP-synced or manual) lives there. Resolve both from the
+  // default-branch workspace's CACHED resolver model (one call, no per-
+  // keystroke file reads) so the share dialog suggests — and the grant route
+  // accepts — the same principals the admin screens manage, regardless of
+  // which branch the caller is viewing. People stay branch-local (the
+  // caller's own workspace).
+  const defaultBranchPrincipals = async (): Promise<{
+    roles: string[];
+    groups: string[];
+    plugins: { name: string; folder: string }[];
+  }> => {
+    await workspaceService.getOrCreateForBranch(kb.defaultBranch);
+    const { roles, groups, plugins } = await accessControl.kbPrincipals(kb.defaultWorkspaceId());
+    // `plugins` is defensive: an older resolver double may omit it.
+    return { roles, groups, plugins: plugins ?? [] };
   };
+
+  /**
+   * The groups `email` may be offered as a grantee, or name in a grant: the
+   * resolver's ONE answer to who sees which group (`visibleGroups`: every
+   * group for an admin, only their own for anyone else), the same the
+   * Library's Groups tab lists. Read on the default branch, where the active
+   * group source lives. The picker never names a group the caller has no
+   * part in, and the grant route refuses one with the same words as a group
+   * that does not exist.
+   */
+  const visibleGroups = (email: string, groups: string[]): Promise<string[]> =>
+    accessControl.visibleGroups(kb.defaultWorkspaceId(), email, groups);
+
+  /**
+   * The plugins `email` may DISCOVER — read the folder's access.md, the same
+   * verdict the plugin index lists on. Both the suggest list and the grant
+   * route go through this, so a plugin hidden from the picker cannot be
+   * named in a grant either, and an undiscoverable one answers exactly like
+   * one that does not exist.
+   */
+  const discoverablePlugins = async (
+    email: string,
+    plugins: { name: string; folder: string }[],
+  ): Promise<{ name: string; folder: string }[]> => {
+    if (plugins.length === 0) return [];
+    const verdicts = await accessControl.canReadBatch(
+      kb.defaultWorkspaceId(),
+      email,
+      plugins.map((p) => `${p.folder}/access.md`),
+    );
+    return plugins.filter((p) => verdicts.get(`${p.folder}/access.md`) === true);
+  };
+
+  /**
+   * What the mutation routes accept as a principal. `group` and `plugin`
+   * exist only at this boundary: in the access.md entry grammar a group grant
+   * is the `group/<Name>` token and a plugin grant is the
+   * `plugin/<Name>/<verb>` token, so both are spliced as role-shaped
+   * principals — the separate kinds buy validation against the right
+   * namespace and honest 404s.
+   */
+  type RoutePrincipal =
+    | Principal
+    | { kind: 'group'; group: string }
+    | { kind: 'plugin'; plugin: string; verb: PluginTokenVerb };
+
+  /**
+   * The role-shaped principal the splice layer actually writes/matches.
+   *   - group     → the explicit `group/<Name>` token. Never the bare name:
+   *                 a bare name is the ROLE whenever one of that name exists,
+   *                 so a bare group grant could silently mean someone else.
+   *   - role      → the explicit `role/<Name>` token. Bare spellings in
+   *                 existing files remain read-compatible. The built-in
+   *                 `everyone` stays bare: it is not a roles.yaml role and
+   *                 has no `role/` alias.
+   */
+  const asSplicePrincipal = (p: RoutePrincipal): Principal => {
+    if (p.kind === 'group') return { kind: 'role', role: `${GROUP_TOKEN_PREFIX}${groupName(p.group)}` };
+    // Written with the folder's own casing; `parseAccessEntry` canonicalises
+    // the name half to the manifest slug on the way back in.
+    if (p.kind === 'plugin') return { kind: 'role', role: `${PLUGIN_TOKEN_PREFIX}${p.plugin.trim()}/${p.verb}` };
+    if (p.kind === 'role') {
+      const canonical = canonicalRoleName(p.role);
+      const bare = canonical.startsWith(ROLE_TOKEN_PREFIX)
+        ? canonical.slice(ROLE_TOKEN_PREFIX.length)
+        : canonical;
+      // The built-in `everyone` has NO `role/` alias in the principal index
+      // (it is not a roles.yaml role), so `role/everyone` would be a DEAD
+      // token — granted but resolving to nothing. Normalize either spelling
+      // to the bare built-in (keeping the caller's casing, e.g. `Everyone`),
+      // on grant and revoke symmetrically.
+      if (bare === EVERYONE_CANONICAL) {
+        const raw = p.role.trim();
+        return {
+          kind: 'role',
+          role: canonical.startsWith(ROLE_TOKEN_PREFIX)
+            ? raw.slice(ROLE_TOKEN_PREFIX.length).trim()
+            : raw,
+        };
+      }
+      if (canonical.startsWith(ROLE_TOKEN_PREFIX)) return p;
+      return { kind: 'role', role: `${ROLE_TOKEN_PREFIX}${p.role.trim()}` };
+    }
+    return p;
+  };
+
+  /** A group as the caller named it, without a `group/` prefix it may carry (casing kept). */
+  function groupName(group: string): string {
+    const raw = group.trim();
+    return splitPrincipalToken(canonicalRoleName(raw)).prefix === 'group'
+      ? raw.slice(GROUP_TOKEN_PREFIX.length).trim()
+      : raw;
+  }
 
   // Authentication gate only. Per PLAN §3 the workspace `:id` is a branch
   // identifier — any authenticated user can read its access tree.
@@ -139,26 +280,50 @@ export function createAccessRoutes(
     ) {
       throw new AccessMutationError('path must stay inside the KB repo');
     }
+    // One spelling per target, as the file verbs and the edit lock require: a
+    // `./README.md` would reach the resolver as a different chain from
+    // `README.md` (and a `./A/x.md` would skip `A/access.md`).
+    if (repoRelTarget.split('/').some((segment) => segment === '.')) {
+      throw new AccessMutationError("path must not contain '.' segments");
+    }
   }
 
   /**
    * GET /api/workspace/:id/access?path=<relativePath>&kind=<folder|file>
    * Returns the resolved access view for the current user at a single path,
    * including a per-principal `sources` map (where each principal's access comes
-   * from) so the dialog can show inherited-vs-direct. `kind` defaults to `file`
-   * (the resolver treats a folder vs a file's own scope differently only for the
-   * `sources` direct/ancestor split; the eligible/verdict fields are identical).
+   * from) so the dialog can show inherited-vs-direct, the matching `denials` map
+   * (per verb, the entries that DENY it — same direct/ancestor split, closest
+   * first, stopping at a grant that beats them) and `deniedHere` — every
+   * principal a deny ON THIS TARGET names, however many verbs it took. Note what
+   * that is NOT: a partial restriction (edit denied, read still inherited) puts
+   * the principal in `deniedHere` while they stay in the eligible lists for the
+   * verbs they keep; only a principal denied every verb holds nothing and drops
+   * out of those lists. A deny naming a role nobody knows appears in neither
+   * field — the resolver ignores such a line, so it restricts nothing.
+   *
+   * Together those two let the dialog decide its sections by LOCAL ENTRY, grant
+   * or denial, rather than by local grant alone: without them a person
+   * restricted here reads as merely inherited and drops into the collapsed
+   * parent section, looking removed.
+   *
+   * `kind` defaults to `file` (the resolver treats a folder vs a file's own scope
+   * differently only for the direct/ancestor split; the eligible/verdict fields
+   * are identical).
    */
   router.get('/workspace/:id/access', async (req, res) => {
     const user = await requireUser(req, res);
     if (!user) return;
 
     const rawPath = req.query.path;
-    if (typeof rawPath !== 'string' || !rawPath) {
+    const kind: TargetKind = req.query.kind === 'folder' ? 'folder' : 'file';
+    // The dialog addresses the repository root as the empty repo-relative path,
+    // so an empty `path` is the root FOLDER — refusing it left the root
+    // dialog unable to re-read its view after a change.
+    if (typeof rawPath !== 'string' || (!rawPath && kind !== 'folder')) {
       res.status(400).json({ error: 'path query parameter is required' });
       return;
     }
-    const kind: TargetKind = req.query.kind === 'folder' ? 'folder' : 'file';
 
     try {
       // Same sanitize/validate the POST routes apply: strip any kbDir prefix and
@@ -177,7 +342,7 @@ export function createAccessRoutes(
    *
    * Every access declaration living INSIDE a folder — the descendant
    * `access.md` files and the node frontmatter that override the folder's own
-   * rules for the principals they name. Display-only: the plugin access surface
+   * rules for the principals they name. Display-only: the folder access surface
    * shows it so nobody reads a folder's share list as the whole story.
    *
    * Gating is stricter than the sibling `GET /access`, which hands its eligible
@@ -233,14 +398,103 @@ export function createAccessRoutes(
   });
 
   /**
+   * GET /api/workspace/:id/access/prospective?from=<file|folder>&toDir=<folder>
+   *
+   * Who can open and who can edit one file OR FOLDER where it is, and where
+   * a move would put it — `{ before, after }`, each `{ read, write }` lists
+   * of principals named as their grants name them. `toDir` is the
+   * destination FOLDER (`''` is the repo root); the thing keeps its name, so
+   * the route derives the destination path itself rather than trusting a
+   * second one.
+   *
+   * The destination path does not exist yet, which is why this cannot be two
+   * calls to `GET /access`: the resolver is asked for a hypothetical, over
+   * what the move carries — a file's own frontmatter, or the `access.md`
+   * files inside a folder, at the paths they land on. Nothing is written and
+   * nothing is moved.
+   *
+   * Gated like the sibling `overrides` route rather than the permissive
+   * `GET /access`: the caller must resolve read on the thing being moved AND
+   * on the destination folder. The lists name people, and someone who cannot
+   * see a thing has no business learning who can; the `after` lists and the
+   * `changes` are the destination folder's rules read back (whom it grants,
+   * whom it denies by name), so a folder the caller may not open tells them
+   * nothing either.
+   *
+   * `changes` is who loses and who gains `read` or `write` in the move, as the
+   * resolver judges each candidate on both sides
+   * (`prospectiveHolderChanges`) — the one answer the move dialog and the
+   * agent's `move_file` both show. The two lists are not that answer: they
+   * name grants, so a writer leaving a folder everyone reads shows as losing
+   * `read` it keeps, and a person the destination denies by name is on
+   * neither list.
+   */
+  router.get('/workspace/:id/access/prospective', async (req, res) => {
+    const user = await requireUser(req, res);
+    if (!user) return;
+
+    const rawFrom = req.query.from;
+    // An empty `toDir` is the repo ROOT, a real destination — only a missing
+    // one is a bad request.
+    const rawToDir = req.query.toDir;
+    if (typeof rawFrom !== 'string' || !rawFrom) {
+      res.status(400).json({ error: 'from query parameter is required' });
+      return;
+    }
+    if (typeof rawToDir !== 'string') {
+      res.status(400).json({ error: 'toDir query parameter is required' });
+      return;
+    }
+
+    try {
+      const from = toRepoRelative(rawFrom);
+      assertRepoRelativeTarget(from, 'file');
+      const toDir = toRepoRelative(rawToDir);
+      assertRepoRelativeTarget(toDir, 'folder');
+
+      if (!(await accessControl.canRead(req.params.id, user.email, from))) {
+        res.status(403).json({ error: 'You do not have access to this file.' });
+        return;
+      }
+      if (!(await accessControl.canRead(req.params.id, user.email, toDir))) {
+        res.status(403).json({ error: 'You do not have access to this folder.' });
+        return;
+      }
+
+      const name = from.slice(from.lastIndexOf('/') + 1);
+      const to = toDir ? `${toDir}/${name}` : name;
+      const [{ before, after }, changes] = await Promise.all([
+        accessControl.prospectiveHolders(req.params.id, from, to),
+        accessControl.prospectiveHolderChanges(req.params.id, from, to),
+      ]);
+      res.json({
+        before: { read: holderPrincipals(before.read), write: holderPrincipals(before.write) },
+        after: { read: holderPrincipals(after.read), write: holderPrincipals(after.write) },
+        changes,
+      });
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
+  /**
    * POST /api/workspace/:id/access/batch
-   * Body: `{ paths: string[] }`. Returns `{ results: { [path]: boolean } }`.
+   * Body: `{ paths: string[], verb?: 'write' | 'owner' | 'read' }`. Returns
+   * `{ results: { [path]: boolean } }`.
+   *
+   * `verb` defaults to `write`, the question every existing caller asks.
+   * `owner` answers from the `owner:` lists alone — no admin rescue, and a
+   * writer is not an owner — which is what an Owner pill has to mean. `read`
+   * is the verdict the single lookup's `canRead` gives, for many paths at
+   * once: what New page asks on a draft branch, where a page may go wherever
+   * its author may read, of every Knowledge folder in one request.
    */
   router.post('/workspace/:id/access/batch', async (req, res) => {
     const user = await requireUser(req, res);
     if (!user) return;
 
-    const paths = (req.body as { paths?: unknown }).paths;
+    const { paths, verb = 'write' } = req.body as { paths?: unknown; verb?: unknown };
     if (!Array.isArray(paths) || paths.some((p) => typeof p !== 'string')) {
       res.status(400).json({ error: 'paths must be an array of strings' });
       return;
@@ -249,9 +503,20 @@ export function createAccessRoutes(
       res.status(400).json({ error: 'paths cannot exceed 500 entries per request' });
       return;
     }
+    if (verb !== 'write' && verb !== 'owner' && verb !== 'read') {
+      res.status(400).json({ error: 'verb must be "write", "owner" or "read"' });
+      return;
+    }
 
     try {
-      const result = await accessControl.canWriteBatch(
+      const batch =
+        verb === 'owner'
+          ? accessControl.canOwnerBatch
+          : verb === 'read'
+            ? accessControl.canReadBatch
+            : accessControl.canWriteBatch;
+      const result = await batch.call(
+        accessControl,
         req.params.id,
         user.email,
         paths as string[],
@@ -267,14 +532,22 @@ export function createAccessRoutes(
 
   /**
    * GET /api/workspace/:id/access/suggest?q=<query>
-   * Autocomplete for the share dialog. Returns matching plugins (roles.yaml role
-   * names — resolved from the DEFAULT branch, the authoritative roles source)
-   * and people (branch-local to `:id`). Plugins are small + non-sensitive so they
-   * always show;
-   * PEOPLE are withheld until `q` is ≥ 2 chars, so an empty query can't dump the
-   * whole directory (email-harvesting guard). People are the union of the
-   * KB-canonical set (roles.yaml + access.md grants) and the `users` table
-   * (logged-in users). Results are capped.
+   * Autocomplete for the share dialog. Returns matching roles (roles.yaml role
+   * names — resolved from the DEFAULT branch, the authoritative source),
+   * groups (the ACTIVE group source, same authority), and people (branch-local
+   * to `:id`). Roles/groups come from the resolver's CACHED model — no fresh
+   * file reads per keystroke. Roles are small + non-sensitive so they always
+   * show; GROUPS are the caller's own unless they are an admin (see
+   * `visibleGroups`); PEOPLE are withheld until `q` is ≥ 2 chars, so an empty query
+   * can't dump the whole directory (email-harvesting guard). People are the
+   * union of the KB-canonical set (roles.yaml + access.md grants) and the
+   * `users` table (logged-in users). Results are capped. Each person carries
+   * `hasAccount` — false for someone named only in the KB, who has never
+   * signed in — so the dialog can label them; it withholds nobody.
+   *
+   * A name shared by a group and a role is offered as BOTH — nothing is
+   * withheld: each is written with its own prefix (`group/<Name>`,
+   * `role/<Name>`), so the collision never reaches the file.
    */
   router.get('/workspace/:id/access/suggest', async (req, res) => {
     const user = await requireUser(req, res);
@@ -282,20 +555,46 @@ export function createAccessRoutes(
 
     const q = (typeof req.query.q === 'string' ? req.query.q : '').trim().toLowerCase();
     const CAP = 15;
+    // The harvesting guard, named once: it decides both that people are not
+    // returned and that this answer says nothing about accounts. The two must
+    // never disagree — a withheld list is not evidence that nobody has one.
+    const peopleWithheld = q.length < 2;
     try {
-      const plugins = await defaultBranchPlugins();
-      const { people: kbPeople } = await accessControl.kbPrincipals(req.params.id);
+      // Independent lookups batched in ONE Promise.all: the default-branch
+      // principals (cached model), the branch-local KB people (cached model),
+      // and the users table (only consulted once the query is long enough).
+      const [{ roles, groups, plugins }, { people: kbPeople }, userRows] = await Promise.all([
+        defaultBranchPrincipals(),
+        accessControl.kbPrincipals(req.params.id),
+        peopleWithheld ? Promise.resolve([]) : db.select().from(users),
+      ]);
 
-      const matchedPlugins = plugins
+      const matchedRoles = roles
         .filter((g) => !q || g.toLowerCase().includes(q))
         .slice(0, CAP);
 
-      let people: { name: string; email: string }[] = [];
-      if (q.length >= 2) {
+      const matchedGroups = (await visibleGroups(user.email, groups))
+        .filter((g) => !q || g.toLowerCase().includes(q))
+        .slice(0, CAP);
+
+      // Plugins the caller can DISCOVER (read the folder's access.md — the
+      // same verdict the plugin index lists on), so the picker never names a
+      // plugin its enumeration would hide. Their `plugin/<Name>/<verb>`
+      // tokens are built client-side; the name is what a person searches for.
+      const matchedPlugins = (
+        await discoverablePlugins(
+          user.email,
+          plugins.filter((p) => !q || p.name.toLowerCase().includes(q)),
+        )
+      )
+        .map((p) => p.name)
+        .slice(0, CAP);
+
+      let people: { name: string; email: string; hasAccount: boolean }[] = [];
+      if (!peopleWithheld) {
         // Union the KB-canonical people with the login-only users table.
         const byEmail = new Map<string, { name: string; email: string }>();
         for (const p of kbPeople) byEmail.set(p.email.toLowerCase(), p);
-        const userRows = await db.select().from(users);
         for (const u of userRows) {
           const key = u.email.toLowerCase();
           // Prefer a real display name over the email local-part default: only
@@ -306,12 +605,50 @@ export function createAccessRoutes(
             byEmail.set(key, { name: u.name || u.email, email: u.email });
           }
         }
+        // A suggestion says whether that person has an ACCOUNT, the same fact
+        // the access view reports: `users` is exactly the set that has signed
+        // in, so a KB-canonical person named only in access rules — someone
+        // granted ahead of their first sign-in — comes back `false` and the
+        // dialog labels the chip it makes of them.
+        const accountEmails = new Set(userRows.map((u) => u.email.trim().toLowerCase()));
         people = [...byEmail.values()]
           .filter((p) => p.email.toLowerCase().includes(q) || p.name.toLowerCase().includes(q))
-          .slice(0, CAP);
+          // The address actually TYPED is never hidden by the cap. A chip made
+          // from a free-typed email labels itself by ABSENCE from this list, so
+          // an exact match dropped at the 15th match would say "hasn't signed
+          // in yet" about somebody who has. Exact email first, then the rest in
+          // the order they were unioned (sort is stable), then cap.
+          .sort((a, b) => Number(b.email.toLowerCase() === q) - Number(a.email.toLowerCase() === q))
+          .slice(0, CAP)
+          .map((p) => ({ ...p, hasAccount: accountEmails.has(p.email.trim().toLowerCase()) }));
       }
 
-      res.json({ plugins: matchedPlugins, people, peopleWithheld: q.length < 2 });
+      res.json({
+        roles: matchedRoles,
+        groups: matchedGroups,
+        // Plugin FOLDER names; each stands for three grantable principals
+        // (`plugin/<Name>/read|write|owner`). Not `plugins` — that key is the
+        // deprecated alias of `roles` below.
+        pluginPrincipals: matchedPlugins,
+        people,
+        peopleWithheld,
+        // THIS ANSWER rules on accounts — not "this build can": every person
+        // above carries `hasAccount`, and an email absent from `people` is
+        // absent because no account exists for it. The dialog labels a
+        // free-typed chip only on this evidence.
+        //
+        // It is therefore false whenever people were WITHHELD: under two
+        // characters the harvesting guard returns nobody, and an empty list
+        // there means "not asked", which is not the same fact at all. An
+        // older server (no such field) and a failed lookup (no response) are
+        // the other two ways to say nothing — all three leave the address
+        // unjudged rather than labelled on a guess.
+        accountsKnown: !peopleWithheld,
+        // DEPRECATED alias of `roles` — the shipped share dialog still reads
+        // `plugins`. Kept populated for ONE release; remove in 0.2.0 together
+        // with the dialog's rename to `roles`.
+        plugins: matchedRoles,
+      });
     } catch (err) {
       const { status, body } = toHttpError(err);
       res.status(status).json(body);
@@ -325,7 +662,7 @@ export function createAccessRoutes(
   function parseMutationBody(body: unknown): {
     repoRelTarget: string;
     kind: TargetKind;
-    principal: Principal;
+    principal: RoutePrincipal;
   } {
     const b = (body ?? {}) as Record<string, unknown>;
     const rawPath = b.path;
@@ -340,7 +677,7 @@ export function createAccessRoutes(
     if (!principalRaw || typeof principalRaw !== 'object') {
       throw new AccessMutationError('principal is required');
     }
-    let principal: Principal;
+    let principal: RoutePrincipal;
     if (principalRaw.kind === 'user') {
       if (typeof principalRaw.email !== 'string' || typeof principalRaw.displayName !== 'string') {
         throw new AccessMutationError('user principal needs email + displayName');
@@ -355,8 +692,24 @@ export function createAccessRoutes(
         throw new AccessMutationError('role principal needs a role name');
       }
       principal = { kind: 'role', role: principalRaw.role };
+    } else if (principalRaw.kind === 'group') {
+      if (typeof principalRaw.group !== 'string') {
+        throw new AccessMutationError('group principal needs a group name');
+      }
+      principal = { kind: 'group', group: principalRaw.group };
+    } else if (principalRaw.kind === 'plugin') {
+      if (typeof principalRaw.plugin !== 'string' || !principalRaw.plugin.trim()) {
+        throw new AccessMutationError('plugin principal needs a plugin name');
+      }
+      const verb = principalRaw.verb;
+      if (typeof verb !== 'string' || !(PLUGIN_TOKEN_VERBS as readonly string[]).includes(verb)) {
+        throw new AccessMutationError(
+          `plugin principal needs a verb: one of ${PLUGIN_TOKEN_VERBS.join(', ')}`,
+        );
+      }
+      principal = { kind: 'plugin', plugin: principalRaw.plugin, verb: verb as PluginTokenVerb };
     } else {
-      throw new AccessMutationError("principal.kind must be 'user' or 'role'");
+      throw new AccessMutationError("principal.kind must be 'user', 'group', 'plugin', or 'role'");
     }
     const targetKind = kind as TargetKind;
     const repoRelTarget = toRepoRelative(rawPath);
@@ -368,11 +721,16 @@ export function createAccessRoutes(
    * The access.md / node path the write lands on, and the path the write-gate
    * keys on. For a folder both are the folder's access.md; for a file they are
    * the node file itself.
+   *
+   * A file that cannot carry frontmatter has no path of its own to edit: this
+   * throws `folder-governs-access` (422) before any gate, lock or read, so the
+   * grant, default revoke and deny-here all refuse it identically.
    */
   function gateAndEditPaths(kind: TargetKind, repoRelTarget: string): {
     gatePath: string;
     editPath: string;
   } {
+    assertFileCarriesAccessRules(kind, repoRelTarget);
     const editPath = kind === 'folder' ? accessMdPathForFolder(repoRelTarget) : repoRelTarget;
     return { gatePath: editPath, editPath };
   }
@@ -407,7 +765,31 @@ export function createAccessRoutes(
     // resolves to false and is rejected above. Nothing extra needed here — but
     // keep the branch check explicit so the intent is legible.
     void branch;
-    void isProtectedBranch;
+  }
+
+  /**
+   * Which of `emails` have an ACCOUNT — a row in `users`, which exists only
+   * once that person has signed in at least once. Emails are stored canonical
+   * (the auth service lowercases every address it writes), so the canonical
+   * forms match the unique index directly and the lookup stays one indexed
+   * query scoped to the addresses asked about.
+   *
+   * Purely informational. No grant is refused, delayed or rewritten because
+   * an email is missing here — pre-provisioning under single sign-on means
+   * granting to an address whose account does not exist yet, and that is a
+   * supported thing to do.
+   */
+  async function accountsAmong(emails: string[]): Promise<Set<string>> {
+    // `inArray` refuses an empty list, and there is nothing to ask anyway.
+    if (emails.length === 0) return new Set();
+    // Through the blind index: `email` is randomized ciphertext, and the
+    // index is what the unique constraint and every lookup key on. It is
+    // compared with the addresses themselves.
+    const rows = await db
+      .select({ email: users.email })
+      .from(users)
+      .where(inArray(users.emailBidx, emails));
+    return new Set(rows.map((r) => r.email.trim().toLowerCase()));
   }
 
   /** The full resolved-access view returned after a successful mutation. */
@@ -417,55 +799,47 @@ export function createAccessRoutes(
     userEmail: string,
     kind: TargetKind,
   ) {
-    const [canRead, canWrite, canDownload, canOwner, eligible, readers, owners, downloaders] =
-      await Promise.all([
-        accessControl.canRead(workspaceId, userEmail, repoRelTarget),
-        accessControl.canWrite(workspaceId, userEmail, repoRelTarget),
-        accessControl.canDownload(workspaceId, userEmail, repoRelTarget),
-        accessControl.canOwner(workspaceId, userEmail, repoRelTarget),
-        accessControl.eligibleWriters(workspaceId, repoRelTarget),
-        accessControl.eligibleReaders(workspaceId, repoRelTarget),
-        accessControl.eligibleOwners(workspaceId, repoRelTarget),
-        accessControl.eligibleDownloaders(workspaceId, repoRelTarget),
-      ]);
+    const resolved = await resolveAccessView(accessControl, workspaceId, repoRelTarget, userEmail, kind);
 
-    // Per-principal, per-verb origin (direct / ancestor — MECE over editable
-    // files). Keyed `u:<email>` / `r:<role>` to match the dialog's row keys, so
-    // each row can show where its access comes from and which verbs are
-    // removable here. A row whose verbs resolve only via a group/everyone/rescue
-    // has no source (the verb is absent) and renders non-actionable. Built over
-    // the union of every principal in the four eligible lists.
-    const roleSet = new Set<string>([
-      ...eligible.roles,
-      ...readers.roles,
-      ...owners.roles,
-      ...downloaders.roles,
-    ]);
-    const userSet = new Map<string, { name: string; email: string }>();
-    for (const u of [...eligible.users, ...readers.users, ...owners.users, ...downloaders.users]) {
-      if (!userSet.has(u.email.toLowerCase())) userSet.set(u.email.toLowerCase(), u);
+    // Every person the view names says whether they have signed in yet, so the
+    // dialog can label a grant made ahead of a first sign-in (`hasAccount:
+    // false`) without changing what the grant does. The flag is read from the
+    // users table each time the view is built, so it flips to true on its own
+    // the first time that person signs in.
+    //
+    // BEST-EFFORT, deliberately: this view is built AFTER the mutation has
+    // committed, so a users lookup that fails must not turn a grant that was
+    // written into a 500 the caller reads as "it did not save". On failure the
+    // flag is simply ABSENT — which the dialog reads as "the server did not
+    // say", not as "no account", so nobody is labelled on a guess.
+    let view: AccessView | LabelledAccessView = resolved;
+    try {
+      view = labelAccountHolders(resolved, await accountsAmong(emailsInView(resolved)));
+    } catch (err) {
+      // Every piece of this line is caller-controlled — the workspace id and
+      // path come off the request, and the driver's message can carry back
+      // text from the query. `printable` quotes each as one token, the same
+      // rule the rest of the backend's logs follow.
+      logger('access.view.accounts').warn(
+        `users lookup failed for ws=${printable(workspaceId)} path=${printable(repoRelTarget)}; hasAccount omitted: ${printable(
+          err instanceof Error ? err.message : String(err),
+        )}`,
+      );
     }
-    const sources: Record<string, Awaited<ReturnType<IAccessControl['grantSources']>>> = {};
-    await Promise.all([
-      ...[...roleSet].map(async (role) => {
-        sources[`r:${role.toLowerCase()}`] = await accessControl.grantSources(
-          workspaceId,
-          kind,
-          repoRelTarget,
-          { kind: 'role', role },
-        );
-      }),
-      ...[...userSet.values()].map(async (u) => {
-        sources[`u:${u.email.toLowerCase()}`] = await accessControl.grantSources(
-          workspaceId,
-          kind,
-          repoRelTarget,
-          { kind: 'user', email: u.email },
-        );
-      }),
-    ]);
 
-    return { canRead, canWrite, canDownload, canOwner, eligible, readers, owners, downloaders, sources };
+    // A file that cannot carry frontmatter has no rules of its own: name the
+    // folder whose rules govern it (repo-relative, `''` for the root), which
+    // is where the mutation routes point too.
+    // Content counts as much as the name: bytes that are not text (a binary
+    // saved as `.md`) are refused by the mutations too, so the view must say
+    // so — otherwise the dialog offers a field whose every write answers 422.
+    const governedByFolder =
+      kind === 'file' &&
+      (!fileCarriesAccessRules(repoRelTarget) || !(await mutation.targetHoldsText(workspaceId, repoRelTarget)))
+        ? governingFolderOf(repoRelTarget)
+        : undefined;
+
+    return { ...view, ...(governedByFolder !== undefined && { governedByFolder }) };
   }
 
   /**
@@ -473,6 +847,14 @@ export function createAccessRoutes(
    * under the lock) → release (enqueues the commit + push out of band). Mirrors
    * the human-save `withLock` so protected-branch enforcement + commit-as-user
    * are inherited. On op failure, release WITHOUT committing partial bytes.
+   *
+   * The whole sequence takes the path's TURN first, exactly as `PUT /file`
+   * does (turn outside, lock inside — the same order, so the two can never
+   * wait on each other). The mutation re-reads the file under the lock and
+   * refuses binary content; without the turn an upload landing between that
+   * read and the write would be overwritten by frontmatter, or would arrive
+   * just after the read and turn a refusal into a discard of the upload. The
+   * write inside takes the same turn re-entrantly.
    */
   async function withEditLock(
     workspaceId: string,
@@ -482,7 +864,21 @@ export function createAccessRoutes(
     op: () => Promise<void>,
   ): Promise<void> {
     const wsEditPath = `${kbDirName}/${editPath}`;
-    const existing = await workflowService.getLock(workspaceId, branch, wsEditPath);
+    return workspaceService.withPathTurn(workspaceId, wsEditPath, () =>
+      lockAndRun(workspaceId, branch, wsEditPath, editPath, user, op),
+    );
+  }
+
+  /** The acquire → op → release half of {@link withEditLock}, inside the turn. */
+  async function lockAndRun(
+    workspaceId: string,
+    branch: string,
+    wsEditPath: string,
+    editPath: string,
+    user: AuthUser,
+    op: () => Promise<void>,
+  ): Promise<void> {
+    const existing = await versionControlService.getLock(workspaceId, branch, wsEditPath);
     if (existing && existing.holderUserId === user.id) {
       // Caller already holds the lock (mid-edit) — write without touching it.
       await op();
@@ -498,7 +894,7 @@ export function createAccessRoutes(
       eventBus.emit({ kind: 'fs-tree-changed', workspaceId, branch });
       return;
     }
-    const acquired = await workflowService.acquireLock(workspaceId, branch, wsEditPath, user);
+    const acquired = await versionControlService.acquireLock(workspaceId, branch, wsEditPath, user);
     if (!acquired.acquired) {
       const holder = acquired.lock.holderName || 'another user';
       const err: Error & { status?: number } = new Error(
@@ -511,19 +907,28 @@ export function createAccessRoutes(
       await op();
     } catch (err) {
       try {
-        await workflowService.releaseLockNoCommit(workspaceId, branch, wsEditPath, user);
+        // A refusal wrote NOTHING, so the release must leave the disk alone:
+        // `releaseLockNoCommit` discards the path's working-tree changes, and
+        // right after an upload whose commit is still queued that deletes the
+        // upload. Every other failure may have left partial bytes, so it keeps
+        // the discarding release.
+        if (isFolderGovernsRefusal(err)) {
+          await versionControlService.releaseLockUntouched(workspaceId, branch, wsEditPath, user);
+        } else {
+          await versionControlService.releaseLockNoCommit(workspaceId, branch, wsEditPath, user);
+        }
       } catch {
         /* best-effort */
       }
       throw err;
     }
-    await workflowService.releaseLock(workspaceId, branch, wsEditPath, user);
+    await versionControlService.releaseLock(workspaceId, branch, wsEditPath, user);
     eventBus.emit({ kind: 'fs-tree-changed', workspaceId, branch });
   }
 
   /**
    * POST /api/workspace/:id/access/grant
-   * Body: `{ path, kind: 'folder'|'file', verb: 'write'|'owner', principal }`.
+   * Body: `{ path, kind: 'folder'|'file', verb: 'read'|'write'|'download'|'owner', principal }`.
    * Grants the principal the verb on the target (folder → its access.md, file →
    * its own frontmatter). Gated on write to the access config (fail-closed on
    * protected branches). Returns the fresh resolved access for the target.
@@ -542,58 +947,100 @@ export function createAccessRoutes(
       }
       const { repoRelTarget, kind, principal } = parseMutationBody(req.body);
 
-      // For a plugin grant, the role must exist in roles.yaml (Slice 1 grants
-      // existing plugins only; Create Plugin is Slice 2). Reject loudly otherwise.
-      // Validate against the DEFAULT-branch roles (same authoritative source the
-      // suggest autocomplete uses) so a default-branch role can't be suggested
-      // then rejected here on a feature branch whose roles.yaml has diverged.
+      // For a role grant, the role must exist in roles.yaml. Reject loudly
+      // otherwise. Validate against the DEFAULT-branch roles (same
+      // authoritative source the suggest autocomplete uses) so a
+      // default-branch role can't be suggested then rejected here on a
+      // feature branch whose roles.yaml has diverged. No collision refusals:
+      // a name shared with a group is fine — the grant is WRITTEN as the
+      // explicit `role/<Name>` token, which precedence always resolves to the
+      // role.
       if (principal.kind === 'role') {
-        const plugins = await defaultBranchPlugins();
-        const known = plugins.some((g) => canonicalRoleName(g) === canonicalRoleName(principal.role));
+        const { roles } = await defaultBranchPrincipals();
+        const bare = canonicalRoleName(principal.role).startsWith(ROLE_TOKEN_PREFIX)
+          ? canonicalRoleName(principal.role).slice(ROLE_TOKEN_PREFIX.length)
+          : canonicalRoleName(principal.role);
+        const known = roles.some((g) => canonicalRoleName(g) === bare);
         if (!known) {
           throw new AccessMutationError(
-            `No plugin named "${principal.role}". Pick an existing plugin, or ask an admin to create it.`,
+            `No role named "${principal.role}". Pick an existing role.`,
             404,
-            { kind: 'unknown-plugin', role: principal.role },
+            { kind: 'unknown-role', role: principal.role },
           );
         }
         // The built-in `everyone` role is grantable from the share UI for READ
         // only (public read). Write/owner/download to everyone would make the
         // node world-writable from a casual dialog, so those stay a direct
         // access.md edit.
-        if (canonicalRoleName(principal.role) === EVERYONE_CANONICAL && verb !== 'read') {
+        if (bare === EVERYONE_CANONICAL && verb !== 'read') {
           throw new AccessMutationError(
-            '"Everyone" can only be granted read access (public). Grant other access levels to specific people or plugins.',
+            '"Everyone" can only be granted read access (public). Grant other access levels to specific people or roles.',
+          );
+        }
+      } else if (principal.kind === 'group') {
+        // A group grant must name a group in the ACTIVE source (IdP-synced or
+        // manual) on the default branch — same authority the suggest list
+        // uses — and one the caller may see (`visibleGroups`): a group hidden
+        // from the picker is refused here with the same words as one that
+        // does not exist, so the grant route is no oracle for group names.
+        // No role-collision refusal: the grant is written `group/<Name>`,
+        // which always resolves to the group.
+        const groups = await visibleGroups(user.email, (await defaultBranchPrincipals()).groups);
+        const canonical = canonicalRoleName(groupName(principal.group));
+        if (!groups.some((g) => canonicalRoleName(g) === canonical)) {
+          throw new AccessMutationError(
+            `No group named "${principal.group}". Pick an existing group.`,
+            404,
+            { kind: 'unknown-group', group: principal.group },
+          );
+        }
+      } else if (principal.kind === 'plugin') {
+        // A plugin grant must name a plugin the caller can DISCOVER on the
+        // default branch — the same set the suggest list offers, so a plugin
+        // hidden from the picker is refused here with the same words as one
+        // that does not exist. Matched on the manifest slug, the identity the
+        // token canonicalises to.
+        const { plugins } = await defaultBranchPrincipals();
+        const slug = pluginManifestName(principal.plugin);
+        const visible = await discoverablePlugins(user.email, plugins);
+        if (!visible.some((p) => pluginManifestName(p.name) === slug)) {
+          throw new AccessMutationError(
+            `No plugin named "${principal.plugin}". Pick an existing plugin.`,
+            404,
+            { kind: 'unknown-plugin', plugin: principal.plugin },
           );
         }
       }
+      // Splice shape: group → explicit `group/<Name>` token; role → explicit
+      // `role/<Name>` token (see asSplicePrincipal).
+      const splicePrincipal = asSplicePrincipal(principal);
 
       const { gatePath } = gateAndEditPaths(kind, repoRelTarget);
       // Ensure the branch workspace exists before locking.
       await workspaceService.getOrCreateForBranch(branch);
       // Fail-closed gate (BEFORE acquiring the lock).
       await assertCanMutate(workspaceId, branch, user.email, gatePath);
+      // Binary content refuses BEFORE the lock (see assertTargetHoldsText).
+      await mutation.assertTargetHoldsText(workspaceId, kind, repoRelTarget);
 
       const editPath = gatePath; // grant edits the same path it gates on
       await withEditLock(workspaceId, branch, editPath, user, async () => {
-        await mutation.grant(workspaceId, kind, repoRelTarget, verb as Verb, principal);
+        await mutation.grant(workspaceId, kind, repoRelTarget, verb as Verb, splicePrincipal);
       });
 
       // The write landed on disk under the lock; drop the cache so the
       // re-resolve reads the just-written bytes (the async commit's own
       // invalidate is too late for this synchronous response).
       accessControl.invalidate(workspaceId);
-      console.log(
-        `[access.grant] ws=${workspaceId} branch=${branch} byUserId=${user.id} ` +
+      grantLog.info(
+        `ws=${workspaceId} branch=${branch} byUserId=${user.id} ` +
           `verb=${verb} kind=${kind} target=${repoRelTarget} ` +
           `principalKind=${principal.kind} -> ok`,
       );
       res.json(await resolvedView(workspaceId, repoRelTarget, user.email, kind));
     } catch (err) {
       if (err instanceof AccessDeniedError) {
-        console.warn(
-          `[access.grant.denied] ws=${workspaceId} byUserId=${user.id} -> 403`,
-        );
+        logger('access.grant.denied').warn(`ws=${workspaceId} byUserId=${user.id} -> 403`);
       }
       const { status, body } = toHttpError(err);
       res.status(status).json(body);
@@ -632,7 +1079,13 @@ export function createAccessRoutes(
     const branch = branchForWorkspaceId(workspaceId);
     try {
       const mode = (req.body as { mode?: unknown }).mode;
-      const { repoRelTarget, kind, principal } = parseMutationBody(req.body);
+      const { repoRelTarget, kind, principal: routePrincipal } = parseMutationBody(req.body);
+      // A group principal converts straight to its `group/<Name>` token — no
+      // existence check (revoking a grant whose group has since vanished must
+      // keep working). Which spellings a revoke strips is the mutation
+      // service's call: `group/<Name>` never matches `role/<Name>`, and the
+      // bare name only when no role of that name owns it.
+      const principal = asSplicePrincipal(routePrincipal);
       // Optional `verb` scopes ALL three paths to a single verb: a default revoke
       // strips just that verb; remove-from-parent removes just that verb on the
       // ancestor; deny-here denies just that verb at the target. Absent ⇒ the
@@ -692,8 +1145,8 @@ export function createAccessRoutes(
         });
 
         accessControl.invalidate(workspaceId);
-        console.log(
-          `[access.revoke.remove-from-parent] ws=${workspaceId} branch=${branch} ` +
+        logger('access.revoke.remove-from-parent').info(
+          `ws=${workspaceId} branch=${branch} ` +
             `byUserId=${user.id} ancestor=${ancestorDir} target=${repoRelTarget} verb=${verb ?? 'all'} -> ok`,
         );
         res.json(await resolvedView(workspaceId, repoRelTarget, user.email, kind));
@@ -704,13 +1157,14 @@ export function createAccessRoutes(
       if (mode === 'deny-here') {
         const { gatePath } = gateAndEditPaths(kind, repoRelTarget);
         await assertCanMutate(workspaceId, branch, user.email, gatePath);
+        await mutation.assertTargetHoldsText(workspaceId, kind, repoRelTarget);
         await withEditLock(workspaceId, branch, gatePath, user, async () => {
           // Scope the deny to the same verb the user acted on (if any).
           await mutation.denyHere(workspaceId, kind, repoRelTarget, principal, verb);
         });
         accessControl.invalidate(workspaceId);
-        console.log(
-          `[access.revoke.deny-here] ws=${workspaceId} branch=${branch} ` +
+        logger('access.revoke.deny-here').info(
+          `ws=${workspaceId} branch=${branch} ` +
             `byUserId=${user.id} target=${repoRelTarget} verb=${verb ?? 'all'} -> ok`,
         );
         res.json(await resolvedView(workspaceId, repoRelTarget, user.email, kind));
@@ -720,6 +1174,7 @@ export function createAccessRoutes(
       // ---- default: revoke on the target, classified -----------------------
       const { gatePath } = gateAndEditPaths(kind, repoRelTarget);
       await assertCanMutate(workspaceId, branch, user.email, gatePath);
+      await mutation.assertTargetHoldsText(workspaceId, kind, repoRelTarget);
 
       const editPath = gatePath;
       let changed = false;
@@ -735,7 +1190,7 @@ export function createAccessRoutes(
       // any source left is an `ancestor`. Distinguish "inherited" (still named in
       // an ancestor access.md — offer cascade/deny) from "no removable source
       // here" (nothing named in any file we can edit — a genuine no-op). A
-      // principal who only RESOLVES via a plugin / everyone / admin-rescue has no
+      // principal who only RESOLVES via a group/role / everyone / admin-rescue has no
       // source at all (it's not their own file entry) and so is correctly a 200
       // no-op: there is nothing to remove here and no Remove was ever offered for
       // them in the dialog. NEVER a silent unchanged-success when there IS a
@@ -753,8 +1208,8 @@ export function createAccessRoutes(
         const sourcesToCheck: GrantSources = verb ? { [verb]: sources[verb] } : sources;
         const inherited = collectInheritedSources(sourcesToCheck);
         if (inherited.length > 0) {
-          console.log(
-            `[access.revoke.inherited] ws=${workspaceId} branch=${branch} byUserId=${user.id} ` +
+          logger('access.revoke.inherited').info(
+            `ws=${workspaceId} branch=${branch} byUserId=${user.id} ` +
               `target=${repoRelTarget} ancestors=${inherited.join(',')}`,
           );
           res.status(409).json({
@@ -774,16 +1229,16 @@ export function createAccessRoutes(
       // shows an `ancestor` source). The dialog reads that to chain into
       // "Remove from parent?" with no extra response field needed (the old
       // `stillInherited` shortcut is subsumed by the richer per-verb sources).
-      console.log(
-        `[access.revoke] ws=${workspaceId} branch=${branch} byUserId=${user.id} ` +
+      revokeLog.info(
+        `ws=${workspaceId} branch=${branch} byUserId=${user.id} ` +
           `kind=${kind} target=${repoRelTarget} principalKind=${principal.kind} changed=${changed} -> ok`,
       );
       res.json(await resolvedView(workspaceId, repoRelTarget, user.email, kind));
     } catch (err) {
       if (err instanceof AccessDeniedError || err instanceof AccessMutationError) {
-        console.warn(
-          `[access.revoke.denied] ws=${workspaceId} byUserId=${user.id} -> ${
-            err instanceof WorkflowDomainError ? err.status : 500
+        logger('access.revoke.denied').warn(
+          `ws=${workspaceId} byUserId=${user.id} -> ${
+            err instanceof VersionControlDomainError ? err.status : 500
           }`,
         );
       }
@@ -793,7 +1248,10 @@ export function createAccessRoutes(
   });
 
   // -------------------------------------------------------------------------
-  // Roles & Members (admin) — full CRUD on the DEFAULT-branch roles.yaml.
+  // App roles (admin) — MEMBERSHIP editing on the DEFAULT-branch
+  // roles.yaml. Roles are app-defined capabilities: there is deliberately NO
+  // create/rename/delete route — the admin surface cannot mint, rebrand, or
+  // retire a role (legacy people-set roles migrate out via convert-to-group).
   // Routes are GLOBAL (no `:id`): the handler resolves the default-branch
   // workspace internally, because that is the file admin status derives from.
   // Mutating routes are admin-gated by `assertRolesAdmin` (the same admin-only
@@ -806,8 +1264,8 @@ export function createAccessRoutes(
 
   /** Fail-fast admin gate for the roles routes. Throws AccessDeniedError. */
   async function assertRolesAdmin(userEmail: string): Promise<void> {
-    await workspaceService.getOrCreateForBranch(DEFAULT_BRANCH);
-    await assertCanMutate(workspaceIdForBranch(DEFAULT_BRANCH), DEFAULT_BRANCH, userEmail, 'roles.yaml');
+    await workspaceService.getOrCreateForBranch(kb.defaultBranch);
+    await assertCanMutate(kb.defaultWorkspaceId(), kb.defaultBranch, userEmail, 'roles.yaml');
   }
 
   router.get('/access/roles', async (req, res) => {
@@ -818,52 +1276,49 @@ export function createAccessRoutes(
       // surface). The frontend hides the page, but the API must gate too — the
       // roster exposes every role + member email.
       await assertRolesAdmin(user.email);
-      res.json({ roles: await rolesAdmin.getRoster() });
+      res.json({ roles: await rolesAdmin.getRoster(user.email) });
     } catch (err) {
       const { status, body } = toHttpError(err);
       res.status(status).json(body);
     }
   });
 
-  router.post('/access/roles', async (req, res) => {
+  // Who the admins are, for anyone signed in: the top bar tells someone who
+  // is not an admin to ask one, and names them. Names and emails ONLY — the
+  // roster above (every role, its members, groups and references) stays
+  // admin-only. Names come from the accounts table; an admin with no account
+  // yet (a deployment admin before first sign-in, say) is named by address.
+  // A role member whose account is switched off cannot sign in to invite
+  // anyone, so is left out; a deployment admin is not (it signs in with the
+  // environment's password regardless).
+  router.get('/access/admins', async (req, res) => {
     const user = await requireUser(req, res);
     if (!user) return;
     try {
-      await assertRolesAdmin(user.email);
-      const displayName = requireNonEmptyString((req.body ?? {}).displayName, 'displayName');
-      res.json({ roles: await rolesAdmin.createRole(user, displayName) });
+      const emails = await rolesAdmin.getAdminEmails();
+      const rows =
+        emails.length === 0
+          ? []
+          : await db
+              .select({ email: users.email, name: users.name, deactivatedAt: users.deactivatedAt })
+              .from(users)
+              .where(inArray(users.emailBidx, emails));
+      const names = new Map(rows.map((r) => [canonicalEmail(r.email), r.name?.trim() ?? '']));
+      const off = new Set(rows.filter((r) => r.deactivatedAt).map((r) => canonicalEmail(r.email)));
+      const admins = emails
+        .filter((email) => !off.has(email) || rolesAdmin.isFixedAdmin(email))
+        .map((email) => ({ name: names.get(email) || email, email }))
+        .sort((a, b) => a.name.localeCompare(b.name) || a.email.localeCompare(b.email));
+      res.json({ admins });
     } catch (err) {
       const { status, body } = toHttpError(err);
       res.status(status).json(body);
     }
   });
 
-  router.delete('/access/roles/:canonical', async (req, res) => {
-    const user = await requireUser(req, res);
-    if (!user) return;
-    try {
-      await assertRolesAdmin(user.email);
-      const canonical = canonicalRoleName(req.params.canonical);
-      res.json({ roles: await rolesAdmin.deleteRole(user, canonical) });
-    } catch (err) {
-      const { status, body } = toHttpError(err);
-      res.status(status).json(body);
-    }
-  });
-
-  router.patch('/access/roles/:canonical', async (req, res) => {
-    const user = await requireUser(req, res);
-    if (!user) return;
-    try {
-      await assertRolesAdmin(user.email);
-      const canonical = canonicalRoleName(req.params.canonical);
-      const newDisplayName = requireNonEmptyString((req.body ?? {}).newDisplayName, 'newDisplayName');
-      res.json({ roles: await rolesAdmin.renameRole(user, canonical, newDisplayName) });
-    } catch (err) {
-      const { status, body } = toHttpError(err);
-      res.status(status).json(body);
-    }
-  });
+  // NOTE: POST /access/roles (create), PATCH /access/roles/:canonical
+  // (rename), and DELETE /access/roles/:canonical are GONE — roles are
+  // app-defined capabilities, not user-editable objects.
 
   router.post('/access/roles/:canonical/members', async (req, res) => {
     const user = await requireUser(req, res);
@@ -872,7 +1327,71 @@ export function createAccessRoutes(
       await assertRolesAdmin(user.email);
       const canonical = canonicalRoleName(req.params.canonical);
       const email = requireNonEmptyString((req.body ?? {}).email, 'email');
-      res.json({ roles: await rolesAdmin.addMember(user, canonical, email) });
+      // `ifActive`: the invite's promotion, which leaves a switched-off
+      // account unchanged. Inside the roles file's lock, auth reads the
+      // account under the address's switch lock and keeps that transaction
+      // open until roles.yaml is written and committed
+      // (`IAccountSwitchGuard.whileSwitchedOn`). So a switch-off either committed
+      // before the read (the promotion is refused) or waits until the
+      // promotion is written (it lands after, as for any Admin switched off
+      // later: the place in roles stays, the credentials stop being honoured).
+      const ifActive = (req.body ?? {}).ifActive;
+      if (ifActive !== undefined && typeof ifActive !== 'boolean') {
+        res.status(400).json({ error: 'ifActive must be a boolean' });
+        return;
+      }
+      const whileSwitchedOn = (write: () => Promise<void>): Promise<void> => switchGuard.whileSwitchedOn(email, write);
+      res.json({
+        roles: await rolesAdmin.addMember(user, canonical, email, ifActive ? { aroundWrite: whileSwitchedOn } : undefined),
+      });
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
+  // Assign / unassign a GROUP to a role (capability-follows-membership). Any
+  // roster role accepts group references, Admin included — Admin's safety net
+  // is the parse-time invariant that it always keeps at least one DIRECT
+  // email member (a group-only Admin is rejected as hard as an adminless
+  // roles.yaml), so a broken or hostile directory can never leave the
+  // deployment adminless.
+  router.post('/access/roles/:canonical/groups', async (req, res) => {
+    const user = await requireUser(req, res);
+    if (!user) return;
+    try {
+      await assertRolesAdmin(user.email);
+      const canonical = canonicalRoleName(req.params.canonical);
+      const group = requireNonEmptyString((req.body ?? {}).group, 'group');
+      res.json({ roles: await rolesAdmin.assignGroup(user, canonical, group) });
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
+  router.delete('/access/roles/:canonical/groups/:group', async (req, res) => {
+    const user = await requireUser(req, res);
+    if (!user) return;
+    try {
+      await assertRolesAdmin(user.email);
+      const canonical = canonicalRoleName(req.params.canonical);
+      res.json({ roles: await rolesAdmin.unassignGroup(user, canonical, String(req.params.group)) });
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
+  // Convert a legacy people-set role into a manual group (atomic two-file
+  // move; grants keep working because the name is unchanged).
+  router.post('/access/roles/:canonical/convert-to-group', async (req, res) => {
+    const user = await requireUser(req, res);
+    if (!user) return;
+    try {
+      await assertRolesAdmin(user.email);
+      const canonical = canonicalRoleName(req.params.canonical);
+      res.json({ roles: await rolesAdmin.convertRoleToGroup(user, canonical) });
     } catch (err) {
       const { status, body } = toHttpError(err);
       res.status(status).json(body);
@@ -908,7 +1427,7 @@ export function createAccessRoutes(
     if (!user) return;
     try {
       const roles = await rolesAdmin.recover(user);
-      console.warn(`[access.roles.recover] roles.yaml recovered byUserId=${user.id}`);
+      logger('access.roles.recover').warn(`roles.yaml recovered byUserId=${user.id}`);
       res.json({ roles });
     } catch (err) {
       const { status, body } = toHttpError(err);

@@ -3,36 +3,99 @@ import cors from 'cors';
 import path from 'node:path';
 import type { Router, RequestHandler } from 'express';
 import { createAuthRoutes } from '../modules/auth/auth.routes.js';
+import { authCookieSecure } from '../modules/auth/auth.middleware.js';
 import { createWorkspaceRoutes } from '../modules/workspace/workspace.routes.js';
+import {
+  createAgentUploadRoutes,
+  isAgentUploadRawBodyPath,
+} from '../modules/workspace/agent-upload.routes.js';
+import { createAgentDownloadRoutes } from '../modules/workspace/agent-download.routes.js';
+import { createGitInternalsRouteGuard } from '../modules/workspace/git-internals.middleware.js';
+import { startCore } from './lifecycle.js';
 import { createDiffRoutes } from '../modules/diff/diff.routes.js';
-import { createWorkflowRoutes } from '../modules/workflow/workflow.routes.js';
-import { createEventsRoutes } from '../modules/workflow/events.routes.js';
+import {
+  createEventAccess,
+  createEventsRoutes,
+  createVersionControlRoutes,
+  EventDelivery,
+} from '../modules/version-control/index.js';
 import { createAccessRoutes } from '../modules/access/access.routes.js';
+import { createAccessRequestRoutes } from '../modules/access/access-requests.routes.js';
+import { AccessRequestsService } from '../modules/access/access-requests.service.js';
 import { createMcpRoutes } from '../modules/mcp/mcp.routes.js';
 import { createOAuthConsentRoutes } from '../modules/mcp/oauth/oauth-consent.routes.js';
 import { mcpAuthRouter } from '@modelcontextprotocol/sdk/server/auth/router.js';
 import { createManualRoutes } from '../modules/tool-registry/manual.routes.js';
 import {
+  createToolHintsAgentRoutes,
+  createToolHintsRoutes,
+} from '../modules/tool-registry/read-only-hints.js';
+import { createCatalogRevisionRoutes } from './catalog-revision.js';
+import {
   createToolManualsAgentRoutes,
   createToolManualsBrowserRoutes,
   registerToolManualsTools,
 } from '../modules/tool-manuals/index.js';
-import { registerWorkflowTools } from '../modules/workflow/agent-tools/workflow.tools.js';
+import { registerVersionControlTools } from '../modules/version-control/agent-tools/version-control.tools.js';
+import { changeRequestScope, registerChangeRequestReadTools } from '../modules/version-control/agent-tools/change-request-read.tools.js';
+import { createOnboardingRoutes } from '../modules/onboarding/onboarding.routes.js';
 import { registerWorkspaceTools } from '../modules/workspace/workspace.tools.js';
-import { RECOVERY_BOT_EMAIL } from '../modules/workflow/recovery-bot.js';
-import { registerSkillsTools, createSkillsRoutes } from '../modules/skills/index.js';
-import { createPluginsRoutes } from '../modules/plugins/index.js';
-import type { SessionOntologyGate } from '../modules/workspace/session-ontology.gate.js';
+import { registerAgentGuideTool } from '../modules/agent-guide/index.js';
+import { RECOVERY_BOT_EMAIL } from '../modules/version-control/recovery-bot.js';
+import {
+  registerSkillsTools,
+  createSkillsRoutes,
+  createSkillAccessRequestRoutes,
+  AllowedToolsChecker,
+} from '../modules/skills/index.js';
+import {
+  createPluginCreationRoutes,
+  createPluginsRoutes,
+  createTeamsRoutes,
+  registerPluginsTools,
+} from '../modules/plugins/index.js';
+import { keyOrSessionAuth } from '../modules/tool-auth/key-or-session.middleware.js';
+import { ToolDescriptionNotes, type AgentAccessGate } from '../modules/workspace/agent-access.gate.js';
 import {
   createSecretsVaultRoutes,
   createSecretsVaultPublicRoutes,
 } from '../modules/secrets-vault/index.js';
+import { createDeclaredVariableRoutes } from '../modules/declared-variables/index.js';
 import { createAdminAccessRoutes } from '../modules/admin/admin-access.routes.js';
+import { createGroupsAdminRoutes } from '../modules/access/groups-admin.routes.js';
+import { createUpdateCheckRoutes } from '../modules/update-check/update-check.routes.js';
 import { createAccountRoutes } from '../modules/auth/account.routes.js';
-import { createSetupRoutes } from '../modules/settings/setup.routes.js';
-import { DEFAULT_BRANCH, PROTECTED_BRANCHES, type AuthUser } from '@bevel-software/platform-shared';
+import { createConnectionKeysAdminRoutes } from '../modules/tool-auth/connection-keys-admin.routes.js';
+import { createAuditRoutes } from '../modules/audit/audit.routes.js';
+import { createAgentConnectionRoutes } from '../modules/audit/agent-connection.routes.js';
+import { createAgentRestAuditMiddleware } from '../modules/audit/agent-rest-audit.middleware.js';
+import { EXTERNAL_KB_MANUAL_NAME } from '../modules/tool-manuals/tool-manuals.contract.js';
+import { createSetupRoutes, isComplete } from '../modules/settings/setup.routes.js';
+import { createGitHubAppRoutes } from '../modules/github-app/index.js';
+import { oidcRedirectUri } from '../modules/auth/oidc-auth-provider.js';
+import { repositoryConnectionCheck } from '../modules/settings/connection-check.js';
+import { rootFolderListerFor } from '../modules/settings/git-root-folders.js';
+import {
+  createKbSyncRoutes,
+  isSyncRawBodyPath,
+  SYNC_RESPONSE_HEADER,
+} from '../modules/kb-sync/kb-sync.routes.js';
+import { createMarketplaceGitRoutes } from '../modules/marketplace/index.js';
+import {
+  createGitHubFacadeAdminRoutes,
+  createGitHubFacadeRoutes,
+} from '../modules/marketplace/github-facade/index.js';
+import type { AuthUser } from '@bevel-software/platform-shared';
 import { GIT_SHA } from '../version.js';
+import { publicConfig } from './public-config.js';
+import { createReadiness } from './readiness.js';
+import { createAgentInstructionsRoutes } from '../modules/agent-instructions/index.js';
 import type { CoreServices } from './create-core-services.js';
+import { createWriteAccessRoutes, createWriteGateMiddleware } from '../modules/write-access/write-access.js';
+import { createEmbedRoutes, createEmbedLinkRoutes } from '../modules/embed/embed.routes.js';
+import { registerEmbedTools } from '../modules/embed/embed.tools.js';
+import { createMcpAppRoutes } from '../modules/embed/mcp-app.routes.js';
+import { isSandboxReachableOrigin } from '../modules/embed/mcp-app.js';
 
 type ExpressApp = ReturnType<typeof express>;
 
@@ -40,14 +103,19 @@ type ExpressApp = ReturnType<typeof express>;
  * The context handed to {@link ServerExtensions.tools}: everything an overlay
  * needs to register its own tool defs + endpoint routes on the unified tool
  * surface, exactly like the core modules do.
+ *
+ * A tool that works on a branch declares it on its `toolDef` (`branch:
+ * 'required'` or, read-only tools only, `'defaults-to-default-branch'`), and
+ * `toolHandler` resolves the branch before the tool runs — see "The branch"
+ * in `modules/tool-helpers/index.ts`.
  */
 export interface ToolSurfaceCtx {
   registry: CoreServices['toolRegistry'];
   router: Router;
   toolAuth: RequestHandler;
   toolHandler: CoreServices['toolHandlerFactory'];
-  /** Shared ontology-session boundary gate config (file tools + graph tools). */
-  sessionOntologyGate: SessionOntologyGate;
+  /** Shared agent-access gate config (file tools + graph tools). */
+  agentAccessGate: AgentAccessGate;
   core: CoreServices;
 }
 
@@ -64,6 +132,13 @@ export interface ServerExtensions {
    * overlay's own router installs a larger parser for them (body-parser
    * ignores a second parse once the first has run — see the comment at the
    * parser below).
+   *
+   * An exempt path under `/api/workspace/:id` has its body parsed AFTER the
+   * git-internals route guard has looked at it, so a path-bearing field in
+   * that body is not refused ahead of the route the way every other
+   * workspace body is. The services refuse the git folder on their own, so
+   * nothing reaches it; but such a router should run `gitGuardedInputs` on
+   * the parsed body itself if it wants the same early, sanitized 403.
    */
   jsonParserExemptPaths?: string[];
   /**
@@ -93,7 +168,11 @@ export interface ServerExtensions {
 export async function createCoreServer(
   core: CoreServices,
   ext: ServerExtensions = {},
-  opts: { staticDir?: string } = {},
+  opts: {
+    staticDir?: string;
+    /** Run {@link startCore} at the usual point of the mount order. Default true. */
+    boot?: boolean;
+  } = {},
 ): Promise<ExpressApp> {
   const app = express();
 
@@ -117,17 +196,18 @@ export async function createCoreServer(
   // page still can't read events on the user's behalf.
   //
   // `exposedHeaders` lets a BROWSER-based MCP client (e.g. MCP Inspector) read
-  // the Streamable-HTTP session header off the `initialize` response — custom
-  // response headers are hidden from browser JS unless exposed, so without this
-  // the client can't send `Mcp-Session-Id` back and every follow-up 400s with
-  // "session id does not match any active session". `WWW-Authenticate` is
+  // custom response headers, which are hidden from browser JS unless exposed.
+  // The MCP endpoint is stateless and never sends `Mcp-Session-Id`, so only
+  // `Mcp-Protocol-Version` is exposed for it. `WWW-Authenticate` is
   // exposed so a browser client can read the 401 challenge and start the OAuth
   // discovery flow. (Native clients like Claude Code aren't subject to CORS.)
   app.use(
     cors({
       origin: true,
       credentials: true,
-      exposedHeaders: ['Mcp-Session-Id', 'Mcp-Protocol-Version', 'WWW-Authenticate'],
+      // `SYNC_RESPONSE_HEADER` is how the browser tells the sync endpoint's
+      // own 503 from a reverse proxy's — see `kb-sync.routes.ts`.
+      exposedHeaders: ['Mcp-Protocol-Version', 'WWW-Authenticate', SYNC_RESPONSE_HEADER],
     }),
   );
   // Global JSON body parser. Some overlay routes carry a whole document dump
@@ -136,10 +216,36 @@ export async function createCoreServer(
   // parse once the first has run, so without this the 10 MB global limit would
   // shadow the route's larger limit and 413 a large-but-valid upload before it
   // ever reaches the route).
+  // The sync routes (`/api/sync` and `/api/sync/<branch>`) read their body as
+  // raw bytes: one of their credentials is an HMAC over exactly what arrived,
+  // which a parsed-and-reserialised body cannot reproduce.
   const jsonExemptPaths = new Set(ext.jsonParserExemptPaths ?? []);
   const globalJson = express.json({ limit: '10mb' });
+  // The git folder is refused BEFORE the body parser: a request naming it in
+  // the query with a malformed body would otherwise be answered 400 by the
+  // parser, and the promise is one sanitized 403 for such a path whatever else
+  // is wrong with the request. Only the query can be judged this early — a
+  // body that does not parse names nothing anyone can read — so the same guard
+  // is mounted again below, once the body is parsed and once the caller is
+  // known (see the two mounts under `/api/workspace/:id`).
+  app.use('/api/workspace/:id', createGitInternalsRouteGuard(core.workspaceService));
+  // The read-only gate, ahead of every route — core's, the tool surface's
+  // and an overlay's alike — so a read-only deployment refuses a change
+  // wherever it would enter. It lets through what signs people in, manages
+  // accounts and configures the deployment (see `ALWAYS_WRITABLE`); write
+  // tools are judged by the tool layer. A no-op unless a host fills
+  // `ports.writeAccess`. Ahead of the body parser too: a refused write is
+  // refused with its own 403, never parsed first (and answered 400 or 413).
+  app.use(createWriteGateMiddleware(core.writeAccess));
   app.use((req, res, next) => {
-    if (jsonExemptPaths.has(req.path)) return next();
+    // The agent upload route is exempt for the same reason `/api/sync` is:
+    // whoever needs the EXACT bytes has to see them before any parser can
+    // drain the stream. `curl --data-binary @file.zip` with a JSON
+    // content-type is a request an agent can make, and the parser would
+    // otherwise leave the handler nothing to store.
+    if (jsonExemptPaths.has(req.path) || isSyncRawBodyPath(req.path) || isAgentUploadRawBodyPath(req.path)) {
+      return next();
+    }
     return globalJson(req, res, next);
   });
 
@@ -148,6 +254,34 @@ export async function createCoreServer(
   // rollout matches the merged commit before smoke-testing it.
   app.get('/api/health', (_req, res) => {
     res.json({ status: 'ok', sha: GIT_SHA, timestamp: Date.now() });
+  });
+
+  // Readiness: the facts `/api/health` never carried — is the database
+  // reachable, is the commit queue draining and how far behind is it, did the
+  // last attempt to reach the git remote succeed, how much disk is left.
+  // Computed per request, never stored; 503 only when the database is gone,
+  // because a restart cures none of the other conditions and costs every
+  // in-flight request. See `core/readiness.ts`.
+  const readiness = createReadiness({
+    db: core.db,
+    oldestQueuedAt: () => core.pendingCommitsService.oldestQueuedAt(),
+    drains: () => core.commitWorker.held,
+    // Whichever of the two layers reached the remote most recently: the
+    // workspace layer's fetches once the deployment is open, the startup
+    // phase's `ls-remote` at boot — which on a gated deployment is the only
+    // contact there is, and the one that says why it is gated.
+    lastRemoteContact: () => {
+      const contacts = [core.gitService.lastRemoteContact(), core.kbStartupRunner.lastRemoteContact()];
+      return contacts.reduce<{ at: number; ok: boolean } | null>(
+        (latest, c) => (c !== null && (latest === null || c.at > latest.at) ? c : latest),
+        null,
+      );
+    },
+    freeBytes: () => core.disk.freeBytes(core.config.workspacesRoot),
+  });
+  app.get('/api/ready', async (_req, res) => {
+    const report = await readiness();
+    res.status(report.status === 'unavailable' ? 503 : 200).json(report);
   });
 
   /**
@@ -173,66 +307,65 @@ export async function createCoreServer(
   const mcpResourceUrl = new URL('/api/mcp', core.config.publicBackendUrl);
   mcpResourceUrl.username = '';
   mcpResourceUrl.password = '';
+  /** The remote-sync address the setup status publishes for admins to paste into a hook. */
+  const syncUrl = new URL('/api/sync', core.config.publicBackendUrl);
+  syncUrl.username = '';
+  syncUrl.password = '';
+  const marketplaceGitUrl = new URL(`/git/${core.marketplaceRepo.repoName}`, core.config.publicBackendUrl);
+  marketplaceGitUrl.username = '';
+  marketplaceGitUrl.password = '';
 
   /**
-   * The handful of facts the browser needs BEFORE it can render anything, and
-   * therefore before it can authenticate: the branch model.
-   *
-   * Unauthenticated on purpose. The login screen, the router and every module
-   * that reads `DEFAULT_BRANCH` are loaded before a session exists, so a gated
-   * endpoint could not answer in time. What it discloses is two branch names —
-   * which every change request and every URL already shows to anyone who does
-   * get in — and nothing about the repository they live in.
-   *
-   * This replaces baking the values into the frontend bundle at build time.
-   * One artifact now serves any deployment, and renaming a branch no longer
-   * means a rebuild.
+   * The facts the browser needs before it can render anything, and what a
+   * local bridge learns about this deployment in one request. Unauthenticated
+   * on purpose; see `publicConfig` for what it discloses and why.
    */
   app.get('/api/config', (_req, res) => {
     res.json({
-      branchModel: {
-        defaultBranch: DEFAULT_BRANCH,
-        protectedBranches: [...PROTECTED_BRANCHES],
-      },
+      ...publicConfig(core.kb, { marketplaceGitUrl: marketplaceGitUrl.toString(), mcpUrl: mcpResourceUrl.toString() }),
       // Public-demo lockdown flag, so the UI explains disabled surfaces
       // instead of failing at them. Discloses nothing: the demo says the
       // same thing to every visitor in its own copy.
       publicDemo: core.config.publicDemo,
-      /**
-       * The same value the OAuth metadata publishes (see `mcpResourceUrl`).
-       *
-       * The frontend used to build this from `window.location.origin`, which
-       * is the browser's idea of our address rather than ours. The two agree
-       * on a simple deployment and disagree behind a proxy, on a second
-       * domain, or on an internal hostname — and the one that decides whether
-       * a connection works is this one.
-       *
-       * That was survivable while every surface was copy-paste: a human sees
-       * the host before pasting it. It stops being survivable the moment we
-       * hand the URL to a third party (a connector install link), where
-       * nobody reads it and the failure surfaces inside someone else's UI.
-       */
-      mcpUrl: mcpResourceUrl.toString(),
     });
   });
 
-  // Close change requests whose source branch has been deleted. Not awaited:
-  // it fetches from origin, and a slow or unreachable remote must not hold up
-  // the server — nothing downstream depends on the result, and the requests it
-  // closes have been unusable since the branch went away, so landing a few
-  // seconds into uptime is soon enough. Errors are swallowed inside the sweep,
-  // which fails safe by closing nothing.
-  void core.workflowService
-    .closeChangeRequestsWithDeletedBranches()
-    .then((n) => {
-      if (n > 0) {
-        console.log(`[cr] closed ${n} change request${n === 1 ? '' : 's'} with a deleted branch`);
-      }
-    })
-    .catch((err) => console.warn('[cr] deleted-branch sweep failed:', err));
+  // The per-user marketplace as a git remote. Outside `/api` and ahead of
+  // every JWT mount: it authenticates with a connection key in HTTP Basic
+  // (what `git clone https://key:<k>@…` sends), and git's own http-backend
+  // serves the protocol. See modules/marketplace.
+  app.use(
+    '/git',
+    createMarketplaceGitRoutes({
+      repo: core.marketplaceRepo,
+      keys: core.externalApiKeyService,
+      mountPath: '/git',
+    }),
+  );
 
-  // Overlay boot-time side effects (startup reconciles, periodic sweeps).
-  await ext.onBoot?.(core);
+  // The SAME marketplace as a GitHub Enterprise consumer (claude.ai, Cowork)
+  // fetches it: the GitHub-shaped OAuth pair at /login/oauth/* and the REST
+  // calls at /api/v3/*, reading the same per-user tree by the same connection
+  // key. At the app root because those paths are GitHub's, and ahead of the
+  // /api JWT mounts because the consumer's backend arrives with a Bearer
+  // key, never a session.
+  app.use(
+    createGitHubFacadeRoutes({
+      facade: core.githubFacade,
+      keys: core.externalApiKeyService,
+      repo: core.marketplaceRepo,
+      owner: 'git',
+      repoName: core.marketplaceRepo.repoName.replace(/\.git$/, ''),
+      publicUrl: core.config.publicBackendUrl,
+    }),
+  );
+
+  // The graph's boot side effects — the distribution's onBoot, the
+  // knowledge-base startup phase, the sweeps — live in `startCore` so a host
+  // that activates a graph on demand can run and later undo them. Here, at
+  // this point in the mount order, for a single-tenant deployment; a caller
+  // that has already started the graph (or will) passes `boot: false`.
+  if (opts.boot ?? true) await startCore(core, ext);
 
   // Auth routes (unprotected — login endpoint must be accessible)
   app.use(
@@ -242,6 +375,9 @@ export async function createCoreServer(
       core.authMiddleware,
       core.authProviders,
       core.config.loginPasswordEnabled,
+      // The cookie's Secure flag follows the scheme the deployment is reached
+      // on, as the SSO providers' does: one rule for every sign-in path.
+      { cookieSecure: authCookieSecure(core.config.publicBackendUrl) },
     ),
   );
 
@@ -256,7 +392,24 @@ export async function createCoreServer(
     core.mcpAuthMiddleware,
     core.authMiddleware,
     core.usageMeter,
+    // The local-token exchange: verifies an MCP OAuth access token and mints
+    // the loopback internal token the local MCP server uses for its REST reads.
+    core.internalTokenService,
+    core.mcpOAuthProvider,
+    core.mcpResourceMetadataUrl,
+    core.agentScopeService,
   ));
+
+  // Remote sync — `POST /api/sync`, called by a git host's webhook or a
+  // pipeline with the deployment's sync secret (or by an admin's session).
+  // Same reason as MCP for mounting here: a non-JWT bearer must not meet a
+  // protected mount first.
+  app.use('/api', createKbSyncRoutes({
+    kbSync: core.kbSyncService,
+    syncSecret: () => core.settings.resolve('kbSyncSecret'),
+    authService: core.authService,
+    adminAccess: core.adminAccess,
+  }));
 
   // MCP OAuth 2.1 authorization server: /authorize, /token, /register,
   // /revoke + the /.well-known metadata documents (the SDK requires an
@@ -284,9 +437,14 @@ export async function createCoreServer(
     secretsVault: core.secretsVaultService,
     toolManualService: core.toolManualService,
     accessControl: core.accessControl,
+    connectionProbe: core.connectionProbeService,
+    agents: core.agentScopeService,
     stateSecret: core.config.jwtSecret,
     publicBackendUrl: core.config.publicBackendUrl,
     publicFrontendUrl: core.config.publicFrontendUrl,
+    kb: core.kb,
+    // Read at request time: the overlay binds the port after core is built.
+    managedSignIns: () => core.managedSignIns,
   };
   app.use('/api', createSecretsVaultPublicRoutes(secretsVaultRoutesDeps));
 
@@ -301,26 +459,99 @@ export async function createCoreServer(
   const toolsRouter = express.Router();
   const ta = core.toolAuthMiddleware;
   const th = core.toolHandlerFactory;
-  // Shared ontology-session boundary gate config, consumed by every tool
-  // surface that touches the KB (file tools + graph tools). The gate's
-  // blocking decision runs through the workflow hooks: core registers none
-  // (tracking only); the enterprise root registers the ontology block on
-  // `workflowService.hooks` before this server is built.
-  const sessionOntologyGate = {
-    service: core.sessionOntologyService,
-    enabled: core.config.ontologySessionBlock,
-    kbDirName: core.kbDirName,
+  // The Audit log's recorder for the REST tool calls the LOCAL server makes
+  // directly (its skill reads, above all) — judged on `finish`, after each
+  // route's own auth has run, and only for the exchanged grant that names an
+  // agent connection, so nothing the hosted proxy already records is counted
+  // twice. Ahead of every tool route, on the same router.
+  toolsRouter.use(
+    '/agent/tools/:name',
+    createAgentRestAuditMiddleware({
+      recorder: core.agentAuditService,
+      kbManualName: EXTERNAL_KB_MANUAL_NAME,
+      skillFolders: async (userId) => {
+        const user = await core.authService.getUserById(userId);
+        if (!user) return [];
+        const skills = await core.skillService.listSkills(user.email);
+        return skills.map((s) => ({ name: s.name, path: s.path }));
+      },
+    }),
+  );
+  // Shared agent-access gate config, consumed by every tool surface that
+  // touches the KB (file tools + graph tools). The gate decides nothing
+  // itself: it calls the read and write hooks a deployment registered on
+  // `versionControlService.hooks`, and carries the notes that deployment wants
+  // agents to read about the gated tools. Core registers neither, so a
+  // core-only deployment refuses nothing and says nothing extra.
+  const agentAccessGate: AgentAccessGate = {
     recoveryBotEmail: RECOVERY_BOT_EMAIL,
-    hooks: core.workflowService.hooks,
+    hooks: core.versionControlService.hooks,
+    notes: new ToolDescriptionNotes(),
   };
-  registerWorkflowTools(core.toolRegistry, toolsRouter, ta, th);
-  registerWorkspaceTools(core.toolRegistry, toolsRouter, ta, th, core.spillStore, core.accessControl, core.kbDirName, sessionOntologyGate, core.routineWritePolicy, core.sessionSink);
-  registerSkillsTools(core.toolRegistry, toolsRouter, ta, th, core.skillService);
+  // A skill's `allowed-tools`, checked against what the caller can see — on
+  // every save surface (agent write tools, the app's PUT /file) and on
+  // `get_skill`. Warnings only; it never refuses a save.
+  const allowedToolsChecker = new AllowedToolsChecker(core.toolRegistry, core.toolManualService, core.kb);
+  // `delete_branch` sees change requests as `get_change_request` does.
+  // The history tools take the per-file read the file itself takes (`accessControl`).
+  registerVersionControlTools(core.toolRegistry, toolsRouter, ta, th, core.kb, changeRequestScope(core.accessControl, core.kb).maySee, core.accessControl, agentAccessGate);
+  // The five read tools over change requests. Separate from the version-control tools
+  // because they are the only ones that gate their whole payload on the
+  // caller's read access, so they take the access service and nothing else.
+  registerChangeRequestReadTools(core.toolRegistry, toolsRouter, ta, th, core.accessControl, core.kb);
+  const workspaceTools = registerWorkspaceTools(core.toolRegistry, toolsRouter, ta, th, core.spillStore, core.docExtractService, core.accessControl, core.kb, agentAccessGate, core.routineWritePolicy, core.sessionSink, allowedToolsChecker, core.changeGate, core.agentUploadStore, core.agentGuideStart, core.agentDownloadStore, core.starterPackService, core.disk, core.patternMatcher);
+  // `open_page` — the knowledge-base page shown inside a chat. Registered
+  // here, on the same router as the file tools, because it answers with
+  // `read_file`'s own read: the read hook, the access gate and the
+  // not-found refusal come from that registration rather than from a copy.
+  registerEmbedTools(core.toolRegistry, toolsRouter, ta, th, {
+    embedService: core.embedService,
+    kb: core.kb,
+    readForTool: workspaceTools.readForTool,
+    // A host's https sandbox cannot load from a plain-http deployment, so
+    // the tool answers the text and the app address and says so.
+    canBeReached: () => isSandboxReachableOrigin(core.config.publicFrontendUrl),
+    appUrlFor: (repoRelative, slug) => core.embedService.appUrlFor(repoRelative, slug),
+    // The read is `read_file`'s, so the notes a deployment registers for the
+    // gated tools reach this one as well.
+    notes: agentAccessGate.notes,
+  });
+  // The app manifest and the view bytes, for the LOCAL MCP server: it bridges
+  // a host to this deployment over HTTP and has no other way to learn which
+  // tools carry a view. Same router, same `manualAuth` as `all-tools`.
+  toolsRouter.use(createMcpAppRoutes(core.mcpAppService, core.manualAuthMiddleware));
+  // The guide on its own, beside the file tools that serve it by name.
+  registerAgentGuideTool(core.toolRegistry, toolsRouter, ta, th, core.agentGuideSections);
+  // The agent upload route, on the same router as the tool endpoints so it
+  // mounts ahead of the JWT `/api` mounts below — but WITHOUT `toolAuth`: its
+  // whole credential is the single-use token in its path, which is the point
+  // (an agent's `curl` carries no session and no connection key). It resolves
+  // no workspace and writes into none; every access, platform-file and branch
+  // rule is applied later by `apply_file_upload`.
+  toolsRouter.use(createAgentUploadRoutes({ uploads: core.agentUploadStore }));
+  // Its outgoing twin, mounted the same way and for the same reason: the
+  // one-time link is the whole credential an agent's `curl` carries. Every
+  // file behind it was judged when `request_file_download` issued it.
+  toolsRouter.use(createAgentDownloadRoutes({ downloads: core.agentDownloadStore, identify: core.agentDownloadFetcher }));
+  registerSkillsTools(core.toolRegistry, toolsRouter, ta, th, core.skillService, allowedToolsChecker, {
+    accessControl: core.accessControl,
+    defaultWorkspaceId: () => core.kb.defaultWorkspaceId(),
+    // A skill's files as committed on the default branch, for the whole-skill
+    // verdict: the same clone and the same git the skill's history is read from.
+    committedFiles: core.gitService,
+  });
+  // Definitions only: the endpoints they describe are the app's own plugin
+  // creation routes, mounted below behind the key-or-session gate.
+  registerPluginsTools(core.toolRegistry, core.kb);
   registerToolManualsTools(core.toolRegistry, toolsRouter, ta, th, core.toolManualService, {
     accessControl: core.accessControl,
     // The vault satisfies the module's local VariableStatusPort — `list_tool_setup`
     // reports configuration booleans only; secret values never ride through tools.
     variableStatus: core.secretsVaultService,
+    kb: core.kb,
+    // What the proxy's schema check found when each server's tools were last
+    // loaded — reported to a caller who may write the tool, nobody else.
+    hiddenTools: core.mcpService.hiddenTools,
   });
   // Overlay tool registrations (defs + module-hosted endpoints).
   ext.tools?.({
@@ -328,14 +559,20 @@ export async function createCoreServer(
     router: toolsRouter,
     toolAuth: ta,
     toolHandler: th,
-    sessionOntologyGate,
+    agentAccessGate,
     core,
   });
+  // What MCP clients are told about each platform tool's effect: read by the
+  // agent manual (the hosted endpoint) and by `/agent/tool-hints` (hexis-mcp).
+  const { readOnlyHints } = core;
   toolsRouter.use(createManualRoutes(
     core.toolRegistry,
     core.manualAuthMiddleware,
     async (userId) => (await core.authService.getUserById(userId))?.email,
+    readOnlyHints,
+    core.agentScopeService,
   ));
+  toolsRouter.use(createToolHintsAgentRoutes(readOnlyHints, core.manualAuthMiddleware));
   // The aggregated manual list (KB + the caller's accessible `.tool`s) + inline
   // `.tool` sub-manuals. Mounted on the tools router so they share `manualAuth`
   // and sit before the JWT `/api` mounts.
@@ -343,45 +580,152 @@ export async function createCoreServer(
     core.toolManualService,
     core.manualAuthMiddleware,
     async (userId) => (await core.authService.getUserById(userId))?.email,
-    { workspaceService: core.workspaceService, accessControl: core.accessControl, kbDirName: core.kbDirName },
+    {
+      workspaceService: core.workspaceService,
+      accessControl: core.accessControl,
+      kb: core.kb,
+      disk: core.disk,
+      pluginIndex: core.pluginIndexService,
+    },
+    core.agentScopeService,
+  ));
+  // What every connected agent is told at session start, as the hosted proxy
+  // composes it: read by the local `hexis-mcp` bridge at startup and by the
+  // External agent access card. Same `manualAuth`, same router, as `all-tools`.
+  toolsRouter.use(
+    createAgentInstructionsRoutes(
+      core.manualAuthMiddleware,
+      core.readAgentPreamble,
+      () => core.kb.layout,
+      () => core.kb.defaultBranch,
+    ),
+  );
+  // The fingerprint of the caller's released catalog. The local `hexis-mcp`
+  // server polls it to learn that a manual or a skill changed under a
+  // connection it cannot be pushed to; nothing else consults it. Same
+  // `manualAuth`, same router, as `all-tools`.
+  toolsRouter.use(createCatalogRevisionRoutes({
+    toolManuals: core.toolManualService,
+    skills: core.skillService,
+    manualAuth: core.manualAuthMiddleware,
+    resolveUserEmail: async (userId) => (await core.authService.getUserById(userId))?.email,
+    agentScope: core.agentScopeService,
+    // The views move the revision too: a release that changes a view and no
+    // manual would otherwise leave a running local server on the old one.
+    mcpApps: core.mcpAppService,
+  }));
+  // The only core route that returns secret VALUES: a local `.tool`'s declared
+  // variables, for the local MCP server that will execute it. It re-reads the
+  // declaring knowledge-base file server-side, so the file is the allowlist and
+  // the caller cannot widen it. Same `manualAuth` as the rest of the agent
+  // surface.
+  toolsRouter.use(createDeclaredVariableRoutes(
+    core.toolManualService,
+    core.secretsVaultService,
+    core.manualAuthMiddleware,
+    async (userId) => (await core.authService.getUserById(userId))?.email,
+    core.agentScopeService,
   ));
   app.use('/api', toolsRouter);
+
+  // The same guard on the PARSED body, for the WHOLE `/workspace/:id` prefix
+  // and ahead of EVERY router under it — the file routes, the review, version control
+  // and access ones, and whatever an extension mounts below. Mounted here,
+  // before the extension phase, so an overlay surface added there is covered
+  // by its prefix rather than by remembering this. No auth in front of it: the
+  // lexical rule reads the caller's own string and touches no disk, so it
+  // answers nothing; the resolved half waits for the JWT check below.
+  app.use('/api/workspace/:id', createGitInternalsRouteGuard(core.workspaceService));
 
   // Non-JWT overlay surfaces that sit between the tools router and the
   // JWT-protected `/api` routes (LLM proxy, embed, upload — see the phase
   // doc on ServerExtensions.postTools).
+  // The embed surface, ahead of every JWT mount and of the static
+  // catch-all: its data routes authenticate by the embed token ALONE (a
+  // session reaching them must be refused, not honoured), and the two SPA
+  // routes need their framing headers stamped before `index.html` is served.
+  app.use(createEmbedRoutes(core.embedService));
+
   ext.postTools?.(app, core);
 
+  // The plugin creation doors — `POST /api/plugins`, `POST /api/plugins/personal`
+  // — take an agent's connection key as well as a session, because the
+  // `create_plugin` and `my_plugin` tools describe these very endpoints.
+  // Mounted HERE, before the first `app.use('/api', authMiddleware, …)`
+  // below: every one of those runs the JWT check for EVERY `/api` request
+  // that reaches it, whether or not its router matches, so a connection key
+  // sent to these paths would be refused before the gate saw it.
+  app.use(
+    '/api',
+    keyOrSessionAuth({
+      sessionAuth: core.authMiddleware,
+      toolAuth: core.toolAuthMiddleware,
+      isToolCredential: (token) =>
+        core.internalTokenService.looksLikeInternalToken(token) ||
+        core.externalApiKeyService.looksLikeExternalApiKey(token),
+    }),
+    createPluginCreationRoutes(
+      core.pluginProvisionService,
+      async (req) => (req.userId ? ((await core.authService.getUserById(req.userId)) ?? null) : null),
+      core.agentScopeService,
+      // Public-demo lockdown: both creation doors refuse (see CoreConfig.publicDemo).
+      core.config.publicDemo,
+    ),
+  );
+
   // Protected routes
+  // The same guard again, now BEHIND the JWT check, so an authenticated
+  // request also gets the resolved form judged — a link in the repository that
+  // points into the git folder — before any read gate or lock.
+  app.use('/api/workspace/:id', core.authMiddleware, createGitInternalsRouteGuard(core.workspaceService));
+  app.use('/api', core.authMiddleware, createWriteAccessRoutes(core.writeAccess));
   app.use('/api', core.authMiddleware, createWorkspaceRoutes(
     core.workspaceService,
     core.authService,
-    core.workflowService,
+    core.versionControlService,
     core.eventBus,
     core.accessControl,
-    core.kbDirName,
+    core.kb,
     core.creatorAccess,
     core.adminAccess,
+    core.disk,
+    allowedToolsChecker,
+    core.changeGate,
   ));
-  // Workflow is the only branches / changes / change-request surface. The
+  // Version control is the only branches / changes / change-request surface. The
   // former /git/*, /pr/*, /pr/:n/* routes are gone — every consumer goes
   // through /workflow/* now.
-  app.use('/api', core.authMiddleware, createWorkflowRoutes(
-    core.workflowService,
+  // The `/workflow/` prefix is kept for API compatibility until a core major.
+  app.use('/api', core.authMiddleware, createVersionControlRoutes(
+    core.versionControlService,
     core.workspaceService,
     core.authService,
     core.eventBus,
+    core.accessControl,
+    core.kbDirName,
   ));
   // SSE event-bus surface. The route owns its own auth gating via the
   // injected middleware (which accepts both Bearer and the `bevel_token`
   // cookie — the cookie path is what makes EventSource work, since the
   // browser API can't set headers). Mounted as its own app.use so it
   // doesn't share an outer middleware chain with the JSON routes above.
-  app.use('/api', createEventsRoutes(core.eventBus, core.authMiddleware));
+  // Every event passes the delivery rule on its way to a session: the file
+  // routes' read verdict, read in the server's own checkouts — for an
+  // approval, the target branch's; a target with no checkout at its ref.
+  const eventDelivery = new EventDelivery(createEventAccess({
+    accessControl: core.accessControl,
+    kbDirName: core.kbDirName,
+    getChangeRequest: (number) => core.versionControlService.getChangeRequest(number),
+    workspaces: {
+      hasWorkspace: (workspaceId) => core.workspaceService.hasBootstrappedWorkspace(workspaceId),
+      anyWorkspaceId: async () => (await core.workspaceService.findAnyWorkspaceId()) ?? core.kb.defaultWorkspaceId(),
+    },
+  }));
+  app.use('/api', createEventsRoutes(core.eventBus, core.authMiddleware, eventDelivery));
   app.use('/api', core.authMiddleware, createDiffRoutes(
     core.diffService,
     core.authService,
-    core.workflowService,
+    core.versionControlService,
     core.accessControl,
     core.kbDirName,
   ));
@@ -389,52 +733,198 @@ export async function createCoreServer(
     core.accessControl,
     core.workspaceService,
     core.authService,
-    core.workflowService,
+    core.authService,
+    core.versionControlService,
     core.eventBus,
     core.db,
-    core.kbDirName,
+    core.kb,
+    core.disk,
+    [core.config.adminEmail],
   ));
+  // Asking for Can edit or Owner on an item from its Manage access dialog, and
+  // the editors' Accept / Decline. Mounted beside the access routes it shares
+  // its gate with: the request is refused by the same canWrite it would
+  // otherwise have to wait for.
+  app.use('/api', core.authMiddleware, createAccessRequestRoutes({
+    accessControl: core.accessControl,
+    workspaceService: core.workspaceService,
+    authService: core.authService,
+    versionControl: core.versionControlService,
+    lifecycle: core.joinRequestsService,
+    kb: core.kb,
+  }));
   app.use(
     '/api',
     core.authMiddleware,
-    createSkillsRoutes(core.skillService, core.pendingSkillsService),
+    createSkillsRoutes(core.skillService, core.kb, core.pendingSkillsService, core.pluginLinkIndex, core.accessControl, allowedToolsChecker),
+  );
+  // Asking for write on a shared skill — the join-request machinery pointed
+  // at a skill folder. Same JWT gate, same fail-closed shape.
+  app.use(
+    '/api',
+    core.authMiddleware,
+    createSkillAccessRequestRoutes({
+      skillService: core.skillService,
+      accessControl: core.accessControl,
+      versionControl: core.versionControlService,
+      requests: new AccessRequestsService({
+        versionControl: core.versionControlService,
+        workspaceService: core.workspaceService,
+        lifecycle: core.joinRequestsService,
+        kb: core.kb,
+      }),
+      joinRequests: core.joinRequestsService,
+      kb: core.kb,
+      resolveUser: async (req) =>
+        req.userId ? ((await core.authService.getUserById(req.userId)) ?? null) : null,
+    }),
   );
   // Plugin enumeration + join requests. Browser-only (JWT), and fail-closed
   // like every other read surface: plugins the caller cannot access (member,
   // manager, or discoverable via the access.md file's own read grant) are
-  // absent from the list. A join request is a plain change request.
+  // absent from the list. A join request is a plain change request. (The
+  // creation doors are mounted above, before the first JWT-only `/api`
+  // mount — see there.)
   app.use('/api', core.authMiddleware, createPluginsRoutes(
     core.pluginIndexService,
     core.accessControl,
-    core.workflowService,
-    core.workspaceService,
+    core.versionControlService,
     core.joinRequestsService,
+    core.pluginJoinRequestJobs,
     core.pluginProvisionService,
-    core.kbDirName,
     async (req) => (req.userId ? ((await core.authService.getUserById(req.userId)) ?? null) : null),
-    core.config.publicDemo,
+    core.kb,
+    core.pluginLinksService,
+    core.pluginRenameService,
   ));
+  // The Library's "Your teams" lens: what each group can use, sliced from
+  // the catalogs the caller already sees. Same JWT gate, same fail-closed
+  // shape as the plugin index.
+  app.use(
+    '/api',
+    core.authMiddleware,
+    createTeamsRoutes(core.accessControl, core.pluginIndexService, core.skillService, core.toolManualService, core.kb),
+  );
   // Admin-status resolver (CORE — see the note in admin-access.routes.ts;
   // the full admin router is an enterprise `ext.authed` extension).
   app.use('/api', core.authMiddleware, createAdminAccessRoutes(core.adminAccess));
+  // The Tools page's read-only toggles: anyone signed in reads, admins write.
+  app.use('/api', core.authMiddleware, createToolHintsRoutes(readOnlyHints, core.adminAccess));
+  // Groups admin (manual-mode CRUD; typed refusals in IdP mode) —
+  // admin-gated inside.
+  app.use('/api', core.authMiddleware, createGroupsAdminRoutes({
+    groupsAdmin: core.groupsAdminService,
+    adminAccess: core.adminAccess,
+    getUserById: async (id) => (await core.authService.getUserById(id)) ?? null,
+  }));
+  // Update check (admin-only inside): the newest published release vs the
+  // running version, cached server-side — see update-check.service.ts.
+  app.use(
+    '/api',
+    core.authMiddleware,
+    createUpdateCheckRoutes(core.updateCheckService, core.adminAccess),
+  );
   // Account management (list/create password accounts, GDPR erasure) —
   // admin-gated inside.
   app.use('/api', core.authMiddleware, createAccountRoutes(
     core.authService,
     core.adminAccess,
     core.accountErasureService,
+    core.accountHooks,
+    core.userAccessRemovalService,
   ));
+  // Connection keys across the deployment (list per account, revoke any) —
+  // admin-gated inside. The per-user key surface stays on /api/mcp/…
+  app.use(
+    '/api',
+    core.authMiddleware,
+    createConnectionKeysAdminRoutes(core.externalApiKeyService, core.adminAccess),
+  );
+  // The Audit log: a person's agents and keys with what they called (admins:
+  // everyone's), and the revoke of either — owner- or admin-gated inside.
+  app.use(
+    '/api',
+    core.authMiddleware,
+    createAuditRoutes(core.agentAuditService, core.externalApiKeyService, core.adminAccess),
+  );
+  // The onboarding's "is your agent connected yet?" — the caller's own
+  // agents only, read off the same connections and keys the Audit log lists.
+  app.use('/api', core.authMiddleware, createAgentConnectionRoutes(core.agentAuditService));
+  // "What does your team do?" — the starter-pack question a new knowledge
+  // base's admin is asked, and the pack it adds (admin-gated inside).
+  app.use(
+    '/api',
+    core.authMiddleware,
+    createOnboardingRoutes(core.starterPackService, async (req) =>
+      req.userId ? ((await core.authService.getUserById(req.userId)) ?? null) : null,
+    ),
+  );
   // First-run setup. Mounted with the other authed routes but touching NO
   // workspace — it has to work on a deployment that has no knowledge base yet,
-  // which is the whole reason it exists.
-  app.use('/api', core.authMiddleware, createSetupRoutes(core.settings, core.adminAccess));
-  app.use('/api', core.authMiddleware, createToolManualsBrowserRoutes(core.toolManualService, {
-    service: core.mcpServerEditService,
-    getUser: async (userId) => {
-      const u = await core.authService.getUserById(userId);
-      return u ? ({ id: u.id, email: u.email, name: u.name } as AuthUser) : undefined;
-    },
-  }));
+  // which is the whole reason it exists. The startup runner rides along for
+  // the phase's SECOND quiet moment: the save that completes setup.
+  app.use(
+    '/api',
+    core.authMiddleware,
+    createSetupRoutes(
+      core.settings,
+      core.adminAccess,
+      core.kbStartupRunner,
+      core.kb,
+      {
+        // Same address family as the MCP endpoint above, userinfo stripped for
+        // the same reason: this string is handed to admins to paste elsewhere.
+        url: syncUrl.toString(),
+        lastSync: () => core.kbSyncService.lastSync(),
+      },
+      // The connection probe's git — and the root-folder listing's — runs
+      // through the deployment's one runner.
+      repositoryConnectionCheck(core.gitRunner),
+      rootFolderListerFor(core.gitRunner),
+      oidcRedirectUri(core.config.publicBackendUrl),
+      // The two sign-in checks keep their defaults.
+      undefined,
+      undefined,
+      {
+        source: core.repositorySource,
+        ensureManaged: (branch) => core.managedRepository.ensure(core.gitRunner, branch),
+        githubApp: core.githubApp,
+      },
+      // What a move to another repository has to decide about, and what it
+      // runs under. Bound here rather than handed the whole version-control service:
+      // the setup routes ask two questions, hold the commit worker for the
+      // move, and know nothing else about a request or a commit.
+      {
+        countOpen: () => core.versionControlService.countOpenChangeRequests(),
+        closeAsRepositoryReplaced: () => core.versionControlService.closeOpenChangeRequestsAsRepositoryReplaced(),
+        whileCommitsHeld: (work) => core.whileCommitsHeld(work),
+      },
+    ),
+  );
+  // Connecting a repository on GitHub through a GitHub App: the round trips
+  // to GitHub the setup screen starts, behind the same sign-in.
+  app.use(
+    '/api',
+    core.authMiddleware,
+    createGitHubAppRoutes({
+      settings: core.settings,
+      connection: core.githubApp,
+      adminAccess: core.adminAccess,
+      publicBackendUrl: core.config.publicBackendUrl,
+      publicFrontendUrl: core.config.publicFrontendUrl,
+      isComplete: () => isComplete(core.settings, core.kb, core.repositorySource),
+    }),
+  );
+  const toolPageUser = async (userId: string): Promise<AuthUser | undefined> => {
+    const u = await core.authService.getUserById(userId);
+    return u ? ({ id: u.id, email: u.email, name: u.name } as AuthUser) : undefined;
+  };
+  app.use('/api', core.authMiddleware, createToolManualsBrowserRoutes(
+    core.toolManualService,
+    { service: core.mcpServerEditService, getUser: toolPageUser },
+    { service: core.toolDeleteService, getUser: toolPageUser },
+    core.pendingToolsService,
+  ));
   app.use('/api', core.authMiddleware, createSecretsVaultRoutes(secretsVaultRoutesDeps));
   // The authed tail of the MCP OAuth flow: /connect calls these to describe
   // the pending authorization and, on Finish, to mint the one-time code. The
@@ -443,9 +933,31 @@ export async function createCoreServer(
   app.use('/api', core.authMiddleware, createOAuthConsentRoutes({
     provider: core.mcpOAuthProvider,
     stateSecret: core.config.jwtSecret,
+    facade: {
+      isFacadeRequest: (st) => core.githubFacade.isFacadeRequest(st),
+      clientNameFor: (st) => core.githubFacade.clientNameFor(st),
+      completeConsent: (userId, st) => core.githubFacade.completeConsent(userId, st),
+    },
+    agents: core.agentScopeService,
+  }));
+
+  // What an Owner pastes into Claude's admin settings to register this
+  // deployment as a GitHub Enterprise Server — admins only — plus whether it
+  // is registered, a boolean every signed-in person may read.
+  app.use('/api', core.authMiddleware, createGitHubFacadeAdminRoutes({
+    credentials: core.githubFacadeCredentials,
+    isAdmin: (email) => core.adminAccess.isAdmin(email),
+    publicUrl: core.config.publicBackendUrl,
+    marketplaceUrl: marketplaceGitUrl.toString(),
   }));
 
   // JWT-protected overlay routes.
+  // Linking an outside account to the signed-in user, and managing those
+  // links. Under the JWT middleware, deliberately: the link acts AS the
+  // session, which is exactly why the page it is called from refuses every
+  // framing ancestor.
+  app.use('/api', core.authMiddleware, createEmbedLinkRoutes(core.embedService));
+
   ext.authed?.(app, core);
 
   // In production, serve the frontend static build
@@ -460,7 +972,11 @@ export async function createCoreServer(
       // MCP client parses as JSON → "expected object, received undefined" and
       // the whole connection fails. A clean 404 lets discovery fall through to
       // the variant we do serve. Same reasoning for stray `/api/*` gets.
-      if (req.path.startsWith('/.well-known/') || req.path.startsWith('/api/')) {
+      if (
+        req.path.startsWith('/.well-known/') ||
+        req.path.startsWith('/api/') ||
+        req.path.startsWith('/login/oauth/')
+      ) {
         res.status(404).json({ error: 'Not found' });
         return;
       }

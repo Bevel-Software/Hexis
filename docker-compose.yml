@@ -27,13 +27,29 @@ services:
     logging: *bounded-logging
 
   app:
-    build:
-      context: .
-      # No `args:` block. The image still accepts a GIT_SHA build arg — the
-      # Dockerfile declares it, and `GET /api/health` reports whatever it was
-      # given (`unknown` otherwise) — but naming it here made every deployment
-      # UI that reads this file ask for a value nobody sets by hand. CI passes
-      # it directly: `--build-arg GIT_SHA=$(git rev-parse HEAD)`.
+    # The image CI publishes on every release — deploying does not compile
+    # anything. Pin the version in `.env` (`HEXIS_VERSION=0.15.1`) so an
+    # upgrade is a deliberate act: bump the value, `docker compose pull app`,
+    # `up -d`. Left unset it tracks `latest` (the newest release) — right for
+    # a first install, a footgun after: an unplanned `pull` becomes an
+    # unplanned upgrade.
+    #
+    # Building from SOURCE (a staging server tracking dev, a fork) is what
+    # `deployment/docker-compose.build.yml` is for — a standalone file an
+    # orchestrator can be pointed at directly.
+    image: ghcr.io/bevel-software/hexis:${HEXIS_VERSION:-latest}
+    # Always pull. Without this, `docker compose up` reuses whatever image the
+    # host already holds under that tag, so a redeploy of `:latest` can start
+    # a build from months ago: on 2026-09-25 a production host came up on
+    # 0.13.6 (August) with 0.20.0 published, because the host had last pulled
+    # `latest` in August. A pull of an unchanged image is a cheap manifest
+    # check, so this costs nothing when the tag has not moved.
+    pull_policy: always
+    # Run node under a real init, so PID 1 reaps orphans.
+    init: true
+    # Cap the container's task count so a pid/thread leak degrades the app
+    # instead of the host.
+    pids_limit: 4096
     # NO host port is published here, deliberately. A reverse proxy (Coolify,
     # Traefik, nginx) reaches the container on this port over the compose
     # network, and publishing a FIXED host port alongside that breaks every
@@ -67,23 +83,19 @@ services:
     #
     # Variables that are genuinely REQUIRED keep an interpolated reference, so
     # the operator is still prompted for them.
+    #
+    # deployment/docker-compose.build.yml and docker-compose.portainer.yml
+    # mirror this list (each must stand alone for its orchestrator) — a
+    # variable added here is added to both.
     environment:
       - NODE_ENV=production
       - PORT=3001
-      # The commit this build came from, reported by `GET /api/health`.
-      # Coolify injects SOURCE_COMMIT for git-based deploys — but only into the
-      # environment it hands compose, so without a pass-through here it never
-      # reached the container and health reported 'unknown' on every hosted
-      # deploy. `version.ts` has named this fallback all along; this is what
-      # makes it true. Nothing to fill in: absent, health still says 'unknown'.
-      #
-      # LEAVE COOLIFY'S "Include Source Commit in Build" OFF. It controls
-      # BUILD-time availability, and turning it on defeats layer caching across
-      # commits — the setting says so itself, and adds that SOURCE_COMMIT "will
-      # still be available at runtime" either way. Runtime is all we need:
-      # `version.ts` reads it from the process environment when the server
-      # starts, not from anything baked into the image.
-      - SOURCE_COMMIT
+      # The deployed commit sha `GET /api/health` reports is BAKED into the
+      # published image by CI (the Dockerfile's SOURCE_COMMIT build arg, baked
+      # in as GIT_SHA) — nothing to pass at runtime. A runtime SOURCE_COMMIT
+      # pass-through used to sit here; Coolify materialized it as an EMPTY
+      # LITERAL that overrode the real value, which is exactly the failure
+      # baking at build time removes.
       # Git host credential. The KB can live on any git server (GitHub, GitLab,
       # Bitbucket, Azure DevOps, self-hosted): GIT_TOKEN is the Basic-auth
       # password and GIT_USERNAME the Basic username (host-specific — see
@@ -108,8 +120,16 @@ services:
       - OIDC_PROVIDER_LABEL
       # Reverse-proxy hop count. Required behind a proxy (Coolify, Traefik,
       # nginx) or every request looks like it came from the proxy — which
-      # collapses the per-IP login rate limit onto one bucket.
+      # collapses the per-IP login rate limit onto one bucket. (Defaults to 1
+      # when DOMAIN below is set — that declares the bundled Caddy in front.)
       - TRUST_PROXY
+      # The public host name, for deployments fronted by the bundled `caddy`
+      # service below (`docker compose -f docker-compose.yml --profile https up -d`). Setting it
+      # declares "the bundled Caddy fronts this deployment", and the app
+      # derives the rest: PUBLIC_BACKEND_URL / PUBLIC_FRONTEND_URL default to
+      # https://<DOMAIN> and TRUST_PROXY to 1 (one hop — Caddy). Explicit
+      # values for any of those always win.
+      - DOMAIN
       # Tenant slug branded into every credential prefix. Default `bevel`
       # keeps pre-existing keys/tokens valid — change it only for a fresh deploy.
       - TENANT_ID=${TENANT_ID:-bevel}
@@ -128,13 +148,41 @@ services:
       # they are collected on the setup screen.
       - DEFAULT_BRANCH
       - PROTECTED_BRANCHES
+      # The rest of what the setup screen collects. Pass-throughs, so a value
+      # pinned in .env reaches the app and wins over the screen, as the
+      # configuration reference promises — without a line here the container
+      # never sees it. The sync secret lets a git host's webhook or a pipeline
+      # tell this deployment the repository changed (docs/git-sync.md); the
+      # three folder names read a repository laid out by someone else.
+      - KB_SYNC_SECRET
+      - KB_KNOWLEDGE_BASE_DIR
+      - KB_SKILLS_DIR
+      - KB_PLUGINS_DIR
       # 32-byte key (base64 or hex) encrypting secrets-vault values + MCP
       # OAuth client secrets/tokens.
       - SECRETS_ENC_KEY=${SECRETS_ENC_KEY}
-      # Public URLs for OAuth redirects + post-login bounces. The backend
-      # serves the SPA itself, so both default to this container's origin.
-      - PUBLIC_BACKEND_URL=${PUBLIC_BACKEND_URL:-http://localhost:3001}
-      - PUBLIC_FRONTEND_URL=${PUBLIC_FRONTEND_URL:-http://localhost:3001}
+      # Optional dedicated HMAC key for internal (loopback) tool tokens; unset,
+      # one is derived from JWT_SECRET. Pass-through so a rotation set in .env
+      # takes effect.
+      - INTERNAL_TOKEN_SECRET
+      # Update check (admins see a banner when a release is newer). Pass-through
+      # so UPDATE_CHECK=false actually reaches the app — air-gapped and
+      # opt-out deployments disable the one outbound request with it.
+      - UPDATE_CHECK
+      # Public URLs for OAuth redirects + post-login bounces. Pass-throughs,
+      # like everything optional: the defaults live in the app (same move as
+      # DATABASE_URL below), which in production falls back to https://<DOMAIN>
+      # when DOMAIN is set and to this container's own origin otherwise — the
+      # backend serves the SPA itself. Writing a default HERE would defeat the
+      # DOMAIN derivation: the container would always see a value.
+      - PUBLIC_BACKEND_URL
+      - PUBLIC_FRONTEND_URL
+      # The shared secret the Atlassian connector presents to the embed mint
+      # (`POST /api/embed/token`). Pass-through, and unset on a deployment
+      # that has no connector pointed at it: that one route then 404s, and
+      # nothing else about the embed depends on it — an agent's `open_page`
+      # mints through the authenticated MCP session instead.
+      - EMBED_SHARED_SECRET
       # The database. Set DATABASE_URL to point at a Postgres you already have;
       # left unset, the app builds one from the POSTGRES_* values below, which
       # are the same ones the bundled `db` service is created with.
@@ -187,8 +235,75 @@ services:
       - spills:/app/apps/server/tool-chain-spills
     logging: *bounded-logging
 
+  # Public HTTPS in one step, for a server with NO reverse proxy of its own —
+  # a bare EC2 instance, a plain VPS. Opt in with:
+  #
+  #   docker compose -f docker-compose.yml --profile https up -d
+  #
+  # The explicit `-f` matters from a CLONE: without it Compose also merges
+  # docker-compose.override.yml, which publishes app port 3001 on the host —
+  # beside Caddy, and reachable by clients that can then spoof forwarded
+  # headers against the one-hop TRUST_PROXY this profile implies. (wget
+  # deployments have no override file; the flag is harmless there.)
+  #
+  # Caddy obtains and renews Let's Encrypt certificates for $DOMAIN and
+  # redirects HTTP→HTTPS; set DOMAIN in `.env`, and the app derives the public
+  # origins and proxy hop from it (see the app's DOMAIN comment above).
+  # Requirements: a DNS A (or AAAA) record for the domain pointing at this
+  # server, and ports 80 + 443 reachable from the internet — 80 is not
+  # optional, the certificate challenge and the HTTP→HTTPS redirect both use
+  # it. Port 3001 stays closed; only Caddy talks to the app, over the compose
+  # network. Deployments that already sit behind a proxy (Coolify, Traefik,
+  # nginx) do NOT want this profile — two things terminating TLS for one app
+  # is one too many.
+  caddy:
+    profiles: ["https"]
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+      # HTTP/3. Caddy offers it by default; without the UDP mapping the offer
+      # dangles and browsers fall back after a timeout instead of instantly.
+      - "443:443/udp"
+    environment:
+      # A soft `:-` default, NOT `:?`, even though DOMAIN is genuinely
+      # required here: compose interpolates the WHOLE file even for services
+      # whose profile is inactive, so a hard `:?` would break plain
+      # `docker compose up` for everyone. The command below refuses to start
+      # without it instead — same outcome, only when the profile is in play.
+      - DOMAIN=${DOMAIN:-}
+    # No Caddyfile: `caddy reverse-proxy` is Caddy's production-ready quick
+    # subcommand — given a bare hostname in --from it serves that host over
+    # HTTPS with automatic ACME certificates AND the port-80 HTTP→HTTPS
+    # redirect, no config file needed. `$$DOMAIN` (doubled $) keeps compose
+    # from interpolating at config time; the shell inside the container reads
+    # the runtime value, which is what lets the empty check run at start
+    # rather than at parse.
+    command:
+      - sh
+      - -c
+      - |
+        if [ -z "$$DOMAIN" ]; then
+          echo "The https profile needs DOMAIN: set it (in .env, next to the other values) to the public host name this deployment should serve, e.g. DOMAIN=bevel.your-domain.com" >&2
+          exit 1
+        fi
+        exec caddy reverse-proxy --from "$$DOMAIN" --to http://app:3001
+    volumes:
+      # Certificates + ACME account state. Named volumes so they survive
+      # redeploys — Let's Encrypt rate-limits issuance per domain, and a
+      # deploy loop that discards certs can lock the domain out for a week.
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - app
+    restart: unless-stopped
+    logging: *bounded-logging
+
 volumes:
   pgdata:
   workspaces:
   backups:
   spills:
+  # Only used by the `https` profile (the caddy service above).
+  caddy_data:
+  caddy_config:

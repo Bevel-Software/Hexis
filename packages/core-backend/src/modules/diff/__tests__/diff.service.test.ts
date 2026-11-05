@@ -1,10 +1,14 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { NodeFs } from '../../kb-fs/node-fs.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { WorkspaceService, workspaceIdForBranch } from '../../workspace/workspace.service.js';
-import { WorkspaceMutex } from '../../workflow/git/mutex.js';
+import { WorkspaceService } from '../../workspace/workspace.service.js';
+import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
+import { WorkspaceMutex } from '../../kb-fs/mutex.js';
 import { DiffService } from '../diff.service.js';
+import { testKbContext } from '../../../__tests__/kb-context.js';
+import { newWorkspaceService } from '../../../__tests__/workspace-service.js';
 
 async function mkTmpRoot(prefix: string): Promise<string> {
   return fs.mkdtemp(path.join(os.tmpdir(), prefix));
@@ -36,10 +40,11 @@ async function setup(): Promise<Fixture> {
   const repoDir = path.join(workspaceDir, 'knowledge-base');
   // Inner `.git` dir is the marker `resolveWorkspaceDir` looks for.
   await fs.mkdir(path.join(repoDir, '.git'), { recursive: true });
-  const workspaceService = new WorkspaceService(
+  const workspaceService = newWorkspaceService(
     workspacesRoot,
     'https://github.com/Bevel-Software/knowledge-base.git',
-    'knowledge-base',
+    testKbContext(),
+    new NodeFs(),
   );
   const mutex = new WorkspaceMutex();
   const diffService = new DiffService(
@@ -48,6 +53,7 @@ async function setup(): Promise<Fixture> {
     workspacesRoot,
     backupsRoot,
     'knowledge-base',
+    new NodeFs(),
   );
   workspaceService.setDiffService(diffService);
   return { workspacesRoot, backupsRoot, workspaceDir, repoDir, workspaceId, workspaceService, diffService };

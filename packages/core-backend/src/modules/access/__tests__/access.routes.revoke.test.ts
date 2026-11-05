@@ -6,10 +6,12 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import type { IAccessControl, GrantSources } from '../access-control.interface.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { AuthService } from '../../auth/auth.service.js';
-import type { WorkflowService } from '../../workflow/workflow.service.js';
-import type { WorkflowEventBus } from '../../workflow/event-bus.js';
-import type { Database } from '../../database/connection.js';
+import type { VersionControlService } from '../../version-control/version-control.service.js';
+import type { VersionControlEventBus } from '../../version-control/event-bus.js';
 import { createAccessRoutes } from '../access.routes.js';
+import { usersDbDouble } from './users-db-double.js';
+import { testKbContext } from '../../../__tests__/kb-context.js';
+import { NodeFs } from '../../kb-fs/node-fs.js';
 
 /**
  * HTTP-level contract tests for the revoke route's CLASSIFICATION + MODE logic —
@@ -55,6 +57,8 @@ async function makeHarness(opts: {
   effectiveEmails?: Record<string, boolean>;
   /** Override the (otherwise-empty) eligibleWriters list so a principal shows as a row in resolvedView. */
   eligibleWriters?: { roles: string[]; users: { name: string; email: string }[] };
+  /** kbPrincipals' roles — empty (the default) reads as a model that failed to load. */
+  roles?: string[];
 }): Promise<Harness> {
   const files = new Map<string, string>(Object.entries(opts.files ?? {}));
 
@@ -76,18 +80,24 @@ async function makeHarness(opts: {
     canWrite,
     grantSources,
     invalidate: vi.fn(),
+    // The mutation service consults the merged principal index to decide
+    // exact-vs-name token matching on revoke (group shadowing). No groups in
+    // these fixtures; no roles (the default) reads as a failed load → exact.
+    kbPrincipals: vi.fn(async () => ({ roles: opts.roles ?? [], groups: [], people: [] })),
     // resolvedView() fans out to these after a successful mutation; harmless stubs.
     // canRead/canDownload/canOwner are ALSO consumed by denyHere's assert.
     canRead: vi.fn(async (_w: string, email: string) => effEmail(email, true)),
     canDownload: vi.fn(async (_w: string, email: string) => effEmail(email, false)),
     canOwner: vi.fn(async (_w: string, email: string) => effEmail(email, false)),
     eligibleWriters: vi.fn(async () => opts.eligibleWriters ?? { roles: [], users: [] }),
+    holdsAdminRootWrite: vi.fn(async () => false),
     eligibleReaders: vi.fn(async () => ({ restricted: true, roles: [], users: [] })),
     eligibleOwners: vi.fn(async () => ({ roles: [], users: [] })),
     eligibleDownloaders: vi.fn(async () => ({ roles: [], users: [] })),
   } as unknown as IAccessControl;
 
   const workspaceService = {
+    withPathTurn: async (_id: string, _p: string, op: () => Promise<unknown>) => op(),
     getOrCreateForBranch: vi.fn(async () => ({ id: WS, name: WS, kbDirName: KB })),
     readFile: vi.fn(async (_id: string, wsRel: string) => {
       const v = files.get(wsRel);
@@ -98,6 +108,9 @@ async function makeHarness(opts: {
       }
       return v;
     }),
+    readFileBinary: vi.fn(async (_id: string, wsRel: string) =>
+      Buffer.from(await (workspaceService.readFile as (id: string, p: string) => Promise<string>)(_id, wsRel), 'utf-8'),
+    ),
     writeFile: vi.fn(async (_id: string, wsRel: string, content: string) => {
       files.set(wsRel, content);
     }),
@@ -108,15 +121,15 @@ async function makeHarness(opts: {
   const acquireLock = vi.fn(async () => ({ acquired: true, lock: {} }));
   const releaseLock = vi.fn(async () => undefined);
   const releaseLockNoCommit = vi.fn(async () => undefined);
-  const workflowService = {
+  const versionControlService = {
     getLock: vi.fn(async () => null),
     acquireLock,
     releaseLock,
     releaseLockNoCommit,
-  } as unknown as WorkflowService;
+  } as unknown as VersionControlService;
 
-  const eventBus = { emit: vi.fn() } as unknown as WorkflowEventBus;
-  const db = {} as unknown as Database;
+  const eventBus = { emit: vi.fn() } as unknown as VersionControlEventBus;
+  const db = usersDbDouble();
 
   const app = express();
   app.use(express.json());
@@ -124,7 +137,7 @@ async function makeHarness(opts: {
     (req as unknown as { userId: string }).userId = USER.id;
     next();
   });
-  app.use('/api', createAccessRoutes(accessControl, workspaceService, authService, workflowService, eventBus, db, KB));
+  app.use('/api', createAccessRoutes(accessControl, workspaceService, authService, authService, versionControlService, eventBus, db, testKbContext({ kbDirName: KB }), new NodeFs()));
 
   const server = await new Promise<Server>((resolve) => {
     const s = app.listen(0, () => resolve(s));
@@ -273,6 +286,52 @@ describe('POST /access/revoke — route classification + modes', () => {
       const res = await revoke({ path: `${KB}/Sales`, kind: 'folder', principal: ALICE });
       expect(res.status).toBe(200);
       expect(h.stubs.files.get(`${KB}/Sales/access.md`)).toContain('Admin'); // untouched
+    });
+
+    it('a GROUP revoke strips group/<Name> — a VANISHED group never strips the role spellings', async () => {
+      // The file grants every spelling of one name: the bare token and
+      // role/Product (the role's) and group/Product (the group's). The group
+      // has since vanished from the active source and the principal index
+      // says nothing about roles either (kbPrincipals reports none), so
+      // nothing vouches that the bare name is the group's: only the explicit
+      // group token goes.
+      h = await makeHarness({
+        files: {
+          [`${KB}/Sales/access.md`]: '---\nwrite:\n  - Product\n  - role/Product\n  - group/Product\n---\n',
+        },
+        grantSources: () => ({}),
+      });
+      const res = await revoke({
+        path: `${KB}/Sales`,
+        kind: 'folder',
+        principal: { kind: 'group', group: 'Product' },
+      });
+      expect(res.status).toBe(200);
+      const text = h.stubs.files.get(`${KB}/Sales/access.md`)!;
+      // The group's grant is gone; the role's spellings survive.
+      expect(text).not.toContain('group/Product');
+      expect(text).toContain('- role/Product');
+      expect(text.split('\n')).toContain('  - Product');
+    });
+
+    it('a ROLE revoke still sweeps legacy bare spellings when nothing shadows the name', async () => {
+      // Unshadowed role revokes keep the historical cleanup: both `Product`
+      // and `role/Product` are the ROLE's spellings, and both go.
+      h = await makeHarness({
+        files: {
+          [`${KB}/Sales/access.md`]: '---\nwrite:\n  - Product\n  - role/Product\n---\n',
+        },
+        grantSources: () => ({}),
+        roles: ['Everyone', 'Product'],
+      });
+      const res = await revoke({
+        path: `${KB}/Sales`,
+        kind: 'folder',
+        principal: { kind: 'role', role: 'Product' },
+      });
+      expect(res.status).toBe(200);
+      const text = h.stubs.files.get(`${KB}/Sales/access.md`)!;
+      expect(text).not.toContain('Product');
     });
 
     it('refuses 403 when the caller cannot write the target access config', async () => {

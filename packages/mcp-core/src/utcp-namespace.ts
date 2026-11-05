@@ -31,8 +31,13 @@ const LOOPBACK_ORIGIN_TEMPLATE = '${API_URL}';
  * (`http://evil.example/?x=${API_URL}`) but can NOT make it the authority without
  * pointing the request back at our own loopback, so anchoring the trust decision
  * to the origin is what a user `.tool`'s URL text cannot forge.
+ *
+ * Two decisions rest on it, for the same reason: WHICH manuals are seeded the
+ * loopback bearer (below), and WHICH tools the tool client leaves unchecked
+ * because this server hosts them as routes and their own handlers check them
+ * (`call-guards.ts`).
  */
-function isBevelHostedUrl(url: string): boolean {
+export function isPlatformHostedUrl(url: string): boolean {
   if (!url.startsWith(LOOPBACK_ORIGIN_TEMPLATE)) return false;
   // The char right after the origin must delimit the authority; anything else
   // (`${API_URL}.evil.com`, `${API_URL}evil`) is a different, untrusted host.
@@ -62,7 +67,7 @@ export function seedBevelHostedManualVars(
     const name = typeof m.name === 'string' ? m.name : '';
     if (!name) continue;
     const url = (m as { url?: unknown }).url;
-    if (typeof url !== 'string' || !isBevelHostedUrl(url)) continue;
+    if (typeof url !== 'string' || !isPlatformHostedUrl(url)) continue;
     variables[utcpNamespacedKey(name, 'API_URL')] = loopbackBaseUrl;
     variables[utcpNamespacedKey(name, 'CONNECTION_KEY')] = connectionKey;
   }

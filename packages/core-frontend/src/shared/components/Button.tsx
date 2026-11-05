@@ -1,4 +1,4 @@
-import type { ButtonHTMLAttributes, ReactNode } from 'react';
+import type { ButtonHTMLAttributes, ReactNode, Ref } from 'react';
 import { cn } from '../../lib/utils';
 
 /**
@@ -68,6 +68,14 @@ export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   leadingIcon?: ReactNode;
   /** Rendered after the label. */
   trailingIcon?: ReactNode;
+  /**
+   * Declared explicitly because `ButtonHTMLAttributes` does not carry `ref`
+   * (the same contract as `IconButton`). A labelled button that opens a menu
+   * has to be referenceable: dismissing on Escape hands focus back to it, and
+   * an outside-click handler has to tell "clicked the trigger" from "clicked
+   * away", or one click closes and reopens.
+   */
+  ref?: Ref<HTMLButtonElement>;
 }
 
 export function Button({
@@ -78,10 +86,16 @@ export function Button({
   className,
   children,
   type = 'button',
+  ref,
   ...rest
 }: ButtonProps) {
   return (
-    <button type={type} className={buttonClasses({ variant, size, className })} {...rest}>
+    <button
+      ref={ref}
+      type={type}
+      className={buttonClasses({ variant, size, className })}
+      {...rest}
+    >
       {leadingIcon}
       {children}
       {trailingIcon}

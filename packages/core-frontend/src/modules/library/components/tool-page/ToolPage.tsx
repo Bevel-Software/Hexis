@@ -1,14 +1,26 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useId, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
+import { ChevronRight } from 'lucide-react';
+import { HEADER_BAND, HEADER_BAND_LEAD, PAGE_HEADER_TESTID, TITLE_INK_ROOM } from '../../../../shared/theme/header';
+import { cn } from '../../../../lib/utils';
 import { Banner, Button, buttonClasses } from '../../../../shared/components';
+import { announceToolCredentialsChanged } from '../../../../core/events';
 import { useToolPage } from '../../hooks/useToolPage';
+import { useToolSource } from '../../hooks/useToolSource';
 import { McpServerSection } from './McpServerSection';
-import { libraryHomeForItemPath, LIBRARY_ROOT } from '../../routes/library-paths';
+import { libraryHomeForItemPath, pathForPlugin, LIBRARY_ROOT } from '../../routes/library-paths';
+import { useLibrary } from '../../state/library-data';
+import { pluginHoldingPath, pluginLabel, pluginNameForPath } from '../../utils/plugin-summary';
 import { readOAuthFragment } from '../../utils/oauth-fragment';
-import type { ToolCapability } from '../../services/tools.api';
+import type { HiddenTool, ToolCapability } from '../../services/tools.api';
 import type { LibrarySkillSummary } from '../../services/library.api';
 import { ToolConnectionSection } from './ToolConnectionSection';
 import { ToolLogo } from '../ToolLogo';
+import { PageActions } from '../PageActions';
+import { DeleteToolDialog } from './DeleteToolDialog';
+import { copyToClipboard } from '../../utils/clipboard';
+import { useLibraryToast } from '../../state/toast.context';
+import { NameWithBadges } from '../NameWithBadges';
 
 /**
  * One tool, as a page.
@@ -17,7 +29,7 @@ import { ToolLogo } from '../ToolLogo';
  * ROUTE and not a bigger dialog is the OAuth round-trip: signing in leaves the
  * app entirely and comes back through the provider and our callback, which can
  * only return the browser to a URL. A dialog has no URL, so the old flow could
- * only ever land you back on `/connect`, away from what you were doing.
+ * only ever land you back on Connect your tools, away from what you were doing.
  *
  * Three signals gate what renders, and roles are none of them:
  *  - read access to the `.tool` — implied by the tool appearing in the secrets
@@ -47,20 +59,58 @@ export function ToolPage({
   // `actionError` so a successful reload can't clear a callback failure.
   const [oauthOutcome] = useState(readOAuthFragment);
   const [actionError, setActionError] = useState<string | null>(null);
+  /**
+   * Bumped when the tool's DEFINITION changes — an mcp.json server edit. Lives
+   * here rather than in the connection section because the section is not the
+   * component that knows a server was edited, and a probe verdict about the old
+   * endpoint must not survive the change.
+   */
+  const [serverRevision, setServerRevision] = useState(0);
+  /** Whether the tool's delete confirmation is up. */
+  const [deleteOpen, setDeleteOpen] = useState(false);
 
   useEffect(() => {
-    if (oauthOutcome) window.history.replaceState(null, '', window.location.pathname);
+    // Consume the OAuth `#…` fragment, KEEPING the query string: on an
+    // mcp-declared tool the `?server=<slug>` param is the page's identity, and
+    // replacing with the bare pathname stranded a refresh (or any URL copy) on
+    // the ambiguous mcp.json address, which bounces to the plugin page.
+    if (!oauthOutcome) return;
+    window.history.replaceState(null, '', window.location.pathname + window.location.search);
+    // Authorized OR error: a round-trip we did not perform ourselves has just
+    // had its say about this tool's sign-in, so what the catalog believes
+    // about it is an answer from before the browser left. An error is not a
+    // failed save — nothing here wrote anything, and the outcome we were
+    // handed is the only evidence either way — so both outcomes re-read.
+    announceToolCredentialsChanged();
   }, [oauthOutcome]);
 
   // Same rule as the skill page: back goes to the page the tool LIVES on —
   // its plugin, or the personal page — never to a root the reader may not
-  // have come from. Falls back to the root while the tool is still loading.
-  const home = libraryHomeForItemPath(page.tool?.path ?? '');
+  // have come from. While the tool is still loading the path is empty, so
+  // the home is the root; a resolved identity of null falls back to the folder.
+  const data = useLibrary();
+  const toolPath = page.tool?.path ?? '';
+  const home = libraryHomeForItemPath(
+    toolPath,
+    toolPath ? pluginNameForPath(toolPath, data.pluginSummaries) : undefined,
+    (n) => pluginLabel(n, data.pluginSummaries),
+  );
   const backLink = (
     <Button variant="quiet" size="sm" onClick={() => navigate(home.path)}>
       {`‹ ${home.label}`}
     </Button>
   );
+  const toast = useLibraryToast();
+  // Ownership of the plugin the tool LIVES IN — not of the tool file, which
+  // has no rules of its own. The same folder verdict the backend re-derives,
+  // so the menu item and the endpoint agree about who may delete.
+  //
+  // AND its links have to be ours to write: a plugin read from an external
+  // format is edited in its own repository, and the DELETE route refuses one
+  // (422). Offering the item to its owner would be offering a button whose
+  // only outcome is that refusal.
+  const holder = toolPath ? pluginHoldingPath(toolPath, data.pluginSummaries) : null;
+  const canDelete = (holder?.isOwner ?? false) && (holder?.linksAreManaged ?? false);
 
   if (page.loading) {
     return <div className="py-16 text-center text-ui text-ink-muted">Loading…</div>;
@@ -109,23 +159,83 @@ export function ToolPage({
         </Banner>
       )}
 
-      {backLink}
+      <header>
+        {/* The logo and the name are the title BAR — one band, the height the
+            sidebar's header row is. The description reads below it: a line of
+            prose inside the row would make this page's header taller than
+            every other page's, which is the drift the band removes. The way
+            back rides ON the band, as its leading item, for the same reason:
+            a back link in a row above would push the title bar off the line
+            the sidebar's header row holds. (The error and not-found returns
+            above still lead with it on its own row — they have no title bar
+            to hold a line with.) */}
+        <div data-testid={PAGE_HEADER_TESTID} className={cn(HEADER_BAND, 'gap-4')}>
+          <div className={HEADER_BAND_LEAD}>{backLink}</div>
+          {/* The mark and the title through `NameWithBadges`, so this page
+              states its name the way a card and a plugin row do: truncated
+              with an ellipsis, whole in the DOM, whole in `title`.
 
-      <header className="mt-4 flex items-start gap-4">
-        <ToolLogo slug={tool.slug} name={tool.name} size="lg" className="mt-1" />
-        <div className="min-w-0 flex-1">
-          <h1 className="text-display font-semibold text-ink">{tool.name}</h1>
-          {page.detail?.description && (
-            <p className="mt-1.5 max-w-[56ch] text-lede text-ink-muted">
-              {page.detail.description}
-            </p>
-          )}
+              What it does NOT take is the floor, and the reason is the band.
+              A floor is only worth having where something can give the space
+              back, and the only thing that can is a badge taking a second
+              line. This header has no badges, and it could not wrap them if
+              it had: `HEADER_BAND` is one row tall, exactly as tall as the
+              sidebar's header row beside it, so a second line here hangs out
+              of the band rather than growing it. A floor granted against the
+              back link — which is not even inside this component — bought
+              nothing and cost the title its place on the band at every phone
+              width. `wrap={false}` says that out loud, so the day somebody
+              adds a badge the band clips instead of quietly growing.
+
+              `overflow-hidden` is the other half of a row that cannot wrap,
+              exactly as on the plugin page: with nowhere to go, anything
+              past the width goes across the way back unless it is clipped.
+              Clipped, the title gives way first and the way back stays
+              clickable.
+
+              `TITLE_INK_ROOM` on both boxes that clip — the row's
+              `overflow-hidden` and the name's `truncate` — so the tails of
+              g, y and p survive the clipping, as on every other page title. */}
+          <NameWithBadges
+            as="h1"
+            wrap={false}
+            className={cn('min-w-0 flex-1 overflow-hidden', TITLE_INK_ROOM)}
+            gap="gap-4"
+            leading={<ToolLogo slug={tool.slug} name={tool.name} size="lg" />}
+            name={tool.name}
+            nameClassName={cn('text-display font-semibold text-ink', TITLE_INK_ROOM)}
+          />
+          {/* No `Manage access` here, deliberately. Access is decided at the
+              PLUGIN — a tool inherits its folder's `access.md`, so an editor
+              on this page would either duplicate the plugin's one or quietly
+              write a per-file override that nobody looking at the plugin
+              would see. The plugin's `Share` panel is the single place.
+
+              The `⋯` menu, though, is the same one the plugin page carries,
+              and now in the same PLACE: the end of the title row, in the same
+              `flex flex-none items-center gap-1` group `PluginPage` puts it
+              in, so the three item pages answer the same gesture at the same
+              point on the screen. It used to be the last child of this
+              `<header>`, below the description — a menu on its own line under
+              the way back, which is where nothing else on any page is.
+              `onAdd` is absent: there is nothing to add to a tool. */}
+          <div className="flex flex-none items-center gap-1">
+            <PageActions
+              onCopyLink={() => copyToClipboard(window.location.href)}
+              // The OWNER's verb, and the same verdict the DELETE route
+              // enforces (ownership of the plugin holding the tool) — so the
+              // item appears for exactly the people the backend will let
+              // through.
+              onDelete={canDelete ? () => setDeleteOpen(true) : undefined}
+              deleteLabel="Delete tool"
+            />
+          </div>
         </div>
-        {/* No `Manage access` here, deliberately. Access is decided at the
-            PLUGIN — a tool inherits its folder's `access.md`, so an editor on
-            this page would either duplicate the plugin's one or quietly write a
-            per-file override that nobody looking at the plugin would see. The
-            plugin's `Share` panel is the single place. */}
+        {page.detail?.description && (
+          <p className="mt-1.5 max-w-[56ch] text-lede text-ink-muted">
+            {page.detail.description}
+          </p>
+        )}
       </header>
 
       {actionError && (
@@ -134,8 +244,15 @@ export function ToolPage({
         </Banner>
       )}
 
+      {/* Keyed by slug: the section's probe verdict and `checking` flag are
+          component state about THIS tool. Navigating between two canonical
+          tools re-renders the same component instance, and without the key
+          the previous tool's "Connected" (or its failure banner) survives
+          under the next tool's heading. */}
       <ToolConnectionSection
+        key={tool.slug}
         tool={tool}
+        configRevision={serverRevision}
         onChanged={() => {
           setActionError(null);
           page.reload();
@@ -151,12 +268,26 @@ export function ToolPage({
         <McpServerSection
           slug={tool.slug}
           configuredCount={tool.variables.filter((v) => v.adminConfigured || v.userConfigured || v.authorized === true).length}
+          reloadSignal={page.revision}
           onSaved={() => {
             setActionError(null);
+            // The endpoint or headers may have just changed, so any verdict the
+            // connection section is holding describes a server that is no
+            // longer configured.
+            setServerRevision((r) => r + 1);
             page.reload();
           }}
           onError={setActionError}
         />
+      )}
+
+      {/* Above the capabilities, because it is the one thing on this page that
+          asks the reader to act, and because a tool missing from the
+          assistant's list is read as a Hexis fault until this says otherwise.
+          The backend sends it only to a writer of this tool, so there is no
+          permission check here. */}
+      {page.detail && (page.detail.hiddenTools?.length ?? 0) > 0 && (
+        <HiddenToolsSection tools={page.detail.hiddenTools ?? []} />
       )}
 
       {page.detail && page.detail.capabilities.length > 0 && (
@@ -169,6 +300,27 @@ export function ToolPage({
         Managed by the Admins.
       </div>
 
+      {/* Last, and for EVERY type: `path` is the file the platform reads to
+          make this tool — the `.tool`, or the plugin `mcp.json` that declares
+          the server. */}
+      <SourceSection path={tool.path} />
+
+      {deleteOpen && (
+        <DeleteToolDialog
+          slug={tool.slug}
+          name={tool.name}
+          onClose={() => setDeleteOpen(false)}
+          onDeleted={(plugin) => {
+            toast(`Deleted ${tool.name}.`);
+            // This page's subject just ceased to exist — the plugin it lived
+            // in is the honest landing, as the plugin delete lands on the
+            // index. Reloads follow so the cards and the sidebar agree.
+            navigate(pathForPlugin(plugin));
+            data.reload();
+            data.reloadPlugins();
+          }}
+        />
+      )}
     </Article>
   );
 }
@@ -177,13 +329,58 @@ export function ToolPage({
  * The reading column. Horizontal and vertical padding come from the Library
  * layout's `<main>`, which already wraps every page under `/skills-and-tools` —
  * repeating them here would double the gutter.
+ *
+ * And no `max-w` of its own, for the same reason the skill page has none: the
+ * layout's `<main>` already holds the shared `DOCUMENT_COLUMN` measure, so a
+ * second, narrower width here is a second column inside the first. It was
+ * `max-w-3xl` — a 768px article centred in the measure's 800px line — and the
+ * 16px that left on each side moved this page's title row in from where the
+ * plugin page's and the skill page's are: the same band, the same group, the
+ * same `⋯`, ending 16px short of the right edge the other two reach. Where
+ * the menu sits on the row is decided by how wide the row is, so the column
+ * is where "the same position as on the plugin page" is actually kept.
  */
 function Article({ children }: { children: ReactNode }) {
-  return <article className="mx-auto w-full max-w-3xl">{children}</article>;
+  return <article className="w-full">{children}</article>;
 }
 
 function SectionHeading({ children }: { children: ReactNode }) {
   return <h2 className="mb-2.5 text-label font-semibold uppercase text-ink-faint">{children}</h2>;
+}
+
+/**
+ * The tools of this server no agent is offered, because their input schema is
+ * not valid JSON Schema as the server sent it.
+ *
+ * This is the whole reason the check exists. An AI client handed such a tool
+ * drops it and says nothing — the tool is simply missing for the agent — so
+ * without this section the only symptom is a capability that quietly does not
+ * work, with nothing anywhere to look at. Each entry names the tool and quotes
+ * the place in the schema and the reason, which is what the server's vendor
+ * needs to hear; Hexis does not rewrite the schema to make it valid.
+ */
+function HiddenToolsSection({ tools }: { tools: HiddenTool[] }) {
+  return (
+    <section className="mt-8">
+      <SectionHeading>Not offered to assistants</SectionHeading>
+      <Banner tone="urgent" role="note">
+        <ul className="space-y-1.5">
+          {tools.map((t) => (
+            <li key={t.name}>
+              <span className="font-semibold">{t.name}</span>
+              <span> — {t.marker}</span>
+            </li>
+          ))}
+        </ul>
+      </Banner>
+      <p className="mt-2 text-detail text-ink-muted">
+        {tools.length === 1 ? 'This tool is' : 'These tools are'} absent from every assistant's tool
+        list until the server sends a valid schema. The rest of this server's tools are unaffected,
+        and nothing here is rewritten to make the schema valid. The check runs when the server's
+        tools are loaded, so a corrected schema clears this on its own.
+      </p>
+    </section>
+  );
 }
 
 function CapabilitiesSection({ capabilities }: { capabilities: ToolCapability[] }) {
@@ -231,6 +428,82 @@ function PoweredSkillsSection({
           ))}
         </div>
       )}
+    </section>
+  );
+}
+
+/**
+ * The definition file, as text, behind a closed disclosure.
+ *
+ * A WINDOW, NOT AN EDITOR. The file is edited where files are edited; showing
+ * it here is what saves a developer the trip to the knowledge tree to answer
+ * "which template does this capability use" — and nothing in this section can
+ * change it.
+ *
+ * Closed by default is the mechanism, not just the default: the read hangs off
+ * the open state (`useToolSource`), so a reader who never opens the section
+ * never costs a file read, and everything above it renders the same whether
+ * the read succeeds, fails, or never happens.
+ */
+function SourceSection({ path }: { path: string }) {
+  const [open, setOpen] = useState(false);
+  const source = useToolSource(path, open);
+  const panelId = useId();
+  const buttonId = useId();
+  // Open and neither settled state: the read is in flight.
+  const loading = open && source.status !== 'loaded' && source.status !== 'error';
+
+  return (
+    <section className="mt-8">
+      <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-1">
+        <button
+          id={buttonId}
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          aria-expanded={open}
+          aria-controls={panelId}
+          className="flex items-center gap-1.5 text-label font-semibold uppercase text-ink-faint transition-colors hover:text-ink"
+        >
+          <ChevronRight
+            size={11}
+            className={cn('transition-transform duration-150', open && 'rotate-90')}
+          />
+          Source
+        </button>
+        <span className="min-w-0 truncate font-mono text-meta text-ink-faint" title={path}>
+          {path}
+        </span>
+      </div>
+
+      {/* Always in the tree, so `aria-controls` never points at nothing; the
+          CONTENT is what is conditional, which is what keeps the read lazy.
+
+          A labelled region that is live and busy while the read runs: a
+          screen reader otherwise hears the button flip to "expanded" and
+          then nothing, because the content arrives a fetch later. `polite`
+          — the source is worth hearing, not worth interrupting for. */}
+      <div
+        id={panelId}
+        role="region"
+        aria-labelledby={buttonId}
+        aria-live="polite"
+        aria-busy={loading}
+        hidden={!open}
+      >
+        {open &&
+          (source.status === 'error' ? (
+            <p className="mt-2.5 text-detail text-ink-muted">Couldn't load the source.</p>
+          ) : source.status === 'loaded' ? (
+            /* `whitespace-pre` and nothing else: the bytes are shown as the
+               platform stores them — no wrapping, reindenting or trimming.
+               Long lines scroll rather than fold. */
+            <pre className="mt-2.5 max-h-[32rem] select-text overflow-auto whitespace-pre rounded-lg border border-line bg-sunken p-3 font-mono text-meta leading-relaxed text-ink">
+              {source.content}
+            </pre>
+          ) : (
+            <p className="mt-2.5 text-detail text-ink-faint">Loading the source…</p>
+          ))}
+      </div>
     </section>
   );
 }

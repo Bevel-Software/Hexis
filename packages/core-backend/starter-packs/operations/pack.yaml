@@ -1,0 +1,12 @@
+id: operations
+name: Operations
+description: "Pages about how the business runs, your vendors and tools, and skills for processes, runbooks, vendor reviews and status reports."
+order: 4
+firstPagePrompt: |
+  Using our Hexis knowledge base, fill in the How we work page in Knowledge for our operations team: who does what, the processes we run every week, the tools we rely on, and who to go to when something breaks. Ask me for anything you don't know, then save it.
+suggestedPages:
+  - "How we work"
+  - "Vendors"
+  - "Processes"
+  - "Tools we use"
+  - "Glossary"

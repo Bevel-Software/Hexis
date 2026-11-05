@@ -1,14 +1,20 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
+  MCP_DISPLAY_NAME,
+  MCP_SERVER_KEY,
   canDeepLink,
+  chatgptInstallUrl,
   claudeCodeCommand,
   claudeInstallUrl,
   configureMcpUrl,
   connectorName,
+  hexisMcpClaudeCommand,
+  hexisMcpJsonSnippet,
   jsonConfigSnippet,
   langdockSnippet,
   mcpEndpointUrl,
   resetMcpUrlForTests,
+  workspaceBaseUrl,
 } from '../connect-snippets';
 
 /**
@@ -308,8 +314,8 @@ describe('claudeInstallUrl: the documented install link', () => {
    * contains spaces.
    */
   it('encodes spaces as %20 rather than +', () => {
-    const link = claudeInstallUrl(URL_UNDER_TEST, 'Hexis — kb.acme.com');
-    expect(link).toContain('connectorName=Hexis%20%E2%80%94%20kb.acme.com');
+    const link = claudeInstallUrl(URL_UNDER_TEST, 'Knowledge — kb.acme.com');
+    expect(link).toContain('connectorName=Knowledge%20%E2%80%94%20kb.acme.com');
     expect(link).not.toContain('+');
   });
 
@@ -322,9 +328,42 @@ describe('claudeInstallUrl: the documented install link', () => {
   });
 });
 
+describe('chatgptInstallUrl: settings itself, since ChatGPT prefills nothing', () => {
+  it('opens ChatGPT’s settings root over https, not a pane it can rename', () => {
+    const link = chatgptInstallUrl();
+    expect(link.startsWith('https://chatgpt.com/')).toBe(true);
+    expect(link).toBe('https://chatgpt.com/#settings');
+  });
+});
+
+describe('the two spellings of the name', () => {
+  // Humans read this one: it is what the connector list and the ChatGPT
+  // Create dialog show, so it is the product's words, not a slug.
+  it('shows people "Skills, Tools and Knowledge"', () => {
+    expect(MCP_DISPLAY_NAME).toBe('Skills, Tools and Knowledge');
+  });
+
+  /**
+   * Config files read this one. Claude Code derives every tool name from it
+   * (`mcp__<server>__<tool>`), so a space or a comma here would surface in
+   * an identifier — and the same key must serve the hosted endpoint and the
+   * local server, so nothing drifts between the two families of snippets.
+   */
+  it('gives config files a plain slug that every snippet shares', () => {
+    expect(MCP_SERVER_KEY).toMatch(/^[a-z0-9-]+$/);
+    const URL_UNDER_TEST = 'https://kb.acme.com/api/mcp';
+    expect(claudeCodeCommand(URL_UNDER_TEST)).toContain(` ${MCP_SERVER_KEY} `);
+    expect(Object.keys(JSON.parse(jsonConfigSnippet(URL_UNDER_TEST)).mcpServers)).toEqual([MCP_SERVER_KEY]);
+    expect(hexisMcpClaudeCommand('https://kb.acme.com')).toContain(`claude mcp add ${MCP_SERVER_KEY} `);
+    expect(Object.keys(JSON.parse(hexisMcpJsonSnippet('https://kb.acme.com')).mcpServers)).toEqual([
+      MCP_SERVER_KEY,
+    ]);
+  });
+});
+
 describe('connectorName: what it is called in a connector list', () => {
   it('names the product and the deployment', () => {
-    expect(connectorName('https://kb.acme.com/api/mcp')).toBe('Hexis — kb.acme.com');
+    expect(connectorName('https://kb.acme.com/api/mcp')).toBe('Skills, Tools and Knowledge — kb.acme.com');
   });
 
   /**
@@ -340,11 +379,11 @@ describe('connectorName: what it is called in a connector list', () => {
 
   // `host`, not `hostname` — two instances on one machine differ only by port.
   it('keeps a non-default port', () => {
-    expect(connectorName('https://kb.acme.com:8443/api/mcp')).toBe('Hexis — kb.acme.com:8443');
+    expect(connectorName('https://kb.acme.com:8443/api/mcp')).toBe('Skills, Tools and Knowledge — kb.acme.com:8443');
   });
 
   it('still names something when the URL is unparseable', () => {
-    expect(connectorName('not a url')).toBe('Hexis');
+    expect(connectorName('not a url')).toBe('Skills, Tools and Knowledge');
   });
 });
 
@@ -354,13 +393,13 @@ describe('snippets: one builder per client, keyed or not', () => {
 
   it('builds the Claude Code command without a key', () => {
     expect(claudeCodeCommand(URL_UNDER_TEST)).toBe(
-      `claude mcp add --transport http knowledge-base ${URL_UNDER_TEST}`,
+      `claude mcp add --transport http skills-tools-knowledge ${URL_UNDER_TEST}`,
     );
   });
 
   it('appends the Authorization header when there is a key', () => {
     expect(claudeCodeCommand(URL_UNDER_TEST, KEY)).toBe(
-      `claude mcp add --transport http knowledge-base ${URL_UNDER_TEST} --header "Authorization: Bearer ${KEY}"`,
+      `claude mcp add --transport http skills-tools-knowledge ${URL_UNDER_TEST} --header "Authorization: Bearer ${KEY}"`,
     );
   });
 
@@ -370,16 +409,16 @@ describe('snippets: one builder per client, keyed or not', () => {
    */
   it('omits headers entirely from the keyless JSON config', () => {
     const parsed = JSON.parse(jsonConfigSnippet(URL_UNDER_TEST));
-    expect(parsed.mcpServers['knowledge-base']).toEqual({
+    expect(parsed.mcpServers['skills-tools-knowledge']).toEqual({
       type: 'http',
       url: URL_UNDER_TEST,
     });
-    expect('headers' in parsed.mcpServers['knowledge-base']).toBe(false);
+    expect('headers' in parsed.mcpServers['skills-tools-knowledge']).toBe(false);
   });
 
   it('carries the key in the JSON config when there is one', () => {
     const parsed = JSON.parse(jsonConfigSnippet(URL_UNDER_TEST, KEY));
-    expect(parsed.mcpServers['knowledge-base']).toEqual({
+    expect(parsed.mcpServers['skills-tools-knowledge']).toEqual({
       type: 'http',
       url: URL_UNDER_TEST,
       headers: { Authorization: `Bearer ${KEY}` },
@@ -393,7 +432,7 @@ describe('snippets: one builder per client, keyed or not', () => {
    */
   it('escapes shell metacharacters in the key for the Claude Code command', () => {
     expect(claudeCodeCommand(URL_UNDER_TEST, 'a"b$c`d\\e')).toBe(
-      `claude mcp add --transport http knowledge-base ${URL_UNDER_TEST} --header "Authorization: Bearer a\\"b\\$c\\\`d\\\\e"`,
+      `claude mcp add --transport http skills-tools-knowledge ${URL_UNDER_TEST} --header "Authorization: Bearer a\\"b\\$c\\\`d\\\\e"`,
     );
   });
 
@@ -401,13 +440,76 @@ describe('snippets: one builder per client, keyed or not', () => {
   // the client reading the file gets the exact bytes back.
   it('does not shell-escape the key in the JSON config', () => {
     const parsed = JSON.parse(jsonConfigSnippet(URL_UNDER_TEST, 'a"b$c'));
-    expect(parsed.mcpServers['knowledge-base'].headers.Authorization).toBe('Bearer a"b$c');
+    expect(parsed.mcpServers['skills-tools-knowledge'].headers.Authorization).toBe('Bearer a"b$c');
   });
 
   it('spells the Langdock fields out separately', () => {
     expect(langdockSnippet(URL_UNDER_TEST, KEY)).toBe(
       `URL: ${URL_UNDER_TEST}\nHeader name: Authorization\nHeader value: Bearer ${KEY}`,
     );
+  });
+
+  /**
+   * The LOCAL server's builders. These take the WORKSPACE base, not the MCP
+   * endpoint — hexis-mcp resolves the endpoint from `GET <base>/api/config`
+   * itself — so unlike everything above they are handed `workspaceBaseUrl()`
+   * by their callers.
+   */
+  describe('the local server (hexis-mcp)', () => {
+    const BASE = 'https://kb.acme.com';
+
+    // The one address the browser has proven serves this app, config
+    // endpoint included, is the one it loaded the app from.
+    it('workspaceBaseUrl is the page origin', () => {
+      expect(workspaceBaseUrl()).toBe(window.location.origin);
+    });
+
+    it('builds a JSON config that spawns the package with the key', () => {
+      const parsed = JSON.parse(hexisMcpJsonSnippet(BASE, KEY));
+      expect(parsed.mcpServers['skills-tools-knowledge']).toEqual({
+        command: 'npx',
+        args: ['-y', '@bevel-software/hexis-mcp@latest'],
+        env: {
+          HEXIS_URL: BASE,
+          HEXIS_CONNECTION_KEY: KEY,
+        },
+      });
+    });
+
+    /**
+     * Keyless is the interactive mode: the server opens the person's browser
+     * to sign in on first run, so no key belongs in the config — the env must
+     * carry the URL alone. An empty or placeholder HEXIS_CONNECTION_KEY would
+     * be read as key mode and fail at connect time.
+     */
+    it('omits the key env entirely when no key was minted — keyless selects browser sign-in', () => {
+      const parsed = JSON.parse(hexisMcpJsonSnippet(BASE));
+      expect(parsed.mcpServers['skills-tools-knowledge'].env).toEqual({
+        HEXIS_URL: BASE,
+      });
+      expect(hexisMcpJsonSnippet(BASE)).not.toContain(KEY);
+    });
+
+    it('builds the Claude Code command as a stdio add with both env values', () => {
+      expect(hexisMcpClaudeCommand(BASE, KEY)).toBe(
+        `claude mcp add skills-tools-knowledge --env HEXIS_URL="${BASE}" --env HEXIS_CONNECTION_KEY="${KEY}" -- npx -y @bevel-software/hexis-mcp@latest`,
+      );
+    });
+
+    /**
+     * The env values sit inside double quotes on a POSIX shell, where `"`,
+     * `$`, backtick and backslash are still read. A key carrying one of them
+     * must not cut the pasted command short or expand into it — same rule as
+     * the header in `claudeCodeCommand`, applied to both values.
+     */
+    it('escapes shell metacharacters in the key and the URL', () => {
+      expect(hexisMcpClaudeCommand(BASE, 'a"b$c`d\\e')).toContain(
+        '--env HEXIS_CONNECTION_KEY="a\\"b\\$c\\`d\\\\e"',
+      );
+      expect(hexisMcpClaudeCommand('https://kb.acme.com/?a=$b', KEY)).toContain(
+        '--env HEXIS_URL="https://kb.acme.com/?a=\\$b"',
+      );
+    });
   });
 
   /**

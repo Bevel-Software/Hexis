@@ -4,7 +4,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 // real network call. The module under test binds to this import at load.
 vi.mock('../../../lib/api', () => ({ authFetch: vi.fn() }));
 
-import { getMcpServer } from '../services/tools.api';
+import { getMcpServer, listPendingTools } from '../services/tools.api';
 import { authFetch } from '../../../lib/api';
 
 const mockedFetch = vi.mocked(authFetch);
@@ -66,5 +66,48 @@ describe('getMcpServer', () => {
     };
     mockedFetch.mockResolvedValueOnce(jsonRes(200, view));
     await expect(getMcpServer('vendor')).resolves.toEqual(view);
+  });
+});
+
+/**
+ * `GET /api/tools/pending` — the library's review shelf for tools.
+ *
+ * The guard under test is the one the skills side learned the hard way: a
+ * backend built before this route existed answers through `/tools/:slug`, so a
+ * 200 arrives whose body is not this shape. An empty shelf is the right
+ * failure; `undefined` reaching the item mapper blanked the whole library.
+ */
+describe('listPendingTools', () => {
+  const PENDING = {
+    slug: 'weather',
+    name: 'weather',
+    path: 'Plugins/Ops/weather.tool',
+    type: 'http' as const,
+    plugin: 'Ops',
+    changeRequestNumber: 7,
+    branch: 'agent/weather',
+    authorName: 'Ali Raza',
+    createdAt: '2026-09-06T09:00:00.000Z',
+    isAuthor: true,
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('returns the proposals on 200', async () => {
+    mockedFetch.mockResolvedValueOnce(jsonRes(200, { tools: [PENDING] }));
+    await expect(listPendingTools()).resolves.toEqual([PENDING]);
+    expect(mockedFetch).toHaveBeenCalledWith('/api/tools/pending');
+  });
+
+  it('degrades to an empty shelf when the body is not this shape', async () => {
+    mockedFetch.mockResolvedValueOnce(jsonRes(200, { ok: false, error: 'not_found' }));
+    await expect(listPendingTools()).resolves.toEqual([]);
+  });
+
+  it('surfaces a failure rather than pretending nothing is proposed', async () => {
+    mockedFetch.mockResolvedValueOnce(jsonRes(500, { error: 'Internal error' }));
+    await expect(listPendingTools()).rejects.toThrow('Internal error');
   });
 });

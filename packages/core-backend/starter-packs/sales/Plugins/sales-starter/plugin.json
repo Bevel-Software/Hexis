@@ -1,0 +1,10 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "sales-starter",
+  "displayName": "Sales starter",
+  "description": "Sales skills for the whole day: prep calls, summarize and follow up, research accounts, work deals, review pipeline and write the forecast. Works with your CRM, email, calendar and chat when they are connected, or with files you upload.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Anthropic, adapted for Hexis by Bevel"
+  }
+}

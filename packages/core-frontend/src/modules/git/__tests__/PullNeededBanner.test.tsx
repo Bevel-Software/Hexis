@@ -152,14 +152,14 @@ describe('PullNeededBanner: gating', () => {
     expect(container.firstChild).toBeNull();
   });
 
-  it('shows failed auto-update state with Retry', () => {
+  it('shows failed auto-update state with Update', () => {
     renderWith(makeGit({ status: makeStatus({ branch: 'current-company-state' }) }), {
       autoUpdate: failedAutoUpdate(),
     });
 
-    expect(screen.getByText(/Couldn’t update automatically/)).toBeInTheDocument();
+    expect(screen.getByText('Couldn’t get the latest changes')).toBeInTheDocument();
     expect(screen.getByText('Network unreachable')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Retry' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Update' })).toBeEnabled();
   });
 
   // Removed: "shows passive guidance for dirty protected branches without a
@@ -174,9 +174,13 @@ describe('PullNeededBanner: gating', () => {
       workspace: makeWorkspace({ hasUnsavedFileChanges: true }),
     });
 
-    expect(screen.getByText(/Updates are waiting/)).toBeInTheDocument();
-    expect(screen.getByText(/Finish or save your open file/)).toBeInTheDocument();
+    expect(screen.getByText('New changes available')).toBeInTheDocument();
+    expect(screen.getByText('Save your open page to get them.')).toBeInTheDocument();
     expect(screen.queryByRole('button')).toBeNull();
+    // Plain words only: no branch name, no pull or sync.
+    const banner = screen.getByRole('status');
+    expect(banner.textContent).not.toContain('current-company-state');
+    expect(banner.textContent).not.toMatch(/\b(pull|sync|fetch|merge)/i);
   });
 });
 
@@ -188,7 +192,7 @@ describe('PullNeededBanner: protected branch (auto-update failed retry)', () => 
       { autoUpdate: failedAutoUpdate() },
     );
 
-    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Update' }));
 
     await waitFor(() => expect(pull).toHaveBeenCalledTimes(1));
     expect(resolvePullIssue).not.toHaveBeenCalled();
@@ -200,7 +204,7 @@ describe('PullNeededBanner: protected branch (auto-update failed retry)', () => 
       autoUpdate: failedAutoUpdate('target-company-state'),
     });
 
-    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Update' }));
 
     await waitFor(() => expect(pull).toHaveBeenCalledTimes(1));
   });
@@ -217,15 +221,15 @@ describe('PullNeededBanner: protected branch (auto-update failed retry)', () => 
       autoUpdate: failedAutoUpdate(),
     });
 
-    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Update' }));
 
     await waitFor(() =>
-      expect(screen.getByRole('button', { name: 'Retrying…' })).toBeDisabled(),
+      expect(screen.getByRole('button', { name: 'Updating…' })).toBeDisabled(),
     );
 
     resolvePull();
     await waitFor(() =>
-      expect(screen.getByRole('button', { name: 'Retry' })).toBeEnabled(),
+      expect(screen.getByRole('button', { name: 'Update' })).toBeEnabled(),
     );
   });
 
@@ -237,12 +241,17 @@ describe('PullNeededBanner: protected branch (auto-update failed retry)', () => 
       autoUpdate: failedAutoUpdate(),
     });
 
-    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Update' }));
 
+    // In plain words, sorted by what kind of failure it was: never git's own
+    // sentence, scrubbed or not.
     await waitFor(() =>
-      expect(screen.getByRole('alert')).toHaveTextContent('Network unreachable'),
+      expect(screen.getByRole('alert')).toHaveTextContent(
+        'Couldn’t get the latest changes. Your git host couldn’t be reached',
+      ),
     );
-    expect(screen.getByRole('button', { name: 'Retry' })).toBeEnabled();
+    expect(screen.getByRole('alert').textContent).not.toContain('Network unreachable');
+    expect(screen.getByRole('button', { name: 'Update' })).toBeEnabled();
   });
 
   it('falls back to handing the failure to the change-request port when direct pull fails', async () => {
@@ -255,7 +264,7 @@ describe('PullNeededBanner: protected branch (auto-update failed retry)', () => 
       { autoUpdate: failedAutoUpdate(), resolvePullIssue },
     );
 
-    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Update' }));
 
     await waitFor(() => expect(resolvePullIssue).toHaveBeenCalledTimes(1));
     // The classified reason handed to the port must NOT leak git vocabulary
@@ -286,7 +295,7 @@ describe('PullNeededBanner: protected branch (auto-update failed retry)', () => 
       { autoUpdate: failedAutoUpdate(), resolvePullIssue },
     );
 
-    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Update' }));
 
     await waitFor(() => expect(resolvePullIssue).toHaveBeenCalledTimes(1));
     const reason = (resolvePullIssue.mock.calls[0][0] as { reason: string }).reason;
@@ -307,10 +316,10 @@ describe('PullNeededBanner: protected branch (auto-update failed retry)', () => 
       autoUpdate: failedAutoUpdate(),
     });
 
-    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Update' }));
 
     await waitFor(() =>
-      expect(screen.getByRole('alert')).toHaveTextContent(/Could not get updates/),
+      expect(screen.getByRole('alert')).toHaveTextContent(/Couldn’t get the latest changes/),
     );
   });
 
@@ -323,11 +332,11 @@ describe('PullNeededBanner: protected branch (auto-update failed retry)', () => 
       autoUpdate: failedAutoUpdate(),
     });
 
-    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Update' }));
     await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
 
     shouldFail = false;
-    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Update' }));
     await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
     expect(pull).toHaveBeenCalledTimes(2);
   });
@@ -351,7 +360,7 @@ describe('PullNeededBanner: workspace refresh after successful pull', () => {
       workspace,
     });
 
-    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Update' }));
 
     await waitFor(() => expect(workspace.refreshFileTree).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(workspace.bumpFsRevision).toHaveBeenCalledTimes(1));
@@ -366,7 +375,7 @@ describe('PullNeededBanner: workspace refresh after successful pull', () => {
         autoUpdate: failedAutoUpdate(),
       });
 
-      fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Update' }));
 
       await waitFor(() => expect(onPrStale).toHaveBeenCalledTimes(1));
     } finally {
@@ -387,7 +396,7 @@ describe('PullNeededBanner: workspace refresh after successful pull', () => {
         workspace,
       });
 
-      fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Update' }));
 
       await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
       expect(workspace.refreshFileTree).not.toHaveBeenCalled();
@@ -429,6 +438,14 @@ describe('PullNeededBanner: feature branch (agent flow, REGRESSION)', () => {
     } finally {
       detachPrStale();
     }
+  });
+
+  it('announces the new changes in plain words on a draft', () => {
+    renderWith(makeGit({ status: makeStatus({ branch: 'alice/draft' }) }));
+
+    expect(screen.getByText('New changes available')).toBeInTheDocument();
+    expect(screen.getByText('Your draft doesn’t have them yet.')).toBeInTheDocument();
+    expect(screen.getByRole('status').textContent).not.toContain('alice/draft');
   });
 
   it('invokes the port for any non-protected branch name', () => {

@@ -1,0 +1,748 @@
+import { describe, it, expect } from 'vitest';
+import { createShutdown, stopCore, withStartupTask, type LeasedWorker } from '../../index.js';
+// The lease helpers are the module's own, not on the entry point: their
+// ordering is pinned here, where the module is the unit under test.
+import { holdCommitWorkerLease, holdable } from '../lifecycle.js';
+import { BevelSecretsVariableLoader, registerBevelSecretsVariableLoader } from '../../modules/secrets-vault/secrets-variable-loader.js';
+import type { AdvisoryLease } from '../../modules/database/advisory-lock.js';
+import { realpath } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { RipgrepPatternMatcher } from '../../modules/workspace/index.js';
+import { slowRipgrep } from '../../__tests__/slow-ripgrep.js';
+
+/** A lease the suite scripts: what each `tryAcquire` answers, and a way to lose it. */
+function fakeLease(answers: boolean[]) {
+  let held = false;
+  let lost: (() => void) | null = null;
+  const record = { asked: 0, released: 0 };
+  const lease = {
+    get held() {
+      return held;
+    },
+    onLost(cb: () => void) {
+      lost = cb;
+    },
+    async tryAcquire() {
+      if (held) return true;
+      record.asked += 1;
+      held = answers.shift() ?? false;
+      return held;
+    },
+    async release() {
+      record.released += 1;
+      held = false;
+    },
+  } as unknown as AdvisoryLease;
+  return {
+    lease,
+    record,
+    lose() {
+      held = false;
+      lost?.();
+    },
+  };
+}
+
+/** A worker that records its transitions, and can hold its stop open. */
+function fakeWorker() {
+  const events: string[] = [];
+  let releaseStop: (() => void) | null = null;
+  const worker: LeasedWorker = {
+    start() {
+      events.push('start');
+    },
+    stop() {
+      events.push('stop');
+      return new Promise<void>((resolve) => {
+        releaseStop = resolve;
+      });
+    },
+  };
+  return { worker, events, finishStop: () => releaseStop?.() };
+}
+
+/** A sleep the suite steps by hand, so nothing here waits on a clock. */
+function manualSleep() {
+  const pending: Array<() => void> = [];
+  return {
+    sleep: () =>
+      new Promise<void>((resolve) => {
+        pending.push(resolve);
+      }),
+    // Resolves EVERY sleep started so far: a loop woken early leaves its
+    // sleep's resolver behind, and a tick that only served the oldest one
+    // would wake that stale sleep and leave the live one waiting.
+    tick: async () => {
+      for (const wake of pending.splice(0)) wake();
+      await Promise.resolve();
+      await Promise.resolve();
+    },
+  };
+}
+
+const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+describe('holdCommitWorkerLease', () => {
+  it('starts the worker only once the lease is held, and not before', async () => {
+    const { lease, record } = fakeLease([false, false, true]);
+    const { worker, events, finishStop } = fakeWorker();
+    const clock = manualSleep();
+
+    const handle = holdCommitWorkerLease(lease, worker, { sleep: clock.sleep, log: () => undefined });
+    await settle();
+    expect(events).toEqual([]);
+    expect(handle.held).toBe(false);
+
+    await clock.tick();
+    await settle();
+    expect(events).toEqual([]);
+
+    await clock.tick();
+    await settle();
+    expect(events).toEqual(['start']);
+    expect(handle.held).toBe(true);
+    expect(record.asked).toBe(3);
+
+    // The handle's stop waits for the worker's, which this fake holds open.
+    const stopping = handle.stop();
+    await settle();
+    finishStop();
+    await stopping;
+  });
+
+  it('stops the worker when the lease is lost, and starts it again once re-held', async () => {
+    const { lease, lose } = fakeLease([true, true]);
+    const { worker, events, finishStop } = fakeWorker();
+    const clock = manualSleep();
+
+    const handle = holdCommitWorkerLease(lease, worker, { sleep: clock.sleep, log: () => undefined });
+    await settle();
+    expect(events).toEqual(['start']);
+
+    lose();
+    await settle();
+    expect(events).toEqual(['start', 'stop']);
+    expect(handle.held).toBe(false);
+
+    // Re-acquired while the old stop is still in flight: no second start yet.
+    await clock.tick();
+    await settle();
+    expect(events).toEqual(['start', 'stop']);
+
+    // Once the stop finishes, the next pass re-takes the lease and restarts.
+    finishStop();
+    await settle();
+    await clock.tick();
+    await settle();
+    expect(events).toEqual(['start', 'stop', 'start']);
+
+    // Same as above: release the worker's stop only once the handle has asked for it.
+    const stopping = handle.stop();
+    await settle();
+    finishStop();
+    await stopping;
+  });
+
+  it('stop() ends the worker, then releases the lease, and is idempotent', async () => {
+    const { lease, record } = fakeLease([true]);
+    const { worker, events, finishStop } = fakeWorker();
+    const clock = manualSleep();
+
+    const handle = holdCommitWorkerLease(lease, worker, { sleep: clock.sleep, log: () => undefined });
+    await settle();
+
+    const stopping = handle.stop();
+    await settle();
+    // The lease is still held while the in-flight commit finishes: releasing
+    // first would let the replacement start draining the same clone.
+    expect(events).toEqual(['start', 'stop']);
+    expect(record.released).toBe(0);
+
+    finishStop();
+    await stopping;
+    expect(record.released).toBe(1);
+
+    await handle.stop();
+    expect(record.released).toBe(1);
+  });
+
+  /**
+   * A process that never held the lease never ran the worker, and can still
+   * be in the middle of a hold on it: a repository move, using the database.
+   * Shutdown ends the pool after this stop, so this stop is what waits.
+   */
+  it('stop() waits for a hold in flight on a worker this process never ran', async () => {
+    const { lease, record } = fakeLease([false]);
+    const worker = holdable({ start: () => undefined, stop: async () => undefined });
+    const clock = manualSleep();
+    const handle = holdCommitWorkerLease(lease, worker, { sleep: clock.sleep, log: () => undefined });
+    await settle();
+
+    let finishMove: () => void = () => undefined;
+    const move = worker.whileHeld(() => new Promise<void>((resolve) => (finishMove = resolve)));
+    await settle();
+    const stopping = handle.stop();
+    await settle();
+    expect(record.released).toBe(0);
+
+    finishMove();
+    await move;
+    await stopping;
+    expect(record.released).toBe(1);
+  });
+});
+
+describe('withStartupTask', () => {
+  it('runs the task to completion before the worker starts, and a stop meanwhile waits for both', async () => {
+    const events: string[] = [];
+    let finishTask: () => void = () => undefined;
+    const worker: LeasedWorker = {
+      start: () => void events.push('start'),
+      stop: async () => void events.push('stop'),
+    };
+    const leased = withStartupTask(
+      worker,
+      () =>
+        new Promise<void>((resolve) => {
+          events.push('task');
+          finishTask = resolve;
+        }),
+    );
+
+    leased.start();
+    await settle();
+    expect(events).toEqual(['task']);
+
+    const stopping = leased.stop();
+    await settle();
+    expect(events).toEqual(['task']);
+    finishTask();
+    await stopping;
+    expect(events).toEqual(['task', 'start', 'stop']);
+  });
+
+  it('starts the worker even when the task fails, and says so', async () => {
+    const events: string[] = [];
+    const logged: string[] = [];
+    const leased = withStartupTask(
+      { start: () => void events.push('start'), stop: async () => undefined },
+      async () => {
+        throw new Error('reconcile broke');
+      },
+      (m) => logged.push(m),
+    );
+    leased.start();
+    await settle();
+    expect(events).toEqual(['start']);
+    expect(logged).toEqual(['startup task failed; the worker starts regardless: Error: reconcile broke']);
+  });
+});
+
+describe('createShutdown', () => {
+  function deps() {
+    const order: string[] = [];
+    let closeCallback: (() => void) | null = null;
+    return {
+      order,
+      finishClose: () => closeCallback?.(),
+      deps: {
+        server: {
+          close(cb?: () => void) {
+            order.push('server.close');
+            closeCallback = cb ?? null;
+            return this as never;
+          },
+          closeAllConnections() {
+            order.push('server.closeAllConnections');
+          },
+        },
+        commitWorker: {
+          async stop() {
+            order.push('commitWorker.stop');
+          },
+        },
+        pluginJoinRequestJobs: {
+          stopSweeping() {
+            order.push('pluginJoinRequestJobs.stopSweeping');
+          },
+          async drain() {
+            order.push('pluginJoinRequestJobs.drain');
+          },
+        },
+        agentUploadStore: {
+          stopSweeping() {
+            order.push('agentUploadStore.stopSweeping');
+          },
+          async drainSweep() {
+            order.push('agentUploadStore.drainSweep');
+          },
+        },
+        db: {
+          $client: {
+            async end() {
+              order.push('db.end');
+            },
+          },
+        },
+        log: () => undefined,
+      },
+    };
+  }
+
+  it('lets go in order: stop accepting, drop connections, finish the worker, end the pool', async () => {
+    const d = deps();
+    const shutdown = createShutdown(d.deps as never);
+
+    const done = shutdown('SIGTERM');
+    await settle();
+    // The server's close waits for its callback; nothing further has run.
+    expect(d.order).toEqual(['server.close', 'server.closeAllConnections']);
+
+    d.finishClose();
+    await done;
+    expect(d.order).toEqual([
+      'server.close',
+      'server.closeAllConnections',
+      'pluginJoinRequestJobs.stopSweeping',
+      // The upload sweep is stopped in the same breath as the other timers,
+      // and drained before the pool goes: a graph that is stopping must not
+      // leave a sweep walking the staging root its replacement will stage into.
+      'agentUploadStore.stopSweeping',
+      'pluginJoinRequestJobs.drain',
+      'agentUploadStore.drainSweep',
+      'commitWorker.stop',
+      'db.end',
+    ]);
+  });
+
+  it('waits for the jobs a tick already started before the pool goes, within the budget', async () => {
+    const d = deps();
+    let release: () => void = () => undefined;
+    d.deps.pluginJoinRequestJobs!.drain = () => {
+      d.order.push('pluginJoinRequestJobs.drain');
+      return new Promise<void>((resolve) => {
+        release = resolve;
+      });
+    };
+    const shutdown = createShutdown(d.deps as never);
+    const done = shutdown('SIGTERM');
+    await settle();
+    d.finishClose();
+    await settle();
+    // The jobs are still running: nothing after them has run.
+    expect(d.order).toEqual([
+      'server.close',
+      'server.closeAllConnections',
+      'pluginJoinRequestJobs.stopSweeping',
+      'agentUploadStore.stopSweeping',
+      'pluginJoinRequestJobs.drain',
+    ]);
+    release();
+    await done;
+    expect(d.order.slice(-2)).toEqual(['commitWorker.stop', 'db.end']);
+  });
+
+  it('stops the background sweep before anything it could outlive', async () => {
+    const d = deps();
+    const shutdown = createShutdown(d.deps as never);
+    const done = shutdown('SIGTERM');
+    await settle();
+    d.finishClose();
+    await done;
+
+    // Order is the point, not just presence, in BOTH directions. A tick that
+    // fired after `db.end` would query a client that is gone; a tick during
+    // `commitWorker.stop` — which awaits an in-flight commit and can take
+    // most of the shutdown budget — would start fresh clone/commit/push work
+    // that the process exit immediately after kills mid-git.
+    const stopped = d.order.indexOf('pluginJoinRequestJobs.stopSweeping');
+    expect(stopped).toBeGreaterThanOrEqual(0);
+    expect(stopped).toBeLessThan(d.order.indexOf('commitWorker.stop'));
+    expect(stopped).toBeLessThan(d.order.indexOf('db.end'));
+  });
+
+  it('shuts down cleanly when no background jobs were built yet', async () => {
+    const d = deps();
+    // A stop that lands mid-boot: the services exist, the jobs do not.
+    delete (d.deps as { pluginJoinRequestJobs?: unknown }).pluginJoinRequestJobs;
+    delete (d.deps as { agentUploadStore?: unknown }).agentUploadStore;
+    const shutdown = createShutdown(d.deps as never);
+    const done = shutdown('SIGTERM');
+    await settle();
+    d.finishClose();
+    await expect(done).resolves.toBeUndefined();
+    expect(d.order).toEqual([
+      'server.close',
+      'server.closeAllConnections',
+      'commitWorker.stop',
+      'db.end',
+    ]);
+  });
+
+  it('does not wait past the budget for jobs that never finish, and still ends the pool', async () => {
+    const d = deps();
+    d.deps.pluginJoinRequestJobs!.drain = () => {
+      d.order.push('pluginJoinRequestJobs.drain');
+      return new Promise<void>(() => undefined); // a clone that never returns
+    };
+    const shutdown = createShutdown(d.deps as never, { deadlineMs: 60 });
+    const done = shutdown('SIGTERM');
+    await settle();
+    d.finishClose();
+    await done;
+    expect(d.order.slice(-4)).toEqual([
+      'pluginJoinRequestJobs.drain',
+      'agentUploadStore.drainSweep',
+      'commitWorker.stop',
+      'db.end',
+    ]);
+  });
+
+  it('does not hang on a step that never finishes, and still runs the rest', async () => {
+    const d = deps();
+    // A server whose close callback never comes — a connection that will not drain.
+    const shutdown = createShutdown(d.deps as never, { deadlineMs: 60 });
+
+    await shutdown('SIGTERM');
+    expect(d.order).toEqual([
+      'server.close',
+      'server.closeAllConnections',
+      'pluginJoinRequestJobs.stopSweeping',
+      'agentUploadStore.stopSweeping',
+      'pluginJoinRequestJobs.drain',
+      'agentUploadStore.drainSweep',
+      'commitWorker.stop',
+      'db.end',
+    ]);
+  });
+
+  it('runs once: a second signal joins the sequence already under way', async () => {
+    const d = deps();
+    const shutdown = createShutdown(d.deps as never);
+
+    const first = shutdown('SIGTERM');
+    const second = shutdown('SIGINT');
+    d.finishClose();
+    await Promise.all([first, second]);
+    expect(d.order.filter((step) => step === 'db.end')).toHaveLength(1);
+  });
+});
+
+describe('stopCore', () => {
+  function graph() {
+    const order: string[] = [];
+    return {
+      order,
+      core: {
+        commitWorker: {
+          async stop() {
+            order.push('commitWorker.stop');
+          },
+        },
+        pluginJoinRequestJobs: {
+          stopSweeping() {
+            order.push('pluginJoinRequestJobs.stopSweeping');
+          },
+          async drain() {
+            order.push('pluginJoinRequestJobs.drain');
+          },
+        },
+        agentUploadStore: {
+          stopSweeping() {
+            order.push('agentUploadStore.stopSweeping');
+          },
+          async drainSweep() {
+            order.push('agentUploadStore.drainSweep');
+          },
+        },
+        startupRetry: {
+          stop() {
+            order.push('startupRetry.stop');
+          },
+        },
+        versionControlService: {
+          stopTidying() {
+            order.push('versionControlService.stopTidying');
+          },
+          async drainTidy() {
+            order.push('versionControlService.drainTidy');
+          },
+        },
+        db: {
+          $client: {
+            async end() {
+              order.push('db.end');
+            },
+          },
+        },
+        secretsScope: 'acme/t_acme',
+        log: () => undefined,
+      },
+    };
+  }
+
+  it('stops a graph without a server: sweeps and the retry first, the worker, then the pool', async () => {
+    const g = graph();
+    await stopCore(g.core as never);
+    expect(g.order).toEqual([
+      'pluginJoinRequestJobs.stopSweeping',
+      'agentUploadStore.stopSweeping',
+      'startupRetry.stop',
+      'versionControlService.stopTidying',
+      'pluginJoinRequestJobs.drain',
+      'agentUploadStore.drainSweep',
+      'versionControlService.drainTidy',
+      'commitWorker.stop',
+      'db.end',
+    ]);
+  });
+
+  it('stops the upload sweep, so an evicted tenant cannot sweep its own replacement', async () => {
+    const g = graph();
+    await stopCore(g.core as never);
+    // This is the eviction path: the next activation of the same tenant builds
+    // a new store over the SAME staging directory with an empty record map, so
+    // a sweep left running from this graph would read the replacement's files
+    // as orphans and delete them under an apply about to read them. Both
+    // halves, in order — the timer cleared, then the sweep in flight awaited
+    // before anything else lets go.
+    const stopped = g.order.indexOf('agentUploadStore.stopSweeping');
+    const drained = g.order.indexOf('agentUploadStore.drainSweep');
+    expect(stopped).toBeGreaterThanOrEqual(0);
+    expect(stopped).toBeLessThan(drained);
+    expect(drained).toBeLessThan(g.order.indexOf('db.end'));
+  });
+
+  it('stops the workspaces\' tmp sweep with the graph: the timer cleared, the sweep in flight awaited before the pool goes', async () => {
+    const g = graph();
+    const tmpSweeper = {
+      stopSweeping() {
+        g.order.push('tmpSweeper.stopSweeping');
+      },
+      async drainSweep() {
+        g.order.push('tmpSweeper.drainSweep');
+      },
+    };
+    await stopCore({ ...g.core, tmpSweeper } as never);
+    const stopped = g.order.indexOf('tmpSweeper.stopSweeping');
+    const drained = g.order.indexOf('tmpSweeper.drainSweep');
+    expect(stopped).toBeGreaterThanOrEqual(0);
+    expect(stopped).toBeLessThan(drained);
+    expect(drained).toBeLessThan(g.order.indexOf('db.end'));
+  });
+
+  it('forgets the graph\'s secrets scope, so a descriptor that outlives it resolves nothing', async () => {
+    const g = graph();
+    registerBevelSecretsVariableLoader(
+      { resolve: async () => 'sk-live' } as never,
+      g.core.secretsScope,
+    );
+    const loader = new BevelSecretsVariableLoader('user-1', g.core.secretsScope);
+    expect(await loader.get('weather_KEY')).toBe('sk-live');
+    await stopCore(g.core as never);
+    expect(await loader.get('weather_KEY')).toBeNull();
+  });
+
+  it('stops a graph that never left a retry asking and never registered a scope', async () => {
+    const g = graph();
+    const core = { ...g.core, startupRetry: null, secretsScope: undefined };
+    await stopCore(core as never);
+    expect(g.order).toEqual([
+      'pluginJoinRequestJobs.stopSweeping',
+      'agentUploadStore.stopSweeping',
+      'versionControlService.stopTidying',
+      'pluginJoinRequestJobs.drain',
+      'agentUploadStore.drainSweep',
+      'versionControlService.drainTidy',
+      'commitWorker.stop',
+      'db.end',
+    ]);
+  });
+
+  it('ends the grep matcher\'s running searches, so an evicted graph leaves no ripgrep running behind it', async () => {
+    const g = graph();
+    const slow = await slowRipgrep();
+    const patternMatcher = new RipgrepPatternMatcher();
+    try {
+      // A tree search that would hold its ripgrep for the whole 5 s budget when the graph is stopped.
+      const search = await patternMatcher.search('needle', { ignoreCase: false });
+      // A scope's cwd is canonical: where the temp folder is a link (macOS),
+      // the raw spelling would read as a root that has moved, and walk nothing.
+      const cwd = await realpath(tmpdir());
+      const running = (async () => {
+        for await (const file of search.files({ cwd, root: '.' }, { only: ['hit.md'], maxLinesPerFile: 1 })) void file;
+      })();
+      while ((await slow.alive()).length === 0) await new Promise((r) => setTimeout(r, 20));
+      const started = Date.now();
+      await stopCore({ ...g.core, patternMatcher } as never);
+      await expect(running).rejects.toMatchObject({ status: 503, details: { code: 'search_busy' } });
+      expect(Date.now() - started).toBeLessThan(1_000);
+      expect(await slow.alive()).toEqual([]);
+      // Closed for good: nothing after the stop starts a search.
+      await expect(patternMatcher.search('b', { ignoreCase: false })).rejects.toMatchObject({ status: 503 });
+      expect(g.order.at(-1)).toBe('db.end');
+    } finally {
+      await slow.remove();
+    }
+  });
+
+  it('does not wait past the budget for a worker that never stops, and still ends the pool', async () => {
+    const g = graph();
+    const core = { ...g.core, commitWorker: { stop: () => new Promise<void>(() => undefined) } };
+    await stopCore(core as never, { deadlineMs: 50 });
+    expect(g.order).toEqual([
+      'pluginJoinRequestJobs.stopSweeping',
+      'agentUploadStore.stopSweeping',
+      'startupRetry.stop',
+      'versionControlService.stopTidying',
+      'pluginJoinRequestJobs.drain',
+      'agentUploadStore.drainSweep',
+      'versionControlService.drainTidy',
+      'db.end',
+    ]);
+  });
+});
+
+/**
+ * Two independent reasons for the commit worker not to run: the lease loop
+ * does not want it (another process holds the queue), or something holds it
+ * still (the deployment is being moved to another repository). It runs
+ * exactly when it is wanted and nothing holds it.
+ */
+describe('holdable', () => {
+  function recorded() {
+    const events: string[] = [];
+    const worker: LeasedWorker = {
+      start: () => void events.push('start'),
+      stop: async () => void events.push('stop'),
+    };
+    return { events, worker: holdable(worker) };
+  }
+
+  it('stops a running worker for the work, and starts it again afterwards', async () => {
+    const { events, worker } = recorded();
+    worker.start();
+    const answer = await worker.whileHeld(async () => {
+      events.push('work');
+      return 42;
+    });
+    expect(answer).toBe(42);
+    expect(events).toEqual(['start', 'stop', 'work', 'start']);
+  });
+
+  it('starts it again when the work fails, and hands the failure on', async () => {
+    const { events, worker } = recorded();
+    worker.start();
+    await expect(
+      worker.whileHeld(async () => {
+        throw new Error('the move failed');
+      }),
+    ).rejects.toThrow('the move failed');
+    expect(events).toEqual(['start', 'stop', 'start']);
+  });
+
+  it('does not start a worker the lease loop never wanted', async () => {
+    const { events, worker } = recorded();
+    await worker.whileHeld(async () => undefined);
+    expect(events).not.toContain('start');
+  });
+
+  it('holds back a start the lease loop asks for during the work, and makes it afterwards', async () => {
+    const { events, worker } = recorded();
+    await worker.whileHeld(async () => {
+      // The lease is taken while the move runs.
+      worker.start();
+      events.push('work');
+    });
+    expect(events).toEqual(['stop', 'work', 'start']);
+  });
+
+  it('leaves it stopped when the lease loop stopped it during the work', async () => {
+    const { events, worker } = recorded();
+    worker.start();
+    // The loop's stop waits for the hold, so it is not awaited from inside it.
+    let stopping: Promise<void> = Promise.resolve();
+    await worker.whileHeld(async () => {
+      stopping = worker.stop();
+      await settle();
+    });
+    await stopping;
+    expect(events.at(-1)).toBe('stop');
+    expect(events.filter((e) => e === 'start')).toHaveLength(1);
+  });
+
+  /**
+   * Shutdown awaits this stop before it ends the database pool. A move still
+   * setting copies aside needs that pool, so the stop does not come back
+   * while a hold is in flight.
+   */
+  it('does not finish stopping while a hold is still in flight', async () => {
+    const { worker } = recorded();
+    worker.start();
+    let finishMove: () => void = () => undefined;
+    const move = worker.whileHeld(() => new Promise<void>((resolve) => (finishMove = resolve)));
+    await settle();
+    let stopped = false;
+    const stopping = worker.stop().then(() => (stopped = true));
+    await settle();
+    expect(stopped).toBe(false);
+    finishMove();
+    await move;
+    await stopping;
+    expect(stopped).toBe(true);
+  });
+
+  it('finishes stopping when the hold in flight fails', async () => {
+    const { worker } = recorded();
+    let failMove: (err: Error) => void = () => undefined;
+    const move = worker.whileHeld(() => new Promise<void>((_, reject) => (failMove = reject)));
+    move.catch(() => undefined);
+    await settle();
+    const stopping = worker.stop();
+    failMove(new Error('the move failed'));
+    await expect(stopping).resolves.toBeUndefined();
+  });
+
+  /**
+   * A worker's stop answers a second caller at once while the first is
+   * still waiting for the commit in flight. A second hold given that answer
+   * would set a working copy aside under that commit.
+   */
+  it('makes a second hold wait for the stop the first one is still waiting on', async () => {
+    const events: string[] = [];
+    let stopped = false;
+    let finishStop: () => void = () => undefined;
+    const worker = holdable({
+      start: () => void events.push('start'),
+      // As the commit worker's: the first call waits, a later one returns.
+      stop: () => {
+        if (stopped) return Promise.resolve();
+        stopped = true;
+        return new Promise<void>((resolve) => (finishStop = resolve));
+      },
+    });
+    worker.start();
+    const first = worker.whileHeld(async () => void events.push('first work'));
+    const second = worker.whileHeld(async () => void events.push('second work'));
+    await settle();
+    // The commit in flight has not finished: neither hold has begun.
+    expect(events).toEqual(['start']);
+    finishStop();
+    await Promise.all([first, second]);
+    expect(events.slice(0, 3).sort()).toEqual(['first work', 'second work', 'start']);
+  });
+
+  it('waits for the last of two overlapping holds before it starts again', async () => {
+    const { events, worker } = recorded();
+    worker.start();
+    let finishFirst: () => void = () => undefined;
+    const first = worker.whileHeld(() => new Promise<void>((resolve) => (finishFirst = resolve)));
+    await settle();
+    await worker.whileHeld(async () => undefined);
+    // The second hold ended and the first is still running: not started yet.
+    expect(events.filter((e) => e === 'start')).toHaveLength(1);
+    finishFirst();
+    await first;
+    expect(events.filter((e) => e === 'start')).toHaveLength(2);
+  });
+});

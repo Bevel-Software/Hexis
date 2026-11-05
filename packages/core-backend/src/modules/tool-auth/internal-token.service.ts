@@ -12,9 +12,9 @@ export interface InternalTokenClaim {
   /**
    * The agent run / conversation id (the Mastra thread id) this token is scoped
    * to, when minted per-run. Surfaced as `ToolContext.sessionId` so the
-   * ontology-session boundary can scope to one run for the in-process agent
-   * (the external/MCP path carries `sessionId` on the tool body instead).
-   * Absent for identity-only tokens.
+   * agent-access hooks can tell the in-process agent's run apart (the
+   * external/MCP path carries `sessionId` on the tool body instead). Absent
+   * for identity-only tokens.
    */
   sessionId?: string;
   /**
@@ -33,10 +33,29 @@ export interface InternalTokenClaim {
    * connection key to pass through). The verifier resolves such tokens to
    * `source: 'external'`: the caller IS an external agent, and must be treated
    * like one everywhere — admitted to external-only surfaces (`start_session`,
-   * `ask`), refused from internal-only ones (`execute_command`, …), and
+   * `ask`), refused from internal-only ones (`switch_branch`, …), and
    * expected to carry `sessionId` on the tool body, not in the token.
    */
   externalProxy?: boolean;
+  /**
+   * The agent connection (`agent_connections.id`) an external-proxy token
+   * stands in for. The LOCAL MCP server swaps its OAuth grant for one of these
+   * at `/api/mcp/local-token` and presents it everywhere the grant would have
+   * gone, so without this claim every call it makes would arrive with a user
+   * and no agent — unattributable in the Audit log. Carried, never decided:
+   * the exchange copies it from the verified grant. Absent on every other
+   * internal token.
+   */
+  connectionId?: string;
+  /**
+   * The agent configuration the external caller's connection was made as (a
+   * repo-relative knowledge-base path), copied at mint from the verified
+   * grant or connection — the hosted proxy's loopback token and the local
+   * server's exchanged grant both carry it, so every agent surface narrows
+   * their calls to that agent's scope (`modules/agent-scope`). Absent is
+   * Everything. Carried, never decided, like `connectionId`.
+   */
+  agentPath?: string;
 }
 
 interface SignedPayload extends InternalTokenClaim {
@@ -99,8 +118,11 @@ export class InternalTokenService {
     return this.ttlMs;
   }
 
-  /** @param ttlMs Override the default lifetime — e.g. the MCP proxy mints
-   *   session-loopback tokens that must outlive its 4h session idle TTL. */
+  /** @param ttlMs Override the default lifetime — for a caller whose token
+   *   must live a different span than the default: the MCP proxy's loopback
+   *   bearer (`MCP_LOOPBACK_TOKEN_TTL_MS`, longer, so a long tool call is not
+   *   cut off mid-way) and the external-proxy token minted for a grant, whose
+   *   life is bounded by the grant's remaining time (`mcp.routes.ts`). */
   mint(claim: InternalTokenClaim, ttlMs?: number): string {
     const payload: SignedPayload = { ...claim, exp: this.now() + (ttlMs ?? this.ttlMs) };
     const body = b64url(Buffer.from(JSON.stringify(payload), 'utf8'));
@@ -134,6 +156,8 @@ export class InternalTokenService {
       ...(typeof payload.sessionId === 'string' ? { sessionId: payload.sessionId } : {}),
       ...(typeof payload.focusedBranch === 'string' ? { focusedBranch: payload.focusedBranch } : {}),
       ...(payload.externalProxy === true ? { externalProxy: true } : {}),
+      ...(typeof payload.connectionId === 'string' ? { connectionId: payload.connectionId } : {}),
+      ...(typeof payload.agentPath === 'string' && payload.agentPath ? { agentPath: payload.agentPath } : {}),
     };
   }
 

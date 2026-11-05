@@ -1,4 +1,5 @@
 import { authFetch } from '../../../lib/api';
+import type { ManagedSignIn } from './connect.api';
 
 /**
  * Per-tool secrets API. A `.tool` manual declares which `${VAR}`s are set by the
@@ -17,6 +18,13 @@ export interface ToolVarStatus {
   key: string;
   /** A shared (admin) value exists. */
   adminConfigured: boolean;
+  /**
+   * What the shared row IS: a sign-in needs an `oauth` one, not a key left
+   * from when the variable was static. `null` when there is no shared row.
+   * The server always sends it; a consumer tests for `'oauth'` and never for
+   * "not static", which a missing field would satisfy.
+   */
+  adminKind?: 'static' | 'oauth' | null;
   /** The caller's own value exists. */
   userConfigured: boolean;
   /** This variable is filled by an OAuth sign-in, not a typed value. */
@@ -27,19 +35,45 @@ export interface ToolVarStatus {
   needsReauth?: boolean;
   /** For an oauth var: the declared scopes the token was NOT granted (what it can't do). */
   missingScopes?: string[];
+  /** For a managed connector's sign-in: the card the Connect page shows (see `ManagedSignIn`). */
+  managed?: ManagedSignIn;
 }
 
 /**
  * For a `type: mcp` tool, the setup requirement auto-discovery found:
  *  - `open`         — no auth; nothing to configure.
  *  - `oauth-auto`   — sign-in was set up automatically (appears as a user var).
- *  - `oauth-manual` — the server needs sign-in but couldn't be set up
- *                     automatically; a tool writer must declare the provider in
- *                     the `.tool` file and set its client secret. `reason` says why.
+ *  - `oauth-manual` — the sign-in needs an OAuth app the owner registers with
+ *                     the provider: a tool writer declares its client id on a
+ *                     user-scoped variable (the server editor for an mcp.json
+ *                     server; the `.tool` file otherwise) and sets its client
+ *                     secret. `reason` is present only while something still
+ *                     blocks the sign-in, and says what.
  */
 export interface ToolSetup {
   kind: 'open' | 'oauth-auto' | 'oauth-manual';
   reason?: string;
+}
+
+/**
+ * The verdict of the last credential PROBE — a different question from every
+ * `ToolVarStatus` field, which say only what is STORED.
+ *
+ *  - `ok`           — the provider was called and accepted the credential.
+ *  - `failed`       — the provider rejected it; `detail` is what it said.
+ *  - `unverifiable` — we don't know: either the tool offers no way to test it,
+ *                     or the attempt couldn't reach a verdict. `detail` says which.
+ *
+ * NOT stored anywhere. A verdict is returned to the page that asked for it and
+ * lives in that page's state until it is closed or reloaded — because a saved
+ * verdict is evidence with a date on it, and a credential can be revoked or
+ * expire between the check and the render. "Connected" therefore means "a call
+ * succeeded moments ago", which is the only claim a badge can honestly make.
+ */
+export interface ProbeVerdict {
+  status: 'ok' | 'failed' | 'unverifiable';
+  detail: string | null;
+  checkedAt: string;
 }
 
 export interface ToolSecrets {
@@ -94,18 +128,41 @@ async function deleteVar(slug: string, varName: string, tier: ToolVarScope): Pro
  * Store the confidential OAuth CLIENT SECRET for a tool's declared sign-in
  * provider — the owner-side half of a manual OAuth setup. Requires write access
  * to the `.tool`; the public provider config is pinned server-side from the
- * file's own `oauth` declaration.
+ * file's own `oauth` declaration. A MANAGED declaration names no client, so
+ * the caller's `clientId` is used then: the deployment's own app, replacing
+ * the managed one.
  */
-export async function setOAuthClientSecret(slug: string, varName: string, clientSecret: string): Promise<void> {
+export async function setOAuthClientSecret(
+  slug: string,
+  varName: string,
+  clientSecret: string,
+  /** For a managed sign-in only: the deployment's OWN app, replacing the managed one ("use our own app"). */
+  clientId?: string,
+): Promise<void> {
   const res = await authFetch(
     `/api/secrets/tools/${encodeURIComponent(slug)}/vars/${encodeURIComponent(varName)}/oauth/admin`,
     {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ clientSecret }),
+      body: JSON.stringify(clientId ? { clientSecret, clientId } : { clientSecret }),
     },
   );
   if (!res.ok) await unwrap(res, "Couldn't save the client secret.");
+}
+
+/**
+ * Probe this tool's credential NOW and return the verdict.
+ *
+ * Called after saving a key so the user learns immediately whether it works,
+ * while they still have it to hand — the moment a wrong key is cheapest to fix.
+ * A rejected credential is a SUCCESSFUL check, so it resolves with
+ * `status: 'failed'` rather than throwing; only a transport or access failure
+ * rejects.
+ */
+export async function checkToolConnection(slug: string): Promise<ProbeVerdict> {
+  const res = await authFetch(`/api/secrets/tools/${encodeURIComponent(slug)}/check`, { method: 'POST' });
+  if (!res.ok) await unwrap(res, "Couldn't test this connection.");
+  return ((await res.json()) as { verdict: ProbeVerdict }).verdict;
 }
 
 export const setAdminVar = (slug: string, varName: string, value: string, label?: string | null) =>

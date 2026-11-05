@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { isJoinBranchFor, joinBranchFor, kebabPluginName } from '@bevel-software/platform-shared';
-import { assertValidBranchName } from '../../modules/workflow/git/branch-name.js';
+import { assertValidBranchName } from '../../modules/kb-fs/branch-name.js';
 
 /**
  * The join-branch convention. Two properties matter, and they pull in

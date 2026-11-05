@@ -1,29 +1,38 @@
 import path from 'node:path';
+import { createHash } from 'node:crypto';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('tool-manuals');
 import fs from 'node:fs/promises';
 import { parse as parseYaml } from 'yaml';
 import '@utcp/http'; // side effect: register the 'http' call-template type (http + inline sub-manuals)
 import '@utcp/mcp'; // side effect: register the 'mcp' call-template type (mcp `.tool` sources)
+// side effect: register the 'cli' call-template type for PARSING ONLY — the
+// executor is removed again, so this process cannot dispatch a shell command.
+import { containsCliCallTemplate } from './utcp-cli-parse-only.js';
 import {
   UtcpManualSerializer,
   CallTemplateSerializer,
   DefaultVariableSubstitutor,
   type CallTemplate,
 } from '@utcp/sdk';
-import {
-  DEFAULT_BRANCH,
-  PLUGINS_DIR,
-  PLUGIN_MANIFEST_FILE,
-  PLUGIN_MCP_FILE,
-} from '@bevel-software/platform-shared';
+// Also a side effect: loading the package registers the 'google_service_account'
+// auth type, so a `.tool` naming it validates here.
+import { findUnservedGoogleServiceAccountAuth, holdsLiteralGoogleServiceAccountKey } from '@bevel-software/platform-mcp-core';
 import { descriptorsFromMcpJson } from './mcp-json-discovery.js';
-import type { WorkspaceService } from '../workspace/workspace.service.js';
-import { workspaceIdForBranch } from '../workspace/workspace.service.js';
-import type { IAccessControl } from '../access/access-control.interface.js';
+import type { PluginSource } from '../plugins/index.js';
+import type { WorkspaceService } from '../workspace/index.js';
+import type { KbContext } from '../../shared/kb-context.js';
+import { workspaceIdForBranch } from '../../shared/workspace-id.js';
+import type { IAccessControl } from '../access/index.js';
 import { assertSafeFetchUrl } from '../../shared/ssrf.js';
+import { redactSecret } from '../../shared/redact-secret.js';
+import { printable } from '../../shared/printable.js';
 import { RESERVED_VARIABLE_NAMES, findReservedVariableRef } from '../../shared/variable-refs.js';
 import { extractFrontmatter, resolveDeclaredId, isValidId, dedupeById } from '../../shared/frontmatter-id.js';
-import { walkFiles } from '../../shared/fs-walk.js';
+import type { ITreeWalker } from '../../shared/fs.contract.js';
 import { TtlCache } from '../../shared/ttl-cache.js';
+import type { HiddenToolSource } from '../../shared/hidden-tools.js';
 import {
   utcpNamespacePrefix,
   utcpNamespacedKey,
@@ -32,28 +41,28 @@ import {
 } from '../../shared/utcp-namespace.js';
 import {
   EXTERNAL_KB_MANUAL_NAME,
+  MAX_CAPABILITIES,
   type IToolManualService,
+  type ConnectorScope,
   type ToolManualDescriptor,
   type ToolManualDescriptorBase,
   type ToolManualSummary,
   type ToolManualDetail,
+  type InvalidToolManual,
+  type AccessibleCatalog,
   type ToolCapability,
   type UtcpManualDict,
   type ToolManualPreview,
   type ToolManualType,
   type ToolVariable,
+  type ToolHealthCheck,
+  type ToolProbeTarget,
   type ToolVariableScope,
   type ToolVariableOAuth,
+  type LiveDeclaration,
 } from './tool-manuals.contract.js';
 
 const CACHE_TTL_MS = 60_000;
-
-/**
- * How many embedded tools a manual may advertise on the tool page. A `.tool` is
- * author-written, so its `tools` array is unbounded input; the page renders one
- * bullet per entry, and a thousand of them is a broken page, not a useful one.
- */
-const MAX_CAPABILITIES = 100;
 
 /**
  * UTCP namespaces a user `.tool` may NOT claim: they belong to built-in manuals
@@ -79,17 +88,124 @@ const RESERVED_TOOL_NAMESPACES = [INTERNAL_MANUAL_NAME, EXTERNAL_KB_MANUAL_NAME]
  * every boundary that classifies references.
  */
 
-/** Throw if any string in the `.tool` document references a reserved variable. */
-function assertNoReservedVariableRefs(doc: unknown, name: string): void {
+/**
+ * Throw if any string in the `.tool` document references a reserved variable.
+ *
+ * `ref` is named because it is OURS — one of `RESERVED_VARIABLE_NAMES`, matched
+ * from a fixed list rather than copied out of the file. That is the line every
+ * refusal here holds: see {@link describeManualFault}.
+ */
+function assertNoReservedVariableRefs(doc: unknown): void {
   const ref = findReservedVariableRef(doc);
   if (ref !== null) {
     throw new Error(
-      `\`.tool\` "${name}" references the reserved variable "${ref}" — ` +
+      `this \`.tool\` references the reserved variable "${ref}" — ` +
         'API_URL and CONNECTION_KEY (bare or namespaced, e.g. `<namespace>_CONNECTION_KEY`) ' +
         'are seeded by the platform for its own manuals and may not appear anywhere in a `.tool`.',
     );
   }
 }
+
+/**
+ * How much of a validation message may reach a listing. Long enough for every
+ * sentence the normalizer writes; short enough that a message which interpolated
+ * a chunk of the file (`unknown \`.tool\` type: <whatever was written there>`)
+ * cannot smuggle a pasted credential out one character at a time.
+ */
+const MAX_REASON_LENGTH = 300;
+
+/**
+ * Why one `.tool` was refused, in a form safe to hand an agent, a browser and a
+ * log — the `reason` of an {@link InvalidToolManual}.
+ *
+ * This is the LAST of two defences, not the only one. The first is upstream and
+ * structural, and it is the one that carries the guarantee:
+ *
+ *   A REASON REPEATS NOTHING THE FILE SAID.
+ *
+ * Every refusal this module writes locates the fault — a field name we chose
+ * (`` `id` ``, `` `healthCheck.url` ``), an ordinal (`` `variables[2].scope` ``,
+ * `` `headers` entry 3 of 4 ``) — and states the rule. It never interpolates
+ * what was written there, and that includes text which passed a check: a name
+ * matching `[A-Za-z0-9_]+` is a legal identifier, not a string we may repeat,
+ * and a token spelled with underscores matches it. The only author-derived
+ * strings named anywhere are ones matched against a FIXED list of ours (a
+ * reserved variable, a reserved namespace), where saying which one was hit
+ * teaches nothing the platform did not already publish.
+ *
+ * It has to be that way round — no scrub can recognise an arbitrary
+ * author-chosen string as a credential, so a message that interpolates one
+ * cannot be made safe after the fact. What remains for this function is the
+ * text the process does NOT author: the YAML parser's, which quotes the file at
+ * its fault.
+ *
+ * Two things happen here, and both are about NOT echoing the file back.
+ *
+ * 1. A `YAMLParseError`'s `message` ends with a SOURCE SNIPPET: the offending
+ *    lines, verbatim, under a caret. A `.tool` is content an author may have
+ *    pasted a literal token into (`Authorization: Bearer <a real key>`), and
+ *    the line that fails to parse is as likely to be that one as any other.
+ *    So only the message's first line survives — the parser's own prose — and
+ *    the location is re-stated from `linePos`, which is numbers, not text.
+ * 2. Everything is then run through `redactSecret` and capped. The normalizer's
+ *    own messages quote a url on an SSRF refusal, and a url can carry
+ *    `user:pass@host` or a presigned query; that is precisely what the shared
+ *    scrub takes out, and reusing it is what keeps one definition of "this must
+ *    not reach a log" for the whole backend.
+ *
+ * What remains of the parser's prose still interpolates the odd token (`Missing
+ * , between flow map items`, `Unexpected , in flow collection`) — a structural
+ * character or a token type, never a value line. That is the point of the cut:
+ * the fault is described, the file is not quoted.
+ */
+export function describeManualFault(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err);
+  // `linePos` is the `yaml` package's own location, on the error object — the
+  // authority for WHERE, so the snippet never has to be read to find out.
+  const pos = (err as { linePos?: [{ line: number; col: number }, ...unknown[]] } | null)?.linePos?.[0];
+  // The prose, snippet dropped. `yaml` appends ` at line N, column M:` to it as
+  // the snippet's header; drop that too, since the location is restated below
+  // in a form that does not depend on the parser's phrasing.
+  const prose = raw.split('\n')[0].replace(/ at line \d+, column \d+:?$/, '').trim();
+  const located = pos ? `${prose} (line ${pos.line}, column ${pos.col})` : prose;
+  const scrubbed = redactSecret(located);
+  return scrubbed.length > MAX_REASON_LENGTH ? `${scrubbed.slice(0, MAX_REASON_LENGTH - 1)}…` : scrubbed;
+}
+
+/**
+ * One scan of the manuals on disk: what parsed, and what did not.
+ *
+ * The two travel TOGETHER, through the cache and out to every surface, because
+ * they are two halves of one answer. A caller handed only the manuals cannot
+ * tell a catalog of three tools from a catalog of four with one broken — which
+ * is exactly the confusion a silently-skipped file creates.
+ */
+interface ScanResult {
+  manuals: ToolManualDescriptor[];
+  invalid: InvalidToolManual[];
+  /**
+   * Every manual the parse refused whose file still says which manual it is,
+   * by slug, with the reason. Not a listing surface (`invalid` is that, by
+   * path): it lets a sign-in started on a refused declaration answer why,
+   * where the slug alone would otherwise find nothing.
+   */
+  refused: RefusedManual[];
+}
+
+interface RefusedManual {
+  slug: string;
+  path: string;
+  reason: string;
+}
+
+/**
+ * The empty answer — a workspace that isn't there yet, or a caller who may read
+ * nothing. A FUNCTION, not a shared constant: the arrays in a scan result are
+ * handed to decoration passes and to the cache, and a single frozen-by-
+ * convention instance is one push away from every empty scan in the process
+ * inheriting another's contents.
+ */
+const emptyScan = (): ScanResult => ({ manuals: [], invalid: [], refused: [] });
 
 const manualSerializer = new UtcpManualSerializer();
 const callTemplateSerializer = new CallTemplateSerializer();
@@ -103,18 +219,31 @@ const variableSubstitutor = new DefaultVariableSubstitutor();
  * the vault applies in the other direction with `VariableScopeResolver`.
  */
 export interface McpAuthDiscoveryPort {
-  statusFor(
-    manualName: string,
-    mcpUrl: string,
-  ): Promise<
-    | { status: 'open' }
-    | {
-        status: 'oauth';
-        provider: { authorizationUrl: string; tokenUrl: string; clientId: string; scopes?: string[] };
-      }
-    | { status: 'unsupported'; reason: string }
-  >;
+  statusFor(manualName: string, mcpUrl: string): Promise<McpAuthDiscoveryResult>;
+  /**
+   * The sign-in endpoints for an OWNER-REGISTERED client: the same metadata
+   * walk as `statusFor`, stopping short of dynamic registration — the manual
+   * already names its `clientId`. Nothing is persisted; every sign-in start
+   * completes the declaration afresh (`liveDeclaration`). Optional so a port that
+   * only knows the zero-config path still satisfies the interface.
+   */
+  providerForDeclaredClient?(manualName: string, mcpUrl: string, clientId: string): Promise<McpAuthDiscoveryResult>;
 }
+
+export type McpAuthDiscoveryResult =
+  | { status: 'open' }
+  | {
+      status: 'oauth';
+      provider: {
+        authorizationUrl: string;
+        tokenUrl: string;
+        clientId: string;
+        scopes?: string[];
+        resource?: string;
+        pkce?: boolean;
+      };
+    }
+  | { status: 'unsupported'; reason: string };
 
 /**
  * Reads `*.tool` manuals from the DEFAULT-branch workspace (never the caller's
@@ -124,16 +253,47 @@ export interface McpAuthDiscoveryPort {
  * must never break because a `.tool` can't be read.
  */
 export class ToolManualService implements IToolManualService {
-  private readonly cache: TtlCache<ToolManualDescriptor[]>;
+  private readonly cache: TtlCache<ScanResult>;
   private mcpAuthDiscovery?: McpAuthDiscoveryPort;
+  /** Where a hidden tool's schema finding comes from; absent until wired. */
+  private hiddenTools?: HiddenToolSource;
+  /**
+   * The refused set as it was last written to the log, so the warnings are
+   * logged ONCE PER CHANGE rather than once per scan. A broken `.tool` sits
+   * there until someone fixes it, and the catalog is re-scanned every minute on
+   * every surface — repeating the same three lines forever buries the scan that
+   * actually changed something. `null` until the first scan, so the first state
+   * is always reported.
+   */
+  private loggedInvalid: string | null = null;
+  /**
+   * The scan currently running, shared by everyone who asks while it runs.
+   *
+   * The TTL cache only holds a value once the scan RETURNS, so without this
+   * every caller arriving during the walk starts its own — and a listing that
+   * wants both halves of the catalog is exactly such a pair, as is a page that
+   * fires two requests. Sharing the promise makes one cold listing one disk
+   * walk, one MCP-discovery pass, and ONE snapshot for every reader of it.
+   * Cleared by `invalidate()` as well as on settle, so a caller arriving after
+   * a merge never inherits a scan that started on the tree it replaced — the
+   * same rule `TtlCache`'s generation token enforces for the cached value.
+   */
+  private inFlightScan: Promise<ScanResult> | null = null;
 
   constructor(
     private readonly workspaceService: WorkspaceService,
     private readonly accessControl: IAccessControl,
-    private readonly kbDirName: string,
+    private readonly kb: KbContext,
+    private readonly disk: ITreeWalker,
+    /** Where plugins (and their MCP servers) come from — the one discovery every catalog shares. */
+    private readonly source: PluginSource,
     now: () => number = Date.now,
   ) {
     this.cache = new TtlCache(CACHE_TTL_MS, now);
+  }
+
+  private get kbDirName(): string {
+    return this.kb.kbDirName;
   }
 
   /**
@@ -146,16 +306,30 @@ export class ToolManualService implements IToolManualService {
     this.mcpAuthDiscovery = discovery;
   }
 
+  setHiddenTools(source: HiddenToolSource): void {
+    this.hiddenTools = source;
+  }
+
   invalidate(): void {
     this.cache.invalidate();
+    this.inFlightScan = null;
   }
 
   async listAccessible(userEmail: string): Promise<ToolManualSummary[]> {
     return (await this.accessibleManuals(userEmail)).map(toSummary);
   }
 
+  async listAccessibleCatalog(userEmail: string, within?: ConnectorScope): Promise<AccessibleCatalog> {
+    const { manuals, invalid } = await this.accessibleScan(userEmail, within);
+    return { tools: manuals.map(toSummary), invalid };
+  }
+
   async listAllSummaries(): Promise<ToolManualSummary[]> {
-    return (await this.scan()).map(toSummary);
+    return (await this.scan()).manuals.map(toSummary);
+  }
+
+  async catalogFingerprints(userEmail: string, within?: ConnectorScope): Promise<string[]> {
+    return (await this.accessibleManuals(userEmail, within)).map(manualFingerprint);
   }
 
   async getDetail(userEmail: string, slug: string): Promise<ToolManualDetail | null> {
@@ -165,16 +339,94 @@ export class ToolManualService implements IToolManualService {
     // model, no second place for the access rules to drift.
     const found = (await this.accessibleManuals(userEmail)).find((m) => m.slug === slug);
     if (!found) return null;
+    // The marker is for whoever manages the server: the same per-file write
+    // verdict that gates setting the tool's shared secrets. A reader sees
+    // nothing of it — they can neither fix the schema nor do anything with the
+    // knowledge that one of the server's tools is off. The write check is
+    // asked only when there is something to show, so the healthy case (every
+    // tool of every server) costs no ACL round-trip.
+    const hidden = this.hiddenTools?.hiddenFor(found.name) ?? [];
+    const mayManage =
+      hidden.length > 0 && (await this.accessControl.canWrite(this.kb.defaultWorkspaceId(), userEmail, found.path));
     return {
       ...toSummary(found),
       description: found.description ?? null,
       capabilities: capabilitiesOf(found),
+      hiddenTools: mayManage ? hidden : [],
     };
   }
 
-  async listLocalOnly(userEmail: string): Promise<{ name: string; path: string }[]> {
-    const manuals = await this.accessibleManuals(userEmail);
-    return manuals.filter((m) => m.remote === false).map((m) => ({ name: m.name, path: m.path }));
+  async liveDeclaration(
+    userEmail: string,
+    slug: string,
+    varName: string,
+  ): Promise<LiveDeclaration | null> {
+    // The disk walk the catalog's scan is built from, run afresh and never
+    // cached: a sign-in must follow the file as it is, and the catalog's scan
+    // can be a refresh behind it. The whole walk rather than the one file, so
+    // the descriptor comes out of exactly the parse, plugin discovery and
+    // namespace dedup the catalog applies — a sign-in start is rare and
+    // interactive, and a second, single-file reading of the same files is a
+    // second place for those rules to drift. A workspace that cannot be opened
+    // is an error here, never an empty answer: "no sign-in declared" would be
+    // the wrong diagnosis for a server that could not read its files.
+    const { manuals, refused } = await this.readableBy(await this.scanDisk(undefined, 'throw'), userEmail);
+    const m = manuals.find((x) => x.slug === slug);
+    if (!m) {
+      // The file is there and says it is this manual, but the parse refused
+      // it — e.g. its sign-in names an http:// or private token endpoint. That
+      // reason is the answer; "not found" would hide the one thing to fix.
+      const r = refused.find((x) => x.slug === slug);
+      return r ? { refused: r.reason } : null;
+    }
+    const variable = (m.variables ?? []).find((v) => v.name === varName);
+    // Completed by the catalog's own decoration, on this one fresh descriptor.
+    // Only when THIS variable is a sign-in: then the manual has a declared one,
+    // so the pass completes its endpoints from the server's metadata and never
+    // probes for (or registers) a zero-config client.
+    if (variable?.oauth) await this.decorateMcpOAuth([m]);
+    return { manual: toSummary(m), ...(variable ? { variable } : {}) };
+  }
+
+  async listLocalOnly(userEmail: string, within?: ConnectorScope): Promise<{ slug: string; name: string; path: string }[]> {
+    const manuals = await this.accessibleManuals(userEmail, within);
+    return manuals.filter((m) => m.remote === false).map((m) => ({ slug: m.slug, name: m.name, path: m.path }));
+  }
+
+  async listDeclaredOnlyOnBranch(
+    userEmail: string,
+    branch: string,
+    within?: ConnectorScope,
+  ): Promise<{ name: string; path: string; type: ToolManualType }[]> {
+    if (!branch || branch === this.kb.defaultBranch) return [];
+    // Only a draft this process already holds a clone of — the one the caller
+    // wrote the declaration on. `scanDisk` would otherwise BOOTSTRAP any branch
+    // name a caller sends, before the read gate below has had a say: a clone
+    // and a fetch per guessed, private or nonexistent branch. A declaration on
+    // a branch nobody has checked out here is nothing this answer can report.
+    if (!(await this.workspaceService.hasBootstrappedWorkspace(workspaceIdForBranch(branch)))) return [];
+    // Names and paths only — `scanDisk` never probes a server, so asking about
+    // a draft costs no network and registers no OAuth client for a declaration
+    // that may never be merged.
+    const onBranch = (await this.scanDisk(branch)).manuals;
+    if (onBranch.length === 0) return [];
+    // Compared by NAMESPACE, the catalog's own identity (see the dedupe in
+    // `scanDisk`): a draft entry whose namespace the default branch already
+    // serves is an edit of a live tool, not a tool missing from the catalog.
+    const released = new Set((await this.scan()).manuals.map((m) => utcpNamespacePrefix(m.name)));
+    const pending = onBranch.filter((m) => !released.has(utcpNamespacePrefix(m.name)));
+    if (pending.length === 0) return [];
+    // Read-gated on the BRANCH's workspace, where the declaration lives — the
+    // same default-deny rule as the catalog, so this can't reveal a draft file
+    // the caller could not open with `read_file`.
+    const allowed = await this.accessControl.canReadBatch(
+      workspaceIdForBranch(branch),
+      userEmail,
+      pending.map((m) => m.path),
+    );
+    return pending
+      .filter((m) => allowed.get(m.path) === true && (within === undefined || within(m.path)))
+      .map((m) => ({ name: m.name, path: m.path, type: m.type }));
   }
 
   async userScopedKeysForManual(
@@ -187,7 +439,7 @@ export class ToolManualService implements IToolManualService {
     // manual name doubled), so a readiness check reads the exact rows `resolve`
     // would. `oauth` lets the pre-check treat a not-yet-authorized sign-in as
     // still-missing.
-    const manual = (await this.scan()).find((m) => m.name === manualName);
+    const manual = (await this.scan()).manuals.find((m) => m.name === manualName);
     return (manual?.variables ?? [])
       .filter((v) => v.scope === 'user')
       .map((v) => ({
@@ -202,13 +454,27 @@ export class ToolManualService implements IToolManualService {
       }));
   }
 
+  async sharedSignInKeysForManual(
+    manualName: string,
+  ): Promise<{ key: string; name: string; label: string | null; oauthScopes?: string[] }[]> {
+    const manual = (await this.scan()).manuals.find((m) => m.name === manualName);
+    return (manual?.variables ?? [])
+      .filter((v) => v.scope === 'admin' && v.oauth != null)
+      .map((v) => ({
+        key: utcpNamespacedKey(manualName, v.name),
+        name: v.name,
+        label: v.label ?? null,
+        oauthScopes: v.oauth?.scopes,
+      }));
+  }
+
   async scopeOfVariable(effectiveKey: string): Promise<ToolVariableScope> {
     // UTCP looks up `<namespace-with-doubled-underscores>_<VAR>`. Find the manual
     // whose namespace prefixes this key; the declared var is the remainder. Match
     // the LONGEST prefix so a manual `a` can't shadow `a_b` when both exist. (A
     // plain first-underscore split would mis-parse a snake_case manual name.)
     let best: { manual: ToolManualDescriptor; varName: string; len: number } | null = null;
-    for (const m of await this.scan()) {
+    for (const m of (await this.scan()).manuals) {
       const prefix = utcpNamespacePrefix(m.name);
       if (effectiveKey.startsWith(prefix) && (!best || prefix.length > best.len)) {
         best = { manual: m, varName: effectiveKey.slice(prefix.length), len: prefix.length };
@@ -219,8 +485,44 @@ export class ToolManualService implements IToolManualService {
     return declared?.scope ?? 'admin';
   }
 
-  async toManualCallTemplates(userEmail: string, opts?: { remoteOnly?: boolean }): Promise<CallTemplate[]> {
+  /**
+   * The probe config for a manual this caller can read — the internal
+   * counterpart to everything on `ToolManualSummary`.
+   *
+   * Access-gated through `accessibleManuals` like every other read, so this
+   * cannot become a way to learn what a `.tool` you can't see declares.
+   */
+  async probeTargetFor(userEmail: string, slug: string): Promise<ToolProbeTarget | null> {
     const manuals = await this.accessibleManuals(userEmail);
+    const m = manuals.find((x) => x.slug === slug);
+    if (!m) return null;
+    // Built here, from the manual already in hand. `toManualCallTemplates`
+    // would validate every manual in the workspace to hand back the one we
+    // want; an invalid template for THIS manual is not an error, just a probe
+    // that has nothing to dial (the caller reports it as unverifiable).
+    //
+    // Only for the ONE path that dials it — an `mcp` manual, reachable from
+    // this process, that declared no health check of its own. Everywhere else
+    // the template is built, validated and thrown away, and an http tool with
+    // an unvalidatable template warn-logs on every probe about a value nothing
+    // was ever going to use.
+    const dialsTheTemplate = m.type === 'mcp' && !m.healthCheck && m.remote !== false;
+    let callTemplate: CallTemplate | null = null;
+    if (dialsTheTemplate) {
+      try {
+        callTemplate = callTemplateSerializer.validateDict(this.buildCallTemplateDict(m));
+      } catch (err) {
+        log.warn(`no valid call template for "${m.path}": ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    return { name: m.name, type: m.type, remote: m.remote, healthCheck: m.healthCheck, callTemplate };
+  }
+
+  async toManualCallTemplates(
+    userEmail: string,
+    opts?: { remoteOnly?: boolean; within?: ConnectorScope },
+  ): Promise<CallTemplate[]> {
+    const manuals = await this.accessibleManuals(userEmail, opts?.within);
     const out: CallTemplate[] = [];
     for (const m of manuals) {
       // Remote consumers (the hosted MCP proxy) don't get local-only manuals —
@@ -231,19 +533,23 @@ export class ToolManualService implements IToolManualService {
       } catch (err) {
         // A `.tool` that produces an invalid call-template is dropped here — at
         // the producing boundary — so the served list is always valid.
-        console.warn(
-          `[tool-manuals] skipping "${m.path}": ${err instanceof Error ? err.message : String(err)}`,
-        );
+        log.warn(`skipping "${m.path}": ${err instanceof Error ? err.message : String(err)}`);
       }
     }
     return out;
   }
 
-  async resolveInlineManual(userEmail: string, slug: string): Promise<UtcpManualDict | null> {
-    const found = (await this.scan()).find((m) => m.slug === slug);
+  async resolveInlineManual(
+    userEmail: string,
+    slug: string,
+    opts?: { within?: ConnectorScope },
+  ): Promise<UtcpManualDict | null> {
+    const found = (await this.scan()).manuals.find((m) => m.slug === slug);
     if (!found || found.type !== 'inline') return null;
-    const wsId = workspaceIdForBranch(DEFAULT_BRANCH);
+    const wsId = this.kb.defaultWorkspaceId();
     if (!(await this.accessControl.canRead(wsId, userEmail, found.path))) return null;
+    // After the read gate, as every narrowing is: a connection's scope can only take away.
+    if (opts?.within && !opts.within(found.path)) return null;
     try {
       return manualSerializer.validateDict({
         utcp_version: '1.1.0',
@@ -355,30 +661,95 @@ export class ToolManualService implements IToolManualService {
     };
   }
 
-  private async accessibleManuals(userEmail: string): Promise<ToolManualDescriptor[]> {
-    const manuals = await this.scan();
-    if (manuals.length === 0) return [];
-    const wsId = workspaceIdForBranch(DEFAULT_BRANCH);
-    const allowed = await this.accessControl.canReadBatch(
-      wsId,
-      userEmail,
-      manuals.map((m) => m.path),
-    );
-    // Fail closed: keep a manual only on an explicit `true` verdict (a missing
-    // entry is treated as denied, matching the KB's default-deny read model).
-    return manuals.filter((m) => allowed.get(m.path) === true);
+  private async accessibleManuals(userEmail: string, within?: ConnectorScope): Promise<ToolManualDescriptor[]> {
+    return (await this.accessibleScan(userEmail, within)).manuals;
   }
 
-  private async scan(): Promise<ToolManualDescriptor[]> {
+  /**
+   * The scan cut to what this caller may read — manuals AND refusals, through
+   * ONE `canReadBatch`. Both halves are paths in the same workspace judged by
+   * the same rule, and splitting them into two calls would pay a second
+   * round-trip to ask the same question.
+   *
+   * `within` narrows the answer to a connection's connectors, AFTER the read
+   * gate: it can take a manual out of what the caller may read, never put one
+   * in. Absent, the answer is the caller's whole readable catalog.
+   */
+  private async accessibleScan(userEmail: string, within?: ConnectorScope): Promise<ScanResult> {
+    return this.readableBy(await this.scan(), userEmail, within);
+  }
+
+  /** A scan cut to what this caller may read — see {@link accessibleScan}. */
+  private async readableBy(scan: ScanResult, userEmail: string, within?: ConnectorScope): Promise<ScanResult> {
+    const { manuals, invalid, refused } = scan;
+    if (manuals.length === 0 && invalid.length === 0 && refused.length === 0) return emptyScan();
+    const wsId = this.kb.defaultWorkspaceId();
+    const allowed = await this.accessControl.canReadBatch(wsId, userEmail, [
+      ...new Set([...manuals.map((m) => m.path), ...invalid.map((i) => i.path), ...refused.map((r) => r.path)]),
+    ]);
+    // Fail closed: keep an entry only on an explicit `true` verdict (a missing
+    // entry is treated as denied, matching the KB's default-deny read model).
+    // A REFUSED file is gated the same way a listed one is: its path is a fact
+    // about the knowledge base, and "there is a broken tool at this path" is
+    // not something to tell someone who may not read that path.
+    const inScope = (p: string) => allowed.get(p) === true && (within === undefined || within(p));
+    return {
+      manuals: manuals.filter((m) => inScope(m.path)),
+      invalid: invalid.filter((i) => inScope(i.path)),
+      refused: refused.filter((r) => inScope(r.path)),
+    };
+  }
+
+  private async scan(): Promise<ScanResult> {
     const cached = this.cache.get();
     if (cached) return cached;
-    const manuals = await this.scanDisk();
+    // See `inFlightScan`: the cache is populated only when the walk finishes,
+    // so between the miss above and that moment, callers share this promise
+    // instead of each starting a walk of their own.
+    if (this.inFlightScan) return this.inFlightScan;
+    const started = this.runScan().finally(() => {
+      // Only if it is still OURS: an `invalidate()` during the scan already
+      // cleared the field (and may have installed a newer scan), and this
+      // settle must not undo that.
+      if (this.inFlightScan === started) this.inFlightScan = null;
+    });
+    this.inFlightScan = started;
+    return started;
+  }
+
+  private async runScan(): Promise<ScanResult> {
+    // See `TtlCache.begin`: taken before the read so an `invalidate()` that
+    // lands mid-scan discards this result instead of being overwritten by it.
+    const token = this.cache.begin();
+    const scanned = await this.scanDisk();
+    const { manuals } = scanned;
     await this.decorateMcpOAuth(manuals);
     // AFTER the oauth decoration, so an injected `${MCP_OAUTH}` header ref is
     // already declared and isn't re-surfaced as a bare admin key.
     for (const m of manuals) this.surfaceReferencedVariables(m);
-    this.cache.set(manuals);
-    return manuals;
+    this.cache.set(scanned, token);
+    return scanned;
+  }
+
+  /**
+   * Say what the scan refused — once per CHANGE, not once per scan. Every
+   * surface re-scans on its own TTL, so a file that stays broken would
+   * otherwise repeat these lines in the log forever and drown the scan where
+   * something actually moved. A fixed file is worth a line too: the set going
+   * empty is the recovery, said out loud.
+   */
+  private logInvalidOnChange(invalid: InvalidToolManual[]): void {
+    const signature = JSON.stringify(invalid);
+    if (signature === this.loggedInvalid) return;
+    const first = this.loggedInvalid === null;
+    this.loggedInvalid = signature;
+    // Both halves are author-written — a KB filename and a parser's words about
+    // a KB file — so both go through `printable`: a newline in either would
+    // otherwise forge a second log line, and an escape sequence would paint the
+    // operator's terminal.
+    // (`printable` quotes what it escapes, so the path keeps its quotes here.)
+    for (const i of invalid) log.warn(`skipping ${printable(i.path)}: ${printable(i.reason)}`);
+    if (invalid.length === 0 && !first) log.info('every `.tool` in the catalog parses again.');
   }
 
   /**
@@ -398,6 +769,19 @@ export class ToolManualService implements IToolManualService {
       // templates, not the (Bevel-hosted) discovery template.
       if (m.type === 'inline' && m.tools) {
         refs.push(...variableSubstitutor.findRequiredVariables(m.tools, m.name));
+      }
+      // A probe-only credential still has to reach the secrets UI. The call
+      // template is built from `url`/`headers` and never carries `healthCheck`,
+      // so a `${VAR}` used solely by the probe would never be surfaced for
+      // provisioning — and `probeDeclared` would then report `unverifiable`
+      // forever on a variable no screen ever offered anyone to fill in.
+      if (m.healthCheck) {
+        refs.push(
+          ...variableSubstitutor.findRequiredVariables(
+            { url: m.healthCheck.url, headers: m.healthCheck.headers ?? {} },
+            m.name,
+          ),
+        );
       }
     } catch {
       return; // a malformed template is reported elsewhere; never break the scan
@@ -426,21 +810,35 @@ export class ToolManualService implements IToolManualService {
   private async decorateMcpOAuth(manuals: ToolManualDescriptor[]): Promise<void> {
     const discovery = this.mcpAuthDiscovery;
     if (!discovery) return;
-    const eligible = manuals.filter((m) => {
-      if (m.type !== 'mcp' || !m.url) return false;
-      // Local-only servers aren't probeable from here; templated URLs aren't
-      // resolvable without a caller. Both keep their file-declared behavior.
-      if (m.remote === false || m.url.includes('${')) return false;
+    const bare: ToolManualDescriptor[] = [];
+    const declared: { m: ToolManualDescriptor; v: ToolVariable }[] = [];
+    for (const m of manuals) {
+      if (m.type !== 'mcp') continue;
+      const oauthVar = (m.variables ?? []).find((v) => v.oauth != null);
+      if (oauthVar) {
+        // A MANAGED sign-in has nothing for an owner to set up here: its
+        // client is the broker's, its endpoints are in the file. No setup
+        // kind, so no surface asks for a client secret it does not need.
+        if (oauthVar.oauth?.managed) continue;
+        // An owner-registered client is `oauth-manual` by definition — whether
+        // the declaration is complete or still needs its endpoints discovered.
+        // Explicit wins over discovery: never registered over, never probed
+        // for anything but the endpoints the declaration left out.
+        m.setup = { kind: 'oauth-manual' };
+        const o = oauthVar.oauth!;
+        if (!o.authorizationUrl || !o.tokenUrl) declared.push({ m, v: oauthVar });
+        continue;
+      }
       // The file configures auth itself — explicit wins over discovery.
       const hasAuthHeader = Object.keys(m.headers ?? {}).some((h) => h.toLowerCase() === 'authorization');
-      const hasOAuthVar = (m.variables ?? []).some((v) => v.oauth != null);
-      return !hasAuthHeader && !hasOAuthVar;
-    });
+      if (!hasAuthHeader && isProbeableMcpServer(m)) bare.push(m);
+    }
     // Probe every eligible server CONCURRENTLY — a cold scan with several bare
     // mcp tools shouldn't pay one network round-trip per tool in series. The
     // mutation still happens per-manual after its own probe settles.
-    await Promise.all(
-      eligible.map(async (m) => {
+    await Promise.all([
+      ...declared.map(({ m, v }) => this.completeDeclaredOAuth(discovery, m, v)),
+      ...bare.map(async (m) => {
         try {
           const found = await discovery.statusFor(m.name, m.url!);
           // Record the setup requirement so the secrets UI can tell an admin
@@ -456,6 +854,20 @@ export class ToolManualService implements IToolManualService {
           }
           m.setup = { kind: 'oauth-auto' };
           m.headers = { ...(m.headers ?? {}), Authorization: `Bearer \${${MCP_OAUTH_VAR}}` };
+          // A declared healthCheck froze its headers during normalize —
+          // BEFORE this decoration — so it would dial without the bearer
+          // every real call now carries and read its own 401 as a rejected
+          // credential. The injected sign-in reaches the check too, unless
+          // the check declares its own Authorization.
+          if (
+            m.healthCheck &&
+            !Object.keys(m.healthCheck.headers ?? {}).some((h) => h.toLowerCase() === 'authorization')
+          ) {
+            m.healthCheck = {
+              ...m.healthCheck,
+              headers: { ...(m.healthCheck.headers ?? {}), Authorization: `Bearer \${${MCP_OAUTH_VAR}}` },
+            };
+          }
           m.variables = [
             ...(m.variables ?? []),
             {
@@ -480,28 +892,114 @@ export class ToolManualService implements IToolManualService {
           ];
         } catch (err) {
           // Discovery must never break the catalog — the tool just stays bare.
-          console.warn(
-            `[tool-manuals] mcp auth discovery failed for "${m.path}": ${err instanceof Error ? err.message : String(err)}`,
-          );
+          log.warn(`mcp auth discovery failed for "${m.path}": ${err instanceof Error ? err.message : String(err)}`);
         }
       }),
-    );
+    ]);
   }
 
-  private async scanDisk(): Promise<ToolManualDescriptor[]> {
+  /**
+   * "Bring your own client": a declared sign-in that names only its `clientId`
+   * (the owner registered an app with a provider that offers no dynamic
+   * registration — HubSpot, Google) gets its endpoints, PKCE and resource
+   * indicator from the server's own OAuth metadata, exactly as the zero-config
+   * path would. The descriptor is completed IN MEMORY, for the catalog's scan
+   * and for every sign-in start (`liveDeclaration`) alike, so nothing here
+   * persists. When the metadata can't be had, the declaration stays
+   * incomplete and `setup.reason` says so — the client-secret save and the
+   * sign-in start then refuse with the same reason instead of running a
+   * provider with no endpoints.
+   */
+  private async completeDeclaredOAuth(
+    discovery: McpAuthDiscoveryPort,
+    m: ToolManualDescriptor,
+    v: ToolVariable,
+  ): Promise<void> {
+    const declaredByHand = 'declare `authorizationUrl` and `tokenUrl` on the sign-in variable';
+    if (!isProbeableMcpServer(m)) {
+      m.setup = {
+        kind: 'oauth-manual',
+        reason: `the sign-in endpoints can't be discovered for a local-only or templated server URL — ${declaredByHand}`,
+      };
+      return;
+    }
+    if (!discovery.providerForDeclaredClient) {
+      m.setup = { kind: 'oauth-manual', reason: `sign-in endpoint discovery is unavailable — ${declaredByHand}` };
+      return;
+    }
+    // A file-declared sign-in carries its client id unless it is managed, and
+    // a managed one has nothing to discover: its endpoints are in the file.
+    const clientId = v.oauth?.clientId;
+    if (!clientId) {
+      m.setup = { kind: 'oauth-manual', reason: `the sign-in names no client id — ${declaredByHand}` };
+      return;
+    }
+    try {
+      const found = await discovery.providerForDeclaredClient(m.name, m.url!, clientId);
+      if (found.status !== 'oauth') {
+        m.setup = {
+          kind: 'oauth-manual',
+          reason:
+            found.status === 'unsupported'
+              ? found.reason
+              : `the server did not ask for a sign-in and publishes no OAuth metadata — ${declaredByHand} if it needs one`,
+        };
+        return;
+      }
+      v.oauth = {
+        ...v.oauth!,
+        authorizationUrl: found.provider.authorizationUrl,
+        tokenUrl: found.provider.tokenUrl,
+        // A hand-declared resource wins; otherwise the server's own canonical URL.
+        ...(!v.oauth!.resource && found.provider.resource ? { resource: found.provider.resource } : {}),
+      };
+    } catch (err) {
+      // Never break the catalog — the sign-in just isn't ready yet.
+      const msg = err instanceof Error ? err.message : String(err);
+      log.warn(`sign-in endpoint discovery failed for "${m.path}": ${msg}`);
+      m.setup = { kind: 'oauth-manual', reason: `sign-in endpoint discovery failed: ${msg}` };
+    }
+  }
+
+  /**
+   * Parse every declaration on `branch`'s workspace — the default branch for
+   * the catalog, a draft for `listDeclaredOnlyOnBranch`. Pure disk: no
+   * discovery, no access filter; callers add what their surface needs.
+   *
+   * ONE FILE'S FAULT IS ONE FILE'S FAULT. Every per-manual step below is
+   * contained — read, parse, validate, and the namespace dedup — so the answer
+   * is always "here is every manual that parses, and here is what the rest got
+   * wrong". There is no path through this loop on which a single bad `.tool`
+   * costs the catalog a manual that is fine, and nothing is remembered between
+   * calls: a refusal lives only in the scan it came from, so a fixed file is a
+   * valid manual on the very next scan.
+   */
+  private async scanDisk(
+    branch: string = this.kb.defaultBranch,
+    /**
+     * What a workspace that cannot be opened means. For the catalog, an empty
+     * scan: a listing surface answers "nothing released" and the next scan
+     * tries again. For a sign-in start (`liveDeclaration`), the error itself:
+     * an empty answer there would read as "this tool has no sign-in", a
+     * misconfiguration, when the server could not read its files at all.
+     */
+    workspaceFailure: 'empty' | 'throw' = 'empty',
+  ): Promise<ScanResult> {
     let wsId: string;
     try {
-      wsId = (await this.workspaceService.getOrCreateForBranch(DEFAULT_BRANCH)).id;
-    } catch {
-      return [];
+      wsId = (await this.workspaceService.getOrCreateForBranch(branch)).id;
+    } catch (err) {
+      if (workspaceFailure === 'throw') throw err;
+      return emptyScan();
     }
     const kbRoot = path.join(await this.workspaceService.getWorkspacePath(wsId), this.kbDirName);
 
     // A `.tool` sits under `Plugins/`, beside the skills that use it.
     const files: { abs: string; rel: string }[] = [];
-    const root = path.join(kbRoot, PLUGINS_DIR);
-    for (const rel of await walkFiles(root, (n) => n.toLowerCase().endsWith('.tool'))) {
-      files.push({ abs: path.join(root, rel), rel: `${PLUGINS_DIR}/${rel}` });
+    const layout = this.kb.layout;
+    const root = path.join(kbRoot, layout.pluginsDir);
+    for (const rel of await this.disk.walkFiles(root, (n) => n.toLowerCase().endsWith('.tool'))) {
+      files.push({ abs: path.join(root, rel), rel: `${layout.pluginsDir}/${rel}` });
     }
 
     // MCP servers come from each plugin's mcp.json — the AUTHORITATIVE source
@@ -509,46 +1007,68 @@ export class ToolManualService implements IToolManualService {
     // shape. Listed BEFORE the `.tool` files: on a name collision (a legacy
     // mcp `.tool` the migration has not converted yet), the shared dedup keeps
     // the first occurrence, and the authoritative source must be the one kept.
+    // The plugins (and their mcp.json text) come from the configured source, so
+    // a dialect that expands servers from a registry lands here unchanged.
     const parsed: ToolManualDescriptor[] = [];
-    let pluginFolders: string[] = [];
-    try {
-      pluginFolders = (await fs.readdir(root, { withFileTypes: true }))
-        .filter((e) => e.isDirectory() && !e.name.startsWith('.'))
-        .map((e) => e.name)
-        .sort();
-    } catch {
-      /* no Plugins/ root — nothing to scan */
-    }
-    for (const folder of pluginFolders) {
-      let mcpJson: string;
-      try {
-        mcpJson = await fs.readFile(path.join(root, folder, PLUGIN_MCP_FILE), 'utf-8');
-      } catch {
-        continue; // no mcp.json is the common case, not an error
+    const refused: RefusedManual[] = [];
+    const discovered = await this.source.discover(kbRoot);
+    for (const plugin of discovered.plugins) {
+      if (plugin.mcpJsonText === null) continue; // no servers is the common case, not an error
+      // One stamp for every server the file declares: the two texts together
+      // are the whole source of these descriptors, so any edit to either
+      // (a URL, a header, an added or dropped server, a `local: true` flip)
+      // moves every server's digest — which is correct, if slightly generous.
+      const from = sourceDigest(plugin.mcpJsonText + '\u0000' + (plugin.manifestText ?? ''));
+      const onRefused = (slug: string, reason: string, path: string) =>
+        refused.push({ slug, path, reason: describeManualFault(reason) });
+      for (const d of descriptorsFromMcpJson(plugin.relFolder, plugin.mcpJsonText, plugin.manifestText, layout, onRefused)) {
+        d.sourceRevision = from;
+        parsed.push(d);
       }
-      const pluginJson = await fs
-        .readFile(path.join(root, folder, PLUGIN_MANIFEST_FILE), 'utf-8')
-        .catch(() => null);
-      parsed.push(...descriptorsFromMcpJson(folder, mcpJson, pluginJson));
     }
 
+    const invalid: InvalidToolManual[] = [];
     for (const f of files) {
       let content: string;
       try {
         content = await fs.readFile(f.abs, 'utf-8');
-      } catch {
+      } catch (err) {
+        // Not a malformed manual — a file the walk saw and the read could not
+        // open (deleted under us, a permission fault). Reported like one anyway:
+        // to the person looking for their tool, "it isn't here" needs a reason
+        // whichever step lost it.
+        //
+        // The CODE, not the message: an fs error quotes the absolute path it
+        // tried, which is this server's disk layout rather than anything about
+        // the knowledge base, and this string is handed to agents and browsers.
+        const code = (err as NodeJS.ErrnoException | null)?.code;
+        invalid.push({
+          path: f.rel,
+          reason: `the file could not be read${code ? ` (${code})` : ''} — it may have just been moved or deleted.`,
+        });
         continue;
       }
       let descriptor: ToolManualDescriptor;
       try {
         descriptor = normalizeToolManual(baseName(f.rel), f.rel, content);
-      } catch {
-        // A malformed `.tool` is skipped rather than breaking the catalog.
+      } catch (err) {
+        // A malformed `.tool` is skipped rather than breaking the catalog —
+        // and NAMED, rather than vanishing. Skipping in silence is the same
+        // outage from where the author stands: the tool is gone from every
+        // listing, with nothing anywhere saying which file or why.
+        invalid.push({ path: f.rel, reason: describeManualFault(err) });
+        const slug = refusedToolManualName(baseName(f.rel), content);
+        if (slug !== null) refused.push({ slug, path: f.rel, reason: describeManualFault(err) });
         continue;
       }
       // The route slug IS the id (unique after dedup below, snake_case → URL-safe),
       // so the URL a user sees matches the tool's declared identity.
       descriptor.slug = descriptor.name;
+      // Stamped from the BYTES, here, before `decorateMcpOAuth` and
+      // `surfaceReferencedVariables` mutate the descriptor: those two derive
+      // from the network and from the file respectively, and a digest taken
+      // afterwards would move whenever an OAuth probe happened to fail.
+      descriptor.sourceRevision = sourceDigest(content);
       parsed.push(descriptor);
     }
     // The manual name (= its id) is the UTCP variable namespace secrets bind to, so
@@ -556,16 +1076,77 @@ export class ToolManualService implements IToolManualService {
     // silently rebind a configured secret to a different file. The winner is
     // deterministic (files scanned in sorted path order); the shared `dedupeById`
     // is the one dedup rule across tools and skills.
-    return dedupeById(parsed, (m) => m.name, (m, id) =>
-      console.warn(
-        `[tool-manuals] skipping "${m.path}": manual id "${id}" is already used by another ` +
-          '`.tool` — give it a unique `id` (the id is the secret-variable namespace and must be unique).',
-      ),
+    // Deduped by NAMESPACE, not by name. The comment below has always said the
+    // id is the secret-variable namespace and must be unique — but the check
+    // compared raw names, and the two are not the same function. Namespacing
+    // maps every non-word character to `_` and then doubles it, so `a-b` and
+    // `a_b` are different names with the SAME namespace `a__b_`. A `.tool` id
+    // cannot contain a hyphen, but an mcp.json server name can, so the pair is
+    // reachable — and the consequence is that two manuals share one set of
+    // vault keys, with either able to resolve the other's secrets.
+    const manuals = dedupeById(parsed, (m) => utcpNamespacePrefix(m.name), (m) =>
+      // A collision drops a manual from every surface just as surely as a parse
+      // error does, so it is reported the same way rather than only reaching a
+      // log that nobody browsing the catalog can see.
+      invalid.push({
+        path: m.path,
+        // Neither the manual's name nor the namespace it resolved to is
+        // repeated: both are the author's text put through a transform, and a
+        // reason carries none of it (see `describeManualFault`). `path` says
+        // which file, and the rule says what to look for in it.
+        reason:
+          'this manual resolves to a secret-variable namespace another manual already uses. ' +
+          'Names differing only in `-` vs `_` share one namespace — rename one of them.',
+      }),
     );
+    // Sorted so the refused set is a stable VALUE: the change-detecting log
+    // below compares one scan against the last, and two orderings of the same
+    // three faults are not a change worth repeating.
+    invalid.sort((a, b) => a.path.localeCompare(b.path));
+    // Only the CATALOG's scan talks. `listDeclaredOnlyOnBranch` re-scans a
+    // draft workspace, and a draft's half-written `.tool` is not news about the
+    // served catalog — it would also flap the log every time an agent saves.
+    if (branch === this.kb.defaultBranch) this.logInvalidOnChange(invalid);
+    return { manuals, invalid, refused };
   }
 }
 
 // --- helpers ------------------------------------------------------------------
+
+/**
+ * A short digest of the text a descriptor was parsed from. Truncated because
+ * this is only ever compared for equality, and 128 bits of it is far past what
+ * a per-workspace catalog could collide in.
+ */
+function sourceDigest(text: string): string {
+  return createHash('sha256').update(text).digest('hex').slice(0, 32);
+}
+
+/**
+ * One manual's line in the catalog fingerprint: what makes it the tool it is,
+ * plus the digest of the file it came from.
+ *
+ * The named fields rather than the whole descriptor, deliberately: `setup` and
+ * `variables` carry OAuth auto-discovery results, which are re-probed on every
+ * scan and can differ between two scans of an unchanged file — hashing them
+ * would report a catalog change that no commit made. `sourceRevision` is what
+ * covers everything else the file says, so nothing is lost by leaving the
+ * decorated fields out.
+ */
+function manualFingerprint(m: ToolManualDescriptor): string {
+  return [
+    m.slug,
+    m.name,
+    m.path,
+    m.type,
+    m.remote === false ? 'local' : 'remote',
+    m.description ?? '',
+    m.sourceRevision ?? '',
+    // NUL-joined, like the skill lines this sits beside: no field can contain
+    // one, so two different manuals can never render the same line by having
+    // a separator inside one of their own fields.
+  ].join('\u0000');
+}
 
 /**
  * The one descriptor → summary projection, shared by every list surface
@@ -608,7 +1189,15 @@ function capabilitiesOf(m: ToolManualDescriptor): ToolCapability[] {
   return out;
 }
 
-function baseName(rel: string): string {
+/**
+ * A `.tool` file's PROVISIONAL slug — its filename without the extension, which
+ * is what `normalizeToolManual` falls back to when the frontmatter names
+ * nothing. It is not the served id: `scanDisk` overwrites `slug` with the
+ * resolved manual `name` just below. Exported for the pending-tool surface,
+ * which parses a `.tool` read at a change request's branch and must feed the
+ * parser the same provisional value — and then resolve the slug the same way.
+ */
+export function baseName(rel: string): string {
   const base = rel.slice(rel.lastIndexOf('/') + 1);
   return base.replace(/\.tool$/i, '');
 }
@@ -628,6 +1217,54 @@ function manualName(raw: string): string {
   const name = raw.replace(/[^a-zA-Z0-9]/g, '');
   if (!name || /^[0-9]/.test(name)) return `tool${name}`;
   return name;
+}
+
+/**
+ * The object a `.tool` file holds: its `---` block when fenced, the whole file
+ * when not. Throws when that is not an object.
+ */
+function toolFileObject(content: string): Record<string, unknown> {
+  const fm = extractFrontmatter(content);
+  const source = fm ? fm.frontmatter : content;
+  const parsed = parseYaml(source) as unknown;
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('`.tool` file must be a YAML/JSON object (in the `---` block when fenced)');
+  }
+  return parsed as Record<string, unknown>;
+}
+
+/**
+ * A `.tool`'s manual name — its UTCP namespace, and the slug the scan serves it
+ * under. An explicit `id` is used VERBATIM, so it must be lowercase snake_case
+ * (UTCP's namespace grammar). With no explicit id, fall back to `name` then the
+ * filename and sanitize (legacy behaviour — keeps existing tools' namespaces).
+ */
+function toolManualName(obj: Record<string, unknown>, provisionalSlug: string): string {
+  const explicitId = typeof obj.id === 'string' ? obj.id.trim() : '';
+  if (!explicitId) return manualName(resolveDeclaredId(obj, provisionalSlug));
+  if (!isValidId(explicitId)) {
+    // The rejected id is NOT quoted back — see `describeManualFault`: this
+    // message becomes an `invalid[].reason` on an agent transcript, a browser
+    // and a log, and `id` is a field an author can paste anything into,
+    // including the token they meant for a header. The field name plus the
+    // rule is what the author needs; the value is in front of them.
+    throw new Error('tool `id` must be lowercase snake_case (letters, digits, underscores)');
+  }
+  return explicitId;
+}
+
+/**
+ * The manual name of a `.tool` the parser REFUSED, when the file still says
+ * which manual it is — by the same rule {@link normalizeToolManual} names a
+ * manual it accepts. `null` when even that cannot be read (unparseable YAML,
+ * a malformed `id`): then nothing can claim the refusal by name.
+ */
+function refusedToolManualName(provisionalSlug: string, content: string): string | null {
+  try {
+    return toolManualName(toolFileObject(content), provisionalSlug);
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -653,43 +1290,24 @@ export function normalizeToolManual(
   // finds its verbs inside the fence, the id index finds `id`/`name`, and the
   // config keys live in the same object. A fence-less file is the legacy form
   // (the whole file is the object) — JSON `.tool`s can't carry fences.
-  const fm = extractFrontmatter(content);
-  const source = fm ? fm.frontmatter : content;
-  const parsed = parseYaml(source) as unknown;
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error('`.tool` file must be a YAML/JSON object (in the `---` block when fenced)');
-  }
-  const obj = parsed as Record<string, unknown>;
+  const obj = toolFileObject(content);
   const type = normalizeType(obj.type);
-
-  // Identity: an explicit `id` is used VERBATIM as the UTCP manual namespace, so
-  // it must be lowercase snake_case (UTCP's namespace grammar). With no explicit
-  // id, fall back to `name` then the filename and sanitize (legacy behaviour —
-  // keeps existing tools' namespaces).
-  const explicitId = typeof obj.id === 'string' ? obj.id.trim() : '';
-  let name: string;
-  if (explicitId) {
-    if (!isValidId(explicitId)) {
-      throw new Error(`tool id "${explicitId}" must be lowercase snake_case (letters, digits, underscores)`);
-    }
-    name = explicitId;
-  } else {
-    name = manualName(resolveDeclaredId(obj, provisionalSlug));
-  }
+  const name = toolManualName(obj, provisionalSlug);
 
   // A `.tool` may not reproduce a built-in manual's UTCP namespace — that would
   // let it read the loopback creds seeded under that namespace on the agent's
   // code-mode client (internal token, connector creds, KB bearer).
   if (RESERVED_TOOL_NAMESPACES.includes(name.toLowerCase())) {
     throw new Error(
-      `tool namespace "${name}" is reserved for a built-in manual — choose a different \`id\`/\`name\` ` +
-        "(a `.tool` sharing a built-in namespace could read that manual's seeded credentials).",
+      'the tool namespace this file resolves to is reserved for a built-in manual — ' +
+        "choose a different `id`/`name` (a `.tool` sharing a built-in namespace could read " +
+        "that manual's seeded credentials).",
     );
   }
 
   // Any `.tool` content — url, headers, inline tool templates, notes — may not
   // reference the platform-seeded variables.
-  assertNoReservedVariableRefs(obj, name);
+  assertNoReservedVariableRefs(obj);
 
   // The non-stdio constituent of the union, by name: `.tool` parsing can
   // never produce a spawn spec, and the stdio side pins `remote: false`,
@@ -713,6 +1331,57 @@ export function normalizeToolManual(
   if (variables.length) descriptor.variables = variables;
 
   descriptor.remote = normalizeRemote(obj.remote);
+
+  // A `.tool` that shells out is LOCAL, always. The hosted platform parses and
+  // lists these so the local MCP server can find them, but it must never be the
+  // thing that runs them — a `.tool` is knowledge-base content, and agents write
+  // to the knowledge base. A declared `remote: true` beside a shell command is
+  // therefore a refusal rather than a warning: silently correcting it would let
+  // an author believe they had published a remote tool, and would leave the
+  // catalog disagreeing with the file about what the platform will do.
+  if (containsCliCallTemplate(obj)) {
+    if (obj.remote === true) {
+      throw new Error(
+        'this `.tool` declares `remote: true` but contains a `cli` call template — ' +
+          'shell tools execute only in a local runtime (drop `remote: true`, or the `cli` template).',
+      );
+    }
+    descriptor.remote = false;
+  }
+
+  // A service account's KEY IS NEVER WRITTEN IN A `.tool`. The file is
+  // knowledge-base content: committed, and read by everyone and every agent
+  // that can read the knowledge base. So `credentials` names the vault
+  // variable and nothing else, and a file that holds anything else there is
+  // refused before the block's placement is even looked at: a key in a block
+  // nothing acts on is just as readable. The refusal does not quote the value.
+  if (holdsLiteralGoogleServiceAccountKey(obj)) {
+    throw new Error(
+      '`auth_type: google_service_account` has something other than a vault variable as its `credentials`. ' +
+        'Write `credentials: ${GOOGLE_SA_KEY}` and store the key in the Secrets Vault under that name: a `.tool` is ' +
+        'read by everyone who can read the knowledge base. If a real key was saved in this file, treat it as ' +
+        'exposed and replace it at Google; removing it here does not take it out of the history.',
+    );
+  }
+
+  // A Google service-account `auth` block works on one thing: an inline tool's
+  // `http` call template. Anywhere else it validates and is then sent as no
+  // credentials at all, so the tool would save cleanly and call Google
+  // unauthenticated, with Google's 401 the only hint. Refused here instead,
+  // naming where the block was found. The templates below are the only ones
+  // this file's tools are called through: a `tools` list on a file that is not
+  // `inline` is never read, so nothing in it counts.
+  const toolCallTemplates =
+    type === 'inline' && Array.isArray(obj.tools)
+      ? obj.tools.map((tool: unknown) => (tool && typeof tool === 'object' ? (tool as Record<string, unknown>).tool_call_template : undefined))
+      : [];
+  const unserved = findUnservedGoogleServiceAccountAuth(obj, toolCallTemplates);
+  if (unserved) {
+    throw new Error(
+      `\`auth_type: google_service_account\` is on ${unserved}, where no token would be sent. ` +
+        "It works only as the `auth` of an inline tool's `tool_call_template` with `call_template_type: http`.",
+    );
+  }
 
   if (type === 'inline') {
     const tools = Array.isArray(obj.tools) ? obj.tools : undefined;
@@ -741,20 +1410,8 @@ export function normalizeToolManual(
     // literal internal host slips past as a templated scheme or userinfo.
     // Local-only (`remote: false`) `.tool`s are never fetched server-side, so
     // are exempt.
-    const literalScheme = /^([a-zA-Z][a-zA-Z0-9+.-]*:)[\\/]{2}/.exec(url)?.[1];
-    const sepMatch = /:[\\/]{2}/.exec(url);
-    const sepIdx = sepMatch ? sepMatch.index : -1;
-    const authority = sepIdx >= 0 ? url.slice(sepIdx + 3).split(/[/\\?#]/, 1)[0] : url;
-    const hostPort = authority.slice(authority.lastIndexOf('@') + 1);
-    const host = hostPort.startsWith('[') ? hostPort.slice(0, hostPort.indexOf(']') + 1) : hostPort.split(':')[0];
-    if (descriptor.remote !== false && !host.includes('${')) {
-      const checkUrl =
-        literalScheme && !authority.includes('${')
-          ? url // fully literal scheme + authority → validate the URL as-is
-          : sepIdx >= 0
-            ? `${literalScheme ?? 'http:'}//${host}` // templated scheme/userinfo/port, literal host
-            : url; // no authority shape at all → parse raw (refuses malformed)
-      assertSafeFetchUrl(checkUrl, { label: `\`.tool\` "${name}" url` });
+    if (descriptor.remote !== false) {
+      assertSafeManualFetchUrl(url, '`url`');
     }
     if (obj.headers && typeof obj.headers === 'object' && !Array.isArray(obj.headers)) {
       descriptor.headers = obj.headers as Record<string, string>;
@@ -764,7 +1421,145 @@ export function normalizeToolManual(
       descriptor.httpMethod = m === 'POST' ? 'POST' : 'GET';
     }
   }
+
+  // LAST, because it inherits the manual's own `headers` when it declares none
+  // — which is the common case, and the reason a one-line `healthCheck: {url}`
+  // authenticates exactly like a real call. Resolving that default here, where
+  // the whole descriptor is in hand, keeps the probe self-contained: nothing
+  // downstream has to re-derive which headers a manual would have sent.
+  //
+  // For `http`/`mcp` only. An `inline` manual's execution never sends its
+  // top-level `headers` — each embedded tool carries its own call template —
+  // so inheriting them would have the probe prove a request no real call
+  // makes. An inline probe declares its own headers on the healthCheck, or
+  // sends none.
+  const declaredHeaders =
+    type !== 'inline' && obj.headers && typeof obj.headers === 'object' && !Array.isArray(obj.headers)
+      ? (obj.headers as Record<string, string>)
+      : undefined;
+  const healthCheck = normalizeHealthCheck(obj.healthCheck, descriptor.remote, declaredHeaders);
+  if (healthCheck) descriptor.healthCheck = healthCheck;
+
   return descriptor;
+}
+
+/**
+ * SSRF guard for a URL a `.tool` will make the SERVER fetch — its manual `url`
+ * and its declared `healthCheck.url` alike, which is why this is a function
+ * rather than an inline block: two fetch targets policed by one rule cannot
+ * drift apart.
+ *
+ * A remote-capable `.tool` triggers a server-side fetch (the MCP proxy, the
+ * in-process agent, headless routines, and now the credential probe), so a
+ * literal private/loopback/metadata host is refused at the producing boundary.
+ * Only a TEMPLATED HOSTNAME (resolved at call time) is uncheckable here — a
+ * `${...}` in the scheme, userinfo, port, path, or query still leaves a
+ * concrete network target (`${S}://169.254.169.254/x` and
+ * `http://${U}@169.254.169.254/x` target the metadata IP no matter what
+ * resolves), so the guard must still run against the literal host. The
+ * authority is therefore taken from `://` INDEPENDENT of the scheme being
+ * literal, and when the raw url can't parse (templated scheme or port) the
+ * check runs on a synthetic `<scheme-or-http>//host`. A BACKSLASH behaves as a
+ * slash for http(s) in WHATWG `new URL` — BOTH as the scheme separator
+ * (`${S}:\\169.254.169.254\\p` → the IP is the host) and inside the authority
+ * (`http://169.254.169.254\\@${HOST}/x` fetches the IP, the `\\@…` becoming
+ * path). So the authority separator is `:` + two `[\/]` (not just `://`), and
+ * `\` also terminates the authority alongside `/?#`; otherwise a literal
+ * internal host slips past as a templated scheme or userinfo.
+ *
+ * Callers gate on `remote !== false`: a local-only `.tool` is never fetched
+ * server-side, so it is exempt.
+ */
+function assertSafeManualFetchUrl(url: string, label: string): void {
+  const literalScheme = /^([a-zA-Z][a-zA-Z0-9+.-]*:)[\\/]{2}/.exec(url)?.[1];
+  const sepMatch = /:[\\/]{2}/.exec(url);
+  const sepIdx = sepMatch ? sepMatch.index : -1;
+  const authority = sepIdx >= 0 ? url.slice(sepIdx + 3).split(/[/\\?#]/, 1)[0] : url;
+  const hostPort = authority.slice(authority.lastIndexOf('@') + 1);
+  const host = hostPort.startsWith('[') ? hostPort.slice(0, hostPort.indexOf(']') + 1) : hostPort.split(':')[0];
+  // A templated host resolves to something we can't know yet — nothing to check.
+  if (host.includes('${')) return;
+  const checkUrl =
+    literalScheme && !authority.includes('${')
+      ? url // fully literal scheme + authority → validate the URL as-is
+      : sepIdx >= 0
+        ? `${literalScheme ?? 'http:'}//${host}` // templated scheme/userinfo/port, literal host
+        : url; // no authority shape at all → parse raw (refuses malformed)
+  assertSafeFetchUrl(checkUrl, { label });
+}
+
+/**
+ * Parse the optional `healthCheck:` block — the read-only call that proves this
+ * tool's credential works (see {@link ToolHealthCheck}).
+ *
+ * Throws on a malformed block rather than dropping it, matching `variables`
+ * and for the same reason inverted: a silently-ignored probe would leave the
+ * tool reporting "can't verify" forever while its author believes they wired
+ * one up, and the whole point of the field is to stop the UI overclaiming.
+ *
+ * `method` accepts only `GET`. A probe that can mutate is not a probe — it runs
+ * unattended on every save and re-check, so `POST` is refused outright instead
+ * of being quietly downgraded.
+ */
+function normalizeHealthCheck(
+  raw: unknown,
+  remote: boolean | undefined,
+  manualHeaders: Record<string, string> | undefined,
+): ToolHealthCheck | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== 'object' || Array.isArray(raw)) throw new Error('`healthCheck` must be an object');
+  const e = raw as Record<string, unknown>;
+  const url = typeof e.url === 'string' ? e.url.trim() : '';
+  if (!url) throw new Error('`healthCheck` must have a `url`');
+  if (remote !== false) {
+    assertSafeManualFetchUrl(url, '`healthCheck.url`');
+  }
+  const check: ToolHealthCheck = { url };
+  if (e.method !== undefined) {
+    const m = typeof e.method === 'string' ? e.method.toUpperCase() : '';
+    if (m !== 'GET') throw new Error('`healthCheck.method` must be `GET` — a health check may not mutate');
+    check.method = 'GET';
+  }
+  // Whichever headers the probe ends up carrying get checked — declared OR
+  // inherited. Validating only the declared branch left the common case
+  // unguarded: `healthCheck: { url }` alone inherits the manual's headers, so a
+  // YAML `Authorization: 1234` there still reached the probe untouched.
+  if (e.headers !== undefined) {
+    if (!e.headers || typeof e.headers !== 'object' || Array.isArray(e.headers)) {
+      throw new Error('`healthCheck.headers` must be an object');
+    }
+    check.headers = assertStringHeaders(e.headers as Record<string, unknown>, 'healthCheck.headers');
+  } else if (manualHeaders) {
+    check.headers = assertStringHeaders(manualHeaders as Record<string, unknown>, 'headers');
+  }
+  return check;
+}
+
+/**
+ * The VALUES of a header map, not just its container.
+ *
+ * YAML types `Authorization: 1234` as a number, and a cast alone let it through
+ * to the probe, where substitution calls `.matchAll` on it — surfacing
+ * `text.matchAll is not a function` to the user as the reason their credential
+ * is unhealthy. Caught at parse time, next to `url` and `method`, it reads as
+ * what it is: a mistake in the `.tool` file.
+ */
+function assertStringHeaders(headers: Record<string, unknown>, label: string): Record<string, string> {
+  // Located by POSITION, not by its key. A header name is text the author
+  // wrote, and a refusal reason carries none of that — see
+  // {@link describeManualFault}. The `.tool` has a handful of headers and the
+  // reader is looking at the file, so an ordinal finds the line as surely as
+  // the name would.
+  const entries = Object.entries(headers);
+  for (const [i, [, v]] of entries.entries()) {
+    if (typeof v !== 'string') {
+      throw new Error(
+        `\`${label}\` entry ${i + 1} of ${entries.length} must have a string value ` +
+          '(quote it if it looks like a number)',
+      );
+    }
+  }
+  return headers as Record<string, string>;
 }
 
 /**
@@ -777,31 +1572,44 @@ function normalizeVariables(raw: unknown): ToolVariable[] {
   if (raw === undefined || raw === null) return [];
   if (!Array.isArray(raw)) throw new Error('`variables` must be an array');
   const seen = new Set<string>();
-  return raw.map((entry) => {
+  return raw.map((entry, i) => {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
-      throw new Error('each `variables` entry must be an object');
+      throw new Error(`\`variables[${i}]\` must be an object`);
     }
     const e = entry as Record<string, unknown>;
     const name = typeof e.name === 'string' ? e.name.trim() : '';
+    // EVERY refusal in this block is located by `variables[i]`, never by the
+    // name the entry declared — passing `[A-Za-z0-9_]+` makes a string a legal
+    // identifier, not a string this process may repeat. A token spelled with
+    // underscores passes that test, and the field an author mis-pastes a token
+    // into is not one we get to choose. See {@link describeManualFault}.
+    const at = `\`variables[${i}]`;
     if (!/^[A-Za-z0-9_]+$/.test(name)) {
-      throw new Error(`variable name "${name}" must match [A-Za-z0-9_]+`);
+      throw new Error(`${at}.name\` must match [A-Za-z0-9_]+`);
     }
     if (RESERVED_VARIABLE_NAMES.includes(name)) {
-      throw new Error(`variable name "${name}" is reserved for platform seeding and may not be declared by a \`.tool\``);
+      // `name` is one of OURS here — matched against a fixed list — so saying
+      // which reserved name was taken repeats nothing the file taught us.
+      throw new Error(
+        `${at}.name\` is "${name}", which is reserved for platform seeding and may not be declared by a \`.tool\``,
+      );
     }
-    if (seen.has(name)) throw new Error(`duplicate variable "${name}"`);
+    if (seen.has(name)) throw new Error(`${at}.name\` duplicates an earlier entry's`);
     seen.add(name);
     const rawScope = typeof e.scope === 'string' ? e.scope.toLowerCase().trim() : '';
     if (rawScope && rawScope !== 'admin' && rawScope !== 'user') {
-      throw new Error(`variable "${name}" has invalid scope "${e.scope}" (expected admin|user)`);
+      throw new Error(`${at}.scope\` is invalid (expected admin|user)`);
     }
     const scope: ToolVariableScope = rawScope === 'user' ? 'user' : 'admin';
     const label = typeof e.label === 'string' && e.label.trim() ? e.label.trim() : undefined;
-    const oauth = normalizeVariableOAuth(name, e.oauth);
+    const oauth = normalizeVariableOAuth(at, e.oauth);
     // OAuth is inherently per-caller — each user signs in for their own token. An
-    // admin-shared OAuth token would leak one user's token to all callers.
-    if (oauth && scope !== 'user') {
-      throw new Error(`variable "${name}" with oauth must be scope:user`);
+    // admin-shared OAuth token would leak one user's token to all callers. The
+    // one exception is a MANAGED sign-in enabled as a workspace connection:
+    // there the shared token is the point (one CRM account for the company),
+    // and only an owner of the tool can make it.
+    if (oauth && scope !== 'user' && !oauth.managed) {
+      throw new Error(`${at}\` has \`oauth\`, so its \`scope\` must be \`user\``);
     }
     return {
       name,
@@ -813,61 +1621,108 @@ function normalizeVariables(raw: unknown): ToolVariable[] {
 }
 
 /**
+ * Whether the platform can reach an MCP server's URL for OAuth discovery.
+ * Local-only servers aren't probeable from here; templated URLs aren't
+ * resolvable without a caller. Both keep their file-declared behavior — the
+ * one rule for the zero-config probe and for completing a declared client.
+ */
+function isProbeableMcpServer(m: ToolManualDescriptor): boolean {
+  return !!m.url && m.remote !== false && !m.url.includes('${');
+}
+
+/**
  * Parse a variable's optional OAuth provider config. Carries PUBLIC config only —
  * never a client secret. Both URLs are validated with the SAME SSRF-safe check the
  * vault uses for OAuth endpoints (`assertSafeFetchUrl` with https required), so a
- * `.tool` author can't aim a sign-in/token exchange at an internal host.
+ * `.tool` author can't aim a sign-in/token exchange at an internal host. Both
+ * URLs are REQUIRED here: a `.tool` (http/inline) has no server whose OAuth
+ * metadata could fill them in — that convenience belongs to mcp.json servers.
+ *
+ * `at` is the entry's position — `` `variables[2] `` with its opening backtick,
+ * each message closing it after the field — rather than the variable's name.
+ * Same rule as everywhere else a refusal is written: the reason locates the
+ * fault in the file without repeating anything the file said. See
+ * {@link describeManualFault}.
  */
-function normalizeVariableOAuth(name: string, raw: unknown): ToolVariableOAuth | undefined {
+function normalizeVariableOAuth(at: string, raw: unknown): ToolVariableOAuth | undefined {
   if (raw === undefined || raw === null) return undefined;
   if (typeof raw !== 'object' || Array.isArray(raw)) {
-    throw new Error(`variable "${name}" oauth must be an object`);
+    throw new Error(`${at}.oauth\` must be an object`);
   }
   const o = raw as Record<string, unknown>;
   // Confidential OAuth material is provisioned only through the protected
   // client-secret route; reject it here so a plaintext `.tool` can't smuggle one in.
   for (const forbidden of ['clientSecret', 'client_secret', 'secret']) {
     if (o[forbidden] !== undefined) {
-      throw new Error(`variable "${name}" oauth.${forbidden} must be set through the protected client-secret route`);
+      throw new Error(`${at}.oauth.${forbidden}\` must be set through the protected client-secret route`);
     }
   }
   const safeUrl = (v: unknown, field: string): string => {
     const s = typeof v === 'string' ? v.trim() : '';
     try {
-      assertSafeFetchUrl(s, { requireHttps: true, label: `${name} oauth.${field}` });
+      assertSafeFetchUrl(s, { requireHttps: true, label: `${at}.oauth.${field}\`` });
     } catch (err) {
-      throw new Error(err instanceof Error ? err.message : `variable "${name}" oauth.${field} invalid`);
+      throw new Error(err instanceof Error ? err.message : `${at}.oauth.${field}\` is invalid`);
     }
     return s;
   };
   const authorizationUrl = safeUrl(o.authorizationUrl, 'authorizationUrl');
   const tokenUrl = safeUrl(o.tokenUrl, 'tokenUrl');
+  // A managed sign-in names the platform connector it goes through instead
+  // of a client id: the client is the broker's. Both parts are ids of OURS
+  // (matched against the catalog later), so the shape check here is all the
+  // file gets — and neither value is repeated in a refusal.
+  let managed: { connectorId: string; scopeSet: string } | undefined;
+  if (o.managed !== undefined) {
+    const m = o.managed as Record<string, unknown> | null;
+    const connectorId = m && typeof m === 'object' && typeof m.connectorId === 'string' ? m.connectorId.trim() : '';
+    const scopeSet = m && typeof m === 'object' && typeof m.scopeSet === 'string' ? m.scopeSet.trim() : '';
+    if (!isValidId(connectorId) || !isValidId(scopeSet)) {
+      throw new Error(`${at}.oauth.managed\` must be { connectorId, scopeSet } (lowercase snake_case ids)`);
+    }
+    managed = { connectorId, scopeSet };
+  }
   const clientId = typeof o.clientId === 'string' && o.clientId.trim() ? o.clientId.trim() : '';
-  if (!clientId) throw new Error(`variable "${name}" oauth.clientId is required`);
+  if (!clientId && !managed) throw new Error(`${at}.oauth.clientId\` is required`);
+  // One client or the other: a managed sign-in runs with the broker's app, and
+  // a client id beside it would be a declaration two flows claim.
+  if (clientId && managed) {
+    throw new Error(`${at}.oauth\` names both \`managed\` and a \`clientId\`; a managed sign-in has no client of its own`);
+  }
   let scopes: string[] | undefined;
   if (o.scopes !== undefined) {
     if (!Array.isArray(o.scopes) || !o.scopes.every((s) => typeof s === 'string')) {
-      throw new Error(`variable "${name}" oauth.scopes must be string[]`);
+      throw new Error(`${at}.oauth.scopes\` must be string[]`);
     }
     scopes = o.scopes as string[];
   }
   let authParams: Record<string, string> | undefined;
   if (o.authParams !== undefined) {
     if (typeof o.authParams !== 'object' || Array.isArray(o.authParams)) {
-      throw new Error(`variable "${name}" oauth.authParams must be an object of string values`);
+      throw new Error(`${at}.oauth.authParams\` must be an object of string values`);
     }
     const entries = Object.entries(o.authParams as Record<string, unknown>);
     if (!entries.every(([, v]) => typeof v === 'string')) {
-      throw new Error(`variable "${name}" oauth.authParams values must be strings`);
+      throw new Error(`${at}.oauth.authParams\` values must be strings`);
     }
     authParams = Object.fromEntries(entries) as Record<string, string>;
   }
+  // PKCE is on unless the file says `false`; only the opt-out is ever stored.
+  if (o.pkce !== undefined && typeof o.pkce !== 'boolean') {
+    throw new Error(`${at}.oauth.pkce\` must be a boolean`);
+  }
+  // Never fetched (it rides as a request param), but it names the remote
+  // server — same https/SSRF bar as the endpoints.
+  const resource = o.resource !== undefined ? safeUrl(o.resource, 'resource') : undefined;
   return {
     authorizationUrl,
     tokenUrl,
-    clientId,
+    ...(clientId ? { clientId } : {}),
     ...(scopes ? { scopes } : {}),
     ...(authParams ? { authParams } : {}),
+    ...(o.pkce === false ? { pkce: false } : {}),
+    ...(resource ? { resource } : {}),
+    ...(managed ? { managed } : {}),
   };
 }
 
@@ -886,5 +1741,8 @@ function normalizeType(raw: unknown): ToolManualType {
   if (t === 'http') return 'http';
   if (t === 'mcp') return 'mcp';
   if (t === 'inline' || t === 'text' || t === '') return 'inline';
-  throw new Error(`unknown \`.tool\` type: ${raw}`);
+  // The written value is not echoed (see the `id` refusal above): the accepted
+  // set says more than the rejected value does, and a `type:` line is one
+  // mis-paste away from holding a credential like any other.
+  throw new Error('unknown `.tool` `type` (expected `http`, `mcp`, `inline`, or absent)');
 }

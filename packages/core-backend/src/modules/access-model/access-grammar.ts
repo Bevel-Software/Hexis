@@ -1,0 +1,1111 @@
+/**
+ * The pure access grammar — every parser, canonicaliser, constant, and type
+ * that defines WHAT the roles/groups/access files mean, with no I/O and no
+ * service state. Extracted from `modules/access/access-control.service.ts`;
+ * the resolver and the `AccessControlService` (filesystem/git model loading,
+ * caching, permission gates) stay there and consume this grammar.
+ *
+ * This module is a LEAF: files here import each other freely, but from the
+ * outside world only node builtins, platform-shared, `@mastra/core/workspace`
+ * types, and `src/shared/*` — never another `modules/*` directory. (The
+ * `./group-files.js` import below is access-model's own file, not a breach.)
+ */
+
+import { parse as parseFullYaml } from 'yaml';
+import {
+  KNOWN_VERBS,
+  VERB_REQUIRES,
+  VERBS_BROADEST_FIRST,
+  pluginManifestName,
+  requiredVerbsFor,
+  sourceVerbsFor,
+  type Verb,
+} from '@bevel-software/platform-shared';
+import { canonicalEmail } from '../../shared/email-identity.js';
+import { scanFrontmatter } from './frontmatter-lines.js';
+import type { GroupsIndex } from './group-files.js';
+
+// ---------------------------------------------------------------------------
+// Constants — kept in lockstep with knowledge-base/lib/access-control.js
+// ---------------------------------------------------------------------------
+
+export const ADMIN_CANONICAL = 'admin';
+/**
+ * Verbs the resolver understands in an `access.md` frontmatter. Each verb
+ * is a list of grants (role or `Name <email>` references, optionally
+ * prefixed with `deny `). Keep `Verb` and `KNOWN_VERBS` in lockstep —
+ * `AccessFile.entries` is statically keyed on this union.
+ *
+ * `read` controls who may VIEW a path (the file viewer, embed surface, and
+ * the agent's read tools). It is **default-deny**: a path with no effective
+ * `read:`, `write:`, `download:` or `owner:` grant is not readable. To make
+ * content public, list the built-in role `everyone` under `read:`.
+ *
+ * The verbs nest: `owner` is a superset of `read` + `write` + `download`, and
+ * `write` and `download` are each a superset of `read` (anyone who can edit, or
+ * who may save a copy, can view). An `owner` grant therefore confers all three
+ * lower verbs, and a `write` or `download` grant additionally confers `read`;
+ * `owner` also marks the principal as a contact point for the node (surfaced in
+ * the UI so users know who to ask). `write` and `download` stay independent of
+ * each other — neither confers the other. Denials run the other way: a verb
+ * denied at a scope takes every verb that presupposes it down with it there.
+ *
+ * The verbs, the dependency graph between them (`VERB_REQUIRES`) and the two
+ * lists derived from it (`sourceVerbsFor`, `requiredVerbsFor`) live in
+ * `@bevel-software/platform-shared` (`workspace/access-verbs.ts`), because the
+ * share dialog folds the same verbs on the client and must never do it by a
+ * second table. They are re-exported here so the grammar remains the one
+ * import for everything on the server side.
+ */
+export { KNOWN_VERBS, VERB_REQUIRES, VERBS_BROADEST_FIRST, requiredVerbsFor, sourceVerbsFor };
+export type { Verb };
+const KNOWN_VERBS_SET: ReadonlySet<string> = new Set<string>(KNOWN_VERBS);
+export const EVERYONE_CANONICAL = 'everyone';
+/** Display name for the built-in `everyone` role in the share UI. */
+export const EVERYONE_DISPLAY = 'Everyone';
+
+/*
+ * How the graph is applied on the server (the table itself is in shared):
+ *
+ *   - `resolveScopes` reads `sourceVerbsFor` for the grants that confer the
+ *     target verb and `requiredVerbsFor` for the denials that strip it. Within
+ *     ONE scope a grant of the verb, or of one that confers it, beats a denial
+ *     of the verb or of one it presupposes.
+ *   - `plugin-principals.ts` reads `sourceVerbsFor` to decide who lands in
+ *     `plugin/<slug>/read`; `personal-spaces.step.ts` reads it to ask whether
+ *     a space is already open.
+ *
+ * `download` presupposes `read` because the pair is otherwise a DEAD
+ * combination: the raw-file route read-gates before it download-gates, so a
+ * download-only grant let its holder neither open the file nor save it.
+ */
+export const RESERVED_ROLE_NAMES = new Set(['deny', EVERYONE_CANONICAL]);
+export const DENY_PREFIX = 'deny ';
+/**
+ * Member-entry prefix in roles.yaml that references a GROUP instead of an
+ * email: `- group:Engineering`. Explicit on purpose — membership kind is
+ * never guessed from string shape. Valid on EVERY role including Admin, with
+ * one kept invariant (see `parseRolesYaml`): Admin must always retain at
+ * least one direct email member, so a misconfigured or unreachable directory
+ * can never leave the deployment without a rescuable admin.
+ */
+export const GROUP_REF_PREFIX = 'group:';
+/**
+ * Explicit ROLE token prefix in access.md entries: `role/<Name>` resolves to
+ * the roles.yaml role only, never a group. A BARE name resolves ROLE-FIRST
+ * and falls back to the group, so a group that shares a role's name is
+ * reached only as `group/<Name>` (see `GROUP_TOKEN_PREFIX`) — a group named
+ * `Admin` never takes over the grants written for the Admin role. The prefix
+ * is reserved in the group name-safety rules (a group may never be named
+ * `role/...`), and every role is also registered in the principal index under
+ * its `role/<canonical>` alias.
+ */
+export const ROLE_TOKEN_PREFIX = 'role/';
+
+/**
+ * Explicit GROUP token prefix in access.md entries: `group/<Name>` resolves
+ * to the active source's group only, never a role. Every group is registered
+ * in the principal index under its `group/<canonical>` alias; the bare name
+ * reaches the group only while no role of that name exists. The share dialog
+ * and the access API always write groups this way. Reserved in the group
+ * name-safety rules and in roles.yaml like `role/`.
+ */
+export const GROUP_TOKEN_PREFIX = 'group/';
+
+/**
+ * A canonical role-shaped token split into its explicit kind prefix and its
+ * bare name: `role/admin` → `{ prefix: 'role', name: 'admin' }`, `group/admin`
+ * → `{ prefix: 'group', name: 'admin' }`, anything else (a bare name, a
+ * plugin token, `everyone`) → `{ prefix: null, name: <token> }`. A prefixed
+ * name is canonicalised again, so `group/ admin` splits like `group/admin`
+ * (as `parseAccessEntry` reads it).
+ */
+export function splitPrincipalToken(canonical: string): {
+  prefix: 'role' | 'group' | null;
+  name: string;
+} {
+  if (canonical.startsWith(ROLE_TOKEN_PREFIX)) {
+    return { prefix: 'role', name: canonicalRoleName(canonical.slice(ROLE_TOKEN_PREFIX.length)) };
+  }
+  if (canonical.startsWith(GROUP_TOKEN_PREFIX)) {
+    return { prefix: 'group', name: canonicalRoleName(canonical.slice(GROUP_TOKEN_PREFIX.length)) };
+  }
+  return { prefix: null, name: canonical };
+}
+
+/**
+ * PLUGIN-principal token prefix in access.md entries: `plugin/<Name>/<verb>`
+ * names everyone who holds `<verb>` on the plugin folder `Plugins/<Name>` —
+ * `plugin/GTM/read` is the GTM plugin's members, `plugin/GTM/write` its
+ * managers. Membership is DERIVED at model-load time from the plugin's own
+ * `access.md` (see `plugin-principals.ts`), so a grant naming one follows the
+ * plugin's roster with no copying. This is how a shared skill under `Skills/`
+ * is made visible to a plugin: `read: plugin/GTM/read` on the skill folder.
+ *
+ * The name half is canonicalised with the plugin's MANIFEST slug, so
+ * `plugin/Sales Team/read` and `plugin/sales-team/read` are one principal —
+ * the same identity a conformant client keys the plugin on. Reserved in the
+ * group name-safety rules like `role/`.
+ */
+export const PLUGIN_TOKEN_PREFIX = 'plugin/';
+
+/** The verbs a plugin token may name — each is a distinct principal. */
+export const PLUGIN_TOKEN_VERBS = ['read', 'write', 'owner'] as const;
+export type PluginTokenVerb = (typeof PLUGIN_TOKEN_VERBS)[number];
+
+/** The canonical key of a plugin principal, from the plugin's manifest slug. */
+export function pluginPrincipalKey(slug: string, verb: PluginTokenVerb): string {
+  return `${PLUGIN_TOKEN_PREFIX}${slug}/${verb}`;
+}
+
+/**
+ * The parts of a CANONICAL plugin key, or null when the text is not one:
+ * exactly one separator after the prefix, a slug that is its own manifest
+ * slug, one of the three verbs. A generated key never carries a nested
+ * name, so `plugin/a/b/read` is a typo, not a principal.
+ */
+export function parsePluginPrincipalKey(
+  canonical: string,
+): { slug: string; verb: PluginTokenVerb } | null {
+  if (!canonical.startsWith(PLUGIN_TOKEN_PREFIX)) return null;
+  const rest = canonical.slice(PLUGIN_TOKEN_PREFIX.length);
+  const cut = rest.indexOf('/');
+  if (cut <= 0 || rest.indexOf('/', cut + 1) !== -1) return null;
+  const slug = rest.slice(0, cut);
+  if (pluginManifestName(slug) !== slug) return null;
+  const verb = rest.slice(cut + 1);
+  if (!(PLUGIN_TOKEN_VERBS as readonly string[]).includes(verb)) return null;
+  return { slug, verb: verb as PluginTokenVerb };
+}
+
+/**
+ * The canonical key for ANY spelling of a plugin token — `plugin/Sales Team/read`,
+ * `Plugin/sales-team/READ` — or null when the text is not one: a name must be
+ * present and hold no further `/`, the verb must be one of the three. The ONE
+ * place a plugin's spelling folds to its slug: the access-file parser, the
+ * role canonicaliser (which grant and revoke compare through) and the link
+ * service all go through it, so a grant written one way is found again
+ * however it was spelled.
+ */
+export function canonicalPluginToken(token: string): string | null {
+  const body = token.trim();
+  if (!body.toLowerCase().startsWith(PLUGIN_TOKEN_PREFIX)) return null;
+  const rest = body.slice(PLUGIN_TOKEN_PREFIX.length).trim();
+  const cut = rest.lastIndexOf('/');
+  const name = cut > 0 ? rest.slice(0, cut).trim() : '';
+  const verb = cut > 0 ? rest.slice(cut + 1).trim().toLowerCase() : '';
+  if (!name || name.includes('/') || !(PLUGIN_TOKEN_VERBS as readonly string[]).includes(verb)) return null;
+  const slug = pluginManifestName(name);
+  if (!slug) return null;
+  return pluginPrincipalKey(slug, verb as PluginTokenVerb);
+}
+
+export const USER_REF_REGEX = /^(.+?)\s+<\s*([^<>\s]+@[^<>\s]+)\s*>\s*$/;
+export const EMAIL_REGEX = /^[^<>\s@]+@[^<>\s@]+\.[^<>\s@]+$/;
+
+// ---------------------------------------------------------------------------
+// Domain types
+// ---------------------------------------------------------------------------
+
+export interface RoleEntry {
+  kind: 'role';
+  role: string; // canonical (lowercase, single-spaced)
+  displayRole: string; // original casing/spacing
+  deny: boolean;
+}
+
+export interface UserEntry {
+  kind: 'user';
+  email: string; // canonical (lowercased, trimmed)
+  displayName: string;
+  deny: boolean;
+}
+
+export type ParsedEntry = RoleEntry | UserEntry;
+
+export interface AccessFile {
+  /** repo-relative POSIX path — e.g. `access.md`, `Knowledge/Sales/access.md`. */
+  path: string;
+  /** repo-relative POSIX directory — `''` for root. */
+  dir: string;
+  /**
+   * Verb → list of grants/denials. Always carries an entry for every
+   * known verb (empty array when the verb wasn't declared in the file) so
+   * the resolver doesn't need to null-check at every chain step.
+   */
+  entries: Record<Verb, ParsedEntry[]>;
+}
+
+function emptyEntries(): Record<Verb, ParsedEntry[]> {
+  const out = {} as Record<Verb, ParsedEntry[]>;
+  for (const v of KNOWN_VERBS) out[v] = [];
+  return out;
+}
+
+export function isAccessMdPath(p: string): boolean {
+  return p === 'access.md' || p.endsWith('/access.md');
+}
+
+/**
+ * Extensions of node files whose OWN `---` frontmatter can carry access verbs
+ * the resolver enforces (`readOwnEntries` → `parseOwnAccessEntries`). The
+ * SINGLE source of truth for every surface that enumerates candidate files —
+ * the access-declarations scan and the shared `KbReferenceScanner` (which
+ * must scan/rewrite the same set, or a rename strands a live `.tool`
+ * frontmatter grant). `access.md` is covered by `.md`.
+ *
+ * `.tool` is whole-document YAML: the file IS one `---` fenced block, and its
+ * access verbs sit in it as ordinary keys beside the rest of the definition
+ * (`parseOwnAccessEntries` ignores every key that is not a verb). It is
+ * configuration rather than a graph node — it lives outside the typed
+ * ontologies — but it is exactly the kind of file whose edits grant
+ * capability, so it needs the same per-file governance as a node.
+ *
+ * This is the CORE set. An overlay that ships its own whole-document
+ * configuration files adds their extensions through
+ * {@link registerAccessFrontmatterExtensions} — the grammar is core's, the
+ * file kinds are not necessarily.
+ */
+const CORE_ACCESS_FRONTMATTER_EXTENSIONS = ['.md', '.tool'] as const;
+
+const accessFrontmatterExtensions = new Set<string>(CORE_ACCESS_FRONTMATTER_EXTENSIONS);
+
+/**
+ * Extend the set of files whose own frontmatter carries access verbs.
+ *
+ * For overlays whose configuration files follow the same whole-document
+ * convention and, like a `.tool`, grant capability by being edited. Call once
+ * at boot, BEFORE any access resolution or reference scan — the declarations
+ * scan and the reference scanner must agree on the set, and a scanner that
+ * learned a new extension after a scan would leave a live grant unrewritten
+ * on the next rename.
+ *
+ * Idempotent, and additive only: an extension cannot be removed, because
+ * removing one would silently drop grants that are already enforced.
+ */
+export function registerAccessFrontmatterExtensions(extensions: readonly string[]): void {
+  // Validate EVERYTHING first, then apply. These registrations decide which
+  // files' edits carry enforced access grants, so a typo (`workflow` for
+  // `.workflow`) must THROW rather than be skipped — a silent skip makes a
+  // failed registration indistinguishable from a successful one, at boot,
+  // where nobody is looking. And it must throw before the registry changes:
+  // a list that is half-applied when it throws leaves later scans governing a
+  // set nobody asked for.
+  const normalized = extensions.map((ext) => {
+    const n = ext.trim().toLowerCase();
+    if (!/^\.[a-z0-9]+$/.test(n)) {
+      throw new Error(
+        `access frontmatter extension "${ext}" is malformed — expected a leading dot, e.g. ".workflow"`,
+      );
+    }
+    return n;
+  });
+  for (const n of normalized) accessFrontmatterExtensions.add(n);
+}
+
+/** Every extension currently in the set, core's plus any an overlay registered. */
+export function accessFrontmatterExtensionList(): string[] {
+  return [...accessFrontmatterExtensions];
+}
+
+/**
+ * True when `p` is a file the resolver reads access frontmatter from.
+ *
+ * Case-SENSITIVE on the path, as it always was: `doc.MD` is not a node and
+ * carries no enforced grant. Registered extensions are normalized to lowercase
+ * so `.Workflow` and `.workflow` register the same thing, but which FILES are
+ * governed must not change because the set became registrable — widening it to
+ * `X.MD` silently in a release would be an access-model change nobody asked
+ * for, made in a refactor.
+ */
+export function hasAccessFrontmatterExtension(p: string): boolean {
+  for (const ext of accessFrontmatterExtensions) {
+    if (p.endsWith(ext)) return true;
+  }
+  return false;
+}
+/**
+ * The PRINCIPAL index — canonical name → member emails. Despite the name it
+ * holds both kinds of named principal after `mergeGroupsIntoRoles` runs:
+ * roles.yaml roles (`kind: 'role'`, the default) and the active group file's
+ * groups (`kind: 'group'`). Grant resolution treats them identically — a
+ * grant names a principal, the principal has member emails — which is what
+ * lets the whole closeness-first resolver work on groups without changes.
+ *
+ * `groupRefs` carries a role's `group:<Name>` member entries between parse
+ * and merge; the merge expands them into `emails`/`byEmail`.
+ */
+export interface RolesIndex {
+  byCanonical: Map<
+    string,
+    {
+      displayName: string;
+      emails: Set<string>;
+      groupRefs?: Set<string>;
+      kind?: 'role' | 'group' | 'plugin';
+      /** For `kind: 'plugin'`: the plugin's identity (its manifest name) the principal derives from. */
+      pluginName?: string;
+      /** For `kind: 'plugin'`: the repo-relative plugin directory, e.g. `Plugins/GTM`. */
+      pluginDir?: string;
+      /**
+       * For `kind: 'plugin'`: the role and group keys whose members the
+       * principal was expanded FROM — the non-user entries of the plugin's
+       * own rules, as `byCanonical` keys. `emails` is the flattened roster;
+       * this is its provenance, kept so a question asked of a PRINCIPAL
+       * rather than a person ("what can this team read?") can follow the
+       * team into the plugins that admit it, the way a member's key set does.
+       */
+      sourceKeys?: Set<string>;
+    }
+  >;
+  byEmail: Map<string, Set<string>>;
+  /**
+   * Principal keys EVERY caller holds, known or not — a plugin whose own
+   * rules grant `everyone` yields a plugin principal no email list can
+   * enumerate. The resolver unions these into every caller's key set.
+   */
+  publicKeys?: Set<string>;
+}
+// ---------------------------------------------------------------------------
+// Tiny YAML subset parser — handles only block mappings + block sequences
+// of plain scalars. See `knowledge-base/lib/access-control.js` for the
+// reference implementation (this file is the TypeScript port).
+// ---------------------------------------------------------------------------
+
+type YamlValue = string | YamlValue[] | { [key: string]: YamlValue } | null;
+
+interface YamlOk {
+  ok: true;
+  value: YamlValue;
+}
+
+interface YamlErr {
+  ok: false;
+  error: string;
+}
+
+/**
+ * Strip a trailing `# comment` the way the YAML-subset tokeniser reads a
+ * line: a `#` at the start (after only whitespace) or preceded by whitespace
+ * begins a comment. Exported so the reference scanner matches tokens against
+ * the SAME comment rule the resolver parses with (a `- GTM Team  # sales`
+ * entry is the token `GTM Team`, never `GTM Team # sales`).
+ */
+export function stripComment(line: string): string {
+  let inWs = true;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '#' && (inWs || (i > 0 && /\s/.test(line[i - 1])))) {
+      return line.slice(0, i);
+    }
+    if (!/\s/.test(ch)) inWs = false;
+  }
+  return line;
+}
+
+interface Token {
+  lineNum: number;
+  indent: number;
+  kind: 'kv' | 'item';
+  key?: string;
+  value: string;
+}
+
+function tokenise(
+  text: string,
+  opts?: { tolerateEmptyKeys?: boolean },
+): YamlErr | { ok: true; tokens: Token[] } {
+  const lines = text.split(/\r?\n/);
+  const tokens: Token[] = [];
+  // Tolerated blank keys are uniquified as runs of spaces so a SECOND blank
+  // key doesn't trip the duplicate-key check (which would retire every valid
+  // group after it). All-whitespace keys still canonicalize to '' downstream,
+  // so the entry-level "empty group name — skipped" handling sees them all.
+  let blankKeySeq = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const stripped = stripComment(lines[i]).replace(/\s+$/, '');
+    if (!stripped.trim()) continue;
+    const indentMatch = stripped.match(/^( *)/);
+    const indent = indentMatch ? indentMatch[1].length : 0;
+    const content = stripped.slice(indent);
+    const lineNum = i + 1;
+
+    if (content.startsWith('- ') || content === '-') {
+      const value = content === '-' ? '' : content.slice(2).trim();
+      tokens.push({ lineNum, indent, kind: 'item', value });
+      continue;
+    }
+    const colonIdx = content.indexOf(':');
+    if (colonIdx < 0) {
+      return { ok: false, error: `line ${lineNum}: expected 'key:' or '- value' but got '${content}'` };
+    }
+    let key = content.slice(0, colonIdx).trim();
+    const valuePart = content.slice(colonIdx + 1).trim();
+    // An empty key is normally a hard error (roles.yaml/access.md want loud
+    // failures), but a parser with ENTRY-level forgiveness (the group files:
+    // one bad entry must not retire every other group) keeps it as a
+    // whitespace key for its own skip-with-warning handling.
+    if (!key) {
+      if (!opts?.tolerateEmptyKeys) {
+        return { ok: false, error: `line ${lineNum}: empty mapping key` };
+      }
+      key = ' '.repeat(++blankKeySeq);
+    }
+    tokens.push({ lineNum, indent, kind: 'kv', key, value: valuePart });
+  }
+  return { ok: true, tokens };
+}
+
+export function parseYamlSubset(
+  text: string,
+  opts?: { tolerateEmptyKeys?: boolean },
+): YamlOk | YamlErr {
+  const tok = tokenise(text, opts);
+  if (!tok.ok) return tok;
+  if (tok.tokens.length === 0) return { ok: true, value: {} };
+
+  type Frame = { indent: number; container: YamlValue[] | { [key: string]: YamlValue }; kind: 'map' | 'list' };
+  const root: { [key: string]: YamlValue } = {};
+  const stack: Frame[] = [{ indent: -1, container: root, kind: 'map' }];
+
+  for (let t = 0; t < tok.tokens.length; t++) {
+    const cur = tok.tokens[t];
+    while (stack.length > 1 && stack[stack.length - 1].indent >= cur.indent) {
+      stack.pop();
+    }
+    const top = stack[stack.length - 1];
+
+    if (cur.kind === 'item') {
+      if (top.kind !== 'list') {
+        return {
+          ok: false,
+          error: `line ${cur.lineNum}: list item with no enclosing list (indent ${cur.indent})`,
+        };
+      }
+      (top.container as YamlValue[]).push(cur.value);
+      continue;
+    }
+
+    if (top.kind !== 'map') {
+      return {
+        ok: false,
+        error: `line ${cur.lineNum}: mapping key '${cur.key}' inside a list — not supported`,
+      };
+    }
+    const map = top.container as { [key: string]: YamlValue };
+    const key = cur.key as string;
+    if (Object.prototype.hasOwnProperty.call(map, key)) {
+      return { ok: false, error: `line ${cur.lineNum}: duplicate key '${key}'` };
+    }
+
+    if (cur.value !== '') {
+      // Inline empty collections are the only flow-style YAML we accept, so
+      // `owner: []` reads as an empty list and `groups: {}` as an empty
+      // mapping rather than the scalar strings "[]" / "{}".
+      if (cur.value === '[]') {
+        map[key] = [];
+        continue;
+      }
+      if (cur.value === '{}') {
+        map[key] = {};
+        continue;
+      }
+      map[key] = cur.value;
+      continue;
+    }
+
+    const next = tok.tokens[t + 1];
+    if (!next || next.indent <= cur.indent) {
+      map[key] = null;
+      continue;
+    }
+    if (next.kind === 'item') {
+      const list: YamlValue[] = [];
+      map[key] = list;
+      stack.push({ indent: cur.indent, container: list, kind: 'list' });
+    } else {
+      const sub: { [key: string]: YamlValue } = {};
+      map[key] = sub;
+      stack.push({ indent: cur.indent, container: sub, kind: 'map' });
+    }
+  }
+
+  return { ok: true, value: root };
+}
+
+// ---------------------------------------------------------------------------
+// Frontmatter extraction
+// ---------------------------------------------------------------------------
+
+export function extractFrontmatter(
+  text: string,
+): { ok: true; frontmatter: string } | { ok: false; error: string } {
+  const scan = scanFrontmatter(text);
+  if (scan.kind === 'none') return { ok: false, error: 'expected `---` on the first line' };
+  if (scan.kind === 'unterminated') {
+    return { ok: false, error: 'unterminated frontmatter — no closing `---` found' };
+  }
+  return { ok: true, frontmatter: scan.fm.join('\n') };
+}
+
+/** The text AFTER the closing frontmatter fence ('' when there is no closed block). */
+export function bodyAfterFrontmatter(text: string): string {
+  const scan = scanFrontmatter(text);
+  return scan.kind === 'frontmatter' ? scan.post.slice(1).join('\n') : '';
+}
+
+// ---------------------------------------------------------------------------
+// Canonicalisation
+// ---------------------------------------------------------------------------
+
+export function canonicalRoleName(name: string): string {
+  // A plugin token canonicalises to its KEY (slugged name), not to its
+  // lowercased spelling — see `canonicalPluginToken`.
+  return canonicalPluginToken(name) ?? name.trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+/**
+ * Re-exported from `shared/email-identity.ts`, where it lives beside the
+ * identity HASH that must normalise identically. The grammar keeps the name
+ * because its parsers and splices read as prose with it, and its own callers
+ * keep importing it from here.
+ */
+export { canonicalEmail };
+
+// ---------------------------------------------------------------------------
+// Entry parser
+// ---------------------------------------------------------------------------
+
+export function parseAccessEntry(
+  raw: unknown,
+): { ok: true; entry: ParsedEntry } | { ok: false; error: string } {
+  if (typeof raw !== 'string') return { ok: false, error: 'entry must be a string' };
+  const trimmed = raw.trim();
+  if (!trimmed) return { ok: false, error: 'empty entry' };
+
+  let deny = false;
+  let body = trimmed;
+  if (trimmed.startsWith(DENY_PREFIX)) {
+    deny = true;
+    body = trimmed.slice(DENY_PREFIX.length).trim();
+    if (!body) return { ok: false, error: `'deny' with no principal` };
+  }
+
+  const userMatch = body.match(USER_REF_REGEX);
+  if (userMatch) {
+    const displayName = userMatch[1].trim();
+    const email = canonicalEmail(userMatch[2]);
+    if (!displayName) return { ok: false, error: `user reference '${body}' has no name` };
+    if (!EMAIL_REGEX.test(email)) {
+      return { ok: false, error: `user reference '${body}' has malformed email '${email}'` };
+    }
+    return { ok: true, entry: { kind: 'user', email, displayName, deny } };
+  }
+
+  if (body.includes('<') || body.includes('>')) {
+    return {
+      ok: false,
+      error: `entry '${body}' looks like a user reference but doesn't match 'Name <email>' shape`,
+    };
+  }
+
+  let role = canonicalRoleName(body);
+  if (!role) return { ok: false, error: `empty role name in entry '${raw}'` };
+  // Explicit role token: normalize `role/ <Name>` spacing so the canonical
+  // form is always `role/<canonicalName>` — the exact alias key the principal
+  // index registers for every role.
+  if (role.startsWith(ROLE_TOKEN_PREFIX)) {
+    const suffix = canonicalRoleName(role.slice(ROLE_TOKEN_PREFIX.length));
+    if (!suffix) return { ok: false, error: `entry '${body}' names no role after '${ROLE_TOKEN_PREFIX}'` };
+    role = `${ROLE_TOKEN_PREFIX}${suffix}`;
+  } else if (role.startsWith(GROUP_TOKEN_PREFIX)) {
+    // Explicit group token, normalised the same way to `group/<canonicalName>`.
+    const suffix = canonicalRoleName(role.slice(GROUP_TOKEN_PREFIX.length));
+    if (!suffix) return { ok: false, error: `entry '${body}' names no group after '${GROUP_TOKEN_PREFIX}'` };
+    role = `${GROUP_TOKEN_PREFIX}${suffix}`;
+  } else if (role.startsWith(PLUGIN_TOKEN_PREFIX)) {
+    // `plugin/<Name>/<verb>`: the name is canonicalised to the plugin's
+    // manifest slug, the verb must be one of the three. Anything else is a
+    // parse error naming the valid shapes — a token that silently resolved to
+    // nothing would be a grant nobody gets and nobody is told about.
+    const key = canonicalPluginToken(body);
+    // Exactly one separator: `plugin/GTM/foo/read` is a typo, not a grant to
+    // some plugin whose slug happens to fold `GTM/foo` into `gtm-foo`.
+    if (key === null) {
+      return {
+        ok: false,
+        error:
+          `entry '${body}' is not a plugin principal — write it as ` +
+          `${PLUGIN_TOKEN_PREFIX}<plugin>/read, ${PLUGIN_TOKEN_PREFIX}<plugin>/write or ${PLUGIN_TOKEN_PREFIX}<plugin>/owner`,
+      };
+    }
+    role = key;
+  }
+  return { ok: true, entry: { kind: 'role', role, displayRole: body, deny } };
+}
+// ---------------------------------------------------------------------------
+// roles.yaml + access.md parsers
+// ---------------------------------------------------------------------------
+
+export function parseRolesYaml(
+  text: string,
+): { ok: true; index: RolesIndex } | { ok: false; errors: string[] } {
+  const parsed = parseYamlSubset(text);
+  if (!parsed.ok) return { ok: false, errors: [`roles.yaml: ${parsed.error}`] };
+
+  const errors: string[] = [];
+  const root = parsed.value;
+  if (root == null || typeof root !== 'object' || Array.isArray(root)) {
+    return { ok: false, errors: [`roles.yaml: must be a top-level mapping`] };
+  }
+
+  const rolesNode = (root as Record<string, YamlValue>).roles;
+  if (rolesNode == null || typeof rolesNode !== 'object' || Array.isArray(rolesNode)) {
+    return { ok: false, errors: [`roles.yaml: missing top-level 'roles:' mapping`] };
+  }
+
+  const index: RolesIndex = {
+    byCanonical: new Map(),
+    byEmail: new Map(),
+  };
+
+  for (const [displayName, value] of Object.entries(rolesNode as Record<string, YamlValue>)) {
+    const canonical = canonicalRoleName(displayName);
+    if (!canonical) {
+      errors.push(`roles.yaml: empty role name`);
+      continue;
+    }
+    if (RESERVED_ROLE_NAMES.has(canonical)) {
+      errors.push(
+        `roles.yaml: role '${displayName}' uses reserved name '${canonical}' — this token has special meaning in access entries and cannot be a roles.yaml role`,
+      );
+      continue;
+    }
+    if (canonical.startsWith(ROLE_TOKEN_PREFIX)) {
+      errors.push(
+        `roles.yaml: role '${displayName}' starts with the reserved '${ROLE_TOKEN_PREFIX}' prefix — that spelling is the explicit role token in access entries`,
+      );
+      continue;
+    }
+    if (canonical.startsWith(GROUP_TOKEN_PREFIX)) {
+      errors.push(
+        `roles.yaml: role '${displayName}' starts with the reserved '${GROUP_TOKEN_PREFIX}' prefix — that spelling is the explicit group token in access entries`,
+      );
+      continue;
+    }
+    // A role spelled `plugin/…` would be overwritten by the synthesised plugin
+    // principal of the same key while its members kept the token — plugin
+    // access for people who are not plugin members. Refused at parse time,
+    // like the group name-safety rule.
+    if (canonical.startsWith(PLUGIN_TOKEN_PREFIX)) {
+      errors.push(
+        `roles.yaml: role '${displayName}' starts with the reserved '${PLUGIN_TOKEN_PREFIX}' prefix — that spelling is the plugin-principal token in access entries`,
+      );
+      continue;
+    }
+    if (index.byCanonical.has(canonical)) {
+      const prev = index.byCanonical.get(canonical)!.displayName;
+      errors.push(
+        `roles.yaml: role '${displayName}' canonicalises to '${canonical}', which is already declared as '${prev}'`,
+      );
+      continue;
+    }
+    if (!Array.isArray(value)) {
+      errors.push(`roles.yaml: role '${displayName}' must be a list of emails`);
+      continue;
+    }
+    const emails = new Set<string>();
+    const groupRefs = new Set<string>();
+    for (const rawEmail of value) {
+      if (typeof rawEmail !== 'string') {
+        errors.push(`roles.yaml: role '${displayName}' has a non-string entry`);
+        continue;
+      }
+      // `- group:<Name>` assigns the role to a whole group (expanded against
+      // the active group source by `mergeGroupsIntoRoles`). Allowed on every
+      // role, Admin included — the Admin invariant below only demands at
+      // least one DIRECT email member so a broken directory can never leave
+      // the deployment adminless.
+      if (rawEmail.trim().toLowerCase().startsWith(GROUP_REF_PREFIX)) {
+        const refName = canonicalRoleName(rawEmail.trim().slice(GROUP_REF_PREFIX.length));
+        if (!refName) {
+          errors.push(`roles.yaml: role '${displayName}' has an empty group reference '${rawEmail}'`);
+          continue;
+        }
+        groupRefs.add(refName);
+        continue;
+      }
+      const email = canonicalEmail(rawEmail);
+      if (!EMAIL_REGEX.test(email)) {
+        errors.push(`roles.yaml: role '${displayName}' has malformed email '${rawEmail}'`);
+        continue;
+      }
+      emails.add(email);
+      let set = index.byEmail.get(email);
+      if (!set) {
+        set = new Set();
+        index.byEmail.set(email, set);
+      }
+      set.add(canonical);
+    }
+    index.byCanonical.set(canonical, { displayName: displayName.trim(), emails, groupRefs });
+  }
+
+  if (!index.byCanonical.has(ADMIN_CANONICAL)) {
+    errors.push(`roles.yaml: must declare at least one 'Admin' role`);
+  } else if (index.byCanonical.get(ADMIN_CANONICAL)!.emails.size === 0) {
+    // The kept invariant: Admin may reference groups, but must ALWAYS retain
+    // at least one direct email member — the rescue story requires an admin
+    // whose membership does not depend on a reachable, well-configured
+    // directory. A group-only Admin is as hard an error as an adminless one.
+    errors.push(
+      `roles.yaml: 'Admin' role has no direct email members — Admin must keep at least one individual email (group references alone are not enough)`,
+    );
+  }
+
+  if (errors.length) return { ok: false, errors };
+  return { ok: true, index };
+}
+/**
+ * Merge the active group source into the principal index and expand role →
+ * group assignments. Mutates `index` in place; returns human-readable
+ * warnings (callers log them — nothing here ever throws, because group
+ * problems must degrade, not brick access resolution).
+ *
+ * Rules (the grant-grammar precedence):
+ *   - Every role is ALSO registered under its explicit `role/<canonical>`
+ *     alias, and every group under its explicit `group/<canonical>` alias —
+ *     the tokens that always resolve to that kind.
+ *   - A BARE name resolves ROLE-FIRST: when a group's canonical name
+ *     collides with a role's, the bare key stays the ROLE's (warned); the
+ *     group is reachable only via `group/<canonical>`. So a group named
+ *     `Admin` — whoever proposed it — never gains what `Admin` is granted.
+ *   - Role `group:<Name>` refs — Admin's included — expand against the
+ *     merged groups; an unknown ref contributes nothing (warned).
+ *   - `byEmail` is rebuilt so each member holds exactly the tokens that
+ *     resolve to a principal they belong to (bare + `role/` alias for roles,
+ *     `group/` alias plus the bare name when the group owns it for groups).
+ */
+export function mergeGroupsIntoRoles(
+  index: RolesIndex,
+  groups: GroupsIndex,
+  sourceFile: string,
+): string[] {
+  const warnings: string[] = [];
+  // Snapshot before any group lands: at this point the index holds roles only.
+  const roleRecords = new Map(index.byCanonical);
+
+  // 1. Expand role → group assignments (Admin included — its safety net is
+  //    the parse-time "at least one direct email" invariant, not a merge skip).
+  for (const [, principal] of roleRecords) {
+    if (!principal.groupRefs?.size) continue;
+    for (const ref of principal.groupRefs) {
+      const group = groups.get(ref);
+      if (!group) {
+        warnings.push(
+          `roles.yaml: role '${principal.displayName}' references unknown group '${ref}' — reference ignored`,
+        );
+        continue;
+      }
+      for (const email of group.emails) principal.emails.add(email);
+    }
+  }
+
+  // 2. Bare-name precedence: roles keep the bare token; every group gets its
+  //    `group/<canonical>` alias, and the bare key only when no role owns it.
+  for (const [canonical, def] of groups) {
+    const group = { displayName: def.displayName, emails: new Set(def.emails), kind: 'group' as const };
+    index.byCanonical.set(`${GROUP_TOKEN_PREFIX}${canonical}`, group);
+    if (roleRecords.has(canonical)) {
+      warnings.push(
+        `${sourceFile}: group '${def.displayName}' shares its name with a role — the bare name resolves to the ROLE; use '${GROUP_TOKEN_PREFIX}${canonical}' to reference the group`,
+      );
+      continue;
+    }
+    index.byCanonical.set(canonical, group);
+  }
+
+  // 3. Explicit `role/<canonical>` alias for every role (same record — the
+  //    alias and the bare key, when the role still owns it, stay in lockstep).
+  for (const [canonical, principal] of roleRecords) {
+    principal.kind = 'role';
+    index.byCanonical.set(`${ROLE_TOKEN_PREFIX}${canonical}`, principal);
+  }
+
+  // 4. Rebuild the email → tokens map from the final index so membership
+  //    reflects the post-precedence keys (a collided group's members hold
+  //    only its `group/` alias, never the role's bare token).
+  index.byEmail.clear();
+  for (const [key, principal] of index.byCanonical) {
+    for (const email of principal.emails) {
+      let set = index.byEmail.get(email);
+      if (!set) {
+        set = new Set();
+        index.byEmail.set(email, set);
+      }
+      set.add(key);
+    }
+  }
+
+  return warnings;
+}
+/**
+ * Does an `access.md` body declare access rules — i.e. is the file in the NEW
+ * (body-governs-the-folder) format?
+ *
+ * The two-format story: historically the FRONTMATTER carried the folder's
+ * rules and the file could not govern itself. The new format follows the
+ * convention every other file uses — frontmatter is about the FILE (who may
+ * read/write `access.md` itself), and the content (the body) is the folder's
+ * rules. The compat rule, applied per file: **when the body is not parsable as
+ * rules, the frontmatter is resolved for the folder as before.**
+ *
+ * "Parsable as rules" is deliberately shallow — the body YAML-parses to a
+ * mapping that names at least one known verb. A prose body (the repo-root
+ * README-style file) fails the YAML parse or carries no verb key and stays
+ * legacy. A body that DOES name a verb has claimed to be rules: shape errors
+ * inside it (a scalar verb, a malformed entry) are then hard parse ERRORS of
+ * the file, never a silent fallback to the frontmatter — falling back would
+ * let a typo in the body hand the folder to the frontmatter's (possibly
+ * `read: everyone`) self-rules.
+ */
+export function accessMdDeclaresBodyRules(text: string): boolean {
+  const body = bodyAfterFrontmatter(text);
+  if (!body.trim()) return false;
+  const parsed = parseYamlSubset(body);
+  if (!parsed.ok) return false;
+  const root = parsed.value;
+  if (root == null || typeof root !== 'object' || Array.isArray(root)) return false;
+  return Object.keys(root as Record<string, YamlValue>).some((k) => KNOWN_VERBS_SET.has(k));
+}
+
+/**
+ * The access verbs an `access.md` declares FOR ITSELF — its frontmatter, and
+ * only in the new format (body-governed). A legacy file cannot govern itself:
+ * its frontmatter IS the folder's rules, so returning them as own-entries
+ * would double-apply them at the file scope.
+ *
+ * Parsed forgivingly (like node frontmatter): the new-format frontmatter may
+ * carry non-access keys, and a typo there must not make the file unreadable.
+ */
+export function accessMdSelfEntries(text: string): Record<Verb, ParsedEntry[]> | null {
+  if (!accessMdDeclaresBodyRules(text)) return null;
+  return parseOwnAccessEntries(text);
+}
+
+/**
+ * Parse one `access.md`'s FOLDER rules into its per-verb entry lists.
+ *
+ * Two formats (see {@link accessMdDeclaresBodyRules}): when the body declares
+ * rules, the body is parsed (new format — frontmatter then governs the file
+ * itself via {@link accessMdSelfEntries}); otherwise the frontmatter is parsed
+ * (legacy format), exactly as before.
+ *
+ * Exported so read-only surfaces can report WHERE rules are declared without
+ * reimplementing the parse (see `access-declarations.ts`). Exporting changes
+ * nothing about resolution — this is the same function the resolver builds its
+ * model from, so a display of declarations can never drift from the rules that
+ * are actually enforced.
+ */
+export function parseAccessFile(
+  text: string,
+  relativePath: string,
+): { ok: true; file: AccessFile; warnings: string[] } | { ok: false; errors: string[] } {
+  const bodyFormat = accessMdDeclaresBodyRules(text);
+  let ruleSource: string;
+  if (bodyFormat) {
+    ruleSource = bodyAfterFrontmatter(text);
+  } else {
+    const fm = extractFrontmatter(text);
+    if (!fm.ok) return { ok: false, errors: [`${relativePath}: ${fm.error}`] };
+    ruleSource = fm.frontmatter;
+  }
+  const parsed = parseYamlSubset(ruleSource);
+  if (!parsed.ok) return { ok: false, errors: [`${relativePath}: ${parsed.error}`] };
+
+  const root = parsed.value;
+  if (root == null || typeof root !== 'object' || Array.isArray(root)) {
+    return {
+      ok: false,
+      errors: [`${relativePath}: ${bodyFormat ? 'body' : 'frontmatter'} must be a mapping`],
+    };
+  }
+
+  const errors: string[] = [];
+  const warnings: string[] = [];
+  const entries = emptyEntries();
+
+  for (const [key, value] of Object.entries(root as Record<string, YamlValue>)) {
+    if (!KNOWN_VERBS_SET.has(key)) {
+      // Forgiving by design: unknown keys (typos, future verbs, custom
+      // metadata an operator chose to colocate) must not break the access
+      // tree. Warn so operators see the typo in logs, then move on as if
+      // the key didn't exist. The verbs we DO understand still parse.
+      warnings.push(
+        `${relativePath}: unknown access key '${key}' — ignored (known: ${[...KNOWN_VERBS].join(', ')})`,
+      );
+      continue;
+    }
+    const verb = key as Verb;
+    if (!Array.isArray(value)) {
+      errors.push(`${relativePath}: '${key}:' must be a list`);
+      continue;
+    }
+    const list: ParsedEntry[] = [];
+    for (const raw of value) {
+      const result = parseAccessEntry(raw);
+      if (!result.ok) {
+        errors.push(`${relativePath}: ${result.error}`);
+        continue;
+      }
+      list.push(result.entry);
+    }
+    entries[verb] = list;
+  }
+
+  if (errors.length) return { ok: false, errors };
+
+  const slash = relativePath.lastIndexOf('/');
+  const dir = slash === -1 ? '' : relativePath.slice(0, slash);
+  return { ok: true, file: { path: relativePath, dir, entries }, warnings };
+}
+/**
+ * Per-verb access entries declared in a single node file's *own* frontmatter
+ * (the same YAML block that carries `nodeType:`). This is the most-specific
+ * scope — applied after every directory `access.md` in the chain.
+ */
+export type OwnEntries = Record<Verb, ParsedEntry[]>;
+/**
+ * The top-level mapping of a file's own frontmatter, for the verb keys.
+ *
+ * The subset parser is tried first: it is what every `access.md` and node
+ * frontmatter has always been read with, and its answer must not change. But
+ * a whole-document configuration file (`.tool`, and whatever an overlay
+ * registers) is real YAML — folded descriptions (`>-`), literal blocks (`|`),
+ * nested maps — and the subset parser stops at the first line it does not
+ * understand. Before this fallback that meant the file's `owner:` / `read:` /
+ * `write:` were silently dropped: a grant that was reviewed and merged did
+ * not exist, and the file was unreadable by the very principal it named.
+ * So on a subset failure the frontmatter is read by the full parser and only
+ * its top-level mapping is used — the verb keys are looked up exactly as
+ * before, everything else is ignored exactly as before.
+ */
+function ownEntriesRoot(frontmatter: string): unknown {
+  const subset = parseYamlSubset(frontmatter);
+  if (subset.ok && !verbValuesNeedFullYaml(subset.value)) return subset.value;
+  try {
+    // The FAILSAFE schema: every scalar stays the text it was written as —
+    // `true`, `42`, `0x10`, `2026-01-01` — which is all the subset parser has
+    // ever handed the entry grammar. The core schema would type them, and a
+    // role spelled `0x10` would come back as `16` the moment another verb on
+    // the same file used a quoted value.
+    const full = parseFullYaml(frontmatter, { schema: 'failsafe' });
+    // A document the full parser rejects but the subset parser accepted keeps
+    // the subset answer — whatever it read is what has always been read.
+    return full == null ? (subset.ok ? subset.value : null) : full;
+  } catch {
+    return subset.ok ? subset.value : null;
+  }
+}
+
+/**
+ * Whether a verb's value, as the subset parser read it, is really YAML syntax
+ * the subset parser does not understand and passed through as text: a flow
+ * sequence (`read: [A, B]`) or a quoted scalar (`read: "A <a@x>"`, `- 'Role'`).
+ * The subset parser SUCCEEDS on these — it just hands the brackets and quotes
+ * to the entry parser, which then drops the entry, or worse, keeps the quotes
+ * as part of a role name. Such a value means the full parser has to read the
+ * document.
+ */
+function verbValuesNeedFullYaml(root: unknown): boolean {
+  if (!root || typeof root !== 'object' || Array.isArray(root)) return false;
+  const looksLikeSyntax = (v: unknown): boolean =>
+    typeof v === 'string' && /^\s*(\[\s*\S|\{\s*\S|"|')/.test(v);
+  for (const [key, value] of Object.entries(root as Record<string, unknown>)) {
+    if (!KNOWN_VERBS_SET.has(key)) continue;
+    if (looksLikeSyntax(value)) return true;
+    if (Array.isArray(value) && value.some(looksLikeSyntax)) return true;
+  }
+  return false;
+}
+
+/**
+ * Whether an access.md's FRONTMATTER says the file is private: its `read`
+ * denies `everyone` and names nobody but people — the shape the personal
+ * template seeds (`deny everyone` and the owner), and what a person writes
+ * to keep a plugin to a few named colleagues. A role or group beside the
+ * denial is a roster, not a private list; no frontmatter, or a `read` that
+ * never mentions `everyone`, is not a statement of privacy at all (what such
+ * a file admits is whatever the folder above it says). The frontmatter
+ * alone is read on purpose: it is the block a reader sees first and the one
+ * the Library's "Private" mark reflects, so the mark and the file agree.
+ */
+export function isPrivateAccessMd(text: string): boolean {
+  const own = parseOwnAccessEntries(text);
+  if (!own) return false;
+  const deniesEveryone = (e: ParsedEntry) => e.kind === 'role' && e.deny && e.role === EVERYONE_CANONICAL;
+  if (!own.read.some(deniesEveryone)) return false;
+  return own.read.every((e) => deniesEveryone(e) || (e.kind === 'user' && !e.deny));
+}
+
+/**
+ * Parse the access verbs a node file declares in its own YAML frontmatter.
+ * Returns the per-verb entry lists, or null when the file has no frontmatter
+ * or declares no access verb at all.
+ *
+ * Forgiving by design — a node's frontmatter legitimately carries non-access
+ * keys (notably `nodeType:`), so unknown keys are ignored, and a malformed
+ * entry is dropped rather than failing the file. A typo in a node's `owner:`
+ * must never make the node unreadable; it just doesn't grant anything.
+ */
+export function parseOwnAccessEntries(text: string): OwnEntries | null {
+  const fm = extractFrontmatter(text);
+  if (!fm.ok) return null;
+  const root = ownEntriesRoot(fm.frontmatter);
+  if (root == null || typeof root !== 'object' || Array.isArray(root)) return null;
+
+  const entries = emptyEntries();
+  let sawVerb = false;
+  for (const [key, value] of Object.entries(root as Record<string, YamlValue>)) {
+    if (!KNOWN_VERBS_SET.has(key)) continue; // ignore nodeType, etc.
+    // Accept both the list form (`owner:\n  - A\n  - B`) and the convenience
+    // single-value scalar form (`owner: Test <test@test.com>`) — the latter
+    // is the natural way to name one owner in a node's own frontmatter.
+    // Anything else (a mapping, null) is malformed → skip forgivingly.
+    let raws: YamlValue[];
+    if (Array.isArray(value)) raws = value;
+    else if (typeof value === 'string' && value.trim()) raws = [value];
+    else continue;
+    const verb = key as Verb;
+    const list: ParsedEntry[] = [];
+    for (const raw of raws) {
+      const result = parseAccessEntry(raw);
+      if (result.ok) list.push(result.entry);
+    }
+    entries[verb] = list;
+    sawVerb = true;
+  }
+  return sawVerb ? entries : null;
+}
+
+/**
+ * Whether a node file's frontmatter could be READ at all, which
+ * {@link parseOwnAccessEntries} does not say: its null covers a file with no
+ * frontmatter, one that names no access verb, and one whose frontmatter is
+ * broken, and only the last of those is a failure to read.
+ *
+ * Readable: no frontmatter block at all (the file grants nothing), or a
+ * block that parses to a mapping. Not readable: a block that is never
+ * closed, or one that does not parse to a mapping. For a caller that must
+ * not take "could not tell" for "grants nothing".
+ */
+export function ownAccessReadable(text: string): boolean {
+  const scan = scanFrontmatter(text);
+  if (scan.kind === 'none') return true;
+  if (scan.kind === 'unterminated') return false;
+  const block = scan.fm.join('\n');
+  // An empty block says nothing, and says it readably.
+  if (!block.trim()) return true;
+  const root = ownEntriesRoot(block);
+  return root != null && typeof root === 'object' && !Array.isArray(root);
+}

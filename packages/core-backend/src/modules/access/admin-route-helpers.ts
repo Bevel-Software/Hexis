@@ -1,0 +1,55 @@
+/**
+ * SHARED route plumbing for the access-family routers (access.routes,
+ * groups-admin.routes) — one error shape, one input-coercion rule, so the two
+ * surfaces can't drift apart again.
+ *
+ * Error shape: a sub-500 `VersionControlDomainError` renders as its own status +
+ * message + payload; everything else — a raw error OR a 500-status domain
+ * error (e.g. AccessMutationService wraps unexpected raw errors in a 500
+ * AccessMutationError, message included) — is an INTERNAL error: logged
+ * server-side in full, answered with a generic message. A raw `err.message`
+ * must never leak through a 500 (it can carry fs/db paths and internals the
+ * caller has no business seeing).
+ */
+
+import type express from 'express';
+import { logger } from '../../shared/logging.js';
+import { VersionControlDomainError } from '../../shared/domain-errors.js';
+import { domainErrorBody } from '../../shared/http-errors.js';
+
+/** One error shape for every access-family route. */
+export function toHttpError(
+  err: unknown,
+  logTag: string,
+): { status: number; body: Record<string, unknown> } {
+  if (err instanceof VersionControlDomainError && err.status < 500) {
+    return { status: err.status, body: domainErrorBody(err) };
+  }
+  logger(logTag).error('route failure:', { err });
+  const status = err instanceof VersionControlDomainError ? err.status : 500;
+  return { status, body: { error: 'Internal error.' } };
+}
+
+/** Answer `res` with the shared error shape. */
+export function sendError(res: express.Response, err: unknown, logTag: string): void {
+  const { status, body } = toHttpError(err, logTag);
+  res.status(status).json(body);
+}
+
+/**
+ * Coerce a request-body field that must be a non-empty string. Rejects arrays,
+ * objects, numbers, null — anything `String()` would silently stringify into a
+ * bogus principal name / email (`[object Object]`, `"a,b"`) — with a 400
+ * instead of persisting garbage. Returns the raw string (untrimmed by default
+ * — services trim; pass `trim: true` where the route owns normalization).
+ */
+export function requireNonEmptyString(
+  value: unknown,
+  field: string,
+  opts?: { trim?: boolean },
+): string {
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw new VersionControlDomainError(`${field} must be a non-empty string`, 400);
+  }
+  return opts?.trim ? value.trim() : value;
+}

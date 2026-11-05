@@ -1,52 +1,209 @@
 import {
-  AGENTS_DIR,
-  DATA_DIR,
   KNOWLEDGE_BASE_DIR,
-  PIPELINES_DIR,
-  PLUGINS_DIR,
+  currentKbLayout,
+  reservedRootDirNames,
   type FileTreeEntry,
 } from '@bevel-software/platform-shared';
 import type { PendingEntry } from '../state/workspace.context';
+import { isAccessRulesFile as isAccessRulesPath } from './display-file-name';
 
 // RESERVED is not the same as CREATED (see kb-layout.ts): core only seeds
-// KnowledgeBase/ and Plugins/, but every reserved name renders as its own root
-// when present — a distribution that owns the execution layer seeds Data/,
-// Agents/ and Pipelines/, and a KB that has them must not see them folded
-// into Knowledge as stray content.
-export const KB_ROOT_DIRS = new Set([
-  KNOWLEDGE_BASE_DIR,
-  DATA_DIR,
-  AGENTS_DIR,
-  PIPELINES_DIR,
-  PLUGINS_DIR,
-]);
+// KnowledgeBase/, Skills/ and Plugins/, but every reserved name renders as its
+// own root when present — a distribution that owns the execution layer seeds
+// Data/, Agents/ and Workflows/, and a KB that has them must not see them
+// folded into Knowledge as stray content. A function, not a module-scope set:
+// three of the names are configurable and arrive after this module loads.
+export const KB_ROOT_DIRS = {
+  has: (name: string): boolean => reservedRootDirNames(currentKbLayout()).has(name),
+};
 
 /**
- * Descend past the workspace / KB-clone wrapper levels to the node that holds
- * the well-known KB root dirs (`KnowledgeBase/`, `Data/`, `Agents/`, …), or
- * null when the tree predates the split. Shared by the explorer's sectioning
- * and registry-contributed explorer items (e.g. the enterprise Graph view).
+ * The repository checkout inside the workspace tree: the direct child of the
+ * workspace root named by the deployment (`workspace.kbDirName`, which the
+ * bootstrap response already carries), or null when it is not there.
+ *
+ * A LOOKUP, not a search. This used to descend the tree until it met a node
+ * whose children included a well-known root name (`KnowledgeBase/`,
+ * `Plugins/`, …) — which is a guess, and on core-staging it guessed the
+ * WORKSPACE ROOT, because a stray `KnowledgeBase/` had been written beside
+ * the checkout. Every sidebar then read that directory: the stray became
+ * "Knowledge", the real checkout was folded in beneath it as ordinary
+ * content, and the Skills tree found no `Skills/` at all. The deployment
+ * NAMES the folder, so nothing has to be inferred from what happens to sit
+ * next to it.
+ *
+ * Null is an answer, not a cue to look elsewhere: the caller shows the
+ * empty-workspace state rather than rendering some other directory's
+ * contents (see `CHECKOUT_MISSING_MESSAGE`).
  */
-export function findKbRoot(node: FileTreeEntry | null): FileTreeEntry | null {
-  if (!node?.children) return null;
-  const holdsSplit = node.children.some(
-    (c) => c.type === 'directory' && KB_ROOT_DIRS.has(c.name),
-  );
-  if (holdsSplit) return node;
-  for (const child of node.children) {
-    if (child.type === 'directory') {
-      const found = findKbRoot(child);
-      if (found) return found;
-    }
-  }
-  return null;
+export function checkoutRoot(
+  tree: FileTreeEntry | null,
+  kbDirName: string | null,
+): FileTreeEntry | null {
+  if (!tree?.children || !kbDirName) return null;
+  return tree.children.find((c) => c.type === 'directory' && c.name === kbDirName) ?? null;
 }
 
-function findEntryByPath(tree: FileTreeEntry | null, relativePath: string): FileTreeEntry | null {
+/**
+ * Whether the tree shows the caller anything of the knowledge base at all.
+ * What does not count: the reserved root folders themselves (every knowledge
+ * base has them, and the server keeps them visible even to a reader who may
+ * open nothing inside), and the root `.bevelignore` every reader sees in a
+ * knowledge base nobody has written to yet. Anything else — a file, or a
+ * folder, at any depth — is an entry on screen.
+ *
+ * Read from the checkout down, like every other surface. A workspace whose
+ * checkout is missing shows nothing, whatever else was written beside it.
+ *
+ * `hiddenRoot` names the top-level folders the tree does not show (the roots
+ * an app claims, `AppDef.roots`): nothing in them is on screen here.
+ */
+export function treeHasVisibleEntries(
+  tree: FileTreeEntry | null,
+  kbDirName: string | null,
+  hiddenRoot: (name: string) => boolean = () => false,
+): boolean {
+  const kbRoot = checkoutRoot(tree, kbDirName);
+  if (!kbRoot) return false;
+  return (kbRoot.children ?? []).some((c) => {
+    if (c.type === 'file') return c.name !== '.bevelignore';
+    if (hiddenRoot(c.name)) return false;
+    return !KB_ROOT_DIRS.has(c.name) || (c.children?.length ?? 0) > 0;
+  });
+}
+
+/**
+ * Whether ONE root of the tree — the folder at `rootPath` — shows anything.
+ * The Library renders `Skills/` and `Plugins/` as trees of their own, and each
+ * is empty on its own terms: a knowledge base full of notes still has an
+ * empty Skills tree, and the notice that says so belongs to that tree. A root
+ * that is not in the listing at all shows nothing.
+ */
+export function subtreeHasVisibleEntries(tree: FileTreeEntry | null, rootPath: string): boolean {
+  const root = findEntryByPath(tree, rootPath);
+  return (root?.children ?? []).some((c) => c.type !== 'file' || c.name !== '.bevelignore');
+}
+
+/**
+ * How many entries the caller's read rules kept out of ONE folder's subtree —
+ * the folder's own `withheld`, which the server sets per directory. 0 for a
+ * folder the listing does not have, or one nothing was kept out of.
+ */
+export function subtreeWithheld(tree: FileTreeEntry | null, rootPath: string): number {
+  return findEntryByPath(tree, rootPath)?.withheld ?? 0;
+}
+
+/** Documents, as opposed to the data, config and archives beside them. */
+const READABLE_PAGE = /\.(md|markdown)$/i;
+
+/**
+ * An `access.md` is a document by extension only: it is a folder's
+ * access-control rules, and it sits INSIDE the knowledge tree (every plugin
+ * and any governed folder carries one), so the root-file exclusion below
+ * never reaches it. Nobody opens a knowledge base to read who may edit it.
+ */
+const isAccessRulesFile = (entry: FileTreeEntry): boolean => isAccessRulesPath(entry.relativePath);
+
+/**
+ * Pages worth offering to someone who has nothing open: the documents nearest
+ * the top of the knowledge tree, breadth-first, so the opening suggestion is a
+ * section heading rather than the fifth file inside the first folder.
+ *
+ * Scoped to exactly what the explorer browses under "Knowledge" — see
+ * `knowledgeFiles` for what that scope is and why.
+ *
+ * Fewer than `limit` — including none at all — is a legitimate answer for a
+ * knowledge base that is still empty; the caller says so rather than padding.
+ */
+export function suggestedPages(
+  tree: FileTreeEntry | null,
+  kbDirName: string | null,
+  limit: number,
+): FileTreeEntry[] {
+  return walkKnowledge(tree, kbDirName, (entry) => READABLE_PAGE.test(entry.name), limit);
+}
+
+/**
+ * Every file the explorer browses under "Knowledge", breadth-first — what the
+ * toolbar's search palette finds pages by name in. Not only documents: a
+ * spreadsheet or a PDF has a row in the explorer, and a search that could not
+ * find what the tree beside it shows would read as a broken search. The same
+ * exclusions as `suggestedPages` apply, because they are about what the
+ * explorer is FOR rather than about file types.
+ *
+ * Scoped to the CHECKOUT: `KnowledgeBase/` plus any content folder beside it
+ * inside `<kbDirName>/`. `Plugins/` is the Skills & Tools app's storage and is
+ * not a browsing destination here, and the loose files at the checkout root
+ * (`access.md`, `roles.yaml`) are how the deployment is configured, not
+ * something to read. A clone that predates the split has no named roots at
+ * all, so its whole checkout is the knowledge — including the loose files at
+ * its root, which in that layout are pages rather than configuration. A
+ * workspace with no checkout in it has nothing to offer.
+ */
+export function knowledgeFiles(tree: FileTreeEntry | null, kbDirName: string | null): FileTreeEntry[] {
+  return walkKnowledge(tree, kbDirName, () => true, Infinity);
+}
+
+/**
+ * The walk both of the above share: breadth-first from the knowledge roots,
+ * stopping once `limit` files have been accepted. Dot-prefixed entries,
+ * `access.md` files and folders named after a reserved root are skipped at
+ * every depth before `accept` is asked.
+ */
+function walkKnowledge(
+  tree: FileTreeEntry | null,
+  kbDirName: string | null,
+  accept: (file: FileTreeEntry) => boolean,
+  limit: number,
+): FileTreeEntry[] {
+  const kbRoot = checkoutRoot(tree, kbDirName);
+  const split = kbRoot?.children?.some((c) => c.type === 'directory' && KB_ROOT_DIRS.has(c.name));
+  const roots = !kbRoot
+    ? []
+    : split
+      ? [
+          ...(kbRoot.children ?? []).filter((c) => c.type === 'directory' && c.name === KNOWLEDGE_BASE_DIR),
+          ...(kbRoot.children ?? []).filter((c) => c.type === 'directory' && !KB_ROOT_DIRS.has(c.name)),
+        ]
+      : [kbRoot];
+
+  const pages: FileTreeEntry[] = [];
+  let level = roots;
+  while (level.length > 0 && pages.length < limit) {
+    const next: FileTreeEntry[] = [];
+    for (const entry of level) {
+      // Enough pages is enough work: without this, the last level scanned is
+      // walked to its end — every remaining sibling tested and pushed — for
+      // pages the final slice would throw away.
+      if (pages.length >= limit) break;
+      // Dot-prefixed entries are the repository's own bookkeeping.
+      if (entry.name.startsWith('.')) continue;
+      if (entry.type === 'file') {
+        if (!isAccessRulesFile(entry) && accept(entry)) pages.push(entry);
+      } else if (level === roots || !KB_ROOT_DIRS.has(entry.name)) {
+        // Below the roots, the reserved SET decides — not two names: a folder
+        // named after any reserved root, at any depth, is the same kind of
+        // thing the root selection above keeps out. The roots themselves are
+        // the selection's own answer (Knowledge is a reserved name too).
+        next.push(...(entry.children ?? []));
+      }
+    }
+    level = next;
+  }
+  return pages.slice(0, limit);
+}
+
+/**
+ * The entry at exactly `relativePath` (a file or a folder), or null when the
+ * tree has none. It descends only into the folder on the path: an entry's
+ * path is its folder's plus its own name, so no other subtree can hold it,
+ * and a caller asking on every render does not walk the whole checkout.
+ */
+export function findEntryByPath(tree: FileTreeEntry | null, relativePath: string): FileTreeEntry | null {
   if (!tree) return null;
   if (tree.relativePath === relativePath) return tree;
-  if (tree.children) {
-    for (const child of tree.children) {
+  for (const child of tree.children ?? []) {
+    if (relativePath === child.relativePath || relativePath.startsWith(`${child.relativePath}/`)) {
       const found = findEntryByPath(child, relativePath);
       if (found) return found;
     }
@@ -56,6 +213,28 @@ function findEntryByPath(tree: FileTreeEntry | null, relativePath: string): File
 
 export function pathExistsInTree(tree: FileTreeEntry | null, relativePath: string): boolean {
   return findEntryByPath(tree, relativePath) !== null;
+}
+
+/**
+ * Return the tree without one exact workspace-relative path. Reuses untouched
+ * branches so a caller can apply it on every render without cloning the whole
+ * file tree when the server has already filtered the path.
+ */
+export function omitPathFromTree(
+  tree: FileTreeEntry | null,
+  relativePath: string,
+): FileTreeEntry | null {
+  if (!tree || tree.relativePath === relativePath) return null;
+  if (!tree.children) return tree;
+
+  let changed = false;
+  const children: FileTreeEntry[] = [];
+  for (const child of tree.children) {
+    const visible = omitPathFromTree(child, relativePath);
+    if (visible !== child) changed = true;
+    if (visible) children.push(visible);
+  }
+  return changed ? { ...tree, children } : tree;
 }
 
 function collectFilesByBasename(tree: FileTreeEntry | null, basename: string, acc: string[]): void {
@@ -94,10 +273,9 @@ export function mergePendingIntoTree(
 ): FileTreeEntry {
   if (pending.size === 0) return tree;
 
+  // A spread, so what the server set on a folder (`withheld`) survives the copy.
   const cloneNode = (node: FileTreeEntry): FileTreeEntry => ({
-    name: node.name,
-    relativePath: node.relativePath,
-    type: node.type,
+    ...node,
     children: node.children ? node.children.map(cloneNode) : undefined,
   });
   const root = cloneNode(tree);

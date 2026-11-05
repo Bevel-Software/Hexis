@@ -2,10 +2,43 @@ import type { ISessionSink } from '../modules/workspace/session-sink.js';
 import type {
   ISystemNoticeSink,
   RecoveryAgentRunner,
-} from '../modules/workflow/pending-commits.worker.js';
+} from '../modules/version-control/pending-commits.worker.js';
 import type { ILlmUsageMeter } from '../modules/tool-auth/llm-usage-meter.js';
 import type { AuthProviderPlugin } from '../modules/auth/auth.routes.js';
 import type { IErasureParticipant } from '../modules/auth/account-erasure.service.js';
+import type { IAccountAdmission } from '../modules/auth/account-admission.js';
+import type { IWriteAccess } from '../modules/write-access/write-access.js';
+import type { OnServerStart } from '../modules/workspace/startup/on-server-start.js';
+import type { AgentGuideHook } from '../modules/agent-guide/agent-guide.js';
+import type { IAgentScopeResolver } from '../modules/agent-scope/index.js';
+import type { EmbedNodeIdResolver } from '../modules/embed/embed.interface.js';
+import type { ManagedSignInPort } from '../modules/secrets-vault/secrets-vault.contract.js';
+import type { IWorkspaceService } from '@bevel-software/platform-shared';
+import type { IAccessControl } from '../modules/access/index.js';
+import type { KbContext } from '../shared/kb-context.js';
+import type { ITreeWalker } from '../shared/fs.contract.js';
+import type { IPluginLinkIndex } from '../modules/plugins/index.js';
+
+/**
+ * The core services a distribution's agent-scope resolver reads through,
+ * handed to `CorePorts.agentScope` when core makes it: the clones of the
+ * branches, the person's read gate, the branch model and knowledge-base
+ * layout, the disk walk that finds its configurations, and the plugin link
+ * index that says which plugins a `plugins:`-style entry stands for.
+ *
+ * Each is the service's CONTRACT, not its class: a resolver written against
+ * these runs on any implementation of them — core's own services in a
+ * deployment, a stand-in in a distribution's tests — and a resolver that
+ * needs more than a contract offers asks for the contract to grow, not for
+ * the class.
+ */
+export interface AgentScopeCollaborators {
+  workspaceService: IWorkspaceService;
+  accessControl: IAccessControl;
+  kb: KbContext;
+  disk: ITreeWalker;
+  pluginLinkIndex: IPluginLinkIndex;
+}
 
 /**
  * Every seam the enterprise overlay can fill in the CORE composition
@@ -32,10 +65,15 @@ import type { IErasureParticipant } from '../modules/auth/account-erasure.servic
  *   enterprise root overwrites the `CoreServices` fields (or pushes into the
  *   `authProviders` array) after construction, before the server is built.
  *
- * (Commit-time KB validation and the ontology write block are NOT ports:
- * they are workflow lifecycle HOOKS the enterprise root registers on
- * `workflowService.hooks` after construction — see
- * `modules/workflow/workflow-hooks.ts`.)
+ * - REQUEST-TIME seams (`managedSignIns`, the third of the three patterns): seeded onto `CoreServices` the same
+ *   way, but the routes that use it read the field on every request rather
+ *   than at mount, so the enterprise root may assign it at any point after
+ *   construction — even after the server is listening.
+ *
+ * (Commit-time KB validation and the agent read/write hooks are NOT ports:
+ * they are version-control lifecycle HOOKS the enterprise root registers on
+ * `versionControlService.hooks` after construction — see
+ * `modules/version-control/version-control-hooks.ts`.)
  */
 export interface CorePorts {
   /**
@@ -91,6 +129,82 @@ export interface CorePorts {
    * should arrive carrying READMEs.
    */
   kbExtraRootDirs?: readonly string[];
+  /**
+   * Steps THIS distribution appends to the KB startup phase, run after core's
+   * own steps in array order (see `startup/on-server-start.ts` for the
+   * contract each step signs up to). Core default: `[]`.
+   */
+  kbStartupSteps?: readonly OnServerStart[];
+  /**
+   * THIS distribution's say over the agent guide — the text `get_agent_guide`
+   * and a `read_file` of the guide's name serve. Called with core's sections
+   * and the layout in effect on every composition; returns the sections the
+   * guide is made of, so a distribution appends its own, replaces one of
+   * core's by id, or drops one, and every change core makes to the rest still
+   * reaches it. Core default: core's sections as they are. See
+   * `modules/agent-guide`.
+   */
+  agentGuide?: AgentGuideHook;
+  /**
+   * THIS distribution's agent configurations: what "Connect as" offers beside
+   * Everything, and what a connection made as one of them loads (see
+   * `modules/agent-scope`). Core owns the mechanism and no configuration —
+   * the file kind, where it lives and what its definition says are the
+   * distribution's, as the file kinds registered for access verbs are. A
+   * factory, since a resolver reads through core services that exist only
+   * once core is built: called ONCE, during construction, with those
+   * services (`AgentScopeCollaborators`), and its answer is the one resolver
+   * every surface consults from then on — the tool contexts, which capture it
+   * at construction, as much as the routes the server mounts later. Core
+   * default: `noAgentConfigurations()` — nothing is offered, and a connection
+   * recorded as some path loads nothing, never Everything.
+   */
+  agentScope?: (core: AgentScopeCollaborators) => IAgentScopeResolver;
+  /**
+   * Mirror this composition's branch model and knowledge-base layout onto the
+   * shared package's PROCESS-WIDE live bindings (`DEFAULT_BRANCH`,
+   * `PLUGINS_DIR`, …), for an overlay that still reads them. Core itself
+   * reads only `CoreServices.kb`. Default true, so an overlay behaves as it
+   * did; a host that serves several knowledge bases in one process passes
+   * false, since there is no single value to put there.
+   */
+  mirrorSharedBindings?: boolean;
+  /**
+   * Whether a NEW account may be provisioned, asked before the row is
+   * inserted on every path that creates one (a first SSO sign-in, an admin
+   * creating an account, the owner's bootstrap sign-in, an embed identity).
+   * Core default: everyone is admitted. A host that sells seats answers
+   * from its plan; a refusal carries the port's own words to the person or
+   * admin who asked. See `modules/auth/account-admission.ts`.
+   */
+  accountAdmission?: IAccountAdmission;
+  /**
+   * Whether the deployment may be changed right now. Asked before every
+   * mutating route (bar the ones that sign people in, manage accounts or
+   * configure the deployment) and every write tool. Core default: always.
+   * A host that sells seats answers no while more accounts are on than its
+   * plan allows, so the workspace is read-only until an admin fixes it. See
+   * `modules/write-access/write-access.ts`.
+   */
+  writeAccess?: IWriteAccess;
+  /**
+   * How an embed reference that is a bare NODE ID (`/workspace/<branch>/<id>`,
+   * the app's copy-link form) becomes the repository path it names. Core has
+   * no node graph, so core refuses such a reference; a distribution with one
+   * answers from it, and the Atlassian connector's links to nodes mint as
+   * they did when that distribution served the embed itself. Returns null
+   * for an id that names nothing. See `modules/embed/embed.interface.ts`.
+   */
+  embedNodeIdResolver?: EmbedNodeIdResolver;
+  /**
+   * The distribution's side of a MANAGED sign-in (a `.tool` sign-in whose
+   * `oauth` block names a platform connector): what the Connect page shows
+   * for it and how a sign-in through the broker is opened. Core default:
+   * none, so such a sign-in is listed as waiting on the deployment. Also
+   * settable after construction (`CoreServices.managedSignIns`), like the
+   * session sink. See `modules/secrets-vault/secrets-vault.contract.ts`.
+   */
+  managedSignIns?: ManagedSignInPort;
 }
 
 /**

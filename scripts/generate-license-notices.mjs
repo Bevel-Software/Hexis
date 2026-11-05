@@ -57,7 +57,7 @@ const TARGETS = [
  * what a dual-licensed package elects, so it runs fewest-obligations first.
  */
 const ALLOWED = [
-  'MIT', '0BSD', 'Unlicense', 'CC0-1.0', 'BlueOak-1.0.0', 'ISC',
+  'MIT', 'MIT-0', '0BSD', 'Unlicense', 'CC0-1.0', 'BlueOak-1.0.0', 'ISC',
   'BSD-2-Clause', 'BSD-3-Clause', 'BSD', 'Zlib', 'Apache-2.0',
   'Python-2.0', 'AFL-2.1', 'CC-BY-4.0', 'MPL-2.0',
 ];

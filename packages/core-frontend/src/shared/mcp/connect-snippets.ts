@@ -29,6 +29,25 @@
 const MCP_PATH = '/api/mcp';
 
 /**
+ * What this workspace is called when it shows up in an agent's server list.
+ * Two spellings of one name, because the two places it goes have different
+ * rules:
+ *
+ * - {@link MCP_DISPLAY_NAME} is for humans: the connector name claude.ai
+ *   shows, and what someone types into ChatGPT's "Create" dialog. Spaces and
+ *   punctuation are fine there.
+ * - {@link MCP_SERVER_KEY} is for config files: the `mcpServers` key and the
+ *   `claude mcp add <name>` argument. Clients derive identifiers from it —
+ *   Claude Code names every tool `mcp__<server>__<tool>` — so it has to be a
+ *   plain slug. The same key serves the hosted endpoint and the local server:
+ *   they are one workspace, and nobody adds both to one client.
+ *
+ * Everything below spells the name through these two; nothing re-types it.
+ */
+export const MCP_DISPLAY_NAME = 'Skills, Tools and Knowledge';
+export const MCP_SERVER_KEY = 'skills-tools-knowledge';
+
+/**
  * The deployment's own answer, from `GET /api/config`. Module-global because
  * it is a property of the deployment rather than of any component, and it is
  * settled once during boot — the same shape as the branch model next door.
@@ -279,9 +298,9 @@ function isPrivateIpv6(bracketed: string): boolean {
  */
 export function connectorName(mcpUrl: string): string {
   try {
-    return `Hexis — ${new URL(mcpUrl).host}`;
+    return `${MCP_DISPLAY_NAME} — ${new URL(mcpUrl).host}`;
   } catch {
-    return 'Hexis';
+    return MCP_DISPLAY_NAME;
   }
 }
 
@@ -308,6 +327,27 @@ export function claudeInstallUrl(mcpUrl: string, name: string): string {
   return `${CLAUDE_ADD_CONNECTOR}?${params}`;
 }
 
+/**
+ * ChatGPT's settings — the root, not a pane inside it.
+ *
+ * This used to point at `#settings/Connectors`, the old "Apps & Connectors"
+ * pane. ChatGPT has since renamed that page Plugins, and people who followed
+ * that link and the old steps could not find their way. A pane anchor names a
+ * page ChatGPT can rename again without notice; the settings root is the one
+ * that survives, and the numbered steps beside the button (see
+ * `AGENT_CLIENTS`) start from exactly there and name both page names.
+ *
+ * Unlike Claude, ChatGPT publishes no install link: there is no query
+ * parameter that prefills a connector's name or URL. So this is a shortcut
+ * into settings and nothing more — the person still types the name and
+ * pastes the endpoint, which is why every surface that offers this link shows
+ * both right beside it. Settings is a hash route, so it takes no parameters
+ * and there is nothing to encode.
+ */
+export function chatgptInstallUrl(): string {
+  return 'https://chatgpt.com/#settings';
+}
+
 /* ------------------------------------------------------------------ *
  * The snippets themselves. One builder per client, each taking the URL
  * so no caller ever re-derives it, and an optional bearer token for the
@@ -326,7 +366,7 @@ function escapeForDoubleQuotes(value: string): string {
 
 /** The `claude mcp add` one-liner, with the key appended when there is one. */
 export function claudeCodeCommand(mcpUrl: string, bearer?: string): string {
-  const base = `claude mcp add --transport http knowledge-base ${mcpUrl}`;
+  const base = `claude mcp add --transport http ${MCP_SERVER_KEY} ${mcpUrl}`;
   return bearer ? `${base} --header "Authorization: Bearer ${escapeForDoubleQuotes(bearer)}"` : base;
 }
 
@@ -335,7 +375,7 @@ export function jsonConfigSnippet(mcpUrl: string, bearer?: string): string {
   return JSON.stringify(
     {
       mcpServers: {
-        'knowledge-base': {
+        [MCP_SERVER_KEY]: {
           type: 'http',
           url: mcpUrl,
           ...(bearer ? { headers: { Authorization: `Bearer ${bearer}` } } : {}),
@@ -350,4 +390,83 @@ export function jsonConfigSnippet(mcpUrl: string, bearer?: string): string {
 /** Langdock wants the URL and the header spelled out as separate fields. */
 export function langdockSnippet(mcpUrl: string, bearer: string): string {
   return `URL: ${mcpUrl}\nHeader name: Authorization\nHeader value: Bearer ${bearer}`;
+}
+
+/* ------------------------------------------------------------------ *
+ * The LOCAL server (`npx @bevel-software/hexis-mcp@latest`): the same workspace
+ * as a stdio server on the member's own machine, which is the only place
+ * a plugin's local-only tools — stdio servers, localhost services — can
+ * run. It serves everything the hosted endpoint serves plus those. It
+ * authenticates either interactively — keyless, opening the person's own
+ * browser to sign in on first run — or autonomously with a connection
+ * key, for pipelines with nobody present to sign in.
+ * ------------------------------------------------------------------ */
+
+/**
+ * The base URL to hand the local server — deliberately NOT `mcpEndpointUrl`.
+ *
+ * `hexis-mcp` takes the WORKSPACE's address, not the MCP endpoint: it asks
+ * `GET <base>/api/config` for the real endpoint itself, the same field
+ * `configureMcpUrl` records up top. So what it needs is a base the config
+ * endpoint answers on — and the one address the browser has PROVEN serves
+ * this whole app, config endpoint included, is its own origin, because it
+ * loaded this page from it. The configured `mcpUrl` proves less: it may sit
+ * on a proxy domain that forwards only the MCP path.
+ */
+export function workspaceBaseUrl(): string {
+  return window.location.origin;
+}
+
+/**
+ * The JSON block that runs the workspace as a LOCAL MCP server. Read by the
+ * same clients as `jsonConfigSnippet` — Claude Desktop, Cursor, Windsurf,
+ * Cline, anything that loads servers from a JSON config — but the entry
+ * spawns `npx @bevel-software/hexis-mcp@latest` instead of pointing at the
+ * hosted endpoint, so the command needs Node on the machine.
+ *
+ * Without a bearer there is NO key field at all: keyless is the interactive
+ * mode, where the server opens the person's browser to sign in on first run
+ * (the same OAuth flow the hosted endpoint puts web agents through). The
+ * bearer variant exists for the key-reveal modal, whose reader is setting up
+ * an autonomous pipeline that cannot open a browser.
+ */
+export function hexisMcpJsonSnippet(baseUrl: string, bearer?: string): string {
+  return JSON.stringify(
+    {
+      mcpServers: {
+        [MCP_SERVER_KEY]: {
+          command: 'npx',
+          // `@latest`, spelled out: a bare name lets npx reuse whatever
+          // version its cache holds, and a machine that first ran the server
+          // before agents were named kept signing in as "hexis-mcp on <host>".
+          args: ['-y', '@bevel-software/hexis-mcp@latest'],
+          env: {
+            HEXIS_URL: baseUrl,
+            ...(bearer ? { HEXIS_CONNECTION_KEY: bearer } : {}),
+          },
+        },
+      },
+    },
+    null,
+    2,
+  );
+}
+
+/**
+ * The `claude mcp add` one-liner for the local server. A stdio command, not
+ * a URL, so the address (and the key, when the autonomous variant carries
+ * one) travel as `--env` values — interpolated inside double quotes and
+ * escaped, exactly as the header is in `claudeCodeCommand`. Today's values
+ * are tame (a tenant-prefixed key, an https URL), but a URL can legally
+ * carry `$` or backtick, and quoting only the value that looks dangerous is
+ * how the other one bites later. Keyless = interactive sign-in, same as
+ * {@link hexisMcpJsonSnippet}.
+ */
+export function hexisMcpClaudeCommand(baseUrl: string, bearer?: string): string {
+  return (
+    `claude mcp add ${MCP_SERVER_KEY}` +
+    ` --env HEXIS_URL="${escapeForDoubleQuotes(baseUrl)}"` +
+    (bearer ? ` --env HEXIS_CONNECTION_KEY="${escapeForDoubleQuotes(bearer)}"` : '') +
+    ` -- npx -y @bevel-software/hexis-mcp@latest`
+  );
 }

@@ -1,13 +1,17 @@
 import type { Server as HttpServer } from 'node:http';
 import express from 'express';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ToolRegistry } from '../../tool-registry/tool-registry.js';
-import { InternalTokenService } from '../../tool-auth/internal-token.service.js';
-import { createToolAuthMiddleware } from '../../tool-auth/tool-auth.middleware.js';
-import { createToolContextResolver } from '../../tool-helpers/tool-context.js';
-import { createToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
+import { ToolRegistry } from '../../tool-registry/index.js';
+import {
+  InternalTokenService,
+  createToolAuthMiddleware,
+  createToolContextResolver,
+  createToolHandlerFactory,
+} from '../../../__tests__/tool-wiring.js';
 import { registerToolManualsTools } from '../tool-manuals.tools.js';
 import type { IToolManualService } from '../tool-manuals.contract.js';
+import { testKbContext } from '../../../__tests__/kb-context.js';
+import type { HiddenTool, HiddenToolSource } from '../../../shared/hidden-tools.js';
 
 /**
  * `list_tool_setup` MUST respect the same access controls as every other tool
@@ -30,7 +34,10 @@ const BOB = { id: 'user-bob', email: 'bob@x.com', name: 'Bob' };
 const CATALOG = [
   {
     slug: 'weather',
-    name: 'weather',
+    // The catalog NAME differs from the slug on purpose: the hidden-tool
+    // source is keyed by name, and a lookup keyed by slug would pass a
+    // fixture where the two are the same string.
+    name: 'Weather Service',
     path: 'Plugins/weather.tool',
     type: 'mcp' as const,
     setup: { kind: 'oauth-manual' as const, reason: 'no dynamic client registration' },
@@ -45,11 +52,28 @@ const CATALOG = [
   },
 ];
 
+// Alice's plugin holds a `.tool` the scan refused; Bob can't read that file.
+const REFUSED = [
+  { path: 'Plugins/Sales/broken.tool', reason: 'Nested mappings are not allowed in compact mappings (line 4, column 3)' },
+];
+
 const toolManualService = {
   listAccessible: vi.fn(async (email: string) =>
     email === ALICE.email ? CATALOG : CATALOG.filter((m) => m.slug === 'weather'),
   ),
+  // Both halves out of one call — the listing has no way to ask for them
+  // separately, and so no way to describe two different snapshots.
+  listAccessibleCatalog: vi.fn(async (email: string) => ({
+    tools: email === ALICE.email ? CATALOG : CATALOG.filter((m) => m.slug === 'weather'),
+    invalid: email === ALICE.email ? REFUSED : [],
+  })),
   listLocalOnly: async () => [],
+  // Alice declared `crm` on her draft; nothing else is pending anywhere.
+  listDeclaredOnlyOnBranch: vi.fn(async (email: string, branch: string) =>
+    email === ALICE.email && branch === 'alice/add-crm'
+      ? [{ name: 'crm', path: 'Plugins/Sales/mcp.json', type: 'mcp' as const }]
+      : [],
+  ),
 } as unknown as IToolManualService;
 
 const accessControl = {
@@ -75,7 +99,16 @@ const externalApiKeyService = {
     t === 'bevel_alice' ? { user: ALICE, tokenId: 'tok-a' } : t === 'bevel_bob' ? { user: BOB, tokenId: 'tok-b' } : null,
 } as never;
 
-async function start(): Promise<string> {
+/** What the proxy's schema check found for `weather`, when a test wires one in. */
+const HIDDEN_WEATHER_TOOL: HiddenTool = {
+  manual: 'Weather Service',
+  name: 'weather_srv_forecast',
+  path: '/properties/value/anyOf/0/required/0',
+  reason: 'must be a string',
+  marker: 'Hidden from agents: its schema is invalid at /properties/value/anyOf/0/required/0 (must be a string).',
+};
+
+async function start(hiddenTools?: HiddenToolSource): Promise<string> {
   const registry = new ToolRegistry();
   const internalToken = new InternalTokenService({ secret: 'test-secret' });
   const toolAuth = createToolAuthMiddleware(externalApiKeyService, internalToken);
@@ -84,7 +117,7 @@ async function start(): Promise<string> {
       getUserById: async (id: string) => (id === ALICE.id ? ALICE : id === BOB.id ? BOB : null),
     } as never,
     workspaceService: { getWorkspacePath: async () => '/tmp/ws' } as never,
-    workflowService: {} as never,
+    versionControlService: {} as never,
     events: {} as never,
     kbDirName: 'knowledge-base',
     creatorAccess: { planForCreate: async () => null, grantInExtractedFile: async () => null, noteAccessFileWritten: () => {} },
@@ -97,6 +130,8 @@ async function start(): Promise<string> {
   registerToolManualsTools(registry, router, toolAuth, toolHandler, toolManualService, {
     accessControl,
     variableStatus: { statusFor },
+    kb: testKbContext(),
+    hiddenTools,
   });
   app.use('/api', router);
 
@@ -113,11 +148,11 @@ afterEach(async () => {
   vi.clearAllMocks();
 });
 
-const callSetup = (base: string, bearer: string) =>
+const callSetup = (base: string, bearer: string, body: Record<string, unknown> = {}) =>
   fetch(`${base}/api/agent/tools/list_tool_setup`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', authorization: `Bearer ${bearer}` },
-    body: JSON.stringify({}),
+    body: JSON.stringify(body),
   });
 
 describe('list_tool_setup — access controls resolved for the caller', () => {
@@ -139,9 +174,83 @@ describe('list_tool_setup — access controls resolved for the caller', () => {
     // Bob can't read billing — it must be absent, not just canWrite=false.
     expect(bob.tools.map((t) => t.slug)).toEqual(['weather']);
     expect(bob.tools[0].canWrite).toBe(false);
-    // Status was resolved for BOB's user id, not leaked from Alice's.
-    expect(statusFor).toHaveBeenLastCalledWith(BOB.id, ['weather_SHARED_KEY']);
+    // Status was resolved for BOB's user id, not leaked from Alice's — under
+    // the key the vault derives from the manual's NAME (`Weather Service`:
+    // the space becomes `_`, every `_` is doubled, then the variable).
+    expect(statusFor).toHaveBeenLastCalledWith(BOB.id, ['Weather__Service_SHARED_KEY']);
     expect(bob.tools[0].variables[0].userConfigured).toBe(false);
+  });
+
+  it('names the `.tool` files the scan refused, resolved for the caller', async () => {
+    const base = await start();
+
+    const alice = (await (await callSetup(base, 'bevel_alice')).json()) as {
+      tools: { slug: string }[];
+      invalid: { path: string; reason: string }[];
+    };
+    // The refusal costs that file and nothing else: the catalog is whole...
+    expect(alice.tools.map((t) => t.slug).sort()).toEqual(['billing', 'weather']);
+    // ...and the one file that did not make it is named, with why and where.
+    expect(alice.invalid).toEqual(REFUSED);
+    expect(toolManualService.listAccessibleCatalog).toHaveBeenCalledWith(ALICE.email);
+
+    // Bob can't read that file, so he is not told it exists — the same
+    // default-deny the catalog itself applies.
+    const bob = (await (await callSetup(base, 'bevel_bob')).json()) as { invalid: unknown[] };
+    expect(bob.invalid).toEqual([]);
+  });
+
+  it('marks a tool hidden for an invalid schema, to the caller who may manage the server', async () => {
+    const base = await start({
+      hiddenFor: (manual) => (manual === 'Weather Service' ? [HIDDEN_WEATHER_TOOL] : []),
+    });
+
+    const alice = (await (await callSetup(base, 'bevel_alice')).json()) as {
+      tools: { slug: string; hiddenTools: HiddenTool[] }[];
+    };
+    // Alice writes `weather`, so she is the one who can get the schema fixed.
+    expect(alice.tools.find((t) => t.slug === 'weather')!.hiddenTools).toEqual([HIDDEN_WEATHER_TOOL]);
+    // The marker names the tool, the place and the reason, in one sentence.
+    expect(alice.tools.find((t) => t.slug === 'weather')!.hiddenTools[0].marker).toBe(
+      'Hidden from agents: its schema is invalid at /properties/value/anyOf/0/required/0 (must be a string).',
+    );
+    // Nothing is wrong with `billing`, which Alice cannot write anyway.
+    expect(alice.tools.find((t) => t.slug === 'billing')!.hiddenTools).toEqual([]);
+
+    // Bob READS `weather` and cannot write it: the marker is not his to see.
+    // He has no way to fix the schema, and the hidden tool is simply not among
+    // the ones he can call.
+    const bob = (await (await callSetup(base, 'bevel_bob')).json()) as {
+      tools: { slug: string; hiddenTools: HiddenTool[] }[];
+    };
+    expect(bob.tools.map((t) => t.slug)).toEqual(['weather']);
+    expect(bob.tools[0].hiddenTools).toEqual([]);
+  });
+
+  it('reports no hidden tool on a deployment with no MCP surface at all — no source wired', async () => {
+    const base = await start(); // no source wired, as a deployment without the proxy
+    const alice = (await (await callSetup(base, 'bevel_alice')).json()) as {
+      tools: { slug: string; hiddenTools: HiddenTool[] }[];
+    };
+    for (const tool of alice.tools) expect(tool.hiddenTools).toEqual([]);
+  });
+
+  it('reports no hidden tool to a manager whose server is healthy, or has not loaded yet — source wired, nothing found', async () => {
+    // The distinct case from the one above: the proxy IS there and has nothing
+    // against `weather`, which Alice manages. `[]` is the finding, not the
+    // absence of a finder.
+    const hiddenFor = vi.fn((): HiddenTool[] => []);
+    const base = await start({ hiddenFor });
+    const alice = (await (await callSetup(base, 'bevel_alice')).json()) as {
+      tools: { slug: string; canWrite: boolean; hiddenTools: HiddenTool[] }[];
+    };
+    const weather = alice.tools.find((t) => t.slug === 'weather')!;
+    expect(weather.canWrite).toBe(true);
+    expect(weather.hiddenTools).toEqual([]);
+    // Asked by the manual's catalog NAME, which is how the proxy knows it —
+    // not by its slug — and the answer came from the source.
+    expect(hiddenFor).toHaveBeenCalledWith('Weather Service');
+    expect(hiddenFor).not.toHaveBeenCalledWith('weather');
   });
 
   it('rejects an unauthenticated call outright', async () => {
@@ -152,5 +261,205 @@ describe('list_tool_setup — access controls resolved for the caller', () => {
       body: JSON.stringify({}),
     });
     expect(res.status).toBe(401);
+  });
+});
+
+describe('list_tool_setup — a declaration that lives on a draft says so', () => {
+  it('names the tools declared on the given branch that the default branch does not serve yet', async () => {
+    const base = await start();
+    const res = await callSetup(base, 'bevel_alice', { branch: 'alice/add-crm' });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      tools: { slug: string }[];
+      onBranchOnly: { name: string; path: string; branch: string }[];
+      note?: string;
+    };
+    // Resolved for the caller, on the branch they named.
+    expect(toolManualService.listDeclaredOnlyOnBranch).toHaveBeenCalledWith(ALICE.email, 'alice/add-crm', undefined);
+    // The released catalog is unchanged — the draft's server is not in it...
+    expect(body.tools.map((t) => t.slug)).not.toContain('crm');
+    // ...and the agent is told where it is and what makes it live.
+    expect(body.onBranchOnly).toEqual([
+      { name: 'crm', path: 'Plugins/Sales/mcp.json', type: 'mcp', branch: 'alice/add-crm' },
+    ]);
+    expect(body.note).toContain('`alice/add-crm` only');
+    expect(body.note).toContain('open_change_request');
+  });
+
+  it('defaults to the in-app agent’s focused branch when no branch is given', async () => {
+    const base = await start();
+    // The in-process agent's loopback token carries the branch its workspace is on.
+    const agentToken = new InternalTokenService({ secret: 'test-secret' }).mint({
+      userId: ALICE.id,
+      focusedBranch: 'alice/add-crm',
+    });
+    const res = await callSetup(base, agentToken);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { onBranchOnly: { name: string; branch: string }[]; note?: string };
+    expect(toolManualService.listDeclaredOnlyOnBranch).toHaveBeenCalledWith(ALICE.email, 'alice/add-crm', undefined);
+    expect(body.onBranchOnly).toEqual([
+      { name: 'crm', path: 'Plugins/Sales/mcp.json', type: 'mcp', branch: 'alice/add-crm' },
+    ]);
+    expect(body.note).toContain('`alice/add-crm` only');
+  });
+
+  it('prefers an explicit branch over the focused one', async () => {
+    const base = await start();
+    const agentToken = new InternalTokenService({ secret: 'test-secret' }).mint({
+      userId: ALICE.id,
+      focusedBranch: 'alice/other-draft',
+    });
+    const body = (await (await callSetup(base, agentToken, { branch: 'alice/add-crm' })).json()) as {
+      onBranchOnly: { name: string }[];
+    };
+    expect(toolManualService.listDeclaredOnlyOnBranch).toHaveBeenCalledTimes(1);
+    expect(toolManualService.listDeclaredOnlyOnBranch).toHaveBeenCalledWith(ALICE.email, 'alice/add-crm', undefined);
+    expect(body.onBranchOnly.map((p) => p.name)).toEqual(['crm']);
+  });
+
+  it('carries the refused files on the branch answer too', async () => {
+    const base = await start();
+    const body = (await (await callSetup(base, 'bevel_alice', { branch: 'alice/add-crm' })).json()) as {
+      invalid: { path: string }[];
+      onBranchOnly: unknown[];
+      note?: string;
+    };
+    // The two halves are independent: a pending draft declaration must not
+    // displace the report of a file the released catalog refused.
+    expect(body.invalid.map((i) => i.path)).toEqual(['Plugins/Sales/broken.tool']);
+    expect(body.onBranchOnly).toHaveLength(1);
+    expect(body.note).toBeTruthy();
+  });
+
+  it('reports nothing pending, and no note, without a branch', async () => {
+    const base = await start();
+    const body = (await (await callSetup(base, 'bevel_alice')).json()) as { onBranchOnly: unknown[]; note?: string };
+    expect(body.onBranchOnly).toEqual([]);
+    expect(body.note).toBeUndefined();
+    expect(toolManualService.listDeclaredOnlyOnBranch).not.toHaveBeenCalled();
+  });
+});
+
+describe('list_tool_setup — a tool that needs the caller’s own value says so', () => {
+  const TICKETS = {
+    slug: 'ticketdesk',
+    name: 'ticketdesk',
+    path: 'Plugins/Support/ticketdesk.tool',
+    type: 'http' as const,
+    variables: [{ name: 'TICKETDESK_TOKEN', scope: 'user' as const, label: null }],
+  };
+
+  it('tells a caller without their own value where to set it, and to reconnect', async () => {
+    const base = await start();
+    vi.mocked(toolManualService.listAccessibleCatalog).mockResolvedValueOnce({ tools: [TICKETS], invalid: [] } as never);
+    // Bob has configured nothing (see `statusFor`).
+    const body = (await (await callSetup(base, 'bevel_bob')).json()) as { note?: string };
+    expect(body.note).toContain('`ticketdesk` needs your own value or sign-in');
+    expect(body.note).toContain('Connect page, never in the chat');
+    expect(body.note).toContain('reconnect your assistant');
+  });
+
+  it('says nothing to a caller who has set theirs', async () => {
+    const base = await start();
+    vi.mocked(toolManualService.listAccessibleCatalog).mockResolvedValueOnce({ tools: [TICKETS], invalid: [] } as never);
+    const body = (await (await callSetup(base, 'bevel_alice')).json()) as { note?: string };
+    expect(body.note).toBeUndefined();
+  });
+
+  const SIGN_IN = {
+    ...TICKETS,
+    variables: [{ name: 'TICKETDESK_OAUTH', scope: 'user' as const, label: null, oauth: { scopes: ['tickets'] } }],
+  };
+
+  /** The owner's side of a sign-in: a provider row of the OAuth kind. */
+  const ownerSignedUp = { adminConfigured: true, adminKind: 'oauth' as const };
+
+  /** A managed connector enabled as ONE workspace connection: the sign-in sits on an `admin` variable. */
+  const SHARED_SIGN_IN = {
+    ...TICKETS,
+    variables: [
+      {
+        name: 'ACCESS_TOKEN',
+        scope: 'admin' as const,
+        label: 'Ticketdesk sign-in',
+        oauth: { scopes: ['tickets'], managed: { connectorId: 'ticketdesk', scopeSet: 'read' } },
+      },
+    ],
+  };
+
+  it('a workspace connection is authorized only while the owner’s token covers the declared scopes, and names its connector', async () => {
+    const base = await start();
+    const authorizedOf = async (status: Record<string, unknown>) => {
+      vi.mocked(toolManualService.listAccessibleCatalog).mockResolvedValueOnce({ tools: [SHARED_SIGN_IN], invalid: [] } as never);
+      statusFor.mockImplementationOnce(async (_userId: string, keys: string[]) =>
+        keys.map((key) => ({ key, adminConfigured: true, adminKind: 'oauth' as const, userConfigured: false, ...status })),
+      );
+      const body = (await (await callSetup(base, 'bevel_bob')).json()) as {
+        tools: { variables: { authorized: boolean | null; managed?: unknown }[] }[];
+      };
+      return body.tools[0].variables[0];
+    };
+    // Connected by an owner, but before the tool asked for `tickets`.
+    expect((await authorizedOf({ adminAuthorized: true, adminGrantedScopes: 'profile' })).authorized).toBe(false);
+    // Connected with a covering token: everyone's, Bob's included.
+    const connected = await authorizedOf({ adminAuthorized: true, adminGrantedScopes: 'profile tickets' });
+    expect(connected.authorized).toBe(true);
+    expect(connected.managed).toEqual({ connectorId: 'ticketdesk', scopeSet: 'read' });
+    // Nobody has connected it yet.
+    expect((await authorizedOf({ adminAuthorized: false })).authorized).toBe(false);
+  });
+
+  it('tells a caller to sign in once the owner has set the sign-in up', async () => {
+    const base = await start();
+    vi.mocked(toolManualService.listAccessibleCatalog).mockResolvedValueOnce({ tools: [SIGN_IN], invalid: [] } as never);
+    statusFor.mockImplementationOnce(async (_userId: string, keys: string[]) =>
+      keys.map((key) => ({ key, ...ownerSignedUp, userConfigured: false })),
+    );
+    const body = (await (await callSetup(base, 'bevel_bob')).json()) as { note?: string };
+    expect(body.note).toContain('`ticketdesk` needs your own value or sign-in');
+  });
+
+  it('names a tool the proxy hides for a stale credential: the wrong kind, or a sign-in short of a scope', async () => {
+    const base = await start();
+    // A row left from when the variable was a plain key.
+    vi.mocked(toolManualService.listAccessibleCatalog).mockResolvedValueOnce({ tools: [SIGN_IN], invalid: [] } as never);
+    statusFor.mockImplementationOnce(async (_userId: string, keys: string[]) =>
+      keys.map((key) => ({ key, ...ownerSignedUp, userConfigured: true, userKind: 'static' as const })),
+    );
+    expect(((await (await callSetup(base, 'bevel_bob')).json()) as { note?: string }).note).toContain('`ticketdesk` needs your own value or sign-in');
+    // Signed in, but before the tool asked for `tickets`.
+    vi.mocked(toolManualService.listAccessibleCatalog).mockResolvedValueOnce({ tools: [SIGN_IN], invalid: [] } as never);
+    statusFor.mockImplementationOnce(async (_userId: string, keys: string[]) =>
+      keys.map((key) => ({ key, ...ownerSignedUp, userConfigured: true, userKind: 'oauth' as const, userAuthorized: true, grantedScopes: 'profile' })),
+    );
+    expect(((await (await callSetup(base, 'bevel_bob')).json()) as { note?: string }).note).toContain('`ticketdesk` needs your own value or sign-in');
+    // Signed in with the scope: nothing to say.
+    vi.mocked(toolManualService.listAccessibleCatalog).mockResolvedValueOnce({ tools: [SIGN_IN], invalid: [] } as never);
+    statusFor.mockImplementationOnce(async (_userId: string, keys: string[]) =>
+      keys.map((key) => ({ key, ...ownerSignedUp, userConfigured: true, userKind: 'oauth' as const, userAuthorized: true, grantedScopes: 'tickets' })),
+    );
+    expect(((await (await callSetup(base, 'bevel_bob')).json()) as { note?: string }).note).toBeUndefined();
+  });
+
+  it('does not send a caller to sign in before the owner has set the sign-in up', async () => {
+    const base = await start();
+    vi.mocked(toolManualService.listAccessibleCatalog).mockResolvedValueOnce({ tools: [SIGN_IN], invalid: [] } as never);
+    statusFor.mockImplementationOnce(async (_userId: string, keys: string[]) =>
+      keys.map((key) => ({ key, adminConfigured: false, userConfigured: false })),
+    );
+    const body = (await (await callSetup(base, 'bevel_bob')).json()) as { note?: string };
+    expect(body.note).toBeUndefined();
+  });
+
+  it('does not send a caller to sign in on a shared key left from when the variable was static', async () => {
+    const base = await start();
+    // The owner turned a plain key into a sign-in; the old shared row is still
+    // there, so `adminConfigured` is true, but it is no provider to sign in to.
+    vi.mocked(toolManualService.listAccessibleCatalog).mockResolvedValueOnce({ tools: [SIGN_IN], invalid: [] } as never);
+    statusFor.mockImplementationOnce(async (_userId: string, keys: string[]) =>
+      keys.map((key) => ({ key, adminConfigured: true, adminKind: 'static' as const, userConfigured: false })),
+    );
+    const body = (await (await callSetup(base, 'bevel_bob')).json()) as { note?: string };
+    expect(body.note).toBeUndefined();
   });
 });

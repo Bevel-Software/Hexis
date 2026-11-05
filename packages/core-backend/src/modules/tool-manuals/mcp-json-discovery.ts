@@ -2,9 +2,12 @@ import {
   HEXIS_EXTENSION_NS,
   PLUGIN_MCP_FILE,
   PLUGIN_MANIFEST_FILE,
-  PLUGINS_DIR,
+  type KbLayout,
 } from '@bevel-software/platform-shared';
 import type { ToolManualDescriptor, ToolVariable } from './tool-manuals.contract.js';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('tool-manuals');
 import { assertSafeFetchUrl } from '../../shared/ssrf.js';
 import { RESERVED_VARIABLE_NAMES, findReservedVariableRef } from '../../shared/variable-refs.js';
 
@@ -87,65 +90,117 @@ const SERVER_NAME_RE = /^[a-z0-9][a-z0-9_-]*$/;
  * silently vanishes from the catalog the moment its edit lands.
  */
 export function validatedVariables(raw: unknown): ToolVariable[] | null {
-  if (raw === undefined) return [];
-  if (!Array.isArray(raw)) return null;
+  const verdict = judgeVariables(raw);
+  return verdict.ok ? verdict.variables : null;
+}
+
+/**
+ * {@link validatedVariables} with the reason a declaration was refused. The
+ * reason locates the entry by its position (`` `variables[2] ``), never by
+ * the name it declared or any other value the author wrote — the `.tool`
+ * parser's discipline (`describeManualFault`): passing `[A-Za-z0-9_]+` makes
+ * a string a legal identifier, not one this process may repeat. The reason
+ * reaches logs and, for a sign-in start on the server, the person signing in.
+ */
+function judgeVariables(
+  raw: unknown,
+): { ok: true; variables: ToolVariable[] } | { ok: false; reason: string } {
+  const no = (reason: string) => ({ ok: false as const, reason });
+  if (raw === undefined) return { ok: true, variables: [] };
+  if (!Array.isArray(raw)) return no('`variables` must be a list');
   const out: ToolVariable[] = [];
   const declared = new Set<string>();
-  for (const entry of raw) {
-    if (!isRecord(entry)) return null;
-    if (typeof entry.name !== 'string' || !/^[A-Za-z0-9_]+$/.test(entry.name)) return null;
+  for (const [i, entry] of raw.entries()) {
+    const at = `\`variables[${i}]`;
+    if (!isRecord(entry)) return no(`${at}\` must be an object`);
+    if (typeof entry.name !== 'string' || !/^[A-Za-z0-9_]+$/.test(entry.name)) {
+      return no(`${at}.name\` must match [A-Za-z0-9_]+`);
+    }
     // The `.tool` parser's declaration rules, at this file's grain: a
     // platform-seeded name may not be re-declared (it would shadow the
     // seeding), and a duplicate would make later scope resolution depend on
     // declaration order.
-    if (RESERVED_VARIABLE_NAMES.includes(entry.name) || declared.has(entry.name)) return null;
+    if (RESERVED_VARIABLE_NAMES.includes(entry.name)) return no(`${at}.name\` is reserved for platform seeding`);
+    if (declared.has(entry.name)) return no(`${at}.name\` duplicates an earlier entry's`);
     declared.add(entry.name);
     const scope = entry.scope ?? 'admin';
-    if (scope !== 'admin' && scope !== 'user') return null;
+    if (scope !== 'admin' && scope !== 'user') return no(`${at}.scope\` must be \`admin\` or \`user\``);
     let oauth: ToolVariable['oauth'];
     if (entry.oauth !== undefined) {
       // OAuth is inherently per-caller (same rule the `.tool` parser
       // enforces): an admin-shared OAuth token would leak one user's token
-      // to all callers. The provider config's required halves must be there
-      // — a sign-in wired to a missing URL is a declaration, not a feature.
-      if (!isRecord(entry.oauth) || scope !== 'user') return null;
+      // to all callers.
+      if (!isRecord(entry.oauth)) return no(`${at}.oauth\` must be an object`);
+      if (scope !== 'user') return no(`${at}\` has \`oauth\`, so its \`scope\` must be \`user\``);
       const o = entry.oauth;
+      // Confidential material never loads from a file, on either declaration
+      // surface: the `.tool` parser throws on these keys, and silently
+      // dropping one here would leave a plugin.json carrying a secret that
+      // "worked" — the file is portable package data, readable by every
+      // client that loads the plugin.
+      if (o.clientSecret !== undefined || o.client_secret !== undefined || o.secret !== undefined) {
+        return no(`${at}.oauth\` may not carry a client secret — it is set through the protected client-secret route`);
+      }
       // `clientId` is trimmed and must be non-empty, exactly as the `.tool`
       // parser requires: a whitespace-only value would pass discovery and
       // then fail the owner's client-secret setup with "clientId is
       // required" — an error at the wrong surface, long after the save.
-      if (
-        typeof o.authorizationUrl !== 'string' ||
-        typeof o.tokenUrl !== 'string' ||
-        typeof o.clientId !== 'string' ||
-        !o.clientId.trim()
-      ) {
-        return null;
+      if (typeof o.clientId !== 'string' || !o.clientId.trim()) return no(`${at}.oauth.clientId\` is required`);
+      // The endpoints are OPTIONAL here, unlike in a `.tool`: an MCP server
+      // publishes its authorization-server metadata, so a declaration that
+      // names only the client id is completed at scan time. Both or neither
+      // — one URL without the other is a half-declaration, not a feature.
+      // An empty string counts as absent (the editor's cleared field).
+      const optionalUrl = (v: unknown): string | undefined | null => {
+        if (v === undefined || v === null) return undefined;
+        if (typeof v !== 'string') return null;
+        const trimmed = v.trim();
+        return trimmed ? trimmed : undefined;
+      };
+      const authorizationUrl = optionalUrl(o.authorizationUrl);
+      const tokenUrl = optionalUrl(o.tokenUrl);
+      const resource = optionalUrl(o.resource);
+      if (authorizationUrl === null || tokenUrl === null || resource === null) {
+        return no(`${at}.oauth\` URLs must be strings`);
+      }
+      if ((authorizationUrl === undefined) !== (tokenUrl === undefined)) {
+        return no(`${at}.oauth\` must declare both \`authorizationUrl\` and \`tokenUrl\`, or neither`);
       }
       // The same https + SSRF gate the `.tool` parser runs on these URLs: a
       // sign-in or token exchange aimed at an internal host is a declaration
-      // this surface must refuse exactly like the other one does.
+      // this surface must refuse exactly like the other one does. `resource`
+      // is never fetched, but it names the remote server — same bar.
       try {
-        assertSafeFetchUrl(o.authorizationUrl, { requireHttps: true, label: `${entry.name} oauth.authorizationUrl` });
-        assertSafeFetchUrl(o.tokenUrl, { requireHttps: true, label: `${entry.name} oauth.tokenUrl` });
-      } catch {
-        return null;
+        if (authorizationUrl !== undefined) {
+          assertSafeFetchUrl(authorizationUrl, { requireHttps: true, label: `${at}.oauth.authorizationUrl\`` });
+          assertSafeFetchUrl(tokenUrl!, { requireHttps: true, label: `${at}.oauth.tokenUrl\`` });
+        }
+        if (resource !== undefined) {
+          assertSafeFetchUrl(resource, { requireHttps: true, label: `${at}.oauth.resource\`` });
+        }
+      } catch (err) {
+        // `assertSafeFetchUrl` names the field and the rule, never the URL.
+        return no(err instanceof Error ? err.message : `${at}.oauth\` has an invalid URL`);
       }
       // Forwarded verbatim as query params later — a non-string value here is
       // a malformed declaration, not something to coerce.
       if (o.authParams !== undefined) {
         if (!isRecord(o.authParams) || !Object.values(o.authParams).every((v) => typeof v === 'string')) {
-          return null;
+          return no(`${at}.oauth.authParams\` must be an object of string values`);
         }
       }
+      // PKCE is on unless the declaration says `false`; anything else there is
+      // a malformed flag, not a preference.
+      if (o.pkce !== undefined && typeof o.pkce !== 'boolean') return no(`${at}.oauth.pkce\` must be a boolean`);
       oauth = {
-        authorizationUrl: o.authorizationUrl,
-        tokenUrl: o.tokenUrl,
+        ...(authorizationUrl !== undefined ? { authorizationUrl, tokenUrl: tokenUrl! } : {}),
         clientId: o.clientId.trim(),
         ...(Array.isArray(o.scopes) && o.scopes.every((s) => typeof s === 'string')
           ? { scopes: o.scopes as string[] }
           : {}),
         ...(o.authParams !== undefined ? { authParams: o.authParams as Record<string, string> } : {}),
+        ...(o.pkce === false ? { pkce: false } : {}),
+        ...(resource !== undefined ? { resource } : {}),
       };
     }
     out.push({
@@ -155,7 +210,7 @@ export function validatedVariables(raw: unknown): ToolVariable[] | null {
       ...(oauth ? { oauth } : {}),
     });
   }
-  return out;
+  return { ok: true, variables: out };
 }
 
 /**
@@ -171,16 +226,139 @@ export function validatedVariables(raw: unknown): ToolVariable[] | null {
  * materialization is a later phase — so a stdio server relying on them will
  * fail to spawn until then; bare-command servers (`npx …`) work today.
  */
+/**
+ * The ONE judgement of an `mcp.json` server entry — its name and its
+ * transport — shared by the manual scanner (which layers the platform's
+ * extension data and its reachability gate on top), the bundle dialect's
+ * registry (whose configs become entries) and the marketplace compiler
+ * (which ships only what a client could run). An entry that fails here fails
+ * everywhere, for one reason; an entry that passes is returned NORMALISED to
+ * the portable shape every consumer emits.
+ */
+export type McpEntryVerdict =
+  | { ok: true; transport: 'stdio'; entry: PortableStdioEntry }
+  | { ok: true; transport: 'streamable-http'; entry: PortableHttpEntry }
+  | { ok: false; reason: string };
+
+/** A stdio server as a client launches it — every field already the type the launcher needs. */
+export interface PortableStdioEntry {
+  type: 'stdio';
+  command: string;
+  args: string[];
+  env?: Record<string, string>;
+  cwd?: string;
+}
+/** An http server as a client dials it — an endpoint, never a credential. */
+export interface PortableHttpEntry {
+  type: 'streamable-http';
+  url: string;
+  headers?: Record<string, string>;
+}
+
+/**
+ * A record whose every value is a string, or null — no coercion, no cast.
+ * Built without a prototype: the keys are HTTP header and environment
+ * variable names, and a plain object would silently swallow one spelled
+ * `__proto__` (a prototype assignment, not a property) — every accepted key
+ * must come out the other side.
+ */
+function stringMap(v: unknown): Record<string, string> | null {
+  if (!isRecord(v)) return null;
+  const out: Record<string, string> = Object.create(null) as Record<string, string>;
+  for (const [k, val] of Object.entries(v)) {
+    if (typeof val !== 'string') return null;
+    out[k] = val;
+  }
+  return out;
+}
+
+export function judgeMcpServerEntry(name: string, raw: unknown): McpEntryVerdict {
+  // The name rule (lowercase, alphanumeric first) also keeps every object
+  // prototype key — `__proto__`, `constructor` — out of the plain-object
+  // maps consumers build from these names.
+  if (!SERVER_NAME_RE.test(name)) {
+    return {
+      ok: false,
+      reason: 'the name is the secret namespace and route slug, so it must be lowercase alphanumeric with `_`/`-`',
+    };
+  }
+  if (!isRecord(raw) || typeof raw.type !== 'string') return { ok: false, reason: 'no transport type' };
+  if (raw.type === 'stdio') {
+    if (typeof raw.command !== 'string' || raw.command.length === 0) return { ok: false, reason: 'no command' };
+    const entry: PortableStdioEntry = { type: 'stdio', command: raw.command, args: [] };
+    if (raw.args !== undefined) {
+      // A launcher gets the strings it was given, never a stringified object.
+      if (!Array.isArray(raw.args) || !raw.args.every((a) => typeof a === 'string')) {
+        return { ok: false, reason: 'args must be a list of strings' };
+      }
+      entry.args = raw.args;
+    }
+    if (raw.env !== undefined) {
+      const env = stringMap(raw.env);
+      if (env === null) return { ok: false, reason: 'env must be a map of strings' };
+      entry.env = env;
+    }
+    if (raw.cwd !== undefined) {
+      if (typeof raw.cwd !== 'string') return { ok: false, reason: 'cwd must be a string' };
+      entry.cwd = raw.cwd;
+    }
+    return { ok: true, transport: 'stdio', entry };
+  }
+  if (raw.type === 'sse') {
+    // The pinned `@utcp/mcp` speaks `stdio` and streamable `http` — there
+    // is no sse transport in its schema, so a declaration claiming one either
+    // fails validation or, worse, dials a handshake the server does not
+    // speak. Refusing names the fix; silently rebuilding as http used to
+    // configure exactly that wrong handshake.
+    return {
+      ok: false,
+      reason: 'the MCP client has no `sse` transport — declare the server as `streamable-http` if it supports it',
+    };
+  }
+  if (raw.type === 'streamable-http') {
+    if (typeof raw.url !== 'string' || raw.url.length === 0) return { ok: false, reason: 'no url' };
+    let parsed: URL;
+    try {
+      parsed = new URL(raw.url);
+    } catch {
+      return { ok: false, reason: 'url must be http(s)' };
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return { ok: false, reason: 'url must be http(s)' };
+    // A portable entry is an endpoint. A credential belongs in the vault and
+    // reaches a client through the platform, never verbatim in a config that
+    // is compiled into a marketplace and cloned onto every member's machine.
+    if (parsed.username || parsed.password) return { ok: false, reason: 'url must not carry credentials' };
+    const entry: PortableHttpEntry = { type: 'streamable-http', url: raw.url };
+    if (raw.headers !== undefined) {
+      const headers = stringMap(raw.headers);
+      if (headers === null) return { ok: false, reason: 'headers must be a map of strings' };
+      entry.headers = headers;
+    }
+    return { ok: true, transport: 'streamable-http', entry };
+  }
+  // Unknown transport: the spec says an unknown `type` invalidates the
+  // ENTRY, not the file — the caller skips it and keeps its siblings.
+  return { ok: false, reason: `unknown type "${raw.type}"` };
+}
+
 export function descriptorsFromMcpJson(
   pluginFolder: string,
   mcpJsonText: string,
   pluginJsonText: string | null,
+  layout: KbLayout,
+  /**
+   * Told of every server this file declares and the parse refuses, with the
+   * reason the log line gives. The scan keeps them so a sign-in started on a
+   * refused server answers why, instead of finding nothing by that name.
+   */
+  onRefused?: (server: string, reason: string, path: string) => void,
 ): ToolManualDescriptor[] {
+  const { pluginsDir } = layout;
   let mcp: unknown;
   try {
     mcp = JSON.parse(mcpJsonText);
   } catch {
-    console.warn(`[tool-manuals] ${PLUGINS_DIR}/${pluginFolder}/${PLUGIN_MCP_FILE} is not valid JSON — skipped.`);
+    log.warn(`${pluginsDir}/${pluginFolder}/${PLUGIN_MCP_FILE} is not valid JSON — skipped.`);
     return [];
   }
   if (!isRecord(mcp) || !isRecord(mcp.mcpServers)) return [];
@@ -193,28 +371,28 @@ export function descriptorsFromMcpJson(
       // A broken manifest costs the extension data (auth wiring), not the
       // servers themselves — they are still listed, as the spec's own
       // "invalid components are skipped, valid ones load" posture suggests.
-      console.warn(
-        `[tool-manuals] ${PLUGINS_DIR}/${pluginFolder}/${PLUGIN_MANIFEST_FILE} is not valid JSON — ` +
+      log.warn(
+        `${pluginsDir}/${pluginFolder}/${PLUGIN_MANIFEST_FILE} is not valid JSON — ` +
           'its mcp-server auth/variable declarations are ignored.',
       );
     }
   }
   const extensions = extensionServers(manifest);
-  const mcpJsonPath = `${PLUGINS_DIR}/${pluginFolder}/${PLUGIN_MCP_FILE}`;
+  const mcpJsonPath = `${pluginsDir}/${pluginFolder}/${PLUGIN_MCP_FILE}`;
 
   const out: ToolManualDescriptor[] = [];
-  for (const [name, raw] of Object.entries(mcp.mcpServers)) {
-    if (!SERVER_NAME_RE.test(name)) {
-      console.warn(
-        `[tool-manuals] skipping mcp server "${name}" in ${mcpJsonPath}: the name is the secret ` +
-          'namespace and route slug, so it must be lowercase alphanumeric with `_`/`-`.',
-      );
+  const skip = (name: string, reason: string) => {
+    log.warn(`skipping mcp server "${name}" in ${mcpJsonPath}: ${reason}`);
+    onRefused?.(name, reason, mcpJsonPath);
+  };
+  for (const [name, rawEntry] of Object.entries(mcp.mcpServers)) {
+    const verdict = judgeMcpServerEntry(name, rawEntry);
+    if (!verdict.ok) {
+      skip(name, `${verdict.reason}.`);
       continue;
     }
-    if (!isRecord(raw) || typeof raw.type !== 'string') {
-      console.warn(`[tool-manuals] skipping mcp server "${name}" in ${mcpJsonPath}: no transport type.`);
-      continue;
-    }
+    // Narrowed by the verdict: an entry that passed is a record.
+    const raw = rawEntry as Record<string, unknown>;
     // The extension entry is knowledge-base content too — same zero-trust
     // parse as the rest: a non-object entry reads as "no extension data".
     const ext: HexisMcpServerExtension = isRecord(extensions[name])
@@ -225,22 +403,23 @@ export function descriptorsFromMcpJson(
     // into outbound requests exactly the same way.
     const reserved = referencesReservedVariable({ raw, ext });
     if (reserved !== null) {
-      console.warn(
-        `[tool-manuals] skipping mcp server "${name}" in ${mcpJsonPath}: its declaration (mcp.json ` +
-          `entry or plugin.json extension) references the reserved variable "${reserved}" — API_URL and ` +
-          'CONNECTION_KEY are platform-seeded and may not appear in server declarations.',
+      skip(
+        name,
+        `its declaration (mcp.json entry or plugin.json extension) references the reserved variable "${reserved}" — ` +
+          'API_URL and CONNECTION_KEY are platform-seeded and may not appear in server declarations.',
       );
       continue;
     }
-    const variables = validatedVariables(ext.variables);
-    if (variables === null) {
-      console.warn(
-        `[tool-manuals] skipping mcp server "${name}" in ${mcpJsonPath}: its plugin.json \`variables\` ` +
-          'declaration is malformed — a dropped declaration would silently re-scope a credential, so ' +
-          'the server stays offline until the manifest is fixed.',
+    const judged = judgeVariables(ext.variables);
+    if (!judged.ok) {
+      skip(
+        name,
+        `its plugin.json \`variables\` declaration is malformed (${judged.reason}) — a dropped declaration ` +
+          'would silently re-scope a credential, so the server stays offline until the manifest is fixed.',
       );
       continue;
     }
+    const variables = judged.variables;
     const shared = {
       slug: name,
       name,
@@ -250,79 +429,46 @@ export function descriptorsFromMcpJson(
       ...(variables.length > 0 ? { variables } : {}),
     };
 
-    if (raw.type === 'stdio') {
-      if (typeof raw.command !== 'string' || raw.command.length === 0) {
-        console.warn(`[tool-manuals] skipping stdio server "${name}" in ${mcpJsonPath}: no command.`);
-        continue;
-      }
-      out.push({
-        ...shared,
-        remote: false,
-        stdio: {
-          command: raw.command,
-          args: Array.isArray(raw.args) ? raw.args.map(String) : [],
-          env: isRecord(raw.env) ? (raw.env as Record<string, string>) : undefined,
-          cwd: typeof raw.cwd === 'string' ? raw.cwd : undefined,
-        },
-      });
+    if (verdict.transport === 'stdio') {
+      const { command, args, env, cwd } = verdict.entry;
+      out.push({ ...shared, remote: false, stdio: { command, args, env, cwd } });
       continue;
     }
 
-    if (raw.type === 'streamable-http' || raw.type === 'sse') {
-      if (typeof raw.url !== 'string' || raw.url.length === 0) {
-        console.warn(`[tool-manuals] skipping mcp server "${name}" in ${mcpJsonPath}: no url.`);
-        continue;
-      }
-      // Remote-capable servers get the same SSRF gate `.tool` urls pass —
-      // otherwise mcp.json becomes the way to point the backend at loopback,
-      // private ranges, or the cloud metadata endpoint. A `local: true` entry
-      // is exempt because loopback is exactly what local MEANS, and only the
-      // user's own machine ever dials it.
-      // Scheme first, for EVERYONE: `local: true` exempts a server from the
-      // private-network reachability policy, not from being http(s) at all.
-      let schemeOk = false;
+    const url = verdict.entry.url;
+    // Remote-capable servers get the same SSRF gate `.tool` urls pass —
+    // otherwise mcp.json becomes the way to point the backend at loopback,
+    // private ranges, or the cloud metadata endpoint. A `local: true` entry
+    // is exempt because loopback is exactly what local MEANS, and only the
+    // user's own machine ever dials it. (The scheme itself was judged for
+    // everyone above: `local: true` exempts a server from the reachability
+    // policy, not from being http(s) at all.)
+    if (ext.local !== true) {
       try {
-        const u = new URL(raw.url);
-        schemeOk = u.protocol === 'http:' || u.protocol === 'https:';
-      } catch {
-        schemeOk = false;
-      }
-      if (!schemeOk) {
-        console.warn(`[tool-manuals] skipping mcp server "${name}" in ${mcpJsonPath}: url must be http(s).`);
+        assertSafeFetchUrl(url, { label: `mcp server "${name}" url` });
+      } catch (err) {
+        skip(
+          name,
+          `${err instanceof Error ? err.message : String(err)} (declare it \`local: true\` if it is deliberately private).`,
+        );
         continue;
       }
-      if (ext.local !== true) {
-        try {
-          assertSafeFetchUrl(raw.url, { label: `mcp server "${name}" url` });
-        } catch (err) {
-          console.warn(
-            `[tool-manuals] skipping mcp server "${name}" in ${mcpJsonPath}: ` +
-              `${err instanceof Error ? err.message : String(err)} (declare it \`local: true\` if it is deliberately private).`,
-          );
-          continue;
-        }
-      }
-      // Extension headers (auth, `${VAR}` refs) win over mcp.json's literal
-      // ones on a key collision: the portable file cannot carry a credential,
-      // so when both name the same header the extension is the operative one.
-      // Both sides pass the isRecord gate — spreading a malformed non-object
-      // value (a string, say) would scatter its indices into header keys.
-      const headers = {
-        ...(isRecord(raw.headers) ? (raw.headers as Record<string, string>) : {}),
-        ...(isRecord(ext.headers) ? (ext.headers as Record<string, string>) : {}),
-      };
-      out.push({
-        ...shared,
-        url: raw.url,
-        ...(Object.keys(headers).length > 0 ? { headers } : {}),
-        ...(ext.local === true ? { remote: false } : {}),
-      });
-      continue;
     }
-
-    // Unknown transport: the spec says an unknown `type` invalidates the
-    // ENTRY, not the file — skip it, keep its siblings.
-    console.warn(`[tool-manuals] skipping mcp server "${name}" in ${mcpJsonPath}: unknown type "${raw.type}".`);
+    // Extension headers (auth, `${VAR}` refs) win over mcp.json's literal
+    // ones on a key collision: the portable file cannot carry a credential,
+    // so when both name the same header the extension is the operative one.
+    // Both sides pass the isRecord gate — spreading a malformed non-object
+    // value (a string, say) would scatter its indices into header keys.
+    const headers = {
+      ...(verdict.entry.headers ?? {}),
+      ...(isRecord(ext.headers) ? (ext.headers as Record<string, string>) : {}),
+    };
+    out.push({
+      ...shared,
+      url,
+      ...(Object.keys(headers).length > 0 ? { headers } : {}),
+      ...(ext.local === true ? { remote: false } : {}),
+    });
   }
   return out;
 }

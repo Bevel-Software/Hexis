@@ -1,14 +1,60 @@
 /**
+ * THE fence rule: a line is a frontmatter fence when, whitespace aside, it is
+ * exactly `---`. Forgiving on purpose — an opening fence with a trailing space
+ * or an indented fence is still a fence.
+ *
+ * Every reader in the platform asks this one function. The access model's
+ * line scan always judged fences this way while the splitter below demanded
+ * `---` at column 0, so a file written with a near-miss fence had access
+ * rules that applied while the catalog, the tool manuals and the frontmatter
+ * panel saw no frontmatter at all. One rule, asked everywhere, is what keeps
+ * a file from meaning two things.
+ */
+export function isFrontmatterFence(line: string | undefined): boolean {
+  return line?.trim() === '---';
+}
+
+/**
  * The ONE `---` frontmatter splitter, shared by backend and frontend so no file
- * type grows its own regex. Splits a leading `---`-fenced YAML block from the
- * body; null when the text doesn't open with a fence. Parsing the YAML inside is
- * the caller's concern (the access-control resolver deliberately keeps its own
- * hardened line-based reader — see `modules/access/access-splice.ts`).
+ * type grows its own reader. Splits a leading fenced YAML block from the body;
+ * null when the first line is not a fence or no later line closes it. Fences
+ * are judged by {@link isFrontmatterFence}. Parsing the YAML inside is the
+ * caller's concern (the access model keeps its own line scan, on the same
+ * fence rule, because a splice must put bytes back exactly as it found them).
+ *
+ * `frontmatter` is the raw text between the fence lines and `body` the raw
+ * text after the closing fence's line break, both byte for byte — line
+ * endings included — so a caller that rebuilds the file changes nothing it
+ * did not mean to.
  */
 export function extractFrontmatter(text: string): { frontmatter: string; body: string } | null {
-  const m = text.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
-  if (!m) return null;
-  return { frontmatter: m[1], body: m[2] };
+  // Walk the lines by offset rather than splitting, so both halves can be
+  // sliced out of the original text with their own line endings intact.
+  let start = 0;
+  let lineIndex = 0;
+  let openEnd = -1; // offset just past the opening fence's line break
+  while (start <= text.length) {
+    const nl = text.indexOf('\n', start);
+    const end = nl === -1 ? text.length : nl;
+    const line = text.slice(start, end).replace(/\r$/, '');
+    const next = nl === -1 ? text.length + 1 : nl + 1;
+    if (lineIndex === 0) {
+      // A lone `---` with nothing after it opens nothing.
+      if (!isFrontmatterFence(line) || nl === -1) return null;
+      openEnd = next;
+    } else if (isFrontmatterFence(line)) {
+      // The frontmatter ends before the line break that precedes this fence.
+      const fmEnd = start - (start >= 2 && text[start - 2] === '\r' ? 2 : 1);
+      return {
+        frontmatter: fmEnd > openEnd ? text.slice(openEnd, fmEnd) : '',
+        body: next > text.length ? '' : text.slice(next),
+      };
+    }
+    if (nl === -1) return null; // never closed
+    start = next;
+    lineIndex += 1;
+  }
+  return null;
 }
 
 /**
@@ -37,7 +83,10 @@ export function setFrontmatterField(text: string, key: string, value: string): s
     // No frontmatter — prepend a fresh block, keeping the original body intact.
     return `---${eol}${line}${eol}---${eol}${text}`;
   }
-  const fmLines = fm.frontmatter.split(/\r?\n/);
+  // An empty block has no lines, not one empty line: splitting '' would give
+  // [''], and the inserted key would be followed by a blank line before the
+  // closing fence.
+  const fmLines = fm.frontmatter === '' ? [] : fm.frontmatter.split(/\r?\n/);
   const idx = fmLines.findIndex((l) => keyRe.test(l));
   if (idx >= 0) fmLines[idx] = line;
   else fmLines.unshift(line);

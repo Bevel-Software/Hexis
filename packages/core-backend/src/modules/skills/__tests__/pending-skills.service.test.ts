@@ -1,10 +1,11 @@
 import { describe, test, expect } from 'vitest';
-import type { ChangeRequest, IWorkflowService } from '@bevel-software/platform-shared';
+import { DEFAULT_BRANCH, type ChangeRequest, type IVersionControlService } from '@bevel-software/platform-shared';
 import { PendingSkillsService } from '../pending-skills.service.js';
-import { hashEmail } from '../../../shared/hash-email.js';
+import { hashEmail } from '../../../shared/email-identity.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import type { ISkillService, SkillSummary } from '../skills.contract.js';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 
 /**
  * The half of the catalog that is NOT on the default branch.
@@ -37,7 +38,7 @@ function cr(over: Partial<ChangeRequest> = {}): ChangeRequest {
     author: { login: 'user-abc', name: 'service' },
     appAuthor: { name: 'Ali Raza' },
     branch: 'agent/weekly-newsletter',
-    base: 'main',
+    base: DEFAULT_BRANCH,
     state: 'open',
     createdAt: '2026-08-06T09:00:00.000Z',
     touchedNodePaths: ['Plugins/Engineering/weekly-newsletter/SKILL.md'],
@@ -73,11 +74,11 @@ function harness(opts: {
     listSkills: async () => opts.released ?? [],
   } as unknown as ISkillService;
 
-  const workflow = {
+  const versionControl = {
     listChangeRequests: async () => opts.crs,
-  } as unknown as IWorkflowService;
+  } as unknown as IVersionControlService;
 
-  return new PendingSkillsService(workspaceService, accessControl, skillService, workflow);
+  return new PendingSkillsService(workspaceService, accessControl, skillService, versionControl, testKbContext());
 }
 
 const ADMIN_WRITES = {
@@ -196,20 +197,21 @@ describe('PendingSkillsService', () => {
   });
 
   /**
-   * This hangs off the library's list load. A workflow service that cannot
+   * This hangs off the library's list load. A version-control service that cannot
    * answer must cost the reader an empty review shelf, not their whole library.
    */
   test('degrades to nothing pending when the change requests cannot be listed', async () => {
-    const workflow = {
+    const versionControl = {
       listChangeRequests: async () => {
         throw new Error('offline');
       },
-    } as unknown as IWorkflowService;
+    } as unknown as IVersionControlService;
     const svc = new PendingSkillsService(
       {} as unknown as WorkspaceService,
       {} as unknown as IAccessControl,
       { listSkills: async () => [] } as unknown as ISkillService,
-      workflow,
+      versionControl,
+      testKbContext(),
     );
     await expect(svc.listPendingSkills(AUTHOR)).resolves.toEqual([]);
   });

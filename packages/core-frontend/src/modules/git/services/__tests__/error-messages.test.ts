@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { GitApiError } from '../git.api';
 import {
   friendlyGitError,
+  friendlyGitMessage,
   parseGitError,
   NO_SHARED_HISTORY_KIND,
   NO_SHARED_HISTORY_RECOVERY_PROMPT,
@@ -54,6 +55,35 @@ describe('friendlyGitError: translates raw backend git messages', () => {
     expect(friendlyGitError(err)).toBe('something completely new went wrong');
   });
 
+  it('rewrites the read-before-write refusal to name the folder the person cannot read', () => {
+    // The backend's `AccessDeniedError` with `unreadable` set: the folder a
+    // new file would land in, or the file itself when it exists.
+    const folder = new GitApiError(
+      403,
+      'You don\'t have permission to write to "knowledge-base/KnowledgeBase/Sales/brief.pdf". You don\'t have read access to "KnowledgeBase/Sales"; only what you can read can be created, changed or removed.',
+    );
+    expect(friendlyGitError(folder)).toBe(
+      'You can\'t add or change anything in "KnowledgeBase/Sales" because you don\'t have read access to it. Ask an admin or the folder\'s owners to share it with you first.',
+    );
+    const root = new GitApiError(
+      403,
+      'You don\'t have permission to write to "knowledge-base/notes.md". You don\'t have read access to the top level; only what you can read can be created, changed or removed.',
+    );
+    expect(friendlyGitError(root)).toBe(
+      'You can\'t add or change anything in the top level because you don\'t have read access to it. Ask an admin or the folder\'s owners to share it with you first.',
+    );
+  });
+
+  it('still rewrites the write-grant refusal, which shares the same lead', () => {
+    const err = new GitApiError(
+      403,
+      'You don\'t have permission to write to "knowledge-base/KnowledgeBase/Sales/brief.md". Eligible: Sales; Ana <ana@x.io>.',
+    );
+    expect(friendlyGitError(err)).toBe(
+      'You don\'t have permission to edit "knowledge-base/KnowledgeBase/Sales/brief.md". Editing is restricted to Sales; Ana <ana@x.io>. Ask one of them to make the change, or to broaden access for this folder.',
+    );
+  });
+
   it('rewrites raw "no history in common" CLI errors when pre-flight is bypassed', () => {
     const err = new GitApiError(
       500,
@@ -79,6 +109,72 @@ describe('friendlyGitError: translates raw backend git messages', () => {
     expect(message).not.toMatch(/\bbranch\b/i);
     expect(message).not.toMatch(/\brebase\b/i);
     expect(message).toMatch(/assistant/i);
+  });
+});
+
+describe('friendlyGitMessage: a change request that lands reads as published', () => {
+  it('says a refused apply in publish words, keeping the reasons', () => {
+    expect(
+      friendlyGitMessage(
+        'Merge gate rejected: Waiting on approval for Docs/a.md from Owners.; Ali need to re-approve Docs/b.md after the latest push.',
+      ),
+    ).toBe(
+      "Can't publish this yet. Waiting on approval for Docs/a.md from Owners.; Ali must re-approve Docs/b.md after the latest changes.",
+    );
+  });
+
+  it('keeps every separator where it was, since a reason can carry one of its own', () => {
+    // A role and a named approver on one file are joined by the same `; `
+    // the gate joins its reasons with; splitting on it would read as
+    // "Product Manager Bob".
+    expect(friendlyGitMessage('Merge gate rejected: Waiting on approval for Docs/a.md from Product Manager; Bob.')).toBe(
+      "Can't publish this yet. Waiting on approval for Docs/a.md from Product Manager; Bob.",
+    );
+    expect(friendlyGitMessage('Admin need to re-approve Docs/b.md after the latest push.')).toBe(
+      'Admin must re-approve Docs/b.md after the latest changes.',
+    );
+  });
+
+  it('rewrites the merge outcomes and the bypass refusal', () => {
+    expect(friendlyGitMessage('Merge failed')).toBe("Couldn't publish this change.");
+    expect(friendlyGitMessage('Merge failed: the host refused the write')).toBe(
+      "Couldn't publish this change: the host refused the write",
+    );
+    expect(friendlyGitMessage('This change request has already been merged.')).toBe(
+      'This change request is already published.',
+    );
+    expect(
+      friendlyGitMessage(
+        'Only admins can merge with bypass. You need write access to roles.yaml on the base branch to skip approval warnings.',
+      ),
+    ).toBe('Only an admin can publish a change before everyone has approved it.');
+    expect(friendlyGitMessage('This draft conflicts with the target and needs resolving first.')).toBe(
+      "Files changed after this was proposed, so it can't be published as it is.",
+    );
+  });
+
+  it('never leaves merge or push in what it returns for those messages', () => {
+    for (const raw of [
+      'Merge gate rejected: This pull request has already been merged.',
+      'Merge gate rejected: This pull request has no file changes to approve.',
+      'Ali need to re-approve Docs/b.md after the latest push.',
+    ]) {
+      expect(friendlyGitMessage(raw)).not.toMatch(/merg|push|pull request/i);
+    }
+  });
+
+  it('names who has access, not access.md, when nobody can approve a file', () => {
+    const said = friendlyGitMessage(
+      'No one is eligible to approve this file — broaden the access.md rules covering it first',
+    );
+    expect(said).toBe(
+      'No one can approve this file yet: nobody has edit access to its folder. Ask an admin to change who has access.',
+    );
+    expect(said).not.toContain('access.md');
+  });
+
+  it('is what friendlyGitError says for the same text in an error', () => {
+    expect(friendlyGitError(new GitApiError(422, 'Merge failed'))).toBe("Couldn't publish this change.");
   });
 });
 

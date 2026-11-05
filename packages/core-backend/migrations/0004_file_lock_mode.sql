@@ -1,0 +1,2 @@
+ALTER TABLE "file_locks" ADD COLUMN "mode" text DEFAULT 'edit' NOT NULL;--> statement-breakpoint
+ALTER TABLE "file_locks" ADD CONSTRAINT "file_locks_mode" CHECK ("file_locks"."mode" IN ('edit', 'coordination'));

@@ -1,20 +1,59 @@
+import path from 'node:path';
+import { logger } from '../shared/logging.js';
 import type { AuthProviderPlugin } from '../modules/auth/auth.routes.js';
 import type { AuthUser } from '@bevel-software/platform-shared';
-import {
-  DEFAULT_BRANCH,
-  configureBranchModel,
-  validateBranchModel,
-  PROTECTED_BRANCHES,
-  PLUGINS_DIR,
-} from '@bevel-software/platform-shared';
-import { CoreConfig } from '../core-config.js';
+// The browser-side live bindings, imported here and nowhere else in this
+// package: `mirrorSharedBindings` below keeps them in step with `kb` for an
+// overlay that still reads them. Core's own modules read only `KbContext`.
+// eslint-disable-next-line no-restricted-imports
+import { configureBranchModel, configureKbLayout } from '@bevel-software/platform-shared';
+import type { TenantConfig } from '../core-config.js';
+import { sql } from 'drizzle-orm';
+import { DEFAULT_DB_SCHEMA, assertSearchPath } from '../modules/database/connection.js';
+import { DEFAULT_SECRETS_SCOPE } from '../modules/secrets-vault/secrets-variable-loader.js';
+import { KbContext } from '../shared/kb-context.js';
+import { branchForWorkspaceId } from '../shared/workspace-id.js';
 import { getDb, type Database } from '../modules/database/connection.js';
 import { runCoreMigrations } from '../modules/database/migrate.js';
 import { coreMigrationsDir } from '../assets.js';
 import { WorkspaceService } from '../modules/workspace/workspace.service.js';
+import { KbRepository, repositoryDirFor } from '../modules/workspace/kb-repository.js';
+import type { IKbRepository } from '../modules/workspace/kb-repository.contract.js';
+import { AccountLinkService } from '../modules/embed/account-link.service.js';
+import type { EmbedService } from '../modules/embed/embed.service.js';
+import { composeEmbedService } from './compose-embed.js';
+import { McpAppService, type IMcpAppService } from '../modules/embed/mcp-app.js';
+import { createFileReaderRegistry } from '../modules/workspace/file-readers/file-reader.registry.js';
 import { RoutineWritePolicyService } from '../modules/workspace/routine-write-policy.js';
-import { KbSeedService } from '../modules/workspace/kb-seed.service.js';
-import { DeploymentSettingsService } from '../modules/settings/deployment-settings.service.js';
+import { KbStartupRunner } from '../modules/workspace/startup/kb-startup-runner.js';
+import { GroupsToPluginsStep } from '../modules/workspace/startup/steps/groups-to-plugins.step.js';
+import { PluginDisplayNamesStep } from '../modules/workspace/startup/steps/plugin-display-names.step.js';
+import { PluginManifestsStep } from '../modules/workspace/startup/steps/plugin-manifests.step.js';
+import { PersonalSpacesStep } from '../modules/workspace/startup/steps/personal-spaces.step.js';
+import { TemplateFilesStep } from '../modules/workspace/startup/steps/template-files.step.js';
+import { RolesYamlStep } from '../modules/workspace/startup/steps/roles-yaml.step.js';
+import { buildSeedTree } from '../modules/workspace/startup/steps/seed-tree.js';
+import { DeploymentSettingsService, retireMergedBranchesOn } from '../modules/settings/deployment-settings.service.js';
+import { ToolReadOnlyHints } from '../modules/tool-registry/read-only-hints.js';
+import type { IToolReadOnlyHints } from '../modules/tool-registry/read-only-hints.contract.js';
+import { KbSyncService } from '../modules/kb-sync/kb-sync.service.js';
+import { NodeFs } from '../modules/kb-fs/node-fs.js';
+import { assertKbDirNameFree } from '../modules/kb-fs/repo-path.js';
+import type { IFsProbe, ITreeWalker } from '../shared/fs.contract.js';
+import type { IGitRunner } from '../shared/git.contract.js';
+import { ManagedRepository, MANAGED_DEFAULT_BRANCH } from '../modules/settings/managed-repository.js';
+import { RepositorySource } from '../modules/settings/repository-source.js';
+import { GitHubAppConnection } from '../modules/github-app/index.js';
+import { AdvisoryLease, AdvisoryLock } from '../modules/database/advisory-lock.js';
+import { holdCommitWorkerLease, holdable, withStartupTask, type LeaseLoopHandle } from './lifecycle.js';
+
+/** The hosted MCP endpoint at a deployment address, with any userinfo stripped. */
+function mcpEndpointUrl(publicBackendUrl: string): string {
+  const url = new URL('/api/mcp', publicBackendUrl);
+  url.username = '';
+  url.password = '';
+  return url.toString();
+}
 
 /** `a.com, b.com` → `['a.com','b.com']`, tolerating a leading `@` or `.`. */
 function parseDomainList(raw: string): string[] {
@@ -24,41 +63,100 @@ function parseDomainList(raw: string): string[] {
     .filter((d) => d.length > 0);
 }
 import { SpillStore } from '../modules/workspace/spill-store.js';
+import { TmpSweeper } from '../modules/workspace/workspace-tmp.js';
+import { AgentUploadStore, assertUploadsRootOutsideWorkspaces } from '../modules/workspace/agent-upload.store.js';
+import { AgentDownloadStore, type IAgentDownloadStore } from '../modules/workspace/agent-download.store.js';
+import { createDownloadFetcherIdentifier } from '../modules/workspace/agent-download.routes.js';
+import type { Request } from 'express';
+import {
+  assertRipgrep,
+  DocExtractService,
+  RipgrepPatternMatcher,
+  WorkerDocumentExtractor,
+  type IDocumentExtractor,
+  type IPatternMatcher,
+} from '../modules/workspace/index.js';
 import { UuidSessionSink, type ISessionSink } from '../modules/workspace/session-sink.js';
 import { AuthService } from '../modules/auth/auth.service.js';
+import { AccountHooks, type IAccountHooks } from '../modules/auth/account-hooks.js';
 import { AccountErasureService } from '../modules/auth/account-erasure.service.js';
-import { OidcAuthProvider } from '../modules/auth/oidc-auth-provider.js';
-import { createAuthMiddleware } from '../modules/auth/auth.middleware.js';
-import { AccessControlService } from '../modules/access/access-control.service.js';
+import { OidcAuthProvider, oidcSettingsFrom } from '../modules/auth/oidc-auth-provider.js';
+import { authCookieSecure, createAuthMiddleware, readAuthCookie } from '../modules/auth/auth.middleware.js';
+import { AccessControlService, loadActiveGroups } from '../modules/access/access-control.service.js';
+import { AccessMutationService } from '../modules/access/access-mutation.service.js';
 import { CreatorAccessService } from '../modules/access/creator-access.js';
-import { PendingSkillsService, SkillService } from '../modules/skills/index.js';
-import { ToolManualService } from '../modules/tool-manuals/index.js';
+import { ChangeReadGate } from '../modules/access/change-read-gate.js';
+import { GroupsAdminService } from '../modules/access/groups-admin.service.js';
+import { UserAccessRemovalService } from '../modules/access/user-access-removal.service.js';
+import { makeRolesYamlWriteValidator } from '../modules/access-model/index.js';
+// The implementations, from their files: the module entries offer them as
+// types only, so nothing that imports an entry loads a service.
+import { SkillService } from '../modules/skills/skills.service.js';
+import { PendingSkillsService } from '../modules/skills/pending-skills.service.js';
+import { ToolManualService } from '../modules/tool-manuals/tool-manuals.service.js';
+import { PendingToolsService } from '../modules/tool-manuals/pending-tools.service.js';
 import { McpServerEditService } from '../modules/tool-manuals/mcp-server-edit.service.js';
-import { PluginIndexService, PluginProvisionService, JoinRequestsService } from '../modules/plugins/index.js';
+import { ToolDeleteService } from '../modules/tool-manuals/tool-delete.service.js';
+import {
+  PluginIndexService,
+  pluginFolderBelowRoot,
+  PluginProvisionService,
+  JoinRequestsService,
+  PluginJoinRequestJobs,
+  JoinRequestNotReadyError,
+  DbJoinRequestStore,
+  PluginLinkIndex,
+  PluginLinksService,
+  PluginRenameService,
+  MarketplaceCompilerService,
+  KbPluginSource,
+} from '../modules/plugins/index.js';
+import { noAgentConfigurations, type IAgentScopeResolver } from '../modules/agent-scope/index.js';
+import { MarketplaceRepoService } from '../modules/marketplace/index.js';
+import {
+  GitHubFacadeCredentialsService,
+  GitHubFacade,
+  DbGitHubFacadeCodeStore,
+  DbGitHubFacadeCredentialsStore,
+  CLAUDE_CONSUMER,
+  GITHUB_LINK_KEY_KIND,
+  GITHUB_LINK_KEY_SPEC,
+} from '../modules/marketplace/github-facade/index.js';
 import {
   DbSecretsVaultService,
   McpOAuthDiscoveryService,
+  managedSignInErasure,
   registerBevelSecretsVariableLoader,
+  type ManagedSignInPort,
 } from '../modules/secrets-vault/index.js';
-import { GitService } from '../modules/workflow/git/git.service.js';
-import { PullRequestService } from '../modules/workflow/git/pull-request.service.js';
-import { WorkspaceMutex } from '../modules/workflow/git/mutex.js';
-import { assertGitVersion } from '../modules/workflow/git/git-version.js';
+import { ConnectionProbeService } from '../modules/connection-probe/index.js';
+import { GitService } from '../modules/version-control/git/git.service.js';
+import { NodeGitRunner } from '../modules/version-control/git/node-git-runner.js';
+import { PullRequestService } from '../modules/version-control/git/pull-request.service.js';
+import { WorkspaceIdMutex, WorkspaceMutex } from '../modules/kb-fs/mutex.js';
+import { assertGitVersion } from '../modules/version-control/git/git-version.js';
 import { DiffService } from '../modules/diff/diff.service.js';
-import { ReviewWorkflowService } from '../modules/workflow/review-workflow/review-workflow.service.js';
-import { FileLockService } from '../modules/workflow/file-lock.service.js';
-import { WorkflowEventBus } from '../modules/workflow/event-bus.js';
-import { FileChangeNotifier } from '../modules/workflow/file-change-notifier.js';
-import { WorkflowService } from '../modules/workflow/workflow.service.js';
-import { WorkflowHooks } from '../modules/workflow/workflow-hooks.js';
-import { SessionOntologyService } from '../modules/workflow/session-ontology.service.js';
-import { PendingCommitsService } from '../modules/workflow/pending-commits.service.js';
+import { ChangeRequestReviewService } from '../modules/version-control/change-request-review/change-request-review.service.js';
+import { FileLockService } from '../modules/version-control/file-lock.service.js';
+import { VersionControlEventBus } from '../modules/version-control/index.js';
+import { FileChangeNotifier } from '../modules/kb-fs/file-change-notifier.js';
+import { StarterPackService } from '../modules/onboarding/starter-pack.service.js';
+import { VersionControlService } from '../modules/version-control/version-control.service.js';
+import { VersionControlHooks } from '../modules/version-control/version-control-hooks.js';
+import { ChangeRequestHooks, type IChangeRequestHooks } from '../modules/version-control/change-request-hooks.js';
+import { PendingCommitsService } from '../modules/version-control/pending-commits.service.js';
 import {
   PendingCommitsWorker,
   consoleSystemNoticeSink,
-} from '../modules/workflow/pending-commits.worker.js';
-import { ensureRecoveryBotUser } from '../modules/workflow/recovery-bot.js';
+} from '../modules/version-control/pending-commits.worker.js';
+import { ensureRecoveryBotUser } from '../modules/version-control/recovery-bot.js';
 import { AdminAccessService } from '../modules/admin/admin-access.service.js';
+import {
+  SyncedGroupsWriter,
+  type SyncedGroupsSource,
+} from '../modules/access/synced-groups-writer.js';
+import { createSyncedGroupsCommitter } from '../modules/access/synced-groups-committer.js';
+import { ensureDirectorySyncBot } from '../modules/access/directory-sync-bot.js';
 import { ExternalApiKeyService } from '../modules/tool-auth/external-api-key.service.js';
 import {
   InternalTokenService,
@@ -66,19 +164,32 @@ import {
 } from '../modules/tool-auth/internal-token.service.js';
 import {
   createToolAuthMiddleware,
+  createTokenVerifier,
   createManualAuthMiddleware,
 } from '../modules/tool-auth/tool-auth.middleware.js';
 import { unmeteredLlmUsage, type ILlmUsageMeter } from '../modules/tool-auth/llm-usage-meter.js';
-import { McpSessionStore } from '../modules/mcp/mcp-session-store.js';
 import { McpService } from '../modules/mcp/mcp.service.js';
+import { AgentAuditService, retentionDaysFrom } from '../modules/audit/agent-audit.service.js';
+import { readAgentPreamble, type AgentPreambleReader } from '../modules/agent-instructions/index.js';
+import {
+  agentGuideSections,
+  guideStartText,
+  joinGuideSections,
+  type AgentGuideReader,
+  type AgentGuideSectionsReader,
+} from '../modules/agent-guide/index.js';
 import { createMcpAuthMiddleware } from '../modules/mcp/mcp-auth.middleware.js';
 import { BevelOAuthProvider } from '../modules/mcp/oauth/bevel-oauth-provider.js';
 import { getOAuthProtectedResourceMetadataUrl } from '@modelcontextprotocol/sdk/server/auth/router.js';
 import { ToolRegistry } from '../modules/tool-registry/tool-registry.js';
 import { createToolContextResolver } from '../modules/tool-helpers/tool-context.js';
+import { alwaysWritable, type IWriteAccess } from '../modules/write-access/write-access.js';
 import { createToolHandlerFactory } from '../modules/tool-helpers/tool-handler.js';
 import { TokenCrypto } from '../shared/token-crypto.js';
+import { UpdateCheckService } from '../modules/update-check/update-check.service.js';
+import { resolveAppVersion } from '../version.js';
 import { noopRecoveryAgent, type CorePorts } from './core-ports.js';
+import { registerCatalogCacheInvalidation } from './catalog-cache-invalidation.js';
 
 /**
  * Everything the CORE composition builds: the core services `createCoreServer`
@@ -91,60 +202,252 @@ import { noopRecoveryAgent, type CorePorts } from './core-ports.js';
  * core services to construct). See {@link CorePorts} for the pattern.
  */
 export interface CoreServices {
-  config: CoreConfig;
+  config: TenantConfig;
   db: Database;
+  /**
+   * Reading the disk without locks — the one tree walk and the one path
+   * probe (see `shared/fs.contract.ts`). Every core module that reads a
+   * checkout is handed this; an overlay's own readers take it too, rather
+   * than carrying a `readdir` loop or an errno check of their own.
+   */
+  disk: ITreeWalker & IFsProbe;
+  /**
+   * Running git — the one runner every module shells out through, carrying
+   * the deployment's deadline. Exposed like `disk` so an overlay's own git
+   * callers run under the same ceiling rather than spawning their own.
+   */
+  gitRunner: IGitRunner;
+  /**
+   * The commit-worker lease loop (see `core/lifecycle.ts`). `held` says
+   * whether THIS process is the one draining the queue; `stop()` is the
+   * shutdown sequence's way of finishing the in-flight commit and handing the
+   * lease to the replacement.
+   */
+  commitWorker: LeaseLoopHandle;
+  /**
+   * Run something with no queued commit being written: the commit worker is
+   * stopped for its duration and started again afterwards, the lease kept.
+   * What a move to another repository runs the startup phase under.
+   */
+  whileCommitsHeld<T>(work: () => Promise<T>): Promise<T>;
   workspaceService: WorkspaceService;
-  kbSeedService: KbSeedService;
+  /**
+   * The KB startup phase (see `startup/on-server-start.ts`): run at the
+   * deployment's two quiet moments — boot, before routes mount, and
+   * first-time setup completion — and never again while the process serves.
+   */
+  kbStartupRunner: KbStartupRunner;
+  /**
+   * Where the knowledge base's repository is and what git presents to it,
+   * whichever way the deployment was given one (see `RepositorySource`).
+   */
+  repositorySource: RepositorySource;
+  /** The repository the deployment keeps for itself, when that is the way it chose. */
+  managedRepository: ManagedRepository;
+  /** The connection to GitHub through a GitHub App, when that is the way it chose. */
+  githubApp: GitHubAppConnection;
+  /**
+   * The startup phase's retry when the boot survived an unreachable remote
+   * — set by `startCore`, stopped by `stopCore` (see `core/lifecycle.ts`);
+   * null while nothing is asking.
+   */
+  startupRetry: { stop(): void } | null;
+  /**
+   * What tells this graph's locks, migration ledger and secrets scope apart
+   * from another graph's in the same process and database: the schema name,
+   * or `''` for the default schema (the single-tenant ids).
+   */
+  tenantKey: string;
+  /** The scope this graph's vault is registered under with the UTCP variable loader. */
+  secretsScope: string;
   spillStore: SpillStore;
+  /** The bytes an agent uploaded, held until `apply_file_upload` lands them or their token expires. */
+  agentUploadStore: AgentUploadStore;
+  /** The bytes `request_file_download` captured, held until their one-time link is fetched or expires. */
+  agentDownloadStore: IAgentDownloadStore;
+  /** Sweeps every workspace's `tmp/` folder of entries older than seven days, hourly; started and stopped with the graph. */
+  tmpSweeper: TmpSweeper;
+  /** Runs a caller's `grep` pattern in ripgrep under a budget; its running searches end when the graph stops. */
+  patternMatcher: IPatternMatcher;
+  /**
+   * Every user a download fetch identifies itself as, by its bearer and its
+   * session cookie — none when it carries none that verifies — so the
+   * download route can refuse a link presented by someone it was not issued to.
+   */
+  agentDownloadFetcher: (req: Request) => Promise<string[]>;
+  /** Runs every document extraction off the request thread under a budget; its workers end when the graph stops. */
+  documentExtractor: IDocumentExtractor;
+  docExtractService: DocExtractService;
   accessControl: AccessControlService;
   creatorAccess: CreatorAccessService;
-  sessionOntologyService: SessionOntologyService;
+  /** Read-before-write, for the surfaces that ask ahead of the lock (see `access-model/change-gate.ts`). */
+  changeGate: ChangeReadGate;
   routineWritePolicy: RoutineWritePolicyService;
   skillService: SkillService;
   pendingSkillsService: PendingSkillsService;
   toolManualService: ToolManualService;
+  pendingToolsService: PendingToolsService;
+  /**
+   * Reads the admin's `mcp-description.md` on the default branch with
+   * platform rights: the one reader behind every MCP session's instructions
+   * and `GET /api/agent/instructions`. See modules/agent-instructions.
+   */
+  readAgentPreamble: AgentPreambleReader;
+  /**
+   * Composes the platform's agent guide for the layout in effect, through
+   * the distribution's hook when it passed one: what `get_agent_guide` and a
+   * `read_file` of the guide's name answer. See modules/agent-guide.
+   */
+  agentGuide: AgentGuideReader;
+  /**
+   * The start of that guide and the list of its sections: what a `read_file`
+   * of the guide's name answers, the same as `get_agent_guide` with no
+   * `section`. See `guideStartText`.
+   */
+  agentGuideStart: AgentGuideReader;
+  /** The same guide as its sections, each with its title — what `get_agent_guide` lists and serves one of. */
+  agentGuideSections: AgentGuideSectionsReader;
   mcpServerEditService: McpServerEditService;
+  /** Deleting one tool — the owner's verb (see ToolDeleteService). */
+  toolDeleteService: ToolDeleteService;
   pluginIndexService: PluginIndexService;
   pluginProvisionService: PluginProvisionService;
+  /**
+   * "What does your team do?" — the starter pack a new knowledge base's admin
+   * may fill it from, and the record of what was chosen. See modules/onboarding.
+   */
+  starterPackService: StarterPackService;
   joinRequestsService: JoinRequestsService;
+  /**
+   * Records a join request and finishes it in the background. Its `sweep()`
+   * runs once at boot — see `createCoreServer`, after the knowledge-base
+   * startup phase — so a request recorded before a restart is completed or
+   * marked failed after it rather than lost.
+   */
+  pluginJoinRequestJobs: PluginJoinRequestJobs;
+  /** Which plugins hold which skills (inline or linked) — see `PluginLinkIndex`. */
+  pluginLinkIndex: PluginLinkIndex;
+  /**
+   * Connecting as an agent configuration: the choices offered at consent and key
+   * mint, and the scope every agent surface narrows a connection to — see
+   * `modules/agent-scope`.
+   */
+  agentScopeService: IAgentScopeResolver;
+  /** Link / unlink / repair shared skills into plugins. */
+  pluginLinksService: PluginLinksService;
+  pluginRenameService: PluginRenameService;
+  /** Source layout → distribution layout, for one audience. */
+  marketplaceCompiler: MarketplaceCompilerService;
+  /** The bare repository the per-user marketplace git endpoint serves from. */
+  marketplaceRepo: MarketplaceRepoService;
+  /** The GitHub Enterprise facade products such as claude.ai add the marketplace through. */
+  githubFacade: GitHubFacade;
+  githubFacadeCredentials: GitHubFacadeCredentialsService;
   authService: AuthService;
+  /**
+   * The seam for "an account was invited": a deployment registers here how
+   * the person is told (the cloud's mail, say), and the invite's answer says
+   * whether somebody did. Core registers nothing.
+   */
+  accountHooks: IAccountHooks;
   authMiddleware: ReturnType<typeof createAuthMiddleware>;
   accountErasureService: AccountErasureService;
   gitService: GitService;
   pullRequestService: PullRequestService;
   diffService: DiffService;
-  reviewWorkflowService: ReviewWorkflowService;
+  changeRequestReviewService: ChangeRequestReviewService;
   fileLockService: FileLockService;
-  workflowService: WorkflowService;
-  eventBus: WorkflowEventBus;
+  versionControlService: VersionControlService;
+  /**
+   * The seam for "a change request was opened": a deployment registers here
+   * how the reviewers are told (the cloud's mail, say), and the open's answer
+   * says whether somebody did. Core registers nothing.
+   */
+  changeRequestHooks: IChangeRequestHooks;
+  /** Remote sync (`POST /api/sync`): a git host or pipeline makes the clones catch up. */
+  kbSyncService: KbSyncService;
+  eventBus: VersionControlEventBus;
   fileChangeNotifier: FileChangeNotifier;
   pendingCommitsService: PendingCommitsService;
   pendingCommitsWorker: PendingCommitsWorker;
   recoveryBot: AuthUser;
   adminAccess: AdminAccessService;
+  /** Manual-mode groups CRUD + the manual→IdP retirement half. */
+  groupsAdminService: GroupsAdminService;
+  /** Removes a deleted account's address from roles, groups and access rules. */
+  userAccessRemovalService: UserAccessRemovalService;
+  /**
+   * Build the debounced directory → `synced-groups.yaml` materializer for a
+   * directory source an OVERLAY provides (e.g. a SCIM mirror fed by the IdP's
+   * provisioning engine — core ships no directory integration of its own).
+   * Ensures the directory-sync bot user and closes over the git commit
+   * pipeline; the overlay only implements {@link SyncedGroupsSource} and
+   * calls `notifyMutation()` after each directory change.
+   */
+  createSyncedGroupsMaterializer: (
+    source: SyncedGroupsSource,
+    opts?: { debounceMs?: number; log?: (message: string) => void },
+  ) => Promise<SyncedGroupsWriter>;
+  /** Newest-release lookup behind `GET /api/update-check` (admin-only). */
+  updateCheckService: UpdateCheckService;
   /** Deployment settings, env-first — the KB remote resolves through these. */
   settings: DeploymentSettingsService;
+  /**
+   * The knowledge base as this composition names it: the checkout folder,
+   * the branch model and the layout — the one object every core service reads
+   * those from (see `shared/kb-context.ts`). The setup-completing save applies
+   * the branch model and the layout to it, so an overlay reads the answer in
+   * effect here rather than from the shared package's live bindings.
+   */
+  kb: KbContext;
   /**
    * The knowledge-base directory name IN EFFECT — environment first, then the
    * stored setting, then the default. Published here because `config.kbDirName`
    * is only the environment's half of that answer: reading it directly gives
    * the empty string on any deployment configured through the setup screen, and
-   * every path built from it would be wrong.
+   * every path built from it would be wrong. The same value as `kb.kbDirName`.
    */
   kbDirName: string;
   secretsVaultService: DbSecretsVaultService;
+  connectionProbeService: ConnectionProbeService;
   externalApiKeyService: ExternalApiKeyService;
   internalTokenService: InternalTokenService;
+  /**
+   * The embed surface: the token-minted page a chat host frames, and the
+   * account links that let an outside identity reach it. Exposed so an
+   * overlay can mint for its own consumers and register a node-id resolver.
+   */
+  embedService: EmbedService;
+  /** The MCP Apps this deployment serves — the `open_page` view and its sandbox metadata. */
+  mcpAppService: IMcpAppService;
   mcpService: McpService;
   mcpAuthMiddleware: ReturnType<typeof createMcpAuthMiddleware>;
   mcpOAuthProvider: BevelOAuthProvider;
+  /**
+   * RFC 9728 protected-resource-metadata URL carried on MCP 401 challenges.
+   * Published so the route layer's own challenges (the local-token exchange)
+   * advertise the same pointer the auth middleware does.
+   */
+  mcpResourceMetadataUrl: string;
+  /** The Audit log: what every connected agent and key called, and the revoke of an agent's grant. */
+  agentAuditService: AgentAuditService;
   toolRegistry: ToolRegistry;
+  /** Each platform tool's and meta-tool's read-only hint, and an admin's overrides of them. */
+  readOnlyHints: IToolReadOnlyHints;
   toolAuthMiddleware: ReturnType<typeof createToolAuthMiddleware>;
   manualAuthMiddleware: ReturnType<typeof createManualAuthMiddleware>;
   toolHandlerFactory: ReturnType<typeof createToolHandlerFactory>;
+  /** Whether the deployment may be changed right now — `ports.writeAccess`, or always. */
+  writeAccess: IWriteAccess;
   // ── Server-time seams (enterprise overwrites after construction) ────────
   /** `start_session` backing — core default {@link UuidSessionSink}. */
   sessionSink: ISessionSink;
+  /**
+   * The managed sign-in port (see `CorePorts.managedSignIns`), or null when
+   * the distribution registers none. Mutable for the same reason the session
+   * sink is: the overlay builds it after core, from services core returned.
+   */
+  managedSignIns: ManagedSignInPort | null;
   /** Connection-key LLM metering view — core default unmetered. */
   usageMeter: ILlmUsageMeter;
   /** SSO plugins the auth router mounts — same array instance as the port. */
@@ -152,14 +455,35 @@ export interface CoreServices {
 }
 
 export async function createCoreServices(
-  config: CoreConfig,
+  config: TenantConfig,
   ports: CorePorts = {},
 ): Promise<CoreServices> {
   // Fail fast on a runtime whose git is too old for `--no-write-fetch-head`
   // (see `git-version.ts`): every clone, fetch and refresh below depends on it,
   // so an unsupported binary is better surfaced here than at the first merge.
   await assertGitVersion();
-  const db = getDb(config.databaseUrl);
+  // The same for ripgrep, which the grep tool searches with and has no
+  // fallback for (see `ripgrep-version.ts`).
+  await assertRipgrep();
+  // What tells this knowledge base's locks, migration ledger and secrets
+  // loader apart from another's in the same process and database. Empty for
+  // the default schema, so a single-tenant deployment keeps the lock ids and
+  // the ledger it always had.
+  const tenantKey = config.dbSchema === DEFAULT_DB_SCHEMA ? '' : config.dbSchema;
+  // The handle holds this knowledge base's key for its personal-data columns:
+  // the same `SECRETS_ENC_KEY` that seals its stored credentials — its own
+  // derived one, for a tenant — so everything in the schema opens with one
+  // key and nothing in it opens with another tenant's.
+  const db = getDb(config.databaseUrl, { schema: config.dbSchema, piiKey: config.secretsEncKey });
+  // A schema of its own is created on first use, so a tenant's first
+  // activation needs nothing done by hand; `public` always exists. Then the
+  // server is asked whether the connections really search that schema: a
+  // pooler that dropped the startup parameter would otherwise land every
+  // tenant's tables in `public`, silently — see `assertSearchPath`.
+  if (tenantKey) {
+    await db.execute(sql.raw(`create schema if not exists "${config.dbSchema}"`));
+    await assertSearchPath(db, config.dbSchema);
+  }
   // Migrations must run BEFORE any service that reads or writes a managed
   // table. `PendingCommitsService.startupReconcile` (called later in this
   // function) hits `pending_commits` — on a fresh DB, deferring migrations to
@@ -170,151 +494,474 @@ export async function createCoreServices(
   // package runs its own squashed idempotent CORE history from the packaged
   // `migrations/` folder, tracked in `__drizzle_migrations_core`. An
   // enterprise overlay runs its own history AFTER this (see migrate.ts).
+  // `runCoreMigrations` also seals any pre-encryption plaintext PII rows and
+  // swaps the unique constraints onto the blind-index columns (see
+  // migrate.ts), under the same lock, before any service reads or writes a
+  // PII column.
   await runCoreMigrations(db, coreMigrationsDir());
 
   // Deployment settings come next, before ANY service is built: the KB remote
   // is resolved through them, and a fresh install has none of it in the
   // environment. `load()` is env-first, so an existing deployment sees exactly
   // what it saw before — a stored row only answers where a variable is silent.
-  const settings = new DeploymentSettingsService(db, config.secretsEncKey);
+  const settings = new DeploymentSettingsService(db, config.secretsEncKey, undefined, { env: config.settingsEnv });
   await settings.load();
 
-  /**
-   * The branch model, before anything reads it. It used to be applied at import
-   * time from the environment, which is what forced the frontend to bake it
-   * into its bundle; it now comes through the settings store like the rest of
-   * the deployment's configuration (environment first, as always).
-   *
-   * UNCONFIGURED IS ALLOWED, and that is the point: a fresh deployment has no
-   * branch model, and refusing to boot would take away the setup screen where
-   * one gets entered. What reads it before then is the setup path itself, which
-   * does not need it — the bootstrap admin is recognised without a workspace.
-   * `isComplete` keeps the rest of the app behind the gate until it is set, and
-   * the setting is restart-to-apply because services take the value at
-   * construction.
-   */
-  const branchModel = {
-    defaultBranch: settings.resolve('defaultBranch'),
-    protectedBranches: settings.resolve('protectedBranches'),
-  };
-  if (!validateBranchModel(branchModel)) configureBranchModel(branchModel);
-  // A token supplied through the setup screen has to reach the credential
-  // helper, which reads `$GITHUB_TOKEN` at call time.
-  settings.syncGitTokenEnv();
+  // The layout variables that were retired this release, folded into their
+  // saved settings before anything reads the layout — so the boot that imports
+  // them also RUNS on the imported names rather than on the defaults.
+  await settings.importLegacyLayoutEnv();
 
   // `kbDirName` is read ONCE and threaded into a dozen services as a plain
   // string, which is why changing it needs a restart (the setting says so).
   // The remote URL and username are read per-operation instead, so an admin
   // finishing setup can clone immediately without bouncing the process.
   const kbDirName = settings.resolve('kbDirName') || 'knowledge-base';
+  // A checkout folder named like one of the repository's own roots would make
+  // every path under that root read as the checkout itself, and the root
+  // unnameable. Both are operator settings, so the collision is refused here,
+  // by name, before any service captures either.
+  assertKbDirNameFree(kbDirName, settings.resolveKbLayout());
+  /**
+   * The knowledge base's context — the checkout folder, the branch model and
+   * the layout — built before any service, and handed to each one that reads
+   * a name from it (see `shared/kb-context.ts`). The values come through the
+   * settings store like the rest of the deployment's configuration
+   * (environment first, as always).
+   *
+   * The branch model: UNCONFIGURED IS ALLOWED, and that is the point. A fresh
+   * deployment has no branch model, and refusing to boot would take away the
+   * setup screen where one gets entered. What reads it before then is the
+   * setup path itself, which does not need it — the bootstrap admin is
+   * recognised without a workspace. `isComplete` keeps the rest of the app
+   * behind the gate until it is set, and the save that completes setup applies
+   * it to this very object, which every service reads at use rather than
+   * capturing at construction.
+   *
+   * The layout — the three renameable roots and the agent guide's file name —
+   * always resolves (every name has a default), so an invalid value is a real
+   * misconfiguration and stops the boot.
+   */
+  const kb = new KbContext(
+    kbDirName,
+    KbContext.branchModelOrUnconfigured({
+      defaultBranch: settings.resolve('defaultBranch'),
+      protectedBranches: settings.resolve('protectedBranches'),
+    }),
+    settings.resolveKbLayout(),
+  );
+  // The shared package's process-wide live bindings, kept in step with `kb`
+  // for an overlay that still reads them — now, and again when the setup-
+  // completing save applies a model or a layout. Nothing in this package
+  // reads them; a host serving several knowledge bases turns this off.
+  if (ports.mirrorSharedBindings !== false) {
+    const mirrorBranchModel = () => {
+      if (kb.isBranchModelConfigured()) {
+        configureBranchModel({ defaultBranch: kb.defaultBranch, protectedBranches: [...kb.protectedBranches] });
+      }
+    };
+    const mirrorLayout = () => configureKbLayout(kb.layout);
+    mirrorBranchModel();
+    mirrorLayout();
+    kb.onBranchModelApplied(mirrorBranchModel);
+    kb.onLayoutApplied(mirrorLayout);
+  }
+  // The disk: one walk, one probe, for every reader below.
+  const disk = new NodeFs();
+  // What git authenticates with, read on every call: the username and token
+  // the setup screen stored, or the environment's. Environment first for the
+  // token, as for every setting (`resolve` is env-first); the legacy
+  // `GITHUB_TOKEN` / `GH_TOKEN` spellings only through `config`, since the
+  // settings catalogue knows `GIT_TOKEN` alone. Handed to the runner, which
+  // puts the token into each child's environment — never into this
+  // process's, which several knowledge bases may share.
+  //
+  // Both come from the repository source, which is the one place that knows
+  // a deployment can be given its repository in more than one way; what
+  // comes back is the address and the credential, as it always was.
+  const managedRepository = new ManagedRepository(path.join(config.backupsRoot, 'managed-repository'));
+  const githubApp = new GitHubAppConnection({
+    read: (key) => settings.resolve(key),
+    sourceOf: (key) => settings.sourceOf(key),
+  });
+  const repositorySource = new RepositorySource({
+    read: (key) => settings.resolve(key),
+    fallback: { username: config.gitUsername, token: config.gitToken },
+    managed: managedRepository,
+    githubApp,
+  });
+  const gitCredentialsInEffect = repositorySource.credentials;
+  // How git is run, for every module that runs it: one environment, one buffer
+  // ceiling, one error shape, and — the reason it exists — one deadline, so a
+  // git that never returns cannot hold a workspace (and with it the commit
+  // queue) open indefinitely. See `shared/git.contract.ts`.
+  const gitRunner = new NodeGitRunner(config.gitTimeoutMs, gitCredentialsInEffect);
+  // A deployment that keeps its own repository has it before anything asks
+  // for it: one that chose the mode through the environment never passes
+  // through the save that would have created it, and the startup phase's
+  // first question would be asked of a folder that is not there. Left to
+  // that phase to report if it cannot be made: its failures are classified
+  // and shown on the setup screen, where a throw here would take the screen
+  // down with the boot.
+  if (repositorySource.mode() === 'managed') {
+    await managedRepository
+      .ensure(gitRunner, settings.resolve('defaultBranch') || MANAGED_DEFAULT_BRANCH)
+      .catch((err: unknown) => logger('setup').error('the managed repository could not be created:', { err }));
+  }
+  // One reached through a GitHub App has a token in hand before anything
+  // reads it: a working copy's credential helper is stamped according to
+  // whether there is a token, by code that cannot wait for one. A failure is
+  // the startup phase's to report, for the same reason as above.
+  if (repositorySource.mode() === 'github-app') {
+    await githubApp.prepare().catch(() => undefined);
+  }
+  /**
+   * Where a working copy of a replaced repository is kept, for BOTH the places
+   * that find one: the KB startup phase sweeping the workspaces root, and the
+   * workspace service refusing to adopt one on a branch open. One variable,
+   * passed to both, because they move the same clones for the same reason and
+   * an admin looking for their work must have one folder to look in — the two
+   * drifted apart once already, and the copy the workspace service set aside
+   * landed in the image's own filesystem and was gone at the next recreate.
+   *
+   * Under the backups root: a persistent volume of its own, and one nothing
+   * sweeps (see the runner's `reconcileClonesWithConfiguredRepository`).
+   */
+  // Shared mutex so git and diff operations on the same workspace serialize
+  // against each other — a backup-reseed races a concurrent commit otherwise.
+  // Keyed by the CANONICAL workspace id: a route's Express-decoded `:id` and
+  // a tool's encoded one reserve the same clone (see `WorkspaceIdMutex`).
+  const workspaceMutex = new WorkspaceIdMutex();
+  /**
+   * The knowledge base's ONE repository: every branch workspace is a worktree
+   * of it (see `kb-repository.ts`). One instance, handed to the workspace
+   * service, the startup phase and (through the workspace service) the git
+   * layer, so one fetch serves every workspace and the writes to its one
+   * config file are serialized in one place. Git operations in the worktrees
+   * are not serialized against each other beyond the workspace mutex: git's
+   * own locks cover a repository shared by worktrees.
+   *
+   * Under the backups root, like the set-aside copies: a persistent volume in
+   * every shipped compose file, so no new mount is needed, and outside the
+   * workspaces root, where the orphan sweep never sees it. The folder name
+   * starts with a dot, which no branch — and so no backup ledger's workspace
+   * id — can. On hexis-cloud every tenant has its own backups root: one
+   * repository per tenant.
+   */
+  const kbRepository: IKbRepository = new KbRepository({
+    dir: repositoryDirFor(config.workspacesRoot, kbDirName, path.join(config.backupsRoot, '.kb-repository')),
+    kbRepoUrl: () => repositorySource.url(),
+    gitRunner,
+  });
+  const replacedWorkingCopiesRoot = path.join(config.backupsRoot, 'replaced-working-copies');
+  /**
+   * What must leave with a working copy that is set aside, whoever sets it
+   * aside: the startup phase, or the workspace service on a branch open.
+   *
+   * Its queue: whatever still waits to be committed into that copy was
+   * written against the repository that was left, and the path it names is
+   * about to hold a fresh clone of another one. Held for a person, on every
+   * branch, never written and never deleted.
+   *
+   * And the locks on its branch: each is a claim on a file of the copy that
+   * is going. Left standing, a holder still connected keeps one alive with
+   * heartbeats, and the same path in the new repository refuses everybody
+   * else. Dropped without enqueueing anything, as when change requests are
+   * closed as "repository replaced".
+   *
+   * Throws when either cannot be done, and the caller then leaves the copy
+   * where it is. Reaches FORWARD to both services, like `gitService` below:
+   * it is only ever called long after this function has returned them.
+   */
+  const releaseWorkOnSetAsideCopy = async (workspaceId: string): Promise<void> => {
+    const held = await pendingCommitsService.markNeedsAttentionInWorkspace(
+      workspaceId,
+      'The knowledge-base repository was replaced while this commit was still queued, so it was never ' +
+        'written. The bytes are kept here: the working copy it was meant for belongs to the previous repository.',
+    );
+    if (held > 0) {
+      logger('kb-startup').warn(
+        `${held} queued commit(s) for the working copy "${workspaceId}" need attention: the repository was ` +
+          'replaced before they landed, so they were not written to the new one.',
+      );
+    }
+    await fileLockService.releaseAllOnBranch(branchForWorkspaceId(workspaceId));
+  };
   const workspaceService = new WorkspaceService(
     config.workspacesRoot,
-    () => settings.resolve('kbRepoUrl'),
-    kbDirName,
-    () => settings.resolve('gitUsername') || 'x-access-token',
+    () => repositorySource.url(),
+    kb,
+    disk,
+    gitRunner,
+    replacedWorkingCopiesRoot,
+    // A branch opened onto a clone of another repository sets it aside on
+    // the spot, with nobody having stopped the commit worker for it. So it
+    // is held here, for the one move, and the copy's work leaves first and
+    // is looked for again once the copy has gone: a release that queued its
+    // bytes in between was writing to the copy that left.
+    //
+    // Only the first look may refuse the branch: the copy has not moved yet.
+    // The second runs after the move, so its failure is tried once more and
+    // then logged, as the startup phase logs the same step. Refusing then
+    // would report a move that did happen as one that did not.
+    (workspaceId, move) =>
+      leased.whileHeld(async () => {
+        await releaseWorkOnSetAsideCopy(workspaceId);
+        await move();
+        await releaseWorkOnSetAsideCopy(workspaceId)
+          .catch(() => releaseWorkOnSetAsideCopy(workspaceId))
+          .catch((err: unknown) => {
+            logger('workspace').error(
+              `the working copy "${workspaceId}" was set aside, but what was queued or locked on it meanwhile ` +
+                'could not be looked for again:',
+              { err },
+            );
+          });
+      }),
+    kbRepository,
   );
-  // Seed (or top-up) the KB remote before the first clone so the rest of the app
-  // can keep assuming the remote already carries the protected branches + base
-  // scaffolding — a fresh or partially-populated remote no longer needs to have
-  // been forked from the standalone template.
-  const kbSeedService = new KbSeedService(
-    () => settings.resolve('kbRepoUrl'),
-    config.kbTemplateDir,
-    // Getters, not values: the branch model can arrive from the setup screen
-    // after this object exists, and seeding is the first thing that needs it.
-    () => [...PROTECTED_BRANCHES],
-    () => DEFAULT_BRANCH,
+  // The KB startup phase: every seeding, scaffolding and migration concern,
+  // run through one runner at the deployment's quiet moments (boot + setup
+  // completion) instead of lazily on branch loads. Root folders this
+  // distribution reserves on top of core's two are a plain value, not a
+  // getter: they are named in the composition root rather than collected on
+  // the setup screen, so there is nothing to re-read.
+  const extraDirs = ports.kbExtraRootDirs ?? [];
+  // Core's steps first, in dependency order — the Groups→Plugins migration
+  // reshapes trees the template top-up would otherwise re-scaffold — then
+  // whatever the distribution appends.
+  const kbStartupSteps = [
+    // (The note about anything sitting BESIDE a checkout is not a step: it is
+    // read-only, needs no remote, and must be said even on a deployment whose
+    // setup never finished — so `noteBesideCheckout` runs once from the server
+    // builder, ahead of this gated phase.)
+    new GroupsToPluginsStep(disk, kb),
+    new PluginManifestsStep(disk, kb),
+    // After the manifests step: a folder that only just got its manifest got
+    // one the renderer wrote, which already carries the display name — the
+    // backfill then has nothing to do for it. Ordered the other way, the
+    // backfill would walk a tree still missing those manifests.
+    new PluginDisplayNamesStep(disk, kb),
+    new PersonalSpacesStep(disk, kb),
+    new TemplateFilesStep(disk, kb, extraDirs),
+    new RolesYamlStep(disk, [config.adminEmail]),
+    ...(ports.kbStartupSteps ?? []),
+  ];
+  const kbStartupRunner = new KbStartupRunner({
+    // Getters, not values: the remote and the branch model can arrive from the
+    // setup screen after this object exists, and the setup-completion run is
+    // the first thing that needs them.
+    kbRepoUrl: () => repositorySource.url(),
+    workspacesRoot: config.workspacesRoot,
+    // The same folder the workspace service sets aside into — see
+    // `replacedWorkingCopiesRoot` above for why the two must agree.
+    setAsideRoot: replacedWorkingCopiesRoot,
+    // The one repository every branch workspace is a worktree of — the same
+    // instance the workspace service holds (see `kbRepository` above).
+    repository: kbRepository,
+    kbDirName,
+    templateDir: config.kbTemplateDir,
+    defaultBranch: () => kb.defaultBranch,
+    protectedBranches: () => [...kb.protectedBranches],
     // The deployment owner is the initial Admin of a freshly seeded KB — the
     // same answer `SEED_ADMIN_EMAILS` used to ask for a second time.
-    [config.adminEmail],
-    () => settings.resolve('gitUsername') || 'x-access-token',
-    // Root folders this distribution reserves on top of core's two. A plain
-    // value, not a getter: these are named in the composition root rather than
-    // collected on the setup screen, so there is nothing to re-read.
-    ports.kbExtraRootDirs ?? [],
-  );
-  workspaceService.setSeedService(kbSeedService);
+    seedAdminEmails: [config.adminEmail],
+    steps: kbStartupSteps,
+    buildSeedTree: buildSeedTree(disk, config.kbTemplateDir, extraDirs, [config.adminEmail], kb),
+    gitRunner,
+    // The work on a working copy that is about to be set aside leaves first:
+    // its queued commits and the locks on its branch (see
+    // `releaseWorkOnSetAsideCopy`). A failure here stops the phase before
+    // the copy moves: a replacement cloned over an untouched queue is how
+    // those bytes would land in the wrong repository.
+    beforeCloneSetAside: releaseWorkOnSetAsideCopy,
+    // And once it is set aside it must leave the workspace service's cache:
+    // on the SAVE that moves the deployment the process is already running,
+    // and a cached path to a directory that is gone is how the next reader
+    // gets an ENOENT instead of a fresh clone.
+    //
+    // Then the copy's work is looked for once more. A release that queued
+    // its bytes between the first look and the move was writing to the copy
+    // that has now gone; nothing can queue against it after this.
+    onCloneDiscarded: async (workspaceId) => {
+      workspaceService.forgetClone(workspaceId);
+      await releaseWorkOnSetAsideCopy(workspaceId);
+    },
+    // And the replacement it cloned in its place: a fresh clone holds every
+    // ref, so the git layer's per-workspace fetch record is told so. Without
+    // it that record still holds the FAILED fetch of the repository that was
+    // replaced, and a strict branch listing within its TTL refuses the new
+    // clone's refs as unproven. Reaches FORWARD to `gitService`, which is
+    // built further down: safe because the runner only ever calls this from
+    // `runAll`, which the server builder invokes long after this function has
+    // returned every service.
+    onCloneCreated: (workspaceId) => gitService.noteWorkspaceFetched(workspaceId),
+  });
   // Shared, workspace-independent store for oversized `call_tool_chain` results,
   // read back via `read_file`. Sibling of `workspacesRoot`, never committed.
   const spillStore = new SpillStore(config.spillRoot);
+  // What the chat, the SharePoint reader and tool chains stage in a
+  // workspace's `tmp/` folder lives seven days past its last change; the file
+  // tools read it through the `__tmp__/` ref meanwhile (see workspace-tmp.ts).
+  const tmpSweeper = new TmpSweeper((signal) => workspaceService.sweepTmp(undefined, undefined, signal));
+  // The upload route an agent lands files by, so their content never passes
+  // through the model. Bytes live BESIDE the workspaces root (never inside
+  // one) until the apply commits them or the token expires — checked here
+  // rather than assumed, because a root configured inside a workspace would
+  // put bytes no gate has judged where the file tools read.
+  await assertUploadsRootOutsideWorkspaces(config.agentUploadsRoot, config.workspacesRoot);
+  const agentUploadStore = new AgentUploadStore({
+    root: config.agentUploadsRoot,
+    publicBaseUrl: config.publicBackendUrl,
+    tokenPrefix: config.uploadTokenPrefix,
+  });
+  // The way OUT: bytes `request_file_download` captured, held beside the
+  // upload root — outside every workspace, for the same reason — until their
+  // one-time link is fetched or expires.
+  const agentDownloadsRoot = path.resolve(config.agentUploadsRoot, '..', 'agent-downloads');
+  // An upload root that is itself named `agent-downloads` would make the two
+  // stores one directory, each sweeping the other's files.
+  if (agentDownloadsRoot === path.resolve(config.agentUploadsRoot)) {
+    throw new Error(
+      'AGENT_UPLOADS_ROOT must not be a directory named `agent-downloads`: that name, beside it, is the agent download root.',
+    );
+  }
+  await assertUploadsRootOutsideWorkspaces(agentDownloadsRoot, config.workspacesRoot, {
+    name: 'The agent download root (`agent-downloads`, beside AGENT_UPLOADS_ROOT)',
+    why:
+      'captured download bytes wait there for their one-time links, so a root inside a workspace would let the ' +
+      'file tools read them. Point AGENT_UPLOADS_ROOT at a directory whose parent is outside WORKSPACES_ROOT.',
+  });
+  const patternMatcher = new RipgrepPatternMatcher();
+  const agentDownloadStore = new AgentDownloadStore({
+    root: agentDownloadsRoot,
+    publicBaseUrl: config.publicBackendUrl,
+    // `<tenant>-down_`: recognisable by shape beside the upload token.
+    tokenPrefix: config.uploadTokenPrefix.replace(/up_$/, 'down_'),
+  });
+  // The worker threads every office/PDF/email extraction runs in, under a
+  // 10 s budget per file (see `WorkerDocumentExtractor`).
+  const documentExtractor = new WorkerDocumentExtractor();
   // The deployment owner counts as Admin for the two hardcoded `write`
   // rescues (`roles.yaml` and any `access.md`) — the SAME list
   // `AdminAccessService` below is given, so the admin surfaces and the write
   // gate cannot disagree about who the owner is. They did: the owner could
-  // open Roles & Members and then be refused the save, with the UI showing
+  // open App roles and then be refused the save, with the UI showing
   // them as an admin and the gate saying "Eligible: Admin".
-  const accessControl = new AccessControlService(workspaceService, kbDirName, [
-    config.adminEmail,
-  ]);
-  // Creator read-grant on creation: read is default-deny, so every surface
-  // that creates KB files/folders (human routes, agent tools, upload apply)
-  // consults this planner to keep creations visible to their creator.
-  const creatorAccess = new CreatorAccessService(workspaceService, accessControl, kbDirName);
+  const accessControl = new AccessControlService(
+    workspaceService,
+    kbDirName,
+    disk,
+    [config.adminEmail],
+    gitRunner,
+    kb,
+  );
+  // Creator read-grant on creation: read is default-deny and the roots grant
+  // it to nobody, so every surface that starts a new folder at a root (human
+  // routes, agent tools, upload apply) consults this planner to keep the new
+  // folder visible to its creator.
+  const creatorAccess = new CreatorAccessService(workspaceService, accessControl, kb, disk);
+  // Read-before-write: the gate every lock acquire asks, on every branch —
+  // nothing is created, changed or removed where its author cannot read,
+  // except that new folder at a root (see `access-model/change-gate.ts`).
+  const changeGate = new ChangeReadGate(workspaceService, accessControl, kb, disk);
 
-  // Ontology-session boundary: records each agent run's touched ontologies and
-  // blocks writes once a run has crossed ontologies. Postgres-backed so the
-  // boundary survives a restart.
-  const sessionOntologyService = new SessionOntologyService(db);
   // Per-run write restriction (by file extension). Shared by the workspace tool
   // surface (which enforces it) and the routine runner (which sets it for
-  // dashboard-only `watchlist_check` runs). In-memory: a restriction lives only for
-  // one run, unlike the Postgres-backed ontology touched-set above.
+  // dashboard-only `watchlist_check` runs). In-memory: a restriction lives only
+  // for one run.
   const routineWritePolicy = new RoutineWritePolicyService();
   // Skills: discovered from the default-branch workspace only (global catalog).
-  const skillService = new SkillService(workspaceService, accessControl, kbDirName);
+  const skillService = new SkillService(workspaceService, accessControl, kb, disk);
   // Tool manuals: user-authored `*.tool` files under `Plugins/` in the default
   // branch — access-controlled like Skills, served to external agents via
   // `GET /api/agent/all-tools` and registered on the MCP proxy's UTCP client.
-  const toolManualService = new ToolManualService(workspaceService, accessControl, kbDirName);
+  // Where plugins come from: one walk of the plugins root that reads every
+  // plugin folder in whichever file shape it carries (see
+  // modules/plugins/discovery). Nothing to configure, nothing to document.
+  const pluginSource = new KbPluginSource(disk, kb);
+  const toolManualService = new ToolManualService(workspaceService, accessControl, kb, disk, pluginSource);
   // Plugins: the folders under `Plugins/` that carry a
   // team's skills AND the tools they need. Enumerated for EVERY authenticated
   // caller — a plugin they cannot read still exists for them, as a locked one —
   // with the counts read off the two catalogs above rather than a second scan.
+  // The link index resolves manifests against the released catalog, and the
+  // plugin index counts through it (inline + linked), so it comes first.
+  const pluginLinkIndex = new PluginLinkIndex(workspaceService, skillService, accessControl, kb, pluginSource);
+  // What "Connect as" offers and what a connection made as an agent loads:
+  // the distribution's resolver (`CorePorts.agentScope`), made HERE with the
+  // core services it reads through — its configurations behind the person's
+  // read gate, `plugins:` expanded through the link index above — or core's
+  // default, which offers no agent and loads nothing for a path it cannot
+  // read. Made once, before anything consults it: the tool-context resolver
+  // below captures it, as the routes the server mounts do, so there is one
+  // resolver in effect and no later assignment to miss. Core owns the
+  // mechanism and no configuration (see `modules/agent-scope`).
+  const agentScopeService: IAgentScopeResolver =
+    ports.agentScope?.({ workspaceService, accessControl, kb, disk, pluginLinkIndex }) ?? noAgentConfigurations();
   const pluginIndexService = new PluginIndexService(
     workspaceService,
     accessControl,
     skillService,
     toolManualService,
-    kbDirName,
+    kb,
+    pluginSource,
+    Date.now,
+    pluginLinkIndex,
   );
   // Auth service — resolves identities for login, PR author attribution, and
   // access lookups. (Change requests now store the author email directly, so
   // PullRequestService no longer depends on it for attribution.)
   // The allow-list is resolved, not read off the environment: it is settable
   // from the setup screen alongside the SSO configuration it guards.
-  const authService = new AuthService(db, {
-    jwtSecret: config.jwtSecret,
-    adminEmail: config.adminEmail,
-    adminPassword: config.adminPassword,
-    allowedEmailDomains: parseDomainList(settings.resolve('allowedEmailDomains')),
-  });
+  const authService = new AuthService(
+    db,
+    {
+      jwtSecret: config.jwtSecret,
+      adminEmail: config.adminEmail,
+      adminPassword: config.adminPassword,
+      allowedEmailDomains: parseDomainList(settings.resolve('allowedEmailDomains')),
+      loginPasswordEnabled: config.loginPasswordEnabled,
+    },
+    ports.accountAdmission,
+  );
   const authMiddleware = createAuthMiddleware(authService);
+  // Who tells an invited person: the composition root of a distribution
+  // registers its listener here, after this returns (see `AccountHooks`).
+  const accountHooks = new AccountHooks();
 
-  // Shared mutex so git and diff operations on the same workspace serialize
-  // against each other — a backup-reseed races a concurrent commit otherwise.
-  const workspaceMutex = new WorkspaceMutex();
-  // Workflow lifecycle hooks — the ONE registry this composition shares
-  // between GitService (advisory commit validation), the session-ontology
-  // gate (blocking preWrite), and the enterprise composition root, which
-  // registers module-owned handlers on `workflowService.hooks` right after
-  // this function returns. Core registers none: no commit-time validation
-  // (advisory anyway) and no ontology write block.
-  const workflowHooks = new WorkflowHooks();
+  // Version-control lifecycle hooks — the ONE registry this composition shares
+  // between GitService (advisory commit validation), the agent-access gate
+  // (the blocking agentRead / preWrite hooks), and the composition root,
+  // which registers module-owned handlers on `versionControlService.hooks` right
+  // after this function returns. Core registers none: no commit-time
+  // validation (advisory anyway) and nothing that refuses an agent call.
+  const versionControlHooks = new VersionControlHooks();
   const gitService = new GitService(
     workspaceService,
-    workflowHooks,
-    kbDirName,
+    versionControlHooks,
+    kb,
     workspaceMutex,
     accessControl,
+    gitRunner,
   );
+  // `get_skill` with a `version` reads the skill out of the default branch's
+  // history; the skill service is built before git exists, so git is handed
+  // to it here.
+  skillService.setHistory(gitService);
   // A fresh clone has already fetched every ref — let the git layer skip the
   // redundant implicit `git fetch` on the first `listBranches` after bootstrap.
   workspaceService.setWorkspaceClonedListener((id) => gitService.noteWorkspaceFetched(id));
+  // A branch listing is also the platform's memory of which branch names it
+  // has ever heard of — what tells a deleted branch (410) from one that never
+  // existed (404) when a bootstrap finds no such ref on origin.
+  gitService.setBranchesListedListener((names) => workspaceService.noteBranchesListed(names));
   const pullRequestService = new PullRequestService(
     db,
     workspaceService,
     accessControl,
     gitService,
+    config.configuredPublicFrontendUrl,
   );
   const diffService = new DiffService(
     workspaceService,
@@ -322,13 +969,14 @@ export async function createCoreServices(
     config.workspacesRoot,
     config.backupsRoot,
     kbDirName,
+    disk,
   );
   // Late-bind the diff service into WorkspaceService so file writes/moves
   // trigger backup updates. (GitService used to take a diffService too — for
   // the post-switch backup reseed — but switchBranch is gone with the
   // per-branch workspace model, so the injection no longer applies.)
   workspaceService.setDiffService(diffService);
-  const reviewWorkflowService = new ReviewWorkflowService(
+  const changeRequestReviewService = new ChangeRequestReviewService(
     db,
     accessControl,
     workspaceService,
@@ -336,14 +984,14 @@ export async function createCoreServices(
   );
   // Late-bind the comment enricher so PullRequestService.getPrDetail includes
   // our DB-backed comments without forcing a circular constructor dependency.
-  pullRequestService.setDetailEnricher(reviewWorkflowService);
+  pullRequestService.setDetailEnricher(changeRequestReviewService);
 
-  // Workflow facade — the abstraction every app consumer should reach for
-  // instead of the individual git / PR / review-workflow services. See
+  // Version-control facade — the abstraction every app consumer should reach for
+  // instead of the individual git / PR / change-request-review services. See
   // PLAN.md for the migration story. Today it delegates straight through;
-  // implementations migrate into the workflow module over later steps.
+  // implementations migrate into the version-control module over later steps.
   const fileLockService = new FileLockService(db);
-  // Background commit queue. The `WorkflowService.releaseLock` path
+  // Background commit queue. The `VersionControlService.releaseLock` path
   // enqueues a row here instead of running commitFile + push inline; the
   // worker drains the queue out of band so a git hiccup can't block the
   // user-visible save path. See `lock-decoupling-plan.md`.
@@ -358,49 +1006,171 @@ export async function createCoreServices(
     (await pendingCommitsService.hasAnyForWorkspace(workspaceId)) ||
     (await fileLockService.hasAnyActive(workspaceId)),
   );
-  // In-process event bus: every WorkflowService mutation method that
+  // In-process event bus: every VersionControlService mutation method that
   // succeeds emits a typed event; the SSE route fans it to connected
   // browser sessions. Single instance per Node process — survives across
   // requests, doesn't survive restarts (clients reconnect + resync).
-  const eventBus = new WorkflowEventBus();
+  const eventBus = new VersionControlEventBus();
+  // Office-document/PDF/email text extraction for `read_file`/`grep`, cached
+  // by content hash beside the workspaces root (see `DocExtractionCache`),
+  // failures included. A fresh failure is told to the people looking at the
+  // file: the events route delivers it only to sessions that may read it.
+  const docExtractService = new DocExtractService(config.docExtractCacheRoot, documentExtractor, {
+    onUnreadable: ({ workspaceId, path, reason }) =>
+      eventBus.emit({ kind: 'document-unreadable', workspaceId, path, reason }),
+  });
   // In-process post-commit hook (distinct from the SSE bus): fires once per
   // committed change (batched paths) so catalogs refresh instantly and the
   // id-repair keeps the id namespace collision-free. Subscribers are registered
   // below, once the reacting services exist.
   const fileChangeNotifier = new FileChangeNotifier();
-  const workflowService = new WorkflowService(
+  // Who tells the reviewers of an opened change request: the composition root
+  // of a distribution registers its listener here, after this returns (see
+  // `ChangeRequestHooks`).
+  const changeRequestHooks = new ChangeRequestHooks();
+  const versionControlService = new VersionControlService(
     db,
     gitService,
     pullRequestService,
-    reviewWorkflowService,
+    changeRequestReviewService,
     workspaceService,
     accessControl,
     fileLockService,
     pendingCommitsService,
-    kbDirName,
+    kb,
+    changeGate,
     eventBus,
     fileChangeNotifier,
-    // Exposed as `workflowService.hooks` — the SAME instance GitService and
-    // the session-ontology gate consult, so enterprise registrations against
+    // Exposed as `versionControlService.hooks` — the SAME instance GitService and
+    // the agent-access gate consult, so a deployment's registrations against
     // it reach every hook point.
-    workflowHooks,
+    versionControlHooks,
+    // Exposed as `changeRequestHooks`, the same instance, for the same reason.
+    changeRequestHooks,
+    // The opened event names the approvers as accounts; auth answers which
+    // of the addresses the access model names have one.
+    authService,
   );
+  // The leftover-branch cleanup asks the Deployment page at every round, so
+  // switching it off there applies without a restart.
+  versionControlService.leftoverCleanupEnabled = () => retireMergedBranchesOn(settings.resolve('retireMergedBranches'));
 
   // Join requests: derived entirely from two copies of a plugin's `access.md`
   // (the request's branch vs the default branch), so it holds no state — it
   // only needs to read files at refs and to close a request whose proposals
   // have all landed.
-  const joinRequestsService = new JoinRequestsService(workspaceService, workflowService);
+  const joinRequestsService = new JoinRequestsService(
+    workspaceService,
+    versionControlService,
+    kb,
+    // Read-only: the one question a request asks of the resolver is whether
+    // the person it names already holds what it proposes.
+    accessControl,
+  );
+  // The OTHER half of a join request: the row the subscribe endpoint writes
+  // before it answers, and the branch/clone/commit/push/change-request work
+  // that runs against it afterwards. The row is what lets the click be
+  // answered in a database round-trip instead of a clone, and what survives a
+  // restart with the request still owed.
+  const pluginJoinRequestJobs = new PluginJoinRequestJobs(new DbJoinRequestStore(db), {
+    versionControl: versionControlService,
+    workspaceService,
+    kb,
+    // A record keys on the plugin's primary FOLDER below the root, which the
+    // catalog is the only thing that can turn back into a path and a name
+    // people read. Null once nothing answers to the key — a deleted plugin,
+    // a moved folder — which the job records as a failure the requester sees.
+    //
+    // An EMPTY catalog is not that. Discovery degrades to empty whenever it
+    // cannot read the knowledge base — a boot that has not finished cloning,
+    // a remote that blipped — and answering "null" then would tell everyone
+    // with a request outstanding that their plugin is gone, permanently, for
+    // a fault that healed in seconds. A request is only refused when the
+    // catalog has something to say and this key is absent from it; when it
+    // has nothing to say at all, the failure is raised as a transient one, so
+    // the row stays `pending` for the next sweep to retry.
+    target: async (pluginKey) => {
+      const catalog = await pluginIndexService.catalog();
+      if (catalog.length === 0) {
+        throw new JoinRequestNotReadyError('the plugin catalog is not available yet');
+      }
+      const entry = catalog.find((g) => pluginFolderBelowRoot(g.folders[0]) === pluginKey);
+      return entry ? { folder: entry.folders[0], displayName: entry.displayName } : null;
+    },
+    requester: (email) => authService.getUserByEmail(email),
+  });
+  // Links land as ordinary default-branch commits and change what the plugin
+  // index counts, so a link drops that cache too.
+  const pluginLinksService = new PluginLinksService(
+    workspaceService,
+    versionControlService,
+    accessControl,
+    new AccessMutationService(workspaceService, accessControl, kb.kbDirName),
+    skillService,
+    pluginLinkIndex,
+    kb,
+    eventBus,
+    () => pluginIndexService.invalidate(),
+  );
+  // A rename rewrites grants across the knowledge base in one batch commit,
+  // then drops every cache that keyed on the old identity.
+  const pluginRenameService = new PluginRenameService(
+    workspaceService,
+    versionControlService,
+    accessControl,
+    pluginSource,
+    disk,
+    kb,
+    eventBus,
+    () => {
+      pluginIndexService.invalidate();
+      pluginLinkIndex.invalidate();
+    },
+  );
+  // Source → distribution. The marketplace's identity is fixed for now; the
+  // per-user git endpoint and any mirror both compile through this.
+  const marketplaceCompiler = new MarketplaceCompilerService(
+    workspaceService,
+    accessControl,
+    skillService,
+    pluginLinkIndex,
+    kb,
+    {
+      name: 'hexis',
+      owner: 'Hexis',
+      description: 'Skills and plugins from this knowledge base',
+      // The knowledge base as a tool, shipped in the skills plugin so an
+      // agent installing from the marketplace can read what its skills refer
+      // to. The same address `/api/config` and the OAuth metadata publish,
+      // userinfo stripped; the client's OAuth flow supplies the identity.
+      knowledgeBaseMcp: { name: 'hexis', url: mcpEndpointUrl(config.publicBackendUrl) },
+    },
+    pluginSource,
+    disk,
+    gitRunner,
+  );
+  // Sibling of the workspaces root, like the spill store: one bare repo, one
+  // git namespace per caller (see marketplace-repo.service.ts).
+  const marketplaceRepo = new MarketplaceRepoService(
+    path.resolve(config.workspacesRoot, '..', 'marketplace.git'),
+    marketplaceCompiler,
+    gitRunner,
+  );
+
+  // Remote sync. Drives the version-control module's per-branch pull-and-announce
+  // over every clone the workspace service knows about; owns no git of its own.
+  const kbSyncService = new KbSyncService(versionControlService, workspaceService);
   // Server-scoped MCP editing — the tool page's edit form. One server's truth
   // spans a plugin's mcp.json AND plugin.json extensions block, and this is
   // the ONE writer that rewrites both entries and commits them together (see
   // McpServerEditService).
   const mcpServerEditService = new McpServerEditService(
     workspaceService,
-    workflowService,
+    versionControlService,
     accessControl,
     toolManualService,
-    kbDirName,
+    kb,
+    disk,
   );
 
   // Plugin provisioning — the one privileged door that brings `Plugins/<name>/`
@@ -409,60 +1179,51 @@ export async function createCoreServices(
   // folder's rules are at HEAD before the endpoint answers.
   const pluginProvisionService = new PluginProvisionService(
     workspaceService,
-    workflowService,
+    versionControlService,
     accessControl,
-    kbDirName,
+    kb,
     eventBus,
+    pluginSource,
+    disk,
   );
 
   // Pending skills: the other half of the catalog — skills that exist only on
   // an open change request's branch. Built here rather than beside
-  // `skillService` because it needs the workflow service, which does not exist
+  // `skillService` because it needs the version-control service, which does not exist
   // that early; it holds no state of its own, so where it is constructed is the
   // only thing the ordering decides.
   const pendingSkillsService = new PendingSkillsService(
     workspaceService,
     accessControl,
     skillService,
-    workflowService,
+    versionControlService,
+    kb,
   );
 
-  // Subscriber A — catalog freshness: a committed change drops the affected
-  // caches immediately instead of waiting out their TTLs. The tool/skill
-  // catalogs are global but read the DEFAULT branch only, so only
-  // default-branch changes under their folders matter. (The kb-graph id-index
-  // invalidation that used to live in this subscriber is registered by the
-  // enterprise overlay, next to the kb-graph service it belongs to — the
-  // caches are independent, so the split preserves behavior.)
-  fileChangeNotifier.onFilesChanged(({ branch, paths }) => {
-    if (branch !== DEFAULT_BRANCH) return;
-    // Skills, tools and the plugin index all live under `Plugins/`, so one
-    // touch check drives all three caches. An access grant lands as a
-    // default-branch change to `Plugins/<plugin>/access.md`, so this is also
-    // what makes a newly-granted plugin unlock within one round-trip instead
-    // of one TTL.
-    const touched = paths.some((p) => p.startsWith(`${kbDirName}/${PLUGINS_DIR}/`));
-    if (touched) {
-      toolManualService.invalidate();
-      skillService.invalidate();
-      pluginIndexService.invalidate();
-    }
-  });
+  // The same missing half, for tools: a `.tool` manual or an `mcp.json` server
+  // an agent proposes is nowhere in the product until its change request
+  // merges. Built here for the same reason — it needs the version-control service —
+  // and stateless for the same reason.
+  const pendingToolsService = new PendingToolsService(
+    workspaceService,
+    accessControl,
+    toolManualService,
+    versionControlService,
+    kb,
+  );
 
-  // Subscriber B — WRITE-time freshness for the same three caches. The
-  // workspace routes emit `fs-tree-changed` the moment bytes hit a working
-  // tree; Subscriber A above fires only when the ASYNC commit lands. Between
-  // the two, "create a skill, reload the catalog" raced the commit pipeline
-  // and lost — the new skill's card stayed invisible until a refresh outlived
-  // the TTL. The catalogs scan the working tree anyway, so invalidating at
-  // write time makes the very next read see the file. No path filter: this
-  // event carries none, and a spurious drop only costs one re-scan.
-  eventBus.onEmit((event) => {
-    if (event.kind !== 'fs-tree-changed') return;
-    if (!('branch' in event) || event.branch !== DEFAULT_BRANCH) return;
-    toolManualService.invalidate();
-    skillService.invalidate();
-    pluginIndexService.invalidate();
+  // Catalog freshness: the skill / tool-manual / plugin-index caches all scan
+  // the DEFAULT branch's working tree, and all three go stale on the same
+  // events (a commit, a working-tree write, a merge) — as does the access
+  // model they are filtered through. Wired in one place so a new way of
+  // reaching the default branch cannot refresh two of them and leave the
+  // third serving last minute's answer.
+  registerCatalogCacheInvalidation({
+    eventBus,
+    fileChangeNotifier,
+    kb,
+    catalogs: [toolManualService, skillService, pluginIndexService, pluginLinkIndex],
+    accessControl,
   });
 
   // Admin = `Admin` role in roles.yaml, resolved through the access model on the
@@ -470,13 +1231,43 @@ export async function createCoreServices(
   const adminAccess = new AdminAccessService(
     accessControl,
     workspaceService,
-    () => DEFAULT_BRANCH,
+    () => kb.defaultBranch,
     // The deployment owner administers accounts/roles even before the KB's
     // roles.yaml lists them, and whatever the sign-in method — this list is
     // consulted before any roles.yaml lookup, so it holds for SSO too.
     // Required by CoreConfig, hence no empty case.
     [config.adminEmail],
   );
+
+  // The starter-pack question: one commit on the default branch through the
+  // same batch write the roles admin uses, the choice kept as a deployment
+  // setting. Read by its routes and by `start_session`'s first-run note.
+  const starterPackService = new StarterPackService({
+    packsDir: config.starterPacksDir,
+    kb,
+    workspaceService,
+    versionControl: versionControlService,
+    adminAccess,
+    settings,
+    accessControl,
+    disk,
+    pluginSource,
+    pluginLocks: pluginProvisionService,
+    events: eventBus,
+    fileChanges: fileChangeNotifier,
+    // Its own lock: one starter-pack choice at a time, a concern no other
+    // service's mutex serialises.
+    choosing: new WorkspaceMutex(),
+  });
+
+  // In-app update check: lazily compares the running release version against
+  // the newest published GitHub release, only when an admin's browser asks —
+  // no timers, so a deployment nobody looks at makes zero calls. The flag
+  // removes even that (air-gapped deployments; see CoreConfig).
+  const updateCheckService = new UpdateCheckService({
+    enabled: config.updateCheckEnabled,
+    currentVersion: resolveAppVersion(),
+  });
 
   // Secrets Vault: the per-user store of credentials (static API keys + OAuth
   // tokens) that back UTCP tool variables (`${FOO_API_KEY}`). Encrypted at rest
@@ -492,8 +1283,37 @@ export async function createCoreServices(
     (key) => toolManualService.scopeOfVariable(key),
   );
   // Register the `bevel-secrets` UTCP variable loader against this vault so any
-  // UTCP client can resolve `${VAR}` from the caller's secrets at tool-call time.
-  registerBevelSecretsVariableLoader(secretsVaultService);
+  // UTCP client can resolve `${VAR}` from the caller's secrets at tool-call
+  // time — under this knowledge base's scope, since the loader registry is
+  // UTCP's and process-wide while the vault is this graph's.
+  const secretsScope = tenantKey ? `${config.tenantId}/${config.dbSchema}` : DEFAULT_SECRETS_SCOPE;
+  registerBevelSecretsVariableLoader(secretsVaultService, secretsScope);
+
+  // Deleting ONE tool from its page — the owner's verb, the other end of the
+  // promise that made them the owner. Built here because it is the one service
+  // that spans both halves of a tool: the definition (a `.tool` file or an
+  // mcp.json entry) and the credentials stored under its name, which is why it
+  // can only exist once the vault does.
+  const toolDeleteService = new ToolDeleteService(
+    workspaceService,
+    versionControlService,
+    accessControl,
+    toolManualService,
+    skillService,
+    pluginIndexService,
+    pluginSource,
+    secretsVaultService,
+    kb,
+    disk,
+  );
+
+  // The credential probe: whether a tool's stored credential actually WORKS, as
+  // distinct from whether one is stored. Built here — after the vault and the
+  // tool catalog — because a probe needs both: the catalog to know what to
+  // call, the vault to resolve the credential to call it with. Holds no state
+  // and takes no `db`: a verdict is returned to the caller that asked for it and
+  // never outlives their page (see `ProbeVerdict`).
+  const connectionProbeService = new ConnectionProbeService(toolManualService, secretsVaultService, secretsScope);
 
   // Zero-config OAuth for bare `type: mcp` `.tool`s: when the remote server
   // demands OAuth (MCP authorization spec), discover its authorization server,
@@ -523,50 +1343,157 @@ export async function createCoreServices(
   });
 
   // GDPR erasure path: admin-driven user deletion. The core service erases the
-  // rows it owns; each module contributes its slice as a participant.
-  const accountErasureService = new AccountErasureService(db, ports.erasureParticipants ?? []);
+  // rows it owns; each module contributes its slice as a participant. The
+  // vault's runs first: a managed sign-in's tokens are revoked with their
+  // provider before the user row goes and the vault rows cascade with it.
+  // The port's array is held, never copied (see `CorePorts.erasureParticipants`:
+  // the enterprise root fills it AFTER construction) and never written to
+  // (a root that rebuilds a graph over the same array would otherwise keep
+  // every past graph's vault slice): core's own slices travel beside it.
+  const accountErasureService = new AccountErasureService(db, changeRequestReviewService, ports.erasureParticipants ?? [], [
+    managedSignInErasure(secretsVaultService),
+  ]);
 
   // MCP (remote agent access). ExternalApiKeyService handles connection-key
-  // lifecycle; McpSessionStore holds per-session userId in memory
-  // (single-replica — see docs/mcp-remote-access.md). McpService is now a
-  // GENERIC proxy: per session it discovers the UTCP manual at /api/agent/utcp
-  // over loopback and re-exposes every tool, dispatching calls back through the
-  // REST tool surface (so agent logic + metering live there, once).
-  const externalApiKeyService = new ExternalApiKeyService(db, config.externalApiKeyPrefix);
-  const mcpSessionStore = new McpSessionStore();
+  // lifecycle. McpService is a GENERIC, STATELESS proxy: per request it
+  // discovers the caller's catalog at /api/agent/all-tools over loopback and
+  // re-exposes every tool, dispatching calls back through the REST tool
+  // surface (so agent logic + metering live there, once). No MCP session is
+  // kept, so a restart is invisible to connected clients.
+  // Connection keys also come as GitHub-shaped links (`gho_…`, kind
+  // `github-link`): the same key, minted by the marketplace facade below when
+  // a person connects an account on claude.ai, told apart by its stored kind.
+  const externalApiKeyService = new ExternalApiKeyService(
+    db,
+    config.externalApiKeyPrefix,
+    { [GITHUB_LINK_KEY_KIND]: GITHUB_LINK_KEY_SPEC },
+    // A key's first use tells its owner's open tabs that the agent arrived.
+    eventBus,
+  );
+
+  // The facade that lets products which sync marketplaces only from a GitHub
+  // Enterprise Server (claude.ai, Cowork) add the per-user marketplace:
+  // generated app credentials an Owner registers once, and the connect flow
+  // that turns a hexis session into a connection key the product holds.
+  // Reuses the MCP flow's signed state and /connect page — see
+  // modules/marketplace/github-facade.
+  const githubFacadeCredentials = new GitHubFacadeCredentialsService(
+    new DbGitHubFacadeCredentialsStore(db, config.secretsEncKey ? new TokenCrypto(config.secretsEncKey) : null),
+  );
+  const githubFacade = new GitHubFacade({
+    credentials: githubFacadeCredentials,
+    codes: new DbGitHubFacadeCodeStore(db),
+    keys: externalApiKeyService,
+    consumers: [CLAUDE_CONSUMER],
+    stateSecret: config.jwtSecret,
+    publicFrontendUrl: config.publicFrontendUrl,
+  });
+  // What every connected agent is told at initialize: the admin's preamble
+  // at the repository root, read as the platform (the root is default-deny
+  // for readers, and the preamble is a broadcast). One reader, two consumers:
+  // the proxy below composes in-process per request; the agent-facing route
+  // serves the same composition to the local bridge and the frontend card.
+  const readPreamble: AgentPreambleReader = () => readAgentPreamble(workspaceService, kb, disk);
+  // The guide every agent is told to read first, composed when asked for —
+  // the layout and the default branch are read per call, so a name the setup
+  // save applies lands without a restart, and the distribution's hook sees
+  // every composition.
+  const agentGuideSectionsReader: AgentGuideSectionsReader = () =>
+    agentGuideSections(kb.layout, ports.agentGuide, { kbDirName, defaultBranch: kb.defaultBranch });
+  const agentGuide: AgentGuideReader = async () => joinGuideSections(await agentGuideSectionsReader());
+  const agentGuideStart: AgentGuideReader = async () => guideStartText(await agentGuideSectionsReader());
+  // The Audit log. Records through the proxy below (every call an external
+  // agent makes), reads keys through the key service so their shape is
+  // defined once, and prunes past the retention setting — read per sweep, so
+  // a change on the Deployment page applies without a restart.
+  const agentAuditService = new AgentAuditService(db, externalApiKeyService, () =>
+    retentionDaysFrom(settings.resolve('auditRetentionDays')),
+  );
+  // The embed surface. It reads files through the workspace service and
+  // judges them with the same access resolver the app file page uses, so what
+  // a reader may see and change inside a chat is what they may see and change
+  // in the app — never a second answer to the same question.
+  const embedService = composeEmbedService(
+    {
+      // The RESOLVED checkout folder, not the env's: `config.kbDirName` is only
+      // the environment value, empty on a deployment that took the default or
+      // named it in setup, and every path the embed builds starts with it.
+      config: { ...config, kbDirName },
+      kb,
+      workspaceService,
+      accessControl,
+      authService,
+      versionControlService,
+      gitService,
+      accountLinks: new AccountLinkService(db),
+      // The SAME extension-to-reader registry `read_file` dispatches on, so the
+      // embed answer to "is this text, or bytes a renderer fetches?" cannot
+      // disagree with what a read of the file returns.
+      readers: createFileReaderRegistry(docExtractService),
+      // The SAME pre-disk gate the file editor and the agent tools run: a
+      // `roles.yaml` that would not parse is refused before it is written, from
+      // a chat exactly as from the app.
+      validateWrite: makeRolesYamlWriteValidator(kbDirName),
+    },
+    // A node-id reference resolves only where a node graph is: the
+    // distribution's, when it registers one (`ports.embedNodeIdResolver`).
+    ports,
+  );
+  // The `ui://` view `open_page` carries, with the one origin it may frame:
+  // this deployment own public origin.
+  const mcpAppService = new McpAppService({ publicFrontendUrl: config.publicFrontendUrl });
   const mcpService = new McpService(
-    mcpSessionStore,
     {
       // Loopback to our own REST tool surface — 127.0.0.1 (not localhost) to pin
       // IPv4 and dodge resolver ambiguity. The proxy authenticates each call with
       // the caller's own connection key.
-      loopbackBaseUrl: `http://127.0.0.1:${config.port}`,
+      loopbackBaseUrl: config.loopbackBaseUrl ?? `http://127.0.0.1:${config.port}`,
       // Manual namespace + UTCP variable prefix (KNOWLEDGE_BASE_API_URL / …).
       manualName: 'KNOWLEDGE_BASE',
-      // Oversized chain results spill here too — an external MCP session has no
+      // Oversized chain results spill here too — an external MCP caller has no
       // ambient workspace, so it reads the spill back by ref via `read_file`.
       spillStore,
       // For the needs-authorization setup link surfaced to external agents.
       publicFrontendUrl: config.publicFrontendUrl,
+      readAgentPreamble: readPreamble,
+      // The root-folder and platform-file names the shared file rules spell,
+      // read per request so a layout the setup save applies lands without a restart.
+      kbLayout: () => kb.layout,
+      // The branch the shared rules name as the one people read — a getter
+      // too, so the name in effect is the one an agent is told.
+      defaultBranch: () => kb.defaultBranch,
+      secretsScope,
+      // Read at listing time, by when the hints below exist.
+      readOnlyOverrides: () => readOnlyHints.overrides(),
     },
     // Pre-dispatch per-user credential check: the vault answers "has this caller
     // set it?" and the manual catalog answers "which user-scoped vars does this
     // tool need?".
     secretsVaultService,
     toolManualService,
-    // Loopback bearer mint for OAuth/JWT sessions — their own bearer would
+    // Loopback bearer mint for OAuth/JWT requests — their own bearer would
     // 401 at the connection-key/internal-only /api/agent/* hop.
     internalTokenService,
-    // Session-grant reset for broken tool sign-ins. A closure because the
+    // Grant reset for broken tool sign-ins. A closure because the
     // provider is constructed just below (it needs nothing from McpService;
     // the binding is only dereferenced at call time, long after boot).
     (bearer) => mcpOAuthProvider.revokeByAccessToken(bearer),
+    // Every attributable call lands in the Audit log through this.
+    agentAuditService,
+    // The views the endpoint serves over resources/read, and the tools that
+    // carry them.
+    mcpAppService,
   );
-  // A changed secret invalidates the proxy's remembered manual failures for
-  // that user (null = shared secret → everyone), so a just-repaired
-  // credential is retried on the very next session build instead of waiting
-  // out the failure memo's TTL.
-  secretsVaultService.onMutation((changedUserId) => mcpService.clearManualFailures(changedUserId));
+  // A changed secret invalidates what the proxy built from the old value for
+  // that user (null = shared secret → everyone): remembered manual failures,
+  // so a just-repaired credential is retried on the very next request instead
+  // of waiting out the failure memo's TTL, and pooled downstream connections.
+  secretsVaultService.onMutation((changedUserId) => mcpService.onSecretsChanged(changedUserId));
+  // The proxy is the one place a connected server's tools are loaded, so it is
+  // the one place their schemas are checked — and the tool catalog is where the
+  // people who manage a server read what it found. Setter injection, like the
+  // OAuth discovery above: the proxy is constructed after the catalog.
+  toolManualService.setHiddenTools(mcpService.hiddenTools);
   // MCP OAuth 2.1 authorization server (our own AS): lets MCP clients with no
   // pre-shared connection key connect via the standard 401 → discovery → DCR →
   // authorize (PKCE) flow. The authorize step routes the browser to /connect
@@ -578,6 +1505,8 @@ export async function createCoreServices(
     stateSecret: config.jwtSecret,
     publicFrontendUrl: config.publicFrontendUrl,
     tokenPrefix: config.mcpOAuthTokenPrefix,
+    // An agent connection's first use tells its owner's open tabs the agent arrived.
+    events: eventBus,
   });
   // RFC 9728 pointer carried on every MCP 401 challenge so OAuth-capable
   // clients discover the AS. Single source of truth for the resource id.
@@ -593,6 +1522,7 @@ export async function createCoreServices(
     externalApiKeyService,
     mcpOAuthProvider,
     mcpResourceMetadataUrl,
+    internalTokenService,
   );
 
   // ── Unified tool surface ──────────────────────────────────────────────
@@ -603,20 +1533,40 @@ export async function createCoreServices(
   // `internalTokenService` minted above (shared with the agent factories) is
   // the same one the tool-auth middleware verifies internal tokens against.
   const toolRegistry = new ToolRegistry();
+  // What MCP clients are told about each platform tool's effect: its write
+  // declaration, or an admin's override from the Tools page.
+  const readOnlyHints = new ToolReadOnlyHints(toolRegistry, settings);
   const resolveToolContext = createToolContextResolver({
     authService,
     workspaceService,
-    workflowService,
+    versionControlService,
     events: eventBus,
     kbDirName: kbDirName,
     creatorAccess,
+    loadActiveGroups,
+    agentScope: agentScopeService,
   });
-  const toolHandlerFactory = createToolHandlerFactory(resolveToolContext);
-  const toolAuthMiddleware = createToolAuthMiddleware(externalApiKeyService, internalTokenService);
+  const writeAccess = ports.writeAccess ?? alwaysWritable;
+  // The branch every tool call runs on is resolved by the handler, before the
+  // tool: the default read live (a rename in the settings is the next call's
+  // default), the existence asked without cloning anything.
+  const toolHandlerFactory = createToolHandlerFactory(resolveToolContext, writeAccess, {
+    defaultBranch: () => kb.defaultBranch,
+    isMissing: (branch) => workspaceService.isBranchMissing(branch),
+  });
+  const toolAuthMiddleware = createToolAuthMiddleware(externalApiKeyService, internalTokenService, authService, mcpOAuthProvider);
+  const verifyToolToken = createTokenVerifier(externalApiKeyService, internalTokenService, authService, mcpOAuthProvider);
+  // Every credential kind this server issues — connection keys, internal
+  // tokens and app sessions (bearer or cookie) — so a fetch carrying another
+  // user's identity of ANY kind is refused the link.
+  const agentDownloadFetcher: (req: Request) => Promise<string[]> = createDownloadFetcherIdentifier(
+    { verifyToolToken, verifySession: (token) => authService.verifyToken(token) },
+    readAuthCookie,
+  );
   // Read-only manual endpoints accept the above PLUS a browser JWT, so a
   // logged-in user can browse the catalog with their session. Execution routes
   // keep `toolAuthMiddleware` (no JWT), so a session can read but not invoke.
-  const manualAuthMiddleware = createManualAuthMiddleware(externalApiKeyService, internalTokenService, authService);
+  const manualAuthMiddleware = createManualAuthMiddleware(externalApiKeyService, internalTokenService, authService, mcpOAuthProvider);
 
   // Recovery-bot identity: a synthetic `recovery-bot@bevel.local` user
   // backing (a) the recovery agent's commit authorship and (b) the
@@ -629,16 +1579,17 @@ export async function createCoreServices(
   // retry budget AND recovery-agent budget exhausted) the worker emits
   // a `'system'` feedback notice that admins triage out of band.
   //
-  // The orphan-startup sweep runs BEFORE start() so any rows that
-  // previous deploys left as `running` (process crashed mid-commit) get
-  // reset to `pending` before the worker starts claiming. The sweep
-  // also enqueues working-tree dirt that pre-dates the queue (the
-  // existing `target-company-state` orphans).
-  await pendingCommitsService.startupReconcile(
-    workspaceService.knownWorkspaces(),
-    { scan: (ws) => workspaceService.scanOrphanedPaths(ws.id) },
-    { email: recoveryBot.email, name: recoveryBot.name },
-  );
+  // The queue's recovery — rows a dead process left `running` go back to
+  // `pending`, and working-tree dirt that pre-dates the queue is enqueued —
+  // runs under the commit-worker lease, right before the worker starts (see
+  // `withStartupTask` below). At boot, before the lease, it would reset rows
+  // the outgoing process of a redeploy is still committing.
+  const reconcileQueue = () =>
+    pendingCommitsService.startupReconcile(
+      workspaceService.knownWorkspaces(),
+      { scan: (ws) => workspaceService.scanOrphanedPaths(ws.id) },
+      { email: recoveryBot.email, name: recoveryBot.name },
+    );
   const pendingCommitsWorker = new PendingCommitsWorker({
     service: pendingCommitsService,
     // The service IS the driver — passed directly rather than wrapped in a
@@ -648,7 +1599,7 @@ export async function createCoreServices(
     // swallowed the `opts` carrying `skipValidation`, so the burst-validation
     // skip was a no-op in production while every unit test — which stubs this
     // port — passed. No wrapper, no gap to fall through.
-    workflow: workflowService,
+    versionControl: versionControlService,
     // Both escalation sinks come through CorePorts: the recovery agent and the
     // notice sink are enterprise-owned (background-agent factory / feedback
     // dashboard); core defaults skip recovery and log to stderr.
@@ -663,81 +1614,197 @@ export async function createCoreServices(
       name: recoveryBot.name,
     },
   });
-  pendingCommitsWorker.start();
+  // Holdable: a move to another repository stops the worker for as long as
+  // working copies are being set aside and cloned again, without giving up
+  // the lease (see `holdable` in `core/lifecycle.ts`).
+  const leased = holdable(withStartupTask(pendingCommitsWorker, reconcileQueue));
 
   // SSO providers. The array REFERENCE is shared with the caller's port — an
   // overlay pushes its own plugins into it after construction (they mount when
-  // the server is built, later). Core contributes the generic OIDC provider
-  // when the env configures one.
+  // the server is built, later). Core contributes the generic OIDC provider.
   const authProviders = ports.authProviders ?? [];
-  // Resolved through settings, so an admin can configure SSO from the setup
-  // screen instead of the environment. Env still wins, so a deployment that
-  // sets these keeps behaving exactly as it did.
-  const oidcIssuerUrl = settings.resolve('oidcIssuerUrl');
-  const oidcClientId = settings.resolve('oidcClientId');
-  const oidcClientSecret = settings.resolve('oidcClientSecret');
-  if (oidcIssuerUrl && oidcClientId && oidcClientSecret) {
-    authProviders.push(
-      new OidcAuthProvider({
-        issuerUrl: oidcIssuerUrl,
-        clientId: oidcClientId,
-        clientSecret: oidcClientSecret,
-        scopes: settings.resolve('oidcScopes') || 'openid profile email',
-        label: settings.resolve('oidcProviderLabel') || 'Single sign-on',
-        publicBackendUrl: config.publicBackendUrl,
-        publicFrontendUrl: config.publicFrontendUrl,
-        cookieSecure: config.publicBackendUrl.startsWith('https'),
+  // Registered unconditionally and resolved through settings on every use, so
+  // an admin can configure SSO from the setup screen — or change it — without
+  // a restart; the provider advertises itself only while the configuration is
+  // complete. Env still wins, so a deployment that sets these keeps behaving
+  // exactly as it did.
+  authProviders.push(
+    new OidcAuthProvider({
+      settings: () => oidcSettingsFrom(settings),
+      publicBackendUrl: config.publicBackendUrl,
+      publicFrontendUrl: config.publicFrontendUrl,
+      cookieSecure: authCookieSecure(config.publicBackendUrl),
+      // A real sign-in proves the values that sign-in used. Recorded against
+      // those — under their own key — so it says nothing about any saved
+      // since, and cannot overwrite what was recorded about them.
+      onSignedIn: async ({ issuerUrl, clientId, clientSecret }) => {
+        const credentials = { issuerUrl, clientId, clientSecret };
+        if ((await settings.oidcVerificationOf(credentials)) === 'verified') return;
+        await settings.recordOidcVerification('verified', credentials);
+      },
+    }),
+  );
+
+  // Materializer factory for an overlay-provided directory source: every
+  // provisioning burst regenerates `synced-groups.yaml` on the default branch
+  // (debounced), committed by the sync bot — that file is what puts access
+  // resolution in IdP mode. Core itself ships no directory integration, so
+  // nothing is constructed here until an overlay brings a source.
+  const createSyncedGroupsMaterializer = async (
+    source: SyncedGroupsSource,
+    opts?: { debounceMs?: number; log?: (message: string) => void },
+  ): Promise<SyncedGroupsWriter> => {
+    const bot = await ensureDirectorySyncBot(db);
+    return new SyncedGroupsWriter({
+      source,
+      ...createSyncedGroupsCommitter({
+        workspaceService,
+        versionControlService,
+        accessControl,
+        eventBus,
+        kbDirName,
+        bot,
+        defaultBranchOf: () => kb.defaultBranch,
       }),
-    );
-  }
+      debounceMs: opts?.debounceMs,
+      log: opts?.log ?? ((message) => logger('directory-sync').warn(message)),
+    });
+  };
+  // Groups — the "who you are" principal sets. Manual-mode CRUD on
+  // groups.yaml, IdP-mode refusals, and the connect-time retirement the
+  // directory token route drives.
+  const groupsAdminService = new GroupsAdminService(
+    workspaceService,
+    versionControlService,
+    accessControl,
+    disk,
+    kbDirName,
+    () => kb.defaultBranch,
+    eventBus,
+  );
+  // Account deletion's optional half: the erased address out of roles.yaml,
+  // groups.yaml and every access rule, in one commit on the default branch.
+  // The deployment owner is never removed this way.
+  const userAccessRemovalService = new UserAccessRemovalService(
+    workspaceService,
+    versionControlService,
+    accessControl,
+    disk,
+    kbDirName,
+    () => kb.defaultBranch,
+    eventBus,
+    [config.adminEmail],
+  );
+
+  // THE LAST THING STARTED, once everything above is built: the lease loop
+  // is the one piece of this function that keeps running on its own, and a
+  // throw anywhere after it would leave a loop holding — or forever asking
+  // for — this knowledge base's lock with no graph to stop it. Single-tenant
+  // never noticed (the process exited with the throw); a host that retries
+  // an activation would. Not `start()`: the worker runs only while this
+  // process holds the commit-worker lease. On a redeploy the outgoing
+  // container still holds it, so this one serves requests and declines to
+  // drain until that one exits; then it takes the lease and starts. Two
+  // processes draining one shared clone volume is the failure this prevents
+  // — see `core/lifecycle.ts`.
+  const commitWorker = holdCommitWorkerLease(new AdvisoryLease(db, AdvisoryLock.CommitWorker, { tenantKey }), leased);
 
   return {
     config,
     db,
+    gitRunner,
+    commitWorker,
+    whileCommitsHeld: (work) => leased.whileHeld(work),
+    startupRetry: null,
+    tenantKey,
+    secretsScope,
+    disk,
     mcpServerEditService,
+    toolDeleteService,
     workspaceService,
-    kbSeedService,
+    kbStartupRunner,
+    repositorySource,
+    managedRepository,
+    githubApp,
     settings,
+    kb,
     kbDirName,
     spillStore,
+    agentUploadStore,
+    agentDownloadStore,
+    tmpSweeper,
+    patternMatcher,
+    agentDownloadFetcher,
+    documentExtractor,
+    docExtractService,
     accessControl,
     creatorAccess,
-    sessionOntologyService,
+    changeGate,
     routineWritePolicy,
     skillService,
     pendingSkillsService,
     toolManualService,
+    pendingToolsService,
+    readAgentPreamble: readPreamble,
+    agentGuide,
+    agentGuideStart,
+    agentGuideSections: agentGuideSectionsReader,
     pluginIndexService,
     pluginProvisionService,
+    starterPackService,
     joinRequestsService,
+    pluginJoinRequestJobs,
+    pluginLinkIndex,
+    agentScopeService,
+    pluginLinksService,
+    pluginRenameService,
+    marketplaceCompiler,
+    marketplaceRepo,
+    githubFacade,
+    githubFacadeCredentials,
     authService,
+    accountHooks,
     authMiddleware,
     accountErasureService,
     gitService,
     pullRequestService,
     diffService,
-    reviewWorkflowService,
+    changeRequestReviewService,
     fileLockService,
-    workflowService,
+    versionControlService,
+    changeRequestHooks,
+    kbSyncService,
     eventBus,
     fileChangeNotifier,
     pendingCommitsService,
     pendingCommitsWorker,
     recoveryBot,
     adminAccess,
+    groupsAdminService,
+    userAccessRemovalService,
+    createSyncedGroupsMaterializer,
+    updateCheckService,
     secretsVaultService,
+    connectionProbeService,
     externalApiKeyService,
     internalTokenService,
+    embedService,
+    mcpAppService,
     mcpService,
     mcpAuthMiddleware,
     mcpOAuthProvider,
+    mcpResourceMetadataUrl,
+    agentAuditService,
     toolRegistry,
+    readOnlyHints,
     toolAuthMiddleware,
     manualAuthMiddleware,
     toolHandlerFactory,
+    writeAccess,
     // Server-time seams — defaults here; the enterprise overlay overwrites
     // (or, for the array, pushes into) these after construction.
     sessionSink: ports.sessionSink ?? new UuidSessionSink(),
+    managedSignIns: ports.managedSignIns ?? null,
     usageMeter: ports.usageMeter ?? unmeteredLlmUsage,
     authProviders,
   };

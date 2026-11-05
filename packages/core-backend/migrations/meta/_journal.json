@@ -29,6 +29,146 @@
       "when": 1785943322636,
       "tag": "0003_deployment_settings",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1787191920033,
+      "tag": "0004_file_lock_mode",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1788791352625,
+      "tag": "0005_github_facade",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1789034558662,
+      "tag": "0006_api_tokens_revoked_by",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1789406950616,
+      "tag": "0007_github_facade_registered",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1789563611048,
+      "tag": "0008_change_request_apply_failure",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1789649918539,
+      "tag": "0009_change_request_apply_failure_kind",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1789813372971,
+      "tag": "0010_plugin_join_requests",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1789903776474,
+      "tag": "0011_plugin_join_request_claim",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1790179003112,
+      "tag": "0012_agent_audit",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1790243482866,
+      "tag": "0013_agent_identity_and_key_soft_delete",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1790667040382,
+      "tag": "0014_change_request_closed_reason",
+      "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "7",
+      "when": 1790892582327,
+      "tag": "0015_account_deactivation",
+      "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1790933605784,
+      "tag": "0016_pii_encryption",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1791359019161,
+      "tag": "0017_atlassian_account_links",
+      "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1792106401545,
+      "tag": "0018_agent_events_page",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1792404850653,
+      "tag": "0019_oauth_token_rotated_at",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1792491287956,
+      "tag": "0020_change_request_body_is_the_description",
+      "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1792491290917,
+      "tag": "0021_data_migrations_ledger",
+      "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1792657514328,
+      "tag": "0022_session_version",
+      "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1793089896833,
+      "tag": "0023_agent_path",
+      "breakpoints": true
     }
   ]
 }

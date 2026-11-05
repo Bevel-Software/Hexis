@@ -46,7 +46,7 @@ describe('git.api', () => {
   it('fetchBranches returns the array body', async () => {
     fetchMock.mockResolvedValueOnce(
       ok([
-        { name: 'current-company-state', isCurrent: true, isProtected: true, ahead: 0, behind: 0 },
+        { name: 'current-company-state', isCurrent: true, isProtected: true },
       ]),
     );
     const bs = await fetchBranches('ws-1');
@@ -56,7 +56,7 @@ describe('git.api', () => {
 
   it('createBranch POSTs JSON body', async () => {
     fetchMock.mockResolvedValueOnce(
-      ok({ name: 'feature/x', isCurrent: false, isProtected: false, ahead: null, behind: null }),
+      ok({ name: 'feature/x', isCurrent: false, isProtected: false }),
     );
     await createBranch('ws-1', 'feature/x');
     const [, init] = fetchMock.mock.calls[0];

@@ -1,0 +1,1 @@
+ALTER TABLE "change_requests" ADD COLUMN "closed_reason" text;

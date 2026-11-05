@@ -1,5 +1,7 @@
 import { useState, useEffect, type FormEvent } from 'react';
 import { useAuth } from '../state/auth.context';
+import { ProductName } from '../../../core/ProductName';
+import { useAppRegistry } from '../../../core/registry';
 import {
   startSsoLogin,
   fetchLoginProviders,
@@ -11,28 +13,44 @@ const OAUTH_ERROR_MESSAGES: Record<string, string> = {
   state: 'Sign-in could not be verified. Please try again.',
   auth: 'Sign-in failed. Please try again.',
   start: 'Could not start sign-in. Please try again.',
+  not_configured: 'Single sign-on is not configured on this deployment.',
+  admission: 'This workspace has no seat available for your account. Ask its admin.',
+  // On file, switched off until an admin switches the account on.
+  waiting: 'This workspace has no seat left right now. Its admin can see you are waiting and can let you in.',
+  deactivated: 'Your account on this workspace is switched off. Ask its admin to turn it back on.',
+  // Who you are was proven; nobody has given that person an account here.
+  not_invited: 'You do not have an account in this workspace yet. Ask its admin to invite you.',
+  // The provider signed the person in but does not vouch for the address.
+  unverified_email:
+    'Your sign-in provider has not verified your email address, so it cannot be used to sign in here.',
 };
+
+/** The message for an error an SSO callback left for this screen (stored by useAuthState), if any. */
+function storedOAuthError(): string | null {
+  const code = sessionStorage.getItem(OAUTH_ERROR_KEY);
+  return code ? (OAUTH_ERROR_MESSAGES[code] ?? 'Sign-in failed.') : null;
+}
 
 export function LoginScreen() {
   const { login } = useAuth();
+  const { loginLinks } = useAppRegistry();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [error, setError] = useState<string | null>(null);
+  // An SSO callback's error is the screen's first message, read as the state
+  // is made so it shows on the first render. StrictMode runs this twice,
+  // which is why the stored error is cleared in the effect, not here.
+  const [error, setError] = useState<string | null>(storedOAuthError);
   const [submitting, setSubmitting] = useState(false);
   // Default to password-only until the probe resolves, matching fetchLoginProviders'
   // failure fallback so we never flash a button the backend can't service.
   const [passwordEnabled, setPasswordEnabled] = useState(true);
   const [ssoProviders, setSsoProviders] = useState<SsoProvider[]>([]);
 
-  // Surface an error returned by an SSO callback (stored by useAuthState),
-  // and probe which login methods this deployment offers.
+  // Clear the SSO callback's error once shown, so it is not shown again on a
+  // later visit, and probe which login methods this deployment offers.
   useEffect(() => {
     let mounted = true;
-    const oauthError = sessionStorage.getItem(OAUTH_ERROR_KEY);
-    if (oauthError) {
-      sessionStorage.removeItem(OAUTH_ERROR_KEY);
-      setError(OAUTH_ERROR_MESSAGES[oauthError] ?? 'Sign-in failed.');
-    }
+    sessionStorage.removeItem(OAUTH_ERROR_KEY);
     // Capability probe: never set state after unmount.
     fetchLoginProviders()
       .then((providers) => {
@@ -59,100 +77,120 @@ export function LoginScreen() {
     }
   }
 
+  // The page scrolls rather than the root (which never does): on a screen too
+  // short for the card and its links, both stay reachable. The inner column is
+  // at least the page's height, so a card that fits is still centred.
   return (
-    <div className="flex items-center justify-center h-full bg-white">
-      <form
-        onSubmit={handleSubmit}
-        className="bg-white p-8 rounded-xl border border-line w-full max-w-sm space-y-5"
-      >
-        <div className="text-center space-y-1">
-          <h1 className="text-2xl font-semibold text-ink">Bevel</h1>
-          <p className="text-sm text-ink-muted">Sign in to continue</p>
-        </div>
+    <div className="h-full overflow-y-auto bg-white">
+      <div className="flex flex-col items-center justify-center gap-4 min-h-full p-4">
+        <form
+          onSubmit={handleSubmit}
+          className="bg-white p-8 rounded-xl border border-line w-full max-w-sm space-y-5"
+        >
+          <div className="text-center space-y-1">
+            <h1 className="text-2xl font-semibold text-ink">
+              <ProductName />
+            </h1>
+            <p className="text-sm text-ink-muted">Sign in to continue</p>
+          </div>
 
-        {passwordEnabled && (
-          <>
-            <div className="space-y-3">
-              <label className="block space-y-1">
-                <span className="text-xs text-ink-muted">Email</span>
-                <input
-                  type="email"
-                  required
-                  autoComplete="email"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  className="w-full rounded-md bg-sunken border border-line-strong px-3 py-2 text-sm text-ink focus:outline-none focus:border-accent"
-                />
-              </label>
-              <label className="block space-y-1">
-                <span className="text-xs text-ink-muted">Password</span>
-                <input
-                  type="password"
-                  required
-                  autoComplete="current-password"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  className="w-full rounded-md bg-sunken border border-line-strong px-3 py-2 text-sm text-ink focus:outline-none focus:border-accent"
-                />
-              </label>
+          {passwordEnabled && (
+            <>
+              <div className="space-y-3">
+                <label className="block space-y-1">
+                  <span className="text-xs text-ink-muted">Email</span>
+                  <input
+                    type="email"
+                    required
+                    autoComplete="email"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    className="w-full rounded-md bg-sunken border border-line-strong px-3 py-2 text-sm text-ink focus:outline-none focus:border-accent"
+                  />
+                </label>
+                <label className="block space-y-1">
+                  <span className="text-xs text-ink-muted">Password</span>
+                  <input
+                    type="password"
+                    required
+                    autoComplete="current-password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    className="w-full rounded-md bg-sunken border border-line-strong px-3 py-2 text-sm text-ink focus:outline-none focus:border-accent"
+                  />
+                </label>
+              </div>
+
+              <button
+                type="submit"
+                disabled={submitting}
+                className="w-full rounded-md bg-accent text-white text-sm font-medium py-2 hover:bg-accent-hover disabled:opacity-60 disabled:cursor-not-allowed"
+              >
+                {submitting ? 'Signing in…' : 'Sign in'}
+              </button>
+            </>
+          )}
+
+          {error && (
+            <div className="text-sm text-red-600" role="alert">
+              {error}
             </div>
+          )}
 
+          {passwordEnabled && ssoProviders.length > 0 && (
+            <div className="flex items-center gap-3 text-xs text-ink-faint">
+              <span className="h-px flex-1 bg-line" />
+              or
+              <span className="h-px flex-1 bg-line" />
+            </div>
+          )}
+
+          {ssoProviders.map((provider) => (
             <button
-              type="submit"
-              disabled={submitting}
-              className="w-full rounded-md bg-accent text-white text-sm font-medium py-2 hover:bg-accent-hover disabled:opacity-60 disabled:cursor-not-allowed"
+              key={provider.key}
+              type="button"
+              onClick={() => startSsoLogin(provider)}
+              className="w-full rounded-md border border-line-strong bg-white text-ink text-sm font-medium py-2 hover:bg-hover"
             >
-              {submitting ? 'Signing in…' : 'Sign in'}
+              {provider.label}
             </button>
-          </>
-        )}
+          ))}
 
-        {error && (
-          <div className="text-sm text-red-600" role="alert">
-            {error}
-          </div>
+          {/*
+            Single sign-on auto-provisions an account on first use, so the
+            address Google returns is stored here — and the button above says
+            "Single sign-on", not "Google", so nobody can infer that from it.
+            Say it before the click, not after, and name the erasure route in
+            the same breath (GDPR Art. 17) rather than burying it elsewhere.
+          */}
+          {ssoProviders.length > 0 && (
+            <p className="text-xs text-ink-muted text-center">
+              Signing in with Google saves your email address to this demo. To have it deleted,
+              email{' '}
+              <a
+                href="mailto:razvan.radulescu@bevel.software?subject=Delete%20my%20demo%20account"
+                className="text-accent hover:underline"
+              >
+                razvan.radulescu@bevel.software
+              </a>
+              .
+            </p>
+          )}
+        </form>
+        {loginLinks && loginLinks.length > 0 && (
+          <nav aria-label="Legal">
+            <ul className="flex flex-wrap justify-center gap-x-4 gap-y-1 text-xs text-ink-muted">
+              {loginLinks.map((link) => (
+                <li key={link.href}>
+                  <a href={link.href} className="hover:underline">
+                    {link.label}
+                  </a>
+                </li>
+              ))}
+            </ul>
+          </nav>
         )}
-
-        {passwordEnabled && ssoProviders.length > 0 && (
-          <div className="flex items-center gap-3 text-xs text-ink-faint">
-            <span className="h-px flex-1 bg-line" />
-            or
-            <span className="h-px flex-1 bg-line" />
-          </div>
-        )}
-
-        {ssoProviders.map((provider) => (
-          <button
-            key={provider.key}
-            type="button"
-            onClick={() => startSsoLogin(provider)}
-            className="w-full rounded-md border border-line-strong bg-white text-ink text-sm font-medium py-2 hover:bg-hover"
-          >
-            {provider.label}
-          </button>
-        ))}
-
-        {/*
-          Single sign-on auto-provisions an account on first use, so the
-          address Google returns is stored here — and the button above says
-          "Single sign-on", not "Google", so nobody can infer that from it.
-          Say it before the click, not after, and name the erasure route in
-          the same breath (GDPR Art. 17) rather than burying it elsewhere.
-        */}
-        {ssoProviders.length > 0 && (
-          <p className="text-xs text-ink-muted text-center">
-            Signing in with Google saves your email address to this demo. To have it deleted,
-            email{' '}
-            <a
-              href="mailto:razvan.radulescu@bevel.software?subject=Delete%20my%20demo%20account"
-              className="text-accent hover:underline"
-            >
-              razvan.radulescu@bevel.software
-            </a>
-            .
-          </p>
-        )}
-      </form>
+      </div>
     </div>
   );
 }

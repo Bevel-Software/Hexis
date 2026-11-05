@@ -1,0 +1,244 @@
+import { describe, expect, it, vi, afterEach } from 'vitest';
+import type { HexisMcpConfig } from '../config.js';
+import {
+  RENEWAL_FRACTION,
+  RETRY_AFTER_FAILURE_MS,
+  cancelProactiveRenewal,
+  closeRenewal,
+  renewConnectionKeyNow,
+  scheduleProactiveRenewal,
+} from '../renewal.js';
+
+/**
+ * The one renewal mechanism, tested as the unit it is: single-flight sharing,
+ * proactive scheduling at ~80% of the granted lifetime, the credential
+ * listener firing on every success, and the retry after a failed proactive
+ * attempt. The wire-level integration (racing 401s through getJson against a
+ * real stub deployment) lives in oauth.test.ts.
+ */
+
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
+
+function makeConfig(
+  renew: HexisMcpConfig['renewConnectionKey'],
+): HexisMcpConfig {
+  return { baseUrl: 'https://x.example', connectionKey: 'initial', renewConnectionKey: renew };
+}
+
+describe('renewConnectionKeyNow: single flight', () => {
+  it('shares ONE in-flight renewal between concurrent callers', async () => {
+    let resolveGrant!: (v: { token: string }) => void;
+    const renew = vi.fn(
+      () => new Promise<{ token: string }>((resolve) => (resolveGrant = resolve)),
+    );
+    const config = makeConfig(renew);
+
+    const first = renewConnectionKeyNow(config);
+    const second = renewConnectionKeyNow(config);
+    resolveGrant({ token: 'fresh' });
+
+    expect(await first).toBe('fresh');
+    expect(await second).toBe('fresh');
+    expect(renew).toHaveBeenCalledTimes(1);
+    expect(config.connectionKey).toBe('fresh');
+  });
+
+  it('shares the failure too, and lets the NEXT call start a fresh flight', async () => {
+    const renew = vi
+      .fn<() => Promise<{ token: string }>>()
+      .mockRejectedValueOnce(new Error('refresh died'))
+      .mockResolvedValueOnce({ token: 'second-try' });
+    const config = makeConfig(renew);
+
+    const first = renewConnectionKeyNow(config);
+    const second = renewConnectionKeyNow(config);
+    await expect(first).rejects.toThrow('refresh died');
+    await expect(second).rejects.toThrow('refresh died');
+    expect(renew).toHaveBeenCalledTimes(1);
+
+    // The flight is over; a later caller runs a new one.
+    expect(await renewConnectionKeyNow(config)).toBe('second-try');
+    expect(renew).toHaveBeenCalledTimes(2);
+  });
+
+  it('notifies the credential listener on every success — and its failure does not fail the renewal', async () => {
+    const applied: string[] = [];
+    const config = makeConfig(async () => ({ token: 'fresh' }));
+    config.onConnectionKeyRenewed = async (token) => {
+      applied.push(token);
+      throw new Error('swap failed');
+    };
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    expect(await renewConnectionKeyNow(config)).toBe('fresh');
+    expect(applied).toEqual(['fresh']);
+    expect(err).toHaveBeenCalledWith(expect.stringContaining('swap failed'));
+  });
+
+  it('refuses key mode — there is nothing to renew', async () => {
+    const config: HexisMcpConfig = { baseUrl: 'https://x.example', connectionKey: 'bevel_key' };
+    await expect(renewConnectionKeyNow(config)).rejects.toThrow(/key mode/);
+  });
+});
+
+describe('scheduleProactiveRenewal: the timer the remote manual depends on', () => {
+  it('renews at ~80% of the granted lifetime and re-arms from each new grant', async () => {
+    vi.useFakeTimers();
+    const applied: string[] = [];
+    let minted = 0;
+    const config = makeConfig(async () => ({ token: `t${(minted += 1)}`, expiresInMs: 10_000 }));
+    config.onConnectionKeyRenewed = (token) => {
+      applied.push(token);
+    };
+
+    scheduleProactiveRenewal(config, 10_000);
+    await vi.advanceTimersByTimeAsync(10_000 * RENEWAL_FRACTION);
+    expect(applied).toEqual(['t1']);
+    expect(config.connectionKey).toBe('t1');
+
+    // The success re-armed from ITS grant: another 80% later, another renewal.
+    await vi.advanceTimersByTimeAsync(10_000 * RENEWAL_FRACTION);
+    expect(applied).toEqual(['t1', 't2']);
+  });
+
+  it('arms nothing without a lifetime, in key mode, or after cancel', async () => {
+    vi.useFakeTimers();
+    const renew = vi.fn(async () => ({ token: 'fresh' }));
+    const config = makeConfig(renew);
+
+    scheduleProactiveRenewal(config, undefined);
+    scheduleProactiveRenewal(config, Number.NaN);
+    scheduleProactiveRenewal(config, -5);
+    const keyMode: HexisMcpConfig = { baseUrl: 'https://x.example', connectionKey: 'bevel_key' };
+    scheduleProactiveRenewal(keyMode, 10_000);
+
+    scheduleProactiveRenewal(config, 10_000);
+    cancelProactiveRenewal(config);
+
+    await vi.advanceTimersByTimeAsync(60 * 60 * 1000);
+    expect(renew).not.toHaveBeenCalled();
+  });
+
+  it('retries after a failed proactive renewal instead of leaving the transport to die quietly', async () => {
+    vi.useFakeTimers();
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const renew = vi
+      .fn<() => Promise<{ token: string; expiresInMs?: number }>>()
+      .mockRejectedValueOnce(new Error('deployment briefly down'))
+      .mockResolvedValueOnce({ token: 'recovered', expiresInMs: 10_000 });
+    const config = makeConfig(renew);
+
+    scheduleProactiveRenewal(config, 10_000);
+    await vi.advanceTimersByTimeAsync(10_000 * RENEWAL_FRACTION);
+    expect(renew).toHaveBeenCalledTimes(1);
+    expect(err).toHaveBeenCalledWith(expect.stringContaining('proactive credential renewal failed'));
+
+    await vi.advanceTimersByTimeAsync(RETRY_AFTER_FAILURE_MS);
+    expect(renew).toHaveBeenCalledTimes(2);
+    expect(config.connectionKey).toBe('recovered');
+  });
+
+  it('a cancel while a FAILING attempt is in flight revokes the retry — shutdown is never re-armed out of', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    let rejectGrant!: (err: Error) => void;
+    const renew = vi.fn(
+      () => new Promise<{ token: string }>((_resolve, reject) => (rejectGrant = reject)),
+    );
+    const config = makeConfig(renew);
+
+    scheduleProactiveRenewal(config, 10_000);
+    await vi.advanceTimersByTimeAsync(10_000 * RENEWAL_FRACTION);
+    expect(renew).toHaveBeenCalledTimes(1);
+
+    // Shutdown lands while the attempt is still pending; its failure must not
+    // arm the after-failure retry into a world that is closing.
+    cancelProactiveRenewal(config);
+    rejectGrant(new Error('deployment down'));
+    await vi.advanceTimersByTimeAsync(RETRY_AFTER_FAILURE_MS * 5);
+    expect(renew).toHaveBeenCalledTimes(1);
+  });
+
+  it('a cancel while a SUCCEEDING attempt is in flight revokes the re-arm and the listener — the grant itself is kept', async () => {
+    vi.useFakeTimers();
+    const applied: string[] = [];
+    let resolveGrant!: (v: { token: string; expiresInMs: number }) => void;
+    const renew = vi.fn(
+      () => new Promise<{ token: string; expiresInMs: number }>((resolve) => (resolveGrant = resolve)),
+    );
+    const config = makeConfig(renew);
+    config.onConnectionKeyRenewed = (token) => {
+      applied.push(token);
+    };
+
+    scheduleProactiveRenewal(config, 10_000);
+    await vi.advanceTimersByTimeAsync(10_000 * RENEWAL_FRACTION);
+    cancelProactiveRenewal(config);
+    resolveGrant({ token: 'fresh', expiresInMs: 10_000 });
+    await vi.advanceTimersByTimeAsync(60 * 60 * 1000);
+
+    // Callers already awaiting the flight legitimately get the fresh bearer…
+    expect(config.connectionKey).toBe('fresh');
+    // …but nothing is notified into the shut-down server, and nothing re-arms.
+    expect(applied).toEqual([]);
+    expect(renew).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses a renewal that STARTS after closeRenewal — an ordinary cancel is not final', async () => {
+    vi.useFakeTimers();
+    const renew = vi.fn(async () => ({ token: 'fresh', expiresInMs: 10_000 }));
+    const config = makeConfig(renew);
+
+    // The re-arm cancel is hygiene, not teardown: the reactive 401 path must
+    // keep working through normal operation.
+    cancelProactiveRenewal(config);
+    expect(await renewConnectionKeyNow(config)).toBe('fresh');
+    expect(renew).toHaveBeenCalledTimes(1);
+
+    // The FINAL cancel: a renewal starting afterwards (a straggling REST
+    // 401-retry racing shutdown) is refused instead of renewing and re-arming
+    // the timer into a torn-down world — and nothing can arm again.
+    closeRenewal(config);
+    await expect(renewConnectionKeyNow(config)).rejects.toThrow(/shut down/);
+    scheduleProactiveRenewal(config, 10_000);
+    await vi.advanceTimersByTimeAsync(60 * 60 * 1000);
+    expect(renew).toHaveBeenCalledTimes(1);
+  });
+
+  it('a flight already up when closeRenewal lands still completes for its awaiters — but applies nothing', async () => {
+    const applied: string[] = [];
+    let resolveGrant!: (v: { token: string; expiresInMs: number }) => void;
+    const renew = vi.fn(
+      () => new Promise<{ token: string; expiresInMs: number }>((resolve) => (resolveGrant = resolve)),
+    );
+    const config = makeConfig(renew);
+    config.onConnectionKeyRenewed = (token) => {
+      applied.push(token);
+    };
+
+    const inFlight = renewConnectionKeyNow(config);
+    closeRenewal(config);
+    resolveGrant({ token: 'fresh', expiresInMs: 10_000 });
+
+    // Whoever was awaiting the flight legitimately gets the fresh bearer…
+    expect(await inFlight).toBe('fresh');
+    // …but nothing is notified or re-armed, and no NEW flight may start.
+    expect(applied).toEqual([]);
+    await expect(renewConnectionKeyNow(config)).rejects.toThrow(/shut down/);
+    expect(renew).toHaveBeenCalledTimes(1);
+  });
+
+  it('clamps the delay to Node\'s timer ceiling — an over-long grant must not overflow setTimeout into a 1ms loop', async () => {
+    // REAL timers, deliberately: fake ones do not reproduce Node's
+    // over-2^31-1 overflow-to-1ms, which is exactly what this pins.
+    const renew = vi.fn(async () => ({ token: 'fresh' }));
+    const config = makeConfig(renew);
+    scheduleProactiveRenewal(config, Number.MAX_SAFE_INTEGER);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(renew).not.toHaveBeenCalled();
+    cancelProactiveRenewal(config);
+  });
+});

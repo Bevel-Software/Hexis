@@ -1,30 +1,51 @@
-import { useCallback, useEffect, useId, useMemo, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
+import { cn } from '../../../../lib/utils';
+import { HEADER_BAND, HEADER_BAND_LEAD, PAGE_HEADER_TESTID, TITLE_INK_ROOM } from '../../../../shared/theme/header';
+import { ArrowLeft, History } from 'lucide-react';
 import {
   DEFAULT_BRANCH,
-  pluginOfPath,
+  type FileTreeEntry,
   type PullRequestSummary,
 } from '@bevel-software/platform-shared';
 import '../../library.css';
-import { Badge, Button } from '../../../../shared/components';
-import { useAuth } from '../../../auth/state/auth.context';
-import { useWorkspace } from '../../../workspace/state/workspace.context';
-import { kbFileUrl, resolveRelativePath, useNodeIdNav } from '../../../workspace/routing/kb-routes';
-import { cancelPullRequest } from '../../../pr/services/pr-cancel.api';
-import { useFileAccess } from '../../../access/hooks/useFileAccess';
-import { proposeChange, suggestionBranchFor } from '../../services/library.api';
-import { getOrCreateWorkspace, writeFile } from '../../../workspace/services/workspace.api';
+import {
+  Badge,
+  Banner,
+  Button,
+  IconButton,
+  Surface,
+  useFocusHandoff,
+} from '../../../../shared/components';
+import { useAuth } from '../../../auth';
+import { useWorkspace, kbFileUrl, useFileNav, useFileNodeId, useNodeIdNav, useWorkspaceImageResolver } from '../../../workspace';
+import { useGit } from '../../../git';
+import { FileHistoryPanel } from '../../../git/components/FileHistoryPanel';
+import { cancelPullRequest } from '../../../pr';
+import { useFileAccess, offersManageAccess } from '../../../access';
+import { proposeChange, suggestionBranchFor, listSkillAccessRequests, reconcileSkillAccessRequest } from '../../services/library.api';
+import {
+  getOrCreateWorkspace,
+  writeFile,
+  type SkillToolWarning,
+} from '../../../workspace';
 import { useSkillDetail } from '../../hooks/useSkillDetail';
-import { useApplyChangeRequest } from '../../../change-requests/hooks/useApplyChangeRequest';
-import { useCrFileDiffs } from '../../../change-requests/hooks/useCrFileDiffs';
-import { useDefaultBranchFile, useFileOnBranch } from '../../../change-requests/hooks/useFileOnBranch';
+import {
+  refusalLine,
+  useApplyChangeRequest,
+} from '../../../change-requests';
+import { useCrFileDiffs, useDefaultBranchFile, useFileOnBranch, changeAuthorName, formatWhen, conflictResolutionPrompt } from '../../../change-requests';
 import { useLibrary } from '../../state/library-data';
 import { useLibraryToast } from '../../state/toast.context';
-import { libraryHomeForItemPath, urlForSkillFile } from '../../routes/library-paths';
-import { changeAuthorName, formatWhen } from '../../../change-requests/utils/author';
-import { ownersTextOf } from '../../utils/plugin-summary';
+import { CONNECT_TOOLS_PATH, libraryHomeForItemPath, urlForSkillFile } from '../../routes/library-paths';
+import { ownersTextOf, pluginLabel } from '../../utils/plugin-summary';
 import { neededToolsFor, toolStatus } from '../../utils/status';
 import { StatusDot } from '../StatusDot';
+import { SharedViaPlugins } from './SharedViaPlugins';
+import { AccessRequestsBanner } from '../../../access/components/AccessRequestsBanner';
+import { useJoinRequests, type JoinRequestsApi } from '../../hooks/useJoinRequests';
+import { ManageAccessDialog } from '../../../access/components/ManageAccessDialog';
+import { ShareButton } from '../ShareButton';
 import { ChangeRequestDock } from '../ChangeRequestDock';
 import { ChangeRequestDialog } from '../../../change-requests/components/ChangeRequestDialog';
 import { SkillFileTabs } from './SkillFileTabs';
@@ -32,7 +53,6 @@ import { skillPanelId, skillTabId } from './tab-ids';
 import { SkillFilePane } from './SkillFilePane';
 import { SkillFileEditor } from './SkillFileEditor';
 import { ChangeBox } from '../../../change-requests/components/ChangeBox';
-import { conflictResolutionPrompt } from '../../../change-requests/utils/conflict';
 import { isBinaryFile } from '../../../workspace/components/renderers';
 
 /**
@@ -86,25 +106,75 @@ export function SkillPage({
   const detail = useSkillDetail(name);
   // The same id-link resolver the Knowledge renderer uses — a `[text](node-id)`
   // link inside a skill file navigates to that node, not to a dead span.
-  const { openNodeId } = useNodeIdNav();
+  const { openNodeId, nodeIdTarget } = useNodeIdNav();
+  const { openLink, linkTarget, openFilePage } = useFileNav();
 
   const [selectedState, setSelected] = useState('SKILL.md');
   const selected = activeFile ?? selectedState;
   const [compareCr, setCompareCr] = useState<PullRequestSummary | null>(null);
+  /**
+   * The clock-arrow's destination: the git log for the file on screen,
+   * rendered in place of the reading pane. Local state rather than a URL,
+   * matching the Knowledge viewer's `activeTab` — a skill's canonical address
+   * names the FILE, and history is a lens on it, not a different file.
+   *
+   * Cleared whenever the file changes; see `historyKey` for why that is not a
+   * matter of taste.
+   */
+  const [historyOpen, setHistoryOpen] = useState(false);
   /** Ties the tabs to the panel they control; unique per mounted page. */
   const tabsId = useId();
+  const git = useGit();
 
-  // Ownership is a property of the CATALOG entry, not of the skill document —
-  // it comes from the per-file ACL the provider already resolved, so the page
-  // reads it rather than asking again.
-  const owned = useMemo(
-    () => data.items.some((i) => i.kind === 'skill' && i.id === name && i.owned),
+  // Ownership and write are properties of the CATALOG entry, not of the skill
+  // document — the provider already resolved both, so the page reads them
+  // rather than asking again. `owned` is the pill alone; every editor-side
+  // affordance goes by `canWrite`, which a writer holds without owning.
+  const entry = useMemo(
+    () => data.items.find((i) => i.kind === 'skill' && i.id === name),
     [data.items, name],
   );
+  const owned = entry?.owned === true;
+  const canWrite = entry?.canWrite === true;
 
   const skill = detail.skill;
   const skillPath = skill?.path ?? '';
   const prefix = `${skillPath}/`;
+
+  /** Every plugin holding this skill, from the catalog's decoration. */
+  const memberships = useMemo(
+    () => data.items.find((i) => i.kind === 'skill' && i.id === name)?.plugins ?? [],
+    [data.items, name],
+  );
+  /**
+   * Write-access requests on this skill, for its editors. The endpoint answers
+   * `[]` to everyone else, so the fetch is unconditional and the banner hides
+   * itself; `owned` only spares a pointless call.
+   */
+  const skillRequestsApi = useMemo<JoinRequestsApi>(
+    () => ({ list: listSkillAccessRequests, reconcile: reconcileSkillAccessRequest }),
+    [],
+  );
+  const accessRequests = useJoinRequests(name, skillPath || null, skillRequestsApi);
+  /**
+   * The skill FOLDER as the access dialog addresses it — the same entry the
+   * explorer's right-click hands over for a folder. Null until both the KB dir
+   * and the skill have resolved: a half-built path would manage the wrong
+   * folder, or the KB root.
+   */
+  const skillFolderEntry = useMemo<FileTreeEntry | null>(
+    () =>
+      kbDirName && skillPath
+        ? { name, relativePath: `${kbDirName}/${skillPath}`, type: 'directory' }
+        : null,
+    [kbDirName, skillPath, name],
+  );
+  /**
+   * What the ONE access dialog is open on. Share and the access-requests
+   * banner both set it to the skill folder; the dialog's own "Manage <Folder>"
+   * link retargets it at an ancestor (the plugin), as it does in the explorer.
+   */
+  const [manageTarget, setManageTarget] = useState<FileTreeEntry | null>(null);
 
   /**
    * Who has to say yes. A skill has no owner of its own — it inherits its plugin
@@ -112,11 +182,14 @@ export function SkillPage({
    * plugin's owners. Naming the wrong reviewer is worse than naming none, hence
    * the neutral fallback when the plugin index hasn't resolved.
    */
+  const itemPlugin = useMemo(
+    () => data.items.find((i) => i.kind === 'skill' && i.id === name)?.plugin ?? null,
+    [data.items, name],
+  );
   const ownerName = useMemo(() => {
-    const plugin = skill ? pluginOfPath(skill.path) : null;
-    const summary = plugin ? data.pluginSummaries.find((g) => g.name === plugin) : undefined;
+    const summary = itemPlugin ? data.pluginSummaries.find((g) => g.name === itemPlugin) : undefined;
     return summary ? ownersTextOf(summary) : 'the owner';
-  }, [skill, data.pluginSummaries]);
+  }, [itemPlugin, data.pluginSummaries]);
 
   const files = useMemo(
     () => ['SKILL.md', ...(skill?.files ?? []).map((f) => f.slice(prefix.length))],
@@ -211,6 +284,107 @@ export function SkillPage({
   );
   const [busyCr, setBusyCr] = useState<number | null>(null);
   /**
+   * What the last save on this page said about the skill's `allowed-tools`
+   * (entries that look like platform tools but name none the saver can see),
+   * or `null` while nothing has been saved here — then the banner speaks from
+   * the loaded skill's own `warnings`, so a skill left pointing at a manual
+   * that was since retired says so on open. Advisory either way: a save has
+   * already landed. A save's answer wins over the load's because a proposal's
+   * content lives on another branch than the skill on screen; an approval
+   * rewrites the skill underneath (see `onApplied`) and hands the word back to
+   * the reload. Per-page state, and the route mounts this component with
+   * `key={name}`, so moving to another skill starts from that skill's own.
+   */
+  const [savedWarnings, setSavedWarnings] = useState<SkillToolWarning[] | null>(null);
+  const toolWarnings = savedWarnings ?? skill?.warnings ?? [];
+
+  /**
+   * The file on screen as a workspace path, `<kbDirName>/<skill>/<file>`: the
+   * base every relative link and image in it resolves against, and the path
+   * the history panel reads. Null until the workspace and the skill have both
+   * resolved.
+   */
+  const fileWorkspacePath = kbDirName && skillPath ? `${kbDirName}/${fileRepoPath}` : null;
+  /**
+   * The workspace-relative path `FileHistoryPanel` reads the git log for — the
+   * same string the Knowledge viewer hands it, so a skill file's history is
+   * the file's history, not a second implementation of it. Null until the
+   * workspace and the skill have both resolved: the panel takes a path and
+   * asks immediately, so handing it a half-built one would ask about
+   * `undefined/SKILL.md`.
+   */
+  const historyPath = fileWorkspacePath;
+  /**
+   * Whether `⋯` has anything behind it. Git not ready means there is no log to
+   * show, and an overflow that opens onto an empty panel is worse than no
+   * overflow at all — the same call `KbPageHeader` makes.
+   *
+   * `!editing` is the other half, and it is not cosmetic: `SkillFileEditor`
+   * holds the draft in its own state, so swapping it out for the history panel
+   * would throw away whatever the person had typed with no warning and no way
+   * back. The menu returns the moment they save or cancel.
+   */
+  const historyAvailable = git.availability === 'ready' && historyPath !== null && !editing;
+  /**
+   * History closes when the file changes. It is a lens on ONE file, so a tab
+   * switch must land on that file's CONTENT — and it must stay landed: keying
+   * the open flag to the file it was opened for is not enough, because coming
+   * back to that tab then re-opens the log nobody asked for a second time.
+   *
+   * Adjusted during render rather than in an effect, so the new file's content
+   * paints on the first frame. An effect would show the old file's log under
+   * the new file's heading for one commit, which is the flicker the `active`
+   * derivation a few lines up exists to avoid.
+   */
+  const [historyKey, setHistoryKey] = useState(fileRepoPath);
+  if (historyKey !== fileRepoPath) {
+    setHistoryKey(fileRepoPath);
+    if (historyOpen) setHistoryOpen(false);
+  }
+  // Losing the log CLOSES it, rather than parking it behind a flag. Git
+  // availability is re-derived from a polled status call, so a single failed
+  // poll flips it to `error` — which takes the panel off screen — and the next
+  // successful one flips it back. Left open, that second poll would put the
+  // log back over the file minutes after the reader returned to reading. Once
+  // it is gone they ask for it again, which is one click.
+  //
+  // `editing` is the second door into the same state: the editor withdraws
+  // `historyAvailable` (its draft would be discarded under the panel), and
+  // Cancel must not hand the log back open over the file.
+  if (historyOpen && !historyAvailable) setHistoryOpen(false);
+  const viewingHistory = historyAvailable && historyOpen;
+  /**
+   * The clock that opens the log sits in the file bar, and the bar unmounts
+   * with the file; the pressed clock that closes it sits in the history row,
+   * which unmounts with the log. Either way the control a keyboard user just
+   * activated is gone from the DOM, so the two clocks hand focus to each
+   * other (`useFocusHandoff`): opening lands on the pressed clock, closing
+   * lands on the bar's. Only for a swap the USER made; the log closing
+   * because git stopped answering names no target and moves nothing.
+   *
+   * The bar's clock is not guaranteed to come back: `historyAvailable`
+   * withdraws it, and a failed status poll can land in the same commit as the
+   * click. The page's own title is named last for that, since it is on screen
+   * in every state and names the skill the user came back to.
+   *
+   * Knowledge states the same rule with its document title, where the case is
+   * routine rather than a race: a comparison outlives `historyAvailable` on
+   * purpose, so leaving one while git is silent finds no clock at all. See
+   * `FileViewer.backToDocument` and the test beside it.
+   */
+  const paneClockRef = useRef<HTMLButtonElement>(null);
+  const pressedClockRef = useRef<HTMLButtonElement>(null);
+  const titleRef = useRef<HTMLHeadingElement>(null);
+  const handoff = useFocusHandoff(viewingHistory);
+  const openHistory = () => {
+    handoff(true, pressedClockRef);
+    setHistoryOpen(true);
+  };
+  const closeHistory = () => {
+    handoff(false, paneClockRef, titleRef);
+    setHistoryOpen(false);
+  };
+  /**
    * Change requests a merge attempt has REFUSED as unmergeable. Git is the only
    * thing that can answer "does this still apply?", and it answers when asked
    * to merge — so this fills in from failures rather than from a guess made up
@@ -229,6 +403,10 @@ export function SkillPage({
     onApplied() {
       toast('Approved: the skill now reads with that change.');
       setRevision((r) => r + 1);
+      // The merge just rewrote the skill, `allowed-tools` included, so the
+      // advisory from this page's last save is about text that is no longer
+      // there. The reload below answers for the merged skill instead.
+      setSavedWarnings(null);
       data.reload();
       // The pane renders `skill.body`, which this hook holds and the merge just
       // changed. Without re-reading it the page keeps showing the pre-merge
@@ -267,7 +445,7 @@ export function SkillPage({
   const raw = active === 'SKILL.md' ? rawOnMain : detail.fileContent(active);
 
   /** Every open change request's version of the file on screen. */
-  const crDiffs = useCrFileDiffs(skillCrs, fileRepoPath, rawOnMain, revision);
+  const crDiffs = useCrFileDiffs(skillCrs, fileRepoPath, revision);
 
   /** The change requests with something to say about THIS file. */
   const boxes = useMemo(
@@ -299,10 +477,71 @@ export function SkillPage({
   // reads it. Only the propose flow stacks on the caller's own branch copy.
   const editorBase = !canEditDirectly && ownCr ? ownBranchBase : rawOnMain;
 
-  const openInEditor = useCallback(
-    (wsRelative: string) => navigate(kbFileUrl(DEFAULT_BRANCH, wsRelative)),
-    [navigate],
+  /**
+   * Follow a link out of the rendered file — the Knowledge view's rule, from
+   * the same hook (`useFileNav().openLink`): the destination is decoded, an
+   * absolute app URL keeps its own branch, an external one opens in a new
+   * tab, another file of the knowledge base opens in a NEW TAB and this page
+   * stays where it is, and a link to this file's own sections moves only the
+   * fragment. A relative link resolves on the default branch, where skills
+   * live, whatever is checked out. `fileLinkTarget` is the same answer for the
+   * anchor to carry, so a middle-click goes where the click does.
+   *
+   * A link to a section of this file scrolls the pane to that heading
+   * (`scrollToSection`, from the pane) and leaves this page's address alone:
+   * the skill page has no heading scroll on its address, so moving the
+   * fragment there would change the URL and nothing on screen.
+   */
+  const openLinkInEditor = useCallback(
+    (href: string, scrollToSection: (hash: string) => void) => {
+      if (fileWorkspacePath) {
+        openLink(href, fileWorkspacePath, { homeBranch: DEFAULT_BRANCH, onSection: scrollToSection });
+      }
+    },
+    [fileWorkspacePath, openLink],
   );
+  /**
+   * An HTML page's links resolve against its real home — the workspace path
+   * and the default branch — not `active`, which names the file relative to
+   * the skill.
+   */
+  const pageLinkHome = useMemo(
+    () => (fileWorkspacePath ? { path: fileWorkspacePath, branch: DEFAULT_BRANCH } : undefined),
+    [fileWorkspacePath],
+  );
+  const fileLinkTarget = useCallback(
+    (href: string) => (fileWorkspacePath ? linkTarget(href, fileWorkspacePath, DEFAULT_BRANCH) : null),
+    [fileWorkspacePath, linkTarget],
+  );
+  /**
+   * An id-link follows the same rule, told which node is on screen — the id
+   * of the file in the pane, on the default branch it was read from — so a
+   * link to this node's own heading (`[Steps](newsletter#steps)`) scrolls
+   * the pane like a section link, instead of opening this skill again in a
+   * new tab. This page's address is not the node's id URL, so the hook could
+   * not tell from the address. Any other id names a node on the default
+   * branch too, where this file was read from, whatever is checked out.
+   */
+  const ownNodeId = useFileNodeId(fileWorkspacePath, DEFAULT_BRANCH);
+  const openNodeIdInFile = useCallback(
+    (idOrLink: string, scrollToSection: (hash: string) => void) =>
+      openNodeId(idOrLink, ownNodeId, { homeBranch: DEFAULT_BRANCH, onSection: scrollToSection }),
+    [openNodeId, ownNodeId],
+  );
+  const nodeIdLinkTarget = useCallback(
+    (idOrLink: string) => nodeIdTarget(idOrLink, ownNodeId, DEFAULT_BRANCH),
+    [nodeIdTarget, ownNodeId],
+  );
+
+  /**
+   * Images in the file, served from the DEFAULT branch's workspace: that is
+   * the tree this pane renders (`rawOnMain`), and where `headingLink` and the
+   * link handler above point. The checked-out branch may be somebody's draft
+   * with another copy of the picture, or none. The revision keeps an open page
+   * current when a teammate replaces a screenshot under the same name.
+   */
+  const skillWorkspaceId = encodeURIComponent(DEFAULT_BRANCH);
+  const resolveImage = useWorkspaceImageResolver(skillWorkspaceId, fileWorkspacePath);
 
   /**
    * A heading's citation deep-link — the file's KNOWLEDGE URL plus `#slug`,
@@ -327,7 +566,10 @@ export function SkillPage({
    */
   async function saveDirect(content: string) {
     const { workspace } = await getOrCreateWorkspace(DEFAULT_BRANCH);
-    await writeFile(workspace.id, `${workspace.kbDirName}/${fileRepoPath}`, content);
+    const saved = await writeFile(workspace.id, `${workspace.kbDirName}/${fileRepoPath}`, content);
+    // Only a SKILL.md save has a say: a bundled file's answer carries no
+    // warnings, and taking it as "none" would hide the loaded skill's.
+    if (active === 'SKILL.md') setSavedWarnings(saved?.warnings ?? []);
     setEditing(false);
     setRevision((r) => r + 1);
     toast('Saved: the skill now reads with your change.');
@@ -336,7 +578,7 @@ export function SkillPage({
 
   async function submitProposal(content: string) {
     if (!user) throw new Error('Sign in to propose a change.');
-    await proposeChange({
+    const proposed = await proposeChange({
       skillName: name,
       repoRelativePath: fileRepoPath,
       content,
@@ -344,6 +586,7 @@ export function SkillPage({
       userName: user.name,
       existingCr: ownCr,
     });
+    if (active === 'SKILL.md') setSavedWarnings(proposed?.warnings ?? []);
     setEditing(false);
     setRevision((r) => r + 1);
     toast(`Sent to ${ownerName}: nothing changes until they approve it.`);
@@ -379,7 +622,7 @@ export function SkillPage({
   // The page the skill lives on, not the Library root: "back" from a skill
   // you opened off its plugin page must land on that plugin page. Derived from
   // the path, so a deep link gets the same honest destination as a click.
-  const home = libraryHomeForItemPath(skillPath);
+  const home = libraryHomeForItemPath(skillPath, itemPlugin, (n) => pluginLabel(n, data.pluginSummaries));
   const backLink = (
     <Button variant="quiet" size="sm" onClick={() => navigate(home.path)}>
       {`‹ ${home.label}`}
@@ -436,27 +679,100 @@ export function SkillPage({
   // second layout when the detail request settles.
   return (
     <Article>
-      {backLink}
-
-      <header className="mt-4">
-        <div className="flex items-center gap-3">
-          <h1 className="text-display font-semibold text-ink">{skill?.name ?? name}</h1>
+      <header>
+        {/* The shared header band — one height for this title bar and the
+            sidebar's header row beside it, so a skill page opens on the same
+            line a file page and the Library's own pages do. The way back
+            rides ON the band, as its leading item: a back link in a row above
+            would push this row down off that line, which is the whole seam.
+            (The error and not-found returns above still lead with it on its
+            own row — they have no title bar to hold a line with.) */}
+        <div data-testid={PAGE_HEADER_TESTID} className={cn(HEADER_BAND, 'gap-3')}>
+          <div className={HEADER_BAND_LEAD}>{backLink}</div>
+          {/* `tabIndex={-1}` keeps the heading out of the tab order while
+              letting `.focus()` land on it — where focus goes when closing
+              the log finds no clock to hand back to. No focus ring: it is a
+              programmatic landing after the user's own click. */}
+          <h1
+            ref={titleRef}
+            tabIndex={-1}
+            // `title` because `truncate` hides the rest of a long skill name,
+            // and a heading you cannot finish reading needs somewhere to say it.
+            title={skill?.name ?? name}
+            className={`min-w-0 truncate text-display font-semibold text-ink focus:outline-none ${TITLE_INK_ROOM}`}
+          >
+            {skill?.name ?? name}
+          </h1>
           {skill && owned && (
             <Badge tone="outline" size="xs" className="shrink-0 uppercase">
               Owner
             </Badge>
+          )}
+          {/* Share IS the manage-access dialog, on the skill's own folder —
+              standalone or inside a plugin. A rule written here sits beside
+              the plugin's, and the resolver reads both at their depths. Shown
+              wherever the explorer would offer `Manage access` on the same
+              folder; for someone who cannot change the rules the dialog
+              renders read-only, and the grant route refuses regardless. */}
+          {skillFolderEntry && offersManageAccess(skillFolderEntry) && (
+            <div className="ml-auto flex flex-none items-center gap-1.5">
+              <ShareButton onClick={() => setManageTarget(skillFolderEntry)} />
+            </div>
           )}
         </div>
         {/* No description line here — the file pane renders the raw SKILL.md,
             and its frontmatter panel already says what the skill is for.
             Repeating it above the pane said the same sentence twice on the
             first screenful. */}
-        {/* No `Manage access` here, deliberately — a skill inherits its plugin
-            folder's `access.md`, and the plugin's Share panel is the one place
-            those rules are decided. Same call the tool page made. */}
       </header>
 
-      <IntegrationsSection needed={needed} onConnect={() => navigate('/connect')} />
+      <ToolWarningsBanner warnings={toolWarnings} />
+
+      {/* Not before the folder is known: Accept grants ON the folder and
+          Manage access opens it, and both are no-ops against ''. */}
+      {canWrite && skillFolderEntry && (
+        <AccessRequestsBanner
+          itemName={name}
+          folders={[skillPath]}
+          requests={accessRequests.requests}
+          onManage={() => setManageTarget(skillFolderEntry)}
+          onAccept={(r, p) => void accessRequests.accept(r, p)}
+          onDecline={(r) => void accessRequests.decline(r)}
+        />
+      )}
+      {manageTarget && (
+        <ManageAccessDialog
+          // Keyed on the path, so retargeting at an ancestor remounts it
+          // against that folder — the explorer's arrangement exactly.
+          key={manageTarget.relativePath}
+          // The Library speaks the DEFAULT branch: a skill's rules are edited
+          // where the catalog reads them, whatever branch the ambient
+          // workspace happens to be on.
+          workspaceId={encodeURIComponent(DEFAULT_BRANCH)}
+          entry={manageTarget}
+          onManageAncestor={setManageTarget}
+          onClose={() => {
+            setManageTarget(null);
+            accessRequests.reload();
+            data.reload();
+          }}
+        />
+      )}
+
+      <IntegrationsSection needed={needed} onConnect={() => navigate(CONNECT_TOOLS_PATH)} />
+
+      {skill && (
+        <SharedViaPlugins
+          skillName={name}
+          skillPath={skillPath}
+          memberships={memberships}
+          canWrite={canWrite}
+          onChanged={() => {
+            data.reload();
+            data.reloadPlugins();
+          }}
+        />
+      )}
 
       <SkillFileTabs
         files={files}
@@ -476,16 +792,63 @@ export function SkillPage({
         }}
       />
 
-      {/* The panel the tabs control. It wraps BOTH the reading pane and the
-          editor that replaces it, so `aria-controls` resolves in either state
-          rather than pointing at an element that exists only half the time. */}
+      {/* The panel the tabs control. It wraps the reading pane, the editor
+          that replaces it and the history that replaces both, so
+          `aria-controls` resolves in every state rather than pointing at an
+          element that exists only some of the time. */}
       <div
         role="tabpanel"
         id={skillPanelId(tabsId)}
         aria-labelledby={skillTabId(tabsId, active)}
-        aria-busy={detail.loading || raw === null || undefined}
+        aria-busy={(!viewingHistory && (detail.loading || raw === null)) || undefined}
       >
-      {detail.loading ? (
+      {viewingHistory && historyPath !== null ? (
+        <>
+          {/* An explicit way back. Without it the only route to the file would
+              be reopening it, since history is not in the URL. The clock that
+              opened the log sits in the file bar, and the bar leaves with the
+              file, so the same clock is drawn here PRESSED: the control that
+              opened the view stays on screen showing that it is open, and a
+              second click on it is the other way back. Same shape as the
+              Knowledge header while its log is open. */}
+          <div className="mb-3 mt-4 flex items-center gap-2">
+            <Button
+              variant="quiet"
+              size="sm"
+              leadingIcon={<ArrowLeft size={13} />}
+              onClick={closeHistory}
+            >
+              Back to the file
+            </Button>
+            <span className="text-detail text-ink-faint">{`Version history: ${active}`}</span>
+            <IconButton
+              ref={pressedClockRef}
+              aria-label="Version history"
+              aria-pressed
+              title="Back to the file"
+              active
+              className="ml-auto"
+              onClick={closeHistory}
+            >
+              <History size={14} />
+            </IconButton>
+          </div>
+          {/* A DEFINITE height, and a flex column to hold it. The panel is
+              built for the Knowledge viewer's full-height pane: its list and
+              its diff both scroll inside themselves, which needs a parent
+              whose height does not come from them. Dropped straight into this
+              reading column it would size to its own content instead, so a
+              long diff would stretch the page rather than scroll in place and
+              the empty state would collapse to a line. The measure matches the
+              editor's textarea, which is the same trade in the same column. */}
+          <Surface
+            radius="lg"
+            className="flex h-[60vh] min-h-80 flex-col overflow-hidden"
+          >
+            <FileHistoryPanel filePath={historyPath} />
+          </Surface>
+        </>
+      ) : detail.loading ? (
         <SkillFilePane
           file={active}
           raw={null}
@@ -506,12 +869,33 @@ export function SkillPage({
           file={active}
           raw={raw}
           suggestion={null}
-          onOpenLink={(href) => {
-            if (!kbDirName) return;
-            openInEditor(resolveRelativePath(`${kbDirName}/${skillPath}/${active}`, href));
-          }}
-          onOpenNodeId={openNodeId}
+          onOpenLink={openLinkInEditor}
+          fileLinkTarget={fileLinkTarget}
+          onOpenNodeId={openNodeIdInFile}
+          nodeIdLinkTarget={nodeIdLinkTarget}
+          // A section link's own address (a modified click on it, a copied
+          // heading link) carries the heading as its fragment: arriving with
+          // one scrolls the pane to it.
+          sectionHash={location.hash}
           headingLink={headingLink}
+          // No workspace yet means no base to resolve against: images render
+          // as plain tags, exactly as before the resolver existed.
+          resolveImage={fileWorkspacePath ? resolveImage : undefined}
+          // The page's tools are answered here, as on its file page, under
+          // the path the file page uses for it (repo-relative, kbDirName
+          // stripped): one identity per page in the Audit log and the
+          // consent card, never the skill-relative tab name.
+          pagePath={fileWorkspacePath ? fileRepoPath : undefined}
+          // The renderer's own target for Open in the platform, which it
+          // offers only to a page mounted without tools: the Knowledge file
+          // page, in a new tab, as the page asked from inside itself
+          // (`openFilePage`, the Knowledge view's own). The plain URL would
+          // route straight back here (every file under a skill's folder IS
+          // the skill page); the file-page URL asks for the file route.
+          onOpenInPlatform={
+            fileWorkspacePath ? () => openFilePage(fileWorkspacePath, DEFAULT_BRANCH) : undefined
+          }
+          linkHome={pageLinkHome}
           /*
            * ONE action, decided by the ACL. An `Edit` used to sit beside
            * `Propose changes` for EVERYONE and jump to the Knowledge editor —
@@ -534,11 +918,32 @@ export function SkillPage({
            * fork, never a silent restart from the published text.
            */
           actions={
-            // Only a RESOLVED verdict earns a button: `null` (lookup in
-            // flight) briefly shows no action rather than an Edit that might
-            // open the wrong mode — a writer's text must never ride the
-            // proposal path just because they clicked before the ACL answered.
-            fileAccess.canWrite === true
+            <>
+              {/* "Who changed this, when" — the clock-arrow beside Edit, where
+                  Google Docs keeps it. This page is the only surface a
+                  `Plugins/` file has: the shell routes those URLs here
+                  (`isLibraryLocation`) and the Knowledge tree does not list
+                  `Plugins/`, so this button is the deployment's one way into a
+                  skill's git log. It used to be the lone item behind a ⋯ in
+                  the page header — two clicks and a menu for a question people
+                  ask often. Withdrawn with `historyAvailable`: git not
+                  answering, or no path to ask about. */}
+              {historyAvailable && (
+                <IconButton
+                  ref={paneClockRef}
+                  aria-label="Version history"
+                  title="Version history"
+                  onClick={openHistory}
+                >
+                  <History size={14} />
+                </IconButton>
+              )}
+              {/* Only a RESOLVED verdict earns a write button: `null` (lookup
+                  in flight) briefly shows none rather than an Edit that might
+                  open the wrong mode — a writer's text must never ride the
+                  proposal path just because they clicked before the ACL
+                  answered. */}
+              {fileAccess.canWrite === true
               ? rawOnMain !== null && (
                   <Button
                     variant="outline"
@@ -562,20 +967,26 @@ export function SkillPage({
                   >
                     Propose changes
                   </Button>
-                )
+                )}
+            </>
           }
         />
       )}
 
       {/* Every open proposal on this file, under the file it is about. The
-          owner decides here; the author can take theirs back. */}
+          owner decides here; the author can take theirs back. Not under the
+          history panel: a box asking "approve this?" needs the text it would
+          change above it, and the log is not that text. The dock below still
+          reaches every open request from either view. */}
       {!editing &&
+        !viewingHistory &&
         boxes.map((cr) => {
           const mine = data.myCrNumbers.has(cr.number);
           // `[]` is the hook's "overtaken" answer — the proposal and the file
           // now say the same thing — and is distinct from `null`, which only
           // means a side has not arrived yet.
-          const fileDiff = crDiffs.get(cr.number) ?? null;
+          const read = crDiffs.get(cr.number) ?? null;
+          const fileDiff = read === 'unreadable' ? null : read;
           return (
             <ChangeBox
               key={cr.number}
@@ -583,26 +994,21 @@ export function SkillPage({
               author={changeAuthorName(cr)}
               when={formatWhen(cr.createdAt)}
               mine={mine}
-              canDecide={owned && !mine}
+              canDecide={canWrite && !mine}
               diff={fileDiff}
               binary={isBinaryFile(active)}
+              unreadable={read === 'unreadable'}
               upToDate={fileDiff !== null && fileDiff.length === 0}
               blocked={blockedCrs.has(cr.number)}
               conflictPrompt={conflictResolutionPrompt(cr)}
-              // A conflict already speaks through `blocked`; repeating it as a
-              // refusal line would say the same thing twice in one box.
-              refusal={
-                applying.refusals.get(cr.number)?.conflicts === false
-                  ? (applying.refusals.get(cr.number)?.reason ?? null)
-                  : null
-              }
+              refusal={refusalLine(cr, applying.refusals)}
               owner={ownerName}
               busy={busyCr === cr.number || applying.activeCr === cr.number}
               phase={applying.activeCr === cr.number ? applying.phase : 'idle'}
               onApprove={() => applying.apply(cr)}
               onDecline={() => void decline(cr)}
               onWithdraw={() => void withdraw(cr)}
-              onOpenFull={owned ? () => setCompareCr(cr) : undefined}
+              onOpenFull={canWrite ? () => setCompareCr(cr) : undefined}
             />
           );
         })}
@@ -611,8 +1017,10 @@ export function SkillPage({
       {/* Outside the panel: the dock lists change requests touching ANY file of
           the skill, so it is not about the selected tab. The boxes above only
           cover the file on screen, and without this a proposal to a file you
-          are not looking at has no way to reach you. */}
-      {skill && owned && <ChangeRequestDock crs={skillCrs} onSelect={setCompareCr} />}
+          are not looking at has no way to reach you. Gated by write, not
+          ownership, like Approve itself: the server takes an approval from
+          anyone who can write the file, so a writer reviews the whole change. */}
+      {skill && canWrite && <ChangeRequestDock crs={skillCrs} onSelect={setCompareCr} />}
     </Article>
   );
 }
@@ -663,7 +1071,11 @@ function IntegrationsSection({
               <div className="min-w-0">
                 <b className="block text-detail font-semibold text-ink">{t.name}</b>
                 <small className="block text-meta text-ink-faint">
-                  {status.state === 'ok' ? 'Connected. Nothing to do' : status.text}
+                  {/* `status.text`, never a hardcoded "Connected": this list is
+                      built from what is stored, and nothing here has probed
+                      anything — so it says "Key saved"/"Signed in" and keeps the
+                      reassurance that no action is needed. */}
+                  {status.state === 'ok' ? `${status.text}. Nothing to do` : status.text}
                 </small>
               </div>
               <div className="ml-auto flex shrink-0 items-center gap-2">
@@ -680,6 +1092,26 @@ function IntegrationsSection({
         })}
       </div>
     </section>
+  );
+}
+
+/**
+ * The skill page's status line for `allowed-tools` entries the platform could
+ * not resolve. A warning, never a block: the list also names the client's own
+ * tools, which the server cannot know, so it only speaks about names that look
+ * like its own.
+ */
+function ToolWarningsBanner({ warnings }: { warnings: SkillToolWarning[] }) {
+  if (warnings.length === 0) return null;
+  return (
+    <Banner tone="wait" role="status" className="mt-4">
+      <p className="font-semibold">Some tools this skill lists are not available</p>
+      <ul className="mt-1 list-disc pl-5">
+        {warnings.map((w) => (
+          <li key={w.entry}>{w.message}</li>
+        ))}
+      </ul>
+    </Banner>
   );
 }
 

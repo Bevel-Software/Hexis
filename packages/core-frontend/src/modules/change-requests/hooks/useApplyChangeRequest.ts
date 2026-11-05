@@ -1,9 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { PullRequestSummary } from '@bevel-software/platform-shared';
-import { useEventBus } from '../../workflow/state/event-bus.context';
-import { fetchPrDetail } from '../../pr/services/pr-detail.api';
-import { approvePrFile } from '../../pr/services/pr-approvals.api';
-import { mergePullRequest } from '../../pr/services/pr-merge.api';
+import { useEventBus } from '../../version-control';
+import { fetchPrDetail, approvePrFile, mergePullRequest } from '../../pr';
+import { friendlyGitError, friendlyGitMessage } from '../../git';
 
 /**
  * Safety net for the async apply: if neither a `change-request-merged` nor a
@@ -22,6 +21,41 @@ export type ApplyPhase = 'idle' | 'approving' | 'applying';
 export interface ApplyRefusal {
   reason: string;
   conflicts: boolean;
+  /**
+   * When it failed (ISO): the server's instant for a refusal the server
+   * reported — the same one it persists — else this tab's clock.
+   */
+  at?: string;
+}
+
+/**
+ * The refusal line a change box shows for `cr`. This tab's own attempt speaks
+ * first, and a conflict there says nothing here because the box's blocked state
+ * already does — unless the request carries a LATER refusal, from somebody
+ * else's attempt since. Otherwise the refusal PERSISTED on the request, which
+ * is how the author and every other viewer learn that somebody's apply failed.
+ * That one never withdraws the button: the author may already have fixed the
+ * cause, and only a new attempt can say so.
+ */
+export function refusalLine(
+  cr: PullRequestSummary,
+  refusals: ReadonlyMap<number, ApplyRefusal>,
+): string | null {
+  const own = refusals.get(cr.number);
+  const persisted = cr.lastApplyFailure ?? null;
+  if (own && !isLater(persisted?.at, own.at)) return own.conflicts ? null : own.reason;
+  // The server stored this one as the gate said it; the reader gets it in the
+  // same words the dialog's banner uses.
+  return persisted?.reason ? friendlyGitMessage(persisted.reason) : null;
+}
+
+/** True when `a` is a strictly later instant than `b`; unknown is never later. */
+function isLater(a: string | undefined, b: string | undefined): boolean {
+  if (!a) return false;
+  if (!b) return true;
+  const ta = Date.parse(a);
+  const tb = Date.parse(b);
+  return Number.isFinite(ta) && Number.isFinite(tb) && ta > tb;
 }
 
 export interface ApplyChangeRequest {
@@ -40,8 +74,8 @@ export interface ApplyChangeRequest {
  * calling `mergePullRequest` and awaiting it:
  *
  * 1. **Approving is not merging.** The merge gate requires a recorded per-file
- *    approval from an eligible approver for every markdown file that has
- *    owners — which is precisely the case the skill page is built for, since a
+ *    approval from an eligible approver for every file that has owners,
+ *    whatever its type — which is precisely the case the skill page is built for, since a
  *    SKILL.md inside a plugin folder inherits that folder's `access.md`. Going
  *    straight to merge is refused with "Waiting on approval for …". So the
  *    owner's click records the approvals FIRST, then merges. Files the caller
@@ -111,7 +145,8 @@ export function useApplyChangeRequest(opts: {
   const fail = useCallback(
     (number: number, refusal: ApplyRefusal) => {
       stop();
-      setRefusals((m) => new Map(m).set(number, refusal));
+      const at = refusal.at ?? new Date().toISOString();
+      setRefusals((m) => new Map(m).set(number, { ...refusal, at }));
       onFailedRef.current?.(number, refusal);
     },
     [stop],
@@ -131,8 +166,9 @@ export function useApplyChangeRequest(opts: {
     const offFailed = bus.subscribe('change-request-merge-failed', (e) => {
       if (runningRef.current !== e.number) return;
       fail(e.number, {
-        reason: e.reason || "Couldn't apply this change.",
+        reason: e.reason ? friendlyGitMessage(e.reason) : "Couldn't apply this change.",
         conflicts: e.conflicts === true,
+        at: e.at,
       });
     });
     return () => {
@@ -173,10 +209,9 @@ export function useApplyChangeRequest(opts: {
 
           for (const a of detail.approvals) {
             if (a.isApproved) continue;
-            // No eligible approvers means the gate ignores the file entirely.
-            const gateCares =
-              a.eligibleApprovers.roles.length > 0 || a.eligibleApprovers.users.length > 0;
-            if (!gateCares) continue;
+            // The server's verdict on whether the gate binds the file at all —
+            // a file it ignores gets no recorded approval.
+            if (!a.inMergeGate) continue;
             // A refusal here is "not your file", which is normal on a change
             // request spanning several owners — let the gate below decide
             // whether what did get approved is enough.
@@ -223,7 +258,7 @@ export function useApplyChangeRequest(opts: {
           // instead of waiting for an event that will never come.
           if (runningRef.current !== cr.number) return;
           fail(cr.number, {
-            reason: err instanceof Error ? err.message : "Couldn't apply this change.",
+            reason: err instanceof Error ? friendlyGitError(err) : "Couldn't apply this change.",
             conflicts: false,
           });
         }

@@ -1,0 +1,699 @@
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
+import { Check, Loader2, Pencil, Plus, Trash2, X } from 'lucide-react';
+import { PageShell } from '../../../shared/components/PageShell';
+import { Banner } from '../../../shared/components/Banner';
+import { Dialog } from '../../../shared/components/Dialog';
+import { useAdmin } from '../state/admin.context';
+import { useAppRegistry } from '../../../core/registry';
+import { useExclusiveRunner, type ExclusiveRunner } from '../hooks/useExclusiveRunner';
+import {
+  addGroupMember,
+  createGroup,
+  deleteGroup,
+  getGroupsRoster,
+  GroupsApiError,
+  removeGroupMember,
+  renameGroup,
+  type GroupRosterEntry,
+  type GroupsRoster,
+} from '../services/groups.api';
+import { EMAIL_RE, isGroupPrefixed } from '../../../lib/email';
+import { AddMemberInput } from './AddMemberInput';
+import { GROUP_PARAM, isNamedGroup } from './group-members-path';
+
+function errMessage(err: unknown, fallback: string): string {
+  return err instanceof Error ? err.message : fallback;
+}
+
+/**
+ * The Groups & Members page (still routed at `/directory-groups` — the component and
+ * route name stayed to avoid churn). Groups are people-sets for access
+ * management, with ONE source per deployment:
+ *
+ *   - MANUAL mode: groups are created and edited right here.
+ *   - IDP mode: an identity provider owns the groups — the roster renders
+ *     read-only (membership is managed in the IdP).
+ *
+ * HOW an identity provider gets connected is not core's business: an overlay
+ * contributes that UI through the registry's `groupsDirectoryPanel` slot,
+ * rendered below the list in both modes. A core-only deployment simply never
+ * mentions a directory connection.
+ *
+ * `?group=<name>` opens the page on one group (the Library sidebar's "Manage
+ * members"): its card is scrolled into view and, in manual mode, its
+ * add-member field takes focus. In IdP mode the same row is brought into view
+ * under the read-only notice, which is the answer to "why can't I edit this".
+ */
+export function DirectoryGroupsPage() {
+  const { isAdmin } = useAdmin();
+  const [searchParams] = useSearchParams();
+  const targetGroup = searchParams.get(GROUP_PARAM);
+  const { groupsDirectoryPanel: DirectoryPanel } = useAppRegistry();
+  const [roster, setRoster] = useState<GroupsRoster | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  // The broken-MANUAL-groups.yaml state: the roster answers 422
+  // (`kind: 'broken-groups'`) with the parse message instead of a group list.
+  // Held separately from `error` so the page can render the same loud
+  // repair banner the in-roster `groupsHealth` marker gets — a broken groups
+  // file means groups are NOT applying, which is worse than a failed fetch.
+  const [brokenGroups, setBrokenGroups] = useState<{ file?: string; reason: string } | null>(null);
+  const [working, setWorking] = useState(false);
+  // Group pending delete confirmation (manual mode).
+  const [deleteTarget, setDeleteTarget] = useState<GroupRosterEntry | null>(null);
+  // Only rules in files the admin can read: the roster leaves the rest out
+  // entirely (Admin status does not grant read, not even a count). So the
+  // copy below always says "you can read" and never claims there are no
+  // other rules — it reads the same whether or not unreadable ones exist.
+  const deleteRuleCount = deleteTarget?.referencedBy.length ?? 0;
+  // The overlay panel's "a directory connection exists" signal — true between
+  // connecting and the first push, when the roster still reads 'manual' but
+  // manual edits would go dormant. See GroupsDirectoryPanelProps.
+  const [directoryConnected, setDirectoryConnected] = useState(false);
+  // All roster mutations queue through here — see useExclusiveRunner.
+  const runExclusive = useExclusiveRunner();
+
+  // Refreshes queue through the SAME exclusive runner as the mutations, so a
+  // refresh and a mutation can never interleave OR apply out of order:
+  // whichever queued first runs — and settles, and applies its roster — first.
+  // (That total order is also why there is no request-id stale-response guard
+  // here: the queue's tail only starts the next task after the previous one's
+  // handlers ran, so a superseded response can never land after a newer one.)
+  const refresh = useCallback(() => {
+    runExclusive(getGroupsRoster)
+      .then((r) => {
+        setRoster(r);
+        setError(null);
+        setBrokenGroups(null);
+      })
+      .catch((err) => {
+        if (err instanceof GroupsApiError && err.kind === 'broken-groups') {
+          // Manual groups.yaml is unreadable: surface the repair banner with
+          // the parse message. Not a generic error — groups are not applying.
+          setBrokenGroups({ file: err.file, reason: err.reason ?? err.message });
+          setError(null);
+          // A roster rendered from an EARLIER healthy load no longer describes
+          // the file: clear the stale rows (and any pending delete confirm) so
+          // no CRUD control can operate on a file that can't be parsed. The
+          // banner above is the whole page until the file is repaired.
+          setRoster(null);
+          setDeleteTarget(null);
+          return;
+        }
+        setError(errMessage(err, "Couldn't load groups."));
+        // Keep whatever was already on screen — a failed reload is a banner,
+        // not an empty page.
+      });
+  }, [runExclusive]);
+
+  useEffect(() => {
+    if (isAdmin) refresh();
+  }, [isAdmin, refresh]);
+
+  // Any mutation on the groups roster returns the authoritative roster — set
+  // it directly rather than refetching. No requestId bump needed: mutations
+  // share the exclusive queue with refresh(), so their responses already apply
+  // in a strict total order.
+  const applyRoster = useCallback((r: GroupsRoster) => {
+    setRoster(r);
+    // A stale banner from an earlier failed reload no longer describes what's
+    // on screen.
+    setError(null);
+    setBrokenGroups(null);
+  }, []);
+
+  async function handleDeleteGroup() {
+    if (!deleteTarget || working) return;
+    setWorking(true);
+    setError(null);
+    try {
+      const target = deleteTarget;
+      applyRoster(await runExclusive(() => deleteGroup(target.canonical)));
+      setDeleteTarget(null);
+    } catch (err) {
+      setDeleteTarget(null);
+      setError(errMessage(err, "Couldn't delete the group."));
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  if (!isAdmin) {
+    return (
+      <PageShell title="Groups & Members">
+        <div className="text-sm text-ink-muted">Admins only.</div>
+      </PageShell>
+    );
+  }
+
+  const idpMode = roster?.mode === 'idp';
+
+  // The broken-source banner has TWO triggers describing the same fact — the
+  // groups file cannot be read, so groups are NOT being applied:
+  //   - a 200 roster whose `groupsHealth` marker is not ok (broken IdP-synced
+  //     file: mode stays 'idp', roster is empty, resolution degrades), and
+  //   - the roster 422 `broken-groups` (broken MANUAL file: no roster at all).
+  const health = roster?.groupsHealth;
+  const broken =
+    brokenGroups ?? (health && !health.ok ? { file: health.file, reason: health.reason } : null);
+  // Groups that share a role's name, with the rules that spell them bare —
+  // those rules grant the ROLE, so an Admin must rewrite them if the group
+  // was meant.
+  const bareCollisions = (roster?.groups ?? []).filter(
+    (g) => (g.bareNameResolvesToRole?.length ?? 0) > 0,
+  );
+
+  return (
+    <>
+      <PageShell title="Groups & Members">
+        <div className="space-y-4">
+          {broken && (
+            <div
+              className="text-xs text-danger bg-danger-soft border border-danger/30 rounded-sm px-2 py-1.5 space-y-0.5"
+              role="alert"
+            >
+              <div className="font-semibold">
+                The groups file{broken.file ? ` (${broken.file})` : ''} is broken — groups are
+                not being applied.
+              </div>
+              <div>
+                No one gets access through groups until the file is repaired.
+                {broken.reason ? <> Reason: {broken.reason}</> : null}
+              </div>
+            </div>
+          )}
+
+          {bareCollisions.length > 0 && (
+            <Banner tone="wait" role="status" className="text-xs">
+              <div className="font-semibold">
+                Some access rules name a group the way a role is named.
+              </div>
+              <div>
+                A bare name in an access rule means the role when one of that name exists. These
+                rules resolve to the role, not the group — if the group was meant, write it as{' '}
+                <code>group/&lt;Name&gt;</code> (a denial as <code>deny group/&lt;Name&gt;</code>):
+              </div>
+              {/* A row is a verb and a file: whether the rule there grants or denies is
+                  not in the roster, so the spelling is given for both. */}
+              <ul className="mt-1 list-disc pl-4">
+                {bareCollisions.flatMap((g) =>
+                  g.bareNameResolvesToRole!.map((ref, index) => (
+                    <li key={`${g.canonical}:${ref.path}:${ref.verb}:${index}`}>
+                      <code>{ref.path}</code> — {ref.verb}: {g.displayName} (write{' '}
+                      <code>group/{g.displayName}</code>, or <code>deny group/{g.displayName}</code> for a denial)
+                    </li>
+                  )),
+                )}
+              </ul>
+            </Banner>
+          )}
+
+          {error && (
+            <div
+              className="text-xs text-danger bg-danger-soft border border-danger/30 rounded-sm px-2 py-1.5"
+              role="alert"
+            >
+              {error}
+            </div>
+          )}
+
+          {roster === null ? (
+            error || broken ? null : <div className="text-xs text-ink-muted">Loading…</div>
+          ) : idpMode ? (
+            <IdpModeView roster={roster} targetGroup={targetGroup} />
+          ) : directoryConnected ? (
+            // Connected, but the first provisioning push hasn't landed: the
+            // IdP already owns groups, so no manual CRUD — creating one now
+            // would go dormant the moment the first push materializes.
+            <p className="text-xs text-ink-muted leading-snug">
+              An identity provider is connected. Groups appear here after its
+              first provisioning push — membership is managed there from now on.
+            </p>
+          ) : (
+            <ManualModeView
+              roster={roster}
+              onApply={applyRoster}
+              onDeleteRequest={setDeleteTarget}
+              runExclusive={runExclusive}
+              targetGroup={targetGroup}
+            />
+          )}
+
+          {roster !== null &&
+            // Not while connected-but-unsynced (no roster to search yet), nor
+            // while the groups file is broken (its roster is empty by design —
+            // the banner above already says why).
+            (idpMode || !directoryConnected) &&
+            !broken &&
+            targetGroup &&
+            !roster.groups.some((g) => isNamedGroup(g, targetGroup)) && (
+              // A shared link can outlive its group — say so rather than open
+              // on an unmarked page the reader has to search.
+              <p className="text-xs text-ink-muted">No group named “{targetGroup}”.</p>
+            )}
+
+          {roster !== null && DirectoryPanel && (
+            <DirectoryPanel
+              mode={roster.mode}
+              onDirectoryChanged={refresh}
+              onConnectedChange={(connected) => {
+                setDirectoryConnected(connected);
+                // A connection flipping true unmounts the manual CRUD view —
+                // a delete confirm still open would then operate on a roster
+                // the IdP now owns. Close it.
+                if (connected) setDeleteTarget(null);
+              }}
+            />
+          )}
+        </div>
+      </PageShell>
+
+      {/* Delete-group confirm (manual mode), warning on grants that reference it. */}
+      <Dialog
+        open={deleteTarget !== null}
+        onClose={() => setDeleteTarget(null)}
+        title={deleteTarget ? `Delete "${deleteTarget.displayName}"?` : 'Delete group'}
+        size="sm"
+        busy={working}
+        footer={
+          <>
+            <button
+              onClick={() => setDeleteTarget(null)}
+              disabled={working}
+              className="px-3 py-1.5 text-sm rounded-sm text-ink hover:bg-hover border border-line disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleDeleteGroup}
+              disabled={working}
+              className="px-3 py-1.5 text-sm rounded-sm bg-danger hover:bg-danger/90 text-white disabled:opacity-50"
+            >
+              {working ? 'Working…' : 'Delete group'}
+            </button>
+          </>
+        }
+      >
+        {deleteTarget && (
+          <div className="space-y-2">
+            {deleteRuleCount > 0 ? (
+              <>
+                <p className="text-xs text-ink leading-snug">
+                  {deleteRuleCount} access rule
+                  {deleteRuleCount === 1 ? '' : 's'} you can read reference
+                  {deleteRuleCount === 1 ? 's' : ''} this group and will stop
+                  matching anyone after deletion:
+                </p>
+                <ul className="max-h-40 overflow-auto text-xs text-ink-muted space-y-0.5">
+                  {deleteTarget.referencedBy.map((ref, i) => (
+                    <li key={`${ref.path}:${ref.verb}:${i}`} className="truncate">
+                      {ref.verb} · {ref.path}
+                    </li>
+                  ))}
+                </ul>
+              </>
+            ) : (deleteTarget.assignedToRoles?.length ?? 0) === 0 ? (
+              <p className="text-xs text-ink leading-snug">
+                No access rule you can read references this group.
+              </p>
+            ) : null}
+            {/* Role assignments are unassigned atomically with the delete —
+                each named role loses the members it inherits through this
+                group, which the admin must hear BEFORE confirming. */}
+            {(deleteTarget.assignedToRoles?.length ?? 0) > 0 && (
+              <p className="text-xs text-ink leading-snug">
+                Deleting also unassigns this group from the{' '}
+                {deleteTarget.assignedToRoles!.length === 1 ? 'role' : 'roles'}{' '}
+                <span className="font-semibold">{deleteTarget.assignedToRoles!.join(', ')}</span>
+                {' '}— this group's members no longer hold{' '}
+                {deleteTarget.assignedToRoles!.length === 1 ? 'that role' : 'those roles'} through it.
+              </p>
+            )}
+          </div>
+        )}
+      </Dialog>
+    </>
+  );
+}
+
+/** Manual mode: in-app group CRUD. */
+function ManualModeView({
+  roster,
+  onApply,
+  onDeleteRequest,
+  runExclusive,
+  targetGroup,
+}: {
+  roster: GroupsRoster;
+  onApply: (roster: GroupsRoster) => void;
+  onDeleteRequest: (group: GroupRosterEntry) => void;
+  runExclusive: ExclusiveRunner;
+  targetGroup: string | null;
+}) {
+  return (
+    <>
+      <p className="text-xs text-ink-muted leading-snug">
+        Groups are sets of people you can share with and assign roles to.
+      </p>
+
+      <CreateGroupForm onApply={onApply} runExclusive={runExclusive} />
+
+      {roster.groups.length === 0 ? (
+        <div className="text-xs text-ink-muted">No groups yet.</div>
+      ) : (
+        <div className="flex flex-col gap-3 max-w-xl">
+          {roster.groups.map((group) => (
+            <ManualGroupCard
+              key={group.canonical}
+              group={group}
+              onApply={onApply}
+              onDeleteRequest={onDeleteRequest}
+              runExclusive={runExclusive}
+              targeted={isNamedGroup(group, targetGroup)}
+            />
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
+function CreateGroupForm({
+  onApply,
+  runExclusive,
+}: {
+  onApply: (roster: GroupsRoster) => void;
+  runExclusive: ExclusiveRunner;
+}) {
+  const [name, setName] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const submit = async () => {
+    const trimmed = name.trim();
+    if (!trimmed) {
+      setError('Enter a group name.');
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      onApply(await runExclusive(() => createGroup(trimmed)));
+      setName('');
+    } catch (err) {
+      setError(errMessage(err, 'Failed to create group'));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="space-y-1 max-w-xl">
+      <div className="flex items-center gap-1.5">
+        <input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') submit();
+          }}
+          placeholder="New group name"
+          disabled={busy}
+          className="text-xs px-2 py-1 border border-line rounded-sm focus:outline-none focus:border-accent w-56 max-w-full min-w-0"
+          aria-label="New group name"
+        />
+        <button
+          type="button"
+          onClick={submit}
+          disabled={busy}
+          className="px-2 py-1 text-xs rounded-sm bg-accent hover:bg-accent-hover text-white disabled:opacity-50 flex items-center gap-1"
+        >
+          {busy ? <Loader2 size={12} className="animate-spin" /> : <Plus size={12} />}
+          Create group
+        </button>
+      </div>
+      {error && (
+        <div className="text-xs text-danger bg-danger-soft border border-danger/30 rounded-sm px-2 py-1">
+          {error}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ManualGroupCard({
+  group,
+  onApply,
+  onDeleteRequest,
+  runExclusive,
+  targeted,
+}: {
+  group: GroupRosterEntry;
+  onApply: (roster: GroupsRoster) => void;
+  onDeleteRequest: (group: GroupRosterEntry) => void;
+  runExclusive: ExclusiveRunner;
+  /** The group the URL names: land on this card and in its add-member field. */
+  targeted: boolean;
+}) {
+  const card = useRef<HTMLDivElement>(null);
+  const addInput = useRef<HTMLInputElement>(null);
+  // On arrival only — keyed on `targeted`, so a roster re-applied after an
+  // edit does not yank the page back to this card.
+  useEffect(() => {
+    if (!targeted) return;
+    card.current?.scrollIntoView?.({ block: 'center' });
+    addInput.current?.focus({ preventScroll: true });
+  }, [targeted]);
+  const [email, setEmail] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  // Inline rename: null = not renaming; otherwise the draft name.
+  const [renameDraft, setRenameDraft] = useState<string | null>(null);
+
+  const submitRename = async () => {
+    const trimmed = (renameDraft ?? '').trim();
+    if (!trimmed) {
+      setError('Enter a group name.');
+      return;
+    }
+    if (trimmed === group.displayName) {
+      setRenameDraft(null);
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      onApply(await runExclusive(() => renameGroup(group.canonical, trimmed)));
+      setRenameDraft(null);
+    } catch (err) {
+      setError(errMessage(err, 'Failed to rename group'));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // `value` is whatever the input handed over: the typed text, or the email of
+  // a chosen suggestion. A suggestion is a shortcut for typing, nothing more —
+  // both land on exactly these rules and exactly this request.
+  const submitAdd = async (value: string) => {
+    const trimmed = value.trim();
+    // Mirror the backend's refusal of `group:`-prefixed member values with an
+    // inline hint — group members are emails; groups don't contain groups.
+    if (isGroupPrefixed(trimmed)) {
+      setError("Group members are emails — 'group:' references aren't allowed here.");
+      return;
+    }
+    if (!EMAIL_RE.test(trimmed)) {
+      setError('Enter a valid email address.');
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      onApply(await runExclusive(() => addGroupMember(group.canonical, trimmed)));
+      setEmail('');
+    } catch (err) {
+      setError(errMessage(err, 'Failed to add member'));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const submitRemove = async (member: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      onApply(await runExclusive(() => removeGroupMember(group.canonical, member)));
+    } catch (err) {
+      setError(errMessage(err, 'Failed to remove member'));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div
+      ref={card}
+      data-group={group.canonical}
+      aria-current={targeted || undefined}
+      className={`border rounded-lg p-3 ${targeted ? 'border-accent' : 'border-line'}`}
+    >
+      <div className="flex items-start gap-3">
+        {renameDraft === null ? (
+          <h2 className="flex-1 min-w-0 text-sm font-semibold text-ink truncate">
+            {group.displayName}
+          </h2>
+        ) : (
+          <div className="flex-1 min-w-0 flex items-center gap-1.5">
+            <input
+              value={renameDraft}
+              onChange={(e) => setRenameDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') submitRename();
+                if (e.key === 'Escape') setRenameDraft(null);
+              }}
+              disabled={busy}
+              autoFocus
+              className="text-sm font-semibold px-2 py-0.5 border border-line rounded-sm focus:outline-none focus:border-accent flex-1 min-w-0"
+              aria-label={`Rename ${group.displayName}`}
+            />
+            <button
+              type="button"
+              onClick={submitRename}
+              disabled={busy}
+              className="p-1.5 rounded-sm hover:bg-hover text-accent disabled:opacity-50 shrink-0"
+              title="Save name"
+              aria-label={`Save name for ${group.displayName}`}
+            >
+              {busy ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}
+            </button>
+            <button
+              type="button"
+              onClick={() => setRenameDraft(null)}
+              disabled={busy}
+              className="p-1.5 rounded-sm hover:bg-hover text-ink-faint disabled:opacity-50 shrink-0"
+              title="Cancel rename"
+              aria-label={`Cancel renaming ${group.displayName}`}
+            >
+              <X size={14} />
+            </button>
+          </div>
+        )}
+        {renameDraft === null && (
+          <button
+            type="button"
+            onClick={() => setRenameDraft(group.displayName)}
+            disabled={busy}
+            className="p-1.5 rounded-sm hover:bg-hover text-ink-muted disabled:opacity-50 shrink-0"
+            title="Rename group"
+            aria-label={`Rename ${group.displayName}`}
+          >
+            <Pencil size={14} />
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={() => onDeleteRequest(group)}
+          disabled={busy}
+          className="p-1.5 rounded-sm hover:bg-danger-soft text-danger disabled:opacity-50 shrink-0"
+          title="Delete group"
+          aria-label={`Delete ${group.displayName}`}
+        >
+          <Trash2 size={14} />
+        </button>
+      </div>
+
+      <div className="mt-2 flex flex-wrap gap-2">
+        {group.members.length === 0 ? (
+          <span className="text-xs text-ink-faint">No members.</span>
+        ) : (
+          group.members.map((member) => (
+            <span
+              key={member}
+              className="inline-flex max-w-full items-center gap-1.5 px-1.5 py-1 bg-sunken border border-line rounded-full text-xs text-ink"
+            >
+              <span className="min-w-0 truncate max-w-[14rem]">{member}</span>
+              <button
+                type="button"
+                onClick={() => submitRemove(member)}
+                disabled={busy}
+                className="shrink-0 rounded-full p-0.5 text-ink-faint hover:text-danger hover:bg-danger-soft disabled:opacity-50"
+                title="Remove member"
+                aria-label={`Remove ${member}`}
+              >
+                <X size={12} />
+              </button>
+            </span>
+          ))
+        )}
+      </div>
+
+      {/* Add member — the same input the roles page uses, so a group member is
+          picked from people suggestions exactly the way a role member is.
+          Current members are excluded: they are already here. */}
+      <AddMemberInput
+        value={email}
+        onValueChange={setEmail}
+        onSubmit={submitAdd}
+        exclude={group.members}
+        inputLabel={`Add member to ${group.displayName}`}
+        busy={busy}
+        className="mt-2"
+        inputRef={addInput}
+      />
+
+      {error && (
+        <div className="mt-2 text-xs text-danger bg-danger-soft border border-danger/30 rounded-sm px-2 py-1">
+          {error}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** IdP mode: the synced roster, read-only — membership is managed in the IdP. */
+function IdpModeView({ roster, targetGroup }: { roster: GroupsRoster; targetGroup: string | null }) {
+  return (
+    <>
+      <p className="text-xs text-ink-muted leading-snug">
+        Groups are synced from your identity provider and are read-only here —
+        membership is managed there.
+      </p>
+
+      {roster.groups.length === 0 ? (
+        <div className="text-xs text-ink-muted">No groups synced yet.</div>
+      ) : (
+        <div className="max-w-xl space-y-1">
+          <ul className="divide-y divide-line border border-line rounded-sm">
+            {roster.groups.map((group) => (
+              <IdpGroupRow key={group.canonical} group={group} targeted={isNamedGroup(group, targetGroup)} />
+            ))}
+          </ul>
+          <div className="text-meta text-ink-muted">
+            Membership is managed in your identity provider.
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+/** One synced group. Brought into view when the URL names it — there is no field to focus. */
+function IdpGroupRow({ group, targeted }: { group: GroupRosterEntry; targeted: boolean }) {
+  const row = useRef<HTMLLIElement>(null);
+  useEffect(() => {
+    if (targeted) row.current?.scrollIntoView?.({ block: 'center' });
+  }, [targeted]);
+  return (
+    <li
+      ref={row}
+      data-group={group.canonical}
+      aria-current={targeted || undefined}
+      className={`px-3 py-2 text-sm ${targeted ? 'bg-hover' : ''}`}
+    >
+      <div className="font-medium truncate">{group.displayName}</div>
+      <div className="text-meta text-ink-muted truncate">
+        {group.members.length} {group.members.length === 1 ? 'member' : 'members'}
+      </div>
+    </li>
+  );
+}

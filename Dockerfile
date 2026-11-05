@@ -62,8 +62,21 @@ FROM node:22-slim AS production
 RUN corepack enable && corepack prepare pnpm@10.33.3 --activate
 
 # git backs every workspace operation (clone/commit/push of the KB repo).
+# ripgrep (`rg`) is what the agents' grep tool searches with; the server
+# refuses to start without it (`ripgrep-version.ts`).
+# tini is PID 1: the reaper. The server spawns git, MCP servers and the
+# shell tool's commands; a grandchild that outlives its parent reparents to
+# PID 1, and a node process there never reaps it — zombies accumulate until
+# the host cannot fork (a self-hosted deployment reached ~4,500 tasks that
+# way). The shipped compose files set `init: true` for the same reason, but a
+# deployment built from this Dockerfile alone — a Coolify "Dockerfile" app, a
+# hand-written compose — got no reaper. Baking it in means no deployment can
+# forget it; `init: true` on top is harmless. (When both are present, Docker's
+# own init takes PID 1 and this tini runs under it — the `-s` on the
+# ENTRYPOINT registers it as a child subreaper for exactly that case, so it
+# still reaps its subtree instead of warning on every boot.)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      git ca-certificates \
+      git ca-certificates tini ripgrep \
     && rm -rf /var/lib/apt/lists/*
 
 # tsx runs the TypeScript server shell at runtime. It lives in apps/server's
@@ -89,13 +102,22 @@ COPY apps/web/package.json apps/web/
 RUN pnpm install --frozen-lockfile --prod
 
 # Compiled packages + their packaged assets. `coreMigrationsDir()` /
-# `defaultKbTemplateDir()` resolve these relative to the package root, so the
-# layout must mirror the source tree.
+# `defaultKbTemplateDir()` / `agentGuideDir()` / `mcpAppDir()` /
+# `defaultStarterPacksDir()` (src/assets.ts) resolve these relative to the
+# package root, so the layout must mirror the source tree.
+# Every folder assets.ts names must be copied here: a missing one is not found
+# until the first request that reads it, and `agent-guide` is read while the
+# tool list is built, so leaving it out took every agent surface down on the
+# deployment (2026-10-06). `packaged-assets-ship.test.ts` checks this list
+# against assets.ts.
 COPY --from=builder /app/packages/shared/dist packages/shared/dist
 COPY --from=builder /app/packages/mcp-core/dist packages/mcp-core/dist
 COPY --from=builder /app/packages/core-backend/dist packages/core-backend/dist
 COPY --from=builder /app/packages/core-backend/migrations packages/core-backend/migrations
 COPY --from=builder /app/packages/core-backend/kb-template packages/core-backend/kb-template
+COPY --from=builder /app/packages/core-backend/agent-guide packages/core-backend/agent-guide
+COPY --from=builder /app/packages/core-backend/mcp-app packages/core-backend/mcp-app
+COPY --from=builder /app/packages/core-backend/starter-packs packages/core-backend/starter-packs
 
 # The server shell (tsx runs TypeScript directly) + the built SPA it serves.
 COPY --from=builder /app/apps/server/src apps/server/src
@@ -111,14 +133,22 @@ ENV PORT=3001
 
 # Bake the deployed commit sha into the image so `GET /api/health` can report
 # it. `.git` is in .dockerignore, so the sha can't be read inside the build —
-# pass it in explicitly: `--build-arg GIT_SHA=$(git rev-parse HEAD)`, which is
-# what CI does. `docker-compose.yml` deliberately does NOT declare it as a build
-# arg — naming it there made every deployment UI reading that file ask for a
-# value nobody sets by hand. Unset, health reports 'unknown'.
-ARG GIT_SHA
-ENV GIT_SHA=${GIT_SHA}
+# it arrives as ONE build arg, SOURCE_COMMIT, the name Coolify gives the
+# checked-out commit: CI passes `--build-arg SOURCE_COMMIT=<sha>`, Coolify
+# appends `--build-arg SOURCE_COMMIT` to its compose build (with "Include
+# SOURCE_COMMIT in build" enabled), and a manual build passes
+# `$(git rev-parse HEAD)`. Unset, health reports 'unknown'.
+#
+# Baked under a DIFFERENT name on purpose. A runtime environment variable
+# overrides an image ENV of the same name, and SOURCE_COMMIT is exactly the
+# name a hosted deployment UI writes at runtime — the pass-through tried
+# first was materialized as an EMPTY LITERAL that blanked the real value.
+# GIT_SHA is a name nothing at runtime sets, so what the image owns stands.
+ARG SOURCE_COMMIT
+ENV GIT_SHA=$SOURCE_COMMIT
 
 EXPOSE 3001
 
 WORKDIR /app/apps/server
+ENTRYPOINT ["/usr/bin/tini", "-s", "--"]
 CMD ["tsx", "src/main.ts"]

@@ -11,15 +11,11 @@
 # Repo hygiene files that clutter the tree without being node content.
 .gitignore
 .gitattributes
-AGENTS.md
-# The pre-rename name. Listed so a knowledge base carrying both files hides
-# both — top-up adds AGENTS.md but never deletes the CLAUDE.md beside it.
-CLAUDE.md
+# The deployment preamble is edited from External agent access, not as a KB page.
+/mcp-description.md
 
 # Empty-folder placeholders used only for committing empty dirs.
 **/.gitkeep
 
 **/access.md
 roles.yaml
-
-Plugins/

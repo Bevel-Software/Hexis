@@ -1,0 +1,1210 @@
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { testKbContext } from '../../../../__tests__/kb-context.js';
+import { NodeFs } from '../../../kb-fs/node-fs.js';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { NodeGitRunner } from '../../../version-control/git/node-git-runner.js';
+import { ClassifiedFailure, classifyGitFailure, failureOf } from '../../../../shared/git-failure.js';
+import { GitRunError, gitCredentials } from '../../../../shared/git.contract.js';
+import type { OnServerStart, ServerStartContext, StepResult } from '../on-server-start.js';
+import { newKbStartupRunner, newWorkspaceService } from '../../../../__tests__/workspace-service.js';
+
+/**
+ * The token in effect for the runners these suites build, changed by the
+ * cases that need one — the way the setup screen changes it on a running
+ * deployment: through the provider the runner reads on every call, never
+ * through this process's environment.
+ */
+let token: string | null = null;
+const credentials = gitCredentials('x-access-token', () => token);
+
+const execFileAsync = promisify(execFile);
+
+const PROTECTED = ['current-company-state', 'target-company-state'];
+const DEFAULT_BRANCH = 'current-company-state';
+
+async function git(cwd: string, args: string[]): Promise<string> {
+  const { stdout } = await execFileAsync('git', args, {
+    cwd,
+    env: {
+      ...process.env,
+      GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 't@x.com',
+      GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 't@x.com',
+    },
+  });
+  return stdout.toString();
+}
+
+let root: string;
+let upstream: string;
+let workspacesRoot: string;
+
+beforeEach(async () => {
+  root = await fs.mkdtemp(path.join(os.tmpdir(), 'kb-startup-'));
+  workspacesRoot = path.join(root, 'workspaces');
+  await fs.mkdir(workspacesRoot, { recursive: true });
+  upstream = path.join(root, 'upstream.git');
+  await git(root, ['init', '--bare', '-b', DEFAULT_BRANCH, upstream]);
+  delete process.env.KB_SAFE_BOOT;
+});
+
+afterEach(async () => {
+  delete process.env.KB_SAFE_BOOT;
+  await fs.rm(root, { recursive: true, force: true });
+});
+
+/** A populated upstream: one commit on the default branch, both protected refs. */
+async function populatedUpstream(): Promise<void> {
+  const seed = path.join(root, '.seed');
+  await fs.mkdir(seed);
+  await git(seed, ['init', '-b', DEFAULT_BRANCH]);
+  await fs.writeFile(path.join(seed, 'marker.txt'), 'seeded', 'utf8');
+  await git(seed, ['add', '-A']);
+  await git(seed, ['commit', '-m', 'init']);
+  await git(seed, ['branch', PROTECTED[1]!]);
+  await git(seed, ['remote', 'add', 'origin', upstream]);
+  await git(seed, ['push', 'origin', ...PROTECTED]);
+}
+
+function makeRunner(steps: OnServerStart[], overrides: Partial<Parameters<typeof runnerOpts>[1]> = {}) {
+  return newKbStartupRunner(runnerOpts(steps, overrides));
+}
+
+function runnerOpts(steps: OnServerStart[], overrides: Record<string, unknown> = {}) {
+  return {
+    gitRunner: new NodeGitRunner(undefined, credentials),
+    kbRepoUrl: () => upstream,
+    workspacesRoot,
+    setAsideRoot: path.join(root, 'set-aside'),
+    kbDirName: 'knowledge-base',
+    templateDir: path.join(root, 'template'),
+    defaultBranch: () => DEFAULT_BRANCH,
+    protectedBranches: () => PROTECTED,
+    seedAdminEmails: ['admin@example.com'],
+    // An unfinished clone made by a suite is abandoned the moment it exists.
+    unfinishedCloneQuietMs: 0,
+    steps,
+    buildSeedTree: async (dir: string) => {
+      await fs.writeFile(path.join(dir, 'seeded.md'), 'from template', 'utf8');
+      return [];
+    },
+    ...overrides,
+  };
+}
+
+function step(name: string, run: (ctx: ServerStartContext) => Promise<StepResult>): OnServerStart {
+  return { name, run };
+}
+
+async function checkout(branch: string): Promise<string> {
+  const dir = path.join(root, `checkout-${branch}-${Math.random().toString(36).slice(2)}`);
+  await git(root, ['clone', '-b', branch, upstream, dir]);
+  return dir;
+}
+
+/**
+ * The configured repository was replaced while working copies of the old one
+ * were still on disk. A clone fetches through its OWN stored address, so
+ * every one of them kept asking the repository that was gone: the boot
+ * stopped on "repository not found" and took the setup screen with it.
+ */
+describe('KbStartupRunner — the repository was replaced', () => {
+  const touchDefault = step('touch', async (ctx) => {
+    await (await ctx.defaultBranch()).repoDir();
+    return { outcome: 'ok' };
+  });
+  const cloneDir = (branch: string) => path.join(workspacesRoot, encodeURIComponent(branch), 'knowledge-base');
+
+  /** A second, unrelated repository with the same branch names. */
+  async function replacementUpstream(): Promise<string> {
+    const other = path.join(root, 'replacement.git');
+    await git(root, ['init', '--bare', '-b', DEFAULT_BRANCH, other]);
+    const seed = path.join(root, '.seed-replacement');
+    await fs.mkdir(seed);
+    await git(seed, ['init', '-b', DEFAULT_BRANCH]);
+    await fs.writeFile(path.join(seed, 'marker.txt'), 'replacement', 'utf8');
+    await git(seed, ['add', '-A']);
+    await git(seed, ['commit', '-m', 'init']);
+    await git(seed, ['branch', PROTECTED[1]!]);
+    await git(seed, ['remote', 'add', 'origin', other]);
+    await git(seed, ['push', 'origin', ...PROTECTED]);
+    return other;
+  }
+
+  /** Boot once against the first repository, and leave a draft's clone beside it. */
+  async function bootedOnTheOldRepository(): Promise<void> {
+    await populatedUpstream();
+    await makeRunner([touchDefault]).runAll();
+    await fs.mkdir(path.dirname(cloneDir('someone/draft')), { recursive: true });
+    await git(root, ['clone', '-b', DEFAULT_BRANCH, upstream, cloneDir('someone/draft')]);
+  }
+
+  /** Where one run set its working copies aside: the single dated folder under the root. */
+  async function setAside(): Promise<string> {
+    const runs = await fs.readdir(path.join(root, 'set-aside'));
+    expect(runs).toHaveLength(1);
+    return path.join(root, 'set-aside', runs[0]!);
+  }
+
+  it('clones the new repository in place of the old one\'s clones, even with the old one gone', async () => {
+    await bootedOnTheOldRepository();
+    const replacement = await replacementUpstream();
+    // Gone, as it was in production: any fetch through the old address fails.
+    await fs.rm(upstream, { recursive: true, force: true });
+
+    await makeRunner([touchDefault], { kbRepoUrl: () => replacement }).runAll();
+
+    const repo = cloneDir(DEFAULT_BRANCH);
+    expect((await git(repo, ['config', '--get', 'remote.origin.url'])).trim()).toBe(replacement);
+    expect(await fs.readFile(path.join(repo, 'marker.txt'), 'utf8')).toBe('replacement');
+    // A clone this boot had no reason to touch leaves the workspaces root
+    // too: the workspace service would otherwise adopt it and fetch from the
+    // old address.
+    await expect(fs.access(cloneDir('someone/draft'))).rejects.toThrow();
+  });
+
+  /**
+   * The old repository is GONE, so its clones are the last copy of what it
+   * held, and the commit nobody pushed exists nowhere else at all. They
+   * leave the workspaces root and nothing else happens to them.
+   */
+  it('sets the old repository\'s clones aside whole, unpushed work included, and deletes nothing', async () => {
+    await bootedOnTheOldRepository();
+    const old = cloneDir(DEFAULT_BRANCH);
+    await fs.writeFile(path.join(old, 'unpushed.md'), 'the only copy', 'utf8');
+    await git(old, ['add', '-A']);
+    await git(old, ['commit', '-m', 'never pushed']);
+    const head = (await git(old, ['rev-parse', 'HEAD'])).trim();
+    const replacement = await replacementUpstream();
+    await fs.rm(upstream, { recursive: true, force: true });
+
+    await makeRunner([touchDefault], { kbRepoUrl: () => replacement }).runAll();
+
+    const kept = await setAside();
+    const keptDefault = path.join(kept, encodeURIComponent(DEFAULT_BRANCH));
+    expect((await git(keptDefault, ['rev-parse', 'HEAD'])).trim()).toBe(head);
+    expect(await fs.readFile(path.join(keptDefault, 'unpushed.md'), 'utf8')).toBe('the only copy');
+    expect(await fs.readFile(path.join(keptDefault, 'marker.txt'), 'utf8')).toBe('seeded');
+    // The draft's clone too, under its own workspace's name.
+    await expect(fs.access(path.join(kept, encodeURIComponent('someone/draft'), '.git'))).resolves.toBeUndefined();
+    // And the probe that compared the histories left no refs behind in it.
+    expect((await git(keptDefault, ['for-each-ref', 'refs/hexis-probe/'])).trim()).toBe('');
+  });
+
+  /**
+   * The shipped compose files mount the backups root as a volume of its own,
+   * where a rename across to it is refused. That is the path production
+   * takes: a copy, and the original removed only once the copy is whole.
+   */
+  it('sets a clone aside across volumes, by copying it whole', async () => {
+    await bootedOnTheOldRepository();
+    const old = cloneDir(DEFAULT_BRANCH);
+    await fs.writeFile(path.join(old, 'unpushed.md'), 'the only copy', 'utf8');
+    await git(old, ['add', '-A']);
+    await git(old, ['commit', '-m', 'never pushed']);
+    const head = (await git(old, ['rev-parse', 'HEAD'])).trim();
+    const replacement = await replacementUpstream();
+    await fs.rm(upstream, { recursive: true, force: true });
+    const crossDevice = Object.assign(new Error('EXDEV: cross-device link not permitted'), { code: 'EXDEV' });
+    const rename = vi.spyOn(fs, 'rename').mockRejectedValue(crossDevice);
+    try {
+      await makeRunner([touchDefault], { kbRepoUrl: () => replacement }).runAll();
+    } finally {
+      rename.mockRestore();
+    }
+
+    const keptDefault = path.join(await setAside(), encodeURIComponent(DEFAULT_BRANCH));
+    expect((await git(keptDefault, ['rev-parse', 'HEAD'])).trim()).toBe(head);
+    expect(await fs.readFile(path.join(keptDefault, 'unpushed.md'), 'utf8')).toBe('the only copy');
+    expect(await fs.readFile(path.join(cloneDir(DEFAULT_BRANCH), 'marker.txt'), 'utf8')).toBe('replacement');
+  });
+
+  /**
+   * A clone that cannot be set aside stays exactly where it is, and the boot
+   * stops saying why: deleting it to get past would be the one outcome this
+   * whole path exists to rule out.
+   */
+  it('deletes nothing when a clone cannot be set aside, and says why', async () => {
+    await bootedOnTheOldRepository();
+    const old = cloneDir(DEFAULT_BRANCH);
+    const head = (await git(old, ['rev-parse', 'HEAD'])).trim();
+    const replacement = await replacementUpstream();
+    await fs.rm(upstream, { recursive: true, force: true });
+    const rename = vi.spyOn(fs, 'rename').mockRejectedValue(Object.assign(new Error('EXDEV'), { code: 'EXDEV' }));
+    const cp = vi.spyOn(fs, 'cp').mockRejectedValue(Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' }));
+    try {
+      await expect(makeRunner([touchDefault], { kbRepoUrl: () => replacement }).runAll()).rejects.toThrow(
+        /Could not set aside the working copy.*no space left.*Nothing was deleted/s,
+      );
+    } finally {
+      rename.mockRestore();
+      cp.mockRestore();
+    }
+    expect((await git(old, ['rev-parse', 'HEAD'])).trim()).toBe(head);
+  });
+
+  /**
+   * The one change the setup screen tells an admin to make: the same
+   * repository, moved. The clone is pointed at the new address and kept, and
+   * the commit that was never pushed goes on to be pushed there.
+   */
+  it('keeps a clone of the same repository at a new address, and points it there', async () => {
+    await bootedOnTheOldRepository();
+    const repo = cloneDir(DEFAULT_BRANCH);
+    await fs.writeFile(path.join(repo, 'unpushed.md'), 'local work', 'utf8');
+    await git(repo, ['add', '-A']);
+    await git(repo, ['commit', '-m', 'local work']);
+    const head = (await git(repo, ['rev-parse', 'HEAD'])).trim();
+    // Moved: everything the old address held is at the new one, and the old
+    // one answers nothing any more.
+    const moved = path.join(root, 'moved.git');
+    await git(root, ['clone', '--bare', upstream, moved]);
+    await fs.rm(upstream, { recursive: true, force: true });
+
+    await makeRunner([touchDefault], { kbRepoUrl: () => moved }).runAll();
+
+    expect((await git(repo, ['config', '--get', 'remote.origin.url'])).trim()).toBe(moved);
+    expect((await git(repo, ['rev-parse', 'HEAD'])).trim()).toBe(head);
+    expect((await git(cloneDir('someone/draft'), ['config', '--get', 'remote.origin.url'])).trim()).toBe(moved);
+    expect((await git(repo, ['for-each-ref', 'refs/hexis-probe/'])).trim()).toBe('');
+    // Nothing was another repository's, so nothing was set aside.
+    await expect(fs.access(path.join(root, 'set-aside'))).rejects.toThrow();
+  });
+
+  it('leaves a clone of the configured repository alone, unpushed work included', async () => {
+    await bootedOnTheOldRepository();
+    const repo = cloneDir(DEFAULT_BRANCH);
+    await fs.writeFile(path.join(repo, 'unpushed.md'), 'local work', 'utf8');
+    await git(repo, ['add', '-A']);
+    await git(repo, ['commit', '-m', 'local work']);
+    const head = (await git(repo, ['rev-parse', 'HEAD'])).trim();
+
+    await makeRunner([touchDefault]).runAll();
+
+    expect((await git(repo, ['rev-parse', 'HEAD'])).trim()).toBe(head);
+    await expect(fs.access(cloneDir('someone/draft'))).resolves.toBeUndefined();
+  });
+
+  it('does not take a different spelling of the same address for another repository', async () => {
+    await bootedOnTheOldRepository();
+    const repo = cloneDir(DEFAULT_BRANCH);
+    await fs.writeFile(path.join(repo, 'unpushed.md'), 'local work', 'utf8');
+    await git(repo, ['add', '-A']);
+    await git(repo, ['commit', '-m', 'local work']);
+    const head = (await git(repo, ['rev-parse', 'HEAD'])).trim();
+
+    // `upstream` ends in `.git`; the same repository without it, and with a
+    // trailing slash.
+    await makeRunner([touchDefault], { kbRepoUrl: () => `${upstream.replace(/\.git$/, '')}/` }).runAll().catch(() => {});
+
+    expect((await git(repo, ['rev-parse', 'HEAD'])).trim()).toBe(head);
+  });
+
+it('tells the workspace layer about every working copy it deletes', async () => {
+    // On a SAVE the process is already running, and the workspace service
+    // caches branch→directory. A clone that was set aside, left in that cache,
+    // is a path to nothing, and nothing would ever re-clone it.
+    await bootedOnTheOldRepository();
+    const replacement = await replacementUpstream();
+    const discarded: string[] = [];
+
+    await makeRunner([touchDefault], {
+      kbRepoUrl: () => replacement,
+      onCloneDiscarded: (id: string) => discarded.push(id),
+    }).runAll();
+
+    expect(discarded.sort()).toEqual(
+      [encodeURIComponent(DEFAULT_BRANCH), encodeURIComponent('someone/draft')].sort(),
+    );
+  });
+
+  /**
+   * Holding back the queue of a working copy is a precondition of setting it
+   * aside. A phase that carried on past a failure there would clone the
+   * replacement over an untouched queue, and the worker would commit those
+   * bytes into a repository they were never meant for.
+   */
+  it('stops, with the working copy still in place, when its queue cannot be held back first', async () => {
+    await bootedOnTheOldRepository();
+    const replacement = await replacementUpstream();
+    const before = (await git(cloneDir(DEFAULT_BRANCH), ['config', '--get', 'remote.origin.url'])).trim();
+    const discarded: string[] = [];
+
+    await expect(
+      makeRunner([touchDefault], {
+        kbRepoUrl: () => replacement,
+        beforeCloneSetAside: async () => {
+          throw new Error('pending_commits is down');
+        },
+        onCloneDiscarded: (id: string) => discarded.push(id),
+      }).runAll(),
+    ).rejects.toThrow(/pending_commits is down/);
+
+    // Nothing moved: the next run finds the same copy and asks again.
+    expect((await git(cloneDir(DEFAULT_BRANCH), ['config', '--get', 'remote.origin.url'])).trim()).toBe(before);
+    expect(discarded).toEqual([]);
+  });
+
+  it('holds back the queue of each working copy before it sets that copy aside', async () => {
+    await bootedOnTheOldRepository();
+    const replacement = await replacementUpstream();
+    const order: string[] = [];
+
+    await makeRunner([touchDefault], {
+      kbRepoUrl: () => replacement,
+      beforeCloneSetAside: async (id: string) => void order.push(`queue ${id}`),
+      onCloneDiscarded: (id: string) => void order.push(`aside ${id}`),
+    }).runAll();
+
+    const main = encodeURIComponent(DEFAULT_BRANCH);
+    expect(order.indexOf(`queue ${main}`)).toBeGreaterThanOrEqual(0);
+    expect(order.indexOf(`queue ${main}`)).toBeLessThan(order.indexOf(`aside ${main}`));
+  });
+
+  it('tells the git layer that each working copy it cloned is freshly fetched', async () => {
+    // A clone holds every ref, so it IS a successful fetch. Unsaid, the git
+    // layer keeps the per-workspace record that drove the replacement — a
+    // FAILED fetch of the repository that is gone — and a strict branch
+    // listing inside its TTL refuses the new clone's refs as unproven.
+    await bootedOnTheOldRepository();
+    const replacement = await replacementUpstream();
+    const announced: string[] = [];
+
+    await makeRunner([touchDefault], {
+      kbRepoUrl: () => replacement,
+      onCloneCreated: (id: string) => announced.push(id),
+    }).runAll();
+
+    // Every working copy the phase made in place of one it set aside.
+    expect(announced).toContain(encodeURIComponent(DEFAULT_BRANCH));
+  });
+
+  it('says nothing about a working copy it keeps', async () => {
+    await bootedOnTheOldRepository();
+    const discarded: string[] = [];
+    await makeRunner([touchDefault], { onCloneDiscarded: (id: string) => discarded.push(id) }).runAll();
+    expect(discarded).toEqual([]);
+  });
+
+  it('keeps every clone when the configured repository cannot be reached', async () => {
+    // A typo in the address must not cost the working copies: the sweep runs
+    // only once the configured remote has answered.
+    await bootedOnTheOldRepository();
+    await expect(
+      makeRunner([touchDefault], { kbRepoUrl: () => path.join(root, 'no-such-repository.git') }).runAll(),
+    ).rejects.toThrow();
+    await expect(fs.access(path.join(cloneDir(DEFAULT_BRANCH), '.git'))).resolves.toBeUndefined();
+    await expect(fs.access(cloneDir('someone/draft'))).resolves.toBeUndefined();
+  });
+});
+
+describe('KbStartupRunner', () => {
+  it('seeds an empty remote with every protected branch before any step runs', async () => {
+    const seen: string[] = [];
+    await makeRunner([
+      step('probe', async (ctx) => {
+        for (const b of await ctx.protectedBranches()) seen.push(b.name);
+        return { outcome: 'ok' };
+      }),
+    ]).runAll();
+    expect(seen.sort()).toEqual([...PROTECTED].sort());
+    for (const b of PROTECTED) {
+      const dir = await checkout(b);
+      expect(await fs.readFile(path.join(dir, 'seeded.md'), 'utf8')).toBe('from template');
+    }
+  });
+
+  it('rejects a repository URL with embedded credentials — operator error, fail-closed', async () => {
+    let stepRan = false;
+    await expect(
+      makeRunner(
+        [step('never', async () => { stepRan = true; return { outcome: 'ok' }; })],
+        { kbRepoUrl: () => 'https://alice:hunter2@example.com/kb.git' },
+      ).runAll(),
+    ).rejects.toThrow(/embeds credentials.*process listings/s);
+    expect(stepRan).toBe(false);
+  });
+
+  it('KB_SAFE_BOOT boots over a persisted credentials-bearing URL — the rescue never invokes git', async () => {
+    process.env.KB_SAFE_BOOT = '1';
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await makeRunner(
+        [step('never', async () => ({ outcome: 'ok' }))],
+        { kbRepoUrl: () => 'https://alice:hunter2@example.com/kb.git' },
+      ).runAll(); // resolves — the server boots unmaintained
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('accepts a concurrent replica\'s seed when the empty-remote seed push loses the race', async () => {
+    // The WINNER lands its seed between this replica's empty ls-remote and
+    // its push — buildSeedTree runs exactly in that window, which makes the
+    // race deterministic with real git.
+    const seen: string[] = [];
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      await makeRunner(
+        [
+          step('probe', async (ctx) => {
+            for (const b of await ctx.protectedBranches()) seen.push(b.name);
+            return { outcome: 'ok' };
+          }),
+        ],
+        {
+          buildSeedTree: async (dir: string) => {
+            const winner = path.join(root, 'winner-seed');
+            await fs.mkdir(winner);
+            await git(winner, ['init', '-b', DEFAULT_BRANCH]);
+            await fs.writeFile(path.join(winner, 'seeded.md'), 'winner content', 'utf8');
+            await git(winner, ['add', '-A']);
+            await git(winner, ['commit', '-m', 'winner seed']);
+            await git(winner, ['branch', PROTECTED[1]!]);
+            await git(winner, ['remote', 'add', 'origin', upstream]);
+            await git(winner, ['push', 'origin', ...PROTECTED]);
+            await fs.writeFile(path.join(dir, 'seeded.md'), 'loser content', 'utf8');
+            return [];
+          },
+        },
+      ).runAll(); // resolves — the loser accepts the winner's identical work
+    } finally {
+      vi.restoreAllMocks();
+    }
+    expect(seen.sort()).toEqual([...PROTECTED].sort());
+    // The remote carries the WINNER's seed; the loser's never landed.
+    for (const b of PROTECTED) {
+      const dir = await checkout(b);
+      expect(await fs.readFile(path.join(dir, 'seeded.md'), 'utf8')).toBe('winner content');
+    }
+  });
+
+  it('applies a step\'s buffered ops before the next step runs, and commits once per branch with the notes', async () => {
+    await populatedUpstream();
+    const secondSaw: string[] = [];
+    await makeRunner([
+      step('first', async (ctx) => {
+        const b = await ctx.defaultBranch();
+        b.write('a/one.md', 'one');
+        b.note('Add one.md');
+        return { outcome: 'ok' };
+      }),
+      step('second', async (ctx) => {
+        const b = await ctx.defaultBranch();
+        // The previous step's op is REAL on disk by now.
+        secondSaw.push(await fs.readFile(path.join(await b.repoDir(), 'a/one.md'), 'utf8'));
+        b.write('b/two.md', 'two');
+        b.note('Add two.md');
+        return { outcome: 'ok' };
+      }),
+    ]).runAll();
+    expect(secondSaw).toEqual(['one']);
+    const dir = await checkout(DEFAULT_BRANCH);
+    expect(await fs.readFile(path.join(dir, 'a/one.md'), 'utf8')).toBe('one');
+    expect(await fs.readFile(path.join(dir, 'b/two.md'), 'utf8')).toBe('two');
+    const log = await git(dir, ['log', '--format=%s%n%b', '-1']);
+    expect(log).toContain('Add one.md');
+    expect(log).toContain('Add two.md');
+    // ONE commit carried both steps' changes.
+    const count = (await git(dir, ['rev-list', '--count', 'HEAD'])).trim();
+    expect(count).toBe('2'); // init + the one startup commit
+  });
+
+  it('discards a skipped step\'s ops unapplied — the tree is untouched by construction', async () => {
+    await populatedUpstream();
+    await makeRunner([
+      step('flaky', async (ctx) => {
+        (await ctx.defaultBranch()).write('never.md', 'x');
+        return { outcome: 'skipped', reason: 'precondition unmet' };
+      }),
+      step('after', async (ctx) => {
+        const repo = await (await ctx.defaultBranch()).repoDir();
+        expect(await fs.access(path.join(repo, 'never.md')).then(() => true, () => false)).toBe(false);
+        return { outcome: 'ok' };
+      }),
+    ]).runAll();
+    const dir = await checkout(DEFAULT_BRANCH);
+    await expect(fs.access(path.join(dir, 'never.md'))).rejects.toThrow();
+  });
+
+  it('an unhandled step throw stops the boot with the step named; nothing commits', async () => {
+    await populatedUpstream();
+    await expect(
+      makeRunner([
+        step('good', async (ctx) => {
+          const b = await ctx.defaultBranch();
+          b.write('good.md', 'ok');
+          return { outcome: 'ok' };
+        }),
+        step('broken', async () => {
+          throw new Error('ECONNREFUSED somewhere');
+        }),
+      ]).runAll(),
+    ).rejects.toThrow(/step "broken" failed: .*ECONNREFUSED/);
+    // The good step's APPLIED but uncommitted work never reached the remote.
+    const dir = await checkout(DEFAULT_BRANCH);
+    await expect(fs.access(path.join(dir, 'good.md'))).rejects.toThrow();
+  });
+
+  it('stopBoot is the deliberate kill switch and carries the message', async () => {
+    await populatedUpstream();
+    await expect(
+      makeRunner([
+        step('guard', async () => ({ outcome: 'stopBoot', message: 'KB layout is newer than this build' })),
+      ]).runAll(),
+    ).rejects.toThrow(/stopped the boot: KB layout is newer/);
+  });
+
+  it('KB_SAFE_BOOT=1 abandons the phase on failure, resets uncommitted work, and boots', async () => {
+    await populatedUpstream();
+    const originSha = (await git(path.join(root, '.seed'), ['rev-parse', 'HEAD'])).trim();
+    process.env.KB_SAFE_BOOT = '1';
+    await makeRunner([
+      step('good', async (ctx) => {
+        (await ctx.defaultBranch()).write('good.md', 'ok');
+        return { outcome: 'ok' };
+      }),
+      step('broken', async () => {
+        throw new Error('boom');
+      }),
+    ]).runAll(); // resolves — the server boots
+    // The applied-but-uncommitted change was reset; the remote never saw it.
+    const local = path.join(workspacesRoot, DEFAULT_BRANCH, 'knowledge-base');
+    await expect(fs.access(path.join(local, 'good.md'))).rejects.toThrow();
+    // The rollback lands EXACTLY on the pre-phase sha recorded at clone time.
+    expect((await git(local, ['rev-parse', 'HEAD'])).trim()).toBe(originSha);
+    const dir = await checkout(DEFAULT_BRANCH);
+    await expect(fs.access(path.join(dir, 'good.md'))).rejects.toThrow();
+  });
+
+  it('KB_SAFE_BOOT rollback undoes even a created-but-unpushed finalize commit (reset to the pre-phase sha)', async () => {
+    await populatedUpstream();
+    const originSha = (await git(path.join(root, '.seed'), ['rev-parse', 'HEAD'])).trim();
+    // A pre-receive hook that refuses every push: a POLICY refusal, not the
+    // concurrent-replica carve-out — finalize rethrows AFTER committing, and
+    // safe boot must roll that commit back or it strands locally forever.
+    const hookPath = path.join(upstream, 'hooks', 'pre-receive');
+    await fs.mkdir(path.dirname(hookPath), { recursive: true });
+    await fs.writeFile(hookPath, '#!/bin/sh\necho "policy says no" >&2\nexit 1\n', { mode: 0o755 });
+    process.env.KB_SAFE_BOOT = '1';
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await makeRunner([
+        step('write', async (ctx) => {
+          const b = await ctx.defaultBranch();
+          b.write('managed.md', 'phase');
+          b.note('Add managed.md');
+          return { outcome: 'ok' };
+        }),
+      ]).runAll(); // resolves — safe boot abandons after the push refusal
+    } finally {
+      vi.restoreAllMocks();
+    }
+    const local = path.join(workspacesRoot, DEFAULT_BRANCH, 'knowledge-base');
+    expect((await git(local, ['rev-parse', 'HEAD'])).trim()).toBe(originSha);
+    await expect(fs.access(path.join(local, 'managed.md'))).rejects.toThrow();
+  });
+
+  it("finalize stages only the phase's paths — pre-existing dirt in a surviving clone stays out of the commit and in the tree", async () => {
+    await populatedUpstream();
+    // Materialize the surviving clone, then drop operator dirt into it.
+    await makeRunner([
+      step('touch', async (ctx) => {
+        await (await ctx.defaultBranch()).repoDir();
+        return { outcome: 'ok' };
+      }),
+    ]).runAll();
+    const local = path.join(workspacesRoot, DEFAULT_BRANCH, 'knowledge-base');
+    await fs.writeFile(path.join(local, 'stray.md'), 'operator dirt', 'utf8');
+    // A crashed tool even STAGED it — the pre-existing index state must be
+    // dropped, not adopted into the phase's commit.
+    await git(local, ['add', '--', 'stray.md']);
+
+    await makeRunner([
+      step('write', async (ctx) => {
+        const b = await ctx.defaultBranch();
+        b.write('managed.md', 'phase');
+        b.note('Add managed.md');
+        return { outcome: 'ok' };
+      }),
+    ]).runAll();
+
+    // The commit carries ONLY the phase's path.
+    const committed = (await git(local, ['show', '--name-only', '--format=', 'HEAD'])).trim();
+    expect(committed.split('\n')).toEqual(['managed.md']);
+    const dir = await checkout(DEFAULT_BRANCH);
+    expect(await fs.readFile(path.join(dir, 'managed.md'), 'utf8')).toBe('phase');
+    await expect(fs.access(path.join(dir, 'stray.md'))).rejects.toThrow();
+    // The dirt remains in the working tree, uncommitted — not this phase's to touch.
+    expect(await fs.readFile(path.join(local, 'stray.md'), 'utf8')).toBe('operator dirt');
+    expect((await git(local, ['status', '--porcelain', '--', 'stray.md'])).trim()).toBe('?? stray.md');
+  });
+
+  it('draft branches are reachable AND writable through allBranches()', async () => {
+    await populatedUpstream();
+    const seed = path.join(root, '.seed');
+    await git(seed, ['checkout', '-b', 'alice/draft']);
+    await fs.writeFile(path.join(seed, 'draft.md'), 'draft', 'utf8');
+    await git(seed, ['add', '-A']);
+    await git(seed, ['commit', '-m', 'draft work']);
+    await git(seed, ['push', 'origin', 'alice/draft']);
+
+    await makeRunner([
+      step('uniform', async (ctx) => {
+        for (const b of await ctx.allBranches()) {
+          expect(typeof b.isProtected).toBe('boolean');
+          b.write('uniform.md', `maintained ${b.name}`);
+          b.note(`Maintain ${b.name}`);
+        }
+        return { outcome: 'ok' };
+      }),
+    ]).runAll();
+
+    const draft = await checkout('alice/draft');
+    expect(await fs.readFile(path.join(draft, 'uniform.md'), 'utf8')).toBe('maintained alice/draft');
+    expect(await fs.readFile(path.join(draft, 'draft.md'), 'utf8')).toBe('draft');
+  });
+
+  it('refuses op paths that escape, target .git, or traverse a symlink', async () => {
+    await populatedUpstream();
+    for (const bad of ['../outside.md', '.git/hooks/x', '']) {
+      await expect(
+        makeRunner([
+          step('hostile', async (ctx) => {
+            (await ctx.defaultBranch()).write(bad, 'x');
+            return { outcome: 'ok' };
+          }),
+        ]).runAll(),
+      ).rejects.toThrow(/op path/);
+    }
+  });
+
+  it('self-skips when the branch model is set but the repository URL is not', async () => {
+    let stepRan = false;
+    // A partially set-up deployment (branch model saved, repo URL not yet):
+    // running would `ls-remote ''` and fail forever, with the setup screen
+    // that could fix it unreachable behind the failed boot.
+    await makeRunner(
+      [step('never', async () => { stepRan = true; return { outcome: 'ok' }; })],
+      { kbRepoUrl: () => '' },
+    ).runAll(); // resolves — nothing to maintain yet
+    expect(stepRan).toBe(false);
+  });
+
+  it("discards a skipped step's notes with its ops — a later commit never carries them", async () => {
+    await populatedUpstream();
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await makeRunner([
+        step('flaky', async (ctx) => {
+          const b = await ctx.defaultBranch();
+          b.write('never.md', 'x');
+          b.note('Never say this');
+          return { outcome: 'skipped', reason: 'precondition unmet' };
+        }),
+        step('after', async (ctx) => {
+          const b = await ctx.defaultBranch();
+          b.write('after.md', 'y');
+          b.note('Add after.md');
+          return { outcome: 'ok' };
+        }),
+      ]).runAll();
+    } finally {
+      vi.restoreAllMocks();
+    }
+    const dir = await checkout(DEFAULT_BRANCH);
+    const log = await git(dir, ['log', '--format=%s%n%b', '-1']);
+    expect(log).toContain('Add after.md');
+    expect(log).not.toContain('Never say this');
+  });
+
+  it('the push-race rollback undoes exactly the startup commit — a pre-existing AHEAD commit survives', async () => {
+    await populatedUpstream();
+    // Materialize the clone, then give it a committed-but-unpushed (AHEAD)
+    // commit — the crash-before-push state ensureClone deliberately preserves.
+    await makeRunner([
+      step('touch', async (ctx) => {
+        await (await ctx.defaultBranch()).repoDir();
+        return { outcome: 'ok' };
+      }),
+    ]).runAll();
+    const local = path.join(workspacesRoot, DEFAULT_BRANCH, 'knowledge-base');
+    await fs.writeFile(path.join(local, 'unpushed.md'), 'precious', 'utf8');
+    await git(local, ['add', '-A']);
+    await git(local, ['commit', '-m', 'committed but unpushed']);
+
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await makeRunner([
+        step('dirty-and-race', async (ctx) => {
+          const b = await ctx.defaultBranch();
+          b.write('startup.md', 'maintenance');
+          b.note('Add startup.md');
+          // A concurrent replica lands its own commit upstream AFTER this
+          // runner's fetch, so the finalize push is rejected non-fast-forward.
+          const other = await checkout(DEFAULT_BRANCH);
+          await fs.writeFile(path.join(other, 'winner.md'), 'replica won', 'utf8');
+          await git(other, ['add', '-A']);
+          await git(other, ['commit', '-m', 'replica commit']);
+          await git(other, ['push', 'origin', DEFAULT_BRANCH]);
+          return { outcome: 'ok' };
+        }),
+      ]).runAll(); // resolves — the carve-out rolls back and continues
+    } finally {
+      vi.restoreAllMocks();
+    }
+    // The rollback undid the startup commit and ONLY it: the AHEAD commit is
+    // still HEAD (a reset to origin/<branch> would have discarded it too).
+    expect(await fs.readFile(path.join(local, 'unpushed.md'), 'utf8')).toBe('precious');
+    expect((await git(local, ['log', '--format=%s', '-1'])).trim()).toBe('committed but unpushed');
+    expect(await fs.access(path.join(local, 'startup.md')).then(() => true, () => false)).toBe(false);
+  });
+
+  it('a surviving clone that is AHEAD keeps its unpushed commit — not this phase\'s to discard', async () => {
+    await populatedUpstream();
+    // First pass touches the branch so the clone exists (handles are lazy —
+    // a pass that never asks for repoDir never clones).
+    await makeRunner([
+      step('touch', async (ctx) => {
+        await (await ctx.defaultBranch()).repoDir();
+        return { outcome: 'ok' };
+      }),
+    ]).runAll();
+    const local = path.join(workspacesRoot, DEFAULT_BRANCH, 'knowledge-base');
+    // A crash-before-push scenario: a committed local change origin never got.
+    await fs.writeFile(path.join(local, 'unpushed.md'), 'precious', 'utf8');
+    await git(local, ['add', '-A']);
+    await git(local, ['commit', '-m', 'committed but unpushed']);
+
+    await makeRunner([step('noop', async () => ({ outcome: 'ok' }))]).runAll();
+    expect(await fs.readFile(path.join(local, 'unpushed.md'), 'utf8')).toBe('precious');
+  });
+});
+
+/**
+ * A clone that was cut short leaves a `.git` folder and no commit. Every
+ * start found it again, could do nothing with a branch that has no commit,
+ * and stopped: one such folder kept a whole deployment from starting.
+ */
+describe('KbStartupRunner — a working copy whose clone was never finished', () => {
+  const touchDefault = step('touch', async (ctx) => {
+    await (await ctx.defaultBranch()).repoDir();
+    return { outcome: 'ok' };
+  });
+  const local = () => path.join(workspacesRoot, DEFAULT_BRANCH, 'knowledge-base');
+
+  /** What an interrupted clone leaves: the repository made, its remote set, nothing checked out. */
+  async function halfMadeClone(): Promise<void> {
+    await fs.mkdir(local(), { recursive: true });
+    await git(local(), ['init', '-b', DEFAULT_BRANCH]);
+    await git(local(), ['remote', 'add', 'origin', upstream]);
+    await fs.writeFile(path.join(local(), 'left-here.txt'), 'somebody put this here', 'utf8');
+  }
+
+  it('is set aside, files and all, and cloned again, so the start goes through', async () => {
+    await populatedUpstream();
+    await halfMadeClone();
+    const discarded: string[] = [];
+
+    await makeRunner([touchDefault], { onCloneDiscarded: (id: string) => void discarded.push(id) }).runAll();
+
+    // A real clone stands in its place.
+    expect(await fs.readFile(path.join(local(), 'marker.txt'), 'utf8')).toBe('seeded');
+    expect((await git(local(), ['rev-parse', '--abbrev-ref', 'HEAD'])).trim()).toBe(DEFAULT_BRANCH);
+    // Nothing was deleted: what was in the folder is where set-aside copies go.
+    const runs = await fs.readdir(path.join(root, 'set-aside'));
+    expect(runs).toHaveLength(1);
+    const kept = path.join(root, 'set-aside', runs[0]!, DEFAULT_BRANCH);
+    expect(await fs.readFile(path.join(kept, 'left-here.txt'), 'utf8')).toBe('somebody put this here');
+    expect(discarded).toEqual([DEFAULT_BRANCH]);
+
+    // And the next start finds an ordinary clone: nothing more is set aside.
+    await makeRunner([touchDefault]).runAll();
+    expect(await fs.readdir(path.join(root, 'set-aside'))).toHaveLength(1);
+  });
+
+  it('leaves a working copy that has a commit exactly where it is', async () => {
+    await populatedUpstream();
+    await makeRunner([touchDefault]).runAll();
+    await fs.writeFile(path.join(local(), 'unpushed.md'), 'precious', 'utf8');
+    await git(local(), ['add', '-A']);
+    await git(local(), ['commit', '-m', 'committed but unpushed']);
+
+    await makeRunner([touchDefault]).runAll();
+
+    expect(await fs.readFile(path.join(local(), 'unpushed.md'), 'utf8')).toBe('precious');
+    expect(await fs.access(path.join(root, 'set-aside')).then(() => true, () => false)).toBe(false);
+  });
+
+  it('leaves a working copy alone when git could not say whether it has a commit', async () => {
+    await populatedUpstream();
+    await makeRunner([touchDefault]).runAll();
+    await fs.writeFile(path.join(local(), 'unpushed.md'), 'precious', 'utf8');
+    await git(local(), ['add', '-A']);
+    await git(local(), ['commit', '-m', 'committed but unpushed']);
+    // Git gives no answer to the one question: the deadline passes, as it
+    // does on a host under load. Everything else runs for real.
+    const real = new NodeGitRunner(undefined, credentials);
+    const gitRunner = {
+      defaultTimeoutMs: real.defaultTimeoutMs,
+      credentials: real.credentials,
+      run: (cwd: string, args: string[], opts?: object) =>
+        args.includes('--verify')
+          ? Promise.reject(new GitRunError('git rev-parse timed out', { timedOut: true }))
+          : real.run(cwd, args, opts),
+    };
+
+    const err = await makeRunner([touchDefault], { gitRunner })
+      .runAll()
+      .then(
+        () => null,
+        (e: unknown) => e as Error,
+      );
+
+    // "Could not tell" is not "has no commit": the start stops, the branch is
+    // named, and the work is where it was.
+    expect(err?.message).toContain(`the working copy of branch "${DEFAULT_BRANCH}" could not be prepared`);
+    expect(await fs.readFile(path.join(local(), 'unpushed.md'), 'utf8')).toBe('precious');
+    expect(await fs.access(path.join(root, 'set-aside')).then(() => true, () => false)).toBe(false);
+  });
+
+  // On a redeploy two processes share the volume for a few seconds. What the
+  // other one did while this one waited is what decides.
+  it('does not move a clone another process put in its place while this one waited', async () => {
+    await populatedUpstream();
+    await halfMadeClone();
+    const beforeCloneSetAside = async () => {
+      await fs.rm(local(), { recursive: true, force: true });
+      await git(root, ['clone', '-b', DEFAULT_BRANCH, upstream, local()]);
+      await fs.writeFile(path.join(local(), 'theirs.txt'), 'the other process wrote this', 'utf8');
+    };
+
+    await makeRunner([touchDefault], { beforeCloneSetAside }).runAll();
+
+    expect(await fs.readFile(path.join(local(), 'theirs.txt'), 'utf8')).toBe('the other process wrote this');
+    expect(await fs.access(path.join(root, 'set-aside')).then(() => true, () => false)).toBe(false);
+  });
+
+  it('clones when another process moved the half-made clone away while this one waited', async () => {
+    await populatedUpstream();
+    await halfMadeClone();
+    const beforeCloneSetAside = () => fs.rm(local(), { recursive: true, force: true });
+
+    await makeRunner([touchDefault], { beforeCloneSetAside }).runAll();
+
+    expect(await fs.readFile(path.join(local(), 'marker.txt'), 'utf8')).toBe('seeded');
+    expect(await fs.access(path.join(root, 'set-aside')).then(() => true, () => false)).toBe(false);
+  });
+
+  it('carries on when the half-made clone is taken away in the instant before the move', async () => {
+    await populatedUpstream();
+    await halfMadeClone();
+    // The folder goes right after git has answered, for the last time before
+    // the move, that it holds no commit.
+    const real = new NodeGitRunner(undefined, credentials);
+    let asked = 0;
+    const gitRunner = {
+      defaultTimeoutMs: real.defaultTimeoutMs,
+      credentials: real.credentials,
+      run: async (cwd: string, args: string[], opts?: object) => {
+        if (!args.includes('--verify') || ++asked !== 3) return real.run(cwd, args, opts);
+        try {
+          return await real.run(cwd, args, opts);
+        } finally {
+          await fs.rm(local(), { recursive: true, force: true });
+        }
+      },
+    };
+    const discarded: string[] = [];
+
+    await makeRunner([touchDefault], { gitRunner, onCloneDiscarded: (id: string) => void discarded.push(id) }).runAll();
+
+    expect(await fs.readFile(path.join(local(), 'marker.txt'), 'utf8')).toBe('seeded');
+    // This start moved nothing, so it says nothing was moved.
+    expect(discarded).toEqual([]);
+    expect(await fs.readdir(path.join(root, 'set-aside'))).toEqual([]);
+  });
+
+  it('tells the listener a second time when the first telling fails', async () => {
+    await populatedUpstream();
+    await halfMadeClone();
+    let told = 0;
+    const onCloneDiscarded = async () => {
+      if (++told === 1) throw new Error('the queue could not be reached');
+    };
+
+    await makeRunner([touchDefault], { onCloneDiscarded }).runAll();
+
+    expect(told).toBe(2);
+    expect(await fs.readFile(path.join(local(), 'marker.txt'), 'utf8')).toBe('seeded');
+  });
+
+  it('does not remove a clone somebody started at the path once it was announced empty', async () => {
+    await populatedUpstream();
+    await halfMadeClone();
+    // Told the copy is gone, the rest of the process may clone there at once.
+    const onCloneDiscarded = async () => {
+      await git(root, ['clone', '-b', DEFAULT_BRANCH, upstream, local()]);
+      await fs.writeFile(path.join(local(), 'theirs.txt'), 'a branch being opened wrote this', 'utf8');
+    };
+
+    await makeRunner([touchDefault], { onCloneDiscarded }).runAll();
+
+    expect(await fs.readFile(path.join(local(), 'theirs.txt'), 'utf8')).toBe('a branch being opened wrote this');
+    expect(await fs.readdir(path.join(root, 'set-aside'))).toHaveLength(1);
+  });
+
+  it('leaves a clone that is still being written, and uses it once it is finished', async () => {
+    await populatedUpstream();
+    await halfMadeClone();
+    // Somebody is still cloning: it finishes while this start waits for quiet.
+    const finishing = (async () => {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await git(local(), ['fetch', 'origin']);
+      await git(local(), ['checkout', DEFAULT_BRANCH]);
+    })();
+
+    await makeRunner([touchDefault], { unfinishedCloneQuietMs: 5_000 }).runAll();
+    await finishing;
+
+    // Theirs, where it was, with what was in it: nothing was set aside.
+    expect(await fs.readFile(path.join(local(), 'left-here.txt'), 'utf8')).toBe('somebody put this here');
+    expect(await fs.readFile(path.join(local(), 'marker.txt'), 'utf8')).toBe('seeded');
+    expect(await fs.access(path.join(root, 'set-aside')).then(() => true, () => false)).toBe(false);
+  });
+
+  it('sets an unfinished clone aside only once nothing has written to it for the quiet time', async () => {
+    await populatedUpstream();
+    await halfMadeClone();
+    const started = Date.now();
+
+    await makeRunner([touchDefault], { unfinishedCloneQuietMs: 1_500 }).runAll();
+
+    expect(Date.now() - started).toBeGreaterThanOrEqual(1_350);
+    expect(await fs.readFile(path.join(local(), 'marker.txt'), 'utf8')).toBe('seeded');
+    expect(await fs.readdir(path.join(root, 'set-aside'))).toHaveLength(1);
+  });
+
+  it('names the branch when a working copy cannot be prepared', async () => {
+    await populatedUpstream();
+    await makeRunner([touchDefault]).runAll();
+    // The clone is sound and has a commit, but git cannot read the branch it
+    // is to follow: the ref the fetch updates is damaged. Not a state this
+    // phase repairs, so the start stops, and says which working copy.
+    // The refs are where git says they are: a worktree's live in the
+    // repository it shares with every other branch.
+    const gitDir = (await git(local(), ['rev-parse', '--path-format=absolute', '--git-common-dir'])).trim();
+    const refs = path.join(gitDir, 'refs', 'remotes', 'origin');
+    await fs.rm(path.join(gitDir, 'packed-refs'), { force: true });
+    await fs.mkdir(refs, { recursive: true });
+    await fs.writeFile(path.join(refs, DEFAULT_BRANCH), 'not a commit id\n', 'utf8');
+
+    const err = await makeRunner([touchDefault])
+      .runAll()
+      .then(
+        () => null,
+        (e: unknown) => e as Error,
+      );
+    expect(err).toBeInstanceOf(ClassifiedFailure);
+    expect(err?.message).toContain(`the working copy of branch "${DEFAULT_BRANCH}" could not be prepared`);
+    // Nothing was set aside for it: it has a commit, so it is somebody's work.
+    expect(await fs.access(path.join(root, 'set-aside')).then(() => true, () => false)).toBe(false);
+  });
+});
+
+describe('KbStartupRunner — what a failed phase throws', () => {
+  it('a scrubbed message (tokens, a presigned query) that still carries what git said', async () => {
+    const prev = process.env.GITHUB_TOKEN;
+    // Tokens that spell parts of git's own wording: scrubbing them rewrites the
+    // diagnostic, so the scrubbed message alone would no longer read as unreachable.
+    process.env.GITHUB_TOKEN = 'onnect';
+    try {
+      const err = await makeRunner([step('noop', async () => ({ outcome: 'ok' }))], {
+        kbRepoUrl: () => 'https://127.0.0.1:1/kb.git?X-Amz-Signature=SECRETSIG',
+        gitRunner: new NodeGitRunner(undefined, gitCredentials('x-access-token', 'access')),
+      })
+        .runAll()
+        .then(
+          () => null,
+          (e: unknown) => e,
+        );
+      expect(err).toBeInstanceOf(ClassifiedFailure);
+      const message = (err as Error).message;
+      expect(message).not.toContain('SECRETSIG');
+      expect(message).not.toMatch(/onnect|access/);
+      expect(failureOf(err).kind).toBe('unreachable');
+      expect(classifyGitFailure(message).kind).not.toBe('unreachable');
+    } finally {
+      if (prev === undefined) delete process.env.GITHUB_TOKEN;
+      else process.env.GITHUB_TOKEN = prev;
+    }
+  });
+});
+
+describe('KbStartupRunner redaction', () => {
+  it('scrubs the token in effect from a failure, even one that never reached the environment', async () => {
+    const saved = process.env.GITHUB_TOKEN;
+    delete process.env.GITHUB_TOKEN;
+    try {
+      await populatedUpstream();
+      const runner = makeRunner(
+        [
+          step('leaky', async () => {
+            throw new Error('the host said ghp_settingsonly42 is not welcome');
+          }),
+        ],
+        { gitRunner: new NodeGitRunner(undefined, gitCredentials('x-access-token', 'ghp_settingsonly42')) },
+      );
+      const err = await runner.runAll().then(
+        () => null,
+        (e: unknown) => e as Error,
+      );
+      expect(err?.message).toContain('KB startup step "leaky" failed');
+      expect(err?.message).not.toContain('ghp_settingsonly42');
+    } finally {
+      if (saved !== undefined) process.env.GITHUB_TOKEN = saved;
+    }
+  });
+});
+
+describe('KbStartupRunner credentials', () => {
+  // The phase clones the default branch into the very directory
+  // `WorkspaceService` adopts, and `GitService.push` later runs a bare
+  // `git push` from it. Position of the credential config is what decides
+  // whether that works: `git -c … clone` authenticates the clone and leaves
+  // the repo with nothing, so every later push prompts for a username, finds
+  // no tty, and dies — commits pile up locally and reach the remote never.
+  // Only real git tells the two spellings apart, so this drives real git.
+  afterEach(() => {
+    token = null;
+  });
+
+
+  /** Run the phase far enough to put the default branch's clone on disk. */
+  async function materializeDefaultBranchClone(): Promise<string> {
+    let repoDir = '';
+    await makeRunner([
+      step('touch', async (ctx) => {
+        repoDir = await (await ctx.defaultBranch()).repoDir();
+        return { outcome: 'ok' };
+      }),
+    ]).runAll();
+    expect(repoDir).toBe(path.join(workspacesRoot, DEFAULT_BRANCH, 'knowledge-base'));
+    return repoDir;
+  }
+
+  it('leaves the boot clone able to authenticate a push of its own', async () => {
+    token = 'ghp_boot';
+    await populatedUpstream();
+    // The branch handle clones lazily, so a step has to actually reach for the
+    // repo before there is anything on disk to inspect.
+    const repo = await materializeDefaultBranchClone();
+    const helper = (await git(repo, ['config', '--local', '--get', 'credential.helper'])).trim();
+    expect(helper).toContain('username=x-access-token');
+    // The literal, not the value — the helper resolves it per invocation, so
+    // the secret never lands in a config file we don't control the lifetime of.
+    expect(helper).toContain('password=$GITHUB_TOKEN');
+    expect(helper).not.toContain('ghp_boot');
+
+    // Exactly one value: a re-stamp must collapse, never accumulate, or git
+    // errors with "cannot overwrite multiple values".
+    const all = (await git(repo, ['config', '--local', '--get-all', 'credential.helper'])).trim();
+    expect(all.split('\n')).toHaveLength(1);
+  });
+
+  it('adopting an existing clone collapses an accumulated helper back to one value', async () => {
+    // The boot-time assertion above sees a FRESH clone, which only ever has
+    // one value by construction. The collapse guarantee lives in the adoption
+    // path (`--replace-all`), so drift a second value in out of band and let
+    // WorkspaceService adopt the clone — that is the code the guarantee is
+    // about.
+    token = 'ghp_boot';
+    await populatedUpstream();
+    const repo = await materializeDefaultBranchClone();
+    // App-shaped drift: a second stamp of OURS with a stale username — the
+    // realistic accumulation (an operator's own helper is a different case,
+    // covered below, and must NOT be collapsed).
+    await git(repo, ['config', '--add', 'credential.helper',
+      '!f() { echo "username=stale-user"; echo "password=$GITHUB_TOKEN"; }; f']);
+
+    const ws = newWorkspaceService(workspacesRoot, upstream, testKbContext(), new NodeFs(), new NodeGitRunner(undefined, credentials));
+    await ws.getOrCreateForBranch(DEFAULT_BRANCH);
+
+    const all = (await git(repo, ['config', '--local', '--get-all', 'credential.helper'])).trim();
+    expect(all.split('\n')).toHaveLength(1);
+    expect(all).toContain('username=x-access-token');
+    expect(all).not.toContain('stale-user');
+  });
+
+  it('an operator-configured helper survives both the stamp and the token-removal unset', async () => {
+    // git chains every configured helper, so an operator's clone-local
+    // `cache`/`store`/custom helper coexists with ours — and losing it on a
+    // token change would break the very fallback auth they set up.
+    token = 'ghp_boot';
+    await populatedUpstream();
+    const repo = await materializeDefaultBranchClone();
+    await git(repo, ['config', '--add', 'credential.helper', 'cache --timeout=300']);
+
+    const ws = newWorkspaceService(workspacesRoot, upstream, testKbContext(), new NodeFs(), new NodeGitRunner(undefined, credentials));
+    await ws.getOrCreateForBranch(DEFAULT_BRANCH); // stamp with token
+    let all = (await git(repo, ['config', '--local', '--get-all', 'credential.helper'])).trim();
+    expect(all).toContain('cache --timeout=300');
+    expect(all).toContain('password=$GITHUB_TOKEN');
+
+    token = null;
+    const ws2 =newWorkspaceService(workspacesRoot, upstream, testKbContext(), new NodeFs(), new NodeGitRunner(undefined, credentials));
+    await ws2.getOrCreateForBranch(DEFAULT_BRANCH); // unset OUR helper only
+    all = (await git(repo, ['config', '--local', '--get-all', 'credential.helper'])).trim();
+    expect(all).toContain('cache --timeout=300');
+    expect(all).not.toContain('password=$GITHUB_TOKEN');
+  });
+
+  it('adopting a clone after the token was removed unsets the stale helper', async () => {
+    // A deployment that lost its token must not keep a clone-local helper
+    // answering with an empty password — it would shadow whatever fallback
+    // auth the operator switched to.
+    token = 'ghp_boot';
+    await populatedUpstream();
+    const repo = await materializeDefaultBranchClone(); // stamped
+    token = null;
+
+    const ws = newWorkspaceService(workspacesRoot, upstream, testKbContext(), new NodeFs(), new NodeGitRunner(undefined, credentials));
+    await ws.getOrCreateForBranch(DEFAULT_BRANCH);
+
+    await expect(git(repo, ['config', '--local', '--get', 'credential.helper']))
+      .rejects.toMatchObject({ code: 1 });
+  });
+
+  it('a token added after the branch is cached reaches the clone without a restart', async () => {
+    // The rotation gap: the setup screen can supply a token AFTER a branch
+    // was first opened, and the cached fast path returns before the adoption
+    // re-stamp. The fingerprint check must catch the change there.
+    token = null;
+    await populatedUpstream();
+    const repo = await materializeDefaultBranchClone(); // no helper
+
+    const ws = newWorkspaceService(workspacesRoot, upstream, testKbContext(), new NodeFs(), new NodeGitRunner(undefined, credentials));
+    await ws.getOrCreateForBranch(DEFAULT_BRANCH); // adopt, tokenless
+    token = 'ghp_late';
+    await ws.getOrCreateForBranch(DEFAULT_BRANCH); // cached fast path
+
+    const helper = (await git(repo, ['config', '--local', '--get', 'credential.helper'])).trim();
+    expect(helper).toContain('password=$GITHUB_TOKEN');
+    expect(helper).not.toContain('ghp_late');
+  });
+
+  it('clones without a helper when the deployment has no token — an open remote still boots', async () => {
+    token = null;
+    await populatedUpstream();
+    const repo = await materializeDefaultBranchClone();
+    // `--get` exits 1 when the key is unset. Assert on that exit code rather
+    // than on "it threw": a missing clone directory throws too, which would
+    // pass this test while proving nothing.
+    await expect(git(repo, ['config', '--local', '--get', 'credential.helper']))
+      .rejects.toMatchObject({ code: 1 });
+  });
+});

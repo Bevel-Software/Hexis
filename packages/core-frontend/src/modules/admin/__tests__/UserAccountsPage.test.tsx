@@ -5,16 +5,40 @@ import { UserAccountsPage } from '../components/UserAccountsPage';
 import { AdminContext } from '../state/admin.context';
 import { AuthContext, type AuthContextValue } from '../../auth/state/auth.context';
 import {
+  InviteDialogContext,
+  type InviteDialogController,
+} from '../../onboarding/state/invite-dialog.context';
+import {
   createAccount,
+  deactivateAccount,
   deleteAccount,
+  getAccountReferences,
   listAccounts,
+  reactivateAccount,
+  type AccountReferences,
+  type AccountSummary,
 } from '../../auth/services/account.api';
 
 vi.mock('../../auth/services/account.api', () => ({
   createAccount: vi.fn(),
+  deactivateAccount: vi.fn(),
   deleteAccount: vi.fn(),
+  reactivateAccount: vi.fn(),
+  getAccountReferences: vi.fn(),
   listAccounts: vi.fn(),
 }));
+
+const REFS = {
+  roles: 1,
+  groups: 2,
+  accessRules: 3,
+  fileGrants: 1,
+  total: 7,
+  files: ['Sales/Plan.md', 'Sales/access.md', 'groups.yaml', 'roles.yaml'],
+  removable: true,
+  blockedReason: null,
+  unwritable: [] as string[],
+};
 
 const ME = { id: 'admin-1', email: 'admin@example.com', name: 'Admin' };
 const ALICE = {
@@ -22,10 +46,48 @@ const ALICE = {
   email: 'alice@example.com',
   name: 'Alice',
   hasPassword: false,
+  isEnvAdmin: false,
+  isOwner: false,
+  ownerCanBeDeleted: false,
   createdAt: '2026-01-01T00:00:00Z',
+  deactivatedAt: null,
+  isSystem: false,
+};
+const BOB = {
+  id: 'u-bob',
+  email: 'bob@example.com',
+  name: 'Bob',
+  hasPassword: true,
+  isEnvAdmin: false,
+  isOwner: false,
+  ownerCanBeDeleted: false,
+  createdAt: '2026-01-01T00:00:00Z',
+  deactivatedAt: null,
+  isSystem: false,
+};
+// The owner (ADMIN_EMAIL) on a self-hosted deployment with ADMIN_PASSWORD set
+// — a different account from the signed-in admin. No hash stored yet.
+const ROOT = {
+  id: 'u-root',
+  email: 'root@example.com',
+  name: 'Root',
+  hasPassword: false,
+  isEnvAdmin: true,
+  isOwner: true,
+  ownerCanBeDeleted: true,
+  createdAt: '2026-01-01T00:00:00Z',
+  deactivatedAt: null,
+  isSystem: false,
 };
 
-function renderPage(opts: { isAdmin?: boolean } = {}) {
+/** The "email · Joined … · sign-in method" line of the named account's row. */
+function row(name: string): HTMLElement {
+  const li = screen.getByText(name).closest('li');
+  if (!li) throw new Error(`no row for ${name}`);
+  return within(li).getByText(/· Joined /);
+}
+
+function renderPage(opts: { isAdmin?: boolean; invite?: InviteDialogController | null } = {}) {
   const auth: AuthContextValue = {
     user: ME,
     token: 't',
@@ -47,7 +109,9 @@ function renderPage(opts: { isAdmin?: boolean } = {}) {
           runRolesRecovery: async () => {},
         }}
       >
-        <UserAccountsPage />
+        <InviteDialogContext.Provider value={opts.invite === undefined ? null : opts.invite}>
+          <UserAccountsPage />
+        </InviteDialogContext.Provider>
       </AdminContext.Provider>
     </AuthContext.Provider>,
   );
@@ -57,11 +121,14 @@ beforeEach(() => {
   vi.mocked(listAccounts)
     .mockReset()
     .mockResolvedValue([
-      { ...ME, hasPassword: true, createdAt: '2026-01-01T00:00:00Z' },
+      { ...ME, hasPassword: true, isEnvAdmin: false, isOwner: false, ownerCanBeDeleted: false, createdAt: '2026-01-01T00:00:00Z', deactivatedAt: null, isSystem: false },
       ALICE,
     ]);
-  vi.mocked(deleteAccount).mockReset().mockResolvedValue(undefined);
-  vi.mocked(createAccount).mockReset().mockResolvedValue(undefined);
+  vi.mocked(deleteAccount).mockReset().mockResolvedValue(null);
+  vi.mocked(getAccountReferences).mockReset().mockResolvedValue(REFS);
+  vi.mocked(createAccount).mockReset().mockResolvedValue({});
+  vi.mocked(deactivateAccount).mockReset().mockResolvedValue(undefined);
+  vi.mocked(reactivateAccount).mockReset().mockResolvedValue(undefined);
 });
 
 describe('UserAccountsPage', () => {
@@ -74,7 +141,7 @@ describe('UserAccountsPage', () => {
   it('lists accounts with sign-in method; own row offers no actions', async () => {
     renderPage();
     await waitFor(() => expect(screen.getByText('Alice')).toBeInTheDocument());
-    expect(screen.getByText(/Single sign-on only/)).toBeInTheDocument();
+    expect(row('Alice')).toHaveTextContent(/· No password — signs in with single sign-on$/);
     expect(
       screen.getByRole('button', { name: 'Set password for alice@example.com' }),
     ).toBeInTheDocument();
@@ -87,6 +154,182 @@ describe('UserAccountsPage', () => {
     expect(
       screen.queryByRole('button', { name: 'Delete account admin@example.com' }),
     ).not.toBeInTheDocument();
+  });
+
+  it('labels each account with the sign-in methods it actually has', async () => {
+    vi.mocked(listAccounts).mockResolvedValue([
+      ALICE,
+      BOB,
+      ROOT,
+      { ...ROOT, id: 'u-root-hashed', name: 'Root Hashed', hasPassword: true },
+    ]);
+    renderPage();
+    await waitFor(() => screen.getByText('Alice'));
+    expect(row('Alice')).toHaveTextContent(/· No password — signs in with single sign-on$/);
+    expect(row('Bob')).toHaveTextContent(/· Password$/);
+    // The deployment admin reads the same with or without a stored hash.
+    expect(row('Root')).toHaveTextContent(/· Password \(owner\)$/);
+    expect(row('Root Hashed')).toHaveTextContent(/· Password \(owner\)$/);
+    expect(screen.queryByText(/Single sign-on only/)).not.toBeInTheDocument();
+  });
+
+  it('the delete confirmation describes the password state in the same words', async () => {
+    vi.mocked(listAccounts).mockResolvedValue([ALICE, BOB, ROOT]);
+    renderPage();
+    await waitFor(() => screen.getByText('Alice'));
+    const cases: Array<[string, RegExp]> = [
+      ['alice@example.com', /No password — signs in with single sign-on: they can sign in again later with single sign-on/],
+      ['bob@example.com', /Password: to sign in again they will need an admin/],
+      ['root@example.com', /Password \(owner\): they can still sign in with the owner password set on the server, but will start fresh\./],
+    ];
+    for (const [email, wording] of cases) {
+      await userEvent.click(screen.getByRole('button', { name: `Delete account ${email}` }));
+      const dialog = screen.getByRole('dialog');
+      expect(dialog).toHaveTextContent(wording);
+      expect(dialog).not.toHaveTextContent(/Single sign-on only/);
+      await userEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    }
+    expect(deleteAccount).not.toHaveBeenCalled();
+  });
+
+  // The one account no admin may give a stored password. Its password is the
+  // environment's: a stored one would not replace that credential, it would add
+  // a second that survives rotating ADMIN_PASSWORD. The service refuses it, so
+  // the page must not offer a button that can only fail — it says why instead.
+  it('offers no password action on the deployment admin row, and says why', async () => {
+    vi.mocked(listAccounts).mockResolvedValue([
+      ALICE,
+      ROOT,
+      { ...ROOT, id: 'u-root-hashed', name: 'Root Hashed', email: 'root2@example.com', hasPassword: true },
+    ]);
+    renderPage();
+    await waitFor(() => screen.getByText('Root'));
+    // Neither label, and `hasPassword` does not pick one for it either: the
+    // deployment admin reads the same with or without a stored hash.
+    for (const email of ['root@example.com', 'root2@example.com']) {
+      expect(
+        screen.queryByRole('button', { name: `Set password for ${email}` }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole('button', { name: `Reset password for ${email}` }),
+      ).not.toBeInTheDocument();
+    }
+    const li = screen.getByText('Root').closest('li');
+    expect(li).toHaveTextContent('Password set in the deployment environment');
+    expect(screen.getByText('Root Hashed').closest('li')).toHaveTextContent(
+      'Password set in the deployment environment',
+    );
+    // Only that one action is withheld — erasure still belongs to another admin.
+    expect(
+      screen.getByRole('button', { name: 'Delete account root@example.com' }),
+    ).toBeInTheDocument();
+    // And the ordinary account beside it is untouched by the rule.
+    expect(
+      screen.getByRole('button', { name: 'Set password for alice@example.com' }),
+    ).toBeInTheDocument();
+  });
+
+  it('after Set password the label follows the refreshed facts, no manual reload', async () => {
+    // Initial load, then one reload per Set password: each reload reports the
+    // hash now stored for the account that was just set.
+    vi.mocked(listAccounts)
+      .mockResolvedValueOnce([ALICE, BOB])
+      .mockResolvedValueOnce([{ ...ALICE, hasPassword: true }, BOB]);
+    renderPage();
+    await waitFor(() => screen.getByText('Alice'));
+
+    expect(row('Alice')).toHaveTextContent(/· No password — signs in with single sign-on$/);
+    await userEvent.click(screen.getByRole('button', { name: 'Set password for alice@example.com' }));
+    const dialog = within(screen.getByRole('dialog'));
+    await userEvent.type(dialog.getByLabelText('New password'), 'fresh-password-1');
+    await userEvent.click(dialog.getByRole('button', { name: 'Set password' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+
+    await waitFor(() => expect(row('Alice')).toHaveTextContent(/· Password$/));
+    expect(listAccounts).toHaveBeenCalledTimes(2);
+    // ...and the action offered on that row is now the OTHER one: the same
+    // reload that changed the sign-in method changes what the button does.
+    expect(
+      screen.getByRole('button', { name: 'Reset password for alice@example.com' }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: 'Set password for alice@example.com' }),
+    ).not.toBeInTheDocument();
+  });
+
+  // The whole point of the ticket: first setup and replacing a working
+  // credential are different acts, so they are not offered in the same words.
+  it('offers Set password without one and Reset password with one', async () => {
+    vi.mocked(listAccounts).mockResolvedValue([ALICE, BOB]);
+    renderPage();
+    await waitFor(() => screen.getByText('Alice'));
+    expect(
+      screen.getByRole('button', { name: 'Set password for alice@example.com' }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: 'Reset password for bob@example.com' }),
+    ).toBeInTheDocument();
+    // Neither label leaks onto the other row.
+    expect(
+      screen.queryByRole('button', { name: 'Reset password for alice@example.com' }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: 'Set password for bob@example.com' }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('the Set password dialog says the person gains a way to sign in', async () => {
+    vi.mocked(listAccounts).mockResolvedValue([ALICE, BOB]);
+    renderPage();
+    await waitFor(() => screen.getByText('Alice'));
+    await userEvent.click(screen.getByRole('button', { name: 'Set password for alice@example.com' }));
+    const dialog = screen.getByRole('dialog');
+    // Title, explanation and confirm button all say the same act.
+    expect(within(dialog).getByRole('heading', { name: 'Set password' })).toBeInTheDocument();
+    expect(dialog).toHaveTextContent(/from now on they will be able to sign in with this one/);
+    expect(within(dialog).getByRole('button', { name: 'Set password' })).toBeInTheDocument();
+    // Nothing is being taken away, so nothing warns that it is.
+    expect(dialog).not.toHaveTextContent(/stops working/);
+    expect(dialog).not.toHaveTextContent(/Reset it\?/);
+  });
+
+  it('the Reset password dialog says the old password stops working, and asks', async () => {
+    vi.mocked(listAccounts).mockResolvedValue([ALICE, BOB]);
+    renderPage();
+    await waitFor(() => screen.getByText('Bob'));
+    await userEvent.click(screen.getByRole('button', { name: 'Reset password for bob@example.com' }));
+    const dialog = screen.getByRole('dialog');
+    expect(within(dialog).getByRole('heading', { name: 'Reset password' })).toBeInTheDocument();
+    expect(dialog).toHaveTextContent(/current password stops working immediately/);
+    expect(dialog).toHaveTextContent(/Reset it\?/);
+    expect(within(dialog).getByRole('button', { name: 'Reset password' })).toBeInTheDocument();
+    // It asks before it does anything: the question is on screen and nothing
+    // has been sent until the confirm button is pressed.
+    expect(createAccount).not.toHaveBeenCalled();
+    await userEvent.type(within(dialog).getByLabelText('New password'), 'fresh-password-2');
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Reset password' }));
+    await waitFor(() =>
+      expect(createAccount).toHaveBeenCalledWith('bob@example.com', '', 'fresh-password-2'),
+    );
+    // ...and the banner reports the act that was actually performed.
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      'Password reset for bob@example.com',
+    );
+  });
+
+  it('cancelling a reset leaves the password alone', async () => {
+    vi.mocked(listAccounts).mockResolvedValue([ALICE, BOB]);
+    renderPage();
+    await waitFor(() => screen.getByText('Bob'));
+    await userEvent.click(screen.getByRole('button', { name: 'Reset password for bob@example.com' }));
+    const dialog = within(screen.getByRole('dialog'));
+    await userEvent.type(dialog.getByLabelText('New password'), 'fresh-password-2');
+    await userEvent.click(dialog.getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(createAccount).not.toHaveBeenCalled();
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    expect(listAccounts).toHaveBeenCalledTimes(1);
   });
 
   it('sets a password for a user WITHOUT touching their name', async () => {
@@ -112,9 +355,188 @@ describe('UserAccountsPage', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Delete account alice@example.com' }));
     const dialog = within(screen.getByRole('dialog'));
     await userEvent.click(dialog.getByRole('button', { name: 'Delete account' }));
-    await waitFor(() => expect(deleteAccount).toHaveBeenCalledWith('u-alice'));
+    await waitFor(() =>
+      expect(deleteAccount).toHaveBeenCalledWith('u-alice', { removeFromAccess: true }),
+    );
     // List reloaded after the delete.
     expect(listAccounts).toHaveBeenCalledTimes(2);
+  });
+
+  it('the confirmation counts where the address is named and offers removal, checked by default', async () => {
+    renderPage();
+    await waitFor(() => screen.getByText('Alice'));
+    await userEvent.click(screen.getByRole('button', { name: 'Delete account alice@example.com' }));
+    const dialog = within(screen.getByRole('dialog'));
+    await waitFor(() =>
+      expect(screen.getByRole('dialog')).toHaveTextContent(
+        'Their address is named in 7 places: 1 role, 2 groups, 3 access rules and 1 file grant.',
+      ),
+    );
+    expect(getAccountReferences).toHaveBeenCalledWith('u-alice');
+    const option = dialog.getByRole('checkbox', {
+      name: 'Also remove them from roles, groups and access rules',
+    });
+    expect(option).toBeChecked();
+    expect(screen.getByRole('dialog')).not.toHaveTextContent(/will remain in those files/);
+  });
+
+  it('with the option off the dialog says the address remains, and the delete does not ask for removal', async () => {
+    renderPage();
+    await waitFor(() => screen.getByText('Alice'));
+    await userEvent.click(screen.getByRole('button', { name: 'Delete account alice@example.com' }));
+    const dialog = within(screen.getByRole('dialog'));
+    await userEvent.click(
+      dialog.getByRole('checkbox', { name: 'Also remove them from roles, groups and access rules' }),
+    );
+    expect(screen.getByRole('dialog')).toHaveTextContent('Their address will remain in those files.');
+    await userEvent.click(dialog.getByRole('button', { name: 'Delete account' }));
+    await waitFor(() =>
+      expect(deleteAccount).toHaveBeenCalledWith('u-alice', { removeFromAccess: false }),
+    );
+  });
+
+  it('names the files this admin cannot write, and still runs the removal for the rest', async () => {
+    vi.mocked(getAccountReferences).mockResolvedValue({ ...REFS, unwritable: ['Sales/Plan.md'] });
+    vi.mocked(deleteAccount).mockResolvedValueOnce({
+      ok: true,
+      removedFrom: ['Sales/access.md', 'groups.yaml', 'roles.yaml'],
+      stillNamedIn: ['Sales/Plan.md'],
+    });
+    renderPage();
+    await waitFor(() => screen.getByText('Alice'));
+    await userEvent.click(screen.getByRole('button', { name: 'Delete account alice@example.com' }));
+    const dialog = within(screen.getByRole('dialog'));
+    await waitFor(() =>
+      expect(screen.getByRole('dialog')).toHaveTextContent(
+        '1 file you cannot write will keep the address: Sales/Plan.md.',
+      ),
+    );
+    expect(
+      dialog.getByRole('checkbox', { name: 'Also remove them from roles, groups and access rules' }),
+    ).toBeChecked();
+
+    // The removal really runs with the option ON — it cleans everything else.
+    await userEvent.click(dialog.getByRole('button', { name: 'Delete account' }));
+    await waitFor(() =>
+      expect(deleteAccount).toHaveBeenCalledWith('u-alice', { removeFromAccess: true }),
+    );
+    // And the file it could not write is named again in the outcome.
+    await waitFor(() => screen.getByText(/Some files still name them/));
+    expect(screen.getByText('Sales/Plan.md')).toBeInTheDocument();
+  });
+
+  it('with the option off, the unwritable-files warning goes away', async () => {
+    vi.mocked(getAccountReferences).mockResolvedValue({ ...REFS, unwritable: ['Sales/Plan.md'] });
+    renderPage();
+    await waitFor(() => screen.getByText('Alice'));
+    await userEvent.click(screen.getByRole('button', { name: 'Delete account alice@example.com' }));
+    const dialog = within(screen.getByRole('dialog'));
+    await waitFor(() => expect(screen.getByRole('dialog')).toHaveTextContent(/you cannot write/));
+    await userEvent.click(
+      dialog.getByRole('checkbox', { name: 'Also remove them from roles, groups and access rules' }),
+    );
+    expect(screen.getByRole('dialog')).not.toHaveTextContent(/you cannot write/);
+    await userEvent.click(dialog.getByRole('button', { name: 'Delete account' }));
+    await waitFor(() =>
+      expect(deleteAccount).toHaveBeenCalledWith('u-alice', { removeFromAccess: false }),
+    );
+  });
+
+  it('says so when it could not tell which files this admin can write', async () => {
+    vi.mocked(getAccountReferences).mockResolvedValue({ ...REFS, unwritable: null });
+    renderPage();
+    await waitFor(() => screen.getByText('Alice'));
+    await userEvent.click(screen.getByRole('button', { name: 'Delete account alice@example.com' }));
+    const dialog = within(screen.getByRole('dialog'));
+    await waitFor(() =>
+      expect(screen.getByRole('dialog')).toHaveTextContent(
+        /Which of these files you can write could not be checked/,
+      ),
+    );
+    // Unknown is not "none", and not a reason to refuse the removal. The
+    // definite "N files ...: <list>" line belongs to a check that DID run.
+    expect(screen.getByRole('dialog')).not.toHaveTextContent(/\d+ files? you cannot write/);
+    expect(
+      dialog.getByRole('checkbox', { name: 'Also remove them from roles, groups and access rules' }),
+    ).toBeChecked();
+  });
+
+  it('the deployment owner / last Admin cannot be removed this way: option disabled with the reason', async () => {
+    vi.mocked(getAccountReferences).mockResolvedValue({
+      ...REFS,
+      removable: false,
+      blockedReason: 'This is the last Admin; the Admin role must keep at least one direct email member.',
+    });
+    renderPage();
+    await waitFor(() => screen.getByText('Alice'));
+    await userEvent.click(screen.getByRole('button', { name: 'Delete account alice@example.com' }));
+    const dialog = within(screen.getByRole('dialog'));
+    await waitFor(() => expect(screen.getByRole('dialog')).toHaveTextContent(/last Admin/));
+    const option = dialog.getByRole('checkbox', {
+      name: 'Also remove them from roles, groups and access rules',
+    });
+    expect(option).toBeDisabled();
+    expect(option).not.toBeChecked();
+    expect(screen.getByRole('dialog')).toHaveTextContent('Their address will remain in those files.');
+    await userEvent.click(dialog.getByRole('button', { name: 'Delete account' }));
+    await waitFor(() =>
+      expect(deleteAccount).toHaveBeenCalledWith('u-alice', { removeFromAccess: false }),
+    );
+  });
+
+  it('a failed removal commit still reloads the (deleted) list and lists the files that still name the user', async () => {
+    vi.mocked(deleteAccount).mockResolvedValueOnce({
+      ok: false,
+      error: 'Roles are being edited by Sam. Try again in a moment.',
+      removedFrom: [],
+      stillNamedIn: ['Sales/access.md', 'roles.yaml'],
+    });
+    renderPage();
+    await waitFor(() => screen.getByText('Alice'));
+    await userEvent.click(screen.getByRole('button', { name: 'Delete account alice@example.com' }));
+    await userEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Delete account' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    const alert = screen.getByRole('alert');
+    expect(alert).toHaveTextContent(/The account was deleted, but removing them .* failed: Roles are being edited by Sam/);
+    expect(within(alert).getByText('Sales/access.md')).toBeInTheDocument();
+    expect(within(alert).getByText('roles.yaml')).toBeInTheDocument();
+    expect(listAccounts).toHaveBeenCalledTimes(2);
+  });
+
+  it('a slower references answer for an account opened earlier does not land in a later dialog', async () => {
+    vi.mocked(listAccounts).mockResolvedValue([ALICE, BOB]);
+    let answerAlice: (refs: AccountReferences) => void = () => {};
+    vi.mocked(getAccountReferences).mockImplementation((id: string) =>
+      id === 'u-alice'
+        ? new Promise((resolve) => {
+            answerAlice = resolve;
+          })
+        : Promise.resolve({ ...REFS, total: 1, roles: 1, groups: 0, accessRules: 0, fileGrants: 0 }),
+    );
+    renderPage();
+    await waitFor(() => screen.getByText('Alice'));
+    await userEvent.click(screen.getByRole('button', { name: 'Delete account alice@example.com' }));
+    await userEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Cancel' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Delete account bob@example.com' }));
+    await waitFor(() => expect(screen.getByRole('dialog')).toHaveTextContent('named in 1 place: 1 role'));
+    answerAlice({ ...REFS, removable: false, blockedReason: 'This is the last Admin.' });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const dialog = screen.getByRole('dialog');
+    expect(dialog).toHaveTextContent('named in 1 place: 1 role');
+    expect(dialog).not.toHaveTextContent(/last Admin/);
+    expect(
+      within(dialog).getByRole('checkbox', { name: 'Also remove them from roles, groups and access rules' }),
+    ).toBeChecked();
+  });
+
+  it('a removal whose re-scan failed says the remaining files could not be checked', async () => {
+    vi.mocked(deleteAccount).mockResolvedValueOnce({ ok: true, removedFrom: ['roles.yaml'], stillNamedIn: null });
+    renderPage();
+    await waitFor(() => screen.getByText('Alice'));
+    await userEvent.click(screen.getByRole('button', { name: 'Delete account alice@example.com' }));
+    await userEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Delete account' }));
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/could not be checked/));
+    expect(screen.getByRole('alert')).toHaveTextContent(/roles, groups, access rules and file grants/);
   });
 
   it('a failed delete closes the dialog, surfaces the error, and does not reload', async () => {
@@ -133,31 +555,6 @@ describe('UserAccountsPage', () => {
     expect(listAccounts).toHaveBeenCalledTimes(1);
   });
 
-  it('adds a new account and refreshes the list', async () => {
-    renderPage();
-    await waitFor(() => screen.getByText('Alice'));
-    await userEvent.type(screen.getByLabelText('Email'), 'bob@example.com');
-    await userEvent.type(screen.getByLabelText(/Name/), 'Bob');
-    await userEvent.type(screen.getByLabelText('Password'), 'bobs-password-1');
-    await userEvent.click(screen.getByRole('button', { name: 'Add account' }));
-    await waitFor(() =>
-      expect(createAccount).toHaveBeenCalledWith('bob@example.com', 'Bob', 'bobs-password-1'),
-    );
-    expect(listAccounts).toHaveBeenCalledTimes(2);
-  });
-
-  it('surfaces an add failure inline', async () => {
-    vi.mocked(createAccount).mockRejectedValueOnce(
-      new Error('Password must be at least 8 characters'),
-    );
-    renderPage();
-    await waitFor(() => screen.getByText('Alice'));
-    await userEvent.type(screen.getByLabelText('Email'), 'bob@example.com');
-    await userEvent.type(screen.getByLabelText('Password'), 'short');
-    await userEvent.click(screen.getByRole('button', { name: 'Add account' }));
-    expect(await screen.findByRole('alert')).toHaveTextContent('at least 8 characters');
-  });
-
   // "We could not ask" is not "there is nobody". The failure used to store an
   // empty list, so an admin whose backend was unreachable read "No user
   // accounts." — a deployment they would have had every reason to believe.
@@ -168,5 +565,338 @@ describe('UserAccountsPage', () => {
     expect(screen.queryByText('No user accounts.')).not.toBeInTheDocument();
     // ...and no "Loading…" left sitting beside the banner forever, either.
     expect(screen.queryByText('Loading…')).not.toBeInTheDocument();
+  });
+});
+
+describe('UserAccountsPage — switching accounts off and on', () => {
+  it('asks before switching another account off, then shows it off; offers no switch for your own', async () => {
+    const user = userEvent.setup();
+    vi.mocked(listAccounts)
+      .mockResolvedValueOnce([ALICE])
+      .mockResolvedValueOnce([{ ...ALICE, deactivatedAt: '2026-09-01T00:00:00Z' }]);
+    renderPage();
+    await waitFor(() => expect(screen.getByText('Alice')).toBeInTheDocument());
+    expect(screen.queryByRole('button', { name: 'Switch off admin@example.com' })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Switch off alice@example.com' }));
+    // Nothing happens until it is confirmed.
+    expect(deactivateAccount).not.toHaveBeenCalled();
+    const dialog = screen.getByRole('dialog');
+    expect(dialog).toHaveTextContent('Nothing is deleted');
+    await user.click(within(dialog).getByRole('button', { name: 'Switch off' }));
+    expect(deactivateAccount).toHaveBeenCalledWith('u-alice');
+    // The refreshed list shows it off, and offers to switch it on.
+    expect(await screen.findByText('(switched off)')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Switch on alice@example.com' })).toBeInTheDocument();
+  });
+
+  it('switches nothing off when the confirmation is cancelled', async () => {
+    const user = userEvent.setup();
+    vi.mocked(listAccounts).mockResolvedValue([ALICE]);
+    renderPage();
+    await user.click(await screen.findByRole('button', { name: 'Switch off alice@example.com' }));
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Cancel' }));
+    expect(deactivateAccount).not.toHaveBeenCalled();
+  });
+
+  it('marks a switched-off account and switches it back on, then shows it on', async () => {
+    const user = userEvent.setup();
+    vi.mocked(listAccounts)
+      .mockResolvedValueOnce([{ ...ALICE, deactivatedAt: '2026-09-01T00:00:00Z' }])
+      .mockResolvedValueOnce([ALICE]);
+    renderPage();
+    await waitFor(() => expect(screen.getByText('(switched off)')).toBeInTheDocument());
+    await user.click(screen.getByRole('button', { name: 'Switch on alice@example.com' }));
+    expect(reactivateAccount).toHaveBeenCalledWith('u-alice');
+    expect(await screen.findByRole('button', { name: 'Switch off alice@example.com' })).toBeInTheDocument();
+    expect(screen.queryByText('(switched off)')).not.toBeInTheDocument();
+  });
+
+  it('offers no switch on an account the platform runs its own work as', async () => {
+    vi.mocked(listAccounts).mockResolvedValue([{ ...ALICE, id: 'u-bot', email: 'recovery-bot@bevel.local', name: 'Recovery Bot', isSystem: true }]);
+    renderPage();
+    await waitFor(() => expect(screen.getByText('Recovery Bot')).toBeInTheDocument());
+    expect(screen.queryByRole('button', { name: 'Switch off recovery-bot@bevel.local' })).not.toBeInTheDocument();
+  });
+
+  it("shows the deployment's reason when there is no room to switch one on", async () => {
+    const user = userEvent.setup();
+    vi.mocked(listAccounts).mockResolvedValue([{ ...ALICE, deactivatedAt: '2026-09-01T00:00:00Z' }]);
+    vi.mocked(reactivateAccount).mockRejectedValue(new Error('All 3 seats are taken'));
+    renderPage();
+    await user.click(await screen.findByRole('button', { name: 'Switch on alice@example.com' }));
+    expect(await screen.findByText('All 3 seats are taken')).toBeInTheDocument();
+  });
+
+  it('offers no switch on the deployment admin, whose environment password is the way back in', async () => {
+    vi.mocked(listAccounts).mockResolvedValue([ROOT]);
+    renderPage();
+    await waitFor(() => expect(screen.getByText('Root')).toBeInTheDocument());
+    expect(screen.queryByRole('button', { name: 'Switch off root@example.com' })).not.toBeInTheDocument();
+  });
+
+});
+
+/**
+ * One way to create an account: User accounts has no Add account form, and
+ * its list ends with an "Invite new users" row that opens the Invite dialog
+ * the toolbar opens. A send from that dialog shows on the list without a
+ * reload.
+ */
+describe('UserAccountsPage — inviting new users', () => {
+  function controller(invitedRevision = 0): InviteDialogController {
+    return { open: vi.fn(), invitedRevision };
+  }
+
+  it('has no Add account form', async () => {
+    renderPage({ invite: controller() });
+    await waitFor(() => expect(screen.getByText('Alice')).toBeInTheDocument());
+    expect(screen.queryByText('Add account')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Add account' })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Email')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Leave it empty and they sign in with single sign-on/)).not.toBeInTheDocument();
+  });
+
+  it('ends the account list with "Invite new users", which opens the Invite dialog', async () => {
+    const invite = controller();
+    renderPage({ invite });
+    await waitFor(() => expect(screen.getByText('Alice')).toBeInTheDocument());
+    const button = screen.getByRole('button', { name: 'Invite new users' });
+    const items = within(button.closest('ul')!).getAllByRole('listitem');
+    expect(items[items.length - 1]).toContainElement(button);
+    await userEvent.click(button);
+    expect(invite.open).toHaveBeenCalledTimes(1);
+    expect(createAccount).not.toHaveBeenCalled();
+  });
+
+  it('offers no row without an Invite dialog to open', async () => {
+    renderPage({ invite: null });
+    await waitFor(() => expect(screen.getByText('Alice')).toBeInTheDocument());
+    expect(screen.queryByRole('button', { name: 'Invite new users' })).not.toBeInTheDocument();
+  });
+
+  it('reads the list again after a send, so the new accounts show without a reload', async () => {
+    const view = renderPage({ invite: controller(0) });
+    await waitFor(() => expect(screen.getByText('Alice')).toBeInTheDocument());
+    expect(listAccounts).toHaveBeenCalledTimes(1);
+
+    vi.mocked(listAccounts).mockResolvedValue([
+      { ...ME, hasPassword: true, isEnvAdmin: false, isOwner: false, ownerCanBeDeleted: false, createdAt: '2026-01-01T00:00:00Z', deactivatedAt: null, isSystem: false },
+      ALICE,
+      { ...BOB, id: 'u-lena', email: 'lena@example.com', name: 'lena' },
+    ]);
+    view.rerender(
+      <AuthContext.Provider value={{ user: ME, token: 't', isLoading: false, login: vi.fn(async () => {}), logout: vi.fn() }}>
+        <AdminContext.Provider
+          value={{
+            isAdmin: true,
+            unreadCount: 0,
+            lastSeen: null,
+            markSeen: () => {},
+            refresh: () => {},
+            rolesConfigCorrupted: false,
+            rolesConfigErrors: [],
+            runRolesRecovery: async () => {},
+          }}
+        >
+          <InviteDialogContext.Provider value={controller(1)}>
+            <UserAccountsPage />
+          </InviteDialogContext.Provider>
+        </AdminContext.Provider>
+      </AuthContext.Provider>,
+    );
+    expect(await screen.findByText('lena')).toBeInTheDocument();
+    expect(listAccounts).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the refreshed list when an older read answers after it', async () => {
+    const withLena = [
+      { ...ME, hasPassword: true, isEnvAdmin: false, isOwner: false, ownerCanBeDeleted: false, createdAt: '2026-01-01T00:00:00Z', deactivatedAt: null, isSystem: false },
+      ALICE,
+      { ...BOB, id: 'u-lena', email: 'lena@example.com', name: 'lena' },
+    ];
+    let answerFirst: (rows: typeof withLena) => void = () => {};
+    vi.mocked(listAccounts)
+      .mockReset()
+      .mockImplementationOnce(() => new Promise((resolve) => (answerFirst = resolve)))
+      .mockResolvedValue(withLena);
+    const page = (revision: number) => (
+      <AuthContext.Provider value={{ user: ME, token: 't', isLoading: false, login: vi.fn(async () => {}), logout: vi.fn() }}>
+        <AdminContext.Provider
+          value={{
+            isAdmin: true,
+            unreadCount: 0,
+            lastSeen: null,
+            markSeen: () => {},
+            refresh: () => {},
+            rolesConfigCorrupted: false,
+            rolesConfigErrors: [],
+            runRolesRecovery: async () => {},
+          }}
+        >
+          <InviteDialogContext.Provider value={controller(revision)}>
+            <UserAccountsPage />
+          </InviteDialogContext.Provider>
+        </AdminContext.Provider>
+      </AuthContext.Provider>
+    );
+    const view = render(page(0));
+    view.rerender(page(1));
+    expect(await screen.findByText('lena')).toBeInTheDocument();
+    // The first read, from before the send, answers last: it must not land.
+    answerFirst([withLena[0]!, ALICE]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.getByText('lena')).toBeInTheDocument();
+  });
+
+  it('keeps a switch busy until the latest read lands, even when a send’s refresh overtook its own', async () => {
+    const user = userEvent.setup();
+    const off = { ...ALICE, deactivatedAt: '2026-09-01T00:00:00Z' };
+    let answerSwitch: (rows: AccountSummary[]) => void = () => {};
+    let answerSend: (rows: AccountSummary[]) => void = () => {};
+    vi.mocked(listAccounts)
+      .mockReset()
+      .mockResolvedValueOnce([ALICE])
+      .mockImplementationOnce(() => new Promise((resolve) => (answerSwitch = resolve)))
+      .mockImplementationOnce(() => new Promise((resolve) => (answerSend = resolve)));
+    const page = (revision: number) => (
+      <AuthContext.Provider value={{ user: ME, token: 't', isLoading: false, login: vi.fn(async () => {}), logout: vi.fn() }}>
+        <AdminContext.Provider
+          value={{
+            isAdmin: true,
+            unreadCount: 0,
+            lastSeen: null,
+            markSeen: () => {},
+            refresh: () => {},
+            rolesConfigCorrupted: false,
+            rolesConfigErrors: [],
+            runRolesRecovery: async () => {},
+          }}
+        >
+          <InviteDialogContext.Provider value={controller(revision)}>
+            <UserAccountsPage />
+          </InviteDialogContext.Provider>
+        </AdminContext.Provider>
+      </AuthContext.Provider>
+    );
+    const view = render(page(0));
+    await user.click(await screen.findByRole('button', { name: 'Switch off alice@example.com' }));
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Switch off' }));
+    await waitFor(() => expect(listAccounts).toHaveBeenCalledTimes(2));
+    // A send from the Invite dialog reads the list again before the switch's read answers.
+    view.rerender(page(1));
+    await waitFor(() => expect(listAccounts).toHaveBeenCalledTimes(3));
+    answerSwitch([off]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    // Its own read was overtaken: still busy, so the stale row offers no second click.
+    expect(screen.getByRole('button', { name: 'Switching off…' })).toBeDisabled();
+    answerSend([off]);
+    expect(await screen.findByText('(switched off)')).toBeInTheDocument();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * The owner (`ADMIN_EMAIL`), on a self-hosted deployment with a server-held
+ * owner password (ROOT) and on one without (the cloud's configuration).
+ */
+describe('UserAccountsPage — the owner', () => {
+  // The cloud: the owner signs in with single sign-on, the server holds no password for them.
+  const CLOUD_OWNER = {
+    ...ALICE,
+    id: 'u-owner',
+    email: 'owner@example.com',
+    name: 'Olive',
+    isOwner: true,
+    ownerCanBeDeleted: false,
+  };
+
+  for (const [label, owner] of [
+    ['with a server-held owner password', ROOT],
+    ['without one (the cloud)', CLOUD_OWNER],
+  ] as const) {
+    it(`labels the owner's row "Owner" and offers no Switch off or password action, ${label}`, async () => {
+      vi.mocked(listAccounts).mockResolvedValue([ALICE, owner]);
+      renderPage();
+      await waitFor(() => screen.getByText(owner.name));
+      const li = screen.getByText(owner.name).closest('li')!;
+      expect(within(li).getByText('Owner')).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: `Switch off ${owner.email}` })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: `Set password for ${owner.email}` })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: `Reset password for ${owner.email}` })).not.toBeInTheDocument();
+      // The account beside it keeps every control, and no label.
+      const alice = screen.getByText('Alice').closest('li')!;
+      expect(within(alice).queryByText('Owner')).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Switch off alice@example.com' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Set password for alice@example.com' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Delete account alice@example.com' })).toBeInTheDocument();
+    });
+  }
+
+  it('offers Delete account for the owner only where the server allows it', async () => {
+    vi.mocked(listAccounts).mockResolvedValue([ROOT, CLOUD_OWNER]);
+    renderPage();
+    await waitFor(() => screen.getByText('Olive'));
+    expect(screen.getByRole('button', { name: 'Delete account root@example.com' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Delete account owner@example.com' })).not.toBeInTheDocument();
+    // No controls at all on the cloud owner's row.
+    expect(within(screen.getByText('Olive').closest('li')!).queryAllByRole('button')).toHaveLength(0);
+  });
+
+  it('the delete dialog for the owner says they keep their place in roles and access rules', async () => {
+    vi.mocked(listAccounts).mockResolvedValue([ROOT]);
+    vi.mocked(getAccountReferences).mockResolvedValue({
+      ...REFS,
+      removable: false,
+      blockedReason: 'The owner stays in roles and access rules.',
+    });
+    renderPage();
+    await waitFor(() => screen.getByText('Root'));
+    await userEvent.click(screen.getByRole('button', { name: 'Delete account root@example.com' }));
+    const dialog = screen.getByRole('dialog');
+    expect(dialog).toHaveTextContent(
+      'Password (owner): they can still sign in with the owner password set on the server, but will start fresh.',
+    );
+    expect(dialog).toHaveTextContent('The owner stays in roles and access rules.');
+    expect(dialog).not.toHaveTextContent('ADMIN_EMAIL');
+    expect(dialog).not.toHaveTextContent('deployment admin');
+    const option = within(dialog).getByRole('checkbox', { name: 'Also remove them from roles, groups and access rules' });
+    expect(option).toBeDisabled();
+    expect(option).not.toBeChecked();
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Delete account' }));
+    await waitFor(() => expect(deleteAccount).toHaveBeenCalledWith('u-root', { removeFromAccess: false }));
+  });
+
+  it("the owner's note is the server's reason once it has arrived, and the same sentence when it cannot be fetched", async () => {
+    vi.mocked(listAccounts).mockResolvedValue([ROOT]);
+    vi.mocked(getAccountReferences).mockResolvedValue({ ...REFS, removable: false, blockedReason: 'Reason from the server.' });
+    renderPage();
+    await waitFor(() => screen.getByText('Root'));
+    await userEvent.click(screen.getByRole('button', { name: 'Delete account root@example.com' }));
+    await waitFor(() => expect(screen.getByRole('dialog')).toHaveTextContent('Reason from the server.'));
+    expect(screen.getByRole('dialog')).not.toHaveTextContent('The owner stays in roles and access rules.');
+    await userEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Cancel' }));
+
+    vi.mocked(getAccountReferences).mockRejectedValue(new Error('offline'));
+    await userEvent.click(screen.getByRole('button', { name: 'Delete account root@example.com' }));
+    await waitFor(() => expect(screen.getByRole('dialog')).toHaveTextContent('offline'));
+    expect(screen.getByRole('dialog')).toHaveTextContent('The owner stays in roles and access rules.');
+  });
+
+  it('the owner viewing their own row sees "(you)" and "Owner", and no buttons', async () => {
+    vi.mocked(listAccounts).mockResolvedValue([{ ...CLOUD_OWNER, id: ME.id, email: ME.email, name: ME.name }, ALICE]);
+    renderPage();
+    await waitFor(() => screen.getByText('Admin'));
+    const li = screen.getByText('Admin').closest('li')!;
+    expect(li).toHaveTextContent('(you)');
+    expect(within(li).getByText('Owner')).toBeInTheDocument();
+    expect(within(li).queryAllByRole('button')).toHaveLength(0);
+  });
+
+  it('an owner switched off before the server refused it can still be switched back on', async () => {
+    vi.mocked(listAccounts).mockResolvedValue([{ ...CLOUD_OWNER, deactivatedAt: '2026-10-10T00:00:00Z' }]);
+    renderPage();
+    await waitFor(() => screen.getByText('Olive'));
+    await userEvent.click(screen.getByRole('button', { name: 'Switch on owner@example.com' }));
+    expect(reactivateAccount).toHaveBeenCalledWith('u-owner');
   });
 });

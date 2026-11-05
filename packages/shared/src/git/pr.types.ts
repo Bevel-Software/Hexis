@@ -1,5 +1,8 @@
 export type PullRequestState = 'open' | 'merged' | 'closed';
 
+/** The level an access request asks for: Can edit, or Owner. */
+export type AccessRequestLevel = 'write' | 'owner';
+
 export interface PullRequestAuthor {
   login: string;
   name?: string;
@@ -41,11 +44,132 @@ export interface PullRequestSummary {
   base: string;
   state: PullRequestState;
   createdAt: string;
+  /**
+   * The latest moment the change-request ROW records: the latest of its
+   * creation time, its `updated_at` stamp (written when the row itself
+   * changes — a merge, a close, a recorded apply failure, an edit of its title
+   * or description) and its close time.
+   * GitHub's `updated_at` on a pull request means "when anything about it
+   * last changed"; approvals carry their own times here and do
+   * not move this one, so this is as close as the row can honestly answer —
+   * never a time guessed from elsewhere. Absent only on a summary built by
+   * something other than a change-request row (test doubles).
+   */
+  updatedAt?: string;
   /** Relative paths within `knowledge-base/`. Empty if not yet computed. */
   touchedNodePaths: string[];
+  /**
+   * The same changed files as {@link touchedNodePaths}, paired with the path
+   * each was renamed from — what a READ gate has to decide over, since
+   * `touchedNodePaths` reports a rename under its new name alone and so cannot
+   * say that a readable-looking file came out of a folder its reader cannot
+   * open.
+   *
+   * Absent when no summary builder filled it (a test double, a caller that
+   * constructs a summary by hand). A read gate must treat absence as "nothing
+   * proven" rather than falling back to `touchedNodePaths` — that fallback is
+   * precisely the disagreement between a list and a detail this field exists to
+   * remove, and it would come back silently.
+   */
+  touchedNodeFiles?: ChangedPathPair[];
   review: PullRequestReviewStatus;
+  /**
+   * Link to the change request: absolute (`<public frontend address>/change-requests/<number>`)
+   * when the deployment has a public address configured, else the in-app relative path.
+   */
   url: string;
+  /** Present when `url` is relative — says how to get absolute links. */
+  urlNote?: string;
+  /**
+   * The most recent apply attempt that did not land, while the request is
+   * still open — so its author and every other viewer see the refusal the
+   * person who clicked Apply saw. Replaced by a newer refusal; null or
+   * absent when there is nothing to report.
+   */
+  lastApplyFailure?: ChangeRequestApplyFailure | null;
 }
+
+/**
+ * What refused an apply: the merge gate (approvals it still waits on), git
+ * (conflicts with the target), or anything else (a push, the roles.yaml guard,
+ * an internal error). Decides which later change makes the refusal obsolete.
+ */
+export type ChangeRequestApplyFailureKind = 'gate' | 'conflicts' | 'error';
+
+/** Why the last apply of a change request failed, as persisted on the request. */
+export interface ChangeRequestApplyFailure {
+  /** Human-readable reason, credentials already redacted. */
+  reason: string;
+  /** True when git refused the merge on conflicts with the target. */
+  conflicts: boolean;
+  /** ISO timestamp of the failed attempt. */
+  at: string;
+  /** Display name of whoever attempted the apply. */
+  byName: string;
+}
+
+/**
+ * One changed file of a change request, named on both sides: where it is now
+ * and, for a rename, where it came from.
+ *
+ * The minimum a READ gate needs. A plain path list says a rename's new name and
+ * (with `forAccessCheck`) its old one, but not that the two are the same file —
+ * and the diff of a rename shows the old side's content, so a file moved out of
+ * a folder its reader cannot open must not be offered under its new name
+ * either. Both the list of change requests and the detail of one decide
+ * readability over these, so the two cannot disagree about whether a request is
+ * visible.
+ */
+export interface ChangedPathPair {
+  path: string;
+  previousPath?: string;
+}
+
+/**
+ * An APPLIED change request, named by BOTH the commit its row records and the
+ * number that row carries — because reading the commit's own change is only
+ * sound if the commit really is that request's merge commit, and the number is
+ * what proves it (the merge commit's subject ends with `(#<number>)`).
+ *
+ * The pair travels together so no read can ask for a commit without saying which
+ * request it must belong to. `merged_sha` is not reliably a commit the request
+ * created: a merge with nothing to merge used to record the TARGET TIP, which in
+ * a deployment that lands everything through change requests is usually ANOTHER
+ * request's merge commit.
+ */
+export interface AppliedChangeRef {
+  /** The change request's number, as its merge commit's subject names it. */
+  number: number;
+  /** The `merged_sha` the row records. */
+  mergeSha: string;
+  /**
+   * The request's stored title, which lets a merge commit written by an
+   * earlier release — the title not yet flattened, so a blank line in it put
+   * the number after git's subject — be recognised as the request's own.
+   */
+  title?: string;
+}
+
+/**
+ * What applying a change request did.
+ *
+ * Two different commits, which is why they are two fields:
+ *
+ *   `sha` is the state the target is left at — the tip at which the request
+ *   counts as merged. When there was nothing to merge it is whatever landed on
+ *   the target last, usually ANOTHER request's merge commit, so it must never be
+ *   recorded as this request's own: a reader would answer with that other
+ *   request's files under this number.
+ *
+ *   `mergeCommit` is the commit this request OWNS, and the only sha a row may
+ *   record as its `merged_sha` — the commit this merge wrote, or the one an
+ *   earlier attempt wrote and left on the target when it failed to finalize the
+ *   row. Null when the request has none, which is the genuinely empty case: its
+ *   file list is empty anyway, so nothing readable is lost.
+ */
+export type AppliedMergeResult =
+  | { kind: 'merged'; sha: string; mergeCommit: string | null }
+  | { kind: 'conflicts'; paths: string[] };
 
 export type PrFileStatus =
   | 'added'
@@ -73,38 +197,6 @@ export interface PullRequestFile {
   sha: string;
   /** Authenticated `raw.githubusercontent.com`-style URL for the blob at head. */
   rawUrl: string;
-}
-
-/**
- * One comment in the Bevel-owned PR discussion. GitHub never sees these —
- * they live only in our DB, attributed to the authenticated user. Shape
- * encodes three comment kinds:
- *
- *   General         → path undefined, line undefined
- *   File-level      → path set,      line undefined
- *   Inline (line)   → path set,      line set
- *
- * Threading: `parentId` points at the root of the thread; top-level comments
- * have it undefined.
- */
-export interface PrReviewComment {
-  id: string;
-  author: { email: string; name: string };
-  body: string;
-  path?: string;
-  line?: number;
-  /** The head SHA the comment was authored against — lets the UI grey out stale inline pins. */
-  headSha: string;
-  parentId?: string;
-  createdAt: string;
-  updatedAt?: string;
-}
-
-export interface PostPrCommentInput {
-  body: string;
-  path?: string;
-  line?: number;
-  parentId?: string;
 }
 
 /**
@@ -146,15 +238,30 @@ export interface FileApprovalState {
   };
   approvedBy: FileApprovalEntry[];
   /**
+   * True only when `eligibleApprovers` is the access tree's actual answer for
+   * this file. False (or absent) when it could not be resolved — no workspace,
+   * no usable access config on the base, a failed lookup — in which case the
+   * empty approver set means "unknown", not "outside the gate", and anything
+   * granted on the strength of that emptiness must fail closed.
+   */
+  eligibilityResolved?: boolean;
+  /**
    * True iff at least one eligible approver has submitted a non-stale
    * approval. Always `false` when `eligibleApprovers` is empty — with no
    * eligible set, nobody can satisfy the check.
    * Whether the gate *cares* about this file is a separate concern handled
-   * by the merge-gate logic: non-md files and files with no eligible
-   * approvers are silently excluded from the gate, so `isApproved: false`
+   * by the merge-gate logic: files with no eligible approvers, whatever
+   * their type, are silently excluded from the gate, so `isApproved: false`
    * on one of them does not block merge.
    */
   isApproved: boolean;
+  /**
+   * Whether the merge gate binds this file at all — the backend's one
+   * relevance rule, stamped per file so clients read the verdict instead of
+   * re-deriving it. False files neither warn nor block a merge, so no surface
+   * should count them as pending or name anyone to wait on.
+   */
+  inMergeGate: boolean;
   /**
    * Pre-computed for the requesting viewer: would `approveFile` accept their
    * click? True iff their email resolves to `write` on this path under the
@@ -169,36 +276,47 @@ export interface FileApprovalState {
 
 /**
  * Full read-only PR detail for the in-app viewer. Extends the summary with
- * body, SHAs, file list, and the Bevel-owned comments. Later phases add
+ * body, SHAs and file list. Later phases add
  * `approvals` and merge-gate fields — this shape grows incrementally.
  */
 export interface PullRequestDetail extends PullRequestSummary {
+  /**
+   * The request's description — the whole body, exactly as its author (or a
+   * later edit) left it. Hexis writes nothing of its own into it: who must
+   * approve each file is resolved live and answered per file in `approvals`,
+   * and an access request's level and note are `accessRequest`'s.
+   */
   body: string;
+  /**
+   * Set on a request the access-request flow opened: the level the person
+   * asked for, and their note when they wrote one. Absent on every other
+   * request.
+   */
+  accessRequest?: { level: AccessRequestLevel; note?: string };
   headSha: string;
   baseSha: string;
   files: PullRequestFile[];
-  comments: PrReviewComment[];
   /**
    * One entry per file in `files`, same order. Empty when the caller had no
    * resolvable workspace to do the owner lookup against.
    */
   approvals: FileApprovalState[];
   /**
-   * True iff no *hard* block applies — the PR is open, has files, and isn't
-   * merged/closed. Soft warnings (missing owner approvals on md files) do
-   * **not** set this to false; the UI handles them via the bypass dialog.
-   * The button is disabled only when this is false.
+   * True iff no blocking reason remains — the PR is open, has files, isn't
+   * merged/closed, and every file with an eligible approver (of any file
+   * type) holds a current approval. False while any approval is missing; an
+   * admin may still merge past missing approvals with the bypass flag.
    */
   mergeableInBevel: boolean;
   /**
-   * Hard-block reasons — merging is impossible until these resolve (PR state,
-   * no files, etc.). Empty when the PR can be merged (possibly after bypass).
+   * Blocking reasons — hard blocks (PR state, no files) followed by each
+   * missing approval. Empty exactly when `mergeableInBevel` is true.
    */
   mergeBlockedReasons: string[];
   /**
-   * Soft warnings — md files with an owner who hasn't approved (or whose
-   * approval is stale). Merging is allowed but the UI asks for an explicit
-   * bypass confirmation first. Non-md files and ownerless md files are silent.
+   * The missing approvals alone — files of any type with an eligible approver
+   * who hasn't approved (or whose approval is stale). An admin bypass merges
+   * past exactly these and records them. Files nobody can approve are silent.
    */
   mergeWarnings: string[];
   /**
@@ -221,7 +339,132 @@ export interface PullRequestDetail extends PullRequestSummary {
    * tree can't be resolved.
    */
   viewerCanCancel: boolean;
+  /**
+   * The commit this request forked from its target (merge base of `headSha`
+   * and `baseSha`). Every file diff in the request reads its "before" side
+   * here, never at the target tip — an edit made on the target after the
+   * proposal must not look like something the proposal deletes. `null` when
+   * the branches share no history (or no workspace could resolve them).
+   */
+  mergeBaseSha: string | null;
+  /**
+   * True iff the target holds commits the proposal does not contain. False
+   * for anything not open.
+   *
+   * This is the honest git fact and nothing more — it says the two branches
+   * have diverged, NOT that anything about this request has gone stale. On a
+   * knowledge base where every shared save commits to the default branch,
+   * it is true again minutes after any update. What the dialog acts on is
+   * `needsUpdate`.
+   */
+  behind: boolean;
+  /**
+   * True iff the request is `behind` AND at least one of the files it
+   * changes was also changed on the target since the fork point — the only
+   * case where the proposal's diff describes text that has moved under it,
+   * and so the only case worth merging the target in for.
+   *
+   * A target that moved in files this request does not contain leaves the
+   * request's diff exactly as true as it was: every "before" side is read at
+   * the fork point, and the apply merges against the latest target whether an
+   * update ran or not. So a request that is `behind` but not `needsUpdate`
+   * opens straight to its files.
+   *
+   * Rename-safe in the conservative direction: the target's change list is
+   * computed without rename detection, so a file the target renamed appears
+   * under both names and a request holding either name counts as affected.
+   * False whenever `behind` is false, and true (with `behind`) when the two
+   * branches share no history at all — there is no fork point to intersect
+   * against, so nothing may be assumed unaffected.
+   */
+  needsUpdate: boolean;
+  /**
+   * True iff the viewer may Update the request (merge its target into it):
+   * the request is open AND the viewer is its author or may apply it. A UX
+   * hint — the update route re-checks the same predicate server-side.
+   */
+  viewerCanUpdate: boolean;
+  /**
+   * True iff the viewer is this request's author — the person who opened it,
+   * hash-matched against the stored `authorId` so the client never has to
+   * hash an email (and no raw email is exposed to do it with). A request a
+   * person's agent opened belongs to that person. Drives wording that speaks
+   * to the author directly ("You can delete it below.") rather than naming
+   * them in the third person. False when no viewer was passed, and for a
+   * request opened outside this backend (no `authorId`).
+   */
+  viewerIsAuthor: boolean;
+  /**
+   * True iff the viewer may delete this request (close it AND retire its
+   * branch): the request is not applied AND the viewer is either its author
+   * or an admin (`viewerCanBypassMerge` is the proxy — the same
+   * `canWriteAtRef('roles.yaml')` predicate the DELETE route enforces).
+   * Deliberately NOT `viewerCanCancel`: that one also grants the changed
+   * files' owners, who may decline a request but must not destroy someone
+   * else's text and branch.
+   *
+   * Note this is true on a CLOSED request too, mirroring the server: a
+   * request withdrawn in another tab still has a leftover branch for the
+   * delete to retire. Only an applied one is nobody's to delete. A UX hint —
+   * `DELETE /api/workflow/change-requests/:number` re-checks server-side.
+   */
+  viewerCanDelete: boolean;
+  /**
+   * True iff the viewer may change the request's title and description: the
+   * request is open AND the viewer is its author or someone who may merge it
+   * (an admin, or the holder of write on every changed file) — exactly
+   * `viewerCanCancel`'s grants, since what is asked belongs to the same people
+   * who may close it. A UX hint — `PATCH /api/workflow/change-requests/:number`
+   * re-checks server-side.
+   */
+  viewerCanEdit: boolean;
 }
+
+/**
+ * Body of `PATCH /api/workflow/change-requests/:number`. At least one field;
+ * an absent field keeps its current text. `description` replaces the
+ * request's description whole — the body is nothing but the description.
+ * `appendDescription` instead adds a paragraph after the description as the
+ * server holds it at the moment of the write, so two appends racing each
+ * other both land (never together with `description`). A title is at most
+ * {@link CHANGE_REQUEST_TITLE_MAX} characters and a description, after an
+ * append as much as after a replacement, at most
+ * {@link CHANGE_REQUEST_DESCRIPTION_MAX}.
+ *
+ * A union of the allowed shapes, so a client cannot build `{}` or a
+ * `description` together with `appendDescription`. The server reads the
+ * body as untrusted JSON all the same — as {@link UpdateChangeRequestFields}
+ * — and answers any other shape with a worded 400.
+ */
+export type UpdateChangeRequestInput =
+  | { title: string; description?: string; appendDescription?: never }
+  | { title?: string; description: string; appendDescription?: never }
+  | { title?: string; description?: never; appendDescription: string };
+
+/**
+ * The fields of a `PATCH /api/workflow/change-requests/:number` body as the
+ * server receives them — any combination, since the body is untrusted JSON.
+ * `VersionControlService.updateChangeRequest` checks the shape and refuses what
+ * {@link UpdateChangeRequestInput} rules out with a worded 400.
+ */
+export interface UpdateChangeRequestFields {
+  title?: string;
+  description?: string;
+  appendDescription?: string;
+}
+
+/** Longest title a change request may carry — the route and the agent tool alike. */
+export const CHANGE_REQUEST_TITLE_MAX = 256;
+
+/**
+ * Longest description a change request may carry, in characters — on
+ * opening, on a replacement and on what an append leaves, for the routes and
+ * the agent tools alike. The body is decrypted by every listing and every
+ * detail read, and the propose flow appends a note on each later round, so
+ * without a ceiling a request's body grows for as long as it is open. The
+ * same ceiling comments had.
+ */
+export const CHANGE_REQUEST_DESCRIPTION_MAX = 64_000;
 
 /**
  * Result of a successful merge via the in-app gate. `sha` is the merge commit
@@ -251,6 +494,17 @@ export interface IPullRequestService {
    * via `gh pr create`) and the user expects to see the update immediately.
    */
   listOpenPrs(opts?: { fresh?: boolean }): Promise<PullRequestSummary[]>;
+  /**
+   * PRs in ANY of `states`, newest first — what `listOpenPrs` answers for the
+   * open ones, widened to the closed and merged rows it filters out. Only the
+   * `['open']` case goes through that method's 30s list cache; a read that
+   * asks for closed rows is rare (a reader catching up on what happened) and
+   * is served straight from the table.
+   */
+  listPrsByState(
+    states: PullRequestState[],
+    opts?: { fresh?: boolean; workspaceId?: string },
+  ): Promise<PullRequestSummary[]>;
   listPrsAuthoredBy(githubLoginOrEmail: string): Promise<PullRequestSummary[]>;
   /**
    * PRs whose touched paths have an owner with the given email.
@@ -269,6 +523,12 @@ export interface IPullRequestService {
    */
   getPrDetail(
     prNumber: number,
-    opts?: { fresh?: boolean; workspaceId?: string; viewerEmail?: string },
+    /**
+     * `patches: false` skips per-file patch generation and keeps the result
+     * out of the detail cache: for internal reads (approve / withdraw /
+     * revert pin their work on the detail) that never look at
+     * `files[].patch`. Clients get the full detail by default.
+     */
+    opts?: { fresh?: boolean; workspaceId?: string; viewerEmail?: string; patches?: boolean },
   ): Promise<PullRequestDetail | null>;
 }

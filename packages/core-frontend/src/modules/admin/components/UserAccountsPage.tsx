@@ -1,75 +1,272 @@
-import { useCallback, useEffect, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Users } from 'lucide-react';
 import { PageShell } from '../../../shared/components/PageShell';
 import { Dialog } from '../../../shared/components/Dialog';
 import { useAdmin } from '../state/admin.context';
-import { useAuth } from '../../auth/state/auth.context';
+import { useAuth } from '../../auth';
+import { useInviteDialog } from '../../onboarding';
+import { useLatestRequest } from '../../../lib/latest-request';
 import {
   createAccount,
+  deactivateAccount,
   deleteAccount,
+  getAccountReferences,
   listAccounts,
+  reactivateAccount,
+  type AccountReferences,
   type AccountSummary,
-} from '../../auth/services/account.api';
+} from '../../auth';
+
+/**
+ * How an account signs in, in the words this page uses everywhere (the row and
+ * the delete confirmation). The deployment admin wins over a stored hash: both
+ * can be true, and the environment credential is the one that survives.
+ */
+function signInMethodLabel(account: Pick<AccountSummary, 'hasPassword' | 'isEnvAdmin'>): string {
+  if (account.isEnvAdmin) return 'Password (owner)';
+  if (account.hasPassword) return 'Password';
+  return 'No password — signs in with single sign-on';
+}
+
+/**
+ * What deleting the account means for signing in again, keyed off the same
+ * facts as {@link signInMethodLabel} and opening with its wording.
+ */
+function signInAfterDelete(account: AccountSummary): string {
+  const label = signInMethodLabel(account);
+  if (account.isEnvAdmin) {
+    return `${label}: they can still sign in with the owner password set on the server, but will start fresh.`;
+  }
+  if (account.hasPassword) {
+    return `${label}: to sign in again they will need an admin to create a new account for them.`;
+  }
+  return `${label}: they can sign in again later with single sign-on, but will start fresh.`;
+}
+
+/**
+ * Why an owner's address is never removed from access files, said where the
+ * delete dialog would offer it, until the server's own reason
+ * (`user-access-removal.service.ts`) has arrived, or when it could not be
+ * fetched. The server's words win once they are here.
+ */
+const OWNER_ACCESS_NOTE = 'The owner stays in roles and access rules.';
+
+function plural(n: number, one: string, many: string): string {
+  return `${n} ${n === 1 ? one : many}`;
+}
+
+/** "Named in 5 places: 1 role, 1 group, 2 access rules and 1 file grant." */
+function referencesSummary(refs: AccountReferences): string {
+  if (refs.total === 0) return 'Their address is not named in any role, group or access rule.';
+  const parts = [
+    refs.roles > 0 ? plural(refs.roles, 'role', 'roles') : null,
+    refs.groups > 0 ? plural(refs.groups, 'group', 'groups') : null,
+    refs.accessRules > 0 ? plural(refs.accessRules, 'access rule', 'access rules') : null,
+    refs.fileGrants > 0 ? plural(refs.fileGrants, 'file grant', 'file grants') : null,
+  ].filter((part): part is string => part !== null);
+  const list = parts.length > 1 ? `${parts.slice(0, -1).join(', ')} and ${parts.at(-1)}` : parts[0];
+  return `Their address is named in ${plural(refs.total, 'place', 'places')}: ${list}.`;
+}
+
+/**
+ * The two password actions and everything the page says about each. Setting a
+ * first password and replacing one someone signs in with today are different
+ * acts — the second takes a working credential away — so they get different
+ * labels and different copy, and a reset asks before it does it.
+ *
+ * The whole branch is `hasPassword`, the flag the list already carries for the
+ * sign-in method line: nothing about the credential itself is read here, and
+ * nothing more needs to be.
+ */
+type PasswordAction = {
+  /** The row button, the dialog title and the confirm button all read this. */
+  label: string;
+  /** The row button's tooltip. */
+  title: string;
+  /** What the new password does, said after the account it is for. */
+  effect: string;
+  /** The question the confirm button answers, or none when there is nothing to lose. */
+  confirm: string | null;
+  /** The inline banner once it is done. */
+  done: string;
+};
+
+const SET_PASSWORD: PasswordAction = {
+  label: 'Set password',
+  title: 'Set a sign-in password for this account.',
+  effect:
+    'They have no password today, so from now on they will be able to sign in with this one as well as with single sign-on.',
+  confirm: null,
+  done: 'Password set',
+};
+
+const RESET_PASSWORD: PasswordAction = {
+  label: 'Reset password',
+  title: 'Replace the sign-in password this account has now.',
+  effect:
+    'Their current password stops working immediately and this one takes its place, so they are locked out of password sign-in until they have it.',
+  confirm: 'Reset it?',
+  done: 'Password reset',
+};
+
+function passwordAction(account: Pick<AccountSummary, 'hasPassword'>): PasswordAction {
+  return account.hasPassword ? RESET_PASSWORD : SET_PASSWORD;
+}
 
 /**
  * The User Accounts page (`/user-accounts`, admins only) — the ONE
  * account-management surface: every account on the deployment, whether it can
- * sign in with a password, set a user's password (accounts that predate
- * per-user passwords can't sign in until an admin sets one), permanently
- * delete an account (the GDPR erasure path — overlays contribute their data
- * slices via erasure participants), and add a new account. Password
- * set/create both go through `POST /api/admin/accounts`, an upsert-by-email
- * that preserves an existing display name when none is supplied. The
- * signed-in admin's own row offers neither action — the backend refuses
- * self-erasure, and their own password lives on the Account page.
+ * sign in with a password, set a user's first password (accounts that predate
+ * per-user passwords can't sign in until an admin sets one) or reset the one
+ * they have — two acts the page names apart, see {@link PasswordAction} —
+ * permanently delete an account (the GDPR erasure path — overlays contribute
+ * their data slices via erasure participants). New accounts come from the
+ * Invite dialog, the one way to create an account: the list ends with an
+ * "Invite new users" row that opens it, and is read again after each send.
+ * Set and reset go through `POST /api/admin/accounts`, an upsert-by-email
+ * that preserves an existing display name when none is supplied. The signed-in admin's own row offers neither action — the backend
+ * refuses self-erasure, and their own password lives on the Account page. The
+ * deployment admin's row offers no password action either, from any admin:
+ * that account's password is set in the deployment environment, and the
+ * backend refuses to store one for it.
+ *
+ * An owner's row (`ADMIN_EMAIL`; on the cloud, whoever created the
+ * workspace) is labelled "Owner" and offers no password action and no Switch
+ * off, from any admin, and Delete account only where the owner could sign
+ * back in with the server's password (`ownerCanBeDeleted`). The server
+ * refuses the same, so this hides only controls that could never work.
  */
 export function UserAccountsPage() {
   const { isAdmin } = useAdmin();
   const { user: me } = useAuth();
+  const invite = useInviteDialog();
+  const invitedRevision = invite?.invitedRevision ?? 0;
   const [accounts, setAccounts] = useState<AccountSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   // The account awaiting delete confirmation; non-null drives the confirm
   // Dialog. `deleting` keeps the confirm open while the request is in flight.
   const [pendingDelete, setPendingDelete] = useState<AccountSummary | null>(null);
   const [deleting, setDeleting] = useState(false);
+  // Where the pending account's address is named, and whether to remove it
+  // from those files in the same delete (on by default).
+  const [references, setReferences] = useState<AccountReferences | null>(null);
+  const [referencesError, setReferencesError] = useState<string | null>(null);
+  const [removeFromAccess, setRemoveFromAccess] = useState(true);
+  // Which references request the dialog is waiting for — a slower answer
+  // for an account opened earlier must not land in a later dialog.
+  const referencesRequest = useRef(0);
+  // After a delete whose access-file cleanup did not fully land: what went
+  // wrong and which files still name the deleted user.
+  const [accessNotice, setAccessNotice] = useState<{ message: string; files: string[] } | null>(null);
   // The account whose password is being set; non-null drives the password
   // Dialog. Success feedback surfaces inline above the list.
   const [passwordTarget, setPasswordTarget] = useState<AccountSummary | null>(null);
   const [newPassword, setNewPassword] = useState('');
   const [passwordError, setPasswordError] = useState<string | null>(null);
   const [savingPassword, setSavingPassword] = useState(false);
-  const [passwordSetFor, setPasswordSetFor] = useState<string | null>(null);
-  // Add-account form.
-  const [addEmail, setAddEmail] = useState('');
-  const [addName, setAddName] = useState('');
-  const [addPassword, setAddPassword] = useState('');
-  const [addError, setAddError] = useState<string | null>(null);
-  const [adding, setAdding] = useState(false);
+  // Which account was just given a password, and which of the two actions it
+  // was — the target is cleared when the dialog closes, and "set" and "reset"
+  // are not the same news to report.
+  const [passwordDone, setPasswordDone] = useState<{
+    email: string;
+    action: PasswordAction;
+  } | null>(null);
+  // The account being switched off or on, while the request and the refresh after it are in flight.
+  const [switching, setSwitching] = useState<string | null>(null);
+  // The account awaiting confirmation before it is switched off; non-null drives that Dialog.
+  const [pendingDeactivate, setPendingDeactivate] = useState<AccountSummary | null>(null);
 
-  const refresh = useCallback(() => {
-    listAccounts()
-      .then((rows) => {
-        setAccounts(rows);
-        setError(null);
-      })
-      .catch((err) => {
-        setError(err instanceof Error ? err.message : "Couldn't load accounts.");
+  // Only the latest read lands: an older one answering late would otherwise
+  // put back a list without the people a send just invited. And a caller
+  // waiting on a read that was overtaken waits on to the latest one, so
+  // "busy until the list shows the new state" still holds (`LatestRequest`).
+  const reads = useLatestRequest<{ rows: AccountSummary[] } | { error: string }>();
+  const refresh = useCallback(async () => {
+    await reads.run(
+      () =>
+        listAccounts().then(
+          (rows) => ({ rows }),
+          (err: unknown) => ({ error: err instanceof Error ? err.message : "Couldn't load accounts." }),
+        ),
+      (read) => {
+        if ('rows' in read) {
+          setAccounts(read.rows);
+          setError(null);
+          return;
+        }
+        setError(read.error);
         // `accounts` is deliberately left alone. A RELOAD that fails keeps the
         // rows it already had; a FIRST load that fails stays `null`, because
         // storing `[]` would render "No user accounts." — an admin reading
         // that would take a deployment they cannot reach for one nobody is on.
-      });
-  }, []);
+      },
+    );
+  }, [reads]);
 
+  // Again after every send from the Invite dialog, so the people just invited appear.
   useEffect(() => {
     if (isAdmin) refresh();
-  }, [isAdmin, refresh]);
+  }, [isAdmin, refresh, invitedRevision]);
+
+  function openDeleteDialog(account: AccountSummary) {
+    setPendingDelete(account);
+    setReferences(null);
+    setReferencesError(null);
+    setRemoveFromAccess(true);
+    const requestId = ++referencesRequest.current;
+    getAccountReferences(account.id)
+      .then((refs) => {
+        if (referencesRequest.current !== requestId) return;
+        setReferences(refs);
+        if (!refs.removable) setRemoveFromAccess(false);
+      })
+      .catch((err) => {
+        if (referencesRequest.current !== requestId) return;
+        setReferencesError(err instanceof Error ? err.message : "Couldn't count where they are named.");
+      });
+  }
+
+  // An owner is never removed from access files; the server refuses it, so
+  // the option is off from the start rather than after the count arrives.
+  const removalBlocked = pendingDelete?.isOwner === true || (references !== null && !references.removable);
+  // Files naming them that this admin may not write: the cleanup skips those,
+  // so say it before the delete rather than only in the outcome. `unwritable`
+  // is null when that could not be judged — which is not "none".
+  const unwritableCount = references?.unwritable?.length ?? 0;
+  const unwritableUnknown = references !== null && references.unwritable === null;
 
   async function confirmDelete() {
     if (!pendingDelete || deleting) return;
     setDeleting(true);
     setError(null);
+    setAccessNotice(null);
     try {
-      await deleteAccount(pendingDelete.id);
+      const outcome = await deleteAccount(pendingDelete.id, {
+        removeFromAccess: removeFromAccess && !removalBlocked,
+      });
+      const unchecked = ' Which files still name them could not be checked — look through roles, groups, access rules and file grants.';
+      if (outcome && !outcome.ok) {
+        setAccessNotice({
+          message: `The account was deleted, but removing them from roles, groups and access rules failed${
+            outcome.error ? `: ${outcome.error}` : '.'
+          }${outcome.stillNamedIn === null ? unchecked : ''}`,
+          files: outcome.stillNamedIn ?? [],
+        });
+      } else if (outcome) {
+        const pending = outcome.publishPending
+          ? ' The removal is saved; publishing it is being retried.'
+          : '';
+        if (outcome.stillNamedIn === null) {
+          setAccessNotice({ message: `The account was deleted.${pending}${unchecked}`, files: [] });
+        } else if (outcome.stillNamedIn.length > 0) {
+          setAccessNotice({
+            message: `The account was deleted.${pending} Some files still name them and need a manual edit:`,
+            files: outcome.stillNamedIn,
+          });
+        } else if (pending) {
+          setAccessNotice({ message: `The account was deleted.${pending}`, files: [] });
+        }
+      }
       setPendingDelete(null);
       refresh();
     } catch (err) {
@@ -84,41 +281,41 @@ export function UserAccountsPage() {
     setPasswordTarget(account);
     setNewPassword('');
     setPasswordError(null);
-    setPasswordSetFor(null);
+    setPasswordDone(null);
   }
 
-  async function confirmSetPassword() {
+  async function confirmPasswordChange() {
     if (!passwordTarget || savingPassword || newPassword.length === 0) return;
     setSavingPassword(true);
     setPasswordError(null);
     try {
       // No name → the upsert keeps the account's existing display name.
       await createAccount(passwordTarget.email, '', newPassword);
-      setPasswordSetFor(passwordTarget.email);
+      setPasswordDone({ email: passwordTarget.email, action: passwordAction(passwordTarget) });
       setPasswordTarget(null);
       refresh();
     } catch (err) {
-      setPasswordError(err instanceof Error ? err.message : "Couldn't set the password.");
+      setPasswordError(err instanceof Error ? err.message : "Couldn't save the password.");
     } finally {
       setSavingPassword(false);
     }
   }
 
-  async function handleAdd(e: FormEvent<HTMLFormElement>) {
-    e.preventDefault();
-    if (adding) return;
-    setAdding(true);
-    setAddError(null);
+  async function toggleActive(account: AccountSummary) {
+    if (switching) return;
+    setSwitching(account.id);
+    setError(null);
     try {
-      await createAccount(addEmail.trim(), addName.trim(), addPassword);
-      setAddEmail('');
-      setAddName('');
-      setAddPassword('');
-      refresh();
+      if (account.deactivatedAt) await reactivateAccount(account.id);
+      else await deactivateAccount(account.id);
+      // Busy until the list shows the new state, so a second click cannot
+      // ask for the same change again from the old one.
+      await refresh();
     } catch (err) {
-      setAddError(err instanceof Error ? err.message : "Couldn't add the account.");
+      setError(err instanceof Error ? err.message : "Couldn't change this account.");
     } finally {
-      setAdding(false);
+      setSwitching(null);
+      setPendingDeactivate(null);
     }
   }
 
@@ -135,6 +332,10 @@ export function UserAccountsPage() {
   const inputClass =
     'w-full rounded-md bg-sunken border border-line-strong px-3 py-2 text-sm text-ink focus:outline-none focus:border-accent';
 
+  // Which of the two the open dialog is. The Dialog renders nothing without a
+  // target, so the fallback is never on screen — it just keeps the type honest.
+  const passwordDialog = passwordTarget ? passwordAction(passwordTarget) : SET_PASSWORD;
+
   return (
     <>
       <PageShell title="User accounts">
@@ -142,8 +343,11 @@ export function UserAccountsPage() {
           <p className="text-xs text-ink-muted leading-snug">
             Everyone with an account on this deployment. Deleting an account permanently removes
             the person&apos;s data and anonymizes their past review activity; their saves in the
-            knowledge base keep their history. Setting a password lets someone sign in with
-            email + password (existing accounts keep everything else).
+            knowledge base keep their history. Switching an account off keeps all of that but
+            stops them signing in, and their keys and agent connections stop working until it is
+            switched back on. Setting a password lets someone sign in with email + password
+            (existing accounts keep everything else); resetting one replaces the password they
+            have now.
           </p>
 
           {error && (
@@ -154,12 +358,29 @@ export function UserAccountsPage() {
               {error}
             </div>
           )}
-          {passwordSetFor && (
+          {accessNotice && (
+            <div
+              className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-sm px-2 py-1.5"
+              role="alert"
+            >
+              {accessNotice.message}
+              {accessNotice.files.length > 0 && (
+                <ul className="mt-1 list-disc pl-4">
+                  {accessNotice.files.map((file) => (
+                    <li key={file} className="font-mono">
+                      {file}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+          {passwordDone && (
             <div
               className="text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-sm px-2 py-1.5"
               role="status"
             >
-              Password set for {passwordSetFor}.
+              {passwordDone.action.done} for {passwordDone.email}.
             </div>
           )}
 
@@ -182,25 +403,71 @@ export function UserAccountsPage() {
                         {isSelf && (
                           <span className="ml-1.5 text-meta font-normal text-ink-muted">(you)</span>
                         )}
+                        {account.isOwner && (
+                          <span className="ml-1.5 rounded-sm border border-line px-1 text-meta font-normal text-ink-muted">
+                            Owner
+                          </span>
+                        )}
+                        {account.deactivatedAt && (
+                          <span className="ml-1.5 text-meta font-normal text-ink-muted">(switched off)</span>
+                        )}
                       </div>
                       <div className="text-meta text-ink-muted truncate">
                         {account.email} · Joined {new Date(account.createdAt).toLocaleDateString()} ·{' '}
-                        {account.hasPassword ? 'Password sign-in' : 'Single sign-on only'}
+                        {signInMethodLabel(account)}
                       </div>
                     </div>
-                    {!isSelf && (
+                    {!isSelf &&
+                      (account.isEnvAdmin ? (
+                        // Neither password action for the deployment admin: its
+                        // password is the environment's, and a stored one
+                        // would only ADD a credential that outlives rotating
+                        // ADMIN_PASSWORD. The backend refuses it too — this
+                        // says why instead of offering a button that fails.
+                        // `hasPassword` does not change that on this row.
+                        <span className="text-meta text-ink-muted text-right max-w-[13rem]">
+                          Password set in the deployment environment
+                        </span>
+                      ) : account.isOwner ? null : (
+                        // Nor for any other owner: another admin setting the
+                        // owner's password could then sign in as them. The
+                        // owner sets their own on the Account page.
+                        <button
+                          onClick={() => openPasswordDialog(account)}
+                          className="text-xs px-2 py-1 rounded-sm text-ink hover:bg-hover border border-line"
+                          title={passwordAction(account).title}
+                          aria-label={`${passwordAction(account).label} for ${account.email}`}
+                        >
+                          {passwordAction(account).label}
+                        </button>
+                      ))}
+                    {!isSelf && (!account.isOwner || account.deactivatedAt) && !account.isSystem && (
+                      // Not for your own account (the backend refuses it, so
+                      // an admin always remains who can sign in), nor an
+                      // owner's (switching them off locks them out of their
+                      // own workspace; one switched off before the server
+                      // refused it can still be switched back on), nor one
+                      // the platform runs its own work as. Switching off asks
+                      // first; switching on does not.
                       <button
-                        onClick={() => openPasswordDialog(account)}
-                        className="text-xs px-2 py-1 rounded-sm text-ink hover:bg-hover border border-line"
-                        title="Set a new sign-in password for this account."
-                        aria-label={`Set password for ${account.email}`}
+                        onClick={() => (account.deactivatedAt ? toggleActive(account) : setPendingDeactivate(account))}
+                        disabled={switching !== null}
+                        className="text-xs px-2 py-1 rounded-sm text-ink hover:bg-hover border border-line disabled:opacity-50"
+                        title={
+                          account.deactivatedAt
+                            ? 'Let this person sign in again.'
+                            : 'Stop this person signing in, without deleting anything.'
+                        }
+                        aria-label={`${account.deactivatedAt ? 'Switch on' : 'Switch off'} ${account.email}`}
                       >
-                        Set password
+                        {account.deactivatedAt ? 'Switch on' : 'Switch off'}
                       </button>
                     )}
-                    {!isSelf && (
+                    {!isSelf && (!account.isOwner || account.ownerCanBeDeleted) && (
+                      // An owner only where they can sign back in with the
+                      // server's password; elsewhere the server refuses it.
                       <button
-                        onClick={() => setPendingDelete(account)}
+                        onClick={() => openDeleteDialog(account)}
                         className="text-xs px-2 py-1 rounded-sm text-red-700 hover:bg-red-50 border border-red-200"
                         title="Permanently delete this account and its personal data."
                         aria-label={`Delete account ${account.email}`}
@@ -211,67 +478,28 @@ export function UserAccountsPage() {
                   </li>
                 );
               })}
+              {invite && (
+                <li>
+                  <button
+                    type="button"
+                    onClick={() => invite.open()}
+                    className="flex w-full items-center gap-2 px-3 py-2.5 text-sm text-accent hover:bg-hover"
+                  >
+                    <Users size={14} aria-hidden />
+                    Invite new users
+                  </button>
+                </li>
+              )}
             </ul>
           )}
 
-          <form onSubmit={handleAdd} className="border-t border-line pt-3 space-y-2 max-w-md">
-            <div className="text-xs font-semibold uppercase tracking-wide text-ink-muted">
-              Add account
-            </div>
-            <div className="grid grid-cols-2 gap-2">
-              <label className="block space-y-1">
-                <span className="text-xs text-ink-muted">Email</span>
-                <input
-                  type="email"
-                  required
-                  value={addEmail}
-                  onChange={(e) => setAddEmail(e.target.value)}
-                  className={inputClass}
-                />
-              </label>
-              <label className="block space-y-1">
-                <span className="text-xs text-ink-muted">
-                  Name <span className="text-ink-faint">(optional)</span>
-                </span>
-                <input
-                  type="text"
-                  value={addName}
-                  onChange={(e) => setAddName(e.target.value)}
-                  className={inputClass}
-                />
-              </label>
-            </div>
-            <label className="block space-y-1">
-              <span className="text-xs text-ink-muted">Password</span>
-              <input
-                type="password"
-                required
-                autoComplete="new-password"
-                value={addPassword}
-                onChange={(e) => setAddPassword(e.target.value)}
-                className={inputClass}
-              />
-            </label>
-            {addError && (
-              <div className="text-xs text-red-600" role="alert">
-                {addError}
-              </div>
-            )}
-            <button
-              type="submit"
-              disabled={adding}
-              className="rounded-md bg-accent text-white text-sm font-medium px-3 py-1.5 hover:bg-accent-hover disabled:opacity-60 disabled:cursor-not-allowed"
-            >
-              {adding ? 'Adding…' : 'Add account'}
-            </button>
-          </form>
         </div>
       </PageShell>
 
       <Dialog
         open={passwordTarget !== null}
         onClose={() => setPasswordTarget(null)}
-        title="Set password"
+        title={passwordDialog.label}
         size="sm"
         busy={savingPassword}
         footer={
@@ -284,11 +512,11 @@ export function UserAccountsPage() {
               Cancel
             </button>
             <button
-              onClick={confirmSetPassword}
+              onClick={confirmPasswordChange}
               disabled={savingPassword || newPassword.length === 0}
               className="px-3 py-1.5 text-sm rounded-sm bg-accent hover:bg-accent-hover text-white disabled:opacity-50"
             >
-              {savingPassword ? 'Saving…' : 'Set password'}
+              {savingPassword ? 'Saving…' : passwordDialog.label}
             </button>
           </>
         }
@@ -299,7 +527,9 @@ export function UserAccountsPage() {
             <span className="font-medium">
               {passwordTarget?.name} ({passwordTarget?.email})
             </span>
-            . Share it with them out-of-band; they can change it later on their Account page.
+            . {passwordDialog.effect} Share it with them out-of-band; they can change it later on
+            their Account page.
+            {passwordDialog.confirm && ` ${passwordDialog.confirm}`}
           </p>
           <label className="block space-y-1">
             <span className="text-xs text-ink-muted">New password</span>
@@ -351,9 +581,85 @@ export function UserAccountsPage() {
           </span>
           ? This removes their personal data for good and anonymizes their past review activity.
           Their saves in the knowledge base keep their history.{' '}
-          {pendingDelete?.hasPassword
-            ? 'To sign in again they will need an admin to create a new account for them.'
-            : 'They can sign in again later with single sign-on, but will start fresh.'}
+          {pendingDelete && signInAfterDelete(pendingDelete)}
+        </p>
+        <div className="mt-3 space-y-1.5 text-xs text-ink leading-snug">
+          {references ? (
+            <p>{referencesSummary(references)}</p>
+          ) : referencesError ? (
+            <p className="text-ink-muted">{referencesError}</p>
+          ) : (
+            <p className="text-ink-muted">Counting where they are named…</p>
+          )}
+          <label className="flex items-start gap-2">
+            <input
+              type="checkbox"
+              className="mt-0.5"
+              checked={removeFromAccess && !removalBlocked}
+              disabled={deleting || removalBlocked}
+              onChange={(e) => setRemoveFromAccess(e.target.checked)}
+            />
+            <span>Also remove them from roles, groups and access rules</span>
+          </label>
+          {removalBlocked && pendingDelete?.isOwner ? (
+            <p className="text-ink-muted">{references?.blockedReason ?? OWNER_ACCESS_NOTE}</p>
+          ) : (
+            removalBlocked &&
+            references?.blockedReason && <p className="text-ink-muted">{references.blockedReason}</p>
+          )}
+          {!removalBlocked && removeFromAccess && unwritableCount > 0 && (
+            <p className="text-ink-muted">
+              {plural(unwritableCount, 'file', 'files')} you cannot write will keep the address:{' '}
+              {references?.unwritable?.join(', ')}.
+            </p>
+          )}
+          {!removalBlocked && removeFromAccess && unwritableUnknown && (
+            <p className="text-ink-muted">
+              Which of these files you can write could not be checked. Any you cannot write will
+              keep the address, and are listed afterwards.
+            </p>
+          )}
+          {(!removeFromAccess || removalBlocked) && !pendingDelete?.isOwner && (
+            <p className="text-ink-muted">
+              Their address will remain in those files.
+            </p>
+          )}
+        </div>
+      </Dialog>
+
+      <Dialog
+        open={pendingDeactivate !== null}
+        onClose={() => setPendingDeactivate(null)}
+        title="Switch off account"
+        size="sm"
+        busy={switching !== null}
+        footer={
+          <>
+            <button
+              onClick={() => setPendingDeactivate(null)}
+              disabled={switching !== null}
+              className="px-3 py-1.5 text-sm rounded-sm text-ink hover:bg-hover border border-line disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={() => pendingDeactivate && toggleActive(pendingDeactivate)}
+              disabled={switching !== null}
+              className="px-3 py-1.5 text-sm rounded-sm bg-red-600 hover:bg-red-700 text-white disabled:opacity-50 disabled:hover:bg-red-600"
+            >
+              {switching !== null ? 'Switching off…' : 'Switch off'}
+            </button>
+          </>
+        }
+      >
+        <p className="text-xs text-ink leading-snug">
+          Switch off{' '}
+          <span className="font-medium">
+            {pendingDeactivate?.name} ({pendingDeactivate?.email})
+          </span>
+          ? Nothing is deleted: they keep their history and their place in roles and groups. But
+          they can no longer sign in, and their connection keys and agent connections stop working,
+          until the account is switched back on.
         </p>
       </Dialog>
     </>

@@ -1,0 +1,483 @@
+import { describe, it, expect } from 'vitest';
+import {
+  assertInsideRepo,
+  assertKbDirNameFree,
+  assertRepoRootNameFree,
+  assertRepoRootNameFreeArgs,
+  hasControlCharacter,
+  isInsideRepo,
+  normalizePathArgs,
+  normalizeWorkspacePath,
+} from '../repo-path.js';
+import { VersionControlValidationError } from '../../../shared/domain-errors.js';
+
+const KB = 'knowledge-base';
+
+describe('isInsideRepo', () => {
+  it('accepts the repository folder and anything under it', () => {
+    expect(isInsideRepo('knowledge-base', KB)).toBe(true);
+    expect(isInsideRepo('knowledge-base/KnowledgeBase/Foo.md', KB)).toBe(true);
+    expect(isInsideRepo('knowledge-base/roles.yaml', KB)).toBe(true);
+  });
+
+  it('refuses a repo-relative path: it would land beside the repository, where git never looks', () => {
+    expect(isInsideRepo('KnowledgeBase/Reviews/PR-12.html', KB)).toBe(false);
+    expect(isInsideRepo('review.log', KB)).toBe(false);
+    expect(isInsideRepo('tmp/spill.txt', KB)).toBe(false);
+  });
+
+  it('matches the folder as a whole segment, not as a string prefix', () => {
+    expect(isInsideRepo('knowledge-based/x.md', KB)).toBe(false);
+    expect(isInsideRepo('knowledge-base-old/x.md', KB)).toBe(false);
+    expect(isInsideRepo('knowledge-base.bak', KB)).toBe(false);
+  });
+
+  it('refuses traversal that starts under the prefix and climbs back out', () => {
+    // `knowledge-base/../stray.md` starts with the clone folder but resolves
+    // beside it: the containment check is against the WORKSPACE dir, so the
+    // filesystem would accept it and the bytes would land outside git.
+    expect(isInsideRepo('knowledge-base/../stray.md', KB)).toBe(false);
+    expect(isInsideRepo('knowledge-base/KnowledgeBase/../../stray.md', KB)).toBe(false);
+    expect(isInsideRepo('knowledge-base/./x.md', KB)).toBe(false);
+    expect(isInsideRepo('knowledge-base//x.md', KB)).toBe(false);
+  });
+
+  it('refuses backslashes anywhere: on Windows they separate segments too, and the commit layer rejects them', () => {
+    expect(isInsideRepo('knowledge-base/foo\\..\\..\\outside.md', KB)).toBe(false);
+    expect(isInsideRepo('knowledge-base\\KnowledgeBase\\x.md', KB)).toBe(false);
+    expect(isInsideRepo('knowledge-base/KnowledgeBase/a\\b.md', KB)).toBe(false);
+  });
+
+  it('refuses a control character anywhere: git reads a line break in a path as a separator', () => {
+    expect(isInsideRepo('knowledge-base/Docs/secret.md\nzzz', KB)).toBe(false);
+    expect(isInsideRepo('knowledge-base/Docs/secret.md\rzzz', KB)).toBe(false);
+    expect(isInsideRepo('knowledge-base/Docs/a\u0000b.md', KB)).toBe(false);
+    expect(isInsideRepo('knowledge-base/Docs/a\u001Bb.md', KB)).toBe(false);
+    expect(isInsideRepo('knowledge-base/Docs/a\u007Fb.md', KB)).toBe(false);
+  });
+
+  it('tolerates a trailing slash on a directory path', () => {
+    expect(isInsideRepo('knowledge-base/', KB)).toBe(true);
+    expect(isInsideRepo('knowledge-base/KnowledgeBase/Projects/', KB)).toBe(true);
+  });
+
+  it('refuses dressed-up forms of the prefix that the commit layer would reject anyway', () => {
+    expect(isInsideRepo('./knowledge-base/x.md', KB)).toBe(false);
+    expect(isInsideRepo('/knowledge-base/x.md', KB)).toBe(false);
+    expect(isInsideRepo('', KB)).toBe(false);
+  });
+});
+
+describe('assertInsideRepo', () => {
+  it('passes silently for a path inside the repository', () => {
+    expect(() => assertInsideRepo('knowledge-base/KnowledgeBase/Foo.md', KB)).not.toThrow();
+  });
+
+  it('throws a 400 that names the prefix and spells out the corrected path', () => {
+    let err: unknown;
+    try {
+      assertInsideRepo('KnowledgeBase/Reviews/PR-12.html', KB);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(VersionControlValidationError);
+    const e = err as VersionControlValidationError;
+    expect(e.status).toBe(400);
+    // The offending path, the rule, and the exact path to use instead: an
+    // agent reading this error can retry without guessing.
+    expect(e.message).toContain('"KnowledgeBase/Reviews/PR-12.html"');
+    expect(e.message).toContain('"knowledge-base/"');
+    expect(e.message).toContain('"knowledge-base/KnowledgeBase/Reviews/PR-12.html"');
+    expect(e.payload).toMatchObject({
+      kind: 'path-outside-repo',
+      path: 'KnowledgeBase/Reviews/PR-12.html',
+      kbDirName: KB,
+      // On its own as well: the pending-commits worker's notice reads it from
+      // here, because the message it keeps is truncated.
+      corrected: 'knowledge-base/KnowledgeBase/Reviews/PR-12.html',
+    });
+  });
+
+  it('suggests the path with the traversal collapsed, back under the prefix', () => {
+    expect(() => assertInsideRepo('knowledge-base/../stray.md', KB)).toThrow('"knowledge-base/stray.md"');
+    expect(() => assertInsideRepo('knowledge-base/../../escape.md', KB)).toThrow('"knowledge-base/escape.md"');
+  });
+
+  it('suggests a forward-slash path for a backslash one', () => {
+    expect(() => assertInsideRepo('knowledge-base/foo\\..\\..\\outside.md', KB)).toThrow('"knowledge-base/outside.md"');
+    expect(() => assertInsideRepo('KnowledgeBase\\Reviews\\PR-12.html', KB)).toThrow('"knowledge-base/KnowledgeBase/Reviews/PR-12.html"');
+  });
+
+  it('never suggests a path that still climbs: a bare `..` corrects to the repository folder', () => {
+    for (const p of ['..', '../', '../..', '../../', 'knowledge-base/..']) {
+      let message = '';
+      try {
+        assertInsideRepo(p, KB);
+      } catch (e) {
+        message = (e as Error).message;
+      }
+      expect(message, p).toContain('Use "knowledge-base/" instead');
+      expect(message, p).not.toMatch(/Use "[^"]*\.\.[^"]*" instead/);
+    }
+  });
+});
+
+describe('a line break in a path — one name to the gates, two object names to git', () => {
+  // `git cat-file --batch` reads one `<ref>:<path>` spec per LINE. A path
+  // carrying a `\n` therefore means TWO things at once: the read gate, the
+  // download gate and the not-a-directory check are answered about the whole
+  // string — a name that exists nowhere, so the real file's own frontmatter
+  // rules are never the ones consulted — while git answers about the part
+  // before the break and hands over its bytes. In the access resolver's batch
+  // read the extra answer also shifts every result after it, so one directory
+  // is judged by another's `access.md`.
+  //
+  // Which is why the refusal is HERE, at the normaliser every accepted path
+  // passes through, and not at the route that happened to surface it: the next
+  // caller to build a git spec out of a path will not remember this.
+  const INJECTED = 'knowledge-base/Docs/secret.md\nzzz';
+
+  it('is refused by the normaliser, with a message that says what is wrong', () => {
+    let err: unknown;
+    try {
+      normalizeWorkspacePath(INJECTED, KB);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(VersionControlValidationError);
+    const e = err as VersionControlValidationError;
+    expect(e.status).toBe(400);
+    expect(e.message).toMatch(/control character/);
+    // Never "use this instead": there is no corrected spelling of a name with
+    // an invisible byte in it.
+    expect(e.message).not.toMatch(/Use "/);
+    // The path is named, ESCAPED — `sanitizedPath`, the same spelling every
+    // other refusal uses — so the character that made the path invalid cannot
+    // forge a second line of the refusal either.
+    expect(e.payload).toMatchObject({
+      kind: 'path-control-character',
+      path: 'knowledge-base/Docs/secret.md\\nzzz',
+    });
+    expect(e.message).toContain('"knowledge-base/Docs/secret.md\\nzzz"');
+    expect(e.message).not.toContain('\n');
+  });
+
+  it('is refused the same way unprefixed, which is the form a route receives', () => {
+    expect(() => normalizeWorkspacePath('Docs/secret.md\nzzz', KB)).toThrow(/control character/);
+  });
+
+  it('is refused by the check AFTER the normaliser too', () => {
+    expect(() => assertInsideRepo(INJECTED, KB)).toThrow(/control character/);
+  });
+
+  it('refuses every control character, not only the line breaks', () => {
+    for (const ch of ['\u0000', '\u0001', '\t', '\n', '\u000B', '\r', '\u001F', '\u007F']) {
+      expect(() => normalizeWorkspacePath(`knowledge-base/Docs/a${ch}b.md`, KB), ch).toThrow(
+        VersionControlValidationError,
+      );
+    }
+  });
+
+  it('refuses a CHECKOUT FOLDER NAME carrying one, which the normaliser would otherwise emit', () => {
+    // The name is prefixed onto the result rather than read from it, so a
+    // clean path joined to `kb\nname` would come out carrying the break: the
+    // normaliser would emit exactly what it refuses from a caller, from inputs
+    // that were each individually fine.
+    let err: unknown;
+    try {
+      normalizeWorkspacePath('Docs/report.md', 'kb\nname');
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(VersionControlValidationError);
+    const e = err as VersionControlValidationError;
+    // Named as the CONFIGURATION error it is: an operator told their own path
+    // was invalid would have nothing to fix.
+    expect(e.message).toMatch(/checkout folder name/);
+    expect(e.message).toMatch(/KB_DIR_NAME/);
+    expect(e.message).toContain('"kb\\nname"');
+    expect(e.payload).toMatchObject({ kind: 'kb-dir-name-control-character', kbDirName: 'kb\\nname' });
+    // The guarantee the fence is for: no return value of this function carries
+    // a control character, whatever it was given.
+    for (const dir of ['kb\nname', 'kb\rname', 'kb\u0000name']) {
+      for (const p of ['Docs/report.md', `${dir}/Docs/report.md`, 'x']) {
+        let out: string | null = null;
+        try {
+          out = normalizeWorkspacePath(p, dir);
+        } catch {
+          out = null;
+        }
+        if (out !== null) expect(hasControlCharacter(out), `${dir} + ${p}`).toBe(false);
+      }
+    }
+  });
+
+  it('exposes the rule as a predicate, so the places that SET a name share it', () => {
+    expect(hasControlCharacter('knowledge-base')).toBe(false);
+    expect(hasControlCharacter('kb\nname')).toBe(true);
+    expect(hasControlCharacter('kb\u007Fname')).toBe(true);
+    // U+2028 is not in the range: nothing to git, and a name carrying one is
+    // creatable today — refusing it would make an existing file unreadable.
+    expect(hasControlCharacter('kb\u2028name')).toBe(false);
+  });
+
+  it('leaves ordinary names alone — the rule costs no real path', () => {
+    expect(normalizeWorkspacePath('knowledge-base/Docs/[Approved] Handbook_Order archive.docx', KB)).toBe(
+      'knowledge-base/Docs/[Approved] Handbook_Order archive.docx',
+    );
+    expect(normalizeWorkspacePath('knowledge-base/Docs/Ünïcödé — naïve.md', KB)).toBe(
+      'knowledge-base/Docs/Ünïcödé — naïve.md',
+    );
+  });
+
+  it('refuses it through normalizePathArgs, which is where the MCP tools meet the rule', () => {
+    expect(() => normalizePathArgs({ path: INJECTED }, KB, { tool: 'read_file' })).toThrow(/control character/);
+    expect(() => normalizePathArgs({ files: [{ path: INJECTED }] }, KB, { tool: 'read_file' })).toThrow(/control character/);
+  });
+});
+
+describe('normalizeWorkspacePath — THE normaliser', () => {
+  it('leaves a path that is already inside the repository alone', () => {
+    expect(normalizeWorkspacePath('knowledge-base/KnowledgeBase/Foo.md', KB)).toBe('knowledge-base/KnowledgeBase/Foo.md');
+    expect(normalizeWorkspacePath('knowledge-base', KB)).toBe('knowledge-base');
+    expect(normalizeWorkspacePath('knowledge-base/KnowledgeBase/Projects/', KB)).toBe('knowledge-base/KnowledgeBase/Projects/');
+  });
+
+  it('places an unprefixed path under the repository folder', () => {
+    expect(normalizeWorkspacePath('KnowledgeBase/Foo.md', KB)).toBe('knowledge-base/KnowledgeBase/Foo.md');
+    expect(normalizeWorkspacePath('TestDocx.docx', KB)).toBe('knowledge-base/TestDocx.docx');
+    expect(normalizeWorkspacePath('Plugins/GTM/tools.json', KB)).toBe('knowledge-base/Plugins/GTM/tools.json');
+    // The one that made the folder on core-staging.
+    expect(normalizeWorkspacePath('KnowledgeBase/Reports', KB)).toBe('knowledge-base/KnowledgeBase/Reports');
+  });
+
+  it('reads the prefixed and unprefixed spellings as the same path', () => {
+    expect(normalizeWorkspacePath('KnowledgeBase/Reports', KB)).toBe(
+      normalizeWorkspacePath('knowledge-base/KnowledgeBase/Reports', KB),
+    );
+  });
+
+  it('drops the single leading slash of the root-anchored form', () => {
+    expect(normalizeWorkspacePath('/knowledge-base/KnowledgeBase/Foo.md', KB)).toBe('knowledge-base/KnowledgeBase/Foo.md');
+    expect(normalizeWorkspacePath('/knowledge-base', KB)).toBe('knowledge-base');
+  });
+
+  it('strips a leading "./" and collapses repeated slashes, as the platform always has', () => {
+    expect(normalizeWorkspacePath('./KnowledgeBase/Foo.md', KB)).toBe('knowledge-base/KnowledgeBase/Foo.md');
+    expect(normalizeWorkspacePath('./knowledge-base/Foo.md', KB)).toBe('knowledge-base/Foo.md');
+    // One identity per file: the write turns and the lock rows coordinate on it.
+    expect(normalizeWorkspacePath('knowledge-base//Foo.md', KB)).toBe('knowledge-base/Foo.md');
+    expect(normalizeWorkspacePath('KnowledgeBase//Foo.md', KB)).toBe('knowledge-base/KnowledgeBase/Foo.md');
+  });
+
+  it('refuses traversal, backslashes and absolute paths with the existing message', () => {
+    for (const p of [
+      '../etc/hostname',
+      'KnowledgeBase/../../stray.md',
+      'knowledge-base/../stray.md',
+      'knowledge-base/./x.md',
+      'KnowledgeBase\\x',
+      'knowledge-base\\KnowledgeBase\\x.md',
+      '/tmp/x',
+      '/etc/passwd',
+      '//knowledge-base/Foo.md',
+      // Drive-qualified, and drive-relative: absolute on Windows, where
+      // `path.resolve` reads the drive and the workspace dir loses. Neither
+      // carries a leading slash or a backslash, so both are named on their own.
+      'C:/Windows/System32/drivers/etc/hosts',
+      'c:/Windows',
+      'C:Windows',
+      '',
+    ]) {
+      expect(() => normalizeWorkspacePath(p, KB), p).toThrow(/outside the knowledge base repository/);
+    }
+  });
+
+  it('never suggests a correction it would refuse itself', () => {
+    for (const p of ['../etc/hostname', 'KnowledgeBase/../../stray.md', '/tmp/x', 'KnowledgeBase\\x']) {
+      let corrected: string | undefined;
+      try {
+        normalizeWorkspacePath(p, KB);
+      } catch (e) {
+        corrected = /Use "([^"]*)" instead/.exec((e as Error).message)?.[1];
+      }
+      expect(corrected, p).toBeDefined();
+      expect(normalizeWorkspacePath(corrected!, KB), p).toBe(corrected);
+    }
+  });
+
+  it('refuses a non-string rather than crashing on it', () => {
+    expect(() => normalizeWorkspacePath(undefined as unknown as string, KB)).toThrow(
+      /outside the knowledge base repository/,
+    );
+  });
+
+  it('uses the deployment\'s own clone folder name', () => {
+    expect(normalizeWorkspacePath('KnowledgeBase/Foo.md', 'kb')).toBe('kb/KnowledgeBase/Foo.md');
+    expect(normalizeWorkspacePath('kb/KnowledgeBase/Foo.md', 'kb')).toBe('kb/KnowledgeBase/Foo.md');
+    // With a different name configured, the default name is ordinary content.
+    expect(normalizeWorkspacePath('knowledge-base/Foo.md', 'kb')).toBe('kb/knowledge-base/Foo.md');
+  });
+});
+
+describe('assertRepoRootNameFree', () => {
+  it('reserves the checkout folder name at the repository root, and says why', () => {
+    expect(() => assertRepoRootNameFree('knowledge-base/knowledge-base', KB)).toThrow(/is reserved/);
+    expect(() => assertRepoRootNameFree('knowledge-base/knowledge-base', KB)).toThrow(
+      /it is the checkout folder's name/,
+    );
+    expect(() => assertRepoRootNameFree('knowledge-base/knowledge-base/Notes.md', KB)).toThrow(/is reserved/);
+    expect(() => assertRepoRootNameFree('knowledge-base/knowledge-base/', KB)).toThrow(/is reserved/);
+  });
+
+  it('reserves it in every case, because one filesystem in three folds them together', () => {
+    // `Knowledge-Base/` and `knowledge-base/` are ONE folder on macOS and on
+    // Windows, so a case variant creates exactly the unreachable folder this
+    // refuses. Refused everywhere, so a repository stays clonable onto all three.
+    expect(() => assertRepoRootNameFree('knowledge-base/Knowledge-Base/x.md', KB)).toThrow(
+      /"Knowledge-Base" is reserved/,
+    );
+    expect(() => assertRepoRootNameFree('knowledge-base/KNOWLEDGE-BASE', KB)).toThrow(
+      /refused in every spelling/,
+    );
+    // The exact-case refusal keeps its one sentence, with no aside about case.
+    let message = '';
+    try {
+      assertRepoRootNameFree('knowledge-base/knowledge-base', KB);
+    } catch (e) {
+      message = (e as Error).message;
+    }
+    expect(message).toContain('"knowledge-base" is reserved');
+    expect(message).not.toContain('in every spelling');
+  });
+
+  it('leaves every other name alone, the namesakes deeper down included', () => {
+    expect(() => assertRepoRootNameFree('knowledge-base/KnowledgeBase/knowledge-base', KB)).not.toThrow();
+    expect(() => assertRepoRootNameFree('knowledge-base/knowledge-base-old', KB)).not.toThrow();
+    expect(() => assertRepoRootNameFree('knowledge-base', KB)).not.toThrow();
+    expect(() => assertRepoRootNameFree('knowledge-base/KnowledgeBase/Foo.md', KB)).not.toThrow();
+  });
+});
+
+describe('normalizePathArgs', () => {
+  const T = { tool: 'read_file' };
+
+  it('normalizes every path-shaped tool argument, batch entries included', () => {
+    expect(
+      normalizePathArgs(
+        {
+          branch: '/main',
+          path: '/knowledge-base/a.md',
+          src: 'KnowledgeBase/b.md',
+          dest: 'knowledge-base/c.md',
+          destination: '/knowledge-base/d',
+          files: [{ path: 'e.md', content: '/x' }],
+        },
+        KB,
+        T,
+      ),
+    ).toEqual({
+      branch: '/main',
+      path: 'knowledge-base/a.md',
+      src: 'knowledge-base/KnowledgeBase/b.md',
+      dest: 'knowledge-base/c.md',
+      destination: 'knowledge-base/d',
+      files: [{ path: 'knowledge-base/e.md', content: '/x' }],
+    });
+  });
+
+  it('leaves a spill ref alone — it belongs to no workspace', () => {
+    expect(
+      normalizePathArgs({ path: '__tool_chain_spill__/abc.json' }, KB, { tool: 'read_file', skip: (v) => v.startsWith('__tool_chain_spill__/') }),
+    ).toEqual({ path: '__tool_chain_spill__/abc.json' });
+  });
+
+  it('still takes the earlier call form, a skip predicate or nothing, and refuses a tmp ref in every input there', () => {
+    const spill = (v: string) => v.startsWith('__tool_chain_spill__/');
+    expect(normalizePathArgs({ path: '__tool_chain_spill__/abc.json' }, KB, spill)).toEqual({ path: '__tool_chain_spill__/abc.json' });
+    expect(normalizePathArgs({ path: 'a.md' }, KB)).toEqual({ path: 'knowledge-base/a.md' });
+    for (const legacy of [undefined, spill]) {
+      expect(() => normalizePathArgs({ path: '__tmp__/x.md' }, KB, legacy)).toThrow(/this tool does not take one there/);
+    }
+  });
+
+  it('leaves an absent or empty path to the handler\'s own required-argument message', () => {
+    expect(normalizePathArgs({ path: undefined }, KB, T)).toEqual({ path: undefined });
+    expect(normalizePathArgs({ path: '' }, KB, T)).toEqual({ path: '' });
+    expect(normalizePathArgs({ branch: 'main' }, KB, T)).toEqual({ branch: 'main' });
+  });
+
+  it('collapses the spellings so two callers take one lock row', () => {
+    expect(normalizePathArgs({ path: './knowledge-base//a.md' }, KB, T)).toEqual({ path: 'knowledge-base/a.md' });
+  });
+
+  it('admits a tmp ref, as written, in exactly the inputs the tool names', () => {
+    expect(normalizePathArgs({ src: '__tmp__/a.pdf', dest: 'a.pdf' }, KB, { tool: 'copy_file', tmpRefInputs: ['src'] })).toEqual({
+      src: '__tmp__/a.pdf',
+      dest: 'knowledge-base/a.pdf',
+    });
+  });
+
+  it('refuses a tmp ref in every other input, lists included, naming the tool and copy_file', () => {
+    const calls: Array<Record<string, unknown>> = [
+      { path: '__tmp__/a.md' },
+      { src: '__tmp__/a.md' },
+      { dest: '__tmp__/a.md' },
+      { destination: '__tmp__' },
+      { files: [{ path: 'ok.md' }, { path: '__tmp__/a.md' }] },
+      { paths: ['ok.md', '__tmp__/a.md'] },
+      { resolutions: [{ path: 'ok.md', choose: 'ours' }, { path: '__tmp__/a.md', content: 'x' }] },
+    ];
+    for (const args of calls) {
+      expect(() => normalizePathArgs(args, KB, { tool: 'save_file' })).toThrow(
+        /is a tmp ref, and save_file does not take one there: the workspace's tmp folder is read-only through the ref\..*copy_file/,
+      );
+    }
+    // A tool that takes a ref in `src` still refuses one in `dest`.
+    expect(() => normalizePathArgs({ dest: '__tmp__/a.md' }, KB, { tool: 'copy_file', tmpRefInputs: ['src'] })).toThrow(
+      /copy_file does not take one there/,
+    );
+  });
+
+  it('reads a path that only contains the prefix as an ordinary repository path', () => {
+    expect(normalizePathArgs({ path: 'knowledge-base/__tmp__/a.md' }, KB, T)).toEqual({ path: 'knowledge-base/__tmp__/a.md' });
+    expect(normalizePathArgs({ path: '/knowledge-base/__tmp__/a.md' }, KB, T)).toEqual({ path: 'knowledge-base/__tmp__/a.md' });
+  });
+
+  it('refuses a traversing tool argument', () => {
+    expect(() => normalizePathArgs({ path: '../escape.md' }, KB, T)).toThrow(/outside the knowledge base repository/);
+  });
+});
+
+describe('assertRepoRootNameFreeArgs', () => {
+  const reserved = `${KB}/${KB}/x.md`;
+
+  it('refuses the reserved name on the inputs a tool creates at, batch entries included', () => {
+    expect(() => assertRepoRootNameFreeArgs({ path: reserved }, KB, ['path'])).toThrow(/is reserved/);
+    expect(() => assertRepoRootNameFreeArgs({ dest: `${KB}/${KB}` }, KB, ['dest'])).toThrow(/is reserved/);
+    expect(() => assertRepoRootNameFreeArgs({ files: [{ path: `${KB}/ok.md` }, { path: reserved }] }, KB, ['files'])).toThrow(
+      /is reserved/,
+    );
+  });
+
+  it('looks only at the keys it is given, so a source or a delete of an existing one is left possible', () => {
+    // A move OUT of the reserved folder: `src` is not a creation.
+    expect(() => assertRepoRootNameFreeArgs({ src: reserved, dest: `${KB}/elsewhere/x.md` }, KB, ['dest'])).not.toThrow();
+    expect(() => assertRepoRootNameFreeArgs({ path: reserved }, KB, [])).not.toThrow();
+    expect(() => assertRepoRootNameFreeArgs({ path: undefined, files: 'not-a-list' }, KB, ['path', 'files'])).not.toThrow();
+  });
+});
+
+describe('assertKbDirNameFree', () => {
+  const layout = { knowledgeBaseDir: 'KnowledgeBase', skillsDir: 'Skills', pluginsDir: 'Plugins', agentsFile: 'AGENTS.md' };
+
+  it('accepts a checkout folder name none of the repository roots use', () => {
+    expect(() => assertKbDirNameFree('knowledge-base', layout)).not.toThrow();
+  });
+
+  it('refuses a checkout folder named like a repository root, in any case, naming both', () => {
+    expect(() => assertKbDirNameFree('KnowledgeBase', layout)).toThrow(/knowledgeBaseDir \("KnowledgeBase"\)/);
+    expect(() => assertKbDirNameFree('skills', layout)).toThrow(/skillsDir \("Skills"\)/);
+    expect(() => assertKbDirNameFree('agents.md', layout)).toThrow(/agentsFile \("AGENTS.md"\)/);
+  });
+});

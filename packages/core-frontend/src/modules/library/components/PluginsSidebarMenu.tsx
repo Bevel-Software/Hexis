@@ -1,5 +1,5 @@
 import type { RefObject } from 'react';
-import { FilePlus, FolderPlus, Link2, Trash2, Users } from 'lucide-react';
+import { FilePlus, FolderPlus, Link2, Trash2, Users, UsersRound } from 'lucide-react';
 import { MenuItem, MenuPanel, useDismissableMenu } from '../../../shared/components';
 
 /**
@@ -46,6 +46,11 @@ export interface PluginsSidebarMenuProps {
   onManageAccess?(): void;
   /** Opens the delete confirmation. Present ONLY for a plugin the caller owns. */
   onDelete?(): void;
+  /**
+   * Opens the group's card on the Groups & Members page. Present ONLY for an
+   * administrator on a group row — never on Everyone, which nobody edits.
+   */
+  onManageMembers?(): void;
   /** The row this menu was opened from — Escape hands focus back to it. */
   returnFocusTo?: RefObject<HTMLElement | null>;
 }
@@ -60,6 +65,7 @@ export function PluginsSidebarMenu({
   onCopyLink,
   onManageAccess,
   onDelete,
+  onManageMembers,
   returnFocusTo,
 }: PluginsSidebarMenuProps) {
   const ref = useDismissableMenu<HTMLDivElement>({ open: true, onClose, returnFocusTo });
@@ -130,6 +136,25 @@ export function PluginsSidebarMenu({
               <span className="flex items-center gap-2">
                 <Users size={14} />
                 Manage access
+              </span>
+            </MenuItem>
+          </>
+        )}
+        {onManageMembers && (
+          <>
+            {/* Like access, it is about who is here rather than what is — so it
+                sits below the rule, after the items the row already had. */}
+            <div className="my-1 border-t border-line" />
+            <MenuItem
+              role="menuitem"
+              onClick={() => {
+                onManageMembers();
+                onClose();
+              }}
+            >
+              <span className="flex items-center gap-2">
+                <UsersRound size={14} />
+                Manage members
               </span>
             </MenuItem>
           </>

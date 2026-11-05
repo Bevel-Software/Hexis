@@ -21,6 +21,26 @@ export interface ToolCapability {
   description: string | null;
 }
 
+/**
+ * One tool of this server that Hexis keeps off every agent surface because its
+ * input schema is not valid JSON Schema as the server sent it.
+ *
+ * The backend sends these ONLY to a caller who may write the tool: the people
+ * who manage the server are the only ones who can get the schema fixed, and a
+ * reader has nothing to do with the knowledge. So the page may render whatever
+ * arrives, with no permission check of its own.
+ */
+export interface HiddenTool {
+  /** The name the tool would have been offered to agents under. */
+  name: string;
+  /** JSON Pointer to the place in the schema that is not valid. */
+  path: string;
+  /** Why that place is not valid, in the validator's own words. */
+  reason: string;
+  /** The sentence to show, built on the server so every surface says the same thing. */
+  marker: string;
+}
+
 export interface ToolManualDetail {
   slug: string;
   name: string;
@@ -35,6 +55,13 @@ export interface ToolManualDetail {
    * same "nothing to show" as a remote one.
    */
   capabilities: ToolCapability[];
+  /**
+   * Hidden-for-an-invalid-schema findings about THIS tool's server. Empty for
+   * a healthy server, and empty for a caller who may not write the tool.
+   * Optional on the wire so the page still renders against a backend that does
+   * not serve the field yet.
+   */
+  hiddenTools?: HiddenTool[];
 }
 
 async function unwrap(res: Response, fallback: string): Promise<never> {
@@ -67,6 +94,28 @@ export async function getToolDetail(slug: string): Promise<ToolManualDetail> {
  */
 export type McpTransport = 'streamable-http' | 'sse' | 'stdio';
 
+/**
+ * A declared `${VAR}` of an mcp.json server, exactly as plugin.json stores it.
+ * `oauth` makes it a sign-in (user-scoped only): the owner's OAuth app's client
+ * id, and optionally the provider endpoints — absent, they are discovered from
+ * the server's own OAuth metadata. PKCE is on unless `pkce: false`. The client
+ * SECRET is never here; it lives in the vault, set on the tool's page.
+ */
+export interface McpServerVariable {
+  name: string;
+  scope: 'admin' | 'user';
+  label?: string;
+  oauth?: {
+    authorizationUrl?: string;
+    tokenUrl?: string;
+    clientId: string;
+    scopes?: string[];
+    authParams?: Record<string, string>;
+    pkce?: boolean;
+    resource?: string;
+  };
+}
+
 export interface McpServerView {
   name: string;
   transport: McpTransport;
@@ -77,7 +126,7 @@ export interface McpServerView {
   env?: Record<string, string>;
   literalHeaders: Record<string, string>;
   authHeaders: Record<string, string>;
-  variables: { name: string; scope: 'admin' | 'user'; label?: string }[];
+  variables: McpServerVariable[];
   description?: string;
   local: boolean;
   canWrite: boolean;
@@ -103,6 +152,42 @@ export async function getMcpServer(slug: string): Promise<McpServerView | null> 
   return (await res.json()) as McpServerView;
 }
 
+/**
+ * What deleting a tool would affect — the dialog's whole content.
+ *
+ * Owner-only on the backend, which is the same verdict the page gates the menu
+ * item on: a 403 here means the affordance should never have been offered, and
+ * the dialog says so rather than pretending the delete is still possible.
+ */
+export interface ToolDependents {
+  slug: string;
+  name: string;
+  /** `manual` — a `.tool` file; `server` — one entry in a plugin's mcp.json. */
+  source: 'manual' | 'server';
+  /** Where the page returns once the tool is gone. */
+  plugin: { name: string; displayName: string };
+  /** Skills whose `allowed-tools` name this tool — their files are NOT touched. */
+  skills: { name: string; path: string }[];
+  /** Other plugins that carry it. */
+  plugins: { name: string; displayName: string }[];
+  /** Counts only — never a value, never whose. */
+  storedKeys: number;
+  signIns: number;
+}
+
+export async function getToolDependents(slug: string): Promise<ToolDependents> {
+  const res = await authFetch(`/api/tools/${encodeURIComponent(slug)}/dependents`);
+  if (!res.ok) await unwrap(res, "Couldn't read what depends on this tool.");
+  return (await res.json()) as ToolDependents;
+}
+
+/** Delete the tool. Answers the plugin it lived in — where the page goes next. */
+export async function deleteTool(slug: string): Promise<{ plugin: string }> {
+  const res = await authFetch(`/api/tools/${encodeURIComponent(slug)}`, { method: 'DELETE' });
+  if (!res.ok) await unwrap(res, "Couldn't delete the tool.");
+  return (await res.json()) as { plugin: string };
+}
+
 export async function putMcpServer(slug: string, write: McpServerWrite): Promise<{ name: string }> {
   const res = await authFetch(`/api/tools/${encodeURIComponent(slug)}/server`, {
     method: 'PUT',
@@ -111,4 +196,46 @@ export async function putMcpServer(slug: string, write: McpServerWrite): Promise
   });
   if (!res.ok) await unwrap(res, "Couldn't save the server configuration.");
   return (await res.json()) as { name: string };
+}
+
+/**
+ * A tool that exists only on an open change request's branch — proposed, and
+ * waiting on somebody to approve it. The mirror of `PendingSkillSummary`, and
+ * separate from every catalog type for the same reason: it is not in the
+ * catalog, nothing registers it, nothing calls it, and it is visible only to
+ * its author and to whoever could approve it.
+ */
+export interface PendingToolSummary {
+  slug: string;
+  name: string;
+  /** The `.tool` file, or the plugin's `mcp.json` — what the card files under. */
+  path: string;
+  type: 'inline' | 'http' | 'mcp';
+  description?: string;
+  /** The plugin folder the declaration targets, or null when it targets none. */
+  plugin: string | null;
+  changeRequestNumber: number;
+  branch: string;
+  authorName: string;
+  createdAt: string;
+  /** True when the caller proposed it themselves. */
+  isAuthor: boolean;
+}
+
+/**
+ * Tools awaiting approval that the caller may see. The backend does the
+ * filtering — author or possible approver — so this is a plain read.
+ */
+export async function listPendingTools(): Promise<PendingToolSummary[]> {
+  const res = await authFetch('/api/tools/pending');
+  if (!res.ok) await unwrap(res, "Couldn't load proposed tools.");
+  const body = (await res.json()) as { tools?: PendingToolSummary[] } | null;
+  // Guarded, not trusted: a backend BUILT BEFORE this route existed answers
+  // through `/tools/:slug` — a 200 whose shape is not this one. The review
+  // shelf degrading to empty is the right failure; `undefined` reaching the
+  // item mapper takes the whole library down (blank page), which is exactly
+  // what it did on the skills side before its own guard. A bare `null` body is
+  // one of those shapes, and reading `.tools` off it would throw BEFORE the
+  // guard ran — so the optional chain is the guard's first half, not decoration.
+  return Array.isArray(body?.tools) ? body.tools : [];
 }

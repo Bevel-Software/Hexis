@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import type { JoinRequest } from '../services/plugins.api';
 
@@ -174,5 +174,64 @@ describe('PluginJoinRequests', () => {
     );
     await waitFor(() => expect(pluginsMock.listJoinRequests).toHaveBeenCalled());
     expect(container.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  /**
+   * The answers sit where the question is. Accept and Decline used to sit on
+   * separate lines, and Manage access was a button on a line of its own.
+   */
+  describe('layout', () => {
+    /** The line (flex row) a control sits on. */
+    const lineOf = (el: HTMLElement) => el.closest('div.flex-wrap') as HTMLElement;
+
+    it('puts Accept then Decline at the end of the line naming the requester', async () => {
+      renderBanner();
+      const text = await screen.findByText(/Ali Baba asked for access to GTM/);
+      const accept = screen.getByRole('button', { name: 'Grant read to Ali Baba' });
+      const decline = screen.getByRole('button', { name: 'Decline the request from Ali Baba' });
+      expect(lineOf(accept)).toBe(lineOf(text));
+      expect(lineOf(decline)).toBe(lineOf(text));
+      expect(accept.compareDocumentPosition(decline) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(text).toHaveTextContent('Ali Baba asked for access to GTM: read');
+    });
+
+    it('with several proposals, each proposal line ends in its own Accept and the request line in Decline', async () => {
+      pluginsMock.listJoinRequests.mockResolvedValue([
+        request({
+          proposals: [
+            ...request().proposals,
+            {
+              verb: 'write',
+              id: 'user:juan@bevel.software',
+              principal: { kind: 'user', email: 'juan@bevel.software', displayName: 'Juan Viera' },
+              label: 'Juan Viera',
+            },
+          ],
+        }),
+      ]);
+      renderBanner();
+      const requestLine = lineOf(await screen.findByText('Ali Baba asked for access to GTM.'));
+      expect(within(requestLine).getAllByRole('button').map((b) => b.getAttribute('aria-label'))).toEqual([
+        'Decline the request from Ali Baba',
+      ]);
+      const ali = screen.getByRole('button', { name: 'Grant read to Ali Baba' });
+      const juan = screen.getByRole('button', { name: 'Grant write to Juan Viera' });
+      expect(lineOf(ali)).not.toBe(requestLine);
+      expect(lineOf(juan)).not.toBe(lineOf(ali));
+      expect(lineOf(juan)).toHaveTextContent('Juan Viera: write');
+    });
+
+    it('Manage access is a text link closing the last line, and opens the plugin folder', async () => {
+      const { onManage } = renderBanner();
+      const accept = await screen.findByRole('button', { name: 'Grant read to Ali Baba' });
+      const manage = screen.getByRole('button', { name: 'Manage access' });
+      // Not a line of its own: it shares the requester's line, after the answers.
+      expect(lineOf(manage)).toBe(lineOf(accept));
+      const decline = screen.getByRole('button', { name: 'Decline the request from Ali Baba' });
+      expect(decline.compareDocumentPosition(manage) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(manage.className).toContain('underline');
+      fireEvent.click(manage);
+      expect(onManage).toHaveBeenCalledWith('Plugins/GTM');
+    });
   });
 });

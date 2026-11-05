@@ -1,0 +1,11 @@
+id: engineering
+name: Engineering
+description: "Pages about what you build and how you ship it, and skills for thinking an idea through, reviewing a plan and reviewing a diff."
+order: 1
+firstPagePrompt: |
+  Using our Hexis knowledge base, fill in the Architecture page in Knowledge for our engineering team: the main parts of our system, how they talk to each other, where the data lives, and what a new engineer should read first. Start from our repository's README and code if you can reach them. Ask me for anything you don't know, then save it.
+suggestedPages:
+  - "About us"
+  - "Architecture"
+  - "How we ship"
+  - "Glossary"

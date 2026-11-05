@@ -1,15 +1,18 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { NodeFs } from '../../kb-fs/node-fs.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import type { WorkflowService } from '../../workflow/workflow.service.js';
-import type { WorkflowEventBus } from '../../workflow/event-bus.js';
-import type { FileTreeEntry, WorkflowEventPayload } from '@bevel-software/platform-shared';
-import { workspaceIdForBranch } from '../../workspace/workspace.service.js';
+import type { VersionControlService } from '../../version-control/version-control.service.js';
+import type { VersionControlEventBus } from '../../version-control/event-bus.js';
+import type { FileTreeEntry, VersionControlEventPayload } from '@bevel-software/platform-shared';
+import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { AccessControlService } from '../access-control.service.js';
-import { RolesAdminService, rewriteRoleTokensInText, findRoleRefsInText } from '../roles-admin.service.js';
+import { RolesAdminService } from '../roles-admin.service.js';
+import { rewriteRoleTokensInText, findRoleRefsInText } from '../reference-scan.js';
+import { PushNeedsAgentResolutionError } from '../../../shared/domain-errors.js';
 import type { AuthUser } from '@bevel-software/platform-shared';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 
@@ -18,6 +21,8 @@ const WS = workspaceIdForBranch(DEFAULT_BRANCH);
 
 const ADMIN: AuthUser = { id: 'u-admin', email: 'razvan@bevel.software', name: 'Razvan' } as AuthUser;
 const OTHER_ADMIN: AuthUser = { id: 'u-2', email: 'juan@bevel.software', name: 'Juan' } as AuthUser;
+/** A Sales member: reads the Sales-governed files the roster tests reference. */
+const SALES_VIEWER = 'felix@example.com';
 
 const ROLES = `roles:
   Admin:
@@ -75,7 +80,7 @@ function stubWorkspace(workspaceDir: string): WorkspaceService {
 }
 
 /**
- * WorkflowService stub backed by the real temp repo. Models the two write paths
+ * VersionControlService stub backed by the real temp repo. Models the two write paths
  * the service uses:
  *   - Single-file ops go through a real LockingFilesystem, which calls
  *     acquireLock → (LocalFilesystem writes to disk) → releaseLock. We track the
@@ -86,27 +91,33 @@ function stubWorkspace(workspaceDir: string): WorkspaceService {
  *     (non-deferred) atomic write straight to the repo. Records commits so tests
  *     can assert one-per-op.
  */
-function stubWorkflow() {
+function stubVersionControl() {
   const commits: { summary: string }[] = [];
   const resets: string[] = [];
-  /** Current holder of the roles.yaml lock, or null. */
-  let holder: AuthUser | null = null;
+  /** Per-path lock rows with STRICT acquire — mirrors FileLockService: a
+   *  live lock is contended EVEN FOR THE SAME USER (only expired rows are
+   *  reclaimed), so a service nesting a second acquire under its own hold
+   *  fails here exactly like production. */
+  const locks = new Map<string, AuthUser>();
   const lockRow = (h: AuthUser) => ({ holderUserId: h.id, holderName: h.name });
   const svc = {
-    getLock: async () => (holder ? lockRow(holder) : null),
-    acquireLock: async (...a: unknown[]) => {
-      const user = a[3] as AuthUser;
-      return holder && holder.id !== user.id
-        ? { acquired: false, lock: lockRow(holder) }
-        : ((holder = user), { acquired: true, lock: lockRow(user) });
+    getLock: async (_w: string, _b: string, p: string) => {
+      const h = locks.get(p);
+      return h ? lockRow(h) : null;
+    },
+    acquireLock: async (_w: string, _b: string, p: string, user: AuthUser) => {
+      const h = locks.get(p);
+      if (h) return { acquired: false, lock: lockRow(h) };
+      locks.set(p, user);
+      return { acquired: true, lock: lockRow(user) };
     },
     // LockingFilesystem's success path: the LocalFilesystem write already hit
     // disk, so releasing just drops the lock (the "commit" is a no-op in-memory).
-    releaseLock: async () => {
-      holder = null;
+    releaseLock: async (_w: string, _b: string, p: string) => {
+      locks.delete(p);
     },
-    releaseLockNoCommit: async () => {
-      holder = null;
+    releaseLockNoCommit: async (_w: string, _b: string, p: string) => {
+      locks.delete(p);
     },
     // The rename's atomic batch flows through LockingFilesystem.writeFiles, which
     // writes every file to disk (real LocalFilesystem) then calls commitChanges
@@ -122,19 +133,19 @@ function stubWorkflow() {
     resetToRemote: async (_ws: string, branch: string) => {
       resets.push(branch);
     },
-  } as unknown as WorkflowService;
+  } as unknown as VersionControlService;
   return { svc, commits, resets };
 }
 
 /** Event bus stub that records every emitted payload for assertions. */
 function stubEventBus() {
-  const events: WorkflowEventPayload[] = [];
+  const events: VersionControlEventPayload[] = [];
   const bus = {
-    emit: (payload: WorkflowEventPayload) => {
+    emit: (payload: VersionControlEventPayload) => {
       events.push(payload);
       return {} as unknown;
     },
-  } as unknown as WorkflowEventBus;
+  } as unknown as VersionControlEventBus;
   return { bus, events };
 }
 
@@ -143,7 +154,7 @@ describe('RolesAdminService', () => {
   let repo: string;
   let access: AccessControlService;
   let ws: WorkspaceService;
-  let workflow: ReturnType<typeof stubWorkflow>;
+  let versionControl: ReturnType<typeof stubVersionControl>;
   let bus: ReturnType<typeof stubEventBus>;
   let svc: RolesAdminService;
 
@@ -157,10 +168,12 @@ describe('RolesAdminService', () => {
     repo = path.join(workspaceDir, KB);
     await write(repo, 'roles.yaml', ROLES);
     ws = stubWorkspace(workspaceDir);
-    access = new AccessControlService(ws, KB);
-    workflow = stubWorkflow();
+    access = new AccessControlService(ws, KB, new NodeFs());
+    versionControl = stubVersionControl();
     bus = stubEventBus();
-    svc = new RolesAdminService(ws, workflow.svc, access, KB, () => DEFAULT_BRANCH, bus.bus);
+    svc = new RolesAdminService(ws, versionControl.svc, access, new NodeFs(), KB, () => DEFAULT_BRANCH, bus.bus, [
+      'recovery-admin@example.com',
+    ]);
   });
 
   afterEach(async () => {
@@ -168,7 +181,7 @@ describe('RolesAdminService', () => {
   });
 
   it('getRoster lists roles, marks Admin, dedupes members', async () => {
-    const roster = await svc.getRoster();
+    const roster = await svc.getRoster(ADMIN.email);
     expect(roster.map((r) => r.canonical)).toEqual(['admin', 'sales']);
     expect(roster.find((r) => r.canonical === 'admin')!.isAdmin).toBe(true);
     expect(roster.find((r) => r.canonical === 'sales')!.members).toEqual(['felix@example.com']);
@@ -180,9 +193,9 @@ describe('RolesAdminService', () => {
     // `DEFAULT_BRANCH` and froze it — every roles route then failed branch
     // validation with `Invalid branch name "": empty name` until a restart.
     let branch = '';
-    const late = new RolesAdminService(ws, workflow.svc, access, KB, () => branch, bus.bus);
+    const late = new RolesAdminService(ws, versionControl.svc, access, new NodeFs(), KB, () => branch, bus.bus);
     branch = DEFAULT_BRANCH;
-    const roster = await late.getRoster();
+    const roster = await late.getRoster(ADMIN.email);
     expect(roster.map((r) => r.canonical)).toEqual(['admin', 'sales']);
   });
 
@@ -212,16 +225,48 @@ describe('RolesAdminService', () => {
 
     // Recovery syncs the clone to origin's default branch BEFORE writing, so the
     // restoring commit fast-forwards on push instead of diverging.
-    expect(workflow.resets).toEqual([DEFAULT_BRANCH]);
+    expect(versionControl.resets).toEqual([DEFAULT_BRANCH]);
     // Corrupted bytes parked verbatim in old-roles.yaml.
     expect(await fs.readFile(path.join(repo, 'old-roles.yaml'), 'utf-8')).toBe(corrupt);
     // roles.yaml restored to a parseable default with an Admin role.
     const restored = await readRoles();
     expect(access.validateRolesYaml(restored).ok).toBe(true);
     expect(roster.find((r) => r.canonical === 'admin')?.isAdmin).toBe(true);
-    expect(roster.find((r) => r.canonical === 'admin')!.members.length).toBeGreaterThan(0);
+    // The roster is THIS deployment's configured admin — never a list baked
+    // into the build (hard-coded emails would land one company's admins in
+    // every customer's recovered file).
+    expect(roster.find((r) => r.canonical === 'admin')!.members).toEqual([
+      'recovery-admin@example.com',
+    ]);
+    expect(restored).not.toContain('bevel.software');
     // And the file is now healthy.
     expect(await svc.getHealth()).toEqual({ ok: true, errors: [] });
+  });
+
+  it('recover writes a role the current file does not declare — the agent-only new-role rule is not applied here', async () => {
+    await write(repo, 'roles.yaml', 'roles: oops\n');
+    access.invalidate(WS);
+
+    const roster = await svc.recover(ADMIN);
+
+    expect(roster.find((r) => r.canonical === 'admin')?.members).toEqual(['recovery-admin@example.com']);
+    expect(await readRoles()).toMatch(/Admin:/);
+  });
+
+  it('recover refuses when no admin is configured — an adminless roster is the disease, not the cure', async () => {
+    const corrupt = 'roles:\n  Admin:\n    - a@x.eu\n  Admin:\n    - b@x.eu\n';
+    await write(repo, 'roles.yaml', corrupt);
+    access.invalidate(WS);
+    const adminless = new RolesAdminService(ws, versionControl.svc, access, new NodeFs(), KB, () => DEFAULT_BRANCH, bus.bus);
+    // 409, not 500: the route helper hides >=500 bodies behind a generic
+    // message, and this break-glass refusal must reach the operator verbatim.
+    await expect(adminless.recover(ADMIN)).rejects.toMatchObject({
+      status: 409,
+      payload: { kind: 'no-recovery-admins' },
+    });
+    // Nothing parked, nothing overwritten.
+    await expect(fs.readFile(path.join(repo, 'old-roles.yaml'), 'utf-8')).rejects.toThrow();
+    expect(await fs.readFile(path.join(repo, 'roles.yaml'), 'utf-8')).toBe(corrupt);
   });
 
   it("getRoster's referencedBy is sound — finds node-frontmatter refs, not just folder access.md", async () => {
@@ -230,21 +275,32 @@ describe('RolesAdminService', () => {
     // ...AND a grant that lives ONLY in a node's own frontmatter (the gap).
     await write(repo, 'team/deal.md', '---\nowner: Sales\n---\n# Deal\n');
 
-    const sales = (await svc.getRoster()).find((r) => r.canonical === 'sales')!;
+    const sales = (await svc.getRoster(SALES_VIEWER)).find((r) => r.canonical === 'sales')!;
     const paths = sales.referencedBy.map((r) => r.path).sort();
     expect(paths).toEqual(['team/access.md', 'team/deal.md']);
     // The frontmatter ref carries its verb, so the warning can name it.
     expect(sales.referencedBy).toContainEqual({ path: 'team/deal.md', verb: 'owner' });
     // An unreferenced role still shows nothing.
-    expect((await svc.getRoster()).find((r) => r.canonical === 'admin')!.referencedBy).toEqual([]);
+    expect((await svc.getRoster(SALES_VIEWER)).find((r) => r.canonical === 'admin')!.referencedBy).toEqual([]);
+  });
+
+  it("getRoster names only files the viewer can read and leaves the rest out, uncounted — an Admin can't read Sales's files", async () => {
+    await write(repo, 'team/access.md', '---\nread:\n  - deny everyone\n  - Sales\n---\n');
+    await write(repo, 'team/deal.md', '---\nowner: Sales\n---\n# Deal\n');
+
+    const asAdmin = (await svc.getRoster(ADMIN.email)).find((r) => r.canonical === 'sales')!;
+    expect(asAdmin.referencedBy).toEqual([]);
+    expect(asAdmin).not.toHaveProperty('referencesHidden');
+    const asMember = (await svc.getRoster(SALES_VIEWER)).find((r) => r.canonical === 'sales')!;
+    expect(asMember.referencedBy).toHaveLength(2);
   });
 
   it('addMember persists + is idempotent', async () => {
     await svc.addMember(ADMIN, 'sales', 'New@example.com');
     expect(await readRoles()).toContain('new@example.com');
-    const before = workflow.commits.length;
+    const before = versionControl.commits.length;
     await svc.addMember(ADMIN, 'sales', 'new@example.com'); // duplicate → no commit
-    expect(workflow.commits.length).toBe(before);
+    expect(versionControl.commits.length).toBe(before);
   });
 
   it('removeMember refuses to empty the Admin role', async () => {
@@ -270,42 +326,29 @@ describe('RolesAdminService', () => {
     expect(await readRoles()).not.toContain('juan@bevel.software');
   });
 
-  it('createRole rejects reserved/duplicate; deleteRole refuses Admin', async () => {
-    await expect(svc.createRole(ADMIN, 'everyone')).rejects.toMatchObject({ status: 422 });
-    await expect(svc.createRole(ADMIN, 'Sales')).rejects.toMatchObject({ status: 422 });
-    await expect(svc.deleteRole(ADMIN, 'admin')).rejects.toMatchObject({ status: 422 });
-    await svc.createRole(ADMIN, 'Marketing');
-    expect(await readRoles()).toContain('Marketing: []');
+  it('role CRUD is GONE from the service — roles are app-defined capabilities', () => {
+    // The editors were removed outright, not just un-routed: legacy roles stay
+    // membership-editable, but nothing can mint/rename/delete a role anymore.
+    const anySvc = svc as unknown as Record<string, unknown>;
+    expect(anySvc.createRole).toBeUndefined();
+    expect(anySvc.renameRole).toBeUndefined();
+    expect(anySvc.deleteRole).toBeUndefined();
   });
 
-  it('rename: Admin canonical change is refused (400); casing-only allowed', async () => {
-    await expect(svc.renameRole(ADMIN, 'admin', 'Administrators')).rejects.toMatchObject({ status: 400 });
-    await svc.renameRole(ADMIN, 'admin', 'ADMIN'); // casing-only OK
-    const roster = await svc.getRoster();
-    expect(roster.find((r) => r.canonical === 'admin')!.displayName).toBe('ADMIN');
-  });
-
-  it('rename (identity change) rewrites access.md AND node frontmatter in ONE commit', async () => {
-    await write(repo, 'Sales/access.md', `---\nwrite:\n  - Sales\n  - Other Team\n---\n# Sales folder\n`);
-    await write(repo, 'Sales/Deal.md', `---\nowner: Sales\n---\n# A deal\n`);
-    access.invalidate(WS);
-    const commitsBefore = workflow.commits.length;
-
-    await svc.renameRole(ADMIN, 'sales', 'Sales Team');
-
-    // roles.yaml + both referencing files, all in a single commit (verified by
-    // commits.length += 1; the per-file content is asserted on disk below).
-    expect(workflow.commits.length).toBe(commitsBefore + 1);
-    expect(await fs.readFile(path.join(repo, 'Sales/access.md'), 'utf-8')).toContain('- Sales Team');
-    expect(await fs.readFile(path.join(repo, 'Sales/access.md'), 'utf-8')).toContain('- Other Team'); // untouched
-    expect(await fs.readFile(path.join(repo, 'Sales/Deal.md'), 'utf-8')).toContain('owner: Sales Team');
-    expect(await readRoles()).toContain('Sales Team:');
+  it("addMember refuses a 'group:'-prefixed member with an actionable message", async () => {
+    await expect(svc.addMember(ADMIN, 'sales', 'group:lee@x.io')).rejects.toMatchObject({
+      status: 422,
+    });
+    await expect(svc.addMember(ADMIN, 'sales', 'group:gtm team')).rejects.toThrow(/group assignment/);
+    expect(await readRoles()).not.toContain('group:');
   });
 
   it('LOCKOUT-IMPOSSIBILITY: the validator rejects garbage in isolation', async () => {
     expect(access.validateRolesYaml('roles:\n  : []\n').ok).toBe(false);
+    // Group-only Admin is garbage too — the kept invariant.
+    expect(access.validateRolesYaml('roles:\n  Admin:\n    - group:ops\n').ok).toBe(false);
     // Happy path still keeps admins resolving (sanity baseline for the gate).
-    await svc.createRole(ADMIN, 'Marketing');
+    await svc.addMember(ADMIN, 'sales', 'marketing@example.com');
     expect(await access.canWrite(WS, 'razvan@bevel.software', 'roles.yaml')).toBe(true);
   });
 
@@ -316,50 +359,49 @@ describe('RolesAdminService', () => {
     // — no commit, roles.yaml byte-for-byte unchanged, admin status intact. This
     // catches a regression that would write/commit before validating.
     const before = await readRoles();
-    const commitsBefore = workflow.commits.length;
+    const commitsBefore = versionControl.commits.length;
     const realValidate = access.validateRolesYaml.bind(access);
     access.validateRolesYaml = () => ({ ok: false, errors: ['forced parse failure'] });
     try {
-      await expect(svc.createRole(ADMIN, 'Marketing')).rejects.toMatchObject({ status: 422 });
+      await expect(svc.addMember(ADMIN, 'sales', 'x@example.com')).rejects.toMatchObject({ status: 422 });
     } finally {
       access.validateRolesYaml = realValidate;
     }
-    expect(workflow.commits.length).toBe(commitsBefore); // nothing committed
+    expect(versionControl.commits.length).toBe(commitsBefore); // nothing committed
     expect(await readRoles()).toBe(before); // file untouched
     expect(await access.canWrite(WS, 'razvan@bevel.software', 'roles.yaml')).toBe(true);
   });
 
-  it('rename fails closed when a candidate cannot be read (no partial rewrite)', async () => {
-    // A referenced file that the rewrite cannot read must abort the WHOLE atomic
-    // rename — committing roles.yaml + the readable files while silently skipping
-    // the unreadable one would leave a half-renamed role pointing at the old name
-    // (lost access). Assert: the op throws, nothing is committed, roles.yaml is
-    // unchanged, and the role keeps its old identity.
-    await write(repo, 'Sales/access.md', `---\nwrite:\n  - Sales\n---\n# Sales\n`);
-    access.invalidate(WS);
-    const before = await readRoles();
-    const commitsBefore = workflow.commits.length;
-    // Point the candidate list at a path that does not exist on disk, so the
-    // rewrite's readFile throws and the fail-closed guard fires.
-    (ws as unknown as { listFiles: () => Promise<FileTreeEntry> }).listFiles = async () => ({
-      name: WS,
-      relativePath: '.',
-      type: 'directory',
-      children: [
-        { name: 'does-not-exist.md', relativePath: `${KB}/Sales/does-not-exist.md`, type: 'file' },
-      ],
+  it('a post-commit push failure does NOT revert the landed edit (saved; retried later)', async () => {
+    // versionControlService.commitChanges throwing PushNeedsAgentResolutionError
+    // means the COMMIT landed and only the push needs help. The old twins
+    // restored pre-edit bytes here — publishing a compensating revert of a
+    // landed commit. The shared helper must keep the new bytes and surface
+    // the typed 409 as-is.
+    const failing = versionControl.svc as unknown as {
+      commitChanges: (...args: unknown[]) => Promise<unknown>;
+    };
+    const realCommit = failing.commitChanges.bind(versionControl.svc);
+    failing.commitChanges = async (...args: unknown[]) => {
+      await realCommit(...args); // the commit records — it "landed"
+      throw new PushNeedsAgentResolutionError(DEFAULT_BRANCH, 'roles.yaml', 'rejected', 'conflict');
+    };
+    await expect(svc.addMember(ADMIN, 'sales', 'pushed@example.com')).rejects.toMatchObject({
+      status: 409,
+      payload: { kind: 'push-needs-resolution' },
     });
-
-    await expect(svc.renameRole(ADMIN, 'sales', 'Sales Team')).rejects.toMatchObject({ status: 422 });
-
-    expect(workflow.commits.length).toBe(commitsBefore); // nothing committed
-    expect(await readRoles()).toBe(before); // roles.yaml untouched — role keeps old identity
+    // The edit SURVIVES on disk — no compensating restore of pre-edit bytes.
+    expect(await readRoles()).toContain('pushed@example.com');
+    // And the lock was released normally (a follow-up edit works).
+    failing.commitChanges = realCommit;
+    await svc.addMember(ADMIN, 'sales', 'after@example.com');
+    expect(await readRoles()).toContain('after@example.com');
   });
 
   it('concurrent edit is serialized — a mutation 409s while another admin holds the lock', async () => {
     // Another admin is mid-edit (holds the roles.yaml lock). The getLock
     // pre-check sees a different holder and refuses with a friendly 409.
-    await workflow.svc.acquireLock(WS, DEFAULT_BRANCH, `${KB}/roles.yaml`, OTHER_ADMIN);
+    await versionControl.svc.acquireLock(WS, DEFAULT_BRANCH, `${KB}/roles.yaml`, OTHER_ADMIN);
     await expect(svc.addMember(ADMIN, 'sales', 'x@example.com')).rejects.toMatchObject({ status: 409 });
   });
 
@@ -377,21 +419,6 @@ describe('RolesAdminService', () => {
     expect(bus.events).toHaveLength(0);
   });
 
-  it('rename emits file-changed for EVERY rewritten file (roles.yaml + refs)', async () => {
-    await write(repo, 'Sales/access.md', `---\nwrite:\n  - Sales\n---\n# Sales\n`);
-    await write(repo, 'Sales/Deal.md', `---\nowner: Sales\n---\n# A deal\n`);
-    access.invalidate(WS);
-
-    await svc.renameRole(ADMIN, 'sales', 'Sales Team');
-
-    const paths = bus.events
-      .filter((e) => e.kind === 'file-changed')
-      .map((e) => (e as { path: string }).path)
-      .sort();
-    expect(paths).toEqual(
-      [`${KB}/roles.yaml`, `${KB}/Sales/access.md`, `${KB}/Sales/Deal.md`].sort(),
-    );
-  });
 });
 
 describe('rewriteRoleTokensInText (reference-aware, frontmatter-only)', () => {
@@ -454,6 +481,57 @@ describe('rewriteRoleTokensInText (reference-aware, frontmatter-only)', () => {
   });
 });
 
+describe('rewriteRoleTokensInText — body-governed access.md (isAccessMd)', () => {
+  it('rewrites BODY rules and frontmatter self-rules of a body-governed access.md', () => {
+    const text = [
+      '---',
+      'write:',
+      '  - Sales', // self-rule: who may edit access.md itself
+      '---',
+      'read:',
+      '  - Sales', // the FOLDER rule the resolver enforces
+      '  - deny Sales',
+      'write:',
+      '  - Admin',
+    ].join('\n');
+    const out = rewriteRoleTokensInText(text, 'sales', 'Sales Team', true, true);
+    const lines = out.split('\n');
+    expect(lines[2]).toBe('  - Sales Team'); // frontmatter self-rule
+    expect(lines[5]).toBe('  - Sales Team'); // body rule
+    expect(lines[6]).toBe('  - deny Sales Team'); // deny preserved in body
+    expect(out).toContain('  - Admin'); // other roles untouched
+  });
+
+  it('a LEGACY access.md (prose body) keeps its body untouched even with isAccessMd', () => {
+    const text = [
+      '---',
+      'read:',
+      '  - Sales',
+      '---',
+      '# About this folder',
+      '- Sales', // prose bullet, not a rule — the body does not parse as rules
+    ].join('\n');
+    const out = rewriteRoleTokensInText(text, 'sales', 'Sales Team', true, true);
+    const lines = out.split('\n');
+    expect(lines[2]).toBe('  - Sales Team'); // legacy frontmatter rules rewritten
+    expect(lines[5]).toBe('- Sales'); // prose untouched
+  });
+
+  it('a fence-less access.md is untouched — the resolver hard-errors it, so it is no rule source', () => {
+    const text = 'read:\n  - Sales\n';
+    expect(rewriteRoleTokensInText(text, 'sales', 'Sales Team', true, true)).toBe(text);
+  });
+
+  it('findRoleRefsInText sees body rules of a body-governed access.md', () => {
+    const text = ['---', 'write:', '  - Admin', '---', 'read:', '  - Sales'].join('\n');
+    const refs = findRoleRefsInText(text, true, true);
+    expect(refs).toContainEqual({ role: 'sales', verb: 'read' });
+    expect(refs).toContainEqual({ role: 'admin', verb: 'write' });
+    // Without the access.md flag the body stays invisible (node files, prose).
+    expect(findRoleRefsInText(text, true, false)).not.toContainEqual({ role: 'sales', verb: 'read' });
+  });
+});
+
 describe('findRoleRefsInText (sound reference scan — shared with the rewrite)', () => {
   it('reports every genuine role ref with its enclosing verb, ignoring users/prose', () => {
     const text = [
@@ -477,5 +555,186 @@ describe('findRoleRefsInText (sound reference scan — shared with the rewrite)'
 
   it('a .md with no frontmatter fence has no references', () => {
     expect(findRoleRefsInText('# Doc\nread:\n  - Sales\n')).toEqual([]);
+  });
+});
+
+describe('roster referencedBy under group shadowing', () => {
+  let root: string;
+  let repo: string;
+  let svc: RolesAdminService;
+
+  beforeEach(async () => {
+    root = await mkTmpRoot();
+    const workspaceDir = path.join(root, WS);
+    repo = path.join(workspaceDir, KB);
+    await write(repo, 'roles.yaml', ROLES);
+    const ws = stubWorkspace(workspaceDir);
+    svc = new RolesAdminService(
+      ws,
+      stubVersionControl().svc,
+      new AccessControlService(ws, KB, new NodeFs()),
+      new NodeFs(),
+      KB,
+      () => DEFAULT_BRANCH,
+      stubEventBus().bus,
+    );
+  });
+
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it('a bare-token hit stays the ROLE’s when a group shares the name; group/<name> hits never are', async () => {
+    // A group named Sales shares the Sales role's name: bare tokens still
+    // resolve to the ROLE, so the roles roster claims them; group/ is the group.
+    await write(repo, 'groups.yaml', 'groups:\n  Sales:\n    - pat@x.io\n');
+    await write(
+      repo,
+      'team/access.md',
+      '---\nread:\n  - Sales\nwrite:\n  - role/Sales\nowner:\n  - group/Sales\n---\n',
+    );
+
+    const sales = (await svc.getRoster(SALES_VIEWER)).find((r) => r.canonical === 'sales')!;
+    expect(sales.referencedBy).toEqual([
+      { path: 'team/access.md', verb: 'read' },
+      { path: 'team/access.md', verb: 'write' },
+    ]);
+  });
+
+  it('with no group of the name: bare hits count for the role (both spellings)', async () => {
+    await write(repo, 'team/access.md', '---\nread:\n  - Sales\nwrite:\n  - role/Sales\n---\n');
+    const sales = (await svc.getRoster(SALES_VIEWER)).find((r) => r.canonical === 'sales')!;
+    expect(sales.referencedBy).toEqual([
+      { path: 'team/access.md', verb: 'read' },
+      { path: 'team/access.md', verb: 'write' },
+    ]);
+  });
+});
+
+/**
+ * The deployment admin (`ADMIN_EMAIL`) on the Admin role. The resolver admits
+ * that address ahead of `roles.yaml` (`isAdminEmail` checks `deploymentOwners`
+ * first), so the roster must SAY so — the bug this covers is a page that never
+ * showed the account, leaving "remove yourself from Admin" looking like it
+ * should work.
+ */
+describe('Admin fixed members — the deployment admin', () => {
+  const OWNER = 'owner@bevel.software';
+  let root: string;
+  let repo: string;
+  let ws: WorkspaceService;
+  let versionControl: ReturnType<typeof stubVersionControl>;
+
+  /** Service whose configured deployment admins are `admins`. */
+  function serviceWith(admins: readonly string[]): RolesAdminService {
+    return new RolesAdminService(
+      ws,
+      versionControl.svc,
+      new AccessControlService(ws, KB, new NodeFs()),
+      new NodeFs(),
+      KB,
+      () => DEFAULT_BRANCH,
+      stubEventBus().bus,
+      admins,
+    );
+  }
+
+  beforeEach(async () => {
+    root = await mkTmpRoot();
+    const workspaceDir = path.join(root, WS);
+    repo = path.join(workspaceDir, KB);
+    await write(repo, 'roles.yaml', ROLES);
+    ws = stubWorkspace(workspaceDir);
+    versionControl = stubVersionControl();
+  });
+
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it('lists the deployment admin as a fixed member of Admin, and of no other role', async () => {
+    const roster = await serviceWith([OWNER]).getRoster(ADMIN.email);
+    expect(roster.find((r) => r.canonical === 'admin')!.fixedMembers).toEqual([OWNER]);
+    expect(roster.find((r) => r.canonical === 'sales')!.fixedMembers).toEqual([]);
+  });
+
+  it('sends the note with the roster, and the refusal leads with that same note', async () => {
+    // The page prints `fixedMembersNote` as sent, so this is the one copy of
+    // the wording: the note and the API refusal cannot drift apart.
+    const svc = serviceWith([OWNER]);
+    const roster = await svc.getRoster(ADMIN.email);
+    const note = roster.find((r) => r.canonical === 'admin')!.fixedMembersNote;
+    expect(note).toBe('Owner; cannot be removed here');
+    expect(roster.find((r) => r.canonical === 'sales')!.fixedMembersNote).toBeNull();
+    const refusal = await svc.addMember(ADMIN, 'admin', OWNER).catch((e: Error) => e);
+    expect((refusal as Error).message.startsWith(`${note}. `)).toBe(true);
+  });
+
+  it('canonicalises the configured address and drops a blank one', async () => {
+    // The composition root passes `[config.adminEmail]` unconditionally, so an
+    // unset ADMIN_EMAIL arrives as [''] — that must not become a member "".
+    expect((await serviceWith(['']).getRoster(ADMIN.email)).find((r) => r.canonical === 'admin')!.fixedMembers)
+      .toEqual([]);
+    expect(
+      (await serviceWith(['  Owner@Bevel.Software  ']).getRoster(ADMIN.email)).find((r) => r.canonical === 'admin')!
+        .fixedMembers,
+    ).toEqual([OWNER]);
+  });
+
+  it('reports a fixed member the roles file ALSO names in both lists, so the invariant still counts the file', async () => {
+    // The seeded roles.yaml names ADMIN_EMAIL, so overlap is the normal case.
+    // `members` must keep it — the Admin >=1-direct-email invariant counts the
+    // FILE — and the page is what renders the overlap once.
+    const admin = (await serviceWith(['razvan@bevel.software']).getRoster(ADMIN.email)).find(
+      (r) => r.canonical === 'admin',
+    )!;
+    expect(admin.members).toContain('razvan@bevel.software');
+    expect(admin.fixedMembers).toEqual(['razvan@bevel.software']);
+  });
+
+  it('refuses to ADD the deployment admin to Admin, with the note the page shows', async () => {
+    const svc = serviceWith([OWNER]);
+    await expect(svc.addMember(ADMIN, 'admin', OWNER)).rejects.toMatchObject({
+      status: 422,
+      payload: { kind: 'fixed-deployment-admin' },
+      message: expect.stringContaining(
+        'Owner; cannot be removed here',
+      ),
+    });
+    // Nothing written: the file is byte-identical.
+    expect(await fs.readFile(path.join(repo, 'roles.yaml'), 'utf-8')).toBe(ROLES);
+  });
+
+  it('refuses the add whatever the spelling of the configured address', async () => {
+    await expect(
+      serviceWith(['Owner@Bevel.Software']).addMember(ADMIN, 'admin', 'OWNER@bevel.software'),
+    ).rejects.toMatchObject({ status: 422, payload: { kind: 'fixed-deployment-admin' } });
+  });
+
+  it('refuses to REMOVE the deployment admin from Admin — the page shows no remove control either', async () => {
+    await write(repo, 'roles.yaml', `roles:\n  Admin:\n    - ${OWNER}\n    - juan@bevel.software\n`);
+    const svc = serviceWith([OWNER]);
+    await expect(svc.removeMember(ADMIN, 'admin', OWNER, true)).rejects.toMatchObject({
+      status: 422,
+      payload: { kind: 'fixed-deployment-admin' },
+      message: expect.stringContaining(
+        'Owner; cannot be removed here',
+      ),
+    });
+    expect(await fs.readFile(path.join(repo, 'roles.yaml'), 'utf-8')).toContain(OWNER);
+  });
+
+  it('leaves OTHER roles editable for that address — a deployment admin is an ordinary Sales member', async () => {
+    const svc = serviceWith([OWNER]);
+    const roster = await svc.addMember(ADMIN, 'sales', OWNER);
+    expect(roster.find((r) => r.canonical === 'sales')!.members).toContain(OWNER);
+  });
+
+  it('with no ADMIN_EMAIL configured, no role has a fixed member', async () => {
+    const roster = await serviceWith([]).getRoster(ADMIN.email);
+    expect(roster.every((r) => r.fixedMembers.length === 0)).toBe(true);
+    expect(roster.every((r) => r.fixedMembersNote === null)).toBe(true);
+    // ...and ordinary Admin membership stays editable.
+    await expect(serviceWith([]).addMember(ADMIN, 'admin', OWNER)).resolves.toBeDefined();
   });
 });

@@ -15,13 +15,22 @@ const DEFAULT_PLUGINS: RemarkPlugins = [remarkGfm];
 // agent emits paths like this routinely (KB filenames contain spaces). Wrap
 // any unwrapped destination that contains a space in `<...>`, which CommonMark
 // accepts. Skips destinations that already start with `<` so we don't
-// double-wrap.
+// double-wrap. The same tail serves an image: `![alt](Some Shot.png)`.
 const LINK_WITH_SPACE_RE = /(\[[^\]\n]*\])\(([^<\s)][^)\n]*)\)/g;
+
+// A destination may end in a title: `path "title"` or `path 'title'`. The
+// title is the one place a space is legal, so it is split off before the path
+// is judged and wrapped; wrapping the whole thing (`<path "title">`) used to
+// turn the title into part of the path and lose it.
+const TRAILING_TITLE_RE = /^(.*?)(\s+(?:"[^"]*"|'[^']*'))$/;
 
 export function escapeSpacesInLinkDestinations(markdown: string): string {
   return markdown.replace(LINK_WITH_SPACE_RE, (match, label, destination) => {
-    if (!destination.includes(' ')) return match;
-    return `${label}(<${destination}>)`;
+    const titled = (destination as string).match(TRAILING_TITLE_RE);
+    const path = titled ? titled[1] : destination;
+    const title = titled ? titled[2] : '';
+    if (!path.includes(' ')) return match;
+    return `${label}(<${path}>${title})`;
   });
 }
 

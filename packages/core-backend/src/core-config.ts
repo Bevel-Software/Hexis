@@ -1,10 +1,21 @@
 import dotenv from 'dotenv';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { defaultKbTemplateDir } from './assets.js';
+import { defaultKbTemplateDir, defaultStarterPacksDir } from './assets.js';
+import { assertKeyDecodesTo32Bytes } from './shared/token-crypto.js';
+import { DEFAULT_GIT_TIMEOUT_MS } from './modules/version-control/git/node-git-runner.js';
+import { DEFAULT_DB_SCHEMA, assertSchemaName } from './modules/database/connection.js';
+import { logger } from './shared/logging.js';
+import { hasControlCharacter } from './modules/kb-fs/repo-path.js';
+import { sanitizedPath } from './shared/printable.js';
+
+const log = logger('config');
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
+
+/** The largest delay a Node timer honours; anything larger fires at once. */
+const MAX_TIMER_MS = 2_147_483_647;
 
 /**
  * The Postgres connection string: `DATABASE_URL` if given, otherwise built
@@ -36,15 +47,126 @@ export function resolveDatabaseUrl(env: NodeJS.ProcessEnv = process.env): string
 }
 
 /**
- * Configuration for the CORE platform: the git-backed workspace/workflow,
+ * `url` with any `user:pass@` removed and EVERY OTHER BYTE KEPT. Not a
+ * `new URL(...).toString()` round-trip: that drops a default port, lowercases
+ * the host and re-encodes, and a provider comparing redirect URIs as exact
+ * strings (Entra, Okta) would refuse the one an admin registered.
+ *
+ * Through the LAST `@` before the path, query or fragment: a password can
+ * carry an unencoded `@` of its own (`https://u:p@ss@host`), and stopping at
+ * the first would leave `ss@` — most of the credential — in what is kept.
+ */
+export function withoutUserinfo(url: string): string {
+  return url.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/?#]*@/i, '$1');
+}
+
+/**
+ * Everything ONE knowledge base's service graph is built from — the values
+ * that differ between two knowledge bases a process might host. A
+ * single-tenant deployment reads them from the environment ({@link CoreConfig});
+ * a host serving several builds one of these per tenant from its registry.
+ * `createCoreServices` takes this shape, so the two are the same code path.
+ *
+ * `port`, `nodeEnv` and `trustProxy` are process facts a graph still needs
+ * (the loopback address the MCP proxy dials, cookie flags, the proxy hop
+ * count its Express app trusts), so they appear here as well as on
+ * {@link ProcessConfig}: a tenant's config carries the values of the process
+ * it runs in.
+ */
+export interface TenantConfig {
+  readonly port: number;
+  readonly databaseUrl: string;
+  /** The Postgres schema this knowledge base's tables live in. `public` for a single-tenant deployment. */
+  readonly dbSchema: string;
+  readonly nodeEnv: string;
+  readonly tenantId: string;
+  /** The credential prefixes derived from `tenantId` — see the getters on {@link CoreConfig}. */
+  readonly externalApiKeyPrefix: string;
+  readonly internalTokenPrefix: string;
+  readonly uploadTokenPrefix: string;
+  readonly mcpOAuthTokenPrefix: string;
+  readonly workspacesRoot: string;
+  readonly backupsRoot: string;
+  readonly spillRoot: string;
+  readonly agentUploadsRoot: string;
+  readonly docExtractCacheRoot: string;
+  readonly jwtSecret: string;
+  readonly adminEmail: string;
+  readonly adminPassword: string;
+  readonly oidcIssuerUrl: string;
+  readonly oidcClientId: string;
+  readonly oidcClientSecret: string;
+  readonly oidcScopes: string;
+  readonly oidcProviderLabel: string;
+  readonly kbRepoUrl: string;
+  readonly kbDirName: string;
+  readonly gitUsername: string;
+  readonly gitToken: string;
+  readonly kbTemplateDir: string;
+  readonly starterPacksDir: string;
+  readonly updateCheckEnabled: boolean;
+  readonly loginPasswordEnabled: boolean;
+  /**
+   * Public-demo lockdown (see `CoreConfig.publicDemo`). Optional: a tenant
+   * record that does not say is not a demo, and only the single-process
+   * config ever sets it.
+   */
+  readonly publicDemo?: boolean;
+  readonly allowedEmailDomains: string[];
+  readonly secretsEncKey: string;
+  readonly internalTokenSecret: string;
+  readonly embedSharedSecret: string;
+  readonly trustProxy: string;
+  readonly gitTimeoutMs: number;
+  readonly publicBackendUrl: string;
+  readonly publicFrontendUrl: string;
+  readonly configuredPublicFrontendUrl: string | null;
+  /**
+   * Where this graph's own REST surface is reached from inside the process
+   * (the MCP proxy dials it, and seeds it into the UTCP manuals it builds).
+   * Unset, `http://127.0.0.1:<port>`; a tenant host names its tenant on the
+   * path — see `tenancy/tenant-host.ts`.
+   */
+  readonly loopbackBaseUrl?: string;
+  /**
+   * The environment the deployment settings (repository, git credential,
+   * branch model, SSO, sync secret, …) resolve against before the stored
+   * layer. Unset, the process's own. A tenant host builds one per tenant
+   * from its record, so a variable set on the host process never reaches
+   * every tenant and a record's values behave as environment-pinned ones.
+   */
+  readonly settingsEnv?: NodeJS.ProcessEnv;
+}
+
+/**
+ * What the PROCESS is configured with, independent of how many knowledge
+ * bases it serves: where it listens, which proxy hops it trusts, and the
+ * environment name. A single-tenant deployment's {@link CoreConfig} is both
+ * this and its one tenant's {@link TenantConfig}.
+ */
+export interface ProcessConfig {
+  readonly port: number;
+  readonly nodeEnv: string;
+  readonly trustProxy: string;
+}
+
+/**
+ * Configuration for the CORE platform: the git-backed workspace and version control,
  * skills, tools, secrets vault, access control, and the MCP surface. Contains
  * NO LLM, connector, or SSO-provider settings — those live on the enterprise
  * `AppConfig` (config.ts), which extends this class. A core-only deployment
  * boots from exactly these env vars.
  */
-export class CoreConfig {
+export class CoreConfig implements TenantConfig, ProcessConfig {
   readonly port: number;
   readonly databaseUrl: string;
+  /**
+   * The Postgres schema this deployment's tables live in (`DB_SCHEMA`,
+   * default `public`). Set it to host this knowledge base beside others in
+   * one database, each on a schema of its own; see
+   * `modules/database/connection.ts` for what that changes.
+   */
+  readonly dbSchema: string;
   readonly nodeEnv: string;
   /**
    * Tenant slug injected into every credential prefix so a deploy can brand its
@@ -71,6 +193,28 @@ export class CoreConfig {
    * never committed, best-effort GC'd on write.
    */
   readonly spillRoot: string;
+  /**
+   * Sibling-to-`workspacesRoot` location for the bytes an agent uploads with
+   * `request_file_upload`, held until `apply_file_upload` lands them (or their
+   * token expires, whichever comes first). BESIDE the workspaces, never inside
+   * one, and that placement is the point: an upload is content the server has
+   * accepted but not yet judged, so no file tool may name it — every workspace
+   * path resolves against a branch's checkout, and there is no spelling of one
+   * that reaches in here. Ephemeral and never committed.
+   *
+   * `AGENT_UPLOADS_ROOT` overrides it, and the placement is CHECKED at boot
+   * (`assertUploadsRootOutsideWorkspaces`): a value inside `workspacesRoot` —
+   * or one that resolves there through a link — refuses to start rather than
+   * quietly staging unjudged bytes where the file tools read.
+   */
+  readonly agentUploadsRoot: string;
+  /**
+   * Sibling-to-`workspacesRoot` location for the document-extraction cache —
+   * text extracted from office documents/PDFs (`read_file`/`grep`), keyed by
+   * git blob sha. Derived data only: safe to delete at any time, never
+   * committed, size-bounded by the cache itself.
+   */
+  readonly docExtractCacheRoot: string;
   readonly jwtSecret: string;
   /**
    * The deployment's owner. REQUIRED — three separate jobs rest on it, and a
@@ -127,6 +271,13 @@ export class CoreConfig {
    */
   readonly gitUsername: string;
   /**
+   * The git token the environment supplied (`GIT_TOKEN`, or the legacy
+   * `GITHUB_TOKEN` / `GH_TOKEN`), or `''`. The setup screen's stored token is
+   * read through the settings service instead; the composition root folds
+   * the two into the runner's credentials, environment first.
+   */
+  readonly gitToken: string;
+  /**
    * Filesystem path to the KB seed template (the `kb-template/` folder shipped
    * inside this package — see `defaultKbTemplateDir()`). The seeder reads this
    * to initialise an empty KB remote, and to top-up missing scaffolding on an
@@ -134,16 +285,23 @@ export class CoreConfig {
    */
   readonly kbTemplateDir: string;
   /**
-   * Ontology-session boundary kill-switch. When true (default), an agent run
-   * that has read across more than one ontology can no longer write. A no-op on
-   * a single-ontology KB. Set `ONTOLOGY_SESSION_BLOCK=false` to disable.
-   *
-   * Stays on CORE config (not `AppConfig`) even though the write BLOCK itself
-   * is an enterprise-registered hook: the flag also switches off the core-owned
-   * touch TRACKING (the gate skips entirely when false — see
-   * `session-ontology.gate.ts`), so it must exist wherever the tracking runs.
+   * Filesystem path to the starter packs a new knowledge base's admin may
+   * pick from (the `starter-packs/` folder shipped inside this package — see
+   * `defaultStarterPacksDir()`): one folder per team, each a `pack.yaml` with
+   * the pages and the plugin it adds. A distribution offers its own with
+   * `STARTER_PACKS_DIR`; a folder holding no valid pack offers none.
    */
-  readonly ontologySessionBlock: boolean;
+  readonly starterPacksDir: string;
+  /**
+   * In-app update check. When true (default), `GET /api/update-check` lazily
+   * asks api.github.com for the newest Hexis release — only when an admin's
+   * browser asks, cached for hours, never on a timer — so admins see a quiet
+   * banner when this deployment is behind. The request carries nothing but
+   * the request itself: no token, no identifier, no telemetry. Set
+   * `UPDATE_CHECK=false` for air-gapped deployments or anyone who objects to
+   * the phone-home; disabled, the server never makes the call.
+   */
+  readonly updateCheckEnabled: boolean;
   /**
    * Password-login toggle for the login screen. Default enabled; set
    * `LOGIN_PASSWORD=false` to hide the method AND reject `/auth/login`
@@ -159,7 +317,7 @@ export class CoreConfig {
    * already denies them everywhere except the two provisioning doors that
    * deliberately bypass it — group creation and the personal folder — so this
    * flag closes those two: both endpoints refuse with a visitor-facing
-   * message, and `/setup/status` reports the flag so the UI can explain
+   * message, and `GET /api/config` reports the flag so the UI can explain
    * itself instead of failing. Never set outside a public demo.
    */
   readonly publicDemo: boolean;
@@ -208,6 +366,17 @@ export class CoreConfig {
    */
   readonly internalTokenSecret: string;
   /**
+   * The shared secret the Atlassian connector presents to \`POST
+   * /api/embed/token\` (\`EMBED_SHARED_SECRET\`). Unset on a deployment that
+   * has no connector pointed at it, which 404s that one route — the embed
+   * surface itself needs no secret, because the MCP App mints through the
+   * authenticated MCP session instead.
+   *
+   * There is deliberately NO framing setting beside it: any site may frame
+   * the embed page (see the embed module), so there is no allowlist to keep.
+   */
+  readonly embedSharedSecret: string;
+  /**
    * Express `trust proxy` setting, from `TRUST_PROXY`: the number of reverse
    * proxy hops in front of this backend (e.g. `1`), or an address/CIDR list
    * (`loopback`, `10.0.0.0/8`). Unset (default) → forwarded headers are
@@ -215,19 +384,47 @@ export class CoreConfig {
    * but behind a proxy it makes every client share the proxy's IP (so the
    * per-IP login rate limit would pool all users). Set it to the actual hop
    * count — never a blanket trust — so clients can't spoof X-Forwarded-For.
+   * With `DOMAIN` set (the bundled Caddy fronts the deployment) it defaults
+   * to `1` instead — see the derivation in the constructor.
    */
   readonly trustProxy: string;
   /**
+   * Deadline in milliseconds on every git command, after which the child is
+   * killed and the call fails (see `modules/version-control/git/node-git-runner.ts`).
+   *
+   * Configurable because the right ceiling depends on the deployment's own git
+   * host and the size of its knowledge base: a first clone over a slow link can
+   * legitimately take minutes, and a deadline that cuts it off turns a working
+   * deployment into a broken one. Without a knob the remedy for a false timeout
+   * would be a release.
+   */
+  readonly gitTimeoutMs: number;
+  /**
    * Public base URL of THIS backend, used to build OAuth redirect URIs.
    * Must match a redirect URI registered with the OAuth provider(s).
+   * Defaults to `https://<DOMAIN>` when `DOMAIN` is set.
    */
   readonly publicBackendUrl: string;
-  /** Public base URL of the frontend, where callbacks redirect post-login. */
+  /**
+   * Public base URL of the frontend, where callbacks redirect post-login.
+   * Defaults to `https://<DOMAIN>` when `DOMAIN` is set, else to the backend
+   * origin in production (the backend serves the SPA) and Vite's `:5173` in
+   * development.
+   */
   readonly publicFrontendUrl: string;
+  /**
+   * The public frontend address when one is actually configured
+   * (`PUBLIC_FRONTEND_URL`, `https://<DOMAIN>`, or a production
+   * `PUBLIC_BACKEND_URL`), else null. Unlike `publicFrontendUrl` it never
+   * falls back to a local default, so a link built from it is one a person
+   * outside the deployment can open.
+   */
+  readonly configuredPublicFrontendUrl: string | null;
 
   constructor() {
     this.port = parseInt(process.env.PORT || '3001', 10);
     this.databaseUrl = resolveDatabaseUrl();
+    this.dbSchema = assertSchemaName((process.env.DB_SCHEMA || DEFAULT_DB_SCHEMA).trim());
     this.nodeEnv = process.env.NODE_ENV || 'development';
     this.tenantId = (process.env.TENANT_ID || 'bevel').trim().toLowerCase();
     if (!/^[a-z0-9]+$/.test(this.tenantId)) {
@@ -238,6 +435,10 @@ export class CoreConfig {
     this.workspacesRoot = process.env.WORKSPACES_ROOT || path.resolve(process.cwd(), 'workspaces');
     this.backupsRoot = process.env.BACKUPS_ROOT || path.resolve(this.workspacesRoot, '..', 'backups');
     this.spillRoot = process.env.SPILL_ROOT || path.resolve(this.workspacesRoot, '..', 'tool-chain-spills');
+    this.agentUploadsRoot =
+      process.env.AGENT_UPLOADS_ROOT || path.resolve(this.workspacesRoot, '..', 'agent-uploads');
+    this.docExtractCacheRoot =
+      process.env.DOC_EXTRACT_CACHE_ROOT || path.resolve(this.workspacesRoot, '..', 'doc-extract-cache');
     // Required, and checked BEFORE the auth routes it signs for are ever
     // mounted. Empty, the first login attempt fails deep inside the JWT library
     // with a message about a missing key — a boot error naming the variable is
@@ -296,13 +497,14 @@ export class CoreConfig {
     this.kbRepoUrl = (process.env.KB_REPO_URL || '').trim();
     this.kbDirName = (process.env.KB_DIR_NAME || '').trim();
     // Provider-neutral git token: operators can set GIT_TOKEN (or the legacy
-    // GITHUB_TOKEN / GH_TOKEN). Normalize onto GITHUB_TOKEN — the name the
-    // credential helper and every `$GITHUB_TOKEN` read + redaction use — so all
-    // three work unchanged. GIT_TOKEN takes PRECEDENCE: it's the provider-neutral
-    // name, so setting it must override a stale legacy GITHUB_TOKEN (e.g. when
-    // switching the KB from GitHub to GitLab), not be shadowed by it.
-    const gitToken = process.env.GIT_TOKEN || process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
-    if (gitToken) process.env.GITHUB_TOKEN = gitToken;
+    // GITHUB_TOKEN / GH_TOKEN). Read here, never written back: the git runner
+    // hands the token in effect to each child it spawns, so the process
+    // environment does not need to carry it, and a server hosting several
+    // knowledge bases could not carry all of theirs. GIT_TOKEN takes
+    // PRECEDENCE: it's the provider-neutral name, so setting it must override
+    // a stale legacy GITHUB_TOKEN (e.g. when switching the KB from GitHub to
+    // GitLab), not be shadowed by it.
+    this.gitToken = (process.env.GIT_TOKEN || process.env.GITHUB_TOKEN || process.env.GH_TOKEN || '').trim();
     this.gitUsername = (process.env.GIT_USERNAME || 'x-access-token').trim();
     // Interpolated into the credential-helper shell snippet, so reject anything
     // that isn't a plain token — no quotes, spaces, or shell metacharacters.
@@ -314,34 +516,92 @@ export class CoreConfig {
     // Default: the `kb-template/` folder shipped inside this package (works
     // both from src/ and compiled dist/ — see assets.ts).
     this.kbTemplateDir = process.env.KB_TEMPLATE_DIR || defaultKbTemplateDir();
-    this.ontologySessionBlock =
-      (process.env.ONTOLOGY_SESSION_BLOCK ?? 'true').trim().toLowerCase() !== 'false';
+    this.starterPacksDir = process.env.STARTER_PACKS_DIR || defaultStarterPacksDir();
+    this.updateCheckEnabled =
+      (process.env.UPDATE_CHECK ?? 'true').trim().toLowerCase() !== 'false';
     this.publicDemo = (process.env.PUBLIC_DEMO ?? '').trim().toLowerCase() === 'true';
     this.allowedEmailDomains = (process.env.ALLOWED_EMAIL_DOMAINS || '')
       .split(/[\s,]+/)
       .map((d) => d.trim().toLowerCase().replace(/^[@.]+/, ''))
       .filter((d) => d.length > 0);
-    this.secretsEncKey = (
-      process.env.SECRETS_ENC_KEY ||
-      process.env.CONNECTOR_CONFIG_ENC_KEY ||
-      process.env.SHAREPOINT_TOKEN_ENC_KEY ||
-      ''
-    ).trim();
-    if (!this.secretsEncKey) {
+    // Which variable actually supplied the key decides whose name a bad key
+    // is reported under: a legacy deploy still on the fallback chain must be
+    // told to fix the variable it set, not one it never heard of.
+    const secretsKeySource = (
+      ['SECRETS_ENC_KEY', 'CONNECTOR_CONFIG_ENC_KEY', 'SHAREPOINT_TOKEN_ENC_KEY'] as const
+    ).find((name) => (process.env[name] ?? '').trim() !== '');
+    this.secretsEncKey = secretsKeySource ? process.env[secretsKeySource]!.trim() : '';
+    if (!secretsKeySource) {
       throw new Error(
         'SECRETS_ENC_KEY is required — it encrypts the secrets vault, the MCP OAuth ' +
           'tokens and the git credential saved from the setup screen. Generate one ' +
           `with: node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"`,
       );
     }
+    // Validate the LENGTH here too, while the winning variable's name is in
+    // hand. Every later `new TokenCrypto(config.secretsEncKey)` blames
+    // SECRETS_ENC_KEY by default, which is only certainly right because a bad
+    // key never gets past this line.
+    assertKeyDecodesTo32Bytes(this.secretsEncKey, secretsKeySource);
     this.internalTokenSecret = (process.env.INTERNAL_TOKEN_SECRET || '').trim();
-    this.trustProxy = (process.env.TRUST_PROXY || '').trim();
-    this.publicBackendUrl = (process.env.PUBLIC_BACKEND_URL || `http://localhost:${this.port}`)
+    this.embedSharedSecret = (process.env.EMBED_SHARED_SECRET || '').trim();
+    // Setting DOMAIN declares "the bundled Caddy `https` profile fronts this
+    // deployment" — one proxy hop, and the public origin IS that domain. The
+    // three values below therefore default from it, so `DOMAIN=x.example.com`
+    // in `.env` is the whole configuration for that shape: TRUST_PROXY falls
+    // to 1 (Caddy is the hop) and both public URLs to `https://<DOMAIN>` (the
+    // backend serves the SPA, so they share an origin). Explicit
+    // PUBLIC_BACKEND_URL / PUBLIC_FRONTEND_URL / TRUST_PROXY always win — a
+    // CDN in front of Caddy (TRUST_PROXY=2) or a frontend served elsewhere
+    // stays expressible.
+    const domain = (process.env.DOMAIN || '').trim();
+    this.trustProxy = (process.env.TRUST_PROXY || (domain ? '1' : '')).trim();
+    // A non-numeric or non-positive value is a misconfiguration whose effect
+    // would be "no deadline at all", so it falls back to the default rather
+    // than being honoured. So does one past Node's largest timer delay
+    // (2^31-1 ms, ~24.8 days): `setTimeout` silently coerces that to 1ms,
+    // which would time every git command out on the spot.
+    const gitTimeout = Number(process.env.GIT_TIMEOUT_MS);
+    this.gitTimeoutMs =
+      Number.isFinite(gitTimeout) && gitTimeout > 0 && gitTimeout <= MAX_TIMER_MS
+        ? gitTimeout
+        : DEFAULT_GIT_TIMEOUT_MS;
+    // Userinfo stripped HERE, once, so no consumer can hand it on: a
+    // `PUBLIC_BACKEND_URL` spelled with `user:pass@` (a basic-auth proxy in
+    // front of the deployment) must not reach an identity provider in a
+    // redirect URI, a third-party OAuth provider, or `/api/config`.
+    const backendUrl = (process.env.PUBLIC_BACKEND_URL || (domain ? `https://${domain}` : `http://localhost:${this.port}`))
       .trim()
       .replace(/\/+$/, '');
-    this.publicFrontendUrl = (process.env.PUBLIC_FRONTEND_URL || 'http://localhost:5173')
+    this.publicBackendUrl = withoutUserinfo(backendUrl);
+    if (this.publicBackendUrl !== backendUrl) {
+      // Said out loud — it is likely a mistake — but never with the credential.
+      log.warn(
+        `PUBLIC_BACKEND_URL contains credentials (user:pass@); they are ignored and the public address is ${this.publicBackendUrl}.`,
+      );
+    }
+    // Unset, the frontend origin is the backend's own in production (the
+    // backend serves the built SPA — under docker compose this is what makes
+    // a bare `up -d` bounce logins back to the right place), and Vite's dev
+    // server in development.
+    this.publicFrontendUrl = (
+      process.env.PUBLIC_FRONTEND_URL ||
+      (domain
+        ? `https://${domain}`
+        : this.nodeEnv === 'production'
+          ? this.publicBackendUrl
+          : 'http://localhost:5173')
+    )
       .trim()
       .replace(/\/+$/, '');
+    // Only an address someone set counts — the localhost fallbacks above are
+    // no link to hand a person. In production an explicit backend origin is
+    // the frontend's too (the backend serves the SPA).
+    const frontendConfigured =
+      Boolean((process.env.PUBLIC_FRONTEND_URL || '').trim()) ||
+      Boolean(domain) ||
+      (this.nodeEnv === 'production' && Boolean((process.env.PUBLIC_BACKEND_URL || '').trim()));
+    this.configuredPublicFrontendUrl = frontendConfigured ? this.publicFrontendUrl : null;
     // Parse-validate so a malformed URL fails at boot rather than producing a
     // broken OAuth redirect later. (We intentionally don't force https / reject
     // localhost in production: local Docker runs prod mode over http://localhost.)
@@ -408,6 +668,17 @@ export class CoreConfig {
       path.isAbsolute(this.kbDirName)
     ) {
       throw new Error(`KB_DIR_NAME must be a single path segment: ${this.kbDirName}`);
+    }
+    // A control character, a line break above all: this name is PREFIXED onto
+    // every workspace-relative path, and a line break in a path is a separator
+    // in git's line-oriented stdin protocols (`cat-file --batch` reads one
+    // `<ref>:<path>` per line). A name carrying one would make the normaliser
+    // emit the very path it refuses from a caller — so the deployment fails to
+    // boot rather than resolving paths nothing downstream can safely read.
+    if (hasControlCharacter(this.kbDirName)) {
+      throw new Error(
+        `KB_DIR_NAME must not contain a control character: "${sanitizedPath(this.kbDirName)}"`,
+      );
     }
   }
 }

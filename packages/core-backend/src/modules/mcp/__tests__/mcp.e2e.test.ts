@@ -1,47 +1,85 @@
+import { randomUUID } from 'node:crypto';
 import type { Server as HttpServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import type { RequestHandler } from 'express';
 import express from 'express';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { CallTemplateSerializer, UtcpClientConfigSerializer } from '@utcp/sdk';
+import { CodeModeUtcpClient } from '@utcp/code-mode';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createMcpRoutes } from '../mcp.routes.js';
 import { McpService } from '../mcp.service.js';
-import { McpSessionStore } from '../mcp-session-store.js';
-import { SpillStore } from '../../workspace/spill-store.js';
-import { createManualRoutes } from '../../tool-registry/manual.routes.js';
-import { ToolRegistry } from '../../tool-registry/tool-registry.js';
-import { toolDef } from '../../tool-helpers/tool-def.js';
+import { SpillStore } from '../../workspace/index.js';
+import { ToolRegistry, createManualRoutes } from '../../tool-registry/index.js';
+import { toolDef } from '../../tool-helpers/index.js';
+import { DEFAULT_KB_LAYOUT } from '@bevel-software/platform-shared';
+import { platformInstructions } from '../../agent-instructions/index.js';
+import { startFakeDownstreamMcpServer, type FakeDownstreamMcpServer } from './fake-downstream-mcp-server.js';
+import { registerBevelSecretsVariableLoader } from '../../secrets-vault/index.js';
+import type { ForcedRefreshOutcome, ISecretsVaultService } from '../../secrets-vault/index.js';
+import type { IToolManualService } from '../../tool-manuals/index.js';
+import { setLogger } from '../../../shared/logging.js';
+import type { ILogger } from '../../../shared/logger.contract.js';
+import { formatProbeReport, probeFirstCall } from '../first-call-probe.js';
+import { printable } from '../../../shared/printable.js';
 
 /**
- * True end-to-end test over the REAL Streamable-HTTP MCP transport. A real MCP
- * `Client` talks to the real `createMcpRoutes` HTTP surface, which drives the
- * real `McpService` proxy, which discovers and dispatches against the real
- * `createExternalToolsRoutes` surface over loopback — all on one express app.
- * Nothing is faked except the two auth middlewares (we're testing the transport
- * + proxy wiring, not credential verification). This is the closest automated
- * coverage to a production MCP client connecting in.
+ * True end-to-end test over the REAL Streamable-HTTP MCP transport. Real MCP
+ * clients (the official SDK `Client`, and `@utcp/mcp` — the client `hexis-mcp`
+ * pins) talk to the real `createMcpRoutes` HTTP surface, which drives the real
+ * `McpService` proxy, which discovers and dispatches against real tool routes
+ * over loopback — all on one express app per "platform process". Nothing is
+ * faked except credential verification (a bearer → user map).
+ *
+ * The endpoint is STATELESS, so the suite's centre of gravity is what that
+ * buys: no session id ever issued, every request served on its own, and a
+ * platform restart between two requests of one client invisible to it.
  */
 
-const TEST_BEARER = 'bevel_e2e_testkey';
+const KEY_A = 'bevel_key_user_a';
+const KEY_B = 'bevel_key_user_b';
+const KEY_FORGER = 'bevel_key_user_forger';
+/**
+ * A user id carrying a whole forged log line — and one character from every
+ * class `printable` escapes: a C0 newline, a C1 control (U+009B, the one-byte
+ * CSI that opens an ANSI sequence), and a Unicode line separator (U+2028).
+ * `JSON.stringify` escapes only the first, so the last two are what keep the
+ * escaping test honest about what it pins.
+ */
+const FORGER_ID =
+  'user-C\ninfo: downstream token refresh: manual=notion user=root outcome=refreshed\u009b31m\u2028tail';
+/** An INTERACTIVE caller (OAuth/JWT): no connection-key id, so it gets the full tool listing. */
+const KEY_INTERACTIVE = 'bevel_key_user_interactive';
+const USERS: Record<string, { userId: string; tokenId?: string }> = {
+  [KEY_A]: { userId: 'user-A', tokenId: 'tok-A' },
+  [KEY_B]: { userId: 'user-B', tokenId: 'tok-B' },
+  [KEY_FORGER]: { userId: FORGER_ID, tokenId: 'tok-C' },
+  [KEY_INTERACTIVE]: { userId: 'user-I' },
+};
 
-let httpServer: HttpServer | undefined;
-const cleanups: Array<() => Promise<void>> = [];
+const bearerOf = (req: express.Request) => (req.headers.authorization ?? '').replace(/^Bearer\s+/i, '');
 
-// Stand-in auth: bind a user + token like the real middlewares do, accepting
-// the test bearer. Used for the /mcp surface; the loopback tool endpoints are
-// hosted directly below.
-const fakeAuth: RequestHandler = (req, _res, next) => {
-  req.userId = 'user-A';
-  req.externalApiKeyId = 'tok-1';
+// Stand-in auth: bind the user + connection-key id for the bearer, as the real
+// middleware does — per request, from that request's own header.
+const fakeAuth: RequestHandler = (req, res, next) => {
+  const user = USERS[bearerOf(req)];
+  if (!user) {
+    res.status(401).json({ error: 'unauthorized' });
+    return;
+  }
+  req.userId = user.userId;
+  req.externalApiKeyId = user.tokenId;
   next();
 };
 
-async function connectClient(): Promise<Client> {
+const passthrough: RequestHandler = (_req, _res, next) => next();
+
+/** A tool registry: the echo `ask` + erroring `boom`, plus `extra` tools only this catalog has. */
+function registryWith(extra: string[]): ToolRegistry {
   const registry = new ToolRegistry();
-  // Echo `ask` (reflects the received sessionId so continuity is observable) +
-  // an erroring `boom`, registered as defs and hosted as endpoints.
   registry.registerExternalTool(
     toolDef({
       name: 'ask',
@@ -57,94 +95,1368 @@ async function connectClient(): Promise<Client> {
   registry.registerExternalTool(
     toolDef({ name: 'boom', description: 'always errors', path: '/api/agent/tools/boom', inputs: { type: 'object', properties: {} } }),
   );
+  for (const name of extra) {
+    registry.registerExternalTool(
+      toolDef({ name, description: name, path: `/api/agent/tools/${name}`, inputs: { type: 'object', properties: {} } }),
+    );
+  }
+  return registry;
+}
+
+interface Platform {
+  baseUrl: string;
+  port: number;
+  service: McpService;
+  /** Loopback `ask` calls, with the bearer each one carried. */
+  askCalls: Array<{ bearer: string; prompt?: string; sessionId?: string }>;
+  stop(): Promise<void>;
+}
+
+interface PlatformOptions {
+  /** Bind this port — how a "restarted" platform comes back at the same address. */
+  port?: number;
+  readAgentPreamble?: () => Promise<string | null>;
+  /** The default branch the instructions name, read per request as the composition root wires it. */
+  defaultBranch?: () => string;
+  /** Extra manuals the catalog serves each caller (beyond the KB manual). */
+  manualsFor?: (bearer: string) => unknown[];
+  poolNow?: () => number;
+  /** The vault + manual catalog behind per-user credentials; absent ⇒ the proxy skips credential handling. */
+  secretsVault?: ConstructorParameters<typeof McpService>[1];
+  toolManuals?: ConstructorParameters<typeof McpService>[2];
+  /**
+   * Extra KB-manual tools in this platform's catalog. Empty for every suite
+   * that asserts on the catalog's exact contents; the first-call reproduction
+   * adds `start_session` so it can call the tool the ticket is about.
+   */
+  extraTools?: string[];
+}
+
+const platforms: Platform[] = [];
+const cleanups: Array<() => Promise<void>> = [];
+
+/**
+ * One "platform process": its own express app, its own `McpService`, nothing
+ * shared with any earlier instance — which is exactly what a restart leaves.
+ */
+async function startPlatform(opts: PlatformOptions = {}): Promise<Platform> {
+  const askCalls: Platform['askCalls'] = [];
+  // Per-user catalogs: user B can see `b_only`, user A cannot.
+  const routesA = createManualRoutes(registryWith(opts.extraTools ?? []), passthrough);
+  const routesB = createManualRoutes(registryWith(['b_only']), passthrough);
 
   const app = express();
   app.use(express.json());
   app.post('/api/agent/tools/ask', (req, res) => {
     const b = (req.body ?? {}) as { prompt?: string; sessionId?: string };
+    askCalls.push({ bearer: bearerOf(req), prompt: b.prompt, sessionId: b.sessionId });
     const incoming = typeof b.sessionId === 'string' ? b.sessionId : undefined;
     res.json({ text: `echo: ${b.prompt} sid=${incoming ?? 'NONE'}`, sessionId: incoming ?? 'sess-1' });
   });
   app.post('/api/agent/tools/boom', (_req, res) => res.status(500).json({ error: 'kaboom' }));
-
-  // Listen first so we know the port, then construct the proxy pointed at our
-  // own loopback address and mount the routes (Express allows post-listen use).
-  httpServer = await new Promise<HttpServer>((resolve) => {
-    const s = app.listen(0, () => resolve(s));
+  // The real `start_session` behind the core `UuidSessionSink`: a fresh id and
+  // no I/O whatsoever. Mounted on every platform, but reachable only through a
+  // catalog that lists the tool (see `extraTools`).
+  app.post('/api/agent/tools/start_session', (_req, res) => res.json({ sessionId: randomUUID() }));
+  app.get('/api/agent/all-tools', (req, res) => {
+    res.json({
+      manuals: [
+        {
+          name: 'KNOWLEDGE_BASE',
+          call_template_type: 'http',
+          http_method: 'GET',
+          url: '${API_URL}/api/agent/utcp',
+          content_type: 'application/json',
+          headers: { Authorization: 'Bearer ${CONNECTION_KEY}' },
+        },
+        ...(opts.manualsFor?.(bearerOf(req)) ?? []),
+      ],
+    });
   });
-  const port = (httpServer.address() as { port: number }).port;
+
+  const httpServer = await new Promise<HttpServer>((resolve) => {
+    const s = app.listen(opts.port ?? 0, '127.0.0.1', () => resolve(s));
+  });
+  const { port } = httpServer.address() as AddressInfo;
   const baseUrl = `http://127.0.0.1:${port}`;
 
-  const mcpService = new McpService(new McpSessionStore(), {
+  const service = new McpService({
     loopbackBaseUrl: baseUrl,
     manualName: 'KNOWLEDGE_BASE',
     spillStore: new SpillStore(join(tmpdir(), 'bevel-test-spills')),
     publicFrontendUrl: 'http://localhost:5173',
-  });
+    readAgentPreamble: opts.readAgentPreamble,
+    defaultBranch: opts.defaultBranch,
+    downstreamPool: opts.poolNow ? { now: opts.poolNow } : undefined,
+  }, opts.secretsVault, opts.toolManuals);
   const stub = {} as never;
-  app.use('/api', createMcpRoutes(mcpService, stub, fakeAuth, fakeAuth, stub));
-  app.use('/api', createManualRoutes(registry, fakeAuth));
+  app.use('/api', createMcpRoutes(service, stub, fakeAuth, fakeAuth, stub, stub, stub, ''));
+  // The loopback catalog is served per caller, from the bearer it carries.
+  app.use('/api', (req, res, next) => (bearerOf(req) === KEY_B ? routesB : routesA)(req, res, next));
 
+  let stopped = false;
+  const platform: Platform = {
+    baseUrl,
+    port,
+    service,
+    askCalls,
+    async stop() {
+      if (stopped) return;
+      stopped = true;
+      // A pooled downstream connection belongs to this process; a restart ends it.
+      service.onSecretsChanged(null);
+      httpServer.closeAllConnections();
+      await new Promise<void>((r) => httpServer.close(() => r()));
+    },
+  };
+  platforms.push(platform);
+  return platform;
+}
+
+/** Stop `platform` and bring a brand-new one up at the same address. */
+async function restart(platform: Platform, opts: PlatformOptions = {}): Promise<Platform> {
+  await platform.stop();
+  // A real restart has downtime, during which a client's idle keep-alive
+  // sockets see the close. Without this pause the test would instead measure a
+  // same-tick race — a pooled socket reused before its FIN was processed —
+  // that no restart produces and that has nothing to do with sessions.
+  await new Promise((r) => setTimeout(r, 50));
+  return startPlatform({ ...opts, port: platform.port });
+}
+
+async function connectSdkClient(baseUrl: string, bearer = KEY_A): Promise<{ client: Client; transport: StreamableHTTPClientTransport }> {
   const transport = new StreamableHTTPClientTransport(new URL(`${baseUrl}/api/mcp`), {
-    requestInit: { headers: { Authorization: `Bearer ${TEST_BEARER}` } },
+    requestInit: { headers: { Authorization: `Bearer ${bearer}` } },
   });
   const client = new Client({ name: 'e2e-client', version: '0.0.0' }, { capabilities: {} });
   await client.connect(transport);
   cleanups.push(async () => {
     await client.close();
   });
-  return client;
+  return { client, transport };
 }
+
+/** One raw JSON-RPC POST; the SSE or JSON body decoded into its messages. */
+async function rpc(
+  baseUrl: string,
+  body: unknown,
+  headers: Record<string, string> = {},
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- raw JSON-RPC bodies, read by shape
+): Promise<{ res: Response; messages: Array<{ id?: unknown; result?: any; error?: any }> }> {
+  const res = await fetch(`${baseUrl}/api/mcp`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json, text/event-stream',
+      Authorization: `Bearer ${KEY_A}`,
+      ...headers,
+    },
+    body: JSON.stringify(body),
+  });
+  const text = await res.text();
+  const messages = (res.headers.get('content-type') ?? '').includes('text/event-stream')
+    ? text
+        .split('\n')
+        .filter((line) => line.startsWith('data:'))
+        .map((line) => JSON.parse(line.slice('data:'.length)))
+    : text
+      ? [JSON.parse(text)]
+      : [];
+  return { res, messages };
+}
+
+const INITIALIZE = {
+  jsonrpc: '2.0',
+  id: 0,
+  method: 'initialize',
+  params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'raw', version: '0' } },
+};
+
+const toolText = (res: { content?: unknown }) => (res.content as Array<{ text: string }>)[0].text;
+const toolNames = async (client: Client) => (await client.listTools()).tools.map((t) => t.name).sort();
 
 afterEach(async () => {
   for (const c of cleanups.splice(0)) await c().catch(() => {});
-  if (httpServer) await new Promise<void>((r) => httpServer!.close(() => r()));
-  httpServer = undefined;
+  for (const p of platforms.splice(0)) await p.stop().catch(() => {});
+  vi.restoreAllMocks();
 });
 
 describe('MCP over real Streamable-HTTP transport', () => {
   it('initializes, discovers, and lists the proxied tools with their schemas verbatim', async () => {
-    const client = await connectClient();
+    const { baseUrl } = await startPlatform();
+    const { client } = await connectSdkClient(baseUrl);
     const { tools } = await client.listTools();
     const byName = Object.fromEntries(tools.map((t) => [t.name, t]));
 
     expect(Object.keys(byName).sort()).toEqual(['ask', 'boom', 'call_tool_chain', 'list_tools', 'tools_info']);
     // The {body} envelope the manual carries reaches the client untouched.
-    expect((byName.ask.inputSchema as any).properties.body.properties.prompt).toBeDefined();
+    const askSchema = byName.ask.inputSchema as { properties: { body?: { properties?: Record<string, unknown> } } };
+    expect(askSchema.properties.body?.properties?.prompt).toBeDefined();
   });
 
   it('calls a tool end-to-end and returns the result text', async () => {
-    const client = await connectClient();
+    const { baseUrl } = await startPlatform();
+    const { client } = await connectSdkClient(baseUrl);
     const res = await client.callTool({ name: 'ask', arguments: { body: { prompt: 'hello' } } });
-    // The whole structured result is stringified, so the answer text and the
-    // returned sessionId both survive for a client without proxy auto-inject.
-    const payload = JSON.parse((res.content as Array<{ text: string }>)[0].text);
+    const payload = JSON.parse(toolText(res));
     expect(payload.text).toBe('echo: hello sid=NONE');
     expect(payload.sessionId).toBe('sess-1');
     expect(res.isError).toBeFalsy();
   });
 
-  it('continuity is the caller\'s: an echoed sessionId reaches the tool verbatim', async () => {
-    const client = await connectClient();
-    // First call: no sessionId → the tool starts a conversation and returns
-    // 'sess-1' in the (fully stringified) result for the caller to read.
-    const res1 = await client.callTool({ name: 'ask', arguments: { body: { prompt: 'one' } } });
-    const first = JSON.parse((res1.content as Array<{ text: string }>)[0].text);
-    expect(first.text).toBe('echo: one sid=NONE');
-    expect(first.sessionId).toBe('sess-1');
-    // Second call: the CALLER echoes the id per the tool's schema — the proxy
-    // passes it through untouched, no server-side injection.
-    const res2 = await client.callTool({
-      name: 'ask',
-      arguments: { body: { prompt: 'two', sessionId: first.sessionId } },
-    });
-    expect(JSON.parse((res2.content as Array<{ text: string }>)[0].text).text).toBe('echo: two sid=sess-1');
-  });
-
   it('surfaces a downstream tool failure as an MCP isError result', async () => {
-    const client = await connectClient();
+    const { baseUrl } = await startPlatform();
+    const { client } = await connectSdkClient(baseUrl);
     const res = await client.callTool({ name: 'boom', arguments: {} });
     expect(res.isError).toBe(true);
-    expect((res.content as Array<{ text: string }>)[0].text).toMatch(/kaboom/i);
+    expect(toolText(res)).toMatch(/kaboom/i);
+  });
+
+  it('call_tool_chain runs against the request-built client', async () => {
+    const { baseUrl } = await startPlatform();
+    const { client } = await connectSdkClient(baseUrl);
+    const res = await client.callTool({
+      name: 'call_tool_chain',
+      arguments: { code: "return KNOWLEDGE_BASE.ask({ body: { prompt: 'chain' } });" },
+    });
+    expect(JSON.parse(toolText(res)).result).toMatchObject({ text: 'echo: chain sid=NONE' });
+  });
+});
+
+describe('stateless: no session, every request on its own', () => {
+  it('initialize succeeds without ever issuing an Mcp-Session-Id', async () => {
+    const { baseUrl } = await startPlatform();
+    const { res, messages } = await rpc(baseUrl, INITIALIZE);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('mcp-session-id')).toBeNull();
+    expect(messages[0].result.serverInfo.name).toBe('bevel-mcp');
+    // And the official client, following the server's lead, holds no session id.
+    const { transport } = await connectSdkClient(baseUrl);
+    expect(transport.sessionId).toBeUndefined();
+  });
+
+  it('serves tools/list and tools/call with no prior initialize at all', async () => {
+    const { baseUrl } = await startPlatform();
+    const list = await rpc(baseUrl, { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} });
+    expect(list.res.status).toBe(200);
+    expect(list.res.headers.get('mcp-session-id')).toBeNull();
+    expect(list.messages[0].result.tools.map((t: { name: string }) => t.name)).toContain('ask');
+
+    const call = await rpc(baseUrl, {
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'tools/call',
+      params: { name: 'ask', arguments: { body: { prompt: 'cold' } } },
+    });
+    expect(call.res.status).toBe(200);
+    expect(JSON.parse(call.messages[0].result.content[0].text).text).toBe('echo: cold sid=NONE');
+  });
+
+  it('never answers "Session not found": a stale session id from before is simply ignored', async () => {
+    const { baseUrl } = await startPlatform();
+    const { res, messages } = await rpc(
+      baseUrl,
+      { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} },
+      { 'mcp-session-id': 'sess-from-before-the-restart' },
+    );
+    expect(res.status).toBe(200);
+    expect(messages[0].error).toBeUndefined();
+    expect(messages[0].result.tools.length).toBeGreaterThan(0);
+  });
+
+  it.each(['GET', 'DELETE'])('%s /mcp is retired with 405', async (method) => {
+    const { baseUrl } = await startPlatform();
+    const res = await fetch(`${baseUrl}/api/mcp`, { method, headers: { Authorization: `Bearer ${KEY_A}` } });
+    expect(res.status).toBe(405);
+    expect(res.headers.get('allow')).toBe('POST');
+  });
+});
+
+describe('a platform restart is invisible to a connected client', () => {
+  it('official SDK client: the next tools/list and tools/call after a restart just work', async () => {
+    const first = await startPlatform();
+    const { client } = await connectSdkClient(first.baseUrl);
+    expect(await toolNames(client)).toContain('ask');
+
+    // A brand-new process at the same address: new app, new McpService, nothing carried over.
+    const second = await restart(first);
+
+    // Same client object, no re-initialize, no reconnect.
+    expect(await toolNames(client)).toContain('ask');
+    const res = await client.callTool({ name: 'ask', arguments: { body: { prompt: 'after' } } });
+    expect(res.isError).toBeFalsy();
+    expect(JSON.parse(toolText(res)).text).toBe('echo: after sid=NONE');
+    // Served by the new process, which never saw an initialize from this client.
+    expect(second.askCalls).toHaveLength(1);
+  });
+
+  it("`@utcp/mcp` (hexis-mcp's client): a registered manual keeps calling across a restart", async () => {
+    const first = await startPlatform();
+    const client = await CodeModeUtcpClient.create(process.cwd(), new UtcpClientConfigSerializer().validateDict({}));
+    cleanups.push(() => client.close());
+    const registered = await client.registerManual(
+      new CallTemplateSerializer().validateDict({
+        name: 'hexis',
+        call_template_type: 'mcp',
+        config: {
+          mcpServers: {
+            platform: {
+              transport: 'http',
+              url: `${first.baseUrl}/api/mcp`,
+              headers: { Authorization: `Bearer ${KEY_A}` },
+            },
+          },
+        },
+      }),
+    );
+    expect(registered.success).toBe(true);
+    const names = (await client.getTools()).map((t) => t.name);
+    expect(names).toContain('hexis.platform.ask');
+
+    const before = await client.callTool('hexis.platform.ask', { body: { prompt: 'one' } });
+    expect(JSON.stringify(before)).toContain('echo: one');
+
+    const second = await restart(first);
+    const after = await client.callTool('hexis.platform.ask', { body: { prompt: 'two' } });
+    expect(JSON.stringify(after)).toContain('echo: two');
+    expect(second.askCalls.map((c) => c.prompt)).toEqual(['two']);
+  });
+});
+
+describe('per-request identity: catalog, metering and continuity', () => {
+  it("two users' catalogs never bleed into each other, even interleaved on one process", async () => {
+    const { baseUrl } = await startPlatform();
+    const { client: a } = await connectSdkClient(baseUrl, KEY_A);
+    const { client: b } = await connectSdkClient(baseUrl, KEY_B);
+    const [listA1, listB1] = await Promise.all([toolNames(a), toolNames(b)]);
+    const [listB2, listA2] = await Promise.all([toolNames(b), toolNames(a)]);
+    expect(listA1).not.toContain('b_only');
+    expect(listA2).not.toContain('b_only');
+    expect(listB1).toContain('b_only');
+    expect(listB2).toContain('b_only');
+    // A cannot call what it was not given, however recently B listed it.
+    const denied = await a.callTool({ name: 'b_only', arguments: {} });
+    expect(denied.isError).toBe(true);
+    expect(toolText(denied)).toMatch(/Unknown tool/);
+  });
+
+  it('answers the retired merge_change_request with who merges now, not "Unknown tool"', async () => {
+    const { baseUrl } = await startPlatform();
+    const { client } = await connectSdkClient(baseUrl, KEY_A);
+    expect(await toolNames(client)).not.toContain('merge_change_request');
+    const res = await client.callTool({ name: 'merge_change_request', arguments: { body: { number: 4 } } });
+    expect(res.isError).toBe(true);
+    expect(toolText(res)).toMatch(/a change request is merged by a person in the app/);
+    // And from inside a code-mode chain, where the runner reports the failure
+    // in its logs instead of throwing.
+    const chained = await client.callTool({
+      name: 'call_tool_chain',
+      arguments: { code: 'return KNOWLEDGE_BASE.merge_change_request({ body: { number: 4 } })' },
+    });
+    expect(chained.isError).toBe(true);
+    expect(toolText(chained)).toMatch(/a change request is merged by a person in the app/);
+  });
+
+  it('metering: every loopback call carries THAT request\'s connection key', async () => {
+    const platform = await startPlatform();
+    const { client: a } = await connectSdkClient(platform.baseUrl, KEY_A);
+    const { client: b } = await connectSdkClient(platform.baseUrl, KEY_B);
+    await a.callTool({ name: 'ask', arguments: { body: { prompt: 'from-a' } } });
+    await b.callTool({ name: 'ask', arguments: { body: { prompt: 'from-b' } } });
+    await a.callTool({ name: 'ask', arguments: { body: { prompt: 'from-a-again' } } });
+    expect(platform.askCalls.map((c) => [c.prompt, c.bearer])).toEqual([
+      ['from-a', KEY_A],
+      ['from-b', KEY_B],
+      ['from-a-again', KEY_A],
+    ]);
+  });
+
+  it("`ask` continuity rides the tool's own sessionId — across a restart too", async () => {
+    const first = await startPlatform();
+    const { client } = await connectSdkClient(first.baseUrl);
+    const res1 = await client.callTool({ name: 'ask', arguments: { body: { prompt: 'one' } } });
+    const { sessionId } = JSON.parse(toolText(res1));
+    expect(sessionId).toBe('sess-1');
+
+    const second = await restart(first);
+    const res2 = await client.callTool({ name: 'ask', arguments: { body: { prompt: 'two', sessionId } } });
+    expect(JSON.parse(toolText(res2)).text).toBe('echo: two sid=sess-1');
+    expect(second.askCalls[0].sessionId).toBe('sess-1');
+  });
+});
+
+describe('agent instructions over the real transport', () => {
+  it('the initialize result carries the platform text and the preamble body inline', async () => {
+    const { baseUrl } = await startPlatform({
+      readAgentPreamble: async () => 'Acme builds solar farms.\n\n<!-- private -->Look in Projects/ first.',
+      defaultBranch: () => 'target-company-state',
+    });
+    const { client } = await connectSdkClient(baseUrl);
+    const instructions = client.getInstructions();
+    expect(instructions).toBe(
+      `${platformInstructions(DEFAULT_KB_LAYOUT, 'target-company-state')}\n\nAcme builds solar farms.\n\nLook in Projects/ first.`,
+    );
+    expect(instructions).not.toContain('private');
+    // The deployment's default branch, by its own name — not `main`.
+    expect(instructions).toContain("This knowledge base's default branch is `target-company-state`");
+  });
+
+  it('a default branch renamed between two initializes is the one the second names', async () => {
+    let branch = 'target-company-state';
+    const { baseUrl } = await startPlatform({ defaultBranch: () => branch });
+    const { client: before } = await connectSdkClient(baseUrl);
+    branch = 'company-state';
+    const { client: after } = await connectSdkClient(baseUrl);
+    expect(after.getInstructions()).toContain("This knowledge base's default branch is `company-state`");
+    expect(after.getInstructions()).not.toContain('target-company-state');
+    // Nothing else moved: the text is the old one with the name swapped.
+    expect(after.getInstructions()).toBe(before.getInstructions()!.replaceAll('target-company-state', 'company-state'));
+  });
+
+  it('a later initialize on the SAME process after the file changed carries the new text — read per request', async () => {
+    let content = 'Version one.';
+    const { baseUrl } = await startPlatform({ readAgentPreamble: async () => content });
+    const { client: first } = await connectSdkClient(baseUrl);
+    expect(first.getInstructions()).toContain('Version one.');
+
+    content = 'Version two.';
+    const { client: second } = await connectSdkClient(baseUrl);
+    expect(second.getInstructions()).toContain('Version two.');
+    expect(second.getInstructions()).not.toContain('Version one.');
+    // The first client keeps the instructions it was initialised with.
+    expect(first.getInstructions()).toContain('Version one.');
+  });
+});
+
+describe('proxied third-party MCP servers: the downstream pool', () => {
+  let downstream: FakeDownstreamMcpServer | undefined;
+  afterEach(async () => {
+    await downstream?.stop();
+    downstream = undefined;
+  });
+
+  /** A catalog that gives every caller one `mcp.json`-style manual at the fake server. */
+  const withDownstream = (server: FakeDownstreamMcpServer) => () => [
+    { name: 'notion', call_template_type: 'mcp', config: { mcpServers: { srv: { transport: 'http', url: server.url } } } },
+  ];
+
+  const echoName = async (client: Client) => {
+    const name = (await client.listTools()).tools.map((t) => t.name).find((n) => n.endsWith('echo'));
+    expect(name).toBeDefined();
+    return name!;
+  };
+
+  it('lists and calls a proxied tool, reusing ONE downstream connection across requests', async () => {
+    downstream = await startFakeDownstreamMcpServer();
+    const { baseUrl } = await startPlatform({ manualsFor: withDownstream(downstream) });
+    const { client } = await connectSdkClient(baseUrl);
+    const name = await echoName(client);
+    for (const text of ['one', 'two', 'three']) {
+      const res = await client.callTool({ name, arguments: { text } });
+      expect(res.isError).toBeFalsy();
+      expect(toolText(res)).toContain(text);
+    }
+    // Four requests (list + three calls), one handshake.
+    expect(downstream.initializations()).toBe(1);
+    expect(downstream.executions()).toBe(3);
+  });
+
+  it('single-flight: concurrent first calls to one server produce one connection', async () => {
+    downstream = await startFakeDownstreamMcpServer();
+    const { baseUrl } = await startPlatform({ manualsFor: withDownstream(downstream) });
+    const results = await Promise.all(
+      Array.from({ length: 5 }, (_, i) =>
+        rpc(baseUrl, { jsonrpc: '2.0', id: i, method: 'tools/call', params: { name: 'notion_srv_echo', arguments: { text: `c${i}` } } }),
+      ),
+    );
+    for (const { res } of results) expect(res.status).toBe(200);
+    expect(downstream.initializations()).toBe(1);
+  });
+
+  it('pools per (user, server): another user gets a connection of their own, even for an identical definition', async () => {
+    downstream = await startFakeDownstreamMcpServer();
+    // The same server definition for both users, with no per-user credential
+    // in it — the case where nothing but the pool boundary keeps them apart.
+    const { baseUrl } = await startPlatform({ manualsFor: withDownstream(downstream) });
+    const { client: a } = await connectSdkClient(baseUrl, KEY_A);
+    const { client: b } = await connectSdkClient(baseUrl, KEY_B);
+    await a.callTool({ name: await echoName(a), arguments: { text: 'a' } });
+    await b.callTool({ name: await echoName(b), arguments: { text: 'b' } });
+    // Each pooled client owns its own `mcp` protocol instance, so each user's
+    // entry dials its own session: a second initialization, not a shared one.
+    expect(downstream.initializations()).toBe(2);
+  });
+
+  it('recovery pass-through: a downstream restart is healed on the next call', async () => {
+    downstream = await startFakeDownstreamMcpServer();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { baseUrl } = await startPlatform({ manualsFor: withDownstream(downstream) });
+    const { client } = await connectSdkClient(baseUrl);
+    const name = await echoName(client);
+    await client.callTool({ name, arguments: { text: 'before' } });
+
+    await downstream.restart(); // the downstream forgets our session
+
+    const res = await client.callTool({ name, arguments: { text: 'after' } });
+    expect(res.isError).toBeFalsy();
+    expect(toolText(res)).toContain('after');
+    expect(downstream.initializations()).toBe(2);
+  });
+
+  it('an mcp.json edited after a failure is tried on the next request, not after the failure memo expires', async () => {
+    downstream = await startFakeDownstreamMcpServer();
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    let url = 'http://127.0.0.1:1/mcp'; // nothing listens: registration fails and is memoized
+    const { baseUrl } = await startPlatform({
+      manualsFor: () => [
+        { name: 'notion', call_template_type: 'mcp', config: { mcpServers: { srv: { transport: 'http', url } } } },
+      ],
+    });
+    const { client } = await connectSdkClient(baseUrl);
+    expect((await client.listTools()).tools.some((t) => t.name.endsWith('echo'))).toBe(false);
+
+    url = downstream.url; // the user corrects the definition
+    await echoName(client);
+    expect(downstream.initializations()).toBe(1);
+  });
+
+  it('idle eviction: an entry unused past the TTL is closed and re-dialed lazily', async () => {
+    downstream = await startFakeDownstreamMcpServer();
+    let now = 1_000_000;
+    const { baseUrl } = await startPlatform({ manualsFor: withDownstream(downstream), poolNow: () => now });
+    const { client } = await connectSdkClient(baseUrl);
+    const name = await echoName(client);
+    await client.callTool({ name, arguments: { text: 'x' } });
+    expect(downstream.initializations()).toBe(1);
+
+    now += 4 * 60 * 60 * 1000 + 1; // past the default 4h idle TTL
+    const res = await client.callTool({ name, arguments: { text: 'y' } });
+    expect(res.isError).toBeFalsy();
+    expect(downstream.initializations()).toBe(2);
+  });
+});
+
+describe('proxied third-party MCP servers: a rejected token gets one refresh and a retry', () => {
+  let downstream: FakeDownstreamMcpServer | undefined;
+  let restoreLogger: ILogger | undefined;
+  afterEach(async () => {
+    await downstream?.stop();
+    downstream = undefined;
+    registerBevelSecretsVariableLoader(null as unknown as ISecretsVaultService);
+    if (restoreLogger) setLogger(restoreLogger);
+    restoreLogger = undefined;
+  });
+
+  const KEY = 'notion_ACCESS_TOKEN';
+
+  /**
+   * One user's stored OAuth sign-in for the `notion` manual, as the proxy sees
+   * it through the vault contract: `resolve` hands out the current token, and
+   * `forceRefresh` does what the test scripts — rotate it, wipe it (a dead
+   * grant), or leave it (a provider outage).
+   */
+  function fakeSignIn(initialToken: string, onRefresh: (s: { token: string | null }) => ForcedRefreshOutcome) {
+    const state = { token: initialToken as string | null, refreshes: 0 };
+    const vault = {
+      resolve: async (_userId: string, key: string) => (key === KEY ? state.token : null),
+      statusFor: async (_userId: string, keys: string[]) =>
+        keys.map((key) => ({ key, adminConfigured: false, userConfigured: true, userAuthorized: state.token !== null })),
+      forceRefresh: async (_userId: string, key: string) => {
+        expect(key).toBe(KEY);
+        state.refreshes += 1;
+        return onRefresh(state);
+      },
+    } as unknown as ISecretsVaultService;
+    registerBevelSecretsVariableLoader(vault);
+    const toolManuals = {
+      sharedSignInKeysForManual: async () => [],
+      userScopedKeysForManual: async (manual: string) =>
+        manual === 'notion' ? [{ key: KEY, name: 'ACCESS_TOKEN', label: 'Notion sign-in', oauth: true }] : [],
+    } as unknown as IToolManualService;
+    return { state, vault, toolManuals };
+  }
+
+  const notionManual = (server: FakeDownstreamMcpServer) => () => [
+    {
+      name: 'notion',
+      call_template_type: 'mcp',
+      config: {
+        mcpServers: { srv: { transport: 'http', url: server.url, headers: { Authorization: 'Bearer ${ACCESS_TOKEN}' } } },
+      },
+    },
+  ];
+
+  /** Every log line, flattened to text, so a test can assert what was — and was not — written. */
+  function captureLogs(): string[] {
+    const lines: string[] = [];
+    const capture = (bindings: Record<string, unknown>): ILogger => {
+      const write = (message: string, fields?: Record<string, unknown>) =>
+        lines.push(JSON.stringify({ ...bindings, message, fields }, (_k, v) => (v instanceof Error ? v.message : v)));
+      return { debug: write, info: write, warn: write, error: write, child: (more) => capture({ ...bindings, ...more }) };
+    };
+    restoreLogger = setLogger(capture({}));
+    return lines;
+  }
+  const refreshLines = (lines: string[]) => lines.filter((l) => l.includes('downstream token refresh'));
+
+  /**
+   * Does this text carry anything `printable` escapes? Everything it escapes,
+   * not just the C0 controls: DEL and the C1 block (U+009B is a one-byte CSI —
+   * an ANSI sequence on its own) and the line separators U+2028/U+2029 all
+   * survive `captureLogs`' JSON round trip raw, so a C0-only check would let a
+   * regression that dropped their escaping through while the line still breaks
+   * or colours an operator's terminal.
+   */
+  const unprintable = (text: string) =>
+    [...text].some((c) => {
+      const code = c.codePointAt(0)!;
+      return code < 0x20 || (code >= 0x7f && code <= 0x9f) || code === 0x2028 || code === 0x2029;
+    });
+
+  const quiet = () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+  };
+
+  it('reproduction: a deliberately invalid stored token is refreshed at the handshake and the tool works', async () => {
+    quiet();
+    let valid = 'fresh-token';
+    downstream = await startFakeDownstreamMcpServer({ acceptsToken: (t) => t === valid });
+    const { state, vault, toolManuals } = fakeSignIn('deliberately-invalid-token', (s) => {
+      s.token = valid;
+      return 'refreshed';
+    });
+    const logs = captureLogs();
+    const { baseUrl } = await startPlatform({ manualsFor: notionManual(downstream), secretsVault: vault, toolManuals });
+    const { client } = await connectSdkClient(baseUrl);
+
+    const res = await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'hello' } });
+
+    expect(res.isError).toBeFalsy();
+    expect(toolText(res)).toContain('hello');
+    expect(state.refreshes).toBe(1);
+    expect(downstream.rejections()).toBeGreaterThan(0);
+    expect(refreshLines(logs)).toHaveLength(1);
+    expect(refreshLines(logs)[0]).toContain('manual=\\"notion\\" user=\\"user-A\\" outcome=refreshed');
+    valid = 'unused';
+  });
+
+  it('401 → refresh → retry: a token revoked mid-life is refreshed and the call succeeds; the caller sees only that', async () => {
+    quiet();
+    let valid = 'token-1';
+    downstream = await startFakeDownstreamMcpServer({ acceptsToken: (t) => t === valid });
+    const { state, vault, toolManuals } = fakeSignIn('token-1', (s) => {
+      s.token = 'token-2';
+      return 'refreshed';
+    });
+    const { baseUrl } = await startPlatform({ manualsFor: notionManual(downstream), secretsVault: vault, toolManuals });
+    const { client } = await connectSdkClient(baseUrl);
+    expect(toolText(await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'one' } }))).toContain('one');
+    expect(downstream.initializations()).toBe(1);
+
+    valid = 'token-2'; // the provider revokes token-1 before its stated expiry
+
+    const res = await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'two' } });
+    expect(res.isError).toBeFalsy();
+    expect(toolText(res)).toContain('two');
+    expect(state.refreshes).toBe(1);
+    expect(downstream.executions()).toBe(2); // the refused attempt ran nothing
+    expect(downstream.initializations()).toBe(2); // the retry dialed with the fresh token
+  });
+
+  it('refresh rejected → token wiped → status not connected → the answer says to re-authorize on /connect', async () => {
+    quiet();
+    let valid = 'token-1';
+    downstream = await startFakeDownstreamMcpServer({ acceptsToken: (t) => t === valid });
+    const { state, vault, toolManuals } = fakeSignIn('token-1', (s) => {
+      s.token = null; // the vault wipes a dead grant
+      return 'rejected';
+    });
+    const logs = captureLogs();
+    const { baseUrl } = await startPlatform({ manualsFor: notionManual(downstream), secretsVault: vault, toolManuals });
+    const { client } = await connectSdkClient(baseUrl);
+    await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'one' } });
+
+    valid = 'nothing-valid-any-more';
+
+    const res = await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'two' } });
+    expect(res.isError).toBe(true);
+    expect(toolText(res)).toContain('Your sign-in for "notion" was rejected and has been disconnected');
+    expect(toolText(res)).toContain('Re-authorize it on http://localhost:5173/connect');
+    expect(state.refreshes).toBe(1);
+    expect((await vault.statusFor('user-A', [KEY]))[0]?.userAuthorized).toBe(false);
+    expect(refreshLines(logs)[0]).toContain('manual=\\"notion\\" user=\\"user-A\\" outcome=rejected');
+  });
+
+  it('a WORKSPACE connection rejected on refresh tells the caller a tool owner has to reconnect it, and does not retry', async () => {
+    quiet();
+    let valid = 'token-1';
+    downstream = await startFakeDownstreamMcpServer({ acceptsToken: (t) => t === valid });
+    // The same sign-in, declared as one shared connection: the manual reports
+    // it under `sharedSignInKeysForManual`, the vault under the owner's row.
+    const state = { token: 'token-1' as string | null, refreshes: 0 };
+    const vault = {
+      resolve: async (_userId: string, key: string) => (key === KEY ? state.token : null),
+      statusFor: async (_userId: string, keys: string[]) =>
+        keys.map((key) => ({ key, adminConfigured: true, adminKind: 'oauth', userConfigured: false, adminAuthorized: state.token !== null })),
+      forceRefresh: async (_userId: string, key: string) => {
+        expect(key).toBe(KEY);
+        state.refreshes += 1;
+        state.token = null;
+        return 'rejected' as const;
+      },
+    } as unknown as ISecretsVaultService;
+    registerBevelSecretsVariableLoader(vault);
+    const toolManuals = {
+      sharedSignInKeysForManual: async (manual: string) =>
+        manual === 'notion' ? [{ key: KEY, name: 'ACCESS_TOKEN', label: 'Notion sign-in' }] : [],
+      userScopedKeysForManual: async () => [],
+    } as unknown as IToolManualService;
+    const { baseUrl } = await startPlatform({ manualsFor: notionManual(downstream), secretsVault: vault, toolManuals });
+    const { client } = await connectSdkClient(baseUrl);
+    await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'one' } });
+
+    valid = 'nothing-valid-any-more';
+
+    const res = await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'two' } });
+    expect(res.isError).toBe(true);
+    expect(toolText(res)).toContain('The workspace connection for "notion" was rejected by the provider and has been disconnected');
+    expect(toolText(res)).toContain('A tool owner has to reconnect it on http://localhost:5173/connect');
+    expect(toolText(res)).not.toContain('Your sign-in');
+    expect(state.refreshes).toBe(1);
+    expect(downstream.executions()).toBe(1); // nothing was retried against a dead workspace grant
+  });
+
+  it('transient refresh failure: the original error comes back, the token is kept, and a later call tries again', async () => {
+    quiet();
+    let now = 1_000_000;
+    let valid = 'token-1';
+    downstream = await startFakeDownstreamMcpServer({ acceptsToken: (t) => t === valid });
+    let providerUp = false;
+    const { state, vault, toolManuals } = fakeSignIn('token-1', (s) => {
+      if (!providerUp) return 'transient';
+      s.token = 'token-2';
+      return 'refreshed';
+    });
+    const logs = captureLogs();
+    const { baseUrl } = await startPlatform({
+      manualsFor: notionManual(downstream),
+      secretsVault: vault,
+      toolManuals,
+      poolNow: () => now,
+    });
+    const { client } = await connectSdkClient(baseUrl);
+    await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'one' } });
+
+    valid = 'token-2';
+
+    const failed = await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'two' } });
+    expect(failed.isError).toBe(true);
+    expect(toolText(failed)).toContain('invalid_token'); // the downstream's own refusal, unchanged
+    expect(toolText(failed)).not.toContain('Re-authorize');
+    expect(state.token).toBe('token-1'); // kept
+    expect(refreshLines(logs)[0]).toContain('outcome=transient');
+
+    providerUp = true;
+    now += 60_000;
+    const later = await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'three' } });
+    expect(later.isError).toBeFalsy();
+    expect(state.refreshes).toBe(2);
+  });
+
+  it('once per minute: a grant the downstream keeps refusing cannot loop the provider', async () => {
+    quiet();
+    let now = 1_000_000;
+    let valid = 'token-1';
+    downstream = await startFakeDownstreamMcpServer({ acceptsToken: (t) => t === valid });
+    // The provider happily refreshes; the downstream refuses whatever comes back.
+    const { state, vault, toolManuals } = fakeSignIn('token-1', (s) => {
+      s.token = `token-${s.token}-next`;
+      return 'refreshed';
+    });
+    const { baseUrl } = await startPlatform({
+      manualsFor: notionManual(downstream),
+      secretsVault: vault,
+      toolManuals,
+      poolNow: () => now,
+    });
+    const { client } = await connectSdkClient(baseUrl);
+    await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'one' } });
+
+    valid = 'never';
+    for (let i = 0; i < 4; i++) {
+      const res = await client.callTool({ name: 'notion_srv_echo', arguments: { text: `x${i}` } });
+      expect(res.isError).toBe(true);
+      now += 10_000;
+    }
+    // Four refused calls inside the minute, one refresh. (The window reopening
+    // is the guard's own test; here the manual-failure memo additionally keeps
+    // a manual that failed to register from being re-dialed for a while.)
+    expect(state.refreshes).toBe(1);
+  });
+
+  it('logs one line per refresh attempt — manual, user, outcome — and never the token', async () => {
+    quiet();
+    let valid = 'secret-token-OLD';
+    downstream = await startFakeDownstreamMcpServer({ acceptsToken: (t) => t === valid });
+    const { vault, toolManuals } = fakeSignIn('secret-token-OLD', (s) => {
+      s.token = 'secret-token-NEW';
+      return 'refreshed';
+    });
+    const logs = captureLogs();
+    const { baseUrl } = await startPlatform({ manualsFor: notionManual(downstream), secretsVault: vault, toolManuals });
+    const { client } = await connectSdkClient(baseUrl);
+    await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'one' } });
+    valid = 'secret-token-NEW';
+    await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'two' } });
+
+    expect(refreshLines(logs)).toEqual([
+      expect.stringContaining('manual=\\"notion\\" user=\\"user-A\\" outcome=refreshed'),
+    ]);
+    for (const line of logs) {
+      expect(line).not.toContain('secret-token-OLD');
+      expect(line).not.toContain('secret-token-NEW');
+    }
+  });
+
+  it('the refresh line cannot be forged: caller-controlled text is escaped, so one attempt is one line', async () => {
+    quiet();
+    let valid = 'token-1';
+    downstream = await startFakeDownstreamMcpServer({ acceptsToken: (t) => t === valid });
+    const { vault, toolManuals } = fakeSignIn('token-1', (s) => {
+      s.token = 'token-2';
+      return 'refreshed';
+    });
+    const logs = captureLogs();
+    const { baseUrl } = await startPlatform({ manualsFor: notionManual(downstream), secretsVault: vault, toolManuals });
+    // This caller's user id is a newline plus a plausible-looking refresh line.
+    const { client } = await connectSdkClient(baseUrl, KEY_FORGER);
+    await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'one' } });
+    valid = 'token-2';
+    await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'two' } });
+
+    // One attempt, one EVENT. The forged text is carried inside the line it
+    // belongs to, escaped, rather than starting a line of its own — here and
+    // in every other line that names the caller.
+    const messages = logs.map((entry) => JSON.parse(entry).message as string);
+    const events = messages.filter((m) => m.startsWith('downstream token refresh:'));
+    expect(events).toEqual([
+      `downstream token refresh: manual="notion" user=${printable(FORGER_ID)} outcome=refreshed`,
+    ]);
+    for (const message of messages) expect(unprintable(message)).toBe(false);
+  });
+
+  it('a transient refresh at the HANDSHAKE is not remembered as a dead manual: the next call tries again', async () => {
+    quiet();
+    let now = 1_000_000;
+    // Rejects the stored token outright, so the very first connection — the
+    // handshake, before any tool call — is what gets the 401.
+    downstream = await startFakeDownstreamMcpServer({ acceptsToken: (t) => t === 'token-2' });
+    let providerUp = false;
+    const { state, vault, toolManuals } = fakeSignIn('token-1', (s) => {
+      if (!providerUp) return 'transient';
+      s.token = 'token-2';
+      return 'refreshed';
+    });
+    const { baseUrl } = await startPlatform({
+      manualsFor: notionManual(downstream),
+      secretsVault: vault,
+      toolManuals,
+      poolNow: () => now,
+    });
+    const { client } = await connectSdkClient(baseUrl);
+
+    // The provider is down: the manual cannot register, and the catalog says so.
+    expect((await client.listTools()).tools.some((t) => t.name === 'notion_srv_echo')).toBe(false);
+    expect(state.refreshes).toBe(1);
+
+    // The provider comes back inside the manual-failure memo's five minutes.
+    // The refresh policy's window is one minute, and it is the one that governs:
+    // a transient credential failure is never written into that memo.
+    providerUp = true;
+    now += 60_000;
+    expect((await client.listTools()).tools.some((t) => t.name === 'notion_srv_echo')).toBe(true);
+    expect(state.refreshes).toBe(2);
+    expect(toolText(await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'hi' } }))).toContain('hi');
+  });
+
+  it('a manual catalog that fails mid-refresh is reported on one line, escaped, and refreshes nothing', async () => {
+    quiet();
+    // The catalog breaks only BETWEEN the pre-call secrets check and the
+    // refresh: the fake downstream flips it the moment it answers 401, which
+    // is exactly the window `refreshDownstreamToken` reads it in.
+    let broken = false;
+    let valid = 'token-1';
+    downstream = await startFakeDownstreamMcpServer({
+      acceptsToken: (t) => {
+        const ok = t === valid;
+        if (!ok) broken = true;
+        return ok;
+      },
+    });
+    const { state, vault } = fakeSignIn('token-1', () => 'refreshed');
+    const boom = new Error('catalog read failed\u009b31m\nerror: forged by the manual name\u2028tail');
+    const toolManuals = {
+      sharedSignInKeysForManual: async () => [],
+      userScopedKeysForManual: async (manual: string) => {
+        if (broken) throw boom;
+        return manual === 'notion' ? [{ key: KEY, name: 'ACCESS_TOKEN', label: 'Notion sign-in', oauth: true }] : [];
+      },
+    } as unknown as IToolManualService;
+    const logs = captureLogs();
+    const { baseUrl } = await startPlatform({ manualsFor: notionManual(downstream), secretsVault: vault, toolManuals });
+    const { client } = await connectSdkClient(baseUrl);
+    await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'one' } });
+
+    valid = 'token-2'; // the provider revokes the stored token
+
+    // The token is now refused, so the refresh path runs — and finds the
+    // catalog broken.
+    const res = await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'two' } });
+
+    expect(res.isError).toBe(true);
+    expect(state.refreshes).toBe(0); // nothing to refresh against: the token stands
+    const messages = logs.map((entry) => JSON.parse(entry).message as string);
+    const warnings = messages.filter((m) => m.startsWith('downstream token refresh: could not read'));
+    expect(warnings).toEqual([
+      `downstream token refresh: could not read the variables of manual=${printable('notion')}: ${printable(boom.message)}`,
+    ]);
+    // The error's own text cannot start a line either — it travels escaped,
+    // not as a raw Error the logger would render verbatim.
+    for (const message of messages) expect(unprintable(message)).toBe(false);
+  });
+
+  /** The connect link every not-signed-in answer carries. */
+  const CONNECT = 'http://localhost:5173/connect';
+
+  it('after the wipe the manual stays on the surface: an interactive caller still lists the tool, and a call answers with the sign-in link', async () => {
+    quiet();
+    let valid = 'token-1';
+    downstream = await startFakeDownstreamMcpServer({ acceptsToken: (t) => t === valid });
+    const { state, vault, toolManuals } = fakeSignIn('token-1', (s) => {
+      s.token = null; // the vault wipes the dead grant
+      return 'rejected';
+    });
+    const { baseUrl } = await startPlatform({ manualsFor: notionManual(downstream), secretsVault: vault, toolManuals });
+    const { client } = await connectSdkClient(baseUrl, KEY_INTERACTIVE);
+    expect(toolText(await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'one' } }))).toContain('one');
+
+    valid = 'nothing-valid-any-more';
+    const wiped = await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'two' } });
+    expect(toolText(wiped)).toContain('has been disconnected');
+    expect(state.token).toBeNull();
+
+    // The sign-in is gone; the manual is not. Its tools stay listed from what
+    // the downstream last advertised, and calling one says what to do —
+    // rather than the tool vanishing and the call answering "Unknown tool".
+    expect((await client.listTools()).tools.some((t) => t.name === 'notion_srv_echo')).toBe(true);
+    const res = await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'three' } });
+    expect(res.isError).toBe(true);
+    expect(toolText(res)).toContain('needs credentials you haven\'t set up yet');
+    expect(toolText(res)).toContain(CONNECT);
+    expect(toolText(res)).not.toContain('Unknown tool');
+    // One refresh in total. The wipe's own attempt is the one; whatever the
+    // listing and the third call ran into afterwards (a token that no longer
+    // substitutes, or a rejection inside the same minute) stayed inside the
+    // once-a-minute window and did not reach the provider again.
+    expect(state.refreshes).toBe(1);
+  });
+
+  it('after the wipe a connection-key caller does not list the tool, but a call to it still gets the sign-in link', async () => {
+    quiet();
+    let valid = 'token-1';
+    downstream = await startFakeDownstreamMcpServer({ acceptsToken: (t) => t === valid });
+    const { vault, toolManuals } = fakeSignIn('token-1', (s) => {
+      s.token = null;
+      return 'rejected';
+    });
+    const { baseUrl } = await startPlatform({ manualsFor: notionManual(downstream), secretsVault: vault, toolManuals });
+    const { client } = await connectSdkClient(baseUrl);
+    await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'one' } });
+    valid = 'nothing-valid-any-more';
+    await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'two' } });
+
+    // Autonomous callers are shown only what is ready to run…
+    expect((await client.listTools()).tools.some((t) => t.name === 'notion_srv_echo')).toBe(false);
+    // …but one holding the name from before is told why, and where to go.
+    const res = await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'three' } });
+    expect(res.isError).toBe(true);
+    expect(toolText(res)).toContain(CONNECT);
+    expect(toolText(res)).not.toContain('Unknown tool');
+  });
+
+  it('a manual nobody has connected to since the process started still answers a call with the sign-in link', async () => {
+    quiet();
+    // Fresh process (a deploy restarted it), and this caller's sign-in is
+    // already gone: no connection was ever made, so no tool definitions exist
+    // to put on the surface — the call must still not answer "Unknown tool".
+    downstream = await startFakeDownstreamMcpServer({ acceptsToken: () => false });
+    const { state, vault, toolManuals } = fakeSignIn('token-1', () => 'rejected');
+    state.token = null;
+    const { baseUrl } = await startPlatform({ manualsFor: notionManual(downstream), secretsVault: vault, toolManuals });
+    const { client } = await connectSdkClient(baseUrl);
+
+    expect((await client.listTools()).tools.some((t) => t.name === 'notion_srv_echo')).toBe(false);
+    const res = await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'one' } });
+    expect(res.isError).toBe(true);
+    expect(toolText(res)).toContain('needs credentials you haven\'t set up yet');
+    expect(toolText(res)).toContain(CONNECT);
+    expect(toolText(res)).not.toContain('Unknown tool');
+    // A name that belongs to no manual of the caller's is still unknown.
+    expect(toolText(await client.callTool({ name: 'linear_srv_echo', arguments: {} }))).toContain('Unknown tool');
+  });
+
+  it('a leftover sign-in row does not stand in for a plain key the manual now declares: the call asks for setup', async () => {
+    quiet();
+    // The `.tool` was edited from an OAuth sign-in to a static key; the user's
+    // old OAuth row is still there and its token is even accepted downstream.
+    downstream = await startFakeDownstreamMcpServer({ acceptsToken: (t) => t === 'old-oauth-token' });
+    const { vault } = fakeSignIn('old-oauth-token', () => 'refreshed');
+    const withKind = {
+      ...vault,
+      statusFor: async (_userId: string, keys: string[]) =>
+        keys.map((key) => ({ key, adminConfigured: false, userConfigured: true, userAuthorized: true, userKind: 'oauth' })),
+    } as unknown as ISecretsVaultService;
+    registerBevelSecretsVariableLoader(withKind);
+    const toolManuals = {
+      sharedSignInKeysForManual: async () => [],
+      userScopedKeysForManual: async (manual: string) =>
+        manual === 'notion' ? [{ key: KEY, name: 'ACCESS_TOKEN', label: 'Notion key', oauth: false }] : [],
+    } as unknown as IToolManualService;
+    const { baseUrl } = await startPlatform({ manualsFor: notionManual(downstream), secretsVault: withKind, toolManuals });
+    const { client } = await connectSdkClient(baseUrl, KEY_INTERACTIVE);
+
+    const res = await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'one' } });
+    expect(res.isError).toBe(true);
+    expect(toolText(res)).toContain('needs credentials you haven\'t set up yet');
+    expect(toolText(res)).toContain(CONNECT);
+    expect(downstream.executions()).toBe(0);
+  });
+});
+
+// A measurement, not a regression gate: it asserts nothing about latency, so it
+// runs only on request (`MCP_PERF=1`) instead of spending ~40 loopback calls on
+// every CI run.
+describe.runIf(process.env.MCP_PERF === '1')('per-request overhead (reported, not asserted)', () => {
+  it('measures tools/list and tools/call latency against a warm process', async () => {
+    const { baseUrl } = await startPlatform();
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const { client } = await connectSdkClient(baseUrl);
+    await client.listTools(); // warm-up
+
+    const time = async (fn: () => Promise<unknown>, runs = 20) => {
+      const samples: number[] = [];
+      for (let i = 0; i < runs; i++) {
+        const t0 = performance.now();
+        await fn();
+        samples.push(performance.now() - t0);
+      }
+      samples.sort((x, y) => x - y);
+      // Nearest-rank percentile: the smallest sample with at least p% of samples at or below it.
+      const pct = (p: number) => samples[Math.min(runs - 1, Math.max(0, Math.ceil(runs * p) - 1))]!;
+      return { p50: pct(0.5), p95: pct(0.95) };
+    };
+    const list = await time(() => client.listTools());
+    const call = await time(() => client.callTool({ name: 'ask', arguments: { body: { prompt: 'perf' } } }));
+    log.mockRestore();
+    console.log(
+      `[mcp perf] per-request (in-process loopback, test catalog): ` +
+        `tools/list p50=${list.p50.toFixed(1)}ms p95=${list.p95.toFixed(1)}ms; ` +
+        `tools/call p50=${call.p50.toFixed(1)}ms p95=${call.p95.toFixed(1)}ms`,
+    );
+    expect(list.p50).toBeGreaterThan(0);
+  });
+});
+
+/**
+ * The ticket's reproduction, run against the whole platform: real transport,
+ * real `McpService` proxy, real catalog discovery, real tool route.
+ *
+ * The report was one first `start_session` failing on a fresh connection with
+ * a generic error, and an immediate retry working. Fifty fresh connections,
+ * one first call each, all at once — an agent tester opens them in bursts, and
+ * a first-call failure that only shows under contention would never appear one
+ * connection at a time. Every connection pays for its own `initialize` and its
+ * own catalog discovery here, which is the expensive part of a first call and
+ * the part a reused connection never repeats.
+ *
+ * The suite asserts no timing: what it pins is that the burst produces fifty
+ * ids and no failure, so a regression that makes the first call flaky under
+ * load fails here instead of in an agent's transcript.
+ */
+describe('the first call on a fresh connection, fifty at once', () => {
+  it('serves every one of fifty fresh connections its own session id', async () => {
+    const { baseUrl } = await startPlatform({ extraTools: ['start_session'] });
+
+    // `timeoutMs` well under the vitest budget on purpose. The probe charges it
+    // per phase, so the default 30s would let one hung attempt burn ~60s and
+    // vitest would abort the test before `probeFirstCall` resolved — in exactly
+    // the flaky-first-call scenario this test exists to catch, the failure list
+    // and the report below would never be printed, and the run would show a
+    // bare timeout instead of which attempt died where.
+    const report = await probeFirstCall({ baseUrl, bearer: KEY_A, connections: 50, timeoutMs: 20_000 });
+
+    // Printed as well as asserted: this block is what the ticket's log records,
+    // and a run whose numbers were never shown proves nothing to a reader.
+    console.log(`[first-call probe]\n${formatProbeReport(report)}`);
+    // Not `toHaveLength(0)`: on a failure the assertion should show WHICH
+    // attempt died, at which stage, with the platform's own error text.
+    expect(report.failures).toEqual([]);
+    expect(report.ok).toBe(50);
+    expect(report.distinctSessionIds).toBe(50);
+  }, 120_000);
+});
+
+
+/**
+ * A connected server's input schemas, end to end: what the server sends is
+ * what a client is offered, and a tool whose schema is genuinely invalid is
+ * kept off every agent surface with a reason its owner can read.
+ *
+ * Over the real transport, because this is the layer where the three
+ * silently-dropped tools would have been caught. The proxy had been corrupting
+ * deeply nested schemas on the way OUT, after every parse in the chain had
+ * approved them, so nothing short of a client's own refusal said so.
+ *
+ * One boundary this suite also pins, because it decides what the check can
+ * ever see: a tool whose schema breaks the shape `@modelcontextprotocol/sdk`
+ * models at the ROOT (`type`, `properties`, `required`) makes the SDK client
+ * reject the WHOLE `tools/list` response, so that server's manual fails to
+ * register and Hexis is handed none of its tools. See the last test.
+ */
+describe('a connected tool whose schema is invalid is not offered to agents', () => {
+  let downstream: FakeDownstreamMcpServer | undefined;
+  afterEach(async () => {
+    await downstream?.stop();
+    downstream = undefined;
+  });
+
+  const manualAt = (server: FakeDownstreamMcpServer) => () => [
+    { name: 'notion', call_template_type: 'mcp', config: { mcpServers: { srv: { transport: 'http', url: server.url } } } },
+  ];
+
+  /** The constructs the dropped tools carried, nested as deep as theirs were. */
+  function richSchema(levels: number): Record<string, unknown> {
+    let node: Record<string, unknown> = {
+      type: 'object',
+      properties: {
+        socialLinks: { type: 'array', items: { anyOf: [{ type: 'string' }, { type: 'null' }] } },
+        value: { anyOf: [{ type: 'object', required: ['id', 'name'] }, { type: 'null' }] },
+        table: { type: 'object', properties: { rows: { type: 'array', items: { type: 'string' } } } },
+      },
+      required: ['value'],
+    };
+    for (let i = levels; i > 0; i -= 1) {
+      node = { type: 'object', properties: { [`level${i}`]: node }, required: [`level${i}`] };
+    }
+    return node;
+  }
+
+  /**
+   * The Notion refusal, as reported: `required` holding a number, in an
+   * `anyOf` branch. `anyOf` is a keyword nothing between the server and Hexis
+   * models, which is why a tool carrying this arrives intact and is ours to
+   * screen — unlike the same mistake at the root (last test).
+   */
+  const INVALID_SCHEMA = {
+    type: 'object',
+    properties: { value: { anyOf: [{ type: 'object', required: [7] }] } },
+  };
+  const INVALID_AT = '/properties/value/anyOf/0/required/0';
+  const INVALID_BECAUSE = 'must be a string';
+
+  const goodTool = (name: string) => ({
+    name,
+    description: `does ${name}`,
+    inputSchema: { type: 'object', properties: { text: { type: 'string' } } },
+  });
+
+  it('offers an `anyOf` list, a `required` list and nested `items` exactly as the server sent them', async () => {
+    // Twelve levels deep: past the point at which the proxy used to replace
+    // whatever node it had reached with `{}`, which is how `anyOf: {}`,
+    // `required: [{}]` and `type: {}` reached clients and cost three real
+    // tools their place in the agent's toolset.
+    const sent = richSchema(12);
+    downstream = await startFakeDownstreamMcpServer({
+      tools: () => [{ name: 'query', description: 'query it', inputSchema: sent }],
+    });
+    const { baseUrl } = await startPlatform({ manualsFor: manualAt(downstream) });
+    const { client } = await connectSdkClient(baseUrl);
+    const offered = (await client.listTools()).tools.find((t) => t.name === 'notion_srv_query');
+    expect(offered).toBeDefined();
+    expect(offered!.inputSchema).toEqual(sent);
+  });
+
+  it('hides the tool whose schema is invalid, keeps its nine siblings, and marks it for the owner', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    downstream = await startFakeDownstreamMcpServer({
+      tools: () => [
+        ...Array.from({ length: 9 }, (_, i) => goodTool(`good${i}`)),
+        { name: 'broken', description: 'broken', inputSchema: INVALID_SCHEMA },
+      ],
+    });
+    const platform = await startPlatform({ manualsFor: manualAt(downstream) });
+    const { client } = await connectSdkClient(platform.baseUrl);
+    const names = (await client.listTools()).tools.map((t) => t.name);
+
+    expect(names).not.toContain('notion_srv_broken');
+    for (let i = 0; i < 9; i += 1) expect(names).toContain(`notion_srv_good${i}`);
+
+    // The owner's side of the same fact, by the manual's catalog name.
+    expect(platform.service.hiddenTools.hiddenFor('notion')).toEqual([
+      {
+        manual: 'notion',
+        name: 'notion_srv_broken',
+        path: INVALID_AT,
+        reason: INVALID_BECAUSE,
+        marker: `Hidden from agents: its schema is invalid at ${INVALID_AT} (${INVALID_BECAUSE}).`,
+      },
+    ]);
+  });
+
+  it('keeps the hidden tool out of `list_tools` and out of the tool chain', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    downstream = await startFakeDownstreamMcpServer({
+      tools: () => [goodTool('fine'), { name: 'broken', description: 'broken', inputSchema: INVALID_SCHEMA }],
+    });
+    const { baseUrl } = await startPlatform({ manualsFor: manualAt(downstream) });
+    const { client } = await connectSdkClient(baseUrl);
+    // `list_tools` and the chain read the SAME tool repository the listing is
+    // built from, which is why taking the tool off it covers all three.
+    const listed = toolText(await client.callTool({ name: 'list_tools', arguments: {} }));
+    expect(listed).toContain('notion.srv_fine');
+    expect(listed).not.toContain('broken');
+
+    // The chain's view of the catalog is the same repository: it can describe
+    // the sibling and knows nothing of the hidden tool.
+    const info = JSON.parse(
+      toolText(
+        await client.callTool({
+          name: 'tools_info',
+          arguments: { tool_names: ['notion.srv_fine', 'notion.srv_broken'] },
+        }),
+      ),
+    ) as { interfaces: string; not_found: string[] };
+    expect(info.interfaces).toContain('fine');
+    expect(info.not_found).toEqual(['notion.srv_broken']);
+
+    // And a chain that calls it dies on a tool that is not there — the
+    // namespace is bound, the member is simply absent, so the isolate's own
+    // reason NAMES it. Asserted on that reason rather than on a prefix: the
+    // chain reports a failure as `isError` with the thrown text, and a test
+    // pinned to the wrapper's wording passes while the tool is still bound.
+    const chain = await client.callTool({
+      name: 'call_tool_chain',
+      arguments: { code: 'return notion.srv_broken({ body: {} });' },
+    });
+    expect(chain.isError).toBe(true);
+    expect(toolText(chain)).toContain('notion.srv_broken is not a function');
+
+    // The same chain, same namespace, on the sibling: bound and callable. This
+    // is what makes the line above a statement about the HIDDEN tool rather
+    // than about a namespace the chain could not reach at all.
+    // Called the way its `Call:` line shows: a connected tool takes its
+    // arguments flat, and the same call wrapped in `body` is refused.
+    const sibling = await client.callTool({
+      name: 'call_tool_chain',
+      arguments: { code: 'return notion.srv_fine({});' },
+    });
+    expect(sibling.isError).toBeFalsy();
+  });
+
+  it('answers an agent that calls the hidden tool by name, without quoting the schema to it', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    downstream = await startFakeDownstreamMcpServer({
+      tools: () => [{ name: 'broken', description: 'broken', inputSchema: INVALID_SCHEMA }],
+    });
+    const { baseUrl } = await startPlatform({ manualsFor: manualAt(downstream) });
+    const { client } = await connectSdkClient(baseUrl);
+    await client.listTools(); // the load that screens the server's tools
+    const res = await client.callTool({ name: 'notion_srv_broken', arguments: {} });
+    expect(res.isError).toBe(true);
+    const text = toolText(res);
+    expect(text).toContain('hidden from agents because its schema is invalid');
+    expect(text).toContain('list_tool_setup');
+    // The place and the reason are the owner's to read, not the agent's.
+    expect(text).not.toContain(INVALID_AT);
+  });
+
+  it('offers the tool again, with no marker, once the server sends a corrected schema', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    let required: unknown = [7];
+    downstream = await startFakeDownstreamMcpServer({
+      tools: () => [
+        {
+          name: 'query',
+          description: 'query it',
+          inputSchema: { type: 'object', properties: { value: { anyOf: [{ type: 'object', required }] } } },
+        },
+      ],
+    });
+    const platform = await startPlatform({ manualsFor: manualAt(downstream) });
+    const { client } = await connectSdkClient(platform.baseUrl);
+    expect((await client.listTools()).tools.map((t) => t.name)).not.toContain('notion_srv_query');
+
+    required = ['id']; // the vendor fixes it
+    // Dropping the pooled connection is what a refresh IS: the next request
+    // re-dials and re-reads the tools. Nothing is restarted, and no marker has
+    // to be cleared by hand.
+    platform.service.onSecretsChanged(null);
+
+    expect((await client.listTools()).tools.map((t) => t.name)).toContain('notion_srv_query');
+    expect(platform.service.hiddenTools.hiddenFor('notion')).toEqual([]);
+  });
+
+  it('a tool call does not re-run the check, and does not hide a tool it ran on before', async () => {
+    downstream = await startFakeDownstreamMcpServer({ tools: () => [goodTool('echo')] });
+    const { baseUrl } = await startPlatform({ manualsFor: manualAt(downstream) });
+    const { client } = await connectSdkClient(baseUrl);
+    await client.listTools();
+    // The surface is rebuilt per request, so a call sees the same schemas
+    // again; what it must not do is check them again. That the check runs once
+    // per distinct schema is counted in the guard's own unit test — here the
+    // point is that calling costs nothing and changes nothing.
+    for (const text of ['a', 'b', 'c']) {
+      expect((await client.callTool({ name: 'notion_srv_echo', arguments: { text } })).isError).toBeFalsy();
+    }
+    expect((await client.listTools()).tools.map((t) => t.name)).toContain('notion_srv_echo');
+  });
+
+  /**
+   * The boundary, pinned so nobody has to rediscover it: at the ROOT of a
+   * tool's input schema, `type`, `properties` and `required` are the three
+   * fields `@modelcontextprotocol/sdk` models itself
+   * (`ToolSchema.inputSchema`, with `required: z.array(z.string())`), and the
+   * client rejects the ENTIRE `tools/list` response when one tool breaks them.
+   *
+   * So for that class of defect Hexis is handed NOTHING — not the bad tool, not
+   * the good ones — and cannot hide one tool or mark it: the whole manual fails
+   * to register, which is what it did before this change too. The reason is
+   * logged, with the SDK's own message naming the tool's index.
+   */
+  it('cannot single out a root-level defect: the MCP SDK refuses the whole tools/list response', async () => {
+    const warnings: string[] = [];
+    vi.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => {
+      warnings.push(args.map(String).join(' '));
+    });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    downstream = await startFakeDownstreamMcpServer({
+      tools: () => [
+        goodTool('fine'),
+        { name: 'broken', description: 'broken', inputSchema: { type: 'object', properties: {}, required: [7] } },
+      ],
+    });
+    const platform = await startPlatform({ manualsFor: manualAt(downstream) });
+    const { client } = await connectSdkClient(platform.baseUrl);
+    const names = (await client.listTools()).tools.map((t) => t.name);
+
+    expect(names).not.toContain('notion_srv_broken');
+    // Its sibling goes with it, and the marker cannot name what never arrived.
+    expect(names).not.toContain('notion_srv_fine');
+    expect(platform.service.hiddenTools.hiddenFor('notion')).toEqual([]);
+    expect(warnings.join('\n')).toContain('skipping manual "notion"');
+    expect(warnings.join('\n')).toContain('required');
   });
 });

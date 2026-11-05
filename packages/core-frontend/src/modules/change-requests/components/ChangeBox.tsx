@@ -3,18 +3,25 @@ import '../change-requests.css';
 import { Button, Surface } from '../../../shared/components';
 import { cn } from '../../../lib/utils';
 import { collapseUnchanged, type DiffLine } from '../utils/diff';
+import { waitingOnViewerLabel } from '../utils/author';
 import { ConflictHelp } from './ConflictHelp';
 
 export interface ChangeBoxProps {
   /** File the proposal is against, relative to the skill folder. */
   file: string;
+  /** The file's real name, for hover, when `file` is a platform file's plain name. */
+  fileTitle?: string;
   /** Display name of whoever proposed it. */
   author: string;
   /** Already-formatted, e.g. "today" or "2 Aug". */
   when: string;
   /** The caller wrote this one. */
   mine: boolean;
-  /** The caller decides this one (owns the skill). */
+  /**
+   * The caller decides this one: they can write the file. That is not
+   * ownership — a writer decides without being named in an `owner:` grant —
+   * so the box never tells them they own it.
+   */
   canDecide: boolean;
   /** The proposal diffed against the file as it stands NOW; null while loading. */
   diff: DiffLine[] | null;
@@ -24,6 +31,12 @@ export interface ChangeBoxProps {
    * working — approving still applies the whole request.
    */
   binary?: boolean;
+  /**
+   * One of the two file reads failed, so there is no comparison to show and
+   * none is coming. Said plainly rather than left on "Loading the change…",
+   * and never rendered as an empty or whole-file diff.
+   */
+  unreadable?: boolean;
   /**
    * This file already reads the way the proposal wants it to — someone landed
    * the same edit first, or the author reverted it. There is nothing here to
@@ -50,6 +63,12 @@ export interface ChangeBoxProps {
   refusal?: string | null;
   /** Who the decision is waiting on, for the non-owner's footer. */
   owner?: string;
+  /**
+   * For a viewer who can decide: how many OTHER approvers the proposal is also
+   * waiting on. Given, the footer reads "Waiting on you" / "Waiting on you and
+   * N others" rather than the generic "You can decide this.".
+   */
+  othersPending?: number;
   busy?: boolean;
   /**
    * What the apply is doing right now, so the label names the step instead of
@@ -88,17 +107,20 @@ export interface ChangeBoxProps {
  */
 export function ChangeBox({
   file,
+  fileTitle,
   author,
   when,
   mine,
   canDecide,
   diff,
   binary = false,
+  unreadable = false,
   upToDate = false,
   blocked = false,
   conflictPrompt = null,
   refusal = null,
   owner,
+  othersPending,
   busy,
   phase = 'idle',
   onApprove,
@@ -124,7 +146,9 @@ export function ChangeBox({
         <span className="text-detail text-ink">
           <b className="font-semibold">{who}</b> proposed a change · {when}
         </span>
-        <span className="ml-auto truncate font-mono text-meta text-ink-faint">{file}</span>
+        <span className="ml-auto truncate font-mono text-meta text-ink-faint" title={fileTitle}>
+          {file}
+        </span>
       </div>
 
       {/* No diff area when there is no difference — an empty pane under a
@@ -133,6 +157,10 @@ export function ChangeBox({
         <p className="px-3.5 py-4 text-center text-detail text-ink-faint">
           A binary file (an image, a document…). There is no text to compare. Read the whole
           change to decide.
+        </p>
+      ) : unreadable ? (
+        <p className="px-3.5 py-4 text-center text-detail text-ink-faint">
+          Couldn't read this change. Read the whole change to decide.
         </p>
       ) : diff === null ? (
         <p className="px-3.5 py-4 text-center text-detail text-ink-faint">Loading the change…</p>
@@ -193,7 +221,11 @@ export function ChangeBox({
             </span>
             {!busy && (
               <span className="text-meta text-ink-faint">
-                {canDecide ? 'You decide. You own this.' : `Waiting on ${owner ?? 'the owner'}`}
+                {canDecide
+                  ? othersPending === undefined
+                    ? 'You can decide this.'
+                    : waitingOnViewerLabel(othersPending)
+                  : `Waiting on ${owner ?? 'the owner'}`}
               </span>
             )}
             {/* What the server said, verbatim. The gate names the files and the
@@ -214,6 +246,8 @@ export function ChangeBox({
               Read the whole change
             </Button>
           )}
+          {/* Authorship and approval rights are independent: an approver who
+              wrote the proposal gets Withdraw AND the verdicts. */}
           {mine && onWithdraw && (
             <Button variant="quiet" size="tiny" onClick={onWithdraw} disabled={busy}>
               Withdraw

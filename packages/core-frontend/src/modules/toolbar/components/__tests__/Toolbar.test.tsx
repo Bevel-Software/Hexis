@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { setSidebarCollapsed } from '../../../layout/state/sidebar';
-import { render, screen, within } from '@testing-library/react';
+import { cleanup, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import { Toolbar } from '../Toolbar';
@@ -24,10 +24,13 @@ import { AdminContext } from '../../../admin/state/admin.context';
 import {
   ActiveAppIdContext,
   AppRegistryContext,
+  activeAppId as activeAppIdFor,
   makeRegistry,
   type AdminMenuItem,
+  type AppDef,
   type ToolbarItemDef,
 } from '../../../../core/registry';
+import { GIT_MENU_ITEMS } from '../../../git';
 
 const stubAdminMenuItems: AdminMenuItem[] = [
   {
@@ -48,9 +51,19 @@ const stubAdminMenuItems: AdminMenuItem[] = [
     section: 'admin',
     order: 90,
     label: 'Stub admin row',
-    onSelect: ({ closeMenu }) => closeMenu(),
+    onSelect: ({ closeMenu, user }) => {
+      stubAdminRowSelectedBy.push(user.email);
+      closeMenu();
+    },
+  },
+  {
+    id: 'stub-hidden-row',
+    order: 20,
+    label: 'Stub hidden row',
+    isShown: (user) => user.email !== 'user@example.com',
   },
 ];
+const stubAdminRowSelectedBy: string[] = [];
 
 /** Exposes the router's current pathname so menu navigation can be asserted. */
 function LocationProbe() {
@@ -70,6 +83,8 @@ function renderToolbar(overrides?: {
   /** The shell-provided active app (see ActiveAppIdContext); the Library
    *  sidebar toggle follows this, not the path. */
   activeAppId?: string;
+  /** The switcher's apps; none by default. */
+  apps?: AppDef[];
 }) {
   const toggleExplorer = vi.fn();
   const toggleChat = vi.fn();
@@ -166,8 +181,11 @@ function renderToolbar(overrides?: {
                     >
                       <AppRegistryContext.Provider
                         value={makeRegistry({
-                          adminMenuItems: stubAdminMenuItems,
+                          // As `withCoreModuleContributions` composes it: git's own
+                          // rows ahead of the registry's.
+                          adminMenuItems: [...GIT_MENU_ITEMS, ...stubAdminMenuItems],
                           toolbarItems: overrides?.toolbarItems ?? [],
+                          apps: overrides?.apps ?? [],
                         })}
                       >
                         <Toolbar />
@@ -377,6 +395,51 @@ describe('Toolbar', () => {
     });
   });
 
+  // "Connect your tools" is a Skills & Tools page. At `/connect` it belonged to
+  // no app, so the toggle vanished, the brand jumped left and no tab was
+  // selected. The active app here comes from the shell's own rule
+  // (`activeAppId`), not the harness's guess, so the test fails if the page
+  // ever leaves the app's path again.
+  describe('on Connect your tools', () => {
+    beforeEach(() => setSidebarCollapsed(false));
+
+    const apps: AppDef[] = [
+      { id: 'knowledge', label: 'Knowledge', path: '/workspace', order: 10, element: <div /> },
+      { id: 'skills-tools', label: 'Skills & Tools', path: '/skills-and-tools', order: 20, element: <div /> },
+    ];
+    const renderAt = (route: string) =>
+      renderToolbar({
+        route,
+        apps,
+        activeAppId: activeAppIdFor(apps, route),
+        layout: { canToggleExplorer: false, canToggleChat: false },
+      });
+
+    it('shows the sidebar toggle, and it hides and shows the sidebar', async () => {
+      renderAt('/skills-and-tools/connect');
+      await userEvent.click(screen.getByRole('button', { name: 'Hide sidebar' }));
+      await userEvent.click(screen.getByRole('button', { name: 'Show sidebar' }));
+      expect(screen.getByRole('button', { name: 'Hide sidebar' })).toHaveAttribute('aria-expanded', 'true');
+    });
+
+    it('selects Skills & Tools', () => {
+      renderAt('/skills-and-tools/connect');
+      const appsNav = screen.getByRole('navigation', { name: 'Apps' });
+      expect(within(appsNav).getByRole('link', { name: 'Skills & Tools' })).toHaveAttribute('aria-current', 'page');
+      expect(within(appsNav).getByRole('link', { name: 'Knowledge' })).not.toHaveAttribute('aria-current');
+    });
+
+    it('renders the same top bar as /skills-and-tools, element for element', () => {
+      const markup = (route: string) => {
+        renderAt(route);
+        const html = document.querySelector('header')!.outerHTML;
+        cleanup();
+        return html;
+      };
+      expect(markup('/skills-and-tools/connect')).toBe(markup('/skills-and-tools'));
+    });
+  });
+
   // The "Reconciling with the team…" status pill is gone with the
   // pending-commits queue refactor — push failures are handled silently
   // by the background recovery agent now, so there's nothing user-facing
@@ -448,6 +511,37 @@ describe('Toolbar', () => {
       expect(logout).toHaveBeenCalledTimes(1);
     });
 
+    // The way back from the branch delete's "Don't ask again": there exactly
+    // while THIS person's question is off in this browser.
+    describe('Ask before deleting branches', () => {
+      const KEY = 'hexis.skipBranchDeleteConfirm:user@example.com';
+      afterEach(() => localStorage.clear());
+
+      it('is not offered while the question is on', async () => {
+        renderToolbar();
+        await openMenu();
+        expect(noRow('Ask before deleting branches')).toBeNull();
+      });
+
+      it("is not offered for someone else's choice", async () => {
+        localStorage.setItem('hexis.skipBranchDeleteConfirm:someone@example.com', '1');
+        renderToolbar();
+        await openMenu();
+        expect(noRow('Ask before deleting branches')).toBeNull();
+      });
+
+      it('is offered while the question is off, and turns it back on', async () => {
+        localStorage.setItem(KEY, '1');
+        renderToolbar();
+        await openMenu();
+        await userEvent.click(row('Ask before deleting branches'));
+        expect(localStorage.getItem(KEY)).toBeNull();
+        expect(panelGone()).toBeNull();
+        await openMenu();
+        expect(noRow('Ask before deleting branches')).toBeNull();
+      });
+    });
+
     // Nothing in the menu means anything without a person, and the trigger is
     // that person — so signed out there is no button at all.
     it('renders nothing when there is no signed-in user', () => {
@@ -487,10 +581,21 @@ describe('Toolbar', () => {
       renderToolbar({ isAdmin: true });
       await openMenu();
       expect(within(panel()).getByText('Admin only')).toBeInTheDocument();
-      expect(row(/Roles/)).toBeInTheDocument();
+      expect(row('App roles')).toBeInTheDocument();
       expect(row('Stub admin row')).toBeInTheDocument();
       // All-user rows are still present alongside the admin ones.
       expect(row('Stub extension')).toBeInTheDocument();
+    });
+
+    // A row decides for itself whether it is offered, and its action learns
+    // who is signed in — how git's "Ask before deleting branches" is built.
+    it('leaves out a row that is not shown to this person, and tells a row who selected it', async () => {
+      stubAdminRowSelectedBy.length = 0;
+      renderToolbar({ isAdmin: true });
+      await openMenu();
+      expect(noRow('Stub hidden row')).toBeNull();
+      await userEvent.click(row('Stub admin row'));
+      expect(stubAdminRowSelectedBy).toEqual(['user@example.com']);
     });
 
     // Core rows all NAVIGATE — the settings surfaces are standalone routed
@@ -512,7 +617,7 @@ describe('Toolbar', () => {
     it('navigates to /roles-and-members from the admin row', async () => {
       renderToolbar({ isAdmin: true });
       await openMenu();
-      await userEvent.click(row('Roles & Members'));
+      await userEvent.click(row('App roles'));
       expect(screen.getByTestId('pathname')).toHaveTextContent('/roles-and-members');
       expect(panelGone()).toBeNull();
     });

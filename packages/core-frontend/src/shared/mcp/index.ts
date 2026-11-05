@@ -12,17 +12,24 @@
  * Tests import it straight from `./connect-snippets`, as `test-setup.ts` does.
  */
 export {
+  MCP_DISPLAY_NAME,
+  MCP_SERVER_KEY,
   canDeepLink,
+  chatgptInstallUrl,
   claudeCodeCommand,
   claudeInstallUrl,
   configureMcpUrl,
   connectorName,
+  hexisMcpClaudeCommand,
+  hexisMcpJsonSnippet,
   jsonConfigSnippet,
   langdockSnippet,
   mcpEndpointUrl,
+  workspaceBaseUrl,
 } from './connect-snippets';
 
 export { ClaudeInstallLink } from './ClaudeInstallLink';
-export { ConnectionInstructions } from './ConnectionInstructions';
+export { ChatGptInstallLink } from './ChatGptInstallLink';
+export { AssistantConnectionInstructions, OtherAgentConnectionInstructions } from './ConnectionInstructions';
 export { CopyBlock } from './CopyBlock';
 export { useCopyFeedback } from './useCopyFeedback';

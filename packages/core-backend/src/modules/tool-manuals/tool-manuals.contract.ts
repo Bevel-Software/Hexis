@@ -1,4 +1,5 @@
 import type { CallTemplate } from '@utcp/sdk';
+import type { HiddenTool, HiddenToolSource } from '../../shared/hidden-tools.js';
 
 /**
  * Tool manuals — user-authored `*.tool` files under `Plugins/` in the DEFAULT
@@ -20,6 +21,16 @@ import type { CallTemplate } from '@utcp/sdk';
 /** The external KB manual's name — shared by `/agent/all-tools` and the MCP proxy. */
 export const EXTERNAL_KB_MANUAL_NAME = 'KNOWLEDGE_BASE';
 
+/**
+ * How many embedded tools a manual may advertise on the tool page. A `.tool` is
+ * author-written, so its `tools` array is unbounded input; the page renders one
+ * bullet per entry, and a thousand of them is a broken page, not a useful one.
+ * On the contract, not the service: the skills module reads it to know when a
+ * detail's capability list may be incomplete, and must not pull the service's
+ * UTCP plugins in to learn a number.
+ */
+export const MAX_CAPABILITIES = 100;
+
 export type ToolManualType = 'inline' | 'http' | 'mcp';
 
 /** How a tool variable's secret is provisioned. */
@@ -30,11 +41,23 @@ export type ToolVariableScope = 'admin' | 'user';
  * present, the variable's value is obtained by signing in with this provider
  * (the per-user secret row is `kind:'oauth'`), rather than being typed. The
  * confidential client secret is provisioned separately by a tool writer.
+ *
+ * The endpoints are OPTIONAL for an `mcp.json` server: an MCP-spec server
+ * publishes its authorization-server metadata, so a declaration carrying only
+ * the `clientId` of an owner-registered app is completed at scan time
+ * (`authorizationUrl`/`tokenUrl`/`resource` filled in from that metadata). A
+ * `.tool` manual has no server to ask, so there both URLs are required.
  */
 export interface ToolVariableOAuth {
-  authorizationUrl: string;
-  tokenUrl: string;
-  clientId: string;
+  /** Absent on an mcp.json server ⇒ discovered from the server's OAuth metadata. */
+  authorizationUrl?: string;
+  tokenUrl?: string;
+  /**
+   * Required on an ordinary sign-in. Absent ONLY on a managed one (see
+   * `managed`), whose client is Bevel's and lives on the broker; an owner who
+   * brings their own app supplies it on the client-secret route instead.
+   */
+  clientId?: string;
   scopes?: string[];
   /**
    * Extra static query params appended to the authorization request — e.g.
@@ -45,6 +68,35 @@ export interface ToolVariableOAuth {
    * secret is still provisioned only through the protected route.
    */
   authParams?: Record<string, string>;
+  /**
+   * PKCE (S256) on the authorization-code flow. ON unless explicitly `false`:
+   * the MCP authorization spec requires it, and a provider that doesn't
+   * implement it ignores the extra parameters (RFC 6749 §3.1). Only `false` is
+   * ever stored — absent means the default.
+   */
+  pkce?: boolean;
+  /**
+   * RFC 8707 resource indicator — the MCP server's canonical URL, so the token
+   * is audience-bound. Filled in from the server's metadata for an mcp.json
+   * server; declare it by hand only when the provider demands it and the
+   * endpoints are declared by hand too.
+   */
+  resource?: string;
+  /**
+   * The sign-in goes through Bevel's managed OAuth app for a platform
+   * connector: the broker does the provider round-trip and hands the tokens
+   * to this deployment, and renews them on its behalf. Written by the
+   * connector template an admin enables; `clientId` is then absent. The
+   * broker decides the scopes it requests from its own copy of the
+   * connector's definition, so an edited file cannot widen them.
+   */
+  managed?: ManagedSignIn;
+}
+
+/** Which managed connector and scope set a sign-in belongs to. */
+export interface ManagedSignIn {
+  connectorId: string;
+  scopeSet: string;
 }
 
 /**
@@ -61,10 +113,64 @@ export interface ToolVariable {
   label?: string;
   /**
    * When present, this variable is OAuth-backed: the user signs in with the
-   * declared provider to obtain a token. Only valid with `scope:'user'` (each
-   * caller authorizes their own). The client secret is NOT declared here.
+   * declared provider to obtain a token. Valid with `scope:'user'` (each
+   * caller authorizes their own), or with `scope:'admin'` ONLY for a managed
+   * sign-in — one workspace connection an owner makes, read by every caller
+   * (the shared row then holds the tokens). The client secret is NOT
+   * declared here.
    */
   oauth?: ToolVariableOAuth;
+}
+
+/**
+ * An optional cheap, read-only call that proves a credential actually WORKS.
+ *
+ * A `type: mcp` manual needs none — its handshake is authenticated, so merely
+ * connecting already tests the token. `http` and `inline` manuals have no such
+ * moment: registering an `http` manual fetches its DESCRIPTION, which providers
+ * usually serve publicly, so a wrong key sails through; an `inline` manual's
+ * discovery template points at Bevel's own API and never touches the provider
+ * at all. Without a declaration there is genuinely nothing to call, and the
+ * platform reports the connection as unverified rather than guessing.
+ *
+ * NOT inferred from the manual's own tools. Picking one automatically would
+ * mean calling an arbitrary tool with invented arguments — a probe that could
+ * send a message or create a record is worse than no probe. The author names a
+ * safe endpoint or the tool stays unverified.
+ *
+ * `${VAR}` refs resolve from the caller's vault exactly as they do in `url` and
+ * `headers`, which is the whole point: the probe must carry the same credential
+ * the real calls carry. Any 2xx is a pass; 401/403 is a rejection; anything
+ * else is treated as the provider being unwell rather than the key being wrong.
+ */
+export interface ToolHealthCheck {
+  /** Absolute URL to call. May contain `${VAR}` refs; SSRF-checked like `url`. */
+  url: string;
+  /** Default `GET`. A health check may not mutate, so nothing else is allowed. */
+  method?: 'GET';
+  /** Defaults to the manual's own `headers` — usually where the credential is. */
+  headers?: Record<string, string>;
+}
+
+/**
+ * One manual, reduced to exactly what testing its credential requires.
+ *
+ * Server-internal, like {@link ToolHealthCheck} and for the same reason: both
+ * `healthCheck.headers` and `callTemplate` can carry a literal token.
+ */
+export interface ToolProbeTarget {
+  name: string;
+  type: ToolManualType;
+  /** `false` for a local-only tool this server is not the one that can reach it. */
+  remote?: boolean;
+  /** The probe the `.tool` declares, if any. */
+  healthCheck?: ToolHealthCheck;
+  /**
+   * The validated UTCP call template, or `null` when the manual doesn't produce
+   * a valid one. Only the `mcp` probe uses it — its handshake IS the test — but
+   * it is built here so the probe never has to walk the catalog again.
+   */
+  callTemplate: CallTemplate | null;
 }
 
 /**
@@ -74,14 +180,18 @@ export interface ToolVariable {
  *  - `open`         — the server needs no auth; nothing to configure.
  *  - `oauth-auto`   — OAuth was auto-configured; the sign-in appears as a
  *                     `user`-scoped variable, so users just authorize.
- *  - `oauth-manual` — the server needs OAuth but auto-discovery couldn't set it
- *                     up (typically no dynamic client registration, e.g. Google);
- *                     a tool writer must declare the provider in the `.tool` file
- *                     and set its client secret. `reason` says exactly why.
+ *  - `oauth-manual` — the server needs OAuth with an OWNER-REGISTERED client:
+ *                     auto-discovery couldn't register one (typically no dynamic
+ *                     client registration — Google, HubSpot), or the declaration
+ *                     already names a client id. A tool writer declares the
+ *                     sign-in on a `user`-scoped variable (the server editor for
+ *                     an `mcp.json` server; the `variables` block of a `.tool`)
+ *                     and sets its client secret. `reason` is present only while
+ *                     something is still missing, and says exactly what.
  */
 export interface ToolManualSetup {
   kind: 'open' | 'oauth-auto' | 'oauth-manual';
-  /** Why auto-setup didn't complete — present for `oauth-manual`. */
+  /** What still blocks the sign-in — present for an unfinished `oauth-manual`. */
   reason?: string;
 }
 
@@ -99,6 +209,21 @@ export interface ToolManualDescriptorBase {
   path: string;
   type: ToolManualType;
   /**
+   * A digest of the SOURCE this descriptor was parsed from — the `.tool`
+   * file's bytes, or the `mcp.json` (plus its `plugin.json`) the server entry
+   * came out of. Stamped by the scan, before any network decoration touches
+   * the descriptor, so it moves when and only when the author's file moved.
+   *
+   * It exists for {@link IToolManualService.catalogFingerprints}: a manual can
+   * change everything about what it CALLS — its `url`, its `headers`, an
+   * inline manual's embedded tool list — while its name, path, type and
+   * description stay exactly as they were, and a fingerprint built from those
+   * alone would report no change to a client whose registered copy is now
+   * wrong. INTERNAL: never on {@link ToolManualSummary}, which is serialized
+   * to the browser.
+   */
+  sourceRevision?: string;
+  /**
    * Optional one-line prose from the frontmatter, for humans browsing the
    * catalog. PURELY COSMETIC — a malformed value is ignored rather than
    * skipping the file (see `normalizeToolManual`), because a bad sentence must
@@ -115,6 +240,15 @@ export interface ToolManualDescriptorBase {
   variables?: ToolVariable[];
   /** For `type: mcp`: the admin-facing setup requirement from auto-discovery. */
   setup?: ToolManualSetup;
+  /**
+   * Optional credential probe — see {@link ToolHealthCheck}. Declared on
+   * `http`/`inline` manuals, and honoured on `type: mcp` too, where it
+   * OVERRIDES the default handshake probe (a server whose health endpoint is
+   * cheaper or more truthful than a full MCP handshake says so here).
+   * INTERNAL: lives on the descriptor, never on {@link ToolManualSummary},
+   * because it carries `headers`.
+   */
+  healthCheck?: ToolHealthCheck;
 }
 
 /** The spawn spec of a stdio-declared MCP server (a plugin `mcp.json` entry). */
@@ -172,6 +306,43 @@ export interface ToolManualSummary {
   remote?: boolean;
   /** For `type: mcp`: the admin-facing setup requirement from auto-discovery. */
   setup?: ToolManualSetup;
+  // NOTE: no `healthCheck` here, deliberately. This type is serialized straight
+  // to the browser by the tool endpoints, and a probe carries `headers` — which
+  // a `.tool` author may write as a literal token rather than a `${VAR}` ref.
+  // The server reads probe config through `IToolManualService.probeTargetFor`.
+}
+
+/**
+ * A `.tool` file the scan REFUSED — reported instead of silently dropped.
+ *
+ * One unparseable manual is a finding about that file, never an outage for the
+ * catalog: every other manual is listed and callable, and the refused one comes
+ * back here so the listing can say which file and why. Nothing is cached about
+ * it beyond the scan's own TTL, so fixing (or deleting) the file restores it on
+ * the next listing — no reconnect, no restart.
+ *
+ * `reason` is the validation message with its LOCATION where the parser gave
+ * one (`line N, column M` for a YAML fault, the field name for a schema one),
+ * scrubbed of anything that could be a credential — see `describeManualFault`.
+ * A `.tool` is knowledge-base content an author may have pasted a literal token
+ * into, and this string reaches an agent transcript, a browser and a log.
+ */
+export interface InvalidToolManual {
+  /** KB-relative path of the refused file, spelled as the catalog spells a manual's `path`. */
+  path: string;
+  /** Why it was refused: the validation message + location, with no credential values. */
+  reason: string;
+}
+
+/**
+ * What one caller may see of the catalog: the manuals that parsed, and the
+ * files the scan refused. Produced together by
+ * {@link IToolManualService.listAccessibleCatalog} — see there for why the two
+ * halves are never fetched apart.
+ */
+export interface AccessibleCatalog {
+  tools: ToolManualSummary[];
+  invalid: InvalidToolManual[];
 }
 
 /** One thing an `inline` manual's embedded tool list says the assistant can do. */
@@ -182,10 +353,11 @@ export interface ToolCapability {
 
 /**
  * A single tool manual for the BROWSER tool page (`GET /api/tools/:slug`): the
- * summary plus the two human-facing fields the catalog listing has no use for.
- * Both are normalized to `null` rather than left optional — the page renders a
- * definite "nothing here" state, so an absent field and an empty one are the
- * same thing to it.
+ * summary plus the three human-facing fields the catalog listing has no use
+ * for — the description, the capabilities and the tools hidden for an invalid
+ * schema. Each is normalized to a definite empty (`null`, `[]`) rather than
+ * left optional — the page renders a definite "nothing here" state, so an
+ * absent field and an empty one are the same thing to it.
  */
 export interface ToolManualDetail extends Omit<ToolManualSummary, 'description'> {
   description: string | null;
@@ -195,11 +367,55 @@ export interface ToolManualDetail extends Omit<ToolManualSummary, 'description'>
    * round-trip this endpoint deliberately does not make), so they report `[]`.
    */
   capabilities: ToolCapability[];
+  /**
+   * Tools of this manual that Hexis keeps off every agent surface because
+   * their input schema is not valid JSON Schema as the server sent it, each
+   * with the place and the reason.
+   *
+   * Only for a caller who may WRITE this manual's file: the marker is for the
+   * people who manage the server, who are the only ones who can get the schema
+   * fixed. `[]` for everyone else, and for a server with nothing wrong.
+   */
+  hiddenTools: HiddenTool[];
 }
+
+/**
+ * A connection's narrowing of the catalog: whether the connector defined at
+ * `definitionPath` (a `.tool` file, or the MCP server definition a server
+ * entry came from) is one the connection loads. Applied AFTER the caller's
+ * read gate, so it can only take manuals away. The agent surfaces pass the
+ * connection scope's `allowsConnector` (`modules/agent-scope`); absent is the
+ * whole readable catalog.
+ */
+export type ConnectorScope = (definitionPath: string) => boolean;
+
+/** A manual as its file reads now — see {@link IToolManualService.liveDeclaration}. */
+export type LiveDeclaration =
+  | { manual: ToolManualSummary; variable?: ToolVariable; refused?: undefined }
+  | { refused: string; manual?: undefined; variable?: undefined };
 
 export interface IToolManualService {
   /** The `.tool` manuals the user can read, as summaries. */
   listAccessible(userEmail: string): Promise<ToolManualSummary[]>;
+  /**
+   * BOTH halves of what this caller may see — the manuals that parsed and the
+   * files the scan refused — from ONE scan and ONE access pass.
+   *
+   * One method rather than a `listAccessible` + `listInvalid` pair, because the
+   * two halves are one answer and asking for them separately is a way to get it
+   * wrong twice: on a cold cache two calls are two disk walks and two MCP
+   * discovery passes, and if a `.tool` is written between them the response
+   * describes two different snapshots — a tool that is in neither half, or in
+   * both. Every surface that reports refusals wants both, so both is what there
+   * is to ask for.
+   *
+   * `invalid` is access-filtered for the same reason the listing is: a path is
+   * a fact about the knowledge base, and a caller who may not read the file may
+   * not learn it exists. The refused file's own frontmatter verbs are
+   * unparseable by definition, so the verdict comes from its folder's
+   * `access.md` chain — default-deny, as everywhere else.
+   */
+  listAccessibleCatalog(userEmail: string, within?: ConnectorScope): Promise<AccessibleCatalog>;
   /**
    * One readable `.tool` by slug, with its description + capabilities, for the
    * browser tool page. `null` when no such slug exists OR the caller can't read
@@ -207,7 +423,45 @@ export interface IToolManualService {
    * confirm that a tool the caller can't see exists).
    */
   getDetail(userEmail: string, slug: string): Promise<ToolManualDetail | null>;
+  /**
+   * One manual's declaration as its file reads on the default branch NOW, for a
+   * sign-in about to start: the files are parsed afresh, never served from the
+   * catalog's cached scan, so an edit made seconds ago is already what this
+   * answers. A sign-in variable that names only its `clientId` is completed from
+   * the server's OAuth metadata by the same walk the catalog completes it with;
+   * when that fails, the endpoints stay absent and `manual.setup.reason` says why.
+   *
+   * `refused` when the file declaring this slug is one the parse refuses as it
+   * reads now (an endpoint failing the https/SSRF check, say): the parser's
+   * reason, so the sign-in can say why instead of finding nothing. `null` when
+   * no readable manual has this slug (fail-closed, like {@link getDetail});
+   * `variable` absent when the file declares no variable of that name. Nothing
+   * the platform synthesises from discovery (the zero-config sign-in variable)
+   * is in the answer: it is not in any file.
+   */
+  liveDeclaration(userEmail: string, slug: string, varName: string): Promise<LiveDeclaration | null>;
 
+  /**
+   * Wire where a hidden tool's schema finding comes from (the MCP proxy, which
+   * is constructed after this service — setter injection for the same reason
+   * `setMcpAuthDiscovery` is one). Without it `getDetail` reports no hidden
+   * tool, which is the honest answer for a deployment with no MCP surface.
+   */
+  setHiddenTools(source: HiddenToolSource): void;
+
+  /**
+   * One line per manual the caller can read, each carrying the manual's
+   * identity AND a digest of the file it was parsed from — the input the
+   * catalog fingerprint (`GET /api/agent/catalog-revision`) is built out of.
+   *
+   * Its own accessor rather than a projection of {@link listAccessible},
+   * because the two answer different questions. A summary is what a person
+   * browsing the catalog sees; this is whether a registered copy of the
+   * catalog is still correct, which a change to a manual's `url` or an inline
+   * manual's embedded tools breaks without touching anything a summary shows.
+   * Opaque to callers: only equality is ever asked of these lines.
+   */
+  catalogFingerprints(userEmail: string, within?: ConnectorScope): Promise<string[]>;
   /**
    * Every manual in the catalog, UNFILTERED by access — the mirror of
    * `skillService.listSkills(undefined)`. For caller-INDEPENDENT counting only
@@ -223,11 +477,31 @@ export interface IToolManualService {
    * NOT include the KB manual (the route prepends that). With `{ remoteOnly: true }`
    * (the remote MCP proxy), LOCAL-ONLY manuals (`remote: false`) are excluded.
    */
-  toManualCallTemplates(userEmail: string, opts?: { remoteOnly?: boolean }): Promise<CallTemplate[]>;
-  /** The `{ name, path }` of the caller's accessible LOCAL-ONLY (`remote: false`) manuals. */
-  listLocalOnly(userEmail: string): Promise<{ name: string; path: string }[]>;
+  toManualCallTemplates(userEmail: string, opts?: { remoteOnly?: boolean; within?: ConnectorScope }): Promise<CallTemplate[]>;
+  /**
+   * The caller's accessible LOCAL-ONLY (`remote: false`) manuals.
+   *
+   * `slug` rides along with `name` and `path` because a local runtime needs
+   * both: `name` is the UTCP namespace its `${VAR}` refs are keyed by, and
+   * `slug` is what addresses the manual on the variable-resolution route.
+   */
+  listLocalOnly(userEmail: string, within?: ConnectorScope): Promise<{ slug: string; name: string; path: string }[]>;
+  /**
+   * Tools declared on `branch` whose namespace the default-branch catalog does
+   * not serve yet, filtered to what the caller can read there. The catalog is
+   * built from the default branch only, so a server an agent declares on its
+   * draft is invisible to every tool surface until the draft is merged — this
+   * is how the agent is told where its declaration lives. `[]` for the default
+   * branch itself, or a branch with no workspace. `within` narrows the answer
+   * to a connection's connectors, after the read gate, as the catalog's does.
+   */
+  listDeclaredOnlyOnBranch(
+    userEmail: string,
+    branch: string,
+    within?: ConnectorScope,
+  ): Promise<{ name: string; path: string; type: ToolManualType }[]>;
   /** The embedded UTCP manual for an inline `.tool` (served at `/api/tools/:slug/manual`). */
-  resolveInlineManual(userEmail: string, slug: string): Promise<UtcpManualDict | null>;
+  resolveInlineManual(userEmail: string, slug: string, opts?: { within?: ConnectorScope }): Promise<UtcpManualDict | null>;
   /** Validate a draft `.tool` file's content for the renderer preview. */
   preview(content: string): Promise<ToolManualPreview>;
   /**
@@ -239,6 +513,31 @@ export interface IToolManualService {
    */
   scopeOfVariable(effectiveKey: string): Promise<ToolVariableScope>;
   /**
+   * Everything the credential probe needs about one readable manual, resolved
+   * in a SINGLE catalog + ACL pass.
+   *
+   * One accessor rather than three because the probe needs three facts that all
+   * come from the same file — is it local-only, does it declare a health check,
+   * and what call template would reach it — and asking for them separately made
+   * one probe walk the catalog four times, building call templates for every
+   * manual in the workspace to use exactly one of them.
+   *
+   * Deliberately NOT reachable through {@link ToolManualSummary}: that type is
+   * serialized straight to the browser by the tool endpoints, and a probe
+   * carries `headers` — which a `.tool` author may write as a literal token
+   * rather than a `${VAR}` ref. Probe config is internal to the server, so it
+   * travels by its own accessor and never rides a public DTO.
+   *
+   * Addressed by SLUG, which is what the route has: resolving the slug here
+   * rather than making the caller map it to a name first is what reduces a
+   * probe to one pass. `ToolProbeTarget.name` carries the UTCP namespace back
+   * out, since that is what the probe's `${VAR}` lookups are keyed by.
+   *
+   * `null` when no such manual exists OR the caller can't read it — the two are
+   * indistinguishable on purpose, as everywhere else in this contract.
+   */
+  probeTargetFor(userEmail: string, slug: string): Promise<ToolProbeTarget | null>;
+  /**
    * The per-user (`user`-scoped) variables a manual declares, each with the vault
    * key (`<manual>_<VAR>`) the caller's value is stored under, its bare name, and
    * its operator label. Used by the MCP proxy to check — before running a tool —
@@ -249,6 +548,84 @@ export interface IToolManualService {
   ): Promise<
     { key: string; name: string; label: string | null; oauth: boolean; oauthScopes?: string[] }[]
   >;
+  /**
+   * The SHARED (`admin`-scoped) sign-ins a manual declares — a managed
+   * connector enabled as a workspace connection. The pre-call check reads
+   * these so a tool whose one connection nobody has made yet is reported as
+   * missing its sign-in, labelled "(a tool owner connects this for the
+   * workspace)", instead of failing opaquely at the provider.
+   *
+   * `key` is the vault key as UTCP derives it (`utcpNamespacedKey`): the
+   * manual's name with every non-word character made `_` and every `_` then
+   * doubled, an `_`, and the variable's name (`my-tool` + `ACCESS_TOKEN` →
+   * `my__tool_ACCESS_TOKEN`). Read it from here; never compose it by hand.
+   */
+  sharedSignInKeysForManual(
+    manualName: string,
+  ): Promise<{ key: string; name: string; label: string | null; oauthScopes?: string[] }[]>;
   /** Drop the cached catalog (call after a merge to the default branch). */
   invalidate(): void;
+}
+
+/**
+ * A tool that exists ONLY on an open change request's branch — proposed, not
+ * released. The mirror of `PendingSkill`, and deliberately NOT a
+ * {@link ToolManualSummary}: the catalog is what agents register and call, and
+ * a tool nobody has approved must never become callable just because it became
+ * visible. This is a review surface only.
+ *
+ * Who may see one is narrower than who may see the catalog: its author, and
+ * whoever could approve it. See `shared/pending-proposals.ts` for why that
+ * predicate is the access tree's answer rather than a plugin-admin check
+ * spelled out again here.
+ */
+export interface PendingTool {
+  /**
+   * The route-safe id this tool would be served under once released — the
+   * resolved UTCP manual name, exactly what the catalog puts on a
+   * {@link ToolManualSummary}. NOT the file name: a `.tool` that declares its
+   * own `id`, or one whose filename is not route-safe, must still line up with
+   * the card the next load replaces it with.
+   *
+   * Unique among released tools, because the catalog refuses a namespace
+   * collision — but NOT yet unique among proposals, which is the price of
+   * nothing having been approved: two open requests may each propose the name,
+   * and until one merges neither has claimed it. A list rendering these keys on
+   * the slug alone must compose it with {@link PendingTool.path} and
+   * {@link PendingTool.changeRequestNumber}.
+   */
+  slug: string;
+  /** The UTCP manual name the declaration would take once released. */
+  name: string;
+  /**
+   * Repo-root-relative path of the DECLARATION — the `.tool` file, or the
+   * plugin's `mcp.json`. What the library files the card under, and what tells
+   * a reader which of the two kinds of tool this is.
+   */
+  path: string;
+  type: ToolManualType;
+  /** The declared one-line prose, when there is a usable one. */
+  description?: string;
+  /**
+   * The plugin folder the declaration targets, or `null` for a `.tool` that
+   * sits directly under the plugins root and so targets none.
+   */
+  plugin: string | null;
+  /** The open change request that would release it. */
+  changeRequestNumber: number;
+  branch: string;
+  /** Display name of whoever opened the request (person or agent). */
+  authorName: string;
+  createdAt: string;
+  /** True when the caller opened the request themselves. */
+  isAuthor: boolean;
+}
+
+export interface IPendingToolService {
+  /**
+   * Tools awaiting approval that `userEmail` is entitled to see — the ones they
+   * proposed, and the ones they could approve. Never throws: a review surface
+   * failing must not take the library down with it.
+   */
+  listPendingTools(userEmail: string): Promise<PendingTool[]>;
 }

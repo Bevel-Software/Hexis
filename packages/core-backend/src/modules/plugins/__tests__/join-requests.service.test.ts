@@ -4,13 +4,14 @@ import {
   joinBranchFor,
   type AuthUser,
   type ChangeRequest,
-  type IWorkflowService,
+  type IVersionControlService,
 } from '@bevel-software/platform-shared';
-import {
-  workspaceIdForBranch,
-  type WorkspaceService,
-} from '../../workspace/workspace.service.js';
+import { type WorkspaceService } from '../../workspace/workspace.service.js';
+import type { IAccessControl } from '../../access/access-control.interface.js';
+import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { JoinRequestsService } from '../join-requests.service.js';
+import { folderTarget } from '../../access/access-requests.contract.js';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 
 /**
  * The derived lifecycle: a join request is open exactly while its branch's
@@ -45,18 +46,32 @@ function cr(over: Partial<ChangeRequest> = {}): ChangeRequest {
 }
 
 /** `byRef[ref]` is the access.md content at that ref (undefined ⇒ absent). */
-function makeHarness(byRef: Record<string, string>) {
+function makeHarness(byRef: Record<string, string>, holds: Record<string, unknown> = {}) {
   const workspaceService = {
     ensureRemotesFetched: vi.fn(async () => undefined),
     readFileAtRef: vi.fn(async (_ws: string, ref: string, path: string) =>
       path === ACCESS_MD ? (byRef[ref] ?? null) : null,
     ),
   } as unknown as WorkspaceService;
-  const workflow = {
+  const versionControl = {
     rejectChangeRequest: vi.fn(async () => ({ number: 7, state: 'closed' })),
     deleteBranch: vi.fn(async () => undefined),
-  } as unknown as IWorkflowService;
-  return { svc: new JoinRequestsService(workspaceService, workflow), workflow, workspaceService };
+  } as unknown as IVersionControlService;
+  // Nobody holds anything by default: every proposal stands on the file diff
+  // alone, which is what these cases are about.
+  const accessControl = {
+    canRead: vi.fn(async () => false),
+    canWrite: vi.fn(async () => false),
+    canOwner: vi.fn(async () => false),
+    canDownload: vi.fn(async () => false),
+    ...holds,
+  } as unknown as IAccessControl;
+  return {
+    svc: new JoinRequestsService(workspaceService, versionControl, testKbContext(), accessControl),
+    versionControl,
+    workspaceService,
+    accessControl,
+  };
 }
 
 const refs = (branchMd: string | undefined, defaultMd = DEFAULT_MD) => ({
@@ -67,19 +82,19 @@ const refs = (branchMd: string | undefined, defaultMd = DEFAULT_MD) => ({
 describe('JoinRequestsService.list', () => {
   it('reports a request with its pending proposals, and leaves it open', async () => {
     const h = makeHarness(refs(PROPOSING_MD));
-    const out = await h.svc.list('GTM', FOLDER, [cr()], ACTOR);
+    const out = await h.svc.list('GTM', folderTarget(FOLDER), [cr()], ACTOR);
     expect(out).toHaveLength(1);
     expect(out[0]).toMatchObject({ number: 7, requesterName: 'Ali Baba' });
     expect(out[0].proposals.map((p) => p.label)).toEqual(['Ali Baba']);
-    expect(h.workflow.rejectChangeRequest).not.toHaveBeenCalled();
+    expect(h.versionControl.rejectChangeRequest).not.toHaveBeenCalled();
   });
 
   it('SETTLES a request whose proposals have all landed: closes it, deletes the branch, omits it', async () => {
     // The grant is on the default branch now, so the branch adds nothing.
     const h = makeHarness(refs(PROPOSING_MD, PROPOSING_MD));
-    const out = await h.svc.list('GTM', FOLDER, [cr()], ACTOR);
+    const out = await h.svc.list('GTM', folderTarget(FOLDER), [cr()], ACTOR);
     expect(out).toEqual([]);
-    expect(h.workflow.rejectChangeRequest).toHaveBeenCalledWith(
+    expect(h.versionControl.rejectChangeRequest).toHaveBeenCalledWith(
       7,
       ACTOR,
       'open',
@@ -90,7 +105,7 @@ describe('JoinRequestsService.list', () => {
       // branch could never silently break this.
       workspaceIdForBranch(DEFAULT_BRANCH),
     );
-    expect(h.workflow.deleteBranch).toHaveBeenCalledWith(
+    expect(h.versionControl.deleteBranch).toHaveBeenCalledWith(
       workspaceIdForBranch(DEFAULT_BRANCH),
       joinBranchFor(ALI, 'GTM'),
       ACTOR,
@@ -106,28 +121,28 @@ describe('JoinRequestsService.list', () => {
       ACTOR,
     );
     expect(out).toEqual([]);
-    expect(h.workflow.rejectChangeRequest).not.toHaveBeenCalled();
+    expect(h.versionControl.rejectChangeRequest).not.toHaveBeenCalled();
   });
 
   it('keeps listing when closing one request fails', async () => {
     const h = makeHarness(refs(PROPOSING_MD, PROPOSING_MD));
-    (h.workflow.rejectChangeRequest as ReturnType<typeof vi.fn>).mockRejectedValue(
+    (h.versionControl.rejectChangeRequest as ReturnType<typeof vi.fn>).mockRejectedValue(
       new Error('gh down'),
     );
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    await expect(h.svc.list('GTM', FOLDER, [cr()], ACTOR)).resolves.toEqual([]);
+    await expect(h.svc.list('GTM', folderTarget(FOLDER), [cr()], ACTOR)).resolves.toEqual([]);
     expect(warn).toHaveBeenCalled();
     warn.mockRestore();
   });
 
   it('still closes the request when the branch delete fails, and says so', async () => {
     const h = makeHarness(refs(PROPOSING_MD, PROPOSING_MD));
-    (h.workflow.deleteBranch as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('protected'));
+    (h.versionControl.deleteBranch as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('protected'));
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     // The request still settles (omitted from the list) — the leftover branch
     // is cosmetic, and the failure is logged rather than swallowed.
-    await expect(h.svc.list('GTM', FOLDER, [cr()], ACTOR)).resolves.toEqual([]);
-    expect(h.workflow.rejectChangeRequest).toHaveBeenCalled();
+    await expect(h.svc.list('GTM', folderTarget(FOLDER), [cr()], ACTOR)).resolves.toEqual([]);
+    expect(h.versionControl.rejectChangeRequest).toHaveBeenCalled();
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('could not delete'));
     warn.mockRestore();
   });
@@ -143,33 +158,33 @@ describe('JoinRequestsService.list', () => {
       [`origin/${DEFAULT_BRANCH}`]: DEFAULT_MD,
       [`origin/${joinBranchFor(ALI, 'Finance!')}`]: DEFAULT_MD,
     });
-    await expect(h.svc.list('finance', 'Plugins/finance', [other], ACTOR)).resolves.toEqual([]);
-    expect(h.workflow.rejectChangeRequest).not.toHaveBeenCalled();
-    expect(h.workflow.deleteBranch).not.toHaveBeenCalled();
-    await expect(h.svc.reconcile('finance', 'Plugins/finance', other, ACTOR)).resolves.toBe(false);
-    expect(h.workflow.rejectChangeRequest).not.toHaveBeenCalled();
+    await expect(h.svc.list('finance', folderTarget('Plugins/finance'), [other], ACTOR)).resolves.toEqual([]);
+    expect(h.versionControl.rejectChangeRequest).not.toHaveBeenCalled();
+    expect(h.versionControl.deleteBranch).not.toHaveBeenCalled();
+    await expect(h.svc.reconcile('finance', folderTarget('Plugins/finance'), other, ACTOR)).resolves.toBe(false);
+    expect(h.versionControl.rejectChangeRequest).not.toHaveBeenCalled();
   });
 });
 
 describe('JoinRequestsService.reconcile', () => {
   it('settles and reports true once nothing is pending', async () => {
     const h = makeHarness(refs(PROPOSING_MD, PROPOSING_MD));
-    await expect(h.svc.reconcile('GTM', FOLDER, cr(), ACTOR)).resolves.toBe(true);
-    expect(h.workflow.rejectChangeRequest).toHaveBeenCalled();
-    expect(h.workflow.deleteBranch).toHaveBeenCalled();
+    await expect(h.svc.reconcile('GTM', folderTarget(FOLDER), cr(), ACTOR)).resolves.toBe(true);
+    expect(h.versionControl.rejectChangeRequest).toHaveBeenCalled();
+    expect(h.versionControl.deleteBranch).toHaveBeenCalled();
   });
 
   it('leaves a request alone while proposals remain', async () => {
     const h = makeHarness(refs(PROPOSING_MD));
-    await expect(h.svc.reconcile('GTM', FOLDER, cr(), ACTOR)).resolves.toBe(false);
-    expect(h.workflow.rejectChangeRequest).not.toHaveBeenCalled();
+    await expect(h.svc.reconcile('GTM', folderTarget(FOLDER), cr(), ACTOR)).resolves.toBe(false);
+    expect(h.versionControl.rejectChangeRequest).not.toHaveBeenCalled();
   });
 
   it('refuses a change request that is not this plugin\'s join branch', async () => {
     const h = makeHarness(refs(PROPOSING_MD, PROPOSING_MD));
     await expect(
-      h.svc.reconcile('GTM', FOLDER, cr({ branch: 'ali/some-draft' }), ACTOR),
+      h.svc.reconcile('GTM', folderTarget(FOLDER), cr({ branch: 'ali/some-draft' }), ACTOR),
     ).resolves.toBe(false);
-    expect(h.workflow.rejectChangeRequest).not.toHaveBeenCalled();
+    expect(h.versionControl.rejectChangeRequest).not.toHaveBeenCalled();
   });
 });

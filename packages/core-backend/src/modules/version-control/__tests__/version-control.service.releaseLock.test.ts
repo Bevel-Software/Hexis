@@ -1,0 +1,885 @@
+import { describe, it, expect, vi, beforeEach, type MockInstance } from 'vitest';
+import { testKbContext } from '../../../__tests__/kb-context.js';
+import type { AuthUser, Change } from '@bevel-software/platform-shared';
+import type { GitService } from '../git/git.service.js';
+import type { PullRequestService } from '../git/pull-request.service.js';
+import type { IChangeRequestReviewService } from '../change-request-review/change-request-review.interface.js';
+import type { WorkspaceService } from '../../workspace/workspace.service.js';
+import type { IAccessControl } from '../../access/access-control.interface.js';
+import { FileLockService } from '../file-lock.service.js';
+import { PendingCommitsService } from '../pending-commits.service.js';
+import { VersionControlEventBus } from '../event-bus.js';
+import { VersionControlService, syncConflictMessage } from '../version-control.service.js';
+import { openChangeGate } from '../../../__tests__/open-change-gate.js';
+import type { Database } from '../../database/connection.js';
+import {
+  PullRebaseConflictError,
+  PullRebaseConflictError,
+  PushNeedsAgentResolutionError,
+  VersionControlValidationError,
+} from '../../../shared/domain-errors.js';
+
+/**
+ * Two surfaces under test:
+ *
+ *   1. `VersionControlService.releaseLock` — new shape (enqueue + drop lock,
+ *      no synchronous commit).
+ *   2. `VersionControlService.runPendingCommit` — what the background worker
+ *      calls per claimed row. This is where the old releaseLock's
+ *      commit + cooperative-push + recovery body now lives, so the
+ *      non-FF + auth-failure + double-push-fail scenarios moved here.
+ *
+ * The non-fast-forward push recovery path has burned us in production
+ * before; every scenario asserts both the git calls AND the SSE
+ * events: a successful commit MUST emit `file-changed`; a failed
+ * commit MUST NOT (other clients would otherwise refetch a sha they
+ * can't reach on origin yet).
+ */
+
+const USER: AuthUser = {
+  id: 'user-1',
+  email: 'alice@example.com',
+  name: 'Alice',
+};
+
+const CHANGE: Change = {
+  sha: 'abc1234',
+  authorName: 'Alice',
+  authorEmail: 'alice@example.com',
+  subject: 'edit foo.md',
+  committedAt: '2026-04-20T00:00:00.000Z',
+};
+
+function makeFileLocks(
+  holderUserId: string,
+  mode: 'edit' | 'coordination' = 'edit',
+): FileLockService {
+  return {
+    acquire: vi.fn(),
+    heartbeat: vi.fn(),
+    release: vi.fn().mockResolvedValue(undefined),
+    get: vi.fn().mockResolvedValue({
+      branch: 'feat/x',
+      path: 'foo.md',
+      holderUserId,
+      holderName: 'Alice',
+      mode,
+      acquiredAt: '',
+      lastHeartbeatAt: '',
+      expiresAt: '',
+    }),
+  } as unknown as FileLockService;
+}
+
+function makePending(): PendingCommitsService {
+  return {
+    enqueue: vi.fn().mockResolvedValue(undefined),
+    enqueueIfAbsent: vi.fn().mockResolvedValue(true),
+    claimNext: vi.fn().mockResolvedValue(null),
+    markSucceeded: vi.fn().mockResolvedValue(undefined),
+    markTransientFailure: vi.fn().mockResolvedValue(undefined),
+    markRecoveryStarted: vi.fn().mockResolvedValue(undefined),
+    markNeedsAttention: vi.fn().mockResolvedValue(undefined),
+    listNeedsAttention: vi.fn().mockResolvedValue([]),
+    countPending: vi.fn().mockResolvedValue(0),
+    hasLiveRowFor: vi.fn().mockResolvedValue(false),
+    startupReconcile: vi.fn().mockResolvedValue(undefined),
+  } as unknown as PendingCommitsService;
+}
+
+function makeGit(overrides: Partial<{
+  commitFile: Change | null;
+  pushBehavior: 'ok' | 'nff' | 'auth-fail';
+  pullBehavior: 'ok' | 'fail' | 'conflict';
+  pushAfterPullBehavior: 'ok' | 'fail';
+  hasUnpushedCommits: boolean;
+}> = {}): GitService {
+  const commitFileResult = overrides.commitFile === undefined ? CHANGE : overrides.commitFile;
+  const pushBehavior = overrides.pushBehavior ?? 'ok';
+  const pullBehavior = overrides.pullBehavior ?? 'ok';
+  const pushAfterPullBehavior = overrides.pushAfterPullBehavior ?? 'ok';
+  let pushCalls = 0;
+  return {
+    commitFile: vi.fn().mockResolvedValue(commitFileResult),
+    discardPath: vi.fn().mockResolvedValue(undefined),
+    hasUnpushedCommits: vi.fn().mockResolvedValue(overrides.hasUnpushedCommits ?? false),
+    push: vi.fn().mockImplementation(async () => {
+      pushCalls++;
+      const phase = pushCalls === 1 ? pushBehavior : pushAfterPullBehavior;
+      if (phase === 'nff') {
+        throw new Error(
+          'git push failed: Command failed: git push -u origin feat/x\n' +
+            ' ! [rejected]        feat/x -> feat/x (non-fast-forward)\n' +
+            'error: failed to push some refs to https://example.com/repo.git\n' +
+            'hint: Updates were rejected because the tip of your current branch is behind\n',
+        );
+      }
+      if (phase === 'auth-fail') {
+        throw new Error('git push failed: Command failed: ... fatal: Authentication failed');
+      }
+      if (phase === 'fail') {
+        throw new Error('git push failed (post-pull retry)');
+      }
+    }),
+    pull: vi.fn().mockImplementation(async () => {
+      if (pullBehavior === 'fail') throw new Error('git pull failed: merge conflict');
+      if (pullBehavior === 'conflict') throw new PullRebaseConflictError('feat/x', ['foo.md'], 'CONFLICT (content)');
+      return { treeChanged: true };
+    }),
+  } as unknown as GitService;
+}
+
+function makeFacade(
+  git: GitService,
+  locks: FileLockService,
+  pending: PendingCommitsService,
+  events: VersionControlEventBus,
+): VersionControlService {
+  return new VersionControlService(
+    {} as unknown as Database,
+    git,
+    {} as PullRequestService,
+    {} as IChangeRequestReviewService,
+    {} as WorkspaceService,
+    {} as IAccessControl,
+    locks,
+    pending,
+    testKbContext(),
+    openChangeGate(),
+    events,
+  );
+}
+
+describe('VersionControlService.releaseLock — new (enqueue, no synchronous commit)', () => {
+  let events: VersionControlEventBus;
+  let emitSpy: MockInstance;
+
+  beforeEach(() => {
+    events = new VersionControlEventBus();
+    emitSpy = vi.spyOn(events, 'emit');
+  });
+
+  it('enqueues a pending-commit row, drops the lock, emits lock-released (NO commit, NO push)', async () => {
+    const git = makeGit();
+    const locks = makeFileLocks(USER.id);
+    const pending = makePending();
+    const svc = makeFacade(git, locks, pending, events);
+
+    await expect(svc.releaseLock('ws-1', 'feat/x', 'foo.md', USER)).resolves.toBeUndefined();
+
+    expect(pending.enqueue).toHaveBeenCalledWith({
+      workspaceId: 'ws-1',
+      branch: 'feat/x',
+      path: 'foo.md',
+      authorEmail: USER.email,
+      authorName: USER.name,
+    });
+    expect(locks.release).toHaveBeenCalledTimes(1);
+    // Critical: the new shape doesn't touch git on the user-visible
+    // path. Commit + push happen later in the worker via runPendingCommit.
+    expect(git.commitFile).not.toHaveBeenCalled();
+    expect(git.push).not.toHaveBeenCalled();
+    // Only lock-released fires synchronously now; file-changed lands when
+    // the worker's commit succeeds (covered in the runPendingCommit suite).
+    expect(emitSpy.mock.calls.map((c) => (c[0] as { kind: string }).kind)).toEqual(['lock-released']);
+  });
+
+  it('answers hasQueuedCommit under the canonical identity, whatever spelling the caller has', async () => {
+    // `releaseLock` stores the row under the canonical path; a caller that
+    // asks with another spelling of the same file must find it, or it would
+    // re-arm a retry vehicle that already exists.
+    const pending = makePending();
+    (pending.hasLiveRowFor as Mock).mockResolvedValue(true);
+    const svc = makeFacade(makeGit(), makeFileLocks(USER.id), pending, events);
+
+    await expect(svc.hasQueuedCommit('ws-1', 'feat/x', './knowledge-base//x.md')).resolves.toBe(true);
+    expect(pending.hasLiveRowFor).toHaveBeenCalledWith('ws-1', 'feat/x', 'knowledge-base/x.md');
+  });
+
+  it('throws lock-not-held when the caller does not hold the lock', async () => {
+    const git = makeGit();
+    const locks = makeFileLocks('someone-else');
+    const pending = makePending();
+    const svc = makeFacade(git, locks, pending, events);
+
+    await expect(svc.releaseLock('ws-1', 'feat/x', 'foo.md', USER)).rejects.toBeInstanceOf(
+      VersionControlValidationError,
+    );
+    // Ownership guard MUST run before we enqueue — otherwise a non-holder
+    // could schedule a commit attributed to themselves on any file.
+    expect(pending.enqueue).not.toHaveBeenCalled();
+    expect(locks.release).not.toHaveBeenCalled();
+    expect(emitSpy).not.toHaveBeenCalled();
+  });
+
+  it('throws lock-not-held when the lock row is missing entirely (TTL expired + GC)', async () => {
+    const git = makeGit();
+    const locks = {
+      ...makeFileLocks(USER.id),
+      get: vi.fn().mockResolvedValue(null),
+    } as unknown as FileLockService;
+    const pending = makePending();
+    const svc = makeFacade(git, locks, pending, events);
+
+    await expect(svc.releaseLock('ws-1', 'feat/x', 'foo.md', USER)).rejects.toBeInstanceOf(
+      VersionControlValidationError,
+    );
+    expect(pending.enqueue).not.toHaveBeenCalled();
+  });
+
+  it('surfaces lock-release failure without rolling back the enqueue', async () => {
+    // Documents the deliberate ordering at version-control.service.ts:
+    // enqueue first, drop second. If `locks.release` throws after a
+    // successful `pending.enqueue`, we let the error propagate — the
+    // queued row stays so the worker eventually commits the file, and
+    // the held lock will be reaped by its TTL. "Brief over-lock" is the
+    // documented trade-off; the alternative (drop-then-enqueue) would
+    // re-introduce the orphan-files bug the queue exists to prevent.
+    const git = makeGit();
+    const locks = {
+      ...makeFileLocks(USER.id),
+      release: vi.fn().mockRejectedValue(new Error('db connection lost')),
+    } as unknown as FileLockService;
+    const pending = makePending();
+    const svc = makeFacade(git, locks, pending, events);
+
+    await expect(svc.releaseLock('ws-1', 'feat/x', 'foo.md', USER)).rejects.toThrow(
+      /db connection lost/,
+    );
+
+    // Enqueue happened first and was NOT compensated/rolled back.
+    expect(pending.enqueue).toHaveBeenCalledTimes(1);
+    expect(pending.enqueue).toHaveBeenCalledWith({
+      workspaceId: 'ws-1',
+      branch: 'feat/x',
+      path: 'foo.md',
+      authorEmail: USER.email,
+      authorName: USER.name,
+    });
+    // Release was attempted (and threw).
+    expect(locks.release).toHaveBeenCalledTimes(1);
+    // No git side effects on the user path — the worker handles those.
+    expect(git.commitFile).not.toHaveBeenCalled();
+    expect(git.push).not.toHaveBeenCalled();
+    // No `lock-released` event when the release itself failed; the lock
+    // is still held, and we'd lie to any SSE subscriber by emitting.
+    expect(emitSpy).not.toHaveBeenCalled();
+  });
+
+  it('REFUSES to release a coordination hold — never enqueues, never drops the row', async () => {
+    // A coordination hold was acquired PAST the write-authorization gate on
+    // the promise that nothing gets written under it. If releaseLock treated
+    // it like an edit lock, the enqueued release commit would publish
+    // whatever bytes sit on disk — on machine-owned paths included — under
+    // this caller's name. The sanctioned release is releaseLockNoCommit.
+    const git = makeGit();
+    const locks = makeFileLocks(USER.id, 'coordination');
+    const pending = makePending();
+    const svc = makeFacade(git, locks, pending, events);
+
+    const err = await svc
+      .releaseLock('ws-1', 'feat/x', 'foo.md', USER)
+      .then(() => null)
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(VersionControlValidationError);
+    expect((err as VersionControlValidationError).payload?.kind).toBe('coordination-hold');
+    expect(pending.enqueue).not.toHaveBeenCalled();
+    expect(locks.release).not.toHaveBeenCalled();
+    expect(emitSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('VersionControlService.releaseLockUntouched — drop the row, leave disk AND queue alone', () => {
+  let events: VersionControlEventBus;
+  let emitSpy: MockInstance;
+
+  beforeEach(() => {
+    events = new VersionControlEventBus();
+    emitSpy = vi.spyOn(events, 'emit');
+  });
+
+  it('releases the lock without enqueueing or discarding, emits lock-released only', async () => {
+    const git = makeGit();
+    const locks = makeFileLocks(USER.id);
+    const pending = makePending();
+    const svc = makeFacade(git, locks, pending, events);
+
+    await svc.releaseLockUntouched('ws-1', 'feat/x', 'foo.md', USER);
+
+    expect(locks.release).toHaveBeenCalledTimes(1);
+    // The whole point: a prior save's dirty bytes on this path must survive
+    // (no discard) without being re-attributed to this caller (no enqueue).
+    expect(pending.enqueue).not.toHaveBeenCalled();
+    expect(git.discardPath).not.toHaveBeenCalled();
+    expect(git.commitFile).not.toHaveBeenCalled();
+    expect(git.push).not.toHaveBeenCalled();
+    expect(emitSpy.mock.calls.map((c) => (c[0] as { kind: string }).kind)).toEqual(['lock-released']);
+  });
+
+  it('no-ops (idempotent) when the caller does not hold the lock', async () => {
+    const git = makeGit();
+    const locks = makeFileLocks('someone-else');
+    const pending = makePending();
+    const svc = makeFacade(git, locks, pending, events);
+
+    await expect(
+      svc.releaseLockUntouched('ws-1', 'feat/x', 'foo.md', USER),
+    ).resolves.toBeUndefined();
+    expect(locks.release).not.toHaveBeenCalled();
+    expect(emitSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('VersionControlService.releaseLockNoCommit — coordination-hold discard guard', () => {
+  let events: VersionControlEventBus;
+
+  beforeEach(() => {
+    events = new VersionControlEventBus();
+  });
+
+  it('discards as usual on an EDIT hold, without consulting the queue', async () => {
+    const git = makeGit();
+    const pending = makePending();
+    const svc = makeFacade(git, makeFileLocks(USER.id), pending, events);
+
+    await svc.releaseLockNoCommit('ws-1', 'feat/x', 'foo.md', USER);
+
+    expect(git.discardPath).toHaveBeenCalledWith('ws-1', 'foo.md');
+    expect(pending.hasLiveRowFor).not.toHaveBeenCalled();
+  });
+
+  it('discards a coordination hold when the queue has NO live row (wipes smuggled bytes)', async () => {
+    const git = makeGit();
+    const pending = makePending();
+    const emitSpy = vi.spyOn(events, 'emit');
+    const svc = makeFacade(git, makeFileLocks(USER.id, 'coordination'), pending, events);
+
+    await svc.releaseLockNoCommit('ws-1', 'feat/x', 'foo.md', USER);
+
+    expect(pending.hasLiveRowFor).toHaveBeenCalledWith('ws-1', 'feat/x', 'foo.md');
+    expect(git.discardPath).toHaveBeenCalledWith('ws-1', 'foo.md');
+    // The disk really changed here, so watchers are told.
+    expect(emitSpy.mock.calls.map((c) => (c[0] as { kind: string }).kind)).toEqual([
+      'lock-released',
+      'file-changed',
+    ]);
+  });
+
+  it('SKIPS the discard on a coordination hold when a live queued row exists (a prior save owns the bytes)', async () => {
+    // The coordination holder never legitimately wrote the path, so dirty
+    // bytes covered by a live pending-commit row belong to an EARLIER save
+    // whose commit hasn't drained yet — discarding to HEAD would silently
+    // destroy that landed edit.
+    const git = makeGit();
+    const pending = makePending();
+    (pending.hasLiveRowFor as ReturnType<typeof vi.fn>).mockResolvedValue(true);
+    const emitSpy = vi.spyOn(events, 'emit');
+    const svc = makeFacade(git, makeFileLocks(USER.id, 'coordination'), pending, events);
+
+    await svc.releaseLockNoCommit('ws-1', 'feat/x', 'foo.md', USER);
+
+    expect(git.discardPath).not.toHaveBeenCalled();
+    // The lock still releases — only the discard is skipped. And since the
+    // disk did NOT change, no file-changed goes out: announcing one would
+    // false-refresh every watcher of a file that is exactly as it was.
+    expect(emitSpy.mock.calls.map((c) => (c[0] as { kind: string }).kind)).toEqual([
+      'lock-released',
+    ]);
+  });
+});
+
+describe('VersionControlService.hasQueuedCommit', () => {
+  it('delegates to the pending-commits queue per (workspace, branch, path)', async () => {
+    const pending = makePending();
+    (pending.hasLiveRowFor as ReturnType<typeof vi.fn>).mockResolvedValue(true);
+    const svc = makeFacade(makeGit(), makeFileLocks(USER.id), pending, new VersionControlEventBus());
+
+    await expect(svc.hasQueuedCommit('ws-1', 'feat/x', 'foo.md')).resolves.toBe(true);
+    expect(pending.hasLiveRowFor).toHaveBeenCalledWith('ws-1', 'feat/x', 'foo.md');
+  });
+});
+
+describe('VersionControlService.runPendingCommit — worker entry point', () => {
+  let events: VersionControlEventBus;
+  let emitSpy: MockInstance;
+
+  beforeEach(() => {
+    events = new VersionControlEventBus();
+    emitSpy = vi.spyOn(events, 'emit');
+  });
+
+  it('happy path: commits + pushes, emits file-changed with the new sha', async () => {
+    const git = makeGit();
+    const svc = makeFacade(git, makeFileLocks(USER.id), makePending(), events);
+
+    await svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER);
+
+    expect(git.commitFile).toHaveBeenCalledTimes(1);
+    expect(git.push).toHaveBeenCalledTimes(1);
+    expect(git.pull).not.toHaveBeenCalled();
+    expect(emitSpy.mock.calls.map((c) => (c[0] as { kind: string }).kind)).toEqual(['file-changed']);
+    expect(emitSpy.mock.calls[0][0]).toMatchObject({
+      kind: 'file-changed',
+      newSha: CHANGE.sha,
+      byUserId: USER.id,
+    });
+  });
+
+  it('skips push + file-changed on a no-op commit with nothing unpushed (double-enqueue, identical bytes)', async () => {
+    // The worker treats a no-op commit as success and drops the row.
+    // No push, no SSE event — there's no new sha for clients to see.
+    const git = makeGit({ commitFile: null, hasUnpushedCommits: false });
+    const svc = makeFacade(git, makeFileLocks(USER.id), makePending(), events);
+
+    await svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER);
+
+    expect(git.commitFile).toHaveBeenCalledTimes(1);
+    expect(git.push).not.toHaveBeenCalled();
+    expect(emitSpy).not.toHaveBeenCalled();
+  });
+
+  it('STILL pushes on a no-op commit when the branch is ahead of origin (stranded autosave commit)', async () => {
+    // Regression: the autosave path commits locally with a best-effort
+    // push. When that push fails, the eventual queue row finds a CLEAN
+    // tree — and the old early-return treated it as success, dropping the
+    // row without ever pushing. The local commit stayed stranded forever
+    // and the recovery ladder never started.
+    const git = makeGit({ commitFile: null, hasUnpushedCommits: true });
+    const svc = makeFacade(git, makeFileLocks(USER.id), makePending(), events);
+
+    await svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER);
+
+    expect(git.push).toHaveBeenCalledTimes(1);
+    // No new commit → still no file-changed (there's no new sha).
+    expect(emitSpy).not.toHaveBeenCalled();
+  });
+
+  it('no-op commit + unpushed + conflicting divergence throws so the worker ladder takes over', async () => {
+    // The stranded-commit case where origin ALSO moved with a conflicting
+    // change (the production stuck-workspace state): push rejects non-FF,
+    // the cooperative pull conflicts — the typed error must reach the
+    // worker so its retry → recovery-agent ladder runs.
+    const git = makeGit({
+      commitFile: null,
+      hasUnpushedCommits: true,
+      pushBehavior: 'nff',
+      pullBehavior: 'fail',
+    });
+    const svc = makeFacade(git, makeFileLocks(USER.id), makePending(), events);
+
+    await expect(svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER)).rejects.toBeInstanceOf(
+      PushNeedsAgentResolutionError,
+    );
+    // `file-changed` still does NOT go out — other clients would refetch a
+    // SHA that isn't on origin yet. What DOES go out is the sync banner: the
+    // commit is sitting locally, and someone has to be able to see that.
+    expect(emitSpy.mock.calls.map((c) => (c[0] as { kind: string }).kind)).toEqual([
+      'git-sync-failed',
+    ]);
+  });
+
+  it('a rebase CONFLICT on the recovery path raises the banner WITH its files, like the remote sync does', async () => {
+    // The banner keeps the latest failure per branch. The remote sync raises
+    // the conflict variant (files as links); if this path then raised the
+    // generic variant for the same conflict, the retry would take the links
+    // away — seen on staging. Every path names the files.
+    const git = makeGit({
+      commitFile: null,
+      hasUnpushedCommits: true,
+      pushBehavior: 'nff',
+      pullBehavior: 'conflict',
+    });
+    const svc = makeFacade(git, makeFileLocks(USER.id), makePending(), events);
+    await expect(svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER)).rejects.toBeInstanceOf(
+      PushNeedsAgentResolutionError,
+    );
+    const failed = emitSpy.mock.calls.map((c) => c[0] as Record<string, unknown>).find((e) => e.kind === 'git-sync-failed');
+    expect(failed).toMatchObject({
+      branch: 'feat/x',
+      conflictedPaths: ['foo.md'],
+      reason: syncConflictMessage('feat/x', ['foo.md']),
+    });
+  });
+
+  it('recovers from non-fast-forward push via pull --rebase + retry, emits file-changed exactly once', async () => {
+    // Teammate pushed to the same branch between our commit and our
+    // push. The cooperative path pulls + retries — this is the case
+    // the worker handles without escalating to the recovery agent.
+    const git = makeGit({ pushBehavior: 'nff' });
+    const svc = makeFacade(git, makeFileLocks(USER.id), makePending(), events);
+
+    await svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER);
+
+    expect(git.pull).toHaveBeenCalledTimes(1);
+    expect(git.push).toHaveBeenCalledTimes(2);
+    expect(emitSpy.mock.calls.map((c) => (c[0] as { kind: string }).kind)).toEqual(['file-changed']);
+  });
+
+  it('throws PushNeedsAgentResolutionError on auth failure so the worker can escalate', async () => {
+    // Auth failures aren't divergences pull-rebase can resolve. The
+    // worker's catch arm decides what to do (transient retry → recovery
+    // agent → needs_attention) based on its own budgets.
+    const git = makeGit({ pushBehavior: 'auth-fail' });
+    const svc = makeFacade(git, makeFileLocks(USER.id), makePending(), events);
+
+    await expect(svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER)).rejects.toBeInstanceOf(
+      PushNeedsAgentResolutionError,
+    );
+    expect(git.pull).not.toHaveBeenCalled();
+    expect(git.push).toHaveBeenCalledTimes(1);
+    // `file-changed` still does NOT go out — other clients would refetch a
+    // SHA that isn't on origin yet. What DOES go out is the sync banner: the
+    // commit is sitting locally, and someone has to be able to see that.
+    expect(emitSpy.mock.calls.map((c) => (c[0] as { kind: string }).kind)).toEqual([
+      'git-sync-failed',
+    ]);
+  });
+
+  it('throws PushNeedsAgentResolutionError when pull --rebase itself fails (textbook conflict case)', async () => {
+    const git = makeGit({ pushBehavior: 'nff', pullBehavior: 'fail' });
+    const svc = makeFacade(git, makeFileLocks(USER.id), makePending(), events);
+
+    const err = await svc
+      .runPendingCommit('ws-1', 'feat/x', 'foo.md', USER)
+      .then(() => null)
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PushNeedsAgentResolutionError);
+    expect((err as PushNeedsAgentResolutionError).branch).toBe('feat/x');
+    expect((err as PushNeedsAgentResolutionError).path).toBe('foo.md');
+    expect(git.pull).toHaveBeenCalledTimes(1);
+    expect(git.push).toHaveBeenCalledTimes(1);
+    // `file-changed` still does NOT go out — other clients would refetch a
+    // SHA that isn't on origin yet. What DOES go out is the sync banner: the
+    // commit is sitting locally, and someone has to be able to see that.
+    expect(emitSpy.mock.calls.map((c) => (c[0] as { kind: string }).kind)).toEqual([
+      'git-sync-failed',
+    ]);
+  });
+
+  it('throws PushNeedsAgentResolutionError when post-pull retry also fails (origin moved twice)', async () => {
+    const git = makeGit({ pushBehavior: 'nff', pushAfterPullBehavior: 'fail' });
+    const svc = makeFacade(git, makeFileLocks(USER.id), makePending(), events);
+
+    await expect(svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER)).rejects.toBeInstanceOf(
+      PushNeedsAgentResolutionError,
+    );
+    expect(git.pull).toHaveBeenCalledTimes(1);
+    expect(git.push).toHaveBeenCalledTimes(2);
+    // `file-changed` still does NOT go out — other clients would refetch a
+    // SHA that isn't on origin yet. What DOES go out is the sync banner: the
+    // commit is sitting locally, and someone has to be able to see that.
+    expect(emitSpy.mock.calls.map((c) => (c[0] as { kind: string }).kind)).toEqual([
+      'git-sync-failed',
+    ]);
+  });
+});
+
+describe('VersionControlService — git-sync visibility events', () => {
+  let events: VersionControlEventBus;
+  let emitSpy: MockInstance;
+
+  beforeEach(() => {
+    events = new VersionControlEventBus();
+    emitSpy = vi.spyOn(events, 'emit');
+  });
+
+  function kinds(): string[] {
+    return emitSpy.mock.calls.map((c) => (c[0] as { kind: string }).kind);
+  }
+
+  it('stays silent while pushes succeed — the healthy path must not broadcast', async () => {
+    // A push runs on every save. If the healthy case announced itself, every
+    // keystroke-driven autosave would fan an event out to every session on
+    // the branch to say that nothing happened.
+    const svc = makeFacade(makeGit(), makeFileLocks(USER.id), makePending(), events);
+
+    await svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER);
+    await svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER);
+
+    expect(kinds()).toEqual(['file-changed', 'file-changed']);
+  });
+
+  it('carries the branch and a reason in words — never the git output — for the banner', async () => {
+    const svc = makeFacade(
+      makeGit({ pushBehavior: 'auth-fail' }),
+      makeFileLocks(USER.id),
+      makePending(),
+      events,
+    );
+
+    await expect(svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER)).rejects.toBeInstanceOf(
+      PushNeedsAgentResolutionError,
+    );
+    expect(emitSpy.mock.calls[0][0]).toMatchObject({
+      kind: 'git-sync-failed',
+      workspaceId: 'ws-1',
+      branch: 'feat/x',
+    });
+    // The kind of failure survives; git's own text stays in the server log.
+    const { reason } = emitSpy.mock.calls[0][0] as { reason: string };
+    expect(reason).toBe("The repository host did not accept this server's credentials.");
+    expect(reason).not.toContain('Authentication failed');
+  });
+
+  it('re-announces on every failure, so a session joining mid-outage still learns of it', async () => {
+    // The banner has no other way in: a client that connects after the first
+    // failure missed the only event that would have told it.
+    // `pushAfterPullBehavior` is what the shared mock serves from the second
+    // push onward, so failing it too is how one broken remote is simulated
+    // across repeated saves rather than just the first.
+    const svc = makeFacade(
+      makeGit({ pushBehavior: 'auth-fail', pushAfterPullBehavior: 'fail' }),
+      makeFileLocks(USER.id),
+      makePending(),
+      events,
+    );
+
+    for (let i = 0; i < 2; i += 1) {
+      await svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER).catch(() => undefined);
+    }
+
+    expect(kinds()).toEqual(['git-sync-failed', 'git-sync-failed']);
+  });
+
+  it('emits git-sync-recovered once when a push finally lands, then goes quiet again', async () => {
+    const failing = makeGit({ pushBehavior: 'auth-fail' });
+    const svc = makeFacade(failing, makeFileLocks(USER.id), makePending(), events);
+    await svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER).catch(() => undefined);
+    expect(kinds()).toEqual(['git-sync-failed']);
+
+    // Same service instance — the failing/healthy state is per-workspace and
+    // lives on it, so recovery has to be observed through the same object.
+    const healthy = makeGit();
+    const recovered = makeFacade(healthy, makeFileLocks(USER.id), makePending(), events);
+    Object.assign(svc as unknown as Record<string, unknown>, {
+      git: (recovered as unknown as { git: GitService }).git,
+    });
+
+    await svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER);
+    await svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER);
+
+    // Recovery announced exactly once; the second healthy push says nothing.
+    expect(kinds()).toEqual([
+      'git-sync-failed',
+      'git-sync-recovered',
+      'file-changed',
+      'file-changed',
+    ]);
+  });
+
+  it('clears a failure recorded under the encoded id when the decoded id recovers', async () => {
+    // HTTP routes hand the service Express-decoded ids (user/feat); internal
+    // callers hand the encoded form (user%2Ffeat). The tracker must treat
+    // them as one workspace, or a failure recorded by one caller can never
+    // be cleared by the other's success and the banner sticks forever.
+    const svc = makeFacade(
+      makeGit({ pushBehavior: 'auth-fail', pushAfterPullBehavior: 'fail' }),
+      makeFileLocks(USER.id),
+      makePending(),
+      events,
+    );
+    await svc.runPendingCommit('user%2Ffeat', 'user/feat', 'foo.md', USER).catch(() => undefined);
+
+    Object.assign(svc as unknown as Record<string, unknown>, { git: makeGit() });
+    await svc.runPendingCommit('user/feat', 'user/feat', 'foo.md', USER);
+
+    const sync = emitSpy.mock.calls
+      .map((c) => c[0] as { kind: string; workspaceId: string })
+      .filter((e) => e.kind.startsWith('git-sync'));
+    // Both events carry the canonical (decoded) id, and the recovery fired.
+    expect(sync).toEqual([
+      expect.objectContaining({ kind: 'git-sync-failed', workspaceId: 'user/feat' }),
+      expect.objectContaining({ kind: 'git-sync-recovered', workspaceId: 'user/feat' }),
+    ]);
+  });
+
+  it('tracks workspaces independently — one recovering neither clears nor suppresses another', async () => {
+    const failingGit = () => makeGit({ pushBehavior: 'auth-fail', pushAfterPullBehavior: 'fail' });
+    const svc = makeFacade(failingGit(), makeFileLocks(USER.id), makePending(), events);
+
+    // Both workspaces broken.
+    await svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER).catch(() => undefined);
+    await svc.runPendingCommit('ws-2', 'feat/y', 'bar.md', USER).catch(() => undefined);
+
+    // ws-1 recovers; ws-2 is still broken and must (a) not be cleared by
+    // ws-1's recovery and (b) still announce its own next failure.
+    Object.assign(svc as unknown as Record<string, unknown>, { git: makeGit() });
+    await svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER);
+    Object.assign(svc as unknown as Record<string, unknown>, { git: failingGit() });
+    await svc.runPendingCommit('ws-2', 'feat/y', 'bar.md', USER).catch(() => undefined);
+
+    expect(
+      emitSpy.mock.calls.map((c) => [
+        (c[0] as { kind: string }).kind,
+        (c[0] as { workspaceId: string }).workspaceId,
+      ]),
+    ).toEqual([
+      ['git-sync-failed', 'ws-1'],
+      ['git-sync-failed', 'ws-2'],
+      ['git-sync-recovered', 'ws-1'],
+      ['file-changed', 'ws-1'],
+      ['git-sync-failed', 'ws-2'],
+    ]);
+  });
+});
+
+describe('VersionControlService.updateFromRemote — pull-conflict recovery dispatch', () => {
+  const CONFLICT = new PullRebaseConflictError(
+    'main',
+    ['PR-Overviews/PR-7.html', 'other.md'],
+    'git rebase failed: could not apply 0d7b463',
+  );
+
+  function makeConflictingGit(err: unknown): GitService {
+    return {
+      pull: vi.fn().mockRejectedValue(err),
+    } as unknown as GitService;
+  }
+
+  it('queues ONE recovery row (first conflicted path, triggering user) and rethrows', async () => {
+    const pending = makePending();
+    const svc = makeFacade(
+      makeConflictingGit(CONFLICT), makeFileLocks(USER.id), pending, new VersionControlEventBus(),
+    );
+
+    await expect(svc.updateFromRemote('main', USER)).rejects.toBe(CONFLICT);
+
+    expect(pending.enqueueIfAbsent).toHaveBeenCalledTimes(1);
+    expect(pending.enqueueIfAbsent).toHaveBeenCalledWith({
+      workspaceId: 'main',
+      branch: 'main',
+      path: 'PR-Overviews/PR-7.html',
+      authorEmail: USER.email,
+      authorName: USER.name,
+    });
+    // `enqueue` (counter-resetting refresh) must NOT be used here — repeated
+    // sync attempts would starve the worker's ladder.
+    expect(pending.enqueue).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the recovery-bot identity when no user is available', async () => {
+    const pending = makePending();
+    const svc = makeFacade(
+      makeConflictingGit(CONFLICT), makeFileLocks(USER.id), pending, new VersionControlEventBus(),
+    );
+
+    await expect(svc.updateFromRemote('main')).rejects.toBe(CONFLICT);
+
+    const input = (pending.enqueueIfAbsent as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(input.authorEmail).toContain('recovery-bot@');
+  });
+
+  it('does NOT queue recovery for a non-conflict pull failure (transient fetch error)', async () => {
+    const pending = makePending();
+    const transient = new Error('git fetch failed: could not resolve host');
+    const svc = makeFacade(
+      makeConflictingGit(transient), makeFileLocks(USER.id), pending, new VersionControlEventBus(),
+    );
+
+    await expect(svc.updateFromRemote('main', USER)).rejects.toBe(transient);
+    expect(pending.enqueueIfAbsent).not.toHaveBeenCalled();
+  });
+
+  it('a queue hiccup does not mask the conflict error', async () => {
+    const pending = makePending();
+    (pending.enqueueIfAbsent as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new Error('db down'),
+    );
+    const svc = makeFacade(
+      makeConflictingGit(CONFLICT), makeFileLocks(USER.id), pending, new VersionControlEventBus(),
+    );
+
+    await expect(svc.updateFromRemote('main', USER)).rejects.toBe(CONFLICT);
+  });
+});
+
+describe('VersionControlService.updateFromRemote — the tree-change announcement', () => {
+  /**
+   * The announcement under test is what keeps the DEFAULT branch's catalog
+   * caches (skills, tool manuals, plugin index) honest: a pull is the one way
+   * a tree changes without passing the write routes, so `pullWorkspace` owes
+   * the process an `fs-tree-changed` — and owes it ONLY when the pull moved
+   * HEAD, on the default branch, after the pull resolved. Asserted through
+   * `updateFromRemote`, the public verb that wraps `pullWorkspace`.
+   */
+  const DEFAULT_WS = 'target-company-state'; // == the test env's DEFAULT_BRANCH
+
+  function makePullingGit(result: { treeChanged: boolean } | Error): {
+    git: GitService;
+    pullSettled: () => boolean;
+  } {
+    let settled = false;
+    const git = {
+      pull: vi.fn().mockImplementation(async () => {
+        // A microtask gap, so an emit issued before the await would be
+        // observably premature rather than coincidentally ordered.
+        await Promise.resolve();
+        settled = true;
+        if (result instanceof Error) throw result;
+        return result;
+      }),
+    } as unknown as GitService;
+    return { git, pullSettled: () => settled };
+  }
+
+  function treeChangedEvents(emitSpy: MockInstance): unknown[] {
+    return emitSpy.mock.calls
+      .map((c) => c[0] as { kind: string })
+      .filter((e) => e.kind === 'fs-tree-changed');
+  }
+
+  it('emits fs-tree-changed for the default workspace once the pull has changed the tree', async () => {
+    const events = new VersionControlEventBus();
+    const emitSpy = vi.spyOn(events, 'emit');
+    const { git, pullSettled } = makePullingGit({ treeChanged: true });
+    let settledAtEmit: boolean | undefined;
+    emitSpy.mockImplementation(() => {
+      settledAtEmit = pullSettled();
+    });
+    const svc = makeFacade(git, makeFileLocks(USER.id), makePending(), events);
+
+    await svc.updateFromRemote(DEFAULT_WS, USER);
+
+    expect(treeChangedEvents(emitSpy)).toEqual([
+      { kind: 'fs-tree-changed', workspaceId: DEFAULT_WS, branch: DEFAULT_WS },
+    ]);
+    // After the pull RESOLVED — an emit for a pull that later failed would
+    // make other clients refetch a tree that never changed.
+    expect(settledAtEmit).toBe(true);
+  });
+
+  it('stays silent when the pull found nothing new (treeChanged: false)', async () => {
+    const events = new VersionControlEventBus();
+    const emitSpy = vi.spyOn(events, 'emit');
+    const { git } = makePullingGit({ treeChanged: false });
+    const svc = makeFacade(git, makeFileLocks(USER.id), makePending(), events);
+
+    await svc.updateFromRemote(DEFAULT_WS, USER);
+
+    // An "already up to date" sync must not drop the catalogs or make every
+    // attached browser refetch its file tree.
+    expect(treeChangedEvents(emitSpy)).toEqual([]);
+  });
+
+  it('stays silent for a non-default workspace even when the tree changed', async () => {
+    const events = new VersionControlEventBus();
+    const emitSpy = vi.spyOn(events, 'emit');
+    const { git } = makePullingGit({ treeChanged: true });
+    const svc = makeFacade(git, makeFileLocks(USER.id), makePending(), events);
+
+    await svc.updateFromRemote(encodeURIComponent('alice/draft'), USER);
+
+    expect(treeChangedEvents(emitSpy)).toEqual([]);
+  });
+
+  it('stays silent when the pull throws', async () => {
+    const events = new VersionControlEventBus();
+    const emitSpy = vi.spyOn(events, 'emit');
+    const { git } = makePullingGit(new Error('git fetch failed: could not resolve host'));
+    const svc = makeFacade(git, makeFileLocks(USER.id), makePending(), events);
+
+    await expect(svc.updateFromRemote(DEFAULT_WS, USER)).rejects.toThrow();
+
+    expect(treeChangedEvents(emitSpy)).toEqual([]);
+  });
+});

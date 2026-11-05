@@ -7,7 +7,7 @@ import type { FileRendererProps } from './types';
  * bundle. Measured from a production build: xlsx (141 KB gzip), mammoth
  * (119 KB) and mermaid's eager core (151 KB) are 411 KB gzip — 43% of a
  * 964 KB payload — for file types most sessions never open. Every route paid
- * that, including `/connect` and `/secrets`, which are the pages users land
+ * that, including Connect your tools and `/secrets`, which are the pages users land
  * on returning from an external OAuth sign-in.
  *
  * The lazy component is self-contained: it carries its own Suspense fallback
@@ -32,7 +32,7 @@ export function lazyRenderer(
   // again. Only a new lazy component can actually re-run the import.
   const first = lazy(loader);
 
-  return function LazyRenderer(props: FileRendererProps) {
+  function LazyRenderer(props: FileRendererProps) {
     const [attempt, setAttempt] = useState(0);
 
     // Attempt 0 reuses the shared component so the common path is unchanged:
@@ -55,5 +55,12 @@ export function lazyRenderer(
         </Suspense>
       </ChunkErrorBoundary>
     );
-  };
+  }
+
+  // Names the wrapper after what it loads. Every wrapper is otherwise the
+  // same anonymous `LazyRenderer`, and the selection tests (and React
+  // DevTools) need to tell "the PDF viewer" from "the spreadsheet viewer"
+  // WITHOUT importing the heavy chunks they exist to defer.
+  LazyRenderer.displayName = `LazyRenderer(${label})`;
+  return LazyRenderer;
 }

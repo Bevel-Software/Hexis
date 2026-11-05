@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { cn } from '../../../lib/utils';
 import { toastDuration } from '../utils/toast-duration';
 import { ToastContext, type ShowToast, type ToastTone } from './toast.context';
@@ -43,6 +43,14 @@ export function LibraryToastProvider({ children }: { children: ReactNode }) {
     visible: boolean;
   } | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // A toast still on screen when the provider goes away has a timer left to
+  // run, which would then set state on something that is no longer there.
+  useEffect(
+    () => () => {
+      if (timer.current) clearTimeout(timer.current);
+    },
+    [],
+  );
 
   const show = useCallback<ShowToast>((msg, tone = 'neutral') => {
     setToast({ message: msg, tone, visible: true });

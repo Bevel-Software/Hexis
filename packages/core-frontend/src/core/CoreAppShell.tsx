@@ -1,5 +1,4 @@
 import {
-  createContext,
   useContext,
   useEffect,
   useMemo,
@@ -7,36 +6,35 @@ import {
   Fragment,
   type ReactNode,
 } from 'react';
-import { BrowserRouter, Navigate, Routes, Route, useLocation } from 'react-router-dom';
+import { BrowserRouter, Navigate, Routes, Route, matchPath, useLocation } from 'react-router-dom';
 import { AuthContext } from '../modules/auth/state/auth.context';
 import { useAuthState } from '../modules/auth/hooks/useAuthState';
 import { LoginScreen } from '../modules/auth/components/LoginScreen';
 import { SetupGate } from '../modules/setup/components/SetupGate';
-import { WorkspaceContext } from '../modules/workspace/state/workspace.context';
+import { WorkspaceContext, useWorkspace } from '../modules/workspace/state/workspace.context';
 import { useWorkspaceState } from '../modules/workspace/hooks/useWorkspaceState';
 import { GitContext } from '../modules/git/state/git.context';
 import { AutoUpdateContext } from '../modules/git/state/auto-update.context';
 import { useGitState } from '../modules/git/hooks/useGitState';
 import { useAutoPullUpdates } from '../modules/git/hooks/useAutoPullUpdates';
-import { EventBusProvider } from '../modules/workflow/state/EventBusProvider';
-import { EventBusFocusBinder } from '../modules/workflow/state/EventBusFocusBinder';
+import { EventBusProvider } from '../modules/version-control';
+import { EventBusFocusBinder } from '../modules/version-control/state/EventBusFocusBinder';
+import { ChangeRequestStaleBinder } from '../modules/version-control/state/ChangeRequestStaleBinder';
 import { Toolbar } from '../modules/toolbar/components/Toolbar';
 import { DemoBanner } from '../modules/layout/components/DemoBanner';
-import { FileExplorer } from '../modules/workspace/components/FileExplorer';
-import { FileViewer } from '../modules/workspace/components/FileViewer';
+import { ReadOnlyBanner } from '../modules/layout/components/ReadOnlyBanner';
 import { OpenChangeRequestsProvider } from '../modules/workspace/state/open-change-requests';
-import { FileRoute } from '../modules/workspace/components/FileRoute';
-import { KB_ROUTE_PREFIX } from '../modules/workspace/routing/kb-routes';
-import { AppLayout } from '../modules/layout/components/AppLayout';
+import { KB_ROUTE_PREFIX, safeDecode } from '../modules/workspace/routing/kb-routes';
+import { CONNECT_TOOLS_PATH } from '../modules/library';
 import {
   LayoutContext,
   NO_PANES_LAYOUT,
+  PaneControllerContext,
   type LayoutController,
 } from '../modules/layout/state/layout.context';
 import { MaintenanceOverlay } from '../modules/layout/components/MaintenanceOverlay';
 import { AdminProvider } from '../modules/admin/state/admin.context';
 import { RolesCorruptedBanner } from '../modules/admin/components/RolesCorruptedBanner';
-import { ConnectToolsPage } from '../modules/secrets-vault/components/ConnectToolsPage';
 import { SettingsLayout } from '../modules/settings/components/SettingsLayout';
 import { DeploymentPage } from '../modules/settings/components/DeploymentPage';
 import { SecretsPage } from '../modules/secrets-vault/components/SecretsPage';
@@ -44,16 +42,23 @@ import { AccountPage } from '../modules/auth/components/AccountPage';
 import { ExternalAgentAccessPage } from '../modules/toolbar/components/ExternalAgentAccessPage';
 import { AdminRolesPage } from '../modules/admin/components/AdminRolesPage';
 import { UserAccountsPage } from '../modules/admin/components/UserAccountsPage';
+import { DirectoryGroupsPage } from '../modules/admin/components/DirectoryGroupsPage';
+import { AuditLogPage } from '../modules/audit/components/AuditLogPage';
 import { ToolsExplorerPage } from '../modules/tools/ToolsExplorerPage';
 import { LibraryRoutes } from '../modules/library/routes/LibraryRoutes';
 import { RootLanding } from '../modules/onboarding/components/RootLanding';
-import { ConnectAgentPill } from '../modules/onboarding/components/ConnectAgentPill';
+import { GetStartedColumn } from '../modules/onboarding/components/GetStartedColumn';
+import { InviteDialogProvider } from '../modules/onboarding/state/invite-dialog';
 import { OpenChangeRequestDialog } from '../modules/pr/components/OpenChangeRequestDialog';
+import { ChangeRequestLink } from '../modules/change-requests/components/ChangeRequestLink';
 import { useMediaQuery } from '../modules/layout/hooks/useMediaQuery';
 import { NARROW_QUERY } from '../modules/layout/breakpoints';
 import { setSidebarCollapsed } from '../modules/layout/state/sidebar';
 import {
   activeAppId,
+  appHostingPath,
+  rootClaims,
+  useRootClaims,
   ActiveAppIdContext,
   AppClaimContext,
   AppRegistryContext,
@@ -62,16 +67,21 @@ import {
   useAppRegistry,
   type AppDef,
   type AppRegistry,
+  type RouteDef,
   type BannerDef,
   type CrCreationInput,
   type CrCreationPort,
-  type PaneDef,
 } from './registry';
+import { withCoreModuleContributions } from './core-contributions';
+import { KnowledgeSurface } from './KnowledgeSurface';
 import { isLibraryLocation } from '../modules/library/routes/library-paths';
+import { EmbedView } from '../modules/embed/components/EmbedView';
+import { EmbedLinkPage } from '../modules/embed/components/EmbedLinkPage';
+import { ConfirmProvider } from '../shared/components';
 
 /**
  * The registry-driven application shell for the core modules (workspace, git,
- * pr, access, auth, workflow/SSE, layout, secrets-vault, tools, toolbar,
+ * pr, access, auth, version control/SSE, layout, secrets-vault, tools, toolbar,
  * library, and the admin roles page). Everything else — chat, connectors,
  * routines, watchlist, voice, embed, onboarding, admin LLM/feedback pages —
  * is contributed through the {@link AppRegistry} passed in (see
@@ -154,6 +164,7 @@ function AuthenticatedAppInner() {
   return (
     <WorkspaceContext.Provider value={workspaceState}>
       <EventBusFocusBinder />
+      <ChangeRequestStaleBinder />
       <GitContext.Provider value={gitState}>
         <AutoUpdateContext.Provider value={autoUpdateState}>
           <AdminProvider>
@@ -170,20 +181,20 @@ function AuthenticatedAppInner() {
 // and its onboarding-import banner after these.
 const CORE_BANNERS: BannerDef[] = [
   { id: 'demo', order: 20, node: <DemoBanner /> },
+  { id: 'read-only', order: 25, node: <ReadOnlyBanner /> },
   { id: 'roles-corrupted', order: 30, node: <RolesCorruptedBanner /> },
 ];
 
-// Core panes; merged (by `order`) with registry-contributed panes (the
-// enterprise chat pane registers at order 30). Sizing mirrors the historical
-// hard-coded three-pane layout exactly. These are the KNOWLEDGE app's panes —
-// other apps render their own full surface (see CORE_APPS).
-const CORE_PANES: PaneDef[] = [
-  // The file tree is the SIDEBAR, not a panel — the same frame, at the same
-  // width, that Skills & Tools puts its plugin list in. It left the resizable
-  // group when the two navs were unified; `SidebarFrame` owns its width and
-  // the shared store owns whether it is showing.
-  { id: 'explorer', order: 10, node: <FileExplorer />, sidebar: true, collapsible: true },
-  { id: 'viewer', order: 20, node: <ViewerRoutes />, minSize: '30%' },
+/**
+ * The two pages that are not part of the app: the embed a chat host frames,
+ * and the account-link page it sends an unlinked viewer to. Routes rather
+ * than apps — neither has a place in the switcher, neither sits inside the
+ * three-pane shell, and neither goes through the session gate (see the
+ * comment at the `<Routes>` block below).
+ */
+const CORE_TOP_LEVEL_ROUTES: RouteDef[] = [
+  { path: '/embed', element: <EmbedView /> },
+  { path: '/embed/link', element: <EmbedLinkPage /> },
 ];
 
 /**
@@ -226,63 +237,64 @@ const CORE_APPS: AppDef[] = [
  * repo's two roots ARE the two apps — `KnowledgeBase/` paths get the pane
  * workspace, default-branch `Plugins/` paths get the library. The catalog is
  * never consulted for the surface, so a just-created skill routes correctly
- * before any reload. Router state `rawFile` steps past the shape rule to the
- * raw file view (the tool page's "Edit the tool file"); it is state, not URL,
- * so a shared link can never land there by accident.
+ * before any reload. The shape rule is the WHOLE rule: a file under one of
+ * the library's roots opens in the library whatever it is — a manifest, an
+ * access.md, a stray upload — with the same viewer Knowledge uses rendered
+ * inside the library's frame (see `WorkspaceItemRoute`). Router state
+ * `rawFile` asks that route for the raw view; it never changes which app is
+ * on screen.
  *
  * While the library renders under a `/workspace` URL it CLAIMS the Skills &
  * Tools app (see {@link AppClaimContext}), so the switcher and the toolbar's
  * sidebar toggle follow the surface on screen, not the URL prefix.
+ *
+ * The third case is a root folder a registered app claims (`AppDef.roots`):
+ * a file URL under it renders THAT app's element, which mounts the narrowed
+ * `KnowledgeSurface`, and claims that app the same way. Same shape rule, read
+ * from the path's root and the registry; with no root claimed it never applies.
+ * It never meets the library: `Skills/` and `Plugins/` are core's own roots,
+ * which `rootClaims` refuses to hand to an app.
  */
 function CoreSurfaces() {
   const location = useLocation();
   const claim = useContext(AppClaimContext);
-  const rawRequested = (location.state as { rawFile?: boolean } | null)?.rawFile === true;
-  const library = !rawRequested && isLibraryLocation(location.pathname);
+  const { apps } = useAppRegistry();
+  const claims = useRootClaims();
+  const { kbDirName } = useWorkspace();
+  const library = isLibraryLocation(location.pathname);
   const claimsSkills = library && location.pathname.startsWith(KB_ROUTE_PREFIX);
+  const host = useMemo(() => {
+    const file = matchPath(`${KB_ROUTE_PREFIX}/:branch/*`, location.pathname);
+    const id = file ? appHostingPath(claims, safeDecode(file.params['*'] ?? ''), kbDirName) : undefined;
+    return id === undefined ? undefined : apps.find((app) => app.id === id);
+  }, [location.pathname, claims, kbDirName, apps]);
+  const claimedApp = host ? host.id : claimsSkills ? 'skills-tools' : null;
   useEffect(() => {
-    if (!claimsSkills) return;
-    claim('skills-tools');
+    if (!claimedApp) return;
+    claim(claimedApp);
     return () => claim(null);
-  }, [claimsSkills, claim]);
-  return library ? <LibraryRoutes /> : <KnowledgeSurface />;
-}
-
-/**
- * Setter through which the Knowledge surface's pane layout reports its
- * controller to AppChrome (whose LayoutContext provider wraps the toolbar).
- */
-const PaneControllerContext = createContext<(c: LayoutController | null) => void>(
-  () => {},
-);
-
-/** The Knowledge app: the historical pane workspace (explorer / viewer / panes). */
-function KnowledgeSurface() {
-  const registry = useAppRegistry();
-  const setController = useContext(PaneControllerContext);
-  const panes = useMemo(
-    () =>
-      [...CORE_PANES, ...registry.panes].sort(
-        (a, b) => (a.order ?? 100) - (b.order ?? 100),
-      ),
-    [registry],
-  );
-  // Mounted here, once, because three separate subtrees ask the same question:
-  // the tree (per row), the tab strip (per tab) and the viewer's banner. A
-  // plain hook per consumer would give every tree row its own request.
+  }, [claimedApp, claim]);
+  // The hosting app's frame is its own: the surface it mounts brings the
+  // change-request provider with it (see `KnowledgeSurface`).
+  if (host) return host.element;
+  // Mounted here, once, above BOTH surfaces: the Knowledge tree, the tab
+  // strip, the viewer's banner AND the Library's Skills tree all ask the same
+  // question, and a tree rendered outside the provider would read the empty
+  // default and never show a proposed file.
+  //
+  // The "Get set up" column sits beside whichever surface is on screen, here
+  // for the same reason: one checklist across both apps, mounted once, so it
+  // does not re-fetch or re-flash on a switch between them. The row wraps
+  // both branches identically, so it is the COLUMN that keeps its place in the
+  // tree and stays mounted across the switch. The surface beside it does not:
+  // `LibraryRoutes` and `KnowledgeSurface` are different components, so a
+  // switch unmounts one and mounts the other, as it always has.
   return (
     <OpenChangeRequestsProvider>
-      {/* The connect-your-agent reminder rides Knowledge's sidebar too, and
-          the shell is where that is decided: `layout` is the app's generic
-          consistency layer and must not name a domain component, so the pill
-          is passed IN from the composition root. The Library passes the same
-          one from `LibraryLayout` — one pill, both surfaces, so a person who
-          skipped the welcome page and stayed in Knowledge still sees it. */}
-      <AppLayout
-        panes={panes}
-        onController={setController}
-        sidebarHeader={<ConnectAgentPill />}
-      />
+      <div className="flex h-full min-h-0">
+        <div className="min-w-0 flex-1">{library ? <LibraryRoutes /> : <KnowledgeSurface />}</div>
+        <GetStartedColumn />
+      </div>
     </OpenChangeRequestsProvider>
   );
 }
@@ -335,6 +347,11 @@ export function AppChrome() {
       <AppClaimContext.Provider value={setClaimedApp}>
       <LayoutContext.Provider value={paneController ?? NO_PANES_LAYOUT}>
         <PaneControllerContext.Provider value={setPaneController}>
+          {/* The invite dialog's host: the toolbar's Invite button and the
+              "Get set up" column open the same one. Inside the registry's
+              providers (this is their child), so the dialog's slot can read
+              what a distribution provides there. */}
+          <InviteDialogProvider>
           {/* Flex-col wrapper so the (conditional) banner strip takes its own
               height and the toolbar + active surface flex into the rest. */}
           <div className="flex flex-col h-full">
@@ -348,6 +365,7 @@ export function AppChrome() {
               <ShellRoutes apps={apps} />
             </div>
           </div>
+          </InviteDialogProvider>
         </PaneControllerContext.Provider>
       </LayoutContext.Provider>
       </AppClaimContext.Provider>
@@ -363,9 +381,9 @@ export function AppChrome() {
  *    still wins over it).
  *  - The standalone settings pages — full pages under the toolbar, outside
  *    any app surface (activeAppId is undefined there, so the switcher shows
- *    no checkmark and the pane toggles hide via NO_PANES_LAYOUT). `/connect`
- *    and `/secrets` are OAuth return targets: external redirects land on
- *    these exact URLs, so they must stay routes with these exact paths.
+ *    no checkmark and the pane toggles hide via NO_PANES_LAYOUT). `/secrets`
+ *    is an OAuth return target: external redirects land on this exact URL,
+ *    so it must stay a route with this exact path.
  *
  *    They now share a persistent nav via a PATHLESS `SettingsLayout` route,
  *    so moving between them no longer means re-opening the profile menu. They
@@ -376,12 +394,26 @@ export function AppChrome() {
  *    reachable, so a non-admin who follows a link gets the explanatory
  *    "Admins only" page rather than a silent redirect to somewhere they did
  *    not ask for. The nav merely declines to advertise the rows.
+ *  - `/connect`, a permanent redirect to "Connect your tools", which is a
+ *    Skills & Tools page (`CONNECT_TOOLS_PATH`). The server still hands out
+ *    `/connect` — MCP consent, the claude.ai hand-off, tool sign-in returns,
+ *    agents' "sign in again" links — so the redirect stays for as long as any
+ *    server code writes that address.
  *  - Redirects: `/` → `/workspace`, and a final catch-all for anything
  *    unknown (including the retired `/library` path).
  *
  * Extracted from AppChrome so the routing behavior is testable without the
  * full provider stack.
  */
+/**
+ * `/connect` → `/skills-and-tools/connect`, keeping the query and fragment, as
+ * a REPLACE: Back must not return to an address that only bounces forward.
+ */
+function ConnectToolsRedirect() {
+  const { search, hash } = useLocation();
+  return <Navigate to={`${CONNECT_TOOLS_PATH}${search}${hash}`} replace />;
+}
+
 export function ShellRoutes({ apps }: { apps: AppDef[] }) {
   return (
     <Routes>
@@ -392,11 +424,15 @@ export function ShellRoutes({ apps }: { apps: AppDef[] }) {
           element={app.element}
         />
       ))}
-      {/* OUTSIDE the settings layout, deliberately. `/connect` is a flow page,
-          not a settings destination: it has no row in the profile menu, it is
-          an OAuth landing target, and in its agent-connect mode somebody else
-          is blocked waiting on a Finish button. Do not "complete the set". */}
-      <Route path="/connect" element={<ConnectToolsPage />} />
+      {/* OUTSIDE the settings layout, deliberately. "Connect your tools" is a
+          flow page, not a settings destination: it has no row in the profile
+          menu, it is an OAuth landing target, and in its agent-connect mode
+          somebody else is blocked waiting on a Finish button. Do not
+          "complete the set". It is a Skills & Tools page instead, and
+          `/connect` — the address the server hands out — is its permanent
+          redirect, carrying the query (`?oauth=`) and the fragment
+          (`#authorized`, `#error=`) those landings depend on. */}
+      <Route path="/connect" element={<ConnectToolsRedirect />} />
       {/* A PATHLESS layout route: the child paths below stay byte-identical,
           which is what keeps `/secrets` the exact URL external OAuth redirects
           land on. Its only job is to keep the settings nav mounted across
@@ -408,53 +444,43 @@ export function ShellRoutes({ apps }: { apps: AppDef[] }) {
         <Route path="/roles-and-members" element={<AdminRolesPage />} />
         <Route path="/deployment" element={<DeploymentPage />} />
         <Route path="/user-accounts" element={<UserAccountsPage />} />
+        <Route path="/directory-groups" element={<DirectoryGroupsPage />} />
+        <Route path="/audit-log" element={<AuditLogPage />} />
+        {/* The Audit log replaced the admin Connection keys overview; links
+            to the old address (bookmarks, the enterprise shell's older rows)
+            land on it. */}
+        <Route path="/connection-keys" element={<Navigate to="/audit-log" replace />} />
         <Route path="/tools" element={<ToolsExplorerPage />} />
       </Route>
-      {/* `/` consults the onboarding: a brand-new account's FIRST visit lands
-          on the welcome page, everyone else (and every later visit) goes to
-          Knowledge as always.
+      {/* `/` lands on Knowledge — or on the deep link an SSO sign-in carried
+          through its round-trip (see `RootLanding`).
 
           `/auth/*` lands the same way, and that is not decoration. The SSO
           callback scrubs its own URL with a RAW `history.replaceState`
           (`microsoft-oauth.ts`), which BrowserRouter never observes — react
           -router only re-reads location on its own navigations and on
           popstate. So after a Microsoft sign-in the address bar says `/`
-          while the router still matches `/auth/microsoft/callback`. Before
-          this feature that was invisible, because `/` and `*` both redirected
-          to Knowledge; the moment they differ, the first SSO sign-in — the
-          exact case onboarding exists for — would fall through the catch-all
-          and never be greeted. Routing the callback path here fixes it
-          without moving the token-scrub out of the service that owns it.
+          while the router still matches `/auth/microsoft/callback`, and the
+          catch-all would drop the stashed deep link on the floor. Routing the
+          callback path here keeps it without moving the token-scrub out of
+          the service that owns it.
 
-          The `*` catch-all stays a plain redirect: a mistyped URL is not a
-          reason to be onboarded.
+          The `*` catch-all stays a plain redirect: a mistyped URL carries no
+          intention to honour.
 
           OUTSIDE the settings layout, like `/connect` above: these are landing
           and redirect targets, not settings destinations. */}
       <Route path="/" element={<RootLanding />} />
       <Route path="/auth/*" element={<RootLanding />} />
+      {/* The address every change-request link carries (the backend's
+          change-request-link helper: `open_change_request`, the read tools,
+          every summary's `url`). It opens the request itself, in the
+          change-request view, over a quiet page; closing it goes to Knowledge.
+          Before this route existed the catch-all below swallowed the link.
+          OUTSIDE the settings layout and the apps, like the `/connect`
+          redirect: a landing target, not a destination with a nav row. */}
+      <Route path="/change-requests/:number" element={<ChangeRequestLink />} />
       <Route path="*" element={<Navigate to={KB_ROUTE_PREFIX} replace />} />
-    </Routes>
-  );
-}
-
-/**
- * The viewer pane: registry routes first, then the core routes. This
- * `<Routes>` block is nested inside the Knowledge surface's
- * `${KB_ROUTE_PREFIX}/*` route, so every path here matches the REMAINDER
- * after `/workspace` — `:branch/*` is `/workspace/<branch>/<path>` (the
- * absolute URLs `kbFileUrl()` builds), and the default `*` is the
- * knowledge-home fallback for `/workspace` itself.
- */
-function ViewerRoutes() {
-  const registry = useAppRegistry();
-  return (
-    <Routes>
-      {registry.viewerRoutes.map((r) => (
-        <Route key={r.path} path={r.path} element={r.element} />
-      ))}
-      <Route path=":branch/*" element={<FileRoute />} />
-      <Route path="*" element={<FileViewer />} />
     </Routes>
   );
 }
@@ -549,16 +575,16 @@ function AppShell() {
  */
 export function CoreAppShell({ registry }: { registry: AppRegistry }) {
   // Core contributions merge ahead of registry-contributed ones: the core
-  // apps (Knowledge + Skills & Tools) that the switcher and AppChrome read.
-  // The review file-viewer panel is no longer registered here — see the note
-  // on `chrome` above.
-  const mergedRegistry = useMemo<AppRegistry>(
-    () => ({
-      ...registry,
-      apps: [...CORE_APPS, ...registry.apps],
-    }),
-    [registry],
-  );
+  // apps (Knowledge + Skills & Tools) that the switcher and AppChrome read,
+  // and core modules' own rows (see `withCoreModuleContributions`). The
+  // review file-viewer panel is no longer registered here — see the note on
+  // `chrome` above.
+  const mergedRegistry = useMemo<AppRegistry>(() => {
+    const apps = [...CORE_APPS, ...registry.apps];
+    // A root claimed twice fails here, when the shell mounts.
+    rootClaims(apps);
+    return { ...withCoreModuleContributions(registry), apps };
+  }, [registry]);
   // BrowserRouter wraps both auth and authenticated views so the address bar URL
   // (e.g. a pasted /workspace/<branch>/<path> link) survives login —
   // FileRoute picks it up automatically once auth resolves.
@@ -572,15 +598,32 @@ export function CoreAppShell({ registry }: { registry: AppRegistry }) {
   return (
     <AppRegistryContext.Provider value={mergedRegistry}>
       <BrowserRouter>
-        {/* Sits above every route (including /embed) — backend downtime during
-            a redeploy affects them all equally. */}
-        <MaintenanceOverlay />
-        <Routes>
-          {registry.topLevelRoutes.map((r) => (
-            <Route key={r.path} path={r.path} element={r.element} />
-          ))}
-          <Route path="*" element={<AppShell />} />
-        </Routes>
+        {/* The app's own confirmation dialog, for every route: whatever asks
+            before acting asks through `useConfirm()`, never `window.confirm`,
+            which the browser can silence. Above the state hooks
+            (`useWorkspaceState` asks before closing an unsaved tab). */}
+        <ConfirmProvider>
+          {/* Sits above every route (including /embed) — backend downtime during
+              a redeploy affects them all equally. */}
+          <MaintenanceOverlay />
+          <Routes>
+            {/* The embed surface, OUTSIDE `AppShell` and its auth gate — like
+                the registry routes below, it owns its own auth story. `/embed`
+                authenticates by the embed token in its query and by nothing
+                else (there is no session inside a host's frame);
+                `/embed/link` is the one page that DOES act under a session,
+                which is why the server refuses to let any site frame it.
+                Core's first, so a deployment adds to the app rather than
+                having to re-register these. */}
+            {CORE_TOP_LEVEL_ROUTES.map((r) => (
+              <Route key={r.path} path={r.path} element={r.element} />
+            ))}
+            {registry.topLevelRoutes.map((r) => (
+              <Route key={r.path} path={r.path} element={r.element} />
+            ))}
+            <Route path="*" element={<AppShell />} />
+          </Routes>
+        </ConfirmProvider>
       </BrowserRouter>
     </AppRegistryContext.Provider>
   );

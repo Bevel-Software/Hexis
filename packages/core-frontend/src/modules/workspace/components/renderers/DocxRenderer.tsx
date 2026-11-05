@@ -6,9 +6,11 @@ import { useEffect, useState } from 'react';
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-expect-error — mammoth ships no .d.ts
 import mammoth from 'mammoth/mammoth.browser.js';
-import { useWorkspace } from '../../state/workspace.context';
-import { authFetch } from '../../../../lib/api';
+import { RetryReadButton } from './RetryReadButton';
+import { useReadRetry } from './useReadRetry';
+import { useRendererRawRead } from './rendererRawRead';
 import { sanitizeDocxHtml } from './sanitizeDocxHtml';
+import { DownloadFileButton } from './DownloadFileButton';
 import type { FileRendererProps } from './types';
 
 /**
@@ -29,21 +31,28 @@ import type { FileRendererProps } from './types';
  * ignores `onSave` / `onValueChange` / `readOnly`.
  */
 export function DocxRenderer({ filePath }: FileRendererProps) {
-  const { workspaceId } = useWorkspace();
+  /**
+   * Where this file's bytes come from. In the app that is the workspace raw
+   * route under the session, for the workspace this viewer is pointed at and
+   * the save it is bound to; on a renderer surface (the embed) it is that
+   * surface's own route, with its own credential. Null until there is a
+   * workspace to read from — the same "nothing to read yet" the guard in the
+   * effect below has always had.
+   */
+  const rawRead = useRendererRawRead();
+  const { attempt, retry } = useReadRetry();
   const [html, setHtml] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     setHtml(null);
     setError(null);
-    if (!workspaceId) return;
+    if (!rawRead) return;
 
     let cancelled = false;
     (async () => {
       try {
-        const res = await authFetch(
-          `/api/workspace/${workspaceId}/file/raw?path=${encodeURIComponent(filePath)}`,
-        );
+        const res = await rawRead.fetch(filePath);
         if (cancelled) return;
         if (!res.ok) {
           setError(`Failed to load Word document (HTTP ${res.status})`);
@@ -65,12 +74,17 @@ export function DocxRenderer({ filePath }: FileRendererProps) {
     return () => {
       cancelled = true;
     };
-  }, [workspaceId, filePath]);
+  }, [rawRead, filePath, attempt]);
 
   if (error) {
     return (
-      <div className="flex items-center justify-center min-h-40 text-danger text-sm">
-        {error}
+      <div className="flex min-h-40 flex-col items-center justify-center gap-3 text-center">
+        <p role="alert" className="text-sm text-danger">{error}</p>
+        <div className="flex items-center gap-2">
+          <RetryReadButton onRetry={retry} />
+          {/* The conversion failed; the bytes may still open fine in Word. */}
+          <DownloadFileButton filePath={filePath} />
+        </div>
       </div>
     );
   }
@@ -87,6 +101,12 @@ export function DocxRenderer({ filePath }: FileRendererProps) {
     // No scroller of its own: a Word document is a document, so it sits in
     // `KbDocumentShell`'s prose column and the column scrolls.
     <div className="min-w-0">
+      {/* The conversion is an approximation (headers/footers, tracked
+          changes and most layout are dropped) — the original stays one
+          click away. */}
+      <div className="mb-3 flex justify-end">
+        <DownloadFileButton filePath={filePath} />
+      </div>
       <div
         className="prose prose-sm max-w-none"
         dangerouslySetInnerHTML={{ __html: html }}

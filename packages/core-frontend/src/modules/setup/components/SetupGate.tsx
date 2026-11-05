@@ -1,6 +1,35 @@
-import { useCallback, useEffect, useState, type ReactNode } from 'react';
-import { fetchSetupStatus, type SetupStatus } from '../services/setup.api';
+import { useState, type ReactNode } from 'react';
+import { useSetupStatus } from '../hooks/useSetupStatus';
+import { keptDraft } from '../utils/kept-draft';
+import type { RepositoryStatus } from '../services/setup.api';
+import { FirstRunStorage } from './FirstRunStorage';
 import { SetupScreen } from './SetupScreen';
+
+/**
+ * Whether the deployment is at the very start: no way of having a repository
+ * chosen, by the settings or by the environment, and the one that needs no
+ * answers on offer. Only then is "where should it live?" the whole question.
+ * `chosen` is absent from a server that does not tell it apart from `mode`,
+ * which then says the same thing.
+ */
+function choosingStorage(repository: RepositoryStatus | undefined): repository is RepositoryStatus {
+  return (
+    !!repository &&
+    !repository.pinned &&
+    (repository.chosen ?? repository.mode) == null &&
+    repository.modes.includes('managed')
+  );
+}
+
+/**
+ * Back from GitHub with what was typed on the full form kept for the trip:
+ * the trip started there, and that form is where it is put back.
+ */
+function backToTheFullForm(): boolean {
+  if (!new URLSearchParams(window.location.search ?? '').has('github')) return false;
+  const kept = keptDraft(() => false);
+  return Object.keys(kept.draft).length > 0 || kept.dropped.length > 0;
+}
 
 /**
  * Stands between a signed-in session and the application, and only lets it
@@ -24,22 +53,19 @@ import { SetupScreen } from './SetupScreen';
  * transient network failure would lock everyone out of a working deployment.
  */
 export function SetupGate({ children }: { children: ReactNode }) {
-  const [status, setStatus] = useState<SetupStatus | null>(null);
-  const [checked, setChecked] = useState(false);
-
-  const refresh = useCallback(() => {
-    fetchSetupStatus()
-      .then(setStatus)
-      .catch(() => setStatus(null))
-      .finally(() => setChecked(true));
-  }, []);
-
-  useEffect(refresh, [refresh]);
+  // The status is read the shared way (`useSetupStatus`): only the latest
+  // read lands, so a late answer cannot undo what a newer one said.
+  const { status, failed, loaded, refresh } = useSetupStatus();
+  /**
+   * Back from a trip to GitHub that started on the full form: that form put
+   * away what was typed, and is where it is given back. Read once, on arrival.
+   */
+  const [fullForm] = useState(backToTheFullForm);
 
   // Nothing is claimed until the answer is in. Rendering the app here and
   // replacing it a moment later would flash a broken workspace at exactly the
   // people this gate exists to protect from one.
-  if (!checked) {
+  if (!loaded) {
     return (
       <div className="flex h-full items-center justify-center bg-surface text-ui text-ink-muted">
         Loading…
@@ -47,7 +73,7 @@ export function SetupGate({ children }: { children: ReactNode }) {
     );
   }
 
-  if (!status || status.complete) return <>{children}</>;
+  if (!status || failed || status.complete) return <>{children}</>;
 
   if (!status.isAdmin || !status.settings) {
     return (
@@ -63,5 +89,25 @@ export function SetupGate({ children }: { children: ReactNode }) {
     );
   }
 
-  return <SetupScreen settings={status.settings} onSaved={refresh} />;
+  // A fresh deployment is asked one question first. Everything else, and
+  // every deployment past that point, gets the full form as it always has.
+  if (!fullForm && choosingStorage(status.repository)) {
+    return (
+      <FirstRunStorage
+        repository={status.repository}
+        onSaved={refresh}
+      />
+    );
+  }
+
+  return (
+    <SetupScreen
+      settings={status.settings}
+      sync={status.sync}
+      kbInit={status.kbInit}
+      oidcVerification={status.oidcVerification}
+      repository={status.repository}
+      onSaved={refresh}
+    />
+  );
 }

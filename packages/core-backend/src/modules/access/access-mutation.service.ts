@@ -25,7 +25,8 @@
  *     no last-owner guard and no self-lockout guard. `owner` names who validates a
  *     file/folder, not a stronger privilege tier, so removing the last owner
  *     creates no lockout; and a user may drop their own access (including write),
- *     since admins keep rescue access regardless.
+ *     since admins keep rescue access regardless. The one refusal: the Admin
+ *     role's write at the repository root (see `removesAdminRootWrite`).
  *
  * Paths in/out of this service are REPO-RELATIVE (e.g. `Knowledge/Sales`,
  * `Knowledge/Sales/Deal.md`). The route strips the `<kbDirName>/` prefix once at
@@ -34,23 +35,36 @@
 
 import path from 'node:path';
 
-import type { WorkspaceService } from '../workspace/workspace.service.js';
+import type { WorkspaceService } from '../workspace/index.js';
 import type { IAccessControl } from './access-control.interface.js';
-import { type Verb, KNOWN_VERBS } from './access-control.service.js';
+import { isAbsence } from '../../shared/fs.contract.js';
+import { isTextBytes } from '../workspace/index.js';
+import {
+  ADMIN_CANONICAL,
+  KNOWN_VERBS,
+  canonicalRoleName,
+  splitPrincipalToken,
+  accessFrontmatterExtensionList,
+} from '../access-model/index.js';
 import {
   spliceRevoke,
   spliceGrant,
   validatePrincipal,
   AccessSpliceError,
-  type Principal,
-} from './access-splice.js';
-import { WorkflowDomainError } from '../workflow/workflow.errors.js';
+} from '../access-model/index.js';
+import type { Verb, Principal, TokenMatch } from '../access-model/index.js';
+import { VersionControlDomainError } from '../../shared/domain-errors.js';
+import {
+  canCarryFrontmatter,
+  FOLDER_GOVERNS_ACCESS_KIND,
+  folderGovernsAccessMessage,
+} from '@bevel-software/platform-shared';
 
 /** Whether the dialog target is a folder (edit folder access.md) or a file (edit node frontmatter). */
 export type TargetKind = 'folder' | 'file';
 
-/** Bad-request-class mutation failure (invalid principal, unknown plugin, lockout). */
-export class AccessMutationError extends WorkflowDomainError {
+/** Bad-request-class mutation failure (invalid principal, unknown role/group, lockout). */
+export class AccessMutationError extends VersionControlDomainError {
   constructor(message: string, status = 400, payload?: Record<string, unknown>) {
     super(message, status, payload);
     this.name = 'AccessMutationError';
@@ -65,6 +79,42 @@ export function accessMdPathForFolder(repoRelDir: string): string {
   return repoRelDir ? `${repoRelDir}/access.md` : 'access.md';
 }
 
+/** The refusal for a mutation that would take Admin's write away at the repository root. */
+export const ADMIN_ROOT_WRITE_MESSAGE =
+  'Admins always keep write access at the root so the deployment cannot lock itself out.';
+
+/**
+ * Whether revoking or denying `principal` on `verb` (absent = every verb) at
+ * this target touches the Admin ROLE's write at the repository root — the
+ * root folder's `access.md`, or a file directly in the root. The resolver
+ * ignores such a rule anyway (the Admin write floor), so writing it would only
+ * leave a line that says something the app does not do. A bare `Admin` is the
+ * role (a bare name is always the role when one exists, and roles.yaml always
+ * declares Admin); `group/Admin` is a group and never the role. Targets arrive
+ * in one spelling: the routes refuse `.` and `..` segments.
+ */
+export function removesAdminRootWrite(
+  kind: TargetKind,
+  repoRelTarget: string,
+  principal: Principal,
+  verb: Verb | undefined,
+): boolean {
+  if (principal.kind !== 'role') return false;
+  if (!touchesRootWrite(kind, repoRelTarget, verb)) return false;
+  const { prefix, name } = splitPrincipalToken(canonicalRoleName(principal.role));
+  return prefix !== 'group' && name === ADMIN_CANONICAL;
+}
+
+/** Whether a mutation on `verb` (absent = every verb) at this target reaches write at the repository root. */
+function touchesRootWrite(kind: TargetKind, repoRelTarget: string, verb: Verb | undefined): boolean {
+  if (verb !== undefined && verb !== 'write') return false;
+  return kind === 'folder' ? repoRelTarget === '' : !repoRelTarget.includes('/');
+}
+
+function adminRootWriteRefusal(): AccessMutationError {
+  return new AccessMutationError(ADMIN_ROOT_WRITE_MESSAGE, 403, { kind: 'admin-root-write' });
+}
+
 /**
  * The file whose frontmatter governs a node — the node file itself. (A file
  * target edits its OWN frontmatter, not the folder's access.md, so a per-file
@@ -72,6 +122,43 @@ export function accessMdPathForFolder(repoRelDir: string): string {
  */
 export function targetFileForNode(repoRelFile: string): string {
   return repoRelFile;
+}
+
+/**
+ * Refuse a FILE target that cannot carry frontmatter (see `canCarryFrontmatter`):
+ * splicing a YAML block into a PDF, a presentation or an image corrupts its
+ * bytes, and the rule would never resolve anyway. Such a file takes its
+ * folder's rules, so the refusal names that folder. 422 with kind
+ * `folder-governs-access`, thrown BEFORE the file is read, locked or written.
+ * A folder target, or a Markdown note, passes.
+ */
+export function assertFileCarriesAccessRules(kind: TargetKind, repoRelTarget: string): void {
+  if (kind !== 'file' || fileCarriesAccessRules(repoRelTarget)) return;
+  throw folderGovernsAccessError(repoRelTarget);
+}
+
+/**
+ * The shared predicate over the resolver's REGISTERED extension set — core's
+ * `.md`/`.tool` plus whatever an overlay added at boot — so a file is refused
+ * exactly when the resolver would never read a rule written into it.
+ */
+export function fileCarriesAccessRules(repoRelFile: string): boolean {
+  return canCarryFrontmatter(repoRelFile, accessFrontmatterExtensionList());
+}
+
+function folderGovernsAccessError(repoRelTarget: string): AccessMutationError {
+  const folder = governingFolderOf(repoRelTarget);
+  return new AccessMutationError(
+    folderGovernsAccessMessage(folder || 'the whole workspace'),
+    422,
+    { kind: FOLDER_GOVERNS_ACCESS_KIND, folder },
+  );
+}
+
+/** The repo-relative folder a file sits in (`''` for a file at the repo root). */
+export function governingFolderOf(repoRelFile: string): string {
+  const dir = path.posix.dirname(repoRelFile);
+  return dir === '.' ? '' : dir;
 }
 
 export class AccessMutationService {
@@ -85,8 +172,13 @@ export class AccessMutationService {
    * Resolve the file we'll actually edit for a (kind, target) pair, repo-relative.
    *   - folder → the folder's `access.md` (block-list form)
    *   - file   → the node file itself (its own frontmatter, scalar form allowed)
+   *
+   * A file that cannot carry frontmatter throws `folder-governs-access`
+   * instead: every mutation resolves its edit path here before reading, so
+   * none of them ever opens such a file.
    */
   fileToEdit(kind: TargetKind, repoRelTarget: string): { editPath: string; allowScalar: boolean } {
+    assertFileCarriesAccessRules(kind, repoRelTarget);
     if (kind === 'folder') {
       return { editPath: accessMdPathForFolder(repoRelTarget), allowScalar: false };
     }
@@ -94,31 +186,126 @@ export class AccessMutationService {
   }
 
   /**
+   * The CONTENT half of the refusal, for the routes to run BEFORE taking the
+   * edit lock: a file target whose bytes are not text (a binary saved as
+   * `.md`) answers `folder-governs-access` without the lock ever being held.
+   * Refusing inside the lock instead makes the route release it without a
+   * commit, and that release discards the path's working-tree changes — which,
+   * right after an upload whose commit is still queued, deletes the upload.
+   * `readOrEmpty` repeats the check under the lock, in case the bytes changed
+   * in between. Folder targets and missing files pass through untouched (the
+   * mutation reports those as before).
+   */
+  async assertTargetHoldsText(workspaceId: string, kind: TargetKind, repoRelTarget: string): Promise<void> {
+    if (kind !== 'file') return;
+    const { editPath } = this.fileToEdit(kind, repoRelTarget);
+    let bytes: Buffer;
+    try {
+      bytes = await this.workspaceService.readFileBinary(workspaceId, this.toWorkspaceRelative(editPath));
+    } catch (err) {
+      if (isAbsence(err)) return;
+      throw err;
+    }
+    if (!isTextBytes(bytes)) throw folderGovernsAccessError(repoRelTarget);
+  }
+
+  /**
+   * The same content question, asked by the READ view, which must not fail:
+   * true when the file's bytes are text, so it really can hold rules of its
+   * own.
+   *
+   * ABSENCE is the one failure that answers yes: there is nothing there to
+   * object to, and a target the view is open on is normally about to exist.
+   * Any OTHER read failure (EACCES, EIO) answers NO — the mutations read the
+   * same bytes and would fail on them too, so the view must not offer a field
+   * whose writes cannot land. The dialog degrades to the folder pointer with
+   * the read side intact, which is better than a 500 that shows nothing.
+   * (The mutations use `assertTargetHoldsText`, which rethrows the failure so
+   * the caller sees the real error rather than a refusal.)
+   */
+  async targetHoldsText(workspaceId: string, repoRelFile: string): Promise<boolean> {
+    try {
+      const bytes = await this.workspaceService.readFileBinary(
+        workspaceId,
+        this.toWorkspaceRelative(repoRelFile),
+      );
+      return isTextBytes(bytes);
+    } catch (err) {
+      return isAbsence(err);
+    }
+  }
+
+  /**
    * Read the to-be-edited file's current text, or '' when it's an expected
-   * missing file. `allowMissing` is true only where an absent file is normal
-   * (a folder that has no `access.md` yet); there we swallow ENOENT/ENOTDIR.
-   * Every other error — a typoed node target, a transient read failure — is
-   * rethrown so we never treat it as empty and write a brand-new access file.
+   * missing file. An absent file is normal only for a folder (no `access.md`
+   * yet); there we swallow ENOENT/ENOTDIR. Every other error — a typoed node
+   * target, a transient read failure — is rethrown so we never treat it as
+   * empty and write a brand-new access file.
+   *
+   * A FILE target must also hold text (`isTextBytes`: no NUL, valid UTF-8 —
+   * the file tools' own test). A path alone cannot tell a note from a binary
+   * saved as `.md`, so binary content is refused with `folder-governs-access`
+   * here, after the read and before any splice or write.
    */
   private async readOrEmpty(
     workspaceId: string,
+    kind: TargetKind,
+    repoRelTarget: string,
     repoRelEditPath: string,
-    allowMissing: boolean,
   ): Promise<string> {
     const wsRelative = this.toWorkspaceRelative(repoRelEditPath);
+    if (kind === 'file') {
+      const bytes = await this.workspaceService.readFileBinary(workspaceId, wsRelative);
+      if (!isTextBytes(bytes)) throw folderGovernsAccessError(repoRelTarget);
+      return bytes.toString('utf-8');
+    }
     try {
       return await this.workspaceService.readFile(workspaceId, wsRelative);
     } catch (err) {
-      const code = (err as NodeJS.ErrnoException | null)?.code;
-      if (allowMissing && (code === 'ENOENT' || code === 'ENOTDIR')) {
-        return '';
-      }
+      if (isAbsence(err)) return '';
       throw err;
     }
   }
 
   private toWorkspaceRelative(repoRelative: string): string {
     return path.posix.join(this.kbDirName, repoRelative);
+  }
+
+  /**
+   * How a REVOKE of `principal` matches file tokens. `'name'` strips the
+   * principal's explicit spelling AND the bare name (never the other kind's
+   * explicit spelling — see `TokenMatch`); `'exact'` strips the literal
+   * spelling alone. The bare name is stripped only when it is THIS
+   * principal's under role-first precedence:
+   *
+   *   - A ROLE (`role/<name>`, or a bare name) owns the bare key unless no
+   *     role of that name exists and a group does — then the bare token is
+   *     the group's, and matching is `'exact'`. A model that fails to load
+   *     keeps it `'exact'` too.
+   *   - A GROUP (`group/<name>`) owns the bare key only while no role of
+   *     that name exists — otherwise the bare token is the role's, and
+   *     matching is `'exact'`. A group that has VANISHED from the active
+   *     source still reads correctly: the question is whether a ROLE holds
+   *     the name. A model that fails to load says nothing about roles, so a
+   *     group revoke then stays `'exact'` rather than risk a role's grant.
+   *
+   * Judged against THIS workspace's merged principal index (`kbPrincipals` —
+   * the same model the resolver reads), so revoke agrees with resolution on
+   * who owns the bare key.
+   */
+  private async revokeTokenMatch(workspaceId: string, principal: Principal): Promise<TokenMatch> {
+    if (principal.kind !== 'role') return 'exact'; // user matching ignores the mode
+    const { prefix, name } = splitPrincipalToken(canonicalRoleName(principal.role));
+    const { roles, groups } = await this.accessControl.kbPrincipals(workspaceId);
+    const isRole = roles.some((r) => canonicalRoleName(r) === name);
+    if (prefix === 'group') {
+      // `roles` always carries at least `Everyone` once the model loads.
+      return isRole || roles.length === 0 ? 'exact' : 'name';
+    }
+    const isGroup = groups.some((g) => canonicalRoleName(g) === name);
+    // No roles at all means the model failed to load: stay exact, so a role
+    // revoke never strips a same-named group's bare grant.
+    return roles.length === 0 || (!isRole && isGroup) ? 'exact' : 'name';
   }
 
   /**
@@ -141,7 +328,7 @@ export class AccessMutationService {
   ): Promise<{ changed: boolean; editPath: string }> {
     this.assertPrincipalSafe(principal); // injection/shape guard (role-exists is the route's job)
     const { editPath, allowScalar } = this.fileToEdit(kind, repoRelTarget);
-    const current = await this.readOrEmpty(workspaceId, editPath, kind === 'folder');
+    const current = await this.readOrEmpty(workspaceId, kind, repoRelTarget, editPath);
     let result;
     try {
       result = spliceGrant(current, verb, principal, { allowScalar, target: kind === 'folder' ? 'folder' : 'node' });
@@ -177,31 +364,50 @@ export class AccessMutationService {
     kind: TargetKind,
     repoRelTarget: string,
     principal: Principal,
-    // Kept on the signature: the route supplies it and the upcoming
-    // revoke-vs-deny slice needs the acting user. Not consumed yet.
+    // Kept on the signature: the route supplies it, for attribution / future
+    // per-principal checks. Not consumed yet.
     _actingUserEmail: string,
     // When present, strip ONLY this verb (a per-checkbox toggle in the share UI);
     // absent strips the principal from every verb (the whole-principal Remove).
     verb?: Verb,
+    // `tokenMatch` overrides the derived matching (see revokeTokenMatch).
+    // One production caller: the plugin-links unlink pins `'exact'` for its
+    // `plugin/<Name>/<verb>` tokens. Pin only `'exact'` — a pinned `'name'`
+    // would bypass the guard that never strips across kinds.
+    opts?: { tokenMatch?: TokenMatch },
   ): Promise<{ changed: boolean; editPath: string }> {
-    void _actingUserEmail; // referenced to satisfy no-unused-vars until Slice 2 consumes it
+    void _actingUserEmail; // referenced to satisfy no-unused-vars until something consumes it
     this.assertPrincipalSafe(principal); // same injection/shape guard grant runs
     const { editPath } = this.fileToEdit(kind, repoRelTarget);
     // Allow a missing target only for a folder (no access.md yet is normal); a
     // missing FILE node is a bad target and should surface, not silently no-op
     // — same rule grant() uses.
-    const original = await this.readOrEmpty(workspaceId, editPath, kind === 'folder');
+    const original = await this.readOrEmpty(workspaceId, kind, repoRelTarget, editPath);
+    // Alias-tolerant vs exact-token matching, decided by who owns the bare
+    // name — see revokeTokenMatch — unless the caller pinned it.
+    const tokenMatch = opts?.tokenMatch ?? (await this.revokeTokenMatch(workspaceId, principal));
     let next = original;
     let changed = false;
+    let writeRemoved = false;
     try {
       const verbsToRevoke = verb ? [verb] : KNOWN_VERBS;
       for (const v of verbsToRevoke) {
-        const r = spliceRevoke(next, v, principal, { target: kind === 'folder' ? 'folder' : 'node' });
+        const r = spliceRevoke(next, v, principal, {
+          target: kind === 'folder' ? 'folder' : 'node',
+          tokenMatch,
+        });
         next = r.text;
         changed = changed || r.changed;
+        writeRemoved = writeRemoved || (v === 'write' && r.changed);
       }
     } catch (err) {
       throw this.toMutationError(err);
+    }
+    // Refused only when an Admin write entry would really go: a whole-row
+    // Remove at a root that grants Admin other verbs but no write line (write
+    // comes from the floor) strips those verbs as usual.
+    if (writeRemoved && removesAdminRootWrite(kind, repoRelTarget, principal, verb)) {
+      throw adminRootWriteRefusal();
     }
     if (!changed) return { changed: false, editPath };
 
@@ -248,18 +454,39 @@ export class AccessMutationService {
     repoRelTarget: string,
     principal: Principal,
     verb?: Verb,
+    // Same override as `revoke`; no production caller passes it here.
+    opts?: { tokenMatch?: TokenMatch },
   ): Promise<{ changed: boolean; editPath: string }> {
     this.assertPrincipalSafe(principal);
     const { editPath, allowScalar } = this.fileToEdit(kind, repoRelTarget);
-    const original = await this.readOrEmpty(workspaceId, editPath, kind === 'folder');
+    const original = await this.readOrEmpty(workspaceId, kind, repoRelTarget, editPath);
 
     const verbsToDeny = verb ? [verb] : KNOWN_VERBS;
+    // Same matching as revoke(): the strip must not swallow a same-named
+    // OTHER principal's grant (`group/<name>` vs the role's bare/`role/`).
+    const tokenMatch = opts?.tokenMatch ?? (await this.revokeTokenMatch(workspaceId, principal));
+    if (removesAdminRootWrite(kind, repoRelTarget, principal, verb)) {
+      throw adminRootWriteRefusal();
+    }
+    // A PERSON who is an admin keeps root write through the floor, so a deny
+    // there could only be rolled back as "ineffective" — refuse it up front
+    // with the reason instead.
+    if (
+      principal.kind === 'user' &&
+      touchesRootWrite(kind, repoRelTarget, verb) &&
+      (await this.accessControl.holdsAdminRootWrite(workspaceId, principal.email))
+    ) {
+      throw adminRootWriteRefusal();
+    }
     let next = original;
     try {
       for (const v of verbsToDeny) {
         // (1) Strip any same-scope GRANT for this principal so grant-beats-deny
         // can't silently swallow the deny we're about to add.
-        next = spliceRevoke(next, v, principal, { target: kind === 'folder' ? 'folder' : 'node' }).text;
+        next = spliceRevoke(next, v, principal, {
+          target: kind === 'folder' ? 'folder' : 'node',
+          tokenMatch,
+        }).text;
         // (2) Add the deny under the same verb.
         next = spliceGrant(next, v, principal, { allowScalar, deny: true, target: kind === 'folder' ? 'folder' : 'node' }).text;
       }
@@ -277,13 +504,16 @@ export class AccessMutationService {
     this.accessControl.invalidate(workspaceId);
 
     // (3) Assert the deny actually removed effective access on the targeted
-    // verb(s) — else roll back.
+    // verb(s) — else roll back. The check evaluates the SAME token identity
+    // the deny above spliced (`tokenMatch` rides along), so a pinned exact
+    // deny is never judged by spellings it did not touch.
     const stillHas = await this.principalStillHasAccess(
       workspaceId,
       kind,
       repoRelTarget,
       principal,
       verb,
+      tokenMatch,
     );
     if (stillHas) {
       await this.workspaceService.writeFile(workspaceId, wsRelative, original);
@@ -305,7 +535,7 @@ export class AccessMutationService {
    * access — not just "is there a removable file entry."
    *
    * For a USER, that distinction matters: effective access includes admin-rescue
-   * on `access.md`/`roles.yaml`, plugin membership, and the built-in `everyone` —
+   * on `access.md`/`roles.yaml`, role/group membership, and the built-in `everyone` —
    * none of which `grantSources` reports (it is MECE over file-backed
    * direct/ancestor entries only). So we ask the same `canRead/canWrite/
    * canDownload/canOwner` resolver every real access decision uses; if the
@@ -319,6 +549,10 @@ export class AccessMutationService {
    * ever holds access by being NAMED in a file (no rescue / role-via-role /
    * everyone indirection applies to a role token), so `grantSources` IS its
    * complete effective-access answer (scoped to `verb` when given).
+   * `tokenMatch` keeps the check on the same token identity the preceding
+   * splice used: 'exact' asks `grantSources` to count only the literally
+   * spelled token — see the denyHere call site for why that matters when a
+   * same-named group and role diverge.
    */
   private async principalStillHasAccess(
     workspaceId: string,
@@ -326,6 +560,7 @@ export class AccessMutationService {
     repoRelTarget: string,
     principal: Principal,
     verb?: Verb,
+    tokenMatch?: TokenMatch,
   ): Promise<boolean> {
     if (principal.kind === 'user') {
       const email = principal.email;
@@ -339,10 +574,13 @@ export class AccessMutationService {
       const results = await Promise.all(verbs.map((v) => canOf[v]()));
       return results.some(Boolean);
     }
-    const sources = await this.accessControl.grantSources(workspaceId, kind, repoRelTarget, {
-      kind: 'role',
-      role: principal.role,
-    });
+    const sources = await this.accessControl.grantSources(
+      workspaceId,
+      kind,
+      repoRelTarget,
+      { kind: 'role', role: principal.role },
+      tokenMatch ? { tokenMatch } : undefined,
+    );
     return verb ? sources[verb] !== undefined : Object.keys(sources).length > 0;
   }
 
@@ -351,7 +589,7 @@ export class AccessMutationService {
    * asynchronously in the route (it needs the roles model). Here we only run the
    * cheap injection/shape validation so a malformed principal never reaches the
    * splice. Role-exists-in-roles.yaml is the route's job (so it can offer
-   * "Create Plugin" for an unknown plugin, an admin-only flow).
+   * an honest 404 for an unknown role/group).
    */
   private assertPrincipalSafe(principal: Principal): void {
     try {
@@ -367,3 +605,9 @@ export class AccessMutationService {
     return new AccessMutationError(err instanceof Error ? err.message : 'mutation failed', 500);
   }
 }
+
+/**
+ * What another module needs of the mutation service: to grant and to revoke.
+ * Injected by the composition root, which owns the implementation.
+ */
+export type IAccessMutation = Pick<AccessMutationService, 'grant' | 'revoke'>;

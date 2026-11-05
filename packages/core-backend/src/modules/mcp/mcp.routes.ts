@@ -1,22 +1,23 @@
-import express, { type Request, type RequestHandler } from 'express';
-import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
+import express, { type Request, type Response, type RequestHandler } from 'express';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('mcp');
+import { InvalidTokenError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
 import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import type { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import {
   InvalidTokenLabelError,
   TokenNotFoundError,
   TokenStillActiveError,
-} from '../tool-auth/external-api-key.errors.js';
-import type { IExternalApiKeyService } from '../tool-auth/external-api-key.interface.js';
-import type { McpService } from './mcp.service.js';
-import type { ILlmUsageMeter } from '../tool-auth/llm-usage-meter.js';
-import '../tool-auth/external-api-key.interface.js'; // req.externalApiKeyId augmentation
-
-interface ActiveSession {
-  transport: StreamableHTTPServerTransport;
-  server: Server;
-  userId: string;
-}
+} from '../tool-auth/index.js';
+import type { IExternalApiKeyService, InternalTokenService, ILlmUsageMeter } from '../tool-auth/index.js';
+import { MCP_LOOPBACK_TOKEN_TTL_MS, type McpService } from './mcp.service.js';
+import type { BevelOAuthProvider } from './oauth/bevel-oauth-provider.js';
+import '../tool-auth/index.js'; // req.externalApiKeyId augmentation
+import './mcp-auth.middleware.js'; // req.mcpCallerKind augmentation
+import { isPagePath } from '../audit/index.js';
+import type { IAgentScopeResolver } from '../agent-scope/index.js';
+import { NOT_AN_AGENT_CHOICE } from './oauth/oauth-consent.routes.js';
 
 /** Pull the raw bearer token off an already-authenticated request. */
 function extractBearer(req: Request): string {
@@ -26,21 +27,73 @@ function extractBearer(req: Request): string {
 }
 
 /**
+ * `-32000` is the code the MCP SDK's own transport pairs with its 4xx transport
+ * refusals (including its 405); ours match it so a client sees one vocabulary.
+ */
+const TRANSPORT_ERROR = -32000;
+/** JSON-RPC 2.0's own code for a fault on our side, used for the 500 catch-all. */
+const INTERNAL_ERROR = -32603;
+
+/**
+ * Answer in the transport's own wire shape
+ * (`{ jsonrpc, error: { code, message }, id: null }`), for the answers this
+ * router gives without ever reaching an SDK transport. `id: null` matches the
+ * SDK: the request id is not reliably known on a body we may never have parsed
+ * as a single message.
+ */
+function jsonRpcError(res: Response, status: number, code: number, message: string): void {
+  res.status(status).json({ jsonrpc: '2.0', error: { code, message }, id: null });
+}
+
+/** The header a page's calls carry: the page's knowledge-base path, URI-encoded. */
+export const PAGE_HEADER = 'x-bevel-page';
+
+/**
+ * The page a request names, decoded: null when it names none, an error
+ * message when it names one it may not.
+ *
+ * Only a session — the person signed in to the app, whose app is relaying a
+ * page's calls — may name one. A connection key, an OAuth token or an
+ * internal token belongs to an agent, which has an Audit log row of its own;
+ * letting it name a page would let it write its calls into a page's history.
+ */
+function pageOf(req: Request): { page: string | null } | { error: string } {
+  const raw = req.headers[PAGE_HEADER];
+  if (raw === undefined) return { page: null };
+  if (req.mcpCallerKind !== 'session') {
+    return { error: 'X-Bevel-Page names the page a signed-in person\'s call comes from; it is not accepted with this credential.' };
+  }
+  let page: string;
+  try {
+    page = decodeURIComponent(Array.isArray(raw) ? (raw[0] ?? '') : raw);
+  } catch {
+    return { error: 'X-Bevel-Page is not a URI-encoded path.' };
+  }
+  return isPagePath(page) ? { page } : { error: 'X-Bevel-Page is not a knowledge-base path.' };
+}
+
+/**
  * Routes for the remote MCP server + the connection-key management endpoints.
  *
  * Layout:
- *   POST   /mcp           — client→server MCP messages (initialize + tool calls)
- *   GET    /mcp           — server→client SSE channel (session-bound)
- *   DELETE /mcp           — terminate a session
+ *   POST   /mcp           — every client→server MCP message, each request on its own
+ *   GET    /mcp           — 405: no standalone server→client stream (stateless)
+ *   DELETE /mcp           — 405: there is no session to terminate (stateless)
  *
  *   GET    /mcp/external-api-keys         — list this user's connection keys
  *   POST   /mcp/external-api-keys         — mint a new key (returns plaintext ONCE)
  *   DELETE /mcp/external-api-keys/:id     — revoke
  *
- * The `/mcp` endpoints accept either a connection key or a JWT (see
+ *   POST   /mcp/local-token               — exchange an MCP OAuth access token
+ *                                           for a loopback internal token
+ *   POST   /mcp/page-refusals             — record a page's call its viewer
+ *                                           refused (session only)
+ *
+ * The `/mcp` POST accepts either a connection key or a JWT/OAuth token (see
  * McpAuthMiddleware). The `/mcp/external-api-keys/*` endpoints accept only the JWT —
  * minting/revoking via a connection key would let a leaked key roll itself
- * over and stay alive forever.
+ * over and stay alive forever. `/mcp/local-token` accepts ONLY an MCP OAuth
+ * access token — every other credential already opens the surface it bridges to.
  */
 export function createMcpRoutes(
   mcpService: McpService,
@@ -48,130 +101,159 @@ export function createMcpRoutes(
   mcpAuthMiddleware: RequestHandler,
   jwtAuthMiddleware: RequestHandler,
   llmUsageService: ILlmUsageMeter,
+  internalTokens: InternalTokenService,
+  oauthProvider: BevelOAuthProvider,
+  // RFC 9728 pointer carried on this router's own 401 challenges (the
+  // local-token exchange), same value McpAuthMiddleware advertises.
+  resourceMetadataUrl: string,
+  /**
+   * The "Connect as" choices a key may be minted as (`modules/agent-scope`).
+   * Absent: keys are minted as Everything only, and no choices are listed.
+   */
+  agents?: Pick<IAgentScopeResolver, 'listChoices' | 'choosable'>,
 ): express.Router {
   const router = express.Router();
 
-  // Per-process map of live MCP sessions. In-memory mirror of McpSessionStore
-  // — McpSessionStore holds the *domain* state (userId, threadId, idle TTL),
-  // this map holds the *transport* state (the SDK objects we need to route
-  // a subsequent HTTP request to the correct session). Both are cleared on
-  // restart; clients re-initialize.
-  const active = new Map<string, ActiveSession>();
+  // ── MCP transport (stateless) ──────────────────────────────────────────
 
-  // When McpSessionStore drops a session on its own (idle-TTL sweep or
-  // size-cap eviction), the matching transport pair would otherwise leak
-  // here — `active.has(id)` would still return true and route requests to a
-  // McpServer whose backing domain state is gone. Subscribe to the store and
-  // tear down the transport so the resources free immediately and the next
-  // request with that id correctly 404s.
-  mcpService.onSessionEvicted((sessionId) => {
-    const entry = active.get(sessionId);
-    if (!entry) return;
-    active.delete(sessionId);
-    // close() is async; fire-and-forget so a slow socket teardown can't
-    // block the store's eviction loop. transport.onclose still fires but
-    // its `active.delete` is now a no-op.
-    void entry.transport.close().catch((err) => {
-      console.warn('[mcp] transport close on eviction failed:', err);
-    });
-  });
-
-  // ── MCP transport ──────────────────────────────────────────────────────
-
+  /**
+   * One request, one MCP server, one transport — and nothing kept afterwards.
+   *
+   * The Streamable HTTP transport makes the session id OPTIONAL: a server that
+   * never assigns one (`sessionIdGenerator: undefined`, the SDK's stateless
+   * profile) is served by clients that treat every request independently. So
+   * there is no `initialize`-first rule, no session to look up, and no
+   * "Session not found" to answer: identity, the metering key and the
+   * ACL-filtered tool surface all come from THIS request's bearer. A platform
+   * restart between two requests of one conversation is therefore invisible —
+   * the next request is served exactly as it would have been before it.
+   *
+   * A stale `Mcp-Session-Id` from a client that connected before this endpoint
+   * went stateless is ignored by the stateless transport, not refused.
+   *
+   * Notifications a request emits (tool-call progress) ride that request's own
+   * response stream. The server and transport are closed when the response
+   * closes — finished, or abandoned by the client mid-call.
+   */
   router.post('/mcp', mcpAuthMiddleware, async (req, res) => {
-    try {
-      const sessionIdHeader = req.headers['mcp-session-id'] as string | undefined;
-      const body = req.body;
-
-      // Three valid request shapes on POST /mcp:
-      //  1. No session id + body is initialize → spin up a new transport.
-      //  2. Session id + matching active session → forward.
-      //  3. Anything else → 400 / 404.
-      if (sessionIdHeader && active.has(sessionIdHeader)) {
-        const session = active.get(sessionIdHeader)!;
-        // Defense in depth: the auth middleware bound a userId for this
-        // request; refuse if it doesn't match the session's owner. Stops
-        // a leaked session id from being used cross-user even if the
-        // attacker has their own valid connection key.
-        if (session.userId !== req.userId) {
-          res.status(403).json({ error: 'Session does not belong to this user' });
-          return;
-        }
-        await session.transport.handleRequest(req, res, body);
-        return;
-      }
-
-      if (!sessionIdHeader && isInitializeRequest(body)) {
-        // The proxy authenticates its loopback calls with the SAME bearer the
-        // client used here, so it acts on the request exactly as the caller
-        // would. Captured at initialize and seeded into the session's UtcpClient.
-        const { transport, server } = await mcpService.createSession(
-          req.userId!,
-          // Connection-key id (set by mcpAuthMiddleware for `bevel_…` bearers;
-          // undefined for browser JWT) — kept for audit/diagnostics.
-          req.externalApiKeyId ?? null,
-          extractBearer(req),
-          (sessionId) => {
-            active.set(sessionId, { transport, server, userId: req.userId! });
-          },
-        );
-        // Closing the transport (DELETE /mcp, or client disconnect during
-        // close) should drop both the active map and the McpSessionStore
-        // entry. McpService wired onsessionclosed → sessionStore.delete; we
-        // mirror it here.
-        transport.onclose = () => {
-          if (transport.sessionId) active.delete(transport.sessionId);
-        };
-        await server.connect(transport);
-        await transport.handleRequest(req, res, body);
-        return;
-      }
-
-      res.status(400).json({
-        error:
-          'Bad request: missing session id, or session id does not match any active session.',
+    const named = pageOf(req);
+    if ('error' in named) {
+      jsonRpcError(res, 400, TRANSPORT_ERROR, named.error);
+      return;
+    }
+    let server: Server | undefined;
+    res.on('close', () => {
+      // Closing the server closes its transport too.
+      void server?.close().catch((err) => {
+        log.warn('closing a request server failed:', { err });
       });
+    });
+    try {
+      const built = await mcpService.createRequestServer(
+        {
+          userId: req.userId!,
+          // Connection-key id (set by mcpAuthMiddleware for `bevel_…` bearers;
+          // undefined for OAuth/JWT) — resolved per request, so per-key metering
+          // never depends on anything remembered from an earlier request.
+          tokenId: req.externalApiKeyId ?? null,
+          // Agent-connection id (set for OAuth bearers and the local server's
+          // exchanged grant; undefined for keys/JWTs) — the Audit log's other
+          // principal, resolved per request like the key id.
+          connectionId: req.agentConnectionId ?? null,
+          // The agent configuration the credential connects as (a key's, an agent
+          // connection's, or the one an exchanged grant carries); null is
+          // Everything. Resolved per request like the ids above.
+          ...(req.mcpAgentPath ? { agentPath: req.mcpAgentPath } : {}),
+          // The proxy authenticates its loopback calls with the SAME bearer the
+          // client used here, so it acts on the request exactly as the caller would.
+          bearer: extractBearer(req),
+          // The page whose script made the call, when the app relays one —
+          // its calls are audited under the page (see pageOf).
+          ...(named.page ? { page: named.page } : {}),
+        },
+        req.body,
+      );
+      // The client gave up while the server was being built: nothing to answer.
+      if (res.writableEnded || res.destroyed) {
+        await built.close().catch(() => {});
+        return;
+      }
+      server = built;
+      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+      await server.connect(transport);
+      await transport.handleRequest(req, res, req.body);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Unknown error';
-      console.error('[mcp] POST /mcp failed:', msg);
+      log.error('POST /mcp failed:', { detail: msg });
       if (!res.headersSent) {
-        res.status(500).json({ error: msg });
+        jsonRpcError(res, 500, INTERNAL_ERROR, msg);
       } else {
         res.end();
       }
     }
   });
 
-  const sessionRequest: RequestHandler = async (req, res) => {
-    const sessionIdHeader = req.headers['mcp-session-id'] as string | undefined;
-    if (!sessionIdHeader || !active.has(sessionIdHeader)) {
-      res.status(404).json({ error: 'Unknown MCP session' });
-      return;
-    }
-    const session = active.get(sessionIdHeader)!;
-    if (session.userId !== req.userId) {
-      res.status(403).json({ error: 'Session does not belong to this user' });
-      return;
-    }
-    try {
-      await session.transport.handleRequest(req, res);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Unknown error';
-      console.error('[mcp] session request failed:', msg);
-      if (!res.headersSent) res.status(500).json({ error: msg });
-      else res.end();
-    }
+  /**
+   * GET and DELETE are retired, per the stateless profile.
+   *
+   * GET would open a standalone server→client stream; with no session there is
+   * nothing to push on one, and the spec's answer for a server that offers none
+   * is 405 — which spec-conformant clients (the SDK's among them) treat as "no
+   * stream", not as a failure. DELETE would terminate a session; there is none,
+   * and 405 is the spec's answer for a server that does not support it.
+   *
+   * Deliberately NOT behind the auth middleware: the answer is the same for
+   * everyone and reveals nothing, and a 401 here would send an OAuth-capable
+   * client into an authorization flow for a stream that does not exist.
+   */
+  const methodNotAllowed: RequestHandler = (_req, res) => {
+    res.setHeader('Allow', 'POST');
+    jsonRpcError(res, 405, TRANSPORT_ERROR, 'Method not allowed.');
   };
+  router.get('/mcp', methodNotAllowed);
+  router.delete('/mcp', methodNotAllowed);
 
-  // GET is the server→client SSE channel for session-scoped notifications.
-  router.get('/mcp', mcpAuthMiddleware, sessionRequest);
-
-  // DELETE terminates the session — SDK closes the transport, our
-  // onclose handler cleans up the active map, and McpService's
-  // onsessionclosed clears the McpSessionStore entry.
-  router.delete('/mcp', mcpAuthMiddleware, sessionRequest);
+  /**
+   * A call a page asked to make and its viewer refused. It never ran, so it
+   * never reached `/mcp`; the app reports it so the Audit log lists it
+   * under the page, as refused, beside the page's allowed calls.
+   *
+   * Body: `{ page, tool, args? }` — the page's knowledge-base path and the
+   * tool's name as the page called it. Session only, like the page header.
+   */
+  router.post('/mcp/page-refusals', mcpAuthMiddleware, async (req, res) => {
+    if (req.mcpCallerKind !== 'session') {
+      res.status(403).json({ error: 'Only the app records a page\'s refused calls.' });
+      return;
+    }
+    const body = (req.body ?? {}) as { page?: unknown; tool?: unknown; args?: unknown };
+    if (typeof body.page !== 'string' || !isPagePath(body.page) || typeof body.tool !== 'string' || !body.tool) {
+      res.status(400).json({ error: 'page (a knowledge-base path) and tool are required' });
+      return;
+    }
+    const args =
+      body.args && typeof body.args === 'object' && !Array.isArray(body.args) ? (body.args as Record<string, unknown>) : {};
+    try {
+      await mcpService.recordPageRefusal({ userId: req.userId!, bearer: extractBearer(req) }, body.page, body.tool, args);
+      res.status(204).end();
+    } catch (err) {
+      log.error('recording a page refusal failed:', { err });
+      res.status(500).json({ error: 'Failed to record the refusal' });
+    }
+  });
 
   // ── Connection-key management (JWT-only) ───────────────────────────────
+
+  // The agents a key may be minted as — the same choices the OAuth consent
+  // step offers below Everything, for the key-mint dialog.
+  router.get('/mcp/agent-choices', jwtAuthMiddleware, async (req, res) => {
+    try {
+      res.json({ agents: agents && req.userEmail ? await agents.listChoices(req.userEmail) : [] });
+    } catch (err) {
+      log.error('listing the agents to connect as failed:', { err });
+      res.status(500).json({ error: 'Failed to list the agents' });
+    }
+  });
 
   router.get('/mcp/external-api-keys', jwtAuthMiddleware, async (req, res) => {
     try {
@@ -204,12 +286,23 @@ export function createMcpRoutes(
         res.status(400).json({ error: 'JSON body required' });
         return;
       }
-      const { label } = req.body as { label?: string };
+      const { label, agentPath: asked } = req.body as { label?: string; agentPath?: unknown };
       if (!label) {
         res.status(400).json({ error: 'label is required' });
         return;
       }
-      const minted = await externalApiKeyService.mint(req.userId!, label);
+      // "Connect as", exactly as on the consent step: absent, null or empty is
+      // Everything; anything else must be an agent the owner may choose now.
+      let agentPath: string | null = null;
+      if (asked !== undefined && asked !== null && asked !== '') {
+        agentPath =
+          typeof asked === 'string' && agents && req.userEmail ? await agents.choosable(req.userEmail, asked) : null;
+        if (agentPath === null) {
+          res.status(400).json({ error: NOT_AN_AGENT_CHOICE });
+          return;
+        }
+      }
+      const minted = await externalApiKeyService.mint(req.userId!, label, agentPath ? { agentPath } : {});
       // The plaintext field is the *only* read path for the raw key. The
       // frontend must store it nowhere — it shows the dialog once and then
       // discards. Subsequent fetches return only `summary`-shaped rows.
@@ -256,6 +349,138 @@ export function createMcpRoutes(
       }
       const msg = err instanceof Error ? err.message : 'Unknown error';
       res.status(500).json({ error: msg });
+    }
+  });
+
+  // ── Local-server token exchange (OAuth-access-token-only) ──────────────
+
+  /**
+   * Exchange an MCP OAuth access token for a short-lived internal token.
+   *
+   * Why it exists: the LOCAL MCP server's REST reads — the all-tools manual,
+   * `list_local_tools`, the plugin archive — live on `/api/agent/*`, which
+   * accepts connection keys and internal tokens ONLY; an MCP OAuth access
+   * token deliberately 401s there. Hosted OAuth requests cross that gap
+   * inside `McpService.createRequestServer`, which mints a loopback internal
+   * token for the resolved user. This endpoint is the same exchange for an
+   * external caller: the one bridge that lets a local server configured via the
+   * deployment's MCP OAuth (instead of a connection key) reach those reads.
+   *
+   * Why it is NOT a widening of the trust boundary: the caller must present a
+   * VERIFIED OAuth grant for this exact user — the same credential that
+   * already drives full tool execution through the hosted `/mcp` endpoint.
+   * The minted token is identical in shape to the hosted proxy's loopback bearer
+   * (`{ userId, externalProxy: true }` → resolved as `source: 'external'` by
+   * the tool-auth verifier, admitted to the external surface, refused from
+   * internal-only tools) and carries the same TTL — CAPPED to the presented
+   * access token's remaining lifetime, so the exchange can never mint a
+   * credential that outlives its grant. Nothing becomes reachable that the
+   * grant did not already reach — only the credential's spelling changes.
+   *
+   * Auth semantics mirror McpAuthMiddleware's OAuth branch: an
+   * invalid/expired/revoked token is a 401 re-challenging with
+   * `resource_metadata` (RFC 9728) so the client can re-authorize; a backend
+   * failure during verification is a 500. A connection key, internal token,
+   * or JWT is a 403 — those credentials need no exchange, so accepting them
+   * here would only manufacture a second credential from a first.
+   *
+   * Response: `{ token, expiresInMs }`.
+   */
+  router.post('/mcp/local-token', async (req, res) => {
+    const wwwAuthenticate = `Bearer realm="bevel-mcp", resource_metadata="${resourceMetadataUrl}"`;
+    const unauthorized = (error: string) => {
+      res.setHeader('WWW-Authenticate', wwwAuthenticate);
+      res.status(401).json({ error });
+    };
+
+    const header = req.headers.authorization;
+    if (!header || !header.toLowerCase().startsWith('bearer ')) {
+      unauthorized('Missing or invalid Authorization header');
+      return;
+    }
+    const token = extractBearer(req);
+
+    if (!oauthProvider.looksLikeAccessToken(token)) {
+      // A recognizable non-OAuth credential gets an explicit 403: a
+      // connection key or internal token already opens `/api/agent/*`
+      // directly, and a JWT holder mints a connection key from the settings
+      // UI — none of them has anything to exchange.
+      if (
+        externalApiKeyService.looksLikeExternalApiKey(token) ||
+        internalTokens.looksLikeInternalToken(token) ||
+        token.startsWith('eyJ')
+      ) {
+        res.status(403).json({
+          error:
+            'This endpoint exchanges MCP OAuth access tokens only. Connection keys, ' +
+            'internal tokens, and JWTs need no exchange — use them directly.',
+        });
+        return;
+      }
+      // Unrecognizable bearer — re-challenge so an OAuth-capable client can
+      // discover the authorization server and obtain a real access token.
+      unauthorized('Invalid access token');
+      return;
+    }
+
+    try {
+      const info = await oauthProvider.verifyAccessToken(token);
+      const userId = String(info.extra?.userId ?? '');
+      if (!userId) {
+        unauthorized('Invalid access token');
+        return;
+      }
+      // The minted token must never OUTLIVE the grant that authorized it: an
+      // OAuth access token revoked-by-expiry would otherwise leave a live
+      // internal token behind for the rest of the loopback TTL. Bind the TTL
+      // to whichever ends first — the constant, or the access token's own
+      // remaining lifetime (AuthInfo.expiresAt is epoch SECONDS, optional; a
+      // provider that reports none falls back to the constant alone).
+      const grantRemainingMs =
+        typeof info.expiresAt === 'number' ? info.expiresAt * 1000 - Date.now() : undefined;
+      // A grant with no life left mints NOTHING: a 200 carrying an
+      // already-dead token would read as success to the caller, whose first
+      // real request then fails somewhere far from the cause. It is the same
+      // 401 an expired token gets from the verifier, challenge and all — and
+      // a non-finite expiresAt (a provider handing back garbage) is refused
+      // the same way rather than turned into a TTL. Deliberately STRICTER
+      // than the verifier at the boundary: AuthInfo floors the expiry to
+      // whole seconds, so a grant inside its final partial second computes
+      // as spent here even though the verifier (which compares the stored
+      // millisecond timestamp) just accepted it — but that sub-second
+      // remainder could only mint a token that is dead before its first use,
+      // and refusing it is exactly this guard's job.
+      if (grantRemainingMs !== undefined && !(Number.isFinite(grantRemainingMs) && grantRemainingMs > 0)) {
+        unauthorized('Invalid, expired, or revoked access token');
+        return;
+      }
+      const ttlMs =
+        grantRemainingMs === undefined
+          ? MCP_LOOPBACK_TOKEN_TTL_MS
+          : Math.min(MCP_LOOPBACK_TOKEN_TTL_MS, grantRemainingMs);
+      // The grant's agent connection rides along, so the local server's
+      // calls with this token stay attributed to the agent in the Audit log.
+      const connectionId = typeof info.extra?.connectionId === 'string' ? info.extra.connectionId : undefined;
+      // So does the agent the connection was made as: the local server's
+      // calls see the same narrowed surface as the hosted endpoint's.
+      const agentPath = typeof info.extra?.agentPath === 'string' && info.extra.agentPath ? info.extra.agentPath : undefined;
+      const minted = internalTokens.mint(
+        { userId, externalProxy: true, ...(connectionId ? { connectionId } : {}), ...(agentPath ? { agentPath } : {}) },
+        ttlMs,
+      );
+      // The ACTUAL lifetime, not the constant — the caller schedules its
+      // proactive renewal off this number.
+      res.json({ token: minted, expiresInMs: ttlMs });
+    } catch (err) {
+      // Same split as McpAuthMiddleware: a bad token is a clean 401 with the
+      // discovery challenge; a backend failure is a 500 — the credential may
+      // be fine, we just can't check it right now.
+      if (err instanceof InvalidTokenError) {
+        unauthorized('Invalid, expired, or revoked access token');
+      } else {
+        log.error('local-token exchange failed:', { err });
+        res.status(500).json({ error: 'Authentication backend unavailable' });
+      }
     }
   });
 

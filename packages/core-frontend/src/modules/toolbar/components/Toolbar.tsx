@@ -3,13 +3,12 @@ import { useLocation } from 'react-router-dom';
 import { PanelRight } from 'lucide-react';
 import { ProfileMenu } from './ProfileMenu';
 import { AppSwitcher } from './AppSwitcher';
-import { useLayout } from '../../layout/state/layout.context';
-import { useMediaQuery } from '../../layout/hooks/useMediaQuery';
+import { SearchPalette } from './SearchPalette';
+import { useLayout, useMediaQuery, toggleSidebar, useSidebar, TOOLBAR_STACK_QUERY } from '../../layout';
 import { useActiveAppId, useAppRegistry } from '../../../core/registry';
 import { SidebarToggle } from '../../layout/components/SidebarToggle';
-import { toggleSidebar, useSidebar } from '../../layout/state/sidebar';
-import { TOOLBAR_STACK_QUERY } from '../../layout/breakpoints';
-import { isSettingsNavPath } from '../../settings/settings-nav-items';
+import { isSettingsNavPath } from '../../settings';
+import { InviteButton } from '../../onboarding/components/InviteButton';
 
 /**
  * The app's top bar: the nav toggle, the app switcher, and whatever the
@@ -58,7 +57,7 @@ export function Toolbar() {
   // own: the branch switcher is an enterprise contribution scoped (by the
   // item itself, via useActiveAppId) to the Knowledge app — the git module
   // still ships the component, the core shell just doesn't mount it.
-  // (Share/Discard buttons retired with the workflow migration: lock release
+  // (Share/Discard buttons retired with the version-control migration: lock release
   // auto-commits + pushes, so there is no separate "share" step.)
   const toolbarItems = useMemo(
     () =>
@@ -82,6 +81,10 @@ export function Toolbar() {
           <div className="flex items-center gap-2 ml-4">{itemCluster}</div>
         )}
 
+        {/* Search by name across Knowledge and Skills & Tools. Below `md` the
+            box gives way to the essentials and Ctrl/⌘K alone opens it. */}
+        <SearchPalette compact={isCompact} />
+
         <div className="flex-1" />
 
         {canToggleChat && (
@@ -97,6 +100,10 @@ export function Toolbar() {
             <PanelRight size={16} />
           </button>
         )}
+
+        {/* Icon-only below `md`, where its word would crowd the profile menu
+            off the row. */}
+        <InviteButton compact={isCompact} />
 
         {/* One button for who you are and everything that follows you around.
             It used to be three things in a row here — a name that was not a

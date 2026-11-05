@@ -1,9 +1,49 @@
 import { describe, expect, it } from 'vitest';
-import { describeToolFailure, toCallToolResult, renderProgress } from '../results.js';
+import {
+  describeToolFailure,
+  withTransportDetail,
+  toCallToolResult,
+  renderProgress,
+  mcpImageResult,
+  isMcpImageResult,
+  omitImagePayloads,
+  MCP_IMAGE_RESULT_KIND,
+} from '../results.js';
 
 describe('describeToolFailure', () => {
   it('pulls the REST error body out of an axios-shaped failure', () => {
     expect(describeToolFailure({ response: { data: { error: 'no such branch' } } })).toBe('no such branch');
+  });
+
+  it('keeps a typed refusal\'s machine-readable fields beside its message', () => {
+    const data = { error: 'logo.png is an image.', kind: 'binary_not_writable', fileKind: 'image', useInstead: ['upload'] };
+    expect(describeToolFailure({ response: { data } })).toBe(
+      'logo.png is an image. {"kind":"binary_not_writable","fileKind":"image","useInstead":["upload"]}',
+    );
+  });
+
+  it('keeps `kind` when the refusal details do not serialise as plain JSON', () => {
+    const data = { error: 'refused.', kind: 'binary_not_writable', size: 10n };
+    expect(describeToolFailure({ response: { data } })).toBe('refused. {"kind":"binary_not_writable","size":"10"}');
+  });
+
+  it('falls back to the plain message when reading the refusal details throws', () => {
+    const data = {
+      error: 'refused.',
+      get kind(): string {
+        throw new Error('getter boom');
+      },
+    };
+    expect(describeToolFailure({ response: { data } })).toBe('refused.');
+    const proxied = new Proxy(
+      { error: 'refused.' },
+      {
+        ownKeys: () => {
+          throw new Error('proxy boom');
+        },
+      },
+    );
+    expect(describeToolFailure({ response: { data: proxied } })).toBe('refused.');
   });
 
   it('never throws on a thrown value whose own toString throws', () => {
@@ -11,6 +51,161 @@ describe('describeToolFailure', () => {
     // describe that throws inside a catch path turns a tool failure into a
     // handler failure.
     expect(describeToolFailure(Object.create(null))).toBe('(indescribable tool failure)');
+  });
+
+  /**
+   * A service's edge answers a refused request with its own HTML page. That
+   * page used to reach the agent whole, in place of a reason.
+   */
+  it('cuts a non-JSON body to the status, the host and its first 200 characters', () => {
+    const page = `<!DOCTYPE html>\n<html>\n  <head><title>403 Forbidden</title></head>\n  <body>${'pad '.repeat(500)}THE-END</body>\n</html>`;
+    const described = describeToolFailure({
+      message: `HTTP 403 calling tool 'search': ${page}`,
+      response: { status: 403, data: page, config: { url: 'https://api.example.com/rest/search?q=x' } },
+    });
+    expect(described.startsWith('403 from api.example.com: <!DOCTYPE html> <html>')).toBe(true);
+    expect(described).not.toContain('THE-END');
+    expect(described.length).toBeLessThanOrEqual('403 from api.example.com: '.length + 200);
+  });
+
+  it('keeps a JSON body as it is, however long — that text is the service\'s own reason', () => {
+    const data = JSON.stringify({ error: 'x'.repeat(400) });
+    expect(describeToolFailure({ response: { status: 400, data } })).toBe(data);
+  });
+
+  it('cuts a non-JSON body even when nothing says where it came from', () => {
+    const described = describeToolFailure({ response: { data: `<html>${'y'.repeat(900)}</html>` } });
+    expect(described.length).toBeLessThanOrEqual(200);
+  });
+
+  it('never throws when reading the body itself throws', () => {
+    // A getter on `response` — the outermost read, which used to run outside
+    // the guard, so a hostile thrown value escaped this function and turned a
+    // tool failure into a handler failure (and a chain failure into a dropped
+    // connection, since `runToolChain` composes its answer with this).
+    // Defined, not assigned: `Object.assign` would READ the getter here.
+    const hostileResponse = new Error('the bridge gave up');
+    Object.defineProperty(hostileResponse, 'response', {
+      get(): never {
+        throw new Error('response getter boom');
+      },
+    });
+    expect(describeToolFailure(hostileResponse)).toBe('the bridge gave up');
+    // And a getter one level in, on `data`.
+    const hostileData = Object.assign(new Error('status code 500'), {
+      response: {
+        get data(): never {
+          throw new Error('data getter boom');
+        },
+      },
+    });
+    expect(describeToolFailure(hostileData)).toBe('status code 500');
+  });
+});
+
+describe('withTransportDetail', () => {
+  it('folds the transport\'s status and body into the one string an MCP caller gets', () => {
+    expect(withTransportDetail('Request failed', 403, { kind: 'branch-protected', branch: 'main' })).toBe(
+      'Request failed (HTTP 403) Error data: {"kind":"branch-protected","branch":"main"}',
+    );
+    expect(withTransportDetail('Request failed', 404, 'no such path')).toBe(
+      'Request failed (HTTP 404) Error data: no such path',
+    );
+  });
+
+  it('says nothing twice', () => {
+    // The transport's own message usually quotes both already, and
+    // `describeToolFailure` folds a typed refusal's fields in — appending them
+    // again would read as two different failures.
+    expect(withTransportDetail('HTTP 400: `branch` is required {"kind":"branch-required"}', 400, { kind: 'branch-required' })).toBe(
+      'HTTP 400: `branch` is required {"kind":"branch-required"}',
+    );
+  });
+
+  it('states the status unless the message states it AS a status code', () => {
+    // The bare digits are not a statement about a response code — a message
+    // that merely contains them must not suppress it.
+    expect(withTransportDetail('Processed 404 files and gave up', 404)).toBe(
+      'Processed 404 files and gave up (HTTP 404)',
+    );
+    // The two phrasings a transport really uses do suppress it.
+    expect(withTransportDetail('Request failed with status code 400', 400)).toBe(
+      'Request failed with status code 400',
+    );
+    expect(withTransportDetail('HTTP 400 calling tool `read_file`', 400)).toBe('HTTP 400 calling tool `read_file`');
+    // A longer number that merely starts with the same digits is not a match.
+    expect(withTransportDetail('HTTP 4042 is not a status', 404)).toBe('HTTP 4042 is not a status (HTTP 404)');
+    // And a status that is not a whole number is not printed as one at all.
+    expect(withTransportDetail('transport refused', 404.5)).toBe('transport refused');
+  });
+
+  it('keeps the body out when the message already carries its reason', () => {
+    // What `describeToolFailure` returns for an axios-shaped refusal: the
+    // body's `error` and `kind` are already in the message, so appending the
+    // raw body beside them would read as two different failures. The status is
+    // still added — it is otherwise invisible to an MCP caller.
+    expect(
+      withTransportDetail('The branch is protected. {"kind":"branch-protected"}', 403, {
+        error: 'The branch is protected.',
+        kind: 'branch-protected',
+      }),
+    ).toBe('The branch is protected. {"kind":"branch-protected"} (HTTP 403)');
+  });
+
+  it('still hands over what the body holds beyond its reason, without saying the reason twice', () => {
+    // A transport error whose message IS the body's `error`: the reason is
+    // said, but the `kind` a caller switches on and the steps a refused write
+    // offers are not, and taking the whole body for covered dropped them.
+    const body = {
+      error: 'You may not write "a.md".',
+      kind: 'write-denied',
+      proposal: { steps: ['create_branch', 'write_file', 'open_change_request'] },
+    };
+    expect(withTransportDetail('You may not write "a.md".', 403, body)).toBe(
+      'You may not write "a.md". (HTTP 403) Error data: ' +
+        '{"kind":"write-denied","proposal":{"steps":["create_branch","write_file","open_change_request"]}}',
+    );
+    // A field the message already states is not repeated beside it.
+    expect(withTransportDetail('You may not write "a.md". [write-denied]', 403, { error: body.error, kind: body.kind })).toBe(
+      'You may not write "a.md". [write-denied] (HTTP 403)',
+    );
+  });
+
+  it('hands over every field of the body it has not said, whatever the field is called', () => {
+    // A body is JSON from a server, and any name is a legal key in it. Parsed,
+    // each is an own property — including the ones that mean something to a
+    // JavaScript object when ASSIGNED: copied by assignment, `__proto__` set
+    // the copy's prototype and was gone from what the caller was told.
+    for (const name of ['__proto__', 'constructor', 'toString', 'hasOwnProperty']) {
+      const body = JSON.parse(`{"error":"refused","${name}":{"why":"it is a key like any other"}}`) as unknown;
+      expect(withTransportDetail('refused', undefined, body), name).toBe(
+        `refused Error data: {"${name}":{"why":"it is a key like any other"}}`,
+      );
+    }
+  });
+
+  it('appends the body when the message is the generic transport line', () => {
+    // The other shape the UTCP http transport throws: the reason is in `data`,
+    // which `describeToolFailure` does not read, so the message says nothing
+    // actionable and the body is the whole answer.
+    expect(
+      withTransportDetail('Request failed with status code 400', 400, {
+        error: '`branch` is required',
+        kind: 'branch-required',
+      }),
+    ).toBe('Request failed with status code 400 Error data: {"error":"`branch` is required","kind":"branch-required"}');
+  });
+
+  it('leaves a message with nothing to add alone', () => {
+    expect(withTransportDetail('catalog is down')).toBe('catalog is down');
+    expect(withTransportDetail('catalog is down', 'not-a-number', {})).toBe('catalog is down');
+  });
+
+  it('degrades a body that does not serialise instead of throwing', () => {
+    const cyclic: Record<string, unknown> = { kind: 'x' };
+    cyclic.self = cyclic;
+    expect(withTransportDetail('failed', undefined, cyclic)).toBe('failed Error data: {"kind":"x","self":"[Circular]"}');
+    expect(withTransportDetail('failed', undefined, { size: 10n })).toBe('failed Error data: {"size":"10"}');
   });
 });
 
@@ -90,5 +285,560 @@ describe('renderProgress', () => {
     const s = renderProgress('x'.repeat(600));
     expect(s).toHaveLength(500);
     expect(s.endsWith('...')).toBe(true);
+  });
+});
+
+describe('toCallToolResult — image results', () => {
+  const B64 = 'aGVsbG8='; // any base64 payload
+
+  it('shapes an image sentinel into spec content: image block + text note', () => {
+    const value = mcpImageResult(B64, 'image/png', '[image: Files/logo.png — image/png, 5 bytes, 1×1 px]');
+    expect(toCallToolResult(value)).toEqual({
+      content: [
+        { type: 'image', data: B64, mimeType: 'image/png' },
+        { type: 'text', text: '[image: Files/logo.png — image/png, 5 bytes, 1×1 px]' },
+      ],
+    });
+  });
+
+  it('shapes a noteless sentinel into a lone image block', () => {
+    expect(toCallToolResult(mcpImageResult(B64, 'image/gif'))).toEqual({
+      content: [{ type: 'image', data: B64, mimeType: 'image/gif' }],
+    });
+  });
+
+  it('reassembles the remote-hop mangled form ([imageBlock, "note"]) instead of stringifying base64', () => {
+    // Exactly what @utcp/mcp's _processMcpToolResult hands the local server for
+    // the hosted proxy's [image, text] result: the image block verbatim, the
+    // prose note JSON-parse-failed back to a bare string.
+    const mangled = [{ type: 'image', data: B64, mimeType: 'image/jpeg' }, '[image: a.jpg — image/jpeg, 5 bytes]'];
+    expect(toCallToolResult(mangled)).toEqual({
+      content: [
+        { type: 'image', data: B64, mimeType: 'image/jpeg' },
+        { type: 'text', text: '[image: a.jpg — image/jpeg, 5 bytes]' },
+      ],
+    });
+  });
+
+  it('reassembles a bare image block (single-entry remote collapse) into spec content', () => {
+    const block = { type: 'image', data: B64, mimeType: 'image/webp' };
+    expect(toCallToolResult(block)).toEqual({ content: [block] });
+  });
+
+  it('leaves ordinary data untouched: a kind field that is not the sentinel constant stringifies as before', () => {
+    const value = { kind: 'image', data: B64, mimeType: 'image/png' };
+    expect(toCallToolResult(value)).toEqual({
+      content: [{ type: 'text', text: JSON.stringify(value) }],
+    });
+  });
+
+  it('CHANGED: an image block beside a NOTE OBJECT is the hop shape, not stringify bait', () => {
+    // This used to take the stringify path, which put the base64 into the text
+    // block it produced — the leak the hop recognition exists to prevent. A
+    // note that was JSON to begin with arrives parsed (@utcp/mcp parses text
+    // blocks), so the pair is reassembled and the note re-serialized.
+    const image = { type: 'image', data: B64, mimeType: 'image/png' };
+    expect(toCallToolResult([image, { other: true }])).toEqual({
+      content: [image, { type: 'text', text: '{"other":true}' }],
+    });
+  });
+
+  it('leaves a LONGER array holding ordinary data on the stringify path', () => {
+    // Only the exact hop shape (one image, one note) is reassembled, so a
+    // caller's own array keeps its structure.
+    const value = [{ type: 'image', data: B64, mimeType: 'image/png' }, { other: true }, { more: 1 }];
+    expect(toCallToolResult(value)).toEqual({
+      content: [{ type: 'text', text: JSON.stringify(value) }],
+    });
+  });
+
+  it('leaves ordinary data mixing an image-shaped object with scalars on the stringify path', () => {
+    // The hop never produces this: its array form is exactly [imageBlock,
+    // note]. A caller's own array of scalars that happens to hold an
+    // image-shaped object used to be reinterpreted as MCP content, which
+    // destroyed the array's structure.
+    const value = ['a', { type: 'image', data: B64, mimeType: 'image/png' }, 1, true];
+    expect(toCallToolResult(value)).toEqual({
+      content: [{ type: 'text', text: JSON.stringify(value) }],
+    });
+  });
+});
+
+describe('omitImagePayloads', () => {
+  const sentinel = mcpImageResult('QUJD', 'image/png', '[image: Files/logo.png — image/png, 3 bytes]');
+
+  it('replaces a top-level sentinel with an omitted-image note that keeps the file description', () => {
+    const out = omitImagePayloads(sentinel) as { image_omitted: boolean; note: string };
+    expect(out.image_omitted).toBe(true);
+    expect(out.note).toContain('Files/logo.png');
+    expect(out.note).toContain('read_file');
+    expect(JSON.stringify(out)).not.toContain('QUJD');
+  });
+
+  it('replaces sentinels nested inside the structure a chain built', () => {
+    const value = { files: [{ name: 'a', res: sentinel }], count: 1 };
+    const out = JSON.stringify(omitImagePayloads(value));
+    expect(out).not.toContain('QUJD');
+    expect(out).not.toContain(MCP_IMAGE_RESULT_KIND);
+    expect(out).toContain('"count":1');
+    expect(out).toContain('image_omitted');
+  });
+
+  it('replaces a spec-shaped image block too (what the remote MCP hop hands a local chain)', () => {
+    const value = [{ type: 'image', data: 'QUJD', mimeType: 'image/png' }, 'note'];
+    const out = JSON.stringify(omitImagePayloads(value));
+    expect(out).not.toContain('QUJD');
+    expect(out).toContain('image_omitted');
+    expect(out).toContain('"note"');
+  });
+
+  it('leaves ordinary values untouched and survives cycles', () => {
+    const value: Record<string, unknown> = { a: 1, list: ['x', 2, null] };
+    value.self = value;
+    const out = omitImagePayloads(value) as Record<string, unknown>;
+    expect(out.a).toBe(1);
+    expect(out.list).toEqual(['x', 2, null]);
+    expect(out.self).toBe('[Circular]');
+  });
+
+  it('omits an image buried 100 levels deep — no depth cutoff lets base64 escape into the transcript', () => {
+    let value: unknown = { res: sentinel };
+    for (let i = 0; i < 100; i++) value = { wrap: [value] };
+    const out = JSON.stringify(omitImagePayloads(value));
+    expect(out).not.toContain('QUJD');
+    expect(out).toContain('image_omitted');
+  });
+
+  it('rebuilds special keys as own data properties — no prototype pollution, no dropped keys', () => {
+    // JSON.parse creates an OWN `__proto__` data property (never a setter call).
+    const value = JSON.parse('{"__proto__": {"polluted": true}, "constructor": "kept"}') as Record<string, unknown>;
+    (value as { img?: unknown }).img = sentinel;
+    const out = omitImagePayloads(value) as Record<string, unknown>;
+    // The key survives as data…
+    expect(Object.getOwnPropertyDescriptor(out, '__proto__')?.value).toEqual({ polluted: true });
+    expect(out.constructor).toBe('kept');
+    expect(JSON.stringify(out)).toContain('"__proto__"');
+    // …and nothing leaked onto Object.prototype or the rebuilt object's chain.
+    expect(Object.getPrototypeOf(out)).toBe(Object.prototype);
+    expect(({} as { polluted?: unknown }).polluted).toBeUndefined();
+  });
+
+  it('preserves non-plain objects by reference instead of mangling them into records', () => {
+    const when = new Date('2026-01-01T00:00:00Z');
+    const buf = new Map([['k', 'v']]);
+    class Thing {
+      label = 'thing';
+    }
+    const thing = new Thing();
+    const out = omitImagePayloads({ when, buf, thing, res: sentinel }) as Record<string, unknown>;
+    expect(out.when).toBe(when);
+    expect(out.buf).toBe(buf);
+    expect(out.thing).toBe(thing);
+    expect((out.res as { image_omitted?: boolean }).image_omitted).toBe(true);
+  });
+
+  it('scrubs a sentinel hidden inside a CLASS INSTANCE — JSON.stringify would emit its base64 otherwise', () => {
+    class Holder {
+      label = 'holder';
+      payload: unknown = sentinel;
+    }
+    const holder = new Holder();
+    const out = omitImagePayloads({ holder }) as Record<string, unknown>;
+    const text = JSON.stringify(out);
+    expect(text).not.toContain('QUJD');
+    expect(text).toContain('image_omitted');
+    expect(text).toContain('"label":"holder"');
+    // The original instance is never mutated — the scrub rebuilt a copy.
+    expect((holder.payload as { data: string }).data).toBe('QUJD');
+    expect(out.holder).not.toBe(holder);
+  });
+
+  it('scrubs a sentinel delivered through toJSON — the serialized shape is what reaches the transcript', () => {
+    const value = {
+      wrapper: new (class {
+        toJSON(): unknown {
+          return { meta: 'from-toJSON', img: sentinel };
+        }
+      })(),
+    };
+    const text = JSON.stringify(omitImagePayloads(value));
+    expect(text).not.toContain('QUJD');
+    expect(text).toContain('image_omitted');
+    expect(text).toContain('"meta":"from-toJSON"');
+  });
+
+  it('scrubs a toJSON that returns the sentinel ITSELF — the view must never be copied into a record frame', () => {
+    const value = {
+      wrapper: new (class {
+        toJSON(): unknown {
+          return sentinel;
+        }
+      })(),
+    };
+    const out = omitImagePayloads(value) as Record<string, unknown>;
+    const text = JSON.stringify(out);
+    expect(text).not.toContain('QUJD');
+    expect(text).not.toContain(MCP_IMAGE_RESULT_KIND);
+    expect((out.wrapper as { image_omitted?: boolean }).image_omitted).toBe(true);
+    expect((out.wrapper as { note?: string }).note).toContain('Files/logo.png');
+  });
+
+  it('scrubs a toJSON that returns a spec-shaped image block directly', () => {
+    const value = {
+      wrapper: new (class {
+        toJSON(): unknown {
+          return { type: 'image', data: 'QUJD', mimeType: 'image/png' };
+        }
+      })(),
+    };
+    const text = JSON.stringify(omitImagePayloads(value));
+    expect(text).not.toContain('QUJD');
+    expect(text).toContain('image_omitted');
+  });
+
+  it('fires a user toJSON exactly ONCE per object per scrub — the probe and the rebuild share one view', () => {
+    let dirtyCalls = 0;
+    const dirty = new (class {
+      toJSON(): unknown {
+        dirtyCalls++;
+        return { img: sentinel };
+      }
+    })();
+    let cleanCalls = 0;
+    const clean = new (class {
+      toJSON(): unknown {
+        cleanCalls++;
+        return { plain: true };
+      }
+    })();
+    const out = omitImagePayloads({ dirty, clean });
+    expect(dirtyCalls).toBe(1);
+    expect(cleanCalls).toBe(1);
+    const text = JSON.stringify(out);
+    // …and STILL once after serialization: both were rebuilt from the view
+    // this scrub cached, so neither hook is left live in the result.
+    expect(dirtyCalls).toBe(1);
+    expect(cleanCalls).toBe(1);
+    expect(text).not.toContain('QUJD');
+    expect(text).toContain('image_omitted');
+    expect(text).toContain('"plain":true');
+  });
+
+  it('a clean non-plain object nested under a dirty one is still probed and evaluated once', () => {
+    let innerCalls = 0;
+    const inner = new (class {
+      toJSON(): unknown {
+        innerCalls++;
+        return { fine: 'kept' };
+      }
+    })();
+    const outer = new (class {
+      constructor(public img: unknown = sentinel, public child: unknown = inner) {}
+    })();
+    const out = omitImagePayloads({ outer });
+    expect(innerCalls).toBe(1);
+    const text = JSON.stringify(out);
+    expect(innerCalls).toBe(1); // rebuilt from that one view, not re-hooked here
+    expect(text).not.toContain('QUJD');
+    expect(text).toContain('image_omitted');
+    expect(text).toContain('"fine":"kept"');
+  });
+
+  it('a Map-like with enumerable own props holding an image is rebuilt as its sanitized JSON shape', () => {
+    const mapish = new Map<string, unknown>();
+    (mapish as unknown as Record<string, unknown>).stashed = { deep: [sentinel] };
+    const out = omitImagePayloads({ mapish }) as Record<string, unknown>;
+    const text = JSON.stringify(out);
+    expect(text).not.toContain('QUJD');
+    expect(text).toContain('image_omitted');
+    expect(out.mapish).not.toBe(mapish);
+  });
+
+  it('Date and RegExp pass through UNTOUCHED even next to an image', () => {
+    const when = new Date('2026-02-02T00:00:00Z');
+    const pattern = /ab+c/gi;
+    const out = omitImagePayloads({ when, pattern, res: sentinel }) as Record<string, unknown>;
+    expect(out.when).toBe(when);
+    expect(out.pattern).toBe(pattern);
+    expect(JSON.stringify(out)).not.toContain('QUJD');
+  });
+
+  it('rebuilds an image-free object that has a toJSON — the hook must not stay live in the result', () => {
+    let calls = 0;
+    const obj = new (class {
+      toJSON(): unknown {
+        calls++;
+        return { plain: true };
+      }
+    })();
+    const out = omitImagePayloads({ obj }) as Record<string, unknown>;
+    // Rebuilt from the cached view, NOT preserved by reference: the reference
+    // would carry the hook into the transcript's own stringify pass.
+    expect(out.obj).not.toBe(obj);
+    expect(out.obj).toEqual({ plain: true });
+    expect(calls).toBe(1);
+    JSON.stringify(out);
+    expect(calls).toBe(1); // serializing the scrubbed result fires nothing
+  });
+
+  it('an IMPURE toJSON cannot smuggle base64 past the scrub on its second call', () => {
+    // Clean when the scrub looks, an image the next time — exactly what a
+    // preserved-by-reference hook would hand JSON.stringify downstream.
+    let calls = 0;
+    const sneaky = new (class {
+      toJSON(): unknown {
+        calls++;
+        return calls === 1 ? { plain: true } : sentinel;
+      }
+    })();
+    const out = omitImagePayloads({ sneaky });
+    expect(calls).toBe(1);
+    const text = JSON.stringify(out);
+    expect(calls).toBe(1); // the hook is gone from the result — nothing re-fired
+    expect(text).not.toContain('QUJD');
+    expect(text).not.toContain(MCP_IMAGE_RESULT_KIND);
+    expect(text).toContain('"plain":true');
+  });
+
+  it('an impure toJSON on a PLAIN record is rebuilt too — stringify applies toJSON before the shape', () => {
+    // A record literal is `isPlainRecord`, but JSON.stringify still calls its
+    // own `toJSON` first; rebuilding it key-by-key used to copy the function
+    // across, hook and all.
+    let calls = 0;
+    const value = {
+      label: 'plain',
+      toJSON(): unknown {
+        calls++;
+        return calls === 1 ? { label: 'plain' } : sentinel;
+      },
+    };
+    const text = JSON.stringify(omitImagePayloads({ value }));
+    expect(calls).toBe(1);
+    expect(text).not.toContain('QUJD');
+    expect(text).toContain('"label":"plain"');
+  });
+
+  it('a clean object with no toJSON anywhere below it still passes through BY REFERENCE', () => {
+    class Leaf {
+      note = 'leaf';
+    }
+    class Holder {
+      label = 'holder';
+      child = new Leaf();
+      list = [1, 2, 3];
+    }
+    const holder = new Holder();
+    const out = omitImagePayloads({ holder, res: sentinel }) as Record<string, unknown>;
+    expect(out.holder).toBe(holder); // no copy: nothing below it needs scrubbing
+    expect(JSON.stringify(out)).not.toContain('QUJD');
+  });
+
+  it('a clean object that merely CONTAINS a toJSON-bearing child is rebuilt around it', () => {
+    let calls = 0;
+    const child = new (class {
+      toJSON(): unknown {
+        calls++;
+        return calls === 1 ? { deep: 'clean' } : sentinel;
+      }
+    })();
+    class Holder {
+      label = 'holder';
+      child: unknown = child;
+    }
+    const holder = new Holder();
+    const out = omitImagePayloads({ holder }) as Record<string, unknown>;
+    expect(out.holder).not.toBe(holder); // rebuilt so the child's hook can be resolved
+    const text = JSON.stringify(out);
+    expect(calls).toBe(1);
+    expect(text).toContain('"label":"holder"');
+    expect(text).toContain('"deep":"clean"');
+    expect(text).not.toContain('QUJD');
+  });
+
+  it('a Date keeps passing by reference — its built-in toJSON can only yield null or a string', () => {
+    const when = new Date('2026-03-03T00:00:00Z');
+    const out = omitImagePayloads({ when }) as Record<string, unknown>;
+    expect(out.when).toBe(when);
+    expect(JSON.stringify(out)).toBe('{"when":"2026-03-03T00:00:00.000Z"}');
+    // …and the trust is pinned to the BUILT-IN pair, not to being a Date: an
+    // own `toJSON` is user code, and so is an own `toISOString`, which the
+    // built-in `toJSON` would go on to call.
+    const hookSpoof = Object.assign(new Date('2026-03-03T00:00:00Z'), {
+      toJSON: () => sentinel as unknown as string,
+    });
+    expect(JSON.stringify(omitImagePayloads({ hookSpoof }))).not.toContain('QUJD');
+    const isoSpoof = Object.assign(new Date('2026-03-03T00:00:00Z'), {
+      toISOString: () => sentinel as unknown as string,
+    });
+    expect(JSON.stringify(omitImagePayloads({ isoSpoof }))).not.toContain('QUJD');
+  });
+
+  it('survives a cycle reachable only through a class instance holding an image', () => {
+    class Node {
+      img: unknown = sentinel;
+      self: unknown;
+    }
+    const node = new Node();
+    node.self = node;
+    const text = JSON.stringify(omitImagePayloads({ node }));
+    expect(text).not.toContain('QUJD');
+    expect(text).toContain('image_omitted');
+    expect(text).toContain('[Circular]');
+  });
+
+  it('calls toJSON with the JSON KEY, exactly as JSON.stringify does', () => {
+    // The spec calls `toJSON(key)`. Calling it with NO argument let a
+    // key-dependent hook answer the scrub one way and the transcript
+    // serializer that runs afterwards another — precisely the divergence the
+    // scrub exists to close. Here the hook is clean under its real key and
+    // dirty under any other, so a missing argument surfaces as an omitted
+    // image where the deck has none.
+    const keyed = new (class {
+      toJSON(key?: unknown): unknown {
+        return key === 'safe' ? { seen: key } : { img: sentinel };
+      }
+    })();
+    expect(JSON.stringify(omitImagePayloads({ safe: keyed }))).toBe('{"safe":{"seen":"safe"}}');
+  });
+
+  it('threads the root, array-index and property keys the way stringify numbers them', () => {
+    const seen: unknown[] = [];
+    const probe = new (class {
+      toJSON(key?: unknown): unknown {
+        seen.push(key);
+        return { at: key };
+      }
+    })();
+    omitImagePayloads(probe); // the root serializes under ''
+    omitImagePayloads(['zero', probe]); // an element under its stringified index
+    omitImagePayloads({ a: { b: probe } }); // a property under its own name
+    expect(seen).toEqual(['', '1', 'b']);
+  });
+
+  it('gives the SAME object two views when it is reachable under two different keys', () => {
+    // The view cache is keyed by (object, key), not by object: one slot would
+    // have emitted the first site's answer at the second site.
+    const keyed = new (class {
+      toJSON(key?: unknown): unknown {
+        return { under: key };
+      }
+    })();
+    const value = { first: keyed, second: keyed };
+    expect(JSON.stringify(omitImagePayloads(value))).toBe(
+      '{"first":{"under":"first"},"second":{"under":"second"}}',
+    );
+  });
+
+  it('never copies a function-valued toJSON out of a VIEW into the rebuilt record', () => {
+    // A hook's return value is rebuilt key by key. When one of those keys is
+    // an enumerable, function-valued `toJSON`, it landed on the sanitized
+    // record — and `toJSON` is the one method JSON.stringify consults on a
+    // plain object, so the hook fired AGAIN at transcript time and an impure
+    // one reintroduced the payload this walk had just removed.
+    let inner = 0;
+    const value = new (class {
+      toJSON(): unknown {
+        return {
+          data: 'kept',
+          toJSON(): unknown {
+            inner++;
+            return { img: sentinel };
+          },
+        };
+      }
+    })();
+    const text = JSON.stringify(omitImagePayloads({ value }));
+    expect(inner).toBe(0); // it never fired: not during the scrub, not after
+    expect(text).toBe('{"value":{"data":"kept"}}');
+    expect(text).not.toContain('QUJD');
+  });
+
+  it('but a `toJSON` that is DATA rather than a function is ordinary content and survives', () => {
+    // Only a CALLABLE toJSON can re-fire; JSON.stringify ignores a
+    // non-callable one, so dropping it would lose a caller's field. And no
+    // other function-valued key can affect serialization: a rebuilt record
+    // has Object.prototype, so there is no inherited `toJSON` left to reach
+    // an own `toISOString` (the way Date.prototype.toJSON would), and
+    // stringify simply skips function values.
+    const out = omitImagePayloads({ v: { toJSON: 'a string', toISOString: () => 'x', n: 1 } });
+    expect(JSON.stringify(out)).toBe('{"v":{"toJSON":"a string","n":1}}');
+  });
+});
+
+describe('results that answer differently the second time they are read', () => {
+  it('an impure GETTER cannot slip an image past the scrub', () => {
+    // The probe reads a property; the serializer reads it again. A getter is
+    // free to answer differently, so an object carrying one is rebuilt from
+    // the value read during the walk rather than preserved by reference.
+    let reads = 0;
+    const payload = { kind: 'bevel/mcp-image@v1', data: 'AAAABASE64', mimeType: 'image/png' };
+    const value = {
+      label: 'report',
+      get attachment(): unknown {
+        reads += 1;
+        return reads === 1 ? { ok: true } : payload;
+      },
+    };
+    const scrubbed = omitImagePayloads(value);
+    expect(JSON.stringify(scrubbed)).not.toContain('AAAABASE64');
+  });
+
+  it('a sentinel whose note is not a string is not a sentinel', () => {
+    // It would be emitted as a text block whose `text` is not a string.
+    expect(isMcpImageResult({ kind: 'bevel/mcp-image@v1', data: 'd', mimeType: 'image/png', note: 7 })).toBe(false);
+    expect(isMcpImageResult({ kind: 'bevel/mcp-image@v1', data: 'd', mimeType: 'image/png' })).toBe(true);
+    expect(isMcpImageResult({ kind: 'bevel/mcp-image@v1', data: 'd', mimeType: 'image/png', note: 'hi' })).toBe(true);
+  });
+
+  it('reassembles a remote-hop image whose note decoded to a NON-string', () => {
+    // @utcp/mcp JSON-parses a text block, so the note "42" arrives as 42.
+    // Insisting on a string sent the whole thing — base64 included — through
+    // the JSON fallback and into the transcript.
+    const res = toCallToolResult([{ type: 'image', data: 'BASE64PAYLOAD', mimeType: 'image/png' }, 42]);
+    expect(res.content[0]).toEqual({ type: 'image', data: 'BASE64PAYLOAD', mimeType: 'image/png' });
+    expect(res.content[1]).toEqual({ type: 'text', text: '42' });
+  });
+});
+
+/**
+ * A tool with an MCP App view: the VIEW reads the result's fields from
+ * `structuredContent` — it has nowhere else to read them — while the model
+ * keeps reading the text. Off for every other tool.
+ */
+describe('toCallToolResult with structured content', () => {
+  const value = { path: 'Data/Thing.md', embedUrl: 'https://hexis.example/embed?token=t' };
+
+  it('answers an object as structured content too, when asked', () => {
+    const result = toCallToolResult(value, { structured: true });
+    expect(result.structuredContent).toEqual(value);
+    expect(result.content).toEqual([{ type: 'text', text: JSON.stringify(value) }]);
+  });
+
+  it('adds none by default', () => {
+    expect(toCallToolResult(value)).not.toHaveProperty('structuredContent');
+  });
+
+  it.each([
+    ['a string', 'plain text'],
+    ['an array', [1, 2]],
+    ['null', null],
+  ])('adds none for %s, which is not an object', (_label, v) => {
+    expect(toCallToolResult(v, { structured: true })).not.toHaveProperty('structuredContent');
+  });
+
+  it('attaches the JSON-safe reading, so a value the serializer would choke on completes', () => {
+    const cyclic: Record<string, unknown> = { path: 'a.md' };
+    cyclic.self = cyclic;
+    const result = toCallToolResult(cyclic, { structured: true });
+    expect(result.content[0]).toMatchObject({ type: 'text' });
+    // Whatever the text made of the cycle, the structured copy is plain JSON
+    // of it — never the original object with its cycle.
+    expect(JSON.stringify(result.structuredContent ?? null)).toBe(
+      JSON.stringify(JSON.parse((result.content[0] as { text: string }).text)),
+    );
+    expect(() => JSON.stringify(result)).not.toThrow();
+
+    const big = { n: 10n } as unknown as Record<string, unknown>;
+    expect(() => JSON.stringify(toCallToolResult(big, { structured: true }))).not.toThrow();
   });
 });

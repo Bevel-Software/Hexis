@@ -3,6 +3,8 @@ import type { CodeModeUtcpClient } from '@utcp/code-mode';
 import type { CallTemplate } from '@utcp/sdk';
 import type { ProxiedTool } from './proxied-tool.js';
 import { toCallToolResult, toolError, describeToolFailure, renderProgress } from './results.js';
+import { installCallGuards } from './call-guards.js';
+import { installGetHasNoBody } from './get-has-no-body.js';
 
 /**
  * Register one manual on a client, reduced to a verdict.
@@ -21,6 +23,19 @@ export async function registerManual(
   client: CodeModeUtcpClient,
   manual: CallTemplate,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
+  // A tool must be registered before it can be called, so registration is the
+  // one point every tool of every surface passes through — and therefore where
+  // the client's guards are installed. A deployment that registers manuals of
+  // its own gets the argument check and the GET-sends-no-body rule for its
+  // tools without writing a line for either. Both are idempotent.
+  //
+  // The client checks the tools with no route HERE — a connected server's, and
+  // an http tool that calls another service. A tool this server hosts as a
+  // route is checked in that route's own handler instead, so every caller gets
+  // the same answer and the route's answer is what comes back
+  // (`call-guards.ts`).
+  installGetHasNoBody();
+  installCallGuards(client);
   try {
     const result = await client.registerManual(manual);
     if (result && result.success === false) {
@@ -57,6 +72,8 @@ export async function dispatchToolCall(
   tool: ProxiedTool,
   args: Record<string, unknown>,
   onProgress?: (progress: number, message: string) => Promise<void>,
+  /** See {@link toCallToolResult}'s `structured`. */
+  options?: { structured?: boolean },
 ): Promise<CallToolResult> {
   let prev: unknown;
   let hasPrev = false;
@@ -84,5 +101,5 @@ export async function dispatchToolCall(
     return toolError(`The "${tool.mcpName}" tool produced no output: its stream ended without a result.`);
   }
 
-  return toCallToolResult(prev);
+  return toCallToolResult(prev, options);
 }

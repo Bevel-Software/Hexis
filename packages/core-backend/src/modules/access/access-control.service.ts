@@ -1,205 +1,181 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { execFile, spawn } from 'node:child_process';
-import { promisify } from 'node:util';
-import { createHash } from 'node:crypto';
+import { StringDecoder } from 'node:string_decoder';
+import { logger } from '../../shared/logging.js';
 
-import type { WorkspaceService } from '../workspace/workspace.service.js';
+const log = logger('access');
+
+import { isAbsence, type ITreeWalker, type WalkListener } from '../../shared/fs.contract.js';
+import { assertOneSpecPerLine, isCommitSha, isGitTimeout, type IGitRunner } from '../../shared/git.contract.js';
+import { hashEmail } from '../../shared/email-identity.js';
+import { NodeGitRunner } from '../version-control/index.js';
+import { readRevSha } from '../kb-fs/index.js';
+import type { WorkspaceService } from '../workspace/index.js';
 import type {
   IAccessControl,
+  AccessDecision,
+  AccessDecisionSource,
   AccessTargetKind,
+  DenialSources,
   GrantPrincipal,
   GrantSource,
   GrantSources,
+  PathHolders,
+  PathVerbs,
+  HolderChange,
+  HolderChanges,
+  ProspectiveHolders,
+  ResolvedPrincipal,
 } from './access-control.interface.js';
-import { AccessConfigError } from './access-errors.js';
+import {
+  DEFAULT_KB_LAYOUT,
+  PLUGIN_MANIFEST_FILE,
+  isFrontmatterFence,
+  isPersonalPluginDir,
+  pluginIdentityOf,
+  platformRestoreDestination,
+} from '@bevel-software/platform-shared';
+import type { KbContext } from '../../shared/kb-context.js';
+import {
+  AccessConfigError,
+  AccessUnreadableError,
+  synthesizePluginPrincipals,
+  GROUPS_YAML,
+  SYNCED_GROUPS_YAML,
+  parseGroupsFile,
+  ADMIN_CANONICAL,
+  EVERYONE_CANONICAL,
+  EVERYONE_DISPLAY,
+  KNOWN_VERBS,
+  ROLE_TOKEN_PREFIX,
+  GROUP_TOKEN_PREFIX,
+  splitPrincipalToken,
+  accessMdSelfEntries,
+  canonicalEmail,
+  canonicalRoleName,
+  isAccessMdPath,
+  mergeGroupsIntoRoles,
+  parseAccessFile,
+  parseOwnAccessEntries,
+  parseRolesYaml,
+  requiredVerbsFor,
+  sourceVerbsFor,
+  type GroupsIndex,
+  type AccessFile,
+  type OwnEntries,
+  type ParsedEntry,
+  type RolesIndex,
+  type Verb,
+} from '../access-model/index.js';
+import {
+  DIRECTORY_SYNC_BOT_EMAIL,
+  DIRECTORY_SYNC_BOT_NAME,
+} from './directory-sync-bot.js';
 
-const execFileAsync = promisify(execFile);
+/**
+ * What one spec of a batched read came back as: a blob's text, nothing at
+ * that path, or an object that is not a file (a directory, say). The last
+ * two are told apart on purpose: for the model at a commit, a path that is
+ * there but is not a file is not "absent", it is config the model cannot be
+ * read from.
+ */
+type CatFileOutcome =
+  | { kind: 'blob'; text: string }
+  | { kind: 'missing' }
+  | { kind: 'non-blob'; type: string };
 
 /**
  * Read many objects from a git repo in ONE `git cat-file --batch` process.
  * `specs` are `<ref>:<path>` lines; the result array is index-aligned with
- * them — the blob's text, or null when the spec is missing/ambiguous at the
- * ref or resolves to a non-blob (e.g. a directory). Output protocol per
- * request: `<oid> <type> <size>\n<size bytes>\n`, or `<spec> missing\n`
- * (the spec may itself contain spaces, hence the endsWith checks).
+ * them. Output protocol per request: `<oid> <type> <size>\n<size bytes>\n`,
+ * or `<spec> missing\n` (the spec may itself contain spaces, hence the
+ * endsWith checks).
  */
-function catFileBatch(repoDir: string, specs: string[]): Promise<(string | null)[]> {
-  return new Promise((resolve, reject) => {
-    const child = spawn('git', ['-C', repoDir, 'cat-file', '--batch'], {
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-    const chunks: Buffer[] = [];
-    const errChunks: Buffer[] = [];
-    child.stdout.on('data', (c: Buffer) => chunks.push(c));
-    child.stderr.on('data', (c: Buffer) => errChunks.push(c));
-    // A dying git can close stdin mid-write; the 'close' handler below still
-    // fires with the exit code, which is the error we want to surface.
-    child.stdin.on('error', () => undefined);
-    child.on('error', reject);
-    child.on('close', (code) => {
-      if (code !== 0) {
-        reject(new Error(`git cat-file --batch exited ${code}: ${Buffer.concat(errChunks).toString('utf-8').trim()}`));
-        return;
-      }
-      try {
-        const out = Buffer.concat(chunks);
-        const results: (string | null)[] = [];
-        let off = 0;
-        for (let i = 0; i < specs.length; i++) {
-          const nl = out.indexOf(0x0a, off);
-          if (nl < 0) throw new Error('unexpected end of git cat-file output');
-          const header = out.subarray(off, nl).toString('utf-8');
-          off = nl + 1;
-          if (header.endsWith(' missing') || header.endsWith(' ambiguous')) {
-            results.push(null);
-            continue;
-          }
-          const parts = header.split(' ');
-          const size = Number(parts[2]);
-          if (parts.length !== 3 || !Number.isInteger(size) || size < 0) {
-            throw new Error(`unexpected git cat-file header: ${header}`);
-          }
-          // Non-blob (a directory path resolves to a tree) → null, but the
-          // payload still has to be skipped to stay aligned.
-          results.push(parts[1] === 'blob' ? out.subarray(off, off + size).toString('utf-8') : null);
-          off += size + 1; // payload + trailing LF
-        }
-        resolve(results);
-      } catch (err) {
-        reject(err);
-      }
-    });
-    child.stdin.write(`${specs.join('\n')}\n`);
-    child.stdin.end();
+async function catFileBatchOutcomes(
+  runner: IGitRunner,
+  repoDir: string,
+  specs: string[],
+): Promise<CatFileOutcome[]> {
+  // Bytes, not text: every `<size>` in the header counts bytes, and the walk
+  // below has to step by that count through content that is not all ASCII.
+  // One spec per LINE is the protocol, and this walk depends on getting back
+  // exactly as many answers as it sent: a spec carrying a line break would
+  // insert an extra answer and shift every result after it, so each directory
+  // would be handed the NEXT one's `access.md`. Paths are refused a control
+  // character at the normaliser; this is the fence at the protocol.
+  assertOneSpecPerLine(specs);
+  const { stdout: out } = await runner.run(repoDir, ['cat-file', '--batch'], {
+    input: `${specs.join('\n')}\n`,
+    encoding: 'buffer',
   });
-}
-
-/** Mirrors `shared/hash-email.ts`. Duplicated to avoid a cross-cutting import. */
-function sha256Email(email: string): string {
-  return createHash('sha256').update(email.trim().toLowerCase()).digest('hex');
-}
-
-// ---------------------------------------------------------------------------
-// Constants — kept in lockstep with knowledge-base/lib/access-control.js
-// ---------------------------------------------------------------------------
-
-export const ADMIN_CANONICAL = 'admin';
-/**
- * Verbs the resolver understands in an `access.md` frontmatter. Each verb
- * is a list of grants (role or `Name <email>` references, optionally
- * prefixed with `deny `). Keep `Verb` and `KNOWN_VERBS` in lockstep —
- * `AccessFile.entries` is statically keyed on this union.
- *
- * `read` controls who may VIEW a path (the file viewer, embed surface, and
- * the agent's read tools). It is **default-deny**: a path with no effective
- * `read:` or `owner:` grant is not readable. To make content public, list the
- * built-in role `everyone` under `read:`.
- *
- * The verbs nest: `owner` is a superset of `read` + `write` + `download`, and
- * `write` is itself a superset of `read` (anyone who can edit can view). An
- * `owner` grant therefore confers all three lower verbs, a `write` grant
- * additionally confers `read`, and `owner` also marks the principal as a
- * contact point for the node (surfaced in the UI so users know who to ask).
- * See `sourceVerbsFor` for how these implications fold into resolution.
- */
-export const KNOWN_VERBS = ['read', 'write', 'download', 'owner'] as const;
-export type Verb = (typeof KNOWN_VERBS)[number];
-const KNOWN_VERBS_SET: ReadonlySet<string> = new Set<string>(KNOWN_VERBS);
-export const EVERYONE_CANONICAL = 'everyone';
-/** Display name for the built-in `everyone` role in the share UI. */
-export const EVERYONE_DISPLAY = 'Everyone';
-
-/**
- * Verbs whose entries contribute to resolving `verb`, target verb first.
- * `owner` implies `read`, `write`, and `download`; `write` additionally
- * implies `read`. So resolving `read` folds in `write` and `owner`, resolving
- * `write`/`download` folds in `owner`, and resolving `owner` uses only `owner`.
- *
- * The implication is **grant-only** (see `resolveAtPath`): a superset grant
- * confers the lower verb, but a superset *denial* does not — `deny write` says
- * nothing about `read`, so it never strips a separate read grant. The target
- * verb itself contributes both its grants and its denials.
- */
-export function sourceVerbsFor(verb: Verb): Verb[] {
-  switch (verb) {
-    case 'owner':
-      return ['owner'];
-    case 'read':
-      return ['read', 'write', 'owner'];
-    default:
-      return [verb, 'owner'];
+  const results: CatFileOutcome[] = [];
+  let off = 0;
+  for (let i = 0; i < specs.length; i++) {
+    const nl = out.indexOf(0x0a, off);
+    if (nl < 0) throw new Error('unexpected end of git cat-file output');
+    const header = out.subarray(off, nl).toString('utf-8');
+    off = nl + 1;
+    if (header.endsWith(' missing') || header.endsWith(' ambiguous')) {
+      results.push({ kind: 'missing' });
+      continue;
+    }
+    const parts = header.split(' ');
+    const size = Number(parts[2]);
+    if (parts.length !== 3 || !Number.isInteger(size) || size < 0) {
+      throw new Error(`unexpected git cat-file header: ${header}`);
+    }
+    // A non-blob (a directory path resolves to a tree) is reported as such,
+    // and its payload still has to be skipped to stay aligned.
+    results.push(
+      parts[1] === 'blob'
+        ? { kind: 'blob', text: out.subarray(off, off + size).toString('utf-8') }
+        : { kind: 'non-blob', type: parts[1]! },
+    );
+    off += size + 1; // payload + trailing LF
   }
-}
-export const RESERVED_ROLE_NAMES = new Set(['deny', EVERYONE_CANONICAL]);
-export const DENY_PREFIX = 'deny ';
-
-export const USER_REF_REGEX = /^(.+?)\s+<\s*([^<>\s]+@[^<>\s]+)\s*>\s*$/;
-export const EMAIL_REGEX = /^[^<>\s@]+@[^<>\s@]+\.[^<>\s@]+$/;
-
-// ---------------------------------------------------------------------------
-// Domain types
-// ---------------------------------------------------------------------------
-
-export interface RoleEntry {
-  kind: 'role';
-  role: string; // canonical (lowercase, single-spaced)
-  displayRole: string; // original casing/spacing
-  deny: boolean;
+  return results;
 }
 
-export interface UserEntry {
-  kind: 'user';
-  email: string; // canonical (lowercased, trimmed)
-  displayName: string;
-  deny: boolean;
+/**
+ * {@link catFileBatchOutcomes} for callers that want text or nothing: the
+ * blob's text, or null when the spec is missing at the ref or resolves to a
+ * non-blob — the own-entries reads, where a directory where a file was
+ * named simply carries no entries.
+ */
+async function catFileBatch(
+  runner: IGitRunner,
+  repoDir: string,
+  specs: string[],
+): Promise<(string | null)[]> {
+  const outcomes = await catFileBatchOutcomes(runner, repoDir, specs);
+  return outcomes.map((o) => (o.kind === 'blob' ? o.text : null));
 }
 
-export type ParsedEntry = RoleEntry | UserEntry;
-
-export interface AccessFile {
-  /** repo-relative POSIX path — e.g. `access.md`, `Knowledge/Sales/access.md`. */
-  path: string;
-  /** repo-relative POSIX directory — `''` for root. */
-  dir: string;
-  /**
-   * Verb → list of grants/denials. Always carries an entry for every
-   * known verb (empty array when the verb wasn't declared in the file) so
-   * the resolver doesn't need to null-check at every chain step.
-   */
-  entries: Record<Verb, ParsedEntry[]>;
-}
-
-function emptyEntries(): Record<Verb, ParsedEntry[]> {
-  const out = {} as Record<Verb, ParsedEntry[]>;
-  for (const v of KNOWN_VERBS) out[v] = [];
-  return out;
-}
-
-export function isAccessMdPath(p: string): boolean {
-  return p === 'access.md' || p.endsWith('/access.md');
-}
-
-interface RolesIndex {
-  byCanonical: Map<string, { displayName: string; emails: Set<string> }>;
-  byEmail: Map<string, Set<string>>;
-}
 
 interface AccessModel {
   roles: RolesIndex;
   accessFilesByDir: Map<string, AccessFile>;
   /**
+   * Whether the active groups source loaded cleanly — see {@link GroupsHealth}.
+   * A broken source degrades (groups contribute nothing) but is recorded here
+   * so admin surfaces can banner it instead of silently resolving without
+   * groups.
+   */
+  groupsHealth: GroupsHealth;
+  /**
    * Canonical emails that count as Admin whatever `roles.yaml` says — the
    * deployment owner (`ADMIN_EMAIL`). Empty when none is configured.
    *
-   * This exists for the two hardcoded `write` rescues below, and only those.
-   * It is NOT a general grant: it never enters scope resolution, so it gives
-   * no read, no download, and no write anywhere except `roles.yaml` and
-   * `access.md`. The deployment owner is the person who can already change
-   * `ADMIN_EMAIL` itself, so admitting them to the rescue path concedes
-   * nothing they could not already take — while withholding it turns a
-   * `roles.yaml` that has lost its last Admin into a knowledge base nobody
-   * can repair through the app.
+   * An owner IS an Admin, for every verb: resolution gives them the Admin
+   * role's own keys (`principalKeysOf`), so they read, download, write and
+   * own exactly where a member of the role does and are excluded exactly
+   * where the role is, and they hold the two hardcoded `write` rescues and
+   * the root floor as the role does. The owner is the person who can already
+   * change `ADMIN_EMAIL` itself, so none of this concedes anything they could
+   * not already take — while withholding it turns a `roles.yaml` that has
+   * lost its last Admin into a knowledge base nobody can repair through the
+   * app, and an owner the file does not name into someone the write floor
+   * admits everywhere and the read gate admits nowhere.
    */
   deploymentOwners: ReadonlySet<string>;
 }
@@ -212,426 +188,79 @@ function roleKnown(roles: RolesIndex, canonicalRole: string): boolean {
   return roles.byCanonical.has(canonicalRole) || isBuiltInRole(canonicalRole);
 }
 
-// ---------------------------------------------------------------------------
-// Tiny YAML subset parser — handles only block mappings + block sequences
-// of plain scalars. See `knowledge-base/lib/access-control.js` for the
-// reference implementation (this file is the TypeScript port).
-// ---------------------------------------------------------------------------
-
-type YamlValue = string | YamlValue[] | { [key: string]: YamlValue } | null;
-
-interface YamlOk {
-  ok: true;
-  value: YamlValue;
-}
-
-interface YamlErr {
-  ok: false;
-  error: string;
-}
-
-function stripComment(line: string): string {
-  let inWs = true;
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
-    if (ch === '#' && (inWs || (i > 0 && /\s/.test(line[i - 1])))) {
-      return line.slice(0, i);
-    }
-    if (!/\s/.test(ch)) inWs = false;
-  }
-  return line;
-}
-
-interface Token {
-  lineNum: number;
-  indent: number;
-  kind: 'kv' | 'item';
-  key?: string;
-  value: string;
-}
-
-function tokenise(text: string): YamlErr | { ok: true; tokens: Token[] } {
-  const lines = text.split(/\r?\n/);
-  const tokens: Token[] = [];
-  for (let i = 0; i < lines.length; i++) {
-    const stripped = stripComment(lines[i]).replace(/\s+$/, '');
-    if (!stripped.trim()) continue;
-    const indentMatch = stripped.match(/^( *)/);
-    const indent = indentMatch ? indentMatch[1].length : 0;
-    const content = stripped.slice(indent);
-    const lineNum = i + 1;
-
-    if (content.startsWith('- ') || content === '-') {
-      const value = content === '-' ? '' : content.slice(2).trim();
-      tokens.push({ lineNum, indent, kind: 'item', value });
-      continue;
-    }
-    const colonIdx = content.indexOf(':');
-    if (colonIdx < 0) {
-      return { ok: false, error: `line ${lineNum}: expected 'key:' or '- value' but got '${content}'` };
-    }
-    const key = content.slice(0, colonIdx).trim();
-    const valuePart = content.slice(colonIdx + 1).trim();
-    if (!key) return { ok: false, error: `line ${lineNum}: empty mapping key` };
-    tokens.push({ lineNum, indent, kind: 'kv', key, value: valuePart });
-  }
-  return { ok: true, tokens };
-}
-
-export function parseYamlSubset(text: string): YamlOk | YamlErr {
-  const tok = tokenise(text);
-  if (!tok.ok) return tok;
-  if (tok.tokens.length === 0) return { ok: true, value: {} };
-
-  type Frame = { indent: number; container: YamlValue[] | { [key: string]: YamlValue }; kind: 'map' | 'list' };
-  const root: { [key: string]: YamlValue } = {};
-  const stack: Frame[] = [{ indent: -1, container: root, kind: 'map' }];
-
-  for (let t = 0; t < tok.tokens.length; t++) {
-    const cur = tok.tokens[t];
-    while (stack.length > 1 && stack[stack.length - 1].indent >= cur.indent) {
-      stack.pop();
-    }
-    const top = stack[stack.length - 1];
-
-    if (cur.kind === 'item') {
-      if (top.kind !== 'list') {
-        return {
-          ok: false,
-          error: `line ${cur.lineNum}: list item with no enclosing list (indent ${cur.indent})`,
-        };
-      }
-      (top.container as YamlValue[]).push(cur.value);
-      continue;
-    }
-
-    if (top.kind !== 'map') {
-      return {
-        ok: false,
-        error: `line ${cur.lineNum}: mapping key '${cur.key}' inside a list — not supported`,
-      };
-    }
-    const map = top.container as { [key: string]: YamlValue };
-    const key = cur.key as string;
-    if (Object.prototype.hasOwnProperty.call(map, key)) {
-      return { ok: false, error: `line ${cur.lineNum}: duplicate key '${key}'` };
-    }
-
-    if (cur.value !== '') {
-      // Inline empty collections are the only flow-style YAML we accept, so
-      // `owner: []` / `download: []` read as an empty list rather than the
-      // scalar string "[]".
-      if (cur.value === '[]') {
-        map[key] = [];
-        continue;
-      }
-      map[key] = cur.value;
-      continue;
-    }
-
-    const next = tok.tokens[t + 1];
-    if (!next || next.indent <= cur.indent) {
-      map[key] = null;
-      continue;
-    }
-    if (next.kind === 'item') {
-      const list: YamlValue[] = [];
-      map[key] = list;
-      stack.push({ indent: cur.indent, container: list, kind: 'list' });
-    } else {
-      const sub: { [key: string]: YamlValue } = {};
-      map[key] = sub;
-      stack.push({ indent: cur.indent, container: sub, kind: 'map' });
-    }
-  }
-
-  return { ok: true, value: root };
-}
-
-// ---------------------------------------------------------------------------
-// Frontmatter extraction
-// ---------------------------------------------------------------------------
-
-export function extractFrontmatter(
-  text: string,
-): { ok: true; frontmatter: string } | { ok: false; error: string } {
-  const lines = text.split(/\r?\n/);
-  if (lines.length === 0 || lines[0].trim() !== '---') {
-    return { ok: false, error: 'expected `---` on the first line' };
-  }
-  for (let i = 1; i < lines.length; i++) {
-    if (lines[i].trim() === '---') {
-      return { ok: true, frontmatter: lines.slice(1, i).join('\n') };
-    }
-  }
-  return { ok: false, error: 'unterminated frontmatter — no closing `---` found' };
-}
-
-/** The text AFTER the closing frontmatter fence ('' when there is no fence). */
-export function bodyAfterFrontmatter(text: string): string {
-  const lines = text.split(/\r?\n/);
-  if (lines.length === 0 || lines[0].trim() !== '---') return '';
-  for (let i = 1; i < lines.length; i++) {
-    if (lines[i].trim() === '---') return lines.slice(i + 1).join('\n');
-  }
-  return '';
-}
-
-// ---------------------------------------------------------------------------
-// Canonicalisation
-// ---------------------------------------------------------------------------
-
-export function canonicalRoleName(name: string): string {
-  return name.trim().toLowerCase().replace(/\s+/g, ' ');
-}
-
-export function canonicalEmail(email: string): string {
-  return email.trim().toLowerCase();
-}
-
-// ---------------------------------------------------------------------------
-// Entry parser
-// ---------------------------------------------------------------------------
-
-export function parseAccessEntry(
-  raw: unknown,
-): { ok: true; entry: ParsedEntry } | { ok: false; error: string } {
-  if (typeof raw !== 'string') return { ok: false, error: 'entry must be a string' };
-  const trimmed = raw.trim();
-  if (!trimmed) return { ok: false, error: 'empty entry' };
-
-  let deny = false;
-  let body = trimmed;
-  if (trimmed.startsWith(DENY_PREFIX)) {
-    deny = true;
-    body = trimmed.slice(DENY_PREFIX.length).trim();
-    if (!body) return { ok: false, error: `'deny' with no principal` };
-  }
-
-  const userMatch = body.match(USER_REF_REGEX);
-  if (userMatch) {
-    const displayName = userMatch[1].trim();
-    const email = canonicalEmail(userMatch[2]);
-    if (!displayName) return { ok: false, error: `user reference '${body}' has no name` };
-    if (!EMAIL_REGEX.test(email)) {
-      return { ok: false, error: `user reference '${body}' has malformed email '${email}'` };
-    }
-    return { ok: true, entry: { kind: 'user', email, displayName, deny } };
-  }
-
-  if (body.includes('<') || body.includes('>')) {
-    return {
-      ok: false,
-      error: `entry '${body}' looks like a user reference but doesn't match 'Name <email>' shape`,
-    };
-  }
-
-  const role = canonicalRoleName(body);
-  if (!role) return { ok: false, error: `empty role name in entry '${raw}'` };
-  return { ok: true, entry: { kind: 'role', role, displayRole: body, deny } };
-}
-
-// ---------------------------------------------------------------------------
-// roles.yaml + access.md parsers
-// ---------------------------------------------------------------------------
-
-export function parseRolesYaml(
-  text: string,
-): { ok: true; index: RolesIndex } | { ok: false; errors: string[] } {
-  const parsed = parseYamlSubset(text);
-  if (!parsed.ok) return { ok: false, errors: [`roles.yaml: ${parsed.error}`] };
-
-  const errors: string[] = [];
-  const root = parsed.value;
-  if (root == null || typeof root !== 'object' || Array.isArray(root)) {
-    return { ok: false, errors: [`roles.yaml: must be a top-level mapping`] };
-  }
-
-  const rolesNode = (root as Record<string, YamlValue>).roles;
-  if (rolesNode == null || typeof rolesNode !== 'object' || Array.isArray(rolesNode)) {
-    return { ok: false, errors: [`roles.yaml: missing top-level 'roles:' mapping`] };
-  }
-
-  const index: RolesIndex = {
-    byCanonical: new Map(),
-    byEmail: new Map(),
-  };
-
-  for (const [displayName, value] of Object.entries(rolesNode as Record<string, YamlValue>)) {
-    const canonical = canonicalRoleName(displayName);
-    if (!canonical) {
-      errors.push(`roles.yaml: empty role name`);
-      continue;
-    }
-    if (RESERVED_ROLE_NAMES.has(canonical)) {
-      errors.push(
-        `roles.yaml: role '${displayName}' uses reserved name '${canonical}' — this token has special meaning in access entries and cannot be a roles.yaml role`,
-      );
-      continue;
-    }
-    if (index.byCanonical.has(canonical)) {
-      const prev = index.byCanonical.get(canonical)!.displayName;
-      errors.push(
-        `roles.yaml: role '${displayName}' canonicalises to '${canonical}', which is already declared as '${prev}'`,
-      );
-      continue;
-    }
-    if (!Array.isArray(value)) {
-      errors.push(`roles.yaml: role '${displayName}' must be a list of emails`);
-      continue;
-    }
-    const emails = new Set<string>();
-    for (const rawEmail of value) {
-      if (typeof rawEmail !== 'string') {
-        errors.push(`roles.yaml: role '${displayName}' has a non-string entry`);
-        continue;
-      }
-      const email = canonicalEmail(rawEmail);
-      if (!EMAIL_REGEX.test(email)) {
-        errors.push(`roles.yaml: role '${displayName}' has malformed email '${rawEmail}'`);
-        continue;
-      }
-      emails.add(email);
-      let set = index.byEmail.get(email);
-      if (!set) {
-        set = new Set();
-        index.byEmail.set(email, set);
-      }
-      set.add(canonical);
-    }
-    index.byCanonical.set(canonical, { displayName: displayName.trim(), emails });
-  }
-
-  if (!index.byCanonical.has(ADMIN_CANONICAL)) {
-    errors.push(`roles.yaml: must declare at least one 'Admin' role`);
-  } else if (index.byCanonical.get(ADMIN_CANONICAL)!.emails.size === 0) {
-    errors.push(`roles.yaml: 'Admin' role has no emails`);
-  }
-
-  if (errors.length) return { ok: false, errors };
-  return { ok: true, index };
-}
 
 /**
- * Does an `access.md` body declare access rules — i.e. is the file in the NEW
- * (body-governs-the-folder) format?
- *
- * The two-format story: historically the FRONTMATTER carried the folder's
- * rules and the file could not govern itself. The new format follows the
- * convention every other file uses — frontmatter is about the FILE (who may
- * read/write `access.md` itself), and the content (the body) is the folder's
- * rules. The compat rule, applied per file: **when the body is not parsable as
- * rules, the frontmatter is resolved for the folder as before.**
- *
- * "Parsable as rules" is deliberately shallow — the body YAML-parses to a
- * mapping that names at least one known verb. A prose body (the repo-root
- * README-style file) fails the YAML parse or carries no verb key and stays
- * legacy. A body that DOES name a verb has claimed to be rules: shape errors
- * inside it (a scalar verb, a malformed entry) are then hard parse ERRORS of
- * the file, never a silent fallback to the frontmatter — falling back would
- * let a typo in the body hand the folder to the frontmatter's (possibly
- * `read: everyone`) self-rules.
+ * Health of the ACTIVE groups source as of the last load. `ok: false` means
+ * the source EXISTS but could not be read or parsed — groups contribute
+ * nothing, bare grant tokens fall through to roles, and group-backed denies
+ * drop (the owner's explicit degrade-loudly decision, NOT fail-closed). The
+ * marker is carried on the loaded model and surfaced by the groups admin
+ * endpoints so the Groups & Members page can banner it.
  */
-export function accessMdDeclaresBodyRules(text: string): boolean {
-  const body = bodyAfterFrontmatter(text);
-  if (!body.trim()) return false;
-  const parsed = parseYamlSubset(body);
-  if (!parsed.ok) return false;
-  const root = parsed.value;
-  if (root == null || typeof root !== 'object' || Array.isArray(root)) return false;
-  return Object.keys(root as Record<string, YamlValue>).some((k) => KNOWN_VERBS_SET.has(k));
-}
+export type GroupsHealth = { ok: true } | { ok: false; file: string; reason: string };
 
 /**
- * The access verbs an `access.md` declares FOR ITSELF — its frontmatter, and
- * only in the new format (body-governed). A legacy file cannot govern itself:
- * its frontmatter IS the folder's rules, so returning them as own-entries
- * would double-apply them at the file scope.
+ * Load the ACTIVE group source through `read` (working tree or at-ref — the
+ * caller supplies the reader, so both model loaders share one mode rule):
+ * `synced-groups.yaml` existing → IdP mode (groups.yaml ignored entirely,
+ * even when the synced file is empty or malformed — falling back would
+ * resurrect retired manual groups); otherwise `groups.yaml` → manual mode.
  *
- * Parsed forgivingly (like node frontmatter): the new-format frontmatter may
- * carry non-access keys, and a typo there must not make the file unreadable.
+ * `read` returns null for a genuinely-absent file — ENOENT/ENOTDIR, the
+ * reader's judgement through the fs probe — and THROWS for any other failure.
+ * Every thrown error — notably one on `synced-groups.yaml` — is treated as a
+ * BROKEN source: no groups, no fallback to the manual file (falling back
+ * would resurrect retired groups), and an `ok: false` health marker.
+ * Structural parse failures degrade the same way; this function never throws
+ * (except to let an `AccessUnreadableError` through — see below).
  */
-export function accessMdSelfEntries(text: string): Record<Verb, ParsedEntry[]> | null {
-  if (!accessMdDeclaresBodyRules(text)) return null;
-  return parseOwnAccessEntries(text);
-}
+export async function loadActiveGroups(
+  read: (filename: string) => Promise<string | null>,
+): Promise<{ groups: GroupsIndex; sourceFile: string; warnings: string[]; health: GroupsHealth }> {
+  const broken = (file: string, reason: string) => ({
+    groups: new Map() as GroupsIndex,
+    sourceFile: file,
+    warnings: [],
+    health: { ok: false as const, file, reason },
+  });
 
-/**
- * Parse one `access.md`'s FOLDER rules into its per-verb entry lists.
- *
- * Two formats (see {@link accessMdDeclaresBodyRules}): when the body declares
- * rules, the body is parsed (new format — frontmatter then governs the file
- * itself via {@link accessMdSelfEntries}); otherwise the frontmatter is parsed
- * (legacy format), exactly as before.
- *
- * Exported so read-only surfaces can report WHERE rules are declared without
- * reimplementing the parse (see `access-declarations.ts`). Exporting changes
- * nothing about resolution — this is the same function the resolver builds its
- * model from, so a display of declarations can never drift from the rules that
- * are actually enforced.
- */
-export function parseAccessFile(
-  text: string,
-  relativePath: string,
-): { ok: true; file: AccessFile; warnings: string[] } | { ok: false; errors: string[] } {
-  const bodyFormat = accessMdDeclaresBodyRules(text);
-  let ruleSource: string;
-  if (bodyFormat) {
-    ruleSource = bodyAfterFrontmatter(text);
+  let syncedText: string | null;
+  try {
+    syncedText = await read(SYNCED_GROUPS_YAML);
+  } catch (err) {
+    // An at-ref `read` throws this when git itself failed — the file's
+    // existence is UNKNOWN, not absent and not broken. That must propagate:
+    // swallowing it into a broken-groups marker builds a model with no groups
+    // in it and caches that model for the commit, so every group-based grant
+    // and denial at that commit is wrong on the strength of a flaky
+    // subprocess. roles.yaml and access.md already fail the build closed on
+    // the same error; groups cannot be the one input that does not.
+    if (err instanceof AccessUnreadableError) throw err;
+    // A read error on the SYNCED source must NOT fall back to groups.yaml —
+    // the synced file may exist and its manual predecessor is retired.
+    // Broken-groups instead.
+    return broken(SYNCED_GROUPS_YAML, err instanceof Error ? err.message : String(err));
+  }
+
+  const sourceFile = syncedText !== null ? SYNCED_GROUPS_YAML : GROUPS_YAML;
+  let text: string | null;
+  if (syncedText !== null) {
+    text = syncedText;
   } else {
-    const fm = extractFrontmatter(text);
-    if (!fm.ok) return { ok: false, errors: [`${relativePath}: ${fm.error}`] };
-    ruleSource = fm.frontmatter;
-  }
-  const parsed = parseYamlSubset(ruleSource);
-  if (!parsed.ok) return { ok: false, errors: [`${relativePath}: ${parsed.error}`] };
-
-  const root = parsed.value;
-  if (root == null || typeof root !== 'object' || Array.isArray(root)) {
-    return {
-      ok: false,
-      errors: [`${relativePath}: ${bodyFormat ? 'body' : 'frontmatter'} must be a mapping`],
-    };
-  }
-
-  const errors: string[] = [];
-  const warnings: string[] = [];
-  const entries = emptyEntries();
-
-  for (const [key, value] of Object.entries(root as Record<string, YamlValue>)) {
-    if (!KNOWN_VERBS_SET.has(key)) {
-      // Forgiving by design: unknown keys (typos, future verbs, custom
-      // metadata an operator chose to colocate) must not break the access
-      // tree. Warn so operators see the typo in logs, then move on as if
-      // the key didn't exist. The verbs we DO understand still parse.
-      warnings.push(
-        `${relativePath}: unknown access key '${key}' — ignored (known: ${[...KNOWN_VERBS].join(', ')})`,
-      );
-      continue;
+    try {
+      text = await read(GROUPS_YAML);
+    } catch (err) {
+      if (err instanceof AccessUnreadableError) throw err; // see above
+      return broken(GROUPS_YAML, err instanceof Error ? err.message : String(err));
     }
-    const verb = key as Verb;
-    if (!Array.isArray(value)) {
-      errors.push(`${relativePath}: '${key}:' must be a list`);
-      continue;
-    }
-    const list: ParsedEntry[] = [];
-    for (const raw of value) {
-      const result = parseAccessEntry(raw);
-      if (!result.ok) {
-        errors.push(`${relativePath}: ${result.error}`);
-        continue;
-      }
-      list.push(result.entry);
-    }
-    entries[verb] = list;
   }
+  if (text === null) return { groups: new Map(), sourceFile, warnings: [], health: { ok: true } };
 
-  if (errors.length) return { ok: false, errors };
-
-  const slash = relativePath.lastIndexOf('/');
-  const dir = slash === -1 ? '' : relativePath.slice(0, slash);
-  return { ok: true, file: { path: relativePath, dir, entries }, warnings };
+  const parsed = parseGroupsFile(text, sourceFile);
+  if (!parsed.ok) return broken(sourceFile, parsed.errors.join('; '));
+  return { groups: parsed.groups, sourceFile, warnings: parsed.warnings, health: { ok: true } };
 }
+
 
 // ---------------------------------------------------------------------------
 // Resolver — walks repo root → file dir, accumulating per-principal state.
@@ -639,54 +268,6 @@ export function parseAccessFile(
 
 type GrantState = 'grant' | 'denied';
 
-/**
- * Per-verb access entries declared in a single node file's *own* frontmatter
- * (the same YAML block that carries `nodeType:`). This is the most-specific
- * scope — applied after every directory `access.md` in the chain.
- */
-type OwnEntries = Record<Verb, ParsedEntry[]>;
-
-/**
- * Parse the access verbs a node file declares in its own YAML frontmatter.
- * Returns the per-verb entry lists, or null when the file has no frontmatter
- * or declares no access verb at all.
- *
- * Forgiving by design — a node's frontmatter legitimately carries non-access
- * keys (notably `nodeType:`), so unknown keys are ignored, and a malformed
- * entry is dropped rather than failing the file. A typo in a node's `owner:`
- * must never make the node unreadable; it just doesn't grant anything.
- */
-export function parseOwnAccessEntries(text: string): OwnEntries | null {
-  const fm = extractFrontmatter(text);
-  if (!fm.ok) return null;
-  const parsed = parseYamlSubset(fm.frontmatter);
-  if (!parsed.ok) return null;
-  const root = parsed.value;
-  if (root == null || typeof root !== 'object' || Array.isArray(root)) return null;
-
-  const entries = emptyEntries();
-  let sawVerb = false;
-  for (const [key, value] of Object.entries(root as Record<string, YamlValue>)) {
-    if (!KNOWN_VERBS_SET.has(key)) continue; // ignore nodeType, etc.
-    // Accept both the list form (`owner:\n  - A\n  - B`) and the convenience
-    // single-value scalar form (`owner: Test <test@test.com>`) — the latter
-    // is the natural way to name one owner in a node's own frontmatter.
-    // Anything else (a mapping, null) is malformed → skip forgivingly.
-    let raws: YamlValue[];
-    if (Array.isArray(value)) raws = value;
-    else if (typeof value === 'string' && value.trim()) raws = [value];
-    else continue;
-    const verb = key as Verb;
-    const list: ParsedEntry[] = [];
-    for (const raw of raws) {
-      const result = parseAccessEntry(raw);
-      if (result.ok) list.push(result.entry);
-    }
-    entries[verb] = list;
-    sawVerb = true;
-  }
-  return sawVerb ? entries : null;
-}
 
 /**
  * Where a single access scope's rules live. `'own'` is the node's own
@@ -702,13 +283,32 @@ export type ScopeSource = { kind: 'own' } | { kind: 'access-md'; path: string };
  * already folded in (grant-only — see `buildScope`), so `byRole`/`byEmail`
  * hold the *effective* verdict each named principal gets at this one scope.
  *
+ * `byRole` and `byEmail` hold FILE-BACKED entries only — every key is a
+ * token some line in the file spells, which is what makes them the source
+ * of "what can be removed here" (`grantSources`). `everyone` is the one
+ * DERIVED verdict: what an unnamed signed-in caller gets at this scope. It
+ * is the literal `everyone` entry's state, promoted to a grant when the
+ * scope grants a PUBLIC plugin principal (one whose plugin admits everyone,
+ * so everyone holds it). Kept apart from `byRole` on purpose: a synthetic
+ * `everyone` key there would read as a line to revoke that no file has.
+ *
  * `source` identifies the file the scope's rules come from (see `ScopeSource`),
  * so a caller can map a per-scope verdict back to the editable file.
  */
 interface AccessScope {
   byRole: Map<string, GrantState>;
   byEmail: Map<string, GrantState>;
+  everyone: GrantState | undefined;
   source: ScopeSource;
+  /**
+   * The keys whose `'denied'` in `byRole` / `byEmail` is IMPLIED — a denial
+   * of a verb the target presupposes (`deny write` when resolving `owner`),
+   * with no `deny <target>` line of their own here. The verdict is as real as
+   * any (the effective walk, the eligible lists and the collapsed view treat
+   * it as denied), but it is not a LINE in this file: `denialSources`, which
+   * reports the entries a person can lift, leaves it out.
+   */
+  implied: { byRole: Set<string>; byEmail: Set<string> };
 }
 
 /**
@@ -722,6 +322,66 @@ interface AccessScope {
  * `hasPermissionResolved`). `collapseScopes` flattens this into the
  * closest-wins-per-principal view the display helpers use.
  */
+/**
+ * The rules listener on the one walk of the checkout: every `access.md` at
+ * any depth (the access tree is structure-agnostic — the root's included),
+ * plus every plugin manifest under the plugins root, for principal
+ * synthesis. A reader: a folder the walk could not list is simply not in
+ * the model (a writer that needs completeness asks the walk for its holes).
+ *
+ * Per-file failures (malformed YAML, bad role refs, unknown verbs) are
+ * logged and the offending file is dropped from the model — they do NOT
+ * throw. A typo in one nested access.md must not 500 the entire editor;
+ * admins can still write `access.md` / `roles.yaml` because
+ * `hasPermissionResolved` admin-rescues those paths, so the bad config
+ * remains fixable from inside the app.
+ */
+function accessFileListener(
+  repoDir: string,
+  pluginsDir: string,
+  out: Map<string, AccessFile>,
+  pluginDirs: Map<string, string>,
+): WalkListener {
+  return {
+    async onFile(dir, name) {
+      const rel = dir ? `${dir}/${name}` : name;
+      if (name === PLUGIN_MANIFEST_FILE && dir.startsWith(`${pluginsDir}/`)) {
+        const text = await fs.readFile(path.join(repoDir, rel), 'utf-8').catch(() => null);
+        pluginDirs.set(dir, pluginIdentityOf(parseManifestText(text), path.posix.basename(dir)));
+        return;
+      }
+      if (name !== 'access.md') return;
+      const text = await fs.readFile(path.join(repoDir, rel), 'utf-8');
+      const parsed = parseAccessFile(text, rel);
+      if (!parsed.ok) {
+        // Treat as if the file didn't exist for resolution purposes.
+        // Admin-rescue on access.md paths still lets an admin fix it.
+        for (const e of parsed.errors) log.warn(`${e} — file ignored`);
+        return;
+      }
+      for (const w of parsed.warnings) log.warn(w);
+      if (out.has(parsed.file.dir)) {
+        log.warn(`${rel}: duplicate access.md for directory '${parsed.file.dir}' — keeping the first one seen`);
+        return;
+      }
+      out.set(parsed.file.dir, parsed.file);
+    },
+  };
+}
+
+/** A manifest's parsed object, or null for absent, unparsable or not-an-object text. */
+function parseManifestText(text: string | null): Record<string, unknown> | null {
+  if (text === null) return null;
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 function resolveScopes(
   model: AccessModel,
   verb: Verb,
@@ -729,13 +389,21 @@ function resolveScopes(
   fileOwn?: OwnEntries | null,
 ): AccessScope[] {
   const target = verb;
+  // Both lists come from the grammar's one dependency graph (`VERB_REQUIRES`):
+  // the verbs whose grant confers the target, and the verbs the target
+  // presupposes, whose denial strips it.
   const supersets = sourceVerbsFor(verb).filter((v) => v !== verb);
+  const prerequisites = requiredVerbsFor(verb).filter((v) => v !== verb);
 
   // Build one scope's effective verdicts. The target verb contributes both
-  // grants and denials; superset verbs contribute grants only (a `deny write`
-  // never strips `read`). Within the scope a grant always wins over a deny of
-  // the same principal, so a same-file superset grant overrides a target deny
-  // (e.g. `owner:` beats `deny write`, `write:` beats `deny read`).
+  // grants and denials. Superset verbs contribute grants only (a `deny write`
+  // never strips `read`); prerequisite verbs contribute DENIALS only (a `deny
+  // write` strips `owner`, a `deny read` strips all three — nobody owns what
+  // they may not edit, or edits what they may not open), and a `read` grant
+  // confers no `write`. Within the scope a grant always wins over a deny of
+  // the same principal, so a same-file grant of the target or of a superset
+  // overrides a deny of the target or of a prerequisite (`owner:` beats `deny
+  // write`, `write:` beats `deny read`).
   const buildScope = (
     entries: Record<Verb, ParsedEntry[]>,
     filterRoles: boolean,
@@ -743,24 +411,62 @@ function resolveScopes(
   ): AccessScope => {
     const byRole = new Map<string, GrantState>();
     const byEmail = new Map<string, GrantState>();
+    const implied = { byRole: new Set<string>(), byEmail: new Set<string>() };
     const set = (entry: ParsedEntry, state: GrantState) => {
       const map = entry.kind === 'role' ? byRole : byEmail;
       const key = entry.kind === 'role' ? entry.role : entry.email;
       if (map.get(key) === 'grant') return; // a grant in this scope sticks
       map.set(key, state);
     };
+    const skip = (entry: ParsedEntry) =>
+      filterRoles && entry.kind === 'role' && !roleKnown(model.roles, entry.role);
     for (const entry of entries[target]) {
-      if (filterRoles && entry.kind === 'role' && !roleKnown(model.roles, entry.role)) continue;
+      if (skip(entry)) continue;
       set(entry, entry.deny ? 'denied' : 'grant');
     }
     for (const src of supersets) {
       for (const entry of entries[src]) {
         if (entry.deny) continue; // grant-only fold
-        if (filterRoles && entry.kind === 'role' && !roleKnown(model.roles, entry.role)) continue;
+        if (skip(entry)) continue;
         set(entry, 'grant');
       }
     }
-    return { byRole, byEmail, source };
+    // Last, so a target or superset GRANT already in the map stands, and a
+    // target's own `deny` line is never re-labelled as implied.
+    for (const src of prerequisites) {
+      for (const entry of entries[src]) {
+        if (!entry.deny) continue; // deny-only fold
+        if (skip(entry)) continue;
+        const map = entry.kind === 'role' ? byRole : byEmail;
+        const key = entry.kind === 'role' ? entry.role : entry.email;
+        if (map.has(key)) continue; // an own verdict (grant or deny) is already the answer
+        map.set(key, 'denied');
+        (entry.kind === 'role' ? implied.byRole : implied.byEmail).add(key);
+      }
+    }
+    // The anonymous caller's verdict at this scope — what someone who holds
+    // exactly the PUBLIC keys (a plugin principal whose plugin admits
+    // everyone, so everyone holds it) resolves to, by the same tiers a named
+    // caller gets: a grant via any public key wins, else a denial via one
+    // denies, else the built-in `everyone` entry decides. Derived HERE, where
+    // a scope's verdicts are built, so every reader of it — the permission
+    // check, the eligible lists, the `restricted` flag, the compiler's
+    // everyone audience — sees one truth; and derived into its own field,
+    // never into `byRole`, so the entries a person can remove stay exactly
+    // the lines the files hold.
+    let publicGrant = false;
+    let publicDeny = false;
+    for (const [key, state] of byRole) {
+      if (!model.roles.publicKeys?.has(key)) continue;
+      if (state === 'grant') publicGrant = true;
+      else if (state === 'denied') publicDeny = true;
+    }
+    const everyone: GrantState | undefined = publicGrant
+      ? 'grant'
+      : publicDeny
+        ? 'denied'
+        : byRole.get(EVERYONE_CANONICAL);
+    return { byRole, byEmail, everyone, source, implied };
   };
 
   const scopes: AccessScope[] = [];
@@ -777,7 +483,7 @@ function resolveScopes(
 
 /** The collapsed closest-wins view: per-principal verdicts with no single
  * source (it's a flattening across scopes). */
-type CollapsedScope = Pick<AccessScope, 'byRole' | 'byEmail'>;
+type CollapsedScope = Pick<AccessScope, 'byRole' | 'byEmail' | 'everyone'>;
 
 /**
  * Flatten ordered scopes (closest→farthest) into a single closest-wins
@@ -788,11 +494,13 @@ type CollapsedScope = Pick<AccessScope, 'byRole' | 'byEmail'>;
 function collapseScopes(scopes: AccessScope[]): CollapsedScope {
   const byRole = new Map<string, GrantState>();
   const byEmail = new Map<string, GrantState>();
+  let everyone: GrantState | undefined;
   for (let i = scopes.length - 1; i >= 0; i--) {
     for (const [k, v] of scopes[i].byRole) byRole.set(k, v);
     for (const [k, v] of scopes[i].byEmail) byEmail.set(k, v);
+    if (scopes[i].everyone !== undefined) everyone = scopes[i].everyone;
   }
-  return { byRole, byEmail };
+  return { byRole, byEmail, everyone };
 }
 
 function resolveAtPath(
@@ -804,10 +512,141 @@ function resolveAtPath(
   return collapseScopes(resolveScopes(model, verb, relativePath, fileOwn));
 }
 
+/**
+ * Every principal key a caller holds: the tokens their email is a member of,
+ * plus the PUBLIC keys every caller holds regardless (a plugin principal
+ * whose plugin grants `everyone`), plus — for a deployment owner — the Admin
+ * role's own keys, whether or not `roles.yaml` names them: the owner IS an
+ * Admin (see `AccessModel.deploymentOwners`), so every rule that binds the
+ * role binds them, for every verb. Undefined when there is nothing at all,
+ * matching the plain `byEmail.get` the tier-2 check used to read.
+ */
+function principalKeysOf(model: AccessModel, email: string): Set<string> | undefined {
+  const own = model.roles.byEmail.get(email);
+  const pub = model.roles.publicKeys;
+  const asOwner = model.deploymentOwners.has(email) && !own?.has(ADMIN_ROLE_KEY);
+  if (!pub?.size && !asOwner) return own;
+  return new Set([
+    ...(own ?? []),
+    ...(pub ?? []),
+    ...(asOwner ? principalKeysOfToken(model, ADMIN_ROLE_KEY) : []),
+  ]);
+}
+
+/** The explicit key of the Admin ROLE — never the bare token, which a same-named group may own. */
+const ADMIN_ROLE_KEY = `${ROLE_TOKEN_PREFIX}${ADMIN_CANONICAL}`;
+
+/**
+ * The verbs the Admin floor at the repository root confers: write, and the
+ * read that write implies (`VERB_REQUIRES`). An admin who may change
+ * everything under the root may see it; otherwise the read-before-write gate
+ * refuses them the very change the floor grants. Download is not implied by
+ * write and stays with the access tree.
+ */
+function holdsAdminFloor(verb: Verb): boolean {
+  return verb === 'write' || verb === 'read';
+}
+
+/**
+ * Add to `keys` what holding them confers on top: every plugin principal
+ * expanded from one of the keys, and the public keys every caller holds.
+ */
+function addDerivedKeys(model: AccessModel, keys: Set<string>): Set<string> {
+  for (const [key, principal] of model.roles.byCanonical) {
+    if (principal.kind !== 'plugin' || !principal.sourceKeys) continue;
+    for (const source of principal.sourceKeys) {
+      if (keys.has(source)) {
+        keys.add(key);
+        break;
+      }
+    }
+  }
+  for (const key of model.roles.publicKeys ?? []) keys.add(key);
+  return keys;
+}
+
+/**
+ * Every principal key that being in `group` confers — the group's OWN key,
+ * the roles that list the group (`group:<Name>` in roles.yaml), the plugin
+ * principals whose roster admits the group directly or through one of those
+ * roles, and the public keys every caller holds. This is the group-shaped
+ * twin of `principalKeysOf`: a member's key set minus everything they hold
+ * for reasons of their own. `null` when no group of that name exists.
+ *
+ * Groups are keyed by `group/<name>`, and by their bare canonical name
+ * when no role owns it (`mergeGroupsIntoRoles`); roles by the bare name and
+ * `role/<name>`. `group` may be spelled either way: a bare name whose record
+ * is a ROLE still finds the group through its `group/` alias, because this
+ * question is always asked of the group.
+ */
+function principalKeysOfGroup(model: AccessModel, group: string): Set<string> | null {
+  const { name } = splitPrincipalToken(canonicalRoleName(group));
+  const record = model.roles.byCanonical.get(`${GROUP_TOKEN_PREFIX}${name}`);
+  if (!record || record.kind !== 'group') return null;
+  const keys = new Set<string>();
+  for (const [key, principal] of model.roles.byCanonical) {
+    if (principal === record) keys.add(key);
+    else if (principal.kind === 'role' && principal.groupRefs?.has(name)) keys.add(key);
+  }
+  // Plugin principals were expanded from role/group entries; a plugin that
+  // admits the group, or a role the group is folded into, admits the group.
+  return addDerivedKeys(model, keys);
+}
+
+/** The key set of a caller who holds nothing: `hasPermissionForKeys` then answers as `everyone`. */
+const NO_KEYS: ReadonlySet<string> = new Set();
+
+/**
+ * The tier-2 half of `hasPermissionResolved` on its own: a verdict for a set
+ * of principal KEYS with no person behind them — no direct-email tier, no
+ * admin rescue, no machine-owned rule — only the Admin floor (write, and the
+ * read it implies), when the keys include the Admin role. Closest scope
+ * first; within a scope a grant to any key wins over a denial to another,
+ * exactly as for a person.
+ */
+function hasPermissionForKeys(
+  model: AccessModel,
+  verb: Verb,
+  keys: ReadonlySet<string>,
+  relativePath: string,
+  fileOwn?: OwnEntries | null,
+): boolean {
+  const adminFloor = holdsAdminFloor(verb) && keys.has(ADMIN_ROLE_KEY);
+  for (const scope of resolveScopes(model, verb, relativePath, fileOwn)) {
+    if (adminFloor && isAdminFloorScope(scope, relativePath)) return true;
+    let grant = false;
+    let deny = false;
+    for (const key of keys) {
+      const state = scope.byRole.get(key);
+      if (state === 'denied') deny = true;
+      else if (state === 'grant') grant = true;
+    }
+    if (grant) return true;
+    if (deny) return false;
+    if (scope.everyone) return scope.everyone === 'grant';
+  }
+  return adminFloor;
+}
+
+/**
+ * Whether a scope sits at the Admin write floor: the repository root's own
+ * `access.md`, or the own frontmatter of a file directly in the root (those
+ * files are part of the root, so their own rules cannot take Admin's write
+ * away either). A folder directly in the root is not covered — its own
+ * `access.md` is an ordinary subfolder scope that may exclude Admin.
+ */
+function isAdminFloorScope(scope: AccessScope, relativePath: string): boolean {
+  if (scope.source.kind === 'own') return !relativePath.includes('/');
+  return scope.source.path === 'access.md';
+}
+
 function isAdminEmail(model: AccessModel, email: string): boolean {
   if (model.deploymentOwners.has(email)) return true;
   const roles = model.roles.byEmail.get(email);
-  return !!roles && roles.has(ADMIN_CANONICAL);
+  // Check the explicit `role/admin` alias: it is the role's whatever the
+  // bare key holds, and a group that happens to be named "Admin" is only
+  // ever `group/admin` — its members never inherit the capability.
+  return !!roles && roles.has(ADMIN_ROLE_KEY);
 }
 
 /**
@@ -841,7 +680,20 @@ function isAdminEmail(model: AccessModel, email: string): boolean {
  * owner is whoever can already set `ADMIN_EMAIL`, so this concedes no
  * authority they did not have; it only gives it a door.
  *
- * No special-cases for `read`/`download` — they fall through to scope resolution.
+ * One floor for `write` and the `read` it implies (`holdsAdminFloor`), applied
+ * during the walk: an admin (same definition) always holds both at the
+ * repository root. When the walk reaches the root `access.md` (or the own
+ * frontmatter of a file directly in the root) — or runs out of scopes without
+ * a verdict — an admin is granted, whatever the root file says, so no root
+ * rule can lock the deployment out of its own tree, and nobody who may change
+ * everything under the root is refused the sight of it. A NEARER scope still
+ * decides first: a subfolder that denies Admin (or denies `everyone` without
+ * naming Admin) excludes admins there like anyone else. The root file's own
+ * entries are not rewritten — the floor is a verdict, not a grant line — so
+ * `grantSources` stays file-backed.
+ *
+ * No special-case for `download` (or `owner`) — they fall through to scope
+ * resolution; write implies read, not download.
  */
 function hasPermissionResolved(
   model: AccessModel,
@@ -850,44 +702,86 @@ function hasPermissionResolved(
   relativePath: string,
   fileOwn?: OwnEntries | null,
 ): boolean {
+  return decidePermissionResolved(model, verb, userEmail, relativePath, fileOwn).allowed;
+}
+
+/**
+ * WHAT decided one caller's verdict: `hasPermissionResolved` with its reasoning
+ * kept. `scope` is the scope whose entry settled it (null for the hardcoded
+ * admin rescues and for default-deny; the root scope, or null when there is
+ * none, for the Admin write floor); `via` is the tier that matched and `key`
+ * the principal key it matched on (the caller's email, a role/group/plugin
+ * key, or `everyone`). `hasPermissionResolved` IS this function's `allowed`,
+ * so an explanation can never disagree with the gate.
+ */
+interface PermissionDecision {
+  allowed: boolean;
+  scope: AccessScope | null;
+  via: 'email' | 'principal' | 'everyone' | 'admin-rescue' | 'admin-floor' | 'default-deny';
+  key?: string;
+}
+
+function decidePermissionResolved(
+  model: AccessModel,
+  verb: Verb,
+  userEmail: string,
+  relativePath: string,
+  fileOwn?: OwnEntries | null,
+): PermissionDecision {
   const email = canonicalEmail(userEmail);
 
   if (verb === 'write') {
-    if (relativePath === 'roles.yaml') return isAdminEmail(model, email);
-    if (isAccessMdPath(relativePath) && isAdminEmail(model, email)) return true;
+    if (relativePath === 'roles.yaml') {
+      return { allowed: isAdminEmail(model, email), scope: null, via: 'admin-rescue' };
+    }
+    if (isAccessMdPath(relativePath) && isAdminEmail(model, email)) {
+      return { allowed: true, scope: null, via: 'admin-rescue' };
+    }
   }
 
-  const userRoles = model.roles.byEmail.get(email);
+  const adminFloor = holdsAdminFloor(verb) && isAdminEmail(model, email);
+  // The deployment owner IS Admin: `principalKeysOf` gives them the role's
+  // keys, so the Admin rules along the way bind them too — a subfolder
+  // denying Admin excludes the owner exactly as it excludes the role's
+  // members, and one granting Admin admits them.
+  const userRoles = principalKeysOf(model, email);
   const scopes = resolveScopes(model, verb, relativePath, fileOwn);
 
   for (const scope of scopes) {
+    if (adminFloor && isAdminFloorScope(scope, relativePath)) return { allowed: true, scope, via: 'admin-floor' };
+
     // Tier 1 — direct email entry is the most specific verdict at this scope.
     const direct = scope.byEmail.get(email);
-    if (direct) return direct === 'grant';
+    if (direct) return { allowed: direct === 'grant', scope, via: 'email', key: email };
 
     // Tier 2 — the caller's roles. A grant via any one of them wins over a deny
     // via another at this same scope (a `deny Engineer` doesn't undo an
     // unrelated `Admin` grant).
     if (userRoles && userRoles.size) {
-      let grant = false;
-      let deny = false;
+      let granted: string | undefined;
+      let denied: string | undefined;
       for (const r of userRoles) {
         const s = scope.byRole.get(r);
-        if (s === 'denied') deny = true;
-        else if (s === 'grant') grant = true;
+        if (s === 'denied') denied ??= r;
+        else if (s === 'grant') granted ??= r;
       }
-      if (grant) return true;
-      if (deny) return false;
+      if (granted !== undefined) return { allowed: true, scope, via: 'principal', key: granted };
+      if (denied !== undefined) return { allowed: false, scope, via: 'principal', key: denied };
     }
 
-    // Tier 3 — the built-in `everyone` role.
-    const everyone = scope.byRole.get(EVERYONE_CANONICAL);
-    if (everyone) return everyone === 'grant';
+    // Tier 3 — the built-in `everyone` role (derived: a public plugin
+    // principal granted here counts, see `AccessScope.everyone`).
+    if (scope.everyone) {
+      return { allowed: scope.everyone === 'grant', scope, via: 'everyone', key: EVERYONE_CANONICAL };
+    }
 
     // No verdict at this scope — fall through to the next (farther) one.
   }
 
-  return false;
+  // No verdict anywhere (and no root access.md to stop at): the floor still holds.
+  return adminFloor
+    ? { allowed: true, scope: null, via: 'admin-floor' }
+    : { allowed: false, scope: null, via: 'default-deny' };
 }
 
 /**
@@ -920,12 +814,55 @@ function scopeToGrantSource(
 }
 
 /**
+ * Where a scope's rules live, as the place a person edits: a folder (the
+ * directory of its `access.md`) or the target's own frontmatter.
+ */
+function decisionSourceOf(
+  scope: AccessScope,
+  kind: AccessTargetKind,
+  relativePath: string,
+): AccessDecisionSource {
+  if (scope.source.kind === 'own') return { kind: 'frontmatter', path: relativePath, inherited: false };
+  const folder = path.posix.dirname(scope.source.path);
+  const dir = folder === '.' ? '' : folder;
+  const grant = scopeToGrantSource(scope, kind, relativePath);
+  return { kind: 'folder', path: dir, inherited: grant.kind === 'ancestor' };
+}
+
+/** A resolver decision in the terms `explainAccess` reports. */
+function explainDecision(
+  model: AccessModel,
+  decision: PermissionDecision,
+  kind: AccessTargetKind,
+  relativePath: string,
+): AccessDecision {
+  const source = decision.scope ? decisionSourceOf(decision.scope, kind, relativePath) : null;
+  const base = { allowed: decision.allowed, source };
+  switch (decision.via) {
+    case 'admin-rescue':
+    case 'default-deny':
+      return { ...base, via: decision.via, principal: null };
+    case 'admin-floor':
+      return { ...base, via: decision.via, principal: 'Admin' };
+    case 'email':
+      return { ...base, via: 'person', principal: decision.key ?? null };
+    case 'everyone':
+      return { ...base, via: 'everyone', principal: EVERYONE_CANONICAL };
+    case 'principal': {
+      const key = decision.key ?? '';
+      const record = model.roles.byCanonical.get(key);
+      return { ...base, via: record?.kind ?? 'role', principal: record?.displayName ?? key };
+    }
+  }
+}
+
+/**
  * Resolve EVERY file scope that names a principal for `verb`, ordered
  * closest-first — the source-returning twin of `hasPermissionResolved`, but
  * returning the WHOLE list of removable entries rather than just the winner.
  *
  * Only the principal's OWN named entry yields a source — a `user` by their email,
- * a `role` by its role token. A grant that reaches the user via a plugin they
+ * a `role` by its role token. A grant that reaches the user via a group/role they
  * belong to, the built-in `everyone`, or admin-rescue is NOT their entry, so it
  * never adds a source (the group/role shows as its own row instead). The list is:
  *   - `[]` (verb omitted by the caller) when the principal effectively holds no
@@ -941,7 +878,7 @@ function scopeToGrantSource(
  * under closest-wins), and the revoke flow needs the inherited remainder that
  * survives removing the direct entry. A group/everyone grant at some scope does
  * not add a source AND does not hide a farther own-entry the principal is named
- * in (removing it is still meaningful if the plugin grant is later removed).
+ * in (removing it is still meaningful if the group/role grant is later removed).
  */
 function resolveGrantSourcesForVerb(
   model: AccessModel,
@@ -950,16 +887,26 @@ function resolveGrantSourcesForVerb(
   relativePath: string,
   principal: GrantPrincipal,
   fileOwn?: OwnEntries | null,
+  tokenMatch?: 'exact' | 'name',
 ): GrantSource[] {
   const scopes = resolveScopes(model, verb, relativePath, fileOwn);
   const out: GrantSource[] = [];
 
   if (principal.kind === 'role') {
-    const role = canonicalRoleName(principal.role);
+    // A named principal can be spelled two ways in a file: the bare token and
+    //     its explicit `role/<name>` or `group/<name>` token. Which spellings
+    //     are THIS principal's entries is `ownTokensOf`'s one rule — the bare
+    //     token counts only when the bare key is this principal's (the role
+    //     when one exists, else the group), and a pinned `'exact'` counts the
+    //     literal spelling alone.
+    const tokens = ownTokensOf(model, principal.role, tokenMatch);
     for (const scope of scopes) {
-      const s = scope.byRole.get(role);
-      if (s === 'denied') break; // a closer deny of this role cuts off farther grants
-      if (s === 'grant') out.push(scopeToGrantSource(scope, kind, relativePath));
+      const states = tokens.map((t) => scope.byRole.get(t));
+      if (states.includes('grant')) {
+        out.push(scopeToGrantSource(scope, kind, relativePath));
+        continue;
+      }
+      if (states.includes('denied')) break; // a closer deny cuts off farther grants
     }
     return out;
   }
@@ -976,6 +923,250 @@ function resolveGrantSourcesForVerb(
     // it neither adds a source nor hides a farther own-entry, so we keep walking.
   }
   return out;
+}
+
+/**
+ * WHICH token spellings in a file are THIS role-shaped principal's own entries
+ * — in one place because the grant walk, the denial walk and the revoke splice
+ * must all agree on it (a disagreement attributes a bare token to the wrong
+ * principal, which is how a "restrict" silently strips a same-named role's
+ * grant).
+ *
+ *   - `role/X` is the role: its own entries are `role/X`, plus the bare `X`
+ *     unless a GROUP owns the bare key (no role X exists, a group X does).
+ *   - `group/X` is the group: `group/X`, plus the bare `X` unless a ROLE
+ *     owns it — under role-first precedence a same-named role always does.
+ *   - A bare `X` is whoever owns the bare key, with that kind's explicit
+ *     spelling; a bare token with no record (`everyone`, a plugin token, a
+ *     vanished principal) is just itself plus the `role/` spelling a legacy
+ *     role grant may carry.
+ *   - PINNED EXACT (`tokenMatch: 'exact'`): only the literal spelling. The
+ *     caller pinned the same identity into the splice it is checking.
+ */
+function ownTokensOf(
+  model: AccessModel,
+  role: string,
+  tokenMatch?: 'exact' | 'name',
+): string[] {
+  const canonical = canonicalRoleName(role);
+  if (tokenMatch === 'exact') return [canonical];
+  const { prefix, name } = splitPrincipalToken(canonical);
+  const bareOwner = model.roles.byCanonical.get(name)?.kind;
+  if (prefix === 'role') return bareOwner === 'group' ? [canonical] : [name, canonical];
+  if (prefix === 'group') return bareOwner === 'role' ? [canonical] : [name, canonical];
+  if (bareOwner === 'group') return [name, `${GROUP_TOKEN_PREFIX}${name}`];
+  if (bareOwner === 'plugin') return [name];
+  return [name, `${ROLE_TOKEN_PREFIX}${name}`];
+}
+
+/**
+ * The polarity twin of {@link resolveGrantSourcesForVerb}: every file scope
+ * whose own entry for this principal DENIES `verb`, closest-first.
+ *
+ * Same walk, mirrored stopping rule. A grant in the principal's own entry at a
+ * scope ENDS the list — under closest-wins a farther deny is dead, and reporting
+ * it would have the dialog say "restricted" about a verb the principal holds.
+ * A grant or deny reaching the principal through a group/role/`everyone` is not
+ * their own entry: it is neither a denial to report nor a reason to stop, so the
+ * walk carries on past it, exactly as the grant twin does.
+ *
+ * Returns `[]` when the principal is not denied `verb` by any file entry.
+ */
+function resolveDenialSourcesForVerb(
+  model: AccessModel,
+  verb: Verb,
+  kind: AccessTargetKind,
+  relativePath: string,
+  principal: GrantPrincipal,
+  fileOwn?: OwnEntries | null,
+  tokenMatch?: 'exact' | 'name',
+): GrantSource[] {
+  const scopes = resolveScopes(model, verb, relativePath, fileOwn);
+  const out: GrantSource[] = [];
+
+  if (principal.kind === 'role') {
+    const tokens = ownTokensOf(model, principal.role, tokenMatch);
+    for (const scope of scopes) {
+      const states = tokens.map((t) => scope.byRole.get(t));
+      // A grant under EITHER spelling wins within the scope (`buildScope` lets a
+      // grant stick over a deny of the same principal), so it ends the walk
+      // whether or not the other spelling denies here.
+      if (states.includes('grant')) break;
+      // Only a `deny <verb>` LINE is a source; a denial the scope implies from
+      // a prerequisite verb's line (`deny write` when asking about owner) is
+      // real but is not this verb's entry — the prerequisite's own report is
+      // where it can be lifted.
+      const written = tokens.some(
+        (t) => scope.byRole.get(t) === 'denied' && !scope.implied.byRole.has(t),
+      );
+      if (written) out.push(scopeToGrantSource(scope, kind, relativePath));
+    }
+    return out;
+  }
+
+  const email = canonicalEmail(principal.email);
+  for (const scope of scopes) {
+    const own = scope.byEmail.get(email);
+    if (own === 'grant') break;
+    if (own === 'denied' && !scope.implied.byEmail.has(email)) {
+      out.push(scopeToGrantSource(scope, kind, relativePath));
+    }
+  }
+  return out;
+}
+
+/**
+ * The model as it will be once `fromPath` has been moved or copied to
+ * `toPath`: every `access.md` the operation carries, keyed at the directory
+ * it lands in, since the rules a folder carries travel with its bytes.
+ *
+ * What travels is BYTES, and the name they land under decides what they
+ * govern — `landing` is the caller's answer to that (see
+ * `relocationSubject`), already parsed as the destination path:
+ *
+ * - a FOLDER takes every `access.md` at or under it, each re-keyed to the
+ *   directory it lands in, and `landing` plays no part;
+ * - a FILE governs a directory exactly when it lands as that directory's
+ *   `access.md`, whatever it was called before — a copy `copy_file` allows,
+ *   and one that governs the destination folder the moment it lands. Its key
+ *   is a PARENT directory, never a path under `fromPath`, which is why the
+ *   prefix walk above cannot see it.
+ *
+ * The emptied side is the mirror: an `access.md` that MOVES stops governing
+ * the directory it left, whether or not it governs anything where it lands.
+ *
+ * PREVIEW ONLY. Nothing here reads disk and nothing here decides whether an
+ * operation may run — the gates resolve against the model as it IS. This
+ * answers the other question, the one a dry run asks: what will be true
+ * afterwards. Judging the destination as it stands today is what made a
+ * rename warn about losing the owner access the folder's own `access.md` was
+ * about to hand straight back.
+ *
+ * `sourceRemains` is the difference between a copy and a move: a copy leaves
+ * the rules where they were, a move takes them away. It changes the answer
+ * only when the destination resolves through a directory the source
+ * occupied; nothing else consults those keys.
+ */
+function withRelocatedAccessFiles(
+  model: AccessModel,
+  fromPath: string,
+  toPath: string,
+  opts: { sourceRemains: boolean; sourceIsFolder: boolean; landing?: AccessFile | null },
+): AccessModel {
+  /** Directories the operation takes an `access.md` AWAY from. */
+  const emptied: string[] = [];
+  /** Directories it leaves one IN, with the file as it will be read there. */
+  const landing: { toDir: string; file: AccessFile }[] = [];
+  if (opts.sourceIsFolder) {
+    for (const [dir, file] of model.accessFilesByDir) {
+      if (dir !== fromPath && !dir.startsWith(`${fromPath}/`)) continue;
+      emptied.push(dir);
+      landing.push({ toDir: `${toPath}${dir.slice(fromPath.length)}`, file });
+    }
+  } else {
+    const fromDir = parentDirOf(fromPath);
+    if (isAccessMdPath(fromPath) && model.accessFilesByDir.has(fromDir)) emptied.push(fromDir);
+    if (opts.landing) landing.push({ toDir: parentDirOf(toPath), file: opts.landing });
+  }
+  if (emptied.length === 0 && landing.length === 0) return model;
+  const accessFilesByDir = new Map(model.accessFilesByDir);
+  if (!opts.sourceRemains) for (const dir of emptied) accessFilesByDir.delete(dir);
+  for (const { toDir, file } of landing) {
+    // A directory that already has an `access.md` keeps it. The operation
+    // would be refused for landing on something that exists long before the
+    // two files could meet, so the model must not invent a merge either.
+    if (accessFilesByDir.has(toDir)) continue;
+    accessFilesByDir.set(toDir, {
+      ...file,
+      dir: toDir,
+      path: toDir ? `${toDir}/access.md` : 'access.md',
+    });
+  }
+  return { ...model, accessFilesByDir };
+}
+
+/** The directory a repo-relative file path sits in; `''` for the repo root. */
+function parentDirOf(relativePath: string): string {
+  const cut = relativePath.lastIndexOf('/');
+  return cut === -1 ? '' : relativePath.slice(0, cut);
+}
+
+/** The first read of {@link frontmatterHead}; each later one doubles, up to the last. */
+const HEAD_FIRST_READ = 1_024;
+const HEAD_LAST_READ = 64 * 1_024;
+
+/**
+ * The start of `file` that holds everything its frontmatter can say: its
+ * first line when that is no fence (no frontmatter at all), the text through
+ * the closing fence when there is one, and the whole file when an opening
+ * fence is never closed. Scanned for its frontmatter (`scanFrontmatter`), it
+ * answers exactly as the whole file does, by the same fence rule
+ * (`isFrontmatterFence`) — and a file with no frontmatter costs one small
+ * read however long it is.
+ */
+async function frontmatterHead(file: string): Promise<string> {
+  const handle = await fs.open(file, 'r');
+  try {
+    const decoder = new StringDecoder('utf8');
+    // What was read, kept as it was decoded and joined once, when answered:
+    // each character is scanned once, however long a line runs.
+    const pieces: string[] = [];
+    let before = 0;
+    // The line being read so far, folded (see `foldLine`), or null once it
+    // can no longer be a fence.
+    let line: string | null = '';
+    let first = true;
+    let position = 0;
+    for (let size = HEAD_FIRST_READ; ; size = Math.min(size * 2, HEAD_LAST_READ)) {
+      const chunk = Buffer.allocUnsafe(size);
+      const { bytesRead } = await handle.read(chunk, 0, size, position);
+      if (bytesRead === 0) return pieces.join('') + decoder.end();
+      position += bytesRead;
+      const piece = decoder.write(chunk.subarray(0, bytesRead));
+      pieces.push(piece);
+      let from = 0;
+      for (let nl = piece.indexOf('\n'); nl !== -1; nl = piece.indexOf('\n', from)) {
+        const fence = line !== null && isFrontmatterFence(foldLine(line, piece.slice(from, nl)));
+        // The first line opens a block or there is none; after it, the first
+        // fence closes the block.
+        if (first ? !fence : fence) return pieces.join('').slice(0, before + nl);
+        first = false;
+        line = '';
+        from = nl + 1;
+      }
+      if (line !== null) {
+        line = foldLine(line, piece.slice(from));
+        if (!'---'.startsWith(line.trim())) line = null;
+      }
+      // A first line still unfinished that already cannot be a fence.
+      if (first && line === null) return pieces.join('');
+      before += piece.length;
+    }
+  } finally {
+    await handle.close();
+  }
+}
+
+/**
+ * `line` continued by `more`, every run of whitespace folded to one space.
+ * Trimmed, it is `---` exactly when the unfolded line is, so it judges a fence
+ * as `isFrontmatterFence` does while staying a few characters long.
+ */
+function foldLine(line: string, more: string): string {
+  return `${line}${more}`.replace(/\s+/g, ' ');
+}
+
+/**
+ * One file's own-entries, parsed as the path `asName` would be read.
+ *
+ * The same frontmatter means two different things by name: in an `access.md`
+ * it is the FOLDER's rules (and the file governs itself only through the
+ * body format — see {@link accessMdSelfEntries}), and anywhere else it is the
+ * file's own. Which is why a preview must read the bytes as the name they
+ * LAND under, not the one they are leaving.
+ */
+function ownEntriesFromText(text: string, asName: string): OwnEntries | null {
+  return isAccessMdPath(asName) ? accessMdSelfEntries(text) : parseOwnAccessEntries(text);
 }
 
 /**
@@ -1014,20 +1205,19 @@ function canEveryoneReadResolved(
   relativePath: string,
   fileOwn?: OwnEntries | null,
 ): boolean {
-  const { byRole, byEmail } = resolveAtPath(model, 'read', relativePath, fileOwn);
+  const { byEmail, everyone } = resolveAtPath(model, 'read', relativePath, fileOwn);
   // Baseline: an unnamed signed-in user (no email/role entries) reads only via
   // `everyone`. As a single principal, its collapsed verdict is its closest —
   // exactly what that user resolves to.
-  if (byRole.get(EVERYONE_CANONICAL) !== 'grant') return false;
+  if (everyone !== 'grant') return false;
   // Every *named* principal must also still read. A collapsed deny may have
   // been shadowed by a closer-scope `everyone` grant, so re-resolve each
   // candidate through the closeness-first gate rather than trusting the
-  // collapsed deny state. (Role members live in roles.yaml; inline-named users
-  // come from `byEmail`.)
-  const candidates = new Set<string>();
-  for (const email of model.roles.byEmail.keys()) candidates.add(email);
-  for (const email of byEmail.keys()) candidates.add(email);
-  for (const email of candidates) {
+  // collapsed deny state. The candidates are the same set the eligible-email
+  // lists enumerate — roles.yaml members, inline-named users, and the
+  // deployment owner, whom a `deny Admin` carves out like any member of the
+  // role whether or not roles.yaml names them.
+  for (const email of namedCandidateEmails(model, byEmail)) {
     if (!hasPermissionResolved(model, 'read', email, relativePath, fileOwn)) return false;
   }
   return true;
@@ -1038,11 +1228,14 @@ function canEveryoneReadResolved(
  *
  * Read is default-deny: a path is readable only when resolution grants the
  * caller `read` directly, via one of their roles, via the built-in `everyone`
- * role, or via `owner:` (owners implicitly read).
+ * role, or via `write:`/`owner:` (both imply read).
  *
- * No admin rescue (mirrors `download`): admins read a node only if an
- * `access.md` lists them — directly, via a role, through `everyone`, or as an
- * owner.
+ * No admin rescue on root files (that is write's), but the Admin floor
+ * holds: an admin — a member of the role or the deployment owner — reads
+ * wherever no nearer scope excludes Admin, whether or not the root names it,
+ * because the floor gives them write there and write implies read. A
+ * subfolder that denies Admin, or everyone, takes the read away as it does
+ * for any principal.
  */
 function canReadResolved(
   model: AccessModel,
@@ -1053,20 +1246,80 @@ function canReadResolved(
   return hasPermissionResolved(model, 'read', userEmail, relativePath, fileOwn);
 }
 
+/**
+ * The key set someone holding exactly the principal behind `token` carries —
+ * the question "would a member of this principal be allowed?" put to
+ * `hasPermissionForKeys`. A group gets its full member key set
+ * (`principalKeysOfGroup`); a role or plugin principal gets every key its
+ * record is registered under (the bare name and the `role/` alias share one
+ * record) plus the plugin principals expanded from those keys; a token with no
+ * record (`everyone`, a vanished principal) is just itself. Public keys are
+ * always included — every caller holds them.
+ */
+function principalKeysOfToken(model: AccessModel, token: string): Set<string> {
+  const record = model.roles.byCanonical.get(token);
+  if (record?.kind === 'group') return principalKeysOfGroup(model, token) ?? new Set([token]);
+  const keys = new Set<string>([token]);
+  if (!record) {
+    for (const key of model.roles.publicKeys ?? []) keys.add(key);
+    return keys;
+  }
+  for (const [key, principal] of model.roles.byCanonical) {
+    if (principal === record) keys.add(key);
+  }
+  return addDerivedKeys(model, keys);
+}
+
 function eligibleHoldersResolved(
   model: AccessModel,
   verb: Verb,
   relativePath: string,
   fileOwn?: OwnEntries | null,
-): { roles: string[]; users: { name: string; email: string }[] } {
-  const { byRole, byEmail } = resolveAtPath(model, verb, relativePath, fileOwn);
+): { principals: ResolvedPrincipal[]; roles: string[]; users: { name: string; email: string }[] } {
+  const { byRole, byEmail, everyone } = resolveAtPath(model, verb, relativePath, fileOwn);
 
-  const roleSet = new Set<string>();
+  // (kind, display name) → one entry. The `byRole` keys are the merged
+  // index's canonical tokens exactly as granted (bare, or the
+  // `role/` or `group/` alias); the `byCanonical` record a key hits carries
+  // its kind — a `role/` alias always hits the role record, a `group/` alias
+  // the group record, a bare key the role when one exists, else the group. A
+  // token with no record (the built-in `everyone`, or a grant naming a
+  // since-vanished principal) degrades to 'role', the pre-groups display.
+  // When one display name is granted as BOTH (the role plus a same-named
+  // group via `group/`) BOTH entries survive — they are DIFFERENT
+  // principals, and collapsing them to one would hide one of the grants from
+  // every consumer of the eligible list.
+  const byIdentity = new Map<string, ResolvedPrincipal>();
+  const addPrincipal = (name: string, kind: ResolvedPrincipal['kind']) => {
+    const key = `${kind}\0${name.toLowerCase()}`;
+    if (!byIdentity.has(key)) byIdentity.set(key, { name, kind });
+  };
+  // Every row is re-checked against the resolver. The collapsed view keeps a
+  // principal's closest OWN verdict, but a nearer scope can still decide for
+  // them without naming them — a `deny everyone` in a subfolder cuts off a
+  // root `write: Admin` — and a list that named them anyway would tell the
+  // dialog and the denial message that someone is eligible whom the gate then
+  // refuses.
+  const allowedFor = (keys: ReadonlySet<string>) =>
+    hasPermissionForKeys(model, verb, keys, relativePath, fileOwn);
   for (const [canonical, state] of byRole) {
     if (state !== 'grant') continue;
-    const role = model.roles.byCanonical.get(canonical);
-    roleSet.add(role ? role.displayName : canonical);
+    if (!allowedFor(principalKeysOfToken(model, canonical))) continue;
+    const record = model.roles.byCanonical.get(canonical);
+    addPrincipal(record ? record.displayName : canonical, record?.kind ?? 'role');
   }
+  // The Admin floor (see `hasPermissionResolved`): Admin holds write, and the
+  // read it implies, here whenever no nearer scope excludes it, whether or not
+  // any file names it.
+  if (holdsAdminFloor(verb) && model.roles.byCanonical.has(ADMIN_ROLE_KEY)) {
+    const adminRole = model.roles.byCanonical.get(ADMIN_ROLE_KEY)!;
+    if (allowedFor(principalKeysOfToken(model, ADMIN_ROLE_KEY))) addPrincipal(adminRole.displayName, 'role');
+  }
+  // The derived everyone verdict: a public plugin principal granted here
+  // means anyone signed in holds the verb, and a list that counts holders (an
+  // approval gate, a "restricted to" banner) must say so — as `everyone`, the
+  // same row a literal grant produces.
+  if (everyone === 'grant' && allowedFor(NO_KEYS)) addPrincipal(EVERYONE_CANONICAL, 'role');
 
   // Mirror the admin overrides applied in `hasPermissionResolved`: write on
   // `roles.yaml` and on any `access.md` is granted to Admin even if the
@@ -1077,20 +1330,106 @@ function eligibleHoldersResolved(
     verb === 'write' &&
     (relativePath === 'roles.yaml' || isAccessMdPath(relativePath))
   ) {
-    const adminRole = model.roles.byCanonical.get(ADMIN_CANONICAL);
-    roleSet.add(adminRole ? adminRole.displayName : ADMIN_CANONICAL);
+    // Look the Admin ROLE up via its explicit alias, the key that is always
+    // the role's. The override is the ROLE's capability, so the row's kind is
+    // 'role' regardless.
+    const adminRole = model.roles.byCanonical.get(ADMIN_ROLE_KEY);
+    addPrincipal(adminRole ? adminRole.displayName : ADMIN_CANONICAL, 'role');
   }
 
-  const roles = [...roleSet].sort();
+  const principals: ResolvedPrincipal[] = [...byIdentity.values()].sort((a, b) =>
+    a.name < b.name ? -1 : a.name > b.name ? 1 : a.kind < b.kind ? -1 : a.kind > b.kind ? 1 : 0,
+  );
+  // Legacy name-only list, kind erased — kept for the many consumers that
+  // only ever render names (banners, contact lines, PR-routing messages).
+  // De-duplicated: a name granted as both group and role appears once here.
+  const roles = [...new Set(principals.map((p) => p.name))];
 
   const users: { name: string; email: string }[] = [];
   for (const [email, state] of byEmail) {
     if (state !== 'grant') continue;
+    if (!hasPermissionResolved(model, verb, email, relativePath, fileOwn)) continue;
     users.push({ name: '', email });
   }
   users.sort((a, b) => a.email.localeCompare(b.email));
 
-  return { roles, users };
+  return { principals, roles, users };
+}
+
+/** One side of a move: the access model, the path, and the rules the file carries there. */
+type MoveSide = { model: AccessModel; path: string; own: OwnEntries | null };
+
+/** The key set behind one entry of an eligible-holders list, read back from its name and kind. */
+function keysOfHolder(model: AccessModel, holder: ResolvedPrincipal): ReadonlySet<string> {
+  for (const [canonical, record] of model.roles.byCanonical) {
+    if (record.kind === holder.kind && record.displayName === holder.name) return principalKeysOfToken(model, canonical);
+  }
+  return principalKeysOfToken(model, canonicalRoleName(holder.name));
+}
+
+/**
+ * Who loses and who gains `verb` between the two sides of a move. The
+ * candidates are every principal and person a rule on either side names for
+ * the verb, as a grant or as a denial, and every holder either side lists;
+ * each is put to both sides' resolvers as the gates would put it. The holder
+ * lists alone are not enough: they name grants, so they miss a group still
+ * covered by `everyone`, and they cannot show someone whose only access was
+ * `everyone` and whom a rule on the far side denies by name.
+ */
+function holderChangesFor(verb: 'read' | 'write', here: MoveSide, there: MoveSide): HolderChanges {
+  const collectives = new Map<string, { holder: ResolvedPrincipal; keys: ReadonlySet<string> }>();
+  const people = new Set<string>();
+  const addCollective = (holder: ResolvedPrincipal, keys: ReadonlySet<string>) => {
+    const id = `${holder.kind}\0${holder.name.toLowerCase()}`;
+    if (!collectives.has(id)) collectives.set(id, { holder, keys });
+  };
+  for (const side of [here, there]) {
+    const held = eligibleHoldersResolved(side.model, verb, side.path, side.own);
+    for (const holder of held.principals) addCollective(holder, keysOfHolder(side.model, holder));
+    for (const user of held.users) people.add(user.email);
+    const { byRole, byEmail } = resolveAtPath(side.model, verb, side.path, side.own);
+    for (const token of byRole.keys()) {
+      const record = side.model.roles.byCanonical.get(token);
+      addCollective(
+        { name: record ? record.displayName : token, kind: record?.kind ?? 'role' },
+        principalKeysOfToken(side.model, token),
+      );
+    }
+    for (const email of byEmail.keys()) people.add(email);
+  }
+  const lose: HolderChange[] = [];
+  const gain: HolderChange[] = [];
+  const record = (had: boolean, has: boolean, change: HolderChange) => {
+    if (had && !has) lose.push(change);
+    if (!had && has) gain.push(change);
+  };
+  for (const { holder, keys } of collectives.values()) {
+    record(
+      hasPermissionForKeys(here.model, verb, keys, here.path, here.own),
+      hasPermissionForKeys(there.model, verb, keys, there.path, there.own),
+      { kind: holder.kind, name: holder.name, verb },
+    );
+  }
+  for (const email of [...people].sort()) {
+    record(
+      hasPermissionResolved(here.model, verb, email, here.path, here.own),
+      hasPermissionResolved(there.model, verb, email, there.path, there.own),
+      { kind: 'person', name: email, email, verb },
+    );
+  }
+  return { lose, gain };
+}
+
+/**
+ * Every individual the model names: `roles.yaml` members, emails named inline
+ * at this path's scope, and the deployment owner (bound by every rule that
+ * names Admin even when `roles.yaml` does not list them).
+ */
+function namedCandidateEmails(model: AccessModel, byEmail: CollapsedScope['byEmail']): Set<string> {
+  const candidates = new Set<string>(model.deploymentOwners);
+  for (const email of model.roles.byEmail.keys()) candidates.add(email);
+  for (const email of byEmail.keys()) candidates.add(email);
+  return candidates;
 }
 
 /**
@@ -1118,10 +1457,10 @@ function eligibleHolderEmailsResolved(
   // in an access.md entry at this path's scope (whether granted or denied —
   // `hasPermissionResolved` filters denials out below). The built-in
   // `everyone` role can grant arbitrary signed-in users, but this finite
-  // expansion can only return emails the access tree explicitly names.
-  const candidates = new Set<string>();
-  for (const email of model.roles.byEmail.keys()) candidates.add(email);
-  for (const email of byEmail.keys()) candidates.add(email);
+  // expansion can only return emails the access tree explicitly names. The
+  // deployment owner is a candidate too: the Admin write floor admits them
+  // whether or not `roles.yaml` lists them.
+  const candidates = namedCandidateEmails(model, byEmail);
 
   for (const email of candidates) {
     if (hasPermissionResolved(model, verb, email, relativePath, fileOwn)) {
@@ -1148,9 +1487,7 @@ function ineligibleNamedEmailsResolved(
   fileOwn?: OwnEntries | null,
 ): Set<string> {
   const { byEmail } = resolveAtPath(model, verb, relativePath, fileOwn);
-  const candidates = new Set<string>();
-  for (const email of model.roles.byEmail.keys()) candidates.add(email);
-  for (const email of byEmail.keys()) candidates.add(email);
+  const candidates = namedCandidateEmails(model, byEmail);
 
   const out = new Set<string>();
   for (const email of candidates) {
@@ -1162,6 +1499,25 @@ function ineligibleNamedEmailsResolved(
 // ---------------------------------------------------------------------------
 // Service
 // ---------------------------------------------------------------------------
+
+/**
+ * An access model read at a git ref. `resolvedRef` is the COMMIT the model
+ * was built from (not the ref name that led there), so the per-file
+ * own-entries reads that follow a gate resolve against exactly that tree.
+ */
+/**
+ * A model built at a commit, with the commit it was built at and, when the
+ * tree is not too large to hold, every path the commit carries: what the
+ * own-entries reads need to tell a path that is absent at the commit (a
+ * fact, remembered) from a blob the batch could not read (never remembered).
+ */
+type AtRefModel = { model: AccessModel; resolvedRef: string; tree: ReadonlySet<string> | null };
+/**
+ * One build's outcome: a model, no roles.yaml at the commit, or one that
+ * doesn't parse. A git read failure is none of these: it throws
+ * AccessUnreadableError out of the build instead.
+ */
+type AtRefBuild = AtRefModel | 'no-roles' | 'malformed';
 
 export class AccessControlService implements IAccessControl {
   /**
@@ -1192,6 +1548,59 @@ export class AccessControlService implements IAccessControl {
   private static readonly OWN_ENTRIES_TTL_MS = 5 * 60_000;
 
   /**
+   * At-ref models keyed by workspace + the COMMIT the ref resolved to. The
+   * tree at a commit is immutable, so an entry can never go stale: a push
+   * that moves `origin/<base>` resolves to a new commit and simply misses.
+   * No TTL, and `invalidate()` leaves it alone, for the same reason.
+   *
+   * This is what makes the change-request gates affordable. One detail read
+   * plus one approval click runs six at-ref gates, and before this cache
+   * every one of them rebuilt the model from git. A build is two git calls
+   * (`buildModelAtCommit`: one `ls-tree`, one `cat-file --batch` for every
+   * file the model reads), and each call forks the server process, which
+   * costs tens of milliseconds on a server holding a large heap.
+   *
+   * Bounded FIFO. The bound is sized for a listing that resolves access at
+   * every open change request's two refs: one commit per open request plus
+   * the targets, and a knowledge base with a hundred open requests was
+   * evicting in a cycle under the old bound of 64, rebuilding every model on
+   * every listing — thousands of forks, minutes of the main thread, and
+   * every other request waiting behind them. A commit's tree never changes,
+   * so a model is good for as long as it is held; the bound only caps memory.
+   *
+   * A commit with no roles.yaml is remembered too (`atRefNoRoles`): the batch
+   * read answers "missing" for it from git itself, which is as final as the
+   * commit. What is never cached is a build that saw a git read FAIL: it
+   * throws AccessUnreadableError and the gate fails closed for that call, and
+   * pinning that to a commit would turn one hiccup into a wrong verdict until
+   * the branch moved. Concurrent misses on the same commit share one build
+   * via `atRefInFlight`.
+   */
+  private readonly atRefCache = new Map<string, AtRefModel>();
+  private readonly atRefNoRoles = new Set<string>();
+  private readonly atRefInFlight = new Map<string, Promise<AtRefBuild>>();
+  private static readonly AT_REF_CACHE_MAX = 512;
+
+  /**
+   * A path's own access entries AT A COMMIT, keyed by commit + path. A blob
+   * at a commit never changes, so neither does what it declares for itself:
+   * no TTL, no invalidation, and no workspace in the key (every clone holds
+   * the same objects). This is the read every at-ref gate makes after the
+   * model: one `cat-file --batch` per call for the paths asked, which a
+   * change-request listing made once per ref per listing for the same paths
+   * at the same commits. Bounded FIFO; the bound only caps memory.
+   */
+  private readonly ownEntriesAtCommit = new Map<string, OwnEntries | null>();
+  private static readonly OWN_ENTRIES_AT_COMMIT_MAX = 16_384;
+  /** Paths a cached model keeps of its commit's tree, at most; a larger tree is not kept. */
+  private static readonly TREE_INDEX_MAX_PATHS = 20_000;
+  /** Paths held across every cached model's tree, at most; past it the oldest models let their tree go. */
+  private static readonly TREE_INDEX_BUDGET = 500_000;
+  private readonly treeIndexMaxPaths: number;
+  private readonly treeIndexBudget: number;
+  private treePathsHeld = 0;
+
+  /**
    * Canonicalised deployment-owner emails (see `AccessModel.deploymentOwners`).
    * Held on the service rather than read per-model because it comes from the
    * environment, not from the knowledge base.
@@ -1201,6 +1610,7 @@ export class AccessControlService implements IAccessControl {
   constructor(
     private readonly workspaceService: WorkspaceService,
     private readonly kbDirName: string,
+    private readonly disk: ITreeWalker,
     /**
      * Emails that count as Admin for the two hardcoded `write` rescues,
      * whatever `roles.yaml` says — in practice `ADMIN_EMAIL`. Optional so the
@@ -1208,20 +1618,69 @@ export class AccessControlService implements IAccessControl {
      * current behaviour (no owner, roles.yaml is the only authority).
      */
     deploymentOwners: readonly string[] = [],
+    /**
+     * How git is run — see `shared/git.contract.ts`. The composition root
+     * passes the one runner; the default is the same runner on its default
+     * deadline, kept for the same reason as `deploymentOwners` above: a great
+     * many fixtures construct this service directly.
+     */
+    private readonly gitRunner: IGitRunner = new NodeGitRunner(),
+    /**
+     * The knowledge base's layout — which folder is the plugins root, what the
+     * platform files are called. Read per use, never captured: the roots are
+     * renameable from the setup screen. Defaulted for the same reason as
+     * `deploymentOwners`: the fixtures that construct this service directly
+     * run on the default layout.
+     */
+    private readonly kb: Pick<KbContext, 'layout'> = { layout: DEFAULT_KB_LAYOUT },
+    /**
+     * How much of the commits' trees the at-ref models may hold (see
+     * `TREE_INDEX_MAX_PATHS`, `TREE_INDEX_BUDGET`). The defaults are the
+     * deployment's; a suite lowers them to reach the bounds with a small
+     * repository.
+     */
+    limits: { treeIndexMaxPaths?: number; treeIndexBudget?: number } = {},
   ) {
     this.deploymentOwners = new Set(
       deploymentOwners.filter(Boolean).map((e) => canonicalEmail(e)),
     );
+    this.treeIndexMaxPaths = limits.treeIndexMaxPaths ?? AccessControlService.TREE_INDEX_MAX_PATHS;
+    this.treeIndexBudget = limits.treeIndexBudget ?? AccessControlService.TREE_INDEX_BUDGET;
   }
 
   /**
    * Drop a workspace's cached model + frontmatter memo. Call after operations
-   * that mutate the working tree — commit, push, pull, branch switch.
+   * that mutate the working tree — commit, push, pull, branch switch. The
+   * at-ref cache is untouched on purpose: its entries are keyed by commit,
+   * and nothing that happens in a working tree changes what a commit holds.
    */
   invalidate(workspaceId: string): void {
     this.cache.delete(workspaceId);
     this.ownEntriesCache.delete(workspaceId);
+    this.generation++;
   }
+
+  /**
+   * Bumped by every `invalidate()`, for any workspace. A model load reads the
+   * tree across many awaits, and an invalidation fires exactly when that tree
+   * changes underneath it: the load that started on the old tree would
+   * otherwise store its model AFTER the drop, and every read for the next TTL
+   * would resolve against a tree that is already gone. `loadModel` takes the
+   * generation before its first read and refuses to store a model fetched
+   * under an older one — the caller that started it still gets its answer,
+   * as old as the moment it started, and the next caller reloads.
+   *
+   * ONE counter, not one per workspace: a per-workspace map would keep an
+   * entry for every branch workspace the process ever loaded, with nothing to
+   * tell it when a workspace is gone. The price of sharing is that a drop on
+   * some other workspace, landing mid-load, costs this one a single reload —
+   * a load is tens of milliseconds and a drop is a commit, so that is rare
+   * and cheap, and it never stores a wrong model. (The own-entries memo needs
+   * no token: it is keyed by the map object a reader took BEFORE its disk
+   * read, and `invalidate()` replaces the map, so a late store lands in an
+   * orphan nobody consults.)
+   */
+  private generation = 0;
 
   /** Memoized `readOwnEntries` for the batch paths; see `ownEntriesCache`. */
   private async cachedOwnEntries(
@@ -1254,35 +1713,13 @@ export class AccessControlService implements IAccessControl {
     return parsed.ok ? { ok: true } : { ok: false, errors: parsed.errors };
   }
 
-  /**
-   * Advisory scan of folder `access.md` files for references to a role (by
-   * canonical name). See `IAccessControl.referencesToRole` — undercounts node
-   * frontmatter by design; powers the delete warning only, never the rename
-   * gate.
-   */
-  async referencesToRole(
-    workspaceId: string,
-    canonicalRole: string,
-  ): Promise<{ path: string; verb: string }[]> {
-    const model = await this.loadModel(workspaceId);
-    const out: { path: string; verb: string }[] = [];
-    for (const file of model.accessFilesByDir.values()) {
-      for (const verb of KNOWN_VERBS) {
-        for (const entry of file.entries[verb]) {
-          if (entry.kind === 'role' && entry.role === canonicalRole) {
-            out.push({ path: file.path, verb });
-          }
-        }
-      }
-    }
-    return out;
-  }
-
   async canWrite(
     workspaceId: string,
     userEmail: string,
     relativePath: string,
   ): Promise<boolean> {
+    const machineOwned = this.machineOwnedWriteRule(userEmail, relativePath);
+    if (machineOwned !== null) return machineOwned;
     const model = await this.loadModel(workspaceId);
     const own = await this.readOwnEntries(await this.repoDir(workspaceId), relativePath);
     return hasPermissionResolved(model, 'write', userEmail, relativePath, own);
@@ -1316,6 +1753,60 @@ export class AccessControlService implements IAccessControl {
     return result;
   }
 
+  async canReadAsGroupBatch(
+    workspaceId: string,
+    group: string,
+    relativePaths: string[],
+  ): Promise<Map<string, boolean> | null> {
+    const model = await this.loadModel(workspaceId);
+    const keys = principalKeysOfGroup(model, group);
+    if (keys === null) return null;
+    const repoDir = await this.repoDir(workspaceId);
+    // The same per-path own-entries `canReadBatch` folds in: a file's own
+    // frontmatter rules are part of the walk for a group as for a person.
+    const owns = await Promise.all(relativePaths.map((p) => this.cachedOwnEntries(workspaceId, repoDir, p)));
+    const result = new Map<string, boolean>();
+    relativePaths.forEach((p, i) => {
+      result.set(p, hasPermissionForKeys(model, 'read', keys, p, owns[i]));
+    });
+    return result;
+  }
+
+  async canReadAsEveryoneBatch(workspaceId: string, relativePaths: string[]): Promise<Map<string, boolean>> {
+    const model = await this.loadModel(workspaceId);
+    const repoDir = await this.repoDir(workspaceId);
+    const owns = await Promise.all(relativePaths.map((p) => this.cachedOwnEntries(workspaceId, repoDir, p)));
+    const result = new Map<string, boolean>();
+    relativePaths.forEach((p, i) => {
+      // No keys at all: the walk then falls through to each scope's derived
+      // `everyone` verdict — the built-in entry, or a public plugin's grant
+      // or denial, whichever the scope builder settled on — which is exactly
+      // what a caller holding nothing of their own resolves to.
+      result.set(p, hasPermissionForKeys(model, 'read', NO_KEYS, p, owns[i]));
+    });
+    return result;
+  }
+
+  async groupsOfUser(workspaceId: string, userEmail: string): Promise<string[]> {
+    const model = await this.loadModel(workspaceId);
+    const email = canonicalEmail(userEmail);
+    const names: string[] = [];
+    // Each group once, through its `group/` alias (the bare key, when the
+    // group owns it, is the same record).
+    for (const [key, principal] of model.roles.byCanonical) {
+      if (!key.startsWith(GROUP_TOKEN_PREFIX)) continue;
+      if (principal.kind === 'group' && principal.emails.has(email)) names.push(principal.displayName);
+    }
+    return names;
+  }
+
+  async visibleGroups(workspaceId: string, userEmail: string, groups: readonly string[]): Promise<string[]> {
+    if (groups.length === 0) return [];
+    if (await this.holdsAdminRootWrite(workspaceId, userEmail)) return [...groups];
+    const mine = new Set(await this.groupsOfUser(workspaceId, userEmail));
+    return groups.filter((g) => mine.has(g));
+  }
+
   async canWriteBatch(
     workspaceId: string,
     userEmail: string,
@@ -1327,7 +1818,8 @@ export class AccessControlService implements IAccessControl {
     const owns = await Promise.all(relativePaths.map((p) => this.cachedOwnEntries(workspaceId, repoDir, p)));
     const result = new Map<string, boolean>();
     relativePaths.forEach((p, i) => {
-      result.set(p, hasPermissionResolved(model, 'write', userEmail, p, owns[i]));
+      const machineOwned = this.machineOwnedWriteRule(userEmail, p);
+      result.set(p, machineOwned ?? hasPermissionResolved(model, 'write', userEmail, p, owns[i]));
     });
     return result;
   }
@@ -1340,6 +1832,22 @@ export class AccessControlService implements IAccessControl {
     const model = await this.loadModel(workspaceId);
     const own = await this.readOwnEntries(await this.repoDir(workspaceId), relativePath);
     return hasPermissionResolved(model, 'download', userEmail, relativePath, own);
+  }
+
+  async canDownloadBatch(
+    workspaceId: string,
+    userEmail: string,
+    relativePaths: string[],
+  ): Promise<Map<string, boolean>> {
+    const model = await this.loadModel(workspaceId);
+    const repoDir = await this.repoDir(workspaceId);
+    // Parallel own-entries reads, memoized — same shape as `canWriteBatch`.
+    const owns = await Promise.all(relativePaths.map((p) => this.cachedOwnEntries(workspaceId, repoDir, p)));
+    const result = new Map<string, boolean>();
+    relativePaths.forEach((p, i) => {
+      result.set(p, hasPermissionResolved(model, 'download', userEmail, p, owns[i]));
+    });
+    return result;
   }
 
   async canOwnerBatch(
@@ -1371,7 +1879,11 @@ export class AccessControlService implements IAccessControl {
   async eligibleOwners(
     workspaceId: string,
     relativePath: string,
-  ): Promise<{ roles: string[]; users: { name: string; email: string }[] }> {
+  ): Promise<{
+    principals: ResolvedPrincipal[];
+    roles: string[];
+    users: { name: string; email: string }[];
+  }> {
     const model = await this.loadModel(workspaceId);
     const own = await this.readOwnEntries(await this.repoDir(workspaceId), relativePath);
     return eligibleHoldersResolved(model, 'owner', relativePath, own);
@@ -1380,7 +1892,11 @@ export class AccessControlService implements IAccessControl {
   async eligibleWriters(
     workspaceId: string,
     relativePath: string,
-  ): Promise<{ roles: string[]; users: { name: string; email: string }[] }> {
+  ): Promise<{
+    principals: ResolvedPrincipal[];
+    roles: string[];
+    users: { name: string; email: string }[];
+  }> {
     const model = await this.loadModel(workspaceId);
     const own = await this.readOwnEntries(await this.repoDir(workspaceId), relativePath);
     return eligibleHoldersResolved(model, 'write', relativePath, own);
@@ -1389,26 +1905,162 @@ export class AccessControlService implements IAccessControl {
   async eligibleReaders(
     workspaceId: string,
     relativePath: string,
-  ): Promise<{ restricted: boolean; roles: string[]; users: { name: string; email: string }[] }> {
+  ): Promise<{
+    restricted: boolean;
+    principals: ResolvedPrincipal[];
+    roles: string[];
+    users: { name: string; email: string }[];
+    publicVia: string[];
+  }> {
     const model = await this.loadModel(workspaceId);
     const own = await this.readOwnEntries(await this.repoDir(workspaceId), relativePath);
-    // When `read: everyone` applies cleanly, the node is readable by all users
-    // and the role/user lists are meaningless. Otherwise return the explicit
-    // reader set; it may be empty for a default-denied path with no grants.
-    if (canEveryoneReadResolved(model, relativePath, own)) {
-      return { restricted: false, roles: [], users: [] };
-    }
-    const { roles, users } = eligibleHoldersResolved(model, 'read', relativePath, own);
-    return { restricted: true, roles, users };
+    // `restricted` is the verdict — whether `read: everyone` applies cleanly —
+    // and the lists are the GRANTS that exist regardless: on a public node
+    // they name what makes it public (`everyone`, and a public plugin
+    // principal whose grant is the one to remove), so the share dialog can
+    // show that grant as a row. Consumers that only want to know whether the
+    // node is public read the flag; the lists may be empty for a
+    // default-denied path with no grants.
+    const { principals, roles, users } = eligibleHoldersResolved(model, 'read', relativePath, own);
+    // WHY it is public, when it is: the public plugin principals granted read
+    // here — the one thing the dialog cannot tell from the lists alone (a
+    // plugin principal in them may or may not be public), so the resolver,
+    // which knows, says it. A literal `everyone` line shows up as a source
+    // of the `everyone` row instead; together the two answer "what remains
+    // public after this grant is removed".
+    const collapsed = resolveAtPath(model, 'read', relativePath, own);
+    const publicVia = [...collapsed.byRole]
+      .filter(([key, state]) => state === 'grant' && model.roles.publicKeys?.has(key))
+      .map(([key]) => key)
+      .sort();
+    return { restricted: !canEveryoneReadResolved(model, relativePath, own), principals, roles, users, publicVia };
   }
 
   async eligibleDownloaders(
     workspaceId: string,
     relativePath: string,
-  ): Promise<{ roles: string[]; users: { name: string; email: string }[] }> {
+  ): Promise<{
+    principals: ResolvedPrincipal[];
+    roles: string[];
+    users: { name: string; email: string }[];
+  }> {
     const model = await this.loadModel(workspaceId);
     const own = await this.readOwnEntries(await this.repoDir(workspaceId), relativePath);
     return eligibleHoldersResolved(model, 'download', relativePath, own);
+  }
+
+  /**
+   * The read and write holders of one file or folder at its current path and
+   * at a path it has not moved to yet (see the interface).
+   *
+   * A move changes nothing about what the thing itself carries — a file's
+   * frontmatter and a folder's `access.md` files travel with the bytes — and
+   * everything about the folder chain above it. So the hypothetical side is
+   * the ordinary resolution at the destination path, over what travels:
+   *
+   * - a FILE's own-entries, read from the SOURCE (nothing sits at the
+   *   destination to read) and parsed as the name they LAND under, layered
+   *   over the destination's ancestors — the two sides can differ, because
+   *   the same frontmatter is a folder's rules in an `access.md` and the
+   *   file's own anywhere else;
+   * - a FOLDER's `access.md` files, keyed at the directories they land in,
+   *   and a file landing as a directory's `access.md` at the directory it
+   *   lands in (`withRelocatedAccessFiles`). A folder has no frontmatter of
+   *   its own, so it passes none.
+   *
+   * One model load and one file read serve all four lookups.
+   */
+  async prospectiveHolders(
+    workspaceId: string,
+    fromPath: string,
+    toPath: string,
+  ): Promise<ProspectiveHolders> {
+    const model = await this.loadModel(workspaceId);
+    const repoDir = await this.repoDir(workspaceId);
+    const { isFolder, ownHere, ownThere, landing } =
+      await this.relocationSubject(repoDir, fromPath, toPath);
+    const after = withRelocatedAccessFiles(model, fromPath, toPath, {
+      sourceRemains: false,
+      sourceIsFolder: isFolder,
+      landing,
+    });
+    const holdersAt = (m: AccessModel, relativePath: string, own: OwnEntries | null): PathHolders => ({
+      read: eligibleHoldersResolved(m, 'read', relativePath, own),
+      write: eligibleHoldersResolved(m, 'write', relativePath, own),
+    });
+    return {
+      before: holdersAt(model, fromPath, ownHere),
+      after: holdersAt(after, toPath, ownThere),
+    };
+  }
+
+  /** Who loses and who gains `read` or `write` in a move (see the interface). */
+  async prospectiveHolderChanges(
+    workspaceId: string,
+    fromPath: string,
+    toPath: string,
+  ): Promise<HolderChanges> {
+    const model = await this.loadModel(workspaceId);
+    const repoDir = await this.repoDir(workspaceId);
+    const { isFolder, ownHere, ownThere, landing } =
+      await this.relocationSubject(repoDir, fromPath, toPath);
+    const here: MoveSide = { model, path: fromPath, own: ownHere };
+    const there: MoveSide = {
+      model: withRelocatedAccessFiles(model, fromPath, toPath, { sourceRemains: false, sourceIsFolder: isFolder, landing }),
+      path: toPath,
+      own: ownThere,
+    };
+    const lose: HolderChange[] = [];
+    const gain: HolderChange[] = [];
+    for (const verb of ['read', 'write'] as const) {
+      const changes = holderChangesFor(verb, here, there);
+      lose.push(...changes.lose);
+      gain.push(...changes.gain);
+    }
+    return { lose, gain };
+  }
+
+  /**
+   * The caller's own verbs at `toPath` as they will be once `fromPath` has
+   * been moved or copied there (see the interface).
+   *
+   * Identical to asking `canRead`/`canWrite`/`canDownload`/`canOwner` at
+   * `toPath` whenever nothing travels — an ordinary file with no rules of its
+   * own, or a folder with no `access.md` of its own — so the cases this was
+   * not written for answer exactly as they always did.
+   *
+   * What travels is what `prospectiveHolders` says travels, and for the same
+   * reason: the preview and the dialog's holder lists must not disagree about
+   * one move. A file's own-entries come from the SOURCE, where the bytes
+   * carrying them still are — asking the destination, which does not exist
+   * yet, always answered null and so dropped the frontmatter a rename hands
+   * straight back (requirement 6: what the caller has afterwards equals what
+   * the preview said) — and they are parsed as the name they LAND under,
+   * because that is the parse the gates will use a moment later.
+   */
+  async previewAccessAfterRelocation(
+    workspaceId: string,
+    userEmail: string,
+    fromPath: string,
+    toPath: string,
+    opts?: { sourceRemains?: boolean; sourceContent?: string },
+  ): Promise<PathVerbs> {
+    const repoDir = await this.repoDir(workspaceId);
+    const { isFolder, ownThere: own, landing } =
+      await this.relocationSubject(repoDir, fromPath, toPath, opts?.sourceContent);
+    const model = withRelocatedAccessFiles(
+      await this.loadModel(workspaceId),
+      fromPath,
+      toPath,
+      { sourceRemains: opts?.sourceRemains === true, sourceIsFolder: isFolder, landing },
+    );
+    const machineOwned = this.machineOwnedWriteRule(userEmail, toPath);
+    return {
+      read: canReadResolved(model, userEmail, toPath, own),
+      write: machineOwned ?? hasPermissionResolved(model, 'write', userEmail, toPath, own),
+      download: hasPermissionResolved(model, 'download', userEmail, toPath, own),
+      owner: hasPermissionResolved(model, 'owner', userEmail, toPath, own),
+    };
   }
 
   async eligibleWriterEmails(
@@ -1434,6 +2086,7 @@ export class AccessControlService implements IAccessControl {
     kind: AccessTargetKind,
     relativePath: string,
     principal: GrantPrincipal,
+    opts?: { tokenMatch?: 'exact' | 'name' },
   ): Promise<GrantSources> {
     const model = await this.loadModel(workspaceId);
     // A file target consults its own frontmatter as the most-specific scope; a
@@ -1445,29 +2098,164 @@ export class AccessControlService implements IAccessControl {
         : null;
     const out: GrantSources = {};
     for (const verb of KNOWN_VERBS) {
-      const sources = resolveGrantSourcesForVerb(model, verb, kind, relativePath, principal, own);
+      const sources = resolveGrantSourcesForVerb(
+        model,
+        verb,
+        kind,
+        relativePath,
+        principal,
+        own,
+        opts?.tokenMatch,
+      );
       if (sources.length > 0) out[verb] = sources;
     }
     return out;
   }
 
-  async kbPrincipals(
+  async denialSources(
     workspaceId: string,
-  ): Promise<{ plugins: string[]; people: { name: string; email: string }[] }> {
+    kind: AccessTargetKind,
+    relativePath: string,
+    principal: GrantPrincipal,
+    opts?: { tokenMatch?: 'exact' | 'name' },
+  ): Promise<DenialSources> {
+    const model = await this.loadModel(workspaceId);
+    // Same own-scope rule as `grantSources`: a file target consults its own
+    // frontmatter, a folder target's own access.md is already in the dir chain.
+    const own =
+      kind === 'file'
+        ? await this.readOwnEntries(await this.repoDir(workspaceId), relativePath)
+        : null;
+    const out: DenialSources = {};
+    for (const verb of KNOWN_VERBS) {
+      const sources = resolveDenialSourcesForVerb(
+        model,
+        verb,
+        kind,
+        relativePath,
+        principal,
+        own,
+        opts?.tokenMatch,
+      );
+      if (sources.length > 0) out[verb] = sources;
+    }
+    return out;
+  }
+
+  async locallyDeniedPrincipals(
+    workspaceId: string,
+    kind: AccessTargetKind,
+    relativePath: string,
+  ): Promise<{ principals: ResolvedPrincipal[]; users: { name: string; email: string }[] }> {
+    const model = await this.loadModel(workspaceId);
+    // The target's OWN entries, and only those — the one scope whose rules a
+    // restriction made here is written into. A folder's are its `access.md` in
+    // the dir model; a file node's are its own frontmatter.
+    const own: OwnEntries | null =
+      kind === 'folder'
+        ? (model.accessFilesByDir.get(relativePath)?.entries ?? null)
+        : await this.readOwnEntries(await this.repoDir(workspaceId), relativePath);
+    if (!own) return { principals: [], users: [] };
+
+    const byIdentity = new Map<string, ResolvedPrincipal>();
+    const byEmail = new Map<string, { name: string; email: string }>();
+    for (const verb of KNOWN_VERBS) {
+      for (const entry of own[verb] ?? []) {
+        // Grants are already reported by the eligible lists; only the denials
+        // are invisible there, and only they are this method's business.
+        if (!entry.deny) continue;
+        if (entry.kind === 'user') {
+          if (!byEmail.has(entry.email)) {
+            byEmail.set(entry.email, { name: entry.displayName, email: entry.email });
+          }
+          continue;
+        }
+        // A token naming a role nobody knows is not a rule: `loadModel` drops
+        // such entries from every `access.md`, and `resolveScopes` filters them
+        // out of a file's own frontmatter (the one scope it does not pre-filter)
+        // — so the resolver denies nothing, `denialSources` reports nothing, and
+        // a row here would claim a restriction the server does not enforce. Skip
+        // it on the same rule, so this list and the denial sources agree.
+        if (!roleKnown(model.roles, entry.role)) continue;
+        // Resolve the token's kind and display name through the SAME merged
+        // index the eligible lists use, so a denied group keys as `g:` and a
+        // denied role as `r:` — matching the row keys the view is built on. A
+        // KNOWN token with no record is a built-in (`everyone`, `admin` before
+        // roles.yaml names it), which displays as the role it is.
+        const record = model.roles.byCanonical.get(entry.role);
+        const name = record ? record.displayName : (entry.displayRole || entry.role);
+        const kindOf = record?.kind ?? 'role';
+        const key = `${kindOf}\0${name.toLowerCase()}`;
+        if (!byIdentity.has(key)) byIdentity.set(key, { name, kind: kindOf });
+      }
+    }
+    const principals = [...byIdentity.values()].sort((a, b) =>
+      a.name < b.name ? -1 : a.name > b.name ? 1 : a.kind < b.kind ? -1 : a.kind > b.kind ? 1 : 0,
+    );
+    const users = [...byEmail.values()].sort((a, b) => a.email.localeCompare(b.email));
+    return { principals, users };
+  }
+
+  async explainAccess(
+    workspaceId: string,
+    userEmail: string,
+    kind: AccessTargetKind,
+    relativePath: string,
+  ): Promise<Record<Verb, AccessDecision>> {
+    const model = await this.loadModel(workspaceId);
+    // The same own-entries read `canRead`/`canWrite`/… make, whatever the
+    // kind: a directory simply has none.
+    const own = await this.readOwnEntries(await this.repoDir(workspaceId), relativePath);
+    const out = {} as Record<Verb, AccessDecision>;
+    for (const verb of KNOWN_VERBS) {
+      const machineOwned = verb === 'write' ? this.machineOwnedWriteRule(userEmail, relativePath) : null;
+      out[verb] =
+        machineOwned !== null
+          ? { allowed: machineOwned, source: null, via: 'machine-owned', principal: null }
+          : explainDecision(model, decidePermissionResolved(model, verb, userEmail, relativePath, own), kind, relativePath);
+    }
+    return out;
+  }
+
+  async kbPrincipals(workspaceId: string): Promise<{
+    roles: string[];
+    groups: string[];
+    plugins: { name: string; folder: string }[];
+    people: { name: string; email: string }[];
+  }> {
     let model: AccessModel;
     try {
       model = await this.loadModel(workspaceId);
     } catch {
-      return { plugins: [], people: [] };
+      return { roles: [], groups: [], plugins: [], people: [] };
     }
-    // Plugins = the built-in `everyone` role plus every declared role's display
-    // name. `everyone` is surfaced so the share UI can grant public read; the
-    // grant route gates it to the `read` verb only (write/owner/download
-    // everyone stay a direct-access.md edit).
-    const plugins = [
-      EVERYONE_DISPLAY,
-      ...[...model.roles.byCanonical.values()].map((r) => r.displayName),
-    ];
+    // Roles = the built-in `everyone` role plus every declared role's display
+    // name — ROLE principals only, never groups. Each role is enumerated via
+    // its `role/<canonical>` alias key, which exists exactly once per role;
+    // each group likewise via its `group/<canonical>` alias (a group that
+    // owns its bare key is registered under both, as one record). `everyone`
+    // is surfaced so the share UI can grant public read; the grant route
+    // gates it to the `read` verb only (write/owner/download everyone stay a
+    // direct-access.md edit).
+    const roles = [EVERYONE_DISPLAY];
+    const groups: string[] = [];
+    // Plugins = the identities behind the synthesised `plugin/<name>/<verb>`
+    // principals, once each (three keys share a folder). Personal shelves are
+    // plugins to the resolver but not to a person picking a grantee — told
+    // apart by their FOLDER (the one structural rule), never by their name.
+    const plugins = new Map<string, string>();
+    for (const [key, principal] of model.roles.byCanonical) {
+      if (key.startsWith(ROLE_TOKEN_PREFIX)) roles.push(principal.displayName);
+      else if (key.startsWith(GROUP_TOKEN_PREFIX) && principal.kind === 'group') groups.push(principal.displayName);
+      else if (
+        principal.kind === 'plugin' &&
+        principal.pluginName &&
+        principal.pluginDir &&
+        !isPersonalPluginDir(principal.pluginDir, this.kb.layout)
+      ) {
+        plugins.set(principal.pluginName, principal.pluginDir);
+      }
+    }
     // People = roles.yaml member emails (name-less) ∪ access.md `Name <email>`
     // grants (named). The login-only users table is unioned in by the caller.
     const byEmail = new Map<string, string>(); // email -> display name ('' if unknown)
@@ -1487,7 +2275,14 @@ export class AccessControlService implements IAccessControl {
       name: name || email.split('@')[0],
       email,
     }));
-    return { plugins, people };
+    return {
+      roles,
+      groups,
+      plugins: [...plugins.entries()]
+        .map(([name, folder]) => ({ name, folder }))
+        .sort((a, b) => a.name.localeCompare(b.name)),
+      people,
+    };
   }
 
   async findEmailByHash(
@@ -1522,12 +2317,26 @@ export class AccessControlService implements IAccessControl {
       ...namesByEmail.keys(),
     ]);
     for (const email of candidates) {
-      if (sha256Email(email) === hash) {
+      if (hashEmail(email) === hash) {
         const displayName = namesByEmail.get(email) ?? email.split('@')[0];
         return { email, displayName };
       }
     }
     return null;
+  }
+
+  /**
+   * `synced-groups.yaml` is MACHINE-OWNED: regenerated wholesale from the
+   * directory mirror and committed by the directory-sync bot. The bot is its
+   * ONLY writer — role/grant resolution never applies to it. That cuts both
+   * ways: the bot needs no role to write it (it isn't in roles.yaml, and on a
+   * protected branch nothing else would make it eligible), and no HUMAN can
+   * hand-edit it through the app (an edit would be silently overwritten by
+   * the next provisioning push anyway).
+   */
+  private machineOwnedWriteRule(userEmail: string, relativePath: string): boolean | null {
+    if (relativePath !== SYNCED_GROUPS_YAML) return null;
+    return canonicalEmail(userEmail) === DIRECTORY_SYNC_BOT_EMAIL;
   }
 
   async canWriteAtRef(
@@ -1536,10 +2345,12 @@ export class AccessControlService implements IAccessControl {
     userEmail: string,
     relativePath: string,
   ): Promise<boolean | null> {
+    const machineOwned = this.machineOwnedWriteRule(userEmail, relativePath);
+    if (machineOwned !== null) return machineOwned;
     const loaded = await this.loadModelAtRef(workspaceId, ref);
     if (!loaded) return null;
     const repoDir = await this.repoDir(workspaceId);
-    const own = await this.readOwnEntriesAtRef(repoDir, loaded.resolvedRef, relativePath);
+    const own = await this.readOwnEntriesAtRef(repoDir, loaded.resolvedRef, relativePath, loaded.tree);
     return hasPermissionResolved(loaded.model, 'write', userEmail, relativePath, own);
   }
 
@@ -1552,7 +2363,7 @@ export class AccessControlService implements IAccessControl {
     const loaded = await this.loadModelAtRef(workspaceId, ref);
     if (!loaded) return null;
     const repoDir = await this.repoDir(workspaceId);
-    const own = await this.readOwnEntriesAtRef(repoDir, loaded.resolvedRef, relativePath);
+    const own = await this.readOwnEntriesAtRef(repoDir, loaded.resolvedRef, relativePath, loaded.tree);
     return canReadResolved(loaded.model, userEmail, relativePath, own);
   }
 
@@ -1562,15 +2373,48 @@ export class AccessControlService implements IAccessControl {
     userEmail: string,
     relativePaths: string[],
   ): Promise<Map<string, boolean> | null> {
+    // Machine-owned paths resolve without the model (see machineOwnedWriteRule)
+    // — matching canWriteAtRef, including on a repo with no rules at the ref.
+    const machineAnswers = new Map<string, boolean>();
+    for (const p of relativePaths) {
+      const machineOwned = this.machineOwnedWriteRule(userEmail, p);
+      if (machineOwned !== null) machineAnswers.set(p, machineOwned);
+    }
+    if (machineAnswers.size === relativePaths.length) return machineAnswers;
     const loaded = await this.loadModelAtRef(workspaceId, ref);
     if (!loaded) return null;
     const repoDir = await this.repoDir(workspaceId);
     // One `git cat-file --batch` for the whole path set — a per-path `git
     // show` spawn made CR owner-routing take minutes on large change sets.
-    const owns = await this.readOwnEntriesAtRefBatch(repoDir, loaded.resolvedRef, relativePaths);
+    const owns = await this.readOwnEntriesAtRefBatch(repoDir, loaded.resolvedRef, relativePaths, loaded.tree);
     const result = new Map<string, boolean>();
     for (const p of relativePaths) {
-      result.set(p, hasPermissionResolved(loaded.model, 'write', userEmail, p, owns.get(p) ?? null));
+      const machineOwned = machineAnswers.get(p);
+      result.set(
+        p,
+        machineOwned ?? hasPermissionResolved(loaded.model, 'write', userEmail, p, owns.get(p) ?? null),
+      );
+    }
+    return result;
+  }
+
+  async canReadBatchAtRef(
+    workspaceId: string,
+    ref: string,
+    userEmail: string,
+    relativePaths: string[],
+  ): Promise<Map<string, boolean> | null> {
+    // No shortcut for an empty path set: the null-semantics are the contract,
+    // so an unresolvable ref must answer null however many paths were asked
+    // about. Returning an empty map early would tell a caller the ref resolved.
+    const loaded = await this.loadModelAtRef(workspaceId, ref);
+    if (!loaded) return null;
+    const repoDir = await this.repoDir(workspaceId);
+    // One `git cat-file --batch` for the whole set — see canWriteBatchAtRef.
+    const owns = await this.readOwnEntriesAtRefBatch(repoDir, loaded.resolvedRef, relativePaths, loaded.tree);
+    const result = new Map<string, boolean>();
+    for (const p of relativePaths) {
+      result.set(p, canReadResolved(loaded.model, userEmail, p, owns.get(p) ?? null));
     }
     return result;
   }
@@ -1580,11 +2424,85 @@ export class AccessControlService implements IAccessControl {
     ref: string,
     relativePath: string,
   ): Promise<{ roles: string[]; users: { name: string; email: string }[] } | null> {
+    if (relativePath === SYNCED_GROUPS_YAML) {
+      // Machine-owned — see machineOwnedWriteRule.
+      return {
+        roles: [],
+        users: [{ name: DIRECTORY_SYNC_BOT_NAME, email: DIRECTORY_SYNC_BOT_EMAIL }],
+      };
+    }
     const loaded = await this.loadModelAtRef(workspaceId, ref);
     if (!loaded) return null;
     const repoDir = await this.repoDir(workspaceId);
-    const own = await this.readOwnEntriesAtRef(repoDir, loaded.resolvedRef, relativePath);
+    const own = await this.readOwnEntriesAtRef(repoDir, loaded.resolvedRef, relativePath, loaded.tree);
     return eligibleHoldersResolved(loaded.model, 'write', relativePath, own);
+  }
+
+  async holdsAdminRootWrite(workspaceId: string, userEmail: string): Promise<boolean> {
+    const model = await this.loadModel(workspaceId);
+    return isAdminEmail(model, canonicalEmail(userEmail));
+  }
+
+  async adminEmails(workspaceId: string): Promise<string[]> {
+    let model: AccessModel;
+    try {
+      model = await this.loadModel(workspaceId);
+    } catch (err) {
+      // As canRestorePlatformFile: with no model to ask, the deployment owners
+      // are the only admins left. A `roles.yaml` that does not parse is that
+      // by design; anything else (a clone being read, the disk) is said, so a
+      // list that names fewer admins than there are is diagnosable.
+      if (!(err instanceof AccessConfigError)) {
+        log.warn('the access model could not be loaded; the admins list names the deployment owners only:', { err });
+      }
+      return [...this.deploymentOwners];
+    }
+    const candidates = new Set<string>(model.deploymentOwners);
+    for (const email of model.roles.byEmail.keys()) candidates.add(email);
+    return [...candidates].filter((email) => isAdminEmail(model, email));
+  }
+
+  async canRestorePlatformFile(
+    workspaceId: string,
+    userEmail: string,
+    destinationRelativePath: string,
+  ): Promise<boolean> {
+    const target = platformRestoreDestination(destinationRelativePath, this.kb.layout);
+    if (target === null) return false;
+    const email = canonicalEmail(userEmail);
+
+    let admin: boolean;
+    try {
+      admin = isAdminEmail(await this.loadModel(workspaceId), email);
+    } catch {
+      // The repository this rescue exists for is exactly the one whose
+      // `roles.yaml` may be the file that went missing, and `loadModel`
+      // throws when it cannot be read. With no model to ask, the deployment
+      // owner is the only admin left — and they are the person who sets
+      // `ADMIN_EMAIL`, so admitting them concedes nothing they did not have.
+      admin = this.deploymentOwners.has(email);
+    }
+    if (!admin) return false;
+
+    // A restore puts back what is MISSING, so the place it lands must be
+    // empty. An `access.md` goes back only into a folder that has none —
+    // into a folder that already has one it would not be a restore but a rule
+    // change wearing a move's clothes, and the destination's own rules would
+    // be the thing it bypassed the write gate to overwrite. The same holds at
+    // the root: a move is a rename on disk, so landing `.bevelignore` on a
+    // root that already has one would silently replace it, and the repository
+    // was never missing that file to begin with.
+    const destination =
+      target.kind === 'root' ? target.name : path.join(target.dir, 'access.md');
+    const repoDir = await this.repoDir(workspaceId);
+    try {
+      await fs.stat(path.join(repoDir, destination));
+      return false;
+    } catch (err) {
+      if (isAbsence(err)) return true;
+      // Anything other than genuine absence is not an answer: fail closed.
+      return false;
+    }
   }
 
   async eligibleWritersForPathsAtRef(
@@ -1600,9 +2518,6 @@ export class AccessControlService implements IAccessControl {
       excludedEmails?: Set<string>;
     }
   > | null> {
-    const loaded = await this.loadModelAtRef(workspaceId, ref);
-    if (!loaded) return null;
-    const repoDir = await this.repoDir(workspaceId);
     const result = new Map<
       string,
       {
@@ -1612,9 +2527,30 @@ export class AccessControlService implements IAccessControl {
         excludedEmails?: Set<string>;
       }
     >();
-    // One `git cat-file --batch` for the whole path set — see canWriteBatchAtRef.
-    const owns = await this.readOwnEntriesAtRefBatch(repoDir, loaded.resolvedRef, relativePaths);
+    // Machine-owned paths resolve without the model — same answer
+    // eligibleWritersAtRef gives (including at a ref with no usable
+    // roles.yaml), so batched consumers (CR owner-routing, approval state)
+    // agree with the single-path surface.
     for (const p of relativePaths) {
+      if (p === SYNCED_GROUPS_YAML) {
+        result.set(p, {
+          roles: [],
+          users: [{ name: DIRECTORY_SYNC_BOT_NAME, email: DIRECTORY_SYNC_BOT_EMAIL }],
+          emails: new Set([DIRECTORY_SYNC_BOT_EMAIL]),
+        });
+      }
+    }
+    // Only short-circuit when there IS a machine-owned path covering the
+    // whole request: an EMPTY request must still answer null for an
+    // unresolvable ref, as documented.
+    if (relativePaths.length > 0 && result.size === relativePaths.length) return result;
+    const loaded = await this.loadModelAtRef(workspaceId, ref);
+    if (!loaded) return null;
+    const repoDir = await this.repoDir(workspaceId);
+    // One `git cat-file --batch` for the whole path set — see canWriteBatchAtRef.
+    const owns = await this.readOwnEntriesAtRefBatch(repoDir, loaded.resolvedRef, relativePaths, loaded.tree);
+    for (const p of relativePaths) {
+      if (result.has(p)) continue;
       const own = owns.get(p) ?? null;
       const display = eligibleHoldersResolved(loaded.model, 'write', p, own);
       const emails = new Set(eligibleHolderEmailsResolved(loaded.model, 'write', p, own).keys());
@@ -1633,6 +2569,8 @@ export class AccessControlService implements IAccessControl {
     if (cached && Date.now() - cached.loadedAt < AccessControlService.CACHE_TTL_MS) {
       return cached.model;
     }
+    // Taken before the first read; see `generation`.
+    const generation = this.generation;
 
     const repoDir = await this.repoDir(workspaceId);
 
@@ -1645,6 +2583,34 @@ export class AccessControlService implements IAccessControl {
 
     const rolesParsed = parseRolesYaml(rolesYaml);
     if (!rolesParsed.ok) throw new AccessConfigError(rolesParsed.errors);
+
+    // Groups — the other named-principal source. Loaded forgivingly (a broken
+    // group file degrades to "contributes nothing"; only roles.yaml problems
+    // may throw) and merged into the principal index, after which the resolver
+    // below needs no group awareness at all. The reader whitelists ONLY
+    // genuine absence (ENOENT/ENOTDIR → null, like synced-groups-committer);
+    // any other read error propagates so loadActiveGroups records a
+    // broken-groups marker instead of silently treating the file as missing.
+    const activeGroups = await loadActiveGroups(async (filename) => {
+      try {
+        return await fs.readFile(path.join(repoDir, filename), 'utf-8');
+      } catch (err) {
+        if (isAbsence(err)) return null;
+        throw err;
+      }
+    });
+    if (!activeGroups.health.ok) {
+      log.error(
+        `groups source ${activeGroups.health.file} is broken (${activeGroups.health.reason}) — groups contribute nothing until it is fixed`,
+      );
+    }
+    for (const w of activeGroups.warnings) log.warn(w);
+    const mergeWarnings = mergeGroupsIntoRoles(
+      rolesParsed.index,
+      activeGroups.groups,
+      activeGroups.sourceFile,
+    );
+    for (const w of mergeWarnings) log.warn(w);
 
     const accessFiles = new Map<string, AccessFile>();
 
@@ -1661,7 +2627,15 @@ export class AccessControlService implements IAccessControl {
     // must not 500 the entire editor; admins can still write `access.md`
     // / `roles.yaml` because `hasPermissionResolved` admin-rescues those
     // paths, so the bad config remains fixable from inside the app.
-    await this.collectAccessFiles(repoDir, '', accessFiles);
+    const pluginDirs = new Map<string, string>();
+    await this.disk.walkKb(repoDir, [accessFileListener(repoDir, this.kb.layout.pluginsDir, accessFiles, pluginDirs)]);
+
+    // Plugin principals (`plugin/<Name>/<verb>`), derived from each plugin
+    // folder's own access.md — a plugin being a folder with a manifest, at
+    // any depth — after groups merged (so their rosters expand through the
+    // finished index) and before the unknown-role sweep below (so a grant
+    // naming one counts as known).
+    synthesizePluginPrincipals(rolesParsed.index, accessFiles, pluginDirs);
 
     // Validate role refs against roles.yaml. `everyone` is a built-in role and
     // is valid without a roles.yaml entry. Unknown refs are dropped from the
@@ -1671,9 +2645,7 @@ export class AccessControlService implements IAccessControl {
       for (const verb of KNOWN_VERBS) {
         file.entries[verb] = file.entries[verb].filter((entry) => {
           if (entry.kind === 'role' && !roleKnown(rolesParsed.index, entry.role)) {
-            console.warn(
-              `[access] ${file.path}: '${verb}' references unknown role '${entry.displayRole}' — entry ignored`,
-            );
+            log.warn(`${file.path}: '${verb}' references unknown role '${entry.displayRole}' — entry ignored`);
             return false;
           }
           return true;
@@ -1684,52 +2656,15 @@ export class AccessControlService implements IAccessControl {
     const model: AccessModel = {
       roles: rolesParsed.index,
       accessFilesByDir: accessFiles,
+      groupsHealth: activeGroups.health,
       deploymentOwners: this.deploymentOwners,
     };
-    this.cache.set(workspaceId, { model, loadedAt: Date.now() });
+    // An invalidation landed mid-load: this model describes a tree that is
+    // already gone, so it is returned to this caller but never stored.
+    if (this.generation === generation) {
+      this.cache.set(workspaceId, { model, loadedAt: Date.now() });
+    }
     return model;
-  }
-
-  private async collectAccessFiles(
-    absDir: string,
-    relDir: string,
-    out: Map<string, AccessFile>,
-  ): Promise<void> {
-    let entries;
-    try {
-      entries = await fs.readdir(absDir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const entry of entries) {
-      // Skip VCS metadata + vendored deps. Hidden dirs (`.git`, `.vscode`,
-      // etc.) and `node_modules` can't host KB rules and are often huge —
-      // walking them would slow every cache miss without benefit.
-      if (entry.name.startsWith('.')) continue;
-      if (entry.name === 'node_modules') continue;
-      const abs = path.join(absDir, entry.name);
-      const rel = relDir ? `${relDir}/${entry.name}` : entry.name;
-      if (entry.isDirectory()) {
-        await this.collectAccessFiles(abs, rel, out);
-      } else if (entry.isFile() && entry.name === 'access.md') {
-        const text = await fs.readFile(abs, 'utf-8');
-        const parsed = parseAccessFile(text, rel);
-        if (!parsed.ok) {
-          // Treat as if the file didn't exist for resolution purposes.
-          // Admin-rescue on access.md paths still lets an admin fix it.
-          for (const e of parsed.errors) console.warn(`[access] ${e} — file ignored`);
-          continue;
-        }
-        for (const w of parsed.warnings) console.warn(`[access] ${w}`);
-        if (out.has(parsed.file.dir)) {
-          console.warn(
-            `[access] ${rel}: duplicate access.md for directory '${parsed.file.dir}' — keeping the first one seen`,
-          );
-          continue;
-        }
-        out.set(parsed.file.dir, parsed.file);
-      }
-    }
   }
 
   private async repoDir(workspaceId: string): Promise<string> {
@@ -1744,20 +2679,95 @@ export class AccessControlService implements IAccessControl {
    * in the new (body-governed) format, where its frontmatter is self-access —
    * see {@link accessMdSelfEntries}. A legacy `access.md` still yields null:
    * its frontmatter IS the folder rules the dir chain already applies.
+   *
+   * Any other file declares them in its frontmatter alone, so only as much of
+   * it is read as the frontmatter takes (see {@link frontmatterHead}): a batch
+   * over a tree of megabyte transcripts reads a line of each, not the tree.
    */
   private async readOwnEntries(
     repoDir: string,
     relativePath: string,
   ): Promise<OwnEntries | null> {
     if (relativePath === 'roles.yaml') return null;
+    const file = path.join(repoDir, relativePath);
     let text: string;
     try {
-      text = await fs.readFile(path.join(repoDir, relativePath), 'utf-8');
+      text = isAccessMdPath(relativePath) ? await fs.readFile(file, 'utf-8') : await frontmatterHead(file);
     } catch {
       return null;
     }
-    if (isAccessMdPath(relativePath)) return accessMdSelfEntries(text);
-    return parseOwnAccessEntries(text);
+    return ownEntriesFromText(text, relativePath);
+  }
+
+  /**
+   * What a move or a copy of `fromPath` to `toPath` CARRIES — the one disk
+   * read both preview surfaces need:
+   *
+   * - `isFolder`: the source is a folder, so the `access.md` files under it
+   *   travel, keyed at the directories they land in;
+   * - `ownHere` / `ownThere`: a file's own-entries as the SOURCE's name reads
+   *   them and as the DESTINATION's name will. They differ because the same
+   *   frontmatter means two things by name (see `ownEntriesFromText`), so
+   *   `Sales/access.md` copied to `Legal/rules-copy.md` arrives as an
+   *   ordinary file whose frontmatter is its own — reading it as the source's
+   *   name had the preview contradict the copy it was previewing;
+   * - `landing`: the folder rules the bytes WILL be, when they land under the
+   *   name `access.md`. Parsed as the destination path, so the directory it
+   *   governs is already the right one. An `access.md` that will not parse
+   *   travels as nothing, as the loader treats it.
+   *
+   * `lstat`, not `stat`: a SYMLINK is none of this. `move_file` refuses a
+   * symlink source outright, so a link to a directory must not be previewed
+   * as a folder taking access files along, and nothing is read THROUGH the
+   * link either — the link's target is not what would move.
+   *
+   * Only absence is an answer (see `isAbsence`): a probe that failed on
+   * permissions or I/O does not say "this is a file", and reading a folder as
+   * one would resolve it through frontmatter it does not have.
+   *
+   * `sourceContent` is the text of a source that is NO repository path — a
+   * file staged in the workspace's `tmp/` folder, which `copy_file` lands in
+   * the repository. Nothing is probed on disk for it: it is one file by the
+   * ref's own rule, and its text is read exactly as a repository file's is,
+   * so the copy previews the rules it carries in.
+   */
+  private async relocationSubject(
+    repoDir: string,
+    fromPath: string,
+    toPath: string,
+    sourceContent?: string,
+  ): Promise<{
+    isFolder: boolean;
+    ownHere: OwnEntries | null;
+    ownThere: OwnEntries | null;
+    landing: AccessFile | null;
+  }> {
+    const nothing = { isFolder: false, ownHere: null, ownThere: null, landing: null };
+    if (sourceContent === undefined) {
+      const fromStat = await fs.lstat(path.join(repoDir, fromPath)).catch((err: unknown) => {
+        if (isAbsence(err)) return null;
+        throw err;
+      });
+      if (fromStat?.isSymbolicLink() === true) return nothing;
+      if (fromStat?.isDirectory() === true) return { ...nothing, isFolder: true };
+    }
+    // `roles.yaml` carries no own-entries wherever it sits, exactly as
+    // `readOwnEntries` has it; a read that fails for any reason is no rules,
+    // which is what the gates would say about the same file.
+    if (fromPath === 'roles.yaml' || toPath === 'roles.yaml') return nothing;
+    let text: string;
+    try {
+      text = sourceContent ?? (await fs.readFile(path.join(repoDir, fromPath), 'utf-8'));
+    } catch {
+      return nothing;
+    }
+    const parsed = isAccessMdPath(toPath) ? parseAccessFile(text, toPath) : null;
+    return {
+      isFolder: false,
+      ownHere: ownEntriesFromText(text, fromPath),
+      ownThere: ownEntriesFromText(text, toPath),
+      landing: parsed?.ok === true ? parsed.file : null,
+    };
   }
 
   /**
@@ -1770,8 +2780,14 @@ export class AccessControlService implements IAccessControl {
     repoDir: string,
     ref: string,
     relativePath: string,
+    tree: ReadonlySet<string> | null = null,
   ): Promise<OwnEntries | null> {
     if (relativePath === 'roles.yaml') return null;
+    // At a commit (what every gate passes: `resolvedRef`), the batched read
+    // and its memo answer; a single `git show` stays for a symbolic ref.
+    if (isCommitSha(ref)) {
+      return (await this.readOwnEntriesAtRefBatch(repoDir, ref, [relativePath], tree)).get(relativePath) ?? null;
+    }
     const text = await this.showAtRef(repoDir, ref, relativePath);
     if (text === null) return null;
     if (isAccessMdPath(relativePath)) return accessMdSelfEntries(text);
@@ -1790,21 +2806,58 @@ export class AccessControlService implements IAccessControl {
     repoDir: string,
     ref: string,
     relativePaths: string[],
+    tree: ReadonlySet<string> | null = null,
   ): Promise<Map<string, OwnEntries | null>> {
     const result = new Map<string, OwnEntries | null>();
     const wanted: string[] = [];
+    const memo = isCommitSha(ref) ? this.ownEntriesAtCommit : null;
     for (const p of relativePaths) {
-      if (p === 'roles.yaml') result.set(p, null);
-      else if (!wanted.includes(p)) wanted.push(p);
+      if (p === 'roles.yaml') {
+        result.set(p, null);
+        continue;
+      }
+      const key = `${ref}\0${p}`;
+      if (memo?.has(key)) {
+        result.set(p, memo.get(key) ?? null);
+        continue;
+      }
+      // A path the commit's tree does not carry has no own entries, as a
+      // fact about the commit: remembered, and not read. (A change request
+      // that adds a file asks about it at the base, where it does not exist
+      // yet; one that deletes a file asks at the head.)
+      if (tree && !tree.has(p)) {
+        result.set(p, null);
+        if (memo) this.rememberOwnEntriesAtCommit(key, null);
+        continue;
+      }
+      if (!wanted.includes(p)) wanted.push(p);
     }
     if (wanted.length === 0) return result;
-    const texts = await catFileBatch(repoDir, wanted.map((p) => `${ref}:${p}`));
+    const texts = await catFileBatch(this.gitRunner, repoDir, wanted.map((p) => `${ref}:${p}`));
     wanted.forEach((p, i) => {
       const text = texts[i];
-      if (text === null) result.set(p, null);
-      else result.set(p, isAccessMdPath(p) ? accessMdSelfEntries(text) : parseOwnAccessEntries(text));
+      if (text === null) {
+        // Absent at the commit (when no tree was there to say so first), or
+        // a blob git could not read: the batch says "missing" for both, and
+        // only the first is a fact about the commit. Answered as no own
+        // entries, as before, but never remembered.
+        result.set(p, null);
+        return;
+      }
+      const own = isAccessMdPath(p) ? accessMdSelfEntries(text) : parseOwnAccessEntries(text);
+      result.set(p, own);
+      // What a blob declares for itself — including nothing — is a fact about the commit.
+      if (memo) this.rememberOwnEntriesAtCommit(`${ref}\0${p}`, own);
     });
     return result;
+  }
+
+  private rememberOwnEntriesAtCommit(key: string, value: OwnEntries | null): void {
+    this.ownEntriesAtCommit.set(key, value);
+    if (this.ownEntriesAtCommit.size > AccessControlService.OWN_ENTRIES_AT_COMMIT_MAX) {
+      const oldest = this.ownEntriesAtCommit.keys().next().value;
+      if (oldest !== undefined) this.ownEntriesAtCommit.delete(oldest);
+    }
   }
 
   /**
@@ -1820,42 +2873,78 @@ export class AccessControlService implements IAccessControl {
   /**
    * Read a file's content at a specific ref via `git show <ref>:<path>`.
    * Returns null when the file is absent on that ref (or the ref doesn't
-   * resolve).
+   * resolve) and also on any other git failure: the single-path gates that
+   * call this have always treated the two alike. The at-ref model build
+   * needs them told apart, so it reads through `showAtRefOutcome` instead.
    */
   private async showAtRef(repoDir: string, ref: string, relativePath: string): Promise<string | null> {
+    const outcome = await this.showAtRefOutcome(repoDir, ref, relativePath);
+    return outcome.kind === 'text' ? outcome.text : null;
+  }
+
+  /**
+   * `git show <ref>:<path>`, telling "not there" apart from "git failed".
+   * Absence is what git reports as `path '<p>' does not exist in '<ref>'`
+   * (or `exists on disk, but not in`), plus an unresolvable ref; anything
+   * else (an IO error, a corrupt object, a dying subprocess) is `error`.
+   * `LC_ALL=C` pins the messages this classifies to English.
+   */
+  private async showAtRefOutcome(
+    repoDir: string,
+    ref: string,
+    relativePath: string,
+  ): Promise<{ kind: 'text'; text: string } | { kind: 'absent' } | { kind: 'error' }> {
     try {
-      const { stdout } = await execFileAsync(
-        'git',
-        ['-C', repoDir, 'show', `${ref}:${relativePath}`],
-        { encoding: 'utf-8', maxBuffer: 16 * 1024 * 1024 },
-      );
-      return stdout;
-    } catch {
-      return null;
+      const { stdout } = await this.gitRunner.run(repoDir, ['show', `${ref}:${relativePath}`]);
+      return { kind: 'text', text: stdout };
+    } catch (err) {
+      const stderr =
+        (err as { stderr?: string }).stderr ?? (err instanceof Error ? err.message : String(err));
+      return /does not exist in|exists on disk, but not in|invalid object name|unknown revision|bad revision/.test(
+        stderr,
+      )
+        ? { kind: 'absent' }
+        : { kind: 'error' };
     }
   }
 
   /**
    * List every `access.md` path that exists at any depth as of `ref`.
    * The access tree is structure-agnostic: any `access.md` participates
-   * regardless of where it sits. Uses `git ls-tree -r --name-only`.
+   * regardless of where it sits. Uses `git ls-tree -r -z --name-only`: `-z`
+   * puts a NUL between paths and prints them as they are, where the default
+   * output C-quotes a path with a non-ASCII or special character, which would
+   * then name nothing when read back. `'error'` when git failed: a model
+   * built without its access files is not the model, and the caller must not
+   * cache it as one.
    */
-  private async listAccessFilesAtRef(repoDir: string, ref: string): Promise<string[]> {
+  private async listAccessFilesAtRef(
+    repoDir: string,
+    ref: string,
+  ): Promise<{ accessFiles: string[]; pluginDirs: string[]; named: Set<string>; all: string[] } | 'error'> {
     try {
-      const { stdout } = await execFileAsync(
-        'git',
-        ['-C', repoDir, 'ls-tree', '-r', '--name-only', ref],
-        { encoding: 'utf-8', maxBuffer: 16 * 1024 * 1024 },
-      );
+      const { stdout } = await this.gitRunner.run(repoDir, ['ls-tree', '-r', '-z', '--name-only', ref]);
       const out: string[] = [];
-      for (const line of stdout.split('\n')) {
-        const p = line.trim();
+      const pluginDirs: string[] = [];
+      const all: string[] = [];
+      // The fixed-name sources the tree carries (roles.yaml, the groups
+      // files): a read of one of these that comes back empty is "absent"
+      // only when the tree does not name it.
+      const named = new Set<string>();
+      const { pluginsDir } = this.kb.layout;
+      for (const p of stdout.split('\0')) {
         if (!p) continue;
+        // One past the cap is enough to know the tree is not kept.
+        if (all.length <= this.treeIndexMaxPaths) all.push(p);
         if (p === 'access.md' || p.endsWith('/access.md')) out.push(p);
+        else if (p === 'roles.yaml' || p === SYNCED_GROUPS_YAML || p === GROUPS_YAML) named.add(p);
+        else if (p.startsWith(`${pluginsDir}/`) && p.endsWith(`/${PLUGIN_MANIFEST_FILE}`)) {
+          pluginDirs.push(p.slice(0, -(PLUGIN_MANIFEST_FILE.length + 1)));
+        }
       }
-      return out;
+      return { accessFiles: out, pluginDirs, named, all };
     } catch {
-      return [];
+      return 'error';
     }
   }
 
@@ -1874,11 +2963,14 @@ export class AccessControlService implements IAccessControl {
    * the gate becomes useful. NEVER fall back to the working tree here: a
    * working-tree fallback lets anyone with edit access to access.md grant
    * themselves approval rights.
+   *
+   * Cached per commit (see `atRefCache`): the ref is resolved to the commit
+   * it points at first, and that commit is both the cache key and the ref
+   * every read is pinned to. `resolvedRef` in the result is therefore a
+   * commit SHA, so the own-entries read callers do afterwards can never
+   * straddle a push that lands between the two.
    */
-  private async loadModelAtRef(
-    workspaceId: string,
-    ref: string,
-  ): Promise<{ model: AccessModel; resolvedRef: string } | null> {
+  private async loadModelAtRef(workspaceId: string, ref: string): Promise<AtRefModel | null> {
     const repoDir = await this.repoDir(workspaceId);
 
     // Refresh remote-tracking refs so a PR branch we've never personally
@@ -1886,25 +2978,222 @@ export class AccessControlService implements IAccessControl {
     // block the lookup if the ref already exists locally.
     await this.workspaceService.ensureRemotesFetched(workspaceId).catch(() => undefined);
 
-    let rolesYaml: string | null = null;
-    let resolvedRef: string | null = null;
+    // Same candidate order as before the cache existed: the first candidate
+    // that carries a roles.yaml wins, so a local branch without one still
+    // defers to `origin/<branch>`.
     for (const candidate of this.refCandidates(ref)) {
-      const text = await this.showAtRef(repoDir, candidate, 'roles.yaml');
-      if (text !== null) {
-        rolesYaml = text;
-        resolvedRef = candidate;
-        break;
+      const commit = await this.revParseCommit(repoDir, candidate);
+      if (!commit) continue;
+      const key = `${workspaceId}\0${commit}`;
+      const hit = this.atRefCache.get(key);
+      if (hit) return hit;
+      // A commit known to carry no roles.yaml: the next candidate, without a
+      // build (see `atRefNoRoles`).
+      if (this.atRefNoRoles.has(key)) continue;
+      // Registered BEFORE the first await on the build path, so concurrent
+      // misses on one commit share a single build instead of all racing past
+      // an empty in-flight check together.
+      let pending = this.atRefInFlight.get(key);
+      if (!pending) {
+        pending = this.buildModelAtCommit(repoDir, commit, candidate)
+          .then((built) => {
+            if (typeof built !== 'string') this.rememberAtRef(key, built);
+            else if (built === 'no-roles') this.rememberNoRolesAtRef(key);
+            return built;
+          })
+          .finally(() => {
+            if (this.atRefInFlight.get(key) === pending) this.atRefInFlight.delete(key);
+          });
+        this.atRefInFlight.set(key, pending);
+      }
+      const built = await pending;
+      if (built === 'no-roles') continue;
+      if (built === 'malformed') return null;
+      return built;
+    }
+    return null;
+  }
+
+  /** The commit `ref` points at in this clone, or null when it doesn't resolve. */
+  private async revParseCommit(repoDir: string, ref: string): Promise<string | null> {
+    if (!ref || ref.startsWith('-')) return null;
+    // The ref files first (`readRevSha`): the names git would try, in git's
+    // order, read without a process. "Missing" from the files is what
+    // rev-parse answers nothing for; "unreadable" — a spelling the reader
+    // does not resolve, a tag it cannot peel, a file it could not read — is
+    // git's to decide, as the authority.
+    const fromFiles = await readRevSha(repoDir, ref);
+    if (fromFiles === 'missing') return null;
+    if (fromFiles !== 'unreadable') return fromFiles.sha;
+    try {
+      const { stdout } = await this.gitRunner.run(repoDir, [
+        'rev-parse',
+        '--verify',
+        '--quiet',
+        `${ref}^{commit}`,
+      ]);
+      const sha = stdout.trim();
+      return /^[0-9a-f]{40,64}$/.test(sha) ? sha : null;
+    } catch (err) {
+      // Null means "does not resolve". A deadline says nothing about the ref,
+      // and as a null it would turn a stalled git into a gate that quietly
+      // reads no roles at that ref; it surfaces instead, as a read failure.
+      if (isGitTimeout(err)) throw err;
+      return null;
+    }
+  }
+
+  private rememberAtRef(key: string, value: AtRefModel): void {
+    this.atRefCache.set(key, value);
+    this.treePathsHeld += value.tree?.size ?? 0;
+    if (this.atRefCache.size > AccessControlService.AT_REF_CACHE_MAX) {
+      const oldest = this.atRefCache.keys().next().value;
+      if (oldest !== undefined) {
+        this.treePathsHeld -= this.atRefCache.get(oldest)?.tree?.size ?? 0;
+        this.atRefCache.delete(oldest);
       }
     }
-    if (!rolesYaml || !resolvedRef) return null;
+    // The trees are a budget of their own, across every held model: past
+    // it, the oldest models keep their model and let their tree go — the
+    // gate still answers, absence is just no longer remembered for them.
+    for (const held of this.atRefCache.values()) {
+      if (this.treePathsHeld <= this.treeIndexBudget) break;
+      if (!held.tree) continue;
+      this.treePathsHeld -= held.tree.size;
+      held.tree = null;
+    }
+  }
 
-    const rolesParsed = parseRolesYaml(rolesYaml);
-    if (!rolesParsed.ok) return null;
+  private rememberNoRolesAtRef(key: string): void {
+    this.atRefNoRoles.add(key);
+    if (this.atRefNoRoles.size > AccessControlService.AT_REF_CACHE_MAX) {
+      const oldest = this.atRefNoRoles.values().next().value;
+      if (oldest !== undefined) this.atRefNoRoles.delete(oldest);
+    }
+  }
+
+  /**
+   * The uncached build behind `loadModelAtRef`: the whole access tree read
+   * at `commit`. `label` is the candidate ref the commit came from, kept for
+   * log lines only; every git read here is pinned to the commit. `'no-roles'`
+   * means the commit carries no roles.yaml (the caller tries its next
+   * candidate); `'malformed'` means it does but it doesn't parse (the caller
+   * answers null, as it always has).
+   *
+   * TWO git calls, whatever the tree holds: one `ls-tree` to learn which
+   * files the model is made of, then one `cat-file --batch` that reads all of
+   * them — roles.yaml, the groups sources, every access.md and every plugin
+   * manifest. It used to be one `git show` per file, and each git call forks
+   * the server process, which on a server holding a large heap costs tens of
+   * milliseconds of the main thread per call: a knowledge base with a few
+   * dozen access files paid a second or more per commit, times every ref a
+   * listing resolves.
+   */
+  private async buildModelAtCommit(
+    repoDir: string,
+    commit: string,
+    label: string,
+  ): Promise<AtRefBuild> {
+    // Every read below tells "absent" apart from "git failed". A failure
+    // refuses the whole build: a model missing one access.md could grant what
+    // that file denies, so no verdict is answered from it, nothing is cached,
+    // and the caller fails closed (AccessUnreadableError, a 503) until a
+    // retry reads the tree in full.
+    const tag = `${label}@${commit.slice(0, 7)}`;
+
+    const listed = await this.listAccessFilesAtRef(repoDir, commit);
+    if (listed === 'error') {
+      logger(`access@${tag}`).warn('listing access.md files failed; refusing to decide from a partial tree');
+      throw new AccessUnreadableError(label, 'access.md (ls-tree)');
+    }
+    const wanted = [
+      'roles.yaml',
+      SYNCED_GROUPS_YAML,
+      GROUPS_YAML,
+      ...listed.accessFiles,
+      ...listed.pluginDirs.map((dir) => `${dir}/${PLUGIN_MANIFEST_FILE}`),
+    ];
+    let outcomes: CatFileOutcome[];
+    try {
+      outcomes = await catFileBatchOutcomes(this.gitRunner, repoDir, wanted.map((p) => `${commit}:${p}`));
+    } catch (err) {
+      // The operational signal: one line per failed build, naming the commit,
+      // so a run of these is visible in the logs.
+      logger(`access@${tag}`).warn(
+        `git read of the access tree failed; refusing to decide from a partial tree: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      throw new AccessUnreadableError(label, 'access tree (cat-file)');
+    }
+    const fetched = new Map<string, CatFileOutcome>();
+    wanted.forEach((p, i) => fetched.set(p, outcomes[i] ?? { kind: 'missing' }));
+    const refuse = (relativePath: string, why: string): never => {
+      logger(`access@${tag}`).warn(`${relativePath} ${why}; refusing to decide from a partial tree`);
+      throw new AccessUnreadableError(label, relativePath);
+    };
+    // What the build reads. "Missing" from the batch is "absent" only for a
+    // groups source the tree does not name. A path the tree names — an
+    // access.md, a plugin manifest, or a groups file the listing carried —
+    // that comes back missing has a blob git could not read (a lost object),
+    // and one that is not a file is a tree the model cannot be read from:
+    // either way the build fails closed rather than drop what that file
+    // would deny. A path the build did not prefetch (none today) is read on
+    // its own, told apart from a git failure as before.
+    const inTree = (relativePath: string) =>
+      listed.named.has(relativePath) || !(relativePath === SYNCED_GROUPS_YAML || relativePath === GROUPS_YAML);
+    const read = async (relativePath: string): Promise<string | null> => {
+      const got = fetched.get(relativePath);
+      if (got === undefined) {
+        const outcome = await this.showAtRefOutcome(repoDir, commit, relativePath);
+        if (outcome.kind === 'error') refuse(relativePath, 'could not be read');
+        return outcome.kind === 'text' ? outcome.text : null;
+      }
+      if (got.kind === 'blob') return got.text;
+      if (got.kind === 'non-blob') return refuse(relativePath, `is a ${got.type}, not a file`);
+      if (!inTree(relativePath)) return null;
+      return refuse(relativePath, 'is in the tree but its blob could not be read');
+    };
+
+    // roles.yaml decides the build's outcome, so its states are read
+    // directly. Absent from the tree is "no roles here" (the caller tries
+    // its next candidate ref). In the tree but unreadable refuses the build:
+    // answering "no roles" for it would be remembered for the commit and
+    // would send a short ref through to origin, which may grant. A directory
+    // of that name is as malformed as a file that does not parse (the caller
+    // answers null, and never falls through to a ref that might grant what
+    // this one does not).
+    const roles = fetched.get('roles.yaml') ?? { kind: 'missing' as const };
+    if (roles.kind === 'missing') {
+      if (listed.named.has('roles.yaml')) refuse('roles.yaml', 'is in the tree but its blob could not be read');
+      return 'no-roles';
+    }
+    if (roles.kind === 'non-blob') return 'malformed';
+    const rolesParsed = parseRolesYaml(roles.text);
+    if (!rolesParsed.ok) return 'malformed';
+
+    // Same group loading as the working-tree model, read AT THE COMMIT — the
+    // whole point of file-materialized groups is that the merge/push gates
+    // can evaluate them at the commit they gate. `read` throws
+    // `AccessUnreadableError` on a git failure and `loadActiveGroups` lets
+    // that through, so a flaky subprocess fails this build closed exactly as
+    // it does for roles.yaml and access.md; the broken-groups marker below
+    // fires only on a file that was read and would not parse.
+    const activeGroups = await loadActiveGroups(read);
+    if (!activeGroups.health.ok) {
+      logger(`access@${tag}`).error(
+        `groups source ${activeGroups.health.file} is broken (${activeGroups.health.reason}) — groups contribute nothing until it is fixed`,
+      );
+    }
+    for (const w of activeGroups.warnings) logger(`access@${tag}`).warn(w);
+    const mergeWarnings = mergeGroupsIntoRoles(
+      rolesParsed.index,
+      activeGroups.groups,
+      activeGroups.sourceFile,
+    );
+    for (const w of mergeWarnings) logger(`access@${tag}`).warn(w);
 
     const accessFiles = new Map<string, AccessFile>();
-    const accessPaths = await this.listAccessFilesAtRef(repoDir, resolvedRef);
-    for (const p of accessPaths) {
-      const text = await this.showAtRef(repoDir, resolvedRef, p);
+    for (const p of listed.accessFiles) {
+      const text = await read(p);
       if (text === null) continue;
       const parsed = parseAccessFile(text, p);
       if (!parsed.ok) continue;
@@ -1913,6 +3202,17 @@ export class AccessControlService implements IAccessControl {
       // duplicates, but be defensive.
       accessFiles.set(parsed.file.dir, parsed.file);
     }
+
+    // Mirror `loadModel`: plugin principals from the plugins the ref carries,
+    // each under the identity its manifest AT THAT REF declares, so a PR-time
+    // verdict on a skill granted to `plugin/<name>/write` counts the plugin's
+    // writers exactly as the working tree would.
+    const pluginIdentities = new Map<string, string>();
+    for (const dir of listed.pluginDirs) {
+      const manifest = parseManifestText(await read(`${dir}/${PLUGIN_MANIFEST_FILE}`));
+      pluginIdentities.set(dir, pluginIdentityOf(manifest, path.posix.basename(dir)));
+    }
+    synthesizePluginPrincipals(rolesParsed.index, accessFiles, pluginIdentities);
 
     // Mirror `loadModel`: drop entries whose role ref is unknown to roles.yaml,
     // while preserving the built-in `everyone` role.
@@ -1928,13 +3228,18 @@ export class AccessControlService implements IAccessControl {
       model: {
         roles: rolesParsed.index,
         accessFilesByDir: accessFiles,
+        groupsHealth: activeGroups.health,
         // Same owners as the working-tree model. The at-ref model backs the
         // PUSH gate, so omitting them here would let the deployment owner save
         // a roles.yaml repair locally and then be refused when it tries to
         // land — the lockout moved one step later, not removed.
         deploymentOwners: this.deploymentOwners,
       },
-      resolvedRef,
+      resolvedRef: commit,
+      // The listing already named every path; held so an own-entries read
+      // can tell absence from a lost blob, unless the tree is too large to
+      // hold for every cached commit (then absence is simply not remembered).
+      tree: listed.all.length <= this.treeIndexMaxPaths ? new Set(listed.all) : null,
     };
   }
 }

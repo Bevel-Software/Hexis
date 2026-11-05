@@ -1,10 +1,18 @@
 import { describe, expect, it, vi, afterEach } from 'vitest';
 import type { Tool as UtcpTool } from '@utcp/sdk';
-import { flattenManualTool, type ProxiedTool } from '@bevel-software/platform-mcp-core';
+import { CHAIN_TIMEOUT_MAX_MS, flattenManualTool, type ProxiedTool } from '@bevel-software/platform-mcp-core';
 import { localManualTemplates, remoteManualTemplate, REMOTE_MANUAL_NAME } from '../manuals.js';
 import { ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 import { discoverTools, getSkillPrompt, listSkillPrompts, listedTools, withoutRemoteMetaTools } from '../server.js';
-import { DeploymentError, fetchAllManuals, fetchLocalOnlyManuals, resolveMcpUrl } from '../deployment.js';
+import {
+  ConnectionKeyRejectedError,
+  DeploymentError,
+  fetchAgentInstructions,
+  fetchAllManuals,
+  fetchLocalOnlyManuals,
+  resolveDeployment,
+  resolveMcpUrl,
+} from '../deployment.js';
 
 function tool(mcpName: string, manualName = REMOTE_MANUAL_NAME): ProxiedTool {
   return {
@@ -62,6 +70,44 @@ describe('localManualTemplates', () => {
     expect(localManualTemplates([localHttp, remoteHttp], new Set())).toEqual([]);
   });
 
+  const platformRef = {
+    name: 'git',
+    call_template_type: 'http',
+    http_method: 'GET',
+    url: 'https://knowledge.example.com/api/tools/git/manual',
+  };
+
+  it("lets a platform '.tool' reference carry cli tools — the reason this server exists", () => {
+    // The deployment serves a `.tool` manual as an http reference, and UTCP's
+    // secure default limits a manual to its template's own protocol. Without
+    // the widening, every cli tool in a local `.tool` was silently dropped at
+    // registration ("registered manual 'git' with 0 tools") and no session
+    // ever had `git.push`.
+    const out = localManualTemplates([platformRef], new Set(['git']));
+    expect(out[0]!.allowed_communication_protocols).toEqual(['cli', 'http']);
+  });
+
+  it('widens ONLY the platform reference shape — a genuine local http integration stays strict', () => {
+    const out = localManualTemplates([localHttp], new Set(['localbox']));
+    expect(out[0]!.allowed_communication_protocols).toBeUndefined();
+  });
+
+  it('respects a declared protocol list — an empty one included — and leaves non-http templates alone', () => {
+    const explicit = { ...platformRef, name: 'a', allowed_communication_protocols: ['http'] };
+    // An explicit [] is the author's restriction (the SDK reads it as
+    // own-protocol-only); declaring it must not be treated as absence.
+    const explicitEmpty = { ...platformRef, name: 'b', allowed_communication_protocols: [] as string[] };
+    const mcpLocal = {
+      name: 'stdiobox',
+      call_template_type: 'mcp',
+      config: { mcpServers: { stdiobox: { transport: 'stdio', command: 'x', args: [] } } },
+    };
+    const out = localManualTemplates([explicit, explicitEmpty, mcpLocal], new Set(['a', 'b', 'stdiobox']));
+    expect(out[0]!.allowed_communication_protocols).toEqual(['http']);
+    expect(out[1]!.allowed_communication_protocols).toEqual([]);
+    expect(out[2]!.allowed_communication_protocols ?? []).toEqual([]);
+  });
+
   it('drops a malformed manual instead of failing the whole catalog', () => {
     const broken = { name: 'broken', call_template_type: 'nonsense-protocol' };
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -92,6 +138,28 @@ describe('discoverTools', () => {
     expect([...repo.keys()]).toEqual([`${REMOTE_MANUAL_NAME}.read_file`]);
     expect(tools.map((t) => t.mcpName)).toEqual(['read_file']);
   });
+
+  it('purges a retired tool an OLDER deployment still advertises', async () => {
+    // This server can be pointed at a deployment that predates the removal.
+    // A discovered `merge_change_request` left registered would be resolved
+    // by the call handler and dispatched — an agent merging a change request
+    // after all. It must not survive discovery, in the registry or the list.
+    const repo = new Map<string, UtcpTool>();
+    for (const name of ['read_file', 'merge_change_request']) {
+      repo.set(
+        `${REMOTE_MANUAL_NAME}.${name}`,
+        { name: `${REMOTE_MANUAL_NAME}.${name}`, description: '', inputs: { type: 'object' } } as unknown as UtcpTool,
+      );
+    }
+    const client = {
+      registerManual: async () => ({ success: true }),
+      getTools: async () => [...repo.values()],
+      config: { tool_repository: { removeTool: async (n: string) => repo.delete(n) } },
+    };
+    const tools = await discoverTools(client as never, { name: REMOTE_MANUAL_NAME } as never, []);
+    expect([...repo.keys()]).toEqual([`${REMOTE_MANUAL_NAME}.read_file`]);
+    expect(tools.map((t) => t.mcpName)).toEqual(['read_file']);
+  });
 });
 
 describe('withoutRemoteMetaTools', () => {
@@ -104,6 +172,11 @@ describe('withoutRemoteMetaTools', () => {
       tool('grep'),
     ]);
     expect(kept.map((t) => t.mcpName)).toEqual(['read_file', 'grep']);
+  });
+
+  it('drops a retired tool the deployment still advertises', () => {
+    const kept = withoutRemoteMetaTools([tool('read_file'), tool('merge_change_request'), tool('merge_branch')]);
+    expect(kept.map((t) => t.mcpName)).toEqual(['read_file', 'merge_branch']);
   });
 });
 
@@ -129,9 +202,103 @@ describe('listedTools', () => {
     expect(flattened.map((t) => t.mcpName)).toEqual(['localbox_read_file', 'localbox_read_file']);
     const survivors = listedTools(flattened).filter((t) => t.name === 'localbox_read_file');
     expect(survivors).toHaveLength(1);
-    // Remote-first discovery order is what makes the workspace copy the winner.
-    expect(survivors[0]!.description).toBe('the workspace copy');
+    // Remote-first discovery order is what makes the workspace copy the winner
+    // (behind the call example every listed description now opens with).
+    expect(survivors[0]!.description).toBe('Call: hexis.localbox_read_file({})\n\nthe workspace copy');
     expect(spy).toHaveBeenCalledWith(expect.stringContaining('localbox_read_file (duplicate)'));
+  });
+
+  it('bares the deployment MCP-shaped names: manual.server.tool, both segments stripped', () => {
+    // The remote manual is MCP-protocol and its single server shares the
+    // manual's name, so core tools arrive as `hexis.hexis.read_file` — THREE
+    // segments. One strip left `hexis.read_file`, an invalid MCP name, and
+    // the entire remote toolset was dropped from the listing (caught live
+    // against a real deployment; the fixtures above had encoded the hosted
+    // proxy's two-segment HTTP shape instead).
+    const utcp = (name: string) =>
+      ({ name, description: '', inputs: { type: 'object', properties: {} } }) as unknown as UtcpTool;
+    expect(flattenManualTool(utcp('hexis.hexis.read_file'), REMOTE_MANUAL_NAME).mcpName).toBe('read_file');
+    // Local manuals keep their fully namespaced, underscore-sanitized names.
+    expect(
+      flattenManualTool(utcp('local_toolbox.local_toolbox.local_echo'), REMOTE_MANUAL_NAME).mcpName,
+    ).toBe('local_toolbox_local_toolbox_local_echo');
+  });
+
+  /**
+   * The namespace in the meta-tools' examples is THIS server's, not the hosted
+   * endpoint's. The description used to be fixed text naming `KNOWLEDGE_BASE`,
+   * which no chain on this connection can call: a copied example died of
+   * `ReferenceError: KNOWLEDGE_BASE is not defined`, which is how this was
+   * reported.
+   */
+  it('writes the meta-tools examples against this server\'s own namespace', () => {
+    const utcp = (name: string) =>
+      ({ name, description: '', inputs: { type: 'object', properties: {} } }) as unknown as UtcpTool;
+    // The real shape: the remote manual is MCP-protocol and its single server
+    // shares the manual's name, so the tool arrives three segments deep and
+    // the chain spells it `hexis.hexis_read_file`.
+    const listed = listedTools([flattenManualTool(utcp('hexis.hexis.read_file'), REMOTE_MANUAL_NAME)]);
+    const chainTool = listed.find((t) => t.name === 'call_tool_chain')!;
+    expect(chainTool.description).toContain('hexis.hexis_read_file');
+    expect(chainTool.description).not.toContain('KNOWLEDGE_BASE');
+    expect(listed.find((t) => t.name === 'list_tools')!.description).toContain('hexis.hexis_read_file');
+  });
+
+  /**
+   * The worked example must come from the tools this listing really serves. A
+   * tool dropped as non-listable or duplicate is not one of them, so an example
+   * naming it is a call nobody can make.
+   */
+  it('never writes the worked example against a tool it dropped from the listing', () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const utcp = (name: string) =>
+      ({ name, description: '', inputs: { type: 'object', properties: {} } }) as unknown as UtcpTool;
+    const good = flattenManualTool(utcp('hexis.hexis.start_session'), REMOTE_MANUAL_NAME);
+    // A name the MCP grammar refuses, so `toListedTool` drops it.
+    const bad = { ...flattenManualTool(utcp('hexis.hexis.read_file'), REMOTE_MANUAL_NAME), mcpName: 'has a space' };
+    const chainTool = listedTools([bad, good]).find((t) => t.name === 'call_tool_chain')!;
+    expect(chainTool.description).toContain('return hexis.hexis_start_session(');
+    expect(chainTool.description).not.toContain('hexis.hexis_read_file');
+  });
+
+  /**
+   * Two tools the LISTING takes for one (their names flatten alike) are both
+   * still in the catalog a chain dispatches to, which refuses the name as
+   * ambiguous. The example has to steer clear of that name — and it can only
+   * do so when it is shown both, not just the one the listing kept.
+   */
+  it('writes no example against a name two tools share, though the listing kept one of them', () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const colliding = (utcpName: string): ProxiedTool => ({
+      utcpName,
+      mcpName: 'hexis_s_a',
+      description: '',
+      inputSchema: { type: 'object', properties: {} },
+      manualName: REMOTE_MANUAL_NAME,
+    });
+    const listed = listedTools([colliding('hexis.s.a'), colliding('hexis.s_a')]);
+    expect(listed.filter((t) => t.name === 'hexis_s_a')).toHaveLength(1);
+    for (const meta of ['list_tools', 'call_tool_chain']) {
+      const description = listed.find((t) => t.name === meta)!.description!;
+      expect(description, meta).not.toContain('hexis.s_a');
+      expect(description, meta).not.toContain('A call that works exactly as written');
+    }
+  });
+
+  it('tells a chain it has the four browser globals, and that a timeout is answered', () => {
+    const chainTool = listedTools([tool('read_file')]).find((t) => t.name === 'call_tool_chain')!;
+    for (const name of ['atob', 'btoa', 'TextEncoder', 'TextDecoder']) {
+      expect(chainTool.description).toContain(name);
+    }
+    // The SENTENCE that says a chain past its timeout is answered. The word
+    // `timeout` alone proves nothing: it is the argument's name and is in the
+    // description whatever it says about what happens.
+    expect(chainTool.description).toContain('Failures are answered, never dropped');
+    expect(chainTool.description).toMatch(/one that outlives `timeout` \(.*\) comes back saying so/);
+    // The constant, not its current value: the description renders
+    // `${CHAIN_TIMEOUT_MAX_MS} ms` and a literal here would let the cap change
+    // in one place and not the other without a single test failing.
+    expect(chainTool.description).toContain(String(CHAIN_TIMEOUT_MAX_MS));
   });
 
   it('drops a tool a meta-tool would shadow, so the listing never advertises an uncallable name', () => {
@@ -209,12 +376,126 @@ describe('resolveMcpUrl', () => {
   });
 });
 
+describe('resolveDeployment', () => {
+  const config = { baseUrl: 'https://x.example', connectionKey: 'bevel_k' };
+
+  function stubConfigEndpoint(body: unknown) {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(body), { status: 200 })));
+  }
+
+  it('reads the endpoint and every capability flag from the one config fetch', async () => {
+    stubConfigEndpoint({ mcpUrl: 'https://x.example/api/mcp', agentInstructions: true, catalogRevision: true, toolHints: true });
+    expect(await resolveDeployment(config)).toEqual({
+      mcpUrl: 'https://x.example/api/mcp',
+      agentInstructions: true,
+      catalogRevision: true,
+      toolHints: true,
+    });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('treats an absent flag as an older deployment', async () => {
+    stubConfigEndpoint({ mcpUrl: 'https://x.example/api/mcp' });
+    const resolved = await resolveDeployment(config);
+    expect(resolved.agentInstructions).toBe(false);
+    expect(resolved.catalogRevision).toBe(false);
+    expect(resolved.toolHints).toBe(false);
+  });
+
+  /**
+   * Both flags are capabilities, not probes: an unknown `/api/*` path on an
+   * older deployment falls through to the JWT mounts and answers 401, which a
+   * caller would read as a dead credential. So anything that is not a literal
+   * `true` has to mean "not there".
+   */
+  it('only a literal true advertises a capability', async () => {
+    stubConfigEndpoint({ mcpUrl: 'https://x.example/api/mcp', agentInstructions: 'yes', catalogRevision: 1, toolHints: 'true' });
+    const resolved = await resolveDeployment(config);
+    expect(resolved.agentInstructions).toBe(false);
+    expect(resolved.catalogRevision).toBe(false);
+    expect(resolved.toolHints).toBe(false);
+  });
+
+  it('still falls back to <base>/api/mcp on a deployment too old to advertise either', async () => {
+    stubConfigEndpoint({ branchModel: { defaultBranch: 'main' } });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    expect(await resolveDeployment(config)).toEqual({
+      mcpUrl: 'https://x.example/api/mcp',
+      agentInstructions: false,
+      catalogRevision: false,
+      toolHints: false,
+    });
+  });
+});
+
+describe('fetchAgentInstructions', () => {
+  const config = { baseUrl: 'https://x.example', connectionKey: 'bevel_k' };
+
+  it('returns the instructions string, sent with the connection key', async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ instructions: 'Hexis is…', toolPrefix: 'x' }), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    expect(await fetchAgentInstructions(config)).toBe('Hexis is…');
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe('https://x.example/api/agent/instructions');
+    expect((init.headers as Record<string, string>).Authorization).toBe('Bearer bevel_k');
+  });
+
+  it('a body without an instructions string logs one line and resolves to undefined', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ nope: 1 }), { status: 200 })));
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    expect(await fetchAgentInstructions(config)).toBeUndefined();
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy).toHaveBeenCalledWith(expect.stringContaining('without an "instructions" string'));
+  });
+
+  it('lets a rejected connection key through instead of degrading quietly', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 401 })));
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await expect(fetchAgentInstructions(config)).rejects.toBeInstanceOf(ConnectionKeyRejectedError);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('a 500 logs one line and resolves to undefined', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('boom', { status: 500 })));
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    expect(await fetchAgentInstructions(config)).toBeUndefined();
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy).toHaveBeenCalledWith(expect.stringContaining('could not fetch the agent instructions'));
+  });
+
+  it('a network error logs one line and resolves to undefined', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('ECONNREFUSED'); }));
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    expect(await fetchAgentInstructions(config)).toBeUndefined();
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy).toHaveBeenCalledWith(expect.stringContaining('ECONNREFUSED'));
+  });
+});
+
 describe('getJson unauthorized messaging', () => {
   const config = { baseUrl: 'https://x.example', connectionKey: 'bevel_k' };
 
   it('blames the connection key only on a request that actually carried it', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 401 })));
     await expect(fetchAllManuals(config)).rejects.toThrow(/connection key was rejected/);
+  });
+
+  it('says exactly what to do with a rejected key, naming the deployment and never the key', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 401 })));
+    const err = (await fetchAllManuals({ ...config, baseUrl: 'https://x.example/hexis' }).catch((e: unknown) => e)) as Error;
+    expect(err).toBeInstanceOf(DeploymentError);
+    expect(err.message).toBe(
+      'The connection key was rejected by https://x.example/hexis. Mint a new one in External agent access. ' +
+        '(Claude Code hides this message; run `claude mcp get <name>` or start the command in a terminal to see it.)',
+    );
+    expect(err.message).not.toContain('bevel_k');
+  });
+
+  it('does not tell a key holder to mint a new key over a 403 — the key is valid', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 403 })));
+    const err = (await fetchAllManuals(config).catch((e: unknown) => e)) as Error;
+    expect(err.message).toMatch(/denied access \(HTTP 403\)/);
+    expect(err.message).not.toMatch(/Mint a new one/);
   });
 
   it('keeps the key out of the story when the failing request carried no credentials', async () => {
@@ -290,7 +571,35 @@ describe('fetchAllManuals / fetchLocalOnlyManuals', () => {
       'fetch',
       vi.fn(async () => new Response(JSON.stringify({ manuals: [], tools: [] }), { status: 200 })),
     );
-    expect(await fetchAllManuals(config)).toEqual([]);
+    expect(await fetchAllManuals(config)).toEqual({ manuals: [] });
     expect((await fetchLocalOnlyManuals(config)).size).toBe(0);
+  });
+
+  it('carries the agent the connection is narrowed to, as the deployment says it, and drops a malformed one', async () => {
+    const agent = { path: 'Agents/narrow.agent', name: 'narrow' };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify({ manuals: [], connection: { agent } }), { status: 200 })),
+    );
+    expect(await fetchAllManuals(config)).toEqual({ manuals: [], connection: { agent } });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify({ manuals: [], connection: { agent: { path: 7 } } }), { status: 200 })),
+    );
+    expect(await fetchAllManuals(config)).toEqual({ manuals: [] });
+  });
+
+  it('reads a refused local-only list as a connection that loads nothing, not as a failed discovery', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ error: 'it loads no tools', code: 'not_available_to_connection' }), { status: 403 }),
+      ),
+    );
+    expect((await fetchLocalOnlyManuals(config)).size).toBe(0);
+    // Any other 403 is still the permission answer it always was.
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ error: 'no' }), { status: 403 })));
+    await expect(fetchLocalOnlyManuals(config)).rejects.toThrow(/denied access/);
   });
 });

@@ -1,17 +1,25 @@
 import express, { type Request, type RequestHandler } from 'express';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('tool-manuals');
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import AdmZip from 'adm-zip';
-import { DEFAULT_BRANCH, PLUGINS_DIR } from '@bevel-software/platform-shared';
-import { workspaceIdForBranch, type WorkspaceService } from '../workspace/workspace.service.js';
-import type { IAccessControl } from '../access/access-control.interface.js';
+import type { WorkspaceService } from '../workspace/index.js';
+import type { KbContext } from '../../shared/kb-context.js';
+import { isAbsence, type IFsProbe, type ITreeWalker } from '../../shared/fs.contract.js';
+import type { IAccessControl } from '../access/index.js';
+import type { IPluginIndexService } from '../plugins/index.js';
 import '@utcp/http'; // side effect: register the 'http' call-template type
 import { CallTemplateSerializer, type CallTemplate } from '@utcp/sdk';
-import { type IToolManualService, EXTERNAL_KB_MANUAL_NAME } from './tool-manuals.contract.js';
+import { type IPendingToolService, type IToolManualService, EXTERNAL_KB_MANUAL_NAME } from './tool-manuals.contract.js';
 import { McpServerEditError, type McpServerEditService, type McpServerWrite } from './mcp-server-edit.service.js';
+import { ToolDeleteError, type ToolDeleteService } from './tool-delete.service.js';
 import type { AuthUser } from '@bevel-software/platform-shared';
-import '../auth/auth.middleware.js'; // Express Request augmentation (req.userId / req.userEmail)
-import '../tool-auth/tool-auth.middleware.js'; // Express Request augmentation (req.toolAuth)
+import '../auth/index.js'; // Express Request augmentation (req.userId / req.userEmail)
+import '../tool-auth/index.js'; // Express Request augmentation (req.toolAuth)
+import { hasGitInternalsSegment } from '../../shared/git-internals.js';
+import { NOT_AVAILABLE_TO_CONNECTION, resolveConnectionScope, type IAgentScopeResolver } from '../agent-scope/index.js';
 
 /** Resolve a connection-key/internal-token user id to its email (per-caller ACL). */
 export type ResolveUserEmail = (userId: string) => Promise<string | undefined>;
@@ -43,7 +51,25 @@ export function createToolManualsAgentRoutes(
   toolManualService: IToolManualService,
   manualAuth: RequestHandler,
   resolveUserEmail: ResolveUserEmail,
-  archiveDeps?: { workspaceService: WorkspaceService; accessControl: IAccessControl; kbDirName: string },
+  archiveDeps?: {
+    workspaceService: WorkspaceService;
+    accessControl: IAccessControl;
+    /** The checkout folder, the released branch, and the layout that names the plugins root. */
+    kb: Pick<KbContext, 'kbDirName' | 'defaultBranch' | 'defaultWorkspaceId' | 'layout'>;
+    disk: ITreeWalker & IFsProbe;
+    /**
+     * Resolves a plugin IDENTITY (its manifest name) to its folder, so a
+     * plugin nested below the root — `Plugins/departments/eng/ado` — is
+     * archived by the one name every client knows it by. Without it only a
+     * folder directly under the root can be named.
+     */
+    pluginIndex?: Pick<IPluginIndexService, 'catalog'>;
+  },
+  /**
+   * Resolves the scope of a connection made as an agent configuration, so
+   * `all-tools` lists only the connectors it loads (`modules/agent-scope`).
+   */
+  agentScope?: Pick<IAgentScopeResolver, 'resolve'>,
 ): express.Router {
   const router = express.Router();
 
@@ -63,11 +89,20 @@ export function createToolManualsAgentRoutes(
       // Default remote-safe: exclude local-only manuals unless the caller (a locally
       // installed MCP server) explicitly opts in with `?remote=false`.
       const remoteOnly = req.query.remote !== 'false';
-      const userManuals = email ? await toolManualService.toManualCallTemplates(email, { remoteOnly }) : [];
+      // A connection made as an agent configuration lists only the connectors that
+      // file loads, and says which agent it is — the MCP proxy words its
+      // refusals and its handshake from that. Everything lists as it always
+      // did, with no `connection` at all.
+      const scope = await resolveConnectionScope(agentScope, email, req.toolAuth?.agentPath);
+      const within = scope.connectorFilter();
+      const userManuals = email
+        ? await toolManualService.toManualCallTemplates(email, within ? { remoteOnly, within } : { remoteOnly })
+        : [];
       const manuals: CallTemplate[] = [kbManualTemplate(), ...userManuals];
-      res.json({ manuals });
+      const connection = scope.toWire();
+      res.json(connection ? { manuals, connection } : { manuals });
     } catch (err) {
-      console.error('[tool-manuals] all-tools failed:', err instanceof Error ? err.message : err);
+      log.error('all-tools failed:', { err });
       res.status(500).json({ error: 'Failed to list tools' });
     }
   });
@@ -90,11 +125,26 @@ export function createToolManualsAgentRoutes(
       if (!folder || folder === '.' || folder === '..' || /[/\\]/.test(folder)) {
         return void res.status(422).json({ error: 'Not a plugin folder name' });
       }
-      const { workspaceService, accessControl, kbDirName } = archiveDeps;
-      const wsId = workspaceIdForBranch(DEFAULT_BRANCH);
-      await workspaceService.getOrCreateForBranch(DEFAULT_BRANCH);
+      const { workspaceService, accessControl, kb, disk, pluginIndex } = archiveDeps;
+      const { kbDirName } = kb;
+      const pluginsDir = kb.layout.pluginsDir;
+      const wsId = kb.defaultWorkspaceId();
+      await workspaceService.getOrCreateForBranch(kb.defaultBranch);
       const wsDir = await workspaceService.getWorkspacePath(wsId);
-      const pluginDir = path.join(wsDir, kbDirName, PLUGINS_DIR, folder);
+      // The name is a folder directly under the root, as it always was — or,
+      // when no such folder exists, a plugin's IDENTITY, which the index maps
+      // to its folder at any depth (`Plugins/departments/eng/ado`). Identity
+      // second, so a folder that spells a nested plugin's name keeps meaning
+      // the folder.
+      let pluginRel = `${pluginsDir}/${folder}`;
+      let pluginDir = path.join(wsDir, kbDirName, pluginsDir, folder);
+      if (pluginIndex && (await disk.lstatOrNull(pluginDir))?.isDirectory() !== true) {
+        const byIdentity = (await pluginIndex.catalog()).find((p) => p.name === folder)?.folders[0];
+        if (byIdentity) {
+          pluginRel = byIdentity;
+          pluginDir = path.join(wsDir, kbDirName, ...byIdentity.split('/'));
+        }
+      }
       // SYMLINKS ARE NOT SUPPORTED IN PLUGINS, anywhere. Access control
       // resolves rules by path, and a symlink is a second path to the same
       // content — a standing invitation for the spelling the ACL judged and
@@ -104,48 +154,56 @@ export function createToolManualsAgentRoutes(
       // guards, no read-time re-resolution — complexity that existed only to
       // support what the platform has no use for. Starting with the plugin
       // folder itself: a symlinked `Plugins/<folder>` is not a plugin.
-      // Only ENOENT is an absence; an EACCES/EIO answered with 404 would
-      // dress a real read problem up as a missing plugin (the same contract
-      // as the realpath/open probes below).
-      const folderStat = await fs.lstat(pluginDir).catch((err: NodeJS.ErrnoException) => {
-        if (err.code === 'ENOENT') return null;
-        throw err;
-      });
+      // Only absence is a 404; an EACCES/EIO answered with 404 would dress a
+      // real read problem up as a missing plugin (the same contract as the
+      // realpath/open probes below).
+      const folderStat = await disk.lstatOrNull(pluginDir);
       if (folderStat === null || !folderStat.isDirectory()) {
         return void res.status(404).json({ error: 'Not found' });
       }
       const rels: string[] = [];
-      const walk = async (dir: string, rel: string): Promise<void> => {
-        let entries;
-        try {
-          entries = await fs.readdir(dir, { withFileTypes: true });
-        } catch (err) {
-          // Only an absent directory is a non-event; anything else (EACCES,
-          // EIO) silently missing from the archive would hand the client an
-          // incomplete plugin stamped as success.
-          if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
-          throw err;
-        }
-        for (const e of entries) {
-          if (e.name === '.git') continue;
-          const childRel = rel ? `${rel}/${e.name}` : e.name;
-          // Dirent's isDirectory/isFile are both false for a symlink, so a
-          // link is never walked and never listed — but say so, once, because
-          // an author who committed one deserves to know it went nowhere.
-          if (e.isDirectory()) await walk(path.join(dir, e.name), childRel);
-          else if (e.isFile()) rels.push(childRel);
-          else if (e.isSymbolicLink()) {
-            console.warn(`[tool-manuals] archive of "${folder}": ${childRel} is a symlink — not supported in plugins, skipped.`);
-          }
-        }
-      };
-      await walk(pluginDir, '');
+      // Only an absent folder is a non-event; anything else (EACCES, EIO)
+      // silently missing from the archive would hand the client an
+      // incomplete plugin stamped as success — so a hole is the error.
+      await disk.walk(pluginDir, { skip: (e) => hasGitInternalsSegment(e.name), unreadable: 'throw' }, [
+        {
+          onFile(dir, name) {
+            rels.push(dir ? `${dir}/${name}` : name);
+          },
+          onOther(dir, e) {
+            // A link is never walked and never listed — but say so, once,
+            // because an author who committed one deserves to know it went
+            // nowhere.
+            if (!e.isSymbolicLink()) return;
+            const childRel = dir ? `${dir}/${e.name}` : e.name;
+            log.warn(`archive of "${folder}": ${childRel} is a symlink — not supported in plugins, skipped.`);
+          },
+        },
+      ]);
       if (rels.length === 0) return void res.status(404).json({ error: 'Not found' });
       const verdicts = await accessControl.canReadBatch(
         wsId,
         email,
-        rels.map((r) => `${PLUGINS_DIR}/${folder}/${r}`),
+        rels.map((r) => `${pluginRel}/${r}`),
       );
+      // A folder with nothing the person may read is absent to them, whatever
+      // the connection — so that 404 comes first, and the connection's own
+      // refusal below never confirms a folder the person could not see.
+      if (![...verdicts.values()].some((v) => v === true)) {
+        return void res.status(404).json({ error: 'Not found' });
+      }
+      // A connection made as an agent configuration materializes only a plugin
+      // that defines a connector the file loads — the archive is how the
+      // local MCP server runs one, and nothing else asks for it. Checked
+      // before any file is opened.
+      const scope = await resolveConnectionScope(agentScope, email, req.toolAuth?.agentPath);
+      if (!scope.loadsConnectorIn(pluginRel)) {
+        const why = scope.describe();
+        return void res.status(403).json({
+          error: `The plugin "${folder}" is not available to this connection.${why ? ` ${why}` : ''}`,
+          code: NOT_AVAILABLE_TO_CONNECTION,
+        });
+      }
       const zip = new AdmZip();
       let included = 0;
       let bytes = 0;
@@ -158,14 +216,14 @@ export function createToolManualsAgentRoutes(
       // verification is a moment old, and a plugin deleted since (a workspace
       // reset, a merged deletion) is an ABSENCE, the same 404 it would have
       // been a moment earlier, not an internal error.
-      const pluginRealBase = await fs.realpath(pluginDir).catch((err: NodeJS.ErrnoException) => {
-        if (err.code === 'ENOENT') return null;
+      const pluginRealBase = await fs.realpath(pluginDir).catch((err: unknown) => {
+        if (isAbsence(err)) return null;
         throw err;
       });
       if (pluginRealBase === null) return void res.status(404).json({ error: 'Not found' });
       for (const rel of rels) {
         // Fail closed, per file — only an explicit `true` verdict is included.
-        if (verdicts.get(`${PLUGINS_DIR}/${folder}/${rel}`) !== true) continue;
+        if (verdicts.get(`${pluginRel}/${rel}`) !== true) continue;
         const abs = path.join(pluginDir, ...rel.split('/'));
         // The no-symlink rule, re-checked at read time over the WHOLE path.
         // The open below guards only the final component — a PARENT directory
@@ -173,13 +231,13 @@ export function createToolManualsAgentRoutes(
         // link with the final component still a regular file. realpath
         // resolves every component, so demanding it equal the spelled path is
         // exactly "no component is a link": identity, not mere containment.
-        const realNow = await fs.realpath(abs).catch((err: NodeJS.ErrnoException) => {
-          if (err.code === 'ENOENT') return null; // deleted since the walk — an absence, not a failure
+        const realNow = await fs.realpath(abs).catch((err: unknown) => {
+          if (isAbsence(err)) return null; // deleted since the walk — an absence, not a failure
           throw err;
         });
         if (realNow === null || realNow !== path.join(pluginRealBase, ...rel.split('/'))) {
           if (realNow !== null) {
-            console.warn(`[tool-manuals] archive of "${folder}": ${rel} no longer resolves to itself — skipped.`);
+            log.warn(`archive of "${folder}": ${rel} no longer resolves to itself — skipped.`);
           }
           continue;
         }
@@ -190,15 +248,15 @@ export function createToolManualsAgentRoutes(
         // O_NOFOLLOW makes a final-component symlink fail the open itself
         // where the platform defines it (Linux — production; Windows test
         // runs fall back to the realpath identity check above alone). Only an
-        // ENOENT is a skip; any other failure is a real read problem that
+        // absence is a skip; any other failure is a real read problem that
         // must surface as a 500, not ship as a silently partial archive.
         const handle = await fs
           .open(abs, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0))
           .catch((err: NodeJS.ErrnoException) => {
-            if (err.code === 'ENOENT') return null; // deleted since the walk — an absence
+            if (isAbsence(err)) return null; // deleted since the walk — an absence
             if (err.code === 'ELOOP') {
               // O_NOFOLLOW's spelling of "the final component is a symlink".
-              console.warn(`[tool-manuals] archive of "${folder}": ${rel} is a symlink — not supported in plugins, skipped.`);
+              log.warn(`archive of "${folder}": ${rel} is a symlink — not supported in plugins, skipped.`);
               return null;
             }
             throw err;
@@ -234,7 +292,7 @@ export function createToolManualsAgentRoutes(
       res.setHeader('Content-Type', 'application/zip');
       res.send(zip.toBuffer());
     } catch (err) {
-      console.error('[tool-manuals] plugin archive failed:', err instanceof Error ? err.message : err);
+      log.error('plugin archive failed:', { err });
       res.status(500).json({ error: 'Failed to archive plugin' });
     }
   });
@@ -244,11 +302,15 @@ export function createToolManualsAgentRoutes(
       const email = await callerEmail(req);
       if (!email) return void res.status(403).json({ error: 'Forbidden' });
       const slug = Array.isArray(req.params.slug) ? req.params.slug[0] : req.params.slug;
-      const manual = await toolManualService.resolveInlineManual(email, String(slug));
+      // A connection made as an agent configuration reads only the manuals of the
+      // connectors it loads; another is as absent as one the person cannot read.
+      const scope = await resolveConnectionScope(agentScope, email, req.toolAuth?.agentPath);
+      const within = scope.connectorFilter();
+      const manual = await toolManualService.resolveInlineManual(email, String(slug), within ? { within } : undefined);
       if (!manual) return void res.status(404).json({ error: 'Not found' });
       res.json(manual);
     } catch (err) {
-      console.error('[tool-manuals] manual resolve failed:', err instanceof Error ? err.message : err);
+      log.error('manual resolve failed:', { err });
       res.status(500).json({ error: 'Failed to resolve manual' });
     }
   });
@@ -259,7 +321,10 @@ export function createToolManualsAgentRoutes(
 /**
  * Browser-facing tool-manual routes (mounted under the JWT auth middleware):
  *   GET  /tools           — the caller's accessible `.tool` manuals (summaries).
+ *   GET  /tools/pending   — tools proposed on an open change request, not released.
  *   POST /tools/preview    — validate a draft `.tool` for the renderer.
+ *   GET  /tools/:slug/dependents — what deleting this tool would affect.
+ *   DELETE /tools/:slug    — delete the manual (or the mcp.json server entry).
  *   GET  /tools/:slug      — one readable manual with description + capabilities
  *                            (the tool page). Registered LAST so no future
  *                            literal sibling is shadowed by the param segment;
@@ -268,8 +333,46 @@ export function createToolManualsAgentRoutes(
 export function createToolManualsBrowserRoutes(
   toolManualService: IToolManualService,
   serverEdit?: { service: McpServerEditService; getUser: (userId: string) => Promise<AuthUser | undefined> },
+  toolDelete?: { service: ToolDeleteService; getUser: (userId: string) => Promise<AuthUser | undefined> },
+  pendingTools?: IPendingToolService,
 ): express.Router {
   const router = express.Router();
+
+  /**
+   * What depends on a tool, and the delete itself — the owner's verb, gated in
+   * the service on the same `canOwner` verdict the plugin delete enforces.
+   *
+   * Both answer 404 for a tool the caller cannot read (indistinguishable from
+   * an unknown slug, as everywhere in this file) and 403 for one they can read
+   * but do not own — at that point the tool's existence is not a secret from
+   * them, and "you are not an owner" is the only useful thing to say.
+   */
+  router.get('/tools/:slug/dependents', async (req, res) => {
+    if (!toolDelete) return void res.status(404).json({ error: 'Not available' });
+    const email = req.userEmail;
+    if (!email) return void res.status(401).json({ error: 'Not authenticated' });
+    try {
+      res.json(await toolDelete.service.dependents(email, String(req.params.slug)));
+    } catch (err) {
+      if (err instanceof ToolDeleteError) return void res.status(err.status).json({ error: err.message });
+      log.error('dependents failed:', { err });
+      res.status(500).json({ error: 'Failed to read what depends on this tool' });
+    }
+  });
+
+  router.delete('/tools/:slug', async (req, res) => {
+    if (!toolDelete) return void res.status(404).json({ error: 'Not available' });
+    if (!req.userId) return void res.status(401).json({ error: 'Not authenticated' });
+    try {
+      const user = await toolDelete.getUser(req.userId);
+      if (!user) return void res.status(401).json({ error: 'Not authenticated' });
+      res.json(await toolDelete.service.deleteTool(user, String(req.params.slug)));
+    } catch (err) {
+      if (err instanceof ToolDeleteError) return void res.status(err.status).json({ error: err.message });
+      log.error('tool delete failed:', { err });
+      res.status(500).json({ error: 'Failed to delete the tool' });
+    }
+  });
 
   /**
    * Server-scoped read/write of one MCP server — the tool page's edit form.
@@ -287,7 +390,7 @@ export function createToolManualsBrowserRoutes(
       if (!view) return void res.status(404).json({ error: 'Not found' });
       res.json(view);
     } catch (err) {
-      console.error('[tool-manuals] server read failed:', err instanceof Error ? err.message : err);
+      log.error('server read failed:', { err });
       res.status(500).json({ error: 'Failed to read the server' });
     }
   });
@@ -308,7 +411,7 @@ export function createToolManualsBrowserRoutes(
       if (err instanceof McpServerEditError) {
         return void res.status(err.status).json({ error: err.message });
       }
-      console.error('[tool-manuals] server write failed:', err instanceof Error ? err.message : err);
+      log.error('server write failed:', { err });
       res.status(500).json({ error: 'Failed to save the server' });
     }
   });
@@ -317,11 +420,32 @@ export function createToolManualsBrowserRoutes(
     const email = req.userEmail;
     if (!email) return void res.status(401).json({ error: 'Not authenticated' });
     try {
-      res.json({ tools: await toolManualService.listAccessible(email) });
+      // `invalid` rides along with the catalog, out of ONE scan: a `.tool` the
+      // scan refused is the ONE reason a tool can be missing here, and a
+      // listing that dropped it in silence is indistinguishable from a
+      // workspace that never had it. Both halves therefore describe the same
+      // snapshot — a file cannot be absent from both because it was written
+      // between two reads.
+      res.json(await toolManualService.listAccessibleCatalog(email));
     } catch (err) {
-      console.error('[tool-manuals] list failed:', err);
+      log.error('list failed:', { err });
       res.status(500).json({ error: 'Internal error' });
     }
+  });
+
+  /**
+   * BEFORE `/tools/:slug`, and it has to stay there: Express matches in
+   * declaration order, so the parameterised route would otherwise swallow
+   * `pending` and answer "no such tool".
+   *
+   * Optional dependency so a host that composes its own service set gets an
+   * empty review shelf rather than a 404 the frontend has to special-case —
+   * the same shape `GET /skills/pending` has.
+   */
+  router.get('/tools/pending', async (req, res) => {
+    const email = req.userEmail;
+    if (!email) return void res.status(401).json({ error: 'Not authenticated' });
+    res.json({ tools: pendingTools ? await pendingTools.listPendingTools(email) : [] });
   });
 
   router.post('/tools/preview', async (req, res) => {
@@ -343,7 +467,7 @@ export function createToolManualsBrowserRoutes(
       if (!tool) return void res.status(404).json({ error: 'Not found' });
       res.json({ tool });
     } catch (err) {
-      console.error('[tool-manuals] detail failed:', err);
+      log.error('detail failed:', { err });
       res.status(500).json({ error: 'Failed to load tool' });
     }
   });

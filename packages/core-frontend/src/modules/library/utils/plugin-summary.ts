@@ -1,4 +1,95 @@
+import {
+  currentKbLayout,
+  isPersonalPluginFolder,
+  pluginOfPath,
+  skillUnderRoot,
+} from '@bevel-software/platform-shared';
+import type { PluginMembership } from '../services/library.api';
 import type { PluginPrincipals, PluginSummary } from '../services/plugins.api';
+
+/**
+ * The plugin a repository path sits in, by IDENTITY: the summary whose
+ * folder holds the path (deepest wins, so a nested plugin beats the scope
+ * around it). Before the summaries have loaded — or for a path under a
+ * folder the catalog does not list — the folder name stands in, which is
+ * what every plugin was called before the manifest became the identity. A
+ * personal folder is a place, not a plugin: null.
+ */
+export function pluginNameForPath(
+  repoPath: string,
+  summaries: readonly Pick<PluginSummary, 'name' | 'folders'>[],
+): string | null {
+  const folder = pluginOfPath(repoPath, currentKbLayout());
+  if (folder === null) return null;
+  // The catalog is the authority: whatever folder it lists as holding the
+  // path names the plugin. Only a path no listed folder holds falls back to
+  // the folder name — and a personal shelf, which the catalog never lists,
+  // to null.
+  const held = pluginHoldingPath(repoPath, summaries);
+  if (held) return held.name;
+  return isPersonalPluginFolder(folder) ? null : folder;
+}
+
+/**
+ * The listed plugin whose folder holds `repoPath` — the folder itself or
+ * anything beneath it, deepest first, so a nested plugin beats the scope
+ * around it. Whole segments only: a sibling folder sharing a prefix never
+ * claims the path. Null when no listed plugin holds it (a path outside
+ * every plugin, or inside one the catalog does not list for this caller).
+ * The one place the rule lives, for every surface that asks which plugin
+ * a path is in.
+ */
+export function pluginHoldingPath<S extends Pick<PluginSummary, 'folders'>>(
+  repoPath: string,
+  summaries: readonly S[],
+): S | null {
+  let best: { plugin: S; depth: number } | null = null;
+  for (const plugin of summaries) {
+    for (const folder of plugin.folders) {
+      if (repoPath !== folder && !repoPath.startsWith(`${folder}/`)) continue;
+      if (!best || folder.length > best.depth) best = { plugin, depth: folder.length };
+    }
+  }
+  return best?.plugin ?? null;
+}
+
+/**
+ * Which plugins hold a TOOL, in the shape a skill's memberships arrive in.
+ *
+ * The server sends none: a `.tool` manual and an `mcp.json` server are not
+ * linked one by one the way a skill is, they are REACHED. So the membership
+ * is derived from the two facts the browser already holds — where the file
+ * is, and which roots each plugin's manifest points at:
+ *
+ *  - INLINE in the plugin whose folder holds the file (deepest wins, as
+ *    everywhere else a path is attributed to a plugin);
+ *  - LINKED into every other plugin one of whose linked roots holds it — the
+ *    tool sits beside the skills that root brought in, and arrives with them.
+ *
+ * `granted` is always true: the grant a link needs is an access rule on a
+ * SKILL's folder, and a tool has none to lose or repair.
+ */
+export function pluginsHoldingTool(
+  repoPath: string,
+  summaries: readonly Pick<PluginSummary, 'name' | 'folders' | 'linkedRoots'>[],
+): PluginMembership[] {
+  const inline = pluginHoldingPath(repoPath, summaries);
+  const memberships: PluginMembership[] = [];
+  if (inline) memberships.push({ name: inline.name, linked: false, granted: true });
+  for (const summary of summaries) {
+    if (summary === inline) continue;
+    // `skillUnderRoot` is the one containment rule for a linked root, not a
+    // rule about skills — a tool under the root is under it the same way.
+    if (!(summary.linkedRoots ?? []).some((root) => skillUnderRoot(repoPath, root))) continue;
+    memberships.push({ name: summary.name, linked: true, granted: true });
+  }
+  return memberships;
+}
+
+/** What a plugin is called on screen — its display name, else its identity. */
+export function pluginLabel(name: string, summaries: readonly Pick<PluginSummary, 'name' | 'displayName'>[]): string {
+  return summaries.find((s) => s.name === name)?.displayName || name;
+}
 
 /**
  * How a plugin describes its membership in prose.
@@ -45,6 +136,22 @@ export function ownersTextOf(summary: Pick<PluginSummary, 'owners' | 'writers'>)
   const writers = usersThenRoles(summary.writers);
   if (writers.length > 0) return writers.join(', ');
   return 'the workspace admins';
+}
+
+/**
+ * The people `ownersTextOf` names, as a list.
+ *
+ * Mirrors that helper's chain exactly — owners, else writers, else nobody — so
+ * the sentence and the count of subjects in it can never disagree. It is a
+ * separate function only because a "we asked them" toast needs the NAMES (to
+ * take first names) while the verb beside them needs the COUNT, and prose
+ * gives back neither. Shared by the locked plugin page and the index row's
+ * Subscribe, which say the same thing after the same call.
+ */
+export function adminNamesOf(summary: Pick<PluginSummary, 'owners' | 'writers'>): string[] {
+  const owners = usersThenRoles(summary.owners);
+  if (owners.length > 0) return owners;
+  return usersThenRoles(summary.writers);
 }
 
 /**

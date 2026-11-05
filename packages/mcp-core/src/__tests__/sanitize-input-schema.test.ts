@@ -91,4 +91,151 @@ describe('sanitizeInputSchema', () => {
       properties: { item: { type: 'string' } },
     });
   });
+
+  it('resolves a `$dynamicRef` like a `$ref`, and never leaves one dangling once `$defs` is gone', () => {
+    // A local pointer is inlined, as a `$ref` is.
+    expect(
+      sanitizeInputSchema({
+        type: 'object',
+        properties: { item: { $dynamicRef: '#/$defs/thing' } },
+        $defs: { thing: { type: 'string', $dynamicAnchor: 'thing' } },
+      }),
+    ).toEqual({ type: 'object', properties: { item: { type: 'string', $dynamicAnchor: 'thing' } } });
+    // A plain-name fragment cannot be resolved here; it degrades to `{}`
+    // ("any value") rather than reaching a client as a reference into a
+    // block that is no longer there.
+    expect(
+      sanitizeInputSchema({
+        type: 'object',
+        properties: { item: { $dynamicRef: '#thing', description: 'kept' } },
+        $defs: { thing: { type: 'string', $dynamicAnchor: 'thing' } },
+      }),
+    ).toEqual({ type: 'object', properties: { item: { description: 'kept' } } });
+  });
+
+  it('walks `dependentSchemas` and `dependencies` as maps of the tool\'s own field names', () => {
+    // A dependency on a field named `default` or `enum` is still a schema to
+    // sanitize — a keyword only by coincidence of its name.
+    expect(
+      sanitizeInputSchema({
+        type: 'object',
+        properties: { default: { type: 'string' }, enum: { type: 'string' } },
+        dependentSchemas: {
+          default: { properties: { count: { type: 'integer', format: 'int32' } } },
+          enum: { properties: { item: { $ref: '#/$defs/thing' } } },
+        },
+        dependencies: { default: ['enum'], enum: { properties: { n: { type: 'number', format: 'double' } } } },
+        $defs: { thing: { type: 'string' } },
+      }),
+    ).toEqual({
+      type: 'object',
+      properties: { default: { type: 'string' }, enum: { type: 'string' } },
+      dependentSchemas: {
+        default: { properties: { count: { type: 'integer' } } },
+        enum: { properties: { item: { type: 'string' } } },
+      },
+      dependencies: { default: ['enum'], enum: { properties: { n: { type: 'number' } } } },
+    });
+  });
+
+  it('inlines `$ref` and `$dynamicRef` both when a schema carries both, as the `allOf` they amount to', () => {
+    expect(
+      sanitizeInputSchema({
+        type: 'object',
+        properties: { item: { $ref: '#/$defs/a', $dynamicRef: '#/$defs/b', description: 'kept' } },
+        $defs: { a: { type: 'string' }, b: { minLength: 1 } },
+      }),
+    ).toEqual({
+      type: 'object',
+      properties: { item: { description: 'kept', allOf: [{ type: 'string' }, { minLength: 1 }] } },
+    });
+    // A boolean target keeps its meaning: `false` rejects everything.
+    expect(
+      sanitizeInputSchema({
+        type: 'object',
+        properties: { item: { $ref: '#/$defs/a', $dynamicRef: '#/$defs/never' } },
+        $defs: { a: { type: 'string' }, never: false },
+      }),
+    ).toEqual({ type: 'object', properties: { item: { allOf: [{ type: 'string' }, false] } } });
+  });
+
+  it('counts a target wider than the budget without walking it whole', () => {
+    // A `$defs` entry with far more members than the budget: counting stops
+    // at the cap, and the reference answers `{}`.
+    const wide: Record<string, unknown> = {};
+    for (let i = 0; i < 200_000; i += 1) wide[`f${i}`] = 1;
+    const out = sanitizeInputSchema({
+      type: 'object',
+      properties: { item: { $ref: '#/$defs/wide' } },
+      $defs: { wide: { type: 'object', properties: wide } },
+    });
+    expect(out).toEqual({ type: 'object', properties: { item: {} } });
+  });
+
+  it('charges a reference the whole size of its target, array entries and scalars included, so repeated references cannot multiply it', () => {
+    // A target that is mostly a `required` list of strings — the shape a
+    // per-object count never saw — referenced three times: the budget is
+    // spent by the first copies, and the reference that no longer fits is
+    // `{}` rather than another twelve thousand names.
+    const wide = { type: 'object', required: Array.from({ length: 12_000 }, (_, i) => `f${i}`) };
+    const out = sanitizeInputSchema({
+      type: 'object',
+      properties: { a: { $ref: '#/$defs/wide' }, b: { $ref: '#/$defs/wide' }, c: { $ref: '#/$defs/wide' } },
+      $defs: { wide },
+    }) as { properties: Record<string, { required?: string[] }> };
+    const copies = Object.values(out.properties).filter((p) => (p.required?.length ?? 0) === 12_000).length;
+    expect(copies).toBeGreaterThan(0);
+    expect(copies).toBeLessThan(3);
+    // What did not fit is `{}` whole: a valid schema, never a dangling reference or a cut list.
+    expect(Object.values(out.properties).every((p) => p.required === undefined || p.required.length === 12_000)).toBe(true);
+    expect(JSON.stringify(out)).not.toContain('$ref');
+  });
+
+  it('answers `{}` for a single target larger than the whole budget, keeping the siblings', () => {
+    const wide: Record<string, unknown> = {};
+    for (let i = 0; i < 25_000; i += 1) wide[`f${i}`] = { type: 'string' };
+    const out = sanitizeInputSchema({
+      type: 'object',
+      properties: { item: { $ref: '#/$defs/wide', description: 'kept' } },
+      $defs: { wide: { type: 'object', properties: wide } },
+    });
+    expect(out).toEqual({ type: 'object', properties: { item: { description: 'kept' } } });
+  });
+
+  it('answers `{}` for a single reference to anything that is not a schema, and keeps a boolean one', () => {
+    // A pointer can land on a string, a number or an array; none of those is
+    // a schema, and the raw value must not reach the listing.
+    expect(
+      sanitizeInputSchema({
+        type: 'object',
+        properties: {
+          s: { $ref: '#/$defs/name', description: 'kept' },
+          n: { $ref: '#/$defs/count' },
+          a: { $ref: '#/$defs/list' },
+          never: { $ref: '#/$defs/never' },
+          neverKept: { $ref: '#/$defs/never', description: 'kept' },
+        },
+        $defs: { name: 'a string', count: 7, list: [{ type: 'string' }], never: false },
+      }),
+    ).toEqual({
+      type: 'object',
+      properties: {
+        s: { description: 'kept' },
+        n: {},
+        a: {},
+        never: false,
+        neverKept: { description: 'kept', allOf: [false] },
+      },
+    });
+  });
+
+  it('resolves a pointer through own members only, so `#/constructor` names nothing', () => {
+    expect(
+      sanitizeInputSchema({
+        type: 'object',
+        properties: { a: { $ref: '#/constructor' }, b: { $dynamicRef: '#/$defs/__proto__' } },
+        $defs: {},
+      }),
+    ).toEqual({ type: 'object', properties: { a: {}, b: {} } });
+  });
 });

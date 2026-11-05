@@ -1,12 +1,12 @@
 import { randomUUID } from 'node:crypto';
 
 /**
- * Port behind `start_session` (workspace.tools.ts): mints the session id an
- * external agent scopes its ontology boundary under. The workspace module owns
- * the port; WHAT backs the id is the composition root's choice:
+ * Port behind `start_session` (workspace.tools.ts): mints the id an external
+ * agent names its conversation with. The workspace module owns the port; WHAT
+ * backs the id is the composition root's choice:
  *
- * - Core default ({@link UuidSessionSink}): a bare random id — sufficient for
- *   the session-ontology gate, with no app-side session record.
+ * - Core default ({@link UuidSessionSink}): a bare random id — all the
+ *   agent-access hooks need, with no app-side session record.
  * - The enterprise app substitutes a sink that mints a REAL chat thread, so the
  *   same id also works end to end with `ask` (its sessionId IS a chat thread).
  *   See the `start_session` comment in workspace.tools.ts for why that

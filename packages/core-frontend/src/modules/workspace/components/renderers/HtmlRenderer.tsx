@@ -1,8 +1,45 @@
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { Pencil, Eye, RotateCw } from 'lucide-react';
-import { useFileNav, KB_ROUTE_PREFIX, resolveRelativePath } from '../../routing/kb-routes';
+import { useLocation } from 'react-router-dom';
+import { useFileNav } from '../../routing/kb-routes';
 import type { FileRendererProps, RendererSaveState } from './types';
 import { buildSandboxedHtml, sanitizeAgentHtml } from './htmlSandbox';
+import { useRendererSurface } from './rendererSurface';
+import { usePageLinkHome } from './htmlToolBridge';
+import { useHtmlToolBridge } from './useHtmlToolBridge';
+import {
+  HTML_FRAME_KEY_STEP,
+  HTML_FRAME_MAX_HEIGHT,
+  HTML_FRAME_MIN_HEIGHT,
+  HTML_FRAME_STANDARD_HEIGHT,
+  attachFrameResizeHandle,
+} from './frameResizeHandle';
+
+/**
+ * Where the reader's chosen frame height is kept, per browser: a
+ * convenience, like a remembered tab. A browser that cannot store it is
+ * asked nothing and shows the standard height each time.
+ */
+const FRAME_HEIGHT_KEY = 'bevel.htmlFrame.height';
+
+function rememberedFrameHeight(): number {
+  try {
+    const stored = Number(window.localStorage.getItem(FRAME_HEIGHT_KEY));
+    return Number.isFinite(stored) && stored >= HTML_FRAME_MIN_HEIGHT && stored <= HTML_FRAME_MAX_HEIGHT
+      ? Math.round(stored)
+      : HTML_FRAME_STANDARD_HEIGHT;
+  } catch {
+    return HTML_FRAME_STANDARD_HEIGHT;
+  }
+}
+
+function rememberFrameHeight(height: number): void {
+  try {
+    window.localStorage.setItem(FRAME_HEIGHT_KEY, String(height));
+  } catch {
+    // Not stored: the standard height next time, which is no worse than today.
+  }
+}
 
 export function HtmlRenderer({
   content,
@@ -14,17 +51,50 @@ export function HtmlRenderer({
   onSaveStateChange,
   readOnly = false,
 }: FileRendererProps) {
-  const { openFile } = useFileNav();
+  const { openLink, branch: tabBranch } = useFileNav();
+  // The fragment this tab's address arrived with (`Board.html#totals`, from a
+  // section link opened in a new tab or a shared address). It names a place
+  // in the PAGE, which lives in the frame, where the app's address never
+  // reaches: the frame is handed it as `bevel.jump` once it has loaded, the
+  // same message a click on a section link inside the page is answered with.
+  const { hash: arrivalHash } = useLocation();
+  const surface = useRendererSurface();
+  // Whether the surface's host grows with the page (an issue panel) rather
+  // than giving it a pane to scroll in (the app, the MCP App's pane).
+  const sizesToContent = surface?.sizesToContent === true;
+  // The file this page's links resolve against, where the host's `filePath`
+  // is not a workspace path on this tab's branch (a skill page).
+  const linkHome = usePageLinkHome();
   const [mode, setMode] = useState<'preview' | 'edit'>('preview');
+  /**
+   * The frame's height where the host grows with the page: the standard
+   * height, or the one this reader last chose in this browser; the reader
+   * drags the handle under the frame to change it. Never derived from the
+   * page — a frame is its own document, and a height read off a page that
+   * is itself laid out in the frame feeds back into itself.
+   */
+  const [frameHeight, setFrameHeight] = useState(() => (sizesToContent ? rememberedFrameHeight() : HTML_FRAME_STANDARD_HEIGHT));
+  const frameHeightRef = useRef(frameHeight);
+  const [dragging, setDragging] = useState(false);
+  const handleRef = useRef<HTMLDivElement | null>(null);
   const [value, setValue] = useState(content);
   const [savedValue, setSavedValue] = useState(savedContent ?? content);
   const [saveState, setSaveState] = useState<RendererSaveState>('idle');
   const [saveError, setSaveError] = useState<string | null>(null);
-  const [bundledSrcdoc, setBundledSrcdoc] = useState<string | null>(null);
-  const [previewError, setPreviewError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const prevFilePathRef = useRef(filePath);
+
+  // The page tool bridge: a page's `window.bevel.tools` and `requireTools()`,
+  // answered for one view of the page — a new frame document (a reload, a
+  // saved edit, another file) or the frame gone (Edit) is a new view. The
+  // view's key is a fresh identity whenever one of the INPUTS of the
+  // document changes, never the built document itself: the bridge's
+  // `toolBridge` goes into the build, so a key read off the build would
+  // chase it; and a distribution's document carries its inlined libraries,
+  // which a key built from it would compare on every render.
+  const viewKey = useMemo(() => ({ reloadKey, mode, savedValue, filePath }), [reloadKey, mode, savedValue, filePath]);
+  const { toolBridge, cards } = useHtmlToolBridge({ iframeRef, filePath, viewKey });
 
   const dirty = !readOnly && value !== savedValue;
 
@@ -49,17 +119,23 @@ export function HtmlRenderer({
     onSaveStateChange?.(saveState);
   }, [saveState, onSaveStateChange]);
 
-  // Build the iframe document whenever we enter preview mode or the saved
-  // content changes. The agent's HTML is sanitized to strip any external URLs
-  // (defense in depth — CSP also blocks them at runtime), then bundled with
-  // the KB's JS library inlined as a `<script type="module">`. The result is a
-  // fully self-contained srcdoc — the iframe makes no network calls of any kind.
-  useEffect(() => {
-    if (mode !== 'preview') return;
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- safe transient reset before rebuild
-    setPreviewError(null);
+  // Build the iframe document for the view on screen: in preview, from the
+  // saved content and the bridge's identity for this view. The agent's HTML
+  // is sanitized to strip any external URLs (defense in depth — CSP also
+  // blocks them at runtime), then bundled with the KB's JS library inlined as
+  // a `<script type="module">`. The result is a fully self-contained srcdoc —
+  // the iframe makes no network calls of any kind.
+  //
+  // Built DURING render, never in an effect after it: a new view (Refresh
+  // remounts the frame) must mount its frame with its own document. Built
+  // after the commit, the new frame first loaded the previous view's document
+  // and had the new one swapped in mid-load, and Chromium leaves a sandboxed
+  // frame whose srcdoc is replaced that early unpainted — blank on every
+  // Refresh.
+  const preview = useMemo((): { srcdoc: string; error: null } | { srcdoc: null; error: string } | null => {
+    if (mode !== 'preview') return null;
     try {
-      const doc = buildSandboxedHtml({
+      const srcdoc = buildSandboxedHtml({
         title: filePath,
         // Core ships no inlined vendor libraries. (The enterprise build inlines
         // d3 + mermaid and the KB graph client here — the knowledge system,
@@ -67,12 +143,19 @@ export function HtmlRenderer({
         // extension.)
         libModuleSources: [],
         bodyHtml: sanitizeAgentHtml(savedValue),
+        toolBridge,
+        // The branch the page is viewed on — the real home of a page whose
+        // host is not a workspace path (a skill page), else the file page's
+        // tab: the same branch its links resolve on. Absent on a surface.
+        branch: linkHome?.branch ?? tabBranch ?? undefined,
       });
-      setBundledSrcdoc(doc);
+      return { srcdoc, error: null };
     } catch (err) {
-      setPreviewError(err instanceof Error ? err.message : 'Failed to build preview');
+      return { srcdoc: null, error: err instanceof Error ? err.message : 'Failed to build preview' };
     }
-  }, [mode, savedValue, filePath, reloadKey]);
+  }, [mode, savedValue, filePath, toolBridge, linkHome, tabBranch]);
+  const bundledSrcdoc = preview?.srcdoc ?? null;
+  const previewError = preview?.error ?? null;
 
   // (The enterprise build additionally installs a postMessage bridge here that
   // serves the iframe's KB-graph client from `/api/workspace/:id/graph` — the
@@ -82,29 +165,66 @@ export function HtmlRenderer({
   // Navigation bridge: agent HTML deep-links into the KB by calling
   // `window.bevel.openNode(href)` or clicking an `<a>` whose href points at a
   // node — both post a `bevel.navigate` message (the iframe sandbox can't
-  // navigate the host window itself). We resolve the href the same way the
-  // markdown renderer does (absolute `/workspace/…` URLs pass through; relative
-  // `.md` paths resolve against this file) and route it through the in-app
-  // navigation so the URL reflects what's on screen.
+  // navigate the host window itself). `openLink` resolves the href the same
+  // way the markdown renderer does (absolute `/workspace/…` URLs keep their
+  // branch; relative paths resolve against this file) and follows it by the
+  // rule for links inside a file: another file opens in a new tab, and this
+  // page — its state, its scroll, its full-screen view — stays as it was.
+  // A link to a section of this same page (`Roadmap.html#q3` from inside
+  // Roadmap.html) is handed back to the frame as `bevel.jump`, which scrolls
+  // it the way the bridge scrolls a bare `#q3`: a fragment on the app's own
+  // address would never reach the frame. A host whose `filePath` is not a
+  // workspace path on this tab's branch (a skill page) names the page's real
+  // home through `PageLinkHomeContext`.
   useEffect(() => {
     function onNavMessage(event: MessageEvent) {
       const iframeWin = iframeRef.current?.contentWindow;
       if (!iframeWin || event.source !== iframeWin) return;
-      const msg = event.data as { type?: unknown; href?: unknown } | null;
+      const msg = event.data as { type?: unknown; href?: unknown; newTab?: unknown } | null;
       if (!msg || typeof msg !== 'object' || msg.type !== 'bevel.navigate') return;
       const href = typeof msg.href === 'string' ? msg.href : null;
       if (!href) return;
-      if (href.startsWith(`${KB_ROUTE_PREFIX}/`)) {
-        openFile(href);
-        return;
-      }
-      let decoded = href;
-      try { decoded = decodeURIComponent(href); } catch { /* leave as-is */ }
-      openFile(resolveRelativePath(filePath, decoded));
+      openLink(href, linkHome?.path ?? filePath, {
+        homeBranch: linkHome?.branch,
+        // A modified or middle click in the page, which the frame cannot
+        // open a tab for itself (see the nav bridge in `htmlSandbox.ts`).
+        newTab: msg.newTab === true,
+        onSection: (hash) => {
+          if (hash) iframeWin.postMessage({ type: 'bevel.jump', hash }, '*');
+        },
+      });
     }
     window.addEventListener('message', onNavMessage);
     return () => window.removeEventListener('message', onNavMessage);
-  }, [openFile, filePath]);
+  }, [openLink, filePath, linkHome]);
+
+  useEffect(() => {
+    frameHeightRef.current = frameHeight;
+  }, [frameHeight]);
+
+  // The handle under the frame, where the host grows with the page: a drag
+  // or the arrow keys set the frame's height, and a height the reader
+  // settled on is remembered in this browser. Attached whenever the handle
+  // is on screen — it comes and goes with the preview.
+  useEffect(() => {
+    const handle = handleRef.current;
+    if (!sizesToContent || !handle) return;
+    return attachFrameResizeHandle(handle, {
+      current: () => frameHeightRef.current,
+      apply: (height) => {
+        setDragging(true);
+        setFrameHeight(height);
+      },
+      settle: (height) => {
+        setDragging(false);
+        setFrameHeight(height);
+        rememberFrameHeight(height);
+      },
+      min: HTML_FRAME_MIN_HEIGHT,
+      max: HTML_FRAME_MAX_HEIGHT,
+      step: HTML_FRAME_KEY_STEP,
+    });
+  }, [sizesToContent, mode, previewError, bundledSrcdoc]);
 
   const save = useCallback(async (): Promise<boolean> => {
     if (readOnly || value === savedValue) return true;
@@ -208,24 +328,57 @@ export function HtmlRenderer({
           {previewError}
         </div>
       ) : bundledSrcdoc ? (
-        <iframe
-          key={reloadKey}
-          ref={iframeRef}
-          srcDoc={bundledSrcdoc}
-          title={filePath}
-          // `allow-scripts` only — without `allow-same-origin` the iframe's
-          // origin is opaque/null. Combined with the document's CSP
-          // (`connect-src 'none'`) and the postMessage-only data channel, the
-          // iframe cannot exfiltrate, navigate, popup, or fetch.
-          sandbox="allow-scripts"
-          referrerPolicy="no-referrer"
-          className="flex-1 w-full bg-white rounded-xs border border-line"
-        />
+        <>
+          <iframe
+            key={reloadKey}
+            ref={iframeRef}
+            srcDoc={bundledSrcdoc}
+            title={filePath}
+            // `allow-scripts` only — without `allow-same-origin` the iframe's
+            // origin is opaque/null. Combined with the document's CSP
+            // (`connect-src 'none'`) and the postMessage-only data channel, the
+            // iframe cannot exfiltrate, navigate, popup, or fetch.
+            sandbox="allow-scripts"
+            referrerPolicy="no-referrer"
+            onLoad={(e) => {
+              if (arrivalHash) e.currentTarget.contentWindow?.postMessage({ type: 'bevel.jump', hash: arrivalHash }, '*');
+            }}
+            // In a pane the frame fills it and scrolls inside; where the host
+            // grows with the page, the frame has the reader's height (a
+            // flex-grown frame in an auto-height column would collapse to the
+            // browser's default 150px instead), as its CONTENT box, so the
+            // page's viewport is exactly that height and the border is not
+            // taken out of it. While the handle is dragged the frame takes no
+            // pointer — a frame is its own document, and would keep the
+            // pointer the moment it crossed in.
+            className={`w-full bg-white rounded-xs border border-line ${sizesToContent ? 'shrink-0' : 'flex-1'}`}
+            style={
+              sizesToContent
+                ? { height: frameHeight, boxSizing: 'content-box', pointerEvents: dragging ? 'none' : undefined }
+                : undefined
+            }
+          />
+          {sizesToContent && (
+            <div
+              ref={handleRef}
+              role="separator"
+              aria-orientation="horizontal"
+              aria-label="Resize the page"
+              aria-valuenow={frameHeight}
+              aria-valuemin={HTML_FRAME_MIN_HEIGHT}
+              aria-valuemax={HTML_FRAME_MAX_HEIGHT}
+              tabIndex={0}
+              title="Drag to make the page taller or shorter"
+              className="shrink-0 h-2 mt-1 rounded-xs cursor-row-resize outline-none hover:bg-hover focus-visible:bg-accent-hover/60 data-[dragging=true]:bg-accent-hover/60 transition-colors"
+            />
+          )}
+        </>
       ) : (
         <div className="flex items-center justify-center h-full text-ink-muted text-sm">
           Loading preview…
         </div>
       )}
+      {cards}
     </div>
   );
 }

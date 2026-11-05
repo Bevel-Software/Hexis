@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { ShieldAlert, Loader2 } from 'lucide-react';
 import { useAdmin } from '../state/admin.context';
 import { RolesApiError } from '../services/roles.api';
-import { Button } from '../../../shared/components';
+import { Button, useConfirm } from '../../../shared/components';
 
 /**
  * App-wide break-glass banner shown when `roles.yaml` fails to parse. A
@@ -16,15 +16,20 @@ export function RolesCorruptedBanner() {
   const { rolesConfigCorrupted, rolesConfigErrors, runRolesRecovery } = useAdmin();
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const confirm = useConfirm();
 
   if (!rolesConfigCorrupted) return null;
 
   const onRecover = async () => {
     if (running) return;
-    const confirmed = window.confirm(
-      'Bevel Recovery will back up the corrupted roles.yaml to old-roles.yaml and ' +
+    const { confirmed } = await confirm({
+      title: 'Bevel Recovery',
+      message:
+        'Bevel Recovery will back up the corrupted roles.yaml to old-roles.yaml and ' +
         'restore the default Bevel roster. Only continue if you are from Bevel. Proceed?',
-    );
+      confirmLabel: 'Proceed',
+      destructive: true,
+    });
     if (!confirmed) return;
     setRunning(true);
     setError(null);

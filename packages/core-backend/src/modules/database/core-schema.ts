@@ -1,29 +1,56 @@
 /**
- * CORE platform tables — the git-backed workspace/workflow, auth, access,
- * change requests, locks, the pending-commits queue, the ontology-session
- * touched-set, connection keys, MCP OAuth, and the Secrets Vault. A core-only
- * deployment migrates and runs on exactly these tables.
+ * CORE platform tables — the git-backed workspace and version control, auth, access,
+ * change requests, locks, the pending-commits queue, connection keys, MCP
+ * OAuth, the Secrets Vault, and the embed's Atlassian account links. A
+ * core-only deployment migrates and runs on exactly these tables.
  *
  * Enterprise-only tables (chat, routines, watchlist, connectors, LLM config,
- * SharePoint/Atlassian links, feedback, upload, kb-revalidation) live in
+ * SharePoint links, feedback, upload, kb-revalidation) live in
  * `enterprise-schema.ts`, which imports the FK targets (`users`,
  * `externalApiKeys`) from here. `schema.ts` re-exports both, so existing
  * imports keep working unchanged.
+ *
+ * PII columns (emails, display names, change-request text) are
+ * `encryptedText` — AES-256-GCM ciphertext in the database, transparently
+ * decrypted on read (see `shared/column-crypto.ts`). Because the ciphertext is
+ * randomized, equality lookups and unique constraints on those columns go
+ * through their deterministic `*_bidx` companions (HMAC-SHA256 blind indexes,
+ * `blindIndexText`) — never `eq()` an encrypted column directly. A `*_bidx`
+ * column is written and compared WITH THE ADDRESS ITSELF; the database handle
+ * the statement runs on turns it into the index, under that handle's key.
  */
 import { sql } from 'drizzle-orm';
 import { boolean, check, index, integer, jsonb, pgTable, primaryKey, text, timestamp, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
+import { blindIndexText, encryptedText } from '../../shared/column-crypto.js';
 
 export const users = pgTable('users', {
   id: uuid('id').defaultRandom().primaryKey(),
-  email: text('email').notNull().unique(),
-  name: text('name').notNull(),
-  avatarUrl: text('avatar_url'),
+  email: encryptedText('email').notNull(),
+  /**
+   * Blind index of the lowercased email — carries the uniqueness constraint
+   * and every lookup-by-email (login, upsert conflict target), which the
+   * randomized `email` ciphertext cannot. Write the email into it on every
+   * insert, and compare it with the email.
+   */
+  emailBidx: blindIndexText('email_bidx').notNull(),
+  name: encryptedText('name').notNull(),
+  avatarUrl: encryptedText('avatar_url'),
   /**
    * scrypt hash for password login (see auth/password-hash.ts). NULL for
    * accounts that only ever signed in via SSO — password login refuses them
    * until an admin (or the user, from their Account page) sets one.
    */
   passwordHash: text('password_hash'),
+  /**
+   * Which generation of this account's sessions is honoured. Every session
+   * token carries the value it was issued at (`sv`; a token from before the
+   * column existed carries none and counts as 0), and one whose value is not
+   * the row's is refused. Changing the password moves it on, so every session
+   * opened with the old password ends at its next request — the one that
+   * made the change is handed a fresh token. Connection keys are not
+   * sessions and do not look at it.
+   */
+  sessionVersion: integer('session_version').default(0).notNull(),
   /**
    * The one onboarding fact the server keeps: has this person concluded the
    * connect-your-agent setup (the welcome page's Done, or the reminder
@@ -37,9 +64,24 @@ export const users = pgTable('users', {
    * backfill would need, and being shown the setup once costs a click.
    */
   onboardingDone: boolean('onboarding_done').default(false).notNull(),
+  /**
+   * When an admin switched this account off; NULL while it is on. A
+   * deactivated account keeps its row, its history and its place in roles
+   * and groups, but nothing it holds is honoured: it cannot sign in, and its
+   * session, connection keys, agent tokens and internal tokens are refused
+   * the next time they are presented (see `AuthService.isActive`). Turning it
+   * back on restores all of them as they were.
+   *
+   * The off switch a host that sells seats needs — a seat is an account that
+   * is on — and the one an admin uses for someone who left without erasing
+   * what they did.
+   */
+  deactivatedAt: timestamp('deactivated_at'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
-});
+}, (t) => ({
+  emailBidxUnq: uniqueIndex('users_email_bidx_unq').on(t.emailBidx),
+}));
 
 /**
  * Per-file owner approvals on a PR. A PR is mergeable-in-Bevel when every
@@ -56,15 +98,18 @@ export const prFileApprovals = pgTable('pr_file_approvals', {
   id: uuid('id').defaultRandom().primaryKey(),
   prNumber: integer('pr_number').notNull(),
   path: text('path').notNull(),
-  approverEmail: text('approver_email').notNull(),  // lowercased at insert
-  approverName: text('approver_name').notNull(),
+  approverEmail: encryptedText('approver_email').notNull(),  // lowercased at insert
+  /** Blind index of `approver_email` — the uniqueness key and eq() lookup. */
+  approverEmailBidx: blindIndexText('approver_email_bidx').notNull(),
+  approverName: encryptedText('approver_name').notNull(),
   headSha: text('head_sha').notNull(),
   approvedAt: timestamp('approved_at').defaultNow().notNull(),
 }, (t) => ({
   // Idempotency: approving the same path on the same SHA twice must be a no-op,
-  // not a duplicate row. Unique on the (PR, path, approver, headSha) tuple.
-  unq: uniqueIndex('pr_file_approvals_unq')
-    .on(t.prNumber, t.path, t.approverEmail, t.headSha),
+  // not a duplicate row. Unique on the (PR, path, approver, headSha) tuple —
+  // via the blind index, because the encrypted email is randomized.
+  unq: uniqueIndex('pr_file_approvals_bidx_unq')
+    .on(t.prNumber, t.path, t.approverEmailBidx, t.headSha),
   byPr: index('pr_file_approvals_by_pr').on(t.prNumber),
 }));
 
@@ -78,47 +123,19 @@ export const prFileApprovals = pgTable('pr_file_approvals', {
 export const prMergeLog = pgTable('pr_merge_log', {
   id: uuid('id').defaultRandom().primaryKey(),
   prNumber: integer('pr_number').notNull(),
-  triggeredByEmail: text('triggered_by_email').notNull(),
-  triggeredByName: text('triggered_by_name').notNull(),
+  triggeredByEmail: encryptedText('triggered_by_email').notNull(),
+  /** Blind index of `triggered_by_email` — GDPR-erasure lookup. */
+  triggeredByEmailBidx: blindIndexText('triggered_by_email_bidx').notNull(),
+  triggeredByName: encryptedText('triggered_by_name').notNull(),
   headShaAtMerge: text('head_sha_at_merge').notNull(),
   mergeMethod: text('merge_method').notNull(),
   succeeded: boolean('succeeded').notNull(),
-  error: text('error'),
+  // Encrypted: merge failure output can quote author identities and CR text.
+  error: encryptedText('error'),
   startedAt: timestamp('started_at').defaultNow().notNull(),
   completedAt: timestamp('completed_at'),
 }, (t) => ({
   byPr: index('pr_merge_log_by_pr').on(t.prNumber),
-}));
-
-/**
- * In-app PR comments. GitHub is authoritative for the diff + PR metadata;
- * Bevel owns the review conversation. Comments never round-trip to GitHub.
- *
- * Shape encodes three comment kinds:
- *   • General PR comment        — path null, line null
- *   • File-level comment        — path set,  line null
- *   • Inline (line-anchored)    — path set,  line set
- *
- * Threading: replies point at their root via `parentId`. Root comments have
- * `parentId = null`. We use a self-FK-less column (no DB-side constraint) to
- * keep the parent row independently deletable — the service layer tolerates
- * orphan replies rather than cascading deletes and losing discussion context.
- */
-export const prComments = pgTable('pr_comments', {
-  id: uuid('id').defaultRandom().primaryKey(),
-  prNumber: integer('pr_number').notNull(),
-  authorEmail: text('author_email').notNull(),
-  authorName: text('author_name').notNull(),
-  path: text('path'),
-  line: integer('line'),
-  headSha: text('head_sha').notNull(),
-  body: text('body').notNull(),
-  parentId: uuid('parent_id'),
-  createdAt: timestamp('created_at').defaultNow().notNull(),
-  updatedAt: timestamp('updated_at'),
-}, (t) => ({
-  byPr: index('pr_comments_by_pr').on(t.prNumber),
-  byThread: index('pr_comments_by_thread').on(t.prNumber, t.path, t.line),
 }));
 
 /**
@@ -128,7 +145,7 @@ export const prComments = pgTable('pr_comments', {
  * hosted) works — the remote only stores commits/branches.
  *
  * `number` is the human-facing id and the join key the sibling tables
- * (`pr_file_approvals`, `pr_comments`, `pr_merge_log`) reference in their
+ * (`pr_file_approvals`, `pr_merge_log`) reference in their
  * `pr_number` column — those columns now hold THIS number, not a GitHub PR
  * number. It's a DB-assigned identity so allocation is race-free.
  *
@@ -141,15 +158,70 @@ export const changeRequests = pgTable('change_requests', {
   number: integer('number').generatedAlwaysAsIdentity(),
   sourceBranch: text('source_branch').notNull(),
   targetBranch: text('target_branch').notNull(),
-  title: text('title').notNull(),
-  body: text('body').notNull().default(''),
-  authorEmail: text('author_email').notNull(), // lowercased at insert
-  authorName: text('author_name').notNull(),
+  // Encrypted: CR title/body exist only in this DB (the remote sees branches).
+  // The DB-level default '' bypasses toDriver, which is fine: the empty string
+  // is deliberately stored unencrypted (see encryptPii), so a defaulted row
+  // and an app-written empty body hold the identical representation.
+  title: encryptedText('title').notNull(),
+  /**
+   * The request's description, and nothing else: exactly what its author (or
+   * a later edit) wrote. Hexis keeps none of its own facts in here — who must
+   * approve each file is resolved live from the access rules, and an access
+   * request's level and note have columns of their own below. Bodies written
+   * before this release carried both as prose and hidden markers; the first
+   * start on it moves them out (`moveLegacyRequestBodies` in `migrate.ts`).
+   */
+  body: encryptedText('body').notNull().default(''),
+  /**
+   * Set on a request the access-request flow opened: the level the person
+   * asked for. Null on every other request. Read back by that flow to say
+   * "Requested: Owner" from the request itself, whose row is always readable,
+   * rather than from a branch a stale clone may not see yet.
+   */
+  accessRequestLevel: text('access_request_level'),
+  /** The requester's note, when they wrote one. Encrypted: a person's own words. */
+  accessRequestNote: encryptedText('access_request_note'),
+  authorEmail: encryptedText('author_email').notNull(), // lowercased at insert
+  /** Blind index of `author_email` — GDPR-erasure lookup. */
+  authorEmailBidx: blindIndexText('author_email_bidx').notNull(),
+  authorName: encryptedText('author_name').notNull(),
   state: text('state').notNull().default('open'), // 'open' | 'merged' | 'closed'
   mergedSha: text('merged_sha'),
+  // The last apply attempt that did not land (null when none, or once a gate
+  // input it depended on changed). Persisted rather than only pushed to the
+  // clicker so every viewer of the still-open request — its author first —
+  // sees the refusal.
+  // Encrypted: the reason can quote identities the way the merge log's error
+  // does, and the name is a person's.
+  applyFailureReason: encryptedText('apply_failure_reason'),
+  applyFailureConflicts: boolean('apply_failure_conflicts'),
+  applyFailedAt: timestamp('apply_failed_at'),
+  applyFailedByName: encryptedText('apply_failed_by_name'),
+  /**
+   * Blind index of the email of the person named above — what account erasure
+   * finds their name by. Written and cleared with the name, so a name never
+   * stands without it: a refusal recorded before the encryption release kept
+   * no address, and its name is taken off at the first start on this release
+   * (`clearUnindexedRefusalNames` in `migrate.ts`).
+   */
+  applyFailedByEmailBidx: blindIndexText('apply_failed_by_email_bidx'),
+  /** What refused the last apply: 'gate' (approvals), 'conflicts' (git), 'error' (anything else). */
+  applyFailureKind: text('apply_failure_kind'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at'),
   closedAt: timestamp('closed_at'),
+  /**
+   * Why a closed request was closed, when something other than a person
+   * closed it. Today the one value is 'repository-replaced': the admin
+   * pointed the deployment at a different knowledge-base repository and chose
+   * to close the requests rather than keep them. Null for every request
+   * closed the ordinary way — by its author, or by the deleted-branch sweep —
+   * so the column reads as "nobody recorded a reason", not as a default.
+   *
+   * The row is never deleted: a replaced repository loses the branches, not
+   * the record of what people asked for.
+   */
+  closedReason: text('closed_reason'),
 }, (t) => ({
   numberUnq: uniqueIndex('change_requests_number_unq').on(t.number),
   // Enforce the "A→B blocks A→B while open" uniqueness rule at the DB level —
@@ -162,6 +234,10 @@ export const changeRequests = pgTable('change_requests', {
   stateCheck: check(
     'change_requests_state_check',
     sql`${t.state} IN ('open', 'merged', 'closed')`,
+  ),
+  accessRequestLevelCheck: check(
+    'change_requests_access_request_level_check',
+    sql`${t.accessRequestLevel} IS NULL OR ${t.accessRequestLevel} IN ('write', 'owner')`,
   ),
 }));
 
@@ -183,9 +259,43 @@ export const externalApiKeys = pgTable('api_tokens', {
   userId: uuid('user_id').notNull().references(() => users.id),
   tokenHash: text('token_hash').notNull().unique(),
   label: text('label').notNull(),
+  /**
+   * What the key was minted as: `key` by hand, or a flow's own kind (a
+   * Claude link). The one fact that tells such keys apart — the label is
+   * free text the person may edit or imitate.
+   */
+  kind: text('kind').default('key').notNull(),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   lastUsedAt: timestamp('last_used_at'),
   revokedAt: timestamp('revoked_at'),
+  /**
+   * Who ended the key — `owner` (the person disconnected it themselves) or
+   * `admin` (an admin revoked it from the deployment overview). Null while
+   * the key is live, and on rows revoked before this column existed, which
+   * the UI reads as the owner's own doing. The owner's page uses it to say
+   * "revoked by an admin" rather than "disconnected", so nobody tries to
+   * reconnect a key that was taken from them.
+   */
+  revokedBy: text('revoked_by'),
+  /**
+   * When the owner deleted the key "for good" from their own pages. A
+   * DELETE in name only: the row stays, because the Audit log's events hang
+   * off it and a log its subject can erase is not one. Hidden from the
+   * owner's listings, shown to admins as deleted; gone for real only when
+   * the account is erased (the cascade) or its events have long been
+   * pruned. Always set on an already-revoked row — a live key is never
+   * deleted in one step.
+   */
+  deletedAt: timestamp('deleted_at'),
+  /**
+   * The agent configuration the key connects as — a repo-relative knowledge-base
+   * path, chosen when the key is minted. Null is Everything: the key sees
+   * every tool, skill and plugin its owner may read, exactly as before the
+   * column existed. The path is the whole record: the file is re-read on
+   * every surface build, so editing it changes what the key sees without a
+   * new key (see `modules/agent-scope`).
+   */
+  agentPath: text('agent_path'),
 }, (t) => ({
   byUser: index('api_tokens_by_user').on(t.userId),
 }));
@@ -210,7 +320,15 @@ export const fileLocks = pgTable('file_locks', {
   branch: text('branch').notNull(),
   path: text('path').notNull(),
   holderUserId: uuid('holder_user_id').notNull().references(() => users.id),
-  holderName: text('holder_name').notNull(),
+  holderName: encryptedText('holder_name').notNull(),
+  // How the lock was acquired. 'edit' (the default) is a normal write hold —
+  // the holder is editing and the release publishes their bytes.
+  // 'coordination' is a pure-mutex hold (see IVersionControlService.acquireLock)
+  // that grants NO write authority. Persisted on the row — not inferred at
+  // release time — so the write/checkpoint/commit-enqueue paths can refuse
+  // to treat a coordination hold as write possession for as long as the row
+  // lives, across process restarts included.
+  mode: text('mode').notNull().default('edit'),
   acquiredAt: timestamp('acquired_at').defaultNow().notNull(),
   lastHeartbeatAt: timestamp('last_heartbeat_at').defaultNow().notNull(),
   expiresAt: timestamp('expires_at').notNull(),
@@ -220,6 +338,7 @@ export const fileLocks = pgTable('file_locks', {
   // table scan once the lock count grows.
   byExpiry: index('file_locks_by_expiry').on(t.expiresAt),
   byHolder: index('file_locks_by_holder').on(t.holderUserId),
+  modeCheck: check('file_locks_mode', sql`${t.mode} IN ('edit', 'coordination')`),
 }));
 
 /**
@@ -262,8 +381,10 @@ export const pendingCommits = pgTable('pending_commits', {
   // Author attribution captured at enqueue. The denormalised name/email pair
   // lands on the eventual `git commit --author=` so the commit history shows
   // the human who triggered the save, not the worker.
-  authorEmail: text('author_email').notNull(),  // lowercased at insert
-  authorName: text('author_name').notNull(),
+  authorEmail: encryptedText('author_email').notNull(),  // lowercased at insert
+  /** Blind index of `author_email` — GDPR-erasure lookup. */
+  authorEmailBidx: blindIndexText('author_email_bidx').notNull(),
+  authorName: encryptedText('author_name').notNull(),
   queuedAt: timestamp('queued_at').defaultNow().notNull(),
   // `running` is set while the worker is mid-commit so a second worker
   // (e.g. after a restart with another instance still draining) doesn't
@@ -276,7 +397,8 @@ export const pendingCommits = pgTable('pending_commits', {
   // `needs_attention` + feedback notice instead of looping forever.
   recoveryAgentRuns: integer('recovery_agent_runs').notNull().default(0),
   lastAttemptedAt: timestamp('last_attempted_at'),
-  lastError: text('last_error'),
+  // Encrypted: git/agent failure output can quote author identities and paths.
+  lastError: encryptedText('last_error'),
 }, (t) => ({
   // Primary read pattern: drain in queued order, scoped to a workspace.
   byWorkspaceQueued: index('pending_commits_by_workspace_queued').on(t.workspaceId, t.queuedAt),
@@ -339,30 +461,6 @@ export const secrets = pgTable('secrets', {
 }));
 
 /**
- * Ontology-session boundary — the per-session log of which named ontologies a
- * run has TOUCHED (one row per `(session_id, ontology)`). Each agent operation
- * that resolves to a named ontology records a row here (idempotent on the PK).
- *
- * The rule the gate enforces from this set:
- *   - READS are always allowed; they just record the ontology they touched.
- *   - WRITES are allowed only while the session's touched set is a SINGLE named
- *     ontology equal to the write target. Once a session has touched two or
- *     more ontologies (e.g. by reading across them), every write is blocked —
- *     "read across ontologies → you can't write anymore at all."
- *
- * Postgres is the durable source of truth so the boundary holds across a
- * backend restart (an in-memory set would reset and silently un-poison a run).
- * A write-through in-process cache fronts this table for the chatty read path;
- * a cache miss falls back here.
- *
- *   - PK is `(session_id, ontology)` — a set, idempotent on repeat touches.
- *   - `ontology` is the resolved ontology id (e.g. `KnowledgeBase/Product`).
- *     Neutral touches don't record, so they never write a row.
- *   - `touched_at` drives the abandoned-run `sweepOlderThan` backstop; the
- *     primary reclamation is an explicit delete of all of a session's rows at
- *     run end.
- */
-/**
  * OAuth clients dynamically registered by MCP clients (RFC 7591 DCR). When an
  * MCP client (claude.ai, Claude Code) connects to `/api/mcp` without a
  * connection key, it registers itself here via `POST /register`, then runs the
@@ -407,9 +505,64 @@ export const oauthAuthCodes = pgTable('oauth_auth_codes', {
   expiresAt: timestamp('expires_at').notNull(),
   consumedAt: timestamp('consumed_at'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
+  /**
+   * The "Connect as" choice made on the consent step, carried from Finish to
+   * the token exchange that makes (or finds) the agent connection — the code
+   * is the only thing that travels between the two. Null is Everything.
+   */
+  agentPath: text('agent_path'),
 }, (t) => ({
   // Sweep expired/spent rows without a full scan.
   byExpiry: index('oauth_auth_codes_by_expiry').on(t.expiresAt),
+}));
+
+/**
+ * "This person connected this agent" — the durable record behind the Audit
+ * log's agent rows. An OAuth grant cannot be that record: its token row is
+ * replaced on every refresh (hourly) and pruned once its refresh window
+ * closes, so nothing about it outlives a month. This row is made the first
+ * time a token is minted for a (user, client) pair, kept across every refresh
+ * (each new token row points at it), and REVOKED rather than deleted when the
+ * person or an admin cuts the agent off — its events stay readable under it.
+ *
+ * A connection is the AGENT, per person — not the OAuth client registration.
+ * Claude registers a fresh client on every re-authorisation (dynamic client
+ * registration mints a new id each time), so keying by registration gave one
+ * person five "Claude" rows for one agent. `agent_key` is what a connection is
+ * keyed by instead: the registered client name, folded (a name-less client
+ * falls back to its id), so every registration of "Claude" by one person
+ * lands on the same live row; `client_id` records the registration that
+ * first made it. `client_name` is that registration's name as shown.
+ *
+ * One LIVE connection per (user, agent): the partial unique index below. A
+ * reconnect after a revoke is a new row, so the old one's history and its
+ * "revoked by an admin" mark are never overwritten.
+ */
+export const agentConnections = pgTable('agent_connections', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  clientId: text('client_id').notNull().references(() => oauthClients.clientId),
+  clientName: text('client_name'),
+  /** The folded client name, or the client id when the registration carried none. */
+  agentKey: text('agent_key').notNull(),
+  connectedAt: timestamp('connected_at').defaultNow().notNull(),
+  lastUsedAt: timestamp('last_used_at'),
+  revokedAt: timestamp('revoked_at'),
+  /** `owner` | `admin` — who ended it; null while live. Same vocabulary as `api_tokens.revoked_by`. */
+  revokedBy: text('revoked_by'),
+  /**
+   * The agent configuration the person chose to connect as on the consent step — a
+   * repo-relative knowledge-base path — or null for Everything. Set by every
+   * consent that lands on the row, so re-authorising with another choice
+   * changes what the agent sees from its next request. Same meaning as
+   * `api_tokens.agent_path`.
+   */
+  agentPath: text('agent_path'),
+}, (t) => ({
+  byUser: index('agent_connections_by_user').on(t.userId),
+  liveUnq: uniqueIndex('agent_connections_live_unq')
+    .on(t.userId, t.agentKey)
+    .where(sql`${t.revokedAt} is null`),
 }));
 
 /**
@@ -417,7 +570,15 @@ export const oauthAuthCodes = pgTable('oauth_auth_codes', {
  * `api_tokens`: plaintext shown only in the token response, SHA-256 hashes
  * stored, revoked-not-deleted so `last_used_at` keeps its audit value and a
  * revoked token can't be re-issued. One row per pair; refresh rotation
- * revokes the old row and inserts a new one.
+ * retires the old row (`rotated_at`) and inserts a new one. A retired row's
+ * access token still verifies until its own expiry, unless the row is then
+ * revoked: by a revoke, a sign-out, or its refresh token's one allowed replay
+ * within the reuse grace, which revokes it in the statement that admits it.
+ *
+ * `connection_id` names the {@link agentConnections} row the pair belongs to,
+ * so every call made with the token is attributed to that agent and revoking
+ * the agent can revoke exactly its tokens. Null only on rows minted before
+ * the column existed.
  */
 export const oauthTokens = pgTable('oauth_tokens', {
   id: uuid('id').defaultRandom().primaryKey(),
@@ -425,18 +586,94 @@ export const oauthTokens = pgTable('oauth_tokens', {
   refreshTokenHash: text('refresh_token_hash').unique(),
   clientId: text('client_id').notNull().references(() => oauthClients.clientId),
   userId: uuid('user_id').notNull().references(() => users.id),
+  connectionId: uuid('connection_id').references(() => agentConnections.id, { onDelete: 'cascade' }),
   scope: text('scope'),
   resource: text('resource'),
   expiresAt: timestamp('expires_at').notNull(),
   refreshExpiresAt: timestamp('refresh_expires_at'),
   revokedAt: timestamp('revoked_at'),
+  /**
+   * When a refresh of this row's refresh token minted its successor. Set by
+   * rotation and never by a revoke, so the two are told apart: a rotated
+   * row's access token still verifies until its own expiry, and its refresh
+   * token is honoured once more within the reuse grace (see
+   * `exchangeRefreshToken`), a replay that revokes the row — access token
+   * included — in the statement that admits it; a revoked row does neither.
+   * Null on a row whose refresh token has not been used, and on rows from
+   * before the column existed, which rotation then marks as it does any
+   * other.
+   */
+  rotatedAt: timestamp('rotated_at'),
   lastUsedAt: timestamp('last_used_at'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 }, (t) => ({
   byUser: index('oauth_tokens_by_user').on(t.userId),
   byExpiry: index('oauth_tokens_by_expiry').on(t.expiresAt),
+  byConnection: index('oauth_tokens_by_connection').on(t.connectionId),
 }));
 
+/**
+ * The Audit log's events: one row per thing an external agent called through
+ * the platform — a hexis capability (the platform's own tools, `read_file`,
+ * `call_tool_chain`, …), a tool from a `.tool` manual or a connected MCP
+ * server, or a skill it read. Append-only; pruned past the deployment's
+ * retention window (the `auditRetentionDays` setting).
+ *
+ * Deliberately WITHOUT arguments or results: a call's inputs can carry
+ * secrets and personal data, and the log's question is "what was used, by
+ * which agent, when" — not "what was said".
+ *
+ * Exactly one principal per row (the CHECK): the connection key or the agent
+ * connection the call arrived through, or the knowledge-base page whose
+ * script made the call as the person viewing it (`page_path`). Key and
+ * connection cascade, so deleting a key for good, revoking-then-erasing a
+ * person, or dropping a connection takes its events along — the same contract
+ * the LLM-usage rows already keep; a page's events go with the person.
+ */
+export const agentEvents = pgTable('agent_events', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  keyId: uuid('key_id').references(() => externalApiKeys.id, { onDelete: 'cascade' }),
+  connectionId: uuid('connection_id').references(() => agentConnections.id, { onDelete: 'cascade' }),
+  /** The knowledge-base path of the HTML page that made the call, for a page's calls; null otherwise. */
+  pagePath: text('page_path'),
+  /** `capability` | `tool` | `skill`. */
+  kind: text('kind').notNull(),
+  /** The MCP server / `.tool` manual (catalog name) for a tool, the skill folder for a skill; null for a capability. */
+  manual: text('manual'),
+  /** The tool's bare name, or the skill's name. */
+  name: text('name').notNull(),
+  /**
+   * `ok` | `error` | `denied` | `refused`. Denied: the caller's sign-in for the
+   * tool was missing, so nothing ran. Refused: the viewer answered a page's
+   * request to write with Deny, so nothing ran.
+   */
+  outcome: text('outcome').notNull(),
+  durationMs: integer('duration_ms'),
+  at: timestamp('at').defaultNow().notNull(),
+}, (t) => ({
+  // The two read paths: one principal's events, newest first.
+  byKey: index('agent_events_by_key').on(t.keyId, t.at),
+  byConnection: index('agent_events_by_connection').on(t.connectionId, t.at),
+  byPage: index('agent_events_by_page').on(t.userId, t.pagePath, t.at),
+  // The retention prune, and per-user counts.
+  byAt: index('agent_events_by_at').on(t.at),
+  byUser: index('agent_events_by_user').on(t.userId),
+  kindCheck: check('agent_events_kind', sql`${t.kind} IN ('capability', 'tool', 'skill')`),
+  outcomeCheck: check('agent_events_outcome', sql`${t.outcome} IN ('ok', 'error', 'denied', 'refused')`),
+  principalCheck: check(
+    'agent_events_principal',
+    sql`num_nonnulls(${t.keyId}, ${t.connectionId}, ${t.pagePath}) = 1`,
+  ),
+}));
+
+/**
+ * UNUSED IN THIS RELEASE. It backed the per-session boundary that a deployment
+ * now owns for itself, behind the agent read/write hooks; nothing in this
+ * package reads or writes it any more. The definition stays for ONE release so
+ * that no deployment runs a version in which neither side has the table, and
+ * the NEXT release drops it (see `TODOS.md`). Do not build on it.
+ */
 export const sessionOntologyTouches = pgTable('session_ontology_touches', {
   sessionId: text('session_id').notNull(),
   ontology: text('ontology').notNull(),
@@ -480,4 +717,209 @@ export const deploymentSettings = pgTable('deployment_settings', {
    */
   updatedBy: uuid('updated_by').references(() => users.id, { onDelete: 'set null' }),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
+/**
+ * What this deployment presents to claude.ai as a "GitHub Enterprise Server"
+ * so that Cowork and claude.ai can add the per-user marketplace: the app id,
+ * client id and secrets an Owner pastes into Claude's admin settings. ONE row,
+ * generated on first use, replaced whole on rotate. Secrets are sealed with
+ * the secrets key, as stored settings are — see
+ * `marketplace/github-facade/github-facade-credentials.service.ts`.
+ */
+export const githubFacadeIdentity = pgTable('github_facade_identity', {
+  id: text('id').primaryKey(),
+  appId: text('app_id').notNull(),
+  clientId: text('client_id').notNull(),
+  /** Sealed. */
+  clientSecret: text('client_secret').notNull(),
+  /** Sealed. */
+  webhookSecret: text('webhook_secret').notNull(),
+  /** Sealed — PKCS#1 PEM. */
+  privateKeyPem: text('private_key_pem').notNull(),
+  publicKeyPem: text('public_key_pem').notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  rotatedAt: timestamp('rotated_at'),
+  /**
+   * When an admin said the deployment is registered with their Claude
+   * organization; null while it is not. Nothing on the Claude side reports
+   * this back, so an admin states it. Not sealed: it is the one fact about
+   * this row every signed-in person may read.
+   */
+  registeredAt: timestamp('registered_at'),
+});
+
+/**
+ * One-time codes the Claude connect flow issues on the consent page and
+ * Anthropic's backend exchanges seconds later — in the database so the
+ * replica that issued a code and the replica asked to exchange it agree.
+ *
+ * Keyed by the PERSON: "one live code per person" is the table's own rule,
+ * not a cleanup's. Issuing upserts their row — the newest code overwrites
+ * the last in one statement — so the table holds at most one row per user,
+ * for as long as the user exists (the row goes with them), and nothing ever
+ * has to sweep it. The client id is data the exchange checks, not part of
+ * the key: the bridge has one client, and a rotated client id must not leave
+ * a dead row behind under the old one. The code's hash is the unique lookup
+ * an exchange uses, spent by a conditional update. See
+ * `marketplace/github-facade/github-facade-codes.store.ts`.
+ */
+export const githubFacadeCodes = pgTable('github_facade_codes', {
+  userId: uuid('user_id').primaryKey().references(() => users.id, { onDelete: 'cascade' }),
+  clientId: text('client_id').notNull(),
+  codeHash: text('code_hash').notNull().unique(),
+  redirectUri: text('redirect_uri').notNull(),
+  expiresAt: timestamp('expires_at').notNull(),
+  consumedAt: timestamp('consumed_at'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
+/**
+ * Join requests as the platform RECORDS them, distinct from the change
+ * request that eventually carries one.
+ *
+ * A join request used to be nothing but a change request: the endpoint did
+ * the branch, the clone, the grant commit, the push and the change request
+ * before it answered, so the row and the answer were the same event. The
+ * first request from a person is a full clone, which is many seconds on a
+ * real repository, and the click looked like a freeze. The record is what
+ * lets the click be answered first: the route writes a row and returns, and
+ * the git work runs after, against the row.
+ *
+ * Which makes the row the durable statement "this person asked", and the
+ * only one — the change request is a CONSEQUENCE of it, recorded back here
+ * as `change_request_number` once it exists. That is the whole reason this
+ * is a table and not a queue in memory: a process that dies between the
+ * answer and the push must leave the ask behind, and the boot sweep re-runs
+ * every row still `pending`.
+ *
+ *   pending   asked, and the git work has not finished (or has not started)
+ *   opened    the change request exists; its number is here
+ *   failed    the git work refused, and `failure_reason` says what it said
+ *
+ * `(requester_email, plugin_key)` is UNIQUE, which is what makes two tabs and
+ * two clicks one request: the second ask upserts the same row. A `failed` row
+ * is revived to `pending` by the next ask rather than replaced, so a retry
+ * continues the recorded request instead of opening a second one.
+ *
+ * `plugin_key` is the plugin's primary FOLDER below the plugins root — the
+ * same key the join BRANCH is cut from, so a record and its branch cannot
+ * drift, and renaming the plugin's identity (which moves no folder) orphans
+ * no record.
+ */
+export const pluginJoinRequests = pgTable('plugin_join_requests', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  requesterEmail: encryptedText('requester_email').notNull(), // lowercased at insert
+  /** Blind index of `requester_email` — the uniqueness key, the by-requester read and the erasure delete. */
+  requesterEmailBidx: blindIndexText('requester_email_bidx').notNull(),
+  /** Denormalised for the commit/change-request authorship, like `file_locks.holder_name`. */
+  requesterName: encryptedText('requester_name').notNull(),
+  pluginKey: text('plugin_key').notNull(),
+  status: text('status').notNull().default('pending'),
+  /** What the git work said when it refused — shown to the requester verbatim. Encrypted: git quotes identities. */
+  failureReason: encryptedText('failure_reason'),
+  changeRequestNumber: integer('change_request_number'),
+  /**
+   * When a process took this row's git work, and the whole of the mutual
+   * exclusion over it.
+   *
+   * A redeploy runs two processes for as long as the changeover takes, and
+   * both sweep. Their single-flight maps are per-process, so without this
+   * they would clone, commit and push the same branch against the same shared
+   * workspace at the same time. Claiming is one conditional UPDATE — the row
+   * is taken only if nobody holds it — so the loser simply does not run.
+   *
+   * A CLAIM EXPIRES, because a process can die holding one and the request
+   * would otherwise be owed forever. The window has to exceed the longest
+   * honest attempt, which is a first-ever request's full clone; past it, the
+   * next sweep or click takes the row over. A row that was never claimed at
+   * all — recorded a moment before the process died — is claimable at once,
+   * which is the common restart case.
+   */
+  claimedAt: timestamp('claimed_at'),
+  /**
+   * WHICH claim `claimed_at` is the liveness of — a fencing token, fresh on
+   * every claim.
+   *
+   * A timestamp alone says a row is held; it cannot say by whom. So a worker
+   * that misses the stale window — a long GC pause, a host that froze, a
+   * network partition that outlived three beats — carries on believing it
+   * holds the row that somebody else has since taken, and its `markOpened`
+   * or `markFailed`, addressed by id alone, lands on the NEW attempt: the
+   * second worker's run is settled by the first worker's outcome, or a row
+   * mid-flight is stamped `failed` under it. Two change requests for one
+   * request is the same race a step earlier.
+   *
+   * Every write that decides or holds the row therefore names the token it
+   * believes it holds, and matches nothing if the token has moved on. A
+   * superseded worker's writes become no-ops rather than corruption, and it
+   * learns it was superseded from its next beat returning false — which is
+   * also how it learns the row was DELETED out from under it, the shape
+   * account erasure takes.
+   */
+  claimToken: uuid('claim_token'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (t) => ({
+  // One request per person per plugin — the DB's rule, not a caller's. Also
+  // the index the plugin listing's by-requester read is served from.
+  // Via the blind index, because the encrypted email is randomized.
+  requesterPluginUnq: uniqueIndex('plugin_join_requests_requester_bidx_plugin_unq')
+    .on(t.requesterEmailBidx, t.pluginKey),
+  // The boot sweep: every row still `pending`, without a full scan.
+  byStatus: index('plugin_join_requests_by_status').on(t.status),
+  statusCheck: check(
+    'plugin_join_requests_status',
+    sql`${t.status} IN ('pending', 'opened', 'failed')`,
+  ),
+}));
+
+/**
+ * Links an account from an outside system — today an Atlassian (Forge)
+ * account id — to a Hexis user, so an embed minted for that account resolves
+ * to a person whose read and write access the view obeys.
+ *
+ * KEPT UNDER ITS ENTERPRISE NAME, deliberately. The table was created by the
+ * Bevel Platform's own migration history before the embed moved into Hexis;
+ * an upgraded database already holds every link its Jira users made, and
+ * nobody is going to re-link. So the core migration creates it only if it is
+ * absent and adopts what is there otherwise (see
+ * `0017_atlassian_account_links.sql`), and the generic name this table
+ * deserves is not worth a data migration for a column nobody reads by name.
+ *
+ * Not sealed: an Atlassian account id is an opaque identifier from another
+ * system, which is the same reason the rest of those are left in the clear.
+ *
+ * PK is the account id — one Hexis user per Atlassian account — while one
+ * user may hold several account ids across sites, which is what `by_user`
+ * serves. Links die with the user (`onDelete: 'cascade'`): an erasure request
+ * must never be blocked by a leftover embed link.
+ */
+export const atlassianAccountLinks = pgTable('atlassian_account_links', {
+  atlassianAccountId: text('atlassian_account_id').primaryKey(),
+  userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (t) => ({
+  byUser: index('atlassian_account_links_by_user').on(t.userId),
+}));
+
+/**
+ * The ledger of the DATA halves of migrations: the rewrites SQL cannot do
+ * because they read sealed columns, run by the application right after the
+ * SQL history under the same lock (`migrate.ts`). One row per pass, written
+ * in the SAME transaction as the rows it rewrote, so a pass is recorded done
+ * exactly when its work is — a crash between the SQL history's own ledger
+ * and the pass leaves no row here, and the next start runs the pass. Drizzle's
+ * `__drizzle_migrations_core` ledger records only the SQL.
+ *
+ * The PII backfill of migration 0016 predates this table and keeps its own
+ * marker (the nullability of the blind-index columns it finalises).
+ */
+export const dataMigrations = pgTable('data_migrations', {
+  /** The pass, named after the migration whose data half it is: `0020_change_request_body_is_the_description`. */
+  name: text('name').primaryKey(),
+  appliedAt: timestamp('applied_at').defaultNow().notNull(),
+  /** What the pass did, for an operator reading the ledger: rows moved, say. */
+  note: text('note'),
 });

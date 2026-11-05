@@ -1,12 +1,18 @@
-import { describe, test, expect, beforeEach, afterEach } from 'vitest';
+import { describe, test, expect, beforeEach, afterEach, vi } from 'vitest';
+import { NodeFs } from '../../kb-fs/node-fs.js';
+import { KbPluginSource } from '../../plugins/discovery/kb-plugin-source.js';
+
+/** The one disk, as production wires it: the service and its discovery read the same one. */
+const disk = new NodeFs();
 import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { ToolManualService } from '../tool-manuals.service.js';
-import { workspaceIdForBranch } from '../../workspace/workspace.service.js';
+import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
+import { testKbContext } from '../../../__tests__/kb-context.js';
 
 const KB_DIR = 'knowledge-base';
 const wsId = workspaceIdForBranch(DEFAULT_BRANCH);
@@ -64,7 +70,7 @@ describe('ToolManualService', () => {
       new Map(paths.map((p) => [p, !p.includes('weather')])),
   } as unknown as IAccessControl;
 
-  const svc = (access: IAccessControl = allowAll) => new ToolManualService(workspaceService, access, KB_DIR);
+  const svc = (access: IAccessControl = allowAll) => new ToolManualService(workspaceService, access, testKbContext({ kbDirName: KB_DIR }), disk, new KbPluginSource(disk, testKbContext({ kbDirName: KB_DIR })));
 
   beforeEach(async () => {
     root = await mkdtemp(join(tmpdir(), 'tools-'));
@@ -80,6 +86,62 @@ describe('ToolManualService', () => {
     expect(list.map((m) => m.name).sort()).toEqual(['billing', 'weather']);
     expect(list.find((m) => m.name === 'weather')!.type).toBe('inline');
     expect(list.find((m) => m.name === 'billing')!.type).toBe('http');
+  });
+
+  test('surfaces a variable referenced ONLY by a health check, and keeps the probe off the summary', async () => {
+    // Two halves of the same contract. The probe's `${VAR}` has to reach the
+    // secrets UI or nobody can ever fill it in and the tool reports
+    // `unverifiable` forever — but the probe's HEADERS must not ride the
+    // browser-facing summary, since a `.tool` may write a literal token there.
+    const tools = join(root, wsId, KB_DIR, 'Plugins');
+    await writeFile(
+      join(tools, 'probe.tool'),
+      JSON.stringify({
+        name: 'probe',
+        type: 'http',
+        url: 'https://api.example.com/utcp',
+        healthCheck: { url: 'https://api.example.com/me', headers: { 'X-Key': '${PROBE_ONLY_KEY}' } },
+      }),
+    );
+
+    const summary = (await svc().listAccessible('user@x.eu')).find((m) => m.name === 'probe')!;
+    expect(summary.variables?.map((v) => v.name)).toContain('PROBE_ONLY_KEY');
+    expect(summary).not.toHaveProperty('healthCheck');
+
+    // The server still reaches it, through the accessor that never serializes.
+    const target = await svc().probeTargetFor('user@x.eu', 'probe');
+    expect(target?.healthCheck?.headers).toEqual({ 'X-Key': '${PROBE_ONLY_KEY}' });
+  });
+
+  test('builds a call template only for the probe that actually dials one', async () => {
+    // The template is dialled by exactly one probe: an `mcp` manual, reachable
+    // from this process, that declared no health check. Building it for the
+    // others costs a validation pass per probe and warn-logs about a value
+    // nothing was going to use.
+    const tools = join(root, wsId, KB_DIR, 'Plugins');
+    await writeFile(
+      join(tools, 'chat.tool'),
+      JSON.stringify({ name: 'chat', type: 'mcp', url: 'https://mcp.example.com' }),
+    );
+    await writeFile(
+      join(tools, 'checked.tool'),
+      JSON.stringify({
+        name: 'checked',
+        type: 'mcp',
+        url: 'https://mcp.example.com',
+        healthCheck: { url: 'https://api.example.com/me' },
+      }),
+    );
+
+    const service = svc();
+    // Asserted through the template's own type, not `not.toBeNull()`: the
+    // optional chain yields `undefined` when the lookup itself fails, and
+    // `undefined` is not null — so the weaker form passes on no target at all.
+    expect((await service.probeTargetFor('user@x.eu', 'chat'))?.callTemplate?.call_template_type).toBe('mcp');
+    // A declared health check wins for every type, so this one never dials it.
+    expect((await service.probeTargetFor('user@x.eu', 'checked'))?.callTemplate).toBeNull();
+    // An http manual is probed only by what it declares, never by a handshake.
+    expect((await service.probeTargetFor('user@x.eu', 'billing'))?.callTemplate).toBeNull();
   });
 
   test('ACL filters out manuals the user cannot read', async () => {
@@ -119,6 +181,166 @@ describe('ToolManualService', () => {
     // `weather` is inline, so this passes the type check and reaches the ACL gate.
     const manual = await svc(denyWeather).resolveInlineManual('user@x.eu', 'weather');
     expect(manual).toBeNull();
+  });
+
+  test("does not resolve a readable inline manual outside a connection's connectors", async () => {
+    // The narrowing applies after the read gate, on the manual's own path.
+    const paths: string[] = [];
+    const within = (p: string) => (paths.push(p), false);
+    expect(await svc().resolveInlineManual('user@x.eu', 'weather', { within })).toBeNull();
+    expect(paths).toEqual([expect.stringMatching(/weather\.tool$/)]);
+    expect(await svc().resolveInlineManual('user@x.eu', 'weather', { within: () => true })).not.toBeNull();
+  });
+
+  test('resolves an inline tool that calls Google as a service account, and surfaces the key variable', async () => {
+    // The auth block is what makes the call; the key it names has to reach the
+    // secrets UI as a shared variable or nobody can store it.
+    await writeFile(
+      join(root, wsId, KB_DIR, 'Plugins', 'google_ads.tool'),
+      JSON.stringify({
+        id: 'google_ads',
+        type: 'inline',
+        tools: [
+          {
+            name: 'list_accessible_customers',
+            description: 'List the customers the service account can reach.',
+            inputs: { type: 'object', properties: {} },
+            outputs: { type: 'object', properties: {} },
+            tool_call_template: {
+              call_template_type: 'http',
+              http_method: 'GET',
+              url: 'https://googleads.googleapis.com/v22/customers:listAccessibleCustomers',
+              headers: { 'developer-token': '${DEVELOPER_TOKEN}' },
+              auth: {
+                auth_type: 'google_service_account',
+                credentials: '${GOOGLE_SA_KEY}',
+                scopes: 'https://www.googleapis.com/auth/adwords',
+              },
+            },
+          },
+        ],
+      }),
+    );
+
+    const manual = await svc().resolveInlineManual('user@x.eu', 'google_ads');
+    const tools = (manual as { tools?: { name?: string; tool_call_template?: { auth?: unknown } }[] } | null)?.tools ?? [];
+    expect(tools.map((t) => t.name)).toEqual(['list_accessible_customers']);
+    // The auth block is what makes the call, so resolving must carry it through intact.
+    expect(tools[0]?.tool_call_template?.auth).toEqual({
+      auth_type: 'google_service_account',
+      credentials: '${GOOGLE_SA_KEY}',
+      scopes: 'https://www.googleapis.com/auth/adwords',
+    });
+
+    const summary = (await svc().listAccessible('user@x.eu')).find((m) => m.name === 'google_ads')!;
+    expect(summary.variables?.find((v) => v.name === 'GOOGLE_SA_KEY')?.scope).toBe('admin');
+  });
+
+  test('refuses a Google service-account auth block where no token would be sent, and says where', async () => {
+    // Only the `http` protocol mints the token. On any other template the
+    // block validates and is then sent as no credentials at all, so the file
+    // is refused when it is read rather than left to fail at Google.
+    const serviceAccount = {
+      auth_type: 'google_service_account',
+      credentials: '${GOOGLE_SA_KEY}',
+      scopes: 'https://www.googleapis.com/auth/adwords',
+    };
+    const inlineOver = (callTemplateType: string) =>
+      JSON.stringify({
+        type: 'inline',
+        tools: [
+          {
+            name: 'events',
+            description: 'Stream events.',
+            inputs: { type: 'object', properties: {} },
+            outputs: { type: 'object', properties: {} },
+            tool_call_template: { call_template_type: callTemplateType, url: 'https://api.example.com/events', auth: serviceAccount },
+          },
+        ],
+      });
+    const plugins = join(root, wsId, KB_DIR, 'Plugins');
+    await writeFile(join(plugins, 'over_sse.tool'), inlineOver('sse'));
+    await writeFile(join(plugins, 'over_streamable.tool'), inlineOver('streamable_http'));
+    // Not on a call template at all: a discovered manual takes only a url and headers.
+    await writeFile(
+      join(plugins, 'discovered.tool'),
+      JSON.stringify({ type: 'http', url: 'https://api.example.com/utcp', auth: serviceAccount }),
+    );
+    // Looking like an `http` call template is not enough: a discovered manual
+    // reads neither a block at its root nor a `tools` list, whatever they say.
+    await writeFile(
+      join(plugins, 'dressed_root.tool'),
+      JSON.stringify({ type: 'http', url: 'https://api.example.com/utcp', call_template_type: 'http', auth: serviceAccount }),
+    );
+    await writeFile(
+      join(plugins, 'unread_tools.tool'),
+      JSON.stringify({ ...JSON.parse(inlineOver('http')), type: 'http', url: 'https://api.example.com/utcp' }),
+    );
+    await writeFile(join(plugins, 'over_http.tool'), inlineOver('http'));
+
+    const catalog = await svc().listAccessibleCatalog('user@x.eu');
+
+    const reasonFor = (file: string) => catalog.invalid.find((i) => i.path === `Plugins/${file}`)?.reason ?? '';
+    expect(reasonFor('over_sse.tool')).toContain('a `sse` call template');
+    expect(reasonFor('over_streamable.tool')).toContain('a `streamable_http` call template');
+    expect(reasonFor('discovered.tool')).toContain("not a call template's `auth`");
+    expect(reasonFor('dressed_root.tool')).toContain('no tool is called through');
+    expect(reasonFor('unread_tools.tool')).toContain('no tool is called through');
+    for (const file of ['over_sse.tool', 'over_streamable.tool', 'discovered.tool', 'dressed_root.tool', 'unread_tools.tool']) {
+      expect(reasonFor(file)).toContain('`call_template_type: http`');
+    }
+    // The one place it works is left alone.
+    expect(reasonFor('over_http.tool')).toBe('');
+    expect(catalog.tools.map((m) => m.name)).toContain('overhttp');
+  });
+
+  test('refuses a `.tool` that holds a service-account key itself, wherever the block sits, and never repeats it', async () => {
+    // A `.tool` is committed and read by everyone who can read the knowledge
+    // base, so the key lives in the vault and the file only names it.
+    const key = JSON.stringify({ type: 'service_account', client_email: 'ads@proj.iam.gserviceaccount.com', private_key: 'MIIEvQIBADANBgkq-NOT-A-REAL-KEY' });
+    const withCredentials = (credentials: unknown, callTemplateType = 'http') =>
+      JSON.stringify({
+        type: 'inline',
+        tools: [
+          {
+            name: 'list',
+            description: 'List.',
+            inputs: { type: 'object', properties: {} },
+            outputs: { type: 'object', properties: {} },
+            tool_call_template: {
+              call_template_type: callTemplateType,
+              http_method: 'GET',
+              url: 'https://googleads.googleapis.com/v22/customers',
+              auth: { auth_type: 'google_service_account', credentials, scopes: 'https://www.googleapis.com/auth/adwords' },
+            },
+          },
+        ],
+      });
+    const plugins = join(root, wsId, KB_DIR, 'Plugins');
+    await writeFile(join(plugins, 'pasted_key.tool'), withCredentials(key));
+    await writeFile(join(plugins, 'pasted_base64.tool'), withCredentials(Buffer.from(key).toString('base64')));
+    // A variable with the key, or anything else, written around it is still text in the file.
+    await writeFile(join(plugins, 'beside_a_variable.tool'), withCredentials('${GOOGLE_SA_KEY}' + key));
+    // In a block nothing acts on, the key is just as readable: that it is there is said first.
+    await writeFile(join(plugins, 'key_over_sse.tool'), withCredentials(key, 'sse'));
+    await writeFile(join(plugins, 'braced.tool'), withCredentials('${GOOGLE_SA_KEY}'));
+    await writeFile(join(plugins, 'bare.tool'), withCredentials(' $GOOGLE_SA_KEY '));
+
+    const catalog = await svc().listAccessibleCatalog('user@x.eu');
+
+    const reasonFor = (file: string) => catalog.invalid.find((i) => i.path === `Plugins/${file}`)?.reason ?? '';
+    for (const file of ['pasted_key.tool', 'pasted_base64.tool', 'beside_a_variable.tool', 'key_over_sse.tool']) {
+      expect(reasonFor(file), file).toContain('something other than a vault variable as its `credentials`');
+      expect(reasonFor(file), file).toContain('Secrets Vault');
+    }
+    // Nothing of what was pasted comes back in the answer, in either spelling.
+    const answer = JSON.stringify(catalog);
+    expect(answer).not.toMatch(/NOT-A-REAL-KEY|iam\.gserviceaccount/);
+    expect(answer).not.toContain(Buffer.from(key).toString('base64').slice(0, 40));
+    // Either spelling of one variable is what the field is for.
+    expect(reasonFor('braced.tool')).toBe('');
+    expect(reasonFor('bare.tool')).toBe('');
+    expect(catalog.tools.map((m) => m.name)).toEqual(expect.arrayContaining(['braced', 'bare']));
   });
 
   test('manual names are alphanumeric (no underscores) for variable namespacing', async () => {
@@ -170,6 +392,131 @@ describe('ToolManualService', () => {
       { name: 'ORG_ID', scope: 'admin' },
       { name: 'PLAIN', scope: 'admin' },
     ]);
+  });
+
+  /**
+   * A bad manual costs its author their own tool and NOBODY ELSE anything.
+   *
+   * Asserted here rather than taken on trust because the refresh work makes
+   * the catalog re-scan far more often — on every default-branch commit rather
+   * than once a minute — so a broken file is now read, and skipped, many times
+   * more often than it used to be. One file that could take the listing down
+   * would take it down constantly.
+   */
+  test('a `.tool` that cannot be read or parsed, beside good ones, costs only itself', async () => {
+    const tools = join(root, wsId, KB_DIR, 'Plugins');
+    // Four ways a manual can be wrong. Three are about its CONTENT: unparseable
+    // bytes, a valid document that is not a manual, and a manual with an
+    // invalid field.
+    await writeFile(join(tools, 'truncated.tool'), '{ "name": "truncated", "type": "htt');
+    await writeFile(join(tools, 'nottool.tool'), JSON.stringify({ hello: 'world' }));
+    await writeFile(
+      join(tools, 'badscope.tool'),
+      JSON.stringify({ name: 'badscope', type: 'http', url: 'https://x/m', variables: [{ name: 'K', scope: 'root' }] }),
+    );
+    // The fourth is the scan failing to READ the file at all — a separate
+    // branch from parsing, and the one a permissions mistake or a half-written
+    // checkout actually produces. A directory with a `.tool` name is the
+    // honest way to induce it: the walk lists it, and the read throws EISDIR
+    // with no mocking anywhere near the code under test.
+    await mkdir(join(tools, 'adirectory.tool'), { recursive: true });
+
+    const list = await svc().listAccessible('user@x.eu');
+    expect(list.map((m) => m.name).sort()).toEqual(['billing', 'weather']);
+    // And the valid ones are still usable, not merely counted.
+    expect(list.find((m) => m.name === 'billing')!.type).toBe('http');
+  });
+
+  /**
+   * The catalog fingerprint — what `GET /api/agent/catalog-revision` hashes,
+   * and therefore what decides whether a long-lived MCP client re-registers.
+   *
+   * The hard half is the change that is invisible in a listing: a `.tool` that
+   * keeps its name, path, type and description while its `url`, its headers or
+   * an inline manual's embedded tools change is a DIFFERENT callable thing,
+   * and a client still holding the old definition has to be told. Hence the
+   * source digest on the line; these pin that it is there and that it is not
+   * so eager it fires on a scan of a file nobody touched.
+   */
+  describe('catalogFingerprints', () => {
+    const tools = () => join(root, wsId, KB_DIR, 'Plugins');
+    const line = async (access = allowAll) =>
+      (await svc(access).catalogFingerprints('user@x.eu')).find((l) => l.includes('billing'))!;
+
+    test('is stable across scans of a catalog nobody touched', async () => {
+      expect(await line()).toBe(await line());
+    });
+
+    test.each([
+      ['its url', { name: 'billing', type: 'http', url: 'https://api.example.com/moved' }],
+      [
+        'a header',
+        {
+          name: 'billing',
+          type: 'http',
+          url: 'https://api.example.com/utcp',
+          headers: { Authorization: 'Bearer ${BILLING_KEY}', 'X-Tenant': 'acme' },
+        },
+      ],
+    ])('moves when %s changes, though no listing field did', async (_what, rewritten) => {
+      const before = await line();
+      await writeFile(join(tools(), 'billing.tool'), JSON.stringify(rewritten));
+
+      const after = await line();
+      expect(after).not.toBe(before);
+      // The point of the case: nothing a person browsing the catalog sees has
+      // changed, so a fingerprint built from the summary alone would not move.
+      const [summary] = (await svc().listAccessible('user@x.eu')).filter((m) => m.name === 'billing');
+      expect([summary.slug, summary.name, summary.path, summary.type, summary.description]).toEqual([
+        'billing',
+        'billing',
+        'Plugins/billing.tool',
+        'http',
+        undefined,
+      ]);
+    });
+
+    test("moves when an inline manual's embedded tools change", async () => {
+      const inlineLine = async () =>
+        (await svc().catalogFingerprints('user@x.eu')).find((l) => l.includes('weather'))!;
+      const before = await inlineLine();
+
+      const withAnother = JSON.parse(INLINE_TOOL);
+      withAnother.tools.push({ ...withAnother.tools[0], name: 'historical' });
+      await writeFile(join(tools(), 'weather.tool'), JSON.stringify(withAnother));
+
+      expect(await inlineLine()).not.toBe(before);
+    });
+
+    test('drops a line for a manual the caller cannot read', async () => {
+      const lines = await svc(denyBilling).catalogFingerprints('user@x.eu');
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain('weather');
+    });
+  });
+
+  /**
+   * A connection made as an `.agent` file narrows the catalog (`within`) —
+   * AFTER the read gate, on every read an agent surface makes, so it can take
+   * a manual away and never give one.
+   */
+  describe('narrowed to a connection’s connectors', () => {
+    const onlyBilling = (p: string) => p === 'Plugins/billing.tool';
+    const everything = () => true;
+
+    test('every agent-facing read answers only what is both readable and within', async () => {
+      const s = svc();
+      expect((await s.toManualCallTemplates('user@x.eu', { within: onlyBilling })).map((t) => t.name)).toEqual(['billing']);
+      expect((await s.listAccessibleCatalog('user@x.eu', onlyBilling)).tools.map((t) => t.name)).toEqual(['billing']);
+      expect(await s.catalogFingerprints('user@x.eu', onlyBilling)).toHaveLength(1);
+      expect(await s.listLocalOnly('user@x.eu', () => false)).toEqual([]);
+    });
+
+    test('an entry naming a manual the person may not read loads nothing for it', async () => {
+      const s = svc(denyBilling);
+      expect(await s.toManualCallTemplates('user@x.eu', { within: onlyBilling })).toEqual([]);
+      expect((await s.toManualCallTemplates('user@x.eu', { within: everything })).map((t) => t.name)).toEqual(['weather']);
+    });
   });
 
   test('skips a `.tool` with a malformed `variables` entry (never silently mis-scoped)', async () => {
@@ -266,6 +613,22 @@ describe('ToolManualService', () => {
     expect(await svc().listAccessible('user@x.eu')).toHaveLength(0);
   });
 
+  test('carries oauth.pkce:false and a gated oauth.resource; a `.tool` still needs both endpoints', async () => {
+    await writeOAuthTool(oauthVar({ pkce: false, resource: 'https://api.example.com/mcp' }));
+    const [manual] = await svc().listAccessible('user@x.eu');
+    expect(manual.variables?.[0].oauth).toMatchObject({ pkce: false, resource: 'https://api.example.com/mcp' });
+    // PKCE is the default and is not echoed; only the opt-out is stored.
+    await writeOAuthTool(oauthVar({ pkce: true }));
+    expect((await svc().listAccessible('user@x.eu'))[0].variables?.[0].oauth).not.toHaveProperty('pkce');
+    await writeOAuthTool(oauthVar({ pkce: 'yes' }));
+    expect(await svc().listAccessible('user@x.eu')).toHaveLength(0);
+    await writeOAuthTool(oauthVar({ resource: 'http://localhost/mcp' }));
+    expect(await svc().listAccessible('user@x.eu')).toHaveLength(0);
+    // A `.tool` has no server whose metadata could fill the endpoints in.
+    await writeOAuthTool(oauthVar({ authorizationUrl: undefined }));
+    expect(await svc().listAccessible('user@x.eu')).toHaveLength(0);
+  });
+
   test('parses `remote`: default true, explicit false, rejects non-boolean', async () => {
     root = await mkdtemp(join(tmpdir(), 'toolsrem-'));
     const tools = join(root, wsId, KB_DIR, 'Plugins');
@@ -288,7 +651,7 @@ describe('ToolManualService', () => {
     const s = svc();
     expect((await s.toManualCallTemplates('user@x.eu', { remoteOnly: true })).map((t) => t.name).sort()).toEqual(['pub']);
     expect((await s.toManualCallTemplates('user@x.eu')).map((t) => t.name).sort()).toEqual(['loc', 'pub']);
-    expect(await s.listLocalOnly('user@x.eu')).toEqual([{ name: 'loc', path: 'Plugins/loc.tool' }]);
+    expect(await s.listLocalOnly('user@x.eu')).toEqual([{ slug: 'loc', name: 'loc', path: 'Plugins/loc.tool' }]);
     // The local-only manual is still browsable/editable regardless of the remote flag.
     expect((await s.listAccessible('user@x.eu')).map((m) => m.name).sort()).toEqual(['loc', 'pub']);
   });
@@ -533,5 +896,84 @@ describe('ToolManualService', () => {
     const preview = await svc().preview('{ not valid json');
     expect(preview.ok).toBe(false);
     expect(preview.errors?.length).toBeGreaterThan(0);
+  });
+});
+
+describe('ToolManualService.listDeclaredOnlyOnBranch', () => {
+  let root: string;
+  const DRAFT = 'user/add-crm';
+  const draftWs = workspaceIdForBranch(DRAFT);
+
+  /** Cloned here: the default branch, the draft, and `user/gone` (its remote branch since deleted). */
+  const cloned = new Set([wsId, draftWs, workspaceIdForBranch('user/gone')]);
+  const getOrCreateForBranch = vi.fn(async (branch: string) => {
+    if (branch === 'user/gone') throw new Error('branch does not exist');
+    return { id: workspaceIdForBranch(branch) };
+  });
+  const workspaceService = {
+    getOrCreateForBranch,
+    hasBootstrappedWorkspace: async (id: string) => cloned.has(id),
+    getWorkspacePath: async (id: string) => join(root, id),
+  } as unknown as WorkspaceService;
+
+  /** Reads everything on the default branch; on the draft, everything but `Secret Plugin`. */
+  const readGate = {
+    canReadBatch: async (ws: string, _e: string, paths: string[]) =>
+      new Map(paths.map((p) => [p, ws !== draftWs || !p.startsWith('Plugins/Secret Plugin/')])),
+  } as unknown as IAccessControl;
+
+  const writeMcpJson = async (ws: string, plugin: string, servers: string[]) => {
+    const dir = join(root, ws, KB_DIR, 'Plugins', plugin);
+    await mkdir(dir, { recursive: true });
+    const mcpServers = Object.fromEntries(
+      servers.map((s) => [s, { type: 'streamable-http', url: `https://${s.replace(/_/g, '-')}.example.com/mcp` }]),
+    );
+    await writeFile(join(dir, 'mcp.json'), JSON.stringify({ mcpServers }));
+    await writeFile(join(dir, 'plugin.json'), JSON.stringify({ name: plugin.toLowerCase().replace(/ /g, '-') }));
+  };
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), 'tools-branch-'));
+    // Released: `billing`. The draft carries it too (an edit), plus two new servers,
+    // one of them in a plugin the caller cannot read on that branch.
+    await writeMcpJson(wsId, 'Sales', ['billing']);
+    await writeMcpJson(draftWs, 'Sales', ['billing', 'crm']);
+    await writeMcpJson(draftWs, 'Secret Plugin', ['hidden']);
+  });
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const svc = () => new ToolManualService(workspaceService, readGate, testKbContext({ kbDirName: KB_DIR }), disk, new KbPluginSource(disk, testKbContext({ kbDirName: KB_DIR })));
+
+  test('names only the readable declarations the default branch does not serve', async () => {
+    expect(await svc().listDeclaredOnlyOnBranch('user@example.com', DRAFT)).toEqual([
+      { name: 'crm', path: 'Plugins/Sales/mcp.json', type: 'mcp' },
+    ]);
+  });
+
+  test("narrowed to a connection's connectors, after the read gate", async () => {
+    await writeMcpJson(draftWs, 'Ops', ['pager']);
+    expect(await svc().listDeclaredOnlyOnBranch('user@example.com', DRAFT, (p) => p.startsWith('Plugins/Ops/'))).toEqual([
+      { name: 'pager', path: 'Plugins/Ops/mcp.json', type: 'mcp' },
+    ]);
+    // Naming an unreadable declaration does not let it through.
+    expect(await svc().listDeclaredOnlyOnBranch('user@example.com', DRAFT, (p) => p.startsWith('Plugins/Secret Plugin/'))).toEqual([]);
+  });
+
+  test('is empty for the default branch itself and for a branch without a workspace', async () => {
+    expect(await svc().listDeclaredOnlyOnBranch('user@example.com', DEFAULT_BRANCH)).toEqual([]);
+    expect(await svc().listDeclaredOnlyOnBranch('user@example.com', 'user/gone')).toEqual([]);
+  });
+
+  test('never bootstraps a branch this process holds no clone of', async () => {
+    getOrCreateForBranch.mockClear();
+    expect(await svc().listDeclaredOnlyOnBranch('user@example.com', 'someone/private-guess')).toEqual([]);
+    expect(getOrCreateForBranch).not.toHaveBeenCalledWith('someone/private-guess');
+  });
+
+  test('the released catalog never includes the draft declaration', async () => {
+    expect((await svc().listAccessible('user@example.com')).map((m) => m.name)).toEqual(['billing']);
   });
 });

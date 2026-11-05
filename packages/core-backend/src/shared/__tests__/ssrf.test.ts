@@ -28,6 +28,26 @@ describe('isBlockedHost', () => {
     }
     // A public address in the same mapped-hex form stays allowed (8.8.8.8 → 0808:0808).
     expect(isBlockedHost('::ffff:808:808')).toBe(false);
+    // Every other spelling of a mapped address is judged by its v4 too.
+    for (const h of ['0:0:0:0:0:ffff:808:808', '0:0:0:0:0:ffff:8.8.8.8', '::ffff:8.8.8.8']) {
+      expect(isBlockedHost(h)).toBe(false);
+    }
+    for (const h of ['0:0:0:0:0:ffff:a9fe:a9fe', '0:0:0:0:0:ffff:127.0.0.1', '0:0::ffff:a00:1']) {
+      expect(isBlockedHost(h)).toBe(true);
+    }
+  });
+
+  test('blocks IPv6 literals outside global unicast, and allows global unicast', () => {
+    for (const h of ['::2', '[::2]', '2001:db8::1', '2001:0db8::1', 'ff02::1', '100::1', '64:ff9b::a00:1', 'not:an:address', '2001::db8::1', '1:2:3:4:5:6:7:8:9', '::ffff:999.0.0.1']) {
+      expect(isBlockedHost(h)).toBe(true);
+    }
+    // Special-purpose blocks inside 2000::/3: Teredo, ORCHID, benchmarking, the 3fff documentation range.
+    for (const h of ['2001::1', '2001:1::1', '2001:2::1', '2001:1ff:ffff::1', '3fff::1', '3fff:fff::1']) {
+      expect(isBlockedHost(h), h).toBe(true);
+    }
+    for (const h of ['2606:4700::1111', '[2a00:1450:4001::200e]', '2400:cb00::1', '2001:200::1', '2001:4860:4860::8888', '3fff:1000::1']) {
+      expect(isBlockedHost(h)).toBe(false);
+    }
   });
 });
 

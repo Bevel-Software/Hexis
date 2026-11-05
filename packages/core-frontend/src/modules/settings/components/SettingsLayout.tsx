@@ -1,9 +1,9 @@
 import { useContext, useMemo } from 'react';
 import { Outlet, useLocation } from 'react-router-dom';
-import { AdminContext } from '../../admin/state/admin.context';
+import { AdminContext } from '../../admin';
 import type { AdminMenuItem } from '../../../core/registry';
 import { SidebarFrame } from '../../layout/components/SidebarFrame';
-import { useMediaQuery } from '../../layout/hooks/useMediaQuery';
+import { useMediaQuery } from '../../layout';
 import {
   isSettingsNavPath,
   normalizeSettingsPath,

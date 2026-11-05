@@ -9,43 +9,81 @@
   <a href="https://github.com/Bevel-Software/Hexis/commits"><img src="https://img.shields.io/github/last-commit/Bevel-Software/Hexis?style=flat-square" alt="Last commit"></a>
 </p>
 
-One place where your company's **AI skills, tools and knowledge** live:
-centrally managed, reviewed and access-controlled, and usable from **any AI
-agent**. The open-source core of the Bevel platform.
+**Git-backed control plane for AI-agent skills, tools, context, permissions and
+identity. Self-hosted and MCP-native.**
 
-- **Every employee connects once, in minutes.** They add the workspace to
-  Claude Code, ChatGPT, Cursor or any MCP-capable agent with a single
-  connection key, and their agent can use exactly the skills, tools and
-  knowledge their role allows. No per-tool credentials handed around, no
-  per-agent setup projects.
-- **The company stays in control.** Skills, tool access and knowledge are
-  managed and reviewed in one place: every change has an author and a way
-  back, and anything proposed through a change request reaches its owners
-  for review before it lands. The rules apply to agents exactly as they
-  apply to people.
-- **Independent of any agent vendor.** Because the workspace speaks open
-  protocols, you can switch agent vendors on price and performance, or mix
-  them by task and role, without rebuilding what your agents know and can do.
-  The investment lives with you, not inside one vendor's walls. That is what
-  makes enterprise agent rollouts fast: onboard the next team, or the next
-  agent, instead of starting over.
+One place where your company's AI plugins, tools and knowledge live: centrally
+managed, reviewed and access-controlled, and usable from **any AI agent**. The
+open-source core of the Bevel platform.
 
-Under the hood, everything lives in a **git repository you own**, on any git
-host: skills (`SKILL.md` folders), tool manuals (UTCP) with an encrypted
-secrets vault, and knowledge. You get branches, change requests with owner
-approval, role-based access, and a built-in remote MCP server (OAuth 2.1)
-that agents connect to.
+## Why Hexis?
+
+**Used by teams at**
+
+<p>
+  <a href="https://osapiens.com">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="docs/logos/osapiens-dark.svg">
+      <img src="docs/logos/osapiens-light.svg" alt="osapiens" width="160" height="56">
+    </picture>
+  </a>
+  <a href="https://beo.energy">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="docs/logos/beo-dark.svg">
+      <img src="docs/logos/beo-light.svg" alt="BEO" width="160" height="56">
+    </picture>
+  </a>
+  <a href="https://unite.eu">
+    <img src="docs/logos/unite.png" alt="Unite" width="160" height="56">
+  </a>
+  <a href="https://www.workpath.com">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="docs/logos/workpath-dark.svg">
+      <img src="docs/logos/workpath-light.svg" alt="Workpath" width="160" height="56">
+    </picture>
+  </a>
+</p>
+
+Read more about the learnings that we made which led to Hexis here: [Our Medium Article](https://medium.com/@ali.raza_25708/how-do-you-distribute-and-collaborate-on-agent-skills-in-enterprise-settings-bdb7097dff60)
+
+### For teams
+
+One place where engineers and non-technical people alike can browse and load
+plugins, propose suggestions, and manage access.
+
+### For enterprises
+
+Every skill, tool manual and permission is a file in a git repository you own,
+so the audit trail is the storage layer: who changed what, when, who approved
+it, and how to undo it. An agent can only do what the person running it can do,
+resolved per file, and it never holds the credentials it uses. Runs on your
+infrastructure, behind your own SSO.
+
+### Why it's different from MCP gateways:
+
+MCP gateways are uni-directional; users can consume plugins, skills or tools but there is no mechanism here for users to propose changes or share new skills and MCP servers. You can do this via GitHub in the back, but this is not accessible to non-technical users and there is no fine-grained access control for either viewing or the review process.
+
+Hexis can do all of the above specified capabilities for distribution, and has this bidirectionality needed for management.
+
+In Hexis, skills and tool manuals are reviewable files. Anyone can propose a
+change; on protected branches it reaches the owners of the files it touches and
+ships only once they approve. Agents propose too: one that hits a broken skill
+mid-task can suggest the fix, and a person decides whether it lands.
 
 ## Contents
 
 - [See Hexis in action](#see-hexis-in-action)
+- [Connect Hexis to Cline](#connect-hexis-to-cline)
 - [Try the live demo](#try-it-first-the-live-demo)
 - [Managed hosting](#want-a-managed-instance)
 - [Deploy with Docker](#deploy-it-in-5-minutes-docker)
+- [Links and images in knowledge pages](#links-and-images-in-knowledge-pages)
 - [Local development](#local-development-run-from-source)
-- [Environment reference](#environment-reference)
-- [Troubleshooting](#troubleshooting)
+- [Configuration reference](docs/configuration.md)
+- [Skills in Cowork and claude.ai](docs/claude-cowork.md)
+- [Troubleshooting](docs/troubleshooting.md)
 - [Repository layout](#repository-layout)
+- [FAQ](#faq)
 
 [![Watch the full Hexis demo](docs/demo-video-thumbnail.jpg)](https://youtu.be/RjOWRz4E0ZU?si=R7d8rT_P1YVxmQBO)
 
@@ -69,6 +107,19 @@ load the approved skill instructions and company context your role can access,
 without copying prompts between tools.
 
 ![Claude uses approved team skills and company context through Hexis over MCP](docs/demo-claude-mcp.gif)
+
+### Connect Hexis to Cline
+
+Cline can connect directly to Hexis as a remote Streamable HTTP MCP server.
+Install the public demo connection from the Cline CLI:
+
+```sh
+cline mcp install hexis --transport http https://demo.bevel.software/api/mcp --yes
+```
+
+Complete the OAuth sign-in in your browser when prompted. Cline then discovers
+the skills, tools and context your Hexis role can access. For your own Hexis
+deployment, replace `demo.bevel.software` with your deployment's host.
 
 ### Share skills with the right people
 
@@ -96,22 +147,28 @@ in. Write to **[ali.raza@bevel.software](mailto:ali.raza@bevel.software)**.
 ## Deploy it in 5 minutes (Docker)
 
 You need: [Docker](https://docs.docker.com/get-docker/) with Compose on a
-server (or your laptop; one line below differs), and an
+server (or your laptop; one extra line below), and an
 **empty git repository** on any host (GitHub, GitLab, Bitbucket, Azure DevOps,
 self-hosted) to hold your knowledge base. The app seeds it with a starter
 template on first run.
 
+Grab the two deployment files — no clone needed:
+
 ```sh
-git clone https://github.com/Bevel-Software/Hexis.git
-cd Hexis
-cp .env.example .env
+mkdir hexis && cd hexis
+# v0.15.1 below = the release this page was written against; replace with the latest release tag
+wget https://raw.githubusercontent.com/Bevel-Software/Hexis/v0.15.1/docker-compose.yml
+wget -O .env https://raw.githubusercontent.com/Bevel-Software/Hexis/v0.15.1/.env.example
 ```
+
+(Working from a git clone works identically — both files sit at the repo root;
+`cp .env.example .env`.)
 
 Open `.env` and fill in the **four required values** (everything else can wait):
 
 ```sh
 ADMIN_EMAIL=you@example.com     # the deployment owner, always an admin
-ADMIN_PASSWORD=pick-something   # sign-in password; only with password login (SSO-only deployments drop it, see below)
+ADMIN_PASSWORD=pick-something   # sign-in password; only with password login (SSO-only deployments drop it)
 JWT_SECRET=…                    # generate with the command below
 SECRETS_ENC_KEY=…               # generate with the command below
 ```
@@ -123,38 +180,71 @@ node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
 # no Node installed? docker run --rm node:22-slim node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
 ```
 
-For a public deployment, also set the origin values:
+For a public deployment served over HTTPS by the bundled proxy, also set the
+domain — it derives everything else public (origins, proxy hop):
+
+```sh
+DOMAIN=bevel.your-domain.com
+```
+
+Then start everything. Deploying **pulls the image CI publishes on every
+release** — nothing compiles on your server, so a small instance suffices.
+Pin the version in `.env` (`HEXIS_VERSION=0.15.1`) so a later `pull` can't
+become an unplanned upgrade — [UPGRADING.md](UPGRADING.md) covers upgrades
+and backups. Building from source instead (a staging server tracking a
+branch, a fork) is
+[deployment/docker-compose.build.yml](deployment/docker-compose.build.yml)
+(explained in [deployment/](deployment/README.md)).
+
+**Public HTTPS, no proxy of your own** (a bare EC2 instance, a plain VPS):
+the `https` profile starts Caddy in front of the app, with automatic Let's
+Encrypt certificates for `DOMAIN` and the HTTP→HTTPS redirect. First: a DNS
+A (or AAAA) record for the domain pointing at the server, and ports 80 + 443
+open to the internet (port 80 is not optional — the certificate challenge and
+the redirect both use it).
+
+```sh
+docker compose -f docker-compose.yml --profile https up -d
+```
+
+**Behind your own reverse proxy** (Coolify, Traefik, nginx): skip the profile
+— two things terminating TLS for one app is one too many. Instead of `DOMAIN`,
+set the origin values and the proxy hop count in `.env`, so OAuth redirects
+are built right and rate limits see real client IPs instead of the proxy's:
 
 ```sh
 PUBLIC_BACKEND_URL=https://bevel.your-domain.com   # public origin; OAuth redirects are built from it
 PUBLIC_FRONTEND_URL=https://bevel.your-domain.com  # same origin: the backend serves the SPA
+TRUST_PROXY=1                                      # your proxy hop count
 ```
-
-Then start everything (Postgres + the app). **Behind a reverse proxy**
-(Coolify, Traefik, nginx; recommended):
 
 ```sh
 docker compose -f docker-compose.yml up -d
 ```
 
-Also set `TRUST_PROXY` to your proxy hop count (`1` for a single proxy), so
-rate limits see real client IPs instead of the proxy's.
-
-The explicit `-f` skips `docker-compose.override.yml`, so the app publishes
-**no host port**: your proxy reaches it on port `3001` over the compose
-network. This is deliberate: a fixed published port makes every redeploy fail
-with `port is already allocated`, because the replacement container starts
-while the outgoing one still holds it.
-
-**Directly exposed** (no proxy): plain `docker compose up -d` publishes
-`:3001`; use `APP_PORT=8080 docker compose up -d` for a different host port.
-Leave `TRUST_PROXY` unset here. With no proxy in front, trusting forwarded
-headers would let clients spoof their own address.
+The explicit `-f` matters in a clone: it skips `docker-compose.override.yml`,
+so the app publishes **no host port** — your proxy reaches it on port `3001`
+over the compose network. This is deliberate: a fixed published port makes
+every redeploy fail with `port is already allocated`, because the replacement
+container starts while the outgoing one still holds it.
 
 Open your domain and sign in with `ADMIN_EMAIL` / `ADMIN_PASSWORD`.
 
-**Just trying it on your laptop?** Same steps, minus the origin values: plain
-`docker compose up -d`, then open **http://localhost:3001**.
+**Just trying it on your laptop?** Same steps, minus `DOMAIN` and the origin
+values — plus one extra file: `docker-compose.yml` alone publishes no host
+port (see above), and `docker-compose.override.yml` is the piece that puts
+the app on localhost. A clone already has it; next to the wget'd files, fetch
+it too:
+
+```sh
+wget https://raw.githubusercontent.com/Bevel-Software/Hexis/v0.15.1/docker-compose.override.yml
+docker compose up -d
+```
+
+Then open **http://localhost:3001** (a different port:
+`APP_PORT=8080 docker compose up -d`). Leave `TRUST_PROXY` unset here — with
+no proxy in front, trusting forwarded headers would let clients spoof their
+own address.
 
 ### First sign-in: the setup screen
 
@@ -172,34 +262,42 @@ real host before saving**:
 
 Since the repo is empty, the app initialises it from the bundled template and
 writes a `roles.yaml` whose first Admin is you. That's it: you're in the
-workspace. Head to **Skills & Tools** to make your first group and skill, and to
+workspace. Head to **Skills & Tools** to make your first plugin and skill, and to
 **Connect** (in the app menu) to hook up an agent over MCP.
 
-Prefer configuring by environment instead of the setup screen? Every one of
-those values has an env var (`KB_REPO_URL`, `GIT_TOKEN`, `DEFAULT_BRANCH`, …);
-anything set in the environment wins over the setup screen. See
-[`.env.example`](.env.example).
+Going to production? [Configuration reference](docs/configuration.md) covers
+single sign-on, the state you need to back up, health checks, and configuring
+by environment instead of the setup screen.
 
-Worth knowing in production:
+## Links and images in knowledge pages
 
-- **State that survives redeploys**: Postgres data plus three app volumes
-  (workspace clones, diff-review backups, tool-chain spill files) are named
-  volumes, so a redeploy or image rebuild loses nothing. Back up the `pgdata`
-  volume and your knowledge-base git repo; everything else is derivable.
-- **Health**: `GET /api/health`. First boot can take a minute or two while it
-  runs migrations and seeds the knowledge-base repo.
-- **Single sign-on**: set `OIDC_ISSUER_URL` / `OIDC_CLIENT_ID` /
-  `OIDC_CLIENT_SECRET` (any spec-compliant provider) or configure it on the
-  setup screen, which shows you the redirect URI to register. For SSO-only
-  deployments set `LOGIN_PASSWORD=false` and drop `ADMIN_PASSWORD`. If your
-  issuer is multi-tenant (Google, Entra `common`), set
-  `ALLOWED_EMAIL_DOMAINS`. SSO auto-provisions accounts, and that list is the
-  only signup boundary.
+Pages are markdown. A link to another page is a relative path, and Hexis opens
+it in the app:
+
+```md
+See the [approval process](../Processes/Approval.md#steps).
+```
+
+Images work the same way. Keep them in an `assets/` folder next to the pages
+that use them, and link them relatively:
+
+```md
+![Approval screen](./assets/approval-screen.png)
+```
+
+Access follows folders, so a person who may read the page may see its
+screenshots, and moving the folder keeps every link valid; one shared
+`Uploads/` folder gives up both. An export that arrives with a sibling
+`.assets/` folder (Microsoft Loop, for one) can be dropped into the knowledge
+base as it is, and the links resolve unchanged. Pasted base64 images are not
+supported: save the file and link it.
 
 ## Local development (run from source)
 
-You need: **Node 22** (`.nvmrc`; the engine range is `>=22 <23`),
-**pnpm 10**, **git ≥ 2.41**, and a Postgres 17 (the bundled one is fine):
+You need: **Node 22.13 or newer** (`.nvmrc`; the engine range is `>=22.13 <23`),
+**pnpm 10**, **git ≥ 2.41**, **ripgrep** (`rg` on your PATH — the agents' `grep` tool
+searches with it, and the server and the backend test suites refuse to run
+without it), and a Postgres 17 (the bundled one is fine):
 
 ```sh
 docker compose up -d db        # just the database
@@ -216,54 +314,14 @@ commands: `pnpm test`, `pnpm typecheck`, `pnpm lint`.
 Migrations run automatically on boot; there is no separate migrate step, in
 dev or in production.
 
-## Environment reference
+## Reference
 
-The four **required** values, then the rest. Everything marked *setup screen*
-can be left unset and configured in the app at first sign-in (env always wins).
-[`.env.example`](.env.example) documents every variable in full.
-
-| Variable | Required | Purpose |
-| --- | --- | --- |
-| `ADMIN_EMAIL` | yes | Deployment owner: always an admin, and the initial Admin of a freshly seeded KB |
-| `ADMIN_PASSWORD` | with password login | Bootstrap sign-in password, checked against the env and never stored. Not needed when `LOGIN_PASSWORD=false` |
-| `JWT_SECRET` | yes | Signs login sessions + OAuth state |
-| `SECRETS_ENC_KEY` | yes | 32-byte key (base64/hex) encrypting vault secrets + MCP OAuth tokens |
-| `DATABASE_URL` | see note | Postgres connection string. Unset under compose, the app builds it from the `POSTGRES_*` values the bundled db was created with |
-| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | no | Credentials for the bundled database (applied only when its volume is first created) |
-| `KB_REPO_URL` | setup screen | https clone/push URL of the knowledge-base repo, on any git host |
-| `GIT_TOKEN` / `GIT_USERNAME` | setup screen | Git credential (HTTP Basic password / host-specific username; see `.env.example` for per-host usernames) |
-| `DEFAULT_BRANCH` / `PROTECTED_BRANCHES` | setup screen | Branch model. Runtime-only: served to the frontend over `/api/config`, so one build runs anywhere |
-| `PUBLIC_BACKEND_URL` / `PUBLIC_FRONTEND_URL` | production | Public origins for OAuth redirects + post-login bounces |
-| `TRUST_PROXY` | behind a proxy | Reverse-proxy hop count, so `req.ip` and the login rate limit see the real client |
-| `OIDC_ISSUER_URL` / `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` | no | Generic OIDC SSO; the login method appears once all three are set |
-| `ALLOWED_EMAIL_DOMAINS` | with multi-tenant SSO | Signup allow-list for SSO auto-provisioning |
-| `LOGIN_PASSWORD` | no | `false` hides password login and rejects the endpoint |
-| `PORT` | no | Backend port (default 3001) |
-| `KB_DIR_NAME` | no | Directory name of the KB clone inside each workspace |
-| `TENANT_ID` | no | Slug branding credential prefixes (default `bevel`) |
-| `KB_TEMPLATE_DIR` | no | Overrides the packaged KB seed template |
-| `ONTOLOGY_SESSION_BLOCK` | no | Ontology-session touch tracking toggle (default on) |
-
-## Troubleshooting
-
-- **`port is already allocated` on redeploy**: you're behind a proxy but ran
-  compose without `-f docker-compose.yml`, so the override published a host
-  port. Deploy with the explicit `-f` (see above).
-- **Changed `POSTGRES_PASSWORD` but can't connect**: Postgres applies those
-  values only when its data volume is **first** created. In dev,
-  `docker compose down -v` resets it; in production, change the password in
-  the database itself.
-- **`pnpm install` fails on Node version**: the engine range is strict
-  (`>=22 <23`) because of a native dependency's ABI. `nvm use` picks up
-  `.nvmrc`.
-- **Setup screen rejects the git token**: the token needs read *and* write
-  (push) access to the KB repository; the setup screen's test tells you which
-  half failed. On GitHub, fine-grained tokens also need the repo explicitly
-  selected.
-- **Changed `ADMIN_PASSWORD` and nothing happened**: it's read once at
-  startup; restart the app container.
-- **App unhealthy right after first start**: give it the `start_period`
-  (~90s); first boot runs migrations and seeds the KB repo before answering.
+- **[Configuration](docs/configuration.md)**: every environment variable, SSO
+  setup, secret generation, backups and health.
+- **[Several knowledge bases in one process](docs/multi-tenant.md)**: the
+  tenants file, what is kept apart, and moving a tenant to its own deployment.
+- **[Troubleshooting](docs/troubleshooting.md)**: the failures you are most
+  likely to hit, and what causes them.
 
 ## Repository layout
 
@@ -274,5 +332,59 @@ can be left unset and configured in the app at first sign-in (env always wins).
 | `packages/core-frontend` | `@bevel-software/platform-core-frontend`: the core UI, published as raw TS/TSX source |
 | `apps/server` | standalone core backend shell |
 | `apps/web` | standalone core SPA shell (Vite) |
+
+## FAQ
+
+Questions that come up when teams evaluate Hexis as a central, versioned
+catalogue for agent skills and tools.
+
+<details>
+<summary><b>How do agents find skills without flooding the context window?</b></summary>
+
+They look them up rather than loading them all: `list_skills` and `search`
+narrow the field, `get_skill` returns one skill at call time.
+</details>
+
+<details>
+<summary><b>How does an agent know what is in the knowledge base?</b></summary>
+
+Every MCP session starts with instructions: a fixed platform header that says
+what Hexis is and to search the knowledge base before answering from memory,
+followed by `mcp-description.md` from the root of your repository, where an
+admin describes what the knowledge base holds and when to consult it. Clients
+that read the handshake (Claude Code, Claude Desktop, Cursor) put it in the
+system prompt; for the ones that do not, the first line is also shown on the
+four core tools. The External agent access page shows exactly what agents get.
+</details>
+
+<details>
+<summary><b>Which agents can connect?</b></summary>
+
+Any MCP-capable client, including Claude Code, Codex, Cursor, Cline and ChatGPT,
+each seeing only what its user's role allows.
+
+Agents that run on your own machine can instead start the workspace as a **local**
+MCP server (`npx -y @bevel-software/hexis-mcp`), which adds your plugins'
+local-only tools to everything the hosted endpoint serves. That command needs
+**Node 22.13+ or 24** — the versions its sandbox ships a prebuilt binary for —
+and a client launched from the Dock or a desktop icon may not see `npx` on PATH
+at all: run `which npx` (`where npx` on Windows) and use the full path it
+prints as the `"command"`. See
+[Troubleshooting](docs/troubleshooting.md#desktop-agents-the-local-mcp-server).
+</details>
+
+<details>
+<summary><b>How is the catalogue versioned?</b></summary>
+
+By git: every save is a commit, so history, blame and revert work as they do for
+code, and changes to protected branches ship as reviewable change requests.
+</details>
+
+<details>
+<summary><b>What governance do we get?</b></summary>
+
+Per-file access control, review-gated change requests, and a git audit trail of
+who changed what and who approved it.
+</details>
 
 License: [Apache-2.0](LICENSE)
