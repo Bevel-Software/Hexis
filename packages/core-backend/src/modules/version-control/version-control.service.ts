@@ -1578,6 +1578,9 @@ export class VersionControlService implements IVersionControlService {
     // without waiting for the eventual lock release. Best-effort, same
     // semantics as the push in `releaseLock`.
     if (change) {
+      // Not announced here: no reactor may act on a path while its lock is
+      // held. The release of this hold announces it (see `checkpointedHolds`).
+      this.checkpointedHolds.add(this.holdKey(workspaceId, branch, targetPath));
       try {
         await this.git.push(workspaceId, user);
         this.noteGitSyncOk(workspaceId, branch);
@@ -1798,13 +1801,19 @@ export class VersionControlService implements IVersionControlService {
       // A clean tree at release does not mean nothing landed under the hold:
       // the autosave checkpoints (`commitFileWhileLocked`) commit a file's
       // bytes while the lock is still held, where no reactor may act on the
-      // path. The release is the moment the lock is free, so the save is
-      // announced here whether the bytes landed in this commit or in a
-      // checkpoint before it — the contract on `announceCommitted` promises
-      // every single-file save, and this is the path that used to break it.
-      this.announceCommitted({ workspaceId, branch, paths: [targetPath], byUser: user });
+      // path, and the contract on `announceCommitted` promises every
+      // single-file save. The release is the moment the lock is free, so a
+      // hold a checkpoint landed under is announced here, once. A clean tree
+      // for any other reason — a double enqueue, a queued push retry of a
+      // batch's hand-off, which the batch announced itself — announces nothing.
+      if (this.checkpointedHolds.delete(this.holdKey(workspaceId, branch, targetPath))) {
+        this.announceCommitted({ workspaceId, branch, paths: [targetPath], byUser: user });
+      }
       return;
     }
+    // The release commit carries everything the hold wrote, checkpointed or
+    // not; a checkpoint's mark must not outlive it and announce a later no-op.
+    this.checkpointedHolds.delete(this.holdKey(workspaceId, branch, targetPath));
     await this.pushWithRecovery(workspaceId, branch, targetPath, user, opts);
     this.events?.emit({
       kind: 'file-changed',
@@ -1830,6 +1839,23 @@ export class VersionControlService implements IVersionControlService {
    * was already fine, which clients treat as a no-op.
    */
   private readonly gitSyncFailing = new Set<string>();
+
+  /**
+   * Holds under which an autosave checkpoint (`commitFileWhileLocked`) landed
+   * a commit, keyed by canonical workspace id, branch and path. The release of
+   * such a hold finds a clean tree, and is the one no-op commit that must still
+   * announce: the checkpoint's bytes were never announced, because no reactor
+   * may act on a path while its lock is held. A queued push retry of a batch's
+   * hand-off also finds a clean tree and must NOT announce again — the batch
+   * did. Process-local like `gitSyncFailing`, for the same reason: a restart
+   * between a checkpoint and its release costs one announcement, and the
+   * path's catalogs fall back to their TTL.
+   */
+  private readonly checkpointedHolds = new Set<string>();
+
+  private holdKey(workspaceId: string, branch: string, path: string): string {
+    return `${branchForWorkspaceId(workspaceId)}|${branch}|${path}`;
+  }
 
   /**
    * Announce that a push landed. Emits only when this workspace was previously

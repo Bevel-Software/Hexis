@@ -13,7 +13,7 @@ import { PendingCommitsService } from '../pending-commits.service.js';
 import { VersionControlEventBus } from '../event-bus.js';
 import { VersionControlService, syncConflictMessage } from '../version-control.service.js';
 import { openChangeGate } from '../../../__tests__/open-change-gate.js';
-import type { Database } from '../../database/connection.js';
+import type { Database } from '../../database/index.js';
 import {
   PullRebaseConflictError,
   PullRebaseConflictError,
@@ -442,12 +442,33 @@ describe('VersionControlService.runPendingCommit — worker entry point', () => 
     expect(emitSpy).not.toHaveBeenCalled();
   });
 
-  it('announces the save on a no-op commit all the same — autosave checkpoints landed the bytes under the hold', async () => {
+  it('announces a hold an autosave checkpoint landed under, once, at its no-op release', async () => {
     // The clean tree is the autosave path's normal ending: `commitFileWhileLocked`
     // committed the file while the lock was held, where no reactor may act on
-    // it. The release is when the lock is free, so the save is announced then,
-    // once, as the person — the contract says every single-file save is.
+    // it, so the checkpoint announced nothing. The release is when the lock is
+    // free, so the save is announced then, once, as the person — the contract
+    // says every single-file save is.
     const git = makeGit({ commitFile: null, hasUnpushedCommits: false });
+    (git.commitFile as unknown as MockInstance).mockResolvedValueOnce(CHANGE).mockResolvedValueOnce(null);
+    const notifier = realFileChangeNotifier();
+    const heard: unknown[] = [];
+    notifier.onFilesChanged((change) => void heard.push(change));
+    const svc = makeFacade(git, makeFileLocks(USER.id), makePending(), events, notifier);
+
+    await svc.commitFileWhileLocked('ws-1', 'feat/x', 'foo.md', USER);
+    expect(heard).toEqual([]);
+    await svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER);
+    expect(heard).toEqual([{ workspaceId: 'ws-1', branch: 'feat/x', paths: ['foo.md'], byUser: USER }]);
+
+    // The mark is consumed: a later no-op on the same path announces nothing more.
+    await svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER);
+    expect(heard).toHaveLength(1);
+  });
+
+  it('announces nothing on a no-op commit nothing was checkpointed under — a queued retry of a batch hand-off, which the batch announced', async () => {
+    // A locked batch whose push failed enqueued its committed paths; the
+    // worker finds each clean, pushes, and must not announce a second time.
+    const git = makeGit({ commitFile: null, hasUnpushedCommits: true });
     const notifier = realFileChangeNotifier();
     const heard: unknown[] = [];
     notifier.onFilesChanged((change) => void heard.push(change));
@@ -455,9 +476,8 @@ describe('VersionControlService.runPendingCommit — worker entry point', () => 
 
     await svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER);
 
-    expect(heard).toEqual([{ workspaceId: 'ws-1', branch: 'feat/x', paths: ['foo.md'], byUser: USER }]);
-    // Still no `file-changed`: there is no new sha for clients to fetch.
-    expect(emitSpy).not.toHaveBeenCalled();
+    expect(git.push).toHaveBeenCalledTimes(1);
+    expect(heard).toEqual([]);
   });
 
   it('STILL pushes on a no-op commit when the branch is ahead of origin (stranded autosave commit)', async () => {
