@@ -56,7 +56,7 @@ async function makeHarness(overrides: {
     overrides.commit?.();
     return { sha: 'abc', summary } as never;
   });
-  const versionControl = { acquireLock, releaseLockNoCommit, commitChanges } as unknown as IVersionControlService;
+  const versionControl = { acquireLock, releaseLockNoCommit, commitChanges, announceCommitted: () => undefined } as unknown as IVersionControlService;
 
   const revertPlan = vi.fn(async (_ws: string, paths: string[]) => ({
     workspaceDir,

@@ -127,6 +127,7 @@ function stubVersionControl() {
       commits.push({ summary });
       return {} as unknown;
     },
+    announceCommitted: () => undefined,
     // Recovery resyncs with origin before writing. The stub has no real remote,
     // so this is a no-op — the recover tests assert on the on-disk result of the
     // subsequent write, which is unaffected.

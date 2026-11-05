@@ -78,6 +78,7 @@ beforeEach(async () => {
     releaseLockNoCommit: vi.fn(async () => undefined),
     releaseLockUntouched: vi.fn(async () => undefined),
     commitChanges: vi.fn((w: string, u: AuthUser, s: string, paths?: string[]) => svc.commitChanges(w, u, s, paths)),
+    announceCommitted: vi.fn(),
   } as unknown as IVersionControlService;
 });
 

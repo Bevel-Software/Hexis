@@ -48,6 +48,7 @@ import type {
   DeleteBranchResult,
   FileApproval,
   FileLock,
+  FilesChange,
   FolderChangeRequest,
   FolderChangeRequestRemoval,
   IVersionControlService,
@@ -1264,6 +1265,16 @@ export class VersionControlService implements IVersionControlService {
     return change;
   }
 
+  /**
+   * The post-commit announcement for a batch (see the interface): the caller
+   * of `commitChanges` says when its locks are gone, and the reactors hear of
+   * the whole batch once. Same hook `runPendingCommit` fires for every
+   * single-file write.
+   */
+  announceCommitted(change: FilesChange): void {
+    this.fileChanges?.emit(change);
+  }
+
   listChangesForFile(workspaceId: string, path: string, limit?: number): Promise<Change[]> {
     return this.git.logForFile(workspaceId, path, limit);
   }
@@ -1796,7 +1807,7 @@ export class VersionControlService implements IVersionControlService {
     });
     // Post-commit, post-lock-release: the one chokepoint every single-file write
     // converges on. Backend reactors (catalog invalidation, id-repair) hook here.
-    this.fileChanges?.emit({ workspaceId, branch, paths: [targetPath], byUser: user });
+    this.announceCommitted({ workspaceId, branch, paths: [targetPath], byUser: user });
   }
 
   /**

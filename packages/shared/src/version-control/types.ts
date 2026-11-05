@@ -14,6 +14,7 @@
  * inputs, conflict-resolution payloads) live here directly.
  */
 
+import type { AuthUser } from '../auth/types.js';
 import type {
   BranchInfo,
   CommitAttribution,
@@ -64,6 +65,23 @@ export type Change = CommitAttribution;
  * forced single-path scope).
  */
 export type ChangeInput = ShareChangesRequest;
+
+/**
+ * A set of files committed and pushed as one change, as the version-control
+ * service announces it to the in-process reactors (catalog invalidation,
+ * id-repair, a deployment's own listeners) once the files' locks are released.
+ * One announcement per commit: a single-file save names its one path, a batch
+ * names every path it committed, so a reactor that does expensive work per
+ * announcement does it once per batch.
+ */
+export interface FilesChange {
+  workspaceId: string;
+  branch: string;
+  /** Workspace-relative paths committed in this change (≥1; sorted for batches). */
+  paths: string[];
+  /** Who the change was committed as — a reacting write (id-repair) acts as the same user. */
+  byUser: AuthUser;
+}
 
 // ── File locks (new — no git counterpart) ────────────────────────────────────
 
