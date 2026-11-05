@@ -120,6 +120,9 @@ const SOURCE = '<button onclick="bevel.tools.callTool(\'edit_file\', {})">Edit</
 
 /** The digests this browser remembers an Allow for. */
 const remembered = rememberedDigests;
+/** Every raw memory entry in storage, well-formed or not. */
+const storedEntries = (): string[] =>
+  Array.from({ length: window.localStorage.length }, (_, i) => window.localStorage.key(i)!).filter((key) => key.startsWith(ALLOWED_PAGE_KEY_PREFIX));
 
 beforeEach(() => window.localStorage.clear());
 
@@ -300,7 +303,8 @@ describe('useHtmlToolBridge through a renderer of its own', () => {
     fireEvent.click(await screen.findByRole('button', { name: "Don't allow" }));
     await waitFor(() => expect(frame.replies.at(-1)).toEqual({ type: 'bevel.tool.response', requestId: 'w1', ok: false, error: 'denied', code: 'denied' }));
     expect(server.mcp).toEqual([]);
-    expect(remembered()).toEqual([]);
+    expect(window.localStorage.getItem(ALLOWED_PAGE_KEY_PREFIX + sha256Hex(SOURCE))).toBeNull();
+    expect(storedEntries()).toEqual([]);
     frame.post(write('w2'));
     expect(await screen.findByText(CARD)).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: "Don't allow" }));

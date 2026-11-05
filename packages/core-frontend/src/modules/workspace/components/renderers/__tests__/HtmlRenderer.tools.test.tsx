@@ -6,7 +6,7 @@ import { GitContext, type GitContextValue } from '../../../../git';
 import { clearToken, setToken } from '../../../../../lib/api';
 import { WorkspaceContext, type WorkspaceContextValue } from '../../../state/workspace.context';
 import { sha256Hex } from '@bevel-software/platform-shared';
-import { rememberedDigests } from '../pageConsentMemory';
+import { ALLOWED_PAGE_KEY_PREFIX, rememberedDigests } from '../pageConsentMemory';
 import { frameChannel, stubServer } from './pageToolsHarness';
 
 /**
@@ -150,7 +150,8 @@ describe('the consent card on the file page', () => {
     fireEvent.click(await screen.findByRole('button', { name: "Don't allow" }));
     await waitFor(() => expect(frame.replies.at(-1)).toEqual({ type: 'bevel.tool.response', requestId: 'w1', ok: false, error: 'denied', code: 'denied' }));
     expect(server.mcp).toEqual([]);
-    expect(rememberedDigests()).toEqual([]);
+    expect(window.localStorage.getItem(ALLOWED_PAGE_KEY_PREFIX + sha256Hex('<h1>Roadmap</h1>'))).toBeNull();
+    expect(Array.from({ length: window.localStorage.length }, (_, i) => window.localStorage.key(i)!).filter((key) => key.startsWith(ALLOWED_PAGE_KEY_PREFIX))).toEqual([]);
 
     frame.post({ type: 'bevel.tool.call', requestId: 'w2', fn: 'callTool', args: ['edit_file', {}] });
     fireEvent.click(await screen.findByRole('button', { name: 'Allow' }));
