@@ -27,6 +27,19 @@ afterEach(async () => {
   await Promise.all(opened.splice(0).map((db) => closeDb(db)));
 });
 
+describe('an idle connection the server closes', () => {
+  it('is logged and let go — the pool has a listener, so the event cannot end the process', () => {
+    const db = createDb(URL);
+    opened.push(db);
+    // `pg.Pool` emits an idle client's failure on itself; without a listener
+    // Node throws the event. The terminated-backend error is what a server
+    // restart or a forced drop sends to every idle client.
+    const terminated = Object.assign(new Error('terminating connection due to administrator command'), { code: '57P01' });
+    expect(db.$client.listenerCount('error')).toBe(1);
+    expect(() => db.$client.emit('error', terminated)).not.toThrow();
+  });
+});
+
 describe('schema per knowledge base', () => {
   it('searches the schema it was built for, and leaves the default schema to the server', () => {
     const acme = createDb(URL, { schema: 'acme' });
