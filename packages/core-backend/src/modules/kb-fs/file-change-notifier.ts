@@ -14,9 +14,10 @@
  * made some other way (the startup runner's seed of a fresh knowledge base,
  * before any catalog exists) is the one commit this does not see. A commit
  * that ARRIVES by a pull was landed — and announced — by the process that made
- * it; the pull announces the tree change on the SSE bus (`fs-tree-changed`),
- * which the catalogs also listen to, and rebases this process's own commits
- * without re-announcing them (their content is unchanged).
+ * it; a pull of the default branch also announces the tree change on the SSE
+ * bus (`fs-tree-changed`), which the catalogs listen to, and a pull rebases
+ * this process's own commits without re-announcing them (their content is
+ * unchanged).
  *
  * BATCHED by design: a single-file save emits `paths: [p]`, a batch emits ONE
  * event with every path it committed, a merge every path it brought in — so a

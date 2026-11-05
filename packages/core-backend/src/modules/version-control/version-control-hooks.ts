@@ -16,9 +16,10 @@ const log = logger('version-control');
  *   - `commitLanded` — INFORMATIONAL. Runs in `GitService` when a commit it
  *     made is final: right after `git commit` for a save, an autosave
  *     checkpoint, a batch, a branch merge and a `commit_change`; after the
- *     push lands for a change-request merge, whose commit is redone if the
- *     push is rejected. Carries the commit's workspace-relative paths and the
- *     person. The one place a commit is reported from; the composition root
+ *     push lands for a change-request merge, whose commit is redone on the new
+ *     tip if the push is rejected because the target advanced (any other
+ *     refusal throws, and nothing is reported). Carries the commit's
+ *     workspace-relative paths and the person. The one place a commit is reported from; the composition root
  *     hands it to the file-change notifier. A hook that throws, or whose
  *     promise rejects, is logged and can neither fail nor unwind the commit.
  *
