@@ -22,6 +22,8 @@ function makeHarness(opts: {
   /** The commit finds a clean tree and answers null: nothing landed. */
   commitNoop?: boolean;
   releaseLockError?: Error;
+  /** The no-commit release of THIS path fails (the lock stays until TTL); the others release. */
+  releaseNoCommitErrorFor?: string;
 }) {
   const files = new Map<string, string>();
   const locks = new Map<string, AuthUser>();
@@ -56,6 +58,7 @@ function makeHarness(opts: {
     }),
     releaseLockNoCommit: vi.fn(async (_w: string, _b: string, p: string) => {
       releaseNoCommitCalls.push(p);
+      if (opts.releaseNoCommitErrorFor === p) throw new Error(`release of ${p} failed`);
       locks.delete(p);
     }),
     commitChanges: vi.fn(async () => {
@@ -116,6 +119,27 @@ describe('AdminLockedCommits.withFileLocks — release semantics', () => {
       }
     } finally {
       warn.mockRestore();
+    }
+  });
+
+  it('a committed path whose release failed is not announced: it stays locked until TTL, the others are announced after their release', async () => {
+    const h = makeHarness({ releaseNoCommitErrorFor: `${KB}/roles.yaml` });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      await h.locked.withFileLocks(WS, ACTOR, ['groups.yaml', 'roles.yaml'], async () => {
+        await h.locked.writeAndCommitLocked(WS, ACTOR, TWO_FILES, 'two admin files');
+      });
+    } finally {
+      warn.mockRestore();
+    }
+    // roles.yaml's lock is still held (TTL frees it); groups.yaml's is gone.
+    expect([...h.locks.keys()]).toEqual([`${KB}/roles.yaml`]);
+    const announce = h.versionControlService.announceCommitted as ReturnType<typeof vi.fn>;
+    expect(announce).toHaveBeenCalledTimes(1);
+    expect(announce).toHaveBeenCalledWith({ workspaceId: WS, branch: BRANCH, paths: [`${KB}/groups.yaml`], byUser: ACTOR });
+    const announcedAt = announce.mock.invocationCallOrder[0]!;
+    for (const order of (h.versionControlService.releaseLockNoCommit as ReturnType<typeof vi.fn>).mock.invocationCallOrder) {
+      expect(order).toBeLessThan(announcedAt);
     }
   });
 

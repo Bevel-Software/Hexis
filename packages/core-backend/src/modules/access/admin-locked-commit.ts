@@ -249,7 +249,7 @@ export class AdminLockedCommits {
       for (const h of held) {
         const committedClean =
           this.committedCleanPaths.delete(this.cleanKey(workspaceId, h)) && !pushRetry;
-        if (this.committedPaths.delete(this.cleanKey(workspaceId, h))) committed.push(h);
+        const wasCommitted = this.committedPaths.delete(this.cleanKey(workspaceId, h));
         try {
           if (coordination.has(h) || committedClean || unrestored?.has(h)) {
             // Coordination-only hold (see the method doc): `fn` never wrote
@@ -269,6 +269,11 @@ export class AdminLockedCommits {
             // work must be preserved, never discarded).
             await this.deps.versionControlService.releaseLock(workspaceId, this.defaultBranch, h, actor);
           }
+          // Announced only once its lock is really gone: a path whose release
+          // failed stays locked until TTL, and a reactor told of it now could
+          // not take it. Its catalogs refresh when the lock frees, like the
+          // lock itself — nothing is announced twice or early.
+          if (wasCommitted) committed.push(h);
         } catch (releaseErr) {
           logger(this.deps.logTag).warn(
             `could not release lock on ${h}${pushRetry ? ' (push-retry release)' : ''}; ` +
