@@ -1,38 +1,38 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { AuthContext } from '../../auth/state/auth.context';
-import { authValue } from '../../library/__tests__/auth-harness';
-import { AdminContext, type AdminContextValue } from '../../admin/state/admin.context';
-import type { AdminContact } from '../../access/api';
+import { AuthContext, type AuthContextValue } from '../../auth';
+import { AdminContext, type AdminContextValue } from '../../admin';
 import { InviteButton } from '../components/InviteButton';
 import { InviteDialogContext, type InviteDialogController } from '../state/invite-dialog.context';
 import { InviteDialogProvider } from '../state/invite-dialog';
 
 /**
- * The top bar's Invite, for everyone signed in: an admin's click opens the
- * Invite dialog; anyone else's opens a popover that says to ask an admin and
- * lists the admins, each with an Email button carrying a prefilled request.
+ * The top bar's Invite, for everyone signed in: anyone's click opens the
+ * Invite dialog, admin or not. There is no ask-an-admin popover any more.
  */
 
-const { fetchAdminsMock } = vi.hoisted(() => ({
-  fetchAdminsMock: vi.fn<() => Promise<AdminContact[]>>(),
-}));
-vi.mock('../../access/api', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../../access/api')>()),
-  fetchAdmins: fetchAdminsMock,
-}));
-vi.mock('../../../lib/api', () => ({ authFetch: vi.fn() }));
-// The dialog asks how people sign in; this file is about the button.
-vi.mock('../../auth/services/sso', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../../auth/services/sso')>()),
-  fetchLoginProvidersStrict: vi.fn(async () => ({ password: true, sso: [] })),
-}));
+const { authFetchMock } = vi.hoisted(() => ({ authFetchMock: vi.fn() }));
+vi.mock('../../../lib/api', () => ({ authFetch: authFetchMock, getToken: () => 'test-token', setToken: () => {} }));
 
-const ADMINS: AdminContact[] = [
-  { name: 'Dana Admin', email: 'dana@acme.com' },
-  { name: 'Sam Ortiz', email: 'sam.ortiz@acme.com' },
-];
+beforeEach(() => {
+  authFetchMock.mockReset();
+  // The dialog asks how people sign in; this file is about the button.
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async () => new Response(JSON.stringify({ password: true, sso: [] }), { status: 200 })),
+  );
+});
+
+function authValue(): AuthContextValue {
+  return {
+    user: { id: 'u1', email: 'juan@bevel.software', name: 'Juan Viera' },
+    token: 'test-token',
+    isLoading: false,
+    login: vi.fn(),
+    logout: vi.fn(),
+  };
+}
 
 function adminValue(isAdmin: boolean, isAdminLoading = false): AdminContextValue {
   return {
@@ -55,10 +55,7 @@ function mountWithController(isAdmin: boolean, compact = false, isAdminLoading =
     <AuthContext.Provider value={authValue()}>
       <AdminContext.Provider value={adminValue(isAdmin, isAdminLoading)}>
         <InviteDialogContext.Provider value={invite}>
-          <div>
-            <p>Elsewhere on the page</p>
-            <InviteButton compact={compact} />
-          </div>
+          <InviteButton compact={compact} />
         </InviteDialogContext.Provider>
       </AdminContext.Provider>
     </AuthContext.Provider>,
@@ -66,134 +63,50 @@ function mountWithController(isAdmin: boolean, compact = false, isAdminLoading =
   return invite;
 }
 
-function popover() {
-  return screen.queryByRole('group', { name: 'Ask an admin to invite people' });
+/** With the real dialog host, so a test sees the dialog itself. */
+function mountWithDialog(isAdmin: boolean) {
+  render(
+    <AuthContext.Provider value={authValue()}>
+      <AdminContext.Provider value={adminValue(isAdmin)}>
+        <InviteDialogProvider>
+          <InviteButton />
+        </InviteDialogProvider>
+      </AdminContext.Provider>
+    </AuthContext.Provider>,
+  );
 }
 
-beforeEach(() => {
-  fetchAdminsMock.mockReset().mockResolvedValue(ADMINS);
-});
-
-describe('InviteButton while the admin check is still out', () => {
-  it('is visibly disabled, so a click opens nothing: no ask-an-admin popover for someone who may be an admin', async () => {
-    const invite = mountWithController(false, false, true);
-    expect(screen.getByRole('button', { name: 'Invite' })).toBeDisabled();
-    await userEvent.click(screen.getByRole('button', { name: 'Invite' }));
-    expect(popover()).toBeNull();
-    expect(fetchAdminsMock).not.toHaveBeenCalled();
-    expect(invite.open).not.toHaveBeenCalled();
-  });
-});
-
-describe('InviteButton for an admin', () => {
-  it('opens the Invite dialog, and no popover', async () => {
-    render(
-      <AuthContext.Provider value={authValue()}>
-        <AdminContext.Provider value={adminValue(true)}>
-          <InviteDialogProvider>
-            <InviteButton />
-          </InviteDialogProvider>
-        </AdminContext.Provider>
-      </AuthContext.Provider>,
-    );
+describe('InviteButton', () => {
+  it('opens the Invite dialog for an admin', async () => {
+    mountWithDialog(true);
     await userEvent.click(screen.getByRole('button', { name: 'Invite' }));
     expect(screen.getByRole('dialog', { name: 'Invite your team' })).toBeInTheDocument();
-    expect(popover()).not.toBeInTheDocument();
-    expect(fetchAdminsMock).not.toHaveBeenCalled();
+  });
+
+  it('opens the Invite dialog for anyone else, with no ask-an-admin popover and no admin list read', async () => {
+    mountWithDialog(false);
+    await userEvent.click(screen.getByRole('button', { name: 'Invite' }));
+    expect(screen.getByRole('dialog', { name: 'Invite your team' })).toBeInTheDocument();
+    expect(screen.queryByRole('group', { name: 'Ask an admin to invite people' })).not.toBeInTheDocument();
+    expect(authFetchMock).not.toHaveBeenCalledWith('/api/access/admins', expect.anything());
+    expect(authFetchMock).not.toHaveBeenCalledWith('/api/access/admins');
+  });
+
+  it('is enabled and opens the dialog while the admin check is still out', async () => {
+    const invite = mountWithController(false, false, true);
+    const button = screen.getByRole('button', { name: 'Invite' });
+    expect(button).toBeEnabled();
+    await userEvent.click(button);
+    expect(invite.open).toHaveBeenCalledTimes(1);
   });
 
   it('drops its word on a compact toolbar but keeps its name, and still opens the dialog', async () => {
-    const invite = mountWithController(true, true);
+    const invite = mountWithController(false, true);
     const button = screen.getByRole('button', { name: 'Invite' });
     // Exactly empty: the word is the accessible name, never on screen.
     expect(button.textContent).toBe('');
     await userEvent.click(button);
     expect(invite.open).toHaveBeenCalledTimes(1);
-    expect(popover()).not.toBeInTheDocument();
-  });
-});
-
-describe('InviteButton for anyone else', () => {
-  it('is shown, and opens a popover saying to ask an admin — not the dialog', async () => {
-    const invite = mountWithController(false);
-    const button = screen.getByRole('button', { name: 'Invite' });
-    expect(button).toHaveAttribute('aria-expanded', 'false');
-    await userEvent.click(button);
-    expect(button).toHaveAttribute('aria-expanded', 'true');
-    const panel = popover()!;
-    expect(within(panel).getByText('Ask an admin to invite people')).toBeInTheDocument();
-    expect(within(panel).getByText('Only admins can add people to this workspace.')).toBeInTheDocument();
-    expect(invite.open).not.toHaveBeenCalled();
-  });
-
-  it('lists every admin with name, email and an Email button carrying the request', async () => {
-    mountWithController(false);
-    await userEvent.click(screen.getByRole('button', { name: 'Invite' }));
-    const list = await screen.findByRole('list', { name: 'Admins' });
-    const rows = within(list).getAllByRole('listitem');
-    expect(rows).toHaveLength(2);
-    expect(within(rows[0]).getByText('Dana Admin')).toBeInTheDocument();
-    expect(within(rows[0]).getByText('dana@acme.com')).toBeInTheDocument();
-    expect(within(rows[1]).getByText('Sam Ortiz')).toBeInTheDocument();
-    expect(within(rows[1]).getByText('sam.ortiz@acme.com')).toBeInTheDocument();
-
-    const email = within(rows[0]).getByRole('link', { name: 'Email Dana Admin' });
-    expect(email).toHaveTextContent('Email');
-    const href = email.getAttribute('href')!;
-    expect(href.startsWith('mailto:dana@acme.com?')).toBe(true);
-    const params = new URLSearchParams(href.slice(href.indexOf('?') + 1));
-    expect(params.get('subject')).toBe('Please invite someone to Hexis');
-    expect(params.get('body')).toBe(
-      `Hi Dana,\n\nCould you invite ... to our workspace at ${window.location.origin}?\n\nThanks`,
-    );
-    expect(within(rows[1]).getByRole('link', { name: 'Email Sam Ortiz' }).getAttribute('href')).toMatch(
-      /^mailto:sam\.ortiz@acme\.com\?.*Hi%20Sam%2C/,
-    );
-  });
-
-  it('keeps its two lines and lists nobody when the admins cannot be read', async () => {
-    fetchAdminsMock.mockRejectedValue(new Error('down'));
-    mountWithController(false);
-    await userEvent.click(screen.getByRole('button', { name: 'Invite' }));
-    await waitFor(() => expect(fetchAdminsMock).toHaveBeenCalled());
-    const panel = popover()!;
-    expect(within(panel).getByText('Ask an admin to invite people')).toBeInTheDocument();
-    expect(within(panel).getByText('Only admins can add people to this workspace.')).toBeInTheDocument();
-    expect(within(panel).queryByRole('list')).not.toBeInTheDocument();
-  });
-
-  it('closes on Escape and hands focus back to the button', async () => {
-    mountWithController(false);
-    const button = screen.getByRole('button', { name: 'Invite' });
-    await userEvent.click(button);
-    await screen.findByRole('list', { name: 'Admins' });
-    await userEvent.keyboard('{Escape}');
-    expect(popover()).not.toBeInTheDocument();
-    expect(button).toHaveFocus();
-  });
-
-  it('closes on a click outside', async () => {
-    mountWithController(false);
-    await userEvent.click(screen.getByRole('button', { name: 'Invite' }));
-    expect(popover()).toBeInTheDocument();
-    await userEvent.click(screen.getByText('Elsewhere on the page'));
-    expect(popover()).not.toBeInTheDocument();
-  });
-
-  it('toggles closed on a second click of the button', async () => {
-    mountWithController(false);
-    const button = screen.getByRole('button', { name: 'Invite' });
-    await userEvent.click(button);
-    await userEvent.click(button);
-    expect(popover()).not.toBeInTheDocument();
-  });
-
-  it('the compact icon opens the same popover', async () => {
-    const invite = mountWithController(false, true);
-    await userEvent.click(screen.getByRole('button', { name: 'Invite' }));
-    expect(popover()).toBeInTheDocument();
-    expect(await screen.findByRole('list', { name: 'Admins' })).toBeInTheDocument();
-    expect(invite.open).not.toHaveBeenCalled();
   });
 });
 
