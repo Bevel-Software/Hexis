@@ -111,10 +111,12 @@ deployment tags as writing, such as `edit_file` or `write_file`, or any
 changes using your account. Do you want to allow that?", with the page's path
 under it and the buttons Don't allow and Allow. Allow runs the call, and every
 later writing call of the page view runs without asking. The browser
-remembers an Allow for the page's exact content, so the same page asks nothing
-on a later view in that browser. Content it has not allowed asks again, such
-as an edited page, as does another browser, a browser that will not store, and content past the 500 most
-recently allowed: never rely on an Allow being kept. Don't allow runs nothing and rejects
+remembers an Allow for the signed-in account and the page's exact content, so
+the same page asks that account nothing on a later view in that browser.
+Signing out clears what the account kept. Content the account has not allowed
+asks again, such as an edited page, as does another account or browser, a
+browser that will not store, and content past the account's 500 most recently
+allowed: never rely on an Allow being kept. Don't allow runs nothing and rejects
 the call with `denied` (`error.message` and `error.code` are both
 `'denied'`). It is never remembered: the next writing call asks again. The
 card is the app's, outside the frame: the page cannot draw, dismiss or answer

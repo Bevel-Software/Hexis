@@ -9,10 +9,10 @@ import {
   useHtmlToolBridge,
   type RendererSurface,
 } from '..';
+import { AuthContext, type AuthContextValue } from '../../../../auth';
 import { GitContext, type GitContextValue } from '../../../../git';
 import { WorkspaceContext, type WorkspaceContextValue } from '../../../state/workspace.context';
 import { sha256Hex } from '@bevel-software/platform-shared';
-import { ALLOWED_PAGE_KEY_PREFIX } from '../pageConsentMemory';
 import { frameChannel, stubServer } from './pageToolsHarness';
 
 /**
@@ -51,11 +51,12 @@ type Where = 'file page' | 'elsewhere' | 'embed';
 
 function mount(
   where: Where,
-  opts: { openFilePage?: (path: string) => void; openInPlatform?: () => void; path?: string; page?: string; source?: string } = {},
+  opts: { openFilePage?: (path: string) => void; openInPlatform?: () => void; path?: string; page?: string; source?: string; account?: string | null } = {},
 ) {
   const path = opts.path ?? PATH;
   const page = opts.page ?? PAGE;
   let source = opts.source ?? SOURCE;
+  const account = opts.account === undefined ? ACCOUNT : opts.account;
   const surface: RendererSurface = {
     kbDirName: 'knowledge-base',
     openLink: () => undefined,
@@ -85,12 +86,17 @@ function mount(
       ) : (
         renderer
       );
-    return (
+    const app = (
       <MemoryRouter>
         <WorkspaceContext.Provider value={workspace}>
           <GitContext.Provider value={git}>{placed}</GitContext.Provider>
         </WorkspaceContext.Provider>
       </MemoryRouter>
+    );
+    return account === null ? (
+      app
+    ) : (
+      <AuthContext.Provider value={{ user: { id: account } } as unknown as AuthContextValue}>{app}</AuthContext.Provider>
     );
   };
   let viewKey = 0;
@@ -117,6 +123,9 @@ function mount(
 const write = (requestId: string) => ({ type: 'bevel.tool.call', requestId, fn: 'callTool', args: ['edit_file', {}] });
 const CARD = "You're allowing changes using your account. Do you want to allow that?";
 const SOURCE = '<button onclick="bevel.tools.callTool(\'edit_file\', {})">Edit</button>';
+const ACCOUNT = 'user-a';
+/** Where the browser keeps the account's Allow: one entry per digest, holding when it was allowed. */
+const ALLOWED_PAGE_KEY_PREFIX = `bevel.account/${ACCOUNT}/htmlPage.allowedWrite.`;
 
 /** The digests stored in localStorage, least recently allowed first: read through the storage API, as another tab would. */
 const remembered = (): string[] =>
@@ -124,9 +133,9 @@ const remembered = (): string[] =>
     .filter((key) => key.startsWith(ALLOWED_PAGE_KEY_PREFIX) && Number.isFinite(Number(window.localStorage.getItem(key))))
     .sort((a, b) => Number(window.localStorage.getItem(a)) - Number(window.localStorage.getItem(b)))
     .map((key) => key.slice(ALLOWED_PAGE_KEY_PREFIX.length));
-/** Every raw memory entry in storage, well-formed or not. */
+/** Every raw memory entry in storage, any account's, well-formed or not. */
 const storedEntries = (): string[] =>
-  Array.from({ length: window.localStorage.length }, (_, i) => window.localStorage.key(i)!).filter((key) => key.startsWith(ALLOWED_PAGE_KEY_PREFIX));
+  Array.from({ length: window.localStorage.length }, (_, i) => window.localStorage.key(i)!).filter((key) => key.includes('allowedWrite'));
 
 beforeEach(() => window.localStorage.clear());
 
@@ -272,6 +281,48 @@ describe('useHtmlToolBridge through a renderer of its own', () => {
     copy.frame.post(write('w2'));
     await waitFor(() => expect(copy.frame.replies.at(-1)).toMatchObject({ requestId: 'w2', ok: true }));
     expect(screen.queryByText(CARD)).toBeNull();
+  });
+
+  it('asks another account afresh for a source the first allowed; each account then keeps its own', async () => {
+    const server = stubServer();
+    const first = mount('file page', { account: 'user-a' });
+    first.frame.post(write('w1'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Allow' }));
+    await waitFor(() => expect(first.frame.replies.at(-1)).toMatchObject({ requestId: 'w1', ok: true }));
+    cleanup();
+
+    const second = mount('file page', { account: 'user-b' });
+    second.frame.post(write('w2'));
+    expect(await screen.findByText(CARD)).toBeTruthy();
+    expect(server.mcp).toEqual(['edit_file']);
+    fireEvent.click(screen.getByRole('button', { name: 'Allow' }));
+    await waitFor(() => expect(second.frame.replies.at(-1)).toMatchObject({ requestId: 'w2', ok: true }));
+    const digest = sha256Hex(SOURCE);
+    expect(storedEntries().sort()).toEqual([
+      `bevel.account/user-a/htmlPage.allowedWrite.${digest}`,
+      `bevel.account/user-b/htmlPage.allowedWrite.${digest}`,
+    ]);
+    cleanup();
+
+    const back = mount('file page', { account: 'user-a' });
+    back.frame.post(write('w3'));
+    await waitFor(() => expect(back.frame.replies.at(-1)).toMatchObject({ requestId: 'w3', ok: true }));
+    expect(screen.queryByText(CARD)).toBeNull();
+  });
+
+  it('keeps nothing with no account above the renderer: an Allow holds for its view, and every view asks', async () => {
+    stubServer();
+    const { frame, nextView } = mount('file page', { account: null });
+    frame.post(write('w1'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Allow' }));
+    await waitFor(() => expect(frame.replies.at(-1)).toMatchObject({ requestId: 'w1', ok: true }));
+    frame.post(write('w2'));
+    await waitFor(() => expect(frame.replies.at(-1)).toMatchObject({ requestId: 'w2', ok: true }));
+    expect(storedEntries()).toEqual([]);
+
+    const next = nextView();
+    next.post(write('w3'));
+    expect(await screen.findByText(CARD)).toBeTruthy();
   });
 
   it('asks on every view in a browser that cannot store, with no error shown', async () => {

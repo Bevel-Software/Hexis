@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { OpenPageInPlatformContext, PageToolsContext, RendererSurfaceContext, getFileRenderer, type RendererSurface } from '..';
+import { AuthContext, type AuthContextValue } from '../../../../auth';
 import { GitContext, type GitContextValue } from '../../../../git';
 import { clearToken, setToken } from '../../../../../lib/api';
 import { WorkspaceContext, type WorkspaceContextValue } from '../../../state/workspace.context';
@@ -22,8 +23,10 @@ const CARD = "You're allowing changes using your account. Do you want to allow t
 
 const workspace = { workspaceId: 'main', kbDirName: 'knowledge-base' } as unknown as WorkspaceContextValue;
 const git = { status: { branch: 'main' } } as unknown as GitContextValue;
-/** Where the browser keeps an Allow: one entry per digest, holding when it was allowed. */
-const ALLOWED_PAGE_KEY_PREFIX = 'bevel.htmlPage.allowedWrite.';
+/** The account on the file page, as the app's auth gate carries it above the renderer. */
+const auth = { user: { id: 'user-a' } } as unknown as AuthContextValue;
+/** Where the browser keeps the account's Allow: one entry per digest, holding when it was allowed. */
+const ALLOWED_PAGE_KEY_PREFIX = 'bevel.account/user-a/htmlPage.allowedWrite.';
 /** The digests stored in localStorage, least recently allowed first: read through the storage API, as another tab would. */
 const rememberedDigests = (): string[] =>
   Array.from({ length: window.localStorage.length }, (_, i) => window.localStorage.key(i)!)
@@ -38,15 +41,17 @@ const rememberedDigests = (): string[] =>
  */
 function onFilePage({ readOnly = true }: { readOnly?: boolean } = {}) {
   const tree = (content: string) => (
-    <MemoryRouter initialEntries={['/workspace/main/knowledge-base/Dashboards/Roadmap.html']}>
-      <WorkspaceContext.Provider value={workspace}>
-        <GitContext.Provider value={git}>
-          <PageToolsContext.Provider value={{ pagePath: PAGE }}>
-            <HtmlRenderer content={content} filePath={PATH} onSave={async () => undefined} readOnly={readOnly} />
-          </PageToolsContext.Provider>
-        </GitContext.Provider>
-      </WorkspaceContext.Provider>
-    </MemoryRouter>
+    <AuthContext.Provider value={auth}>
+      <MemoryRouter initialEntries={['/workspace/main/knowledge-base/Dashboards/Roadmap.html']}>
+        <WorkspaceContext.Provider value={workspace}>
+          <GitContext.Provider value={git}>
+            <PageToolsContext.Provider value={{ pagePath: PAGE }}>
+              <HtmlRenderer content={content} filePath={PATH} onSave={async () => undefined} readOnly={readOnly} />
+            </PageToolsContext.Provider>
+          </GitContext.Provider>
+        </WorkspaceContext.Provider>
+      </MemoryRouter>
+    </AuthContext.Provider>
   );
   const result = render(tree('<h1>Roadmap</h1>'));
   return { ...result, receive: (content: string) => result.rerender(tree(content)) };

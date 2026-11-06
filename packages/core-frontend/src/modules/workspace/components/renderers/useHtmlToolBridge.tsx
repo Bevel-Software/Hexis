@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
+import { useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
+import { AuthContext } from '../../../auth';
 import { useFileNav } from '../../routing/kb-routes';
 import { useRendererSurface } from './rendererSurface';
 import { sha256Hex } from '@bevel-software/platform-shared';
@@ -41,8 +42,9 @@ export interface HtmlToolBridgeOptions {
   /**
    * The page's source as the renderer received it, the HTML its view's
    * document is built from. An Allow is remembered by its SHA-256 digest, so
-   * a source whose digest this browser still keeps asks no more; any other
-   * (an edit, an evicted digest, a browser that will not store) asks.
+   * a source whose digest this browser still keeps for the signed-in account
+   * asks no more; any other (an edit, an evicted digest, another account, no
+   * account above the renderer, a browser that will not store) asks.
    */
   source: string;
 }
@@ -89,7 +91,10 @@ export function useHtmlToolBridge({ iframeRef, filePath, viewKey, source }: Html
   const cardRef = useRef<PageCard | null>(null);
   // The viewer's answer about this page's writes holds for one VIEW of it: a
   // new frame document (a reload, a saved edit, another file) asks again,
-  // unless the browser remembers an Allow for that document's exact source.
+  // unless the browser remembers this account's Allow for that document's
+  // exact source. Read nullable (not `useAuth`, which throws): no account above
+  // the renderer means nothing is kept and every view asks.
+  const account = useContext(AuthContext)?.user?.id ?? null;
   const consentRef = useRef<PageConsent | null>(null);
   // Which document this view's is: an identity minted per `viewKey` — for
   // every view, tools or not, since a page without tools still asks
@@ -205,18 +210,19 @@ export function useHtmlToolBridge({ iframeRef, filePath, viewKey, source }: Html
         return;
       }
       if (!consentRef.current) {
-        // The view's consent remembers by the source this view was built from.
+        // The view's consent remembers by the source this view was built from,
+        // for the account viewing it.
         const viewDigest = digestRef.current;
         consentRef.current = new PageConsent(() => showCard('write'), {
-          remembered: () => isRemembered(viewDigest),
-          remember: () => remember(viewDigest),
+          remembered: () => isRemembered(account, viewDigest),
+          remember: () => remember(account, viewDigest),
         });
       }
       void answerToolCall(call, toolsClient, consentRef.current).then(reply);
     }
     window.addEventListener('message', onToolMessage);
     return () => window.removeEventListener('message', onToolMessage);
-  }, [iframeRef, toolsClient, showCard]);
+  }, [iframeRef, toolsClient, showCard, account]);
 
   const openInPlatform = useCallback(() => {
     closeCard(false);

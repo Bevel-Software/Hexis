@@ -15,14 +15,20 @@ import { build, type Rollup } from 'vite';
  * a secure context, so no `crypto.subtle`, and the digest must still be the
  * SHA-256 Node computes for the same source.
  *
- * The server is answered here: the UTCP manual (which tools write) and the
- * hosted MCP endpoint, recording every tool call that reached it.
+ * The memory is the signed-in account's: the real session hook resolves the
+ * account from the stored token, and signs out through its real `logout`.
+ *
+ * The server is answered here: who a token belongs to, the UTCP manual (which
+ * tools write) and the hosted MCP endpoint, recording every tool call that
+ * reached it.
  */
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const APP_ORIGIN = 'http://app.example';
 const CARD = "You're allowing changes using your account. Do you want to allow that?";
-const KEY_PREFIX = 'bevel.htmlPage.allowedWrite.';
+const TOKEN_KEY = 'bevel_token';
+const keyPrefix = (account: string) => `bevel.account/${account}/htmlPage.allowedWrite.`;
+const KEY_PREFIX = keyPrefix('user-a');
 
 /** A page whose button makes one writing call and shows how it went. */
 const SOURCE = `<button id="write">write</button><pre id="out"></pre>
@@ -61,13 +67,21 @@ async function bundle(): Promise<string> {
   return pageBundle;
 }
 
-/** Answer the app's origin: the host page, the manual (edit_file writes), and the MCP endpoint. */
+/** Answer the app's origin: the host page, whose token this is (the token names the account), the manual (edit_file writes), and the MCP endpoint. */
 async function serve(page: Page): Promise<string[]> {
   const called: string[] = [];
   await page.route(`${APP_ORIGIN}/**`, async (route) => {
     const req = route.request();
     const url = new URL(req.url());
     if (url.pathname === '/') return route.fulfill({ status: 200, headers: { 'content-type': 'text/html' }, body: HOST });
+    if (url.pathname === '/api/auth/me') {
+      const account = (req.headers().authorization ?? '').replace('Bearer ', '');
+      return route.fulfill({
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ id: account, email: `${account}@example.com`, name: account }),
+      });
+    }
     if (url.pathname === '/api/agent/utcp') {
       return route.fulfill({
         status: 200,
@@ -94,24 +108,31 @@ async function serve(page: Page): Promise<string[]> {
  * NOW — after `view` navigated to it, or after `page.reload()` replaced it.
  * Kept apart from the navigation so a reload test mounts into the reloaded
  * document rather than navigating once more and testing a fresh load.
+ * `signedIn: false` mounts it with no account above it at all.
  */
-async function mount(page: Page, content: string): Promise<void> {
+async function mount(page: Page, content: string, { signedIn = true }: { signedIn?: boolean } = {}): Promise<void> {
   await page.addScriptTag({ content: await bundle() });
   await page.evaluate(
-    (source) => window.mountHtmlPage({ content: source, filePath: 'knowledge-base/Dashboards/Roadmap.html', pagePath: 'Dashboards/Roadmap.html' }),
-    content,
+    ([source, withAccount]) =>
+      window.mountHtmlPage({ content: source, filePath: 'knowledge-base/Dashboards/Roadmap.html', pagePath: 'Dashboards/Roadmap.html', signedIn: withAccount }),
+    [content, signedIn] as const,
   );
   await expect(page.frameLocator('iframe').locator('#write')).toBeVisible();
 }
 
-/** Load the app's page afresh and mount the real renderer showing `content`. */
+/** The session this browser holds from now on: the next document's hook resolves this account. */
+const signInAs = (page: Page, account: string) =>
+  page.evaluate(([key, token]) => window.localStorage.setItem(key, token), [TOKEN_KEY, account] as const);
+
+/** Load the app's page afresh, signed in as `user-a`, and mount the real renderer showing `content`. */
 async function view(page: Page, content: string): Promise<void> {
   await page.goto(`${APP_ORIGIN}/`);
+  await signInAs(page, 'user-a');
   await mount(page, content);
 }
 
-const stored = (page: Page) =>
-  page.evaluate((prefix) => Object.keys(window.localStorage).filter((k) => k.startsWith(prefix)), KEY_PREFIX);
+/** Every memory entry in the browser, any account's. */
+const stored = (page: Page) => page.evaluate(() => Object.keys(window.localStorage).filter((k) => k.includes('allowedWrite')));
 
 const sha256 = (s: string) => createHash('sha256').update(s, 'utf8').digest('hex');
 
@@ -152,6 +173,73 @@ test('Allow is kept in localStorage by the source\'s SHA-256, so a reload asks n
   await page.getByRole('button', { name: 'Allow', exact: true }).click();
   await expect(out).toHaveText('ok {"written":true}');
   expect((await stored(page)).sort()).toEqual([KEY_PREFIX + sha256(SOURCE), KEY_PREFIX + sha256(edited)].sort());
+});
+
+test("another account is asked afresh for a source the first allowed, and signing out clears only the signed-out account's", async ({ page }) => {
+  const called = await serve(page);
+  const entryOf = (account: string) => keyPrefix(account) + sha256(SOURCE);
+  const write = page.frameLocator('iframe').locator('#write');
+  const out = page.frameLocator('iframe').locator('#out');
+  const allow = page.getByRole('button', { name: 'Allow', exact: true });
+
+  // user-a allows.
+  await view(page, SOURCE);
+  await write.click();
+  await allow.click();
+  await expect(out).toHaveText('ok {"written":true}');
+  expect(await stored(page)).toEqual([entryOf('user-a')]);
+
+  // user-b on the same browser and the same source: the card, nothing run until Allow.
+  await signInAs(page, 'user-b');
+  await page.reload();
+  await mount(page, SOURCE);
+  await write.click();
+  await expect(page.getByText(CARD)).toBeVisible();
+  expect(called).toEqual(['edit_file']);
+  await allow.click();
+  await expect(out).toHaveText('ok {"written":true}');
+  expect(called).toEqual(['edit_file', 'edit_file']);
+  expect((await stored(page)).sort()).toEqual([entryOf('user-a'), entryOf('user-b')]);
+
+  // user-b signs out through the app's own hook: their entry goes, user-a's stays.
+  await page.evaluate(() => window.signOutHtmlPage());
+  await expect(page.locator('iframe')).toHaveCount(0);
+  expect(await page.evaluate((key) => window.localStorage.getItem(key), TOKEN_KEY)).toBeNull();
+  expect(await stored(page)).toEqual([entryOf('user-a')]);
+
+  // user-b back: asked afresh.
+  await signInAs(page, 'user-b');
+  await page.reload();
+  await mount(page, SOURCE);
+  await write.click();
+  await expect(page.getByText(CARD)).toBeVisible();
+  await page.getByRole('button', { name: "Don't allow" }).click();
+
+  // user-a back: still remembered.
+  await signInAs(page, 'user-a');
+  await page.reload();
+  await mount(page, SOURCE);
+  await write.click();
+  await expect(out).toHaveText('ok {"written":true}');
+  await expect(page.getByText(CARD)).toHaveCount(0);
+});
+
+test('with no signed-in account above the renderer nothing is kept, and every view asks', async ({ page }) => {
+  const called = await serve(page);
+  await page.goto(`${APP_ORIGIN}/`);
+  await mount(page, SOURCE, { signedIn: false });
+  const out = page.frameLocator('iframe').locator('#out');
+
+  await page.frameLocator('iframe').locator('#write').click();
+  await page.getByRole('button', { name: 'Allow', exact: true }).click();
+  await expect(out).toHaveText('ok {"written":true}');
+  expect(called).toEqual(['edit_file']);
+  expect(await stored(page)).toEqual([]);
+
+  await page.reload();
+  await mount(page, SOURCE, { signedIn: false });
+  await page.frameLocator('iframe').locator('#write').click();
+  await expect(page.getByText(CARD)).toBeVisible();
 });
 
 test("Don't allow keeps nothing in localStorage, and the reloaded page asks again", async ({ page }) => {
