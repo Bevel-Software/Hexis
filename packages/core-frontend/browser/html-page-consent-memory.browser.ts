@@ -89,15 +89,25 @@ async function serve(page: Page): Promise<string[]> {
   return called;
 }
 
-/** Load the app's page afresh and mount the real renderer showing `content`. */
-async function view(page: Page, content: string): Promise<void> {
-  await page.goto(`${APP_ORIGIN}/`);
+/**
+ * Mount the real renderer showing `content` into the document the page holds
+ * NOW — after `view` navigated to it, or after `page.reload()` replaced it.
+ * Kept apart from the navigation so a reload test mounts into the reloaded
+ * document rather than navigating once more and testing a fresh load.
+ */
+async function mount(page: Page, content: string): Promise<void> {
   await page.addScriptTag({ content: await bundle() });
   await page.evaluate(
     (source) => window.mountHtmlPage({ content: source, filePath: 'knowledge-base/Dashboards/Roadmap.html', pagePath: 'Dashboards/Roadmap.html' }),
     content,
   );
   await expect(page.frameLocator('iframe').locator('#write')).toBeVisible();
+}
+
+/** Load the app's page afresh and mount the real renderer showing `content`. */
+async function view(page: Page, content: string): Promise<void> {
+  await page.goto(`${APP_ORIGIN}/`);
+  await mount(page, content);
 }
 
 const stored = (page: Page) =>
@@ -123,9 +133,10 @@ test('Allow is kept in localStorage by the source\'s SHA-256, so a reload asks n
   expect(called).toEqual(['edit_file']);
   expect(await stored(page)).toEqual([KEY_PREFIX + sha256(SOURCE)]);
 
-  // A real reload: a new document, the same browser storage. No card.
+  // A real reload: a new document, the same browser storage, the renderer
+  // mounted into THAT document (no second navigation). No card.
   await page.reload();
-  await view(page, SOURCE);
+  await mount(page, SOURCE);
   await page.frameLocator('iframe').locator('#write').click();
   await expect(out).toHaveText('ok {"written":true}');
   await expect(page.getByText(CARD)).toHaveCount(0);
@@ -134,7 +145,7 @@ test('Allow is kept in localStorage by the source\'s SHA-256, so a reload asks n
   // One character more: asked again; Allow keeps the new digest beside the old one.
   const edited = `${SOURCE} `;
   await page.reload();
-  await view(page, edited);
+  await mount(page, edited);
   await page.frameLocator('iframe').locator('#write').click();
   await expect(page.getByText(CARD)).toBeVisible();
   expect(called).toEqual(['edit_file', 'edit_file']);
@@ -155,7 +166,7 @@ test("Don't allow keeps nothing in localStorage, and the reloaded page asks agai
   expect(await stored(page)).toEqual([]);
 
   await page.reload();
-  await view(page, SOURCE);
+  await mount(page, SOURCE);
   await page.frameLocator('iframe').locator('#write').click();
   await expect(page.getByText(CARD)).toBeVisible();
 });
