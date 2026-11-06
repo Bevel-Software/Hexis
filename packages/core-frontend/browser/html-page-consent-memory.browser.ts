@@ -139,6 +139,9 @@ const sha256 = (s: string) => createHash('sha256').update(s, 'utf8').digest('hex
 test.use({ channel: 'chromium' });
 // Bundling the renderer with vite takes most of this, more under a parallel run.
 test.setTimeout(90_000);
+// One worker for this file, so its tests share the one bundle `bundle()` caches:
+// a build per test, in parallel, is what runs into the limit above.
+test.describe.configure({ mode: 'default' });
 
 test('Allow is kept in localStorage by the source\'s SHA-256, so a reload asks nothing; a changed source asks again', async ({ page }) => {
   const called = await serve(page);
