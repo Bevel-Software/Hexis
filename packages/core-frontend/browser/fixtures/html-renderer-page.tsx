@@ -4,9 +4,11 @@
  * and git contexts, with the file page's page-tools provider, so the frame's
  * document is built with the tool bridge exactly as on the file page.
  * Nothing here stands in for the renderer; only the file page around it.
+ * `signedIn` puts the real session hook above it, as the app's auth gate does.
  */
 import { createRoot } from 'react-dom/client';
 import { MemoryRouter } from 'react-router-dom';
+import { SignedIn } from './SignedIn';
 import { PageToolsContext, getFileRenderer } from '../../src/modules/workspace/components/renderers';
 import { GitContext, type GitContextValue } from '../../src/modules/git';
 import { WorkspaceContext, type WorkspaceContextValue } from '../../src/modules/workspace';
@@ -14,18 +16,18 @@ import { WorkspaceContext, type WorkspaceContextValue } from '../../src/modules/
 declare global {
   interface Window {
     /** Mount the renderer on `#root` showing `content` as `filePath`. */
-    mountHtmlPage(opts: { content: string; filePath: string; pagePath: string }): void;
+    mountHtmlPage(opts: { content: string; filePath: string; pagePath: string; signedIn?: boolean }): void;
   }
 }
 
 const workspace = { workspaceId: 'main', kbDirName: 'knowledge-base' } as unknown as WorkspaceContextValue;
 const git = { status: { branch: 'main' } } as unknown as GitContextValue;
 
-window.mountHtmlPage = ({ content, filePath, pagePath }) => {
+window.mountHtmlPage = ({ content, filePath, pagePath, signedIn }) => {
   const host = document.getElementById('root');
   if (!host) throw new Error('no #root to mount on');
   const HtmlRenderer = getFileRenderer(filePath);
-  createRoot(host).render(
+  const page = (
     <MemoryRouter initialEntries={[`/workspace/main/${filePath}`]}>
       <WorkspaceContext.Provider value={workspace}>
         <GitContext.Provider value={git}>
@@ -36,6 +38,7 @@ window.mountHtmlPage = ({ content, filePath, pagePath }) => {
           </PageToolsContext.Provider>
         </GitContext.Provider>
       </WorkspaceContext.Provider>
-    </MemoryRouter>,
+    </MemoryRouter>
   );
+  createRoot(host).render(signedIn ? <SignedIn>{page}</SignedIn> : page);
 };

@@ -2,9 +2,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { OpenPageInPlatformContext, PageToolsContext, RendererSurfaceContext, getFileRenderer, type RendererSurface } from '..';
+import { AuthContext, type AuthContextValue } from '../../../../auth';
 import { GitContext, type GitContextValue } from '../../../../git';
 import { clearToken, setToken } from '../../../../../lib/api';
 import { WorkspaceContext, type WorkspaceContextValue } from '../../../state/workspace.context';
+import { sha256Hex } from '@bevel-software/platform-shared';
 import { frameChannel, stubServer } from './pageToolsHarness';
 
 /**
@@ -17,9 +19,20 @@ import { frameChannel, stubServer } from './pageToolsHarness';
 const HtmlRenderer = getFileRenderer('Dashboards/Roadmap.html');
 const PATH = 'knowledge-base/Dashboards/Roadmap.html';
 const PAGE = 'Dashboards/Roadmap.html';
+const CARD = "You're allowing changes using your account. Do you want to allow that?";
 
 const workspace = { workspaceId: 'main', kbDirName: 'knowledge-base' } as unknown as WorkspaceContextValue;
 const git = { status: { branch: 'main' } } as unknown as GitContextValue;
+/** The account on the file page, as the app's auth gate carries it above the renderer. */
+const auth = { user: { id: 'user-a' } } as unknown as AuthContextValue;
+/** Where the browser keeps the account's Allow: one entry per digest, holding when it was allowed. */
+const ALLOWED_PAGE_KEY_PREFIX = 'bevel.account/user-a/htmlPage.allowedWrite.';
+/** The digests stored in localStorage, least recently allowed first: read through the storage API, as another tab would. */
+const rememberedDigests = (): string[] =>
+  Array.from({ length: window.localStorage.length }, (_, i) => window.localStorage.key(i)!)
+    .filter((key) => key.startsWith(ALLOWED_PAGE_KEY_PREFIX) && Number.isFinite(Number(window.localStorage.getItem(key))))
+    .sort((a, b) => Number(window.localStorage.getItem(a)) - Number(window.localStorage.getItem(b)))
+    .map((key) => key.slice(ALLOWED_PAGE_KEY_PREFIX.length));
 
 /**
  * The page on the app's file page: in the app, with the file page's provider.
@@ -28,15 +41,17 @@ const git = { status: { branch: 'main' } } as unknown as GitContextValue;
  */
 function onFilePage({ readOnly = true }: { readOnly?: boolean } = {}) {
   const tree = (content: string) => (
-    <MemoryRouter initialEntries={['/workspace/main/knowledge-base/Dashboards/Roadmap.html']}>
-      <WorkspaceContext.Provider value={workspace}>
-        <GitContext.Provider value={git}>
-          <PageToolsContext.Provider value={{ pagePath: PAGE }}>
-            <HtmlRenderer content={content} filePath={PATH} onSave={async () => undefined} readOnly={readOnly} />
-          </PageToolsContext.Provider>
-        </GitContext.Provider>
-      </WorkspaceContext.Provider>
-    </MemoryRouter>
+    <AuthContext.Provider value={auth}>
+      <MemoryRouter initialEntries={['/workspace/main/knowledge-base/Dashboards/Roadmap.html']}>
+        <WorkspaceContext.Provider value={workspace}>
+          <GitContext.Provider value={git}>
+            <PageToolsContext.Provider value={{ pagePath: PAGE }}>
+              <HtmlRenderer content={content} filePath={PATH} onSave={async () => undefined} readOnly={readOnly} />
+            </PageToolsContext.Provider>
+          </GitContext.Provider>
+        </WorkspaceContext.Provider>
+      </MemoryRouter>
+    </AuthContext.Provider>
   );
   const result = render(tree('<h1>Roadmap</h1>'));
   return { ...result, receive: (content: string) => result.rerender(tree(content)) };
@@ -118,41 +133,45 @@ describe('the consent card on the file page', () => {
     frame.post({ type: 'bevel.tool.call', requestId: 'r1', fn: 'callTool', args: ['read_file', {}] });
     await waitFor(() => expect(frame.replies).toEqual([{ type: 'bevel.tool.response', requestId: 'r1', ok: true, result: { ran: 'read_file' } }]));
     expect(server.mcp).toEqual(['read_file']);
-    expect(screen.queryByText(/wants to write to the knowledge base/)).toBeNull();
+    expect(screen.queryByText(CARD)).toBeNull();
   });
 
-  it('asks on the first write with the page\'s name and path; Allow runs it and holds for the view', async () => {
+  it('asks on the first write in the plain sentence with the page\'s path; Allow runs it and holds for the view', async () => {
     const server = stubServer();
     const { container } = onFilePage();
     const frame = frameChannel(await frameOf(container));
     frame.post({ type: 'bevel.tool.call', requestId: 'w1', fn: 'callTool', args: ['edit_file', {}] });
-    expect(await screen.findByText('Roadmap wants to write to the knowledge base')).toBeTruthy();
+    expect(await screen.findByText(CARD)).toBeTruthy();
     expect(screen.getByText(PAGE)).toBeTruthy();
     expect(server.mcp).toEqual([]);
 
-    fireEvent.click(screen.getByRole('button', { name: 'Allow while open' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Allow' }));
     await waitFor(() => expect(frame.replies.at(-1)).toMatchObject({ requestId: 'w1', ok: true, result: { ran: 'edit_file' } }));
 
     frame.post({ type: 'bevel.tool.call', requestId: 'w2', fn: 'callToolChain', args: ['return 1'] });
     await waitFor(() => expect(frame.replies.at(-1)).toMatchObject({ requestId: 'w2', ok: true }));
-    expect(screen.queryByText(/wants to write to the knowledge base/)).toBeNull();
+    expect(screen.queryByText(CARD)).toBeNull();
     expect(server.mcp).toEqual(['edit_file', 'call_tool_chain']);
   });
 
-  it('Deny answers denied and runs nothing; the next write asks again; a reload asks again after an Allow', async () => {
+  it("Don't allow answers denied and runs nothing; the next write asks again; a reload after an Allow asks nothing", async () => {
     const server = stubServer();
     const { container } = onFilePage();
     const frame = frameChannel(await frameOf(container));
     frame.post({ type: 'bevel.tool.call', requestId: 'w1', fn: 'callTool', args: ['edit_file', {}] });
-    fireEvent.click(await screen.findByRole('button', { name: 'Deny' }));
+    fireEvent.click(await screen.findByRole('button', { name: "Don't allow" }));
     await waitFor(() => expect(frame.replies.at(-1)).toEqual({ type: 'bevel.tool.response', requestId: 'w1', ok: false, error: 'denied', code: 'denied' }));
     expect(server.mcp).toEqual([]);
+    expect(window.localStorage.getItem(ALLOWED_PAGE_KEY_PREFIX + sha256Hex('<h1>Roadmap</h1>'))).toBeNull();
+    expect(Array.from({ length: window.localStorage.length }, (_, i) => window.localStorage.key(i)!).filter((key) => key.startsWith(ALLOWED_PAGE_KEY_PREFIX))).toEqual([]);
 
     frame.post({ type: 'bevel.tool.call', requestId: 'w2', fn: 'callTool', args: ['edit_file', {}] });
-    fireEvent.click(await screen.findByRole('button', { name: 'Allow while open' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Allow' }));
     await waitFor(() => expect(frame.replies.at(-1)).toMatchObject({ requestId: 'w2', ok: true }));
+    // The digest of the source the renderer received, not of the document it built.
+    expect(rememberedDigests()).toEqual([sha256Hex('<h1>Roadmap</h1>')]);
 
-    // Reload the page: a new view, a new frame window, and the card again.
+    // Reload the page: a new view, a new frame window, and no card for the same source.
     fireEvent.click(screen.getByTitle('Reload preview'));
     const reloaded = frameChannel(await waitFor(() => {
       const el = container.querySelector('iframe')!;
@@ -160,15 +179,16 @@ describe('the consent card on the file page', () => {
       return el;
     }));
     reloaded.post({ type: 'bevel.tool.call', requestId: 'w3', fn: 'callTool', args: ['edit_file', {}] });
-    expect(await screen.findByText('Roadmap wants to write to the knowledge base')).toBeTruthy();
+    await waitFor(() => expect(reloaded.replies.at(-1)).toMatchObject({ requestId: 'w3', ok: true }));
+    expect(screen.queryByText(CARD)).toBeNull();
   });
 
-  it('asks again after Edit and back to Preview, though the document is the same', async () => {
+  it('asks nothing after Edit and back to Preview: the source is the same', async () => {
     stubServer();
     const { container } = onFilePage({ readOnly: false });
     const frame = frameChannel(await frameOf(container));
     frame.post({ type: 'bevel.tool.call', requestId: 'w1', fn: 'callTool', args: ['edit_file', {}] });
-    fireEvent.click(await screen.findByRole('button', { name: 'Allow while open' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Allow' }));
     await waitFor(() => expect(frame.replies.at(-1)).toMatchObject({ requestId: 'w1', ok: true }));
 
     fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
@@ -176,7 +196,28 @@ describe('the consent card on the file page', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Preview' }));
     const back = frameChannel(await frameOf(container));
     back.post({ type: 'bevel.tool.call', requestId: 'w2', fn: 'callTool', args: ['edit_file', {}] });
-    expect(await screen.findByText('Roadmap wants to write to the knowledge base')).toBeTruthy();
+    await waitFor(() => expect(back.replies.at(-1)).toMatchObject({ requestId: 'w2', ok: true }));
+    expect(screen.queryByText(CARD)).toBeNull();
+  });
+
+  it('asks again when one character of the source changed, and keeps the earlier Allow', async () => {
+    stubServer();
+    const { container, receive } = onFilePage();
+    const frame = frameChannel(await frameOf(container));
+    frame.post({ type: 'bevel.tool.call', requestId: 'w1', fn: 'callTool', args: ['edit_file', {}] });
+    fireEvent.click(await screen.findByRole('button', { name: 'Allow' }));
+    await waitFor(() => expect(frame.replies.at(-1)).toMatchObject({ requestId: 'w1', ok: true }));
+
+    receive('<h1>Roadmap!</h1>');
+    const changed = frameChannel(await frameOf(container));
+    changed.post({ type: 'bevel.tool.call', requestId: 'w2', fn: 'callTool', args: ['edit_file', {}] });
+    expect(await screen.findByText(CARD)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Allow' }));
+    await waitFor(() => expect(changed.replies.at(-1)).toMatchObject({ requestId: 'w2', ok: true }));
+    expect(rememberedDigests()).toEqual([
+      sha256Hex('<h1>Roadmap</h1>'),
+      sha256Hex('<h1>Roadmap!</h1>'),
+    ]);
   });
 
   it('answers requireTools true with nothing shown', async () => {
@@ -228,10 +269,10 @@ describe('an upload from the file page', () => {
       const { container } = onFilePage();
       const frame = frameChannel(await frameOf(container));
       frame.post({ type: 'bevel.tool.call', requestId: 'u1', fn: 'uploadFile', args: [file(), { branch: 'main', destination: 'Data/Campaigns/Easter' }] });
-      expect(await screen.findByText('Roadmap wants to write to the knowledge base')).toBeTruthy();
+      expect(await screen.findByText(CARD)).toBeTruthy();
       expect(server.requests).toEqual([]);
 
-      fireEvent.click(screen.getByRole('button', { name: 'Allow while open' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Allow' }));
       await waitFor(() => expect(frame.replies.at(-1)).toMatchObject({ requestId: 'u1', ok: true, result: { count: 1, destination: 'Data/Campaigns/Easter' } }));
       expect(server.requests.map((r) => r.step)).toEqual([
         'request_file_upload',
@@ -250,18 +291,18 @@ describe('an upload from the file page', () => {
       // Allow holds for the view: the next upload runs with no card.
       frame.post({ type: 'bevel.tool.call', requestId: 'u2', fn: 'uploadFile', args: [file(), { branch: 'main', destination: 'Data' }] });
       await waitFor(() => expect(frame.replies.at(-1)).toMatchObject({ requestId: 'u2', ok: true }));
-      expect(screen.queryByText(/wants to write to the knowledge base/)).toBeNull();
+      expect(screen.queryByText(CARD)).toBeNull();
     } finally {
       clearToken();
     }
   });
 
-  it('Deny answers denied, uploads nothing, and reports a refused apply_file_upload under the page', async () => {
+  it("Don't allow answers denied, uploads nothing, and reports a refused apply_file_upload under the page", async () => {
     const server = stubUploadServer();
     const { container } = onFilePage();
     const frame = frameChannel(await frameOf(container));
     frame.post({ type: 'bevel.tool.call', requestId: 'u1', fn: 'uploadFile', args: [file(), { branch: 'main', destination: 'Data/Campaigns/Easter' }] });
-    fireEvent.click(await screen.findByRole('button', { name: 'Deny' }));
+    fireEvent.click(await screen.findByRole('button', { name: "Don't allow" }));
     await waitFor(() => expect(frame.replies.at(-1)).toEqual({ type: 'bevel.tool.response', requestId: 'u1', ok: false, error: 'denied', code: 'denied' }));
     await waitFor(() => expect(server.requests.map((r) => r.step)).toEqual(['refusal']));
     expect(server.requests[0]!.body).toMatchObject({ page: PAGE, tool: 'apply_file_upload' });
@@ -350,7 +391,7 @@ describe('a call whose view ended before it was decided', () => {
     server.releaseManual();
     await settled();
 
-    expect(screen.queryByText(/wants to write to the knowledge base/)).toBeNull();
+    expect(screen.queryByText(CARD)).toBeNull();
     expect(server.mcp).toEqual([]);
     expect(changed.replies).toEqual([]);
   });
@@ -362,7 +403,7 @@ describe('a call whose view ended before it was decided', () => {
     const frame = frameChannel(iframe);
     // A chain asks without the manual: Allow it, so the view holds an Allow.
     frame.post({ type: 'bevel.tool.call', requestId: 'w1', fn: 'callToolChain', args: ['return 1'] });
-    fireEvent.click(await screen.findByRole('button', { name: 'Allow while open' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Allow' }));
     await waitFor(() => expect(frame.replies.at(-1)).toMatchObject({ requestId: 'w1', ok: true }));
 
     frame.post({ type: 'bevel.tool.call', requestId: 'w2', fn: 'callTool', args: ['edit_file', {}] });
@@ -389,7 +430,7 @@ describe('a call whose view ended before it was decided', () => {
     server.releaseManual();
     await settled();
 
-    expect(screen.queryByText(/wants to write to the knowledge base/)).toBeNull();
+    expect(screen.queryByText(CARD)).toBeNull();
     expect(server.mcp).toEqual([]);
     // Neither document hears an answer meant for a view that is gone.
     expect(frame.replies).toEqual([]);
