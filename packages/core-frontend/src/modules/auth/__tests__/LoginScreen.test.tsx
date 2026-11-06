@@ -99,6 +99,15 @@ describe('LoginScreen', () => {
     }
   });
 
+  it("says the provider refused, not 'try again', when the callback reports denied", async () => {
+    vi.mocked(fetchLoginProviders).mockResolvedValue({ password: true, sso: [] });
+    sessionStorage.setItem('bevel_oauth_error', 'denied');
+    renderScreen();
+    const alert = screen.getByRole('alert');
+    expect(alert).toHaveTextContent('Your sign-in provider did not let you sign in.');
+    expect(alert).not.toHaveTextContent(/try again/i);
+  });
+
   it("clears an SSO callback's error once shown, so a later visit does not show it again", async () => {
     vi.mocked(fetchLoginProviders).mockResolvedValue({ password: true, sso: [] });
     sessionStorage.setItem('bevel_oauth_error', 'not_invited');
