@@ -6,10 +6,9 @@
  * Nothing here stands in for the renderer; only the file page around it.
  * `signedIn` puts the real session hook above it, as the app's auth gate does.
  */
-import type { ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { MemoryRouter } from 'react-router-dom';
-import { AuthContext, useAuthState } from '../../src/modules/auth';
+import { SignedIn } from './SignedIn';
 import { PageToolsContext, getFileRenderer } from '../../src/modules/workspace/components/renderers';
 import { GitContext, type GitContextValue } from '../../src/modules/git';
 import { WorkspaceContext, type WorkspaceContextValue } from '../../src/modules/workspace';
@@ -18,20 +17,11 @@ declare global {
   interface Window {
     /** Mount the renderer on `#root` showing `content` as `filePath`. */
     mountHtmlPage(opts: { content: string; filePath: string; pagePath: string; signedIn?: boolean }): void;
-    /** Sign out through the session hook of a page mounted `signedIn`. */
-    signOutHtmlPage(): void;
   }
 }
 
 const workspace = { workspaceId: 'main', kbDirName: 'knowledge-base' } as unknown as WorkspaceContextValue;
 const git = { status: { branch: 'main' } } as unknown as GitContextValue;
-
-/** The app's auth gate in little: the renderer only while someone is signed in. */
-function SignedIn({ children }: { children: ReactNode }) {
-  const auth = useAuthState();
-  window.signOutHtmlPage = auth.logout;
-  return <AuthContext.Provider value={auth}>{auth.user ? children : null}</AuthContext.Provider>;
-}
 
 window.mountHtmlPage = ({ content, filePath, pagePath, signedIn }) => {
   const host = document.getElementById('root');
