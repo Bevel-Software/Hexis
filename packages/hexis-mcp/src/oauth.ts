@@ -333,15 +333,13 @@ export async function writeStoredCredentials(
   }
 }
 
-/** A lock file older than this was left by a process that died holding it, and is taken over. */
-const STORE_LOCK_STALE_MS = 30_000;
-
 /**
- * How long a process waits for a sibling's refresh before going ahead without
- * the lock. Longer than one bounded token request (FETCH_TIMEOUT_MS), which is
- * the most a holder does under it.
+ * A lock file untouched for this long was left by a process that died holding
+ * it, and is taken over. A live holder touches it every STORE_LOCK_HEARTBEAT_MS
+ * however long its refresh takes, so a live holder's lock is never judged stale.
  */
-const STORE_LOCK_WAIT_MS = FETCH_TIMEOUT_MS + 5_000;
+const STORE_LOCK_STALE_MS = 30_000;
+const STORE_LOCK_HEARTBEAT_MS = 5_000;
 const STORE_LOCK_POLL_MS = 100;
 
 const pause = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -353,17 +351,17 @@ const pause = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
  * inside it, so a refresh is made by one process at a time and the others
  * find its result in the store instead of presenting the token it retired.
  *
- * A lock whose file is older than STORE_LOCK_STALE_MS is a crashed holder's
- * and is removed. A waiter that has waited STORE_LOCK_WAIT_MS goes ahead
- * without it, and a lock that cannot be created at all (an unwritable
- * directory) is skipped: a wedged lock must never cost the person their
- * tools, and a refusal that follows is re-checked against the store anyway.
- * The release removes the file only while it is still this holder's.
+ * A waiter never runs `fn` while another process holds the lock: it waits
+ * until the lock is released, or until its file has gone STORE_LOCK_STALE_MS
+ * without the holder's heartbeat (a crashed holder) and is removed. The one
+ * exception is a lock that cannot be created at all (an unwritable
+ * directory): it is skipped, because a lock that can never be taken must not
+ * cost the person their tools. The release removes the file only while it is
+ * still this holder's.
  */
 async function withStoreLock<T>(baseUrl: string, agent: AgentIdentity | null, fn: () => Promise<T>): Promise<T> {
   const lockFile = `${oauthStorePath(baseUrl, agent)}.lock`;
   const owner = `${process.pid}:${b64url(randomBytes(12))}`;
-  const deadline = Date.now() + STORE_LOCK_WAIT_MS;
   let held = false;
   await fs.mkdir(path.dirname(lockFile), { recursive: true, mode: 0o700 }).catch(() => {});
   for (;;) {
@@ -387,12 +385,19 @@ async function withStoreLock<T>(baseUrl: string, agent: AgentIdentity | null, fn
       if (again === seen) await fs.rm(lockFile, { force: true }).catch(() => {});
       continue;
     }
-    if (Date.now() >= deadline) break;
     await pause(STORE_LOCK_POLL_MS);
   }
+  const heartbeat = held
+    ? setInterval(() => {
+        const now = new Date();
+        fs.utimes(lockFile, now, now).catch(() => {});
+      }, STORE_LOCK_HEARTBEAT_MS)
+    : null;
+  heartbeat?.unref();
   try {
     return await fn();
   } finally {
+    if (heartbeat) clearInterval(heartbeat);
     if (held) {
       const current = await fs.readFile(lockFile, 'utf8').catch(() => null);
       if (current === owner) await fs.rm(lockFile, { force: true }).catch(() => {});
@@ -815,8 +820,8 @@ async function refreshStored(
 /**
  * The stored sign-in's access token, decided under the store lock: the
  * stored one while it is live, else a refresh. A refusal re-reads the store
- * ONCE, because a sibling that held the lock past this process's wait, or
- * signed in again through the browser, may have written a newer sign-in; that
+ * ONCE, because a writer that took no lock (an older hexis-mcp, or a sibling
+ * whose lock directory is unwritable) may have written a newer sign-in; that
  * one is used instead. Nothing newer means the refusal stands.
  */
 async function storedAccessToken(

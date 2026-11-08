@@ -35,8 +35,8 @@ const s256 = (verifier: string): string => b64url(createHash('sha256').update(ve
 type Answer = { status: number; body?: unknown };
 
 interface AuthorityOptions {
-  /** Answer a refresh_token grant. Default: 400 invalid_grant. */
-  refreshGrant?: (params: URLSearchParams) => Answer;
+  /** Answer a refresh_token grant (a promise plays a slow token endpoint). Default: 400 invalid_grant. */
+  refreshGrant?: (params: URLSearchParams) => Answer | Promise<Answer>;
   /** Answer an authorization_code grant. Default: 400. */
   codeGrant?: (params: URLSearchParams) => Answer;
   /** Answer POST /api/mcp/local-token given the presented bearer. Default: 404 (a too-old deployment). */
@@ -120,7 +120,7 @@ async function stubAuthority(opts: AuthorityOptions = {}): Promise<Authority> {
           params.get('grant_type') === 'refresh_token'
             ? (opts.refreshGrant ?? (() => ({ status: 400, body: { error: 'invalid_grant' } })))(params)
             : (opts.codeGrant ?? (() => ({ status: 400, body: { error: 'unsupported_grant_type' } })))(params);
-        send(answer.status, answer.body);
+        void Promise.resolve(answer).then((a) => send(a.status, a.body));
         return;
       }
       const bearer = (req.headers.authorization ?? '').replace(/^Bearer /, '');
@@ -974,6 +974,67 @@ describe('one sign-in shared by every process of an agent', () => {
     }
   });
 
+  it('never goes ahead while a live sibling holds the lock, however long its refresh takes', async () => {
+    const rotation = rotatingRefresh('r-1');
+    const authority = await stubAuthority({ refreshGrant: rotation.grant, localToken: exchangeUnless(new Set()) });
+    const lockFile = `${oauthStorePath(authority.base, agent)}.lock`;
+    // The sibling's heartbeat: it keeps its lock fresh while it works.
+    const sibling = setInterval(() => {
+      const now = new Date();
+      fs.utimes(lockFile, now, now).catch(() => {});
+    }, 1_000);
+    try {
+      await writeStoredCredentials(authority.base, { clientId: 'c1', refreshToken: 'r-1' }, agent);
+      await fs.writeFile(lockFile, 'sibling');
+      const starting = establishOAuthConfig(authority.base, authority.mcpUrl, { openBrowser: neverOpen, print: quiet, agent });
+      // Past any wait a waiter could give up on, and nothing was refreshed.
+      await new Promise((resolve) => setTimeout(resolve, 22_000));
+      expect(refreshes(authority)).toHaveLength(0);
+      await writeStoredCredentials(
+        authority.base,
+        { clientId: 'c1', refreshToken: 'r-sib', accessToken: 'a-sib', accessExpiresAt: Date.now() + HOUR },
+        agent,
+      );
+      clearInterval(sibling);
+      await fs.rm(lockFile);
+      const config = await starting;
+      expect(config.connectionKey).toBe('int-for-a-sib');
+      expect(refreshes(authority)).toHaveLength(0);
+    } finally {
+      clearInterval(sibling);
+      await authority.close();
+    }
+  }, 40_000);
+
+  it('keeps its own lock fresh while its refresh is slow, so no sibling takes it over', async () => {
+    const rotation = rotatingRefresh('r-1');
+    let lockAgeAtAnswer: number | null = null;
+    let lockFile = '';
+    const authority = await stubAuthority({
+      refreshGrant: async (params) => {
+        // The lock is backdated as the request arrives; the holder's heartbeat
+        // must have touched it again by the time the slow answer goes back.
+        const longAgo = new Date(Date.now() - 60_000);
+        await fs.utimes(lockFile, longAgo, longAgo);
+        await new Promise((resolve) => setTimeout(resolve, 6_000));
+        lockAgeAtAnswer = Date.now() - (await fs.stat(lockFile)).mtimeMs;
+        return rotation.grant(params);
+      },
+      localToken: exchangeUnless(new Set()),
+    });
+    lockFile = `${oauthStorePath(authority.base, agent)}.lock`;
+    try {
+      await writeStoredCredentials(authority.base, { clientId: 'c1', refreshToken: 'r-1' }, agent);
+      const config = await establishOAuthConfig(authority.base, authority.mcpUrl, { openBrowser: neverOpen, print: quiet, agent });
+      expect(config.connectionKey).toBe('int-for-a-1');
+      expect(lockAgeAtAnswer).not.toBeNull();
+      expect(lockAgeAtAnswer!).toBeLessThan(30_000);
+      await expect(fs.stat(lockFile)).rejects.toThrow();
+    } finally {
+      await authority.close();
+    }
+  }, 20_000);
+
   it('takes over a lock left behind by a process that died holding it', async () => {
     const rotation = rotatingRefresh('r-1');
     const authority = await stubAuthority({ refreshGrant: rotation.grant, localToken: exchangeUnless(new Set()) });
@@ -1023,7 +1084,8 @@ describe('renewing a shared sign-in', () => {
     const authority = await stubAuthority({
       refreshGrant: (params) => {
         // The sibling's refresh lands between this process's read and its
-        // request (it went ahead without the lock): the token presented here
+        // request (it took no lock: an older hexis-mcp, or an unwritable lock
+        // directory): the token presented here
         // is retired, and the store already holds the sibling's result.
         if (sibling) {
           const write = sibling;
