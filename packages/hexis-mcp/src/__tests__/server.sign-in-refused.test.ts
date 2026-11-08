@@ -22,9 +22,15 @@ const SENTENCE =
 
 let httpServer: http.Server | null = null;
 let base = '';
+/** The bearers the stub's REST surface refuses with 401: what a revoke on the Audit log page does. */
+const refused = new Set<string>();
+/** The REST reads that carried a refused bearer. */
+let refusedReads = 0;
 
 afterEach(() => {
   vi.restoreAllMocks();
+  refused.clear();
+  refusedReads = 0;
 });
 
 beforeAll(async () => {
@@ -39,7 +45,25 @@ beforeAll(async () => {
           res.end(JSON.stringify(payload));
         };
         if (pathname === '/api/config') {
-          json(200, { mcpUrl: `${base}/api/mcp` });
+          // Both optional readers advertised, so a listing runs the catalog
+          // check and reads the tool hints: the paths that would echo a refusal.
+          json(200, { mcpUrl: `${base}/api/mcp`, catalogRevision: true, toolHints: true });
+          return;
+        }
+        if (pathname.startsWith('/api/agent/')) {
+          const bearer = (req.headers.authorization ?? '').replace(/^Bearer /, '');
+          if (refused.has(bearer)) {
+            refusedReads += 1;
+            json(401, { error: 'Invalid token' });
+            return;
+          }
+        }
+        if (pathname === '/api/agent/catalog-revision') {
+          json(200, { revision: 'rev-1' });
+          return;
+        }
+        if (pathname === '/api/agent/tool-hints') {
+          json(200, { tools: {} });
           return;
         }
         if (pathname === '/api/mcp') {
@@ -93,7 +117,8 @@ describe('a sign-in the workspace refused for good', () => {
         throw new SignInRefusedError(SENTENCE);
       });
       const config: HexisMcpConfig = { baseUrl: base, connectionKey: 'tok-0', renewConnectionKey: renew };
-      const handle = await createHexisMcpServer(config, '0.0.0', { catalogCheck: false });
+      // The catalog check ON, unthrottled: every listing asks the workspace.
+      const handle = await createHexisMcpServer(config, '0.0.0', { catalogCheck: { minIntervalMs: 0 } });
       const client = new Client({ name: 'probe', version: '0.0.0' }, { capabilities: {} });
       let listChanged = 0;
       client.setNotificationHandler(ToolListChangedNotificationSchema, () => {
@@ -106,8 +131,12 @@ describe('a sign-in the workspace refused for good', () => {
         const before = await client.listTools();
         expect(before.tools.map((t) => t.name)).not.toContain(DISCOVERY_NOTICE_TOOL);
 
-        await expect(renewConnectionKeyNow(config)).rejects.toBeInstanceOf(SignInRefusedError);
+        // The revoke: the bearer is refused, so the next listing's catalog
+        // check meets a 401, renews, and the renewal is refused for good.
+        refused.add('tok-0');
+        await client.listTools();
         await vi.waitFor(() => expect(listChanged).toBe(1));
+        const readsAtRefusal = refusedReads;
 
         const after = await client.listTools();
         expect(after.tools).toHaveLength(1);
@@ -122,7 +151,11 @@ describe('a sign-in the workspace refused for good', () => {
         await expect(renewConnectionKeyNow(config)).rejects.toBeInstanceOf(SignInRefusedError);
         await client.listTools();
         expect(renew).toHaveBeenCalledTimes(1);
+        // Nothing more is asked of the workspace once the notice stands.
+        expect(refusedReads).toBe(readsAtRefusal);
+        // Said once on stderr: no reader repeats it in its own words.
         expect(err.mock.calls.filter((c) => String(c[0]).includes(SENTENCE))).toHaveLength(1);
+        expect(err.mock.calls.filter((c) => /restart hexis-mcp/.test(String(c[0])))).toHaveLength(1);
       } finally {
         await client.close();
         await handle.shutdown();

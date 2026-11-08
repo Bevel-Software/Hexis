@@ -48,7 +48,7 @@ import {
   type SkillSummary,
   type LoadedSkill,
 } from '@bevel-software/platform-mcp-core';
-import type { HexisMcpConfig } from './config.js';
+import { SignInRefusedError, type HexisMcpConfig } from './config.js';
 import {
   callKbTool,
   ConnectionKeyRejectedError,
@@ -1070,11 +1070,14 @@ export async function createHexisMcpServer(
       // newline in it would start a line of its own in the operator log and an
       // ANSI escape would paint their terminal. The CLIENT-facing copies below
       // keep the reason verbatim — they travel inside a JSON-RPC string, where
-      // it is already data rather than a line.
-      console.error(
-        `[hexis-mcp] tool discovery failed: ${printable(discoveryError)} ` +
-          'The server stays connected and answers tools/list with this notice; restart it once the cause is fixed.',
-      );
+      // it is already data rather than a line. A sign-in refused for good
+      // mid-discovery is not said here: renewal.ts said it once already.
+      if (!(err instanceof SignInRefusedError)) {
+        console.error(
+          `[hexis-mcp] tool discovery failed: ${printable(discoveryError)} ` +
+            'The server stays connected and answers tools/list with this notice; restart it once the cause is fixed.',
+        );
+      }
       // Whatever got built before the failure — including any stdio children
       // already spawned — goes now. The SDK server does not: it is how the
       // client learns any of this.

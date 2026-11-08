@@ -41,7 +41,7 @@ import {
   CatalogRevisionUnsupportedError,
   fetchCatalogRevision,
 } from './deployment.js';
-import type { HexisMcpConfig } from './config.js';
+import { SignInRefusedError, type HexisMcpConfig } from './config.js';
 
 /**
  * The least time between two checks. A burst of activity — a `call_tool_chain`
@@ -177,6 +177,12 @@ export function createCatalogCheck(options: CatalogCheckOptions): CatalogCheck {
         log(`[hexis-mcp] ${printable(err.message)}`);
         return;
       }
+      // The sign-in is over for good: there is nothing left to check with, and
+      // renewal.ts has already said so, once.
+      if (err instanceof SignInRefusedError) {
+        stop();
+        return;
+      }
       if (!failing) {
         failing = true;
         log(
@@ -202,6 +208,10 @@ export function createCatalogCheck(options: CatalogCheckOptions): CatalogCheck {
       try {
         await onChanged(revision);
       } catch (err) {
+        if (err instanceof SignInRefusedError) {
+          stop();
+          return;
+        }
         // `applied` stays where it was, so this revision is still owed and the
         // next check attempts it again. A re-registration fails for the
         // reasons everything else here fails — a deployment mid-restart, a
