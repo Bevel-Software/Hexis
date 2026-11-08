@@ -1,6 +1,7 @@
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
 import http from 'node:http';
 import fs from 'node:fs/promises';
+import fsSync from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
@@ -16,7 +17,8 @@ import {
   writeStoredCredentials,
 } from '../oauth.js';
 import { fetchAllManuals, fetchLocalOnlyManuals } from '../deployment.js';
-import type { HexisMcpConfig } from '../config.js';
+import { SignInRefusedError, type HexisMcpConfig } from '../config.js';
+import { closeRenewal, renewConnectionKeyNow } from '../renewal.js';
 
 /**
  * The OAuth mode, tested against REAL local HTTP servers: one stub plays the
@@ -825,6 +827,335 @@ describe('mid-run 401', () => {
       expect(await readStoredCredentials(authority.base)).toEqual({ clientId: 'c1', refreshToken: 'r3' });
     } finally {
       await authority.close();
+    }
+  });
+});
+
+/**
+ * A token endpoint that rotates like the platform's, minus its reuse grace:
+ * each refresh token works ONCE, and each grant mints an access token that
+ * lives an hour. `refuseAll` plays a sign-in revoked on the Audit log page.
+ */
+function rotatingRefresh(first: string) {
+  const state = { live: first, minted: 0, refuseAll: false };
+  const grant = (params: URLSearchParams): Answer => {
+    if (state.refuseAll || params.get('refresh_token') !== state.live) {
+      return { status: 400, body: { error: 'invalid_grant' } };
+    }
+    state.minted += 1;
+    state.live = `r-${state.minted + 1}`;
+    return { status: 200, body: { access_token: `a-${state.minted}`, refresh_token: state.live, expires_in: 3600 } };
+  };
+  return { state, grant };
+}
+
+/** The exchange: any access token not revoked becomes an internal token named after it. */
+function exchangeUnless(revoked: Set<string>) {
+  return (bearer: string): Answer =>
+    bearer && !revoked.has(bearer) ? { status: 200, body: { token: `int-for-${bearer}` } } : { status: 401 };
+}
+
+const refreshes = (authority: Authority): URLSearchParams[] =>
+  authority.record.token.filter((p) => p.get('grant_type') === 'refresh_token');
+
+const neverOpen = (): void => {
+  throw new Error('the browser must not open for a stored sign-in');
+};
+
+const HOUR = 60 * 60_000;
+
+describe('one sign-in shared by every process of an agent', () => {
+  const agent = { name: 'cursor-vscode' };
+
+  it('keeps the access token and its expiry in the store, and still reads a store written before them', async () => {
+    const baseUrl = 'https://workspace.example';
+    const expiresAt = Date.now() + HOUR;
+    await writeStoredCredentials(baseUrl, { clientId: 'c1', refreshToken: 'r1', accessToken: 'a1', accessExpiresAt: expiresAt });
+    expect(await readStoredCredentials(baseUrl)).toEqual({
+      clientId: 'c1',
+      refreshToken: 'r1',
+      accessToken: 'a1',
+      accessExpiresAt: expiresAt,
+    });
+    // The old shape, as an older package wrote it: the refresh token alone.
+    await fs.writeFile(oauthStorePath(baseUrl), JSON.stringify({ clientId: 'c1', refreshToken: 'r1' }));
+    expect(await readStoredCredentials(baseUrl)).toEqual({ clientId: 'c1', refreshToken: 'r1' });
+    // An access token with no usable expiry is dropped, never trusted.
+    await fs.writeFile(oauthStorePath(baseUrl), JSON.stringify({ clientId: 'c1', refreshToken: 'r1', accessToken: 'a1' }));
+    expect(await readStoredCredentials(baseUrl)).toEqual({ clientId: 'c1', refreshToken: 'r1' });
+  });
+
+  it('three servers started at the same moment all sign in on ONE refresh grant, and no browser opens', async () => {
+    const rotation = rotatingRefresh('r-1');
+    const authority = await stubAuthority({ refreshGrant: rotation.grant, localToken: exchangeUnless(new Set()) });
+    try {
+      await writeStoredCredentials(authority.base, { clientId: 'c1', refreshToken: 'r-1' }, agent);
+      const configs = await Promise.all(
+        [1, 2, 3].map(() =>
+          establishOAuthConfig(authority.base, authority.mcpUrl, { openBrowser: neverOpen, print: quiet, agent }),
+        ),
+      );
+      expect(configs.map((c) => c.connectionKey)).toEqual(['int-for-a-1', 'int-for-a-1', 'int-for-a-1']);
+      expect(refreshes(authority)).toHaveLength(1);
+      expect(authority.record.dcr).toHaveLength(0);
+      expect(await readStoredCredentials(authority.base, agent)).toMatchObject({
+        clientId: 'c1',
+        refreshToken: 'r-2',
+        accessToken: 'a-1',
+      });
+    } finally {
+      await authority.close();
+    }
+  });
+
+  it('a start that finds a live access token in the store uses it, with no refresh grant at all', async () => {
+    const rotation = rotatingRefresh('r-1');
+    const authority = await stubAuthority({ refreshGrant: rotation.grant, localToken: exchangeUnless(new Set()) });
+    try {
+      await writeStoredCredentials(
+        authority.base,
+        { clientId: 'c1', refreshToken: 'r-1', accessToken: 'a-sibling', accessExpiresAt: Date.now() + HOUR },
+        agent,
+      );
+      const config = await establishOAuthConfig(authority.base, authority.mcpUrl, { openBrowser: neverOpen, print: quiet, agent });
+      expect(config.connectionKey).toBe('int-for-a-sibling');
+      expect(refreshes(authority)).toHaveLength(0);
+    } finally {
+      await authority.close();
+    }
+  });
+
+  it('a renewal writes the rotated refresh token, the access token and its expiry before using them, and the next start reuses them', async () => {
+    const rotation = rotatingRefresh('r-1');
+    const authority = await stubAuthority({ refreshGrant: rotation.grant, localToken: exchangeUnless(new Set()) });
+    try {
+      // Nearly spent: inside the reuse margin, so it is refreshed, not reused.
+      await writeStoredCredentials(
+        authority.base,
+        { clientId: 'c1', refreshToken: 'r-1', accessToken: 'a-old', accessExpiresAt: Date.now() + 30_000 },
+        agent,
+      );
+      const before = Date.now();
+      const first = await establishOAuthConfig(authority.base, authority.mcpUrl, { openBrowser: neverOpen, print: quiet, agent });
+      expect(first.connectionKey).toBe('int-for-a-1');
+      const stored = await readStoredCredentials(authority.base, agent);
+      expect(stored).toMatchObject({ clientId: 'c1', refreshToken: 'r-2', accessToken: 'a-1' });
+      expect(stored!.accessExpiresAt).toBeGreaterThanOrEqual(before + HOUR);
+
+      const second = await establishOAuthConfig(authority.base, authority.mcpUrl, { openBrowser: neverOpen, print: quiet, agent });
+      expect(second.connectionKey).toBe('int-for-a-1');
+      expect(refreshes(authority)).toHaveLength(1);
+    } finally {
+      await authority.close();
+    }
+  });
+
+  it('a start waits for a sibling holding the lock, and uses what the sibling wrote', async () => {
+    const rotation = rotatingRefresh('r-1');
+    const authority = await stubAuthority({ refreshGrant: rotation.grant, localToken: exchangeUnless(new Set()) });
+    try {
+      await writeStoredCredentials(authority.base, { clientId: 'c1', refreshToken: 'r-1' }, agent);
+      const lockFile = `${oauthStorePath(authority.base, agent)}.lock`;
+      await fs.writeFile(lockFile, 'sibling');
+      const starting = establishOAuthConfig(authority.base, authority.mcpUrl, { openBrowser: neverOpen, print: quiet, agent });
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      // The sibling finishes its refresh: writes its result, releases the lock.
+      await writeStoredCredentials(
+        authority.base,
+        { clientId: 'c1', refreshToken: 'r-sib', accessToken: 'a-sib', accessExpiresAt: Date.now() + HOUR },
+        agent,
+      );
+      await fs.rm(lockFile);
+      const config = await starting;
+      expect(config.connectionKey).toBe('int-for-a-sib');
+      expect(refreshes(authority)).toHaveLength(0);
+    } finally {
+      await authority.close();
+    }
+  });
+
+  it('takes over a lock left behind by a process that died holding it', async () => {
+    const rotation = rotatingRefresh('r-1');
+    const authority = await stubAuthority({ refreshGrant: rotation.grant, localToken: exchangeUnless(new Set()) });
+    try {
+      await writeStoredCredentials(authority.base, { clientId: 'c1', refreshToken: 'r-1' }, agent);
+      const lockFile = `${oauthStorePath(authority.base, agent)}.lock`;
+      await fs.writeFile(lockFile, 'crashed');
+      const longAgo = new Date(Date.now() - 60_000);
+      await fs.utimes(lockFile, longAgo, longAgo);
+      const startedAt = Date.now();
+      const config = await establishOAuthConfig(authority.base, authority.mcpUrl, { openBrowser: neverOpen, print: quiet, agent });
+      expect(Date.now() - startedAt).toBeLessThan(5_000);
+      expect(config.connectionKey).toBe('int-for-a-1');
+      await expect(fs.stat(lockFile)).rejects.toThrow();
+    } finally {
+      await authority.close();
+    }
+  });
+});
+
+describe('renewing a shared sign-in', () => {
+  const agent = { name: 'cursor-vscode' };
+
+  it('a proactive renewal that finds a live access token a sibling stored uses it and makes no refresh request', async () => {
+    const rotation = rotatingRefresh('r-1');
+    const authority = await stubAuthority({ refreshGrant: rotation.grant, localToken: exchangeUnless(new Set()) });
+    try {
+      await writeStoredCredentials(authority.base, { clientId: 'c1', refreshToken: 'r-1' }, agent);
+      const config = await establishOAuthConfig(authority.base, authority.mcpUrl, { openBrowser: neverOpen, print: quiet, agent });
+      expect(refreshes(authority)).toHaveLength(1);
+      await writeStoredCredentials(
+        authority.base,
+        { clientId: 'c1', refreshToken: 'r-sib', accessToken: 'a-sib', accessExpiresAt: Date.now() + HOUR },
+        agent,
+      );
+      expect(await renewConnectionKeyNow(config)).toBe('int-for-a-sib');
+      expect(refreshes(authority)).toHaveLength(1);
+      closeRenewal(config);
+    } finally {
+      await authority.close();
+    }
+  });
+
+  it('a renewal refused because a sibling rotated the token continues with the newer sign-in, and nothing is shown', async () => {
+    const rotation = rotatingRefresh('r-1');
+    let sibling: (() => void) | null = null;
+    const authority = await stubAuthority({
+      refreshGrant: (params) => {
+        // The sibling's refresh lands between this process's read and its
+        // request (it went ahead without the lock): the token presented here
+        // is retired, and the store already holds the sibling's result.
+        if (sibling) {
+          const write = sibling;
+          sibling = null;
+          write();
+          return { status: 400, body: { error: 'invalid_grant' } };
+        }
+        return rotation.grant(params);
+      },
+      localToken: exchangeUnless(new Set()),
+    });
+    try {
+      await writeStoredCredentials(authority.base, { clientId: 'c1', refreshToken: 'r-1' }, agent);
+      const config = await establishOAuthConfig(authority.base, authority.mcpUrl, { openBrowser: neverOpen, print: quiet, agent });
+      const ended = vi.fn();
+      config.onSignInEnded = ended;
+      // The stored access token is spent, so the renewal must refresh.
+      await writeStoredCredentials(
+        authority.base,
+        { clientId: 'c1', refreshToken: 'r-2', accessToken: 'a-1', accessExpiresAt: Date.now() - 1 },
+        agent,
+      );
+      sibling = () =>
+        fsSync.writeFileSync(
+          oauthStorePath(authority.base, agent),
+          JSON.stringify({ clientId: 'c1', refreshToken: 'r-sib', accessToken: 'a-sib', accessExpiresAt: Date.now() + HOUR }),
+        );
+      expect(await renewConnectionKeyNow(config)).toBe('int-for-a-sib');
+      expect(ended).not.toHaveBeenCalled();
+      closeRenewal(config);
+    } finally {
+      await authority.close();
+    }
+  });
+
+  it('a renewal refused with nothing newer stored ends renewal: the sentence once, and no further refresh request', async () => {
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const rotation = rotatingRefresh('r-1');
+    const authority = await stubAuthority({ refreshGrant: rotation.grant, localToken: exchangeUnless(new Set()) });
+    try {
+      await writeStoredCredentials(authority.base, { clientId: 'c1', refreshToken: 'r-1' }, agent);
+      const config = await establishOAuthConfig(authority.base, authority.mcpUrl, { openBrowser: neverOpen, print: quiet, agent });
+      const ended = vi.fn();
+      config.onSignInEnded = ended;
+      await writeStoredCredentials(
+        authority.base,
+        { clientId: 'c1', refreshToken: 'r-2', accessToken: 'a-1', accessExpiresAt: Date.now() - 1 },
+        agent,
+      );
+      rotation.state.refuseAll = true;
+      const before = refreshes(authority).length;
+      const refusal = await renewConnectionKeyNow(config).catch((e: unknown) => e);
+      expect(refusal).toBeInstanceOf(SignInRefusedError);
+      expect((refusal as Error).message).toMatch(/restart hexis-mcp to sign in through your browser again/);
+      expect(ended).toHaveBeenCalledTimes(1);
+      // A REST 401 afterwards consults the same renewal: refused here, unasked.
+      await expect(fetchAllManuals(config)).rejects.toBeInstanceOf(SignInRefusedError);
+      await expect(renewConnectionKeyNow(config)).rejects.toBeInstanceOf(SignInRefusedError);
+      expect(refreshes(authority).length - before).toBe(1);
+      expect(err.mock.calls.filter((c) => String(c[0]).includes('restart hexis-mcp'))).toHaveLength(1);
+      closeRenewal(config);
+    } finally {
+      await authority.close();
+    }
+  });
+
+  it('revoked on the Audit log page: one refusal per running process, and the next start opens the browser once', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const rotation = rotatingRefresh('r-1');
+    const revoked = new Set<string>();
+    const browser = fakeBrowser();
+    const authority = await stubAuthority({
+      refreshGrant: rotation.grant,
+      codeGrant: (params) =>
+        pkceCodeGrant(browser.seen, { access_token: 'a-flow', refresh_token: 'r-flow' })(params),
+      localToken: exchangeUnless(revoked),
+    });
+    try {
+      await writeStoredCredentials(authority.base, { clientId: 'c1', refreshToken: 'r-1' }, agent);
+      const running = await Promise.all(
+        [1, 2].map(() =>
+          establishOAuthConfig(authority.base, authority.mcpUrl, { openBrowser: neverOpen, print: quiet, agent }),
+        ),
+      );
+      // The revoke: the live access token stops exchanging, every refresh is refused.
+      revoked.add('a-1');
+      rotation.state.refuseAll = true;
+      const before = refreshes(authority).length;
+      for (const config of running) {
+        await expect(renewConnectionKeyNow(config)).rejects.toBeInstanceOf(SignInRefusedError);
+        await expect(renewConnectionKeyNow(config)).rejects.toBeInstanceOf(SignInRefusedError);
+      }
+      expect(refreshes(authority).length - before).toBe(2);
+      expect(authority.record.dcr).toHaveLength(0);
+
+      const restarted = await establishOAuthConfig(authority.base, authority.mcpUrl, {
+        openBrowser: browser.open,
+        print: quiet,
+        agent,
+      });
+      expect(restarted.connectionKey).toBe('int-for-a-flow');
+      expect(authority.record.dcr).toHaveLength(1);
+      expect(await readStoredCredentials(authority.base, agent)).toMatchObject({ clientId: 'dyn-client', refreshToken: 'r-flow' });
+      for (const config of running) closeRenewal(config);
+    } finally {
+      await authority.close();
+    }
+  });
+
+  it('a network error or a 5xx is not a refusal: the renewal fails to be retried later, as before', async () => {
+    const authority = await stubAuthority({
+      refreshGrant: () => ({ status: 503 }),
+      localToken: exchangeUnless(new Set()),
+    });
+    const busy = await stubAuthority({ refreshGrant: () => ({ status: 400, body: { error: 'temporarily_unavailable' } }) });
+    try {
+      await writeStoredCredentials(
+        authority.base,
+        { clientId: 'c1', refreshToken: 'r-1', accessToken: 'a-0', accessExpiresAt: Date.now() + HOUR },
+        agent,
+      );
+      const config = await establishOAuthConfig(authority.base, authority.mcpUrl, { openBrowser: neverOpen, print: quiet, agent });
+      await writeStoredCredentials(authority.base, { clientId: 'c1', refreshToken: 'r-1' }, agent);
+      const failure = await config.renewConnectionKey!().catch((e: unknown) => e);
+      expect(failure).toBeInstanceOf(OAuthError);
+      expect(failure).not.toBeInstanceOf(SignInRefusedError);
+      expect((failure as Error).message).toMatch(/HTTP 503/);
+      await expect(refreshAccessToken(`${busy.base}/token`, 'c1', 'r1')).rejects.toThrow(/temporarily_unavailable/);
+      closeRenewal(config);
+    } finally {
+      await authority.close();
+      await busy.close();
     }
   });
 });

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, afterEach } from 'vitest';
-import type { HexisMcpConfig } from '../config.js';
+import { SignInRefusedError, type HexisMcpConfig } from '../config.js';
 import {
   RENEWAL_FRACTION,
   RETRY_AFTER_FAILURE_MS,
@@ -240,5 +240,70 @@ describe('scheduleProactiveRenewal: the timer the remote manual depends on', () 
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(renew).not.toHaveBeenCalled();
     cancelProactiveRenewal(config);
+  });
+});
+
+describe('a sign-in refused for good', () => {
+  const sentence = 'The workspace refused this sign-in: restart hexis-mcp to sign in through your browser again.';
+
+  it('is never retried on a timer: one attempt, one stderr line, one notice to the server', async () => {
+    vi.useFakeTimers();
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const renew = vi.fn(async (): Promise<{ token: string }> => {
+      throw new SignInRefusedError(sentence);
+    });
+    const config = makeConfig(renew);
+    const ended: string[] = [];
+    config.onSignInEnded = (s) => ended.push(s);
+
+    scheduleProactiveRenewal(config, 10_000);
+    await vi.advanceTimersByTimeAsync(10_000 * RENEWAL_FRACTION);
+    expect(renew).toHaveBeenCalledTimes(1);
+    // An hour of the old once-a-minute retry cadence: nothing more is asked.
+    await vi.advanceTimersByTimeAsync(60 * RETRY_AFTER_FAILURE_MS);
+    expect(renew).toHaveBeenCalledTimes(1);
+    expect(ended).toEqual([sentence]);
+    const lines = err.mock.calls.map((c) => String(c[0]));
+    expect(lines.filter((l) => l.includes(sentence))).toHaveLength(1);
+    expect(lines.some((l) => l.includes('retrying'))).toBe(false);
+  });
+
+  it('refuses every later renewal without asking, a 401-triggered one included, and arms no timer', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const renew = vi.fn(async (): Promise<{ token: string }> => {
+      throw new SignInRefusedError(sentence);
+    });
+    const config = makeConfig(renew);
+    const ended: string[] = [];
+    config.onSignInEnded = (s) => ended.push(s);
+
+    await expect(renewConnectionKeyNow(config)).rejects.toBeInstanceOf(SignInRefusedError);
+    await expect(renewConnectionKeyNow(config)).rejects.toThrow(sentence);
+    scheduleProactiveRenewal(config, 10_000);
+    await vi.advanceTimersByTimeAsync(60 * 60 * 1000);
+    expect(renew).toHaveBeenCalledTimes(1);
+    expect(ended).toEqual([sentence]);
+  });
+
+  it('a transient failure still retries: only the refusal for good is final', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const renew = vi
+      .fn<() => Promise<{ token: string; expiresInMs?: number }>>()
+      .mockRejectedValueOnce(new Error('token endpoint returned HTTP 503'))
+      .mockRejectedValueOnce(new SignInRefusedError(sentence));
+    const config = makeConfig(renew);
+    const ended: string[] = [];
+    config.onSignInEnded = (s) => ended.push(s);
+
+    scheduleProactiveRenewal(config, 10_000);
+    await vi.advanceTimersByTimeAsync(10_000 * RENEWAL_FRACTION);
+    expect(ended).toEqual([]);
+    await vi.advanceTimersByTimeAsync(RETRY_AFTER_FAILURE_MS);
+    expect(renew).toHaveBeenCalledTimes(2);
+    expect(ended).toEqual([sentence]);
+    await vi.advanceTimersByTimeAsync(10 * RETRY_AFTER_FAILURE_MS);
+    expect(renew).toHaveBeenCalledTimes(2);
   });
 });

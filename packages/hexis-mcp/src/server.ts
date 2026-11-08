@@ -428,6 +428,18 @@ export function discoveryNoticeTool(reason: string): McpTool {
 }
 
 /**
+ * The one-tool listing once the workspace has refused this process's sign-in
+ * for good (OAuth mode, see renewal.ts): the same notice tool, saying that
+ * the tools DID load and what brings them back.
+ */
+function signInRefusedNoticeTool(sentence: string): McpTool {
+  return {
+    ...discoveryNoticeTool(sentence),
+    description: `hexis-mcp can no longer reach this workspace: ${sentence} The same sentence is on its stderr log.`,
+  };
+}
+
+/**
  * Stand up the local MCP server — ANSWER FIRST, DISCOVER AFTER.
  *
  * What comes back is a server that can be connected and can answer
@@ -732,8 +744,21 @@ export async function createHexisMcpServer(
       console.error('[hexis-mcp] remote manual re-registered with the renewed credential.');
     });
   };
+  /**
+   * SIGN-IN REFUSED FOR GOOD (OAuth mode). renewal.ts calls this once, when
+   * the workspace refused the refresh and the store held nothing newer: from
+   * then on every listing is the notice and every call answers the sentence,
+   * and the client is told the list changed so it re-lists and shows it.
+   */
+  let signInRefused: string | null = null;
+  const reportSignInRefused = (sentence: string): void => {
+    signInRefused = sentence;
+    if (closed) return;
+    void server?.sendToolListChanged().catch(() => {});
+  };
   if (config.renewConnectionKey) {
     config.onConnectionKeyRenewed = swapRemoteCredential;
+    config.onSignInEnded = reportSignInRefused;
   }
 
   /**
@@ -1082,6 +1107,9 @@ export async function createHexisMcpServer(
     if (config.onConnectionKeyRenewed === swapRemoteCredential) {
       config.onConnectionKeyRenewed = undefined;
     }
+    if (config.onSignInEnded === reportSignInRefused) {
+      config.onSignInEnded = undefined;
+    }
     // Discovery now runs in the BACKGROUND, so teardown can land in the
     // middle of it — mid-download, mid-spawn. `closed` is already true, so
     // every remaining phase boundary stops; this waits for it to come to
@@ -1147,7 +1175,11 @@ export async function createHexisMcpServer(
     );
 
     server.setRequestHandler(ListToolsRequestSchema, async () => {
+      // Before anything that could ask the workspace: with the sign-in refused,
+      // every read would fail on it, and the notice is the whole answer.
+      if (signInRefused !== null) return { tools: [signInRefusedNoticeTool(signInRefused)] };
       await ready;
+      if (signInRefused !== null) return { tools: [signInRefusedNoticeTool(signInRefused)] };
       // A listing is the one moment a stale toolset is answered out loud, so
       // the check is AWAITED here: the list handed back is the current one, a
       // refresh included, rather than a notification's promise of a better
@@ -1214,6 +1246,7 @@ export async function createHexisMcpServer(
       // must not be told it does not exist because the catalog is still
       // arriving. (After the first list this is already settled.)
       await ready;
+      if (signInRefused !== null) throw new McpError(ErrorCode.InternalError, signInRefused);
       if (discoveryError !== null) {
         throw new McpError(
           ErrorCode.InternalError,

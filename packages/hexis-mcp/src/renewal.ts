@@ -1,4 +1,4 @@
-import type { HexisMcpConfig } from './config.js';
+import { SignInRefusedError, type HexisMcpConfig, type RenewedGrant } from './config.js';
 
 /**
  * The ONE renewal mechanism for an OAuth-mode bearer. Three problems, one
@@ -26,6 +26,15 @@ import type { HexisMcpConfig } from './config.js';
  *     server once it exists) is called on EVERY successful renewal — timer- or
  *     401-triggered alike — so the transport swap has exactly one trigger.
  *
+ *  4. A SIGN-IN REFUSED FOR GOOD. A `SignInRefusedError` from the renewal is
+ *     the workspace saying the refresh token is unknown, revoked or expired,
+ *     after the store was re-read for a newer one (oauth.ts). Retrying the
+ *     same dead token on a timer only fills the workspace's log, so the
+ *     config is marked ENDED: the sentence is said once on stderr, handed to
+ *     `config.onSignInEnded`, no timer is re-armed, and every later renewal
+ *     (a 401 on the REST surface included) is refused here without a request.
+ *     Any other failure (network, 5xx) is still retried as below.
+ *
  * Key mode never arrives here: `config.renewConnectionKey` is unset, the
  * schedule call refuses to arm, and `renewConnectionKeyNow` is never consulted
  * (deployment.ts's `renewer` returns undefined first).
@@ -35,7 +44,8 @@ import type { HexisMcpConfig } from './config.js';
 export const RENEWAL_FRACTION = 0.8;
 
 /**
- * A failed proactive renewal retries on this cadence. Deliberately short of
+ * A failed proactive renewal retries on this cadence, unless it failed with a
+ * `SignInRefusedError`, which is never retried. Deliberately short of
  * any plausible token lifetime: the reactive 401 path also keeps trying, but
  * only REST reads travel that path — the remote manual's transport depends on
  * this timer alone.
@@ -69,6 +79,9 @@ const generations = new WeakMap<HexisMcpConfig, number>();
 // renewals or arm timers at all. The ordinary re-arm cancel never sets this,
 // so the reactive 401 path keeps working through normal operation.
 const closedConfigs = new WeakSet<HexisMcpConfig>();
+// A config whose sign-in the workspace refused for good, with the refusal
+// every later renewal is answered with. Final, like a close.
+const endedConfigs = new WeakMap<HexisMcpConfig, SignInRefusedError>();
 
 function generationOf(config: HexisMcpConfig): number {
   return generations.get(config) ?? 0;
@@ -84,6 +97,8 @@ function generationOf(config: HexisMcpConfig): number {
 export function renewConnectionKeyNow(config: HexisMcpConfig): Promise<string> {
   const existing = inflight.get(config);
   if (existing) return existing;
+  const ended = endedConfigs.get(config);
+  if (ended) return Promise.reject(ended);
   if (closedConfigs.has(config)) {
     // A flight that was already up when the close landed still completes (its
     // joiners can use the grant); a NEW flight after close would rotate the
@@ -100,7 +115,13 @@ export function renewConnectionKeyNow(config: HexisMcpConfig): Promise<string> {
   // already awaiting this flight can legitimately use it.
   const generation = generationOf(config);
   const run = (async (): Promise<string> => {
-    const grant = await renew();
+    let grant: RenewedGrant;
+    try {
+      grant = await renew();
+    } catch (err) {
+      if (err instanceof SignInRefusedError) endSignIn(config, err, generation);
+      throw err;
+    }
     config.connectionKey = grant.token;
     if (generationOf(config) === generation) {
       scheduleProactiveRenewal(config, grant.expiresInMs);
@@ -132,7 +153,7 @@ export function renewConnectionKeyNow(config: HexisMcpConfig): Promise<string> {
  * old to say, and reactive renewal still covers the REST surface.
  */
 export function scheduleProactiveRenewal(config: HexisMcpConfig, expiresInMs?: number): void {
-  if (closedConfigs.has(config)) return;
+  if (closedConfigs.has(config) || endedConfigs.has(config)) return;
   cancelProactiveRenewal(config);
   if (!config.renewConnectionKey) return;
   if (typeof expiresInMs !== 'number' || !Number.isFinite(expiresInMs) || expiresInMs <= 0) return;
@@ -167,11 +188,34 @@ export function closeRenewal(config: HexisMcpConfig): void {
   cancelProactiveRenewal(config);
 }
 
+/**
+ * Stop renewing for good and say why, once: on stderr, and to the server's
+ * listener (unless a cancel revoked this attempt's right to notify, as for a
+ * success). Only the first flight to fail this way gets here; every later one
+ * is refused before it starts.
+ */
+function endSignIn(config: HexisMcpConfig, err: SignInRefusedError, generation: number): void {
+  endedConfigs.set(config, err);
+  const notify = generationOf(config) === generation;
+  cancelProactiveRenewal(config);
+  console.error(`[hexis-mcp] ${err.message}`);
+  if (!notify) return;
+  try {
+    config.onSignInEnded?.(err.message);
+  } catch (listenerErr) {
+    console.error(
+      `[hexis-mcp] reporting the refused sign-in failed: ${listenerErr instanceof Error ? listenerErr.message : String(listenerErr)}`,
+    );
+  }
+}
+
 function armTimer(config: HexisMcpConfig, delayMs: number): void {
   const timer = setTimeout(() => {
     timers.delete(config);
     const generation = generationOf(config);
     renewConnectionKeyNow(config).catch((err: unknown) => {
+      // Refused for good: already said once, and never worth another request.
+      if (err instanceof SignInRefusedError) return;
       console.error(
         `[hexis-mcp] proactive credential renewal failed: ${err instanceof Error ? err.message : String(err)} — ` +
           `retrying in ${Math.round(RETRY_AFTER_FAILURE_MS / 1000)}s (a 401 on the REST surface also retries).`,
