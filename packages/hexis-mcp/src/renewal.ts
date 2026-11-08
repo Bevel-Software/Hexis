@@ -28,7 +28,8 @@ import { SignInRefusedError, type HexisMcpConfig, type RenewedGrant } from './co
  *
  *  4. A SIGN-IN REFUSED FOR GOOD. A `SignInRefusedError` from the renewal is
  *     the workspace saying the refresh token is unknown, revoked or expired,
- *     after the store was re-read for a newer one (oauth.ts). Retrying the
+ *     after the store was re-read for a newer one, or rejecting a freshly
+ *     granted access token at the local-token exchange (oauth.ts). Retrying the
  *     same dead token on a timer only fills the workspace's log, so the
  *     config is marked ENDED: the sentence is said once on stderr, handed to
  *     `config.onSignInEnded`, no timer is re-armed, and every later renewal
@@ -92,7 +93,8 @@ function generationOf(config: HexisMcpConfig): number {
  * `connectionKey` is swapped, the next proactive renewal is armed from the
  * grant's own lifetime, and the credential listener is notified. On failure
  * every joined caller sees the same rejection, and a retry is armed so the
- * remote manual is not left to die quietly.
+ * remote manual is not left to die quietly — except for a
+ * `SignInRefusedError`, which ends renewal for good and arms nothing.
  */
 export function renewConnectionKeyNow(config: HexisMcpConfig): Promise<string> {
   const existing = inflight.get(config);

@@ -46,7 +46,7 @@ export interface HexisMcpConfig {
    */
   onConnectionKeyRenewed?: (token: string) => void | Promise<void>;
   /**
-   * OAuth mode only, set by the server once it exists: called ONCE, with the
+   * OAuth mode only, set by the server before its first read: called ONCE, with the
    * sentence to show, when `renewConnectionKey` failed with a
    * `SignInRefusedError`. From then on this config renews nothing, and the
    * server answers every listing with that sentence.
@@ -56,8 +56,9 @@ export interface HexisMcpConfig {
 
 /**
  * What `renewConnectionKey` throws when the workspace has refused the sign-in
- * for good (its refresh token is unknown, revoked or expired, and the store
- * holds nothing newer). Unlike any other renewal failure it is never retried:
+ * for good: its refresh token is unknown, revoked or expired (and the store
+ * holds nothing newer), or the local-token exchange rejects a freshly granted
+ * access token with 401/403. Unlike any other renewal failure it is never retried:
  * `renewal.ts` stops renewing the config, says the sentence once, and hands it
  * to `onSignInEnded`.
  */

@@ -33,8 +33,10 @@
  *
  * Errors are survivable by design. A deployment that restarts, a laptop that
  * sleeps, a VPN that drops: the check fails, says so ONCE, and asks again on
- * the next activity. The one unrecoverable answer is a deployment too old to
- * serve the route, which stops the checker for good.
+ * the next activity. Two answers are unrecoverable and stop the checker for
+ * good: a deployment too old to serve the route, and a sign-in the workspace
+ * has refused for good (OAuth mode, a `SignInRefusedError`), which renewal.ts
+ * has already said once and which leaves nothing to check with.
  */
 import { printable } from '@bevel-software/platform-mcp-core';
 import {
@@ -74,7 +76,8 @@ export interface CatalogCheck {
    * refresh when they differ. Resolves when the check — and any refresh it
    * owed — has settled, so a caller that wants a FRESH answer (a `tools/list`)
    * can await it, and a caller that does not (a finished tool call) can let it
-   * run. Never rejects: every failure is logged and carried to the next check.
+   * run. Never rejects: every failure is logged and carried to the next check,
+   * except the two unrecoverable answers in the module header, which stop it.
    *
    * Throttled from the last check's START, not its finish: a call within
    * {@link CATALOG_CHECK_MIN_INTERVAL_MS} of the last check STARTING, or while
@@ -104,7 +107,8 @@ export interface CatalogCheckOptions {
    * Called once per observed change, never concurrently with itself. A
    * rejection is logged and the checker continues, but the revision is NOT
    * recorded as applied — the change is still owed, so the next check attempts
-   * it again until one succeeds.
+   * it again until one succeeds. A `SignInRefusedError` rejection is the
+   * exception: it stops the checker silently (see the module header).
    */
   onChanged: (revision: string) => void | Promise<void>;
   /** Where a notice goes. Defaults to stderr — the only stream this process may write. */

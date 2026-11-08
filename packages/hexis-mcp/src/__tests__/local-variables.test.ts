@@ -13,7 +13,7 @@ import {
   fetchLocalToolVariables,
   type LocalManualInfo,
 } from '../deployment.js';
-import type { HexisMcpConfig } from '../config.js';
+import { SignInRefusedError, type HexisMcpConfig } from '../config.js';
 
 const config = { baseUrl: 'https://x.example', connectionKey: 'bevel_k' } as HexisMcpConfig;
 
@@ -129,6 +129,26 @@ describe('HexisLocalVariableLoader', () => {
     const loader = bind(local({ git: { slug: 'git', path: 'p' } }));
     await expect(loader.get('git_GITHUB_TOKEN')).rejects.toThrow(
       'The connection key was rejected by https://x.example. Mint a new one in External agent access.',
+    );
+  });
+
+  it('fails the lookup with the sign-in sentence when the workspace refused the sign-in for good', async () => {
+    // OAuth mode: the 401 renews, the renewal is refused for good, and the
+    // tool must not run on process.env in place of the secrets it lost.
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 401 })));
+    const oauthConfig: HexisMcpConfig = {
+      baseUrl: 'https://x.example',
+      connectionKey: 'int-1',
+      renewConnectionKey: async () => {
+        throw new SignInRefusedError('restart hexis-mcp to sign in through your browser again.');
+      },
+    };
+    const loader = new HexisLocalVariableLoader(
+      bindLocalVariableResolver(oauthConfig, local({ git: { slug: 'git', path: 'p' } })),
+    );
+    await expect(loader.get('git_GITHUB_TOKEN')).rejects.toThrow(
+      'restart hexis-mcp to sign in through your browser again.',
     );
   });
 

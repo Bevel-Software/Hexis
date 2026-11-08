@@ -1,6 +1,6 @@
 import { type VariableLoader, VariableLoaderSerializer, Serializer } from '@utcp/sdk';
 import { utcpNamespacePrefix } from '@bevel-software/platform-mcp-core';
-import type { HexisMcpConfig } from './config.js';
+import { SignInRefusedError, type HexisMcpConfig } from './config.js';
 import { ConnectionKeyRejectedError, fetchLocalToolVariables, type LocalManualInfo, type LocalToolVariables } from './deployment.js';
 
 /**
@@ -333,9 +333,10 @@ export class HexisLocalVariableLoader implements VariableLoader {
     try {
       return await resolve(state, effectiveKey);
     } catch (err) {
-      // A rejected key fails the call with its own sentence: falling through
-      // to `process.env` would run the tool without the credentials it lost.
-      if (err instanceof ConnectionKeyRejectedError) throw err;
+      // A rejected key, or a sign-in refused for good, fails the call with its
+      // own sentence: falling through to `process.env` would run the tool
+      // without the credentials it lost.
+      if (err instanceof ConnectionKeyRejectedError || err instanceof SignInRefusedError) throw err;
       // `fetchLocalToolVariables` already logs; an unresolved variable falls
       // through to `process.env` rather than failing the call outright.
       return null;

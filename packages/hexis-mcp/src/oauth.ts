@@ -444,8 +444,10 @@ async function parseTokenResponse(res: Response, url: string): Promise<TokenResp
 }
 
 /**
- * The two OAuth error codes (RFC 6749 §4.1.2.1) that say "try again later"
- * rather than "this token is no good": a 400/401 carrying one is transient.
+ * The two OAuth error codes that say "try again later" rather than "this
+ * token is no good". RFC 6749 defines them for authorization-endpoint
+ * redirects (§4.1.2.1), not token responses (§5.2), but a token endpoint may
+ * still send them, and a 400/401 carrying one is treated as transient.
  */
 const TRANSIENT_TOKEN_ERRORS = new Set(['temporarily_unavailable', 'server_error']);
 

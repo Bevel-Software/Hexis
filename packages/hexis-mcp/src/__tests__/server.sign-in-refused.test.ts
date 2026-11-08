@@ -129,12 +129,15 @@ describe('a sign-in the workspace refused for good', () => {
       await client.connect(clientTransport);
       try {
         const before = await client.listTools();
+        expect(before.tools.map((t) => t.name)).toContain('read_file');
         expect(before.tools.map((t) => t.name)).not.toContain(DISCOVERY_NOTICE_TOOL);
 
         // The revoke: the bearer is refused, so the next listing's catalog
-        // check meets a 401, renews, and the renewal is refused for good.
+        // check meets a 401, renews, and the renewal is refused for good. That
+        // very listing is already the notice, not the stale tools.
         refused.add('tok-0');
-        await client.listTools();
+        const atRefusal = await client.listTools();
+        expect(atRefusal.tools.map((t) => t.name)).toEqual([DISCOVERY_NOTICE_TOOL]);
         await vi.waitFor(() => expect(listChanged).toBe(1));
         const readsAtRefusal = refusedReads;
 
@@ -162,6 +165,35 @@ describe('a sign-in the workspace refused for good', () => {
       }
     },
   );
+
+  it('a sign-in refused during the handshake is the notice from the first listing, said once on stderr', { timeout: 60_000 }, async () => {
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const renew = vi.fn(async (): Promise<{ token: string }> => {
+      throw new SignInRefusedError(SENTENCE);
+    });
+    // Refused from the start: the handshake's catalog read is the one that meets it.
+    refused.add('tok-0');
+    const config: HexisMcpConfig = { baseUrl: base, connectionKey: 'tok-0', renewConnectionKey: renew };
+    const handle = await createHexisMcpServer(config, '0.0.0', { catalogCheck: { minIntervalMs: 0 } });
+    const client = new Client({ name: 'probe', version: '0.0.0' }, { capabilities: {} });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await handle.server.connect(serverTransport);
+    await client.connect(clientTransport);
+    try {
+      const listing = await client.listTools();
+      expect(listing.tools).toHaveLength(1);
+      expect(listing.tools[0]!.name).toBe(DISCOVERY_NOTICE_TOOL);
+      // The sign-in notice, not the generic "could not load" discovery notice.
+      expect(listing.tools[0]!.description).toContain('can no longer reach this workspace');
+      expect(listing.tools[0]!.description).toContain('restart hexis-mcp to sign in through your browser again');
+      expect(renew).toHaveBeenCalledTimes(1);
+      expect(err.mock.calls.filter((c) => String(c[0]).includes(SENTENCE))).toHaveLength(1);
+      expect(err.mock.calls.filter((c) => /discovery failed/.test(String(c[0])))).toHaveLength(0);
+    } finally {
+      await client.close();
+      await handle.shutdown();
+    }
+  });
 
   it('leaves a server started with a connection key exactly as it was: no sign-in to end', { timeout: 60_000 }, async () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});

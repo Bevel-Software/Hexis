@@ -927,7 +927,18 @@ describe('one sign-in shared by every process of an agent', () => {
 
   it('a renewal writes the rotated refresh token, the access token and its expiry before using them, and the next start reuses them', async () => {
     const rotation = rotatingRefresh('r-1');
-    const authority = await stubAuthority({ refreshGrant: rotation.grant, localToken: exchangeUnless(new Set()) });
+    // What the store held at the moment each access token was USED: the exchange.
+    const storeAtExchange = new Map<string, unknown>();
+    let storeFile = '';
+    const exchange = exchangeUnless(new Set());
+    const authority = await stubAuthority({
+      refreshGrant: rotation.grant,
+      localToken: (bearer) => {
+        storeAtExchange.set(bearer, JSON.parse(fsSync.readFileSync(storeFile, 'utf8')));
+        return exchange(bearer);
+      },
+    });
+    storeFile = oauthStorePath(authority.base, agent);
     try {
       // Nearly spent: inside the reuse margin, so it is refreshed, not reused.
       await writeStoredCredentials(
@@ -938,6 +949,11 @@ describe('one sign-in shared by every process of an agent', () => {
       const before = Date.now();
       const first = await establishOAuthConfig(authority.base, authority.mcpUrl, { openBrowser: neverOpen, print: quiet, agent });
       expect(first.connectionKey).toBe('int-for-a-1');
+      // Already on disk when a-1 reached the exchange, not written afterwards.
+      expect(storeAtExchange.get('a-1')).toMatchObject({ clientId: 'c1', refreshToken: 'r-2', accessToken: 'a-1' });
+      expect((storeAtExchange.get('a-1') as { accessExpiresAt: number }).accessExpiresAt).toBeGreaterThanOrEqual(
+        before + HOUR,
+      );
       const stored = await readStoredCredentials(authority.base, agent);
       expect(stored).toMatchObject({ clientId: 'c1', refreshToken: 'r-2', accessToken: 'a-1' });
       expect(stored!.accessExpiresAt).toBeGreaterThanOrEqual(before + HOUR);

@@ -9,6 +9,7 @@ import {
   McpError,
   ErrorCode,
   type CallToolResult,
+  type ListToolsResult,
   type Tool as McpTool,
   type Prompt,
   type GetPromptResult,
@@ -370,7 +371,9 @@ async function prepareLocalManuals(
       out.push(template);
     } catch (err) {
       // A dead key is not one broken server: it fails startup in its own words.
-      if (err instanceof ConnectionKeyRejectedError) throw err;
+      // Nor is a sign-in refused for good: it fails discovery, which leaves
+      // the saying of it to renewal.ts.
+      if (err instanceof ConnectionKeyRejectedError || err instanceof SignInRefusedError) throw err;
       console.error(
         `[hexis-mcp] skipping local server "${String(template.name)}": ${err instanceof Error ? err.message : String(err)}`,
       );
@@ -492,6 +495,21 @@ export async function createHexisMcpServer(
     catalogCheck?: false | { minIntervalMs?: number };
   } = {},
 ): Promise<HexisMcpHandle> {
+  /**
+   * SIGN-IN REFUSED FOR GOOD (OAuth mode). renewal.ts calls this once, when
+   * the workspace refused the refresh and the store held nothing newer: from
+   * then on every listing is the notice and every call answers the sentence.
+   * Installed FIRST, before the handshake's own reads, because any read this
+   * server makes may be the one that meets the refusal, and renewal.ts says
+   * it to the listener only that once.
+   */
+  let signInRefused: string | null = null;
+  let announceSignInRefused = (): void => {};
+  const reportSignInRefused = (sentence: string): void => {
+    signInRefused = sentence;
+    announceSignInRefused();
+  };
+  if (config.renewConnectionKey) config.onSignInEnded = reportSignInRefused;
   const {
     mcpUrl,
     agentInstructions,
@@ -744,21 +762,14 @@ export async function createHexisMcpServer(
       console.error('[hexis-mcp] remote manual re-registered with the renewed credential.');
     });
   };
-  /**
-   * SIGN-IN REFUSED FOR GOOD (OAuth mode). renewal.ts calls this once, when
-   * the workspace refused the refresh and the store held nothing newer: from
-   * then on every listing is the notice and every call answers the sentence,
-   * and the client is told the list changed so it re-lists and shows it.
-   */
-  let signInRefused: string | null = null;
-  const reportSignInRefused = (sentence: string): void => {
-    signInRefused = sentence;
+  // From here a refused sign-in also tells the client the list changed, so
+  // it re-lists and shows the notice.
+  announceSignInRefused = (): void => {
     if (closed) return;
     void server?.sendToolListChanged().catch(() => {});
   };
   if (config.renewConnectionKey) {
     config.onConnectionKeyRenewed = swapRemoteCredential;
-    config.onSignInEnded = reportSignInRefused;
   }
 
   /**
@@ -1177,12 +1188,18 @@ export async function createHexisMcpServer(
       },
     );
 
+    // A refused sign-in decides every answer the listing gives: any read it
+    // makes — discovery, the catalog check, the tool hints — may be the one
+    // that met the refusal. Applied at each return rather than by awaiting
+    // the listing from a wrapper, whose extra tick would let a closing
+    // transport answer a parked listing first (see the shutdown guard below).
+    const answered = (listing: ListToolsResult): ListToolsResult =>
+      signInRefused !== null ? { tools: [signInRefusedNoticeTool(signInRefused)] } : listing;
+
     server.setRequestHandler(ListToolsRequestSchema, async () => {
-      // Before anything that could ask the workspace: with the sign-in refused,
-      // every read would fail on it, and the notice is the whole answer.
-      if (signInRefused !== null) return { tools: [signInRefusedNoticeTool(signInRefused)] };
+      // Before anything that could ask the workspace: nothing is left to ask it with.
+      if (signInRefused !== null) return answered({ tools: [] });
       await ready;
-      if (signInRefused !== null) return { tools: [signInRefusedNoticeTool(signInRefused)] };
       // A listing is the one moment a stale toolset is answered out loud, so
       // the check is AWAITED here: the list handed back is the current one, a
       // refresh included, rather than a notification's promise of a better
@@ -1196,11 +1213,13 @@ export async function createHexisMcpServer(
       // The failure goes IN the listing, not into an empty one: an empty
       // toolset is what a tool-less workspace looks like, and a client that
       // shows one gives its reader nothing to act on.
-      if (discoveryError !== null) return { tools: [discoveryNoticeTool(discoveryError)] };
+      if (discoveryError !== null) return answered({ tools: [discoveryNoticeTool(discoveryError)] });
       // A connection whose agent configuration cannot be used loads NOTHING — not
       // Everything — and the one sentence saying why rides the listing's
       // `_meta`, as it does on the hosted endpoint (the handshake carries it too).
-      if (connection?.unavailable) return { tools: [], _meta: { [CONNECTION_META_KEY]: connection.unavailable } };
+      if (connection?.unavailable) {
+        return answered({ tools: [], _meta: { [CONNECTION_META_KEY]: connection.unavailable } });
+      }
       // Shutdown can land DURING discovery: every phase boundary then returns
       // early, which is a clean return — no error, and `tools` still empty.
       // Answering that with an empty listing would show the reader exactly
@@ -1211,8 +1230,9 @@ export async function createHexisMcpServer(
       // The hints are read per listing, so an admin's change on the Tools page
       // is in the very next one (see `fetchToolHints`) — from a deployment
       // that serves them; an older one keeps the conservative false default.
+      // Not once the sign-in is refused: the answer is the notice regardless.
       let listedHints: Record<string, boolean> = {};
-      if (toolHintsAdvertised) {
+      if (toolHintsAdvertised && signInRefused === null) {
         const read = ++hintReadsStarted;
         listedHints = await fetchToolHints(config, hints);
         if (read > hintReadCached) {
@@ -1221,7 +1241,7 @@ export async function createHexisMcpServer(
         }
       }
       if (closed) throw new McpError(ErrorCode.ConnectionClosed, 'hexis-mcp is shutting down.');
-      return { tools: listedTools(tools, apps.tools, listedHints) };
+      return answered({ tools: listedTools(tools, apps.tools, listedHints) });
     });
 
     // The deployment's MCP App views, served from here so a host connected

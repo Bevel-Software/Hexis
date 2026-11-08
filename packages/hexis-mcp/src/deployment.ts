@@ -321,6 +321,8 @@ export async function fetchAgentInstructions(config: HexisMcpConfig): Promise<st
     return body.instructions;
   } catch (err) {
     if (err instanceof ConnectionKeyRejectedError) throw err;
+    // A sign-in refused for good was said once by renewal.ts; not again here.
+    if (err instanceof SignInRefusedError) return undefined;
     console.error(
       `[hexis-mcp] could not fetch the agent instructions: ${err instanceof Error ? err.message : String(err)}; ` +
         'sessions start without them.',
