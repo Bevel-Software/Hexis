@@ -91,3 +91,18 @@ export function ExitFullScreenButton({
  * on top.
  */
 export const FULL_SCREEN_SURFACE = 'fixed inset-0 z-40 overflow-auto bg-canvas';
+
+/**
+ * The surface for a full-bleed renderer (pdf, xlsx, csv, images, HTML pages).
+ *
+ * Such a renderer opens on its own toolbar, whose right end holds its actions:
+ * a PDF's and a spreadsheet's Download. Laid flush against the window's edges,
+ * that row sat under the exit control, which covered Download. Now the
+ * renderer keeps a 12px gutter, the control's own inset, and its toolbar
+ * shares one row with the control: 14px from the top (`pt-3.5`) centres a
+ * toolbar of tiny buttons (about 25px tall) on the control's 28px at 12px, and
+ * the toolbar leaves the control its slot at the right end
+ * (`FULL_SCREEN_EXIT_ROOM`), so Download sits right beside it. A prose
+ * document needs none of this; its column is centred, away from the corner.
+ */
+export const FULL_BLEED_FULL_SCREEN_SURFACE = `${FULL_SCREEN_SURFACE} flex flex-col px-3 pb-3 pt-3.5`;

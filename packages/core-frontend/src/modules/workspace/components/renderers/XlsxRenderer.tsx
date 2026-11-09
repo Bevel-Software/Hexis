@@ -4,6 +4,7 @@ import { RetryReadButton } from './RetryReadButton';
 import { useReadRetry } from './useReadRetry';
 import { useRendererRawRead } from './rendererRawRead';
 import { DownloadFileButton } from './DownloadFileButton';
+import { FULL_SCREEN_EXIT_ROOM } from './fullScreenExitRoom';
 import { readBodyCapped } from './readBodyCapped';
 import type { FileRendererProps } from './types';
 
@@ -246,7 +247,7 @@ export function XlsxRenderer({ filePath }: FileRendererProps) {
 
   return (
     <div className="flex flex-col h-full">
-      <div className="flex items-center gap-1 border-b border-line px-1 pb-1 shrink-0">
+      <div className={`flex items-center gap-1 border-b border-line px-1 pb-1 shrink-0 ${FULL_SCREEN_EXIT_ROOM}`}>
         {workbook.SheetNames.length > 1 && (
           <div className="flex min-w-0 items-center gap-1 overflow-x-auto">
             {workbook.SheetNames.map((name, i) => (
