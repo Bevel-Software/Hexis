@@ -20,9 +20,9 @@ read.
 - **Inline scripts and styles only.** `<script src>`, `<link>`, `<iframe>`,
   `<object>`, `<embed>`, `<base>` and `<meta>` are removed. Write CSS in a
   `<style>` element and code in an inline `<script>`. An image is a `data:`
-  URL. Only code written in the page runs: a script, `on…` attribute or
-  `javascript:` URL added at runtime does not, even through `innerHTML`. Use
-  `addEventListener`.
+  URL. Code added at runtime runs only if its text is already in the page: a
+  new script, `on…` attribute or `javascript:` URL does not, even through
+  `innerHTML`. Use `addEventListener`.
 - **The body is the page.** The app shows the sanitised contents of `<body>`
   in a document of its own: `<style>` and inline `<script>` in `<head>` are
   kept, moved to the start of the body; everything else in `<head>` and the

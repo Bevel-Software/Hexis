@@ -32,7 +32,7 @@
  *      the agent's own scripts).
  */
 
-import { sha256Base64 } from '@bevel-software/platform-shared';
+import { sha256Base64, sha384Base64 } from '@bevel-software/platform-shared';
 import { isPageLinkExternalHref, normalizeHref } from '../../../../shared/markdown/hrefs';
 
 const DROP_ELEMENTS = new Set([
@@ -213,7 +213,7 @@ export function sanitizeAgentHtml(html: string): string {
  * The fixed part of the Content-Security-Policy applied to the iframe
  * document. Pinned in code so the rules cannot drift between renderer and
  * audit. `script-src` is not here: it is computed per document, see
- * {@link scriptSrcFor}.
+ * {@link scriptPoliciesFor}.
  *
  * - `default-src 'none'`         everything is denied unless explicitly allowed
  * - `style-src  'unsafe-inline'` only inline styles
@@ -240,7 +240,7 @@ const CSP_DIRECTIVES = [
 ];
 
 /**
- * The `script-src` of one document: the SHA-256 of every inline script and
+ * The `script-src` of one document: the hash of every inline script and
  * every inline event handler the document holds, and nothing else.
  *
  * So the code that can run in the frame is the code the frame was built
@@ -251,8 +251,8 @@ const CSP_DIRECTIVES = [
  * `javascript:` URL. Text byte-identical to code the document already holds
  * still matches, which runs nothing the source did not already contain.
  *
- * `documentHtml` is the document the frame loads, without the policy's own
- * `<meta>` (an attribute that holds no code). It is read with the browser's
+ * `documentHtml` is the document the frame loads, without the policies' own
+ * `<meta>`s (attributes that hold no code). It is read with the browser's
  * own parser, and each script or handler is hashed as the text the browser
  * hashes: a script's text content, a handler attribute's value. `<template>`
  * contents are read too: their scripts are in the source, and run when
@@ -263,6 +263,18 @@ const CSP_DIRECTIVES = [
  * text is one it never listed, and does not run. Either way nothing outside
  * the source runs.
  *
+ * Two policies, each listing every piece of code: the first by SHA-256, the
+ * second by SHA-384. A browser enforces both, and code runs only where both
+ * admit it, which inline code the document holds is. The second is the
+ * network boundary: a hash source also admits an EXTERNAL script whose
+ * `integrity` names only listed hashes, and the request for it leaves the
+ * frame before the response is checked, so a page could put data into the
+ * URL of a `<script src integrity>` it creates. Such a script's `integrity`
+ * cannot name only SHA-256 hashes, for the first policy, and only SHA-384
+ * hashes, for the second, so one of them refuses it before any request is
+ * made, as `'unsafe-inline'` did. The empty list is `script-src 'none'`, one
+ * policy, which refuses every script.
+ *
  * `'unsafe-hashes'` is what lets a hash admit an inline handler; it is added
  * only when the document has one. Never `'unsafe-inline'`, which admits any
  * inline script, and never `'strict-dynamic'`, the usual companion of a hash
@@ -270,7 +282,7 @@ const CSP_DIRECTIVES = [
  * hole this closes. `eval` and string timers stay refused, as no
  * `'unsafe-eval'` is listed.
  */
-function scriptSrcFor(documentHtml: string): string {
+function scriptPoliciesFor(documentHtml: string): { sha256: string; sha384: string | null } {
   const doc = new DOMParser().parseFromString(documentHtml, 'text/html');
   const scripts = new Set<string>();
   const handlers = new Set<string>();
@@ -284,10 +296,14 @@ function scriptSrcFor(documentHtml: string): string {
       if (el instanceof HTMLTemplateElement) roots.push(el.content);
     }
   }
-  const hashes = new Set<string>();
-  for (const text of [...scripts, ...handlers]) hashes.add(`'sha256-${sha256Base64(text)}'`);
-  if (hashes.size === 0) return "script-src 'none'";
-  return ['script-src', ...(handlers.size > 0 ? ["'unsafe-hashes'"] : []), ...Array.from(hashes).sort()].join(' ');
+  const code = new Set([...scripts, ...handlers]);
+  if (code.size === 0) return { sha256: "script-src 'none'", sha384: null };
+  const scriptSrc = (hash: (text: string) => string) =>
+    ['script-src', ...(handlers.size > 0 ? ["'unsafe-hashes'"] : []), ...Array.from(code, hash).sort()].join(' ');
+  return {
+    sha256: scriptSrc((text) => `'sha256-${sha256Base64(text)}'`),
+    sha384: scriptSrc((text) => `'sha384-${sha384Base64(text)}'`),
+  };
 }
 
 /**
@@ -690,11 +706,14 @@ ${inlineLib}
 ${opts.bodyHtml}
 </body>
 </html>`;
-  // The policy is computed from the very document returned, less the policy's
-  // own <meta>, so the scripts it admits and the scripts the frame holds
+  // The policies are computed from the very document returned, less their
+  // own <meta>s, so the scripts they admit and the scripts the frame holds
   // cannot disagree. Hash sources are base64 and keyword quotes, nothing that
   // could end the attribute.
-  const csp = [CSP_DIRECTIVES[0], scriptSrcFor(head + rest), ...CSP_DIRECTIVES.slice(1)].join('; ');
+  const scriptSrc = scriptPoliciesFor(head + rest);
+  const csp = [CSP_DIRECTIVES[0], scriptSrc.sha256, ...CSP_DIRECTIVES.slice(1)].join('; ');
+  const second = scriptSrc.sha384 === null ? '' : `<meta http-equiv="Content-Security-Policy" content="${scriptSrc.sha384}">
+`;
   return `${head}<meta http-equiv="Content-Security-Policy" content="${csp}">
-${rest}`;
+${second}${rest}`;
 }
