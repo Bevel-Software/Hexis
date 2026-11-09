@@ -61,10 +61,12 @@ name.
 ### Calling tools: `window.bevel.tools`
 
 On the app's file page, and on a skill's page in the Library (Skills & Tools →
-the skill → its file), a page calls the tools of the person viewing it —
-exactly the tools that person's own agent gets from the hosted MCP server,
-with the same names, answers and refusals — through five functions, each
-returning a promise:
+the skill → its file), a page calls the platform's own tools as the person
+viewing it, with the names, answers and refusals that person's own agent
+gets, through five functions, each returning a promise.
+A page reaches platform tools only: no tool of a `.tool` manual or a plugin's
+MCP server is listed to a page or callable from it, directly or in a chain.
+Such a call rejects as an unknown tool.
 
 - `window.bevel.tools.searchTools(query)` — `{ tools: [names] }`: what
   `list_tools` lists, narrowed to the names containing every word of `query`
@@ -81,11 +83,10 @@ returning a promise:
   answers after the app has uploaded `file` for the viewer (below).
 
 The two kinds of name differ. `searchTools` and `toolsInfo` use the
-namespaced name a chain calls (`KNOWLEDGE_BASE.read_file`, `notion.search`);
-`callTool` takes the name `tools/call` takes: a knowledge-base tool bare
-(`read_file`), any other tool with its dots as underscores
-(`notion_search`). Passing a `searchTools` result straight to `callTool`
-fails as an unknown tool — convert it, or call it from `callToolChain`.
+namespaced name a chain calls (`KNOWLEDGE_BASE.read_file`); `callTool` takes
+the bare name `tools/call` takes (`read_file`). Passing a `searchTools`
+result straight to `callTool` fails as an unknown tool. Drop the prefix, or
+call it from `callToolChain`.
 
 `window.bevel.tools` is `null` wherever tools are not available: on the
 embed (a page shown on another site, or in a chat's MCP App pane), and in a
@@ -104,16 +105,22 @@ if (tools) {
 ```
 
 **Reading runs at once; writing asks first.** A call to a tool that only
-reads runs with no prompt. The first call that may write — to a tool the
-deployment tags as writing (`edit_file`, `write_file`, …), to a tool of a
-`.tool` manual or a plugin's MCP server (nothing says those only read), or
-any `callToolChain` — makes the app show the viewer one card, "<page name>
-wants to write to the knowledge base", with the page's path under it and
-Allow while open and Deny. Allow runs the call, and every later writing call
-of the page runs without asking again until the page is reloaded. Deny runs
-nothing and rejects the call with `denied` (`error.message` and
-`error.code` are both `'denied'`); the next writing call asks again. The card
-is the app's, outside the frame: the page cannot draw, dismiss or answer it.
+reads runs with no prompt. The first call that may write (a tool the
+deployment tags as writing, such as `edit_file` or `write_file`, or any
+`callToolChain`) makes the app show the viewer one card: "You're allowing
+changes using your account. Do you want to allow that?", with the page's path
+under it and the buttons Don't allow and Allow. Allow runs the call, and every
+later writing call of the page view runs without asking. The browser
+remembers an Allow for the signed-in account and the page's exact content, so
+the same page asks that account nothing on a later view in that browser.
+Signing out clears what the account kept. Content the account has not allowed
+asks again, such as an edited page, as does another account or browser, a
+browser that will not store, and content past the account's 500 most recently
+allowed: never rely on an Allow being kept. Don't allow runs nothing and rejects
+the call with `denied` (`error.message` and `error.code` are both
+`'denied'`). It is never remembered: the next writing call asks again. The
+card is the app's, outside the frame: the page cannot draw, dismiss or answer
+it.
 Every call a page makes is recorded in the Audit log under the viewer, with
 the page's path as the agent; a denied call is recorded as refused.
 
@@ -133,8 +140,8 @@ message names it), a destination the viewer may not write, or, when nothing
 landed, the first path's refusal, with its code in `error.code` (`exists`
 under `create`, `missing` under `update`). A refused upload writes nothing,
 and the bytes it sent are deleted at once. An upload is a writing call: the
-first one shows the card above, and Allow while open covers it and every
-later upload and writing call of the page view. The upload's token stays in
+first one shows the card above, and an Allow covers it and every later upload
+and writing call of the page view. The upload's token stays in
 the app; the page never sees it.
 
 ```js
@@ -199,7 +206,7 @@ and never loses the board they were reading:
   prompt.
 - **Load with `callTool`, not `callToolChain`.** A chain may write, so the app
   asks the viewer before it runs: a page that loads through `callToolChain`
-  shows its reader a "wants to write" card for a read.
+  shows its reader the write card for a read.
 - **The reads are the viewer's own.** Every call answers with exactly what
   the person viewing the page may read: `list_files` and `grep` leave out
   what they may not, and `read_file` of such a file rejects. Build the board
