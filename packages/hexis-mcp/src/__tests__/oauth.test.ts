@@ -1051,6 +1051,39 @@ describe('one sign-in shared by every process of an agent', () => {
     }
   }, 20_000);
 
+  it('a holder taken over while paused neither keeps the replacement lock alive nor removes it', async () => {
+    const rotation = rotatingRefresh('r-1');
+    let replacementAge: number | null = null;
+    let lockFile = '';
+    const longAgo = new Date(Date.now() - 60_000);
+    const authority = await stubAuthority({
+      refreshGrant: async (params) => {
+        // Mid-refresh, a sibling judged this holder's lock stale, removed it
+        // and took its own (backdated here, so any touch of it shows).
+        await fs.rm(lockFile);
+        await fs.writeFile(lockFile, 'replacement');
+        await fs.utimes(lockFile, longAgo, longAgo);
+        // Past a heartbeat: the holder's must have touched only its own file.
+        await new Promise((resolve) => setTimeout(resolve, 6_000));
+        replacementAge = Date.now() - (await fs.stat(lockFile)).mtimeMs;
+        return rotation.grant(params);
+      },
+      localToken: exchangeUnless(new Set()),
+    });
+    lockFile = `${oauthStorePath(authority.base, agent)}.lock`;
+    try {
+      await writeStoredCredentials(authority.base, { clientId: 'c1', refreshToken: 'r-1' }, agent);
+      await establishOAuthConfig(authority.base, authority.mcpUrl, { openBrowser: neverOpen, print: quiet, agent });
+      expect(replacementAge).not.toBeNull();
+      expect(replacementAge!).toBeGreaterThanOrEqual(55_000);
+      // The release left the sibling's lock where it was.
+      expect(await fs.readFile(lockFile, 'utf8')).toBe('replacement');
+    } finally {
+      await fs.rm(lockFile, { force: true });
+      await authority.close();
+    }
+  }, 20_000);
+
   it('takes over a lock left behind by a process that died holding it', async () => {
     const rotation = rotatingRefresh('r-1');
     const authority = await stubAuthority({ refreshGrant: rotation.grant, localToken: exchangeUnless(new Set()) });

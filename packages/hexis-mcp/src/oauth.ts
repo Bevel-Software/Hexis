@@ -1,7 +1,7 @@
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
-import fs from 'node:fs/promises';
+import fs, { type FileHandle } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { SignInRefusedError, type HexisMcpConfig, type RenewedGrant } from './config.js';
@@ -24,7 +24,7 @@ import { scheduleProactiveRenewal } from './renewal.js';
  *      live access token is reused as it is; otherwise a refresh grant renews
  *      it. Either way the browser stays shut. Every process of one agent on
  *      one machine shares this store, so both happen under a file lock (see
- *      `withStoreLock`).
+ *      `withStoreLock`; best effort where the lock cannot be created).
  *   3. BROWSER — first run (or a dead refresh token): bind a loopback
  *      redirect, register a client for exactly that redirect (RFC 7591),
  *      send the person's browser to the authorization endpoint with PKCE,
@@ -356,18 +356,21 @@ const pause = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
  * without the holder's heartbeat (a crashed holder) and is removed. The one
  * exception is a lock that cannot be created at all (an unwritable
  * directory): it is skipped, because a lock that can never be taken must not
- * cost the person their tools. The release removes the file only while it is
- * still this holder's.
+ * cost the person their tools.
+ *
+ * The heartbeat and the release both act on the file this holder CREATED,
+ * never on whatever sits at the path: the heartbeat touches it through the
+ * handle that created it, and the release removes the path only while it is
+ * still that file. A holder that was paused past STORE_LOCK_STALE_MS and taken
+ * over therefore neither keeps the replacement lock alive nor removes it.
  */
 async function withStoreLock<T>(baseUrl: string, agent: AgentIdentity | null, fn: () => Promise<T>): Promise<T> {
   const lockFile = `${oauthStorePath(baseUrl, agent)}.lock`;
-  const owner = `${process.pid}:${b64url(randomBytes(12))}`;
-  let held = false;
+  let lock: FileHandle | null = null;
   await fs.mkdir(path.dirname(lockFile), { recursive: true, mode: 0o700 }).catch(() => {});
   for (;;) {
     try {
-      await fs.writeFile(lockFile, owner, { flag: 'wx', mode: 0o600 });
-      held = true;
+      lock = await fs.open(lockFile, 'wx', 0o600);
       break;
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'EEXIST') break;
@@ -387,10 +390,13 @@ async function withStoreLock<T>(baseUrl: string, agent: AgentIdentity | null, fn
     }
     await pause(STORE_LOCK_POLL_MS);
   }
+  const held = lock;
+  // The pid is for a person looking at a lock left behind; nothing reads it.
+  await held?.writeFile(String(process.pid)).catch(() => {});
   const heartbeat = held
     ? setInterval(() => {
         const now = new Date();
-        fs.utimes(lockFile, now, now).catch(() => {});
+        held.utimes(now, now).catch(() => {});
       }, STORE_LOCK_HEARTBEAT_MS)
     : null;
   heartbeat?.unref();
@@ -399,8 +405,14 @@ async function withStoreLock<T>(baseUrl: string, agent: AgentIdentity | null, fn
   } finally {
     if (heartbeat) clearInterval(heartbeat);
     if (held) {
-      const current = await fs.readFile(lockFile, 'utf8').catch(() => null);
-      if (current === owner) await fs.rm(lockFile, { force: true }).catch(() => {});
+      // Closed before the removal: Windows keeps a removed file that is still
+      // open as "delete pending", and a waiter creating the lock then fails.
+      const mine = await held.stat({ bigint: true }).catch(() => null);
+      await held.close().catch(() => {});
+      const there = await fs.stat(lockFile, { bigint: true }).catch(() => null);
+      if (mine && there && mine.ino === there.ino && mine.dev === there.dev) {
+        await fs.rm(lockFile, { force: true }).catch(() => {});
+      }
     }
   }
 }

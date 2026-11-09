@@ -322,6 +322,10 @@ export class HexisLocalVariableLoader implements VariableLoader {
 
   /**
    * Resolve one UTCP-namespaced key, or null to fall through to `process.env`.
+   * Throws instead of falling through when the deployment refused this
+   * process's credential — a `ConnectionKeyRejectedError` (a revoked key) or a
+   * `SignInRefusedError` (a sign-in refused for good) — so the call fails with
+   * that sentence rather than running the tool without its secrets.
    *
    * Null is returned for anything that is not a local manual's variable —
    * including every remote-manual key — so this loader can never become a path
