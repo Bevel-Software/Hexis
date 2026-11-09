@@ -94,6 +94,9 @@ export { CONNECTION_META_KEY };
  * namespace the per-request client registers under AND the prefix its `${VAR}`
  * placeholders resolve through (`<manualName>_API_URL` / `_CONNECTION_KEY`).
  */
+/** What a deployment runs on each tool client built for a caller: see {@link McpProxyOptions.prepareClient}. */
+export type McpClientHook = (client: CodeModeUtcpClient, userId: string) => void;
+
 export interface McpProxyOptions {
   loopbackBaseUrl: string;
   manualName: string;
@@ -148,6 +151,17 @@ export interface McpProxyOptions {
    * tool lists its built-in hint.
    */
   readOnlyOverrides?: () => Promise<Readonly<Record<string, boolean>>>;
+  /**
+   * Run on each tool client built for a caller's surface, with the caller's
+   * user id, before any tool is registered on it: where a deployment wraps the
+   * client's calls the way it wraps its own in-process agent's client (a
+   * distribution that sends a file's bytes as the body of a tool that
+   * declares that body a file path, read as the caller). The argument checks
+   * are installed when the tools are registered, after this, so they stay
+   * outermost and check the call as the agent made it. Absent, the client is
+   * used as built.
+   */
+  prepareClient?: McpClientHook;
 }
 
 /** Who a request is from — everything the proxy needs, resolved from that request's own bearer. */
@@ -1217,6 +1231,7 @@ export class McpService {
       utcpClientConfig(userId, variables, this.opts.secretsScope),
     );
     bindRequestBearer(client);
+    this.opts.prepareClient?.(client, userId);
     return client;
   }
 

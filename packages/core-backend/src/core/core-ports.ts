@@ -13,6 +13,7 @@ import type { AgentGuideHook } from '../modules/agent-guide/agent-guide.js';
 import type { IAgentScopeResolver } from '../modules/agent-scope/index.js';
 import type { EmbedNodeIdResolver } from '../modules/embed/embed.interface.js';
 import type { ManagedSignInPort } from '../modules/secrets-vault/secrets-vault.contract.js';
+import type { McpClientHook } from '../modules/mcp/index.js';
 import type { IWorkspaceService } from '@bevel-software/platform-shared';
 import type { IAccessControl } from '../modules/access/index.js';
 import type { KbContext } from '../shared/kb-context.js';
@@ -205,6 +206,14 @@ export interface CorePorts {
    * session sink. See `modules/secrets-vault/secrets-vault.contract.ts`.
    */
   managedSignIns?: ManagedSignInPort;
+  /**
+   * Run on each tool client the MCP endpoint builds for a caller, with their
+   * user id, before its tools are registered: where a distribution wraps the
+   * calls its MCP callers make (workflow runs, connected agents) the way it
+   * wraps its own in-process agent's. Core default: none, the client as
+   * built. See `McpProxyOptions.prepareClient`.
+   */
+  prepareMcpClient?: McpClientHook;
 }
 
 /**
