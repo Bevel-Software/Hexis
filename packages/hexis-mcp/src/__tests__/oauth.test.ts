@@ -182,7 +182,7 @@ function fakeBrowser(code = 'code-1', mutateState?: (state: string) => string) {
 /** A code grant that enforces the PKCE contract against what the fake browser saw. */
 function pkceCodeGrant(
   seen: { authUrl?: URL },
-  tokens: { access_token: string; refresh_token?: string },
+  tokens: { access_token: string; refresh_token?: string; expires_in?: number },
   code = 'code-1',
 ) {
   return (params: URLSearchParams): Answer => {
@@ -592,6 +592,27 @@ describe('browser flow', () => {
       expect(s256(codeExchange.get('code_verifier')!)).toBe(
         browser.seen.authUrl!.searchParams.get('code_challenge'),
       );
+    } finally {
+      await authority.close();
+    }
+  });
+
+  it('hands back the access token\'s lifetime when the token endpoint gives expires_in', async () => {
+    const browser = fakeBrowser();
+    const authority = await stubAuthority({
+      codeGrant: (params) =>
+        pkceCodeGrant(browser.seen, { access_token: 'a-flow', refresh_token: 'r-flow', expires_in: 3600 })(params),
+    });
+    try {
+      const result = await authorizeInBrowser(
+        {
+          authorizationEndpoint: `${authority.base}/authorize`,
+          tokenEndpoint: `${authority.base}/token`,
+          registrationEndpoint: `${authority.base}/register`,
+        },
+        { openBrowser: browser.open, print: quiet },
+      );
+      expect(result).toEqual({ clientId: 'dyn-client', accessToken: 'a-flow', refreshToken: 'r-flow', expiresInMs: HOUR });
     } finally {
       await authority.close();
     }
@@ -1118,6 +1139,69 @@ describe('one sign-in shared by every process of an agent', () => {
     }
   });
 
+  it('goes ahead without the lock after 2 s when the lock file can never be created, and still refreshes once', async () => {
+    const rotation = rotatingRefresh('r-1');
+    let lockFile = '';
+    let lockedAtRefresh: boolean | null = null;
+    const authority = await stubAuthority({
+      refreshGrant: (params) => {
+        lockedAtRefresh = fsSync.existsSync(lockFile);
+        return rotation.grant(params);
+      },
+      localToken: exchangeUnless(new Set()),
+    });
+    lockFile = `${oauthStorePath(authority.base, agent)}.lock`;
+    // An unwritable lock directory: every attempt to create the lock fails.
+    const open = fs.open.bind(fs);
+    let attempts = 0;
+    const spy = vi.spyOn(fs, 'open').mockImplementation(async (file, ...rest) => {
+      if (String(file) === lockFile) {
+        attempts += 1;
+        throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
+      }
+      return open(file, ...rest);
+    });
+    try {
+      await writeStoredCredentials(authority.base, { clientId: 'c1', refreshToken: 'r-1' }, agent);
+      const started = Date.now();
+      const config = await establishOAuthConfig(authority.base, authority.mcpUrl, { openBrowser: neverOpen, print: quiet, agent });
+      expect(Date.now() - started).toBeGreaterThanOrEqual(2_000);
+      expect(attempts).toBeGreaterThan(1);
+      expect(config.connectionKey).toBe('int-for-a-1');
+      expect(lockedAtRefresh).toBe(false);
+      expect(refreshes(authority)).toHaveLength(1);
+      expect(await readStoredCredentials(authority.base, agent)).toMatchObject({ refreshToken: 'r-2', accessToken: 'a-1' });
+    } finally {
+      spy.mockRestore();
+      await authority.close();
+    }
+  }, 15_000);
+
+  it('a browser sign-in stores the access token and its expiry, and the next start reuses them with no refresh and no browser', async () => {
+    const browser = fakeBrowser();
+    const authority = await stubAuthority({
+      codeGrant: (params) =>
+        pkceCodeGrant(browser.seen, { access_token: 'a-flow', refresh_token: 'r-flow', expires_in: 3600 })(params),
+      localToken: exchangeUnless(new Set()),
+    });
+    try {
+      const before = Date.now();
+      const first = await establishOAuthConfig(authority.base, authority.mcpUrl, { openBrowser: browser.open, print: quiet, agent });
+      expect(first.connectionKey).toBe('int-for-a-flow');
+      const stored = await readStoredCredentials(authority.base, agent);
+      expect(stored).toMatchObject({ clientId: 'dyn-client', refreshToken: 'r-flow', accessToken: 'a-flow' });
+      expect(stored!.accessExpiresAt).toBeGreaterThanOrEqual(before + HOUR);
+      expect(stored!.accessExpiresAt).toBeLessThanOrEqual(Date.now() + HOUR);
+
+      const second = await establishOAuthConfig(authority.base, authority.mcpUrl, { openBrowser: neverOpen, print: quiet, agent });
+      expect(second.connectionKey).toBe('int-for-a-flow');
+      expect(refreshes(authority)).toHaveLength(0);
+      expect(authority.record.dcr).toHaveLength(1);
+    } finally {
+      await authority.close();
+    }
+  });
+
   it('a holder whose heartbeat lapsed near the stale window leaves the lock for the takeover, not the path', async () => {
     const rotation = rotatingRefresh('r-1');
     const realNow = Date.now.bind(Date);
@@ -1267,6 +1351,47 @@ describe('renewing a shared sign-in', () => {
       await authority.close();
     }
   });
+
+  it.each([401, 403])(
+    'a freshly granted access token the exchange rejects (HTTP %i) ends renewal: the sentence once, and no further refresh request',
+    async (status) => {
+      const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const rotation = rotatingRefresh('r-1');
+      const authority = await stubAuthority({
+        refreshGrant: rotation.grant,
+        // a-0 is the access token the process started on; a-1, granted by the renewal, is refused.
+        localToken: (bearer) => (bearer === 'a-0' ? { status: 200, body: { token: 'int-for-a-0' } } : { status }),
+      });
+      try {
+        await writeStoredCredentials(
+          authority.base,
+          { clientId: 'c1', refreshToken: 'r-1', accessToken: 'a-0', accessExpiresAt: Date.now() + HOUR },
+          agent,
+        );
+        const config = await establishOAuthConfig(authority.base, authority.mcpUrl, { openBrowser: neverOpen, print: quiet, agent });
+        expect(config.connectionKey).toBe('int-for-a-0');
+        const ended = vi.fn();
+        config.onSignInEnded = ended;
+        // a-0 has expired, so the renewal refreshes: the grant succeeds, the exchange refuses its token.
+        await writeStoredCredentials(
+          authority.base,
+          { clientId: 'c1', refreshToken: 'r-1', accessToken: 'a-0', accessExpiresAt: Date.now() - 1 },
+          agent,
+        );
+        const refusal = await fetchAllManuals(config).catch((e: unknown) => e);
+        expect(refusal).toBeInstanceOf(SignInRefusedError);
+        expect((refusal as Error).message).toMatch(/restart hexis-mcp to sign in through your browser again/);
+        expect(ended).toHaveBeenCalledTimes(1);
+        expect(refreshes(authority)).toHaveLength(1);
+        await expect(fetchAllManuals(config)).rejects.toBeInstanceOf(SignInRefusedError);
+        await expect(fetchLocalOnlyManuals(config)).rejects.toBeInstanceOf(SignInRefusedError);
+        expect(refreshes(authority)).toHaveLength(1);
+        expect(err.mock.calls.filter((c) => String(c[0]).includes('restart hexis-mcp'))).toHaveLength(1);
+      } finally {
+        await authority.close();
+      }
+    },
+  );
 
   it('revoked on the Audit log page: one refusal per running process, and the next start opens the browser once', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
