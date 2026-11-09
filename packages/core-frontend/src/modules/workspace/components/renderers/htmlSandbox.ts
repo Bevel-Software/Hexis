@@ -32,6 +32,7 @@
  *      the agent's own scripts).
  */
 
+import { sha256Base64 } from '@bevel-software/platform-shared';
 import { isPageLinkExternalHref, normalizeHref } from '../../../../shared/markdown/hrefs';
 
 const DROP_ELEMENTS = new Set([
@@ -209,11 +210,12 @@ export function sanitizeAgentHtml(html: string): string {
 }
 
 /**
- * The Content-Security-Policy applied to the iframe document. Pinned in code
- * so the rules cannot drift between renderer and audit.
+ * The fixed part of the Content-Security-Policy applied to the iframe
+ * document. Pinned in code so the rules cannot drift between renderer and
+ * audit. `script-src` is not here: it is computed per document, see
+ * {@link scriptSrcFor}.
  *
  * - `default-src 'none'`         everything is denied unless explicitly allowed
- * - `script-src 'unsafe-inline'` only inline scripts (no src= loads)
  * - `style-src  'unsafe-inline'` only inline styles
  * - `img-src    data:`           only data: URIs (no remote pixels)
  * - `font-src   data:`           only data: URIs (no font CDNs)
@@ -228,7 +230,6 @@ export function sanitizeAgentHtml(html: string): string {
  */
 const CSP_DIRECTIVES = [
   "default-src 'none'",
-  "script-src 'unsafe-inline'",
   "style-src 'unsafe-inline'",
   'img-src data:',
   'font-src data:',
@@ -236,7 +237,58 @@ const CSP_DIRECTIVES = [
   "form-action 'none'",
   "base-uri 'none'",
   "frame-src 'none'",
-].join('; ');
+];
+
+/**
+ * The `script-src` of one document: the SHA-256 of every inline script and
+ * every inline event handler the document holds, and nothing else.
+ *
+ * So the code that can run in the frame is the code the frame was built
+ * from. A remembered Allow is bound to the page's source (see
+ * `pageConsentMemory.ts`); a script the page creates at runtime, from text it
+ * read out of another file, matches no hash and the browser refuses it, as it
+ * refuses a handler set at runtime (by attribute or through `innerHTML`) and a
+ * `javascript:` URL. Text byte-identical to code the document already holds
+ * still matches, which runs nothing the source did not already contain.
+ *
+ * `documentHtml` is the document the frame loads, without the policy's own
+ * `<meta>` (an attribute that holds no code). It is read with the browser's
+ * own parser, and each script or handler is hashed as the text the browser
+ * hashes: a script's text content, a handler attribute's value. `<template>`
+ * contents are read too: their scripts are in the source, and run when
+ * stamped. The one place this parse differs from the frame's is `<noscript>`:
+ * `DOMParser` runs without scripting, so it reads a `<noscript>`'s contents as
+ * markup where the frame reads them as text. A script it finds there is text
+ * in the frame and runs nothing; a script the frame's parse makes out of that
+ * text is one it never listed, and does not run. Either way nothing outside
+ * the source runs.
+ *
+ * `'unsafe-hashes'` is what lets a hash admit an inline handler; it is added
+ * only when the document has one. Never `'unsafe-inline'`, which admits any
+ * inline script, and never `'strict-dynamic'`, the usual companion of a hash
+ * policy: it lets a trusted script create scripts that run, which is the
+ * hole this closes. `eval` and string timers stay refused, as no
+ * `'unsafe-eval'` is listed.
+ */
+function scriptSrcFor(documentHtml: string): string {
+  const doc = new DOMParser().parseFromString(documentHtml, 'text/html');
+  const scripts = new Set<string>();
+  const handlers = new Set<string>();
+  const roots: ParentNode[] = [doc];
+  for (let r = 0; r < roots.length; r += 1) {
+    for (const el of Array.from(roots[r]!.querySelectorAll('*'))) {
+      if (el.localName === 'script') scripts.add(el.textContent ?? '');
+      for (const attr of Array.from(el.attributes)) {
+        if (attr.name.toLowerCase().startsWith('on')) handlers.add(attr.value);
+      }
+      if (el instanceof HTMLTemplateElement) roots.push(el.content);
+    }
+  }
+  const hashes = new Set<string>();
+  for (const text of [...scripts, ...handlers]) hashes.add(`'sha256-${sha256Base64(text)}'`);
+  if (hashes.size === 0) return "script-src 'none'";
+  return ['script-src', ...(handlers.size > 0 ? ["'unsafe-hashes'"] : []), ...Array.from(hashes).sort()].join(' ');
+}
 
 /**
  * Names exposed on `window.bevel` inside the iframe. Each name MUST be a
@@ -623,12 +675,12 @@ export function buildSandboxedHtml(opts: BuildSandboxedHtmlOptions): string {
     }
   });
 
-  return `<!doctype html>
+  const head = `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="${CSP_DIRECTIVES}">
-<meta name="referrer" content="no-referrer">
+`;
+  const rest = `<meta name="referrer" content="no-referrer">
 <title>${safeTitle}</title>
 </head>
 <body>
@@ -638,4 +690,11 @@ ${inlineLib}
 ${opts.bodyHtml}
 </body>
 </html>`;
+  // The policy is computed from the very document returned, less the policy's
+  // own <meta>, so the scripts it admits and the scripts the frame holds
+  // cannot disagree. Hash sources are base64 and keyword quotes, nothing that
+  // could end the attribute.
+  const csp = [CSP_DIRECTIVES[0], scriptSrcFor(head + rest), ...CSP_DIRECTIVES.slice(1)].join('; ');
+  return `${head}<meta http-equiv="Content-Security-Policy" content="${csp}">
+${rest}`;
 }

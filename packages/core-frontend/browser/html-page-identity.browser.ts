@@ -2,7 +2,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { expect, test, type Page } from '@playwright/test';
 import { build, type Rollup } from 'vite';
-import { buildSandboxedHtml } from '../src/modules/workspace/components/renderers/htmlSandbox';
+import { buildSandboxedHtmlIn } from './fixtures/sandboxed-document';
 import type { PageConsent, PageToolsClient, answerToolCall, asToolCall } from '../src/modules/workspace/components/renderers/htmlToolBridge';
 
 /** What the bundled fixture leaves on the host page: the renderer's tool bridge. */
@@ -163,7 +163,7 @@ async function host(page: Page) {
   const show = async (documentId: string) => {
     // The document names itself in its body, so the test waits for THIS
     // document and never clicks in the one it is replacing.
-    const srcdoc = buildSandboxedHtml({
+    const srcdoc = await buildSandboxedHtmlIn(page, {
       title: 'Board',
       libModuleSources: [],
       bodyHtml: `${PAGE_BODY}<span id="who">${documentId}</span>`,

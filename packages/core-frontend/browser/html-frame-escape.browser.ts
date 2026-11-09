@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
-import { buildSandboxedHtml } from '../src/modules/workspace/components/renderers/htmlSandbox';
+import { buildSandboxedHtmlIn } from './fixtures/sandboxed-document';
 import { isFrameEscape } from '../src/modules/workspace/utils/frameEscape';
 
 /**
@@ -61,7 +61,7 @@ const PAGE_BODY = `<button id="open">Open popup</button>
 
 async function host(page: Page) {
   await page.setContent(HOST);
-  const doc = buildSandboxedHtml({ title: 'page', libModuleSources: [], bodyHtml: PAGE_BODY });
+  const doc = await buildSandboxedHtmlIn(page, { title: 'page', libModuleSources: [], bodyHtml: PAGE_BODY });
   await page.evaluate((srcdoc) => {
     (document.getElementById('page') as HTMLIFrameElement).srcdoc = srcdoc;
     (document.getElementById('other') as HTMLIFrameElement).srcdoc = srcdoc;

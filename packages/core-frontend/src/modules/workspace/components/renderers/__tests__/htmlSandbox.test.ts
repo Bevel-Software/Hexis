@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import vm from 'node:vm';
+import { createHash } from 'node:crypto';
 import { sanitizeAgentHtml, buildSandboxedHtml } from '../htmlSandbox';
 import { runBridge } from './bridgeHarness';
 
@@ -682,6 +683,87 @@ describe('buildSandboxedHtml', () => {
     vm.runInContext(`"use strict"; (function(){ ${scriptBody} }).call(undefined);`, ctx);
 
     expect(ctx.__coreLibRan).toBe(true);
+  });
+});
+
+/**
+ * The frame's `script-src`: built from the document `buildSandboxedHtml`
+ * returns, it lists exactly the inline scripts and handlers that document
+ * holds. The browser enforcing it is `browser/html-page-own-scripts.browser.ts`.
+ */
+describe('buildSandboxedHtml: the scripts a page may run', () => {
+  const policyOf = (doc: string) => {
+    const meta = new DOMParser().parseFromString(doc, 'text/html').querySelector('meta[http-equiv="Content-Security-Policy"]');
+    return meta?.getAttribute('content') ?? '';
+  };
+  const scriptSrcOf = (doc: string) => (policyOf(doc).split('; ').find((d) => d.startsWith('script-src ')) ?? '').split(' ').slice(1);
+  const hash = (text: string) => `'sha256-${createHash('sha256').update(text, 'utf8').digest('base64')}'`;
+  /** What the returned document holds, read independently of the builder: every script's text and every on… value. */
+  const codeIn = (doc: string) => {
+    const parsed = new DOMParser().parseFromString(doc, 'text/html');
+    const all = Array.from(parsed.querySelectorAll('*'));
+    return {
+      scripts: all.filter((el) => el.localName === 'script').map((el) => el.textContent ?? ''),
+      handlers: all.flatMap((el) => Array.from(el.attributes).filter((a) => a.name.startsWith('on')).map((a) => a.value)),
+    };
+  };
+  const build = (body: string, extra: Partial<Parameters<typeof buildSandboxedHtml>[0]> = {}) =>
+    buildSandboxedHtml({ title: 'Page', libModuleSources: [], bodyHtml: sanitizeAgentHtml(body), ...extra });
+
+  it('lists the hash of the runtime and of every page script, and nothing that admits other code', () => {
+    const doc = build('<p id="a"></p><script>document.getElementById("a").textContent = "one";</script><script>window.two = 2;</script>', {
+      toolBridge: { documentId: 'doc-1' },
+      branch: 'main',
+    });
+    const { scripts, handlers } = codeIn(doc);
+    expect(scripts).toHaveLength(3);
+    expect(handlers).toEqual([]);
+    expect(scriptSrcOf(doc).sort()).toEqual(scripts.map(hash).sort());
+    expect(scriptSrcOf(doc)).not.toContain("'unsafe-inline'");
+    expect(policyOf(doc)).not.toContain("'strict-dynamic'");
+    expect(policyOf(doc)).not.toContain("'unsafe-eval'");
+    expect(policyOf(doc)).not.toContain("'unsafe-hashes'");
+    // The fixed directives are unchanged.
+    expect(policyOf(doc)).toBe(
+      `default-src 'none'; script-src ${scriptSrcOf(doc).join(' ')}; style-src 'unsafe-inline'; img-src data:; font-src data:; connect-src 'none'; form-action 'none'; base-uri 'none'; frame-src 'none'`,
+    );
+  });
+
+  it("admits each inline handler by its hash under 'unsafe-hashes', once per distinct text", () => {
+    const doc = build('<button onclick="mark(1)">a</button><button onclick="mark(1)">b</button><svg><rect onmouseover="mark(2)"/></svg>');
+    const { scripts, handlers } = codeIn(doc);
+    expect(handlers).toEqual(['mark(1)', 'mark(1)', 'mark(2)']);
+    const src = scriptSrcOf(doc);
+    expect(src[0]).toBe("'unsafe-hashes'");
+    expect(src.slice(1).sort()).toEqual([...new Set([...scripts, ...handlers])].map(hash).sort());
+    expect(src).toContain(hash('mark(1)'));
+    expect(src).toContain(hash('mark(2)'));
+  });
+
+  it('follows the document: the same page with one script changed lists the changed hash, and not the old one', () => {
+    const before = scriptSrcOf(build('<script>window.v = 1;</script>'));
+    const after = scriptSrcOf(build('<script>window.v = 2;</script>'));
+    expect(before).toContain(hash('window.v = 1;'));
+    expect(after).toContain(hash('window.v = 2;'));
+    expect(after).not.toContain(hash('window.v = 1;'));
+  });
+
+  it('hashes a script as the text the frame will hold, entities and escapes included', () => {
+    // The runtime's `</script>` is escaped in what is emitted; the hash is of that, not of the library as given.
+    const doc = buildSandboxedHtml({ title: 'Page', libModuleSources: ['const s = "</script>";'], bodyHtml: '' });
+    const [runtime] = codeIn(doc).scripts;
+    expect(runtime).toContain('"<\\/script>"');
+    expect(scriptSrcOf(doc)).toEqual([hash(runtime!)]);
+  });
+
+  it('lists a script a <template> holds: it is in the source, and runs when the page stamps it', () => {
+    const doc = build('<template id="t"><script>window.stamped = true;</script></template>');
+    expect(scriptSrcOf(doc)).toContain(hash('window.stamped = true;'));
+  });
+
+  it("refuses every script in an email body, whose frame runs none: script-src 'none'", () => {
+    const doc = buildSandboxedHtml({ title: 'Message', libModuleSources: [], includeRuntime: false, bodyHtml: '<p>Hello</p>' });
+    expect(scriptSrcOf(doc)).toEqual(["'none'"]);
   });
 });
 

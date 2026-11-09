@@ -1,5 +1,5 @@
 /**
- * SHA-256 (FIPS 180-4) of a string's UTF-8 bytes, as lowercase hex.
+ * SHA-256 (FIPS 180-4) of a string's UTF-8 bytes, as lowercase hex or base64.
  *
  * Synchronous and dependency-free, so the same digest is derivable in any
  * browser context and on the server. `crypto.subtle` is not that: a browser
@@ -22,6 +22,20 @@ const utf8 = new TextEncoder();
 
 /** The digest of `text` exactly as given, nothing trimmed or normalised (a lone surrogate is U+FFFD, as `TextEncoder` writes it). */
 export function sha256Hex(text: string): string {
+  return Array.from(digest(text), (x) => x.toString(16).padStart(8, '0')).join('');
+}
+
+/** The same digest as {@link sha256Hex}, in standard padded base64: the form a Content-Security-Policy hash source takes. */
+export function sha256Base64(text: string): string {
+  let binary = '';
+  for (const word of digest(text)) {
+    binary += String.fromCharCode(word >>> 24, (word >>> 16) & 0xff, (word >>> 8) & 0xff, word & 0xff);
+  }
+  return btoa(binary);
+}
+
+/** The digest's eight 32-bit words. */
+function digest(text: string): Uint32Array {
   const bytes = utf8.encode(text);
   const bitLength = bytes.length * 8;
   // The message, a 1 bit, zeros, and the 64-bit length: a whole number of 64-byte blocks.
@@ -64,5 +78,5 @@ export function sha256Hex(text: string): string {
       h[i] = h[i]! + x;
     });
   }
-  return Array.from(h, (x) => x.toString(16).padStart(8, '0')).join('');
+  return h;
 }

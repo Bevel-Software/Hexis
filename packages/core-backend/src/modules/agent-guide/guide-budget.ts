@@ -61,10 +61,13 @@ export const SECTION_TOKEN_BUDGETS: Readonly<Record<string, number>> = Object.fr
   'tool-manuals': SECTION_TOKEN_BUDGET,
   // The page contract is long by nature (the frame, the bridge, the link
   // rules, pages that load live data), and an agent fetches it only to build
-  // a page. 5,600 since a page reaches platform tools only and an Allow is
-  // remembered by the page's content (two rules a page author must know);
-  // 5,500 before.
-  'html-views': 5_600,
+  // a page. 5,650 since only code written in the page runs (a handler set
+  // through `innerHTML` no longer does, which breaks a common way of writing
+  // a page) and an Allow covers that code but not the files it reads; two
+  // restatements were cut to make part of the room. 5,600 since a page
+  // reaches platform tools only and an Allow is remembered by the page's
+  // content; 5,500 before.
+  'html-views': 5_650,
   conventions: SECTION_TOKEN_BUDGET,
   'new-knowledge-base': SECTION_TOKEN_BUDGET,
 });
