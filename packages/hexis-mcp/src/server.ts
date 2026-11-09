@@ -505,9 +505,12 @@ export async function createHexisMcpServer(
    */
   let signInRefused: string | null = null;
   let announceSignInRefused = (): void => {};
+  // An embedding host's own listener is told as well, never replaced.
+  const hostSignInEnded = config.onSignInEnded;
   const reportSignInRefused = (sentence: string): void => {
     signInRefused = sentence;
     announceSignInRefused();
+    hostSignInEnded?.(sentence);
   };
   if (config.renewConnectionKey) config.onSignInEnded = reportSignInRefused;
   const {
@@ -1122,7 +1125,7 @@ export async function createHexisMcpServer(
       config.onConnectionKeyRenewed = undefined;
     }
     if (config.onSignInEnded === reportSignInRefused) {
-      config.onSignInEnded = undefined;
+      config.onSignInEnded = hostSignInEnded;
     }
     // Discovery now runs in the BACKGROUND, so teardown can land in the
     // middle of it — mid-download, mid-spawn. `closed` is already true, so
@@ -1283,6 +1286,8 @@ export async function createHexisMcpServer(
       // the manual between its deregister and its register, where a repository
       // lookup finds nothing.
       while (reregisterInProgress) await reregisterInProgress;
+      // The sign-in may have ended while this call waited.
+      if (signInRefused !== null) throw new McpError(ErrorCode.InternalError, signInRefused);
       // Shutdown can land while a call waits here, and `shutdown` waits only
       // for the re-registration, not for callers parked behind it. Dispatching
       // now would run against a client being torn down, so the caller gets the

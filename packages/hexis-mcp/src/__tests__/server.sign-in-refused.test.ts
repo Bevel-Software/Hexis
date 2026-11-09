@@ -200,6 +200,33 @@ describe('a sign-in the workspace refused for good', () => {
     }
   });
 
+  it('an embedding host that set onSignInEnded hears the sentence once too, and has its listener back after shutdown', { timeout: 60_000 }, async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const renew = vi.fn(async (): Promise<{ token: string }> => {
+      throw new SignInRefusedError(SENTENCE);
+    });
+    const heard: string[] = [];
+    const host = (sentence: string): void => {
+      heard.push(sentence);
+    };
+    refused.add('tok-0');
+    const config: HexisMcpConfig = { baseUrl: base, connectionKey: 'tok-0', renewConnectionKey: renew, onSignInEnded: host };
+    const handle = await createHexisMcpServer(config, '0.0.0', { catalogCheck: { minIntervalMs: 0 } });
+    const client = new Client({ name: 'probe', version: '0.0.0' }, { capabilities: {} });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await handle.server.connect(serverTransport);
+    await client.connect(clientTransport);
+    try {
+      const listing = await client.listTools();
+      expect(listing.tools.map((t) => t.name)).toEqual([DISCOVERY_NOTICE_TOOL]);
+      expect(heard).toEqual([SENTENCE]);
+    } finally {
+      await client.close();
+      await handle.shutdown();
+    }
+    expect(config.onSignInEnded).toBe(host);
+  });
+
   it('leaves a server started with a connection key exactly as it was: no sign-in to end', { timeout: 60_000 }, async () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
     const config: HexisMcpConfig = { baseUrl: base, connectionKey: 'bevel_key' };

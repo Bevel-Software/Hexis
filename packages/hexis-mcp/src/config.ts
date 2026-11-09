@@ -46,10 +46,12 @@ export interface HexisMcpConfig {
    */
   onConnectionKeyRenewed?: (token: string) => void | Promise<void>;
   /**
-   * OAuth mode only, set by the server before its first read: called ONCE, with the
-   * sentence to show, when `renewConnectionKey` failed with a
-   * `SignInRefusedError`. From then on this config renews nothing, and the
-   * server answers every listing with that sentence.
+   * OAuth mode only: called ONCE, with the sentence to show, when
+   * `renewConnectionKey` failed with a `SignInRefusedError`. From then on this
+   * config renews nothing, and the server answers every listing with that
+   * sentence. An embedding host may set it before creating the server: the
+   * server wraps it (its own handler runs first, then the host's) and puts it
+   * back when it shuts down.
    */
   onSignInEnded?: (sentence: string) => void;
 }

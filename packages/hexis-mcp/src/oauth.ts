@@ -426,7 +426,8 @@ const STORE_LOCK_RELEASE_MARGIN_MS = 2 * STORE_LOCK_HEARTBEAT_MS;
  * exception is a lock that cannot be created at all: a failure other than
  * "it exists" is retried for STORE_LOCK_CREATE_RETRY_MS, and only one that
  * persists (an unwritable directory) is skipped, because a lock that can never
- * be taken must not cost the person their tools.
+ * be taken must not cost the person their tools. A stale lock whose removal
+ * keeps failing for as long (another user's file) is skipped the same way.
  *
  * The heartbeat and the release both act on the file this holder CREATED,
  * never on whatever sits at the path: the heartbeat touches it through the
@@ -446,6 +447,7 @@ async function withStoreLock<T>(baseUrl: string, agent: AgentIdentity | null, fn
   const lockFile = `${oauthStorePath(baseUrl, agent)}.lock`;
   let lock: FileHandle | null = null;
   let createFailingSince: number | null = null;
+  let staleRemoveFailingSince: number | null = null;
   await fs.mkdir(path.dirname(lockFile), { recursive: true, mode: 0o700 }).catch(() => {});
   for (;;) {
     try {
@@ -470,7 +472,21 @@ async function withStoreLock<T>(baseUrl: string, agent: AgentIdentity | null, fn
       // judging the same dead lock must not have the slower one remove the
       // lock the faster one has just taken.
       const again = await fs.stat(lockFile).then((stat) => stat.mtimeMs, () => null);
-      if (again === seen) await fs.rm(lockFile, { force: true }).catch(() => {});
+      if (again !== seen) continue;
+      const removed = await fs.rm(lockFile, { force: true }).then(
+        () => true,
+        () => false,
+      );
+      if (removed) {
+        staleRemoveFailingSince = null;
+        continue;
+      }
+      // A stale lock this process cannot remove (another user's file, a
+      // read-only directory) is a lock that can never be taken: the same
+      // budget as a lock that cannot be created, then go ahead without it.
+      staleRemoveFailingSince ??= Date.now();
+      if (Date.now() - staleRemoveFailingSince >= STORE_LOCK_CREATE_RETRY_MS) break;
+      await pause(STORE_LOCK_POLL_MS);
       continue;
     }
     await pause(STORE_LOCK_POLL_MS);
@@ -559,10 +575,10 @@ async function parseTokenResponse(res: Response, url: string): Promise<TokenResp
 const TRANSIENT_TOKEN_ERRORS = new Set(['temporarily_unavailable', 'server_error']);
 
 /**
- * One refresh grant. `null` — not a throw — on a 400/401: an unknown,
- * revoked or expired refresh token is the EXPECTED way a stored sign-in dies,
- * a refusal for good. Anything else throws, a 400/401 naming a transient error
- * included, because a 500 from the token endpoint is not a reason to bother a
+ * One refresh grant. `null` — not a throw — on a 400/401 carrying an OAuth
+ * error: an unknown, revoked or expired refresh token is the EXPECTED way a
+ * stored sign-in dies, a refusal for good. Anything else throws, a 400/401
+ * naming a transient error or carrying no OAuth error at all included, because a 500 from the token endpoint is not a reason to bother a
  * human with a browser tab, nor to give up on a sign-in that may still work.
  */
 export async function refreshAccessToken(
@@ -579,6 +595,15 @@ export async function refreshAccessToken(
     const error = ((await res.json().catch(() => null)) as { error?: unknown } | null)?.error;
     if (typeof error === 'string' && TRANSIENT_TOKEN_ERRORS.has(error)) {
       throw new OAuthError(`The token endpoint at ${tokenEndpoint} could not refresh the sign-in just now (${error}).`);
+    }
+    // Only an OAuth error body is the workspace refusing the token. A 400/401
+    // without one (a proxy or a login page answering in its place) says
+    // nothing about the sign-in, so it is retried like a 5xx, not ended.
+    if (typeof error !== 'string') {
+      throw new OAuthError(
+        `The token endpoint at ${tokenEndpoint} answered HTTP ${res.status} without an OAuth error; ` +
+          'something other than the workspace may have answered for it.',
+      );
     }
     return null;
   }

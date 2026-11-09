@@ -6,6 +6,8 @@ import {
   fetchAllManuals,
   type HexisMcpConfig,
 } from '../index.js';
+/** The retry cadence after a failed proactive renewal, as renewal.ts sets it. */
+import { RETRY_AFTER_FAILURE_MS as RETRY_MS } from '../renewal.js';
 
 /**
  * A sign-in the workspace refused for good, reached the way a caller reaches
@@ -16,8 +18,6 @@ import {
 
 const SENTENCE = 'The workspace refused this sign-in: restart hexis-mcp to sign in through your browser again.';
 
-/** The once-a-minute retry after a failed proactive renewal. */
-const RETRY_MS = 60_000;
 
 afterEach(() => {
   vi.useRealTimers();

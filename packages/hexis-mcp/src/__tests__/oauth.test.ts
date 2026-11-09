@@ -547,15 +547,20 @@ describe('refresh path', () => {
     }
   });
 
-  it('refreshAccessToken returns null on 400/401 and throws on anything else unexpected', async () => {
-    const refused = await stubAuthority({ refreshGrant: () => ({ status: 401 }) });
+  it('refreshAccessToken returns null on a 400/401 with an OAuth error and throws on anything else unexpected', async () => {
+    const refused = await stubAuthority({ refreshGrant: () => ({ status: 401, body: { error: 'invalid_grant' } }) });
     const broken = await stubAuthority({ refreshGrant: () => ({ status: 500 }) });
+    const proxied = await stubAuthority({ refreshGrant: () => ({ status: 401 }) });
     try {
       expect(await refreshAccessToken(`${refused.base}/token`, 'c1', 'r1')).toBeNull();
       await expect(refreshAccessToken(`${broken.base}/token`, 'c1', 'r1')).rejects.toThrow(/HTTP 500/);
+      // No OAuth error body: something else answered for the endpoint, which
+      // says nothing about the sign-in, so it is not a refusal for good.
+      await expect(refreshAccessToken(`${proxied.base}/token`, 'c1', 'r1')).rejects.toThrow(/without an OAuth error/);
     } finally {
       await refused.close();
       await broken.close();
+      await proxied.close();
     }
   });
 });
@@ -1014,6 +1019,28 @@ describe('one sign-in shared by every process of an agent', () => {
       await authority.close();
     }
   });
+
+  it('goes ahead without the lock when a stale one cannot be removed, instead of waiting for ever', async () => {
+    const rotation = rotatingRefresh('r-1');
+    const authority = await stubAuthority({ refreshGrant: rotation.grant, localToken: exchangeUnless(new Set()) });
+    const lockFile = `${oauthStorePath(authority.base, agent)}.lock`;
+    try {
+      await writeStoredCredentials(authority.base, { clientId: 'c1', refreshToken: 'r-1' }, agent);
+      // A stale lock this process cannot remove: a directory, which the lock's
+      // non-recursive remove refuses, as it would another user's file.
+      await fs.mkdir(lockFile);
+      const longAgo = new Date(Date.now() - 60_000);
+      await fs.utimes(lockFile, longAgo, longAgo);
+      const startedAt = Date.now();
+      const config = await establishOAuthConfig(authority.base, authority.mcpUrl, { openBrowser: neverOpen, print: quiet, agent });
+      expect(config.connectionKey).toMatch(/^int-for-/);
+      expect(refreshes(authority)).toHaveLength(1);
+      expect(Date.now() - startedAt).toBeLessThan(10_000);
+    } finally {
+      await fs.rm(lockFile, { recursive: true, force: true });
+      await authority.close();
+    }
+  }, 20_000);
 
   it('never goes ahead while a live sibling holds the lock, however long its refresh takes', async () => {
     const rotation = rotatingRefresh('r-1');
