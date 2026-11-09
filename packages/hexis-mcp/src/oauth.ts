@@ -341,6 +341,20 @@ export async function writeStoredCredentials(
 const STORE_LOCK_STALE_MS = 30_000;
 const STORE_LOCK_HEARTBEAT_MS = 5_000;
 const STORE_LOCK_POLL_MS = 100;
+/**
+ * How long a lock that fails to be created for any reason but "it exists" is
+ * retried before the process goes ahead without it. Covers the brief refusals
+ * (Windows' EPERM on a lock still delete-pending from its last holder, a
+ * moment of EMFILE) and gives up on a directory that will never take one.
+ */
+const STORE_LOCK_CREATE_RETRY_MS = 2_000;
+/**
+ * The release removes the lock file only if no gap between this holder's
+ * heartbeats came within this margin of STORE_LOCK_STALE_MS: a holder that
+ * went that long untouched (a frozen process) may have been taken over, and
+ * leaves the path alone rather than risk removing a sibling's lock.
+ */
+const STORE_LOCK_RELEASE_MARGIN_MS = 2 * STORE_LOCK_HEARTBEAT_MS;
 
 const pause = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -354,26 +368,42 @@ const pause = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
  * A waiter never runs `fn` while another process holds the lock: it waits
  * until the lock is released, or until its file has gone STORE_LOCK_STALE_MS
  * without the holder's heartbeat (a crashed holder) and is removed. The one
- * exception is a lock that cannot be created at all (an unwritable
- * directory): it is skipped, because a lock that can never be taken must not
- * cost the person their tools.
+ * exception is a lock that cannot be created at all: a failure other than
+ * "it exists" is retried for STORE_LOCK_CREATE_RETRY_MS, and only one that
+ * persists (an unwritable directory) is skipped, because a lock that can never
+ * be taken must not cost the person their tools.
  *
  * The heartbeat and the release both act on the file this holder CREATED,
  * never on whatever sits at the path: the heartbeat touches it through the
  * handle that created it, and the release removes the path only while it is
- * still that file. A holder that was paused past STORE_LOCK_STALE_MS and taken
- * over therefore neither keeps the replacement lock alive nor removes it.
+ * still that file AND this holder's heartbeat never lapsed long enough for a
+ * sibling to judge it stale (STORE_LOCK_RELEASE_MARGIN_MS). A lock this holder
+ * cannot vouch for is left for the stale takeover instead, which costs a
+ * waiter time, never a second refresh.
+ *
+ * The one thing no lock file can rule out is a process frozen for seconds
+ * between two consecutive steps of its own, here or in a waiter's takeover;
+ * an operating-system lock would, and Node offers none without a native
+ * dependency. A refusal that follows such a collision re-reads the store
+ * (`storedAccessToken`), so the sign-in is not lost to it.
  */
 async function withStoreLock<T>(baseUrl: string, agent: AgentIdentity | null, fn: () => Promise<T>): Promise<T> {
   const lockFile = `${oauthStorePath(baseUrl, agent)}.lock`;
   let lock: FileHandle | null = null;
+  let createFailingSince: number | null = null;
   await fs.mkdir(path.dirname(lockFile), { recursive: true, mode: 0o700 }).catch(() => {});
   for (;;) {
     try {
       lock = await fs.open(lockFile, 'wx', 0o600);
       break;
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') break;
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') {
+        createFailingSince ??= Date.now();
+        if (Date.now() - createFailingSince >= STORE_LOCK_CREATE_RETRY_MS) break;
+        await pause(STORE_LOCK_POLL_MS);
+        continue;
+      }
+      createFailingSince = null;
     }
     const seen = await fs.stat(lockFile).then(
       (stat) => stat.mtimeMs,
@@ -391,12 +421,20 @@ async function withStoreLock<T>(baseUrl: string, agent: AgentIdentity | null, fn
     await pause(STORE_LOCK_POLL_MS);
   }
   const held = lock;
+  let lastTouch = Date.now();
+  let longestGap = 0;
   // The pid is for a person looking at a lock left behind; nothing reads it.
   await held?.writeFile(String(process.pid)).catch(() => {});
   const heartbeat = held
     ? setInterval(() => {
-        const now = new Date();
-        held.utimes(now, now).catch(() => {});
+        const at = Date.now();
+        held.utimes(new Date(at), new Date(at)).then(
+          () => {
+            longestGap = Math.max(longestGap, at - lastTouch);
+            lastTouch = at;
+          },
+          () => {}, // not touched: the gap keeps growing, and the release sees it
+        );
       }, STORE_LOCK_HEARTBEAT_MS)
     : null;
   heartbeat?.unref();
@@ -405,11 +443,13 @@ async function withStoreLock<T>(baseUrl: string, agent: AgentIdentity | null, fn
   } finally {
     if (heartbeat) clearInterval(heartbeat);
     if (held) {
+      longestGap = Math.max(longestGap, Date.now() - lastTouch);
       // Closed before the removal: Windows keeps a removed file that is still
       // open as "delete pending", and a waiter creating the lock then fails.
       const mine = await held.stat({ bigint: true }).catch(() => null);
       await held.close().catch(() => {});
-      const there = await fs.stat(lockFile, { bigint: true }).catch(() => null);
+      const vouched = longestGap < STORE_LOCK_STALE_MS - STORE_LOCK_RELEASE_MARGIN_MS;
+      const there = vouched ? await fs.stat(lockFile, { bigint: true }).catch(() => null) : null;
       if (mine && there && mine.ino === there.ino && mine.dev === there.dev) {
         await fs.rm(lockFile, { force: true }).catch(() => {});
       }

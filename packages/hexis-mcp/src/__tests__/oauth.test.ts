@@ -1084,6 +1084,66 @@ describe('one sign-in shared by every process of an agent', () => {
     }
   }, 20_000);
 
+  it('retries a lock that briefly cannot be created, and refreshes holding it', async () => {
+    const rotation = rotatingRefresh('r-1');
+    let lockFile = '';
+    let lockedAtRefresh: boolean | null = null;
+    const authority = await stubAuthority({
+      refreshGrant: (params) => {
+        lockedAtRefresh = fsSync.existsSync(lockFile);
+        return rotation.grant(params);
+      },
+      localToken: exchangeUnless(new Set()),
+    });
+    lockFile = `${oauthStorePath(authority.base, agent)}.lock`;
+    // Windows answers EPERM while the last holder's lock is still delete-pending.
+    const open = fs.open.bind(fs);
+    let refusals = 2;
+    const spy = vi.spyOn(fs, 'open').mockImplementation(async (file, ...rest) => {
+      if (String(file) === lockFile && refusals-- > 0) {
+        throw Object.assign(new Error('EPERM: operation not permitted'), { code: 'EPERM' });
+      }
+      return open(file, ...rest);
+    });
+    try {
+      await writeStoredCredentials(authority.base, { clientId: 'c1', refreshToken: 'r-1' }, agent);
+      const config = await establishOAuthConfig(authority.base, authority.mcpUrl, { openBrowser: neverOpen, print: quiet, agent });
+      expect(config.connectionKey).toBe('int-for-a-1');
+      expect(refusals).toBeLessThan(0);
+      expect(lockedAtRefresh).toBe(true);
+    } finally {
+      spy.mockRestore();
+      await authority.close();
+    }
+  });
+
+  it('a holder whose heartbeat lapsed near the stale window leaves the lock for the takeover, not the path', async () => {
+    const rotation = rotatingRefresh('r-1');
+    const realNow = Date.now.bind(Date);
+    const clock: { spy?: { mockRestore: () => void } } = {};
+    const authority = await stubAuthority({
+      refreshGrant: (params) => {
+        // The holder froze mid-refresh: 40 s pass with no heartbeat, long
+        // enough that a sibling may have judged the lock stale and taken it.
+        clock.spy = vi.spyOn(Date, 'now').mockImplementation(() => realNow() + 40_000);
+        return rotation.grant(params);
+      },
+      localToken: exchangeUnless(new Set()),
+    });
+    const lockFile = `${oauthStorePath(authority.base, agent)}.lock`;
+    try {
+      await writeStoredCredentials(authority.base, { clientId: 'c1', refreshToken: 'r-1' }, agent);
+      const config = await establishOAuthConfig(authority.base, authority.mcpUrl, { openBrowser: neverOpen, print: quiet, agent });
+      expect(config.connectionKey).toBe('int-for-a-1');
+      // Not removed by path: if a sibling had taken it over, that would be the sibling's lock.
+      expect(fsSync.existsSync(lockFile)).toBe(true);
+    } finally {
+      clock.spy?.mockRestore();
+      await fs.rm(lockFile, { force: true });
+      await authority.close();
+    }
+  });
+
   it('takes over a lock left behind by a process that died holding it', async () => {
     const rotation = rotatingRefresh('r-1');
     const authority = await stubAuthority({ refreshGrant: rotation.grant, localToken: exchangeUnless(new Set()) });
