@@ -1,10 +1,10 @@
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
-import fs from 'node:fs/promises';
+import fs, { type FileHandle } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import type { HexisMcpConfig, RenewedGrant } from './config.js';
+import { SignInRefusedError, type HexisMcpConfig, type RenewedGrant } from './config.js';
 import { agentDisplayName, agentStoreKey, registrationName, type AgentIdentity } from './handshake.js';
 import { hexisHome, hostKey } from './materialize.js';
 import { scheduleProactiveRenewal } from './renewal.js';
@@ -19,8 +19,12 @@ import { scheduleProactiveRenewal } from './renewal.js';
  *   1. DISCOVER — poke the deployment's MCP endpoint unauthenticated; its 401
  *      names the protected-resource metadata (RFC 9728), which names the
  *      authorization server, whose own metadata names the three endpoints.
- *   2. REFRESH — a prior sign-in left `{clientId, refreshToken}` on disk; a
- *      refresh grant skips the browser entirely.
+ *   2. REUSE OR REFRESH — a prior sign-in left `{clientId, refreshToken}` on
+ *      disk, with the access token it last minted and when that expires. A
+ *      live access token is reused as it is; otherwise a refresh grant renews
+ *      it. Either way the browser stays shut. Every process of one agent on
+ *      one machine shares this store, so both happen under a file lock (see
+ *      `withStoreLock`; best effort where the lock cannot be created).
  *   3. BROWSER — first run (or a dead refresh token): bind a loopback
  *      redirect, register a client for exactly that redirect (RFC 7591),
  *      send the person's browser to the authorization endpoint with PKCE,
@@ -39,6 +43,17 @@ import { scheduleProactiveRenewal } from './renewal.js';
 
 /** Same contract as DeploymentError: a message the person can act on, printed without a stack. */
 export class OAuthError extends Error {}
+
+/** The local-token exchange refused the access token it was handed (401/403): that token is dead. */
+class LocalTokenRejectedError extends OAuthError {}
+
+/**
+ * What a process says, on stderr and in its `hexis_unavailable` notice, once
+ * the workspace has refused its sign-in for good.
+ */
+const SIGN_IN_REFUSED_SENTENCE =
+  'The workspace refused this sign-in (revoked, or expired), so hexis-mcp has stopped renewing it: ' +
+  'restart hexis-mcp to sign in through your browser again.';
 
 /** Bounded like deployment.ts's requests: a wedged endpoint fails with a message, not a hang. */
 const FETCH_TIMEOUT_MS = 15_000;
@@ -226,6 +241,16 @@ export async function discoverAuthServer(mcpUrl: string): Promise<AuthServerEndp
 export interface StoredOAuthCredentials {
   clientId: string;
   refreshToken: string;
+  /**
+   * The OAuth access token the last grant minted, so a sibling process (Cursor
+   * starts one server per window) reuses it instead of spending the rotating
+   * refresh token again. Present only together with `accessExpiresAt`; a store
+   * written before this field existed has neither, and reads as one whose
+   * access token is spent.
+   */
+  accessToken?: string;
+  /** When `accessToken` expires, in ms since the epoch. */
+  accessExpiresAt?: number;
 }
 
 /**
@@ -243,22 +268,69 @@ export function oauthStorePath(baseUrl: string, agent: AgentIdentity | null = nu
 /**
  * A corrupt, unreadable or wrong-shaped store is an ABSENT one: the browser
  * flow rebuilds it, and nothing a person can do to this file should wedge the
- * server behind an unreadable parse error.
+ * server behind an unreadable parse error. An access token without a usable
+ * expiry is dropped, not trusted: the refresh token alone still signs in.
  */
 export async function readStoredCredentials(
   baseUrl: string,
   agent: AgentIdentity | null = null,
 ): Promise<StoredOAuthCredentials | null> {
+  const read = await readStore(baseUrl, agent);
+  return read === STORE_UNREADABLE ? null : read;
+}
+
+/**
+ * A store the file system refused to read: anything but a missing file, once
+ * a refusal with one of STORE_HOLD_RETRY_CODES has been retried for
+ * STORE_HOLD_RETRY_MS (Windows antivirus or the indexer holding it), so a
+ * store held for a moment is not read as absent and answered with a browser
+ * tab. A hold that outlasts the retry still is: absent to
+ * `readStoredCredentials` and to a process with no kept sign-in. A sign-in
+ * this process kept because the store could not take it must not be dropped
+ * for it.
+ */
+const STORE_UNREADABLE = Symbol('store unreadable');
+
+async function readStore(
+  baseUrl: string,
+  agent: AgentIdentity | null,
+): Promise<StoredOAuthCredentials | null | typeof STORE_UNREADABLE> {
+  let raw: string;
+  const readFailingSince = Date.now();
+  for (;;) {
+    try {
+      raw = await fs.readFile(oauthStorePath(baseUrl, agent), 'utf8');
+      break;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code ?? '';
+      if (code === 'ENOENT') return null;
+      if (!STORE_HOLD_RETRY_CODES.has(code) || Date.now() - readFailingSince >= STORE_HOLD_RETRY_MS) {
+        return STORE_UNREADABLE;
+      }
+      await pause(STORE_LOCK_POLL_MS);
+    }
+  }
   try {
-    const raw = await fs.readFile(oauthStorePath(baseUrl, agent), 'utf8');
-    const parsed = JSON.parse(raw) as { clientId?: unknown; refreshToken?: unknown };
+    const parsed = JSON.parse(raw) as {
+      clientId?: unknown;
+      refreshToken?: unknown;
+      accessToken?: unknown;
+      accessExpiresAt?: unknown;
+    };
     if (
       typeof parsed?.clientId === 'string' &&
       parsed.clientId.length > 0 &&
       typeof parsed?.refreshToken === 'string' &&
       parsed.refreshToken.length > 0
     ) {
-      return { clientId: parsed.clientId, refreshToken: parsed.refreshToken };
+      const access =
+        typeof parsed.accessToken === 'string' &&
+        parsed.accessToken.length > 0 &&
+        typeof parsed.accessExpiresAt === 'number' &&
+        Number.isFinite(parsed.accessExpiresAt)
+          ? { accessToken: parsed.accessToken, accessExpiresAt: parsed.accessExpiresAt }
+          : {};
+      return { clientId: parsed.clientId, refreshToken: parsed.refreshToken, ...access };
     }
   } catch {
     // fall through: absent
@@ -267,11 +339,26 @@ export async function readStoredCredentials(
 }
 
 /**
+ * The refusals a rename over the store, or a read of it, meets for a moment
+ * on Windows, while antivirus, the indexer or a sibling's read holds the file
+ * open, and how long they are retried (polled as `withStoreLock`'s create
+ * retry is).
+ */
+const STORE_HOLD_RETRY_CODES = new Set(['EPERM', 'EBUSY', 'EACCES']);
+const STORE_HOLD_RETRY_MS = 2_000;
+
+const pause = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
  * Owner-only, the same posture materialize.ts documents for the plugin trees:
  * the refresh token is a durable credential for the person's workspace access
- * and belongs to no other local user. `writeFile`'s mode only applies on
- * creation, so the chmod re-asserts it for a pre-existing file — with the
- * same Windows pass the rest of the package gives chmod.
+ * and belongs to no other local user. The file is written beside the store and
+ * renamed over it, so a sibling process reading at that moment sees the old
+ * sign-in or the new one, never half of one (which it would read as absent,
+ * and answer with a browser tab). The chmod re-asserts the mode, with the same
+ * Windows pass the rest of the package gives chmod. A rename refused with one
+ * of STORE_HOLD_RETRY_CODES is retried for STORE_HOLD_RETRY_MS before the
+ * write fails.
  */
 export async function writeStoredCredentials(
   baseUrl: string,
@@ -280,10 +367,149 @@ export async function writeStoredCredentials(
 ): Promise<void> {
   const file = oauthStorePath(baseUrl, agent);
   await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
-  await fs.writeFile(file, `${JSON.stringify(credentials)}\n`, { mode: 0o600 });
-  await fs.chmod(file, 0o600).catch((err: unknown) => {
-    if (process.platform !== 'win32') throw err;
-  });
+  const staged = `${file}.${process.pid}.${b64url(randomBytes(6))}.tmp`;
+  try {
+    await fs.writeFile(staged, `${JSON.stringify(credentials)}\n`, { mode: 0o600 });
+    await fs.chmod(staged, 0o600).catch((err: unknown) => {
+      if (process.platform !== 'win32') throw err;
+    });
+    const renameFailingSince = Date.now();
+    for (;;) {
+      try {
+        await fs.rename(staged, file);
+        break;
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code ?? '';
+        if (!STORE_HOLD_RETRY_CODES.has(code) || Date.now() - renameFailingSince >= STORE_HOLD_RETRY_MS) throw err;
+        await pause(STORE_LOCK_POLL_MS);
+      }
+    }
+  } catch (err) {
+    await fs.rm(staged, { force: true }).catch(() => {});
+    throw err;
+  }
+}
+
+/**
+ * A lock file untouched for this long was left by a process that died holding
+ * it, and is taken over. A live holder touches it every STORE_LOCK_HEARTBEAT_MS
+ * however long its refresh takes, so a live holder's lock is never judged stale.
+ */
+const STORE_LOCK_STALE_MS = 30_000;
+const STORE_LOCK_HEARTBEAT_MS = 5_000;
+const STORE_LOCK_POLL_MS = 100;
+/**
+ * How long a lock that fails to be created for any reason but "it exists" is
+ * retried before the process goes ahead without it. Covers the brief refusals
+ * (Windows' EPERM on a lock still delete-pending from its last holder, a
+ * moment of EMFILE) and gives up on a directory that will never take one.
+ */
+const STORE_LOCK_CREATE_RETRY_MS = 2_000;
+/**
+ * The release removes the lock file only if no gap between this holder's
+ * heartbeats came within this margin of STORE_LOCK_STALE_MS: a holder that
+ * went that long untouched (a frozen process) may have been taken over, and
+ * leaves the path alone rather than risk removing a sibling's lock.
+ */
+const STORE_LOCK_RELEASE_MARGIN_MS = 2 * STORE_LOCK_HEARTBEAT_MS;
+
+/**
+ * Run `fn` holding this sign-in's lock: `<store>.lock`, created with `O_EXCL`
+ * so exactly one process on the machine holds it. Everything that reads the
+ * store to decide whether to refresh, refreshes, and writes the result runs
+ * inside it, so a refresh is made by one process at a time and the others
+ * find its result in the store instead of presenting the token it retired.
+ *
+ * A waiter never runs `fn` while another process holds the lock: it waits
+ * until the lock is released, or until its file has gone STORE_LOCK_STALE_MS
+ * without the holder's heartbeat (a crashed holder) and is removed. The one
+ * exception is a lock that cannot be created at all: a failure other than
+ * "it exists" is retried for STORE_LOCK_CREATE_RETRY_MS, and only one that
+ * persists (an unwritable directory) is skipped, because a lock that can never
+ * be taken must not cost the person their tools.
+ *
+ * The heartbeat and the release both act on the file this holder CREATED,
+ * never on whatever sits at the path: the heartbeat touches it through the
+ * handle that created it, and the release removes the path only while it is
+ * still that file AND this holder's heartbeat never lapsed long enough for a
+ * sibling to judge it stale (STORE_LOCK_RELEASE_MARGIN_MS). A lock this holder
+ * cannot vouch for is left for the stale takeover instead, which costs a
+ * waiter time, never a second refresh.
+ *
+ * The one thing no lock file can rule out is a process frozen for seconds
+ * between two consecutive steps of its own, here or in a waiter's takeover;
+ * an operating-system lock would, and Node offers none without a native
+ * dependency. A refusal that follows such a collision re-reads the store
+ * (`storedAccessToken`), so the sign-in is not lost to it.
+ */
+async function withStoreLock<T>(baseUrl: string, agent: AgentIdentity | null, fn: () => Promise<T>): Promise<T> {
+  const lockFile = `${oauthStorePath(baseUrl, agent)}.lock`;
+  let lock: FileHandle | null = null;
+  let createFailingSince: number | null = null;
+  await fs.mkdir(path.dirname(lockFile), { recursive: true, mode: 0o700 }).catch(() => {});
+  for (;;) {
+    try {
+      lock = await fs.open(lockFile, 'wx', 0o600);
+      break;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') {
+        createFailingSince ??= Date.now();
+        if (Date.now() - createFailingSince >= STORE_LOCK_CREATE_RETRY_MS) break;
+        await pause(STORE_LOCK_POLL_MS);
+        continue;
+      }
+      createFailingSince = null;
+    }
+    const seen = await fs.stat(lockFile).then(
+      (stat) => stat.mtimeMs,
+      () => null, // released between our attempt and the stat: try again at once
+    );
+    if (seen === null) continue;
+    if (Date.now() - seen > STORE_LOCK_STALE_MS) {
+      // Removed only if it is still the stale file just judged: two waiters
+      // judging the same dead lock must not have the slower one remove the
+      // lock the faster one has just taken.
+      const again = await fs.stat(lockFile).then((stat) => stat.mtimeMs, () => null);
+      if (again === seen) await fs.rm(lockFile, { force: true }).catch(() => {});
+      continue;
+    }
+    await pause(STORE_LOCK_POLL_MS);
+  }
+  const held = lock;
+  let lastTouch = Date.now();
+  let longestGap = 0;
+  // The pid is for a person looking at a lock left behind; nothing reads it.
+  await held?.writeFile(String(process.pid)).catch(() => {});
+  const heartbeat = held
+    ? setInterval(() => {
+        const at = Date.now();
+        held.utimes(new Date(at), new Date(at)).then(
+          () => {
+            longestGap = Math.max(longestGap, at - lastTouch);
+            lastTouch = at;
+          },
+          () => {}, // not touched: the gap keeps growing, and the release sees it
+        );
+      }, STORE_LOCK_HEARTBEAT_MS)
+    : null;
+  heartbeat?.unref();
+  try {
+    return await fn();
+  } finally {
+    if (heartbeat) clearInterval(heartbeat);
+    if (held) {
+      longestGap = Math.max(longestGap, Date.now() - lastTouch);
+      // Closed before the removal: Windows keeps a removed file that is still
+      // open as "delete pending", and a waiter creating the lock then fails.
+      const mine = await held.stat({ bigint: true }).catch(() => null);
+      await held.close().catch(() => {});
+      const vouched = longestGap < STORE_LOCK_STALE_MS - STORE_LOCK_RELEASE_MARGIN_MS;
+      const there = vouched ? await fs.stat(lockFile, { bigint: true }).catch(() => null) : null;
+      if (mine && there && mine.ino === there.ino && mine.dev === there.dev) {
+        await fs.rm(lockFile, { force: true }).catch(() => {});
+      }
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -293,6 +519,8 @@ export async function writeStoredCredentials(
 interface TokenResponse {
   accessToken: string;
   refreshToken?: string;
+  /** From `expires_in`; absent when the server does not say, and then the access token is never shared. */
+  expiresInMs?: number;
 }
 
 async function postForm(url: string, label: string, params: Record<string, string>): Promise<Response> {
@@ -307,6 +535,7 @@ async function parseTokenResponse(res: Response, url: string): Promise<TokenResp
   const body = (await jsonOrExplain(res, url, 'the token endpoint')) as {
     access_token?: unknown;
     refresh_token?: unknown;
+    expires_in?: unknown;
   };
   if (typeof body?.access_token !== 'string' || !body.access_token) {
     throw new OAuthError(`The token endpoint at ${url} answered without an access_token.`);
@@ -314,15 +543,27 @@ async function parseTokenResponse(res: Response, url: string): Promise<TokenResp
   return {
     accessToken: body.access_token,
     refreshToken: typeof body.refresh_token === 'string' && body.refresh_token ? body.refresh_token : undefined,
+    expiresInMs:
+      typeof body.expires_in === 'number' && Number.isFinite(body.expires_in) && body.expires_in > 0
+        ? body.expires_in * 1000
+        : undefined,
   };
 }
 
 /**
- * One refresh grant. `null` — not a throw — on a 400/401: an expired or
- * revoked refresh token is the EXPECTED way a stored sign-in dies, and the
- * caller's answer is the browser, not an error. Anything else unexpected
- * still throws, because a 500 from the token endpoint is not a reason to
- * bother a human with a browser tab.
+ * The two OAuth error codes that say "try again later" rather than "this
+ * token is no good". RFC 6749 defines them for authorization-endpoint
+ * redirects (§4.1.2.1), not token responses (§5.2), but a token endpoint may
+ * still send them, and a 400/401 carrying one is treated as transient.
+ */
+const TRANSIENT_TOKEN_ERRORS = new Set(['temporarily_unavailable', 'server_error']);
+
+/**
+ * One refresh grant. `null` — not a throw — on a 400/401: an unknown,
+ * revoked or expired refresh token is the EXPECTED way a stored sign-in dies,
+ * a refusal for good. Anything else throws, a 400/401 naming a transient error
+ * included, because a 500 from the token endpoint is not a reason to bother a
+ * human with a browser tab, nor to give up on a sign-in that may still work.
  */
 export async function refreshAccessToken(
   tokenEndpoint: string,
@@ -335,7 +576,10 @@ export async function refreshAccessToken(
     client_id: clientId,
   });
   if (res.status === 400 || res.status === 401) {
-    await res.body?.cancel().catch(() => {});
+    const error = ((await res.json().catch(() => null)) as { error?: unknown } | null)?.error;
+    if (typeof error === 'string' && TRANSIENT_TOKEN_ERRORS.has(error)) {
+      throw new OAuthError(`The token endpoint at ${tokenEndpoint} could not refresh the sign-in just now (${error}).`);
+    }
     return null;
   }
   return parseTokenResponse(res, tokenEndpoint);
@@ -397,6 +641,8 @@ export interface BrowserFlowResult {
   clientId: string;
   accessToken: string;
   refreshToken?: string;
+  /** The access token's lifetime, when the token endpoint says (`expires_in`). */
+  expiresInMs?: number;
 }
 
 /**
@@ -534,7 +780,12 @@ export async function authorizeInBrowser(
       );
     }
     const tokens = await parseTokenResponse(tokenRes, endpoints.tokenEndpoint);
-    return { clientId, accessToken: tokens.accessToken, refreshToken: tokens.refreshToken };
+    return {
+      clientId,
+      accessToken: tokens.accessToken,
+      refreshToken: tokens.refreshToken,
+      ...(tokens.expiresInMs !== undefined ? { expiresInMs: tokens.expiresInMs } : {}),
+    };
   } finally {
     server.close();
     server.closeAllConnections?.();
@@ -571,7 +822,7 @@ export async function exchangeForLocalToken(baseUrl: string, accessToken: string
   }
   if (res.status === 401 || res.status === 403) {
     await res.body?.cancel().catch(() => {});
-    throw new OAuthError(
+    throw new LocalTokenRejectedError(
       `The local-token exchange rejected the sign-in (HTTP ${res.status}). ` +
         'Restart hexis-mcp to sign in through your browser again.',
     );
@@ -609,30 +860,229 @@ export interface OAuthModeOptions {
   agent?: AgentIdentity | null;
 }
 
-/** Refresh first — no browser for a machine that already signed in. Browser on a first run or a dead refresh. */
-async function obtainAccessToken(
+/**
+ * A stored access token is reused only while it has at least this long to
+ * live. The internal token it is exchanged for lives no longer than it does
+ * (the deployment binds the two) and is renewed at 80% of that life, so a
+ * margin of minutes keeps a nearly spent token from being exchanged again and
+ * again as it runs out.
+ */
+const ACCESS_REUSE_MARGIN_MS = 5 * 60_000;
+
+/** The stored access token while it may be reused, else null. `distrusted` is one the exchange just rejected. */
+function reusableAccessToken(stored: StoredOAuthCredentials, distrusted?: string): string | null {
+  if (!stored.accessToken || stored.accessExpiresAt === undefined) return null;
+  if (stored.accessToken === distrusted) return null;
+  return stored.accessExpiresAt - Date.now() > ACCESS_REUSE_MARGIN_MS ? stored.accessToken : null;
+}
+
+/** What the store gave: an access token (reused, or freshly granted), no sign-in at all, or one refused for good. */
+type StoredSignIn =
+  | { kind: 'live'; accessToken: string; reused: boolean }
+  | { kind: 'absent' }
+  | { kind: 'refused' };
+
+/** What one grant minted, as the store keeps it. The access token only with a known expiry. */
+function grantedCredentials(
+  clientId: string,
+  refreshToken: string,
+  accessToken: string,
+  expiresInMs: number | undefined,
+  requestedAt: number,
+): StoredOAuthCredentials {
+  return {
+    clientId,
+    refreshToken,
+    ...(expiresInMs !== undefined ? { accessToken, accessExpiresAt: requestedAt + expiresInMs } : {}),
+  };
+}
+
+/**
+ * This process's sign-in, as far as the store cannot hold it. A grant whose
+ * write fails (the store still refuses after the rename retry) is kept here
+ * instead of thrown away: its refresh token is the only live one, the one on
+ * disk was retired by the grant itself. `replaces` is the refresh token the
+ * store held when the grant was decided on (null: none), taken from the read
+ * BEFORE the grant: a read after the failed write may be refused by the same
+ * hold that refused the write. The kept sign-in stands in for exactly that
+ * store, and a store holding anything else (a sibling's newer sign-in, or
+ * this process's own later write) takes over from it.
+ */
+interface SignInKeeper {
+  unsaved: { credentials: StoredOAuthCredentials; replaces: string | null } | null;
+  /** The refresh token the store held at the last `currentSignIn` read (null: none), behind any kept sign-in. */
+  behind: string | null;
+  /** Says once per process that the sign-in could not be saved. */
+  warnUnsaved: (err: unknown) => void;
+}
+
+function signInKeeper(baseUrl: string, agent: AgentIdentity | null, print: (line: string) => void): SignInKeeper {
+  let warned = false;
+  return {
+    unsaved: null,
+    behind: null,
+    warnUnsaved: (err) => {
+      if (warned) return;
+      warned = true;
+      print(
+        `[hexis-mcp] could not save the sign-in to ${oauthStorePath(baseUrl, agent)} ` +
+          `(${err instanceof Error ? err.message : String(err)}); this process keeps using it, ` +
+          'but another hexis-mcp process starting meanwhile may ask you to sign in through your browser again.',
+      );
+    },
+  };
+}
+
+/**
+ * The sign-in this process should act on: the store, unless it still holds
+ * what an unsaved grant replaced. A store that cannot be read says nothing
+ * newer, so a kept sign-in stays in use and `behind` keeps its last value.
+ */
+async function currentSignIn(
+  keeper: SignInKeeper,
+  baseUrl: string,
+  agent: AgentIdentity | null,
+): Promise<StoredOAuthCredentials | null> {
+  const onDisk = await readStore(baseUrl, agent);
+  if (onDisk === STORE_UNREADABLE) return keeper.unsaved?.credentials ?? null;
+  keeper.behind = onDisk?.refreshToken ?? null;
+  if (keeper.unsaved && keeper.unsaved.replaces === keeper.behind) return keeper.unsaved.credentials;
+  keeper.unsaved = null;
+  return onDisk;
+}
+
+/**
+ * Write a grant to the store; when the store cannot take it, keep it for this
+ * process and say so once. `replaces` is the store's refresh token as read
+ * before the grant (`keeper.behind`). Never throws: the grant is live whether
+ * or not the disk could hold it, and losing it would end the sign-in it just
+ * renewed.
+ */
+async function saveGrant(
+  keeper: SignInKeeper,
+  baseUrl: string,
+  agent: AgentIdentity | null,
+  credentials: StoredOAuthCredentials,
+  replaces: string | null,
+): Promise<void> {
+  try {
+    await writeStoredCredentials(baseUrl, credentials, agent);
+    keeper.unsaved = null;
+  } catch (err) {
+    keeper.unsaved = { credentials, replaces };
+    keeper.warnUnsaved(err);
+  }
+}
+
+/**
+ * Refresh `stored` and write what the grant minted to the store BEFORE
+ * anything uses it: a process starting a moment later must find the rotated
+ * refresh token (the one presented here is now retired), and may reuse the
+ * access token. A store that cannot be written keeps the grant in `keeper`
+ * (see `saveGrant`). Null when the workspace refused the refresh for good.
+ */
+async function refreshStored(
+  keeper: SignInKeeper,
+  baseUrl: string,
+  endpoints: AuthServerEndpoints,
+  agent: AgentIdentity | null,
+  stored: StoredOAuthCredentials,
+): Promise<string | null> {
+  const replaces = keeper.behind;
+  const requestedAt = Date.now();
+  const refreshed = await refreshAccessToken(endpoints.tokenEndpoint, stored.clientId, stored.refreshToken);
+  if (!refreshed) return null;
+  await saveGrant(
+    keeper,
+    baseUrl,
+    agent,
+    grantedCredentials(
+      stored.clientId,
+      refreshed.refreshToken ?? stored.refreshToken,
+      refreshed.accessToken,
+      refreshed.expiresInMs,
+      requestedAt,
+    ),
+    replaces,
+  );
+  return refreshed.accessToken;
+}
+
+/**
+ * The stored sign-in's access token, decided under the store lock: the
+ * stored one while it is live, else a refresh. A refusal re-reads the store
+ * ONCE, because a writer that took no lock (an older hexis-mcp, or a sibling
+ * whose lock directory is unwritable) may have written a newer sign-in; that
+ * one is used instead. Nothing newer means the refusal stands.
+ */
+async function storedAccessToken(
+  keeper: SignInKeeper,
+  baseUrl: string,
+  endpoints: AuthServerEndpoints,
+  agent: AgentIdentity | null,
+  distrusted?: string,
+): Promise<StoredSignIn> {
+  return withStoreLock(baseUrl, agent, async (): Promise<StoredSignIn> => {
+    const stored = await currentSignIn(keeper, baseUrl, agent);
+    if (!stored) return { kind: 'absent' };
+    const reusable = reusableAccessToken(stored, distrusted);
+    if (reusable) return { kind: 'live', accessToken: reusable, reused: true };
+    const refreshed = await refreshStored(keeper, baseUrl, endpoints, agent, stored);
+    if (refreshed) return { kind: 'live', accessToken: refreshed, reused: false };
+    const latest = await currentSignIn(keeper, baseUrl, agent);
+    if (!latest || (latest.clientId === stored.clientId && latest.refreshToken === stored.refreshToken)) {
+      return { kind: 'refused' };
+    }
+    const newer = reusableAccessToken(latest, distrusted);
+    if (newer) return { kind: 'live', accessToken: newer, reused: true };
+    const renewed = await refreshStored(keeper, baseUrl, endpoints, agent, latest);
+    return renewed ? { kind: 'live', accessToken: renewed, reused: false } : { kind: 'refused' };
+  });
+}
+
+/**
+ * The stored sign-in exchanged for an internal token, or why there is none.
+ * A REUSED access token that the exchange rejects (revoked on the Audit log
+ * page before it expired) is distrusted and a refresh tried in its place, so
+ * what follows is the refresh token's own verdict, given once.
+ */
+async function exchangeStoredSignIn(
+  keeper: SignInKeeper,
+  baseUrl: string,
+  endpoints: AuthServerEndpoints,
+  agent: AgentIdentity | null,
+): Promise<LocalTokenGrant | 'absent' | 'refused'> {
+  let signIn = await storedAccessToken(keeper, baseUrl, endpoints, agent);
+  if (signIn.kind === 'live' && signIn.reused) {
+    try {
+      return await exchangeForLocalToken(baseUrl, signIn.accessToken);
+    } catch (err) {
+      if (!(err instanceof LocalTokenRejectedError)) throw err;
+      signIn = await storedAccessToken(keeper, baseUrl, endpoints, agent, signIn.accessToken);
+    }
+  }
+  if (signIn.kind !== 'live') return signIn.kind;
+  return exchangeForLocalToken(baseUrl, signIn.accessToken);
+}
+
+/**
+ * The stored sign-in first: no browser for a machine that already signed in,
+ * and none because a sibling process rotated the refresh token (the lock and
+ * the store see to that). The browser opens only when nothing is stored (or
+ * the store stays unreadable past the read retry, see STORE_UNREADABLE) or the
+ * stored sign-in was refused for good.
+ */
+async function obtainGrant(
+  keeper: SignInKeeper,
   baseUrl: string,
   endpoints: AuthServerEndpoints,
   options: OAuthModeOptions,
-): Promise<string> {
+): Promise<LocalTokenGrant> {
   const agent = options.agent ?? null;
-  const stored = await readStoredCredentials(baseUrl, agent);
-  if (stored) {
-    const refreshed = await refreshAccessToken(endpoints.tokenEndpoint, stored.clientId, stored.refreshToken);
-    if (refreshed) {
-      // Rotation: an authorization server may retire the old refresh token
-      // with every grant, so a new one must land on disk before it is needed.
-      if (refreshed.refreshToken && refreshed.refreshToken !== stored.refreshToken) {
-        await writeStoredCredentials(
-          baseUrl,
-          { clientId: stored.clientId, refreshToken: refreshed.refreshToken },
-          agent,
-        );
-      }
-      return refreshed.accessToken;
-    }
-    // An expired/revoked refresh token falls through to a fresh sign-in.
-  }
+  const stored = await exchangeStoredSignIn(keeper, baseUrl, endpoints, agent);
+  if (typeof stored === 'object') return stored;
+  const replaces = keeper.behind;
+  const flowStartedAt = Date.now();
   const flow = await authorizeInBrowser(endpoints, {
     openBrowser: options.noOpen ? () => {} : options.openBrowser,
     print: options.print,
@@ -640,11 +1090,20 @@ async function obtainAccessToken(
     clientName: registrationName(agent, os.hostname()),
     returnTo: agent ? agentDisplayName(agent) : undefined,
   });
-  if (flow.refreshToken) {
-    await writeStoredCredentials(baseUrl, { clientId: flow.clientId, refreshToken: flow.refreshToken }, agent);
+  const refreshToken = flow.refreshToken;
+  if (refreshToken) {
+    await withStoreLock(baseUrl, agent, () =>
+      saveGrant(
+        keeper,
+        baseUrl,
+        agent,
+        grantedCredentials(flow.clientId, refreshToken, flow.accessToken, flow.expiresInMs, flowStartedAt),
+        replaces,
+      ),
+    );
   }
   if (agent) await retirePlainSignIn(baseUrl, endpoints, options.print);
-  return flow.accessToken;
+  return exchangeForLocalToken(baseUrl, flow.accessToken);
 }
 
 /**
@@ -692,12 +1151,14 @@ async function retirePlainSignIn(
  * still execute on the deployment against its Secrets Vault, and nothing new
  * becomes readable locally.
  *
- * `renewConnectionKey` is the answer to an expiring internal token: refresh →
- * re-exchange, no browser. It is only ever run through `renewal.ts`'s
+ * `renewConnectionKey` is the answer to an expiring internal token: the
+ * stored access token if a sibling has already renewed it, else a refresh,
+ * then a re-exchange; no browser. It is only ever run through `renewal.ts`'s
  * single-flight (deployment.ts consults that on a mid-run 401; the proactive
- * timer armed below consults it before expiry); if the refresh itself is dead
- * mid-run, the error tells the person to restart and sign in again rather
- * than popping a browser out from under a running MCP session.
+ * timer armed below consults it before expiry). A refresh refused for good
+ * mid-run throws `SignInRefusedError`, which tells the person to restart and
+ * sign in again rather than popping a browser out from under a running MCP
+ * session, and which renewal.ts never retries.
  */
 export async function establishOAuthConfig(
   baseUrl: string,
@@ -706,33 +1167,29 @@ export async function establishOAuthConfig(
 ): Promise<HexisMcpConfig> {
   const endpoints = await discoverAuthServer(mcpUrl);
   const agent = options.agent ?? null;
-  const accessToken = await obtainAccessToken(baseUrl, endpoints, options);
-  const grant = await exchangeForLocalToken(baseUrl, accessToken);
+  const keeper = signInKeeper(baseUrl, agent, options.print ?? ((line) => process.stderr.write(`${line}\n`)));
+  const grant = await obtainGrant(keeper, baseUrl, endpoints, options);
   const config: HexisMcpConfig = {
     baseUrl,
     connectionKey: grant.token,
     renewConnectionKey: async (): Promise<RenewedGrant> => {
-      const stored = await readStoredCredentials(baseUrl, agent);
-      if (!stored) {
+      let signIn: LocalTokenGrant | 'absent' | 'refused';
+      try {
+        signIn = await exchangeStoredSignIn(keeper, baseUrl, endpoints, agent);
+      } catch (err) {
+        // A freshly granted access token the exchange rejects: the sign-in is gone.
+        if (err instanceof LocalTokenRejectedError) throw new SignInRefusedError(SIGN_IN_REFUSED_SENTENCE);
+        throw err;
+      }
+      if (signIn === 'refused') throw new SignInRefusedError(SIGN_IN_REFUSED_SENTENCE);
+      if (signIn === 'absent') {
+        // Not a refusal: no request was made, and a sign-in another window
+        // completes lands in the store this retry reads.
         throw new OAuthError(
           'No stored sign-in to refresh — restart hexis-mcp to sign in through your browser again.',
         );
       }
-      const refreshed = await refreshAccessToken(endpoints.tokenEndpoint, stored.clientId, stored.refreshToken);
-      if (!refreshed) {
-        throw new OAuthError(
-          'The sign-in could not be refreshed (revoked, or expired) — ' +
-            'restart hexis-mcp to sign in through your browser again.',
-        );
-      }
-      if (refreshed.refreshToken && refreshed.refreshToken !== stored.refreshToken) {
-        await writeStoredCredentials(
-          baseUrl,
-          { clientId: stored.clientId, refreshToken: refreshed.refreshToken },
-          agent,
-        );
-      }
-      return exchangeForLocalToken(baseUrl, refreshed.accessToken);
+      return signIn;
     },
   };
   // Arm the first proactive renewal off the initial grant: without it the

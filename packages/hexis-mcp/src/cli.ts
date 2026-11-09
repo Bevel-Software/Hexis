@@ -7,7 +7,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
-import { ConfigError, USAGE, resolveConfig, type HexisMcpConfig } from './config.js';
+import { ConfigError, SignInRefusedError, USAGE, resolveConfig, type HexisMcpConfig } from './config.js';
 import { DeploymentError, resolveMcpUrl } from './deployment.js';
 import { holdInitialize, identityLine } from './handshake.js';
 import { OAuthError, establishOAuthConfig } from './oauth.js';
@@ -176,7 +176,9 @@ main().catch((err: unknown) => {
   // A startup failure the person can act on (bad URL, dead key, unreachable
   // deployment) prints its own message and nothing else; an unexpected one
   // keeps its stack, because that is a bug report.
-  if (err instanceof ConfigError || err instanceof DeploymentError || err instanceof OAuthError) {
+  if (err instanceof SignInRefusedError) {
+    // Already said once on stderr by renewal.ts, which stopped renewing on it.
+  } else if (err instanceof ConfigError || err instanceof DeploymentError || err instanceof OAuthError) {
     process.stderr.write(`${err.message}\n`);
   } else {
     console.error(err);
