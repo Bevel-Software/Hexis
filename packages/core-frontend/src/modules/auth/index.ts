@@ -4,7 +4,15 @@
  * layout and free to move. Export what another module needs; nothing more.
  */
 export { useAuthState } from './hooks/useAuthState';
-export { createAccount, deactivateAccount, deleteAccount, getAccountReferences, listAccounts, reactivateAccount } from './services/account.api';
+export {
+  createAccount,
+  deactivateAccount,
+  deleteAccount,
+  getAccountReferences,
+  listAccounts,
+  reactivateAccount,
+  sendInvitation,
+} from './services/account.api';
 export type { AccountReferences, AccountSummary } from './services/account.api';
 export { takePostLoginRedirect } from './services/sso';
 export type { LoginProviders } from './services/sso';

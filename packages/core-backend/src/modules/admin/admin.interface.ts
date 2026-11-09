@@ -8,3 +8,13 @@
 export interface IAdminAccessService {
   isAdmin(email: string | undefined): Promise<boolean>;
 }
+
+/**
+ * The same check for a decision that must fail closed: it throws when Admin
+ * membership cannot be read (no clone, an unreadable `roles.yaml`), where
+ * {@link IAdminAccessService.isAdmin} answers "not admin". A caller that grants
+ * something to a NON-admin asks this, so a failed read never counts as "no".
+ */
+export interface IAdminRoleLookup {
+  holdsAdmin(email: string): Promise<boolean>;
+}

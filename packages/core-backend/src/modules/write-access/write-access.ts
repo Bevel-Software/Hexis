@@ -48,6 +48,9 @@ const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
  *  - Account administration: the way an admin brings the number of people
  *    down. Erasing an account with `removeFromAccess` commits to the
  *    knowledge base, and that commit is part of the same act.
+ *  - Invitations (`POST /api/invitations`): the Invite dialog's way to
+ *    make an account, open as the admins' accounts API always was. Seats
+ *    are the admission port's to refuse, not this gate's.
  *  - The embed mint: `POST /api/embed/token` signs a short-lived VIEW
  *    token for the Atlassian connector and changes nothing; the embed's
  *    own edit routes stay refused. Its lock heartbeat and cancel stay open
@@ -69,6 +72,7 @@ const ALWAYS_WRITABLE: readonly RegExp[] = [
   /^\/api\/mcp(\/|$)/,
   /^\/api\/agent\//,
   /^\/api\/admin\/accounts(\/|$)/,
+  /^\/api\/invitations(\/|$)/,
   /^\/api\/admin\/connection-keys\//,
   /^\/api\/audit\//,
   /^\/api\/sync(\/|$)/,

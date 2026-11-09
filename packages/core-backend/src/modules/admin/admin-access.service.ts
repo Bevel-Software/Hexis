@@ -5,7 +5,7 @@ const log = logger('admin');
 import { type WorkspaceService } from '../workspace/index.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import { canonicalEmail } from '../../shared/email-identity.js';
-import type { IAdminAccessService } from './admin.interface.js';
+import type { IAdminAccessService, IAdminRoleLookup } from './admin.interface.js';
 
 /**
  * Admin = holder of the `Admin` role in `roles.yaml`. We resolve it through the
@@ -17,7 +17,7 @@ import type { IAdminAccessService } from './admin.interface.js';
  * There is no env allow-list (`ADMIN_EMAILS` is gone) — `roles.yaml` is the
  * single source of truth.
  */
-export class AdminAccessService implements IAdminAccessService {
+export class AdminAccessService implements IAdminAccessService, IAdminRoleLookup {
   constructor(
     private readonly accessControl: IAccessControl,
     private readonly workspaceService: WorkspaceService,
@@ -35,20 +35,24 @@ export class AdminAccessService implements IAdminAccessService {
 
   async isAdmin(email: string | undefined): Promise<boolean> {
     if (!email) return false;
-    const normalized = canonicalEmail(email);
-    if (this.alwaysAdminEmails.includes(normalized)) return true;
     try {
-      // Ensure the authoritative clone is on disk, then resolve Admin-role
-      // membership via the access model. Any failure (missing/invalid
-      // roles.yaml, clone error) resolves to "not admin" — the safe default.
-      const branch = typeof this.branch === 'function' ? this.branch() : this.branch;
-      await this.workspaceService.getOrCreateForBranch(branch);
-      return await this.accessControl.canWrite(workspaceIdForBranch(branch), email, 'roles.yaml');
+      // Any failure (missing/invalid roles.yaml, clone error) resolves to
+      // "not admin": the safe default for a check that grants admin powers.
+      return await this.holdsAdmin(email);
     } catch (err) {
       // Log so an admin lockout caused by a clone / roles.yaml failure is
       // diagnosable rather than a silent denial.
       log.warn('isAdmin resolution failed:', { err });
       return false;
     }
+  }
+
+  async holdsAdmin(email: string): Promise<boolean> {
+    if (this.alwaysAdminEmails.includes(canonicalEmail(email))) return true;
+    // Ensure the authoritative clone is on disk, then resolve Admin-role
+    // membership via the access model. A failure throws to the caller.
+    const branch = typeof this.branch === 'function' ? this.branch() : this.branch;
+    await this.workspaceService.getOrCreateForBranch(branch);
+    return await this.accessControl.canWrite(workspaceIdForBranch(branch), email, 'roles.yaml');
   }
 }

@@ -54,9 +54,10 @@ describe('coreCommandActions', () => {
   };
   const all = coreCommandActions({ apps: APPS, settings });
 
-  it('offers a member the page verbs, the apps and their own settings', () => {
+  it('offers a member the page verbs, Invite people, the apps and their own settings', () => {
     expect(labels(visibleActions(all, ctx()))).toEqual([
       'Create new page',
+      'Invite people',
       'Connect your agent',
       'Go to Knowledge',
       'Go to Skills & Tools',
@@ -64,7 +65,7 @@ describe('coreCommandActions', () => {
     ]);
   });
 
-  it('adds Invite people and the admin settings for an admin', () => {
+  it('adds the admin settings for an admin', () => {
     expect(labels(visibleActions(all, ctx({ isAdmin: true })))).toEqual([
       'Create new page',
       'Invite people',
@@ -77,7 +78,7 @@ describe('coreCommandActions', () => {
   });
 
   it('leaves out Create new page before the workspace knows its folder, and Invite with no dialog to open', () => {
-    const shown = labels(visibleActions(all, ctx({ isAdmin: true, createPage: null, invite: null })));
+    const shown = labels(visibleActions(all, ctx({ createPage: null, invite: null })));
     expect(shown).not.toContain('Create new page');
     expect(shown).not.toContain('Invite people');
   });
@@ -154,7 +155,7 @@ describe('suggestedActions', () => {
       'Connect your agent',
       'Go to Skills & Tools',
     ]);
-    expect(suggest(ctx({ activeAppId: 'skills-tools' }))).toEqual(['Create new page', 'Go to Knowledge']);
+    expect(suggest(ctx({ activeAppId: 'skills-tools' }))).toEqual(['Create new page', 'Invite people', 'Go to Knowledge']);
   });
 });
 
@@ -186,6 +187,7 @@ describe('mergeCommandActions / visibleActions', () => {
     };
     expect(labels(visibleActions(mergeCommandActions(core, [broken]), ctx()))).toEqual([
       'Create new page',
+      'Invite people',
       'Connect your agent',
     ]);
     error.mockRestore();

@@ -1,7 +1,6 @@
 import {
   Fragment,
   useCallback,
-  useContext,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -35,7 +34,6 @@ import {
 } from '../../../shared/components';
 import { useWorkspace } from '../../workspace';
 import { useAuth, useSignInMethods } from '../../auth';
-import { AdminContext } from '../../admin';
 import { useInviteDialog } from '../../onboarding';
 import {
   fetchFileAccess,
@@ -349,14 +347,13 @@ const NO_ACCOUNT_HELP =
 
 /**
  * On a deployment with no single sign-on, no sign-in creates the account:
- * until someone invites them (and gives them a password), they cannot get in
- * at all, and "takes effect the moment they first sign in" would be a promise
- * nobody keeps. So there the help says so — to an admin, who can invite them
- * from the row, and to anyone else, who has to ask one. The grant itself
- * saves exactly as before.
+ * until someone invites them (which gives them a password), they cannot get
+ * in at all, and "takes effect the moment they first sign in" would be a
+ * promise nobody keeps. So there the help says so, to whoever sees the row:
+ * anyone signed in may invite them from it. The grant itself saves exactly
+ * as before.
  */
-const NO_ACCOUNT_HELP_ADMIN = "No account yet. They can't sign in until you invite them.";
-const NO_ACCOUNT_HELP_MEMBER = "No account yet. They can't sign in until an admin invites them.";
+const NO_ACCOUNT_HELP_NO_SSO = "No account yet. They can't sign in until you invite them.";
 
 /** The note itself — muted and small, the same weight as a row's second line. */
 function NoAccountNote({ help = NO_ACCOUNT_HELP }: { help?: string }) {
@@ -893,7 +890,7 @@ export function ManageAccessDialog({
     : (workspaceIdProp ?? ctxWorkspaceId);
   const { user } = useAuth();
   // How people sign in here decides what "no account yet" means (see
-  // `NO_ACCOUNT_HELP_ADMIN`). Single sign-on, or an answer we could not get:
+  // `NO_ACCOUNT_HELP_NO_SSO`). Single sign-on, or an answer we could not get:
   // today's words. Optional context: the dialog is mounted bare in tests.
   const signIn = useSignInMethods();
   // Password sign-in and no single sign-on: an invite (which gives a
@@ -901,9 +898,8 @@ export function ManageAccessDialog({
   // well nobody could sign in and an invite would not change that, so that
   // deployment keeps today's words rather than promising one.
   const noSso = signIn.status === 'ready' && signIn.methods.sso.length === 0 && signIn.methods.password;
-  const isAdmin = useContext(AdminContext)?.isAdmin ?? false;
   const invite = useInviteDialog();
-  const noAccountHelp = noSso ? (isAdmin ? NO_ACCOUNT_HELP_ADMIN : NO_ACCOUNT_HELP_MEMBER) : NO_ACCOUNT_HELP;
+  const noAccountHelp = noSso ? NO_ACCOUNT_HELP_NO_SSO : NO_ACCOUNT_HELP;
   const [data, setData] = useState<AccessResponse | null>(null);
   const [loading, setLoading] = useState(!proposalBranchMissing);
   const [error, setError] = useState<string | null>(
@@ -1686,11 +1682,12 @@ export function ManageAccessDialog({
     </span>
   );
 
-  // An admin, on a deployment with no single sign-on, can turn a grant to an
-  // address with no account into a way in: Invite opens the Invite dialog on
-  // top of this one with the address filled in. Nothing about the grant changes.
+  // Anyone viewing, on a deployment with no single sign-on, can turn a grant
+  // to an address with no account into a way in: Invite opens the Invite
+  // dialog on top of this one with the address filled in. Nothing about the
+  // grant changes.
   const inviteAction = (p: PrincipalRow) => {
-    if (!noSso || !isAdmin || !invite || p.kind !== 'user' || p.hasAccount !== false) return null;
+    if (!noSso || !invite || p.kind !== 'user' || p.hasAccount !== false) return null;
     if (p.principal.kind !== 'user') return null;
     const email = p.principal.email;
     return (
