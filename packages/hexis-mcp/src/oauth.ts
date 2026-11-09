@@ -275,8 +275,40 @@ export async function readStoredCredentials(
   baseUrl: string,
   agent: AgentIdentity | null = null,
 ): Promise<StoredOAuthCredentials | null> {
+  const read = await readStore(baseUrl, agent);
+  return read === STORE_UNREADABLE ? null : read;
+}
+
+/**
+ * A store the file system refused to read: anything but a missing file, once
+ * a refusal with one of STORE_HOLD_RETRY_CODES has been retried for
+ * STORE_HOLD_RETRY_MS (Windows antivirus or the indexer holding it), so a
+ * stored sign-in is not read as absent and answered with a browser tab.
+ * Absent to `readStoredCredentials`, but a sign-in this process kept because
+ * the store could not take it must not be dropped for it.
+ */
+const STORE_UNREADABLE = Symbol('store unreadable');
+
+async function readStore(
+  baseUrl: string,
+  agent: AgentIdentity | null,
+): Promise<StoredOAuthCredentials | null | typeof STORE_UNREADABLE> {
+  let raw: string;
+  const readFailingSince = Date.now();
+  for (;;) {
+    try {
+      raw = await fs.readFile(oauthStorePath(baseUrl, agent), 'utf8');
+      break;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code ?? '';
+      if (code === 'ENOENT') return null;
+      if (!STORE_HOLD_RETRY_CODES.has(code) || Date.now() - readFailingSince >= STORE_HOLD_RETRY_MS) {
+        return STORE_UNREADABLE;
+      }
+      await pause(STORE_LOCK_POLL_MS);
+    }
+  }
   try {
-    const raw = await fs.readFile(oauthStorePath(baseUrl, agent), 'utf8');
     const parsed = JSON.parse(raw) as {
       clientId?: unknown;
       refreshToken?: unknown;
@@ -305,12 +337,13 @@ export async function readStoredCredentials(
 }
 
 /**
- * The refusals a rename over the store meets for a moment on Windows, while
- * antivirus, the indexer or a sibling's read holds the file open, and how long
- * they are retried (polled as `withStoreLock`'s create retry is).
+ * The refusals a rename over the store, or a read of it, meets for a moment
+ * on Windows, while antivirus, the indexer or a sibling's read holds the file
+ * open, and how long they are retried (polled as `withStoreLock`'s create
+ * retry is).
  */
-const STORE_RENAME_RETRY_CODES = new Set(['EPERM', 'EBUSY', 'EACCES']);
-const STORE_RENAME_RETRY_MS = 2_000;
+const STORE_HOLD_RETRY_CODES = new Set(['EPERM', 'EBUSY', 'EACCES']);
+const STORE_HOLD_RETRY_MS = 2_000;
 
 const pause = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -322,7 +355,7 @@ const pause = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
  * sign-in or the new one, never half of one (which it would read as absent,
  * and answer with a browser tab). The chmod re-asserts the mode, with the same
  * Windows pass the rest of the package gives chmod. A rename refused with one
- * of STORE_RENAME_RETRY_CODES is retried for STORE_RENAME_RETRY_MS before the
+ * of STORE_HOLD_RETRY_CODES is retried for STORE_HOLD_RETRY_MS before the
  * write fails.
  */
 export async function writeStoredCredentials(
@@ -345,7 +378,7 @@ export async function writeStoredCredentials(
         break;
       } catch (err) {
         const code = (err as NodeJS.ErrnoException).code ?? '';
-        if (!STORE_RENAME_RETRY_CODES.has(code) || Date.now() - renameFailingSince >= STORE_RENAME_RETRY_MS) throw err;
+        if (!STORE_HOLD_RETRY_CODES.has(code) || Date.now() - renameFailingSince >= STORE_HOLD_RETRY_MS) throw err;
         await pause(STORE_LOCK_POLL_MS);
       }
     }
@@ -898,13 +931,18 @@ function signInKeeper(baseUrl: string, agent: AgentIdentity | null, print: (line
   };
 }
 
-/** The sign-in this process should act on: the store, unless it still holds what an unsaved grant replaced. */
+/**
+ * The sign-in this process should act on: the store, unless it still holds
+ * what an unsaved grant replaced. A store that cannot be read says nothing
+ * newer, so a kept sign-in stays in use and `behind` keeps its last value.
+ */
 async function currentSignIn(
   keeper: SignInKeeper,
   baseUrl: string,
   agent: AgentIdentity | null,
 ): Promise<StoredOAuthCredentials | null> {
-  const onDisk = await readStoredCredentials(baseUrl, agent);
+  const onDisk = await readStore(baseUrl, agent);
+  if (onDisk === STORE_UNREADABLE) return keeper.unsaved?.credentials ?? null;
   keeper.behind = onDisk?.refreshToken ?? null;
   if (keeper.unsaved && keeper.unsaved.replaces === keeper.behind) return keeper.unsaved.credentials;
   keeper.unsaved = null;

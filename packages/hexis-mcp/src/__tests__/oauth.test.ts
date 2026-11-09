@@ -507,8 +507,9 @@ describe('refresh path', () => {
         params.get('refresh_token') === 'r1' && params.get('client_id') === 'c1'
           ? { status: 200, body: { access_token: 'a1', refresh_token: 'r2', token_type: 'bearer' } }
           : { status: 400, body: { error: 'invalid_grant' } },
+      // An hour: the proactive renewal this arms (at 80%) must not fire inside a later case of this file.
       localToken: (bearer) =>
-        bearer === 'a1' ? { status: 200, body: { token: 'internal1', expiresInMs: 60_000 } } : { status: 401 },
+        bearer === 'a1' ? { status: 200, body: { token: 'internal1', expiresInMs: 3_600_000 } } : { status: 401 },
     });
     const openBrowser = vi.fn();
     try {
@@ -1220,6 +1221,33 @@ describe('one sign-in shared by every process of an agent', () => {
     },
   );
 
+  it.each(['EPERM', 'EBUSY', 'EACCES'])(
+    'a store read refused for a moment with %s is retried, and the stored sign-in is used without a browser',
+    async (code) => {
+      const rotation = rotatingRefresh('r-1');
+      const authority = await stubAuthority({ refreshGrant: rotation.grant, localToken: exchangeUnless(new Set()) });
+      try {
+        await writeStoredCredentials(authority.base, { clientId: 'c1', refreshToken: 'r-1' }, agent);
+        const storeFile = oauthStorePath(authority.base, agent);
+        const reads = { refused: 0 };
+        const readFile = fs.readFile.bind(fs);
+        vi.spyOn(fs, 'readFile').mockImplementation((async (file: Parameters<typeof fs.readFile>[0], ...rest: unknown[]) => {
+          if (String(file) === storeFile && reads.refused < 3) {
+            reads.refused += 1;
+            throw Object.assign(new Error(`${code}: cannot read ${storeFile}`), { code });
+          }
+          return (readFile as (...args: unknown[]) => Promise<unknown>)(file, ...rest);
+        }) as typeof fs.readFile);
+        const config = await establishOAuthConfig(authority.base, authority.mcpUrl, { openBrowser: neverOpen, agent });
+        expect(config.connectionKey).toBe('int-for-a-1');
+        expect(reads.refused).toBe(3);
+        expect(refreshes(authority).map((p) => p.get('refresh_token'))).toEqual(['r-1']);
+      } finally {
+        await authority.close();
+      }
+    },
+  );
+
   it('a store that can never be written still serves this process, says so once, and renews from the sign-in it kept', async () => {
     const err = vi.spyOn(console, 'error').mockImplementation(() => {});
     const rotation = rotatingRefresh('r-1');
@@ -1295,6 +1323,48 @@ describe('one sign-in shared by every process of an agent', () => {
       hold.released = true;
       await expect(fetchAllManuals(config)).resolves.toMatchObject({ manuals: [] });
       expect(refreshes(authority).map((p) => p.get('refresh_token'))).toEqual(['r-1', 'r-2']);
+      expect(err.mock.calls.filter((c) => String(c[0]).includes('restart hexis-mcp'))).toHaveLength(0);
+    } finally {
+      await authority.close();
+    }
+  }, 15_000);
+
+  it('a kept sign-in survives renewal while the store stays unreadable, and is not dropped for the refused read', async () => {
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const rotation = rotatingRefresh('r-1');
+    const grant = (params: URLSearchParams): Answer => {
+      const answer = rotation.grant(params);
+      return answer.status === 200 ? { ...answer, body: { ...(answer.body as object), expires_in: 60 } } : answer;
+    };
+    const authority = await stubAuthority({
+      refreshGrant: grant,
+      localToken: exchangeUnless(new Set()),
+      restAccepts: (bearer) => bearer === 'int-for-a-2',
+    });
+    const lines: string[] = [];
+    try {
+      await writeStoredCredentials(authority.base, { clientId: 'c1', refreshToken: 'r-1' }, agent);
+      const storeFile = oauthStorePath(authority.base, agent);
+      const renames = refuseStoreRename(storeFile, 'EPERM', Infinity);
+      // The scanner holding the store refuses reads too, from the first refused rename on, and never lets go.
+      const readFile = fs.readFile.bind(fs);
+      vi.spyOn(fs, 'readFile').mockImplementation((async (file: Parameters<typeof fs.readFile>[0], ...rest: unknown[]) => {
+        if (String(file) === storeFile && renames.refused > 0) {
+          throw Object.assign(new Error(`EBUSY: cannot read ${storeFile}`), { code: 'EBUSY' });
+        }
+        return (readFile as (...args: unknown[]) => Promise<unknown>)(file, ...rest);
+      }) as typeof fs.readFile);
+      const config = await establishOAuthConfig(authority.base, authority.mcpUrl, {
+        openBrowser: neverOpen,
+        print: (l) => lines.push(l),
+        agent,
+      });
+      expect(config.connectionKey).toBe('int-for-a-1');
+
+      // Still unreadable at renewal: the kept r-2 is presented, not an absent store.
+      await expect(fetchAllManuals(config)).resolves.toMatchObject({ manuals: [] });
+      expect(refreshes(authority).map((p) => p.get('refresh_token'))).toEqual(['r-1', 'r-2']);
+      expect(unsavedLines(lines)).toHaveLength(1);
       expect(err.mock.calls.filter((c) => String(c[0]).includes('restart hexis-mcp'))).toHaveLength(0);
     } finally {
       await authority.close();
