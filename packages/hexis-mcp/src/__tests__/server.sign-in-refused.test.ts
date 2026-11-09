@@ -5,15 +5,20 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { ListToolsRequestSchema, ToolListChangedNotificationSchema } from '@modelcontextprotocol/sdk/types.js';
-import { DISCOVERY_NOTICE_TOOL, createHexisMcpServer } from '../server.js';
-import { renewConnectionKeyNow } from '../renewal.js';
-import { SignInRefusedError, type HexisMcpConfig } from '../config.js';
+import {
+  ConnectionKeyRejectedError,
+  DISCOVERY_NOTICE_TOOL,
+  SignInRefusedError,
+  createHexisMcpServer,
+  fetchAllManuals,
+  type HexisMcpConfig,
+} from '../index.js';
 
 /**
  * INTEGRATION: what a client sees once the workspace refuses this process's
  * sign-in for good. The stub is a faked deployment with one remote tool, so
- * the listing before the refusal is a real one; the refusal arrives through
- * `renewal.ts` exactly as a proactive or 401-triggered renewal would bring it.
+ * the listing before the refusal is a real one; the refusal arrives as a REST
+ * 401 whose renewal the workspace refuses, as a revoke brings it.
  */
 
 const SENTENCE =
@@ -150,12 +155,12 @@ describe('a sign-in the workspace refused for good', () => {
           /restart hexis-mcp to sign in through your browser again/,
         );
 
-        // Further renewals (a REST 401, the timer) are refused without a request.
-        await expect(renewConnectionKeyNow(config)).rejects.toBeInstanceOf(SignInRefusedError);
         await client.listTools();
-        expect(renew).toHaveBeenCalledTimes(1);
         // Nothing more is asked of the workspace once the notice stands.
         expect(refusedReads).toBe(readsAtRefusal);
+        // A later REST 401 is refused without asking for a renewal.
+        await expect(fetchAllManuals(config)).rejects.toBeInstanceOf(SignInRefusedError);
+        expect(renew).toHaveBeenCalledTimes(1);
         // Said once on stderr: no reader repeats it in its own words.
         expect(err.mock.calls.filter((c) => String(c[0]).includes(SENTENCE))).toHaveLength(1);
         expect(err.mock.calls.filter((c) => /restart hexis-mcp/.test(String(c[0])))).toHaveLength(1);
@@ -202,7 +207,10 @@ describe('a sign-in the workspace refused for good', () => {
     try {
       await handle.ready;
       expect(config.onSignInEnded).toBeUndefined();
-      await expect(renewConnectionKeyNow(config)).rejects.toThrow(/key mode/);
+      // A refused key is the key's own error, not a sign-in to renew or end.
+      refused.add('bevel_key');
+      await expect(fetchAllManuals(config)).rejects.toBeInstanceOf(ConnectionKeyRejectedError);
+      expect(config.onSignInEnded).toBeUndefined();
     } finally {
       await handle.shutdown();
     }

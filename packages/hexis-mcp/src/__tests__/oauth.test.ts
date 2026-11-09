@@ -7,18 +7,19 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import {
   OAuthError,
+  SignInRefusedError,
   authorizeInBrowser,
   discoverAuthServer,
   establishOAuthConfig,
   exchangeForLocalToken,
+  fetchAllManuals,
+  fetchLocalOnlyManuals,
   oauthStorePath,
   readStoredCredentials,
   refreshAccessToken,
   writeStoredCredentials,
-} from '../oauth.js';
-import { fetchAllManuals, fetchLocalOnlyManuals } from '../deployment.js';
-import { SignInRefusedError, type HexisMcpConfig } from '../config.js';
-import { closeRenewal, renewConnectionKeyNow } from '../renewal.js';
+  type HexisMcpConfig,
+} from '../index.js';
 
 /**
  * The OAuth mode, tested against REAL local HTTP servers: one stub plays the
@@ -1167,9 +1168,14 @@ describe('one sign-in shared by every process of an agent', () => {
 describe('renewing a shared sign-in', () => {
   const agent = { name: 'cursor-vscode' };
 
-  it('a proactive renewal that finds a live access token a sibling stored uses it and makes no refresh request', async () => {
+  it('a renewal that finds a live access token a sibling stored uses it and makes no refresh request', async () => {
     const rotation = rotatingRefresh('r-1');
-    const authority = await stubAuthority({ refreshGrant: rotation.grant, localToken: exchangeUnless(new Set()) });
+    const authority = await stubAuthority({
+      refreshGrant: rotation.grant,
+      localToken: exchangeUnless(new Set()),
+      // The REST read's 401 is what renews: only the sibling's token is accepted.
+      restAccepts: (bearer) => bearer === 'int-for-a-sib',
+    });
     try {
       await writeStoredCredentials(authority.base, { clientId: 'c1', refreshToken: 'r-1' }, agent);
       const config = await establishOAuthConfig(authority.base, authority.mcpUrl, { openBrowser: neverOpen, print: quiet, agent });
@@ -1179,9 +1185,9 @@ describe('renewing a shared sign-in', () => {
         { clientId: 'c1', refreshToken: 'r-sib', accessToken: 'a-sib', accessExpiresAt: Date.now() + HOUR },
         agent,
       );
-      expect(await renewConnectionKeyNow(config)).toBe('int-for-a-sib');
+      await fetchAllManuals(config);
+      expect(config.connectionKey).toBe('int-for-a-sib');
       expect(refreshes(authority)).toHaveLength(1);
-      closeRenewal(config);
     } finally {
       await authority.close();
     }
@@ -1205,6 +1211,7 @@ describe('renewing a shared sign-in', () => {
         return rotation.grant(params);
       },
       localToken: exchangeUnless(new Set()),
+      restAccepts: (bearer) => bearer === 'int-for-a-sib',
     });
     try {
       await writeStoredCredentials(authority.base, { clientId: 'c1', refreshToken: 'r-1' }, agent);
@@ -1222,9 +1229,9 @@ describe('renewing a shared sign-in', () => {
           oauthStorePath(authority.base, agent),
           JSON.stringify({ clientId: 'c1', refreshToken: 'r-sib', accessToken: 'a-sib', accessExpiresAt: Date.now() + HOUR }),
         );
-      expect(await renewConnectionKeyNow(config)).toBe('int-for-a-sib');
+      await fetchAllManuals(config);
+      expect(config.connectionKey).toBe('int-for-a-sib');
       expect(ended).not.toHaveBeenCalled();
-      closeRenewal(config);
     } finally {
       await authority.close();
     }
@@ -1246,16 +1253,16 @@ describe('renewing a shared sign-in', () => {
       );
       rotation.state.refuseAll = true;
       const before = refreshes(authority).length;
-      const refusal = await renewConnectionKeyNow(config).catch((e: unknown) => e);
+      // The stub's REST surface refuses every bearer, so each read meets a 401 and renews.
+      const refusal = await fetchAllManuals(config).catch((e: unknown) => e);
       expect(refusal).toBeInstanceOf(SignInRefusedError);
       expect((refusal as Error).message).toMatch(/restart hexis-mcp to sign in through your browser again/);
       expect(ended).toHaveBeenCalledTimes(1);
-      // A REST 401 afterwards consults the same renewal: refused here, unasked.
+      // A later REST 401 consults the same renewal: refused here, unasked.
       await expect(fetchAllManuals(config)).rejects.toBeInstanceOf(SignInRefusedError);
-      await expect(renewConnectionKeyNow(config)).rejects.toBeInstanceOf(SignInRefusedError);
+      await expect(fetchLocalOnlyManuals(config)).rejects.toBeInstanceOf(SignInRefusedError);
       expect(refreshes(authority).length - before).toBe(1);
       expect(err.mock.calls.filter((c) => String(c[0]).includes('restart hexis-mcp'))).toHaveLength(1);
-      closeRenewal(config);
     } finally {
       await authority.close();
     }
@@ -1284,8 +1291,9 @@ describe('renewing a shared sign-in', () => {
       rotation.state.refuseAll = true;
       const before = refreshes(authority).length;
       for (const config of running) {
-        await expect(renewConnectionKeyNow(config)).rejects.toBeInstanceOf(SignInRefusedError);
-        await expect(renewConnectionKeyNow(config)).rejects.toBeInstanceOf(SignInRefusedError);
+        // Each process meets the revoke as a REST 401, twice.
+        await expect(fetchAllManuals(config)).rejects.toBeInstanceOf(SignInRefusedError);
+        await expect(fetchAllManuals(config)).rejects.toBeInstanceOf(SignInRefusedError);
       }
       expect(refreshes(authority).length - before).toBe(2);
       expect(authority.record.dcr).toHaveLength(0);
@@ -1298,7 +1306,6 @@ describe('renewing a shared sign-in', () => {
       expect(restarted.connectionKey).toBe('int-for-a-flow');
       expect(authority.record.dcr).toHaveLength(1);
       expect(await readStoredCredentials(authority.base, agent)).toMatchObject({ clientId: 'dyn-client', refreshToken: 'r-flow' });
-      for (const config of running) closeRenewal(config);
     } finally {
       await authority.close();
     }
@@ -1323,7 +1330,6 @@ describe('renewing a shared sign-in', () => {
       expect(failure).not.toBeInstanceOf(SignInRefusedError);
       expect((failure as Error).message).toMatch(/HTTP 503/);
       await expect(refreshAccessToken(`${busy.base}/token`, 'c1', 'r1')).rejects.toThrow(/temporarily_unavailable/);
-      closeRenewal(config);
     } finally {
       await authority.close();
       await busy.close();
