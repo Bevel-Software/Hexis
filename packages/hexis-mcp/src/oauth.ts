@@ -283,9 +283,11 @@ export async function readStoredCredentials(
  * A store the file system refused to read: anything but a missing file, once
  * a refusal with one of STORE_HOLD_RETRY_CODES has been retried for
  * STORE_HOLD_RETRY_MS (Windows antivirus or the indexer holding it), so a
- * stored sign-in is not read as absent and answered with a browser tab.
- * Absent to `readStoredCredentials`, but a sign-in this process kept because
- * the store could not take it must not be dropped for it.
+ * store held for a moment is not read as absent and answered with a browser
+ * tab. A hold that outlasts the retry still is: absent to
+ * `readStoredCredentials` and to a process with no kept sign-in. A sign-in
+ * this process kept because the store could not take it must not be dropped
+ * for it.
  */
 const STORE_UNREADABLE = Symbol('store unreadable');
 
@@ -1066,8 +1068,9 @@ async function exchangeStoredSignIn(
 /**
  * The stored sign-in first: no browser for a machine that already signed in,
  * and none because a sibling process rotated the refresh token (the lock and
- * the store see to that). The browser opens only when nothing is stored or
- * the stored sign-in was refused for good.
+ * the store see to that). The browser opens only when nothing is stored (or
+ * the store stays unreadable past the read retry, see STORE_UNREADABLE) or the
+ * stored sign-in was refused for good.
  */
 async function obtainGrant(
   keeper: SignInKeeper,
