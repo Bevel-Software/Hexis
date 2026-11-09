@@ -867,12 +867,16 @@ function grantedCredentials(
  * write fails (the store still refuses after the rename retry) is kept here
  * instead of thrown away: its refresh token is the only live one, the one on
  * disk was retired by the grant itself. `replaces` is the refresh token the
- * store held when the write failed (null: none); the kept sign-in stands in
- * for exactly that store, and a store holding anything else (a sibling's
- * newer sign-in, or this process's own later write) takes over from it.
+ * store held when the grant was decided on (null: none), taken from the read
+ * BEFORE the grant: a read after the failed write may be refused by the same
+ * hold that refused the write. The kept sign-in stands in for exactly that
+ * store, and a store holding anything else (a sibling's newer sign-in, or
+ * this process's own later write) takes over from it.
  */
 interface SignInKeeper {
   unsaved: { credentials: StoredOAuthCredentials; replaces: string | null } | null;
+  /** The refresh token the store held at the last `currentSignIn` read (null: none), behind any kept sign-in. */
+  behind: string | null;
   /** Says once per process that the sign-in could not be saved. */
   warnUnsaved: (err: unknown) => void;
 }
@@ -881,6 +885,7 @@ function signInKeeper(baseUrl: string, agent: AgentIdentity | null, print: (line
   let warned = false;
   return {
     unsaved: null,
+    behind: null,
     warnUnsaved: (err) => {
       if (warned) return;
       warned = true;
@@ -900,28 +905,31 @@ async function currentSignIn(
   agent: AgentIdentity | null,
 ): Promise<StoredOAuthCredentials | null> {
   const onDisk = await readStoredCredentials(baseUrl, agent);
-  if (keeper.unsaved && keeper.unsaved.replaces === (onDisk?.refreshToken ?? null)) return keeper.unsaved.credentials;
+  keeper.behind = onDisk?.refreshToken ?? null;
+  if (keeper.unsaved && keeper.unsaved.replaces === keeper.behind) return keeper.unsaved.credentials;
   keeper.unsaved = null;
   return onDisk;
 }
 
 /**
  * Write a grant to the store; when the store cannot take it, keep it for this
- * process and say so once. Never throws: the grant is live whether or not the
- * disk could hold it, and losing it would end the sign-in it just renewed.
+ * process and say so once. `replaces` is the store's refresh token as read
+ * before the grant (`keeper.behind`). Never throws: the grant is live whether
+ * or not the disk could hold it, and losing it would end the sign-in it just
+ * renewed.
  */
 async function saveGrant(
   keeper: SignInKeeper,
   baseUrl: string,
   agent: AgentIdentity | null,
   credentials: StoredOAuthCredentials,
+  replaces: string | null,
 ): Promise<void> {
   try {
     await writeStoredCredentials(baseUrl, credentials, agent);
     keeper.unsaved = null;
   } catch (err) {
-    const onDisk = await readStoredCredentials(baseUrl, agent);
-    keeper.unsaved = { credentials, replaces: onDisk?.refreshToken ?? null };
+    keeper.unsaved = { credentials, replaces };
     keeper.warnUnsaved(err);
   }
 }
@@ -940,6 +948,7 @@ async function refreshStored(
   agent: AgentIdentity | null,
   stored: StoredOAuthCredentials,
 ): Promise<string | null> {
+  const replaces = keeper.behind;
   const requestedAt = Date.now();
   const refreshed = await refreshAccessToken(endpoints.tokenEndpoint, stored.clientId, stored.refreshToken);
   if (!refreshed) return null;
@@ -954,6 +963,7 @@ async function refreshStored(
       refreshed.expiresInMs,
       requestedAt,
     ),
+    replaces,
   );
   return refreshed.accessToken;
 }
@@ -1030,6 +1040,7 @@ async function obtainGrant(
   const agent = options.agent ?? null;
   const stored = await exchangeStoredSignIn(keeper, baseUrl, endpoints, agent);
   if (typeof stored === 'object') return stored;
+  const replaces = keeper.behind;
   const flowStartedAt = Date.now();
   const flow = await authorizeInBrowser(endpoints, {
     openBrowser: options.noOpen ? () => {} : options.openBrowser,
@@ -1046,6 +1057,7 @@ async function obtainGrant(
         baseUrl,
         agent,
         grantedCredentials(flow.clientId, refreshToken, flow.accessToken, flow.expiresInMs, flowStartedAt),
+        replaces,
       ),
     );
   }

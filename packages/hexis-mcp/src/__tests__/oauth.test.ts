@@ -1257,6 +1257,50 @@ describe('one sign-in shared by every process of an agent', () => {
     }
   }, 15_000);
 
+  it('a store hold that also refuses the read after the failed write keeps the sign-in it replaced, and renews from the kept one', async () => {
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const rotation = rotatingRefresh('r-1');
+    const grant = (params: URLSearchParams): Answer => {
+      const answer = rotation.grant(params);
+      return answer.status === 200 ? { ...answer, body: { ...(answer.body as object), expires_in: 60 } } : answer;
+    };
+    const authority = await stubAuthority({
+      refreshGrant: grant,
+      localToken: exchangeUnless(new Set()),
+      restAccepts: (bearer) => bearer === 'int-for-a-2',
+    });
+    const lines: string[] = [];
+    try {
+      await writeStoredCredentials(authority.base, { clientId: 'c1', refreshToken: 'r-1' }, agent);
+      const storeFile = oauthStorePath(authority.base, agent);
+      const renames = refuseStoreRename(storeFile, 'EPERM', Infinity);
+      // The scanner holding the store refuses reads too, from the first refused rename until it lets go.
+      const hold = { released: false };
+      const readFile = fs.readFile.bind(fs);
+      vi.spyOn(fs, 'readFile').mockImplementation((async (file: Parameters<typeof fs.readFile>[0], ...rest: unknown[]) => {
+        if (String(file) === storeFile && renames.refused > 0 && !hold.released) {
+          throw Object.assign(new Error(`EBUSY: cannot read ${storeFile}`), { code: 'EBUSY' });
+        }
+        return (readFile as (...args: unknown[]) => Promise<unknown>)(file, ...rest);
+      }) as typeof fs.readFile);
+      const config = await establishOAuthConfig(authority.base, authority.mcpUrl, {
+        openBrowser: neverOpen,
+        print: (l) => lines.push(l),
+        agent,
+      });
+      expect(config.connectionKey).toBe('int-for-a-1');
+      expect(unsavedLines(lines)).toHaveLength(1);
+
+      // The hold ends; the store is readable again and still holds the retired r-1. The renewal presents r-2.
+      hold.released = true;
+      await expect(fetchAllManuals(config)).resolves.toMatchObject({ manuals: [] });
+      expect(refreshes(authority).map((p) => p.get('refresh_token'))).toEqual(['r-1', 'r-2']);
+      expect(err.mock.calls.filter((c) => String(c[0]).includes('restart hexis-mcp'))).toHaveLength(0);
+    } finally {
+      await authority.close();
+    }
+  }, 15_000);
+
   it('a browser sign-in the store cannot take still serves this process, and says so once', async () => {
     const browser = fakeBrowser();
     const authority = await stubAuthority({
