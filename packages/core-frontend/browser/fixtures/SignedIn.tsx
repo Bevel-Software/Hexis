@@ -12,7 +12,12 @@ declare global {
 export function SignedIn({ children }: { children: ReactNode }) {
   const auth = useAuthState();
   useEffect(() => {
-    window.signOutHtmlPage = auth.logout;
+    const logout = auth.logout;
+    window.signOutHtmlPage = logout;
+    return () => {
+      // Only if it is still this mount's: a later mount's stays.
+      if (window.signOutHtmlPage === logout) window.signOutHtmlPage = () => {};
+    };
   }, [auth.logout]);
   return <AuthContext.Provider value={auth}>{auth.user ? children : null}</AuthContext.Provider>;
 }

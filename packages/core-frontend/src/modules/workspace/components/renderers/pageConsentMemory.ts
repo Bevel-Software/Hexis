@@ -61,8 +61,13 @@ export function remember(account: string | null, digest: string): void {
     // Later than every other Allow, even several within one millisecond.
     const at = Math.max(Date.now(), (others.at(-1)?.at ?? 0) + 1);
     storage.setItem(prefix + digest, String(at));
-    for (const old of others.slice(0, Math.max(0, others.length + 1 - ALLOWED_PAGES_MAX))) {
-      storage.removeItem(prefix + old.digest);
+    // The cap is enforced on what storage holds AFTER this write, not on the
+    // snapshot above, so two tabs allowing at once still leave at most the
+    // cap. Each candidate is removed only while it still holds the time just
+    // read: one another tab has allowed again since is newer, and is kept.
+    const now = entries(storage, prefix).filter((e) => e.digest !== digest);
+    for (const old of now.slice(0, Math.max(0, now.length + 1 - ALLOWED_PAGES_MAX))) {
+      if (storage.getItem(prefix + old.digest) === String(old.at)) storage.removeItem(prefix + old.digest);
     }
   } catch {
     // Not stored: the card shows on the next view, which is no worse than before.

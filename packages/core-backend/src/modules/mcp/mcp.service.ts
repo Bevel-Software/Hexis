@@ -278,6 +278,13 @@ function connectionOf(body: unknown): { connection?: ConnectionScopeWire } {
 const DEGRADED_SURFACE_MAX_AGE_MS = 60_000;
 
 /**
+ * The platform tools an HTML page's surface does not carry: they list the
+ * `.tool` manuals and connectors that surface leaves out (and what each needs
+ * set up), which a page can neither call nor set up.
+ */
+const PAGE_WITHHELD_PLATFORM_TOOLS: ReadonlySet<string> = new Set(['list_local_tools', 'list_tool_setup']);
+
+/**
  * What the platform-hosted manuals' `${CONNECTION_KEY}` is seeded with when a
  * cached client is built. Never sent anywhere: the variable is replaced by a
  * getter that reads the bearer of the request a call belongs to (see
@@ -1064,7 +1071,8 @@ export class McpService {
       : await this.fetchManualTemplates(loopbackBearer);
     const catalogMs = performance.now() - started;
     const client = await this.buildClient(userId, manuals);
-    const discovered = await this.discoverTools(client, manuals, userId);
+    const found = await this.discoverTools(client, manuals, userId);
+    const discovered = platformOnly ? { ...found, tools: await this.withholdFromPage(client, found.tools) } : found;
     // After discovery, which renames each template in place to the name it
     // registered under: that is the name the repository keys it by.
     const rawTemplates = new Map(manuals.map((m) => [utcpManualName(m), m] as const));
@@ -1424,6 +1432,22 @@ export class McpService {
         `${[...found.values()].map((t) => `${t.name} (${t.path}: ${t.reason})`).join(', ')}`,
     );
     return { tools: tools.filter((tool) => !found.has(tool.utcpName)), hidden };
+  }
+
+  /**
+   * Take the platform tools that describe what a page's surface leaves out
+   * (PAGE_WITHHELD_PLATFORM_TOOLS) off a page's client, the way an invalid
+   * schema is taken off: from the repository, so the listing, `tools_info` and
+   * `call_tool_chain`'s interfaces all lose them, and a call is an unknown tool.
+   * A page's client is its own (its surface is keyed apart from the person's),
+   * so the person's agent keeps them.
+   */
+  private async withholdFromPage(client: CodeModeUtcpClient, tools: ProxiedTool[]): Promise<ProxiedTool[]> {
+    const withheld = tools.filter(
+      (tool) => tool.manualName === EXTERNAL_KB_MANUAL_NAME && PAGE_WITHHELD_PLATFORM_TOOLS.has(tool.mcpName),
+    );
+    for (const tool of withheld) await client.config.tool_repository.removeTool(tool.utcpName);
+    return tools.filter((tool) => !withheld.includes(tool));
   }
 
   /** The schema findings the owner-facing surfaces report — see {@link ToolSchemaGuard}. */

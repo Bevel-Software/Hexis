@@ -67,6 +67,31 @@ describe('pageConsentMemory', () => {
     expect(rememberedDigests().slice(-2)).toEqual(['d0', 'd500']);
   });
 
+  it('trims to the cap from what storage holds after its write, so two tabs allowing at once never leave more than 500', () => {
+    // Another tab's Allow at the same moment already took the account to 501.
+    for (let i = 0; i < 501; i++) window.localStorage.setItem(`${PREFIX}d${i}`, String(i + 1));
+    remember(A, 'mine');
+    expect(rememberedDigests()).toHaveLength(500);
+    expect(isRemembered(A, 'mine')).toBe(true);
+    expect(isRemembered(A, 'd0')).toBe(false);
+    expect(isRemembered(A, 'd1')).toBe(false);
+  });
+
+  it("never forgets an entry another tab allowed again while this Allow was being written", () => {
+    for (let i = 0; i < 500; i++) window.localStorage.setItem(`${PREFIX}d${i}`, String(i + 1));
+    const original = window.localStorage.setItem.bind(window.localStorage);
+    vi.spyOn(window.localStorage, 'setItem').mockImplementation((key, value) => {
+      original(key, value);
+      // Another tab allows the oldest page again right as this write lands.
+      if (key === `${PREFIX}mine`) original(`${PREFIX}d0`, String(Number(value) + 1));
+    });
+    remember(A, 'mine');
+    expect(isRemembered(A, 'd0')).toBe(true);
+    expect(isRemembered(A, 'mine')).toBe(true);
+    expect(isRemembered(A, 'd1')).toBe(false);
+    expect(rememberedDigests()).toHaveLength(500);
+  });
+
   it('leaves entries that are not its own alone', () => {
     window.localStorage.setItem('bevel.htmlPage.height', '300');
     for (let i = 0; i < 500; i++) window.localStorage.setItem(`${PREFIX}d${i}`, String(i + 1));

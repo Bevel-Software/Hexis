@@ -184,7 +184,7 @@ describe('the html-views guide section agrees with the renderer', () => {
     // The browser's memory: the account's, by the page's exact content, asked again on any change.
     expect(flat).toContain("The browser remembers an Allow for the signed-in account and the page's exact content, so the same page asks that account nothing on a later view in that browser. Signing out clears what the account kept. Content the account has not allowed asks again, such as an edited page, as does another account or browser, a browser that will not store, and content past the account's 500 most recently allowed: never rely on an Allow being kept.");
     // A page reaches platform tools only.
-    expect(flat).toContain("A page reaches platform tools only: no tool of a `.tool` manual or a plugin's MCP server is listed to a page or callable from it, directly or in a chain. Such a call rejects as an unknown tool.");
+    expect(flat).toContain("A page reaches platform tools only: no tool of a `.tool` manual or a plugin's MCP server, nor `list_local_tools` or `list_tool_setup`, is listed to a page or callable from it, directly or in a chain. Such a call rejects as an unknown tool.");
     expect(flat).not.toContain('wants to write');
     expect(flat).not.toContain('Allow while open');
     expect(flat).toContain('"<page name> uses tools that are only available in the platform", with Continue without tools and Open in the platform');

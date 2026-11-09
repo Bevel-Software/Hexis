@@ -50,6 +50,8 @@ interface HarnessOptions {
   fillerTools?: { count: number; descriptionBytes: number };
   /** A minting internal-token service, for OAuth/session callers. */
   mint?: () => string;
+  /** The platform tools that list `.tool` manuals and their setup, on the KB manual. */
+  toolListings?: boolean;
 }
 
 async function harness(opts: HarnessOptions = {}) {
@@ -71,6 +73,11 @@ async function harness(opts: HarnessOptions = {}) {
       inputs: { type: 'object', properties: { path: { type: 'string' } } },
     }),
   );
+  for (const name of opts.toolListings ? ['list_local_tools', 'list_tool_setup'] : []) {
+    registry.registerExternalTool(
+      toolDef({ name, description: name, path: `/api/agent/tools/${name}`, inputs: { type: 'object', properties: {} } }),
+    );
+  }
   const filler = opts.fillerTools;
   for (let i = 0; i < (filler?.count ?? 0); i++) {
     registry.registerExternalTool(
@@ -110,7 +117,7 @@ async function harness(opts: HarnessOptions = {}) {
     if (opts.catalogDelayMs) await new Promise((r) => setTimeout(r, opts.catalogDelayMs));
     res.json({ manuals: state.extraManuals });
   });
-  for (const tool of ['read_file', 'edit_file']) {
+  for (const tool of ['read_file', 'edit_file', 'list_local_tools', 'list_tool_setup']) {
     app.post(`/api/agent/tools/${tool}`, async (req, res) => {
       const bearer = bearerOf(req);
       if (state.refused.has(bearer)) {
@@ -492,7 +499,7 @@ describe("McpService — a page reaches the platform's tools only", () => {
   /** A `.tool` manual the person may read, listed by their catalog beside the platform manual. */
   async function withToolManual() {
     let minted = 0;
-    const h = await harness({ mint: () => `minted-${++minted}` });
+    const h = await harness({ mint: () => `minted-${++minted}`, toolListings: true });
     h.state.extraManuals = [lateManual(h.state.base)];
     const asPage = () => connect(h.mcp, { tokenId: null, bearer: 'eyJ.session', page: PAGE });
     const asAgent = () => connect(h.mcp, { tokenId: null, bearer: 'eyJ.session' });
@@ -543,6 +550,28 @@ describe("McpService — a page reaches the platform's tools only", () => {
     const agent = await asAgent();
     expect((await agent.callTool({ name: 'late_manual_late_arrival', arguments: {} })).isError).toBeFalsy();
     expect((await agent.callTool({ name: 'call_tool_chain', arguments: { code: 'return await late_manual.late_arrival({});' } })).isError).toBeFalsy();
+  });
+
+  it('withholds the tools that list .tool manuals and their setup from a page, listed and called, while the agent keeps them', async () => {
+    const { state, asPage, asAgent } = await withToolManual();
+    const page = await asPage();
+    const pageTools = await names(page);
+    expect(pageTools).not.toContain('list_local_tools');
+    expect(pageTools).not.toContain('list_tool_setup');
+    expect(pageTools).toContain('read_file');
+    for (const name of ['list_local_tools', 'list_tool_setup']) {
+      const direct = await page.callTool({ name, arguments: {} });
+      expect(direct.isError).toBe(true);
+      expect(JSON.stringify(direct.content)).toContain(`Unknown tool \\"${name}\\"`);
+      const chained = await page.callTool({ name: 'call_tool_chain', arguments: { code: `return await KNOWLEDGE_BASE.${name}({});` } });
+      expect(chained.isError).toBe(true);
+    }
+    expect(state.calls).toEqual([]);
+
+    const agent = await asAgent();
+    expect(await names(agent)).toEqual(expect.arrayContaining(['list_local_tools', 'list_tool_setup']));
+    expect((await agent.callTool({ name: 'list_local_tools', arguments: {} })).isError).toBeFalsy();
+    expect(state.calls.map((c) => c.tool)).toEqual(['list_local_tools']);
   });
 });
 

@@ -65,8 +65,9 @@ the skill → its file), a page calls the platform's own tools as the person
 viewing it, with the names, answers and refusals that person's own agent
 gets, through five functions, each returning a promise.
 A page reaches platform tools only: no tool of a `.tool` manual or a plugin's
-MCP server is listed to a page or callable from it, directly or in a chain.
-Such a call rejects as an unknown tool.
+MCP server, nor `list_local_tools` or `list_tool_setup`, is listed to a page
+or callable from it, directly or in a chain. Such a call rejects as an unknown
+tool.
 
 - `window.bevel.tools.searchTools(query)` — `{ tools: [names] }`: what
   `list_tools` lists, narrowed to the names containing every word of `query`
