@@ -1179,6 +1179,107 @@ describe('one sign-in shared by every process of an agent', () => {
     }
   }, 15_000);
 
+  /** Refuse the rename onto `storeFile` with `code`, `times` times (Infinity: always), as Windows does while a scanner holds it. */
+  function refuseStoreRename(storeFile: string, code: string, times: number) {
+    const rename = fs.rename.bind(fs);
+    const state = { refused: 0 };
+    vi.spyOn(fs, 'rename').mockImplementation(async (from, to) => {
+      if (String(to) === storeFile && state.refused < times) {
+        state.refused += 1;
+        throw Object.assign(new Error(`${code}: cannot rename onto ${String(to)}`), { code });
+      }
+      return rename(from, to);
+    });
+    return state;
+  }
+
+  const unsavedLines = (lines: string[]): string[] => lines.filter((l) => l.includes('could not save the sign-in'));
+
+  it.each(['EPERM', 'EBUSY', 'EACCES'])(
+    'a store rename refused for a moment with %s is retried, and the rotated sign-in is saved',
+    async (code) => {
+      const rotation = rotatingRefresh('r-1');
+      const authority = await stubAuthority({ refreshGrant: rotation.grant, localToken: exchangeUnless(new Set()) });
+      const lines: string[] = [];
+      try {
+        await writeStoredCredentials(authority.base, { clientId: 'c1', refreshToken: 'r-1' }, agent);
+        const refusals = refuseStoreRename(oauthStorePath(authority.base, agent), code, 3);
+        const config = await establishOAuthConfig(authority.base, authority.mcpUrl, {
+          openBrowser: neverOpen,
+          print: (l) => lines.push(l),
+          agent,
+        });
+        expect(config.connectionKey).toBe('int-for-a-1');
+        expect(refusals.refused).toBe(3);
+        expect(await readStoredCredentials(authority.base, agent)).toMatchObject({ refreshToken: 'r-2', accessToken: 'a-1' });
+        expect(unsavedLines(lines)).toHaveLength(0);
+        expect(fsSync.readdirSync(path.dirname(oauthStorePath(authority.base, agent))).filter((f) => f.endsWith('.tmp'))).toEqual([]);
+      } finally {
+        await authority.close();
+      }
+    },
+  );
+
+  it('a store that can never be written still serves this process, says so once, and renews from the sign-in it kept', async () => {
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const rotation = rotatingRefresh('r-1');
+    // A minute-long access token is never reused (inside the reuse margin), so every renewal refreshes.
+    const grant = (params: URLSearchParams): Answer => {
+      const answer = rotation.grant(params);
+      return answer.status === 200 ? { ...answer, body: { ...(answer.body as object), expires_in: 60 } } : answer;
+    };
+    const authority = await stubAuthority({
+      refreshGrant: grant,
+      localToken: exchangeUnless(new Set()),
+      restAccepts: (bearer) => bearer === 'int-for-a-2',
+    });
+    const lines: string[] = [];
+    try {
+      await writeStoredCredentials(authority.base, { clientId: 'c1', refreshToken: 'r-1' }, agent);
+      refuseStoreRename(oauthStorePath(authority.base, agent), 'EPERM', Infinity);
+      const config = await establishOAuthConfig(authority.base, authority.mcpUrl, {
+        openBrowser: neverOpen,
+        print: (l) => lines.push(l),
+        agent,
+      });
+      expect(config.connectionKey).toBe('int-for-a-1');
+      // The store still holds the token the grant retired; this process holds the live one.
+      expect(await readStoredCredentials(authority.base, agent)).toEqual({ clientId: 'c1', refreshToken: 'r-1' });
+      expect(unsavedLines(lines)).toHaveLength(1);
+
+      // int-for-a-1 is refused, so the read renews: from r-2, the token kept in memory, not the retired r-1.
+      await expect(fetchAllManuals(config)).resolves.toMatchObject({ manuals: [] });
+      expect(refreshes(authority).map((p) => p.get('refresh_token'))).toEqual(['r-1', 'r-2']);
+      expect(unsavedLines(lines)).toHaveLength(1);
+      expect(err.mock.calls.filter((c) => String(c[0]).includes('restart hexis-mcp'))).toHaveLength(0);
+    } finally {
+      await authority.close();
+    }
+  }, 15_000);
+
+  it('a browser sign-in the store cannot take still serves this process, and says so once', async () => {
+    const browser = fakeBrowser();
+    const authority = await stubAuthority({
+      codeGrant: (params) =>
+        pkceCodeGrant(browser.seen, { access_token: 'a-flow', refresh_token: 'r-flow', expires_in: 3600 })(params),
+      localToken: exchangeUnless(new Set()),
+    });
+    const lines: string[] = [];
+    try {
+      refuseStoreRename(oauthStorePath(authority.base, agent), 'EBUSY', Infinity);
+      const config = await establishOAuthConfig(authority.base, authority.mcpUrl, {
+        openBrowser: browser.open,
+        print: (l) => lines.push(l),
+        agent,
+      });
+      expect(config.connectionKey).toBe('int-for-a-flow');
+      expect(await readStoredCredentials(authority.base, agent)).toBeNull();
+      expect(unsavedLines(lines)).toHaveLength(1);
+    } finally {
+      await authority.close();
+    }
+  }, 15_000);
+
   it('a browser sign-in stores the access token and its expiry, and the next start reuses them with no refresh and no browser', async () => {
     const browser = fakeBrowser();
     const authority = await stubAuthority({

@@ -305,13 +305,25 @@ export async function readStoredCredentials(
 }
 
 /**
+ * The refusals a rename over the store meets for a moment on Windows, while
+ * antivirus, the indexer or a sibling's read holds the file open, and how long
+ * they are retried (polled as `withStoreLock`'s create retry is).
+ */
+const STORE_RENAME_RETRY_CODES = new Set(['EPERM', 'EBUSY', 'EACCES']);
+const STORE_RENAME_RETRY_MS = 2_000;
+
+const pause = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
  * Owner-only, the same posture materialize.ts documents for the plugin trees:
  * the refresh token is a durable credential for the person's workspace access
  * and belongs to no other local user. The file is written beside the store and
  * renamed over it, so a sibling process reading at that moment sees the old
  * sign-in or the new one, never half of one (which it would read as absent,
  * and answer with a browser tab). The chmod re-asserts the mode, with the same
- * Windows pass the rest of the package gives chmod.
+ * Windows pass the rest of the package gives chmod. A rename refused with one
+ * of STORE_RENAME_RETRY_CODES is retried for STORE_RENAME_RETRY_MS before the
+ * write fails.
  */
 export async function writeStoredCredentials(
   baseUrl: string,
@@ -326,7 +338,17 @@ export async function writeStoredCredentials(
     await fs.chmod(staged, 0o600).catch((err: unknown) => {
       if (process.platform !== 'win32') throw err;
     });
-    await fs.rename(staged, file);
+    const renameFailingSince = Date.now();
+    for (;;) {
+      try {
+        await fs.rename(staged, file);
+        break;
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code ?? '';
+        if (!STORE_RENAME_RETRY_CODES.has(code) || Date.now() - renameFailingSince >= STORE_RENAME_RETRY_MS) throw err;
+        await pause(STORE_LOCK_POLL_MS);
+      }
+    }
   } catch (err) {
     await fs.rm(staged, { force: true }).catch(() => {});
     throw err;
@@ -355,8 +377,6 @@ const STORE_LOCK_CREATE_RETRY_MS = 2_000;
  * leaves the path alone rather than risk removing a sibling's lock.
  */
 const STORE_LOCK_RELEASE_MARGIN_MS = 2 * STORE_LOCK_HEARTBEAT_MS;
-
-const pause = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
  * Run `fn` holding this sign-in's lock: `<store>.lock`, created with `O_EXCL`
@@ -843,12 +863,78 @@ function grantedCredentials(
 }
 
 /**
+ * This process's sign-in, as far as the store cannot hold it. A grant whose
+ * write fails (the store still refuses after the rename retry) is kept here
+ * instead of thrown away: its refresh token is the only live one, the one on
+ * disk was retired by the grant itself. `replaces` is the refresh token the
+ * store held when the write failed (null: none); the kept sign-in stands in
+ * for exactly that store, and a store holding anything else (a sibling's
+ * newer sign-in, or this process's own later write) takes over from it.
+ */
+interface SignInKeeper {
+  unsaved: { credentials: StoredOAuthCredentials; replaces: string | null } | null;
+  /** Says once per process that the sign-in could not be saved. */
+  warnUnsaved: (err: unknown) => void;
+}
+
+function signInKeeper(baseUrl: string, agent: AgentIdentity | null, print: (line: string) => void): SignInKeeper {
+  let warned = false;
+  return {
+    unsaved: null,
+    warnUnsaved: (err) => {
+      if (warned) return;
+      warned = true;
+      print(
+        `[hexis-mcp] could not save the sign-in to ${oauthStorePath(baseUrl, agent)} ` +
+          `(${err instanceof Error ? err.message : String(err)}); this process keeps using it, ` +
+          'but another hexis-mcp process starting meanwhile may ask you to sign in through your browser again.',
+      );
+    },
+  };
+}
+
+/** The sign-in this process should act on: the store, unless it still holds what an unsaved grant replaced. */
+async function currentSignIn(
+  keeper: SignInKeeper,
+  baseUrl: string,
+  agent: AgentIdentity | null,
+): Promise<StoredOAuthCredentials | null> {
+  const onDisk = await readStoredCredentials(baseUrl, agent);
+  if (keeper.unsaved && keeper.unsaved.replaces === (onDisk?.refreshToken ?? null)) return keeper.unsaved.credentials;
+  keeper.unsaved = null;
+  return onDisk;
+}
+
+/**
+ * Write a grant to the store; when the store cannot take it, keep it for this
+ * process and say so once. Never throws: the grant is live whether or not the
+ * disk could hold it, and losing it would end the sign-in it just renewed.
+ */
+async function saveGrant(
+  keeper: SignInKeeper,
+  baseUrl: string,
+  agent: AgentIdentity | null,
+  credentials: StoredOAuthCredentials,
+): Promise<void> {
+  try {
+    await writeStoredCredentials(baseUrl, credentials, agent);
+    keeper.unsaved = null;
+  } catch (err) {
+    const onDisk = await readStoredCredentials(baseUrl, agent);
+    keeper.unsaved = { credentials, replaces: onDisk?.refreshToken ?? null };
+    keeper.warnUnsaved(err);
+  }
+}
+
+/**
  * Refresh `stored` and write what the grant minted to the store BEFORE
  * anything uses it: a process starting a moment later must find the rotated
  * refresh token (the one presented here is now retired), and may reuse the
- * access token. Null when the workspace refused the refresh for good.
+ * access token. A store that cannot be written keeps the grant in `keeper`
+ * (see `saveGrant`). Null when the workspace refused the refresh for good.
  */
 async function refreshStored(
+  keeper: SignInKeeper,
   baseUrl: string,
   endpoints: AuthServerEndpoints,
   agent: AgentIdentity | null,
@@ -857,8 +943,10 @@ async function refreshStored(
   const requestedAt = Date.now();
   const refreshed = await refreshAccessToken(endpoints.tokenEndpoint, stored.clientId, stored.refreshToken);
   if (!refreshed) return null;
-  await writeStoredCredentials(
+  await saveGrant(
+    keeper,
     baseUrl,
+    agent,
     grantedCredentials(
       stored.clientId,
       refreshed.refreshToken ?? stored.refreshToken,
@@ -866,7 +954,6 @@ async function refreshStored(
       refreshed.expiresInMs,
       requestedAt,
     ),
-    agent,
   );
   return refreshed.accessToken;
 }
@@ -879,25 +966,26 @@ async function refreshStored(
  * one is used instead. Nothing newer means the refusal stands.
  */
 async function storedAccessToken(
+  keeper: SignInKeeper,
   baseUrl: string,
   endpoints: AuthServerEndpoints,
   agent: AgentIdentity | null,
   distrusted?: string,
 ): Promise<StoredSignIn> {
   return withStoreLock(baseUrl, agent, async (): Promise<StoredSignIn> => {
-    const stored = await readStoredCredentials(baseUrl, agent);
+    const stored = await currentSignIn(keeper, baseUrl, agent);
     if (!stored) return { kind: 'absent' };
     const reusable = reusableAccessToken(stored, distrusted);
     if (reusable) return { kind: 'live', accessToken: reusable, reused: true };
-    const refreshed = await refreshStored(baseUrl, endpoints, agent, stored);
+    const refreshed = await refreshStored(keeper, baseUrl, endpoints, agent, stored);
     if (refreshed) return { kind: 'live', accessToken: refreshed, reused: false };
-    const latest = await readStoredCredentials(baseUrl, agent);
+    const latest = await currentSignIn(keeper, baseUrl, agent);
     if (!latest || (latest.clientId === stored.clientId && latest.refreshToken === stored.refreshToken)) {
       return { kind: 'refused' };
     }
     const newer = reusableAccessToken(latest, distrusted);
     if (newer) return { kind: 'live', accessToken: newer, reused: true };
-    const renewed = await refreshStored(baseUrl, endpoints, agent, latest);
+    const renewed = await refreshStored(keeper, baseUrl, endpoints, agent, latest);
     return renewed ? { kind: 'live', accessToken: renewed, reused: false } : { kind: 'refused' };
   });
 }
@@ -909,17 +997,18 @@ async function storedAccessToken(
  * what follows is the refresh token's own verdict, given once.
  */
 async function exchangeStoredSignIn(
+  keeper: SignInKeeper,
   baseUrl: string,
   endpoints: AuthServerEndpoints,
   agent: AgentIdentity | null,
 ): Promise<LocalTokenGrant | 'absent' | 'refused'> {
-  let signIn = await storedAccessToken(baseUrl, endpoints, agent);
+  let signIn = await storedAccessToken(keeper, baseUrl, endpoints, agent);
   if (signIn.kind === 'live' && signIn.reused) {
     try {
       return await exchangeForLocalToken(baseUrl, signIn.accessToken);
     } catch (err) {
       if (!(err instanceof LocalTokenRejectedError)) throw err;
-      signIn = await storedAccessToken(baseUrl, endpoints, agent, signIn.accessToken);
+      signIn = await storedAccessToken(keeper, baseUrl, endpoints, agent, signIn.accessToken);
     }
   }
   if (signIn.kind !== 'live') return signIn.kind;
@@ -933,12 +1022,13 @@ async function exchangeStoredSignIn(
  * the stored sign-in was refused for good.
  */
 async function obtainGrant(
+  keeper: SignInKeeper,
   baseUrl: string,
   endpoints: AuthServerEndpoints,
   options: OAuthModeOptions,
 ): Promise<LocalTokenGrant> {
   const agent = options.agent ?? null;
-  const stored = await exchangeStoredSignIn(baseUrl, endpoints, agent);
+  const stored = await exchangeStoredSignIn(keeper, baseUrl, endpoints, agent);
   if (typeof stored === 'object') return stored;
   const flowStartedAt = Date.now();
   const flow = await authorizeInBrowser(endpoints, {
@@ -951,10 +1041,11 @@ async function obtainGrant(
   const refreshToken = flow.refreshToken;
   if (refreshToken) {
     await withStoreLock(baseUrl, agent, () =>
-      writeStoredCredentials(
+      saveGrant(
+        keeper,
         baseUrl,
-        grantedCredentials(flow.clientId, refreshToken, flow.accessToken, flow.expiresInMs, flowStartedAt),
         agent,
+        grantedCredentials(flow.clientId, refreshToken, flow.accessToken, flow.expiresInMs, flowStartedAt),
       ),
     );
   }
@@ -1023,14 +1114,15 @@ export async function establishOAuthConfig(
 ): Promise<HexisMcpConfig> {
   const endpoints = await discoverAuthServer(mcpUrl);
   const agent = options.agent ?? null;
-  const grant = await obtainGrant(baseUrl, endpoints, options);
+  const keeper = signInKeeper(baseUrl, agent, options.print ?? ((line) => process.stderr.write(`${line}\n`)));
+  const grant = await obtainGrant(keeper, baseUrl, endpoints, options);
   const config: HexisMcpConfig = {
     baseUrl,
     connectionKey: grant.token,
     renewConnectionKey: async (): Promise<RenewedGrant> => {
       let signIn: LocalTokenGrant | 'absent' | 'refused';
       try {
-        signIn = await exchangeStoredSignIn(baseUrl, endpoints, agent);
+        signIn = await exchangeStoredSignIn(keeper, baseUrl, endpoints, agent);
       } catch (err) {
         // A freshly granted access token the exchange rejects: the sign-in is gone.
         if (err instanceof LocalTokenRejectedError) throw new SignInRefusedError(SIGN_IN_REFUSED_SENTENCE);
