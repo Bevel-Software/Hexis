@@ -212,6 +212,8 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  // The console spies some cases install must not outlive them.
+  vi.restoreAllMocks();
   if (priorHexisHome === undefined) delete process.env.HEXIS_HOME;
   else process.env.HEXIS_HOME = priorHexisHome;
   await fs.rm(home, { recursive: true, force: true });
