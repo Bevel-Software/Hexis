@@ -9,6 +9,6 @@ export type { AccountReferences, AccountSummary } from './services/account.api';
 export { takePostLoginRedirect } from './services/sso';
 export type { LoginProviders } from './services/sso';
 export { AuthContext, useAuth, type AuthContextValue } from './state/auth.context';
-export { accountKeyPrefix, clearAccountStorage } from './state/accountStorage';
+export { accountKeyPrefix } from './state/accountStorage';
 export { AccountChangedError, accountFetch } from './state/tokenAccount';
 export { useSignInMethods } from './state/use-sign-in-methods';

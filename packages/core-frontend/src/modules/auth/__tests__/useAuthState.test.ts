@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, renderHook, waitFor } from '@testing-library/react';
-import { useAuthState } from '../hooks/useAuthState';
-import { accountKeyPrefix } from '..';
+import { accountKeyPrefix, useAuthState } from '..';
 import { getToken, setToken } from '../../../lib/api';
 
 /**
@@ -54,6 +53,18 @@ describe('useAuthState signing out', () => {
     expect(window.localStorage.getItem(A_ENTRY)).toBeNull();
     expect(window.localStorage.getItem(B_ENTRY)).toBe('2');
     expect(window.localStorage.getItem('bevel.htmlPage.height')).toBe('300');
+  });
+
+  it("never reaches another account whose id starts with the signed-out one's, whatever the id holds", async () => {
+    const others = ['user-a.b', 'user-a/b', 'user-a%2Fb', 'user-a b', 'user-ab', 'user-a@example.com'];
+    for (const other of others) window.localStorage.setItem(`${accountKeyPrefix(other)}entry`, '1');
+    const auth = await signedIn();
+
+    act(() => auth.current.logout());
+
+    expect(window.localStorage.getItem(A_ENTRY)).toBeNull();
+    for (const other of others) expect(window.localStorage.getItem(`${accountKeyPrefix(other)}entry`)).toBe('1');
+    expect(new Set(others.map(accountKeyPrefix)).size).toBe(others.length);
   });
 
   it('still signs out when the storage cannot be listed', async () => {

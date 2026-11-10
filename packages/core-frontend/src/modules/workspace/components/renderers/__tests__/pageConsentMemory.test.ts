@@ -1,5 +1,4 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { clearAccountStorage } from '../../../../auth';
 import { isRemembered, remember } from '../pageConsentMemory';
 
 /**
@@ -121,14 +120,6 @@ describe('pageConsentMemory', () => {
     expect(isRemembered(B, 'd0')).toBe(false);
   });
 
-  it("is gone when the account's storage is cleared, and another account's stays", () => {
-    remember(A, 'a1');
-    remember(B, 'b1');
-    clearAccountStorage(A);
-    expect(isRemembered(A, 'a1')).toBe(false);
-    expect(rememberedDigests(A)).toEqual([]);
-    expect(isRemembered(B, 'b1')).toBe(true);
-  });
 
   it('keeps nothing with no account', () => {
     const setItem = vi.spyOn(window.localStorage, 'setItem');
