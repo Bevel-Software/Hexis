@@ -13,6 +13,7 @@ import {
   fetchAllManuals,
   type HexisMcpConfig,
 } from '../index.js';
+import { renewConnectionKeyNow } from '../renewal.js';
 
 /**
  * INTEGRATION: what a client sees once the workspace refuses this process's
@@ -32,10 +33,17 @@ const refused = new Set<string>();
 /** The REST reads that carried a refused bearer. */
 let refusedReads = 0;
 
+/** Every JSON-RPC method POSTed to the stub's MCP endpoint. */
+const mcpMethods: string[] = [];
+/** Armed by a test: holds the next initialize (a re-registration) until it resolves. */
+let holdInitialize: (() => Promise<void>) | null = null;
+
 afterEach(() => {
   vi.restoreAllMocks();
   refused.clear();
   refusedReads = 0;
+  mcpMethods.length = 0;
+  holdInitialize = null;
 });
 
 beforeAll(async () => {
@@ -73,6 +81,14 @@ beforeAll(async () => {
         }
         if (pathname === '/api/mcp') {
           const parsed = body ? (JSON.parse(body) as unknown) : undefined;
+          const method = String((parsed as { method?: unknown } | undefined)?.method ?? '');
+          if (req.method === 'POST') mcpMethods.push(method);
+          // The gate: an armed initialize is a re-registration held in flight.
+          if (method === 'initialize' && holdInitialize) {
+            const gate = holdInitialize;
+            holdInitialize = null;
+            await gate();
+          }
           const mcp = new Server({ name: 'stub-deployment', version: '0.0.0' }, { capabilities: { tools: {} } });
           mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
             tools: [{ name: 'read_file', description: 'Read a file.', inputSchema: { type: 'object' } }],
@@ -194,6 +210,49 @@ describe('a sign-in the workspace refused for good', () => {
       expect(renew).toHaveBeenCalledTimes(1);
       expect(err.mock.calls.filter((c) => String(c[0]).includes(SENTENCE))).toHaveLength(1);
       expect(err.mock.calls.filter((c) => /discovery failed/.test(String(c[0])))).toHaveLength(0);
+    } finally {
+      await client.close();
+      await handle.shutdown();
+    }
+  });
+
+  it('a call parked behind a re-registration is not sent when the sign-in ends while it waits', { timeout: 60_000 }, async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    let renewals = 0;
+    const renew = vi.fn(async (): Promise<{ token: string }> => {
+      renewals += 1;
+      if (renewals === 1) return { token: 'tok-1' };
+      throw new SignInRefusedError(SENTENCE);
+    });
+    const config: HexisMcpConfig = { baseUrl: base, connectionKey: 'tok-0', renewConnectionKey: renew };
+    const handle = await createHexisMcpServer(config, '0.0.0', { catalogCheck: false });
+    const client = new Client({ name: 'probe', version: '0.0.0' }, { capabilities: {} });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await handle.server.connect(serverTransport);
+    await client.connect(clientTransport);
+    try {
+      expect((await client.listTools()).tools.map((t) => t.name)).toContain('read_file');
+      // A renewal swaps the credential: its re-registration is held in flight.
+      let release!: () => void;
+      let held!: () => void;
+      const reached = new Promise<void>((resolve) => (held = resolve));
+      holdInitialize = () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+          held();
+        });
+      const swapped = renewConnectionKeyNow(config);
+      await reached;
+      // A call arrives and parks behind the re-registration.
+      const call = client.callTool({ name: 'read_file', arguments: {} });
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      // Meanwhile another request's renewal is refused for good, and renewal
+      // tells the server through the listener the server installed.
+      config.onSignInEnded!(SENTENCE);
+      release();
+      await swapped;
+      await expect(call).rejects.toThrow(/restart hexis-mcp to sign in through your browser again/);
+      expect(mcpMethods).not.toContain('tools/call');
     } finally {
       await client.close();
       await handle.shutdown();
