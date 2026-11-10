@@ -1,17 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import express from 'express';
 import type { Server } from 'node:http';
-import { randomBytes } from 'node:crypto';
 import { OidcAuthProvider, oidcRedirectUri, oidcSettingsFrom, type OidcSettings } from '../oidc-auth-provider.js';
 import { createAuthRoutes, type AuthProviderPlugin } from '../auth.routes.js';
 import type { AuthService } from '../auth.service.js';
-import {
-  CORE_SETTINGS,
-  DeploymentSettingsService,
-} from '../../settings/deployment-settings.service.js';
-import type { Database } from '../../database/connection.js';
 import { setLogger } from '../../../shared/logging.js';
-import type { ILogger } from '../../../shared/logger.contract.js';
+import { capturingLogger } from '../../../__tests__/capturing-logger.js';
+import { realDeploymentSettings } from '../../../__tests__/real-settings.js';
 
 const ISSUER = 'https://idp.example.com';
 const DISCOVERY = {
@@ -218,22 +213,25 @@ describe('OidcAuthProvider', () => {
     // Any other string is the provider's own text, however code-like it looks.
     ['client_secret_hunter', 'non-standard'],
     ['something <odd>', 'non-standard'],
-  ])("logs the provider's error %s as %s", async (error, logged) => {
-    const fields: Array<Record<string, unknown> | undefined> = [];
-    const capture = (): ILogger => {
-      const write = (_message: string, f?: Record<string, unknown>) => fields.push(f);
-      return { debug: write, info: write, warn: write, error: write, child: () => capture() };
-    };
-    const restore = setLogger(capture());
+  ])("logs the provider's error %s as %s, and never its description", async (error, logged) => {
+    const description = 'Mailbox carol@example.com is not verified';
+    const { logger, lines } = capturingLogger();
+    const restore = setLogger(logger);
     try {
       const idp = makeIdpFetch();
       const base = await listen(makeProvider(idp.impl, authService));
-      await callbackWith(base, { error });
+      await callbackWith(base, { error, error_description: description });
     } finally {
       setLogger(restore);
     }
-    expect(fields).toContainEqual({ error: logged });
-    expect(JSON.stringify(fields)).not.toContain(logged === 'non-standard' ? error : 'non-standard');
+    expect(lines).toContainEqual(
+      expect.objectContaining({ level: 'warn', fields: expect.objectContaining({ error: logged }) }),
+    );
+    // Every message and field written, together: the provider's description
+    // never appears, and a non-standard error never appears as itself.
+    const written = JSON.stringify(lines);
+    expect(written).not.toContain(description);
+    if (logged === 'non-standard') expect(written).not.toContain(error);
   });
 
   it('still reports a provider error that comes with a forged state as a state failure', async () => {
@@ -338,37 +336,12 @@ describe('OidcAuthProvider', () => {
  * the next sign-in without a restart.
  */
 describe('OidcAuthProvider — live configuration', () => {
-  /** Same in-memory stand-in for `deployment_settings` the settings tests use. */
-  function makeDb() {
-    const rows: { key: string; value: string; encrypted: boolean }[] = [];
-    return {
-      select: () => ({ from: () => Promise.resolve(rows.map((r) => ({ ...r }))) }),
-      insert: () => ({
-        values: (v: { key: string; value: string; encrypted: boolean }) => ({
-          onConflictDoUpdate: () => {
-            const existing = rows.find((r) => r.key === v.key);
-            if (existing) Object.assign(existing, v);
-            else rows.push({ key: v.key, value: v.value, encrypted: v.encrypted });
-            return Promise.resolve();
-          },
-        }),
-      }),
-      delete: () => ({ where: () => Promise.resolve() }),
-    } as unknown as Database;
-  }
-
-  let savedEnv: NodeJS.ProcessEnv;
-  beforeEach(() => {
-    savedEnv = { ...process.env };
-    for (const def of CORE_SETTINGS) delete process.env[def.envVar];
-  });
-  afterEach(() => {
-    process.env = savedEnv;
-  });
-
-  /** The real auth router over real settings, with an overlay plugin beside OIDC. */
-  async function boot(fetchImpl: typeof fetch = makeIdpFetch().impl) {
-    const settings = new DeploymentSettingsService(makeDb(), randomBytes(32).toString('base64'));
+  /**
+   * The real auth router over real settings (reading `env`, empty unless a
+   * test passes one), with an overlay plugin beside OIDC.
+   */
+  async function boot(fetchImpl: typeof fetch = makeIdpFetch().impl, env: NodeJS.ProcessEnv = {}) {
+    const settings = realDeploymentSettings(env);
     const overlay: AuthProviderPlugin = {
       key: 'microsoft',
       label: 'Sign in with Microsoft',
@@ -561,11 +534,12 @@ describe('OidcAuthProvider — live configuration', () => {
   });
 
   it('keeps an environment-configured provider exactly as the environment says', async () => {
-    process.env.OIDC_ISSUER_URL = ISSUER;
-    process.env.OIDC_CLIENT_ID = 'env-client';
-    process.env.OIDC_CLIENT_SECRET = 'env-secret';
-    process.env.OIDC_PROVIDER_LABEL = 'Env SSO';
-    const { base, settings, probe } = await boot();
+    const { base, settings, probe } = await boot(undefined, {
+      OIDC_ISSUER_URL: ISSUER,
+      OIDC_CLIENT_ID: 'env-client',
+      OIDC_CLIENT_SECRET: 'env-secret',
+      OIDC_PROVIDER_LABEL: 'Env SSO',
+    });
     expect((await probe()).find((p) => p.key === 'oidc')?.label).toBe('Env SSO');
 
     // A UI save cannot override an environment value — it is refused outright.

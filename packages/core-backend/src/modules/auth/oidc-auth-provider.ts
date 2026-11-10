@@ -247,8 +247,7 @@ export class OidcAuthProvider implements AuthProviderPlugin {
           // Logged only when it is a standard code; anything else is text of
           // the provider's choosing.
           log.warn('OIDC provider refused the sign-in:', {
-            error: isStandardAuthorizationErrorCode(error) ? error : 'non-standard',
-          });
+            error: isStandardAuthorizationErrorCode(error) ? error : 'non-standard',          });
           fail(error === 'access_denied' ? 'denied' : 'auth');
           return;
         }
