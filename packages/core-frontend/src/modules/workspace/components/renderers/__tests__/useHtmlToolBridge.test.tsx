@@ -99,6 +99,9 @@ function mount(
       <AuthContext.Provider value={{ user: { id: account } } as unknown as AuthContextValue}>{app}</AuthContext.Provider>
     );
   };
+  // Signed in as the account: its session token is the stored one, as after a
+  // sign-in in the app (a test of another tab's sign-in replaces it later).
+  if (account !== null) window.localStorage.setItem('bevel_token', sessionTokenFor(account));
   let viewKey = 0;
   const result = render(tree(viewKey));
   const iframe = result.container.querySelector('iframe')!;
@@ -337,6 +340,23 @@ describe('useHtmlToolBridge through a renderer of its own', () => {
     }
     expect(screen.queryByText(CARD)).toBeNull();
     expect(server.mcp).toEqual(['edit_file']);
+    // Not one request of the page's (manual lookup, call, refusal record)
+    // went out with user-b's token.
+    const sentWith = vi.mocked(fetch).mock.calls.map(([, init]) => new Headers(init?.headers).get('Authorization'));
+    expect(sentWith.length).toBeGreaterThan(0);
+    expect(new Set(sentWith)).toEqual(new Set([`Bearer ${sessionTokenFor('user-a')}`]));
+  });
+
+  it('sends nothing with no session token at all: the call is refused, not sent as nobody', async () => {
+    stubServer();
+    const { frame } = mount('file page', { account: 'user-a' });
+    window.localStorage.removeItem('bevel_token');
+    frame.post({ type: 'bevel.tool.call', requestId: 'r1', fn: 'callTool', args: ['read_file', {}] });
+    frame.post(write('w1'));
+    await waitFor(() => expect(frame.replies).toHaveLength(2));
+    for (const reply of frame.replies) expect(reply).toMatchObject({ ok: false, code: 'account_changed' });
+    expect(screen.queryByText(CARD)).toBeNull();
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled();
   });
 
   it('keeps working on a token renewed for the same account', async () => {

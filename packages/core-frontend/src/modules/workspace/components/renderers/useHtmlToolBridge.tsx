@@ -1,5 +1,5 @@
 import { useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
-import { AuthContext, tokenAccountId } from '../../../auth';
+import { AuthContext, accountFetch } from '../../../auth';
 import { useFileNav } from '../../routing/kb-routes';
 import { useRendererSurface } from './rendererSurface';
 import { sha256Hex } from '@bevel-software/platform-shared';
@@ -86,15 +86,22 @@ export function useHtmlToolBridge({ iframeRef, filePath, viewKey, source }: Html
   const pageTools = usePageTools();
   const openPageInPlatform = useOpenPageInPlatform();
   const toolPagePath = surface === null && pageTools ? pageTools.pagePath : null;
-  const toolsClient = useMemo(() => (toolPagePath ? new PageToolsClient(toolPagePath) : null), [toolPagePath]);
-  const [card, setCard] = useState<PageCard | null>(null);
-  const cardRef = useRef<PageCard | null>(null);
   // The viewer's answer about this page's writes holds for one VIEW of it: a
   // new frame document (a reload, a saved edit, another file) asks again,
   // unless the browser remembers this account's Allow for that document's
   // exact source. Read nullable (not `useAuth`, which throws): no account above
   // the renderer means nothing is kept and every view asks.
   const account = useContext(AuthContext)?.user?.id ?? null;
+  // With an account above the renderer, every request the page's calls make
+  // (the manual lookup, the call, a refusal's record, an upload) is sent only
+  // with that account's token: another tab's sign-in as someone else makes
+  // them fail with nothing sent (`accountFetch`).
+  const toolsClient = useMemo(
+    () => (toolPagePath ? new PageToolsClient(toolPagePath, account === null ? undefined : accountFetch(account)) : null),
+    [toolPagePath, account],
+  );
+  const [card, setCard] = useState<PageCard | null>(null);
+  const cardRef = useRef<PageCard | null>(null);
   const consentRef = useRef<PageConsent | null>(null);
   // Which document this view's is: an identity minted per `viewKey` — for
   // every view, tools or not, since a page without tools still asks
@@ -218,15 +225,7 @@ export function useHtmlToolBridge({ iframeRef, filePath, viewKey, source }: Html
           remember: () => remember(account, viewDigest),
         });
       }
-      // With an account above the renderer, the call never goes out with
-      // another account's token (another tab may have signed in as someone
-      // else). No readable token sends it as nobody, which the server refuses.
-      const sameAccount = () => {
-        if (account === null) return true;
-        const holder = tokenAccountId();
-        return holder === null || holder === account;
-      };
-      void answerToolCall(call, toolsClient, consentRef.current, sameAccount).then(reply);
+      void answerToolCall(call, toolsClient, consentRef.current).then(reply);
     }
     window.addEventListener('message', onToolMessage);
     return () => window.removeEventListener('message', onToolMessage);

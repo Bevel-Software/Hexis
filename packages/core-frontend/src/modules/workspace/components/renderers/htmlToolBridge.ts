@@ -1,5 +1,6 @@
 import { createContext, useContext } from 'react';
 import { authFetch } from '../../../../lib/api';
+import { AccountChangedError } from '../../../auth';
 
 /**
  * The app's half of `window.bevel.tools`: what answers an HTML page's tool
@@ -311,7 +312,15 @@ export class PageToolsClient {
         }
         return map;
       })
-      .catch(() => null);
+      .catch((err: unknown) => {
+        // A session that is no longer this view's account's is not an
+        // unreadable manual: the call fails with it, and nothing is kept.
+        if (err instanceof AccountChangedError) {
+          this.writing = undefined;
+          throw err;
+        }
+        return null;
+      });
     return this.writing;
   }
 
@@ -515,24 +524,18 @@ export function asToolCall(data: unknown): ToolCallMessage | null {
 
 const CLOSED_MESSAGE = 'The page was closed before the viewer answered.';
 
-/** Why a call is refused when the browser's session now belongs to another account than this view's. */
-export const ACCOUNT_CHANGED_MESSAGE =
-  'You signed in as another account in another tab. Reload this page to use its tools as that account.';
-
 /**
  * Answer one of a page's tool calls: wait out an open card, ask for consent
  * when the call may write, run it, and say how it went. A call whose view
  * ended (its `consent` closed) before it was decided runs nothing and is
- * answered `closed`. A call decided for this view's account runs only while
- * the session token is still that account's (`sameAccount`, asked right before
- * it is sent): otherwise it runs nothing and is answered `account_changed`.
- * Never throws — every outcome is a response for the frame.
+ * answered `closed`. A call whose client refuses to send as another account
+ * (`AccountChangedError`, from the auth module's `accountFetch`) is answered
+ * `account_changed`. Never throws — every outcome is a response for the frame.
  */
 export async function answerToolCall(
   msg: ToolCallMessage,
   client: PageToolsClient,
   consent: PageConsent,
-  sameAccount: () => boolean = () => true,
 ): Promise<ToolCallResponse> {
   const fail = (error: string, code?: string): ToolCallResponse => ({
     type: 'bevel.tool.response',
@@ -558,10 +561,6 @@ export async function answerToolCall(
     }
     // The view ended while the call was being decided: it is no longer the view's to run.
     if (consent.closed) return fail(CLOSED_MESSAGE, 'closed');
-    // The token every request carries is shared by the browser's tabs: one
-    // signed in as someone else since this view's account decided must not
-    // have the call sent with their token.
-    if (!sameAccount()) return fail(ACCOUNT_CHANGED_MESSAGE, 'account_changed');
     const [a, b] = msg.args;
     const result =
       msg.fn === 'searchTools'
@@ -575,6 +574,7 @@ export async function answerToolCall(
               : await client.callTool(a, b);
     return { type: 'bevel.tool.response', requestId: msg.requestId, ok: true, result };
   } catch (err) {
+    if (err instanceof AccountChangedError) return fail(err.message, 'account_changed');
     return fail(err instanceof Error ? err.message : String(err), err instanceof PageToolError ? err.code : undefined);
   }
 }

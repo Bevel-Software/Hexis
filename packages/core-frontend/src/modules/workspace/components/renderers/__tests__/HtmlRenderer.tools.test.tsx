@@ -25,6 +25,11 @@ const workspace = { workspaceId: 'main', kbDirName: 'knowledge-base' } as unknow
 const git = { status: { branch: 'main' } } as unknown as GitContextValue;
 /** The account on the file page, as the app's auth gate carries it above the renderer. */
 const auth = { user: { id: 'user-a' } } as unknown as AuthContextValue;
+/** user-a's session token, as the server signs it: a JWT whose `userId` claim names the account (the signature is not checked here). */
+const VIEWER_SESSION = (() => {
+  const part = (value: object) => btoa(JSON.stringify(value)).replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_');
+  return `${part({ alg: 'HS256', typ: 'JWT' })}.${part({ userId: 'user-a', email: 'user-a@example.com' })}.signature`;
+})();
 /** Where the browser keeps the account's Allow: one entry per digest, holding when it was allowed. */
 const ALLOWED_PAGE_KEY_PREFIX = 'bevel.account/user-a/htmlPage.allowedWrite.';
 /** The digests stored in localStorage, least recently allowed first: read through the storage API, as another tab would. */
@@ -40,6 +45,8 @@ const rememberedDigests = (): string[] =>
  * save arriving): the same frame, a new document in it.
  */
 function onFilePage({ readOnly = true }: { readOnly?: boolean } = {}) {
+  // Signed in as user-a: its session token is the stored one.
+  setToken(VIEWER_SESSION);
   const tree = (content: string) => (
     <AuthContext.Provider value={auth}>
       <MemoryRouter initialEntries={['/workspace/main/knowledge-base/Dashboards/Roadmap.html']}>
@@ -263,7 +270,7 @@ describe('an upload from the file page', () => {
   const file = () => new File([new Uint8Array([0x50, 0x4b, 0x03, 0x04])], 'Assets.xlsx');
 
   it('asks with the write card, and on Allow runs the three steps in order with the viewer\'s session', async () => {
-    setToken('viewer-session');
+    setToken(VIEWER_SESSION);
     try {
       const server = stubUploadServer();
       const { container } = onFilePage();
@@ -279,7 +286,7 @@ describe('an upload from the file page', () => {
         'POST /api/agent/uploads?filename=Assets.xlsx',
         'apply_file_upload',
       ]);
-      for (const r of server.requests) expect(r.headers.get('Authorization')).toBe('Bearer viewer-session');
+      for (const r of server.requests) expect(r.headers.get('Authorization')).toBe(`Bearer ${VIEWER_SESSION}`);
       for (const r of server.requests.filter((x) => x.step.endsWith('_upload'))) {
         expect(decodeURIComponent(r.headers.get('X-Bevel-Page')!)).toBe(PAGE);
       }
