@@ -66,6 +66,17 @@ describe('ProfileMenu: the app\'s own sections', () => {
     expect(screen.queryByText('Billing only')).toBeNull();
   });
 
+  it('draws it for an admin its rows are for too, after the default rows and before Admin only', async () => {
+    mount('ada@example.com', true);
+    await userEvent.click(screen.getByRole('button', { name: 'Ada Lovelace' }));
+    const section = screen.getByRole('group', { name: 'Infrastructure only' });
+    const lastDefault = screen.getByRole('button', { name: 'Account' });
+    const adminHeading = screen.getByText('Admin only');
+    expect(within(section).getAllByRole('button').map((b) => b.textContent)).toEqual(['Executors', 'Agents']);
+    expect(lastDefault.compareDocumentPosition(section) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(section.compareDocumentPosition(adminHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
   it('draws nothing of it for anyone else, even an admin', async () => {
     mount('bob@example.com', true);
     await userEvent.click(screen.getByRole('button', { name: 'Ada Lovelace' }));

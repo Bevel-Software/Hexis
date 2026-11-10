@@ -23,7 +23,8 @@
  * really a group; the roles admin surface flags it with a convert action.
  */
 
-import { ADMIN_CANONICAL, canonicalRoleName } from '../access-model/index.js';
+import { ADMIN_CANONICAL, canonicalRoleName, parseRolesYaml } from '../access-model/index.js';
+import { emitRolesModel } from './roles-edit.js';
 
 /** A capability an app surface gates on. Grow this union with the gates. */
 export type Capability =
@@ -80,19 +81,52 @@ export interface AppRole {
 }
 
 /**
- * Core's roles, then the app's: every role this deployment defines, each
- * once. An app role named like a core role (or like another app role) is
- * dropped with the first spelling kept, so core's Admin can never be
- * redefined from outside.
+ * Refuse, with the reason, an app's role list that roles.yaml could not hold:
+ * a name the roles.yaml parser rejects (reserved, a principal prefix, a
+ * colon), one that does not read back as written, or a name core or another
+ * app role already has. Checked once, where the app's roles enter core (the
+ * roles admin service's construction, at boot): the list is the app's code,
+ * so a bad name is a defect that should stop the start, not a role that
+ * looks assignable and fails on its first holder. Each name is judged by
+ * the parser itself, on a roles.yaml that holds it with one member beside
+ * a valid Admin.
+ */
+export function assertAppRoles(appRoles: readonly AppRole[]): void {
+  const taken = new Set(CAPABILITY_ROLES.map((r) => r.canonical));
+  for (const role of appRoles) {
+    const displayName = role.displayName.trim();
+    const canonical = canonicalRoleName(displayName);
+    if (!canonical) throw new Error('an app role has an empty name');
+    if (taken.has(canonical)) throw new Error(`app role "${displayName}" is already a role of this deployment`);
+    taken.add(canonical);
+    const candidate = emitRolesModel([
+      { displayName: 'Admin', members: ['admin@example.com'] },
+      { displayName, members: ['holder@example.com'] },
+    ]);
+    const parsed = parseRolesYaml(candidate);
+    if (!parsed.ok) throw new Error(`app role "${displayName}" cannot be written to roles.yaml: ${parsed.errors.join('; ')}`);
+    if (parsed.index.byCanonical.get(canonical)?.displayName !== displayName) {
+      throw new Error(`app role "${displayName}" does not read back from roles.yaml as written`);
+    }
+  }
+}
+
+/**
+ * Core's roles, then the app's: every role this deployment defines. The
+ * app's list is checked by {@link assertAppRoles} where it enters core, so
+ * each name here is distinct and one roles.yaml can hold.
  */
 export function capabilityRoles(appRoles: readonly AppRole[] = []): readonly CapabilityRole[] {
-  const out: CapabilityRole[] = [...CAPABILITY_ROLES];
-  for (const role of appRoles) {
-    const canonical = canonicalRoleName(role.displayName);
-    if (!canonical || out.some((r) => r.canonical === canonical)) continue;
-    out.push({ canonical, displayName: role.displayName.trim(), description: role.description, capabilities: [], groupAssignable: true });
-  }
-  return out;
+  return [
+    ...CAPABILITY_ROLES,
+    ...appRoles.map((role) => ({
+      canonical: canonicalRoleName(role.displayName),
+      displayName: role.displayName.trim(),
+      description: role.description,
+      capabilities: [],
+      groupAssignable: true,
+    })),
+  ];
 }
 
 export function capabilityRoleFor(roleName: string, appRoles: readonly AppRole[] = []): CapabilityRole | null {

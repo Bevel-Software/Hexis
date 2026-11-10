@@ -743,7 +743,11 @@ describe('roles the app defines', () => {
   const INFRA = { displayName: 'Infrastructure Engineer', description: 'Sees and runs the executors.' };
   let root: string;
   let repo: string;
+  let ws: WorkspaceService;
   let svc: RolesAdminService;
+
+  const serviceWith = (appRoles: { displayName: string; description: string }[], deploymentAdmins: string[] = []) =>
+    new RolesAdminService(ws, stubVersionControl().svc, new AccessControlService(ws, KB, realDisk()), realDisk(), KB, () => DEFAULT_BRANCH, stubEventBus().bus, deploymentAdmins, appRoles);
 
   beforeEach(async () => {
     root = await mkTmpRoot();
@@ -751,12 +755,30 @@ describe('roles the app defines', () => {
     repo = path.join(workspaceDir, KB);
     await write(repo, 'roles.yaml', ROLES);
     await write(repo, 'groups.yaml', 'groups:\n  Platform Team:\n    - pat@x.io\n');
-    const ws = stubWorkspace(workspaceDir);
-    // An app role spelled like core's Admin is not a second Admin: core's stays the only one.
-    svc = new RolesAdminService(ws, stubVersionControl().svc, new AccessControlService(ws, KB, realDisk()), realDisk(), KB, () => DEFAULT_BRANCH, stubEventBus().bus, [], [
-      INFRA,
-      { displayName: ' admin ', description: 'not a second Admin' },
-    ]);
+    ws = stubWorkspace(workspaceDir);
+    svc = serviceWith([INFRA]);
+  });
+
+  it.each([
+    ['a name roles.yaml reads differently (a colon)', 'Sales: EMEA', /cannot be written|does not read back/],
+    ['a reserved name', 'everyone', /reserved name/],
+    ['the other reserved name', 'Deny', /reserved name/],
+    ['a group token', 'group/Ops', /reserved 'group\/' prefix/],
+    ['a plugin token', 'plugin/Tools', /reserved 'plugin\/' prefix/],
+    ["core's Admin, however spelled", ' admin ', /already a role of this deployment/],
+    ['an empty name', '  ', /empty name/],
+  ])('refuses to start with an app role that is %s, saying why', (_what, displayName, reason) => {
+    expect(() => serviceWith([{ displayName, description: 'x' }])).toThrow(reason);
+  });
+
+  it('refuses two app roles of one name', () => {
+    expect(() => serviceWith([INFRA, { displayName: 'infrastructure  engineer', description: 'again' }])).toThrow(/already a role/);
+  });
+
+  it('lists Admin with the deployment admins when roles.yaml does not name it, as when it does', async () => {
+    await write(repo, 'roles.yaml', 'roles:\n  Sales:\n    - felix@example.com\n');
+    const admin = (await serviceWith([INFRA], ['owner@example.com']).getRoster(ADMIN.email)).find((r) => r.canonical === 'admin')!;
+    expect(admin).toMatchObject({ isAdmin: true, members: [], fixedMembers: ['owner@example.com'], fixedMembersNote: 'Owner; cannot be removed here' });
   });
 
   afterEach(async () => {
@@ -793,7 +815,7 @@ describe('roles the app defines', () => {
     expect(await fs.readFile(path.join(repo, 'roles.yaml'), 'utf-8')).toBe(ROLES);
   });
 
-  it('never offers an app role for conversion to a group; a legacy one still converts', async () => {
+  it('refuses to convert an app role to a group; a legacy one still converts', async () => {
     await svc.addMember(ADMIN, 'infrastructure engineer', 'ops@example.com');
     await expect(svc.convertRoleToGroup(ADMIN, 'infrastructure engineer')).rejects.toMatchObject({ status: 422 });
     const roster = await svc.convertRoleToGroup(ADMIN, 'sales');
