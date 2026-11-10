@@ -241,7 +241,8 @@ export class OidcAuthProvider implements AuthProviderPlugin {
         // The provider answered with an error instead of a code (RFC 6749
         // §4.1.2.1). Checked after the state, so a forged response is still a
         // state failure. `access_denied` means the provider (or the person, at
-        // a consent screen) said no, which trying again will not change. Its
+        // a consent screen) said no: the state was fine, so the screen names
+        // the refusal instead of asking to verify the sign-in again. Its
         // `error_description` is the provider's own text and is not shown.
         if (typeof error === 'string' && error) {
           // Logged only when it is a standard code; anything else is text of
