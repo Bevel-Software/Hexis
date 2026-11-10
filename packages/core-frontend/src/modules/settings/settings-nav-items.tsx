@@ -163,9 +163,18 @@ export function isSettingsNavPath(pathname: string): boolean {
   return SETTINGS_NAV_PATHS.includes(normalizeSettingsPath(pathname));
 }
 
+/** One of the app's own labelled sections, with its rows sorted. */
+export interface AppMenuSection {
+  id: string;
+  label: string;
+  items: AdminMenuItem[];
+}
+
 export interface MenuSections {
   defaultItems: AdminMenuItem[];
   adminItems: AdminMenuItem[];
+  /** The app's own sections (see `AdminMenuItem.section`), in their order; drawn between the two above. */
+  appSections: AppMenuSection[];
 }
 
 /**
@@ -180,10 +189,21 @@ export function useMenuSections(): MenuSections {
   const registry = useAppRegistry();
   return useMemo(() => {
     const all = [...CORE_MENU_ITEMS, ...registry.adminMenuItems];
+    const byOrder = (a: AdminMenuItem, b: AdminMenuItem) => (a.order ?? 100) - (b.order ?? 100);
     const bySection = (section: 'default' | 'admin') =>
-      all
-        .filter((item) => (item.section ?? 'default') === section)
-        .sort((a, b) => (a.order ?? 100) - (b.order ?? 100));
-    return { defaultItems: bySection('default'), adminItems: bySection('admin') };
+      all.filter((item) => (item.section ?? 'default') === section).sort(byOrder);
+    // The app's sections: one per id, its label and order from the first row naming it.
+    const sections = new Map<string, AppMenuSection & { order: number }>();
+    for (const item of all) {
+      const section = item.section;
+      if (typeof section !== 'object') continue;
+      const entry = sections.get(section.id) ?? { id: section.id, label: section.label, order: section.order ?? 100, items: [] };
+      entry.items.push(item);
+      sections.set(section.id, entry);
+    }
+    const appSections = [...sections.values()]
+      .sort((a, b) => a.order - b.order)
+      .map(({ id, label, items }) => ({ id, label, items: items.sort(byOrder) }));
+    return { defaultItems: bySection('default'), adminItems: bySection('admin'), appSections };
   }, [registry]);
 }

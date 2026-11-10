@@ -180,7 +180,8 @@ export interface McpCaller {
   /**
    * The knowledge-base path of the HTML page whose script made this request,
    * as the person signed in to the app. The route accepts it from a session
-   * caller only. Its calls are recorded in the Audit log under the page.
+   * caller only. Its calls are recorded in the Audit log under the page. It is
+   * served the person's own tools, as their agent is.
    */
   page?: string | null;
 }
@@ -963,7 +964,8 @@ export class McpService {
    *
    * The key is the person, the kind of caller (a connection key, or a person
    * through OAuth or their session — the latter two reach the same loopback
-   * identity), the credential's scope, and the catalog revision. The revision
+   * identity; an HTML page the person is viewing is the person), the
+   * credential's scope, and the catalog revision. The revision
    * is asked for on every request, with the request's own bearer, so it is
    * the caller's CURRENT catalog that picks the surface: a manual released,
    * edited or put out of their reach moves it, and the request builds anew.
