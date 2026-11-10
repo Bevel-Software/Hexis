@@ -571,7 +571,8 @@ describe("McpService — a page reaches the platform's tools only", () => {
     const agent = await asAgent();
     expect(await names(agent)).toEqual(expect.arrayContaining(['list_local_tools', 'list_tool_setup']));
     expect((await agent.callTool({ name: 'list_local_tools', arguments: {} })).isError).toBeFalsy();
-    expect(state.calls.map((c) => c.tool)).toEqual(['list_local_tools']);
+    expect((await agent.callTool({ name: 'list_tool_setup', arguments: {} })).isError).toBeFalsy();
+    expect(state.calls.map((c) => c.tool)).toEqual(['list_local_tools', 'list_tool_setup']);
   });
 });
 
