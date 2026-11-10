@@ -180,8 +180,8 @@ export interface McpCaller {
   /**
    * The knowledge-base path of the HTML page whose script made this request,
    * as the person signed in to the app. The route accepts it from a session
-   * caller only. Its calls are recorded in the Audit log under the page, and
-   * it is served the platform's own tools only (see `buildSurface`).
+   * caller only. Its calls are recorded in the Audit log under the page. It is
+   * served the person's own tools, as their agent is.
    */
   page?: string | null;
 }
@@ -276,13 +276,6 @@ function connectionOf(body: unknown): { connection?: ConnectionScopeWire } {
  * manual is retried as soon as a refresh may have settled.
  */
 const DEGRADED_SURFACE_MAX_AGE_MS = 60_000;
-
-/**
- * The platform tools an HTML page's surface does not carry: they list the
- * `.tool` manuals and connectors that surface leaves out (and what each needs
- * set up), which a page can neither call nor set up.
- */
-const PAGE_WITHHELD_PLATFORM_TOOLS: ReadonlySet<string> = new Set(['list_local_tools', 'list_tool_setup']);
 
 /**
  * What the platform-hosted manuals' `${CONNECTION_KEY}` is seeded with when a
@@ -929,8 +922,8 @@ export class McpService {
    * so the Audit log shows the page's attempt beside its allowed calls.
    *
    * The tool is named the way the page named it (its MCP name) and recorded
-   * the way that call would have been: through the page's surface, which the
-   * page's earlier calls have normally left warm.
+   * the way that call would have been: through the person's surface, which
+   * the page's earlier calls have normally left warm.
    */
   async recordPageRefusal(
     caller: Pick<McpCaller, 'userId' | 'bearer' | 'scope'>,
@@ -956,7 +949,7 @@ export class McpService {
     await runInRequest(ctx, async () => {
       let utcpName = toolName;
       if (!META_TOOL_NAMES.has(toolName)) {
-        const surface = await this.surfaceFor({ ...caller, tokenId: null, page }, loopbackBearer);
+        const surface = await this.surfaceFor({ ...caller, tokenId: null }, loopbackBearer);
         catalogNames = surface.catalogNames;
         utcpName =
           surface.tools.find((t) => t.mcpName === toolName)?.utcpName ?? surface.hidden.get(toolName)?.utcpName ?? toolName;
@@ -969,12 +962,10 @@ export class McpService {
    * The caller's tool surface: the one cached for their catalog revision, or
    * a fresh build that is then cached.
    *
-   * The key is the person, the kind of caller (a connection key, a person
+   * The key is the person, the kind of caller (a connection key, or a person
    * through OAuth or their session — the latter two reach the same loopback
-   * identity — or an HTML page the person is viewing, whose surface holds the
-   * platform's own tools only), the credential's scope, and the catalog
-   * revision. So a page's surface is never served to the person's agent, nor
-   * the person's to a page. The revision
+   * identity; an HTML page the person is viewing is the person), the
+   * credential's scope, and the catalog revision. The revision
    * is asked for on every request, with the request's own bearer, so it is
    * the caller's CURRENT catalog that picks the surface: a manual released,
    * edited or put out of their reach moves it, and the request builds anew.
@@ -985,9 +976,8 @@ export class McpService {
    */
   private async surfaceFor(caller: McpCaller, loopbackBearer: string): Promise<RequestSurface> {
     const { userId, tokenId } = caller;
-    const platformOnly = Boolean(caller.page);
     const { revision } = await this.fetchCatalogRevision(loopbackBearer);
-    if (revision === null) return this.buildSurface(userId, tokenId, loopbackBearer, 'uncached', platformOnly);
+    if (revision === null) return this.buildSurface(userId, tokenId, loopbackBearer, 'uncached');
     // The agent the connection was made as is part of the key: two
     // connections of one person made as different agents are two surfaces.
     // (The revision already moves when the agent's FILE changes — it carries
@@ -995,14 +985,14 @@ export class McpService {
     // Everything adds nothing, and keeps the key it always had.
     const key = [
       userId,
-      tokenId != null ? 'key' : platformOnly ? 'page' : 'person',
+      tokenId != null ? 'key' : 'person',
       caller.scope ?? 'write',
       revision,
       ...(caller.agentPath ? [caller.agentPath] : []),
     ].join(POOL_KEY_SEPARATOR);
     const { value } = await this.surfaces.get(
       key,
-      () => this.buildSurface(userId, tokenId, loopbackBearer, 'miss', platformOnly),
+      () => this.buildSurface(userId, tokenId, loopbackBearer, 'miss'),
       (built) => (built.degraded ? DEGRADED_SURFACE_MAX_AGE_MS : undefined),
     );
     return value;
@@ -1048,31 +1038,21 @@ export class McpService {
    * Logs one line with the time each half took and whether it was a cache
    * miss, so a build is measured rather than assumed, and a log that shows
    * one line for two requests shows the second was served warm.
-   *
-   * `platformOnly` builds an HTML page's surface: the platform manual alone,
-   * so no `.tool` manual's or plugin MCP server's tool is listed to a page,
-   * or callable from it, directly or in a chain (a chain runs on this
-   * surface's client). The platform manual still answers with the viewer's
-   * access and its `write` tags.
    */
   private async buildSurface(
     userId: string,
     tokenId: string | null,
     loopbackBearer: string,
     cache: 'miss' | 'uncached',
-    platformOnly: boolean,
   ): Promise<RequestSurface> {
     const started = performance.now();
     // The list of manuals this caller gets: the KB manual + each `.tool` they
     // can read. Fetched over loopback with the caller's key, so ACL filtering
     // lives ONCE behind the REST surface.
-    const { manuals, connection }: { manuals: CallTemplate[]; connection?: ConnectionScopeWire } = platformOnly
-      ? { manuals: [this.kbManualTemplate()] }
-      : await this.fetchManualTemplates(loopbackBearer);
+    const { manuals, connection } = await this.fetchManualTemplates(loopbackBearer);
     const catalogMs = performance.now() - started;
     const client = await this.buildClient(userId, manuals);
-    const found = await this.discoverTools(client, manuals, userId);
-    const discovered = platformOnly ? { ...found, tools: await this.withholdFromPage(client, found.tools) } : found;
+    const discovered = await this.discoverTools(client, manuals, userId);
     // After discovery, which renames each template in place to the name it
     // registered under: that is the name the repository keys it by.
     const rawTemplates = new Map(manuals.map((m) => [utcpManualName(m), m] as const));
@@ -1432,22 +1412,6 @@ export class McpService {
         `${[...found.values()].map((t) => `${t.name} (${t.path}: ${t.reason})`).join(', ')}`,
     );
     return { tools: tools.filter((tool) => !found.has(tool.utcpName)), hidden };
-  }
-
-  /**
-   * Take the platform tools that describe what a page's surface leaves out
-   * (PAGE_WITHHELD_PLATFORM_TOOLS) off a page's client, the way an invalid
-   * schema is taken off: from the repository, so the listing, `tools_info` and
-   * `call_tool_chain`'s interfaces all lose them, and a call is an unknown tool.
-   * A page's client is its own (its surface is keyed apart from the person's),
-   * so the person's agent keeps them.
-   */
-  private async withholdFromPage(client: CodeModeUtcpClient, tools: ProxiedTool[]): Promise<ProxiedTool[]> {
-    const withheld = tools.filter(
-      (tool) => tool.manualName === EXTERNAL_KB_MANUAL_NAME && PAGE_WITHHELD_PLATFORM_TOOLS.has(tool.mcpName),
-    );
-    for (const tool of withheld) await client.config.tool_repository.removeTool(tool.utcpName);
-    return tools.filter((tool) => !withheld.includes(tool));
   }
 
   /** The schema findings the owner-facing surfaces report — see {@link ToolSchemaGuard}. */

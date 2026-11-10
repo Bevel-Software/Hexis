@@ -61,13 +61,10 @@ name.
 ### Calling tools: `window.bevel.tools`
 
 On the app's file page, and on a skill's page in the Library (Skills & Tools →
-the skill → its file), a page calls the platform's own tools as the person
-viewing it, with the names, answers and refusals that person's own agent
-gets, through five functions, each returning a promise.
-A page reaches platform tools only: no tool of a `.tool` manual or a plugin's
-MCP server, nor `list_local_tools` or `list_tool_setup`, is listed to a page
-or callable from it, directly or in a chain. Such a call rejects as an unknown
-tool.
+the skill → its file), a page calls the tools of the person viewing it —
+exactly the tools that person's own agent gets from the hosted MCP server,
+with the same names, answers and refusals — through five functions, each
+returning a promise:
 
 - `window.bevel.tools.searchTools(query)` — `{ tools: [names] }`: what
   `list_tools` lists, narrowed to the names containing every word of `query`
