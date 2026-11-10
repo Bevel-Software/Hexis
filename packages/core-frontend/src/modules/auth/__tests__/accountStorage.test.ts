@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { accountKeyPrefix, clearAccountStorage } from '../accountStorage';
+import { accountKeyPrefix, clearAccountStorage } from '..';
 
 /** What each account keeps in the browser, and the one thing signing out does with it. */
 const keys = (): string[] =>

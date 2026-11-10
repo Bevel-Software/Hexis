@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { clearAccountStorage } from '../../../../../lib/accountStorage';
+import { clearAccountStorage } from '../../../../auth';
 import { isRemembered, remember } from '../pageConsentMemory';
 
 /**

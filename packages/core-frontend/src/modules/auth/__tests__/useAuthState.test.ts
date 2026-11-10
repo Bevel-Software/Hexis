@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { useAuthState } from '../hooks/useAuthState';
-import { accountKeyPrefix } from '../../../lib/accountStorage';
+import { accountKeyPrefix } from '..';
 import { getToken, setToken } from '../../../lib/api';
 
 /**

@@ -1,5 +1,5 @@
 import { useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
-import { AuthContext } from '../../../auth';
+import { AuthContext, tokenAccountId } from '../../../auth';
 import { useFileNav } from '../../routing/kb-routes';
 import { useRendererSurface } from './rendererSurface';
 import { sha256Hex } from '@bevel-software/platform-shared';
@@ -218,7 +218,15 @@ export function useHtmlToolBridge({ iframeRef, filePath, viewKey, source }: Html
           remember: () => remember(account, viewDigest),
         });
       }
-      void answerToolCall(call, toolsClient, consentRef.current).then(reply);
+      // With an account above the renderer, the call never goes out with
+      // another account's token (another tab may have signed in as someone
+      // else). No readable token sends it as nobody, which the server refuses.
+      const sameAccount = () => {
+        if (account === null) return true;
+        const holder = tokenAccountId();
+        return holder === null || holder === account;
+      };
+      void answerToolCall(call, toolsClient, consentRef.current, sameAccount).then(reply);
     }
     window.addEventListener('message', onToolMessage);
     return () => window.removeEventListener('message', onToolMessage);

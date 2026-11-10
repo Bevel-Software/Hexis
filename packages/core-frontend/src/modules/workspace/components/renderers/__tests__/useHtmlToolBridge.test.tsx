@@ -124,6 +124,11 @@ const write = (requestId: string) => ({ type: 'bevel.tool.call', requestId, fn: 
 const CARD = "You're allowing changes using your account. Do you want to allow that?";
 const SOURCE = '<button onclick="bevel.tools.callTool(\'edit_file\', {})">Edit</button>';
 const ACCOUNT = 'user-a';
+/** A session token as the server signs it: a JWT whose `userId` claim names the account (the signature is not checked here). */
+const sessionTokenFor = (userId: string, nonce = 'n') => {
+  const part = (value: object) => btoa(JSON.stringify(value)).replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_');
+  return `${part({ alg: 'HS256', typ: 'JWT' })}.${part({ userId, email: `${userId}@example.com`, nonce })}.signature`;
+};
 /** Where the browser keeps the account's Allow: one entry per digest, holding when it was allowed. */
 const ALLOWED_PAGE_KEY_PREFIX = `bevel.account/${ACCOUNT}/htmlPage.allowedWrite.`;
 
@@ -308,6 +313,44 @@ describe('useHtmlToolBridge through a renderer of its own', () => {
     back.frame.post(write('w3'));
     await waitFor(() => expect(back.frame.replies.at(-1)).toMatchObject({ requestId: 'w3', ok: true }));
     expect(screen.queryByText(CARD)).toBeNull();
+  });
+
+  it("sends nothing with another account's token: a sign-in in another tab refuses this view's calls, even an Allow it remembers", async () => {
+    const server = stubServer();
+    window.localStorage.setItem('bevel_token', sessionTokenFor('user-a'));
+    const first = mount('file page', { account: 'user-a' });
+    first.frame.post(write('w1'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Allow' }));
+    await waitFor(() => expect(first.frame.replies.at(-1)).toMatchObject({ requestId: 'w1', ok: true }));
+    expect(server.mcp).toEqual(['edit_file']);
+
+    // Another tab signs in as user-b: the shared token is now theirs, while
+    // this tab still shows user-a's view with user-a's remembered Allow.
+    window.localStorage.setItem('bevel_token', sessionTokenFor('user-b'));
+    const next = first.nextView();
+    next.post(write('w2'));
+    next.post({ type: 'bevel.tool.call', requestId: 'r1', fn: 'callTool', args: ['read_file', {}] });
+    await waitFor(() => expect(next.replies.map((r) => (r as { requestId: string }).requestId).sort()).toEqual(['r1', 'w2']));
+    for (const reply of next.replies) {
+      expect(reply).toMatchObject({ ok: false, code: 'account_changed' });
+      expect((reply as { error: string }).error).toMatch(/signed in as another account in another tab/);
+    }
+    expect(screen.queryByText(CARD)).toBeNull();
+    expect(server.mcp).toEqual(['edit_file']);
+  });
+
+  it('keeps working on a token renewed for the same account', async () => {
+    const server = stubServer();
+    window.localStorage.setItem('bevel_token', sessionTokenFor('user-a', 'before'));
+    const { frame } = mount('file page', { account: 'user-a' });
+    frame.post(write('w1'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Allow' }));
+    await waitFor(() => expect(frame.replies.at(-1)).toMatchObject({ requestId: 'w1', ok: true }));
+    // A password change hands back a new token for the same account.
+    window.localStorage.setItem('bevel_token', sessionTokenFor('user-a', 'after'));
+    frame.post(write('w2'));
+    await waitFor(() => expect(frame.replies.at(-1)).toMatchObject({ requestId: 'w2', ok: true }));
+    expect(server.mcp).toEqual(['edit_file', 'edit_file']);
   });
 
   it('keeps nothing with no account above the renderer: an Allow holds for its view, and every view asks', async () => {

@@ -1,4 +1,4 @@
-import { accountKeyPrefix } from '../../../../lib/accountStorage';
+import { accountKeyPrefix } from '../../../auth';
 
 /**
  * Which pages the signed-in account allowed to write from this browser: the
@@ -9,7 +9,7 @@ import { accountKeyPrefix } from '../../../../lib/accountStorage';
  * and every view asks.
  *
  * Each digest is its own `localStorage` entry under the account's prefix
- * (`lib/accountStorage.ts`), holding when it was last allowed. An Allow writes
+ * (the auth module's `accountKeyPrefix`), holding when it was last allowed. An Allow writes
  * only its own entry, so two tabs allowing two pages at once cannot overwrite
  * each other's; eviction past the cap removes only that account's oldest
  * entries. Signing out clears the account's prefix.
