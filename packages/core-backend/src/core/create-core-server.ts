@@ -20,6 +20,7 @@ import {
   EventDelivery,
 } from '../modules/version-control/index.js';
 import { createAccessRoutes } from '../modules/access/access.routes.js';
+import type { AppRole } from '../modules/access/index.js';
 import { createAccessRequestRoutes } from '../modules/access/access-requests.routes.js';
 import { AccessRequestsService } from '../modules/access/access-requests.service.js';
 import { createMcpRoutes } from '../modules/mcp/mcp.routes.js';
@@ -163,6 +164,13 @@ export interface ServerExtensions {
   postTools?(app: ExpressApp, core: CoreServices): void;
   /** JWT-protected overlay routes; mounted after every core authed route. */
   authed?(app: ExpressApp, core: CoreServices): void;
+  /**
+   * The roles the app defines beside core's Admin: each is listed on App
+   * roles whether anyone holds it or not, may be given to people and groups
+   * there, and is never offered for conversion to a group. What a role
+   * unlocks is the app's own gate; core only keeps who holds it.
+   */
+  appRoles?: readonly AppRole[];
 }
 
 export async function createCoreServer(
@@ -732,6 +740,7 @@ export async function createCoreServer(
     core.kb,
     core.disk,
     [core.config.adminEmail],
+    ext.appRoles ?? [],
   ));
   // Asking for Can edit or Owner on an item from its Manage access dialog, and
   // the editors' Accept / Decline. Mounted beside the access routes it shares

@@ -4,6 +4,7 @@
  * the composition root.
  */
 export type { IAccessControl } from './access-control.interface.js';
+export type { AppRole } from './capability-registry.js';
 // Reached by other modules; exported here so they stop importing the files.
 export type { AccessDecisionSource, AccessTargetKind, HolderChange, HolderChanges } from './access-control.interface.js';
 export { accessMdPathForFolder, fileCarriesAccessRules, governingFolderOf } from './access-mutation.service.js';

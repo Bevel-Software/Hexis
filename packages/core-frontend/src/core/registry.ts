@@ -89,12 +89,31 @@ export interface AdminMenuItemHelpers {
  * Skills & Tools is NOT one of these. It is an `AppDef`, reached from the app
  * switcher.
  */
+/**
+ * A labelled section of the profile menu an app defines (see
+ * {@link AdminMenuItem.section}). Rows naming the same `id` share it; the
+ * label and order are the first such row's.
+ */
+export interface AdminMenuSection {
+  id: string;
+  /** The section's heading, such as "Infrastructure only". */
+  label: string;
+  /** Position among the app's sections; 100 when absent. */
+  order?: number;
+}
+
 export interface AdminMenuItem {
   id: string;
   label: ReactNode;
   icon?: ReactNode;
-  /** 'admin' rows render under the "Admin only" section (admin users only). */
-  section?: 'default' | 'admin';
+  /**
+   * 'admin' rows render under the "Admin only" section (admin users only).
+   * An {@link AdminMenuSection} puts the row under a section of the app's own,
+   * labelled, between the default rows and "Admin only" — for rows meant for
+   * the holders of a role the app defines. Who sees each row is still its
+   * `isShown`; the section shows while any of its rows does.
+   */
+  section?: 'default' | 'admin' | AdminMenuSection;
   /** Merge position among core + registered rows of the same section. */
   order?: number;
   /**

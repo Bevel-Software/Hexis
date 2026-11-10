@@ -13,6 +13,11 @@
  * roles.yaml grammar, expansion, and admin surfaces are already
  * role-name-agnostic.
  *
+ * An app built on core declares its own roles the same way, as data
+ * ({@link AppRole}, passed in `ServerExtensions.appRoles`): the app gates on
+ * them itself, and core lists them on App roles, lets admins assign them,
+ * and never counts them as legacy. Core's own capabilities stay core's.
+ *
  * A roles.yaml role NOT in this registry is a LEGACY people-set role from
  * before the split (e.g. "Product") — still valid as a grant principal, but
  * really a group; the roles admin surface flags it with a convert action.
@@ -63,12 +68,39 @@ export const CAPABILITY_ROLES: readonly CapabilityRole[] = [
   // { canonical: 'plugin creator', displayName: 'Plugin Creator', … }
 ];
 
-export function capabilityRoleFor(roleName: string): CapabilityRole | null {
-  const canonical = canonicalRoleName(roleName);
-  return CAPABILITY_ROLES.find((r) => r.canonical === canonical) ?? null;
+/**
+ * A role an app built on core declares: what admins read about it on App
+ * roles. What it unlocks is the app's own gate (core has no capability for
+ * it), and every app role may be assigned to groups, as every core role may.
+ */
+export interface AppRole {
+  displayName: string;
+  /** Admin-facing one-liner for the App roles page. */
+  description: string;
 }
 
-/** A roles.yaml role that is NOT a capability role — a pre-split people-set. */
-export function isLegacyPeopleSetRole(roleName: string): boolean {
-  return capabilityRoleFor(roleName) === null;
+/**
+ * Core's roles, then the app's: every role this deployment defines, each
+ * once. An app role named like a core role (or like another app role) is
+ * dropped with the first spelling kept, so core's Admin can never be
+ * redefined from outside.
+ */
+export function capabilityRoles(appRoles: readonly AppRole[] = []): readonly CapabilityRole[] {
+  const out: CapabilityRole[] = [...CAPABILITY_ROLES];
+  for (const role of appRoles) {
+    const canonical = canonicalRoleName(role.displayName);
+    if (!canonical || out.some((r) => r.canonical === canonical)) continue;
+    out.push({ canonical, displayName: role.displayName.trim(), description: role.description, capabilities: [], groupAssignable: true });
+  }
+  return out;
+}
+
+export function capabilityRoleFor(roleName: string, appRoles: readonly AppRole[] = []): CapabilityRole | null {
+  const canonical = canonicalRoleName(roleName);
+  return capabilityRoles(appRoles).find((r) => r.canonical === canonical) ?? null;
+}
+
+/** A roles.yaml role that is NOT a capability role (core's or the app's) — a pre-split people-set. */
+export function isLegacyPeopleSetRole(roleName: string, appRoles: readonly AppRole[] = []): boolean {
+  return capabilityRoleFor(roleName, appRoles) === null;
 }

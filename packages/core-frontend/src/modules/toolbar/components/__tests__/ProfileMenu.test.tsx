@@ -21,6 +21,7 @@ vi.mock('../../../settings/settings-nav-items', () => ({
   useMenuSections: () => ({
     defaultItems: [{ id: 'account', label: 'Account', path: '/account' }],
     adminItems: [hidden('hidden-a', 'Hidden A'), hidden('hidden-b', 'Hidden B')],
+    appSections: [],
   }),
 }));
 

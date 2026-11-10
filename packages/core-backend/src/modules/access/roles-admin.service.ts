@@ -60,6 +60,7 @@ import {
   deleteRole as editDeleteRole,
   addMember as editAddMember,
   removeMember as editRemoveMember,
+  withRole,
   addRoleGroupRef as editAddGroupRef,
   removeRoleGroupRef as editRemoveGroupRef,
   isGroupRefMember,
@@ -72,7 +73,7 @@ import {
   emitGroupsModel,
   parseGroupsModel,
 } from './groups-edit.js';
-import { capabilityRoleFor, isLegacyPeopleSetRole } from './capability-registry.js';
+import { capabilityRoleFor, capabilityRoles, isLegacyPeopleSetRole, type AppRole } from './capability-registry.js';
 import { AdminLockedCommits } from './admin-locked-commit.js';
 import { KbReferenceScanner, readableReferences } from './reference-scan.js';
 
@@ -215,6 +216,12 @@ export class RolesAdminService {
      * role reports as {@link RoleRosterEntry.fixedMembers}.
      */
     private readonly deploymentAdmins: readonly string[] = [],
+    /**
+     * The roles the app built on core defines (`ServerExtensions.appRoles`):
+     * listed on the roster whether or not roles.yaml names them yet, and
+     * never counted as legacy.
+     */
+    private readonly appRoles: readonly AppRole[] = [],
   ) {
     this.locked = new AdminLockedCommits({
       workspaceService,
@@ -333,7 +340,7 @@ export class RolesAdminService {
     const out: RoleRosterEntry[] = [];
     for (const role of model) {
       const canonical = canonicalRoleName(role.displayName);
-      const registryEntry = capabilityRoleFor(role.displayName);
+      const registryEntry = capabilityRoleFor(role.displayName, this.appRoles);
       const isAdmin = canonical === ADMIN_CANONICAL;
       out.push({
         canonical,
@@ -354,6 +361,25 @@ export class RolesAdminService {
         referencedBy: [
           ...(referencesByToken.get(canonical) ?? []),
           ...(referencesByToken.get(`${ROLE_TOKEN_PREFIX}${canonical}`) ?? []),
+        ],
+      });
+    }
+    // Every role the deployment defines is listed, held by anyone or not: the
+    // ones roles.yaml does not name yet come after its own, with no members.
+    for (const role of capabilityRoles(this.appRoles)) {
+      if (out.some((r) => r.canonical === role.canonical)) continue;
+      out.push({
+        canonical: role.canonical,
+        displayName: role.displayName,
+        members: [],
+        fixedMembers: [],
+        fixedMembersNote: null,
+        groups: [],
+        isAdmin: role.canonical === ADMIN_CANONICAL,
+        capability: { description: role.description, groupAssignable: role.groupAssignable },
+        referencedBy: [
+          ...(referencesByToken.get(role.canonical) ?? []),
+          ...(referencesByToken.get(`${ROLE_TOKEN_PREFIX}${role.canonical}`) ?? []),
         ],
       });
     }
@@ -500,8 +526,18 @@ export class RolesAdminService {
     opts?: { aroundWrite?: (write: () => Promise<void>) => Promise<void> },
   ): Promise<RoleRosterEntry[]> {
     this.assertNotFixedAdmin(canonical, email);
-    await this.runEdit(actor, (text) => editAddMember(text, canonical, email), opts?.aroundWrite);
+    await this.runEdit(actor, (text) => editAddMember(this.withDeclaredRole(text, canonical), canonical, email), opts?.aroundWrite);
     return this.getRoster(actor.email);
+  }
+
+  /**
+   * `text` with the role in it when the deployment defines that role (core's
+   * or the app's), so the first member or group a role gets writes its entry.
+   * An undefined name passes through, and the edit refuses it as unknown.
+   */
+  private withDeclaredRole(text: string, canonical: string): string {
+    const role = capabilityRoleFor(canonical, this.appRoles);
+    return role ? withRole(text, role.displayName) : text;
   }
 
   /**
@@ -587,7 +623,7 @@ export class RolesAdminService {
           group: groupName.trim(),
         });
       }
-      await this.runEdit(actor, (text) => editAddGroupRef(text, canonical, groupName));
+      await this.runEdit(actor, (text) => editAddGroupRef(this.withDeclaredRole(text, canonical), canonical, groupName));
     });
     return this.getRoster(actor.email);
   }
@@ -611,7 +647,7 @@ export class RolesAdminService {
    */
   async convertRoleToGroup(actor: AuthUser, canonical: string): Promise<RoleRosterEntry[]> {
     const workspaceId = await this.ensureWorkspace();
-    if (!isLegacyPeopleSetRole(canonical)) {
+    if (!isLegacyPeopleSetRole(canonical, this.appRoles)) {
       throw new RolesAdminError(`'${canonical}' is a capability role — it cannot become a group`, 422);
     }
     if ((await this.locked.readKbFile(workspaceId, SYNCED_GROUPS_YAML)) !== null) {
