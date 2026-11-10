@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { logger } from '../../shared/logging.js';
+import { isStandardAuthorizationErrorCode } from '../../shared/oauth-token-error.js';
 
 const log = logger('oidc');
 import type express from 'express';
@@ -243,10 +244,10 @@ export class OidcAuthProvider implements AuthProviderPlugin {
         // a consent screen) said no, which trying again will not change. Its
         // `error_description` is the provider's own text and is not shown.
         if (typeof error === 'string' && error) {
-          // Logged only when shaped like an OAuth error code; anything else
-          // is text of the provider's choosing.
+          // Logged only when it is a standard code; anything else is text of
+          // the provider's choosing.
           log.warn('OIDC provider refused the sign-in:', {
-            error: /^[a-z_]{1,64}$/.test(error) ? error : 'non-standard',
+            error: isStandardAuthorizationErrorCode(error) ? error : 'non-standard',
           });
           fail(error === 'access_denied' ? 'denied' : 'auth');
           return;

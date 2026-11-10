@@ -10,6 +10,8 @@ import {
   DeploymentSettingsService,
 } from '../../settings/deployment-settings.service.js';
 import type { Database } from '../../database/connection.js';
+import { setLogger } from '../../../shared/logging.js';
+import type { ILogger } from '../../../shared/logger.contract.js';
 
 const ISSUER = 'https://idp.example.com';
 const DISCOVERY = {
@@ -207,6 +209,32 @@ describe('OidcAuthProvider', () => {
       expect(idp.calls.some((c) => c.url === DISCOVERY.token_endpoint)).toBe(false);
     },
   );
+
+  it.each([
+    // A standard code reaches the log as itself — including one only the
+    // authorization endpoint sends (OIDC's consent_required).
+    ['access_denied', 'access_denied'],
+    ['consent_required', 'consent_required'],
+    // Any other string is the provider's own text, however code-like it looks.
+    ['client_secret_hunter', 'non-standard'],
+    ['something <odd>', 'non-standard'],
+  ])("logs the provider's error %s as %s", async (error, logged) => {
+    const fields: Array<Record<string, unknown> | undefined> = [];
+    const capture = (): ILogger => {
+      const write = (_message: string, f?: Record<string, unknown>) => fields.push(f);
+      return { debug: write, info: write, warn: write, error: write, child: () => capture() };
+    };
+    const restore = setLogger(capture());
+    try {
+      const idp = makeIdpFetch();
+      const base = await listen(makeProvider(idp.impl, authService));
+      await callbackWith(base, { error });
+    } finally {
+      setLogger(restore);
+    }
+    expect(fields).toContainEqual({ error: logged });
+    expect(JSON.stringify(fields)).not.toContain(logged === 'non-standard' ? error : 'non-standard');
+  });
 
   it('still reports a provider error that comes with a forged state as a state failure', async () => {
     const idp = makeIdpFetch();
