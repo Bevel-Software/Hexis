@@ -2,8 +2,8 @@ import { describe, it, expect } from 'vitest';
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
-import { AuthContext, type AuthContextValue } from '../../../auth/state/auth.context';
-import { AdminContext } from '../../../admin/state/admin.context';
+import { AuthContext, type AuthContextValue } from '../../../auth';
+import { AdminContext } from '../../../admin';
 import { AppRegistryContext, makeRegistry, type AdminMenuItem } from '../../../../core/registry';
 import { ProfileMenu } from '../ProfileMenu';
 

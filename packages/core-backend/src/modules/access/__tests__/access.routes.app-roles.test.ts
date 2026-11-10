@@ -6,11 +6,10 @@ import os from 'node:os';
 import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { AccessControlService } from '../access-control.service.js';
-import { NodeFs } from '../../kb-fs/node-fs.js';
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import type { AuthService } from '../../auth/auth.service.js';
-import type { VersionControlService } from '../../version-control/version-control.service.js';
-import type { VersionControlEventBus } from '../../version-control/event-bus.js';
+import type { WorkspaceService } from '../../workspace/index.js';
+import type { AuthService } from '../../auth/index.js';
+import type { VersionControlEventBus, VersionControlService } from '../../version-control/index.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
 import { createAccessRoutes } from '../access.routes.js';
 import { usersDbDouble } from './users-db-double.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
@@ -45,7 +44,7 @@ async function serve(appRoles: { displayName: string; description: string }[]): 
     getWorkspacePath: vi.fn(async () => workspaceDir),
     readFile: vi.fn(async (_id: string, wsRel: string) => fs.readFile(path.join(workspaceDir, wsRel), 'utf-8')),
   } as unknown as WorkspaceService;
-  const accessControl = new AccessControlService(workspaceService, KB, new NodeFs(), []);
+  const accessControl = new AccessControlService(workspaceService, KB, realDisk(), []);
   const authService = { getUserById: vi.fn(async () => ADMIN) } as unknown as AuthService;
   const app = express();
   app.use(express.json());
@@ -64,7 +63,7 @@ async function serve(appRoles: { displayName: string; description: string }[]): 
       { emit: vi.fn() } as unknown as VersionControlEventBus,
       usersDbDouble([ADMIN]),
       testKbContext({ kbDirName: KB }),
-      new NodeFs(),
+      realDisk(),
       [],
       appRoles,
     ),

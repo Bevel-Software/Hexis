@@ -7,11 +7,11 @@ import { AccountChangedError } from '../../../auth';
  * calls, and what decides when the viewer is asked first.
  *
  * A page's call is answered over the hosted MCP server (`POST /api/mcp`) with
- * the viewer's session and the page's path (`X-Bevel-Page`). For such a call
- * the server serves the platform's own tools only, under the viewer's
- * access — no `.tool` manual's, no plugin MCP server's, nothing of the
- * enterprise agent's internal tools — and records it in the Audit log under
- * the page's path. The five members map to what an agent calls:
+ * the viewer's session and the page's path (`X-Bevel-Page`), so a page sees
+ * and reaches exactly the tools the viewer's own agent does — the same
+ * listing, the same refusals, nothing of the enterprise agent's internal
+ * tools — and the server records it in the Audit log under the page's path.
+ * The five members map to what an agent calls:
  *
  *   searchTools(query)        → `list_tools`, narrowed to the names that
  *                               contain every word of `query` (all of them
@@ -23,8 +23,8 @@ import { AccountChangedError } from '../../../auth';
  *                               upload endpoint, then `apply_file_upload`
  *
  * A call that only reads runs at once. A call that may write — a tool the
- * deployment's UTCP manual tags `write`, a tool the manual does not list
- * (nothing says it only reads; the server answers it as unknown), every
+ * deployment's UTCP manual tags `write`, a tool the manual does not list (a
+ * `.tool`'s, a plugin's MCP server's: nothing says they only read), every
  * chain (a chain may call writers) and every upload — waits for the viewer's
  * answer to one card per page view, unless this browser remembers an Allow
  * for the page's exact source. See {@link PageConsent}.
