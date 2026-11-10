@@ -243,9 +243,19 @@ describe('a sign-in the workspace refused for good', () => {
         });
       const swapped = renewConnectionKeyNow(config);
       await reached;
-      // A call arrives and parks behind the re-registration.
+      // A call arrives and parks behind the re-registration. The barrier: the
+      // server has received it, and one macrotask later every microtask of
+      // its handler has run, so it is waiting on the held re-registration.
+      const arrived = new Promise<void>((resolve) => {
+        const deliver = serverTransport.onmessage!;
+        serverTransport.onmessage = (message, extra) => {
+          deliver(message, extra);
+          if ((message as { method?: unknown }).method === 'tools/call') resolve();
+        };
+      });
       const call = client.callTool({ name: 'read_file', arguments: {} });
-      await new Promise((resolve) => setTimeout(resolve, 200));
+      await arrived;
+      await new Promise((resolve) => setImmediate(resolve));
       // Meanwhile another request's renewal is refused for good, and renewal
       // tells the server through the listener the server installed.
       config.onSignInEnded!(SENTENCE);
