@@ -75,7 +75,7 @@ async function serve(page: Page): Promise<string[]> {
     const url = new URL(req.url());
     if (url.pathname === '/') return route.fulfill({ status: 200, headers: { 'content-type': 'text/html' }, body: HOST });
     if (url.pathname === '/api/auth/me') {
-      const account = (req.headers().authorization ?? '').replace('Bearer ', '');
+      const account = accountOfToken((req.headers().authorization ?? '').replace('Bearer ', ''));
       return route.fulfill({
         status: 200,
         headers: { 'content-type': 'application/json' },
@@ -120,9 +120,18 @@ async function mount(page: Page, content: string, { signedIn = true }: { signedI
   await expect(page.frameLocator('iframe').locator('#write')).toBeVisible();
 }
 
+/** A session token as the server signs it: a JWT whose `userId` claim names the account (the signature is not checked here). */
+const tokenFor = (account: string): string => {
+  const part = (value: object) => Buffer.from(JSON.stringify(value)).toString('base64url');
+  return `${part({ alg: 'HS256', typ: 'JWT' })}.${part({ userId: account, email: `${account}@example.com` })}.signature`;
+};
+/** The account a token names, as the server reads it. */
+const accountOfToken = (token: string): string =>
+  String((JSON.parse(Buffer.from(token.split('.')[1] ?? '', 'base64url').toString('utf8')) as { userId?: unknown }).userId ?? '');
+
 /** The session this browser holds from now on: the next document's hook resolves this account. */
 const signInAs = (page: Page, account: string) =>
-  page.evaluate(([key, token]) => window.localStorage.setItem(key, token), [TOKEN_KEY, account] as const);
+  page.evaluate(([key, token]) => window.localStorage.setItem(key, token), [TOKEN_KEY, tokenFor(account)] as const);
 
 /** Load the app's page afresh, signed in as `user-a`, and mount the real renderer showing `content`. */
 async function view(page: Page, content: string): Promise<void> {
