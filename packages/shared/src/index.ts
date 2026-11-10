@@ -21,6 +21,7 @@ export * from './workspace/access-verbs.js';
 
 // Hashing
 export * from './hash/sha256.js';
+export * from './hash/sha384.js';
 
 // Git
 export * from './git/types.js';

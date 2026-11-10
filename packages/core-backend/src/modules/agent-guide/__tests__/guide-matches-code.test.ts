@@ -79,6 +79,8 @@ const NOT_THE_REGISTRYS: Readonly<Record<string, string>> = {
   callToolChain: '`window.bevel.tools` member',
   uploadFile: '`window.bevel.tools` member',
   getElementById: 'a DOM API',
+  innerHTML: 'a DOM API',
+  addEventListener: 'a DOM API',
   preventDefault: 'a DOM API',
   localStorage: 'a browser API',
   sessionStorage: 'a browser API',

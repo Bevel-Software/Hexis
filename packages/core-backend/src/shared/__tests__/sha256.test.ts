@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { describe, it, expect } from 'vitest';
-import { sha256Hex } from '@bevel-software/platform-shared';
+import { sha256Base64, sha256Hex } from '@bevel-software/platform-shared';
 
 /**
  * The dependency-free SHA-256 an HTML page's consent memory keys on. It must
@@ -27,5 +27,21 @@ describe('sha256Hex', () => {
 
   it('changes with one character', () => {
     expect(sha256Hex('<html>a</html>')).not.toBe(sha256Hex('<html>b</html>'));
+  });
+});
+
+/** The same digest in the base64 form a page frame's Content-Security-Policy lists its scripts by. */
+describe('sha256Base64', () => {
+  it('answers the published FIPS 180-4 vectors', () => {
+    expect(sha256Base64('')).toBe('47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=');
+    expect(sha256Base64('abc')).toBe('ungWv48Bz+pBQUDeXa4iI7ADYaOWF3qctBD/YfIAFa0=');
+  });
+
+  it('is the bytes sha256Hex names, base64-encoded as Node encodes them', () => {
+    const samples = ['', 'abc', '<p>Grüße, 日本語 🚀</p>', 'x'.repeat(55), 'x'.repeat(64), "document.getElementById('a').textContent = 'ran';"];
+    for (const text of samples) {
+      expect(sha256Base64(text)).toBe(Buffer.from(sha256Hex(text), 'hex').toString('base64'));
+      expect(sha256Base64(text)).toBe(createHash('sha256').update(text, 'utf8').digest('base64'));
+    }
   });
 });
