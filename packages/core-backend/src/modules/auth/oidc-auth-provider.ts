@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { logger } from '../../shared/logging.js';
+import { isStandardAuthorizationErrorCode } from '../../shared/oauth-token-error.js';
 
 const log = logger('oidc');
 import type express from 'express';
@@ -229,11 +230,29 @@ export class OidcAuthProvider implements AuthProviderPlugin {
       const fail = (reason: string) =>
         res.redirect(`${publicFrontendUrl}/auth/oidc/callback#error=${reason}`);
       try {
-        const { code, state } = req.query as { code?: string; state?: string };
+        const { code, state, error } = req.query as { code?: string; state?: string; error?: string };
         const cookie = readCookie(req, OAUTH_STATE_COOKIE);
         res.clearCookie(OAUTH_STATE_COOKIE, { path: '/' });
         const [expectedState, verifier] = cookie?.split('.') ?? [];
-        if (!code || !state || !expectedState || !verifier || state !== expectedState) {
+        if (!state || !expectedState || !verifier || state !== expectedState) {
+          fail('state');
+          return;
+        }
+        // The provider answered with an error instead of a code (RFC 6749
+        // §4.1.2.1). Checked after the state, so a forged response is still a
+        // state failure. `access_denied` means the provider (or the person, at
+        // a consent screen) said no, which trying again will not change. Its
+        // `error_description` is the provider's own text and is not shown.
+        if (typeof error === 'string' && error) {
+          // Logged only when it is a standard code; anything else is text of
+          // the provider's choosing.
+          log.warn('OIDC provider refused the sign-in:', {
+            error: isStandardAuthorizationErrorCode(error) ? error : 'non-standard',
+          });
+          fail(error === 'access_denied' ? 'denied' : 'auth');
+          return;
+        }
+        if (!code) {
           fail('state');
           return;
         }

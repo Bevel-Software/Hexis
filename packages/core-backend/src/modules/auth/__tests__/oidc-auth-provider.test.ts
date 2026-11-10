@@ -10,6 +10,8 @@ import {
   DeploymentSettingsService,
 } from '../../settings/deployment-settings.service.js';
 import type { Database } from '../../database/connection.js';
+import { setLogger } from '../../../shared/logging.js';
+import type { ILogger } from '../../../shared/logger.contract.js';
 
 const ISSUER = 'https://idp.example.com';
 const DISCOVERY = {
@@ -169,6 +171,92 @@ describe('OidcAuthProvider', () => {
     expect(cb.headers.get('location')).toBe('http://localhost:5173/auth/oidc/callback#error=state');
     expect(idp.calls.some((c) => c.url === DISCOVERY.token_endpoint)).toBe(false);
     expect(authService.loginWithSso).not.toHaveBeenCalled();
+  });
+
+  /** Start a sign-in, then return to the callback with `query` (state filled in unless given). */
+  async function callbackWith(base: string, query: Record<string, string>): Promise<string> {
+    const start = await fetch(`${base}/api/auth/oidc/login`, { redirect: 'manual' });
+    const state = new URL(start.headers.get('location')!).searchParams.get('state')!;
+    const cookie = start.headers.get('set-cookie')!.split(';')[0];
+    const params = new URLSearchParams({ state, ...query });
+    const cb = await fetch(`${base}/api/auth/oidc/callback?${params}`, {
+      redirect: 'manual',
+      headers: { cookie },
+    });
+    return cb.headers.get('location')!;
+  }
+
+  it("reports the provider's access_denied as #error=denied, not as a state failure", async () => {
+    const idp = makeIdpFetch();
+    const base = await listen(makeProvider(idp.impl, authService));
+    const location = await callbackWith(base, {
+      error: 'access_denied',
+      error_description: 'Email address not verified',
+    });
+    expect(location).toBe('http://localhost:5173/auth/oidc/callback#error=denied');
+    // The provider's own text never reaches the login screen.
+    expect(location).not.toContain('verified');
+    expect(idp.calls.some((c) => c.url === DISCOVERY.token_endpoint)).toBe(false);
+    expect(authService.loginWithSso).not.toHaveBeenCalled();
+  });
+
+  it.each(['invalid_scope', 'server_error', 'temporarily_unavailable', 'something <odd>'])(
+    "reports any other provider error (%s) as #error=auth",
+    async (error) => {
+      const idp = makeIdpFetch();
+      const base = await listen(makeProvider(idp.impl, authService));
+      expect(await callbackWith(base, { error })).toBe('http://localhost:5173/auth/oidc/callback#error=auth');
+      expect(idp.calls.some((c) => c.url === DISCOVERY.token_endpoint)).toBe(false);
+    },
+  );
+
+  it.each([
+    // A standard code reaches the log as itself — including one only the
+    // authorization endpoint sends (OIDC's consent_required).
+    ['access_denied', 'access_denied'],
+    ['consent_required', 'consent_required'],
+    // Any other string is the provider's own text, however code-like it looks.
+    ['client_secret_hunter', 'non-standard'],
+    ['something <odd>', 'non-standard'],
+  ])("logs the provider's error %s as %s", async (error, logged) => {
+    const fields: Array<Record<string, unknown> | undefined> = [];
+    const capture = (): ILogger => {
+      const write = (_message: string, f?: Record<string, unknown>) => fields.push(f);
+      return { debug: write, info: write, warn: write, error: write, child: () => capture() };
+    };
+    const restore = setLogger(capture());
+    try {
+      const idp = makeIdpFetch();
+      const base = await listen(makeProvider(idp.impl, authService));
+      await callbackWith(base, { error });
+    } finally {
+      setLogger(restore);
+    }
+    expect(fields).toContainEqual({ error: logged });
+    expect(JSON.stringify(fields)).not.toContain(logged === 'non-standard' ? error : 'non-standard');
+  });
+
+  it('still reports a provider error that comes with a forged state as a state failure', async () => {
+    const idp = makeIdpFetch();
+    const base = await listen(makeProvider(idp.impl, authService));
+    expect(await callbackWith(base, { state: 'forged', error: 'access_denied' })).toBe(
+      'http://localhost:5173/auth/oidc/callback#error=state',
+    );
+  });
+
+  it('reports a provider error without the state cookie as a state failure', async () => {
+    const idp = makeIdpFetch();
+    const base = await listen(makeProvider(idp.impl, authService));
+    const cb = await fetch(`${base}/api/auth/oidc/callback?error=access_denied&state=anything`, {
+      redirect: 'manual',
+    });
+    expect(cb.headers.get('location')).toBe('http://localhost:5173/auth/oidc/callback#error=state');
+  });
+
+  it('still reports a callback with neither a code nor an error as a state failure', async () => {
+    const idp = makeIdpFetch();
+    const base = await listen(makeProvider(idp.impl, authService));
+    expect(await callbackWith(base, {})).toBe('http://localhost:5173/auth/oidc/callback#error=state');
   });
 
   it('fails with #error=auth when userinfo has no email claim', async () => {
