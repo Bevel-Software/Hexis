@@ -1,4 +1,4 @@
-import { Fragment, type ReactNode } from 'react';
+import type { ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import type { AdminMenuItem } from '../../../core/registry';
 import { cn } from '../../../lib/utils';
@@ -91,10 +91,13 @@ export function SettingsNav({
     >
       {defaultItems.map(row)}
       {sections.map((section) => (
-        <Fragment key={section.id}>
+        // A named group, so a reader who moves from link to link hears which
+        // section a row is in; `contents` keeps the rows in the nav's own row
+        // or column, as if the group were not an element.
+        <div key={section.id} role="group" aria-label={section.label} className="contents">
           {!strip && <SectionLabel spaced>{section.label}</SectionLabel>}
           {section.items.map(row)}
-        </Fragment>
+        </div>
       ))}
       {adminItems.length > 0 && (
         <>

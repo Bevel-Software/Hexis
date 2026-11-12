@@ -1,7 +1,7 @@
 import { useContext, useMemo } from 'react';
 import { Outlet, useLocation } from 'react-router-dom';
 import { AdminContext } from '../../admin';
-import type { AdminMenuItem } from '../../../core/registry';
+import { useAppRegistry, type AdminMenuItem } from '../../../core/registry';
 import { SidebarFrame } from '../../layout/components/SidebarFrame';
 import { useMediaQuery } from '../../layout';
 import { AuthContext } from '../../auth';
@@ -9,6 +9,7 @@ import type { AuthUser } from '@bevel-software/platform-shared';
 import {
   isSettingsNavPath,
   normalizeSettingsPath,
+  registrySettingsPages,
   useMenuSections,
   useSettingsNavPaths,
 } from '../settings-nav-items';
@@ -72,12 +73,27 @@ import { SettingsNav, type LinkableItem } from './SettingsNav';
  * in, and a registry row that happened to declare `/secrets/` would otherwise
  * render a link that never matches the page it is on.
  */
-function linkable(items: AdminMenuItem[], paths: readonly string[], user: AuthUser | null): LinkableItem[] {
+function linkable(items: AdminMenuItem[], paths: readonly string[], mountedPages: ReadonlySet<string>): LinkableItem[] {
   return items
     .filter((item): item is LinkableItem => !!item.path && isSettingsNavPath(item.path, paths))
-    // A row offered to some people only (`isShown`) is offered here to the same ones: with nobody signed in, to none.
-    .filter((item) => !item.isShown || (user !== null && item.isShown(user)))
+    // A row that does something when picked belongs to the dropdown: there its
+    // action wins over its `path`, and a link here would go around the action.
+    .filter((item) => !item.dialog && !item.onSelect)
+    // A row that brings a page is linked only when its page is the one mounted
+    // at that path: one that lost the address to a built-in page, or to an
+    // earlier row, would be a link to somebody else's page under its own name.
+    .filter((item) => !item.page || mountedPages.has(item.id))
     .map((item) => ({ ...item, path: normalizeSettingsPath(item.path) }));
+}
+
+/**
+ * The rows offered to this person (`AdminMenuItem.isShown`): with nobody
+ * signed in, none of the rows that ask who is. Asked on every render, never
+ * memoized, as the profile menu asks: a row may come and go with state the
+ * layout does not own (a role learnt after sign-in, a preference in storage).
+ */
+function offered<T extends AdminMenuItem>(items: T[], user: AuthUser | null): T[] {
+  return items.filter((item) => !item.isShown || (user !== null && item.isShown(user)));
 }
 
 export function SettingsLayout() {
@@ -96,19 +112,26 @@ export function SettingsLayout() {
      horizontal strip. A 212px rail on a 375px screen is most of the screen. */
   const isCompact = useMediaQuery('(max-width: 767px)');
 
-  const navDefault = useMemo(() => linkable(defaultItems, paths, user), [defaultItems, paths, user]);
-  const navAdmin = useMemo(
-    () => (isAdmin ? linkable(adminItems, paths, user) : []),
-    [adminItems, isAdmin, paths, user],
+  // The registry's rows whose page is mounted, by id: what a row that brings a page must be among to be linked.
+  const registry = useAppRegistry();
+  const mountedPages = useMemo(() => new Set(registrySettingsPages(registry.adminMenuItems).map((row) => row.id)), [registry]);
+
+  const linkDefault = useMemo(() => linkable(defaultItems, paths, mountedPages), [defaultItems, paths, mountedPages]);
+  const linkAdmin = useMemo(
+    () => (isAdmin ? linkable(adminItems, paths, mountedPages) : []),
+    [adminItems, isAdmin, paths, mountedPages],
   );
+  const linkSections = useMemo(
+    () => appSections.map((section) => ({ id: section.id, label: section.label, items: linkable(section.items, paths, mountedPages) })),
+    [appSections, paths, mountedPages],
+  );
+  // Who each row is offered to is asked now, on this render (see `offered`).
+  const navDefault = offered(linkDefault, user);
+  const navAdmin = offered(linkAdmin, user);
   // The app's own sections ("Infrastructure only"), each with the pages offered to this person; one with none is left out.
-  const navSections = useMemo(
-    () =>
-      appSections
-        .map((section) => ({ id: section.id, label: section.label, items: linkable(section.items, paths, user) }))
-        .filter((section) => section.items.length > 0),
-    [appSections, paths, user],
-  );
+  const navSections = linkSections
+    .map((section) => ({ ...section, items: offered(section.items, user) }))
+    .filter((section) => section.items.length > 0);
 
   if (isCompact) {
     return (

@@ -152,6 +152,14 @@ export function normalizeSettingsPath(pathname: string): string {
   return pathname.length > 1 ? pathname.replace(/\/+$/, '') : pathname;
 }
 
+/**
+ * Addresses the shell answers itself that have no row above: the old Connection
+ * keys address (a redirect to the Audit log) and `/connect` (a redirect into
+ * Skills & Tools). Both are matched before any page of the registry's, so a
+ * row naming one would be listed and never shown.
+ */
+const OTHER_BUILT_IN_PATHS: readonly string[] = ['/connection-keys', '/connect'];
+
 /** A registry row that is a settings page of the app's own: it says where it lives and what is there. */
 export type SettingsPageRow = AdminMenuItem & { path: string; page: NonNullable<AdminMenuItem['page']> };
 
@@ -162,7 +170,7 @@ export type SettingsPageRow = AdminMenuItem & { path: string; page: NonNullable<
  */
 export function registrySettingsPages(items: AdminMenuItem[]): SettingsPageRow[] {
   const pages: SettingsPageRow[] = [];
-  const taken = new Set(SETTINGS_NAV_PATHS);
+  const taken = new Set([...SETTINGS_NAV_PATHS, ...OTHER_BUILT_IN_PATHS]);
   for (const item of items) {
     if (!item.path || !item.page) continue;
     const path = normalizeSettingsPath(item.path);

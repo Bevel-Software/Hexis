@@ -266,6 +266,12 @@ describe('SettingsLayout with pages the registry brings', () => {
     { id: 'llm', section: 'admin', order: 30, label: 'LLM configuration', path: '/llm-configuration', page: <div>LLM page</div> },
     // A path with no page is somewhere else in the app.
     { id: 'elsewhere', label: 'No page', path: '/agents/workflows' },
+    // Rows that must NOT be linked: a page at a built-in address, at the old Connection keys address, at a path an
+    // earlier row took, and a page row that also runs an action (the menu runs the action; a link would go around it).
+    { id: 'takeover', label: 'Not the secrets page', path: '/secrets', page: <div>Never mounted</div> },
+    { id: 'old-keys', label: 'Not the keys page', path: '/connection-keys', page: <div>Never mounted</div> },
+    { id: 'second', label: 'Second at the same path', path: '/connected-apps', page: <div>Never mounted</div> },
+    { id: 'acts', label: 'Runs an action', path: '/acts', page: <div>Acts page</div>, onSelect: () => {} },
   ];
 
   function renderPages(route: string, { user = ada, isAdmin = false }: { user?: AuthUser | null; isAdmin?: boolean } = {}) {
@@ -275,7 +281,10 @@ describe('SettingsLayout with pages the registry brings', () => {
           <Routes>
             <Route element={<SettingsLayout />}>
               <Route path="/secrets" element={<div>Secrets stub</div>} />
-              <Route path="/executors" element={<div>Executors page</div>} />
+              {/* The app's pages as the shell mounts them: from the rows, through the one function that decides which are. */}
+              {registrySettingsPages(pageRows).map((row) => (
+                <Route key={row.path} path={row.path} element={row.page} />
+              ))}
             </Route>
           </Routes>
         </MemoryRouter>
@@ -308,14 +317,46 @@ describe('SettingsLayout with pages the registry brings', () => {
     expect(within(nav()).queryByRole('link', { name: 'No page' })).toBeNull();
   });
 
-  it('mounts a page per row that brings one, at its own path, and never at one of the built-in addresses', () => {
-    const takeover: AdminMenuItem = { id: 'takeover', label: 'Not the secrets page', path: '/secrets', page: <div>Never mounted</div> };
-    expect(registrySettingsPages([...pageRows, takeover]).map((row) => row.path)).toEqual(['/connected-apps', '/executors', '/llm-configuration']);
+  it('mounts a page per row that brings one, at its own path: never at a built-in address, and one page per path', () => {
+    expect(registrySettingsPages(pageRows).map((row) => `${row.id} ${row.path}`)).toEqual([
+      'connected-apps /connected-apps',
+      'executors /executors',
+      'llm /llm-configuration',
+      'acts /acts',
+    ]);
   });
 
-  it('marks a page of the app\'s own as the current one, whatever slashes its row was written with', () => {
+  it('shows the row\'s own page at its path and marks it current, whatever slashes the row was written with', () => {
     renderPages('/executors');
+    expect(screen.getByText('Executors page')).toBeInTheDocument();
     expect(within(nav()).getByRole('link', { name: 'Executors' })).toHaveAttribute('aria-current', 'page');
+    // Its section is a named group, so a link is heard with the section it is in.
+    expect(within(screen.getByRole('group', { name: 'Infrastructure only' })).getByRole('link', { name: 'Executors' })).toBeInTheDocument();
+  });
+
+  it('asks who a row is shown to on every render, not once', () => {
+    let role = false;
+    const rows: AdminMenuItem[] = [{ id: 'late', label: 'Learnt later', path: '/late', page: <div>Late page</div>, isShown: () => role }];
+    const tree = () => (
+      <AuthContext.Provider value={{ user: ada } as AuthContextValue}>
+        <AppRegistryContext.Provider value={registry}>
+          <MemoryRouter initialEntries={['/secrets']}>
+            <Routes>
+              <Route element={<SettingsLayout />}>
+                <Route path="/secrets" element={<div>Secrets stub</div>} />
+              </Route>
+            </Routes>
+          </MemoryRouter>
+        </AppRegistryContext.Provider>
+      </AuthContext.Provider>
+    );
+    // The same registry object across both renders: nothing the layout memoizes on changes, only the answer does.
+    const registry = makeRegistry({ adminMenuItems: rows });
+    const { rerender } = render(tree());
+    expect(within(nav()).queryByRole('link', { name: 'Learnt later' })).toBeNull();
+    role = true;
+    rerender(tree());
+    expect(within(nav()).getByRole('link', { name: 'Learnt later' })).toBeInTheDocument();
   });
 
   it('offers a row to the people it is shown to, and its section only while a row of it shows', () => {
@@ -323,6 +364,8 @@ describe('SettingsLayout with pages the registry brings', () => {
     expect(within(nav()).queryByRole('link', { name: 'Executors' })).toBeNull();
     expect(within(nav()).queryByText('Infrastructure only')).toBeNull();
     expect(within(nav()).getByRole('link', { name: 'Connected apps' })).toBeInTheDocument();
+    // Not an admin either: a page the registry puts under "Admin only" is not advertised to them.
+    expect(within(nav()).queryByRole('link', { name: 'LLM configuration' })).toBeNull();
   });
 
   it('with nobody signed in, offers none of the rows that ask who is', () => {

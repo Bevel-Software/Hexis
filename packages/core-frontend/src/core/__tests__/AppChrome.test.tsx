@@ -123,3 +123,21 @@ describe('AppChrome: narrow navigation', () => {
     );
   });
 });
+
+// The registry alone puts an app's settings page on screen: a row with a
+// `path` and a `page`, and nothing handed to the routes by the test.
+describe('AppChrome: a settings page the registry brings', () => {
+  it('mounts the page of a registry row at its path, inside the settings nav', () => {
+    setViewportWidth(1400);
+    const row = { id: 'executors', label: 'Executors', path: '/executors', page: <div data-testid="executors-page" /> };
+    render(
+      <MemoryRouter initialEntries={['/executors']}>
+        <AppRegistryContext.Provider value={makeRegistry({ apps, adminMenuItems: [row] })}>
+          <AppChrome />
+        </AppRegistryContext.Provider>
+      </MemoryRouter>,
+    );
+    expect(screen.getByTestId('executors-page')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Executors' })).toHaveAttribute('aria-current', 'page');
+  });
+});
