@@ -7,7 +7,7 @@ export { rejectConnectionKey } from './connection-key-rejection.js';
 export { InvalidTokenLabelError, TokenNotFoundError, TokenStillActiveError } from './external-api-key.errors.js';
 export type { IExternalApiKeyService, KeyKindSpec, MintedExternalApiKey } from './external-api-key.interface.js';
 import './external-api-key.interface.js';
-export type { InternalTokenService } from './internal-token.service.js';
+export { InternalTokenService } from './internal-token.service.js';
 export type { ILlmUsageMeter } from './llm-usage-meter.js';
 export { createTokenVerifier, requireExternalSource, requireInternalSource } from './tool-auth.middleware.js';
 export type { ConnectionChoices, ToolAuth } from './tool-auth.middleware.js';

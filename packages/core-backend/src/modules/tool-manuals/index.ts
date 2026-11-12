@@ -3,7 +3,7 @@
 // does not load the implementations.
 export type { ToolManualService } from './tool-manuals.service.js';
 export type { PendingToolsService } from './pending-tools.service.js';
-export { registerToolManualsTools } from './tool-manuals.tools.js';
+export { registerToolManualsTools, type VariableStatusPort } from './tool-manuals.tools.js';
 export {
   createToolManualsAgentRoutes,
   createToolManualsBrowserRoutes,
