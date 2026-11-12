@@ -15,7 +15,7 @@ import { MCP_LOOPBACK_TOKEN_TTL_MS, type McpService } from './mcp.service.js';
 import type { BevelOAuthProvider } from './oauth/bevel-oauth-provider.js';
 import '../tool-auth/index.js'; // req.externalApiKeyId augmentation
 import './mcp-auth.middleware.js'; // req.mcpCallerKind augmentation
-import { isPagePath } from '../audit/index.js';
+import { isPagePath, type IAgentLastCalls } from '../audit/index.js';
 import type { IAgentScopeResolver } from '../agent-scope/index.js';
 import { NOT_AN_AGENT_CHOICE } from './oauth/oauth-consent.routes.js';
 
@@ -106,6 +106,11 @@ export function createMcpRoutes(
   // RFC 9728 pointer carried on this router's own 401 challenges (the
   // local-token exchange), same value McpAuthMiddleware advertises.
   resourceMetadataUrl: string,
+  /**
+   * Each key's last recorded call (`modules/audit`), which the key list
+   * shows as its "last used", the same date the Audit log shows for it.
+   */
+  lastCalls: IAgentLastCalls,
   /**
    * The "Connect as" choices a key may be minted as (`modules/agent-scope`).
    * Absent: keys are minted as Everything only, and no choices are listed.
@@ -257,13 +262,19 @@ export function createMcpRoutes(
 
   router.get('/mcp/external-api-keys', jwtAuthMiddleware, async (req, res) => {
     try {
-      const tokens = await externalApiKeyService.listForUser(req.userId!);
+      const [tokens, last] = await Promise.all([
+        externalApiKeyService.listForUser(req.userId!),
+        lastCalls.lastCalls(req.userId!),
+      ]);
       // Enrich each key with its LLM-proxy usage today + the daily cap, so the
       // settings UI can show how much of the model budget the key has spent.
       const usage = await llmUsageService.usageForTokens(tokens.map((t) => t.id));
       res.json(
         tokens.map((t) => ({
           ...t,
+          // Its last recorded call, not the stamp the key service keeps: a
+          // git pull or a tools listing stamps the key while calling nothing.
+          lastUsedAt: last.get(t.id) ?? null,
           llmUsage: {
             usedTodayTokens: usage[t.id] ?? 0,
             dailyTokenCap: llmUsageService.dailyCap,
@@ -271,8 +282,10 @@ export function createMcpRoutes(
         })),
       );
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Unknown error';
-      res.status(500).json({ error: msg });
+      // A failed read here is a database error, whose message names tables
+      // and SQL: logged for the operator, never sent to the browser.
+      log.error('listing external API keys failed:', { err });
+      res.status(500).json({ error: "Couldn't load external API keys." });
     }
   });
 
