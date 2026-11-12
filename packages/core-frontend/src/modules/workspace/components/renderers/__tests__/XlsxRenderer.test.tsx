@@ -11,6 +11,7 @@ const apiMock = vi.hoisted(() => ({ authFetch: vi.fn() }));
 vi.mock('../../../../../lib/api', () => ({ authFetch: apiMock.authFetch }));
 
 import { XlsxRenderer } from '../XlsxRenderer';
+import { FULL_SCREEN_EXIT_ROOM } from '../fullScreenExitRoom';
 
 /**
  * The truncation contract. The grid caps what it CONVERTS (1,000 rows / 100
@@ -241,6 +242,19 @@ describe('XlsxRenderer truncation', () => {
 
     expect(await screen.findByText('only cell')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Download/ })).toBeInTheDocument();
+  });
+
+  it("leaves the full-screen exit control its slot at the toolbar's right end, beside Download", async () => {
+    apiMock.authFetch.mockResolvedValue({
+      ok: true,
+      arrayBuffer: async () => workbookBytes([['only cell']]),
+    });
+
+    renderXlsx();
+
+    await screen.findByText('only cell');
+    const toolbar = screen.getByRole('button', { name: /Download/ }).closest('div');
+    expect(toolbar).toHaveClass(FULL_SCREEN_EXIT_ROOM);
   });
 });
 

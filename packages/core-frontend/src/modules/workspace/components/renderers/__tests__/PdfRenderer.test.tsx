@@ -52,6 +52,7 @@ vi.mock('pdfjs-dist', () => ({
 }));
 
 import { PdfRenderer } from '../PdfRenderer';
+import { FULL_SCREEN_EXIT_ROOM } from '../fullScreenExitRoom';
 
 const baseProps = {
   filePath: 'Inbox/brief.pdf',
@@ -157,6 +158,16 @@ describe('PdfRenderer', () => {
     renderWithWorkspace('ws-1');
     await screen.findByText('Page 1 of 3');
     expect(screen.getByRole('button', { name: /Download/ })).toBeInTheDocument();
+  });
+
+  it("leaves the full-screen exit control its slot at the toolbar's right end, beside Download", async () => {
+    stubPdfFetch();
+    renderWithWorkspace('ws-1');
+    await screen.findByText('Page 1 of 3');
+    // The row Download sits in; its geometry against the control is
+    // `browser/full-screen-exit-clearance.browser.ts`.
+    const toolbar = screen.getByRole('button', { name: /Download/ }).closest('div');
+    expect(toolbar).toHaveClass(FULL_SCREEN_EXIT_ROOM);
   });
 
   it('shows the loading state until the document resolves', async () => {

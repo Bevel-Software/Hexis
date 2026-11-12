@@ -8,6 +8,7 @@ import { RetryReadButton } from './RetryReadButton';
 import { useReadRetry } from './useReadRetry';
 import { useRendererRawRead } from './rendererRawRead';
 import { DownloadFileButton } from './DownloadFileButton';
+import { FULL_SCREEN_EXIT_ROOM } from './fullScreenExitRoom';
 import type { FileRendererProps } from './types';
 
 // pdf.js parses on a worker thread; the `?url` import hands Vite the worker
@@ -281,7 +282,7 @@ export function PdfRenderer({ filePath }: FileRendererProps) {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex shrink-0 items-center gap-2 border-b border-line pb-2">
+      <div className={`flex shrink-0 items-center gap-2 border-b border-line pb-2 ${FULL_SCREEN_EXIT_ROOM}`}>
         <Button
           variant="quiet"
           size="tiny"
