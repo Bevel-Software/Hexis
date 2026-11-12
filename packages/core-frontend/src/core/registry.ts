@@ -130,6 +130,18 @@ export interface AdminMenuItem {
    * typecheck for every row the enterprise shell already contributes.
    */
   path?: string;
+  /**
+   * The page this row opens at `path`: a settings page of the app's own.
+   *
+   * A row with a `path` and a `page` is mounted inside the settings layout
+   * beside core's pages, and listed in the settings nav under its section —
+   * so an app's settings are reached, linked to and switched between the way
+   * core's are, instead of each opening a dialog over whatever is behind it.
+   * `path` is absolute and exact (`/agents-settings`), and one of core's own
+   * paths is not taken over: such a row keeps its place in the dropdown and
+   * its page is not mounted.
+   */
+  page?: ReactElement;
   onSelect?(helpers: AdminMenuItemHelpers): void;
   /**
    * Whether the dropdown offers this row to `user` right now. Asked each time

@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import { Fragment, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import type { AdminMenuItem } from '../../../core/registry';
 import { cn } from '../../../lib/utils';
@@ -44,11 +44,14 @@ export type SettingsNavOrientation = 'rail' | 'strip';
  */
 export function SettingsNav({
   defaultItems,
+  sections = [],
   adminItems,
   currentPath,
   orientation = 'rail',
 }: {
   defaultItems: LinkableItem[];
+  /** The app's own sections (see `AdminMenuItem.section`), drawn between the default rows and "Admin only", as the profile menu draws them. */
+  sections?: Array<{ id: string; label: string; items: LinkableItem[] }>;
   adminItems: LinkableItem[];
   currentPath: string;
   orientation?: SettingsNavOrientation;
@@ -87,6 +90,12 @@ export function SettingsNav({
       )}
     >
       {defaultItems.map(row)}
+      {sections.map((section) => (
+        <Fragment key={section.id}>
+          {!strip && <SectionLabel spaced>{section.label}</SectionLabel>}
+          {section.items.map(row)}
+        </Fragment>
+      ))}
       {adminItems.length > 0 && (
         <>
           {/* Inline, the rows simply continue — see the orientation docblock. */}

@@ -4,10 +4,13 @@ import { AdminContext } from '../../admin';
 import type { AdminMenuItem } from '../../../core/registry';
 import { SidebarFrame } from '../../layout/components/SidebarFrame';
 import { useMediaQuery } from '../../layout';
+import { AuthContext } from '../../auth';
+import type { AuthUser } from '@bevel-software/platform-shared';
 import {
   isSettingsNavPath,
   normalizeSettingsPath,
   useMenuSections,
+  useSettingsNavPaths,
 } from '../settings-nav-items';
 import { SettingsNav, type LinkableItem } from './SettingsNav';
 
@@ -69,9 +72,11 @@ import { SettingsNav, type LinkableItem } from './SettingsNav';
  * in, and a registry row that happened to declare `/secrets/` would otherwise
  * render a link that never matches the page it is on.
  */
-function linkable(items: AdminMenuItem[]): LinkableItem[] {
+function linkable(items: AdminMenuItem[], paths: readonly string[], user: AuthUser | null): LinkableItem[] {
   return items
-    .filter((item): item is LinkableItem => !!item.path && isSettingsNavPath(item.path))
+    .filter((item): item is LinkableItem => !!item.path && isSettingsNavPath(item.path, paths))
+    // A row offered to some people only (`isShown`) is offered here to the same ones: with nobody signed in, to none.
+    .filter((item) => !item.isShown || (user !== null && item.isShown(user)))
     .map((item) => ({ ...item, path: normalizeSettingsPath(item.path) }));
 }
 
@@ -82,15 +87,27 @@ export function SettingsLayout() {
   const currentPath = normalizeSettingsPath(useLocation().pathname);
   // Not `useAdmin()` — see (2) above.
   const isAdmin = useContext(AdminContext)?.isAdmin ?? false;
-  const { defaultItems, adminItems } = useMenuSections();
+  // The same reading for the person: the nav is wayfinding, and nobody signed in is nobody a role's rows are for.
+  const user = useContext(AuthContext)?.user ?? null;
+  const { defaultItems, adminItems, appSections } = useMenuSections();
+  // Core's paths and the pages the registry's rows bring (`AdminMenuItem.page`).
+  const paths = useSettingsNavPaths();
   /* Below `md` the sidebar frame is not mounted AT ALL and the rows become a
      horizontal strip. A 212px rail on a 375px screen is most of the screen. */
   const isCompact = useMediaQuery('(max-width: 767px)');
 
-  const navDefault = useMemo(() => linkable(defaultItems), [defaultItems]);
+  const navDefault = useMemo(() => linkable(defaultItems, paths, user), [defaultItems, paths, user]);
   const navAdmin = useMemo(
-    () => (isAdmin ? linkable(adminItems) : []),
-    [adminItems, isAdmin],
+    () => (isAdmin ? linkable(adminItems, paths, user) : []),
+    [adminItems, isAdmin, paths, user],
+  );
+  // The app's own sections ("Infrastructure only"), each with the pages offered to this person; one with none is left out.
+  const navSections = useMemo(
+    () =>
+      appSections
+        .map((section) => ({ id: section.id, label: section.label, items: linkable(section.items, paths, user) }))
+        .filter((section) => section.items.length > 0),
+    [appSections, paths, user],
   );
 
   if (isCompact) {
@@ -106,6 +123,7 @@ export function SettingsLayout() {
         >
           <SettingsNav
             defaultItems={navDefault}
+            sections={navSections}
             adminItems={navAdmin}
             currentPath={currentPath}
             orientation="strip"
@@ -123,6 +141,7 @@ export function SettingsLayout() {
       <SidebarFrame label="Settings">
         <SettingsNav
           defaultItems={navDefault}
+          sections={navSections}
           adminItems={navAdmin}
           currentPath={currentPath}
         />
