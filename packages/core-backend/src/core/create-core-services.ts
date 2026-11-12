@@ -1467,6 +1467,8 @@ export async function createCoreServices(
       secretsScope,
       // Read at listing time, by when the hints below exist.
       readOnlyOverrides: () => readOnlyHints.overrides(),
+      // The distribution's wrapper for each caller's tool client, when it has one.
+      ...(ports.prepareMcpClient ? { prepareClient: ports.prepareMcpClient } : {}),
     },
     // Pre-dispatch per-user credential check: the vault answers "has this caller
     // set it?" and the manual catalog answers "which user-scoped vars does this

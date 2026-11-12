@@ -4,4 +4,5 @@
  * layout and free to move. Export what another module needs; nothing more.
  */
 export { signAuthRequest } from './oauth/oauth-state.js';
+export type { McpClientHook } from './mcp.service.js';
 export type { McpAuthRequestState } from './oauth/oauth-state.js';
