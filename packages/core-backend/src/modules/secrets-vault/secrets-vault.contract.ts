@@ -497,17 +497,30 @@ function canonicalizeScope(s: string): string {
   return SCOPE_ALIASES[s] ?? s;
 }
 
+// Scopes that ask the provider for something other than access, and that a
+// provider need not echo in the token response's `scope`. `offline_access`
+// (OpenID Connect Core §11) asks for a refresh token: Microsoft's identity
+// platform grants it (the response carries a `refresh_token`) but never lists it
+// in `scope`, so requiring it in the echo flagged every Microsoft sign-in "needs
+// signing in again", however often the person signed in. It grants access to
+// nothing, so leaving it out of the coverage check cannot let an under-scoped
+// token through: a withheld refresh token shows where it matters, when the
+// access token expires and the refresh fails. Request-only scopes still go out
+// in the authorize request; they are only never REQUIRED back.
+const REQUEST_ONLY_SCOPES: ReadonlySet<string> = new Set(['offline_access']);
+
 /**
  * The tool's currently-required scopes NOT covered by the token's granted scopes,
  * returned in their ORIGINAL declared form (so a UI shows what the tool author
  * wrote, not the canonical spelling). Matching is by canonical form, so `email`
- * declared against a granted `.../userinfo.email` is covered. Unknown/empty granted
- * → everything required is missing (fail-closed). No required scopes → none missing.
+ * declared against a granted `.../userinfo.email` is covered. Request-only scopes
+ * (`offline_access`) are never missing. Unknown/empty granted → every other required
+ * scope is missing (fail-closed). No required scopes → none missing.
  */
 export function missingScopes(required: string[] | undefined, granted: string | undefined): string[] {
   if (!required || required.length === 0) return [];
   const grantedSet = new Set((granted ?? '').split(/\s+/).filter(Boolean).map(canonicalizeScope));
-  return required.filter((s) => !grantedSet.has(canonicalizeScope(s)));
+  return required.filter((s) => !REQUEST_ONLY_SCOPES.has(s) && !grantedSet.has(canonicalizeScope(s)));
 }
 
 export function scopesCovered(required: string[] | undefined, granted: string | undefined): boolean {

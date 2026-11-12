@@ -99,3 +99,49 @@ describe('missingScopes', () => {
     expect(missingScopes(['openid', 'email'], undefined)).toEqual(['openid', 'email']);
   });
 });
+
+/**
+ * `offline_access` asks for a refresh token and grants no access. Microsoft's identity
+ * platform grants it but never echoes it in `scope`, so it must not count as missing.
+ */
+describe('request-only scopes (offline_access)', () => {
+  // The `scope` Microsoft echoed for a Teams sign-in that asked for offline_access
+  // and got a refresh_token (captured 2026-11-10; it lists every scope the app was
+  // ever consented for, and never offline_access).
+  const MICROSOFT_ECHO =
+    'Channel.ReadBasic.All ChannelMember.Read.All ChannelMessage.Read.All Chat.Read ChatMember.Read ' +
+    'email openid profile Team.ReadBasic.All User.Read';
+  const TEAMS = [
+    'offline_access',
+    'User.Read',
+    'Chat.Read',
+    'ChatMember.Read',
+    'ChannelMessage.Read.All',
+    'ChannelMember.Read.All',
+    'Team.ReadBasic.All',
+    'Channel.ReadBasic.All',
+  ];
+
+  it('covers a Microsoft grant that omits offline_access (the reported bug)', () => {
+    expect(scopesCovered(TEAMS, MICROSOFT_ECHO)).toBe(true);
+    expect(missingScopes(TEAMS, MICROSOFT_ECHO)).toEqual([]);
+  });
+
+  it('still covers when a provider does echo offline_access', () => {
+    expect(scopesCovered(['offline_access', 'User.Read'], 'offline_access User.Read')).toBe(true);
+  });
+
+  it('still gates a real permission missing next to offline_access', () => {
+    expect(missingScopes(['offline_access', 'User.Read', 'Mail.Send'], 'User.Read')).toEqual(['Mail.Send']);
+    expect(scopesCovered(['offline_access', 'Mail.Send'], 'User.Read')).toBe(false);
+  });
+
+  it('keeps fail-closed for the real scopes when granted is unknown', () => {
+    expect(missingScopes(['offline_access', 'User.Read'], undefined)).toEqual(['User.Read']);
+    expect(scopesCovered(['offline_access', 'User.Read'], '')).toBe(false);
+  });
+
+  it('exempts only the exact name, not look-alikes', () => {
+    expect(missingScopes(['Offline_Access', 'offline'], 'User.Read')).toEqual(['Offline_Access', 'offline']);
+  });
+});
