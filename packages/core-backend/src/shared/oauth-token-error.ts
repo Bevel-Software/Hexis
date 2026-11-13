@@ -29,6 +29,37 @@ export function isStandardTokenErrorCode(code: unknown): code is string {
 }
 
 /**
+ * The error codes an authorization endpoint may send back to the redirect URI
+ * in place of a code, as RFC 6749 §4.1.2.1 and OIDC Core §3.1.2.6 define them.
+ * Beside the token-endpoint list for the same reason: a finite list is the
+ * rule for which provider-chosen strings may reach a log, and the sign-in
+ * callback logs a provider's `error` only when it is exactly one of these.
+ */
+export const OAUTH_AUTHORIZATION_ERROR_CODES: readonly string[] = Object.freeze([
+  'invalid_request',
+  'unauthorized_client',
+  'access_denied',
+  'unsupported_response_type',
+  'invalid_scope',
+  'server_error',
+  'temporarily_unavailable',
+  'interaction_required',
+  'login_required',
+  'account_selection_required',
+  'consent_required',
+  'invalid_request_uri',
+  'invalid_request_object',
+  'request_not_supported',
+  'request_uri_not_supported',
+  'registration_not_supported',
+]);
+
+/** Whether `code` is one of the standard authorization-endpoint error codes, and so safe to echo. */
+export function isStandardAuthorizationErrorCode(code: unknown): code is string {
+  return typeof code === 'string' && OAUTH_AUTHORIZATION_ERROR_CODES.includes(code);
+}
+
+/**
  * The standard `error` code in a refusing token endpoint's JSON body, or null:
  * when the body is not JSON, not an object, carries no string `error`, or
  * carries one that is not a standard code.
