@@ -46,7 +46,19 @@ let wsDir: string | undefined;
  * note; without one the note's check has no workspace and the answer carries
  * none.
  */
+// The one owner of the server and the extractor: startSession() closes the
+// previous pair before it opens another, and afterEach closes the last.
+async function closeSessionApp(): Promise<void> {
+  const open = server;
+  server = undefined;
+  if (open) await new Promise<void>((r) => open.close(() => r()));
+  const worker = extractor;
+  extractor = undefined;
+  await worker?.close();
+}
+
 async function startSession(kb: KbContext, defaultWorkspaceDir?: string): Promise<{ base: string; registry: ToolRegistry }> {
+  await closeSessionApp();
   const registry = new ToolRegistry();
   const resolve = async (auth: ToolAuth, signal: AbortSignal): Promise<ToolContext> => ({
     user: { id: 'user-42', email: 'e@x', name: 'N' },
@@ -107,10 +119,7 @@ const call = async (base: string): Promise<Record<string, unknown>> =>
   ).json()) as Record<string, unknown>;
 
 afterEach(async () => {
-  if (server) await new Promise<void>((r) => server!.close(() => r()));
-  server = undefined;
-  await extractor?.close();
-  extractor = undefined;
+  await closeSessionApp();
   if (wsDir) await rm(wsDir, { recursive: true, force: true });
   wsDir = undefined;
 });

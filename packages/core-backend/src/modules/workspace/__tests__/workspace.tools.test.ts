@@ -154,6 +154,14 @@ let patternMatcher: RipgrepPatternMatcher | undefined;
 let docExtractor: WorkerDocumentExtractor | undefined;
 let matcherOptions: RipgrepPatternMatcherOptions = {};
 
+// The one owner of the shared harness server: start() closes the previous one
+// before it opens another, and afterEach closes the last.
+async function closeHttpServer(): Promise<void> {
+  const open = httpServer;
+  httpServer = undefined;
+  if (open) await new Promise<void>((r) => open.close(() => r()));
+}
+
 async function start(
   scope: 'read' | 'write' = 'write',
   access: IAccessControl = allowAll,
@@ -161,6 +169,7 @@ async function start(
   userEmail = 'e@x',
 ): Promise<string> {
   raceHook = null;
+  await closeHttpServer();
   await patternMatcher?.close();
   patternMatcher = new RipgrepPatternMatcher(matcherOptions);
   await docExtractor?.close();
@@ -361,8 +370,7 @@ beforeEach(() => {
   matcherOptions = {};
 });
 afterEach(async () => {
-  if (httpServer) await new Promise<void>((r) => httpServer!.close(() => r()));
-  httpServer = undefined;
+  await closeHttpServer();
   await patternMatcher?.close();
   patternMatcher = undefined;
   await docExtractor?.close();
@@ -2393,6 +2401,14 @@ describe('start_session', () => {
   let sessionExtractor: WorkerDocumentExtractor | undefined;
   let created: Array<{ userId: string; startedAt: Date }> = [];
 
+  // The one owner of the harness server: a test that starts a second app
+  // closes the first here before it is replaced, and afterEach closes the last.
+  async function closeSessionServer(): Promise<void> {
+    const open = server;
+    server = undefined;
+    if (open) await new Promise<void>((r) => open.close(() => r()));
+  }
+
   async function startSessionApp(
     source: 'external' | 'internal' = 'external',
     // The default fake returns one fixed id, which is what most of these
@@ -2412,6 +2428,7 @@ describe('start_session', () => {
     // What the connection was made as, as the context resolver hands it over.
     connectionScope?: ConnectionScope,
   ): Promise<string> {
+    await closeSessionServer();
     created = [];
     const registry = new ToolRegistry();
     const resolve = async (auth: ToolAuth, signal: AbortSignal): Promise<ToolContext> => ({
@@ -2471,8 +2488,7 @@ describe('start_session', () => {
   }
 
   afterEach(async () => {
-    if (server) await new Promise<void>((r) => server!.close(() => r()));
-    server = undefined;
+    await closeSessionServer();
     await sessionExtractor?.close();
     sessionExtractor = undefined;
   });
@@ -2513,12 +2529,14 @@ describe('start_session', () => {
       registerWorkspaceTools(
         registry, express.Router(), ((_req, _res, next) => next()) as express.RequestHandler, (() => () => {}) as never,
         new SpillStore(join(tmpdir(), 'bevel-test-spills')), new DocExtractService(join(tmpdir(), 'bevel-test-doc-extract'), extractor), allowAll, testKbContext({ kbDirName: KB_DIR }),
-        { recoveryBotEmail: RECOVERY_BOT, hooks: new WorkflowHooks(), notes: new ToolDescriptionNotes() },
+        { recoveryBotEmail: RECOVERY_BOT, hooks: new VersionControlHooks(), notes: new ToolDescriptionNotes() },
         new RoutineWritePolicyService(),
         {} as never,
       );
-      const def = (await registry.listExternal()).find((t) => t.name === 'start_session')!;
-      await extractor.close();
+      const def = await registry
+        .listExternal()
+        .then((tools) => tools.find((t) => t.name === 'start_session')!)
+        .finally(() => extractor.close());
       expect(def.description).toContain('Returns `{ sessionId, defaultBranch, connectedAs }`');
       const outputs = def.outputs as { properties: Record<string, { type: unknown; required?: string[] }>; required: string[] };
       expect(outputs.required).toEqual(['sessionId', 'defaultBranch', 'connectedAs']);

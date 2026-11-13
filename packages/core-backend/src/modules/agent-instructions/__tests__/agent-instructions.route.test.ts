@@ -25,7 +25,16 @@ const CONNECTION_KEY = 'bevel_abc';
 const INTERNAL_TOKEN = 'bit_xyz';
 const BROWSER_JWT = 'jwt.session.token';
 
+// The one owner of the test server: serve() closes the previous one before it
+// opens another, and afterEach closes the last.
+async function closeHttpServer(): Promise<void> {
+  const open = httpServer;
+  httpServer = undefined;
+  if (open) await new Promise<void>((r) => open.close(() => r()));
+}
+
 async function serve(readPreamble: () => Promise<string | null>): Promise<string> {
+  await closeHttpServer();
   const externalKeys = {
     looksLikeExternalApiKey: (t: string) => t.startsWith('bevel_'),
     verifyAndLoadToken: async (t: string) => (t === CONNECTION_KEY ? { user: { id: 'u-key' }, tokenId: 'tok-1' } : null),
@@ -51,8 +60,7 @@ async function serve(readPreamble: () => Promise<string | null>): Promise<string
 }
 
 afterEach(async () => {
-  if (httpServer) await new Promise<void>((r) => httpServer!.close(() => r()));
-  httpServer = undefined;
+  await closeHttpServer();
   vi.restoreAllMocks();
 });
 

@@ -39,14 +39,22 @@ const CONNECTIONS: Record<string, ConnectionScopeWire | undefined> = {
 
 let httpServer: HttpServer | undefined;
 const cleanups: Array<() => Promise<void>> = [];
+// The one owner of the test server: harness() closes the previous one before it
+// opens another, and afterEach closes the last.
+async function closeHttpServer(): Promise<void> {
+  const open = httpServer;
+  httpServer = undefined;
+  if (open) await new Promise<void>((r) => open.close(() => r()));
+}
+
 afterEach(async () => {
   for (const c of cleanups.splice(0)) await c().catch(() => {});
-  if (httpServer) await new Promise<void>((r) => httpServer!.close(() => r()));
-  httpServer = undefined;
+  await closeHttpServer();
   vi.restoreAllMocks();
 });
 
 async function harness() {
+  await closeHttpServer();
   const state = { builds: 0, base: '' };
   const connectionOf = (req: express.Request) => CONNECTIONS[(req.headers.authorization ?? '').replace(/^Bearer /, '')];
   const registry = new ToolRegistry();

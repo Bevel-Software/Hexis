@@ -18,10 +18,15 @@ import {
 
 let server: Server | null = null;
 
-afterEach(async () => {
-  if (server) await new Promise<void>((resolve) => server!.close(() => resolve()));
+// The one owner of the test server: serve() closes the previous one before it
+// opens another, and afterEach closes the last.
+async function closeServer(): Promise<void> {
+  const open = server;
   server = null;
-});
+  if (open) await new Promise<void>((resolve) => open.close(() => resolve()));
+}
+
+afterEach(closeServer);
 
 const SECTIONS: RenderedGuideSection[] = [
   { id: 'introduction', title: 'Knowledge base', body: '# Knowledge base\n\nRead me.' },
@@ -31,6 +36,7 @@ const SECTIONS: RenderedGuideSection[] = [
 
 describe('get_agent_guide', () => {
   async function serve(connectionScope?: ConnectionScope) {
+    await closeServer();
     const registry = new ToolRegistry();
     const router = express.Router();
     // Stands in for the connection-key auth: the caller is a signed-in reader.
@@ -270,8 +276,6 @@ describe('get_agent_guide', () => {
       section: 'access-control',
       title: access.title,
     });
-    await new Promise<void>((resolve) => server!.close(() => resolve()));
-    server = null;
 
     // Everything: no line, no `connection`.
     const asEverything = await serve(ConnectionScope.everything());
