@@ -64,20 +64,97 @@ export class AccessDeniedError extends VersionControlDomainError {
     if (details.unreadable !== undefined) {
       tail = unreadableRefusalSentence(details.unreadable);
     } else {
-      const rolesPart = details.eligibleRoles.length
-        ? details.eligibleRoles.join(', ')
-        : 'none';
-      const usersPart = details.eligibleUsers.length
-        ? details.eligibleUsers
-            .map((u) => (u.name ? `${u.name} <${u.email}>` : u.email))
-            .join(', ')
-        : '';
-      const eligible = [rolesPart, usersPart].filter(Boolean).join('; ');
-      tail = `Eligible: ${eligible}.`;
+      tail = `Eligible: ${eligibleWritersPhrase(details.eligibleRoles, details.eligibleUsers)}.`;
     }
     super(`${lead} ${tail}`, 403, { access: details });
     this.name = 'AccessDeniedError';
     this.access = details;
+  }
+}
+
+/**
+ * How a refusal names who may write a path: the roles (`none` when there are
+ * none), then the people. One spelling for the save-time refusal and the
+ * push gate's, so the two never name the same writers differently.
+ */
+function eligibleWritersPhrase(roles: string[], users: { name: string; email: string }[]): string {
+  const rolesPart = roles.length ? roles.join(', ') : 'none';
+  const usersPart = users.length ? users.map((u) => (u.name ? `${u.name} <${u.email}>` : u.email)).join(', ') : '';
+  return [rolesPart, usersPart].filter(Boolean).join('; ');
+}
+
+/** The file a push-gate refusal names, and who may write it at the published state. */
+export interface PushAccessRefusal {
+  /** Repo-relative POSIX path of the file the unpushed commit changed. */
+  path: string;
+  eligibleRoles: string[];
+  eligibleUsers: { name: string; email: string }[];
+}
+
+/**
+ * The sentence a push-gate refusal is told in: the platform refused (never
+ * the repository host) and, given the refusal, which file and who may write
+ * it. Given null, the file goes unnamed, for a person who may not read it.
+ * One composition for the person who pushed, the sync banner each viewer
+ * sees and the pending-commit queue, so they never say it differently.
+ */
+export function pushAccessRefusalSentence(branch: string, refusal: PushAccessRefusal | null): string {
+  return `The platform's access check refused the push of "${branch}": ${pushAccessRefusalClause(refusal)}.`;
+}
+
+function pushAccessRefusalClause(refusal: PushAccessRefusal | null): string {
+  return refusal
+    ? `"${sanitizedPath(refusal.path)}" may be written by ${eligibleWritersPhrase(refusal.eligibleRoles, refusal.eligibleUsers)}`
+    : 'an unshared commit on it changes a file you may not read, which its author may not write there; someone who may write that file can share the branch';
+}
+
+/**
+ * The platform's own access check refused to push a protected branch: an
+ * unpushed commit changes a file that the commit's author (or the pusher,
+ * for an author the platform cannot match to a user) may not write at the
+ * branch's published state. The push never left this server, so this is NOT
+ * the repository host refusing, and nothing that relays it may say so.
+ *
+ * `blocked` is the file and who may write it, always. What the PUSHER is
+ * told is `refusal`: the same, or null when they may not read the file — a
+ * commit by somebody else can touch a file they cannot see, and naming it,
+ * or who may write it, would disclose what the read model hides from them.
+ * The message, `reason` and `payload` are scoped to the pusher the same way.
+ * `blocked` is for a relay that judges each of its own readers, as the sync
+ * banner's delivery does per session.
+ *
+ * `reason` is the clause after "refused the push:", composed here from
+ * repository paths and principals only (never git output), so the
+ * saved-locally sentence and the pending-commit queue can carry it verbatim.
+ */
+export class PushAccessRefusedError extends VersionControlDomainError {
+  readonly kind = 'push-access-refused' as const;
+  readonly reason: string;
+  /** What the pusher may be told: `blocked`, or null when they may not read its file. */
+  readonly refusal: PushAccessRefusal | null;
+
+  constructor(
+    readonly branch: string,
+    readonly blocked: PushAccessRefusal,
+    pusherMayRead: boolean,
+  ) {
+    const refusal = pusherMayRead ? blocked : null;
+    super(
+      pushAccessRefusalSentence(branch, refusal),
+      403,
+      refusal
+        ? {
+            kind: 'push-access-refused',
+            branch,
+            path: refusal.path,
+            eligibleRoles: refusal.eligibleRoles,
+            eligibleUsers: refusal.eligibleUsers,
+          }
+        : { kind: 'push-access-refused', branch },
+    );
+    this.name = 'PushAccessRefusedError';
+    this.refusal = refusal;
+    this.reason = pushAccessRefusalClause(refusal);
   }
 }
 

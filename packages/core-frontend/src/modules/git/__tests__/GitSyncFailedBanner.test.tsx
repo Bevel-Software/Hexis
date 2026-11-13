@@ -119,6 +119,35 @@ describe('GitSyncFailedBanner', () => {
     expect(screen.queryByRole('alert')).toBeNull();
   });
 
+  it("says the platform's access check refused, not the git host, when the platform refused the push", () => {
+    const bus = renderBanner();
+    const reason =
+      'The platform’s access check refused the push of "feat/x": "G/a.md" may be written by Admin; qa-b@example.com.';
+    bus.emit({ ...FAILED, reason, accessRefusal: { path: 'G/a.md' } } as Parameters<typeof bus.emit>[0]);
+
+    const text = screen.getByRole('alert').textContent ?? '';
+    expect(text).toContain('feat/x');
+    expect(text).toContain('saved here');
+    expect(text).toContain('access check refused the push');
+    expect(text).toContain(reason);
+    expect(text).not.toMatch(/git host|server logs/i);
+  });
+
+  it('keeps the platform headline when the file was withheld from this person', () => {
+    const bus = renderBanner();
+    bus.emit({ ...FAILED, reason: 'unnamed', accessRefusal: {} } as Parameters<typeof bus.emit>[0]);
+    const text = screen.getByRole('alert').textContent ?? '';
+    expect(text).toContain('access check refused the push');
+    expect(text).not.toMatch(/git host/i);
+  });
+
+  it('a host failure after a platform refusal goes back to the git-host headline', () => {
+    const bus = renderBanner();
+    bus.emit({ ...FAILED, reason: 'unnamed', accessRefusal: {} } as Parameters<typeof bus.emit>[0]);
+    bus.emit(FAILED);
+    expect(screen.getByRole('alert').textContent).toContain('aren’t reaching your git host');
+  });
+
   it('does not let another workspace recovering clear this one’s banner', () => {
     const bus = renderBanner();
     bus.emit(FAILED);

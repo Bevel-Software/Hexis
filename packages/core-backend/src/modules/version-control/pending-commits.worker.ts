@@ -49,7 +49,10 @@ import {
   canonicalWorkspaceId,
 } from './pending-commits.service.js';
 import { sanitizeError } from './sanitize-error.js';
-import { VersionControlDomainError } from '../../shared/domain-errors.js';
+import { PushNeedsAgentResolutionError, VersionControlDomainError } from '../../shared/domain-errors.js';
+
+/** How much of a platform access refusal the queue keeps: the file and its writers, whole. */
+const ACCESS_REFUSAL_MAX_LEN = 2000;
 
 /**
  * Where the worker escalates terminal failures — the narrow, version-control-owned
@@ -372,7 +375,13 @@ export class PendingCommitsWorker {
       // LLM prompt, AND the user-facing feedback notice. Git stderr can
       // contain credentialed URLs ("https://x-access-token:ghp_…@…"); we
       // can't undo a persisted leak, so mask before any of them sees it.
-      const message = sanitizeError(err);
+      // A refusal by the platform's own access check names the file and who
+      // may write it; the default cap would cut exactly that off, and the
+      // sentence is ours (paths and principals, no git output).
+      const message = sanitizeError(
+        err,
+        err instanceof PushNeedsAgentResolutionError && err.cause === 'access' ? { maxLen: ACCESS_REFUSAL_MAX_LEN } : {},
+      );
 
       const corrected = pathOutsideRepoCorrection(err);
       if (corrected !== null) {

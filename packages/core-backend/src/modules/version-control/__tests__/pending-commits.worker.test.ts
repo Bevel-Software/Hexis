@@ -14,6 +14,8 @@ import type {
   PendingCommitsService,
 } from '../pending-commits.service.js';
 import { assertInsideRepo } from '../../kb-fs/repo-path.js';
+import { PushAccessRefusedError } from '../../access-model/index.js';
+import { PushNeedsAgentResolutionError } from '../../../shared/domain-errors.js';
 
 /**
  * Unit tests for the queue-draining worker. The service + version-control layers
@@ -185,6 +187,43 @@ describe('PendingCommitsWorker.drainOnce', () => {
     expect(recoveryAgent.run).not.toHaveBeenCalled();
     expect(service.markNeedsAttention).not.toHaveBeenCalled();
     expect(feedback.send).not.toHaveBeenCalled();
+  });
+
+  it("records a refusal by the platform's access check whole: the platform's words, the file and its writers", async () => {
+    const row = makeRow({ attempts: 0 });
+    (service.claimNext as ReturnType<typeof vi.fn>).mockResolvedValueOnce(row);
+    const writers = Array.from({ length: 6 }, (_, i) => ({ name: `Writer ${i}`, email: `writer${i}@example.com` }));
+    const gate = new PushAccessRefusedError('main', {
+      path: 'Kunden/DE_Katalogübertragung per SFTP.docx',
+      eligibleRoles: ['Admin', 'Editors'],
+      eligibleUsers: writers,
+    }, true);
+    versionControl.runPendingCommit.mockRejectedValueOnce(
+      new PushNeedsAgentResolutionError('main', row.path, gate.message, '(cooperative path not attempted)', 'access', gate.reason),
+    );
+
+    await worker.drainOnce();
+
+    const recorded = (service.markTransientFailure as ReturnType<typeof vi.fn>).mock.calls[0][1] as string;
+    expect(recorded.length).toBeGreaterThan(200);
+    expect(recorded).toContain("the platform's access check refused the push");
+    expect(recorded).toContain('"Kunden/DE_Katalogübertragung per SFTP.docx" may be written by Admin, Editors;');
+    expect(recorded).toContain('Writer 5 <writer5@example.com>');
+    expect(recorded).not.toMatch(/repository host/i);
+  });
+
+  it('a push the host refused is recorded in the host wording, capped as before', async () => {
+    const row = makeRow({ attempts: 0 });
+    (service.claimNext as ReturnType<typeof vi.fn>).mockResolvedValueOnce(row);
+    versionControl.runPendingCommit.mockRejectedValueOnce(
+      new PushNeedsAgentResolutionError('main', row.path, 'remote: Internal Server Error ' + 'x'.repeat(400), '', 'refused'),
+    );
+
+    await worker.drainOnce();
+
+    const recorded = (service.markTransientFailure as ReturnType<typeof vi.fn>).mock.calls[0][1] as string;
+    expect(recorded).toContain('the repository host refused the push');
+    expect(recorded.length).toBeLessThanOrEqual(200);
   });
 
   it('exhausting transient budget spawns the recovery agent (within recovery budget)', async () => {

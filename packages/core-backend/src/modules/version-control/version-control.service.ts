@@ -107,7 +107,7 @@ import {
   VersionControlValidationError,
 } from '../../shared/domain-errors.js';
 import { RECOVERY_BOT_EMAIL, RECOVERY_BOT_NAME } from './recovery-bot.js';
-import { AccessDeniedError, EVERYONE_CANONICAL, type IChangeReadGate } from '../access-model/index.js';
+import { AccessDeniedError, EVERYONE_CANONICAL, PushAccessRefusedError, pushAccessRefusalSentence, type IChangeReadGate } from '../access-model/index.js';
 import { printable } from '../../shared/printable.js';
 
 const execFileAsync = promisify(execFile);
@@ -1573,7 +1573,10 @@ export class VersionControlService implements IVersionControlService {
         // moment the user actually closes their edit, which is when
         // the agent should step in.
         const detail = err instanceof Error ? err.message : String(err);
-        const looksLikeNonFastForward = /non-fast-forward|rejected|fetch first|updates were rejected/i.test(detail);
+        // The platform's own access refusal is no divergence, whatever its
+        // file names spell: a pull cannot change who may write a file.
+        const looksLikeNonFastForward =
+          !(err instanceof PushAccessRefusedError) && /non-fast-forward|rejected|fetch first|updates were rejected/i.test(detail);
         let recovered = false;
         let recoveryError: unknown = null;
         if (looksLikeNonFastForward) {
@@ -1864,6 +1867,22 @@ export class VersionControlService implements IVersionControlService {
     // Same canonicalization as `noteGitSyncOk` — the pair must agree on keys.
     const id = branchForWorkspaceId(workspaceId);
     this.gitSyncFailing.add(id);
+    // The platform's own access check refused: the host was never asked. The
+    // event fans out to every session on the branch, not only the pusher's,
+    // so it carries the file and its writers whole, with the file marked;
+    // the events route's delivery rule then names them only to a viewer who
+    // may read that file, and tells everyone else the platform refused
+    // without them.
+    if (!conflict && err instanceof PushAccessRefusedError) {
+      this.events?.emit({
+        kind: 'git-sync-failed',
+        workspaceId: id,
+        branch,
+        reason: pushAccessRefusalSentence(branch, err.blocked),
+        accessRefusal: { path: err.blocked.path },
+      });
+      return;
+    }
     this.events?.emit({
       kind: 'git-sync-failed',
       workspaceId: id,
@@ -1932,7 +1951,10 @@ export class VersionControlService implements IVersionControlService {
       this.noteGitSyncOk(workspaceId, branch);
     } catch (firstPushErr) {
       const firstDetail = firstPushErr instanceof Error ? firstPushErr.message : String(firstPushErr);
-      const looksLikeNonFastForward = /non-fast-forward|rejected|fetch first|updates were rejected/i.test(firstDetail);
+      // The platform's own access refusal is no divergence, whatever its file
+      // names spell: a pull cannot change who may write a file.
+      const looksLikeNonFastForward =
+        !(firstPushErr instanceof PushAccessRefusedError) && /non-fast-forward|rejected|fetch first|updates were rejected/i.test(firstDetail);
       let recovered = false;
       let recoveryDetail = '(cooperative path not attempted)';
       let recoveryError: unknown = null;
@@ -1989,6 +2011,13 @@ export class VersionControlService implements IVersionControlService {
           `push failed for workspace=${workspaceId} user=${user.id}; throwing PushNeedsAgentResolutionError so the frontend can hand off to the agent:`,
           { detail: firstDetail },
         );
+        // The platform's own gate refused (the first push, or the retry once
+        // the pull had replayed the branch): the host was never asked, so
+        // the sentence says the platform refused and names what it named.
+        const current = recoveryError ?? firstPushErr;
+        if (current instanceof PushAccessRefusedError) {
+          throw new PushNeedsAgentResolutionError(branch, targetPath, firstDetail, recoveryDetail, 'access', current.reason);
+        }
         throw new PushNeedsAgentResolutionError(
           branch,
           targetPath,

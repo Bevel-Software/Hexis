@@ -31,6 +31,7 @@ import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import type { Database } from '../../database/index.js';
 import { openChangeGate } from '../../../__tests__/open-change-gate.js';
 import { ReadOnBranchDeniedError } from '../read-on-branch.js';
+import { PushAccessRefusedError } from '../../access-model/index.js';
 import { hashEmail } from '../../../shared/email-identity.js';
 
 // `deleteBranch`'s open-request guard is the only DB touch these tests
@@ -1158,6 +1159,104 @@ describe('VersionControlService — revertChangeRequestFile / closeEmptyChangeRe
       expect(pull).toHaveBeenNthCalledWith(1, 'ali%2Fx', { preserveMerges: true });
       expect(pull).toHaveBeenNthCalledWith(2, 'ali%2Fx', { preserveMerges: true });
       expect(kindsOf(emit)).not.toContain('git-sync-failed');
+    });
+  });
+
+  describe("when the platform's access check refuses the push", () => {
+    // The file's name spells "rejected", which the host-divergence test reads
+    // as a non-fast-forward: the gate's refusal must not be taken for one.
+    const gateRefusal = () =>
+      new PushAccessRefusedError('ali/x', {
+        path: 'Docs/rejected ü.md',
+        eligibleRoles: ['Editors'],
+        eligibleUsers: [{ name: 'Bea', email: 'bea@example.com' }],
+      }, true);
+
+    it('answers that the platform refused, names the file and its writers, and never says the host refused', async () => {
+      const emit = vi.fn();
+      const pull = vi.fn().mockResolvedValue({ treeChanged: false });
+      const git = makeRevertGit({ push: vi.fn().mockRejectedValue(gateRefusal()), pull });
+      const { svc } = makeHarness({ git, events: { emit } as unknown as VersionControlEventBus });
+
+      const err = await svc.revertChangeRequestFile(7, makeUser(), 'Docs/a.md').catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(PushNeedsAgentResolutionError);
+      const refusal = err as PushNeedsAgentResolutionError;
+      expect(refusal.cause).toBe('access');
+      expect(refusal.status).toBe(409);
+      expect(refusal.message).toContain('Saved locally on "ali/x"');
+      expect(refusal.message).toContain("the platform's access check refused the push");
+      expect(refusal.message).toContain('"Docs/rejected ü.md" may be written by Editors; Bea <bea@example.com>');
+      expect(refusal.message).not.toMatch(/repository host/i);
+
+      // The banner says the same, in the gate's own words.
+      const failed = emit.mock.calls.map((c) => c[0] as Record<string, unknown>).find((e) => e.kind === 'git-sync-failed');
+      expect(failed?.reason).toBe(gateRefusal().message);
+      expect(String(failed?.reason)).toContain("The platform's access check refused the push");
+      expect(String(failed?.reason)).not.toMatch(/repository host/i);
+      // Marked as the platform's refusal, with the file the delivery rule
+      // names only to a viewer who may read it.
+      expect(failed?.accessRefusal).toEqual({ path: 'Docs/rejected ü.md' });
+      // No cooperative pull: a refusal of who may write is no divergence.
+      // (Once to freshen the checkout before the revert, never as a recovery.)
+      expect(pull).toHaveBeenCalledTimes(1);
+    });
+
+    it('a divergence whose retry the gate refuses is answered as the gate refusal', async () => {
+      const push = vi
+        .fn()
+        .mockRejectedValueOnce(new Error('! [rejected] ali/x -> ali/x (non-fast-forward)'))
+        .mockRejectedValueOnce(gateRefusal());
+      const git = makeRevertGit({ push, pull: vi.fn().mockResolvedValue({ treeChanged: true }) });
+      const { svc } = makeHarness({ git });
+
+      const err = await svc.revertChangeRequestFile(7, makeUser(), 'Docs/a.md').catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(PushNeedsAgentResolutionError);
+      expect((err as PushNeedsAgentResolutionError).cause).toBe('access');
+      expect((err as PushNeedsAgentResolutionError).message).toContain('"Docs/rejected ü.md" may be written by');
+      expect(push).toHaveBeenCalledTimes(2);
+    });
+
+    it('a refusal on a file the pusher may not read names neither the file nor its writers to the pusher', async () => {
+      const emit = vi.fn();
+      const blocked = { path: 'Secret/plan.md', eligibleRoles: ['Admin'], eligibleUsers: [{ name: 'Bea', email: 'bea@example.com' }] };
+      const git = makeRevertGit({
+        push: vi.fn().mockRejectedValue(new PushAccessRefusedError('ali/x', blocked, false)),
+        pull: vi.fn().mockResolvedValue({ treeChanged: false }),
+      });
+      const { svc } = makeHarness({ git, events: { emit } as unknown as VersionControlEventBus });
+
+      const err = await svc.revertChangeRequestFile(7, makeUser(), 'Docs/a.md').catch((e: unknown) => e);
+      const refusal = err as PushNeedsAgentResolutionError;
+      expect(refusal.cause).toBe('access');
+      expect(refusal.message).toContain("the platform's access check refused the push");
+      expect(refusal.message).toContain('a file you may not read');
+      expect(refusal.message).not.toMatch(/repository host|may be written by|Secret\/plan|bea@/i);
+      // The banner event reaches every session on the branch, so it carries
+      // the whole refusal, marked; the events route's delivery rule decides
+      // per viewer what of it they see (events-delivery.test.ts).
+      const failed = emit.mock.calls.map((c) => c[0] as Record<string, unknown>).find((e) => e.kind === 'git-sync-failed');
+      expect(failed?.reason).toBe(
+        `The platform's access check refused the push of "ali/x": "Secret/plan.md" may be written by Admin; Bea <bea@example.com>.`,
+      );
+      expect(failed?.accessRefusal).toEqual({ path: 'Secret/plan.md' });
+      expect(String(failed?.reason)).not.toMatch(/repository host/i);
+    });
+
+    it('a host rejection keeps the repository-host wording and carries no access-refusal marker', async () => {
+      const emit = vi.fn();
+      const git = makeRevertGit({
+        push: vi.fn().mockRejectedValue(new Error('remote: Internal Server Error')),
+        pull: vi.fn().mockResolvedValue({ treeChanged: false }),
+      });
+      const { svc } = makeHarness({ git, events: { emit } as unknown as VersionControlEventBus });
+
+      const err = await svc.revertChangeRequestFile(7, makeUser(), 'Docs/a.md').catch((e: unknown) => e);
+      expect((err as PushNeedsAgentResolutionError).cause).toBe('refused');
+      expect((err as PushNeedsAgentResolutionError).message).toContain('the repository host refused the push');
+      const failed = emit.mock.calls.map((c) => c[0] as Record<string, unknown>).find((e) => e.kind === 'git-sync-failed');
+      expect(failed).toBeDefined();
+      expect(failed).not.toHaveProperty('accessRefusal');
+      expect(String(failed?.reason)).not.toMatch(/platform's access check/i);
     });
   });
 
