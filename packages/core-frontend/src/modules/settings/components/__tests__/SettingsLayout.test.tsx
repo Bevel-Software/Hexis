@@ -372,18 +372,36 @@ describe('SettingsLayout with pages the registry brings', () => {
       page('query', '/teams?tab=all'),
       page('fragment', '/teams#all'),
       page('relative', 'teams'),
+      // Spellings the browser or the router resolves to another address.
+      page('parent-segment', '/teams/../secrets'),
+      page('same-segment', '/teams/./all'),
+      page('ends-in-parent', '/teams/..'),
+      page('doubled-slash', '/teams//all'),
+      page('backslash', '/teams\\all'),
+      page('tab', '/teams\tall'),
+      page('another-origin', '//elsewhere.example/teams'),
+      page('encoded-letter', '/%74eams'),
       // After them all, and still free: none of the rows above took it.
       page('one-address', '/teams/1'),
       page('colon-inside', '/teams/a:b'),
+      page('not-ascii', '/übersicht'),
+      page('trailing-slash', '/groups/'),
     ];
     expect(registrySettingsPages(makeRegistry({ adminMenuItems: rows })).map((row) => `${row.id} ${row.path}`)).toEqual([
       'one-address /teams/1',
       'colon-inside /teams/a:b',
+      'not-ascii /übersicht',
+      'trailing-slash /groups',
     ]);
   });
 
-  it('lists no row whose path is a route pattern', () => {
-    const rows: AdminMenuItem[] = [{ id: 'pattern', label: 'A pattern', path: '/teams/:id', page: <div>Teams</div> }];
+  it('lists no row whose path is a route pattern, or resolves to another page', () => {
+    const rows: AdminMenuItem[] = [
+      { id: 'pattern', label: 'A pattern', path: '/teams/:id', page: <div>Teams</div> },
+      // A link to this would land on the Secrets page under the row's own name.
+      { id: 'elsewhere', label: 'Lands on secrets', path: '/teams/../secrets', page: <div>Teams</div> },
+      { id: 'elsewhere-no-page', label: 'Points at secrets', path: '/teams/../secrets' },
+    ];
     render(
       <AppRegistryContext.Provider value={makeRegistry({ adminMenuItems: rows })}>
         <MemoryRouter initialEntries={['/secrets']}>
@@ -396,6 +414,9 @@ describe('SettingsLayout with pages the registry brings', () => {
       </AppRegistryContext.Provider>,
     );
     expect(within(nav()).queryByRole('link', { name: 'A pattern' })).toBeNull();
+    expect(within(nav()).queryByRole('link', { name: 'Lands on secrets' })).toBeNull();
+    expect(within(nav()).queryByRole('link', { name: 'Points at secrets' })).toBeNull();
+    expect(within(nav()).getAllByRole('link').filter((l) => l.getAttribute('href') === '/secrets')).toHaveLength(1);
   });
 
   it('an app that claims the root takes no address from a page', () => {

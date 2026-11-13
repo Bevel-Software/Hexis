@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import { matchRoutes, parsePath } from 'react-router-dom';
+import { matchRoutes } from 'react-router-dom';
 import { Boxes, CircleUserRound, KeyRound, Lock, ScrollText, SlidersHorizontal, Users, UsersRound } from 'lucide-react';
 import { useAppRegistry, type AdminMenuItem, type AppRegistry } from '../../core/registry';
 import { SHELL_PATHS } from '../../core/shell-paths';
@@ -174,27 +174,44 @@ export function sameSettingsPath(path: string, pathname: string): boolean {
 }
 
 /**
- * Whether a row's `path` is ONE absolute address rather than a route pattern,
- * by the router's own parsers. A row's path is both where its page is mounted
- * and what its link points to, so it has to be an address a link can carry:
- * `parsePath` finds a query, a fragment or an optional segment's `?`, and the
- * path matched against itself as a route yields a parameter for every `:name`
- * and for a splat.
+ * Whether a row's `path` is ONE absolute address, written the way everything
+ * that reads it reads it. A row's path goes to two places: the browser's
+ * address bar (through the row's link) and the router's route table (where
+ * its page is mounted). It is one address only if both read it back
+ * unchanged, each asked with its own parser:
+ *
+ *  - the browser's URL parser keeps it on this origin with no query and no
+ *    fragment, and leaves the path as written (it folds `..` and `.`, turns a
+ *    backslash into a slash, drops a tab; an optional segment's `?` is a
+ *    query to it, and a relative path gains a slash);
+ *  - the path, mounted as a route, answers itself, as written, and nothing
+ *    more: no parameter (`:name`) and no splat, the same pathname (the router
+ *    folds a doubled slash), and a match at all (a percent-encoded letter
+ *    never matches the address it spells).
  */
 function isOneAddress(path: string): boolean {
-  if (!path.startsWith('/')) return false;
-  const { pathname, search, hash } = parsePath(path);
-  if (search || hash || pathname !== path) return false;
+  const origin = 'http://settings.invalid';
+  let inBrowser: string;
+  try {
+    const url = new URL(path, origin);
+    if (url.origin !== origin || url.search || url.hash) return false;
+    // Decoded for the comparison: the browser percent-encodes a space or an `ü` it is given as written.
+    inBrowser = decodeURI(url.pathname);
+  } catch {
+    return false;
+  }
+  if (inBrowser !== path) return false;
   const itself = matchRoutes([{ path }], path);
-  return itself !== null && Object.keys(itself[0].params).length === 0;
+  return itself !== null && itself[0].pathname === path && Object.keys(itself[0].params).length === 0;
 }
 
 /**
  * The registry's rows that bring a settings page (see `AdminMenuItem.page`),
  * each with its path normalized. A row whose path is not one absolute address
- * (a route pattern with a parameter, a splat or an optional segment, a path
- * with a query or a fragment, a relative path) is no destination: it brings no
- * page and holds no address.
+ * (see `isOneAddress`: a route pattern, a path with a query or a fragment, a
+ * relative path, or any spelling the browser or the router would resolve to
+ * something else, such as `/teams/../secrets`) is no destination: it brings
+ * no page and holds no address.
  *
  * An address belongs to whatever answers it first, and a row's page is
  * mounted only at an address nothing else answers: not one of core's settings

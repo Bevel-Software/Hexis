@@ -137,9 +137,12 @@ export interface AdminMenuItem {
    * beside core's pages, and listed in the settings nav under its section —
    * so an app's settings are reached, linked to and switched between the way
    * core's are, instead of each opening a dialog over whatever is behind it.
-   * `path` is one absolute address (`/agents-settings`), not a route
-   * pattern: a row whose path has a parameter (`:id`), a splat, an optional
-   * segment, a query or a fragment, or is relative, brings no page. The page is mounted
+   * `path` is one absolute address (`/agents-settings`), written as the
+   * browser and the router both read it. A row brings no page when its path
+   * is a route pattern (a parameter `:id`, a splat, an optional segment), has
+   * a query or a fragment, is relative, or is a spelling either of them would
+   * resolve to something else (`/teams/../secrets`, a doubled slash, a
+   * backslash, a percent-encoded letter). The page is mounted
    * only at an address nothing else answers: not a settings page of core's,
    * a route the shell answers itself, an app's path or anything under it, a
    * top-level route of the registry, or a path an earlier row named (with or
