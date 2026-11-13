@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, useNavigate } from 'react-router-dom';
 import { AppChrome } from '../CoreAppShell';
@@ -83,8 +83,11 @@ function renderChrome(width: number) {
 beforeEach(() => {
   setViewportWidth(1400);
   // Module state: open the sidebar the previous test may have left collapsed.
-  // Its `narrow` flag needs no reset here: only the sidebar frame reports the
-  // breakpoint, and no test in this file mounts a frame at a narrow width.
+  // Its `narrow` flag needs no reset here, because nothing in this file sets
+  // it: only a mounted sidebar frame reports the breakpoint to the store, the
+  // narrow tests mount stand-in surfaces with no frame (the chrome collapses
+  // the sidebar from its own media query), and the one test that mounts a
+  // frame does so at a wide width.
   setSidebarCollapsed(false);
 });
 
@@ -133,6 +136,7 @@ describe('AppChrome: a settings page the registry brings', () => {
       </MemoryRouter>,
     );
     expect(screen.getByTestId('executors-page')).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'Executors' })).toHaveAttribute('aria-current', 'page');
+    const settingsNav = screen.getByRole('navigation', { name: 'Settings' });
+    expect(within(settingsNav).getByRole('link', { name: 'Executors' })).toHaveAttribute('aria-current', 'page');
   });
 });

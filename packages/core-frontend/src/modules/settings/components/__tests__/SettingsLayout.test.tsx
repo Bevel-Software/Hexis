@@ -279,6 +279,10 @@ describe('SettingsLayout with pages the registry brings', () => {
     { id: 'connect', label: 'Not the connect redirect', path: '/connect', page: <div>Never mounted</div> },
     { id: 'shouting', label: 'Not the secrets page either', path: '/SECRETS', page: <div>Never mounted</div> },
     { id: 'recased', label: 'Connected apps again', path: '/Connected-Apps/', page: <div>Never mounted</div> },
+    // An address belongs to the first row that names it, page or not: a page for the address `elsewhere`
+    // points to is not mounted, and a later row that merely names a mounted page's address is not a second link to it.
+    { id: 'late-claim', label: 'Page at a named address', path: '/agents/workflows', page: <div>Never mounted</div> },
+    { id: 'alias', label: 'Another name for connected apps', path: '/connected-apps' },
   ];
 
   function renderPages(route: string, { user = ada, isAdmin = false }: { user?: AuthUser | null; isAdmin?: boolean } = {}) {
@@ -289,7 +293,7 @@ describe('SettingsLayout with pages the registry brings', () => {
             <Route element={<SettingsLayout />}>
               <Route path="/secrets" element={<div>Secrets stub</div>} />
               {/* The app's pages as the shell mounts them: from the rows, through the one function that decides which are. */}
-              {registrySettingsPages(pageRows).map((row) => (
+              {registrySettingsPages(makeRegistry({ adminMenuItems: pageRows })).map((row) => (
                 <Route key={row.path} path={row.path} element={row.page} />
               ))}
             </Route>
@@ -322,16 +326,55 @@ describe('SettingsLayout with pages the registry brings', () => {
     expect(within(nav()).getByText('Infrastructure only')).toBeInTheDocument();
     expect(within(nav()).getAllByRole('link', { name: 'Secrets' })).toHaveLength(1);
     expect(within(nav()).queryByRole('link', { name: 'No page' })).toBeNull();
+    expect(within(nav()).queryByRole('link', { name: 'Page at a named address' })).toBeNull();
+    expect(within(nav()).queryByRole('link', { name: 'Another name for connected apps' })).toBeNull();
+    // One link per page: the row whose page is mounted there.
+    expect(within(nav()).getAllByRole('link').filter((l) => l.getAttribute('href') === '/connected-apps')).toHaveLength(1);
   });
 
   it('mounts a page per row that brings one, at its own path: never at a built-in address, and one page per path', () => {
-    expect(registrySettingsPages(pageRows).map((row) => `${row.id} ${row.path}`)).toEqual([
+    expect(registrySettingsPages(makeRegistry({ adminMenuItems: pageRows })).map((row) => `${row.id} ${row.path}`)).toEqual([
       'connected-apps /connected-apps',
       'executors /executors',
       'llm /llm-configuration',
       'acts /acts',
       'opens /opens',
     ]);
+  });
+
+  it('mounts no page at an address something else answers: a shell route, an app, a top-level route', () => {
+    const page = (id: string, path: string): AdminMenuItem => ({ id, label: id, path, page: <div>{id}</div> });
+    const registry = makeRegistry({
+      apps: [{ id: 'knowledge', label: 'Knowledge', path: '/workspace', element: <div /> }],
+      topLevelRoutes: [{ path: '/onboarding', element: <div /> }],
+      adminMenuItems: [
+        // One request's address, which the shell's `/change-requests/:number` answers.
+        page('one-request', '/change-requests/123'),
+        page('landing', '/'),
+        page('sign-in-return', '/auth/oidc/callback'),
+        page('embed', '/embed/link'),
+        // An app's surface is its path and everything under it.
+        page('app-root', '/workspace'),
+        page('inside-app', '/workspace/main/settings'),
+        page('top-level', '/onboarding'),
+        page('free', '/change-requests'),
+      ],
+    });
+    expect(registrySettingsPages(registry).map((row) => row.id)).toEqual(['free']);
+  });
+
+  it('an app that claims the root takes no address from a page', () => {
+    const registry = makeRegistry({
+      apps: [{ id: 'everything', label: 'Everything', path: '/', element: <div /> }],
+      adminMenuItems: [{ id: 'free', label: 'Free', path: '/executors', page: <div /> }],
+    });
+    expect(registrySettingsPages(registry).map((row) => row.id)).toEqual(['free']);
+  });
+
+  it('marks the row current and shows its page when the URL spells the path percent-encoded', () => {
+    renderPages('/%65xecutors');
+    expect(screen.getByText('Executors page')).toBeInTheDocument();
+    expect(within(nav()).getByRole('link', { name: 'Executors' })).toHaveAttribute('aria-current', 'page');
   });
 
   it('marks the row current and shows its page when the URL spells the path in another case', () => {
@@ -346,6 +389,7 @@ describe('SettingsLayout with pages the registry brings', () => {
       return (
         <>
           <output aria-label="with the app's pages">{String(isSettingsNavPath('/executors', paths))}</output>
+          <output aria-label="percent-encoded">{String(isSettingsNavPath('/%65xecutors/', paths))}</output>
           <output aria-label="core only">{String(isSettingsNavPath('/executors'))}</output>
         </>
       );
@@ -356,6 +400,8 @@ describe('SettingsLayout with pages the registry brings', () => {
       </AppRegistryContext.Provider>,
     );
     expect(screen.getByRole('status', { name: "with the app's pages" })).toHaveTextContent('true');
+    // What the toolbar's sidebar toggle goes by, for a URL the router reads as that page.
+    expect(screen.getByRole('status', { name: 'percent-encoded' })).toHaveTextContent('true');
     expect(screen.getByRole('status', { name: 'core only' })).toHaveTextContent('false');
   });
 

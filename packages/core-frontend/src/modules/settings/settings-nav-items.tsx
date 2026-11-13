@@ -1,7 +1,7 @@
 import { useMemo } from 'react';
-import { matchPath } from 'react-router-dom';
+import { matchRoutes } from 'react-router-dom';
 import { Boxes, CircleUserRound, KeyRound, Lock, ScrollText, SlidersHorizontal, Users, UsersRound } from 'lucide-react';
-import { useAppRegistry, type AdminMenuItem } from '../../core/registry';
+import { useAppRegistry, type AdminMenuItem, type AppRegistry } from '../../core/registry';
 
 /**
  * The settings rows, and the one merge that orders them.
@@ -154,55 +154,86 @@ export function normalizeSettingsPath(pathname: string): string {
 }
 
 /**
- * Addresses the shell answers itself that have no row above: the old Connection
- * keys address (a redirect to the Audit log) and `/connect` (a redirect into
- * Skills & Tools). Both are matched before any page of the registry's, so a
- * row naming one would be listed and never shown.
+ * The route patterns the shell answers itself, besides the settings pages
+ * above and the apps: the old Connection keys address and `/connect` (both
+ * redirects), the landing routes (`/`, `/auth/*`), a change request's link,
+ * and the two embed pages that sit outside the app. The shell's catch-all is
+ * not here: it owns no address in particular.
+ *
+ * Written out, because the shell imports this module and not the other way
+ * round. `ShellRoutes.test.tsx` reads the route table of `ShellRoutes` and
+ * holds this list to it, so a route added there without its pattern here
+ * fails. The two embed pages are mounted above `ShellRoutes` and are listed
+ * by hand.
  */
-const OTHER_BUILT_IN_PATHS: readonly string[] = ['/connection-keys', '/connect'];
+const SHELL_OWN_ROUTES: readonly string[] = [
+  '/connection-keys',
+  '/connect',
+  '/',
+  '/auth/*',
+  '/change-requests/:number',
+  '/embed',
+  '/embed/link',
+];
 
 /** A registry row that is a settings page of the app's own: it says where it lives and what is there. */
 export type SettingsPageRow = AdminMenuItem & { path: string; page: NonNullable<AdminMenuItem['page']> };
 
+/** What of the registry decides which settings pages are mounted: the rows, and everything else that answers an address. */
+export type SettingsPagesSource = Pick<AppRegistry, 'adminMenuItems' | 'apps' | 'topLevelRoutes'>;
+
 /**
- * Whether `pathname` is the page at `path`, by the router's own rule: React
- * Router's `matchPath` with an exact pattern, so case and a trailing slash
- * count exactly as they count when the route is chosen (`/Secrets/` is the
- * `/secrets` page). Every comparison of a settings path goes through here, so
- * which page the router shows, which page is mounted, which row is listed and
- * which row is marked current cannot disagree.
+ * Whether the route at `path` answers `pathname`, by the router itself: React
+ * Router's `matchRoutes` over that one route, so decoding (`/%65xecutors` is
+ * `/executors`), case and a trailing slash (`/Secrets/` is `/secrets`), and a
+ * pattern's parameters and splat count exactly as they count when the route
+ * is chosen. Every comparison of a settings path goes through here, so which
+ * page the router shows, which page is mounted, which row is listed and which
+ * row is marked current cannot disagree.
  */
 export function sameSettingsPath(path: string, pathname: string): boolean {
-  return matchPath({ path, end: true }, pathname) !== null;
+  return matchRoutes([{ path }], pathname) !== null;
 }
 
 /**
  * The registry's rows that bring a settings page (see `AdminMenuItem.page`),
- * each with its path normalized. A row whose path the router would read as one
- * of core's own, or as one an earlier row took, is left out: the page already
- * at that address stays the one there.
+ * each with its path normalized.
+ *
+ * An address belongs to whatever answers it first, and a row's page is
+ * mounted only at an address nothing else answers: not one of core's settings
+ * pages, not a route the shell answers itself, not an app's surface (its path
+ * and everything under it), not a top-level route of the registry, and not a
+ * path an earlier row named, whether or not that row brings a page. So a
+ * page never takes over a destination that exists, and a row that only points
+ * somewhere (a `path` with no page) keeps its destination against a later
+ * row's page. An app that claims the root owns no address in particular, like
+ * the shell's catch-all.
  */
-export function registrySettingsPages(items: AdminMenuItem[]): SettingsPageRow[] {
+export function registrySettingsPages(registry: SettingsPagesSource): SettingsPageRow[] {
   const pages: SettingsPageRow[] = [];
-  const taken: string[] = [...SETTINGS_NAV_PATHS, ...OTHER_BUILT_IN_PATHS];
-  for (const item of items) {
-    if (!item.path || !item.page) continue;
+  const taken: string[] = [
+    ...SETTINGS_NAV_PATHS,
+    ...SHELL_OWN_ROUTES,
+    ...registry.apps.filter((app) => app.path !== '/').map((app) => `${app.path}/*`),
+    ...registry.topLevelRoutes.map((route) => route.path),
+  ];
+  for (const item of registry.adminMenuItems) {
+    if (!item.path) continue;
     const path = normalizeSettingsPath(item.path);
     if (taken.some((other) => sameSettingsPath(other, path))) continue;
     taken.push(path);
-    pages.push({ ...item, path, page: item.page });
+    if (item.page) pages.push({ ...item, path, page: item.page });
   }
   return pages;
 }
 
 /**
  * Every path the settings layout wraps: core's, and the pages the registry's
- * rows bring. What the nav may link to and what the toolbar's sidebar toggle
- * goes by, from the one list.
+ * rows bring. What the toolbar's sidebar toggle goes by.
  */
 export function useSettingsNavPaths(): readonly string[] {
   const registry = useAppRegistry();
-  return useMemo(() => [...SETTINGS_NAV_PATHS, ...registrySettingsPages(registry.adminMenuItems).map((row) => row.path)], [registry]);
+  return useMemo(() => [...SETTINGS_NAV_PATHS, ...registrySettingsPages(registry).map((row) => row.path)], [registry]);
 }
 
 /**

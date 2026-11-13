@@ -137,10 +137,14 @@ export interface AdminMenuItem {
    * beside core's pages, and listed in the settings nav under its section —
    * so an app's settings are reached, linked to and switched between the way
    * core's are, instead of each opening a dialog over whatever is behind it.
-   * `path` is absolute and exact (`/agents-settings`), and one of core's own
-   * paths, in any spelling the router reads as the same (another case, a
-   * trailing slash), is not taken over: such a row keeps its place in the
-   * dropdown and its page is not mounted.
+   * `path` is absolute and exact (`/agents-settings`). The page is mounted
+   * only at an address nothing else answers: not a settings page of core's,
+   * a route the shell answers itself, an app's path or anything under it, a
+   * top-level route of the registry, or a path an earlier row named (with or
+   * without a page), each as the router matches it (another case, a trailing
+   * slash and percent-encoding are the same address). A row that names such
+   * an address keeps its place in the dropdown, and its page is neither
+   * mounted nor listed in the settings nav.
    */
   page?: ReactElement;
   onSelect?(helpers: AdminMenuItemHelpers): void;

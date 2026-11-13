@@ -94,9 +94,16 @@ export function SettingsNav({
       {defaultItems.map(row)}
       {sections.map((section) => (
         // A named group, so a reader who moves from link to link hears which
-        // section a row is in; `contents` keeps the rows in the nav's own row
-        // or column, as if the group were not an element.
-        <div key={section.id} role="group" aria-label={section.label} className="contents">
+        // section a row is in. A box of its own that lays its rows out as the
+        // nav does (a column in the rail, a row in the strip), not
+        // `display: contents`: an element without a box can drop out of the
+        // accessibility tree, and the group's name with it.
+        <div
+          key={section.id}
+          role="group"
+          aria-label={section.label}
+          className={cn('flex shrink-0', strip ? 'flex-row items-center gap-1' : 'flex-col')}
+        >
           {!strip && <SectionLabel spaced>{section.label}</SectionLabel>}
           {section.items.map(row)}
         </div>

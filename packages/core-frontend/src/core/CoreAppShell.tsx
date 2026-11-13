@@ -327,7 +327,7 @@ export function AppChrome() {
   );
   // The settings pages the registry's rows bring, mounted under the settings layout with core's.
   const settingsPages = useMemo(
-    () => registrySettingsPages(registry.adminMenuItems).map((row) => ({ path: row.path, element: row.page })),
+    () => registrySettingsPages(registry).map((row) => ({ path: row.path, element: row.page })),
     [registry],
   );
   // A claimed app (a library item page at its canonical /workspace URL) wins

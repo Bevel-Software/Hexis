@@ -1,7 +1,8 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, within } from '@testing-library/react';
-import { MemoryRouter, useLocation, useNavigationType } from 'react-router-dom';
+import { MemoryRouter, createRoutesFromChildren, useLocation, useNavigationType, type RouteObject } from 'react-router-dom';
 import { ShellRoutes } from '../CoreAppShell';
+import { registrySettingsPages } from '../../modules/settings';
 import { AppRegistryContext, makeRegistry, type AdminMenuItem, type AppDef } from '../registry';
 
 // The /secrets standalone page fetches on mount — stub its data layer so the
@@ -209,5 +210,26 @@ describe('ShellRoutes with a settings page the registry brings', () => {
     const nav = screen.getByRole('navigation', { name: 'Settings' });
     expect(within(nav).getByRole('link', { name: 'Executors' })).toHaveAttribute('aria-current', 'page');
     expect(within(nav).getByRole('link', { name: 'Secrets' })).toBeInTheDocument();
+  });
+
+  // The rule is read off the shell's own route table, so a route added to
+  // `ShellRoutes` that a registry page could still take over fails here.
+  it('lets no registry page take an address a route of the shell answers', () => {
+    const table = createRoutesFromChildren(ShellRoutes({ apps }).props.children);
+    const patterns = (routes: RouteObject[]): string[] =>
+      routes.flatMap((route) => [...(route.path ? [route.path] : []), ...patterns(route.children ?? [])]);
+    // The catch-all answers what nothing else does: it owns no address.
+    const owned = patterns(table).filter((pattern) => pattern !== '*');
+    expect(owned).toEqual(expect.arrayContaining(['/workspace/*', '/secrets', '/connect', '/', '/auth/*', '/change-requests/:number']));
+
+    for (const pattern of owned) {
+      // An address the pattern answers: a value for each parameter, a segment for a splat.
+      const address = pattern.replace(/:\w+/g, '1').replace(/\*$/, 'x');
+      const registry = makeRegistry({
+        apps,
+        adminMenuItems: [{ id: 'page', label: 'Page', path: address, page: <div /> }],
+      });
+      expect(registrySettingsPages(registry), `a page at ${address} (${pattern})`).toEqual([]);
+    }
   });
 });
