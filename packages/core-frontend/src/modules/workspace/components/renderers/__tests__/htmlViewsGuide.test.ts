@@ -178,8 +178,15 @@ describe('the html-views guide section agrees with the renderer', () => {
 
     // The consent rule and the two cards, in the app's words.
     expect(flat).toContain('A call to a tool that only reads runs with no prompt.');
-    expect(flat).toContain('"<page name> wants to write to the knowledge base", with the page\'s path under it and Allow while open and Deny.');
-    expect(flat).toContain('Deny runs nothing and rejects the call with `denied`');
+    expect(flat).toContain('"You\'re allowing changes using your account. Do you want to allow that?", with the page\'s path under it and the buttons Don\'t allow and Allow.');
+    expect(flat).toContain("Don't allow runs nothing and rejects the call with `denied`");
+    expect(flat).toContain("It is never remembered: the next writing call asks again.");
+    // The browser's memory: the account's, by the page's exact content, asked again on any change.
+    expect(flat).toContain("The browser remembers an Allow for the signed-in account and the page's exact content, so the same page asks that account nothing on a later view in that browser. Signing out clears what the account kept. Content the account has not allowed asks again, such as an edited page, as does another account or browser, a browser that will not store, and content past the account's 500 most recently allowed: never rely on an Allow being kept.");
+    // A page reaches the person's own tools, as their agent does.
+    expect(flat).toContain("a page calls the tools of the person viewing it — exactly the tools that person's own agent gets from the hosted MCP server, with the same names, answers and refusals —");
+    expect(flat).not.toContain('wants to write');
+    expect(flat).not.toContain('Allow while open');
     expect(flat).toContain('"<page name> uses tools that are only available in the platform", with Continue without tools and Open in the platform');
 
     // uploadFile: its arguments, the promise, the consent rule and the size limit.
@@ -187,7 +194,7 @@ describe('the html-views guide section agrees with the renderer', () => {
     expect(flat).toContain("`mode` is `create` (the default), `overwrite` or `update`");
     expect(flat).toContain("The promise resolves with `apply_file_upload`'s answer, `{ destination, count, total, files }`");
     expect(flat).toContain("a file over the deployment's upload limit (the message names it)");
-    expect(flat).toContain('An upload is a writing call: the first one shows the card above, and Allow while open covers it and every later upload and writing call of the page view.');
+    expect(flat).toContain('An upload is a writing call: the first one shows the card above, and an Allow covers it and every later upload and writing call of the page view.');
     expect(flat).toContain("The upload's token stays in the app; the page never sees it.");
 
     // requireTools exists on both, asks the app, and resolves with its answer.

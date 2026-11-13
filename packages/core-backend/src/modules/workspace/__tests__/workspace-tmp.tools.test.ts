@@ -11,7 +11,7 @@ import { DEFAULT_KB_LAYOUT } from '@bevel-software/platform-shared';
 import { testKbContext, TEST_BRANCH_MODEL } from '../../../__tests__/kb-context.js';
 import { newWorkspaceService } from '../../../__tests__/workspace-service.js';
 import { ToolRegistry } from '../../tool-registry/index.js';
-import { createToolHandlerFactory, WorkflowHooks } from '../../../__tests__/tool-wiring.js';
+import { createToolHandlerFactory, VersionControlHooks } from '../../../__tests__/tool-wiring.js';
 import type { ToolContext } from '../../tool-helpers/index.js';
 import type { ToolAuth } from '../../tool-auth/index.js';
 import type { IAccessControl } from '../../access/index.js';
@@ -209,7 +209,7 @@ async function start(): Promise<string> {
       getWorkspacePath: async (id: string) => join(root, id),
       hasBootstrappedWorkspace: async () => false,
     } as never,
-    workflowService: {} as never,
+    versionControlService: {} as never,
     events: {} as never,
     getFilesystem: async (branch: string) => {
       let fs = filesystems.get(branch);
@@ -236,7 +236,7 @@ async function start(): Promise<string> {
     new DocExtractService(docCacheDir, extractor),
     access,
     testKbContext({ kbDirName: KB_DIR }),
-    { recoveryBotEmail: 'bot@x', hooks: new WorkflowHooks(), notes: new ToolDescriptionNotes() },
+    { recoveryBotEmail: 'bot@x', hooks: new VersionControlHooks(), notes: new ToolDescriptionNotes() },
     new RoutineWritePolicyService(),
     {} as never,
     undefined,

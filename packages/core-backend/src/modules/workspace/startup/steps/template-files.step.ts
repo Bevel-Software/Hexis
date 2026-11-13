@@ -70,7 +70,7 @@ export const GENERATED_FILES: readonly string[] = ['roles.yaml'];
  * The three roots CORE gives a knowledge base: the ontologies, the shared
  * skills, and the plugins that hold tools and link the skills.
  *
- * `Data/`, `Agents/` and `Pipelines/` are deliberately absent. They scaffold
+ * `Data/`, `Agents/` and `Workflows/` are deliberately absent. They scaffold
  * the agentic execution layer, which is not part of this platform — a core
  * deployment that created them would be handing every operator three empty
  * folders it has no feature to fill. A distribution that DOES own that layer
@@ -92,7 +92,7 @@ function coreRequiredDirs(layout: Required<KbLayout>): readonly string[] {
  * the repo being maintained.
  *
  * Deliberately NOT a check against the reserved-root set in `kb-layout.ts`:
- * `Data`, `Agents` and `Pipelines` are all in that set, and they are precisely
+ * `Data`, `Agents` and `Workflows` are all in that set, and they are precisely
  * what a distribution passes here. Being reserved is what makes a name worth
  * claiming — the file tree renders it as its own root instead of folding it
  * into Knowledge — so rejecting reserved names would reject the only real use.

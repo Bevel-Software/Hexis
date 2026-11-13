@@ -10,8 +10,7 @@ import { join } from 'node:path';
 import type { CallTemplate } from '@utcp/sdk';
 import { McpService, type McpCaller } from '../mcp.service.js';
 import { SpillStore } from '../../workspace/index.js';
-import { createManualRoutes } from '../../tool-registry/manual.routes.js';
-import { ToolRegistry } from '../../tool-registry/tool-registry.js';
+import { createManualRoutes, ToolRegistry } from '../../tool-registry/index.js';
 import { toolDef } from '../../tool-helpers/index.js';
 import type { AgentEventInput } from '../../audit/index.js';
 import type { SurfaceCacheOptions } from '../surface-cache.js';
@@ -51,6 +50,8 @@ interface HarnessOptions {
   fillerTools?: { count: number; descriptionBytes: number };
   /** A minting internal-token service, for OAuth/session callers. */
   mint?: () => string;
+  /** The platform tools that list `.tool` manuals and their setup, on the KB manual. */
+  toolListings?: boolean;
 }
 
 async function harness(opts: HarnessOptions = {}) {
@@ -72,6 +73,11 @@ async function harness(opts: HarnessOptions = {}) {
       inputs: { type: 'object', properties: { path: { type: 'string' } } },
     }),
   );
+  for (const name of opts.toolListings ? ['list_local_tools', 'list_tool_setup'] : []) {
+    registry.registerExternalTool(
+      toolDef({ name, description: name, path: `/api/agent/tools/${name}`, inputs: { type: 'object', properties: {} } }),
+    );
+  }
   const filler = opts.fillerTools;
   for (let i = 0; i < (filler?.count ?? 0); i++) {
     registry.registerExternalTool(
@@ -111,7 +117,7 @@ async function harness(opts: HarnessOptions = {}) {
     if (opts.catalogDelayMs) await new Promise((r) => setTimeout(r, opts.catalogDelayMs));
     res.json({ manuals: state.extraManuals });
   });
-  for (const tool of ['read_file', 'edit_file']) {
+  for (const tool of ['read_file', 'edit_file', 'list_local_tools', 'list_tool_setup']) {
     app.post(`/api/agent/tools/${tool}`, async (req, res) => {
       const bearer = bearerOf(req);
       if (state.refused.has(bearer)) {
@@ -485,6 +491,43 @@ describe('McpService — retained heap of warm clients of one catalog', () => {
     expect(state.builds).toBe(300);
     for (let i = 0; i < 300; i++) await warm(i);
     expect(state.builds).toBe(300);
+  });
+});
+
+describe("McpService — a page reaches the person's own tools", () => {
+  const PAGE = 'Dashboards/Roadmap.html';
+  /** A `.tool` manual the person may read, listed by their catalog beside the platform manual. */
+  async function withToolManual() {
+    let minted = 0;
+    const h = await harness({ mint: () => `minted-${++minted}`, toolListings: true });
+    h.state.extraManuals = [lateManual(h.state.base)];
+    const asPage = () => connect(h.mcp, { tokenId: null, bearer: 'eyJ.session', page: PAGE });
+    const asAgent = () => connect(h.mcp, { tokenId: null, bearer: 'eyJ.session' });
+    return { ...h, asPage, asAgent };
+  }
+  const names = async (client: Client) => (await client.listTools()).tools.map((t) => t.name);
+
+  it("lists the person's tools to a page, a .tool manual's and the listing tools included, from the person's cached surface", async () => {
+    const { state, asPage, asAgent } = await withToolManual();
+    const agentTools = await names(await asAgent());
+    expect(state.builds).toBe(1);
+
+    const pageTools = await names(await asPage());
+    expect(pageTools.sort()).toEqual([...agentTools].sort());
+    expect(pageTools).toEqual(expect.arrayContaining(['late_manual_late_arrival', 'list_local_tools', 'list_tool_setup', 'read_file']));
+    // The page is the person: it is served the same surface, not a build of its own.
+    expect(state.builds).toBe(1);
+  });
+
+  it(".tool and listing tools are callable from a page, directly and in a chain", async () => {
+    const { state, asPage } = await withToolManual();
+    const page = await asPage();
+    expect((await page.callTool({ name: 'late_manual_late_arrival', arguments: {} })).isError).toBeFalsy();
+    expect((await page.callTool({ name: 'call_tool_chain', arguments: { code: 'return await late_manual.late_arrival({});' } })).isError).toBeFalsy();
+    expect((await page.callTool({ name: 'list_local_tools', arguments: {} })).isError).toBeFalsy();
+    expect((await page.callTool({ name: 'call_tool_chain', arguments: { code: 'return await KNOWLEDGE_BASE.list_tool_setup({});' } })).isError).toBeFalsy();
+    // The .tool manual's tool answers through read_file in this stub.
+    expect(state.calls.map((c) => c.tool)).toEqual(['read_file', 'read_file', 'list_local_tools', 'list_tool_setup']);
   });
 });
 

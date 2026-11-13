@@ -48,6 +48,7 @@ const tool = (slug: string): ToolSecrets => ({
       label: null,
       key: `${slug}_API_KEY`,
       adminConfigured: true,
+      adminKind: 'static',
       userConfigured: false,
     },
   ],

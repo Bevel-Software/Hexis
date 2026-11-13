@@ -2,7 +2,7 @@
  * The contract of the READ-BEFORE-WRITE gate: nothing is created, changed or
  * removed at a place its author cannot read. The service that answers
  * (filesystem stats, access checks) is `modules/access/change-read-gate.ts`;
- * this file carries only the types, so the workflow, kb-fs and tool modules
+ * this file carries only the types, so the version-control, kb-fs and tool modules
  * depend on the contract and never on the access module.
  *
  * Why `read`, when every write already needs `write`: on a draft branch no

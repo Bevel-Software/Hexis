@@ -2,11 +2,11 @@ import {
   joinBranchFor,
   type AuthUser,
   type ChangeRequestState,
-  type IWorkflowService,
+  type IVersionControlService,
 } from '@bevel-software/platform-shared';
 import { DrizzleQueryError } from 'drizzle-orm';
 import { spliceGrant } from '../access-model/index.js';
-import { sanitizeError } from '../workflow/index.js';
+import { sanitizeError } from '../version-control/index.js';
 import { logger } from '../../shared/logging.js';
 import { printable } from '../../shared/printable.js';
 import type { KbContext } from '../../shared/kb-context.js';
@@ -139,8 +139,8 @@ export interface JoinRequestTarget {
 }
 
 export interface JoinRequestJobsDeps {
-  workflow: Pick<
-    IWorkflowService,
+  versionControl: Pick<
+    IVersionControlService,
     | 'createBranch'
     | 'listBranches'
     | 'commitChanges'
@@ -521,7 +521,7 @@ export class PluginJoinRequestJobs {
     claim: ClaimedJoinRequest,
     stillOurs: () => Promise<void>,
   ): Promise<void> {
-    const { workflow, workspaceService, kb } = this.deps;
+    const { versionControl, workspaceService, kb } = this.deps;
     const { kbDirName } = kb;
     const target = await this.deps.target(record.pluginKey);
     if (!target) throw new Error('the plugin is no longer available');
@@ -540,7 +540,7 @@ export class PluginJoinRequestJobs {
     // shows nothing to adopt. Paying a round-trip here is the point: it buys
     // the "one recorded request, one change request" promise, and it is off
     // the answer path entirely.
-    const mine = await workflow.listChangeRequestsAuthoredBy(record.requesterEmail, {
+    const mine = await versionControl.listChangeRequestsAuthoredBy(record.requesterEmail, {
       fresh: true,
     });
     const open = mine.find((cr) => cr.state === 'open' && cr.branch === branch);
@@ -596,7 +596,7 @@ export class PluginJoinRequestJobs {
       // replaced, and it left recorded requests owed forever.
       await stillOurs();
       await workspaceService.writeFile(ws.id, accessPath, spliced.text);
-      await workflow.commitChanges(ws.id, user, `Request access to ${target.displayName}`);
+      await versionControl.commitChanges(ws.id, user, `Request access to ${target.displayName}`);
     }
     // The last gate, and the one that matters most: everything above is
     // idempotent and reusable — a branch, a commit on it — but a change
@@ -619,7 +619,7 @@ export class PluginJoinRequestJobs {
     if (!still || still.id !== user.id) {
       throw new Error('the account that asked no longer exists');
     }
-    const detail = await workflow.openChangeRequest(ws.id, user, {
+    const detail = await versionControl.openChangeRequest(ws.id, user, {
       sourceBranch: branch,
       targetBranch: kb.defaultBranch,
       // People read these: the display name, not the identifier.
@@ -653,10 +653,10 @@ export class PluginJoinRequestJobs {
   private async ensureBranch(branch: string): Promise<void> {
     const wsId = this.deps.kb.defaultWorkspaceId();
     try {
-      await this.deps.workflow.createBranch(wsId, branch, this.deps.kb.defaultBranch);
+      await this.deps.versionControl.createBranch(wsId, branch, this.deps.kb.defaultBranch);
       return;
     } catch (err) {
-      const branches = await this.deps.workflow.listBranches(wsId, {
+      const branches = await this.deps.versionControl.listBranches(wsId, {
         freshFetch: true,
         strictFetch: true,
       });

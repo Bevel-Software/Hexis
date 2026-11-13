@@ -1,14 +1,9 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, useNavigate } from 'react-router-dom';
 import { AppChrome } from '../CoreAppShell';
 import { AppRegistryContext, makeRegistry, type AppDef } from '../registry';
-import {
-  setSidebarCollapsed,
-  setSidebarNarrow,
-  toggleSidebar,
-  useSidebar,
-} from '../../modules/layout/state/sidebar';
+import { setSidebarCollapsed, toggleSidebar, useSidebar } from '../../modules/layout';
 
 vi.mock('../../modules/toolbar/components/Toolbar', () => ({
   Toolbar: () => null,
@@ -87,9 +82,12 @@ function renderChrome(width: number) {
 
 beforeEach(() => {
   setViewportWidth(1400);
-  // Module state: clear the breakpoint the previous test settled on so this
-  // mount reads as a fresh crossing rather than a no-op.
-  setSidebarNarrow(false);
+  // Module state: open the sidebar the previous test may have left collapsed.
+  // Its `narrow` flag needs no reset here, because nothing in this file sets
+  // it: only a mounted sidebar frame reports the breakpoint to the store, the
+  // narrow tests mount stand-in surfaces with no frame (the chrome collapses
+  // the sidebar from its own media query), and the one test that mounts a
+  // frame does so at a wide width.
   setSidebarCollapsed(false);
 });
 
@@ -121,5 +119,24 @@ describe('AppChrome: narrow navigation', () => {
     expect(screen.getByRole('status', { name: 'sidebar state' })).toHaveTextContent(
       'expanded',
     );
+  });
+});
+
+// The registry alone puts an app's settings page on screen: a row with a
+// `path` and a `page`, and nothing handed to the routes by the test.
+describe('AppChrome: a settings page the registry brings', () => {
+  it('mounts the page of a registry row at its path, inside the settings nav', () => {
+    setViewportWidth(1400);
+    const row = { id: 'executors', label: 'Executors', path: '/executors', page: <div data-testid="executors-page" /> };
+    render(
+      <MemoryRouter initialEntries={['/executors']}>
+        <AppRegistryContext.Provider value={makeRegistry({ apps, adminMenuItems: [row] })}>
+          <AppChrome />
+        </AppRegistryContext.Provider>
+      </MemoryRouter>,
+    );
+    expect(screen.getByTestId('executors-page')).toBeInTheDocument();
+    const settingsNav = screen.getByRole('navigation', { name: 'Settings' });
+    expect(within(settingsNav).getByRole('link', { name: 'Executors' })).toHaveAttribute('aria-current', 'page');
   });
 });

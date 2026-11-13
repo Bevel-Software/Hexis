@@ -47,6 +47,7 @@ export const SECTION_TOKEN_BUDGET = 2_500;
  */
 export const SECTION_TOKEN_BUDGETS: Readonly<Record<string, number>> = Object.freeze({
   'start-here': 1_200,
+  onboarding: SECTION_TOKEN_BUDGET,
   'how-agents-find-things': SECTION_TOKEN_BUDGET,
   'for-git-users': SECTION_TOKEN_BUDGET,
   glossary: SECTION_TOKEN_BUDGET,
@@ -60,14 +61,18 @@ export const SECTION_TOKEN_BUDGETS: Readonly<Record<string, number>> = Object.fr
   'tool-manuals': SECTION_TOKEN_BUDGET,
   // The page contract is long by nature (the frame, the bridge, the link
   // rules, pages that load live data), and an agent fetches it only to build
-  // a page.
-  'html-views': 5_500,
+  // a page. 5,600 since an Allow is remembered by the page's content (a rule
+  // a page author must know); 5,500 before.
+  'html-views': 5_600,
   conventions: SECTION_TOKEN_BUDGET,
   'new-knowledge-base': SECTION_TOKEN_BUDGET,
 });
 
-/** Every core section at once: what `section: "all"` returns. */
-export const WHOLE_GUIDE_TOKEN_BUDGET = 21_500;
+/**
+ * Every core section at once: what `section: "all"` returns. 23,000 since the
+ * `onboarding` section (about 1,200) was added; 21,500 before.
+ */
+export const WHOLE_GUIDE_TOKEN_BUDGET = 23_000;
 
 /** One task: the start section plus the sections it routes the task to. */
 export const TASK_TOKEN_BUDGET = 6_000;

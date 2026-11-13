@@ -68,13 +68,13 @@ const PRE_RENAME_AGENTS_FILE = 'CLAUDE.md';
  * that it is read-only is said once here rather than in each description, and
  * the section had no room left for it.
  *
- * 7,700 since the conventions rule names the default branch: the guide's start
+ * 7,900 since the conventions rule names the default branch: the guide's start
  * names it too, but only to an agent that calls `get_agent_guide`, and the
- * sentence is ~185 characters. Measured with
- * a branch name of twenty characters (`target-company-state`); the name is the
- * deployment's, so a longer one costs its own length beyond that.
+ * sentence is ~165 characters plus the name. A CEILING, not a sample: measured
+ * with the longest branch name the platform accepts (255 characters, the
+ * bound `kb-fs` enforces), so no deployment's name can push the rules past it.
  */
-export const SHARED_FILE_RULES_CAP = 7_700;
+export const SHARED_FILE_RULES_CAP = 7_900;
 
 /** One shared rule: how the guide heads it, and the rule itself. */
 export interface SharedFileRule {
@@ -278,9 +278,23 @@ function defaultBranchSentence(defaultBranch: string): string {
   const name = defaultBranch.trim();
   if (!name) return '';
   return (
-    `This knowledge base's default branch is \`${name}\`: the branch people read and the usual target of a ` +
+    `This knowledge base's default branch is ${markdownCodeSpan(name)}: the branch people read and the usual target of a ` +
     'change request; pass it as `branch` unless you are working on a draft.'
   );
+}
+
+/**
+ * `text` as one Markdown code span whatever it contains: a fence one backtick
+ * longer than the longest run inside it, padded with a space where the text
+ * starts or ends with a backtick (CommonMark strips one such space). A branch
+ * name may hold a backtick, and a plain `` `name` `` would end the span early
+ * and leave the rest of the sentence naming half a branch.
+ */
+function markdownCodeSpan(text: string): string {
+  const longestRun = Math.max(0, ...(text.match(/`+/g) ?? []).map((run) => run.length));
+  const fence = '`'.repeat(longestRun + 1);
+  const padded = text.startsWith('`') || text.endsWith('`') ? ` ${text} ` : text;
+  return `${fence}${padded}${fence}`;
 }
 
 /**

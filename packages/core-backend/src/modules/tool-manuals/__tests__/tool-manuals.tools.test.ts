@@ -117,7 +117,7 @@ async function start(hiddenTools?: HiddenToolSource): Promise<string> {
       getUserById: async (id: string) => (id === ALICE.id ? ALICE : id === BOB.id ? BOB : null),
     } as never,
     workspaceService: { getWorkspacePath: async () => '/tmp/ws' } as never,
-    workflowService: {} as never,
+    versionControlService: {} as never,
     events: {} as never,
     kbDirName: 'knowledge-base',
     creatorAccess: { planForCreate: async () => null, grantInExtractedFile: async () => null, noteAccessFileWritten: () => {} },
@@ -373,6 +373,41 @@ describe('list_tool_setup — a tool that needs the caller’s own value says so
 
   /** The owner's side of a sign-in: a provider row of the OAuth kind. */
   const ownerSignedUp = { adminConfigured: true, adminKind: 'oauth' as const };
+
+  /** A managed connector enabled as ONE workspace connection: the sign-in sits on an `admin` variable. */
+  const SHARED_SIGN_IN = {
+    ...TICKETS,
+    variables: [
+      {
+        name: 'ACCESS_TOKEN',
+        scope: 'admin' as const,
+        label: 'Ticketdesk sign-in',
+        oauth: { scopes: ['tickets'], managed: { connectorId: 'ticketdesk', scopeSet: 'read' } },
+      },
+    ],
+  };
+
+  it('a workspace connection is authorized only while the owner’s token covers the declared scopes, and names its connector', async () => {
+    const base = await start();
+    const authorizedOf = async (status: Record<string, unknown>) => {
+      vi.mocked(toolManualService.listAccessibleCatalog).mockResolvedValueOnce({ tools: [SHARED_SIGN_IN], invalid: [] } as never);
+      statusFor.mockImplementationOnce(async (_userId: string, keys: string[]) =>
+        keys.map((key) => ({ key, adminConfigured: true, adminKind: 'oauth' as const, userConfigured: false, ...status })),
+      );
+      const body = (await (await callSetup(base, 'bevel_bob')).json()) as {
+        tools: { variables: { authorized: boolean | null; managed?: unknown }[] }[];
+      };
+      return body.tools[0].variables[0];
+    };
+    // Connected by an owner, but before the tool asked for `tickets`.
+    expect((await authorizedOf({ adminAuthorized: true, adminGrantedScopes: 'profile' })).authorized).toBe(false);
+    // Connected with a covering token: everyone's, Bob's included.
+    const connected = await authorizedOf({ adminAuthorized: true, adminGrantedScopes: 'profile tickets' });
+    expect(connected.authorized).toBe(true);
+    expect(connected.managed).toEqual({ connectorId: 'ticketdesk', scopeSet: 'read' });
+    // Nobody has connected it yet.
+    expect((await authorizedOf({ adminAuthorized: false })).authorized).toBe(false);
+  });
 
   it('tells a caller to sign in once the owner has set the sign-in up', async () => {
     const base = await start();

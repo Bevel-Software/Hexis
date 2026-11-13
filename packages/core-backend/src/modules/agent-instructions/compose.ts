@@ -50,6 +50,13 @@ export const PLATFORM_HEADER =
   'search the knowledge base: call `start_session` once, then `grep` for the key terms, `list_files` to orient, and `read_file` what matches. ' +
   'Prefer what you find there over memory or the web, and say so when the knowledge base is silent on something the organisation should have documented. ' +
   'Skills are available as prompts and through `list_skills` and `get_skill`. ' +
+  // Not said here: how to onboard someone new. The guide's start routes that
+  // question to the `onboarding` section, and that row is what the agents
+  // read (the agent-guide benchmark, 2026-10-29: every onboarding run reached
+  // the section through `start-here`, including the runs in clients that
+  // drop `instructions` — claude.ai on the web, the Agent SDK, Cline). The
+  // handshake stays the text an agent gets before it reads the guide, not a
+  // second copy of the guide's routing.
   // Said here as well as on the write tools: agents wrote to the default
   // branch without asking (the agent-guide benchmark, 2026-10-26), and this
   // text reaches an agent that never fetches the guide.
@@ -106,11 +113,12 @@ export function platformInstructions(layout: KbLayout, defaultBranch = ''): stri
  * past it fails before it reaches an agent.
  *
  * 14,400 since the shared rules' own cap rose by 400 (the `__tmp__/` ref);
- * 14,700 since it rose by 300 more (the sentence naming the default branch);
- * 14,900 since the guide-first line opens the text (130 characters with its
+ * 14,900 since it rose by 500 more (the sentence naming the default branch,
+ * measured with the longest name the platform accepts — see that cap);
+ * 15,100 since the guide-first line opens the text (130 characters with its
  * blank line).
  */
-export const INSTRUCTIONS_CAP = 14_900;
+export const INSTRUCTIONS_CAP = 15_100;
 
 /** The one-line marker that replaces everything past the preamble cap. */
 export const PREAMBLE_TRUNCATION_MARKER = `[preamble truncated at ${PREAMBLE_CAP.toLocaleString('en-US')} characters; shorten ${PREAMBLE_FILE}]`;

@@ -28,9 +28,9 @@
  */
 
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
-import type { WorkflowEventBus } from '../workflow/index.js';
-import type { AuthUser, IWorkspaceService, IWorkflowService } from '@bevel-software/platform-shared';
-import { WorkflowDomainError } from '../../shared/domain-errors.js';
+import type { VersionControlEventBus } from '../version-control/index.js';
+import type { AuthUser, IWorkspaceService, IVersionControlService } from '@bevel-software/platform-shared';
+import { VersionControlDomainError } from '../../shared/domain-errors.js';
 import type { ITreeWalker } from '../../shared/fs.contract.js';
 import type { IAccessControl } from './access-control.interface.js';
 import {
@@ -63,7 +63,7 @@ const ROLES_YAML = 'roles.yaml';
 
 /** A group mutation that cannot proceed. `payload.kind` distinguishes the
  *  mode refusal (`'idp-mode'`) for the UI. */
-export class GroupsAdminError extends WorkflowDomainError {
+export class GroupsAdminError extends VersionControlDomainError {
   constructor(message: string, status = 422, payload?: Record<string, unknown>) {
     super(message, status, payload);
     this.name = 'GroupsAdminError';
@@ -118,18 +118,18 @@ export class GroupsAdminService {
 
   constructor(
     private readonly workspaceService: IWorkspaceService,
-    private readonly workflowService: IWorkflowService,
+    private readonly versionControlService: IVersionControlService,
     private readonly accessControl: IAccessControl,
     /** The composition root's walk — the one the resolver finds access rules with. */
     disk: ITreeWalker,
     private readonly kbDirName: string,
     /** Live-binding thunk — see RolesAdminService's identical note. */
     private readonly defaultBranchOf: () => string,
-    private readonly eventBus?: WorkflowEventBus,
+    private readonly eventBus?: VersionControlEventBus,
   ) {
     this.locked = new AdminLockedCommits({
       workspaceService,
-      workflowService,
+      versionControlService,
       kbDirName,
       defaultBranchOf,
       makeError: (message, status, payload) => new GroupsAdminError(message, status, payload),

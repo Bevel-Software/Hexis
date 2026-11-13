@@ -13,6 +13,8 @@ const OAUTH_ERROR_MESSAGES: Record<string, string> = {
   state: 'Sign-in could not be verified. Please try again.',
   auth: 'Sign-in failed. Please try again.',
   start: 'Could not start sign-in. Please try again.',
+  // The provider, or the person at its consent screen, refused (OAuth access_denied).
+  denied: 'Your sign-in provider did not let you sign in. Check your account with the provider, or ask the admin of this workspace.',
   not_configured: 'Single sign-on is not configured on this deployment.',
   admission: 'This workspace has no seat available for your account. Ask its admin.',
   // On file, switched off until an admin switches the account on.

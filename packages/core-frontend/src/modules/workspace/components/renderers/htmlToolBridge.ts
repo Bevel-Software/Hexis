@@ -1,16 +1,17 @@
 import { createContext, useContext } from 'react';
 import { authFetch } from '../../../../lib/api';
+import { AccountChangedError } from '../../../auth';
 
 /**
  * The app's half of `window.bevel.tools`: what answers an HTML page's tool
  * calls, and what decides when the viewer is asked first.
  *
  * A page's call is answered over the hosted MCP server (`POST /api/mcp`) with
- * the viewer's session, so a page sees and reaches exactly the tools the
- * viewer's own agent does — the same listing, the same refusals, nothing of
- * the enterprise agent's internal tools — and the server records it in the
- * Audit log under the page's path (`X-Bevel-Page`). The five members map to
- * what an agent calls:
+ * the viewer's session and the page's path (`X-Bevel-Page`), so a page sees
+ * and reaches exactly the tools the viewer's own agent does — the same
+ * listing, the same refusals, nothing of the enterprise agent's internal
+ * tools — and the server records it in the Audit log under the page's path.
+ * The five members map to what an agent calls:
  *
  *   searchTools(query)        → `list_tools`, narrowed to the names that
  *                               contain every word of `query` (all of them
@@ -25,7 +26,8 @@ import { authFetch } from '../../../../lib/api';
  * deployment's UTCP manual tags `write`, a tool the manual does not list (a
  * `.tool`'s, a plugin's MCP server's: nothing says they only read), every
  * chain (a chain may call writers) and every upload — waits for the viewer's
- * answer to one card per page view. See {@link PageConsent}.
+ * answer to one card per page view, unless this browser remembers an Allow
+ * for the page's exact source. See {@link PageConsent}.
  */
 
 /** What a host that is the platform tells the HTML renderer: that tools are answered here, and for which page. */
@@ -104,7 +106,7 @@ const CHAIN_TOOL = 'call_tool_chain';
 const UPLOAD_REQUEST_TOOL = 'request_file_upload';
 const UPLOAD_APPLY_TOOL = 'apply_file_upload';
 
-/** The answer a page gets when its viewer chose Deny. */
+/** The answer a page gets when its viewer chose Don't allow. */
 export const DENIED = 'denied';
 
 /** A tool call's failure, as the page receives it: the message, and a code for the cases a page may handle. */
@@ -310,7 +312,15 @@ export class PageToolsClient {
         }
         return map;
       })
-      .catch(() => null);
+      .catch((err: unknown) => {
+        // A session that is no longer this view's account's is not an
+        // unreadable manual: the call fails with it, and nothing is kept.
+        if (err instanceof AccountChangedError) {
+          this.writing = undefined;
+          throw err;
+        }
+        return null;
+      });
     return this.writing;
   }
 
@@ -399,12 +409,26 @@ function toPageResult(result: CallToolResult | undefined): unknown {
 }
 
 /**
+ * What the browser remembers of a page's earlier Allows, bound by the caller
+ * to the page view's source (see `pageConsentMemory.ts`).
+ */
+export interface PageConsentMemory {
+  /** Whether the viewer allowed this exact page before, in this browser. */
+  remembered(): boolean;
+  /** Keep this Allow for later views of the same page. */
+  remember(): void;
+}
+
+/**
  * The viewer's answer about one page view's writes: asked once, on the first
- * writing call, and held until the page is reloaded or left (a new instance).
+ * writing call, and held until the page is reloaded or left (a new instance)
+ * — unless the browser remembers an Allow for this exact page, in which case
+ * nothing asks at all.
  *
- * Allow holds: every later writing call runs without a card. Deny does not:
- * it answers the calls that were waiting on that card, and the next writing
- * call asks again. Calls that arrive while the card is open wait on that same
+ * Allow holds: every later writing call runs without a card, and the memory
+ * keeps it for later views. Don't allow does not: it answers the calls that
+ * were waiting on that card, remembers nothing, and the next writing call
+ * asks again. Calls that arrive while the card is open wait on that same
  * card, so a page that fires ten writes at once sees one card, and every one
  * of the ten gets the answer.
  *
@@ -418,10 +442,12 @@ export class PageConsent {
   private ended = false;
   private asking: Promise<boolean | null> | null = null;
   private readonly ask: () => Promise<boolean | null>;
+  private readonly memory: PageConsentMemory;
 
-  /** `ask` shows the card: true for Allow, false for Deny, null when the view ended with the card still open. */
-  constructor(ask: () => Promise<boolean | null>) {
+  /** `ask` shows the card: true for Allow, false for Don't allow, null when the view ended with the card still open. */
+  constructor(ask: () => Promise<boolean | null>, memory: PageConsentMemory) {
     this.ask = ask;
+    this.memory = memory;
   }
 
   /** Whether a card is open right now — no call of the page runs while it is. */
@@ -443,11 +469,18 @@ export class PageConsent {
   request(): Promise<boolean | null> {
     if (this.ended) return Promise.resolve(null);
     if (this.allowed) return Promise.resolve(true);
+    if (!this.asking && this.memory.remembered()) {
+      this.allowed = true;
+      return Promise.resolve(true);
+    }
     this.asking ??= this.ask().then(
       (ok) => {
         this.asking = null;
         if (this.ended) return null;
-        if (ok) this.allowed = true;
+        if (ok) {
+          this.allowed = true;
+          this.memory.remember();
+        }
         return ok;
       },
       () => {
@@ -495,7 +528,9 @@ const CLOSED_MESSAGE = 'The page was closed before the viewer answered.';
  * Answer one of a page's tool calls: wait out an open card, ask for consent
  * when the call may write, run it, and say how it went. A call whose view
  * ended (its `consent` closed) before it was decided runs nothing and is
- * answered `closed`. Never throws — every outcome is a response for the frame.
+ * answered `closed`. A call whose client refuses to send as another account
+ * (`AccountChangedError`, from the auth module's `accountFetch`) is answered
+ * `account_changed`. Never throws — every outcome is a response for the frame.
  */
 export async function answerToolCall(
   msg: ToolCallMessage,
@@ -539,6 +574,7 @@ export async function answerToolCall(
               : await client.callTool(a, b);
     return { type: 'bevel.tool.response', requestId: msg.requestId, ok: true, result };
   } catch (err) {
+    if (err instanceof AccountChangedError) return fail(err.message, 'account_changed');
     return fail(err instanceof Error ? err.message : String(err), err instanceof PageToolError ? err.code : undefined);
   }
 }

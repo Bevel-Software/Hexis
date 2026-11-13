@@ -51,6 +51,14 @@ describe('coreCommandActions', () => {
       row({ id: 'node-label', label: <b>Fancy</b>, path: '/fancy' }),
     ],
     adminItems: [row({ id: 'roles', label: 'App roles', path: '/roles-and-members' })],
+    // A row in a section of the app's own, for the holders of a role it defines (here: Ada), admin or not.
+    appSections: [
+      {
+        id: 'infra',
+        label: 'Infrastructure only',
+        items: [row({ id: 'executors', label: 'Executors', path: '/agents/executors', isShown: (u: { email: string }) => u.email === 'ada@example.com' })],
+      },
+    ],
   };
   const all = coreCommandActions({ apps: APPS, settings });
 
@@ -61,7 +69,13 @@ describe('coreCommandActions', () => {
       'Go to Knowledge',
       'Go to Skills & Tools',
       'Settings: Secrets',
+      'Settings: Executors',
     ]);
+  });
+
+  it('offers a row of the app\'s own section only to whom its isShown names, admin or not', () => {
+    const other = ctx({ isAdmin: true, user: { ...USER, email: 'bob@example.com' } });
+    expect(labels(visibleActions(all, other))).not.toContain('Settings: Executors');
   });
 
   it('adds Invite people and the admin settings for an admin', () => {
@@ -72,6 +86,7 @@ describe('coreCommandActions', () => {
       'Go to Knowledge',
       'Go to Skills & Tools',
       'Settings: Secrets',
+      'Settings: Executors',
       'Settings: App roles',
     ]);
   });
@@ -96,7 +111,7 @@ describe('coreCommandActions', () => {
     const onSelect = vi.fn(({ navigate }: { navigate(to: string): void }) => navigate('/chosen'));
     const [action] = coreCommandActions({
       apps: [],
-      settings: { defaultItems: [row({ id: 'x', label: 'X', path: '/declared', onSelect })], adminItems: [] },
+      settings: { defaultItems: [row({ id: 'x', label: 'X', path: '/declared', onSelect })], adminItems: [], appSections: [] },
     }).filter((a) => a.id === 'settings:x');
     const c = ctx();
     void action.run(c);
@@ -109,7 +124,7 @@ describe('coreCommandActions', () => {
     const isShown = vi.fn((user: { email: string }) => user.email === 'ada@example.com');
     const actions = coreCommandActions({
       apps: [],
-      settings: { defaultItems: [row({ id: 'undo', label: 'Ask again', onSelect: vi.fn(), isShown })], adminItems: [] },
+      settings: { defaultItems: [row({ id: 'undo', label: 'Ask again', onSelect: vi.fn(), isShown })], adminItems: [], appSections: [] },
     });
     expect(labels(visibleActions(actions, ctx()))).toContain('Settings: Ask again');
     expect(labels(visibleActions(actions, ctx({ user: { ...USER, email: 'bob@example.com' } })))).not.toContain(
@@ -125,7 +140,7 @@ describe('coreCommandActions', () => {
 
 describe('shortcut hints', () => {
   it('come from the table the shortcuts are bound by, and only for bound commands', () => {
-    const all = coreCommandActions({ apps: APPS, settings: { defaultItems: [], adminItems: [] } });
+    const all = coreCommandActions({ apps: APPS, settings: { defaultItems: [], adminItems: [], appSections: [] } });
     const hint = (id: string) => all.find((a) => a.id === id)?.shortcut;
     expect(hint('new-page')).toEqual({ key: 'c' });
     expect(hint('invite')).toEqual({ key: 'i', shift: true });
@@ -144,7 +159,7 @@ describe('shortcut hints', () => {
 });
 
 describe('suggestedActions', () => {
-  const all = coreCommandActions({ apps: APPS, settings: { defaultItems: [], adminItems: [] } });
+  const all = coreCommandActions({ apps: APPS, settings: { defaultItems: [], adminItems: [], appSections: [] } });
   const suggest = (c: CommandContext) => labels(suggestedActions(visibleActions(all, c), c));
 
   it('suggests the commonest verbs and the way to the other app', () => {
@@ -159,7 +174,7 @@ describe('suggestedActions', () => {
 });
 
 describe('mergeCommandActions / visibleActions', () => {
-  const core = coreCommandActions({ apps: [], settings: { defaultItems: [], adminItems: [] } });
+  const core = coreCommandActions({ apps: [], settings: { defaultItems: [], adminItems: [], appSections: [] } });
 
   it('puts the registry’s commands after core’s and drops a reused id', () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});

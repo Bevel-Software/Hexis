@@ -1,6 +1,8 @@
 import { useMemo } from 'react';
+import { matchRoutes } from 'react-router-dom';
 import { Boxes, CircleUserRound, KeyRound, Lock, ScrollText, SlidersHorizontal, Users, UsersRound } from 'lucide-react';
-import { useAppRegistry, type AdminMenuItem } from '../../core/registry';
+import { useAppRegistry, type AdminMenuItem, type AppRegistry } from '../../core/registry';
+import { SHELL_PATHS } from '../../core/shell-paths';
 
 /**
  * The settings rows, and the one merge that orders them.
@@ -152,20 +154,127 @@ export function normalizeSettingsPath(pathname: string): string {
   return pathname.length > 1 ? pathname.replace(/\/+$/, '') : pathname;
 }
 
+/** A registry row that is a settings page of the app's own: it says where it lives and what is there. */
+export type SettingsPageRow = AdminMenuItem & { path: string; page: NonNullable<AdminMenuItem['page']> };
+
+/** What of the registry decides which settings pages are mounted: the rows, and everything else that answers an address. */
+export type SettingsPagesSource = Pick<AppRegistry, 'adminMenuItems' | 'apps' | 'topLevelRoutes'>;
+
+/**
+ * Whether the route at `path` answers `pathname`, by the router itself: React
+ * Router's `matchRoutes` over that one route, so decoding (`/%65xecutors` is
+ * `/executors`), case and a trailing slash (`/Secrets/` is `/secrets`), and a
+ * pattern's parameters and splat count exactly as they count when the route
+ * is chosen. Every comparison of a settings path goes through here, so which
+ * page the router shows, which page is mounted, which row is listed and which
+ * row is marked current cannot disagree.
+ */
+export function sameSettingsPath(path: string, pathname: string): boolean {
+  return matchRoutes([{ path }], pathname) !== null;
+}
+
+/**
+ * Whether a row's `path` is ONE absolute address, written the way everything
+ * that reads it reads it. A row's path goes to two places: the browser's
+ * address bar (through the row's link) and the router's route table (where
+ * its page is mounted). It is one address only if both read it back
+ * unchanged, each asked with its own parser:
+ *
+ *  - the browser's URL parser keeps it on this origin with no query and no
+ *    fragment, and leaves the path as written (it folds `..` and `.`, turns a
+ *    backslash into a slash, drops a tab; an optional segment's `?` is a
+ *    query to it, and a relative path gains a slash);
+ *  - the path, mounted as a route, answers itself, as written, and nothing
+ *    more: no parameter (`:name`) and no splat, the same pathname (the router
+ *    folds a doubled slash), and a match at all (a percent-encoded letter
+ *    never matches the address it spells).
+ */
+function isOneAddress(path: string): boolean {
+  const origin = 'http://settings.invalid';
+  let inBrowser: string;
+  try {
+    const url = new URL(path, origin);
+    if (url.origin !== origin || url.search || url.hash) return false;
+    // Decoded for the comparison: the browser percent-encodes a space or an `ü` it is given as written.
+    inBrowser = decodeURI(url.pathname);
+  } catch {
+    return false;
+  }
+  if (inBrowser !== path) return false;
+  const itself = matchRoutes([{ path }], path);
+  return itself !== null && itself[0].pathname === path && Object.keys(itself[0].params).length === 0;
+}
+
+/**
+ * The registry's rows that bring a settings page (see `AdminMenuItem.page`),
+ * each with its path normalized. A row whose path is not one absolute address
+ * (see `isOneAddress`: a route pattern, a path with a query or a fragment, a
+ * relative path, or any spelling the browser or the router would resolve to
+ * something else, such as `/teams/../secrets`) is no destination: it brings
+ * no page and holds no address.
+ *
+ * An address belongs to whatever answers it first, and a row's page is
+ * mounted only at an address nothing else answers: not one of core's settings
+ * pages, not a route the shell answers itself, not an app's surface (its path
+ * and everything under it), not a top-level route of the registry, and not a
+ * path an earlier row named, whether or not that row brings a page. So a
+ * page never takes over a destination that exists, and a row that only points
+ * somewhere (a `path` with no page) keeps its destination against a later
+ * row's page. An app that claims the root owns no address in particular, like
+ * the shell's catch-all.
+ */
+export function registrySettingsPages(registry: SettingsPagesSource): SettingsPageRow[] {
+  const pages: SettingsPageRow[] = [];
+  const taken: string[] = [
+    ...SETTINGS_NAV_PATHS,
+    // The very patterns the shell mounts its own routes at (`core/shell-paths.ts`).
+    ...Object.values(SHELL_PATHS),
+    ...registry.apps.filter((app) => app.path !== '/').map((app) => `${app.path}/*`),
+    ...registry.topLevelRoutes.map((route) => route.path),
+  ];
+  for (const item of registry.adminMenuItems) {
+    // A path that is not one address names no destination: it brings no page and holds no address.
+    if (!item.path || !isOneAddress(item.path)) continue;
+    const path = normalizeSettingsPath(item.path);
+    if (taken.some((other) => sameSettingsPath(other, path))) continue;
+    taken.push(path);
+    if (item.page) pages.push({ ...item, path, page: item.page });
+  }
+  return pages;
+}
+
+/**
+ * Every path the settings layout wraps: core's, and the pages the registry's
+ * rows bring. What the toolbar's sidebar toggle goes by.
+ */
+export function useSettingsNavPaths(): readonly string[] {
+  const registry = useAppRegistry();
+  return useMemo(() => [...SETTINGS_NAV_PATHS, ...registrySettingsPages(registry).map((row) => row.path)], [registry]);
+}
+
 /**
  * Exact match, never a prefix. These are exact routes, and the nav marks the
  * current row by comparing the whole pathname — a prefix test would light up
- * `/account` for a hypothetical `/accounts-of-other-people`. Exact AFTER
- * normalizing the trailing slash, which is a spelling of the same path rather
- * than a different one.
+ * `/account` for a hypothetical `/accounts-of-other-people`. Exact by the
+ * router's rule (see `sameSettingsPath`): a trailing slash or another case is
+ * a spelling of the same path rather than a different one.
  */
-export function isSettingsNavPath(pathname: string): boolean {
-  return SETTINGS_NAV_PATHS.includes(normalizeSettingsPath(pathname));
+export function isSettingsNavPath(pathname: string, paths: readonly string[] = SETTINGS_NAV_PATHS): boolean {
+  return paths.some((path) => sameSettingsPath(path, pathname));
+}
+
+/** One of the app's own labelled sections, with its rows sorted. */
+export interface AppMenuSection {
+  id: string;
+  label: string;
+  items: AdminMenuItem[];
 }
 
 export interface MenuSections {
   defaultItems: AdminMenuItem[];
   adminItems: AdminMenuItem[];
+  /** The app's own sections (see `AdminMenuItem.section`), in their order; drawn between the two above. */
+  appSections: AppMenuSection[];
 }
 
 /**
@@ -180,10 +289,21 @@ export function useMenuSections(): MenuSections {
   const registry = useAppRegistry();
   return useMemo(() => {
     const all = [...CORE_MENU_ITEMS, ...registry.adminMenuItems];
+    const byOrder = (a: AdminMenuItem, b: AdminMenuItem) => (a.order ?? 100) - (b.order ?? 100);
     const bySection = (section: 'default' | 'admin') =>
-      all
-        .filter((item) => (item.section ?? 'default') === section)
-        .sort((a, b) => (a.order ?? 100) - (b.order ?? 100));
-    return { defaultItems: bySection('default'), adminItems: bySection('admin') };
+      all.filter((item) => (item.section ?? 'default') === section).sort(byOrder);
+    // The app's sections: one per id, its label and order from the first row naming it.
+    const sections = new Map<string, AppMenuSection & { order: number }>();
+    for (const item of all) {
+      const section = item.section;
+      if (typeof section !== 'object') continue;
+      const entry = sections.get(section.id) ?? { id: section.id, label: section.label, order: section.order ?? 100, items: [] };
+      entry.items.push(item);
+      sections.set(section.id, entry);
+    }
+    const appSections = [...sections.values()]
+      .sort((a, b) => a.order - b.order)
+      .map(({ id, label, items }) => ({ id, label, items: items.sort(byOrder) }));
+    return { defaultItems: bySection('default'), adminItems: bySection('admin'), appSections };
   }, [registry]);
 }

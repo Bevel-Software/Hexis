@@ -285,8 +285,8 @@ const accessFrontmatterExtensions = new Set<string>(CORE_ACCESS_FRONTMATTER_EXTE
  */
 export function registerAccessFrontmatterExtensions(extensions: readonly string[]): void {
   // Validate EVERYTHING first, then apply. These registrations decide which
-  // files' edits carry enforced access grants, so a typo (`pipeline` for
-  // `.pipeline`) must THROW rather than be skipped — a silent skip makes a
+  // files' edits carry enforced access grants, so a typo (`workflow` for
+  // `.workflow`) must THROW rather than be skipped — a silent skip makes a
   // failed registration indistinguishable from a successful one, at boot,
   // where nobody is looking. And it must throw before the registry changes:
   // a list that is half-applied when it throws leaves later scans governing a
@@ -295,7 +295,7 @@ export function registerAccessFrontmatterExtensions(extensions: readonly string[
     const n = ext.trim().toLowerCase();
     if (!/^\.[a-z0-9]+$/.test(n)) {
       throw new Error(
-        `access frontmatter extension "${ext}" is malformed — expected a leading dot, e.g. ".pipeline"`,
+        `access frontmatter extension "${ext}" is malformed — expected a leading dot, e.g. ".workflow"`,
       );
     }
     return n;
@@ -313,7 +313,7 @@ export function accessFrontmatterExtensionList(): string[] {
  *
  * Case-SENSITIVE on the path, as it always was: `doc.MD` is not a node and
  * carries no enforced grant. Registered extensions are normalized to lowercase
- * so `.Pipeline` and `.pipeline` register the same thing, but which FILES are
+ * so `.Workflow` and `.workflow` register the same thing, but which FILES are
  * governed must not change because the set became registrable — widening it to
  * `X.MD` silently in a release would be an access-model change nobody asked
  * for, made in a refactor.

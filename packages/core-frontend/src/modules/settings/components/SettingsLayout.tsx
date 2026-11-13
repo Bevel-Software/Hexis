@@ -1,12 +1,15 @@
 import { useContext, useMemo } from 'react';
 import { Outlet, useLocation } from 'react-router-dom';
 import { AdminContext } from '../../admin';
-import type { AdminMenuItem } from '../../../core/registry';
+import { useAppRegistry, type AdminMenuItem } from '../../../core/registry';
 import { SidebarFrame } from '../../layout/components/SidebarFrame';
 import { useMediaQuery } from '../../layout';
+import { AuthContext } from '../../auth';
+import type { AuthUser } from '@bevel-software/platform-shared';
 import {
   isSettingsNavPath,
   normalizeSettingsPath,
+  registrySettingsPages,
   useMenuSections,
 } from '../settings-nav-items';
 import { SettingsNav, type LinkableItem } from './SettingsNav';
@@ -51,7 +54,8 @@ import { SettingsNav, type LinkableItem } from './SettingsNav';
  */
 /**
  * A row can be shown only if it declares where it goes AND that destination is
- * one of the routes this layout wraps.
+ * one of the routes this layout wraps: one of core's pages, or the row's own
+ * page mounted here.
  *
  * The first half excludes dialog rows — a dialog has no URL, so it can be
  * neither linked to nor marked current. The second excludes a registry row
@@ -69,10 +73,30 @@ import { SettingsNav, type LinkableItem } from './SettingsNav';
  * in, and a registry row that happened to declare `/secrets/` would otherwise
  * render a link that never matches the page it is on.
  */
-function linkable(items: AdminMenuItem[]): LinkableItem[] {
+function linkable(items: AdminMenuItem[], mountedPages: ReadonlySet<string>): LinkableItem[] {
   return items
-    .filter((item): item is LinkableItem => !!item.path && isSettingsNavPath(item.path))
+    .filter((item): item is LinkableItem => !!item.path)
+    // A row that does something when picked belongs to the dropdown: there its
+    // action wins over its `path`, and a link here would go around the action.
+    .filter((item) => !item.dialog && !item.onSelect)
+    // Which rows are links depends on whose address the path is. At one of
+    // core's addresses: a row that points there, and never a row that brought
+    // a page of its own (it lost the address to core's page). Anywhere else:
+    // only the row whose page is the one mounted there (`registrySettingsPages`
+    // decides), so a row that lost the address, or merely names it, is not a
+    // link to somebody else's page under its own name.
+    .filter((item) => (isSettingsNavPath(item.path) ? !item.page : mountedPages.has(item.id)))
     .map((item) => ({ ...item, path: normalizeSettingsPath(item.path) }));
+}
+
+/**
+ * The rows offered to this person (`AdminMenuItem.isShown`): with nobody
+ * signed in, none of the rows that ask who is. Asked on every render, never
+ * memoized, as the profile menu asks: a row may come and go with state the
+ * layout does not own (a role learnt after sign-in, a preference in storage).
+ */
+function offered<T extends AdminMenuItem>(items: T[], user: AuthUser | null): T[] {
+  return items.filter((item) => !item.isShown || (user !== null && item.isShown(user)));
 }
 
 export function SettingsLayout() {
@@ -82,16 +106,33 @@ export function SettingsLayout() {
   const currentPath = normalizeSettingsPath(useLocation().pathname);
   // Not `useAdmin()` — see (2) above.
   const isAdmin = useContext(AdminContext)?.isAdmin ?? false;
-  const { defaultItems, adminItems } = useMenuSections();
+  // The same reading for the person: the nav is wayfinding, and nobody signed in is nobody a role's rows are for.
+  const user = useContext(AuthContext)?.user ?? null;
+  const { defaultItems, adminItems, appSections } = useMenuSections();
   /* Below `md` the sidebar frame is not mounted AT ALL and the rows become a
      horizontal strip. A 212px rail on a 375px screen is most of the screen. */
   const isCompact = useMediaQuery('(max-width: 767px)');
 
-  const navDefault = useMemo(() => linkable(defaultItems), [defaultItems]);
-  const navAdmin = useMemo(
-    () => (isAdmin ? linkable(adminItems) : []),
-    [adminItems, isAdmin],
+  // The registry's rows whose page is mounted, by id: the rows that are links at an address that is not core's.
+  const registry = useAppRegistry();
+  const mountedPages = useMemo(() => new Set(registrySettingsPages(registry).map((row) => row.id)), [registry]);
+
+  const linkDefault = useMemo(() => linkable(defaultItems, mountedPages), [defaultItems, mountedPages]);
+  const linkAdmin = useMemo(
+    () => (isAdmin ? linkable(adminItems, mountedPages) : []),
+    [adminItems, isAdmin, mountedPages],
   );
+  const linkSections = useMemo(
+    () => appSections.map((section) => ({ id: section.id, label: section.label, items: linkable(section.items, mountedPages) })),
+    [appSections, mountedPages],
+  );
+  // Who each row is offered to is asked now, on this render (see `offered`).
+  const navDefault = offered(linkDefault, user);
+  const navAdmin = offered(linkAdmin, user);
+  // The app's own sections ("Infrastructure only"), each with the pages offered to this person; one with none is left out.
+  const navSections = linkSections
+    .map((section) => ({ ...section, items: offered(section.items, user) }))
+    .filter((section) => section.items.length > 0);
 
   if (isCompact) {
     return (
@@ -106,6 +147,7 @@ export function SettingsLayout() {
         >
           <SettingsNav
             defaultItems={navDefault}
+            sections={navSections}
             adminItems={navAdmin}
             currentPath={currentPath}
             orientation="strip"
@@ -123,6 +165,7 @@ export function SettingsLayout() {
       <SidebarFrame label="Settings">
         <SettingsNav
           defaultItems={navDefault}
+          sections={navSections}
           adminItems={navAdmin}
           currentPath={currentPath}
         />

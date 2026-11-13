@@ -26,7 +26,7 @@ function deps(): EmbedComposition {
     },
     accessControl: { canRead: vi.fn(async () => true), canWrite: vi.fn(async () => true) } as never,
     authService: { getUserById: vi.fn(async () => USER), isEmailDomainAllowed: () => true, isActive: async () => true },
-    workflowService: {} as never,
+    versionControlService: {} as never,
     gitService: {} as never,
     accountLinks: { getUserId: async () => null, link: async () => undefined, listForUser: async () => [], unlink: async () => true },
     readers: createFileReaderRegistry({ extract } satisfies Pick<DocExtractService, 'extract'> as DocExtractService),

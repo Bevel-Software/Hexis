@@ -6,4 +6,4 @@
 export { SETUP_COLUMN_HIDDEN_QUERY, TOOLBAR_STACK_QUERY } from './breakpoints';
 export { useMediaQuery } from './hooks/useMediaQuery';
 export { LayoutContext, useLayout } from './state/layout.context';
-export { toggleSidebar, useSidebar } from './state/sidebar';
+export { setSidebarCollapsed, toggleSidebar, useSidebar } from './state/sidebar';

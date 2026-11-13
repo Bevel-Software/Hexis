@@ -5,9 +5,9 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import { NodeFs } from '../../kb-fs/node-fs.js';
 import { PathTraversalError } from '../../../shared/domain-errors.js';
-import type { IWorkflowService } from '@bevel-software/platform-shared';
+import type { IVersionControlService } from '@bevel-software/platform-shared';
 import type { IAccessControl } from '../../access/access-control.interface.js';
-import type { WorkflowEventBus } from '../../workflow/event-bus.js';
+import type { VersionControlEventBus } from '../../version-control/event-bus.js';
 import type { AuthService } from '../../auth/auth.service.js';
 import { AccessConfigError } from '../../access-model/access-errors.js';
 import type { IAdminAccessService } from '../../admin/admin.interface.js';
@@ -122,8 +122,8 @@ async function makeHarness(opts: {
   authServiceMock.resolveSession = vi.fn(async (token: string) => authServiceMock.verifyToken!(token));
   const authService = authServiceMock as AuthService;
 
-  const workflowService = {} as unknown as IWorkflowService;
-  const eventBus = {} as unknown as WorkflowEventBus;
+  const versionControlService = {} as unknown as IVersionControlService;
+  const eventBus = {} as unknown as VersionControlEventBus;
 
   const app = express();
   app.use(express.json());
@@ -138,7 +138,7 @@ async function makeHarness(opts: {
   app.use('/api', createWorkspaceRoutes(
     workspaceService,
     authService,
-    workflowService,
+    versionControlService,
     eventBus,
     accessControl,
     testKbContext({ kbDirName: KB }),
@@ -226,7 +226,7 @@ describe('GET /workspace/:id/file/raw — ?download=1 gated on Download role', (
     // malformed) and we don't catch it, the async rejection bubbles past
     // Express and the request hangs (or 500s without the helpful
     // config-error payload). The route should surface the
-    // WorkflowDomainError shape — same JSON the per-path /access endpoint
+    // VersionControlDomainError shape — same JSON the per-path /access endpoint
     // returns when it hits the same exception — so the operator can see
     // which access.md file is broken.
     const configErr = new AccessConfigError([
