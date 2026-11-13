@@ -113,13 +113,21 @@ export class PushNeedsAgentResolutionError extends VersionControlDomainError {
      * cooperative rebase could not reconcile. `refused`: the host turned the
      * push away for any other reason (an outage, credentials, a dropped
      * connection) — nothing to reconcile, the next push of the branch carries
-     * the commits. The opening clause is the same either way.
+     * the commits. `access`: the platform's own access check refused the push
+     * before it left this server (an unpushed commit changes a file its
+     * author may not write); the host was never asked, so the sentence says
+     * the platform refused and carries `accessRefusal`, the gate's own clause
+     * naming the file and who may write it. The opening clause is the same
+     * every way.
      */
-    readonly cause: 'diverged' | 'refused' = 'diverged',
+    readonly cause: 'diverged' | 'refused' | 'access' = 'diverged',
+    readonly accessRefusal?: string,
   ) {
     super(
       `Saved locally on "${branch}" but couldn't share with the team automatically — ` +
-        (cause === 'refused'
+        (cause === 'access'
+          ? `the platform's access check refused the push` + (accessRefusal ? `: ${accessRefusal}.` : '.')
+          : cause === 'refused'
           ? `the repository host refused the push; the next save on this branch will try sharing it again.`
           : `the remote diverged on "${path}" and the cooperative rebase couldn't reconcile. ` +
             `The agent will resolve this.`),

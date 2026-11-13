@@ -10,7 +10,7 @@ import type { WorkspaceService } from '../../../workspace/workspace.service.js';
 import { VersionControlHooks } from '../../version-control-hooks.js';
 import type { IAccessControl } from '../../../access/access-control.interface.js';
 import { GitService } from '../git.service.js';
-import { AccessDeniedError } from '../../../access-model/access-errors.js';
+import { AccessDeniedError, PushAccessRefusedError } from '../../../access-model/access-errors.js';
 
 const execFileAsync = promisify(execFile);
 const PROCESS_MAP_DIR = 'knowledge-base';
@@ -312,7 +312,7 @@ describe('GitService — push gate uses origin/<branch> (not HEAD or working tre
       ac,
     );
 
-    await expect(svc.push(workspaceId, USER)).rejects.toBeInstanceOf(AccessDeniedError);
+    await expect(svc.push(workspaceId, USER)).rejects.toBeInstanceOf(PushAccessRefusedError);
   });
 
   it('skips the gate entirely on non-protected (feature/draft) branches', async () => {
@@ -347,4 +347,253 @@ describe('GitService — push gate uses origin/<branch> (not HEAD or working tre
     expect(calls.filter((c) => c.method === 'canWriteBatchAtRef')).toHaveLength(0);
   });
 
+});
+
+describe('GitService — push gate reads raw paths and judges each commit by its author', () => {
+  let root: string;
+  const workspaceId = 'ws-push-authors';
+  const BRANCH = 'current-company-state';
+  const BOB = 'bob@bevel.software';
+  const CAROL = 'carol@elsewhere.example';
+
+  beforeEach(async () => {
+    root = await mkTmpRoot();
+  });
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  });
+
+  /** A commit authored by `email`, made with plain git (as a stranded save of theirs would be). */
+  async function commitAs(repo: string, email: string, rel: string, contents: string): Promise<void> {
+    await writeFile(repo, rel, contents);
+    await runGit(repo, ['add', '--', rel]);
+    await runGit(repo, ['-c', 'core.quotePath=true', 'commit', `--author=Someone <${email}>`, '-m', `edit ${rel}`]);
+  }
+
+  async function originTip(originDir: string): Promise<string> {
+    const { stdout } = await execFileAsync('git', ['rev-parse', BRANCH], { cwd: originDir });
+    return stdout.trim();
+  }
+
+  async function localTip(repo: string): Promise<string> {
+    const { stdout } = await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: repo });
+    return stdout.trim();
+  }
+
+  /**
+   * A published protected branch with a bare origin, and a GitService whose
+   * access stub grants write by `writable(email, path)` and whose directory
+   * knows `users`.
+   */
+  async function setup(opts: {
+    writable: (email: string, p: string) => boolean;
+    readable?: (email: string, p: string) => boolean;
+    users?: string[];
+    directory?: { isPlatformUser(email: string): Promise<boolean> } | null;
+  }) {
+    const { workspaceDir, repo } = await seedWorkspace(root, workspaceId);
+    const originDir = path.join(root, 'origin.git');
+    await fs.mkdir(originDir);
+    await runGit(originDir, ['init', '--bare', '-b', BRANCH]);
+    await runGit(repo, ['remote', 'add', 'origin', originDir]);
+    await commitFile(repo, 'Knowledge/Seed.md', 'seed\n', 'seed');
+    await runGit(repo, ['push', '-u', 'origin', BRANCH]);
+
+    const { ac, calls } = recordingAccessControl({
+      canWriteBatchAtRef: (_ref, email, paths) => new Map(paths.map((p) => [p, opts.writable(email, p)])),
+      eligible: () => ({ roles: ['Editors'], users: [{ name: 'Bob', email: BOB }] }),
+    });
+    const readCalls: { ref: string; email: string; path: string }[] = [];
+    ac.canReadAtRef = async (_w, ref, email, p) => {
+      readCalls.push({ ref, email, path: p });
+      return opts.readable?.(email, p) ?? true;
+    };
+    const lookups: string[] = [];
+    const users = new Set((opts.users ?? []).map((u) => u.toLowerCase()));
+    const directory =
+      opts.directory === undefined
+        ? {
+            isPlatformUser: async (email: string) => {
+              lookups.push(email);
+              return users.has(email.toLowerCase());
+            },
+          }
+        : opts.directory;
+    const svc = new GitService(
+      stubWorkspaceService(workspaceId, workspaceDir),
+      new VersionControlHooks(),
+      testKbContext(),
+      undefined,
+      ac,
+      undefined,
+      directory,
+    );
+    const gateCalls = () =>
+      calls.filter((c) => c.method === 'canWriteBatchAtRef').map((c) => ({ email: c.userEmail, paths: [...c.paths].sort() }));
+    return { svc, repo, originDir, gateCalls, readCalls, lookups };
+  }
+
+  it('checks a file whose name git would quote by its real path, and the push lands', async () => {
+    const real = 'Kunden/DE_Katalogübertragung per SFTP.docx';
+    const { svc, repo, originDir, gateCalls } = await setup({
+      // Only the real path is writable: the quoted, octal-escaped spelling
+      // git prints by default would fall to a rule that refuses.
+      writable: (email, p) => email === USER.email && p === real,
+    });
+    await commitAs(repo, USER.email, real, 'bytes\n');
+
+    await expect(svc.push(workspaceId, USER)).resolves.toBeUndefined();
+    expect(gateCalls()).toEqual([{ email: USER.email, paths: [real] }]);
+    expect(await originTip(originDir)).toBe(await localTip(repo));
+  });
+
+  it('a colleague’s stranded commits land when THEY may write what they changed, whatever the pusher may', async () => {
+    const { svc, repo, originDir, gateCalls } = await setup({
+      users: [BOB],
+      writable: (email, p) => (email === BOB ? p.startsWith('Bob/') : p.startsWith('Alice/')),
+    });
+    await commitAs(repo, BOB, 'Bob/Prüfung.md', 'bob\n');
+    await commitAs(repo, BOB, 'Bob/second.md', 'bob again\n');
+    await commitAs(repo, USER.email, 'Alice/mine.md', 'alice\n');
+
+    await expect(svc.push(workspaceId, USER)).resolves.toBeUndefined();
+    expect(gateCalls()).toEqual(
+      expect.arrayContaining([
+        { email: BOB, paths: ['Bob/Prüfung.md', 'Bob/second.md'] },
+        { email: USER.email, paths: ['Alice/mine.md'] },
+      ]),
+    );
+    expect(gateCalls()).toHaveLength(2);
+    expect(await originTip(originDir)).toBe(await localTip(repo));
+  });
+
+  it("refuses when a commit's own author may not write a file it changed, as the platform, naming the file and its writers", async () => {
+    const { svc, repo, originDir } = await setup({
+      users: [BOB],
+      // The pusher could write it; its author could not. The author decides.
+      writable: (email, p) => email === USER.email || !p.startsWith('Restricted/'),
+    });
+    const before = await originTip(originDir);
+    await commitAs(repo, BOB, 'Restricted/x.md', 'bob\n');
+    await commitAs(repo, USER.email, 'Alice/mine.md', 'alice\n');
+
+    const err = await svc.push(workspaceId, USER).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PushAccessRefusedError);
+    const refusal = err as PushAccessRefusedError;
+    expect(refusal.message).toContain("The platform's access check refused the push");
+    expect(refusal.message).toContain('"Restricted/x.md" may be written by Editors; Bob <bob@bevel.software>');
+    expect(refusal.message).not.toMatch(/repository host/i);
+    expect(refusal.refusal).toEqual({
+      path: 'Restricted/x.md',
+      eligibleRoles: ['Editors'],
+      eligibleUsers: [{ name: 'Bob', email: BOB }],
+    });
+    // Nothing left this server.
+    expect(await originTip(originDir)).toBe(before);
+  });
+
+  it('a refused file the pusher may not read is not named, nor are its writers', async () => {
+    const { svc, repo, readCalls } = await setup({
+      users: [BOB],
+      writable: (email, p) => email === USER.email || !p.startsWith('Secret/'),
+      readable: (email, p) => !(email === USER.email && p.startsWith('Secret/')),
+    });
+    await commitAs(repo, BOB, 'Secret/plan.md', 'bob\n');
+
+    const err = await svc.push(workspaceId, USER).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PushAccessRefusedError);
+    const refusal = err as PushAccessRefusedError;
+    expect(refusal.refusal).toBeNull();
+    expect(refusal.message).toContain("The platform's access check refused the push");
+    expect(refusal.message).not.toContain('Secret/plan.md');
+    expect(refusal.message).not.toContain(BOB);
+    expect(JSON.stringify(refusal.payload)).not.toMatch(/Secret|bob@/);
+    // Asked of the PUSHER, at the published state.
+    expect(readCalls).toEqual([{ ref: `origin/${BRANCH}`, email: USER.email, path: 'Secret/plan.md' }]);
+  });
+
+  it('a commit whose author is not a platform user is held to the pusher', async () => {
+    const { svc, repo, gateCalls, lookups } = await setup({
+      users: [BOB],
+      writable: () => true,
+    });
+    await commitAs(repo, CAROL, 'Shared/c.md', 'carol\n');
+
+    await expect(svc.push(workspaceId, USER)).resolves.toBeUndefined();
+    expect(lookups).toEqual([CAROL]);
+    expect(gateCalls()).toEqual([{ email: USER.email, paths: ['Shared/c.md'] }]);
+  });
+
+  it('and is refused when the pusher may not write what it changed', async () => {
+    const { svc, repo } = await setup({
+      users: [BOB],
+      // Carol, were she asked, could write it: she is never asked.
+      writable: (email) => email === CAROL,
+    });
+    await commitAs(repo, CAROL, 'Shared/c.md', 'carol\n');
+
+    const err = await svc.push(workspaceId, USER).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PushAccessRefusedError);
+    expect((err as PushAccessRefusedError).refusal?.path).toBe('Shared/c.md');
+  });
+
+  it('without a directory, every unpushed commit is held to the pusher', async () => {
+    const { svc, repo, gateCalls } = await setup({ directory: null, writable: () => true });
+    await commitAs(repo, BOB, 'Bob/x.md', 'bob\n');
+
+    await expect(svc.push(workspaceId, USER)).resolves.toBeUndefined();
+    expect(gateCalls()).toEqual([{ email: USER.email, paths: ['Bob/x.md'] }]);
+  });
+
+  it("the pusher's own commits, under any spelling of their address, are the pusher's: no lookup", async () => {
+    const { svc, repo, gateCalls, lookups } = await setup({ users: [], writable: () => true });
+    await commitAs(repo, 'Alice@Bevel.Software', 'Alice/a.md', 'a\n');
+    await commitAs(repo, USER.email, 'Alice/b.md', 'b\n');
+
+    await expect(svc.push(workspaceId, USER)).resolves.toBeUndefined();
+    expect(lookups).toEqual([]);
+    expect(gateCalls()).toEqual([{ email: USER.email, paths: ['Alice/a.md', 'Alice/b.md'] }]);
+  });
+
+  it('a merge answers for what it brings in, by its merger: the merged branch’s authors are not asked', async () => {
+    const { svc, repo, gateCalls, lookups } = await setup({
+      users: [BOB],
+      writable: (email) => email === USER.email,
+    });
+    await runGit(repo, ['checkout', '-b', 'bob/draft']);
+    await commitAs(repo, BOB, 'Drafts/from-bob.md', 'bob\n');
+    await runGit(repo, ['checkout', BRANCH]);
+    // Merged by the pusher (author and committer both Alice).
+    await execFileAsync('git', ['merge', '--no-ff', '-m', 'merge bob/draft', 'bob/draft'], {
+      cwd: repo,
+      env: { ...process.env, GIT_AUTHOR_NAME: 'Alice', GIT_AUTHOR_EMAIL: USER.email, GIT_COMMITTER_NAME: 'Alice', GIT_COMMITTER_EMAIL: USER.email },
+    });
+
+    await expect(svc.push(workspaceId, USER)).resolves.toBeUndefined();
+    expect(lookups).toEqual([]);
+    expect(gateCalls()).toEqual([{ email: USER.email, paths: ['Drafts/from-bob.md'] }]);
+  });
+
+  it('a directory that cannot answer fails the push; it is never read as an unknown author', async () => {
+    const { svc, repo, originDir, gateCalls } = await setup({
+      directory: { isPlatformUser: async () => { throw new Error('user store unavailable'); } },
+      writable: () => true,
+    });
+    const before = await originTip(originDir);
+    await commitAs(repo, BOB, 'Bob/x.md', 'bob\n');
+
+    await expect(svc.push(workspaceId, USER)).rejects.toThrow('user store unavailable');
+    expect(gateCalls()).toEqual([]);
+    expect(await originTip(originDir)).toBe(before);
+  });
+
+  it('a draft branch push runs no check at all, whoever authored its commits', async () => {
+    const { svc, repo, gateCalls, lookups } = await setup({ users: [BOB], writable: () => false });
+    await runGit(repo, ['checkout', '-b', 'alice/draft']);
+    await commitAs(repo, BOB, 'Bob/x.md', 'bob\n');
+
+    await expect(svc.push(workspaceId, USER)).resolves.toBeUndefined();
+    expect(gateCalls()).toEqual([]);
+    expect(lookups).toEqual([]);
+  });
 });

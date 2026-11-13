@@ -21,6 +21,8 @@
  * worker doesn't see attacker-controlled error text in the first place.
  */
 
+import { PushAccessRefusedError } from '../access-model/index.js';
+
 /** Truncation cap for prompts / DB column. ~200 chars keeps prompts tight. */
 const MAX_LEN = 200;
 
@@ -82,6 +84,10 @@ export function sanitizeError(err: unknown, opts: { maxLen?: number } = {}): str
  * read this repository" on a pull, and the two are fixed in different places.
  */
 export function describeSyncFailure(err: unknown, operation: 'push' | 'pull' = 'push'): string {
+  // The platform's own access check refused before the host was asked. Its
+  // sentence is composed from repository paths and principals, never git
+  // output, and says so; none of the host sentences below is true of it.
+  if (err instanceof PushAccessRefusedError) return err.message;
   const raw = err instanceof Error ? err.message : String(err);
   // `Permission denied (publickey…)` is ssh refusing the KEY — a rejected
   // credential, not a missing permission.
