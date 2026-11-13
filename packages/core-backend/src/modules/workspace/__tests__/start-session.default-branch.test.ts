@@ -40,12 +40,6 @@ let server: HttpServer | undefined;
 let extractor: WorkerDocumentExtractor | undefined;
 let wsDir: string | undefined;
 
-/**
- * `start_session` mounted as the root mounts it, for an external caller.
- * `defaultWorkspaceDir` is the default branch's checkout, for the `firstRun`
- * note; without one the note's check has no workspace and the answer carries
- * none.
- */
 // The one owner of the server and the extractor: startSession() closes the
 // previous pair before it opens another, and afterEach closes the last.
 async function closeSessionApp(): Promise<void> {
@@ -57,6 +51,12 @@ async function closeSessionApp(): Promise<void> {
   await worker?.close();
 }
 
+/**
+ * `start_session` mounted as the root mounts it, for an external caller.
+ * `defaultWorkspaceDir` is the default branch's checkout, for the `firstRun`
+ * note; without one the note's check has no workspace and the answer carries
+ * none.
+ */
 async function startSession(kb: KbContext, defaultWorkspaceDir?: string): Promise<{ base: string; registry: ToolRegistry }> {
   await closeSessionApp();
   const registry = new ToolRegistry();
