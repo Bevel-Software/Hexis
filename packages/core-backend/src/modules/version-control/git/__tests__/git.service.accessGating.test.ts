@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { testKbContext } from '../../../../__tests__/kb-context.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -6,11 +6,11 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 
-import type { WorkspaceService } from '../../../workspace/workspace.service.js';
+import type { WorkspaceService } from '../../../workspace/index.js';
 import { VersionControlHooks } from '../../version-control-hooks.js';
-import type { IAccessControl } from '../../../access/access-control.interface.js';
+import type { IAccessControl } from '../../../access/index.js';
 import { GitService } from '../git.service.js';
-import { AccessDeniedError, PushAccessRefusedError } from '../../../access-model/access-errors.js';
+import { AccessDeniedError, PushAccessRefusedError } from '../../../access-model/index.js';
 
 const execFileAsync = promisify(execFile);
 const PROCESS_MAP_DIR = 'knowledge-base';
