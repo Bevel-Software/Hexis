@@ -3,12 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, useNavigate } from 'react-router-dom';
 import { AppChrome } from '../CoreAppShell';
 import { AppRegistryContext, makeRegistry, type AppDef } from '../registry';
-import {
-  setSidebarCollapsed,
-  setSidebarNarrow,
-  toggleSidebar,
-  useSidebar,
-} from '../../modules/layout/state/sidebar';
+import { setSidebarCollapsed, toggleSidebar, useSidebar } from '../../modules/layout';
 
 vi.mock('../../modules/toolbar/components/Toolbar', () => ({
   Toolbar: () => null,
@@ -87,9 +82,9 @@ function renderChrome(width: number) {
 
 beforeEach(() => {
   setViewportWidth(1400);
-  // Module state: clear the breakpoint the previous test settled on so this
-  // mount reads as a fresh crossing rather than a no-op.
-  setSidebarNarrow(false);
+  // Module state: open the sidebar the previous test may have left collapsed.
+  // Its `narrow` flag needs no reset here: only the sidebar frame reports the
+  // breakpoint, and no test in this file mounts a frame at a narrow width.
   setSidebarCollapsed(false);
 });
 

@@ -138,8 +138,9 @@ export interface AdminMenuItem {
    * so an app's settings are reached, linked to and switched between the way
    * core's are, instead of each opening a dialog over whatever is behind it.
    * `path` is absolute and exact (`/agents-settings`), and one of core's own
-   * paths is not taken over: such a row keeps its place in the dropdown and
-   * its page is not mounted.
+   * paths, in any spelling the router reads as the same (another case, a
+   * trailing slash), is not taken over: such a row keeps its place in the
+   * dropdown and its page is not mounted.
    */
   page?: ReactElement;
   onSelect?(helpers: AdminMenuItemHelpers): void;

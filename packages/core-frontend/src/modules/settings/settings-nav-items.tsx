@@ -1,4 +1,5 @@
 import { useMemo } from 'react';
+import { matchPath } from 'react-router-dom';
 import { Boxes, CircleUserRound, KeyRound, Lock, ScrollText, SlidersHorizontal, Users, UsersRound } from 'lucide-react';
 import { useAppRegistry, type AdminMenuItem } from '../../core/registry';
 
@@ -164,18 +165,31 @@ const OTHER_BUILT_IN_PATHS: readonly string[] = ['/connection-keys', '/connect']
 export type SettingsPageRow = AdminMenuItem & { path: string; page: NonNullable<AdminMenuItem['page']> };
 
 /**
+ * Whether `pathname` is the page at `path`, by the router's own rule: React
+ * Router's `matchPath` with an exact pattern, so case and a trailing slash
+ * count exactly as they count when the route is chosen (`/Secrets/` is the
+ * `/secrets` page). Every comparison of a settings path goes through here, so
+ * which page the router shows, which page is mounted, which row is listed and
+ * which row is marked current cannot disagree.
+ */
+export function sameSettingsPath(path: string, pathname: string): boolean {
+  return matchPath({ path, end: true }, pathname) !== null;
+}
+
+/**
  * The registry's rows that bring a settings page (see `AdminMenuItem.page`),
- * each with its path normalized. A row naming one of core's own paths is left
- * out: core's page stays the one at that address.
+ * each with its path normalized. A row whose path the router would read as one
+ * of core's own, or as one an earlier row took, is left out: the page already
+ * at that address stays the one there.
  */
 export function registrySettingsPages(items: AdminMenuItem[]): SettingsPageRow[] {
   const pages: SettingsPageRow[] = [];
-  const taken = new Set([...SETTINGS_NAV_PATHS, ...OTHER_BUILT_IN_PATHS]);
+  const taken: string[] = [...SETTINGS_NAV_PATHS, ...OTHER_BUILT_IN_PATHS];
   for (const item of items) {
     if (!item.path || !item.page) continue;
     const path = normalizeSettingsPath(item.path);
-    if (taken.has(path)) continue;
-    taken.add(path);
+    if (taken.some((other) => sameSettingsPath(other, path))) continue;
+    taken.push(path);
     pages.push({ ...item, path, page: item.page });
   }
   return pages;
@@ -194,12 +208,12 @@ export function useSettingsNavPaths(): readonly string[] {
 /**
  * Exact match, never a prefix. These are exact routes, and the nav marks the
  * current row by comparing the whole pathname — a prefix test would light up
- * `/account` for a hypothetical `/accounts-of-other-people`. Exact AFTER
- * normalizing the trailing slash, which is a spelling of the same path rather
- * than a different one.
+ * `/account` for a hypothetical `/accounts-of-other-people`. Exact by the
+ * router's rule (see `sameSettingsPath`): a trailing slash or another case is
+ * a spelling of the same path rather than a different one.
  */
 export function isSettingsNavPath(pathname: string, paths: readonly string[] = SETTINGS_NAV_PATHS): boolean {
-  return paths.includes(normalizeSettingsPath(pathname));
+  return paths.some((path) => sameSettingsPath(path, pathname));
 }
 
 /** One of the app's own labelled sections, with its rows sorted. */

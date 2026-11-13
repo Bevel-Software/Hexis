@@ -36,7 +36,7 @@ import { MaintenanceOverlay } from '../modules/layout/components/MaintenanceOver
 import { AdminProvider } from '../modules/admin/state/admin.context';
 import { RolesCorruptedBanner } from '../modules/admin/components/RolesCorruptedBanner';
 import { SettingsLayout } from '../modules/settings/components/SettingsLayout';
-import { registrySettingsPages } from '../modules/settings/settings-nav-items';
+import { registrySettingsPages } from '../modules/settings';
 import { DeploymentPage } from '../modules/settings/components/DeploymentPage';
 import { SecretsPage } from '../modules/secrets-vault/components/SecretsPage';
 import { AccountPage } from '../modules/auth/components/AccountPage';
@@ -54,7 +54,7 @@ import { OpenChangeRequestDialog } from '../modules/pr/components/OpenChangeRequ
 import { ChangeRequestLink } from '../modules/change-requests/components/ChangeRequestLink';
 import { useMediaQuery } from '../modules/layout/hooks/useMediaQuery';
 import { NARROW_QUERY } from '../modules/layout/breakpoints';
-import { setSidebarCollapsed } from '../modules/layout/state/sidebar';
+import { setSidebarCollapsed } from '../modules/layout';
 import {
   activeAppId,
   appHostingPath,

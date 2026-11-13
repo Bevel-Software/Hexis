@@ -2,6 +2,7 @@ import type { ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import type { AdminMenuItem } from '../../../core/registry';
 import { cn } from '../../../lib/utils';
+import { sameSettingsPath } from '../settings-nav-items';
 
 /** A row the nav can render: one that declares where it goes. */
 export type LinkableItem = AdminMenuItem & { path: string };
@@ -17,8 +18,8 @@ export type SettingsNavOrientation = 'rail' | 'strip';
 /**
  * The settings nav's CONTENTS — a pure view of the URL, in the same sense
  * `PluginsSidebar` is. It holds no state, decides no membership and fetches
- * nothing; the layout works out which rows exist and which one is current,
- * and this renders them.
+ * nothing; the layout works out which rows exist, the current one is the
+ * URL's by the router's rule (`sameSettingsPath`), and this renders them.
  *
  * Row styling is `PluginsSidebar`'s declaration token for token, minus the
  * count slot it has no use for, plus `FileExplorer`'s inset focus ring — the
@@ -59,7 +60,8 @@ export function SettingsNav({
   const strip = orientation === 'strip';
 
   const row = (item: LinkableItem) => {
-    const current = item.path === currentPath;
+    // By the router's rule, so the row of the page on screen is the one marked, however the URL is spelt.
+    const current = sameSettingsPath(item.path, currentPath);
     return (
       <Link
         key={item.id}

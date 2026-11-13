@@ -4,10 +4,9 @@ import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { SettingsLayout } from '../SettingsLayout';
-import { registrySettingsPages } from '../../settings-nav-items';
-import { AdminContext, type AdminContextValue } from '../../../admin/state/admin.context';
-import { SIDEBAR_DOM_ID } from '../../../layout/components/SidebarFrame';
-import { setSidebarCollapsed } from '../../../layout/state/sidebar';
+import { isSettingsNavPath, registrySettingsPages, useSettingsNavPaths } from '../../settings-nav-items';
+import { AdminContext, type AdminContextValue } from '../../../admin';
+import { setSidebarCollapsed } from '../../../layout';
 import { AppRegistryContext, makeRegistry, type AdminMenuItem } from '../../../../core/registry';
 import { AuthContext, type AuthContextValue } from '../../../auth';
 import type { AuthUser } from '@bevel-software/platform-shared';
@@ -233,7 +232,8 @@ describe('SettingsLayout', () => {
     it('fills the app sidebar frame on a wide window', () => {
       stubMatchMedia(false);
       renderAt('/secrets');
-      const frame = document.getElementById(SIDEBAR_DOM_ID);
+      // The app's one sidebar frame: an `<aside>` named for the surface it holds.
+      const frame = screen.queryByRole('complementary', { name: 'Settings' });
       expect(frame).not.toBeNull();
       expect(frame).toContainElement(nav());
       vi.unstubAllGlobals();
@@ -244,7 +244,7 @@ describe('SettingsLayout', () => {
     it('becomes a strip with no sidebar frame on a narrow window', () => {
       stubMatchMedia(true);
       renderAt('/secrets');
-      expect(document.getElementById(SIDEBAR_DOM_ID)).toBeNull();
+      expect(screen.queryByRole('complementary', { name: 'Settings' })).toBeNull();
       expect(noNav()).not.toBeNull();
       expect(within(nav()).getAllByRole('link')).toHaveLength(5);
       vi.unstubAllGlobals();
@@ -272,6 +272,13 @@ describe('SettingsLayout with pages the registry brings', () => {
     { id: 'old-keys', label: 'Not the keys page', path: '/connection-keys', page: <div>Never mounted</div> },
     { id: 'second', label: 'Second at the same path', path: '/connected-apps', page: <div>Never mounted</div> },
     { id: 'acts', label: 'Runs an action', path: '/acts', page: <div>Acts page</div>, onSelect: () => {} },
+    // A page row that also opens a dialog: the menu opens the dialog, so the row stays in the menu only.
+    { id: 'opens', label: 'Opens a dialog', path: '/opens', page: <div>Opens page</div>, dialog: () => <></> },
+    // Addresses the router reads as one already taken: the `/connect` redirect, core's page in other
+    // case, and an earlier row's path in other case and with a trailing slash.
+    { id: 'connect', label: 'Not the connect redirect', path: '/connect', page: <div>Never mounted</div> },
+    { id: 'shouting', label: 'Not the secrets page either', path: '/SECRETS', page: <div>Never mounted</div> },
+    { id: 'recased', label: 'Connected apps again', path: '/Connected-Apps/', page: <div>Never mounted</div> },
   ];
 
   function renderPages(route: string, { user = ada, isAdmin = false }: { user?: AuthUser | null; isAdmin?: boolean } = {}) {
@@ -323,7 +330,33 @@ describe('SettingsLayout with pages the registry brings', () => {
       'executors /executors',
       'llm /llm-configuration',
       'acts /acts',
+      'opens /opens',
     ]);
+  });
+
+  it('marks the row current and shows its page when the URL spells the path in another case', () => {
+    renderPages('/Executors/');
+    expect(screen.getByText('Executors page')).toBeInTheDocument();
+    expect(within(nav()).getByRole('link', { name: 'Executors' })).toHaveAttribute('aria-current', 'page');
+  });
+
+  it("counts an app's pages as settings paths through useSettingsNavPaths, and only core's without it", () => {
+    function Probe() {
+      const paths = useSettingsNavPaths();
+      return (
+        <>
+          <output aria-label="with the app's pages">{String(isSettingsNavPath('/executors', paths))}</output>
+          <output aria-label="core only">{String(isSettingsNavPath('/executors'))}</output>
+        </>
+      );
+    }
+    render(
+      <AppRegistryContext.Provider value={makeRegistry({ adminMenuItems: pageRows })}>
+        <Probe />
+      </AppRegistryContext.Provider>,
+    );
+    expect(screen.getByRole('status', { name: "with the app's pages" })).toHaveTextContent('true');
+    expect(screen.getByRole('status', { name: 'core only' })).toHaveTextContent('false');
   });
 
   it('shows the row\'s own page at its path and marks it current, whatever slashes the row was written with', () => {
