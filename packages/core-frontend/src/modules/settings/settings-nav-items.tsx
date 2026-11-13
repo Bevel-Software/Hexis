@@ -153,14 +153,53 @@ export function normalizeSettingsPath(pathname: string): string {
 }
 
 /**
+ * Addresses the shell answers itself that have no row above: the old Connection
+ * keys address (a redirect to the Audit log) and `/connect` (a redirect into
+ * Skills & Tools). Both are matched before any page of the registry's, so a
+ * row naming one would be listed and never shown.
+ */
+const OTHER_BUILT_IN_PATHS: readonly string[] = ['/connection-keys', '/connect'];
+
+/** A registry row that is a settings page of the app's own: it says where it lives and what is there. */
+export type SettingsPageRow = AdminMenuItem & { path: string; page: NonNullable<AdminMenuItem['page']> };
+
+/**
+ * The registry's rows that bring a settings page (see `AdminMenuItem.page`),
+ * each with its path normalized. A row naming one of core's own paths is left
+ * out: core's page stays the one at that address.
+ */
+export function registrySettingsPages(items: AdminMenuItem[]): SettingsPageRow[] {
+  const pages: SettingsPageRow[] = [];
+  const taken = new Set([...SETTINGS_NAV_PATHS, ...OTHER_BUILT_IN_PATHS]);
+  for (const item of items) {
+    if (!item.path || !item.page) continue;
+    const path = normalizeSettingsPath(item.path);
+    if (taken.has(path)) continue;
+    taken.add(path);
+    pages.push({ ...item, path, page: item.page });
+  }
+  return pages;
+}
+
+/**
+ * Every path the settings layout wraps: core's, and the pages the registry's
+ * rows bring. What the nav may link to and what the toolbar's sidebar toggle
+ * goes by, from the one list.
+ */
+export function useSettingsNavPaths(): readonly string[] {
+  const registry = useAppRegistry();
+  return useMemo(() => [...SETTINGS_NAV_PATHS, ...registrySettingsPages(registry.adminMenuItems).map((row) => row.path)], [registry]);
+}
+
+/**
  * Exact match, never a prefix. These are exact routes, and the nav marks the
  * current row by comparing the whole pathname — a prefix test would light up
  * `/account` for a hypothetical `/accounts-of-other-people`. Exact AFTER
  * normalizing the trailing slash, which is a spelling of the same path rather
  * than a different one.
  */
-export function isSettingsNavPath(pathname: string): boolean {
-  return SETTINGS_NAV_PATHS.includes(normalizeSettingsPath(pathname));
+export function isSettingsNavPath(pathname: string, paths: readonly string[] = SETTINGS_NAV_PATHS): boolean {
+  return paths.includes(normalizeSettingsPath(pathname));
 }
 
 /** One of the app's own labelled sections, with its rows sorted. */

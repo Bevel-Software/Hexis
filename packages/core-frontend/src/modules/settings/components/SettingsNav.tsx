@@ -44,11 +44,14 @@ export type SettingsNavOrientation = 'rail' | 'strip';
  */
 export function SettingsNav({
   defaultItems,
+  sections = [],
   adminItems,
   currentPath,
   orientation = 'rail',
 }: {
   defaultItems: LinkableItem[];
+  /** The app's own sections (see `AdminMenuItem.section`), drawn between the default rows and "Admin only", as the profile menu draws them. */
+  sections?: Array<{ id: string; label: string; items: LinkableItem[] }>;
   adminItems: LinkableItem[];
   currentPath: string;
   orientation?: SettingsNavOrientation;
@@ -87,6 +90,15 @@ export function SettingsNav({
       )}
     >
       {defaultItems.map(row)}
+      {sections.map((section) => (
+        // A named group, so a reader who moves from link to link hears which
+        // section a row is in; `contents` keeps the rows in the nav's own row
+        // or column, as if the group were not an element.
+        <div key={section.id} role="group" aria-label={section.label} className="contents">
+          {!strip && <SectionLabel spaced>{section.label}</SectionLabel>}
+          {section.items.map(row)}
+        </div>
+      ))}
       {adminItems.length > 0 && (
         <>
           {/* Inline, the rows simply continue — see the orientation docblock. */}

@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { render, screen, within } from '@testing-library/react';
 import { MemoryRouter, useLocation, useNavigationType } from 'react-router-dom';
 import { ShellRoutes } from '../CoreAppShell';
-import type { AppDef } from '../registry';
+import { AppRegistryContext, makeRegistry, type AdminMenuItem, type AppDef } from '../registry';
 
 // The /secrets standalone page fetches on mount — stub its data layer so the
 // route can render without a network. (The other standalone pages are not
@@ -190,5 +190,24 @@ describe('ShellRoutes — /connect', () => {
   it('replaces the history entry rather than pushing one', () => {
     renderConnect('/connect?oauth=abc');
     expect(screen.getByTestId('navigation')).toHaveTextContent('REPLACE');
+  });
+});
+
+// An app's own settings page (`AdminMenuItem.page`) is mounted under the
+// settings layout: at its own address, with the settings nav beside it.
+describe('ShellRoutes with a settings page the registry brings', () => {
+  it('renders the page at its path, inside the settings nav, and lists it there', () => {
+    const row: AdminMenuItem = { id: 'executors', label: 'Executors', path: '/executors', page: <div data-testid="executors-page" /> };
+    render(
+      <AppRegistryContext.Provider value={makeRegistry({ adminMenuItems: [row] })}>
+        <MemoryRouter initialEntries={['/executors']}>
+          <ShellRoutes apps={apps} settingsPages={[{ path: '/executors', element: row.page! }]} />
+        </MemoryRouter>
+      </AppRegistryContext.Provider>,
+    );
+    expect(screen.getByTestId('executors-page')).toBeInTheDocument();
+    const nav = screen.getByRole('navigation', { name: 'Settings' });
+    expect(within(nav).getByRole('link', { name: 'Executors' })).toHaveAttribute('aria-current', 'page');
+    expect(within(nav).getByRole('link', { name: 'Secrets' })).toBeInTheDocument();
   });
 });

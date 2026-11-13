@@ -36,6 +36,7 @@ import { MaintenanceOverlay } from '../modules/layout/components/MaintenanceOver
 import { AdminProvider } from '../modules/admin/state/admin.context';
 import { RolesCorruptedBanner } from '../modules/admin/components/RolesCorruptedBanner';
 import { SettingsLayout } from '../modules/settings/components/SettingsLayout';
+import { registrySettingsPages } from '../modules/settings/settings-nav-items';
 import { DeploymentPage } from '../modules/settings/components/DeploymentPage';
 import { SecretsPage } from '../modules/secrets-vault/components/SecretsPage';
 import { AccountPage } from '../modules/auth/components/AccountPage';
@@ -324,6 +325,11 @@ export function AppChrome() {
     () => [...registry.apps].sort((a, b) => (a.order ?? 100) - (b.order ?? 100)),
     [registry],
   );
+  // The settings pages the registry's rows bring, mounted under the settings layout with core's.
+  const settingsPages = useMemo(
+    () => registrySettingsPages(registry.adminMenuItems).map((row) => ({ path: row.path, element: row.page })),
+    [registry],
+  );
   // A claimed app (a library item page at its canonical /workspace URL) wins
   // over the prefix rule — the switcher highlights the surface on screen.
   const [claimedApp, setClaimedApp] = useState<string | null>(null);
@@ -362,7 +368,7 @@ export function AppChrome() {
             <div className="flex-1 min-h-0">
               {/* Switching routes swaps EVERYTHING below the toolbar: an app
                   surface, a standalone settings page, or a redirect. */}
-              <ShellRoutes apps={apps} />
+              <ShellRoutes apps={apps} settingsPages={settingsPages} />
             </div>
           </div>
           </InviteDialogProvider>
@@ -414,7 +420,7 @@ function ConnectToolsRedirect() {
   return <Navigate to={`${CONNECT_TOOLS_PATH}${search}${hash}`} replace />;
 }
 
-export function ShellRoutes({ apps }: { apps: AppDef[] }) {
+export function ShellRoutes({ apps, settingsPages = [] }: { apps: AppDef[]; settingsPages?: RouteDef[] }) {
   return (
     <Routes>
       {apps.map((app) => (
@@ -451,6 +457,11 @@ export function ShellRoutes({ apps }: { apps: AppDef[] }) {
             land on it. */}
         <Route path="/connection-keys" element={<Navigate to="/audit-log" replace />} />
         <Route path="/tools" element={<ToolsExplorerPage />} />
+        {/* The app's own settings pages (`AdminMenuItem.page`): under the
+            same layout, so they share the nav and are listed in it. */}
+        {settingsPages.map((page) => (
+          <Route key={page.path} path={page.path} element={page.element} />
+        ))}
       </Route>
       {/* `/` lands on Knowledge — or on the deep link an SSO sign-in carried
           through its round-trip (see `RootLanding`).
