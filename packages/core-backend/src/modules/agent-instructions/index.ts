@@ -3,6 +3,7 @@ export {
   prefixToolDescription,
   platformInstructions,
   INSTRUCTIONS_CAP,
+  GUIDE_FIRST_LINE,
   PLATFORM_HEADER,
   TOOL_PREFIX_LINE,
   PREAMBLE_CAP,

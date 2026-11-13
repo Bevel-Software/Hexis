@@ -27,6 +27,7 @@ import { DocExtractService } from '../file-readers/doc-extract.service.js';
 import { WorkerDocumentExtractor } from '../file-readers/extract-in-worker.js';
 import { OCTET_STREAM_FALLBACK_NOTE } from '../file-readers/content-mode.js';
 import type { IAccessControl } from '../../access/index.js';
+import { ConnectionScope, NOT_AVAILABLE_TO_CONNECTION } from '../../agent-scope/index.js';
 import { realDisk } from '../../../__tests__/real-disk.js';
 import type { WorkspaceService } from '../workspace.service.js';
 import { DEFAULT_KB_LAYOUT, isBranchAuthoredBy, isOwnSuggestionsBranch } from '@bevel-software/platform-shared';
@@ -153,6 +154,14 @@ let patternMatcher: RipgrepPatternMatcher | undefined;
 let docExtractor: WorkerDocumentExtractor | undefined;
 let matcherOptions: RipgrepPatternMatcherOptions = {};
 
+// The one owner of the shared harness server: start() closes the previous one
+// before it opens another, and afterEach closes the last.
+async function closeHttpServer(): Promise<void> {
+  const open = httpServer;
+  httpServer = undefined;
+  if (open) await new Promise<void>((r) => open.close(() => r()));
+}
+
 async function start(
   scope: 'read' | 'write' = 'write',
   access: IAccessControl = allowAll,
@@ -160,6 +169,7 @@ async function start(
   userEmail = 'e@x',
 ): Promise<string> {
   raceHook = null;
+  await closeHttpServer();
   await patternMatcher?.close();
   patternMatcher = new RipgrepPatternMatcher(matcherOptions);
   await docExtractor?.close();
@@ -360,8 +370,7 @@ beforeEach(() => {
   matcherOptions = {};
 });
 afterEach(async () => {
-  if (httpServer) await new Promise<void>((r) => httpServer!.close(() => r()));
-  httpServer = undefined;
+  await closeHttpServer();
   await patternMatcher?.close();
   patternMatcher = undefined;
   await docExtractor?.close();
@@ -2392,6 +2401,14 @@ describe('start_session', () => {
   let sessionExtractor: WorkerDocumentExtractor | undefined;
   let created: Array<{ userId: string; startedAt: Date }> = [];
 
+  // The one owner of the harness server: a test that starts a second app
+  // closes the first here before it is replaced, and afterEach closes the last.
+  async function closeSessionServer(): Promise<void> {
+    const open = server;
+    server = undefined;
+    if (open) await new Promise<void>((r) => open.close(() => r()));
+  }
+
   async function startSessionApp(
     source: 'external' | 'internal' = 'external',
     // The default fake returns one fixed id, which is what most of these
@@ -2408,12 +2425,16 @@ describe('start_session', () => {
     starterPacks?: FirstRunStarterSource,
     // Who may read what: everything, unless a test about the note's gate says otherwise.
     access: IAccessControl = allowAll,
+    // What the connection was made as, as the context resolver hands it over.
+    connectionScope?: ConnectionScope,
   ): Promise<string> {
+    await closeSessionServer();
     created = [];
     const registry = new ToolRegistry();
     const resolve = async (auth: ToolAuth, signal: AbortSignal): Promise<ToolContext> => ({
       user: { id: 'user-42', email: 'e@x', name: 'N' },
       scope: auth.scope,
+      ...(connectionScope ? { connectionScope } : {}),
       source: auth.source,
       abortSignal: signal,
       workspaceService: (defaultWorkspaceDir
@@ -2467,10 +2488,61 @@ describe('start_session', () => {
   }
 
   afterEach(async () => {
-    if (server) await new Promise<void>((r) => server!.close(() => r()));
-    server = undefined;
+    await closeSessionServer();
     await sessionExtractor?.close();
     sessionExtractor = undefined;
+  });
+
+  describe('connectedAs: what the connection was made as', () => {
+    const SHIP_IT = { path: 'Agents/ship-it-reviewer.agent', name: 'Ship It reviewer' };
+    const startAs = async (connectionScope?: ConnectionScope) => {
+      const base = await startSessionApp('external', undefined, undefined, undefined, allowAll, connectionScope);
+      const res = await postRaw(`${base}/api/agent/tools/start_session`);
+      expect(res.status).toBe(200);
+      return (await res.json()) as { sessionId: string; connectedAs: unknown };
+    };
+
+    it('is null for a connection made as Everything', async () => {
+      expect(await startAs()).toEqual({ sessionId: 'thread-xyz', defaultBranch: 'target-company-state', connectedAs: null });
+      expect(await startAs(ConnectionScope.everything())).toEqual({ sessionId: 'thread-xyz', defaultBranch: 'target-company-state', connectedAs: null });
+    });
+
+    it('is the path and name of the agent configuration a narrowed connection was made as', async () => {
+      const scope = ConnectionScope.narrowed(SHIP_IT, { skills: [], connectors: [], platformTools: null }, 'fp');
+      expect(await startAs(scope)).toEqual({ sessionId: 'thread-xyz', defaultBranch: 'target-company-state', connectedAs: SHIP_IT });
+    });
+
+    it('is never answered to a connection whose configuration cannot be used: it is served nothing, start_session included', async () => {
+      // Connect-As-An-Agent's rule, not reopened for this field: the refusal
+      // carries why, and no session (so no `connectedAs`) is minted.
+      const unusable = ConnectionScope.unavailable(SHIP_IT, 'It cannot be read.', 'fp');
+      const base = await startSessionApp('external', undefined, undefined, undefined, allowAll, unusable);
+      const res = await postRaw(`${base}/api/agent/tools/start_session`);
+      expect(res.status).toBe(403);
+      expect(await res.json()).toEqual({ error: 'It cannot be read.', code: NOT_AVAILABLE_TO_CONNECTION });
+      expect(created).toHaveLength(0);
+    });
+
+    it('is declared in the description and the output schema', async () => {
+      const registry = new ToolRegistry();
+      const extractor = new WorkerDocumentExtractor();
+      registerWorkspaceTools(
+        registry, express.Router(), ((_req, _res, next) => next()) as express.RequestHandler, (() => () => {}) as never,
+        new SpillStore(join(tmpdir(), 'bevel-test-spills')), new DocExtractService(join(tmpdir(), 'bevel-test-doc-extract'), extractor), allowAll, testKbContext({ kbDirName: KB_DIR }),
+        { recoveryBotEmail: RECOVERY_BOT, hooks: new VersionControlHooks(), notes: new ToolDescriptionNotes() },
+        new RoutineWritePolicyService(),
+        {} as never,
+      );
+      const def = await registry
+        .listExternal()
+        .then((tools) => tools.find((t) => t.name === 'start_session')!)
+        .finally(() => extractor.close());
+      expect(def.description).toContain('Returns `{ sessionId, defaultBranch, connectedAs }`');
+      const outputs = def.outputs as { properties: Record<string, { type: unknown; required?: string[] }>; required: string[] };
+      expect(outputs.required).toEqual(['sessionId', 'defaultBranch', 'connectedAs']);
+      expect(outputs.properties.connectedAs.type).toEqual(['object', 'null']);
+      expect(outputs.properties.connectedAs.required).toEqual(['path', 'name']);
+    });
   });
 
   it('returns the sink-minted id as sessionId', async () => {
@@ -2625,7 +2697,7 @@ describe('start_session', () => {
     const startSession = async () => {
       const base = await startSessionApp('external', undefined, wsDir);
       // `postRaw`: the tool takes no arguments, and `post` adds a branch.
-      return (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { sessionId: string; firstRun?: string };
+      return (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { sessionId: string; connectedAs: unknown; firstRun?: string };
     };
 
     it('is there while the knowledge folder holds only the starter guide', async () => {
@@ -2638,6 +2710,8 @@ describe('start_session', () => {
 
       expect(res.sessionId).toBe('thread-xyz');
       expect(res.firstRun).toBe(firstRunNote(`${KB_DIR}/KnowledgeBase`));
+      // The note rides beside the connection, not instead of it.
+      expect(res.connectedAs).toBeNull();
       expect(res.firstRun).toContain(`\`${FIRST_RUN_SECTION_ID}\``);
     });
 
@@ -2690,7 +2764,7 @@ describe('start_session', () => {
       const closed = { ...allowAll, canRead: async () => false } as unknown as IAccessControl;
       const base = await startSessionApp('external', undefined, wsDir, undefined, closed);
       const res = (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { firstRun?: string };
-      expect(res).toEqual({ sessionId: 'thread-xyz', defaultBranch: 'target-company-state' });
+      expect(res).toEqual({ sessionId: 'thread-xyz', defaultBranch: 'target-company-state', connectedAs: null });
     });
 
     it('judges the folder as the caller may see it: a page they may not read leaves the note standing', async () => {
@@ -2723,7 +2797,7 @@ describe('start_session', () => {
       } as unknown as IAccessControl;
       const base = await startSessionApp('external', undefined, wsDir, starter, pageClosed);
       const res = (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { firstRun?: string };
-      expect(res).toEqual({ sessionId: 'thread-xyz', defaultBranch: 'target-company-state' });
+      expect(res).toEqual({ sessionId: 'thread-xyz', defaultBranch: 'target-company-state', connectedAs: null });
     });
 
     it('never costs the session id: a workspace it cannot read answers with the id and the default branch', async () => {
@@ -2731,7 +2805,7 @@ describe('start_session', () => {
 
       const res = await startSession();
 
-      expect(res).toEqual({ sessionId: 'thread-xyz', defaultBranch: 'target-company-state' });
+      expect(res).toEqual({ sessionId: 'thread-xyz', defaultBranch: 'target-company-state', connectedAs: null });
     });
   });
 });

@@ -7,6 +7,7 @@ import { createToolHandlerFactory } from '../../../__tests__/tool-wiring.js';
 import { toolDef, type ToolContext } from '../../tool-helpers/index.js';
 import { GET_AGENT_GUIDE_TOOL, registerAgentGuideTool } from '../agent-guide.tools.js';
 import { DEFAULT_KB_LAYOUT } from '@bevel-software/platform-shared';
+import { ConnectionScope } from '../../agent-scope/index.js';
 import {
   START_HERE_SECTION_ID,
   WHOLE_GUIDE_SECTION,
@@ -17,10 +18,15 @@ import {
 
 let server: Server | null = null;
 
-afterEach(async () => {
-  if (server) await new Promise<void>((resolve) => server!.close(() => resolve()));
+// The one owner of the test server: serve() closes the previous one before it
+// opens another, and afterEach closes the last.
+async function closeServer(): Promise<void> {
+  const open = server;
   server = null;
-});
+  if (open) await new Promise<void>((resolve) => open.close(() => resolve()));
+}
+
+afterEach(closeServer);
 
 const SECTIONS: RenderedGuideSection[] = [
   { id: 'introduction', title: 'Knowledge base', body: '# Knowledge base\n\nRead me.' },
@@ -29,7 +35,8 @@ const SECTIONS: RenderedGuideSection[] = [
 ];
 
 describe('get_agent_guide', () => {
-  async function serve() {
+  async function serve(connectionScope?: ConnectionScope) {
+    await closeServer();
     const registry = new ToolRegistry();
     const router = express.Router();
     // Stands in for the connection-key auth: the caller is a signed-in reader.
@@ -49,6 +56,8 @@ describe('get_agent_guide', () => {
         getFilesystem: async () => {
           throw new Error('the guide reads no file');
         },
+        // The scope the connection was made with, as the real resolver hands it over.
+        ...(connectionScope ? { connectionScope } : {}),
       }) as unknown as ToolContext;
     let reads = 0;
     let current: RenderedGuideSection[] = SECTIONS;
@@ -230,5 +239,52 @@ describe('get_agent_guide', () => {
     // The description lists it, so an agent knows it can ask for it.
     const def = (await registry.listExternal()).find((t) => t.name === GET_AGENT_GUIDE_TOOL)!;
     expect(def.description).toContain('`html-views`');
+  });
+
+  /**
+   * A connection made as an agent configuration is told so at the top of the
+   * guide it is sent to read first (the handshake's opening line points
+   * there): the start section and the whole guide open with the line naming
+   * the agent. The sections list and every single section are the same text
+   * Everything gets.
+   */
+  it('opens the guide with the connection line for a connection made as an agent, and changes nothing else', async () => {
+    const agent = { path: 'Agents/ship-it-reviewer.agent', name: 'Ship It reviewer' };
+    const narrowed = ConnectionScope.narrowed(agent, { skills: [], connectors: [], platformTools: null }, 'fp');
+    const line = narrowed.describe()!;
+    expect(line).toContain('"Ship It reviewer" (`Agents/ship-it-reviewer.agent`)');
+    const platform = await agentGuideSections(DEFAULT_KB_LAYOUT);
+    const index = platform.map((s) => ({ id: s.id, title: s.title }));
+    const start = platform.find((s) => s.id === START_HERE_SECTION_ID)!;
+    const access = platform.find((s) => s.id === 'access-control')!;
+
+    const asAgent = await serve(narrowed);
+    asAgent.sectionsNow([...platform]);
+    const first = await asAgent.call();
+    expect(String(first.body.guide).split('\n')[0]).toBe(`> ${line}`);
+    expect(first.body).toEqual({
+      guide: `> ${line}\n\n${start.body}`,
+      connection: line,
+      section: START_HERE_SECTION_ID,
+      title: 'Start here',
+      sections: index,
+    });
+    const whole = await asAgent.call({ section: WHOLE_GUIDE_SECTION });
+    expect(whole.body).toEqual({ guide: `> ${line}\n\n${joinGuideSections(platform)}`, connection: line, sections: index });
+    expect((await asAgent.call({ section: 'access-control' })).body).toEqual({
+      guide: access.body,
+      section: 'access-control',
+      title: access.title,
+    });
+
+    // Everything: no line, no `connection`.
+    const asEverything = await serve(ConnectionScope.everything());
+    asEverything.sectionsNow([...platform]);
+    expect((await asEverything.call()).body).toEqual({
+      guide: start.body,
+      section: START_HERE_SECTION_ID,
+      title: 'Start here',
+      sections: index,
+    });
   });
 });
