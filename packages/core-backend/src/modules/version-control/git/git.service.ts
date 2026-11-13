@@ -2469,7 +2469,7 @@ export class GitService implements IGitService {
         // else's, on a file the pusher cannot see. Null (no rules at the
         // ref) reads as deny, as every caller of the at-ref reads treats it.
         const readable = (await this.accessControl.canReadAtRef(workspaceId, ref, user.email, refused)) === true;
-        throw new PushAccessRefusedError(branch, readable ? { path: refused, eligibleRoles, eligibleUsers } : null);
+        throw new PushAccessRefusedError(branch, { path: refused, eligibleRoles, eligibleUsers }, readable);
       }
     }
   }

@@ -504,6 +504,9 @@ describe('GitService — push gate reads raw paths and judges each commit by its
     expect(err).toBeInstanceOf(PushAccessRefusedError);
     const refusal = err as PushAccessRefusedError;
     expect(refusal.refusal).toBeNull();
+    // The whole refusal still travels, for a relay that judges each of its
+    // own readers (the sync banner's delivery).
+    expect(refusal.blocked.path).toBe('Secret/plan.md');
     expect(refusal.message).toContain("The platform's access check refused the push");
     expect(refusal.message).not.toContain('Secret/plan.md');
     expect(refusal.message).not.toContain(BOB);

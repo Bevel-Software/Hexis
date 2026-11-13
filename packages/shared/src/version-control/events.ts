@@ -157,6 +157,17 @@ export interface GitSyncFailedEvent {
    * this is the author's to act on, so the banner offers to open them.
    */
   conflictedPaths?: string[];
+  /**
+   * Present when the PLATFORM's own access check refused the push before it
+   * left the server (an unpushed commit changes a file its author may not
+   * write), so the repository host was never asked and the banner must not
+   * blame it. `reason` then says the platform refused. `path` is the
+   * repo-relative file that blocks the branch; it, and the writers `reason`
+   * names, reach only a person who may read that file at the branch's
+   * published state. Everyone else gets the platform's sentence without the
+   * file and no `path`.
+   */
+  accessRefusal?: { path?: string };
 }
 
 /**

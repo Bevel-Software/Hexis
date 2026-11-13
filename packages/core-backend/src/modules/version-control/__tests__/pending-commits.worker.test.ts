@@ -197,7 +197,7 @@ describe('PendingCommitsWorker.drainOnce', () => {
       path: 'Kunden/DE_Katalogübertragung per SFTP.docx',
       eligibleRoles: ['Admin', 'Editors'],
       eligibleUsers: writers,
-    });
+    }, true);
     versionControl.runPendingCommit.mockRejectedValueOnce(
       new PushNeedsAgentResolutionError('main', row.path, gate.message, '(cooperative path not attempted)', 'access', gate.reason),
     );

@@ -16,6 +16,10 @@ import { hashEmail } from '../../../shared/email-identity.js';
 
 /** What a `git-sync-failed` says in place of git's words. */
 const REDACTED_REASON = 'The last push did not land.';
+/** What a push-gate refusal says to a person who may not read its file. */
+const UNNAMED_PLATFORM_REFUSAL =
+  `The platform's access check refused the push of "main": an unshared commit on it changes a file you may not read, ` +
+  `which its author may not write there; someone who may write that file can share the branch.`;
 
 /**
  * The events route writes an event to a session only when the session's
@@ -546,6 +550,48 @@ describe('events route — delivery rule', () => {
     expect(forBob).toMatchObject({ reason: REDACTED_REASON });
     expect(forBob).not.toHaveProperty('conflictedPaths');
   });
+
+  it("a refusal by the platform's access check tells every viewer the platform refused, naming the file only to a reader of it", async () => {
+    const bus = new VersionControlEventBus();
+    const base = listen(bus, fakeAccess());
+    const people = ['alice', 'bob', 'carol'] as const;
+    const [alice, bob, carol] = await Promise.all(people.map((u) => open(base, u, `s-${u}`)));
+    for (const u of people) await focus(base, u, `s-${u}`);
+
+    const named = `The platform's access check refused the push of "main": "Public/Notes.md" may be written by Admin; qa-b@example.com.`;
+    const financeNamed = `The platform's access check refused the push of "main": "Finance/Budget.md" may be written by Admin; alice@example.com.`;
+    await emitAndSettle(
+      bus,
+      [
+        { kind: 'git-sync-failed', workspaceId: WS, branch: WS, reason: named, accessRefusal: { path: PUBLIC_REPO } },
+        { kind: 'git-sync-failed', workspaceId: WS, branch: WS, reason: financeNamed, accessRefusal: { path: FINANCE_REPO } },
+      ],
+      alice!,
+      bob!,
+      carol!,
+    );
+
+    const failures = (s: Stream) => s.events.filter((e) => e.kind === 'git-sync-failed');
+    // Bob may not read the root, the case of every user without a role (the
+    // incident's users): the platform's sentence is no git output, so he is
+    // told it whole for the file he may read, never "The last push did not land."
+    const [bobPublic, bobFinance] = failures(bob!);
+    expect(bobPublic).toMatchObject({ reason: named, accessRefusal: { path: PUBLIC_REPO } });
+    // A file he may not read: still the platform's refusal, never the file or its writers.
+    expect(bobFinance).toMatchObject({ reason: UNNAMED_PLATFORM_REFUSAL, accessRefusal: {} });
+    expect(bobFinance).not.toHaveProperty('accessRefusal.path');
+    expect(JSON.stringify(bobFinance)).not.toMatch(/Finance|alice@/);
+    // Carol reads the root but not `Finance/`: the same.
+    const [carolPublic, carolFinance] = failures(carol!);
+    expect(carolPublic).toMatchObject({ reason: named });
+    expect(carolFinance).toMatchObject({ reason: UNNAMED_PLATFORM_REFUSAL, accessRefusal: {} });
+    expect(JSON.stringify(carolFinance)).not.toMatch(/Finance|alice@/);
+    // Alice reads both.
+    expect(failures(alice!).map((e) => (e as { reason: string }).reason)).toEqual([named, financeNamed]);
+    for (const e of [...failures(alice!), ...failures(bob!), ...failures(carol!)]) {
+      expect((e as { reason: string }).reason).not.toMatch(/repository host|did not land/i);
+    }
+  });
 });
 
 describe('EventDelivery', () => {
@@ -571,6 +617,51 @@ describe('EventDelivery', () => {
     expect(
       await judge(stamp({ kind: 'git-sync-failed', workspaceId: WS, branch: WS, reason: 'git said' }), viewer, failing),
     ).toMatchObject({ reason: REDACTED_REASON });
+  });
+
+  it("a platform access refusal whose verdict cannot be reached is still the platform's, without its file", async () => {
+    const failing: EventAccess = {
+      ...fakeAccess(),
+      readableAtBase: () => Promise.reject(new Error('access tree unreadable')),
+    };
+    const refusal = stamp({
+      kind: 'git-sync-failed',
+      workspaceId: WS,
+      branch: WS,
+      reason: `The platform's access check refused the push of "main": "Public/Notes.md" may be written by Admin.`,
+      accessRefusal: { path: PUBLIC_REPO },
+    });
+    for (const viewer of [
+      { userId: 'alice', email: USERS.alice!.email },
+      // No email: nothing named, still the platform's sentence.
+      { userId: 'x', email: undefined },
+    ]) {
+      const got = await judge(refusal, viewer, viewer.email ? failing : fakeAccess());
+      expect(got).toMatchObject({ reason: UNNAMED_PLATFORM_REFUSAL, accessRefusal: {} });
+      expect(got).not.toHaveProperty('accessRefusal.path');
+    }
+  });
+
+  it('judges a platform access refusal at the published state of its branch', async () => {
+    const asked: Array<{ base: string; paths: string[] }> = [];
+    const access: EventAccess = {
+      ...fakeAccess(),
+      readableAtBase: async (base, _email, paths) => {
+        asked.push({ base, paths });
+        return new Set(paths);
+      },
+      // The workspace's checkout is never what decides it.
+      mayReadRepoPath: () => Promise.reject(new Error('must not be asked')),
+    };
+    const refusal = stamp({
+      kind: 'git-sync-failed',
+      workspaceId: 'ali/x',
+      branch: 'ali/x',
+      reason: 'named',
+      accessRefusal: { path: 'Docs/Prüfung.md' },
+    });
+    expect(await judge(refusal, { userId: 'bob', email: USERS.bob!.email }, access)).toBe(refusal);
+    expect(asked).toEqual([{ base: 'ali/x', paths: ['Docs/Prüfung.md'] }]);
   });
 
   it('withholds a named thing from a session with no email', async () => {

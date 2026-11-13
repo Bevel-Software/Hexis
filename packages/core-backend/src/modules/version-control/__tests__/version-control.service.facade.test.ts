@@ -1170,7 +1170,7 @@ describe('VersionControlService — revertChangeRequestFile / closeEmptyChangeRe
         path: 'Docs/rejected ü.md',
         eligibleRoles: ['Editors'],
         eligibleUsers: [{ name: 'Bea', email: 'bea@example.com' }],
-      });
+      }, true);
 
     it('answers that the platform refused, names the file and its writers, and never says the host refused', async () => {
       const emit = vi.fn();
@@ -1193,6 +1193,9 @@ describe('VersionControlService — revertChangeRequestFile / closeEmptyChangeRe
       expect(failed?.reason).toBe(gateRefusal().message);
       expect(String(failed?.reason)).toContain("The platform's access check refused the push");
       expect(String(failed?.reason)).not.toMatch(/repository host/i);
+      // Marked as the platform's refusal, with the file the delivery rule
+      // names only to a viewer who may read it.
+      expect(failed?.accessRefusal).toEqual({ path: 'Docs/rejected ü.md' });
       // No cooperative pull: a refusal of who may write is no divergence.
       // (Once to freshen the checkout before the revert, never as a recovery.)
       expect(pull).toHaveBeenCalledTimes(1);
@@ -1213,10 +1216,11 @@ describe('VersionControlService — revertChangeRequestFile / closeEmptyChangeRe
       expect(push).toHaveBeenCalledTimes(2);
     });
 
-    it('a refusal on a file the pusher may not read names neither the file nor its writers', async () => {
+    it('a refusal on a file the pusher may not read names neither the file nor its writers to the pusher', async () => {
       const emit = vi.fn();
+      const blocked = { path: 'Secret/plan.md', eligibleRoles: ['Admin'], eligibleUsers: [{ name: 'Bea', email: 'bea@example.com' }] };
       const git = makeRevertGit({
-        push: vi.fn().mockRejectedValue(new PushAccessRefusedError('ali/x', null)),
+        push: vi.fn().mockRejectedValue(new PushAccessRefusedError('ali/x', blocked, false)),
         pull: vi.fn().mockResolvedValue({ treeChanged: false }),
       });
       const { svc } = makeHarness({ git, events: { emit } as unknown as VersionControlEventBus });
@@ -1226,9 +1230,33 @@ describe('VersionControlService — revertChangeRequestFile / closeEmptyChangeRe
       expect(refusal.cause).toBe('access');
       expect(refusal.message).toContain("the platform's access check refused the push");
       expect(refusal.message).toContain('a file you may not read');
-      expect(refusal.message).not.toMatch(/repository host|may be written by/i);
+      expect(refusal.message).not.toMatch(/repository host|may be written by|Secret\/plan|bea@/i);
+      // The banner event reaches every session on the branch, so it carries
+      // the whole refusal, marked; the events route's delivery rule decides
+      // per viewer what of it they see (events-delivery.test.ts).
       const failed = emit.mock.calls.map((c) => c[0] as Record<string, unknown>).find((e) => e.kind === 'git-sync-failed');
-      expect(String(failed?.reason)).not.toMatch(/repository host|may be written by/i);
+      expect(failed?.reason).toBe(
+        `The platform's access check refused the push of "ali/x": "Secret/plan.md" may be written by Admin; Bea <bea@example.com>.`,
+      );
+      expect(failed?.accessRefusal).toEqual({ path: 'Secret/plan.md' });
+      expect(String(failed?.reason)).not.toMatch(/repository host/i);
+    });
+
+    it('a host rejection keeps the repository-host wording and carries no access-refusal marker', async () => {
+      const emit = vi.fn();
+      const git = makeRevertGit({
+        push: vi.fn().mockRejectedValue(new Error('remote: Internal Server Error')),
+        pull: vi.fn().mockResolvedValue({ treeChanged: false }),
+      });
+      const { svc } = makeHarness({ git, events: { emit } as unknown as VersionControlEventBus });
+
+      const err = await svc.revertChangeRequestFile(7, makeUser(), 'Docs/a.md').catch((e: unknown) => e);
+      expect((err as PushNeedsAgentResolutionError).cause).toBe('refused');
+      expect((err as PushNeedsAgentResolutionError).message).toContain('the repository host refused the push');
+      const failed = emit.mock.calls.map((c) => c[0] as Record<string, unknown>).find((e) => e.kind === 'git-sync-failed');
+      expect(failed).toBeDefined();
+      expect(failed).not.toHaveProperty('accessRefusal');
+      expect(String(failed?.reason)).not.toMatch(/platform's access check/i);
     });
   });
 

@@ -107,7 +107,7 @@ import {
   VersionControlValidationError,
 } from '../../shared/domain-errors.js';
 import { RECOVERY_BOT_EMAIL, RECOVERY_BOT_NAME } from './recovery-bot.js';
-import { AccessDeniedError, EVERYONE_CANONICAL, PushAccessRefusedError, type IChangeReadGate } from '../access-model/index.js';
+import { AccessDeniedError, EVERYONE_CANONICAL, PushAccessRefusedError, pushAccessRefusalSentence, type IChangeReadGate } from '../access-model/index.js';
 import { printable } from '../../shared/printable.js';
 
 const execFileAsync = promisify(execFile);
@@ -1867,6 +1867,22 @@ export class VersionControlService implements IVersionControlService {
     // Same canonicalization as `noteGitSyncOk` — the pair must agree on keys.
     const id = branchForWorkspaceId(workspaceId);
     this.gitSyncFailing.add(id);
+    // The platform's own access check refused: the host was never asked. The
+    // event fans out to every session on the branch, not only the pusher's,
+    // so it carries the file and its writers whole, with the file marked;
+    // the events route's delivery rule then names them only to a viewer who
+    // may read that file, and tells everyone else the platform refused
+    // without them.
+    if (!conflict && err instanceof PushAccessRefusedError) {
+      this.events?.emit({
+        kind: 'git-sync-failed',
+        workspaceId: id,
+        branch,
+        reason: pushAccessRefusalSentence(branch, err.blocked),
+        accessRefusal: { path: err.blocked.path },
+      });
+      return;
+    }
     this.events?.emit({
       kind: 'git-sync-failed',
       workspaceId: id,

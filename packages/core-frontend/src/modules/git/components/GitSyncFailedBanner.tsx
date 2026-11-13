@@ -70,7 +70,9 @@ function ConflictFileNames({ paths }: { paths: string[] }) {
  * an expired token, a revoked repo grant, an unreachable host — is an operator
  * concern, and there is nothing the person writing a page can do about it. So
  * the copy tells them their work is safe and points whoever can act at the
- * logs, rather than explaining git.
+ * logs, rather than explaining git. The one push failure that is not the git
+ * host's is a refusal by the platform's own access check (`accessRefusal`):
+ * it gets its own headline, which says so, and no pointer at the logs.
  *
  * Clears on `git-sync-recovered`, which the backend emits when a push
  * succeeds after failing. No dismiss control, same as `PullNeededBanner`: the
@@ -106,7 +108,7 @@ export function GitSyncFailedBanner({ workspaceId: forWorkspaceId }: { workspace
   // transition). The alternative — clearing on switch — hides real, still-
   // broken state, which is the exact failure mode this PR exists to fix.
   const [failures, setFailures] = useState<
-    ReadonlyMap<string, { branch: string; reason: string; conflictedPaths?: string[] }>
+    ReadonlyMap<string, { branch: string; reason: string; conflictedPaths?: string[]; refusedByPlatform: boolean }>
   >(new Map());
 
   useEventBusSubscription(
@@ -122,6 +124,7 @@ export function GitSyncFailedBanner({ workspaceId: forWorkspaceId }: { workspace
             branch: e.branch,
             reason: e.reason,
             conflictedPaths: e.conflictedPaths,
+            refusedByPlatform: e.accessRefusal !== undefined,
           }),
         );
       },
@@ -183,6 +186,28 @@ export function GitSyncFailedBanner({ workspaceId: forWorkspaceId }: { workspace
         ) : (
           <ConflictFiles paths={failure.conflictedPaths} />
         )}
+      </div>
+    );
+  }
+
+  // The platform's own access check refused the push: the git host was never
+  // asked, and an operator's logs are not where the answer is. The detail
+  // line says which file blocks the branch and who may write it, as far as
+  // this person may be told.
+  if (failure.refusedByPlatform) {
+    return (
+      <div
+        role="alert"
+        className="px-3 py-1.5 bg-sunken border-b border-line text-xs text-ink shrink-0"
+      >
+        <div className="flex items-center gap-2">
+          <AlertTriangle size={13} className="shrink-0" />
+          <span className="flex-1">
+            Changes on <span className="font-mono font-semibold">{failure.branch}</span> are saved
+            here but were not shared: Hexis’s access check refused the push.
+          </span>
+        </div>
+        <div className="mt-1 ml-5 text-ink-muted break-words">{failure.reason}</div>
       </div>
     );
   }

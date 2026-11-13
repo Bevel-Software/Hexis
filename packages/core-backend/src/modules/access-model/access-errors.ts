@@ -92,36 +92,55 @@ export interface PushAccessRefusal {
 }
 
 /**
+ * The sentence a push-gate refusal is told in: the platform refused (never
+ * the repository host) and, given the refusal, which file and who may write
+ * it. Given null, the file goes unnamed, for a person who may not read it.
+ * One composition for the person who pushed, the sync banner each viewer
+ * sees and the pending-commit queue, so they never say it differently.
+ */
+export function pushAccessRefusalSentence(branch: string, refusal: PushAccessRefusal | null): string {
+  return `The platform's access check refused the push of "${branch}": ${pushAccessRefusalClause(refusal)}.`;
+}
+
+function pushAccessRefusalClause(refusal: PushAccessRefusal | null): string {
+  return refusal
+    ? `"${sanitizedPath(refusal.path)}" may be written by ${eligibleWritersPhrase(refusal.eligibleRoles, refusal.eligibleUsers)}`
+    : 'an unshared commit on it changes a file you may not read, which its author may not write there; someone who may write that file can share the branch';
+}
+
+/**
  * The platform's own access check refused to push a protected branch: an
  * unpushed commit changes a file that the commit's author (or the pusher,
  * for an author the platform cannot match to a user) may not write at the
  * branch's published state. The push never left this server, so this is NOT
  * the repository host refusing, and nothing that relays it may say so.
  *
- * `refusal` is null when the person pushing may not read the file: a commit
- * by somebody else can touch a file they cannot see, and a refusal that
- * named it, or who may write it, would disclose what the read model hides
- * from them. The sentence then says a file they cannot read blocks the
- * branch, without naming it.
+ * `blocked` is the file and who may write it, always. What the PUSHER is
+ * told is `refusal`: the same, or null when they may not read the file — a
+ * commit by somebody else can touch a file they cannot see, and naming it,
+ * or who may write it, would disclose what the read model hides from them.
+ * The message, `reason` and `payload` are scoped to the pusher the same way.
+ * `blocked` is for a relay that judges each of its own readers, as the sync
+ * banner's delivery does per session.
  *
  * `reason` is the clause after "refused the push:", composed here from
- * repository paths and principals only (never git output), so the sync
- * banner, the saved-locally sentence and the pending-commit queue can all
- * carry it verbatim.
+ * repository paths and principals only (never git output), so the
+ * saved-locally sentence and the pending-commit queue can carry it verbatim.
  */
 export class PushAccessRefusedError extends VersionControlDomainError {
   readonly kind = 'push-access-refused' as const;
   readonly reason: string;
+  /** What the pusher may be told: `blocked`, or null when they may not read its file. */
+  readonly refusal: PushAccessRefusal | null;
 
   constructor(
     readonly branch: string,
-    readonly refusal: PushAccessRefusal | null,
+    readonly blocked: PushAccessRefusal,
+    pusherMayRead: boolean,
   ) {
-    const reason = refusal
-      ? `"${sanitizedPath(refusal.path)}" may be written by ${eligibleWritersPhrase(refusal.eligibleRoles, refusal.eligibleUsers)}`
-      : 'an unshared commit on it changes a file you may not read, which its author may not write there; someone who may write that file can share the branch';
+    const refusal = pusherMayRead ? blocked : null;
     super(
-      `The platform's access check refused the push of "${branch}": ${reason}.`,
+      pushAccessRefusalSentence(branch, refusal),
       403,
       refusal
         ? {
@@ -134,7 +153,8 @@ export class PushAccessRefusedError extends VersionControlDomainError {
         : { kind: 'push-access-refused', branch },
     );
     this.name = 'PushAccessRefusedError';
-    this.reason = reason;
+    this.refusal = refusal;
+    this.reason = pushAccessRefusalClause(refusal);
   }
 }
 
