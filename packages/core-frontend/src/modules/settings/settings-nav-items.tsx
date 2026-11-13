@@ -1,7 +1,8 @@
 import { useMemo } from 'react';
-import { matchRoutes } from 'react-router-dom';
+import { matchRoutes, parsePath } from 'react-router-dom';
 import { Boxes, CircleUserRound, KeyRound, Lock, ScrollText, SlidersHorizontal, Users, UsersRound } from 'lucide-react';
 import { useAppRegistry, type AdminMenuItem, type AppRegistry } from '../../core/registry';
+import { SHELL_PATHS } from '../../core/shell-paths';
 
 /**
  * The settings rows, and the one merge that orders them.
@@ -153,29 +154,6 @@ export function normalizeSettingsPath(pathname: string): string {
   return pathname.length > 1 ? pathname.replace(/\/+$/, '') : pathname;
 }
 
-/**
- * The route patterns the shell answers itself, besides the settings pages
- * above and the apps: the old Connection keys address and `/connect` (both
- * redirects), the landing routes (`/`, `/auth/*`), a change request's link,
- * and the two embed pages that sit outside the app. The shell's catch-all is
- * not here: it owns no address in particular.
- *
- * Written out, because the shell imports this module and not the other way
- * round. `ShellRoutes.test.tsx` reads the route table of `ShellRoutes` and
- * holds this list to it, so a route added there without its pattern here
- * fails. The two embed pages are mounted above `ShellRoutes` and are listed
- * by hand.
- */
-const SHELL_OWN_ROUTES: readonly string[] = [
-  '/connection-keys',
-  '/connect',
-  '/',
-  '/auth/*',
-  '/change-requests/:number',
-  '/embed',
-  '/embed/link',
-];
-
 /** A registry row that is a settings page of the app's own: it says where it lives and what is there. */
 export type SettingsPageRow = AdminMenuItem & { path: string; page: NonNullable<AdminMenuItem['page']> };
 
@@ -196,8 +174,27 @@ export function sameSettingsPath(path: string, pathname: string): boolean {
 }
 
 /**
+ * Whether a row's `path` is ONE absolute address rather than a route pattern,
+ * by the router's own parsers. A row's path is both where its page is mounted
+ * and what its link points to, so it has to be an address a link can carry:
+ * `parsePath` finds a query, a fragment or an optional segment's `?`, and the
+ * path matched against itself as a route yields a parameter for every `:name`
+ * and for a splat.
+ */
+function isOneAddress(path: string): boolean {
+  if (!path.startsWith('/')) return false;
+  const { pathname, search, hash } = parsePath(path);
+  if (search || hash || pathname !== path) return false;
+  const itself = matchRoutes([{ path }], path);
+  return itself !== null && Object.keys(itself[0].params).length === 0;
+}
+
+/**
  * The registry's rows that bring a settings page (see `AdminMenuItem.page`),
- * each with its path normalized.
+ * each with its path normalized. A row whose path is not one absolute address
+ * (a route pattern with a parameter, a splat or an optional segment, a path
+ * with a query or a fragment, a relative path) is no destination: it brings no
+ * page and holds no address.
  *
  * An address belongs to whatever answers it first, and a row's page is
  * mounted only at an address nothing else answers: not one of core's settings
@@ -213,12 +210,14 @@ export function registrySettingsPages(registry: SettingsPagesSource): SettingsPa
   const pages: SettingsPageRow[] = [];
   const taken: string[] = [
     ...SETTINGS_NAV_PATHS,
-    ...SHELL_OWN_ROUTES,
+    // The very patterns the shell mounts its own routes at (`core/shell-paths.ts`).
+    ...Object.values(SHELL_PATHS),
     ...registry.apps.filter((app) => app.path !== '/').map((app) => `${app.path}/*`),
     ...registry.topLevelRoutes.map((route) => route.path),
   ];
   for (const item of registry.adminMenuItems) {
-    if (!item.path) continue;
+    // A path that is not one address names no destination: it brings no page and holds no address.
+    if (!item.path || !isOneAddress(item.path)) continue;
     const path = normalizeSettingsPath(item.path);
     if (taken.some((other) => sameSettingsPath(other, path))) continue;
     taken.push(path);

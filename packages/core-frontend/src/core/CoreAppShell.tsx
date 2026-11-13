@@ -75,6 +75,7 @@ import {
 } from './registry';
 import { withCoreModuleContributions } from './core-contributions';
 import { KnowledgeSurface } from './KnowledgeSurface';
+import { SHELL_PATHS } from './shell-paths';
 import { isLibraryLocation } from '../modules/library/routes/library-paths';
 import { EmbedView } from '../modules/embed/components/EmbedView';
 import { EmbedLinkPage } from '../modules/embed/components/EmbedLinkPage';
@@ -194,8 +195,8 @@ const CORE_BANNERS: BannerDef[] = [
  * comment at the `<Routes>` block below).
  */
 const CORE_TOP_LEVEL_ROUTES: RouteDef[] = [
-  { path: '/embed', element: <EmbedView /> },
-  { path: '/embed/link', element: <EmbedLinkPage /> },
+  { path: SHELL_PATHS.embed, element: <EmbedView /> },
+  { path: SHELL_PATHS.embedLink, element: <EmbedLinkPage /> },
 ];
 
 /**
@@ -438,7 +439,7 @@ export function ShellRoutes({ apps, settingsPages = [] }: { apps: AppDef[]; sett
           `/connect` — the address the server hands out — is its permanent
           redirect, carrying the query (`?oauth=`) and the fragment
           (`#authorized`, `#error=`) those landings depend on. */}
-      <Route path="/connect" element={<ConnectToolsRedirect />} />
+      <Route path={SHELL_PATHS.connect} element={<ConnectToolsRedirect />} />
       {/* A PATHLESS layout route: the child paths below stay byte-identical,
           which is what keeps `/secrets` the exact URL external OAuth redirects
           land on. Its only job is to keep the settings nav mounted across
@@ -455,7 +456,7 @@ export function ShellRoutes({ apps, settingsPages = [] }: { apps: AppDef[]; sett
         {/* The Audit log replaced the admin Connection keys overview; links
             to the old address (bookmarks, the enterprise shell's older rows)
             land on it. */}
-        <Route path="/connection-keys" element={<Navigate to="/audit-log" replace />} />
+        <Route path={SHELL_PATHS.connectionKeys} element={<Navigate to="/audit-log" replace />} />
         <Route path="/tools" element={<ToolsExplorerPage />} />
         {/* The app's own settings pages (`AdminMenuItem.page`): under the
             same layout, so they share the nav and are listed in it. */}
@@ -481,8 +482,8 @@ export function ShellRoutes({ apps, settingsPages = [] }: { apps: AppDef[]; sett
 
           OUTSIDE the settings layout, like `/connect` above: these are landing
           and redirect targets, not settings destinations. */}
-      <Route path="/" element={<RootLanding />} />
-      <Route path="/auth/*" element={<RootLanding />} />
+      <Route path={SHELL_PATHS.root} element={<RootLanding />} />
+      <Route path={SHELL_PATHS.authReturn} element={<RootLanding />} />
       {/* The address every change-request link carries (the backend's
           change-request-link helper: `open_change_request`, the read tools,
           every summary's `url`). It opens the request itself, in the
@@ -490,7 +491,7 @@ export function ShellRoutes({ apps, settingsPages = [] }: { apps: AppDef[]; sett
           Before this route existed the catch-all below swallowed the link.
           OUTSIDE the settings layout and the apps, like the `/connect`
           redirect: a landing target, not a destination with a nav row. */}
-      <Route path="/change-requests/:number" element={<ChangeRequestLink />} />
+      <Route path={SHELL_PATHS.changeRequest} element={<ChangeRequestLink />} />
       <Route path="*" element={<Navigate to={KB_ROUTE_PREFIX} replace />} />
     </Routes>
   );

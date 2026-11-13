@@ -363,6 +363,41 @@ describe('SettingsLayout with pages the registry brings', () => {
     expect(registrySettingsPages(registry).map((row) => row.id)).toEqual(['free']);
   });
 
+  it('mounts a page only at one absolute address, never at a route pattern, and such a row holds no address', () => {
+    const page = (id: string, path: string): AdminMenuItem => ({ id, label: id, path, page: <div>{id}</div> });
+    const rows = [
+      page('parameter', '/teams/:id'),
+      page('splat', '/teams/*'),
+      page('optional', '/teams/all?'),
+      page('query', '/teams?tab=all'),
+      page('fragment', '/teams#all'),
+      page('relative', 'teams'),
+      // After them all, and still free: none of the rows above took it.
+      page('one-address', '/teams/1'),
+      page('colon-inside', '/teams/a:b'),
+    ];
+    expect(registrySettingsPages(makeRegistry({ adminMenuItems: rows })).map((row) => `${row.id} ${row.path}`)).toEqual([
+      'one-address /teams/1',
+      'colon-inside /teams/a:b',
+    ]);
+  });
+
+  it('lists no row whose path is a route pattern', () => {
+    const rows: AdminMenuItem[] = [{ id: 'pattern', label: 'A pattern', path: '/teams/:id', page: <div>Teams</div> }];
+    render(
+      <AppRegistryContext.Provider value={makeRegistry({ adminMenuItems: rows })}>
+        <MemoryRouter initialEntries={['/secrets']}>
+          <Routes>
+            <Route element={<SettingsLayout />}>
+              <Route path="/secrets" element={<div>Secrets stub</div>} />
+            </Route>
+          </Routes>
+        </MemoryRouter>
+      </AppRegistryContext.Provider>,
+    );
+    expect(within(nav()).queryByRole('link', { name: 'A pattern' })).toBeNull();
+  });
+
   it('an app that claims the root takes no address from a page', () => {
     const registry = makeRegistry({
       apps: [{ id: 'everything', label: 'Everything', path: '/', element: <div /> }],
