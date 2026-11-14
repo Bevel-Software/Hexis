@@ -33,5 +33,6 @@ import './auth.middleware.js';
 export type { IAccountSwitchGuard } from './account-switch-guard.js';
 export type { AuthService } from './auth.service.js';
 export type { ErasureTarget, ErasureTx, IAccountErasureService, IErasureParticipant } from './account-erasure.service.js';
-// The session token a request carries in auth's cookie, for a route that is reached before the session middleware.
-export { readAuthCookie } from './auth.middleware.js';
+// The session token a request carries (Bearer, else auth's cookie), read by the
+// session middleware's own rule: for a route mounted before that middleware.
+export { sessionTokenOf } from './session-token.js';
