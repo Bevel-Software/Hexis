@@ -465,10 +465,13 @@ export class SecretOAuthError extends Error {
 
 /**
  * Whether an OAuth token's granted scopes cover a tool's currently-required scopes:
- * every required scope must be among the granted ones. No required scopes → trivially
- * covered. Granted scopes unknown (a token minted before we recorded them, `undefined`)
- * → NOT covered when anything is required, so the caller is safely routed to re-auth
- * rather than hitting an opaque provider error. `granted` is the space-delimited string
+ * every required scope must be among the granted ones, except the request-only
+ * scopes (`offline_access`, see `REQUEST_ONLY_SCOPES` below), which are never
+ * required back. No required scopes, or only request-only ones → trivially covered.
+ * Granted scopes unknown (a token minted before we recorded them, `undefined`)
+ * → NOT covered when any scope other than a request-only one is required, so the
+ * caller is safely routed to re-auth rather than hitting an opaque provider error.
+ * `granted` is the space-delimited string
  * the provider echoed (`SecretConfigStatus.grantedScopes`); `required` is the manual's
  * declared list. Lives here (a leaf, dependency-free) so both the MCP pre-check and the
  * connect route can share one definition without crossing module boundaries.

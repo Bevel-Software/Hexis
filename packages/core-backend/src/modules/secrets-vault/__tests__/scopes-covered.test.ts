@@ -141,6 +141,11 @@ describe('request-only scopes (offline_access)', () => {
     expect(scopesCovered(['offline_access', 'User.Read'], '')).toBe(false);
   });
 
+  it('counts a tool that requires only offline_access as covered, even when granted is unknown', () => {
+    expect(missingScopes(['offline_access'], undefined)).toEqual([]);
+    expect(scopesCovered(['offline_access'], '')).toBe(true);
+  });
+
   it('exempts only the exact name, not look-alikes', () => {
     expect(missingScopes(['Offline_Access', 'offline'], 'User.Read')).toEqual(['Offline_Access', 'offline']);
   });
