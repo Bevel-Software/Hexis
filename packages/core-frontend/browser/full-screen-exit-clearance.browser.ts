@@ -101,5 +101,12 @@ for (const width of [1400, 390]) {
     expect(Math.abs(middle(download) - middle(exit))).toBeLessThanOrEqual(1);
     // Beside it: the toolbar's own 8px gap between the two, Download first.
     expect(exit.left - download.right).toBeCloseTo(8, 0);
+    // Clickable, not only drawn clear: a click at Download's right end, where
+    // the control used to sit, reaches Download. Playwright hit-tests the point
+    // and refuses a click another element would intercept, so an invisible
+    // layer over Download fails here even when the boxes do not overlap.
+    const button = page.locator('[data-download]');
+    const size = (await button.boundingBox())!;
+    await button.click({ position: { x: size.width - 2, y: size.height / 2 }, timeout: 3000 });
   });
 }
