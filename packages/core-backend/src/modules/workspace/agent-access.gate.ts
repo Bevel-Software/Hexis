@@ -2,7 +2,7 @@
  * Agent access gate — the per-call seam every gated agent tool runs through.
  *
  * It decides nothing of its own. It calls the hooks a DEPLOYMENT registered
- * (`WorkflowHooks`): one before an agent read of a knowledge-base path, one
+ * (`VersionControlHooks`): one before an agent read of a knowledge-base path, one
  * before an agent write. A hook that throws refuses the operation and the
  * caller sees that hook's own message and status. With no hook registered —
  * every core-only deployment — nothing is refused and nothing is recorded, and
@@ -19,9 +19,9 @@
  * all branches and to reads).
  */
 
-import type { JsonSchema } from '../tool-registry/tool.contract.js';
-import type { ToolContext } from '../tool-helpers/tool.contract.js';
-import type { WorkflowHooks } from '../workflow/workflow-hooks.js';
+import type { JsonSchema } from '../tool-registry/index.js';
+import type { ToolContext } from '../tool-helpers/index.js';
+import type { VersionControlHooks } from '../version-control/index.js';
 
 /**
  * What the `sessionId` input says on its own, before any deployment note. The
@@ -32,7 +32,7 @@ import type { WorkflowHooks } from '../workflow/workflow-hooks.js';
  * takes, so a run's reads and its questions share one conversation.
  */
 export const SESSION_ID_DESCRIPTION =
-  "This conversation's id, so the server can tell one run's calls apart. External agents (direct MCP calls and `call_tool_chain` alike): call the `start_session` tool ONCE at the very start of your work to obtain it, then pass that id here — the same id `ask` takes. The in-process agent runtime supplies this automatically (do not set it yourself).";
+  "This conversation's id: call `start_session` once, at the start of your work, and pass its id here, inside `call_tool_chain` too (and to `ask`, where the deployment offers it). The in-process agent runtime sets it itself.";
 
 /**
  * The `sessionId` input every gated tool declares. The description a MOUNTED
@@ -97,11 +97,11 @@ export interface AgentAccessGate {
   /** Lowercased email of the recovery/merge bot, which never reaches the hooks. */
   recoveryBotEmail: string;
   /**
-   * The workflow lifecycle-hook registry holding the BLOCKING `agentRead` and
+   * The version-control lifecycle-hook registry holding the BLOCKING `agentRead` and
    * `preWrite` hooks. Core registers none; a deployment registers against
-   * `workflowService.hooks` — pass that same instance here.
+   * `versionControlService.hooks` — pass that same instance here.
    */
-  hooks: WorkflowHooks;
+  hooks: VersionControlHooks;
   /** The notes a deployment adds to what agents read about these tools. */
   notes: ToolDescriptionNotes;
 }
@@ -149,8 +149,8 @@ export async function notifyAgentRead(
  * that throws refuses it with its own message and status; with none registered
  * this is a no-op.
  *
- * `wsPath` is omitted by the one write-capable tool with no resolvable target,
- * `execute_command` — the hook then decides at the coarser session level.
+ * `wsPath` is omitted by a write-capable operation with no resolvable
+ * target — the hook then decides at the coarser session level.
  */
 export async function assertAgentWriteAllowed(
   gate: AgentAccessGate,

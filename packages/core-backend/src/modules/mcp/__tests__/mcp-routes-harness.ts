@@ -2,6 +2,7 @@ import type { Server as HttpServer } from 'node:http';
 import type { RequestHandler } from 'express';
 import express from 'express';
 import { createMcpRoutes } from '../mcp.routes.js';
+import type { McpCallerKind } from '../mcp-auth.middleware.js';
 
 /**
  * The shared mount for every `createMcpRoutes` suite.
@@ -19,7 +20,8 @@ import { createMcpRoutes } from '../mcp.routes.js';
  */
 
 /**
- * Auth stand-in binding the user named by `x-test-user`, defaulting to user-A.
+ * Auth stand-in binding the user named by `x-test-user`, defaulting to user-A,
+ * and the credential kind named by `x-test-kind`, when one is.
  *
  * The header lets a suite act as a second user (the cross-user checks need
  * one); suites that never send it see the single fixed user their assertions
@@ -27,6 +29,16 @@ import { createMcpRoutes } from '../mcp.routes.js';
  */
 export const fakeAuth: RequestHandler = (req, _res, next) => {
   req.userId = (req.headers['x-test-user'] as string | undefined) ?? 'user-A';
+  // The signed-in person's email, for a suite whose route reads it.
+  const email = req.headers['x-test-email'] as string | undefined;
+  if (email) req.userEmail = email;
+  // The agent the credential connects as, as the real middleware sets it.
+  const agentPath = req.headers['x-test-agent-path'] as string | undefined;
+  if (agentPath) req.mcpAgentPath = agentPath;
+  // The credential kind the real middleware would have recognised, when a
+  // suite needs one (the page header is a session's alone).
+  const kind = req.headers['x-test-kind'] as McpCallerKind | undefined;
+  if (kind) req.mcpCallerKind = kind;
   next();
 };
 
@@ -42,6 +54,7 @@ export interface McpRoutesDeps {
   internalTokens?: unknown;
   oauthProvider?: unknown;
   resourceMetadataUrl?: string;
+  agents?: unknown;
 }
 
 /** Servers opened by `mountMcpRoutes`, closed together by `closeMountedRoutes`. */
@@ -67,6 +80,7 @@ export async function mountMcpRoutes(deps: McpRoutesDeps = {}): Promise<string> 
       (deps.internalTokens ?? stub) as never,
       (deps.oauthProvider ?? stub) as never,
       deps.resourceMetadataUrl ?? '',
+      deps.agents as never,
     ),
   );
   const server = await new Promise<HttpServer>((resolve) => {

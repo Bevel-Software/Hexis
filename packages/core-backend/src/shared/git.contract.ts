@@ -1,6 +1,6 @@
 /**
  * The contract for RUNNING git. Nothing here spawns anything — the one
- * implementation is `NodeGitRunner` in `modules/workflow/git`, wired once by
+ * implementation is `NodeGitRunner` in `modules/version-control/git`, wired once by
  * the composition root and injected into every module that shells out to git,
  * so no module carries an `execFile('git', …)` of its own.
  *
@@ -70,8 +70,15 @@ export interface GitCredentials {
    * failure here is not the call's failure: git runs with the token in
    * hand, and the host says what it thinks of it. Absent for a credential
    * that does not expire.
+   *
+   * `refused` is the runner reporting that the host just refused the
+   * credential in hand: whatever is held is dead, however much time the
+   * clock says it has left, and a fresh one is asked for now, past whatever
+   * the provider remembers about a recent failure. The failure is thrown to
+   * the caller; what `token` answers afterwards is what the runner judges
+   * by — a credential that could not be replaced is not offered again.
    */
-  prepare?(): Promise<void>;
+  prepare?(opts?: { refused?: boolean }): Promise<void>;
 }
 
 /** The username git is given when a deployment names none. */
@@ -239,6 +246,16 @@ export function assertOneSpecPerLine(specs: readonly string[]): void {
 /** Whether a failure came from the deadline rather than from git's own answer. */
 export function isGitTimeout(err: unknown): boolean {
   return err instanceof GitRunError && err.timedOut;
+}
+
+/**
+ * A full object id (SHA-1 or SHA-256, lowercase hex): what every at-ref
+ * access gate resolves its ref to before reading, and the one spelling the
+ * history tools accept for a commit — anything shorter or mixed-case is a
+ * name, which a fetch can move.
+ */
+export function isCommitSha(ref: string): boolean {
+  return /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(ref);
 }
 
 /**

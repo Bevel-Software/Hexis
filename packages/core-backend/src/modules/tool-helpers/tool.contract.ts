@@ -1,7 +1,9 @@
-import type { AuthUser, IWorkflowService } from '@bevel-software/platform-shared';
+import type { AuthUser, IVersionControlService } from '@bevel-software/platform-shared';
+import type { ConnectionScope } from '../agent-scope/index.js';
 import type { LocalFilesystem } from '@mastra/core/workspace';
-import type { WorkspaceService } from '../workspace/workspace.service.js';
-import type { WorkflowEventBus } from '../workflow/event-bus.js';
+import type { WorkspaceService } from '../workspace/index.js';
+import type { VersionControlEventBus } from '../version-control/index.js';
+import type { WriteValidator } from '../kb-fs/index.js';
 
 /**
  * The hosting/execution contract a module works against when it lets `toolHelpers`
@@ -41,19 +43,44 @@ export interface ToolContext {
   sessionId?: string;
   /**
    * The branch the in-process agent's workspace is focused on, from its internal
-   * token. An internal-only workspace tool (e.g. `execute_command`) falls back to
-   * it when the model omits `branch`, so the in-app chat agent acts on its own
+   * token. A tool may fall back to it when the model omits `branch` (`list_tool_setup`
+   * reads the focused branch's setup), so the in-app chat agent acts on its own
    * workspace even on a branch-less call. Only set for `source: 'internal'`;
    * external callers must name the branch explicitly (a present-but-invalid value
    * still fails closed regardless of this).
    */
   focusedBranch?: string;
+  /**
+   * The branch this call runs on, resolved by the tool handler before the tool
+   * ran from the tool's branch declaration (see `BranchDeclaration`): the one
+   * the caller named, or the deployment's default branch for a
+   * `defaults-to-default-branch` tool called without one. Set for every tool
+   * that declares a branch, and always a non-empty string then; absent for a
+   * tool that takes no branch.
+   */
+  branch?: string;
+  /**
+   * What the caller's connection may load (`modules/agent-scope`): resolved
+   * once per call from the agent configuration its credential connects as. The
+   * tool handler refuses a platform tool outside it before the tool runs; the
+   * tools that list skills and connectors narrow by it. Absent is Everything
+   * — and a context built without it for a credential that names an agent is
+   * refused every tool by the handler, never served Everything.
+   */
+  connectionScope?: ConnectionScope;
   abortSignal: AbortSignal;
   workspaceService: WorkspaceService;
-  workflowService: IWorkflowService;
-  events: WorkflowEventBus;
+  versionControlService: IVersionControlService;
+  events: VersionControlEventBus;
   /** Build the lock-aware filesystem for `branch`'s workspace (cached). The tool supplies `branch` from its own input. */
   getFilesystem(branch: string): Promise<LocalFilesystem>;
+  /**
+   * The agent's pre-disk write gate for `branch`'s workspace (cached) — the
+   * one the filesystem above runs before a byte lands (`roles.yaml`: must
+   * parse, no new role, no unknown group). A tool that writes content by
+   * another road than that filesystem (a merge resolution) takes it too.
+   */
+  getWriteValidator(branch: string): Promise<WriteValidator>;
 }
 
 /**

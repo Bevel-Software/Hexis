@@ -40,6 +40,11 @@ interface DialogProps {
   onClose(): void;
   /** Rendered in the header bar next to the close button. */
   title: ReactNode;
+  /**
+   * Id of the element that describes the dialog (`aria-describedby`): the
+   * question a confirmation asks, so a screen reader reads it with the title.
+   */
+  describedBy?: string;
   children: ReactNode;
   /** Pinned footer (e.g. action buttons). Omit for a bodyless dialog. */
   footer?: ReactNode;
@@ -66,6 +71,7 @@ export function Dialog({
   open,
   onClose,
   title,
+  describedBy,
   children,
   footer,
   headerActions,
@@ -173,6 +179,7 @@ export function Dialog({
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
+        aria-describedby={describedBy}
         tabIndex={-1}
         className={`bg-white border border-line rounded-lg shadow-xl w-full ${SIZE_CLASS[size]} max-h-[90vh] flex flex-col`}
         onClick={(e) => e.stopPropagation()}

@@ -1,0 +1,427 @@
+/**
+ * Version-control event bus types — what the backend pushes over SSE to keep the
+ * frontend in sync with state changes, including those triggered by other
+ * users on the same branch or by the agent acting server-side.
+ *
+ * **Scope model** — events have one of three scopes, set by the variant:
+ *
+ *   - **Workspace-scoped** (`workspaceId` field). Pushed to every connected
+ *     session whose current focus is `workspaceId`. Examples: a file changed
+ *     on this branch, someone took the lock on a file. Anyone editing this
+ *     branch cares.
+ *
+ *   - **User-scoped** (`forUserId` field, no `workspaceId`). Pushed only to
+ *     sessions opened by `forUserId`, regardless of their current focus.
+ *     Examples: an agent turn called a tool on your behalf, your view should
+ *     navigate to a different branch. Other users on the same branch don't
+ *     care.
+ *
+ *   - **Global** (no `workspaceId`, no `forUserId`). Pushed to every
+ *     authenticated session. Examples: change requests opening / merging /
+ *     being rejected — any user with access to the repo might care.
+ *
+ * **Identity + replay** — every event carries an `id` (monotonic int) and an
+ * ISO `ts`. Clients reconnecting with `Last-Event-ID: <id>` get the buffered
+ * tail replayed (server's ring buffer is finite — see `VersionControlEventBus`).
+ * If `id` is older than what the buffer still has, the server sends a
+ * `{ kind: 'resync' }` instead so the client refetches the world cleanly.
+ *
+ * **Idempotency over exactly-once** — clients tolerate duplicates and
+ * out-of-order delivery: every payload carries enough state for the UI to
+ * reach the right end state regardless of how many times it sees the event
+ * (e.g. `file-changed` includes the new SHA — UI only refreshes if the open
+ * tab's SHA differs).
+ */
+
+export interface VersionControlEventEnvelope {
+  /** Monotonic, process-local. Used for `Last-Event-ID` replay. */
+  id: number;
+  /** ISO timestamp the event was emitted on the backend. */
+  ts: string;
+}
+
+// ── Workspace-scoped ─────────────────────────────────────────────────────────
+
+/**
+ * A file's content changed on disk — fires for ANY write that lands bytes
+ * for `(workspaceId, branch, path)`, whether or not a commit followed.
+ *
+ *   - **`newSha` set** → a commit landed. The disk write came through the
+ *     full lock-release pipeline (acquire → write → commitFile → push).
+ *     History views should refetch.
+ *
+ *   - **`newSha === null`** → disk bytes changed but no commit yet, i.e.
+ *     the writer is mid-edit (lock still held — e.g. the editor's Ctrl+S
+ *     autosave-to-disk before the final Save click). Watchers should
+ *     refetch content but NOT history (nothing new in git log).
+ *
+ * Emitted from both the human PUT/PATCH/DELETE routes and the agent's
+ * LockingFilesystem so anyone tailing the file sees changes immediately.
+ */
+export interface FileChangedEvent {
+  kind: 'file-changed';
+  workspaceId: string;
+  branch: string;
+  path: string;
+  /** Commit sha if a commit landed; null if this was a disk-only write. */
+  newSha: string | null;
+  /** The user whose write caused the change. */
+  byUserId: string;
+  byUserName: string;
+}
+
+/** Someone (`holderUserId`) just acquired the lock on `(branch, path)`. */
+export interface LockAcquiredEvent {
+  kind: 'lock-acquired';
+  workspaceId: string;
+  branch: string;
+  path: string;
+  holderUserId: string;
+  holderName: string;
+}
+
+/** The lock on `(branch, path)` was released — file is free for the next caller. */
+export interface LockReleasedEvent {
+  kind: 'lock-released';
+  workspaceId: string;
+  branch: string;
+  path: string;
+}
+
+/**
+ * The file tree for `(workspaceId, branch)` changed in a way that's not
+ * captured by a single `file-changed` event — typically a recursive delete,
+ * a move, or an unzip extracting many files. Emitted alongside per-file
+ * `file-changed` events, but lets the file explorer refresh once instead of
+ * N times.
+ */
+export interface FsTreeChangedEvent {
+  kind: 'fs-tree-changed';
+  workspaceId: string;
+  branch: string;
+}
+
+/**
+ * A document's text could not be extracted, just now: the parser refused it,
+ * or the extraction outlived its budget. Emitted once per FRESH failure —
+ * never for one answered from memory — so a person looking at the file's row
+ * in the explorer is told in place, and nothing is kept for later.
+ *
+ * `reason` follows "Could not be read:" in the explorer's notice. It names the
+ * file and quotes the parser; like every kind that names a path on a
+ * workspace, it is delivered only to sessions whose person may read `path`
+ * (the events route's delivery rule, judged by the access rules).
+ */
+export interface DocumentUnreadableEvent {
+  kind: 'document-unreadable';
+  workspaceId: string;
+  path: string;
+  reason: string;
+}
+
+/**
+ * A commit landed locally but could not be pushed to the remote.
+ *
+ * Saving is deliberately not blocked on this: the commit is safe on the
+ * workspace volume and the next push may well carry it, so the write still
+ * reports success and the recovery paths (cooperative pull-rebase, the
+ * pending-commit queue's retries, the agent hand-off) keep running. What this
+ * event adds is VISIBILITY. Without it a deployment whose pushes are all
+ * failing — a bad token, an expired one, a revoked repo grant — looks
+ * completely healthy from the UI while commits pile up locally, which is
+ * exactly how one self-hosted install got 136 commits and two days deep
+ * before anyone noticed.
+ *
+ * `reason` is the sanitised git error, for the log-shaped detail line under
+ * the banner; anything credential-bearing is already masked out of it. The UI
+ * should point at the server logs rather than try to explain git to the user —
+ * every actionable cause here is an operator concern, not an author's.
+ *
+ * Workspace-scoped: everyone editing this branch has work sitting unpushed,
+ * not just whoever happened to trigger the failing push.
+ *
+ * Emitted on every failure rather than only on the first, so a session that
+ * connects mid-outage learns about it on the next save instead of waiting for
+ * a state it already missed. Clients treat repeats as idempotent.
+ */
+export interface GitSyncFailedEvent {
+  kind: 'git-sync-failed';
+  workspaceId: string;
+  branch: string;
+  /** Sanitised git error — safe to display, tokens already redacted. */
+  reason: string;
+  /**
+   * Present when the failure is a REMOTE-SYNC CONFLICT (`POST /api/sync`
+   * found Hexis-side commits that contradict what landed on the host): the
+   * repo-relative files a person has to reconcile. Unlike a failing push,
+   * this is the author's to act on, so the banner offers to open them.
+   */
+  conflictedPaths?: string[];
+}
+
+/**
+ * A push succeeded on a workspace whose previous push had failed — the
+ * counterpart to `git-sync-failed`, and the signal that clears its banner.
+ *
+ * Only emitted on that transition. A push runs on every save, so announcing
+ * each healthy one would put a broadcast on the hot path to say nothing.
+ */
+export interface GitSyncRecoveredEvent {
+  kind: 'git-sync-recovered';
+  workspaceId: string;
+  branch: string;
+}
+
+// ── User-scoped ──────────────────────────────────────────────────────────────
+
+/**
+ * Agent called `switch_branch` mid-turn and the target validated +
+ * pre-warmed successfully. Tells the frontend to navigate to the new draft
+ * once the in-flight chat turn completes — navigation mid-stream would tear
+ * down the chat connection. The chat hook stashes the latest pending
+ * destination and consumes it in `onFinish`. The native chat path stamps the
+ * `threadId`; the registry `switch_branch` tool (called over the internal
+ * loopback, which carries no threadId) omits it, so the frontend keys the
+ * pending destination on `forUserId` — a user has one active chat stream.
+ *
+ * User-scoped (no `workspaceId`) — only the user whose agent ran the tool
+ * should follow; other users on the same branch don't care.
+ */
+export interface BranchSwitchedEvent {
+  kind: 'branch-switched';
+  forUserId: string;
+  threadId?: string;
+  branch: string;
+  workspaceId: string;
+}
+
+/**
+ * Agent (running on `forUserId`'s behalf) is about to call a tool — used by
+ * the file explorer to highlight files the agent is touching and by the
+ * chat sidebar to show a live activity feed without parsing the chat
+ * stream's data parts.
+ *
+ * Fired BEFORE the tool runs; the resulting `file-changed` /
+ * `change-request-opened` / etc. events arrive after.
+ */
+export interface AgentToolCallEvent {
+  kind: 'agent-tool-call';
+  forUserId: string;
+  threadId: string;
+  tool: string;
+  /**
+   * Free-form summary of what the tool is about to do (e.g. `"writing
+   * Knowledge/Foo.md"`, `"opening change request Foo → target-company-state"`).
+   * Optional — purely informational, never load-bearing.
+   */
+  summary?: string;
+}
+
+// ── Global ───────────────────────────────────────────────────────────────────
+
+/**
+ * A change request was opened. Reaches EVERY session, so it says only that a
+ * request exists: its number, its branches and who opened it — no title and
+ * no paths, which a person may not be allowed to read. A reader fetches the
+ * request, and sees of it what the request routes show them.
+ */
+export interface ChangeRequestOpenedEvent {
+  kind: 'change-request-opened';
+  number: number;
+  source: string;
+  target: string;
+  /** Hash of the author's email (matches the marker in the CR body); null when unattributable. */
+  authorIdHash: string | null;
+}
+
+export interface ChangeRequestMergedEvent {
+  kind: 'change-request-merged';
+  number: number;
+}
+
+export interface ChangeRequestRejectedEvent {
+  kind: 'change-request-rejected';
+  number: number;
+}
+
+/**
+ * A request's title or description was edited. Carries no text: every
+ * viewer re-reads the request through the list and detail endpoints it
+ * already uses, which apply its own read rules.
+ */
+export interface ChangeRequestEditedEvent {
+  kind: 'change-request-edited';
+  number: number;
+}
+
+/**
+ * An apply did NOT land, announced to EVERY session — the counterpart of the
+ * user-scoped `change-request-merge-failed` below, which only the clicker gets.
+ *
+ * The request stays open, so everyone who can see it (its author waiting on
+ * the verdict, another owner, another admin) needs to learn that the attempt
+ * failed and why. The reason is deliberately NOT carried here: it is persisted
+ * on the request (`PullRequestSummary.lastApplyFailure`) and read back through
+ * the list and detail endpoints the viewer already uses, so the broadcast puts
+ * no error text in front of every session, and a session that missed the event
+ * reads the same answer on its next fetch.
+ *
+ * Also sent when a recorded refusal is CLEARED because a change made it
+ * obsolete (an approval for a gate refusal, a moved source head for any):
+ * either way the request's `lastApplyFailure` changed, and every viewer
+ * re-reads it.
+ */
+export interface ChangeRequestApplyFailedEvent {
+  kind: 'change-request-apply-failed';
+  number: number;
+}
+
+/**
+ * A merge the caller triggered did NOT land — either the gate refused it, the
+ * branch needs conflict resolution, or `gh pr merge` failed. The merge route
+ * is async (returns 202 immediately so a large PR's merge can't outlive the
+ * gateway timeout), so this is how the failure reaches the UI that kicked it
+ * off. Success travels on `change-request-merged` instead.
+ *
+ * User-scoped (`forUserId`, no `workspaceId`) — the clicker's immediate
+ * answer, which also routes a conflict into the resolution flow. Everyone else
+ * learns of the failure from `change-request-apply-failed`, which carries no
+ * error string; the reason itself is persisted on the request.
+ */
+export interface ChangeRequestMergeFailedEvent {
+  kind: 'change-request-merge-failed';
+  forUserId: string;
+  number: number;
+  /** Human-readable reason for the error banner (tokens already redacted). */
+  reason: string;
+  /**
+   * True when the merge failed because the branch needs conflict resolution.
+   * The UI routes to the agent resolution flow instead of showing an error.
+   */
+  conflicts: boolean;
+  /**
+   * When the attempt failed (ISO) — the same instant persisted as
+   * `lastApplyFailure.at` when the refusal is recorded, so the clicker's tab
+   * can tell its own refusal from a later one somebody else's attempt made.
+   */
+  at?: string;
+}
+
+/**
+ * Per-file approval on a change request was added or removed (e.g. via the
+ * Approve / Withdraw confirmation buttons, or auto-invalidated by a new
+ * commit). The UI re-fetches the CR detail to get the updated approval set.
+ */
+export interface ApprovalChangedEvent {
+  kind: 'approval-changed';
+  number: number;
+  /** The approved file, KB-repo-relative. */
+  path: string;
+  /**
+   * The request's target branch: the event names a path, and whether a
+   * session's person may hear of it is judged by their read access to that
+   * path at the target — the same rule the request's own detail is scoped by.
+   */
+  targetBranch: string;
+  approverUserId: string;
+  change: 'added' | 'removed';
+}
+
+// ── Control ──────────────────────────────────────────────────────────────────
+
+/**
+ * Sent every ~25 s on the SSE stream to keep proxies / load balancers from
+ * killing idle connections. Carries no payload state — the client ignores it
+ * apart from the keepalive effect.
+ */
+export interface HeartbeatEvent {
+  kind: 'heartbeat';
+}
+
+/**
+ * Server told the client to discard its cached state and refetch from
+ * scratch — sent when a reconnecting client's `Last-Event-ID` is older than
+ * the server's ring buffer still has, so we can't trust an event replay to
+ * catch them up.
+ */
+export interface ResyncEvent {
+  kind: 'resync';
+  /** Human-readable reason for logs / debugging. */
+  reason: string;
+}
+
+/**
+ * One of `forUserId`'s agents has reached the platform: the FIRST
+ * authenticated request on one of their agent connections or connection keys
+ * — the `initialize` or `tools/list` every client sends on connecting, before
+ * it has called any tool. Emitted once per connection or key, when its use
+ * stamp goes from never to now; later uses stamp quietly. It is what the
+ * onboarding waits for (the connect-your-agent page, the Get set up list),
+ * so those pages listen rather than ask on a timer. User-scoped: nobody
+ * else's session cares.
+ */
+export interface AgentConnectedEvent {
+  kind: 'agent-connected';
+  forUserId: string;
+  /** The agent's registered client name, or the connection key's label. */
+  client: string;
+  /**
+   * Which of the two `client` is: `agent` for an OAuth connection's
+   * registered name, `key` for a connection key's free-text label.
+   */
+  agentKind: 'agent' | 'key';
+  /** When the first request landed, ISO 8601. */
+  at: string;
+}
+
+// ── Union + helpers ──────────────────────────────────────────────────────────
+
+export type VersionControlEventPayload =
+  | FileChangedEvent
+  | LockAcquiredEvent
+  | LockReleasedEvent
+  | FsTreeChangedEvent
+  | DocumentUnreadableEvent
+  | GitSyncFailedEvent
+  | GitSyncRecoveredEvent
+  | BranchSwitchedEvent
+  | AgentToolCallEvent
+  | AgentConnectedEvent
+  | ChangeRequestOpenedEvent
+  | ChangeRequestMergedEvent
+  | ChangeRequestRejectedEvent
+  | ChangeRequestEditedEvent
+  | ChangeRequestMergeFailedEvent
+  | ChangeRequestApplyFailedEvent
+  | ApprovalChangedEvent
+  | HeartbeatEvent
+  | ResyncEvent;
+
+export type VersionControlEvent = VersionControlEventEnvelope & VersionControlEventPayload;
+
+/** True for events scoped to a workspace — the focus filter applies. */
+export function isWorkspaceScoped(
+  e: VersionControlEventPayload,
+): e is VersionControlEventPayload & { workspaceId: string } {
+  return (
+    e.kind === 'file-changed' ||
+    e.kind === 'lock-acquired' ||
+    e.kind === 'lock-released' ||
+    e.kind === 'fs-tree-changed' ||
+    e.kind === 'document-unreadable' ||
+    e.kind === 'git-sync-failed' ||
+    e.kind === 'git-sync-recovered'
+  );
+}
+
+/** True for events scoped to a specific user — the user filter applies. */
+export function isUserScoped(
+  e: VersionControlEventPayload,
+): e is VersionControlEventPayload & { forUserId: string } {
+  return (
+    e.kind === 'agent-tool-call' ||
+    e.kind === 'agent-connected' ||
+    e.kind === 'branch-switched' ||
+    e.kind === 'change-request-merge-failed'
+  );
+}

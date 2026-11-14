@@ -1,5 +1,5 @@
 import { createHmac } from 'node:crypto';
-import { timingSafeStringEqual } from '../auth/password-hash.js';
+import { timingSafeStringEqual } from '../auth/index.js';
 
 /**
  * Who may call `POST /api/sync`, decided from the request's credentials.

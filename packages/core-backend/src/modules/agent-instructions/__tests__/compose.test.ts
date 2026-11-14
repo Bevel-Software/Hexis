@@ -21,7 +21,7 @@ import {
  * The rules themselves are pinned in `shared-file-rules.test.ts`; here they are
  * only the fixed text the preamble follows.
  */
-const PLATFORM = platformInstructions(DEFAULT_KB_LAYOUT);
+const PLATFORM = platformInstructions(DEFAULT_KB_LAYOUT, '');
 
 describe('composeAgentInstructions: the handshake text', () => {
   it('sends the platform text alone — header and shared rules — for an absent, empty, whitespace or comment-only preamble', () => {

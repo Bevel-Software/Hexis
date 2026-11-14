@@ -4,15 +4,17 @@ import { DEFAULT_BRANCH, type FileTreeEntry } from '@bevel-software/platform-sha
 import '../library.css';
 import { useLibrary, type LibraryItem } from '../state/library-data';
 import { urlForLibraryItem } from '../routes/library-paths';
-import { useWorkspace } from '../../workspace/state/workspace.context';
+import { useWorkspace } from '../../workspace';
 import { EVERYONE_TEAM, emptyMessageFor, filterLibraryItems, type LibraryFilter } from '../utils/status';
 import { pluginEntriesFor } from '../utils/plugin-entries';
 import { personalPluginName } from '../utils/personal-plugin';
 import { Banner, TextField } from '../../../shared/components';
 import { cn } from '../../../lib/utils';
-import { HEADER_BAND, PAGE_HEADER_TESTID } from '../../../shared/theme/header';
+import { HEADER_BAND, PAGE_HEADER_TESTID, TITLE_INK_ROOM } from '../../../shared/theme/header';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
-import { offersManageAccess } from '../../access/manage-access-affordance';
+import { offersManageAccess } from '../../access';
+import { useAdmin } from '../../admin';
+import { CreatorWelcomePage } from '../../onboarding/components/CreatorWelcomePage';
 import { PluginItemSections } from './plugin-page-parts';
 import { PluginRows } from './PluginRows';
 import { ManagedPluginRequests } from './ManagedPluginRequests';
@@ -62,6 +64,7 @@ function headingFor(filter: LibraryFilter): string {
 
 export function LibraryPage({ filter }: { filter: LibraryFilter }) {
   const data = useLibrary();
+  const { isAdmin, isAdminLoading = false } = useAdmin();
   const navigate = useNavigate();
   const { kbDirName } = useWorkspace();
   const [query, setQuery] = useState('');
@@ -133,6 +136,25 @@ export function LibraryPage({ filter }: { filter: LibraryFilter }) {
     if (kbDirName) navigate(urlForLibraryItem(kbDirName, item));
   }
 
+  /**
+   * An admin's empty catalog is a beginning, not a "nothing here": the page
+   * the Library opens on offers the two smallest real starts — a plugin for a
+   * team, a skill in their own space — instead of an empty gallery. Only once
+   * both indexes have ANSWERED, and answered empty: a load still in flight,
+   * or one that failed, is not an empty library. Members keep the gallery;
+   * the shared structure is not theirs to make.
+   */
+  const catalogIsEmpty =
+    !data.loading &&
+    !data.pluginsLoading &&
+    !data.error &&
+    !data.pluginsError &&
+    data.items.length === 0 &&
+    data.pluginSummaries.length === 0;
+  if (filter.kind === 'all' && isAdmin && !isAdminLoading && catalogIsEmpty) {
+    return <CreatorWelcomePage />;
+  }
+
   return (
     <>
       {/* The title bar, on the band the sidebar's header row is also on. The
@@ -141,7 +163,7 @@ export function LibraryPage({ filter }: { filter: LibraryFilter }) {
           carrying — a height no other page could match. They read below it
           now, where they always looked like they were. */}
       <div data-testid={PAGE_HEADER_TESTID} className={cn(HEADER_BAND, 'gap-4')}>
-        <h1 className="min-w-0 truncate text-display font-semibold" title={headingFor(filter)}>
+        <h1 className={`min-w-0 truncate text-display font-semibold ${TITLE_INK_ROOM}`} title={headingFor(filter)}>
           {headingFor(filter)}
         </h1>
         <TextField

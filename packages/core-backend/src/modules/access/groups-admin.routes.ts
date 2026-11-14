@@ -1,10 +1,10 @@
 import express from 'express';
 import type { AuthUser } from '@bevel-software/platform-shared';
-import type { IAdminAccessService } from '../admin/admin.interface.js';
-import { canonicalRoleName } from '../access-model/access-grammar.js';
+import type { IAdminAccessService } from '../admin/index.js';
+import { canonicalRoleName } from '../access-model/index.js';
 import { sendError as sharedSendError, requireNonEmptyString as sharedRequireNonEmptyString } from './admin-route-helpers.js';
 import type { GroupsAdminService } from './groups-admin.service.js';
-import '../auth/auth.middleware.js'; // Express Request augmentation
+import '../auth/index.js'; // Express Request augmentation
 
 /**
  * Admin surface for GROUPS — the "who you are" half of the roles/groups
@@ -50,9 +50,11 @@ export function createGroupsAdminRoutes(deps: {
   // role assignments) + `groupsHealth` (the broken-source banner marker; a
   // broken MANUAL groups.yaml instead answers 422 with the parse message so
   // the operator sees what to fix).
-  router.get('/admin/groups', requireAdmin, async (_req, res) => {
+  router.get('/admin/groups', requireAdmin, async (req, res) => {
     try {
-      res.json(await groupsAdmin.getRoster());
+      // A read needs no commit attribution: the roster is filtered for the
+      // email `requireAdmin` just checked, with no second user lookup to fail.
+      res.json(await groupsAdmin.getRoster(req.userEmail!));
     } catch (err) {
       sendError(res, err);
     }

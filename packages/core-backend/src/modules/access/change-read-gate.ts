@@ -1,6 +1,6 @@
 /**
  * Read-before-write: the gate every change passes on its way to the lock
- * (`WorkflowService.acquireLock`), on every branch. Contract and rationale in
+ * (`VersionControlService.acquireLock`), on every branch. Contract and rationale in
  * `access-model/change-gate.ts`; this is the service that answers.
  *
  * The verdict is taken against the WORKING TREE, not `HEAD` as the write gate
@@ -18,12 +18,10 @@ import path from 'node:path';
 import { creatableRootDirNames, type KbLayout } from '@bevel-software/platform-shared';
 import type { IFsProbe } from '../../shared/fs.contract.js';
 import type { KbContext } from '../../shared/kb-context.js';
-import type { WorkspaceService } from '../workspace/workspace.service.js';
+import type { WorkspaceService } from '../workspace/index.js';
 import type { IAccessControl } from './access-control.interface.js';
-import { AccessConfigError, AccessDeniedError } from '../access-model/access-errors.js';
-import { SYNCED_GROUPS_YAML } from '../access-model/group-files.js';
-import { toKbRelative } from '../access-model/kb-read-filter.js';
-import type { ChangeReadVerdict, ChangeTargetKind, IChangeReadGate } from '../access-model/change-gate.js';
+import { AccessConfigError, AccessDeniedError, SYNCED_GROUPS_YAML, toKbRelative } from '../access-model/index.js';
+import type { ChangeReadVerdict, ChangeTargetKind, IChangeReadGate } from '../access-model/index.js';
 
 /**
  * Whether `kbRel` (repo-relative) is, or lies inside, a folder directly under

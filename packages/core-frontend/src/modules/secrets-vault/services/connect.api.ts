@@ -1,4 +1,5 @@
 import { authFetch } from '../../../lib/api';
+import type { AgentChoice } from '../../agents';
 
 /**
  * The aggregated "connect your tools" surface: everything standing between the
@@ -54,6 +55,36 @@ export interface ConnectOAuth {
   authorized: boolean;
 }
 
+/**
+ * A sign-in that goes through a managed connector: Bevel's own OAuth app, a
+ * broker that does the provider round-trip, nothing for the owner to
+ * register. What the card shows comes from the connector's definition on the
+ * server; what the row can DO is the same Connect / Reconnect / Disconnect as
+ * any sign-in, plus "Connected as" once the account is known.
+ */
+export interface ManagedSignIn {
+  connectorId: string;
+  scopeSet: string;
+  /** `user`: each person connects their own account. `shared`: one workspace connection an owner makes. */
+  tokenScope: 'user' | 'shared';
+  displayName: string;
+  /** A lucide icon name. */
+  icon: string;
+  /** One line: what connecting lets Hexis do. */
+  description: string;
+  /** Plain-language permissions of the scope set. */
+  permissions: string[];
+  scopeSetLabel: string;
+  dataResidency: string;
+  subprocessor: string;
+  /** The connected account, once the sign-in reported one. */
+  account: string | null;
+  /** An owner replaced the managed app with the deployment's own; the ordinary flow applies. */
+  ownApp: boolean;
+  /** The deployment can start sign-ins through the broker. False ⇒ the admin has setup to do. */
+  available: boolean;
+}
+
 /** An OAuth-backed variable declared BY a tool — authorized via the tool-scoped start. */
 export interface ConnectToolOAuth {
   slug: string;
@@ -62,19 +93,30 @@ export interface ConnectToolOAuth {
   key: string;
   label: string | null;
   authorized: boolean;
+  /** Present for a managed connector's sign-in — see {@link ManagedSignIn}. */
+  managed?: ManagedSignIn;
+  /** With `managed`: whether the caller may write the tool (disconnect a shared connection, bring an own app). */
+  canWrite?: boolean;
   /**
    * Authorized, but the token's granted permissions no longer cover what the tool
    * declares now (a scope was added since sign-in) — show Reconnect, not Connected.
    */
   needsReauth: boolean;
   /**
-   * The owner-side half is done: the provider registration (client secret) exists,
-   * so Authorize can actually reach a consent screen. Until it does, nobody's
-   * sign-in can work — which is why the row is outstanding even for a person who
-   * has nothing to do about it.
+   * The owner-side half is done, so Authorize can actually reach a consent
+   * screen: for an ordinary sign-in the provider registration (client secret)
+   * exists; for a MANAGED one the deployment can reach its broker, an owner
+   * pinned their own app, or a token is already stored. Until it is, nobody's
+   * sign-in can work — which is why the row is outstanding even for a person
+   * who has nothing to do about it.
    */
   ownerConfigured: boolean;
-  /** Waiting on the registration above, and the caller may not write it. */
+  /**
+   * Not the caller's to do: an ordinary sign-in waiting on the registration
+   * above that the caller may not write, or a managed WORKSPACE connection
+   * (one an owner makes for everyone) seen by someone who may not write the
+   * tool.
+   */
   ownerOnly: boolean;
 }
 
@@ -96,9 +138,14 @@ async function fail(res: Response, fallback: string): Promise<never> {
   throw new Error(message);
 }
 
-/** The caller's outstanding per-user credentials across every accessible tool. */
-export async function getConnectPending(): Promise<ConnectPending> {
-  const res = await authFetch('/api/connect/pending');
+/**
+ * The caller's outstanding per-user credentials across every accessible tool —
+ * or, with `agentPath` (the consent step's "Connect as" choice), across the
+ * connectors a connection made as that agent configuration loads. Null is
+ * Everything.
+ */
+export async function getConnectPending(agentPath: string | null = null): Promise<ConnectPending> {
+  const res = await authFetch(agentPath ? `/api/connect/pending?agent=${encodeURIComponent(agentPath)}` : '/api/connect/pending');
   if (!res.ok) await fail(res, "Couldn't load your tools.");
   return (await res.json()) as ConnectPending;
 }
@@ -141,6 +188,14 @@ export interface McpOAuthRequest {
   clientName: string | null;
   scope: string | null;
   resource: string | null;
+  /**
+   * The agent configurations the person may connect this client as, offered below
+   * Everything. Empty when there are none (or for a request that cannot take
+   * a choice).
+   */
+  agents?: AgentChoice[];
+  /** Set when the agents could not be listed: `agents` is then empty for that reason, not because there are none. */
+  agentsUnavailable?: boolean;
 }
 
 /** Describe the pending MCP authorization carried in the signed `state`. */
@@ -153,12 +208,13 @@ export async function getMcpOAuthRequest(state: string): Promise<McpOAuthRequest
 /**
  * Finish the MCP authorization: mint the one-time code for the signed-in user
  * and return the agent's redirect URL the browser should navigate to.
+ * `agentPath` is the "Connect as" choice; null (the default) is Everything.
  */
-export async function completeMcpOAuth(state: string): Promise<string> {
+export async function completeMcpOAuth(state: string, agentPath: string | null = null): Promise<string> {
   const res = await authFetch('/api/mcp/oauth/complete', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ state }),
+    body: JSON.stringify(agentPath ? { state, agentPath } : { state }),
   });
   if (!res.ok) await fail(res, "Couldn't finish connecting.");
   return ((await res.json()) as { redirectTo: string }).redirectTo;

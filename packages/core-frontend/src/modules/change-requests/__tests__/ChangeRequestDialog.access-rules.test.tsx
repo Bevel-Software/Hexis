@@ -61,7 +61,6 @@ function detailWith(path: string) {
     files: [
       { path, status: 'modified', additions: 1, deletions: 0, isBinary: false, sha: '', rawUrl: '' },
     ],
-    comments: [],
     approvals: [],
     mergeableInBevel: true,
     mergeBlockedReasons: [],

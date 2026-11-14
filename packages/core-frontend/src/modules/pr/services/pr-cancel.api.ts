@@ -1,6 +1,6 @@
 import type { CancelPrResult } from '@bevel-software/platform-shared';
 import { authFetch } from '../../../lib/api';
-import { handleApiResponse } from '../../git/services/git.api';
+import { handleApiResponse } from '../../git';
 
 /**
  * Close the change request without merging. The backend re-validates that the

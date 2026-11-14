@@ -4,12 +4,12 @@ import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import { NodeFs } from '../../kb-fs/node-fs.js';
-import type { IWorkflowService } from '@bevel-software/platform-shared';
+import type { IVersionControlService } from '@bevel-software/platform-shared';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import type { ICreatorAccess } from '../../access-model/creator.js';
 import type { ChangeReadVerdict, IChangeReadGate } from '../../access-model/change-gate.js';
 import { AccessDeniedError } from '../../access-model/access-errors.js';
-import type { WorkflowEventBus } from '../../workflow/event-bus.js';
+import type { VersionControlEventBus } from '../../version-control/event-bus.js';
 import type { AuthService } from '../../auth/auth.service.js';
 import type { IAdminAccessService } from '../../admin/admin.interface.js';
 import { createWorkspaceRoutes } from '../workspace.routes.js';
@@ -68,7 +68,7 @@ async function makeHarness(opts: { extracted?: string[]; changeGate?: IChangeRea
     withPathTurn: vi.fn(async (_id: string, _p: string, op: () => Promise<unknown>) => op()),
   } as unknown as WorkspaceService;
 
-  const workflowService = {
+  const versionControlService = {
     getLock: vi.fn(async () => null),
     acquireLock: vi.fn(async (_w: string, _b: string, p: string) => {
       lockedPaths.push(p);
@@ -76,7 +76,7 @@ async function makeHarness(opts: { extracted?: string[]; changeGate?: IChangeRea
     }),
     releaseLock: vi.fn(async () => null),
     releaseLockNoCommit: vi.fn(async () => undefined),
-  } as unknown as IWorkflowService;
+  } as unknown as IVersionControlService;
 
   const creatorAccess = {
     planForCreate: vi.fn(async () => null),
@@ -84,7 +84,7 @@ async function makeHarness(opts: { extracted?: string[]; changeGate?: IChangeRea
   };
 
   const authService = { getUserById: vi.fn(async () => USER) } as unknown as AuthService;
-  const eventBus = { emit: vi.fn() } as unknown as WorkflowEventBus;
+  const eventBus = { emit: vi.fn() } as unknown as VersionControlEventBus;
 
   const app = express();
   app.use(express.json());
@@ -97,7 +97,7 @@ async function makeHarness(opts: { extracted?: string[]; changeGate?: IChangeRea
     createWorkspaceRoutes(
       workspaceService,
       authService,
-      workflowService,
+      versionControlService,
       eventBus,
       {} as unknown as IAccessControl,
       testKbContext({ kbDirName: KB }),

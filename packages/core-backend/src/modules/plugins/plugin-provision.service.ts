@@ -51,11 +51,10 @@ import {
   type AuthUser,
 } from '@bevel-software/platform-shared';
 import type { KbContext } from '../../shared/kb-context.js';
-import type { WorkspaceService } from '../workspace/workspace.service.js';
-import type { IAccessControl } from '../access/access-control.interface.js';
-import { creatorPrincipal } from '../access-model/creator.js';
-import { spliceGrant } from '../access-model/access-splice.js';
-import { WorkspaceMutex } from '../kb-fs/mutex.js';
+import type { WorkspaceService } from '../workspace/index.js';
+import type { IAccessControl } from '../access/index.js';
+import { creatorPrincipal, spliceGrant } from '../access-model/index.js';
+import { WorkspaceMutex } from '../kb-fs/index.js';
 
 /** Commit machinery the provision rides — the pending-commit pipeline, run inline. */
 export interface ProvisionCommitDriver {
@@ -150,6 +149,20 @@ export class PluginProvisionService {
    * name can hold the lock at once.
    */
   private readonly creations = new WorkspaceMutex();
+
+  /**
+   * Run `fn` holding the creation lock of every plugin name in `names` — for
+   * a writer outside this service that publishes plugins of its own (a
+   * starter pack) and whose name check and commit must be one step against
+   * a creation or a deletion of the same name. The set is taken in one
+   * `runAll`; `fn` must not take this lock again (see `WorkspaceMutex`).
+   */
+  withIdentities<T>(names: string[], fn: () => Promise<T>): Promise<T> {
+    return this.creations.runAll(
+      names.map((name) => `plugin:${pluginManifestName(name)}`),
+      fn,
+    );
+  }
 
   constructor(
     private readonly workspaceService: WorkspaceService,
@@ -693,7 +706,14 @@ export function personalAccessMd(creator: { name: string; email: string }): stri
   return spliceGrant(seeded, 'read', creatorPrincipal(creator), { allowScalar: false, target: 'node' }).text;
 }
 
-function withCreatorGrants(base: string, creator: { name: string; email: string }): string {
+/**
+ * `base` — an access.md in the two-block shape — with `creator` named under
+ * `read`, `write` and `owner` of the folder: how a plugin made by someone is
+ * run by them. Exported for the one other door that brings a plugin into
+ * being, a starter pack (`modules/onboarding`), whose shipped rules it adds
+ * the admin who applied the pack to.
+ */
+export function withCreatorGrants(base: string, creator: { name: string; email: string }): string {
   const principal = creatorPrincipal(creator);
   let out = base;
   for (const verb of ['read', 'write', 'owner'] as const) {

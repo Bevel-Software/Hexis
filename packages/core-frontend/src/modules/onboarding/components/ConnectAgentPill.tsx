@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import { useInRouterContext, useLocation, useNavigate } from 'react-router-dom';
 import { X } from 'lucide-react';
 import { cn } from '../../../lib/utils';
-import { useLibraryToast } from '../../library/state/toast.context';
+import { useLibraryToast } from '../../library';
 import { useOnboarding } from '../state/onboarding';
 import { WELCOME_PATH } from '../paths';
 

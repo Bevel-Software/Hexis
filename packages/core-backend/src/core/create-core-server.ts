@@ -3,33 +3,46 @@ import cors from 'cors';
 import path from 'node:path';
 import type { Router, RequestHandler } from 'express';
 import { createAuthRoutes } from '../modules/auth/auth.routes.js';
+import { authCookieSecure } from '../modules/auth/auth.middleware.js';
 import { createWorkspaceRoutes } from '../modules/workspace/workspace.routes.js';
 import {
   createAgentUploadRoutes,
   isAgentUploadRawBodyPath,
 } from '../modules/workspace/agent-upload.routes.js';
+import { createAgentDownloadRoutes } from '../modules/workspace/agent-download.routes.js';
 import { createGitInternalsRouteGuard } from '../modules/workspace/git-internals.middleware.js';
 import { startCore } from './lifecycle.js';
 import { createDiffRoutes } from '../modules/diff/diff.routes.js';
-import { createWorkflowRoutes } from '../modules/workflow/workflow.routes.js';
-import { createEventsRoutes } from '../modules/workflow/events.routes.js';
+import {
+  createEventAccess,
+  createEventsRoutes,
+  createVersionControlRoutes,
+  EventDelivery,
+} from '../modules/version-control/index.js';
 import { createAccessRoutes } from '../modules/access/access.routes.js';
+import type { AppRole } from '../modules/access/index.js';
 import { createAccessRequestRoutes } from '../modules/access/access-requests.routes.js';
+import { AccessRequestsService } from '../modules/access/access-requests.service.js';
 import { createMcpRoutes } from '../modules/mcp/mcp.routes.js';
 import { createOAuthConsentRoutes } from '../modules/mcp/oauth/oauth-consent.routes.js';
 import { mcpAuthRouter } from '@modelcontextprotocol/sdk/server/auth/router.js';
 import { createManualRoutes } from '../modules/tool-registry/manual.routes.js';
+import {
+  createToolHintsAgentRoutes,
+  createToolHintsRoutes,
+} from '../modules/tool-registry/read-only-hints.js';
 import { createCatalogRevisionRoutes } from './catalog-revision.js';
 import {
   createToolManualsAgentRoutes,
   createToolManualsBrowserRoutes,
   registerToolManualsTools,
 } from '../modules/tool-manuals/index.js';
-import { registerWorkflowTools } from '../modules/workflow/agent-tools/workflow.tools.js';
-import { registerChangeRequestReadTools } from '../modules/workflow/agent-tools/change-request-read.tools.js';
+import { registerVersionControlTools } from '../modules/version-control/agent-tools/version-control.tools.js';
+import { changeRequestScope, registerChangeRequestReadTools } from '../modules/version-control/agent-tools/change-request-read.tools.js';
+import { createOnboardingRoutes } from '../modules/onboarding/onboarding.routes.js';
 import { registerWorkspaceTools } from '../modules/workspace/workspace.tools.js';
 import { registerAgentGuideTool } from '../modules/agent-guide/index.js';
-import { RECOVERY_BOT_EMAIL } from '../modules/workflow/recovery-bot.js';
+import { RECOVERY_BOT_EMAIL } from '../modules/version-control/recovery-bot.js';
 import {
   registerSkillsTools,
   createSkillsRoutes,
@@ -55,6 +68,7 @@ import { createUpdateCheckRoutes } from '../modules/update-check/update-check.ro
 import { createAccountRoutes } from '../modules/auth/account.routes.js';
 import { createConnectionKeysAdminRoutes } from '../modules/tool-auth/connection-keys-admin.routes.js';
 import { createAuditRoutes } from '../modules/audit/audit.routes.js';
+import { createAgentConnectionRoutes } from '../modules/audit/agent-connection.routes.js';
 import { createAgentRestAuditMiddleware } from '../modules/audit/agent-rest-audit.middleware.js';
 import { EXTERNAL_KB_MANUAL_NAME } from '../modules/tool-manuals/tool-manuals.contract.js';
 import { createSetupRoutes, isComplete } from '../modules/settings/setup.routes.js';
@@ -79,6 +93,10 @@ import { createReadiness } from './readiness.js';
 import { createAgentInstructionsRoutes } from '../modules/agent-instructions/index.js';
 import type { CoreServices } from './create-core-services.js';
 import { createWriteAccessRoutes, createWriteGateMiddleware } from '../modules/write-access/write-access.js';
+import { createEmbedRoutes, createEmbedLinkRoutes } from '../modules/embed/embed.routes.js';
+import { registerEmbedTools } from '../modules/embed/embed.tools.js';
+import { createMcpAppRoutes } from '../modules/embed/mcp-app.routes.js';
+import { isSandboxReachableOrigin } from '../modules/embed/mcp-app.js';
 
 type ExpressApp = ReturnType<typeof express>;
 
@@ -86,6 +104,11 @@ type ExpressApp = ReturnType<typeof express>;
  * The context handed to {@link ServerExtensions.tools}: everything an overlay
  * needs to register its own tool defs + endpoint routes on the unified tool
  * surface, exactly like the core modules do.
+ *
+ * A tool that works on a branch declares it on its `toolDef` (`branch:
+ * 'required'` or, read-only tools only, `'defaults-to-default-branch'`), and
+ * `toolHandler` resolves the branch before the tool runs — see "The branch"
+ * in `modules/tool-helpers/index.ts`.
  */
 export interface ToolSurfaceCtx {
   registry: CoreServices['toolRegistry'];
@@ -141,6 +164,13 @@ export interface ServerExtensions {
   postTools?(app: ExpressApp, core: CoreServices): void;
   /** JWT-protected overlay routes; mounted after every core authed route. */
   authed?(app: ExpressApp, core: CoreServices): void;
+  /**
+   * The roles the app defines beside core's Admin: each is listed on App
+   * roles whether anyone holds it or not, may be given to people and groups
+   * there, and is never offered for conversion to a group. What a role
+   * unlocks is the app's own gate; core only keeps who holds it.
+   */
+  appRoles?: readonly AppRole[];
 }
 
 export async function createCoreServer(
@@ -347,6 +377,9 @@ export async function createCoreServer(
       core.authMiddleware,
       core.authProviders,
       core.config.loginPasswordEnabled,
+      // The cookie's Secure flag follows the scheme the deployment is reached
+      // on, as the SSO providers' does: one rule for every sign-in path.
+      { cookieSecure: authCookieSecure(core.config.publicBackendUrl) },
     ),
   );
 
@@ -366,6 +399,7 @@ export async function createCoreServer(
     core.internalTokenService,
     core.mcpOAuthProvider,
     core.mcpResourceMetadataUrl,
+    core.agentScopeService,
   ));
 
   // Remote sync — `POST /api/sync`, called by a git host's webhook or a
@@ -406,10 +440,13 @@ export async function createCoreServer(
     toolManualService: core.toolManualService,
     accessControl: core.accessControl,
     connectionProbe: core.connectionProbeService,
+    agents: core.agentScopeService,
     stateSecret: core.config.jwtSecret,
     publicBackendUrl: core.config.publicBackendUrl,
     publicFrontendUrl: core.config.publicFrontendUrl,
     kb: core.kb,
+    // Read at request time: the overlay binds the port after core is built.
+    managedSignIns: () => core.managedSignIns,
   };
   app.use('/api', createSecretsVaultPublicRoutes(secretsVaultRoutesDeps));
 
@@ -445,24 +482,46 @@ export async function createCoreServer(
   // Shared agent-access gate config, consumed by every tool surface that
   // touches the KB (file tools + graph tools). The gate decides nothing
   // itself: it calls the read and write hooks a deployment registered on
-  // `workflowService.hooks`, and carries the notes that deployment wants
+  // `versionControlService.hooks`, and carries the notes that deployment wants
   // agents to read about the gated tools. Core registers neither, so a
   // core-only deployment refuses nothing and says nothing extra.
   const agentAccessGate: AgentAccessGate = {
     recoveryBotEmail: RECOVERY_BOT_EMAIL,
-    hooks: core.workflowService.hooks,
+    hooks: core.versionControlService.hooks,
     notes: new ToolDescriptionNotes(),
   };
   // A skill's `allowed-tools`, checked against what the caller can see — on
   // every save surface (agent write tools, the app's PUT /file) and on
   // `get_skill`. Warnings only; it never refuses a save.
   const allowedToolsChecker = new AllowedToolsChecker(core.toolRegistry, core.toolManualService, core.kb);
-  registerWorkflowTools(core.toolRegistry, toolsRouter, ta, th, core.kb);
-  // The five read tools over change requests. Separate from the workflow tools
+  // `delete_branch` sees change requests as `get_change_request` does.
+  // The history tools take the per-file read the file itself takes (`accessControl`).
+  registerVersionControlTools(core.toolRegistry, toolsRouter, ta, th, core.kb, changeRequestScope(core.accessControl, core.kb).maySee, core.accessControl, agentAccessGate);
+  // The five read tools over change requests. Separate from the version-control tools
   // because they are the only ones that gate their whole payload on the
   // caller's read access, so they take the access service and nothing else.
   registerChangeRequestReadTools(core.toolRegistry, toolsRouter, ta, th, core.accessControl, core.kb);
-  registerWorkspaceTools(core.toolRegistry, toolsRouter, ta, th, core.spillStore, core.docExtractService, core.accessControl, core.kb, agentAccessGate, core.routineWritePolicy, core.sessionSink, allowedToolsChecker, core.changeGate, core.agentUploadStore, core.agentGuide);
+  const workspaceTools = registerWorkspaceTools(core.toolRegistry, toolsRouter, ta, th, core.spillStore, core.docExtractService, core.accessControl, core.kb, agentAccessGate, core.routineWritePolicy, core.sessionSink, allowedToolsChecker, core.changeGate, core.agentUploadStore, core.agentGuideStart, core.agentDownloadStore, core.starterPackService, core.disk, core.patternMatcher);
+  // `open_page` — the knowledge-base page shown inside a chat. Registered
+  // here, on the same router as the file tools, because it answers with
+  // `read_file`'s own read: the read hook, the access gate and the
+  // not-found refusal come from that registration rather than from a copy.
+  registerEmbedTools(core.toolRegistry, toolsRouter, ta, th, {
+    embedService: core.embedService,
+    kb: core.kb,
+    readForTool: workspaceTools.readForTool,
+    // A host's https sandbox cannot load from a plain-http deployment, so
+    // the tool answers the text and the app address and says so.
+    canBeReached: () => isSandboxReachableOrigin(core.config.publicFrontendUrl),
+    appUrlFor: (repoRelative, slug) => core.embedService.appUrlFor(repoRelative, slug),
+    // The read is `read_file`'s, so the notes a deployment registers for the
+    // gated tools reach this one as well.
+    notes: agentAccessGate.notes,
+  });
+  // The app manifest and the view bytes, for the LOCAL MCP server: it bridges
+  // a host to this deployment over HTTP and has no other way to learn which
+  // tools carry a view. Same router, same `manualAuth` as `all-tools`.
+  toolsRouter.use(createMcpAppRoutes(core.mcpAppService, core.manualAuthMiddleware));
   // The guide on its own, beside the file tools that serve it by name.
   registerAgentGuideTool(core.toolRegistry, toolsRouter, ta, th, core.agentGuideSections);
   // The agent upload route, on the same router as the tool endpoints so it
@@ -472,10 +531,20 @@ export async function createCoreServer(
   // no workspace and writes into none; every access, platform-file and branch
   // rule is applied later by `apply_file_upload`.
   toolsRouter.use(createAgentUploadRoutes({ uploads: core.agentUploadStore }));
-  registerSkillsTools(core.toolRegistry, toolsRouter, ta, th, core.skillService, allowedToolsChecker);
+  // Its outgoing twin, mounted the same way and for the same reason: the
+  // one-time link is the whole credential an agent's `curl` carries. Every
+  // file behind it was judged when `request_file_download` issued it.
+  toolsRouter.use(createAgentDownloadRoutes({ downloads: core.agentDownloadStore, identify: core.agentDownloadFetcher }));
+  registerSkillsTools(core.toolRegistry, toolsRouter, ta, th, core.skillService, allowedToolsChecker, {
+    accessControl: core.accessControl,
+    defaultWorkspaceId: () => core.kb.defaultWorkspaceId(),
+    // A skill's files as committed on the default branch, for the whole-skill
+    // verdict: the same clone and the same git the skill's history is read from.
+    committedFiles: core.gitService,
+  });
   // Definitions only: the endpoints they describe are the app's own plugin
   // creation routes, mounted below behind the key-or-session gate.
-  registerPluginsTools(core.toolRegistry);
+  registerPluginsTools(core.toolRegistry, core.kb);
   registerToolManualsTools(core.toolRegistry, toolsRouter, ta, th, core.toolManualService, {
     accessControl: core.accessControl,
     // The vault satisfies the module's local VariableStatusPort — `list_tool_setup`
@@ -495,11 +564,17 @@ export async function createCoreServer(
     agentAccessGate,
     core,
   });
+  // What MCP clients are told about each platform tool's effect: read by the
+  // agent manual (the hosted endpoint) and by `/agent/tool-hints` (hexis-mcp).
+  const { readOnlyHints } = core;
   toolsRouter.use(createManualRoutes(
     core.toolRegistry,
     core.manualAuthMiddleware,
     async (userId) => (await core.authService.getUserById(userId))?.email,
+    readOnlyHints,
+    core.agentScopeService,
   ));
+  toolsRouter.use(createToolHintsAgentRoutes(readOnlyHints, core.manualAuthMiddleware));
   // The aggregated manual list (KB + the caller's accessible `.tool`s) + inline
   // `.tool` sub-manuals. Mounted on the tools router so they share `manualAuth`
   // and sit before the JWT `/api` mounts.
@@ -514,11 +589,19 @@ export async function createCoreServer(
       disk: core.disk,
       pluginIndex: core.pluginIndexService,
     },
+    core.agentScopeService,
   ));
   // What every connected agent is told at session start, as the hosted proxy
   // composes it: read by the local `hexis-mcp` bridge at startup and by the
   // External agent access card. Same `manualAuth`, same router, as `all-tools`.
-  toolsRouter.use(createAgentInstructionsRoutes(core.manualAuthMiddleware, core.readAgentPreamble, () => core.kb.layout));
+  toolsRouter.use(
+    createAgentInstructionsRoutes(
+      core.manualAuthMiddleware,
+      core.readAgentPreamble,
+      () => core.kb.layout,
+      () => core.kb.defaultBranch,
+    ),
+  );
   // The fingerprint of the caller's released catalog. The local `hexis-mcp`
   // server polls it to learn that a manual or a skill changed under a
   // connection it cannot be pushed to; nothing else consults it. Same
@@ -528,6 +611,10 @@ export async function createCoreServer(
     skills: core.skillService,
     manualAuth: core.manualAuthMiddleware,
     resolveUserEmail: async (userId) => (await core.authService.getUserById(userId))?.email,
+    agentScope: core.agentScopeService,
+    // The views move the revision too: a release that changes a view and no
+    // manual would otherwise leave a running local server on the old one.
+    mcpApps: core.mcpAppService,
   }));
   // The only core route that returns secret VALUES: a local `.tool`'s declared
   // variables, for the local MCP server that will execute it. It re-reads the
@@ -539,11 +626,12 @@ export async function createCoreServer(
     core.secretsVaultService,
     core.manualAuthMiddleware,
     async (userId) => (await core.authService.getUserById(userId))?.email,
+    core.agentScopeService,
   ));
   app.use('/api', toolsRouter);
 
   // The same guard on the PARSED body, for the WHOLE `/workspace/:id` prefix
-  // and ahead of EVERY router under it — the file routes, the review, workflow
+  // and ahead of EVERY router under it — the file routes, the review, version control
   // and access ones, and whatever an extension mounts below. Mounted here,
   // before the extension phase, so an overlay surface added there is covered
   // by its prefix rather than by remembering this. No auth in front of it: the
@@ -554,6 +642,12 @@ export async function createCoreServer(
   // Non-JWT overlay surfaces that sit between the tools router and the
   // JWT-protected `/api` routes (LLM proxy, embed, upload — see the phase
   // doc on ServerExtensions.postTools).
+  // The embed surface, ahead of every JWT mount and of the static
+  // catch-all: its data routes authenticate by the embed token ALONE (a
+  // session reaching them must be refused, not honoured), and the two SPA
+  // routes need their framing headers stamped before `index.html` is served.
+  app.use(createEmbedRoutes(core.embedService));
+
   ext.postTools?.(app, core);
 
   // The plugin creation doors — `POST /api/plugins`, `POST /api/plugins/personal`
@@ -575,6 +669,7 @@ export async function createCoreServer(
     createPluginCreationRoutes(
       core.pluginProvisionService,
       async (req) => (req.userId ? ((await core.authService.getUserById(req.userId)) ?? null) : null),
+      core.agentScopeService,
     ),
   );
 
@@ -587,7 +682,7 @@ export async function createCoreServer(
   app.use('/api', core.authMiddleware, createWorkspaceRoutes(
     core.workspaceService,
     core.authService,
-    core.workflowService,
+    core.versionControlService,
     core.eventBus,
     core.accessControl,
     core.kb,
@@ -597,11 +692,12 @@ export async function createCoreServer(
     allowedToolsChecker,
     core.changeGate,
   ));
-  // Workflow is the only branches / changes / change-request surface. The
+  // Version control is the only branches / changes / change-request surface. The
   // former /git/*, /pr/*, /pr/:n/* routes are gone — every consumer goes
   // through /workflow/* now.
-  app.use('/api', core.authMiddleware, createWorkflowRoutes(
-    core.workflowService,
+  // The `/workflow/` prefix is kept for API compatibility until a core major.
+  app.use('/api', core.authMiddleware, createVersionControlRoutes(
+    core.versionControlService,
     core.workspaceService,
     core.authService,
     core.eventBus,
@@ -613,11 +709,23 @@ export async function createCoreServer(
   // cookie — the cookie path is what makes EventSource work, since the
   // browser API can't set headers). Mounted as its own app.use so it
   // doesn't share an outer middleware chain with the JSON routes above.
-  app.use('/api', createEventsRoutes(core.eventBus, core.authMiddleware));
+  // Every event passes the delivery rule on its way to a session: the file
+  // routes' read verdict, read in the server's own checkouts — for an
+  // approval, the target branch's; a target with no checkout at its ref.
+  const eventDelivery = new EventDelivery(createEventAccess({
+    accessControl: core.accessControl,
+    kbDirName: core.kbDirName,
+    getChangeRequest: (number) => core.versionControlService.getChangeRequest(number),
+    workspaces: {
+      hasWorkspace: (workspaceId) => core.workspaceService.hasBootstrappedWorkspace(workspaceId),
+      anyWorkspaceId: async () => (await core.workspaceService.findAnyWorkspaceId()) ?? core.kb.defaultWorkspaceId(),
+    },
+  }));
+  app.use('/api', createEventsRoutes(core.eventBus, core.authMiddleware, eventDelivery));
   app.use('/api', core.authMiddleware, createDiffRoutes(
     core.diffService,
     core.authService,
-    core.workflowService,
+    core.versionControlService,
     core.accessControl,
     core.kbDirName,
   ));
@@ -625,11 +733,14 @@ export async function createCoreServer(
     core.accessControl,
     core.workspaceService,
     core.authService,
-    core.workflowService,
+    core.authService,
+    core.versionControlService,
     core.eventBus,
     core.db,
     core.kb,
+    core.disk,
     [core.config.adminEmail],
+    ext.appRoles ?? [],
   ));
   // Asking for Can edit or Owner on an item from its Manage access dialog, and
   // the editors' Accept / Decline. Mounted beside the access routes it shares
@@ -639,7 +750,7 @@ export async function createCoreServer(
     accessControl: core.accessControl,
     workspaceService: core.workspaceService,
     authService: core.authService,
-    workflow: core.workflowService,
+    versionControl: core.versionControlService,
     lifecycle: core.joinRequestsService,
     kb: core.kb,
   }));
@@ -656,8 +767,13 @@ export async function createCoreServer(
     createSkillAccessRequestRoutes({
       skillService: core.skillService,
       accessControl: core.accessControl,
-      workflow: core.workflowService,
-      workspaceService: core.workspaceService,
+      versionControl: core.versionControlService,
+      requests: new AccessRequestsService({
+        versionControl: core.versionControlService,
+        workspaceService: core.workspaceService,
+        lifecycle: core.joinRequestsService,
+        kb: core.kb,
+      }),
       joinRequests: core.joinRequestsService,
       kb: core.kb,
       resolveUser: async (req) =>
@@ -673,7 +789,7 @@ export async function createCoreServer(
   app.use('/api', core.authMiddleware, createPluginsRoutes(
     core.pluginIndexService,
     core.accessControl,
-    core.workflowService,
+    core.versionControlService,
     core.joinRequestsService,
     core.pluginJoinRequestJobs,
     core.pluginProvisionService,
@@ -693,6 +809,8 @@ export async function createCoreServer(
   // Admin-status resolver (CORE — see the note in admin-access.routes.ts;
   // the full admin router is an enterprise `ext.authed` extension).
   app.use('/api', core.authMiddleware, createAdminAccessRoutes(core.adminAccess));
+  // The Tools page's read-only toggles: anyone signed in reads, admins write.
+  app.use('/api', core.authMiddleware, createToolHintsRoutes(readOnlyHints, core.adminAccess));
   // Groups admin (manual-mode CRUD; typed refusals in IdP mode) —
   // admin-gated inside.
   app.use('/api', core.authMiddleware, createGroupsAdminRoutes({
@@ -713,6 +831,7 @@ export async function createCoreServer(
     core.authService,
     core.adminAccess,
     core.accountErasureService,
+    core.accountHooks,
     core.userAccessRemovalService,
   ));
   // Connection keys across the deployment (list per account, revoke any) —
@@ -728,6 +847,18 @@ export async function createCoreServer(
     '/api',
     core.authMiddleware,
     createAuditRoutes(core.agentAuditService, core.externalApiKeyService, core.adminAccess),
+  );
+  // The onboarding's "is your agent connected yet?" — the caller's own
+  // agents only, read off the same connections and keys the Audit log lists.
+  app.use('/api', core.authMiddleware, createAgentConnectionRoutes(core.agentAuditService));
+  // "What does your team do?" — the starter-pack question a new knowledge
+  // base's admin is asked, and the pack it adds (admin-gated inside).
+  app.use(
+    '/api',
+    core.authMiddleware,
+    createOnboardingRoutes(core.starterPackService, async (req) =>
+      req.userId ? ((await core.authService.getUserById(req.userId)) ?? null) : null,
+    ),
   );
   // First-run setup. Mounted with the other authed routes but touching NO
   // workspace — it has to work on a deployment that has no knowledge base yet,
@@ -761,12 +892,12 @@ export async function createCoreServer(
         githubApp: core.githubApp,
       },
       // What a move to another repository has to decide about, and what it
-      // runs under. Bound here rather than handed the whole workflow service:
+      // runs under. Bound here rather than handed the whole version-control service:
       // the setup routes ask two questions, hold the commit worker for the
       // move, and know nothing else about a request or a commit.
       {
-        countOpen: () => core.workflowService.countOpenChangeRequests(),
-        closeAsRepositoryReplaced: () => core.workflowService.closeOpenChangeRequestsAsRepositoryReplaced(),
+        countOpen: () => core.versionControlService.countOpenChangeRequests(),
+        closeAsRepositoryReplaced: () => core.versionControlService.closeOpenChangeRequestsAsRepositoryReplaced(),
         whileCommitsHeld: (work) => core.whileCommitsHeld(work),
       },
     ),
@@ -808,6 +939,7 @@ export async function createCoreServer(
       clientNameFor: (st) => core.githubFacade.clientNameFor(st),
       completeConsent: (userId, st) => core.githubFacade.completeConsent(userId, st),
     },
+    agents: core.agentScopeService,
   }));
 
   // What an Owner pastes into Claude's admin settings to register this
@@ -821,6 +953,12 @@ export async function createCoreServer(
   }));
 
   // JWT-protected overlay routes.
+  // Linking an outside account to the signed-in user, and managing those
+  // links. Under the JWT middleware, deliberately: the link acts AS the
+  // session, which is exactly why the page it is called from refuses every
+  // framing ancestor.
+  app.use('/api', core.authMiddleware, createEmbedLinkRoutes(core.embedService));
+
   ext.authed?.(app, core);
 
   // In production, serve the frontend static build

@@ -8,16 +8,16 @@ import AdmZip from 'adm-zip';
 import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { testKbContext } from '../../../__tests__/kb-context.js';
-import type { IWorkflowService } from '@bevel-software/platform-shared';
+import type { IVersionControlService } from '@bevel-software/platform-shared';
 import { NodeFs } from '../../kb-fs/node-fs.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
-import type { WorkflowEventBus } from '../../workflow/event-bus.js';
+import type { VersionControlEventBus } from '../../version-control/event-bus.js';
 import type { AuthService } from '../../auth/auth.service.js';
 import type { IAdminAccessService } from '../../admin/admin.interface.js';
 import type { ICreatorAccess } from '../../access-model/creator.js';
 import { createWorkspaceRoutes } from '../workspace.routes.js';
-import { WorkspaceService } from '../workspace.service.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
+import { newWorkspaceService } from '../../../__tests__/workspace-service.js';
 
 /**
  * Nothing the platform accepts resolves outside the repository.
@@ -56,7 +56,7 @@ async function makeHarness(): Promise<Harness> {
   const workspaceDir = path.join(root, workspaceId);
   // The inner `.git` lets the service accept the workspace without cloning.
   await fs.mkdir(path.join(workspaceDir, KB, '.git'), { recursive: true });
-  const workspaceService = new WorkspaceService(root, 'https://example.invalid/kb.git', testKbContext({ kbDirName: KB }), new NodeFs());
+  const workspaceService = newWorkspaceService(root, 'https://example.invalid/kb.git', testKbContext({ kbDirName: KB }), new NodeFs());
   await workspaceService.getWorkspacePath(workspaceId);
 
   const asked: string[] = [];
@@ -70,10 +70,13 @@ async function makeHarness(): Promise<Harness> {
       asked.push(p);
       return true;
     },
+    // Each file of a zipped folder is judged too; this suite is about where
+    // the FOLDER is placed, so the files all pass.
+    canDownloadBatch: async (_w: string, _e: string, paths: string[]) => new Map(paths.map((p) => [p, true])),
   } as unknown as IAccessControl;
 
   const locked: string[] = [];
-  const workflowService = {
+  const versionControlService = {
     getLock: vi.fn(async () => null),
     acquireLock: vi.fn(async (_w: string, _b: string, p: string) => {
       locked.push(p);
@@ -82,7 +85,7 @@ async function makeHarness(): Promise<Harness> {
     releaseLock: vi.fn(async () => undefined as never),
     releaseLockNoCommit: vi.fn(async () => undefined as never),
     releaseLockUntouched: vi.fn(async () => undefined as never),
-  } as unknown as IWorkflowService;
+  } as unknown as IVersionControlService;
 
   const stubCreatorAccess: ICreatorAccess = {
     planForCreate: async () => null,
@@ -100,8 +103,8 @@ async function makeHarness(): Promise<Harness> {
     createWorkspaceRoutes(
       workspaceService,
       { getUserById: vi.fn(async () => USER) } as unknown as AuthService,
-      workflowService,
-      { emit: vi.fn() } as unknown as WorkflowEventBus,
+      versionControlService,
+      { emit: vi.fn() } as unknown as VersionControlEventBus,
       accessControl,
       testKbContext({ kbDirName: KB }),
       stubCreatorAccess,
@@ -455,9 +458,10 @@ describe('no code path outside the normaliser resolves a workspace path', () => 
 
   it('every write route passes its path through the normaliser before anything else', async () => {
     const text = await fs.readFile(path.join(here, '..', 'workspace.routes.ts'), 'utf-8');
-    // One helper, and it is the normaliser's: a route that grew its own
+    // One helper, and it is the normaliser's — reached through kb-fs's public
+    // entry, as every module reaches another: a route that grew its own
     // strip-if-present reading of the prefix is what this forbids.
-    expect(text).toContain("import { normalizeWorkspacePath } from '../kb-fs/repo-path.js'");
+    expect(text).toMatch(/import \{[^}]*\bnormalizeWorkspacePath\b[^}]*\} from '\.\.\/kb-fs\/index\.js'/);
     expect(text.match(/normalizeWorkspacePath\(/g)).toHaveLength(1);
     // The old reading, spelled out so it cannot come back unnoticed.
     expect(text).not.toMatch(/startsWith\(`\$\{kbDirName\}\/`\)\s*\n?\s*\?/);

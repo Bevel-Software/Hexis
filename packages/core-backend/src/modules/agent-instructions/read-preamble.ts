@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { KbContext } from '../../shared/kb-context.js';
 import { isAbsence, type IFsProbe } from '../../shared/fs.contract.js';
-import type { WorkspaceService } from '../workspace/workspace.service.js';
+import type { WorkspaceService } from '../workspace/index.js';
 import { PREAMBLE_FILE } from './compose.js';
 
 /** The one reader both the hosted proxy and the agent-facing route call. */

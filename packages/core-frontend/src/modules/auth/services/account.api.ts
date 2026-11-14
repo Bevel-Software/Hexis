@@ -1,4 +1,4 @@
-import { authFetch } from '../../../lib/api';
+import { authFetch, getToken, setToken } from '../../../lib/api';
 
 /** One row of the admin Accounts list (`GET /api/admin/accounts`). */
 export interface AccountSummary {
@@ -12,6 +12,10 @@ export interface AccountSummary {
    * in with the environment password whether or not a hash is stored.
    */
   isEnvAdmin: boolean;
+  /** One of the deployment's owners (`ADMIN_EMAIL`): never switched off, and its password is not set here. */
+  isOwner: boolean;
+  /** An owner who can sign back in with the server's password, so their account may be deleted; false otherwise. */
+  ownerCanBeDeleted: boolean;
   /** When an admin switched the account off; null while it is on. */
   deactivatedAt: string | null;
   /** One of the accounts the platform runs its own work as: it is never switched off. */
@@ -19,22 +23,58 @@ export interface AccountSummary {
   createdAt: string;
 }
 
+/**
+ * A refused account request, with the HTTP status and the server's `kind`
+ * kept. Most callers only show the message; the invite dialog also needs to
+ * tell the deployment having no place for another account (a seat limit,
+ * say: 403 with `kind: 'admission'`) from any other refusal — a 403 from the
+ * admin check included — and the message alone is the host's own words, not
+ * a code.
+ */
+export class AccountRequestError extends Error {
+  status: number;
+  /** The server's machine-readable reason, when it gave one (`admission`). */
+  kind: string | null;
+  constructor(message: string, status: number, kind: string | null = null) {
+    super(message);
+    this.name = 'AccountRequestError';
+    this.status = status;
+    this.kind = kind;
+  }
+}
+
 async function readError(res: Response, fallback: string): Promise<string> {
   const body = await res.json().catch(() => ({}));
   return (body as { error?: string }).error || fallback;
 }
 
-/** Self-service password change. `currentPassword` is required once one is set. */
+/**
+ * Self-service password change. `currentPassword` is required once one is set.
+ * The change ends every session opened before it, this one's included, so the
+ * fresh token the server hands back replaces the stored one — but only the
+ * one this request sent: the stored token is one key shared by every tab, and
+ * a tab that signed in as someone else while this request was in flight has
+ * replaced it already. That sign-in is kept; this change's token belongs to
+ * a session that tab no longer has.
+ */
 export async function changePassword(
   currentPassword: string | undefined,
   newPassword: string,
 ): Promise<void> {
+  const sent = getToken();
   const res = await authFetch('/api/auth/change-password', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ currentPassword, newPassword }),
   });
   if (!res.ok) throw new Error(await readError(res, 'Could not change password'));
+  const body = (await res.json().catch(() => ({}))) as { token?: unknown };
+  // The change is written by now. Only a token the server actually handed
+  // back replaces the stored one: an answer without one (a replica from
+  // before the change handed tokens back, mid-deploy) must not turn the
+  // stored token into the string "undefined" and sign the person out.
+  const token = typeof body.token === 'string' && body.token ? body.token : null;
+  if (token && getToken() === sent) setToken(token);
 }
 
 export async function listAccounts(): Promise<AccountSummary[]> {
@@ -48,18 +88,50 @@ export async function listAccounts(): Promise<AccountSummary[]> {
  * Create an account (or reset an existing account's password — deliberate
  * upsert). Without a password the account is for single sign-on: the person
  * finds it waiting the first time they sign in.
+ *
+ * With `keepExistingPassword` (an invite's starting password) the password
+ * goes only to a new account or a switched-on one that has none; the reply's
+ * `passwordSet` says whether it did, and `deactivated` whether it did not
+ * because the account is switched off.
+ *
+ * A refusal throws {@link AccountRequestError}; `kind: 'admission'` means
+ * the deployment's admission rules had no place for the account.
  */
 export async function createAccount(
   email: string,
   name: string,
   password?: string,
-): Promise<void> {
+  options: { keepExistingPassword?: boolean } = {},
+): Promise<{ passwordSet?: boolean; deactivated?: boolean; notified?: string[] }> {
   const res = await authFetch('/api/admin/accounts', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, name: name || undefined, password: password || undefined }),
+    body: JSON.stringify({
+      email,
+      name: name || undefined,
+      password: password || undefined,
+      keepExistingPassword: options.keepExistingPassword || undefined,
+    }),
   });
-  if (!res.ok) throw new Error(await readError(res, 'Could not create account'));
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: unknown; kind?: unknown };
+    const message = typeof body.error === 'string' && body.error ? body.error : 'Could not create account';
+    throw new AccountRequestError(message, res.status, typeof body.kind === 'string' ? body.kind : null);
+  }
+  const body = (await res.json().catch(() => ({}))) as {
+    passwordSet?: unknown;
+    deactivated?: unknown;
+    notified?: unknown;
+  };
+  // `notified`: how the deployment told a NEW account's person of the invite
+  // (`'email'`, say), as its listeners answered; empty or absent when nobody
+  // did and the admin hands over the link themselves.
+  const notified = Array.isArray(body.notified) ? body.notified.filter((c): c is string => typeof c === 'string') : [];
+  return {
+    ...(typeof body.passwordSet === 'boolean' ? { passwordSet: body.passwordSet } : {}),
+    ...(body.deactivated === true ? { deactivated: true } : {}),
+    ...(notified.length > 0 ? { notified } : {}),
+  };
 }
 
 /**

@@ -8,6 +8,7 @@ import os from 'node:os';
 import { NodeFs } from '../../kb-fs/node-fs.js';
 import { WorkspaceService } from '../workspace.service.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
+import { newWorkspaceService } from '../../../__tests__/workspace-service.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -64,7 +65,7 @@ describe('WorkspaceService — a branch origin does not have', () => {
   const deleteOnHost = (branch: string): Promise<void> => runGit(upstream, ['branch', '-D', branch]);
 
   const service = (repoUrl = upstream): WorkspaceService =>
-    new WorkspaceService(workspacesRoot, repoUrl, testKbContext(), new NodeFs());
+    newWorkspaceService(workspacesRoot, repoUrl, testKbContext(), new NodeFs());
 
   it('a name nothing has ever cloned or listed is a 404 that names only the branch', async () => {
     const svc = service();

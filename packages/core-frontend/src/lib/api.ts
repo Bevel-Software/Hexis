@@ -110,18 +110,26 @@ export interface AuthFetchOptions {
    * Network failures always signal, whatever this returns.
    */
   isApplicationResponse?: (response: Response) => boolean;
+  /**
+   * The session token to send instead of reading the stored one now: a caller
+   * that checked whose token it is sends exactly that token, never one another
+   * tab put in its place between the check and the request. `null` sends none.
+   */
+  token?: string | null;
 }
 
 /**
  * Fetch wrapper that injects the Authorization header from localStorage.
- * On 401 responses, clears the stored token.
+ * On 401 responses, clears the stored token — but only if it is still the one
+ * this request carried: a password change stores a replacement while older
+ * requests are in flight, and their 401s must not sign the changer out.
  */
 export async function authFetch(
   input: RequestInfo | URL,
   init?: RequestInit,
   opts: AuthFetchOptions = {},
 ): Promise<Response> {
-  const token = getToken();
+  const token = opts.token !== undefined ? opts.token : getToken();
   const headers = new Headers(init?.headers);
   if (token) headers.set('Authorization', `Bearer ${token}`);
 
@@ -141,7 +149,7 @@ export async function authFetch(
     signalUnreachable();
   }
 
-  if (response.status === 401) {
+  if (response.status === 401 && getToken() === token) {
     clearToken();
   }
 

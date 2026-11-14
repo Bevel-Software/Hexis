@@ -1,7 +1,7 @@
 import { generateKeyPairSync, randomBytes, randomInt } from 'node:crypto';
 import { and, eq } from 'drizzle-orm';
-import type { Database } from '../../database/connection.js';
-import { githubFacadeIdentity } from '../../database/schema.js';
+import type { Database } from '../../database/index.js';
+import { githubFacadeIdentity } from '../../database/index.js';
 import type { TokenCrypto } from '../../../shared/token-crypto.js';
 
 /**

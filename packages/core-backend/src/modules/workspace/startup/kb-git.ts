@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { cloneCredentialArgs, credentialHelperValue } from '../../kb-fs/clone-config.js';
+import { cloneCredentialArgs, credentialHelperValue } from '../../kb-fs/index.js';
 import { GitRunError, type IGitRunner } from '../../../shared/git.contract.js';
 import { ClassifiedFailure, classifyGitFailure } from '../../../shared/git-failure.js';
 import { redactSecret, urlQuerySecrets } from '../../../shared/redact-secret.js';
@@ -14,7 +14,7 @@ import { redactSecret, urlQuerySecrets } from '../../../shared/redact-secret.js'
  * runs through (`shared/git.contract.ts`).
  */
 
-/** Fallback committer identity; workflow commits override with `--author`. */
+/** Fallback committer identity; version-control commits override with `--author`. */
 export const BOT_NAME = 'Bevel Workflow';
 export const BOT_EMAIL = 'bevel-workflow@bevel.software';
 

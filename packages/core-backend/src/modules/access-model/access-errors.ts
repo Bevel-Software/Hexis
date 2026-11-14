@@ -1,4 +1,4 @@
-import { WorkflowDomainError } from '../../shared/domain-errors.js';
+import { VersionControlDomainError } from '../../shared/domain-errors.js';
 import { sanitizedPath } from '../../shared/printable.js';
 
 export interface AccessDeniedDetails {
@@ -55,7 +55,7 @@ export function unreadableRefusalSentence(repoRelative: string): string {
  * "you don't have permission to write to <path>; eligible: <roles + users>"
  * without a follow-up roundtrip.
  */
-export class AccessDeniedError extends WorkflowDomainError {
+export class AccessDeniedError extends VersionControlDomainError {
   readonly access: AccessDeniedDetails;
 
   constructor(details: AccessDeniedDetails) {
@@ -89,7 +89,7 @@ export class AccessDeniedError extends WorkflowDomainError {
  * 503 and the caller retries. Distinct from AccessConfigError (the config is
  * there and wrong) and AccessDeniedError (a real permission decision).
  */
-export class AccessUnreadableError extends WorkflowDomainError {
+export class AccessUnreadableError extends VersionControlDomainError {
   constructor(ref: string, relativePath: string) {
     super(
       `Access rules at ${ref} could not be read (git failed on ${relativePath}); nothing was decided. Try again.`,
@@ -105,7 +105,7 @@ export class AccessUnreadableError extends WorkflowDomainError {
  * or malformed at runtime — distinct from AccessDeniedError because the cause
  * is a config bug, not a permission decision.
  */
-export class AccessConfigError extends WorkflowDomainError {
+export class AccessConfigError extends VersionControlDomainError {
   readonly errors: string[];
 
   constructor(errors: string[]) {

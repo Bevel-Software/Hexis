@@ -1,8 +1,8 @@
-import type { IAccessControl } from '../access/access-control.interface.js';
+import type { IAccessControl } from '../access/index.js';
 import { logger } from '../../shared/logging.js';
 
 const log = logger('admin');
-import { type WorkspaceService } from '../workspace/workspace.service.js';
+import { type WorkspaceService } from '../workspace/index.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import { canonicalEmail } from '../../shared/email-identity.js';
 import type { IAdminAccessService } from './admin.interface.js';

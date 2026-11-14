@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { BranchSyncOutcome } from '@bevel-software/platform-shared';
 import { KbSyncService } from '../kb-sync.service.js';
-import type { SyncWorkflowPort, SyncWorkspacePort } from '../kb-sync.interface.js';
+import type { SyncVersionControlPort, SyncWorkspacePort } from '../kb-sync.interface.js';
 
 function deferred<T>() {
   let resolve!: (v: T) => void;
@@ -22,49 +22,75 @@ function updated(branch: string): BranchSyncOutcome {
 }
 
 describe('KbSyncService', () => {
-  it('syncs every known clone for an "all" request and reports unknown branches as not cloned', async () => {
-    const workflow: SyncWorkflowPort = {
+  it('answers the sync without waiting for the tidy-up after it', async () => {
+    let finish = (): void => undefined;
+    const versionControl: SyncVersionControlPort = {
       syncWorkspaceFromRemote: vi.fn(async (id: string) => updated(decodeURIComponent(id))),
-      closeChangeRequestsWithDeletedBranches: vi.fn(async () => 1),
+      closeChangeRequestsWithDeletedBranches: vi.fn(async () => 0),
+      // A tidy-up that never ends unless told to — and one that fails.
+      tidyAfterSweep: vi
+        .fn()
+        .mockImplementationOnce(
+          () => new Promise((resolve) => (finish = () => resolve({ closedEmpty: 0, removedLeftovers: 0 }))),
+        )
+        .mockRejectedValueOnce(new Error('boom')),
       retireRemoteGoneClone: vi.fn(async () => true),
     };
-    const svc = new KbSyncService(workflow, workspaces(['main', 'ali/x']));
+    const svc = new KbSyncService(versionControl, workspaces(['main']));
+    await expect(svc.sync({ branches: 'all' })).resolves.toMatchObject({ status: 'synced' });
+    expect(versionControl.tidyAfterSweep).toHaveBeenCalledTimes(1);
+    await expect(svc.sync({ branches: 'all' })).resolves.toMatchObject({ status: 'synced' });
+    finish();
+  });
+
+  it('syncs every known clone for an "all" request and reports unknown branches as not cloned', async () => {
+    const versionControl: SyncVersionControlPort = {
+      syncWorkspaceFromRemote: vi.fn(async (id: string) => updated(decodeURIComponent(id))),
+      closeChangeRequestsWithDeletedBranches: vi.fn(async () => 1),
+      tidyAfterSweep: vi.fn(async () => ({ closedEmpty: 0, removedLeftovers: 0 })),
+      retireRemoteGoneClone: vi.fn(async () => true),
+    };
+    const svc = new KbSyncService(versionControl, workspaces(['main', 'ali/x']));
 
     const all = await svc.sync({ branches: 'all' });
     expect(all.status).toBe('synced');
     expect(all.results.map((r) => r.branch)).toEqual(['main', 'ali/x']);
     expect(all.changeRequests.closedDeletedBranch).toBe(1);
-    expect(workflow.syncWorkspaceFromRemote).toHaveBeenCalledWith('ali%2Fx');
+    // Every sweep for deleted branches is followed by the leftover cleanup.
+    expect(versionControl.tidyAfterSweep).toHaveBeenCalledTimes(1);
+    expect(versionControl.syncWorkspaceFromRemote).toHaveBeenCalledWith('ali%2Fx');
 
     const some = await svc.sync({ branches: ['ali/x', 'juan/other'] });
     expect(some.results).toEqual([updated('ali/x'), { branch: 'juan/other', outcome: 'not-cloned' }]);
   });
 
   it('a conflict or an error makes the result partial; the other branches still sync', async () => {
-    const workflow: SyncWorkflowPort = {
+    const versionControl: SyncVersionControlPort = {
       syncWorkspaceFromRemote: vi.fn(async (id: string): Promise<BranchSyncOutcome> =>
         id === 'main'
           ? { branch: 'main', outcome: 'conflict', conflictedPaths: ['a.md'], error: 'msg' }
           : updated(decodeURIComponent(id)),
       ),
       closeChangeRequestsWithDeletedBranches: vi.fn(async () => 0),
+      tidyAfterSweep: vi.fn(async () => ({ closedEmpty: 0, removedLeftovers: 0 })),
       retireRemoteGoneClone: vi.fn(async () => true),
     };
-    const svc = new KbSyncService(workflow, workspaces(['main', 'ali/x']));
+    const svc = new KbSyncService(versionControl, workspaces(['main', 'ali/x']));
     const r = await svc.sync({ branches: 'all' });
     expect(r.status).toBe('partial');
     expect(r.results[1]).toEqual(updated('ali/x'));
   });
 
   it('a failing sweep does not fail the sync', async () => {
-    const workflow: SyncWorkflowPort = {
+    const versionControl: SyncVersionControlPort = {
       syncWorkspaceFromRemote: vi.fn(async () => updated('main')),
       closeChangeRequestsWithDeletedBranches: vi.fn(async () => {
         throw new Error('origin down');
       }),
+      tidyAfterSweep: vi.fn(async () => ({ closedEmpty: 0, removedLeftovers: 0 })),
       retireRemoteGoneClone: vi.fn(async () => true),
     };
-    const svc = new KbSyncService(workflow, workspaces(['main']));
+    const svc = new KbSyncService(versionControl, workspaces(['main']));
     const r = await svc.sync({ branches: 'all' });
     expect(r.status).toBe('synced');
     expect(r.changeRequests.closedDeletedBranch).toBe(0);
@@ -77,7 +103,7 @@ describe('KbSyncService', () => {
     // landing after the gate opened.
     const calls: string[][] = [['']];
     let gateOpened = false;
-    const workflow: SyncWorkflowPort = {
+    const versionControl: SyncVersionControlPort = {
       syncWorkspaceFromRemote: vi.fn(async (id: string) => {
         const branch = decodeURIComponent(id);
         if (!gateOpened && branch === 'main') {
@@ -91,9 +117,10 @@ describe('KbSyncService', () => {
         return updated(branch);
       }),
       closeChangeRequestsWithDeletedBranches: vi.fn(async () => 0),
+      tidyAfterSweep: vi.fn(async () => ({ closedEmpty: 0, removedLeftovers: 0 })),
       retireRemoteGoneClone: vi.fn(async () => true),
     };
-    const svc = new KbSyncService(workflow, workspaces(['main', 'ali/x', 'juan/y']));
+    const svc = new KbSyncService(versionControl, workspaces(['main', 'ali/x', 'juan/y']));
 
     const first = svc.sync({ branches: ['main'] });
     // Three requests land while the first is parked on `gate`.
@@ -110,20 +137,21 @@ describe('KbSyncService', () => {
     expect(r2.results.map((r) => r.branch)).toEqual(['ali/x']);
     expect(r3.results.map((r) => r.branch)).toEqual(['juan/y']);
     expect(r4.results.map((r) => r.branch)).toEqual(['ali/x']);
-    expect(workflow.closeChangeRequestsWithDeletedBranches).toHaveBeenCalledTimes(2);
+    expect(versionControl.closeChangeRequestsWithDeletedBranches).toHaveBeenCalledTimes(2);
   });
 
   it('an "all" arriving mid-run absorbs the queued branches', async () => {
     const gate = deferred<void>();
-    const workflow: SyncWorkflowPort = {
+    const versionControl: SyncVersionControlPort = {
       syncWorkspaceFromRemote: vi.fn(async (id: string) => {
         if (id === 'main') await gate.promise;
         return updated(decodeURIComponent(id));
       }),
       closeChangeRequestsWithDeletedBranches: vi.fn(async () => 0),
+      tidyAfterSweep: vi.fn(async () => ({ closedEmpty: 0, removedLeftovers: 0 })),
       retireRemoteGoneClone: vi.fn(async () => true),
     };
-    const svc = new KbSyncService(workflow, workspaces(['main', 'ali/x', 'juan/y']));
+    const svc = new KbSyncService(versionControl, workspaces(['main', 'ali/x', 'juan/y']));
     const first = svc.sync({ branches: ['main'] });
     const second = svc.sync({ branches: ['ali/x'] });
     const third = svc.sync({ branches: 'all' });
@@ -138,13 +166,14 @@ describe('KbSyncService', () => {
 
 describe('KbSyncService.lastSync', () => {
   it('is null before the first sync, then records when, who and what', async () => {
-    const workflow: SyncWorkflowPort = {
+    const versionControl: SyncVersionControlPort = {
       syncWorkspaceFromRemote: vi.fn(async (id: string) => updated(decodeURIComponent(id))),
       closeChangeRequestsWithDeletedBranches: vi.fn(async () => 0),
+      tidyAfterSweep: vi.fn(async () => ({ closedEmpty: 0, removedLeftovers: 0 })),
       retireRemoteGoneClone: vi.fn(async () => true),
     };
     let clock = 1_000;
-    const svc = new KbSyncService(workflow, workspaces(['main']), () => clock);
+    const svc = new KbSyncService(versionControl, workspaces(['main']), () => clock);
     expect(svc.lastSync()).toBeNull();
 
     await svc.sync({ branches: 'all', by: 'bearer' });
@@ -162,15 +191,16 @@ describe('KbSyncService.lastSync', () => {
 
   it('a coalesced follow-up names everyone who asked for it', async () => {
     const gate = deferred<void>();
-    const workflow: SyncWorkflowPort = {
+    const versionControl: SyncVersionControlPort = {
       syncWorkspaceFromRemote: vi.fn(async (id: string) => {
         if (id === 'main') await gate.promise;
         return updated(decodeURIComponent(id));
       }),
       closeChangeRequestsWithDeletedBranches: vi.fn(async () => 0),
+      tidyAfterSweep: vi.fn(async () => ({ closedEmpty: 0, removedLeftovers: 0 })),
       retireRemoteGoneClone: vi.fn(async () => true),
     };
-    const svc = new KbSyncService(workflow, workspaces(['main', 'ali/x']));
+    const svc = new KbSyncService(versionControl, workspaces(['main', 'ali/x']));
     const first = svc.sync({ branches: ['main'], by: 'bearer' });
     const second = svc.sync({ branches: ['ali/x'], by: 'github-signature' });
     const third = svc.sync({ branches: ['ali/x'], by: 'admin@example.com' });
@@ -182,15 +212,16 @@ describe('KbSyncService.lastSync', () => {
 
 describe('KbSyncService — a throwing branch step', () => {
   it('becomes an error outcome; the other branches, the sweep and the record all still happen', async () => {
-    const workflow: SyncWorkflowPort = {
+    const versionControl: SyncVersionControlPort = {
       syncWorkspaceFromRemote: vi.fn(async (id: string) => {
         if (id === 'main') throw new Error('fatal: unable to access https://x:ghp_secret@host/r');
         return updated(decodeURIComponent(id));
       }),
       closeChangeRequestsWithDeletedBranches: vi.fn(async () => 1),
+      tidyAfterSweep: vi.fn(async () => ({ closedEmpty: 0, removedLeftovers: 0 })),
       retireRemoteGoneClone: vi.fn(async () => true),
     };
-    const svc = new KbSyncService(workflow, workspaces(['main', 'ali/x']));
+    const svc = new KbSyncService(versionControl, workspaces(['main', 'ali/x']));
     const r = await svc.sync({ branches: 'all', by: 'bearer' });
     expect(r.status).toBe('partial');
     expect(r.results[0]).toMatchObject({ branch: 'main', outcome: 'error' });
@@ -202,26 +233,28 @@ describe('KbSyncService — a throwing branch step', () => {
 });
 
 describe('KbSyncService — clones the host no longer has, and clones that cannot be read', () => {
-  it('a remote-gone branch is retired through the workflow, counts as clean, and does not stop the others', async () => {
-    const workflow: SyncWorkflowPort = {
+  it('a remote-gone branch is retired through version control, counts as clean, and does not stop the others', async () => {
+    const versionControl: SyncVersionControlPort = {
       syncWorkspaceFromRemote: vi.fn(async (id: string): Promise<BranchSyncOutcome> =>
         id === 'ali%2Fx' ? { branch: 'ali/x', outcome: 'remote-gone' } : updated(decodeURIComponent(id)),
       ),
       closeChangeRequestsWithDeletedBranches: vi.fn(async () => 1),
+      tidyAfterSweep: vi.fn(async () => ({ closedEmpty: 0, removedLeftovers: 0 })),
       retireRemoteGoneClone: vi.fn(async () => true),
     };
-    const svc = new KbSyncService(workflow, workspaces(['ali/x', 'main']));
+    const svc = new KbSyncService(versionControl, workspaces(['ali/x', 'main']));
     const r = await svc.sync({ branches: 'all' });
     expect(r.status).toBe('synced');
     expect(r.results).toEqual([{ branch: 'ali/x', outcome: 'remote-gone' }, updated('main')]);
-    expect(workflow.retireRemoteGoneClone).toHaveBeenCalledTimes(1);
-    expect(workflow.retireRemoteGoneClone).toHaveBeenCalledWith('ali%2Fx');
+    expect(versionControl.retireRemoteGoneClone).toHaveBeenCalledTimes(1);
+    expect(versionControl.retireRemoteGoneClone).toHaveBeenCalledWith('ali%2Fx');
   });
 
   it('a clone that could not be read is that branch’s error, not everyone’s', async () => {
-    const workflow: SyncWorkflowPort = {
+    const versionControl: SyncVersionControlPort = {
       syncWorkspaceFromRemote: vi.fn(async (id: string) => updated(decodeURIComponent(id))),
       closeChangeRequestsWithDeletedBranches: vi.fn(async () => 0),
+      tidyAfterSweep: vi.fn(async () => ({ closedEmpty: 0, removedLeftovers: 0 })),
       retireRemoteGoneClone: vi.fn(async () => true),
     };
     const port: SyncWorkspacePort = {
@@ -230,30 +263,31 @@ describe('KbSyncService — clones the host no longer has, and clones that canno
         { id: 'juan%2Fy', branch: 'juan/y', unreadable: "Could not read this branch's clone: EPERM" },
       ],
     };
-    const svc = new KbSyncService(workflow, port);
+    const svc = new KbSyncService(versionControl, port);
     const r = await svc.sync({ branches: 'all' });
     expect(r.status).toBe('partial');
     expect(r.results).toEqual([
       updated('main'),
       { branch: 'juan/y', outcome: 'error', error: "Could not read this branch's clone: EPERM" },
     ]);
-    expect(workflow.syncWorkspaceFromRemote).toHaveBeenCalledTimes(1);
+    expect(versionControl.syncWorkspaceFromRemote).toHaveBeenCalledTimes(1);
   });
 });
 
 describe('KbSyncService — a coalesced caller is judged by its own branches', () => {
   it("branch A's hook is not failed by branch B's conflict in the same follow-up", async () => {
     const gate = deferred<void>();
-    const workflow: SyncWorkflowPort = {
+    const versionControl: SyncVersionControlPort = {
       syncWorkspaceFromRemote: vi.fn(async (id: string): Promise<BranchSyncOutcome> => {
         if (id === 'main') await gate.promise;
         if (id === 'juan%2Fy') return { branch: 'juan/y', outcome: 'conflict', conflictedPaths: ['a.md'], error: 'msg' };
         return updated(decodeURIComponent(id));
       }),
       closeChangeRequestsWithDeletedBranches: vi.fn(async () => 0),
+      tidyAfterSweep: vi.fn(async () => ({ closedEmpty: 0, removedLeftovers: 0 })),
       retireRemoteGoneClone: vi.fn(async () => true),
     };
-    const svc = new KbSyncService(workflow, workspaces(['main', 'ali/x', 'juan/y']));
+    const svc = new KbSyncService(versionControl, workspaces(['main', 'ali/x', 'juan/y']));
     const first = svc.sync({ branches: ['main'] });
     const hookA = svc.sync({ branches: ['ali/x'] });
     const hookB = svc.sync({ branches: ['juan/y'] });
@@ -272,15 +306,16 @@ describe('KbSyncService — a coalesced caller is judged by its own branches', (
 describe('KbSyncService — a waiter keeps the branches it asked for', () => {
   it('a caller that edits its array after queueing changes nothing about its sync or its answer', async () => {
     const gate = deferred<void>();
-    const workflow: SyncWorkflowPort = {
+    const versionControl: SyncVersionControlPort = {
       syncWorkspaceFromRemote: vi.fn(async (id: string) => {
         if (id === 'main') await gate.promise;
         return updated(decodeURIComponent(id));
       }),
       closeChangeRequestsWithDeletedBranches: vi.fn(async () => 0),
+      tidyAfterSweep: vi.fn(async () => ({ closedEmpty: 0, removedLeftovers: 0 })),
       retireRemoteGoneClone: vi.fn(async () => true),
     };
-    const svc = new KbSyncService(workflow, workspaces(['main', 'ali/x', 'juan/y']));
+    const svc = new KbSyncService(versionControl, workspaces(['main', 'ali/x', 'juan/y']));
     const first = svc.sync({ branches: ['main'] });
     const asked = ['ali/x'];
     const waiting = svc.sync({ branches: asked });
@@ -290,6 +325,6 @@ describe('KbSyncService — a waiter keeps the branches it asked for', () => {
     await first;
     const r = await waiting;
     expect(r.results.map((x) => x.branch)).toEqual(['ali/x']);
-    expect(workflow.syncWorkspaceFromRemote).not.toHaveBeenCalledWith('juan%2Fy');
+    expect(versionControl.syncWorkspaceFromRemote).not.toHaveBeenCalledWith('juan%2Fy');
   });
 });

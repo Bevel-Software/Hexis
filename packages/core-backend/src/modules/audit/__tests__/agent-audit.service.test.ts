@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { SQL } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import { AgentAuditService, retentionDaysFrom } from '../agent-audit.service.js';
-import { AuditPrincipalNotFoundError, InvalidCursorError } from '../audit.contract.js';
+import { AuditPrincipalNotFoundError, InvalidCursorError, pagePrincipalId, parsePagePrincipalId } from '../audit.contract.js';
 import type { Database } from '../../database/connection.js';
 import { agentConnections, oauthTokens } from '../../database/schema.js';
 import type { IExternalApiKeyService } from '../../tool-auth/external-api-key.interface.js';
@@ -14,13 +14,17 @@ import type { IExternalApiKeyService } from '../../tool-auth/external-api-key.in
  * update / delete` pops the next queued result. `transaction` runs its
  * callback against the same fake, so queued results are consumed in order.
  * Every `where` predicate and `update` target is captured, so a test can pin
- * WHICH rows a statement addressed (see {@link render}), not just that it ran.
+ * WHICH rows a statement addressed (see {@link render}), not just that it ran;
+ * `orderBy` and `limit` too, since the fake applies neither and a test can
+ * only pin WHICH row of several a read keeps by the clauses it sent.
  */
 function makeFakeDb(queue: unknown[]) {
-  const captured: { values: any[]; set: any[]; where: SQL[]; updateTargets: unknown[] } = {
+  const captured: { values: any[]; set: any[]; where: SQL[]; orderBy: SQL[][]; limit: number[]; updateTargets: unknown[] } = {
     values: [],
     set: [],
     where: [],
+    orderBy: [],
+    limit: [],
     updateTargets: [],
   };
   const counts = { insert: 0, select: 0, update: 0, delete: 0 };
@@ -36,10 +40,10 @@ function makeFakeDb(queue: unknown[]) {
     chain.values = passthrough((a) => captured.values.push(a[0]));
     chain.set = passthrough((a) => captured.set.push(a[0]));
     chain.where = passthrough((a) => captured.where.push(a[0]));
-    chain.limit = passthrough();
+    chain.limit = passthrough((a) => captured.limit.push(a[0]));
     chain.innerJoin = passthrough();
     chain.from = passthrough();
-    chain.orderBy = passthrough();
+    chain.orderBy = passthrough((a) => captured.orderBy.push(a));
     chain.groupBy = passthrough();
     chain.returning = passthrough();
     chain.then = (onF: any, onR: any) => Promise.resolve(result).then(onF, onR);
@@ -213,6 +217,8 @@ describe('AgentAuditService.listPrincipals', () => {
           { keyId: 'k-1', connectionId: null, n: 7 },
           { keyId: null, connectionId: 'c-1', n: 3 },
         ],
+        // pages
+        [],
       ],
       { listForUser: vi.fn(async () => [key({ lastUsedAt: NOW - 2 * DAY })]) },
     );
@@ -231,6 +237,7 @@ describe('AgentAuditService.listPrincipals', () => {
       [
         [{ connection: connection({ id: 'c-bob', userId: BOB.id }), user: BOB }],
         [],
+        [],
       ],
       { listForDeployment: vi.fn(async () => [{ ...key({}), user: ALICE }]) },
     );
@@ -240,6 +247,80 @@ describe('AgentAuditService.listPrincipals', () => {
     expect(rows.map((r) => r.user.email)).toEqual(['alice@example.com', 'bob@example.com']);
     expect((keyService.listForDeployment as any)).toHaveBeenCalled();
     expect((keyService.listForUser as any)).not.toHaveBeenCalled();
+  });
+});
+
+describe('AgentAuditService — a page as a principal', () => {
+  const ALICE_ID = '11111111-1111-4111-8111-111111111111';
+  const PAGE = 'Dashboards/Roadmap.html';
+
+  it("records a page's call under its path, with neither a key nor a connection", async () => {
+    const { service, captured } = makeService([undefined]);
+    service.record({
+      userId: ALICE_ID,
+      principal: { kind: 'page', path: PAGE },
+      kind: 'capability',
+      manual: null,
+      name: 'edit_file',
+      outcome: 'refused',
+      durationMs: null,
+    });
+    await flush();
+    expect(captured.values[0]).toMatchObject({
+      userId: ALICE_ID,
+      keyId: null,
+      connectionId: null,
+      pagePath: PAGE,
+      name: 'edit_file',
+      outcome: 'refused',
+    });
+  });
+
+  it('lists each page a person opened as a row of its own, labelled by its path, never revocable', async () => {
+    const { service } = makeService([
+      [{ ...ALICE, id: ALICE_ID }],
+      [],
+      [],
+      [
+        {
+          userId: ALICE_ID,
+          pagePath: PAGE,
+          n: 4,
+          first: new Date(NOW - DAY),
+          last: new Date(NOW - 60_000),
+          user: { ...ALICE, id: ALICE_ID },
+        },
+      ],
+    ]);
+    const rows = await service.listPrincipals({ userId: ALICE_ID });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      kind: 'page',
+      id: pagePrincipalId(ALICE_ID, PAGE),
+      label: PAGE,
+      eventCount: 4,
+      createdAt: NOW - DAY,
+      lastUsedAt: NOW - 60_000,
+      revokedAt: null,
+    });
+  });
+
+  it("reads a page's events by its person and path, and owns it by that person", async () => {
+    const id = pagePrincipalId(ALICE_ID, PAGE);
+    expect(parsePagePrincipalId(id)).toEqual({ userId: ALICE_ID, path: PAGE });
+
+    const events = makeService([[], [{ total: 0 }]]);
+    await events.service.listEvents({ kind: 'page', id }, { limit: 10 });
+    expect(render(events.captured.where[0]).params).toEqual([ALICE_ID, PAGE]);
+
+    const owned = makeService([[{ id: 'e-1' }]]);
+    await expect(owned.service.ownerOf({ kind: 'page', id })).resolves.toBe(ALICE_ID);
+    const never = makeService([[]]);
+    await expect(never.service.ownerOf({ kind: 'page', id })).resolves.toBeNull();
+    // An id that names no person and path is no page, without asking the database.
+    const bogus = makeService([]);
+    await expect(bogus.service.ownerOf({ kind: 'page', id: 'not-a-page' })).resolves.toBeNull();
+    expect(bogus.counts.select).toBe(0);
   });
 });
 
@@ -352,6 +433,62 @@ describe('AgentAuditService.revokeConnection', () => {
     await expect(foreign.service.revokeConnection('c-1', 'owner', BOB.id)).rejects.toBeInstanceOf(
       AuditPrincipalNotFoundError,
     );
+  });
+});
+
+/**
+ * The onboarding's "is your agent connected yet?". The page polls it, so the
+ * contract worth pinning is what it reads (one person's LIVE, USED rows of
+ * each kind — never the event log) and how the two kinds are combined.
+ */
+describe('AgentAuditService.lastAgentUse', () => {
+  it('answers null when neither an agent connection nor a key has been used', async () => {
+    const { service, counts } = makeService([[] /* connections */, [] /* keys */]);
+    await expect(service.lastAgentUse(ALICE.id)).resolves.toBeNull();
+    expect(counts.select).toBe(2);
+  });
+
+  it("reads only the caller's live, used rows of each kind", async () => {
+    const { service, captured } = makeService([[], []]);
+    await service.lastAgentUse(ALICE.id);
+    const [connections, keys] = captured.where.map(render);
+    expect(connections!.sql).toContain('"agent_connections"."user_id" = $1');
+    expect(connections!.sql).toContain('"agent_connections"."revoked_at" is null');
+    expect(connections!.sql).toContain('"agent_connections"."last_used_at" is not null');
+    expect(connections!.params).toEqual([ALICE.id]);
+    expect(keys!.sql).toContain('"api_tokens"."user_id" = $1');
+    expect(keys!.sql).toContain('"api_tokens"."revoked_at" is null');
+    expect(keys!.sql).toContain('"api_tokens"."last_used_at" is not null');
+    expect(keys!.params).toEqual([ALICE.id]);
+  });
+
+  it('keeps the most recently used row of each kind, of however many a person has', async () => {
+    // The fake neither sorts nor limits, so what is pinned is what each read
+    // asks the database for: newest use first, one row.
+    const { service, captured } = makeService([[], []]);
+    await service.lastAgentUse(ALICE.id);
+    expect(captured.orderBy.map((clauses) => clauses.map((c) => render(c).sql))).toEqual([
+      ['"agent_connections"."last_used_at" desc'],
+      ['"api_tokens"."last_used_at" desc'],
+    ]);
+    expect(captured.limit).toEqual([1, 1]);
+  });
+
+  it("names an agent connection by its client, and an unnamed one as such", async () => {
+    const at = new Date(NOW - 60_000);
+    const named = makeService([[{ client: 'Claude', at }], []]);
+    await expect(named.service.lastAgentUse(ALICE.id)).resolves.toEqual({ at, client: 'Claude', kind: 'agent' });
+    const unnamed = makeService([[{ client: null, at }], []]);
+    await expect(unnamed.service.lastAgentUse(ALICE.id)).resolves.toEqual({ at, client: 'Unnamed agent', kind: 'agent' });
+  });
+
+  it('answers with the newer of the two when both kinds have been used', async () => {
+    const older = new Date(NOW - DAY);
+    const newer = new Date(NOW - 60_000);
+    const keyNewer = makeService([[{ client: 'Claude', at: older }], [{ client: 'Laptop', at: newer }]]);
+    await expect(keyNewer.service.lastAgentUse(ALICE.id)).resolves.toEqual({ at: newer, client: 'Laptop', kind: 'key' });
+    const agentNewer = makeService([[{ client: 'Claude', at: newer }], [{ client: 'Laptop', at: older }]]);
+    await expect(agentNewer.service.lastAgentUse(ALICE.id)).resolves.toEqual({ at: newer, client: 'Claude', kind: 'agent' });
   });
 });
 

@@ -8,34 +8,39 @@ import AdmZip from 'adm-zip';
 import express from 'express';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { testKbContext } from '../../../__tests__/kb-context.js';
+import { slowRipgrep } from '../../../__tests__/slow-ripgrep.js';
 import { LocalFilesystem } from '@mastra/core/workspace';
-import { ToolRegistry } from '../../tool-registry/tool-registry.js';
-import { createToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
-import { ToolError, type ToolContext } from '../../tool-helpers/tool.contract.js';
-import type { ToolAuth } from '../../tool-auth/tool-auth.middleware.js';
+import { GUIDE_FIRST_SENTENCE, ToolRegistry } from '../../tool-registry/index.js';
+import { AccessControlService, VersionControlHooks, createToolHandlerFactory, type AgentOperationContext } from '../../../__tests__/tool-wiring.js';
+import { ToolError, type ToolContext } from '../../tool-helpers/index.js';
+import type { ToolAuth } from '../../tool-auth/index.js';
 import { registerWorkspaceTools } from '../workspace.tools.js';
-import { sharedFileRules, sharedFileRulesSection } from '../../agent-instructions/shared-file-rules.js';
-import { GUIDE_FIRST_SENTENCE } from '../../tool-registry/guide-first.js';
+import { RipgrepPatternMatcher, type RipgrepPatternMatcherOptions } from '../index.js';
+import { sharedFileRules, sharedFileRulesSection } from '../../agent-instructions/index.js';
+import { composeAgentGuide } from '../../agent-guide/index.js';
 import { RoutineWritePolicyService } from '../routine-write-policy.js';
 import { UuidSessionSink, type ISessionSink } from '../session-sink.js';
-import { WorkflowHooks, type AgentOperationContext } from '../../workflow/workflow-hooks.js';
+import { FIRST_RUN_SECTION_ID, STARTER_GUIDE_FILE, firstRunNote, type FirstRunStarterSource } from '../first-run.js';
 import { SESSION_ID_DESCRIPTION, ToolDescriptionNotes } from '../agent-access.gate.js';
 import { SpillStore } from '../spill-store.js';
 import { DocExtractService } from '../file-readers/doc-extract.service.js';
+import { WorkerDocumentExtractor } from '../file-readers/extract-in-worker.js';
 import { OCTET_STREAM_FALLBACK_NOTE } from '../file-readers/content-mode.js';
-import type { IAccessControl } from '../../access/access-control.interface.js';
-import { AccessControlService } from '../../access/access-control.service.js';
-import { NodeFs } from '../../kb-fs/node-fs.js';
+import type { IAccessControl } from '../../access/index.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
 import type { WorkspaceService } from '../workspace.service.js';
-import { isBranchAuthoredBy, isOwnSuggestionsBranch } from '@bevel-software/platform-shared';
-import { assertValidBranchName } from '../../kb-fs/branch-name.js';
-import { normalizeWorkspacePath } from '../../kb-fs/repo-path.js';
+import { DEFAULT_KB_LAYOUT, isBranchAuthoredBy, isOwnSuggestionsBranch } from '@bevel-software/platform-shared';
+import { normalizeWorkspacePath } from '../../kb-fs/index.js';
 import { GIT_INTERNALS_MESSAGE, PathNotFoundError } from '../../../shared/domain-errors.js';
-import { AccessDeniedError } from '../../access-model/access-errors.js';
+import { AccessDeniedError } from '../../access-model/index.js';
 import { proposalTitleFor } from '../write-denial.js';
 import { NOT_FOUND_NEXT_STEP } from '../not-found.js';
+import { compileCheck, exampleArguments } from '@bevel-software/platform-mcp-core';
 
 const KB_DIR = 'knowledge-base';
+
+/** A move that changes nobody's access: what a stand-in without rules answers. */
+const NO_CHANGES = { lose: [], gain: [] };
 
 /** Allow-all access control — the default for tests not exercising read gating. */
 const allowAll = {
@@ -43,17 +48,25 @@ const allowAll = {
   canReadBatch: async (_w: string, _u: string, paths: string[]) =>
     new Map(paths.map((p) => [p, true])),
   // The verbs `file_stat` and the move/delete preflight ask about. Allowing
-  // everything, and answering "no rules at HEAD" for the batch write check,
-  // keeps these tests about what they test rather than about access.
+  // everything keeps these tests about what they test rather than about
+  // access.
   canWrite: async () => true,
+  canWriteBatch: async (_w: string, _u: string, paths: string[]) =>
+    new Map(paths.map((p) => [p, true])),
   canDownload: async () => true,
   canOwner: async () => true,
-  canWriteBatchAtRef: async () => null,
+  // The `canWrite` the read tools report is judged at the default branch's
+  // HEAD, so a write-scope caller here gets a COMPUTED `true` — never the
+  // fail-closed `false` of a missing method or an unresolvable ref.
+  canWriteBatchAtRef: async (_w: string, _r: string, _u: string, paths: string[]) =>
+    new Map(paths.map((p) => [p, true])),
   // The `after` half of a move's or copy's preview. Allowing everything here
   // keeps it the same answer as the four gates above; what the relocation of
   // a folder's `access.md` files actually does to it is exercised against
   // REAL rules in "a move preview judges the destination as it will be".
   previewAccessAfterRelocation: async () => ({ read: true, write: true, download: true, owner: true }),
+  // Who else loses or gains access in a move: nobody, here.
+  prospectiveHolderChanges: async () => NO_CHANGES,
 } as unknown as IAccessControl;
 
 /** Access control that denies `canRead` for an explicit set of repo-relative paths. */
@@ -67,7 +80,7 @@ function denyReads(denied: Set<string>): IAccessControl {
 
 /**
  * File primitives over a REAL LocalFilesystem on a temp dir — proves read_file /
- * write_file / edit_file / list_files / grep / file_stat / execute_command
+ * write_file / edit_file / list_files / grep / file_stat
  * actually work (the handlers re-expose the same filesystem methods Mastra
  * uses). No locking pipeline (plain LocalFilesystem), so writes don't commit.
  */
@@ -78,11 +91,9 @@ let tempDir = '';
 let docCacheDir = '';
 let fs: LocalFilesystem;
 /**
- * Every branch / workspaceId `execute_command`'s handler resolves a workspace
- * for. Resolving a workspace is what triggers the lazy per-branch CLONE in
- * production, so asserting this never contains `"undefined"` proves the
- * missing-branch guard short-circuits before any clone of a branch literally
- * named "undefined" is attempted.
+ * Every branch a tool resolved a workspace for through `getOrCreateForBranch`.
+ * Resolving a workspace is what triggers the lazy per-branch worktree add in
+ * production.
  */
 let workspacePathCalls: string[] = [];
 /** Every `(archive, destination)` pair `unzip` handed the service. */
@@ -103,14 +114,13 @@ let writePolicy: RoutineWritePolicyService;
 let guideText = 'THE PLATFORM GUIDE\n';
 /**
  * The focused branch the resolved `ToolContext` carries — mirrors the branch an
- * internal token bakes for the in-process agent. A test sets it to prove a
- * branch-less `execute_command` falls back to the session's own workspace.
+ * internal token bakes for the in-process agent.
  */
 let focusedBranch: string | undefined;
 /** The registry the tools were mounted into, so a test can inspect their defs. */
 let toolRegistry: ToolRegistry;
 /** The hook registry the tools were mounted against, so a test can register one. */
-let hooks: WorkflowHooks;
+let hooks: VersionControlHooks;
 /** The note registry the tools were mounted against, so a test can register a note. */
 let notes: ToolDescriptionNotes;
 /**
@@ -131,6 +141,17 @@ let callerSource: 'internal' | 'external' | 'session' = 'internal';
  * ONCE (it clears itself), so a test's later writes are ordinary ones.
  */
 let raceHook: (() => Promise<void>) | null = null;
+/**
+ * The grep matcher `start()` wires, built from `matcherOptions` (the
+ * defaults, unless a test narrows the pool) and closed after each test.
+ */
+let patternMatcher: RipgrepPatternMatcher | undefined;
+/**
+ * The document extractor `start()` wires, closed after each test: its workers
+ * are made lazily, and `unref()` lets the process exit but keeps them alive.
+ */
+let docExtractor: WorkerDocumentExtractor | undefined;
+let matcherOptions: RipgrepPatternMatcherOptions = {};
 
 async function start(
   scope: 'read' | 'write' = 'write',
@@ -139,7 +160,12 @@ async function start(
   userEmail = 'e@x',
 ): Promise<string> {
   raceHook = null;
-  hooks = new WorkflowHooks();
+  await patternMatcher?.close();
+  patternMatcher = new RipgrepPatternMatcher(matcherOptions);
+  await docExtractor?.close();
+  const extractor = new WorkerDocumentExtractor();
+  docExtractor = extractor;
+  hooks = new VersionControlHooks();
   notes = new ToolDescriptionNotes();
   callerSource = 'internal';
   tempDir = await mkdtemp(join(tmpdir(), 'ws-tools-'));
@@ -281,7 +307,7 @@ async function start(
         return { destination: '', extracted, skipped };
       },
     } as never,
-    workflowService: {} as never,
+    versionControlService: {} as never,
     events: {} as never,
     getFilesystem: async () => fs,
   });
@@ -293,14 +319,14 @@ async function start(
   const app = express();
   app.use(express.json());
   const router = express.Router();
-  registerWorkspaceTools(registry, router, fakeAuth, toolHandler, new SpillStore(join(tmpdir(), 'bevel-test-spills')), new DocExtractService(docCacheDir), access, testKbContext({ kbDirName: KB_DIR }), {
+  registerWorkspaceTools(registry, router, fakeAuth, toolHandler, new SpillStore(join(tmpdir(), 'bevel-test-spills')), new DocExtractService(docCacheDir, extractor), access, testKbContext({ kbDirName: KB_DIR }), {
     // The hooks and the notes a test registers against; with neither
     // registered (the default, and every Hexis-only deployment) the gate
     // refuses nothing and the descriptions say nothing extra.
     recoveryBotEmail: RECOVERY_BOT,
     hooks,
     notes,
-  }, writePolicy, {} as never /* sessionSink — start_session not exercised here */, undefined, undefined, undefined, async () => guideText);
+  }, writePolicy, {} as never /* sessionSink — start_session not exercised here */, undefined, undefined, undefined, async () => guideText, undefined, undefined, undefined, patternMatcher);
   app.use('/api', router);
   httpServer = await new Promise<HttpServer>((r) => {
     const s = app.listen(0, () => r(s));
@@ -316,7 +342,9 @@ const postRaw = (url: string, body: unknown = {}) =>
  * POST a well-formed call. Every KB tool requires `branch` — a call that names
  * none is refused at the mount with 400 `branch-required` — so this names one
  * unless the test already did. A test ABOUT the missing input uses `postRaw`,
- * so the thing under test is never papered over by the helper.
+ * so the thing under test is never papered over by the helper. So does
+ * `start_session`, which declares no arguments at all and forbids extras: its
+ * route refuses a `branch` as an argument it does not have.
  */
 const post = (url: string, body: unknown = {}) =>
   postRaw(
@@ -328,10 +356,16 @@ const post = (url: string, body: unknown = {}) =>
 
 beforeEach(() => {
   /* fresh per test via start() */
+  guideText = 'THE PLATFORM GUIDE\n';
+  matcherOptions = {};
 });
 afterEach(async () => {
   if (httpServer) await new Promise<void>((r) => httpServer!.close(() => r()));
   httpServer = undefined;
+  await patternMatcher?.close();
+  patternMatcher = undefined;
+  await docExtractor?.close();
+  docExtractor = undefined;
   if (tempDir) {
     await rm(tempDir, { recursive: true, force: true });
     tempDir = '';
@@ -342,29 +376,10 @@ afterEach(async () => {
   }
 });
 
-/**
- * True once `pid` has been killed: either it is gone, or it is a zombie
- * waiting on a reaper (Linux: `State:\tZ` in /proc). `kill(pid, 0)` alone
- * cannot tell a zombie from a live process.
- */
-async function isDeadOrZombie(pid: number): Promise<boolean> {
-  try {
-    process.kill(pid, 0);
-  } catch {
-    return true;
-  }
-  try {
-    const status = await readFile(`/proc/${pid}/status`, 'utf8');
-    return /^State:\s*Z/m.test(status);
-  } catch {
-    return false; // no /proc (macOS): alive as far as the signal says
-  }
-}
-
 describe('workspace file primitives', () => {
   it('read_file returns the content', async () => {
     const base = await start();
-    expect(await (await post(`${base}/api/agent/tools/read_file`, { path: `${KB_DIR}/a.md` })).json()).toEqual({ path: `${KB_DIR}/a.md`, content: 'hello\nworld\n' });
+    expect(await (await post(`${base}/api/agent/tools/read_file`, { path: `${KB_DIR}/a.md` })).json()).toEqual({ path: `${KB_DIR}/a.md`, content: 'hello\nworld\n', canWrite: true });
   });
 
   it('write_file then read_file round-trips', async () => {
@@ -497,7 +512,7 @@ describe('workspace file primitives', () => {
   // that same text into an agent: a leading slash names the same path.
   it('every path input accepts a leading slash as the same workspace path', async () => {
     const base = await start();
-    expect(await (await post(`${base}/api/agent/tools/read_file`, { path: `/${KB_DIR}/a.md` })).json()).toEqual({ path: `${KB_DIR}/a.md`, content: 'hello\nworld\n' });
+    expect(await (await post(`${base}/api/agent/tools/read_file`, { path: `/${KB_DIR}/a.md` })).json()).toEqual({ path: `${KB_DIR}/a.md`, content: 'hello\nworld\n', canWrite: true });
     expect(await (await post(`${base}/api/agent/tools/file_stat`, { path: `/${KB_DIR}/a.md` })).json()).toMatchObject({ type: 'file' });
     await post(`${base}/api/agent/tools/write_file`, { path: `/${KB_DIR}/b.md`, content: 'fresh' });
     await post(`${base}/api/agent/tools/write_file`, { path: `/${KB_DIR}/c.md`, content: 'batch' });
@@ -589,248 +604,15 @@ describe('workspace file primitives', () => {
     expect(empty.matches.map((m) => m.path)).toEqual([`${KB_DIR}/n.md`]);
   });
 
-  it('execute_command runs in the workspace dir', async () => {
+  // An agent never composes a shell command line: there is no tool that runs
+  // one, and a call to the old one by name answers as any unknown tool.
+  it('offers no shell tool, and a call to execute_command by name finds nothing', async () => {
     const base = await start();
-    const res = (await (await post(`${base}/api/agent/tools/execute_command`, { branch: 'main', command: 'echo hello-exec' })).json()) as { stdout: string; exitCode: number };
-    expect(res.stdout).toContain('hello-exec');
-    expect(res.exitCode).toBe(0);
-  });
-
-  // The command runs under `sh -c`; a timeout used to SIGKILL that shell and
-  // leave what it had started running on as an orphan. The whole process
-  // group goes now. POSIX only: Windows has no process groups to kill.
-  it.skipIf(process.platform === 'win32')('execute_command kills what the command started, not just its shell, on timeout', async () => {
-    const base = await start();
-    // Print the grandchild's pid, then block on it so the timeout fires. The
-    // timeout is the schema's minimum — inside the tool's declared contract,
-    // and long enough that a slow spawn still prints the pid before it fires.
-    const res = (await (
-      await post(`${base}/api/agent/tools/execute_command`, {
-        branch: 'main',
-        command: 'sleep 30 & echo $!; wait',
-        timeout_ms: 1000,
-      })
-    ).json()) as { stdout: string; exitCode: number };
-    expect(res.exitCode).toBe(-1);
-    const grandchild = Number(res.stdout.trim());
-    expect(grandchild).toBeGreaterThan(0);
-    // Dead means killed, not reaped: a SIGKILLed process keeps its pid — and
-    // answers `kill(pid, 0)` as alive — until whoever inherited it reaps it,
-    // and on a host with no reaper (the very thing this guards) that is
-    // never. So where /proc exists, a zombie (`State: Z`) counts as dead; a
-    // vanished pid counts everywhere. Poll to a deadline rather than trust
-    // one fixed pause. Without the fix the grandchild is still sleeping at
-    // the deadline, so what fails is the deadline — never an early check.
-    const deadline = Date.now() + 3_000;
-    let dead = false;
-    while (!dead && Date.now() < deadline) {
-      dead = await isDeadOrZombie(grandchild);
-      if (!dead) await new Promise((r) => setTimeout(r, 50));
-    }
-    expect(dead).toBe(true);
-  });
-
-  it('execute_command 400s when no branch is given AND no focused branch (external caller)', async () => {
-    const base = await start();
-    // No `branch` arg and no `ctx.focusedBranch` (an external caller carries no
-    // focused branch): the branch context is genuinely absent, so it must NOT
-    // resolve the workspace id to "undefined" and try to clone a branch literally
-    // named "undefined" — it fails closed with a clear 4xx naming the missing
-    // branch context, BEFORE any workspace resolve.
-    expect(focusedBranch).toBeUndefined();
-    // `postRaw`: the absent field IS the test here, so the body goes as written.
-    const res = await postRaw(`${base}/api/agent/tools/execute_command`, { command: 'echo should-not-run' });
-    expect(res.status).toBe(400);
-    expect((await res.json()).error).toMatch(/branch/i);
-    // The guard runs before `getOrCreateForBranch`, so no workspace (least of all
-    // the "undefined" one) is ever resolved — proving no clone is attempted.
+    expect((await toolRegistry.listInternal()).map((t) => t.name)).not.toContain('execute_command');
+    expect((await toolRegistry.listExternal()).map((t) => t.name)).not.toContain('execute_command');
+    const res = await post(`${base}/api/agent/tools/execute_command`, { branch: 'main', command: 'echo should-not-run' });
+    expect(res.status).toBe(404);
     expect(workspacePathCalls).toEqual([]);
-  });
-
-  it('execute_command falls back to the session focused branch when branch is omitted', async () => {
-    const base = await start();
-    // The in-app chat agent, focused on `main`, may leave `branch` off a call.
-    // For an internal session that carries a focused branch, the shell runs
-    // against that branch's workspace and returns output end to end (AC2) —
-    // rather than failing closed the way a context-less external call does.
-    focusedBranch = 'main';
-    const res = (await (await postRaw(`${base}/api/agent/tools/execute_command`, { command: 'echo hello-exec' })).json()) as { stdout: string; exitCode: number };
-    expect(res.exitCode).toBe(0);
-    expect(res.stdout).toContain('hello-exec');
-    // Resolved against the focused branch — never an "undefined" workspace.
-    expect(workspacePathCalls).toEqual(['main']);
-  });
-
-  it('execute_command does NOT fall back to the focused branch for an invalid value', async () => {
-    const base = await start();
-    // A present-but-broken branch ("undefined") must fail closed even when a
-    // focused branch is available — a broken value is never silently reinterpreted
-    // as the session's branch.
-    focusedBranch = 'main';
-    const res = await post(`${base}/api/agent/tools/execute_command`, { branch: 'undefined', command: 'echo should-not-run' });
-    expect(res.status).toBe(400);
-    expect((await res.json()).error).toMatch(/branch/i);
-    expect(workspacePathCalls).toEqual([]);
-  });
-
-  // Every branch value that must fail closed without resolving a workspace.
-  // `''` (like the missing field above) is refused a layer earlier by the input
-  // schema's `minLength: 1`; the rest satisfy the schema and reach the handler,
-  // so they exercise the guard itself. Both layers must produce the same 400.
-  // The malformed refs below are rejected by the shared `assertValidBranchName`
-  // shape check; the literal "undefined"/"null" — which that validator ACCEPTS
-  // as ordinary git refs — are rejected by an explicit by-name check ahead of it
-  // (AC3 requires them to fail closed; see the dedicated test below).
-  const invalidBranches: Array<[label: string, branch: string]> = [
-    ['empty', ''],
-    ['whitespace-only', '   '],
-    // Malformed refs — caught by the canonical `assertValidBranchName` shape
-    // check, not by any hand-maintained list of literals.
-    ['whitespace-padded (never silently trimmed)', ' main '],
-    ['containing a space', 'alice/my draft'],
-    ['a ".." ref', 'foo..bar'],
-    ['containing ".."', 'alice/../../etc'],
-    ['a leading dash (git would read it as a flag)', '-x'],
-    ['starting with "--" (flag injection)', '--upload-pack=touch'],
-    ['containing "//"', 'alice//draft'],
-    ['ending with "/"', 'alice/'],
-    ['a segment starting with "."', 'alice/.hidden'],
-    ['a segment ending with ".lock"', 'alice/draft.lock'],
-    ['containing "@{"', 'alice/draft@{0}'],
-    ['containing a shell metacharacter', 'alice/draft;rm -rf /'],
-  ];
-  for (const [label, branch] of invalidBranches) {
-    it(`execute_command 400s when branch is ${label}`, async () => {
-      const base = await start();
-      const res = await post(`${base}/api/agent/tools/execute_command`, { branch, command: 'echo should-not-run' });
-      expect(res.status).toBe(400);
-      expect((await res.json()).error).toMatch(/branch/i);
-      // No workspace is resolved for the bad value — proving no clone is attempted.
-      expect(workspacePathCalls).toEqual([]);
-    });
-  }
-
-  /**
-   * The production regression this ticket bounced on: the guard's hand-written
-   * `"undefined"`/`"null"` rejection was replaced by the canonical
-   * `assertValidBranchName` alone. Both literals are *syntactically valid* git
-   * branch names, so the validator accepts them — a branch-less call then reached
-   * `getOrCreateForBranch("undefined")`, cloned a branch literally named
-   * `undefined` into `/app/workspaces/undefined/`, and 500'd in production.
-   *
-   * AC3 requires these literals to fail closed. Pinning the validator's own
-   * behaviour here is the point: it documents WHY the literal check cannot be
-   * folded into the shape check, so the next person who "simplifies" the guard
-   * down to `assertValidBranchName` gets a red test naming the reason rather than
-   * a fresh production 500.
-   */
-  it('rejects "undefined"/"null" even though the canonical validator accepts them', async () => {
-    for (const literal of ['undefined', 'null']) {
-      expect(() => assertValidBranchName(literal), `${literal} is a valid git ref`).not.toThrow();
-    }
-    const base = await start();
-    for (const literal of ['undefined', 'null']) {
-      const res = await post(`${base}/api/agent/tools/execute_command`, { branch: literal, command: 'echo should-not-run' });
-      expect(res.status, `branch "${literal}" must 400`).toBe(400);
-      // The message names the literal, so the agent can see what it actually sent.
-      expect((await res.json()).error).toContain(literal);
-    }
-    expect(workspacePathCalls).toEqual([]);
-  });
-
-  it('answers a branch-less call with the same kind every other KB tool uses', async () => {
-    const base = await start();
-    // The MESSAGE here is this tool's own — only `execute_command` has a
-    // focused-branch fallback to explain. The DISCRIMINATOR is shared, so a
-    // client switches on one kind across the whole surface instead of matching
-    // prose per tool.
-    for (const body of [{ command: 'x' }, { branch: '', command: 'x' }, { branch: 'undefined', command: 'x' }]) {
-      const res = await postRaw(`${base}/api/agent/tools/execute_command`, body);
-      expect(res.status).toBe(400);
-      expect((await res.json()).kind).toBe('branch-required');
-    }
-    expect(workspacePathCalls).toEqual([]);
-  });
-
-  it('execute_command validates the branch BEFORE the write-policy gate', async () => {
-    const base = await start();
-    // A routine-restricted session is refused by `assertUnrestricted` with 403.
-    // The branch guard must still run first, so a malformed call gets the 400
-    // that names the bad context instead of a 403 masking it.
-    writePolicy.restrictToExtensions('restricted-run', ['.html']);
-    const res = await post(`${base}/api/agent/tools/execute_command`, {
-      branch: 'alice/../../etc',
-      command: 'echo should-not-run',
-      sessionId: 'restricted-run',
-    });
-    expect(res.status).toBe(400);
-    expect((await res.json()).error).toMatch(/branch/i);
-    expect(workspacePathCalls).toEqual([]);
-    // …and the restriction really is live for that session (so the 400 above is
-    // the guard winning the race, not an inert policy).
-    const gated = await post(`${base}/api/agent/tools/execute_command`, {
-      branch: 'main',
-      command: 'echo should-not-run',
-      sessionId: 'restricted-run',
-    });
-    expect(gated.status).toBe(403);
-  });
-
-  it('execute_command bootstraps the workspace through getOrCreateForBranch', async () => {
-    const base = await start();
-    // Per-branch bootstrap is the service's job: the shell passes the branch
-    // itself rather than hand-encoding a workspace id.
-    await post(`${base}/api/agent/tools/execute_command`, { branch: 'alice/draft', command: 'echo hi' });
-    expect(workspacePathCalls).toEqual(['alice/draft']);
-  });
-
-  it('execute_command runs plain git against the nested KB clone', async () => {
-    const base = await start();
-    // Production layout: the repo lives one level BELOW the shell's cwd, at
-    // <workspace>/<kbDirName>/.git. A bare `git …` (what the agent prompt
-    // teaches) must still target that clone instead of failing with
-    // "not a git repository".
-    const execFileAsync = promisify(execFile);
-    const repoDir = join(tempDir, KB_DIR);
-    await mkdir(repoDir, { recursive: true });
-    await execFileAsync('git', ['init'], { cwd: repoDir });
-    await execFileAsync(
-      'git',
-      ['-c', 'user.email=t@test', '-c', 'user.name=t', 'commit', '--allow-empty', '-m', 'kb-seed'],
-      { cwd: repoDir },
-    );
-    const res = (await (await post(`${base}/api/agent/tools/execute_command`, { branch: 'main', command: 'git log -1 --format=%s' })).json()) as { stdout: string; stderr: string; exitCode: number };
-    expect(res.exitCode).toBe(0);
-    expect(res.stdout.trim()).toBe('kb-seed');
-  });
-
-  // POSIX-only probes: `$GIT_DIR` expansion and `>/dev/null` are `sh`
-  // semantics, and `shell: true` on Windows runs cmd.exe, where the probe
-  // itself (not the scoping under test) is meaningless. CI runs Linux.
-  it.skipIf(process.platform === 'win32')('execute_command does not leak GIT_DIR into non-git commands', async () => {
-    const base = await start();
-    // The KB-clone GIT_DIR/GIT_WORK_TREE override is scoped to bare `git …`
-    // only; a non-git command (e.g. npm/pip that shells git internally) must
-    // NOT inherit it, or the nested git child would target the KB clone.
-    // Probe via `node -e` rather than shell expansion — the override lives in
-    // the spawn env, and `$GIT_DIR` syntax doesn't expand under cmd.exe.
-    const res = (await (await post(`${base}/api/agent/tools/execute_command`, { branch: 'main', command: `node -e "console.log('GIT_DIR=['+(process.env.GIT_DIR||'')+']')"` })).json()) as { stdout: string; stderr: string; exitCode: number };
-    expect(res.exitCode).toBe(0);
-    expect(res.stdout.trim()).toBe('GIT_DIR=[]');
-  });
-
-  it.skipIf(process.platform === 'win32')('execute_command does not leak GIT_DIR into a chained step after git', async () => {
-    const base = await start();
-    // Runs under `shell: true`, so a command that merely STARTS with git but
-    // chains another step must not export the KB git env to the whole shell —
-    // otherwise `git … && npm ci` would leak the KB repo context into the npm/pip
-    // git subprocess. `git --version` needs no repo, so exit stays 0. The
-    // version line lands on stdout (`>/dev/null` isn't portable to cmd.exe),
-    // so the leak probe is asserted on the LAST line.
-    const res = (await (await post(`${base}/api/agent/tools/execute_command`, { branch: 'main', command: `git --version && node -e "console.log('leak=['+(process.env.GIT_DIR||'')+']')"` })).json()) as { stdout: string; stderr: string; exitCode: number };
-    expect(res.exitCode).toBe(0);
-    const lines = res.stdout.trim().split(/\r?\n/);
-    expect(lines[lines.length - 1].trim()).toBe('leak=[]');
   });
 
   it('read scope refuses write tools (403) but allows reads', async () => {
@@ -966,6 +748,8 @@ describe('write modes and per-path outcomes', () => {
     for (const res of [
       await writeFile(base, { path: `${KB_DIR}/a.md`, content: 'x', mode: 'replace' }),
       await writeFiles(base, { files: [{ path: `${KB_DIR}/a.md`, content: 'x' }], mode: 'replace' }),
+      // An empty batch is no way round it: the mode is judged before the batch is.
+      await writeFiles(base, { files: [], mode: 'bogus' }),
     ]) {
       expect(res.status).toBe(400);
       const body = (await res.json()) as { error: string; code: string };
@@ -1041,10 +825,10 @@ describe('write modes and per-path outcomes', () => {
     // The paragraph that said this in BOTH descriptions is one shared rule now.
     // What stays on the tool is the input the agent fills, which is where the
     // decision is actually taken.
-    const rule = sharedFileRules(testKbContext().layout).find((r) => r.id === 'write-mode')!;
+    const rule = sharedFileRules(testKbContext().layout, testKbContext().defaultBranch).find((r) => r.id === 'write-mode')!;
     expect(rule.body).toContain('DEFAULTS TO `create`');
     expect(rule.body).toContain('On write_file and write_files');
-    expect(sharedFileRulesSection(testKbContext().layout).split(rule.body)).toHaveLength(2);
+    expect(sharedFileRulesSection(testKbContext().layout, testKbContext().defaultBranch).split(rule.body)).toHaveLength(2);
     for (const name of ['write_file', 'write_files']) {
       const def = tools.find((t) => t.name === name)!;
       expect(def.description, name).not.toContain('DEFAULTS TO `create`');
@@ -1107,14 +891,14 @@ describe('write modes and per-path outcomes', () => {
 describe("the agent guide at the guide's name", () => {
   const GUIDE = `${KB_DIR}/AGENTS.md`;
   const read = (base: string, p = GUIDE, extra: Record<string, unknown> = {}) =>
-    post(`${base}/api/agent/tools/read_file`, { path: p, ...extra }).then((r) => r.json() as Promise<{ path: string; content: string }>);
+    post(`${base}/api/agent/tools/read_file`, { path: p, ...extra }).then((r) => r.json() as Promise<{ path: string; content: string; canWrite?: boolean }>);
   const statOf = (base: string, p = GUIDE) =>
     post(`${base}/api/agent/tools/file_stat`, { path: p }).then((r) => r.json() as Promise<Record<string, unknown>>);
 
   it('answers with the guide when the knowledge base has no file of that name', async () => {
     guideText = 'THE PLATFORM GUIDE\n';
     const base = await start();
-    expect(await read(base)).toEqual({ path: GUIDE, content: 'THE PLATFORM GUIDE\n' });
+    expect(await read(base)).toEqual({ path: GUIDE, content: 'THE PLATFORM GUIDE\n', canWrite: false });
     // By the root-anchored and the prefix-less spellings too, like any path.
     expect((await read(base, `/${GUIDE}`)).content).toBe('THE PLATFORM GUIDE\n');
     expect((await read(base, 'AGENTS.md')).content).toBe('THE PLATFORM GUIDE\n');
@@ -1122,11 +906,22 @@ describe("the agent guide at the guide's name", () => {
     expect((await read(base, GUIDE, { offset: 4, limit: 8 })).content).toBe('PLATFORM');
   });
 
+  it('answers with the platform\'s composed guide, HTML views section and all', async () => {
+    guideText = await composeAgentGuide(DEFAULT_KB_LAYOUT);
+    const base = await start();
+    const { content } = await read(base, 'AGENTS.md');
+    expect(content).toBe(guideText);
+    expect(content).toContain('## HTML views');
+    expect(content).toContain('**A bare fragment scrolls the page.**');
+  });
+
   it("puts the knowledge base's own AGENTS.md first, then the separator, then the guide", async () => {
     guideText = 'THE PLATFORM GUIDE\n';
     const base = await start();
     await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Acme\n\nWrite tickets in the present tense.\n');
-    const { content } = await read(base);
+    const { content, canWrite } = await read(base);
+    // Its own file is a file like any other: the write verdict is the rules' answer for it.
+    expect(canWrite).toBe(true);
     expect(content.startsWith('# Acme\n\nWrite tickets in the present tense.\n\n---\n')).toBe(true);
     expect(content.endsWith('\n\nTHE PLATFORM GUIDE\n')).toBe(true);
     expect(content).toContain("The text above is this knowledge base's own conventions file.");
@@ -1136,7 +931,7 @@ describe("the agent guide at the guide's name", () => {
     guideText = 'THE PLATFORM GUIDE\n';
     const base = await start();
     await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Knowledge base\n\n> **This file is managed by the platform.** Stale.\n');
-    expect((await read(base)).content).toBe('THE PLATFORM GUIDE\n');
+    expect(await read(base)).toEqual({ path: GUIDE, content: 'THE PLATFORM GUIDE\n', canWrite: false });
   });
 
   it("never tells a caller who may not read the knowledge base's own file that it exists", async () => {
@@ -1180,7 +975,7 @@ describe("the agent guide at the guide's name", () => {
     };
     await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Acme\n');
     vanish = true;
-    expect(await read(base)).toEqual({ path: GUIDE, content: 'THE PLATFORM GUIDE\n' });
+    expect(await read(base)).toEqual({ path: GUIDE, content: 'THE PLATFORM GUIDE\n', canWrite: false });
     await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Acme\n');
     vanish = true;
     expect(await statOf(base)).toMatchObject({ platformGuide: true });
@@ -1221,6 +1016,10 @@ describe("the agent guide at the guide's name", () => {
     expect((await grep(base, 'needle', 'AGENTS.md')).matches).toEqual([{ path: GUIDE, line: 3, text: 'Name every needle you plant.' }]);
     // A search under a folder does not reach a file that is not under it.
     expect((await grep(base, 'needle', `${KB_DIR}/Handbook`)).matches.map((m) => m.path)).toEqual([`${KB_DIR}/Handbook/a.md`]);
+    // A folder named with a trailing slash answers the same paths, spelled
+    // once, and the guide once.
+    expect((await grep(base, 'needle', `${KB_DIR}/Handbook/`)).matches.map((m) => m.path)).toEqual([`${KB_DIR}/Handbook/a.md`]);
+    expect((await grep(base, 'needle', `${KB_DIR}/`)).matches).toEqual(fromRoot.matches);
 
     // With the knowledge base's own AGENTS.md, the search covers the composed
     // text — the own file first, then the guide — and once: the walk's own
@@ -1235,17 +1034,18 @@ describe("the agent guide at the guide's name", () => {
     ]);
     expect((await grep(base, 'needle', GUIDE)).matches).toEqual(composed);
 
-    // The own file does not use up `max_results` twice: the walk leaves it to
-    // the composed search, so a file later in the tree is still reached when
-    // the own file alone has more matches than the cap. Without that, the
-    // walk filled the cap from AGENTS.md, those matches were dropped as
-    // duplicates, and Handbook/ was never searched.
+    // The own file does not use up `max_results` twice: the tree search
+    // leaves it to the composed search, so its lines are counted once and the
+    // file after it in path order is still reached. Counted twice, its five
+    // lines and their duplicates would fill a cap of seven, and Handbook/
+    // would be cut.
     await fs.writeFile(`${KB_DIR}/AGENTS.md`, `# Acme\n\n${'needle\n'.repeat(5)}`);
-    const capped = (await (await post(`${base}/api/agent/tools/grep`, { pattern: 'needle', max_results: 3 })).json()) as {
-      matches: { path: string }[];
+    const capped = (await (await post(`${base}/api/agent/tools/grep`, { pattern: 'needle', max_results: 7 })).json()) as {
+      matches: { path: string; line: number }[];
     };
-    expect(capped.matches.map((m) => m.path)).toContain(`${KB_DIR}/Handbook/a.md`);
-    expect(capped.matches).toHaveLength(3);
+    // Five lines of the own file and the guide's one, then the file after it.
+    expect(capped.matches.map((m) => m.path)).toEqual([...Array<string>(6).fill(GUIDE), `${KB_DIR}/Handbook/a.md`]);
+    expect(new Set(capped.matches.map((m) => `${m.path}:${m.line}`)).size).toBe(7);
     await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Acme\n\nOur needle rule.\n');
 
     // A caller who may not read the own file searches the guide alone, from
@@ -1398,6 +1198,22 @@ describe('grep with a path that names a file', () => {
     }
   });
 
+  it('a named text file answers the lines a folder search answers from it, valid UTF-8 lines of a file holding others included', async () => {
+    const base = await start();
+    await fs.writeFile(`${KB_DIR}/mixed/latin.txt`, Buffer.concat([Buffer.from('needle \xff\n', 'latin1'), Buffer.from('needle ok\n')]));
+    const named = await grep(base, { pattern: 'needle', path: `${KB_DIR}/mixed/latin.txt` });
+    const folder = await grep(base, { pattern: 'needle', path: `${KB_DIR}/mixed` });
+    expect(named.matches).toEqual([{ path: `${KB_DIR}/mixed/latin.txt`, line: 2, text: 'needle ok' }]);
+    expect(named.matches).toEqual(folder.matches);
+    expect(named.note).toBeUndefined();
+    // A line that is not UTF-8 counts toward ripgrep's cap, yet the line after it is still answered.
+    for (const path of [`${KB_DIR}/mixed/latin.txt`, `${KB_DIR}/mixed`]) {
+      const one = await grep(base, { pattern: 'needle', path, max_results: 1 });
+      expect(one.matches).toEqual([{ path: `${KB_DIR}/mixed/latin.txt`, line: 2, text: 'needle ok' }]);
+      expect(one.truncated).toBe(true);
+    }
+  });
+
   it('a path with nothing at it fails with an error naming the path — never an empty success', async () => {
     const base = await start();
     const res = await post(`${base}/api/agent/tools/grep`, { pattern: 'needle', path: `${KB_DIR}/notes/ghost.md` });
@@ -1480,6 +1296,360 @@ describe('grep with a path that names a file', () => {
     const res = await grep(base, { pattern: 'needle', path: 'notes' });
     expect(res.matches.map((m) => m.path).sort()).toEqual([`${KB_DIR}/notes/one.md`, `${KB_DIR}/notes/sub/two.md`]);
     expect(res.note).toBeUndefined();
+  });
+});
+
+/**
+ * grep runs ripgrep (RipgrepPatternMatcher), as a child process: the pattern
+ * is ripgrep's default engine's to judge, a search is stopped at its budget
+ * while every other request keeps being served, and the walk covers every
+ * text file the caller may read — hidden, git-ignored and untracked alike —
+ * without following a link or entering `.git`.
+ */
+describe('grep runs ripgrep', () => {
+  type GrepBody = { matches: { path: string; line: number; text: string }[]; truncated: boolean; note?: string; error?: string; code?: string };
+  const grep = async (base: string, body: Record<string, unknown>): Promise<{ status: number; body: GrepBody }> => {
+    const res = await post(`${base}/api/agent/tools/grep`, body);
+    return { status: res.status, body: (await res.json()) as GrepBody };
+  };
+  const git = (...args: string[]) => promisify(execFile)('git', args, { cwd: join(tempDir, KB_DIR) });
+
+  it('stops a search at its 5 s budget with the 400 "too expensive", leaves no ripgrep running, and serves other calls meanwhile', async () => {
+    const slow = await slowRipgrep();
+    try {
+      matcherOptions = {};
+      const base = await start();
+      await fs.writeFile(`${KB_DIR}/hit.md`, 'needle\n');
+      const started = Date.now();
+      const searching = grep(base, { pattern: 'needle' }).then((r) => ({ ...r, took: Date.now() - started }));
+      // Probe while the search runs: each read must answer well within a second.
+      const probes: number[] = [];
+      let done = false;
+      void searching.finally(() => (done = true));
+      while (!done) {
+        const t = Date.now();
+        const res = await post(`${base}/api/agent/tools/read_file`, { path: `${KB_DIR}/a.md` });
+        expect(res.status).toBe(200);
+        probes.push(Date.now() - t);
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      const { status, body, took } = await searching;
+      expect(status).toBe(400);
+      expect(body.code).toBe('pattern_too_expensive');
+      expect(body.error).toMatch(/^Pattern too expensive: /);
+      expect(body.error).toContain("this search's 5 s budget");
+      expect(took).toBeGreaterThanOrEqual(5_000);
+      expect(took).toBeLessThan(5_000 + 2_000);
+      expect(probes.length).toBeGreaterThan(10);
+      expect(Math.max(...probes)).toBeLessThan(1_000);
+      expect(await slow.alive()).toEqual([]);
+    } finally {
+      await slow.remove();
+    }
+  }, 15_000);
+
+  it('answers 503 when every search slot is taken and the queue is full, rather than an incomplete result', async () => {
+    const slow = await slowRipgrep();
+    try {
+      matcherOptions = { budgetMs: 1_000, maxRunning: 1, maxWaiting: 1 };
+      const base = await start();
+      await fs.writeFile(`${KB_DIR}/hit.md`, 'needle\n');
+      const holding = grep(base, { pattern: 'needle' }).then((r) => r.status);
+      while ((await slow.alive()).length === 0) await new Promise((r) => setTimeout(r, 20));
+      const queued = grep(base, { pattern: 'needle' }).then((r) => r.status);
+      await new Promise((r) => setTimeout(r, 100));
+      const refused = await grep(base, { pattern: 'needle' });
+      expect(refused.status).toBe(503);
+      expect(refused.body.code).toBe('search_busy');
+      expect(await Promise.all([holding, queued])).toEqual([400, 400]);
+      expect(await slow.alive()).toEqual([]);
+      // A slot is free again: with the real ripgrep back, a search answers.
+      await slow.remove();
+      const after = await grep(base, { pattern: 'needle', path: `${KB_DIR}/hit.md` });
+      expect(after.status).toBe(200);
+      expect(after.body.matches).toEqual([{ path: `${KB_DIR}/hit.md`, line: 1, text: 'needle' }]);
+    } finally {
+      await slow.remove();
+    }
+  });
+
+  it.each([
+    ['look-ahead', 'foo(?=bar)', /look-around/],
+    ['look-behind', '(?<=foo)bar', /look-around/],
+    ['a backreference', '(a)\\1', /backreferences are not supported/],
+    ['invalid syntax', 'a(', /unclosed group/],
+  ])('refuses %s with a 400 quoting ripgrep and naming the dialect, whatever path it names', async (_what, pattern, reason) => {
+    const base = await start();
+    await fs.writeFile(`${KB_DIR}/img.png`, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 0, 0]));
+    for (const path of [undefined, `${KB_DIR}/a.md`, `${KB_DIR}/img.png`]) {
+      const res = await grep(base, path === undefined ? { pattern } : { pattern, path });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_pattern');
+      expect(res.body.error).toMatch(/^Invalid regex: /);
+      expect(res.body.error).toMatch(reason);
+      expect(res.body.error).toContain('RE2-style patterns: no look-around and no backreferences');
+      // ripgrep's advice to pass a flag the caller cannot pass is not repeated.
+      expect(res.body.error).not.toContain('--pcre2');
+    }
+  });
+
+  it('the description and the pattern input say which patterns the engine takes', async () => {
+    await start();
+    const def = (await toolRegistry.listInternal()).find((t) => t.name === 'grep');
+    expect(def?.description).toContain("grep runs ripgrep's default regex engine, which takes RE2-style patterns: no look-around and no backreferences.");
+    expect(JSON.stringify(def?.inputSchema ?? def)).toContain('RE2-style (ripgrep): no look-around, no backreferences.');
+  });
+
+  it('a pattern that backtracks for ever in JavaScript is answered at once: the engine does not backtrack', async () => {
+    const base = await start();
+    const longLine = `${'a'.repeat(5_000)}!`;
+    await fs.writeFile(`${KB_DIR}/redos.md`, `intro\n${longLine}\n`);
+    const started = Date.now();
+    const none = await grep(base, { pattern: '^(a+)+$' });
+    expect(none.status).toBe(200);
+    expect(none.body.matches).toEqual([]);
+    const some = await grep(base, { pattern: '^a+!$', path: `${KB_DIR}/redos.md` });
+    expect(some.body.matches).toEqual([{ path: `${KB_DIR}/redos.md`, line: 2, text: longLine.slice(0, 300) }]);
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  it('searches hidden, git-ignored and untracked files, never .git, and never through a link', async () => {
+    const base = await start();
+    const outside = await mkdtemp(join(tmpdir(), 'grep-outside-'));
+    try {
+      await writeFile(join(outside, 'secret.md'), 'needle from outside\n');
+      await git('init', '-q');
+      await fs.writeFile(`${KB_DIR}/.gitignore`, 'build/\nignored.md\n');
+      await fs.writeFile(`${KB_DIR}/tracked.md`, 'needle tracked\n');
+      await git('add', '.gitignore', 'tracked.md');
+      await git('-c', 'user.email=t@x', '-c', 'user.name=t', 'commit', '-qm', 'init');
+      await fs.writeFile(`${KB_DIR}/.notes.md`, 'needle hidden\n');
+      await fs.writeFile(`${KB_DIR}/.hidden/deep.md`, 'needle in a hidden folder\n');
+      await fs.writeFile(`${KB_DIR}/build/out.txt`, 'needle ignored folder\n');
+      await fs.writeFile(`${KB_DIR}/ignored.md`, 'needle ignored file\n');
+      await fs.writeFile(`${KB_DIR}/untracked.md`, 'needle untracked\n');
+      await writeFile(join(tempDir, KB_DIR, '.git', 'needle-in-git'), 'needle git internals\n');
+      await mkdir(join(tempDir, KB_DIR, 'sub', '.GIT'), { recursive: true });
+      await writeFile(join(tempDir, KB_DIR, 'sub', '.GIT', 'x'), 'needle git internals\n');
+      await symlink(join(outside, 'secret.md'), join(tempDir, KB_DIR, 'link.md'));
+      await symlink(outside, join(tempDir, KB_DIR, 'linked-dir'));
+      await fs.writeFile(`${KB_DIR}/binary.dat`, Buffer.concat([Buffer.from('needle in binary\n'), Buffer.from([0, 1, 2])]));
+      const res = await grep(base, { pattern: 'needle' });
+      expect(res.status).toBe(200);
+      expect(res.body.matches.map((m) => m.path)).toEqual([
+        `${KB_DIR}/.hidden/deep.md`,
+        `${KB_DIR}/.notes.md`,
+        `${KB_DIR}/build/out.txt`,
+        `${KB_DIR}/ignored.md`,
+        `${KB_DIR}/tracked.md`,
+        `${KB_DIR}/untracked.md`,
+      ]);
+      expect(JSON.stringify(res.body)).not.toContain('outside');
+      expect(JSON.stringify(res.body)).not.toContain('git internals');
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('never answers a line from a file the caller may not read, nor counts it against max_results', async () => {
+    const base = await start('read', denyReads(new Set(['a-secret.md', 'Locked/b.md'])));
+    await fs.writeFile(`${KB_DIR}/a-secret.md`, 'needle 1\nneedle 2\nneedle 3\n');
+    await fs.writeFile(`${KB_DIR}/Locked/b.md`, 'needle locked\n');
+    await fs.writeFile(`${KB_DIR}/open.md`, 'needle open\n');
+    const res = await grep(base, { pattern: 'needle', max_results: 1 });
+    expect(res.body.matches).toEqual([{ path: `${KB_DIR}/open.md`, line: 1, text: 'needle open' }]);
+    expect(res.body.truncated).toBe(true);
+  });
+
+  // Four million matching lines: a file ripgrep searched would spend far more
+  // than the 1.5 s budget answering them.
+  const huge = 'needle\n'.repeat(4_000_000);
+
+  it('never searches a file the caller may not read, so what it holds cannot turn the answer into a 400', async () => {
+    matcherOptions = { budgetMs: 1_500 };
+    const base = await start('read', denyReads(new Set(['Locked/huge.md'])));
+    await fs.writeFile(`${KB_DIR}/Locked/huge.md`, huge);
+    await fs.writeFile(`${KB_DIR}/open.md`, 'needle open\n');
+    const res = await grep(base, { pattern: 'needle' });
+    expect(res.status).toBe(200);
+    expect(res.body.matches).toEqual([{ path: `${KB_DIR}/open.md`, line: 1, text: 'needle open' }]);
+  }, 20_000);
+
+  it('spends the budget on judging who may read what too: a verdict that outlasts it answers the 400 at the budget', async () => {
+    matcherOptions = { budgetMs: 1_000 };
+    // An access check that takes ten seconds, as a cold one over a large tree could.
+    const slowAccess = {
+      ...allowAll,
+      canReadBatch: (_w: string, _u: string, paths: string[]) =>
+        new Promise<Map<string, boolean>>((resolve) => setTimeout(() => resolve(new Map(paths.map((p) => [p, true]))), 10_000)),
+    } as unknown as IAccessControl;
+    const base = await start('read', slowAccess);
+    await fs.writeFile(`${KB_DIR}/open.md`, 'needle open\n');
+    const started = Date.now();
+    const res = await grep(base, { pattern: 'needle' });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('pattern_too_expensive');
+    expect(Date.now() - started).toBeLessThan(3_000);
+  }, 20_000);
+
+  it('stops the search at the file that fills max_results, so what comes after it costs nothing', async () => {
+    matcherOptions = { budgetMs: 1_500 };
+    const base = await start();
+    await fs.writeFile(`${KB_DIR}/a.md`, 'needle first\n');
+    await fs.writeFile(`${KB_DIR}/z/huge.md`, huge);
+    const res = await grep(base, { pattern: 'needle', max_results: 1 });
+    expect(res.status).toBe(200);
+    expect(res.body.matches).toEqual([{ path: `${KB_DIR}/a.md`, line: 1, text: 'needle first' }]);
+    expect(res.body.truncated).toBe(true);
+  }, 20_000);
+
+  it('reads a file of millions of matching lines only as far as max_results, in a tree and named alone', async () => {
+    matcherOptions = { budgetMs: 1_500 };
+    const base = await start();
+    await fs.writeFile(`${KB_DIR}/a/huge.md`, huge);
+    await fs.writeFile(`${KB_DIR}/b.md`, 'needle b\n');
+    const expected = Array.from({ length: 200 }, (_, i) => ({ path: `${KB_DIR}/a/huge.md`, line: i + 1, text: 'needle' }));
+    for (const path of [KB_DIR, `${KB_DIR}/a/huge.md`]) {
+      const res = await grep(base, { pattern: 'needle', path });
+      expect(res.status).toBe(200);
+      expect(res.body.matches).toEqual(expected);
+      expect(res.body.truncated).toBe(true);
+    }
+  }, 20_000);
+
+  it('a named file whose only NUL lies past the first 64 KB has no searchable text; the same length of text has no matches and no note', async () => {
+    matcherOptions = {};
+    const base = await start();
+    // ripgrep stops reading a file at the lines the answer can take, so a NUL
+    // far past the pattern's last chance is found by the read that follows,
+    // chunk by chunk — here in the fourth chunk.
+    const filler = Buffer.alloc(200 * 1024, 'x');
+    await fs.writeFile(`${KB_DIR}/late.md`, Buffer.concat([filler, Buffer.from([0])]));
+    await fs.writeFile(`${KB_DIR}/plain.md`, filler);
+    const binary = await grep(base, { pattern: 'needle', path: `${KB_DIR}/late.md` });
+    expect(binary.status).toBe(200);
+    expect(binary.body.matches).toEqual([]);
+    expect(binary.body.note).toContain('no searchable text');
+    const text = await grep(base, { pattern: 'needle', path: `${KB_DIR}/plain.md` });
+    expect(text.status).toBe(200);
+    expect(text.body.matches).toEqual([]);
+    expect(text.body.note).toBeUndefined();
+  });
+
+  it('stops the search when its caller goes away, leaving no ripgrep running', async () => {
+    const slow = await slowRipgrep();
+    try {
+      matcherOptions = {};
+      const base = await start();
+      const gone = new AbortController();
+      const call = fetch(`${base}/api/agent/tools/grep`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: 'Bearer x' },
+        body: JSON.stringify({ branch: 'main', pattern: 'needle' }),
+        signal: gone.signal,
+      }).catch(() => undefined);
+      while ((await slow.alive()).length === 0) await new Promise((r) => setTimeout(r, 20));
+      const left = Date.now();
+      gone.abort();
+      await call;
+      // Well inside the 5 s budget the search would otherwise have run to.
+      while ((await slow.alive()).length > 0 && Date.now() - left < 4_000) await new Promise((r) => setTimeout(r, 20));
+      expect(await slow.alive()).toEqual([]);
+      expect(Date.now() - left).toBeLessThan(1_000);
+    } finally {
+      await slow.remove();
+    }
+  }, 15_000);
+
+  it('searches node_modules and folders of any depth, and a link inside the workspace only where it points', async () => {
+    const base = await start();
+    const deep = Array.from({ length: 15 }, (_, i) => `d${i}`).join('/');
+    await fs.writeFile(`${KB_DIR}/node_modules/pkg/readme.md`, 'needle in node_modules\n');
+    await fs.writeFile(`${KB_DIR}/${deep}/deep.md`, 'needle fifteen levels down\n');
+    await fs.writeFile(`${KB_DIR}/real/target.md`, 'needle at the target\n');
+    await symlink(join(tempDir, KB_DIR, 'real', 'target.md'), join(tempDir, KB_DIR, 'file-link.md'));
+    await symlink(join(tempDir, KB_DIR, 'real'), join(tempDir, KB_DIR, 'folder-link'));
+    const res = await grep(base, { pattern: 'needle' });
+    expect(res.status).toBe(200);
+    expect(res.body.matches.map((m) => m.path)).toEqual([
+      `${KB_DIR}/${deep}/deep.md`,
+      `${KB_DIR}/node_modules/pkg/readme.md`,
+      `${KB_DIR}/real/target.md`,
+    ]);
+  });
+
+  it('leaves out a file whose name holds a line break, which no tool can read, and answers the rest', async () => {
+    const base = await start();
+    await writeFile(join(tempDir, KB_DIR, 'two\nlines.md'), 'needle in an odd name\n');
+    await fs.writeFile(`${KB_DIR}/plain.md`, 'needle plain\n');
+    expect((await post(`${base}/api/agent/tools/read_file`, { path: `${KB_DIR}/two\nlines.md` })).status).toBe(400);
+    const res = await grep(base, { pattern: 'needle' });
+    expect(res.status).toBe(200);
+    expect(res.body.matches).toEqual([{ path: `${KB_DIR}/plain.md`, line: 1, text: 'needle plain' }]);
+  });
+
+  it('answers the first max_results by path then line, whatever reads them, and marks the answer truncated', async () => {
+    const docx = (text: string): Buffer => {
+      const zip = new AdmZip();
+      zip.addFile('[Content_Types].xml', Buffer.from('<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>'));
+      zip.addFile(
+        'word/document.xml',
+        Buffer.from(`<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>${text}</w:t></w:r></w:p></w:body></w:document>`),
+      );
+      return zip.toBuffer();
+    };
+    const base = await start();
+    await fs.writeFile(`${KB_DIR}/b.md`, 'x\nneedle b2\nneedle b3\n');
+    await fs.writeFile(`${KB_DIR}/a/z.md`, 'needle a/z\n');
+    await fs.writeFile(`${KB_DIR}/a.md`, 'needle a.md\n');
+    await fs.writeFile(`${KB_DIR}/a/m.docx`, docx('needle in a document'));
+    await fs.writeFile(`${KB_DIR}/c.md`, `needle ${'c'.repeat(400)}\n`);
+    const all = await grep(base, { pattern: 'needle' });
+    expect(all.body.matches.map((m) => [m.path, m.line])).toEqual([
+      [`${KB_DIR}/a/m.docx`, 2],
+      [`${KB_DIR}/a/z.md`, 1],
+      [`${KB_DIR}/a.md`, 1],
+      [`${KB_DIR}/b.md`, 2],
+      [`${KB_DIR}/b.md`, 3],
+      [`${KB_DIR}/c.md`, 1],
+    ]);
+    expect(all.body.truncated).toBe(false);
+    expect(all.body.matches[5]!.text).toHaveLength(300);
+    const capped = await grep(base, { pattern: 'needle', max_results: 4 });
+    expect(capped.body.matches).toEqual(all.body.matches.slice(0, 4));
+    expect(capped.body.truncated).toBe(true);
+    // The default cap is 200.
+    await fs.writeFile(`${KB_DIR}/many.md`, 'needle\n'.repeat(250));
+    const many = await grep(base, { pattern: 'needle', path: `${KB_DIR}/many.md` });
+    expect(many.body.matches).toHaveLength(200);
+    expect(many.body.truncated).toBe(true);
+  });
+
+  it('honours ignore_case', async () => {
+    const base = await start();
+    await fs.writeFile(`${KB_DIR}/case.md`, 'Needle\nneedle\nNEEDLE\n');
+    expect((await grep(base, { pattern: 'NEEDLE', path: `${KB_DIR}/case.md` })).body.matches.map((m) => m.line)).toEqual([3]);
+    expect((await grep(base, { pattern: 'NEEDLE', path: `${KB_DIR}/case.md`, ignore_case: true })).body.matches.map((m) => m.line)).toEqual([1, 2, 3]);
+    expect((await grep(base, { pattern: 'NEEDLE', ignore_case: true })).body.matches.map((m) => m.line)).toEqual([1, 2, 3]);
+  });
+
+  it('searches a pattern and a path beginning with `-` as text, never as an option', async () => {
+    const base = await start();
+    await fs.writeFile(`${KB_DIR}/-dir/-n.md`, 'run it with -n\nnothing here\n');
+    for (const path of [undefined, `${KB_DIR}/-dir`, `${KB_DIR}/-dir/-n.md`, '-dir']) {
+      const res = await grep(base, path === undefined ? { pattern: '-n' } : { pattern: '-n', path });
+      expect(res.status).toBe(200);
+      expect(res.body.matches).toEqual([{ path: path === '-dir' ? `${KB_DIR}/-dir/-n.md` : `${KB_DIR}/-dir/-n.md`, line: 1, text: 'run it with -n' }]);
+    }
+    // `--files` as a pattern is a pattern too: it matches nothing here rather than listing files.
+    expect((await grep(base, { pattern: '--files' })).body.matches).toEqual([]);
+  });
+
+  it('a pattern carrying a NUL is refused with the escape to use instead', async () => {
+    const base = await start();
+    const res = await grep(base, { pattern: 'a\u0000b' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('\\x00');
   });
 });
 
@@ -1907,9 +2077,7 @@ describe('office documents and PDFs', () => {
   it('every mounted tool opens with the one sentence sending the agent to the guide, and repeats none of the rules', async () => {
     await start();
     const tools = await toolRegistry.listInternal();
-    // The shell is in the list too: it carried the agent-guide reminder before,
-    // and that reminder is one of the rules that moved.
-    const mounted = ['read_file', 'list_files', 'file_stat', 'grep', 'write_file', 'write_files', 'edit_file', 'delete_file', 'delete_folder', 'mkdir', 'move_file', 'copy_file', 'unzip', 'execute_command'];
+    const mounted = ['read_file', 'list_files', 'file_stat', 'grep', 'write_file', 'write_files', 'edit_file', 'delete_file', 'delete_folder', 'mkdir', 'move_file', 'copy_file', 'unzip'];
     for (const name of mounted) {
       const def = tools.find((t) => t.name === name);
       expect(def, name).toBeDefined();
@@ -1921,7 +2089,7 @@ describe('office documents and PDFs', () => {
       // description. Checked on the whole body rather than on a phrase: the
       // drift this PR exists to prevent is a paragraph pasted back onto a
       // tool, and naming only two marker phrases would catch two of eight.
-      for (const rule of sharedFileRules(testKbContext().layout)) {
+      for (const rule of sharedFileRules(testKbContext().layout, testKbContext().defaultBranch)) {
         expect(def!.description, `${name} / ${rule.id}`).not.toContain(rule.body);
       }
       // The two lead-in labels the paragraphs used to arrive under are gone
@@ -1934,6 +2102,34 @@ describe('office documents and PDFs', () => {
     // External-only, so it is looked up on that surface.
     const external = await toolRegistry.listExternal();
     expect(external.find((t) => t.name === 'start_session')!.description!.startsWith(`${GUIDE_FIRST_SENTENCE} `)).toBe(true);
+  });
+
+  /**
+   * The call example at the top of every description is generated from the
+   * tool's input schema, and the same schema is what the argument check reads.
+   * If the two could disagree, the platform would publish an example its own
+   * check refuses — so every declared tool is called with its own example here.
+   */
+  it('every declared tool can be called with its own generated example', async () => {
+    await start();
+    const tools = await toolRegistry.listInternal();
+    // The whole family this harness declares, the four the scenarios name included.
+    for (const name of ['read_file', 'write_file', 'list_files', 'grep']) {
+      expect(tools.some((t) => t.name === name), name).toBe(true);
+    }
+    expect(tools.length).toBeGreaterThan(12);
+    for (const def of tools) {
+      const compiled = compileCheck(def.inputs);
+      expect(compiled.checkable, `${def.name}: ${compiled.checkable ? '' : compiled.reason}`).toBe(true);
+      // Narrowed by hand: the assertion above already failed the test if not.
+      if (!compiled.checkable) throw new Error(compiled.reason);
+      expect(compiled.check(exampleArguments(def.inputs)), def.name).toEqual([]);
+    }
+    // That the FLAT schema each route checks a call against agrees with the
+    // example is the route layer's own property: tool-helpers'
+    // `route-tool-schemas.catalog.test.ts` holds it over the whole catalog.
+    // And that every description stays inside the cap a client shows is the
+    // registry's: `tool-description-length.test.ts`, over the same catalog.
   });
 
   describe('binary capability contract: a text file, a document, an image and a zip', () => {
@@ -2082,10 +2278,10 @@ describe('office documents and PDFs', () => {
   it('says where the images a page uses go — once, in the shared rules', async () => {
     await start();
     const tools = await toolRegistry.listInternal();
-    const rule = sharedFileRules(testKbContext().layout).find((r) => r.id === 'images-in-pages')!;
+    const rule = sharedFileRules(testKbContext().layout, testKbContext().defaultBranch).find((r) => r.id === 'images-in-pages')!;
     expect(rule.body).toContain('`assets/` folder next to the page');
     expect(rule.body).toContain('![Approval screen](./assets/approval-screen.png)');
-    expect(sharedFileRulesSection(testKbContext().layout)).toContain(rule.body);
+    expect(sharedFileRulesSection(testKbContext().layout, testKbContext().defaultBranch)).toContain(rule.body);
     for (const name of ['write_file', 'write_files']) {
       expect(tools.find((t) => t.name === name)!.description, name).not.toContain('`assets/` folder next to the page');
     }
@@ -2146,7 +2342,7 @@ describe('images', () => {
     const body = (await (await post(`${base}/api/agent/tools/read_file`, { path: `${KB_DIR}/photo.jpg` })).json()) as ImageSentinel;
     expect(body.mimeType).toBe('image/jpeg');
     expect(body.data).toBe(bytes.toString('base64'));
-    expect(body.note).toBe(`[image: ${KB_DIR}/photo.jpg — image/jpeg, ${bytes.length} bytes]`);
+    expect(body.note).toBe(`[image: ${KB_DIR}/photo.jpg — image/jpeg, ${bytes.length} bytes] (canWrite: true)`);
   });
 
   it('read_file refuses an image over 3.5 MiB raw with the downscale message, not a sentinel', async () => {
@@ -2172,6 +2368,7 @@ describe('images', () => {
     expect(await (await post(`${base}/api/agent/tools/read_file`, { path: `${KB_DIR}/icon.svg` })).json()).toEqual({
       path: `${KB_DIR}/icon.svg`,
       content: svg,
+      canWrite: true,
     });
   });
 
@@ -2192,6 +2389,7 @@ describe('images', () => {
 describe('start_session', () => {
   // Minimal harness: own app + a fake ISessionSink that records createSession.
   let server: HttpServer | undefined;
+  let sessionExtractor: WorkerDocumentExtractor | undefined;
   let created: Array<{ userId: string; startedAt: Date }> = [];
 
   async function startSessionApp(
@@ -2201,6 +2399,15 @@ describe('start_session', () => {
     // `UuidSessionSink`, because "did fifty first calls collide?" is a question
     // only the real minting can answer.
     sink?: ISessionSink,
+    // The default branch's workspace directory, for the tests about the
+    // `firstRun` note. Without one the workspace service is a bare stand-in
+    // the note's check cannot use, which is what every other test here wants:
+    // the call answers with the id and the default branch, never `firstRun`.
+    defaultWorkspaceDir?: string,
+    // The starter pack the knowledge base was filled from, for the note.
+    starterPacks?: FirstRunStarterSource,
+    // Who may read what: everything, unless a test about the note's gate says otherwise.
+    access: IAccessControl = allowAll,
   ): Promise<string> {
     created = [];
     const registry = new ToolRegistry();
@@ -2209,8 +2416,13 @@ describe('start_session', () => {
       scope: auth.scope,
       source: auth.source,
       abortSignal: signal,
-      workspaceService: {} as never,
-      workflowService: {} as never,
+      workspaceService: (defaultWorkspaceDir
+        ? {
+            hasBootstrappedWorkspace: async () => true,
+            getWorkspacePath: async () => defaultWorkspaceDir,
+          }
+        : {}) as never,
+      versionControlService: {} as never,
       events: {} as never,
       getFilesystem: async () => ({}) as never,
     });
@@ -2230,12 +2442,22 @@ describe('start_session', () => {
     const app = express();
     app.use(express.json());
     const router = express.Router();
+    await sessionExtractor?.close();
+    const extractor = new WorkerDocumentExtractor();
+    sessionExtractor = extractor;
     registerWorkspaceTools(
       registry, router, auth, toolHandler,
-      new SpillStore(join(tmpdir(), 'bevel-test-spills')), new DocExtractService(join(tmpdir(), 'bevel-test-doc-extract')), allowAll, testKbContext({ kbDirName: KB_DIR }),
-      { recoveryBotEmail: RECOVERY_BOT, hooks: new WorkflowHooks(), notes: new ToolDescriptionNotes() },
+      new SpillStore(join(tmpdir(), 'bevel-test-spills')), new DocExtractService(join(tmpdir(), 'bevel-test-doc-extract'), extractor), access, testKbContext({ kbDirName: KB_DIR }),
+      { recoveryBotEmail: RECOVERY_BOT, hooks: new VersionControlHooks(), notes: new ToolDescriptionNotes() },
       new RoutineWritePolicyService(),
       sink ?? fakeSessionSink,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined /* downloads */,
+      starterPacks,
+      realDisk(),
     );
     app.use('/api', router);
     server = await new Promise<HttpServer>((r) => {
@@ -2247,17 +2469,19 @@ describe('start_session', () => {
   afterEach(async () => {
     if (server) await new Promise<void>((r) => server!.close(() => r()));
     server = undefined;
+    await sessionExtractor?.close();
+    sessionExtractor = undefined;
   });
 
   it('returns the sink-minted id as sessionId', async () => {
     const base = await startSessionApp();
-    const res = (await (await post(`${base}/api/agent/tools/start_session`)).json()) as { sessionId: string };
+    const res = (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { sessionId: string };
     expect(res.sessionId).toBe('thread-xyz');
   });
 
   it('mints the session for the authenticated user', async () => {
     const base = await startSessionApp();
-    await post(`${base}/api/agent/tools/start_session`);
+    await postRaw(`${base}/api/agent/tools/start_session`);
     expect(created).toHaveLength(1);
     expect(created[0].userId).toBe('user-42');
     expect(created[0].startedAt).toBeInstanceOf(Date);
@@ -2268,7 +2492,7 @@ describe('start_session', () => {
     // loopback token resolves to source 'external' at the verifier (see
     // tool-auth), so it is admitted here like any external agent.
     const base = await startSessionApp('internal');
-    const res = await post(`${base}/api/agent/tools/start_session`);
+    const res = await postRaw(`${base}/api/agent/tools/start_session`);
     expect(res.status).toBe(403);
     expect(created).toHaveLength(0);
   });
@@ -2292,7 +2516,7 @@ describe('start_session', () => {
     it('answers every one of them with a session id of its own', async () => {
       const base = await startSessionApp('external', new UuidSessionSink());
 
-      const responses = await Promise.all(Array.from({ length: 50 }, () => post(`${base}/api/agent/tools/start_session`)));
+      const responses = await Promise.all(Array.from({ length: 50 }, () => postRaw(`${base}/api/agent/tools/start_session`)));
       const bodies = (await Promise.all(responses.map((r) => r.json()))) as Array<{ sessionId?: string }>;
 
       expect(responses.map((r) => r.status)).toEqual(Array.from({ length: 50 }, () => 200));
@@ -2325,13 +2549,13 @@ describe('start_session', () => {
       const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
       let failed: Awaited<ReturnType<typeof post>>;
       try {
-        failed = await post(`${base}/api/agent/tools/start_session`);
+        failed = await postRaw(`${base}/api/agent/tools/start_session`);
       } finally {
         errorLog.mockRestore();
       }
       expect(failed.status).toBeGreaterThanOrEqual(500);
 
-      const retried = (await (await post(`${base}/api/agent/tools/start_session`)).json()) as { sessionId: string };
+      const retried = (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { sessionId: string };
       expect(retried.sessionId).toBe('session-2');
       expect(calls).toBe(2);
     });
@@ -2343,8 +2567,8 @@ describe('start_session', () => {
       // to other tools, and the spare is simply never mentioned again.
       const base = await startSessionApp('external', new UuidSessionSink());
 
-      const first = (await (await post(`${base}/api/agent/tools/start_session`)).json()) as { sessionId: string };
-      const retry = (await (await post(`${base}/api/agent/tools/start_session`)).json()) as { sessionId: string };
+      const first = (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { sessionId: string };
+      const retry = (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { sessionId: string };
 
       expect(retry.sessionId).not.toBe(first.sessionId);
       expect(first.sessionId).toBeTruthy();
@@ -2355,10 +2579,11 @@ describe('start_session', () => {
     const registry = new ToolRegistry();
     const router = express.Router();
     const noopAuth: express.RequestHandler = (_req, _res, next) => next();
+    const extractor = new WorkerDocumentExtractor();
     registerWorkspaceTools(
       registry, router, noopAuth, (() => () => {}) as never,
-      new SpillStore(join(tmpdir(), 'bevel-test-spills')), new DocExtractService(join(tmpdir(), 'bevel-test-doc-extract')), allowAll, testKbContext({ kbDirName: KB_DIR }),
-      { recoveryBotEmail: RECOVERY_BOT, hooks: new WorkflowHooks(), notes: new ToolDescriptionNotes() },
+      new SpillStore(join(tmpdir(), 'bevel-test-spills')), new DocExtractService(join(tmpdir(), 'bevel-test-doc-extract'), extractor), allowAll, testKbContext({ kbDirName: KB_DIR }),
+      { recoveryBotEmail: RECOVERY_BOT, hooks: new VersionControlHooks(), notes: new ToolDescriptionNotes() },
       new RoutineWritePolicyService(),
       {} as never,
     );
@@ -2372,6 +2597,142 @@ describe('start_session', () => {
     expect(description).toMatch(/retry/i);
     expect(description).toMatch(/created nothing/i);
     expect(description).toMatch(/harmless/i);
+    // And that the answer may carry a note to act on, so an agent reading
+    // only the catalog knows the field is not noise.
+    expect(description).toContain('`firstRun`');
+    await extractor.close();
+  });
+
+  /**
+   * "The agent is the onboarding guide": on a knowledge base nobody has
+   * written in yet, the first call of a conversation says so, and the note
+   * stops on its own once a page exists.
+   */
+  describe('the firstRun note', () => {
+    let wsDir = '';
+    const knowledge = () => join(wsDir, KB_DIR, 'KnowledgeBase');
+
+    beforeEach(async () => {
+      wsDir = await mkdtemp(join(tmpdir(), 'bevel-first-run-'));
+      await mkdir(knowledge(), { recursive: true });
+      await writeFile(join(knowledge(), STARTER_GUIDE_FILE), '# How to get started\n');
+    });
+
+    afterEach(async () => {
+      await rm(wsDir, { recursive: true, force: true });
+    });
+
+    const startSession = async () => {
+      const base = await startSessionApp('external', undefined, wsDir);
+      // `postRaw`: the tool takes no arguments, and `post` adds a branch.
+      return (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { sessionId: string; firstRun?: string };
+    };
+
+    it('is there while the knowledge folder holds only the starter guide', async () => {
+      // Folder placeholders and access rules are not pages either.
+      await mkdir(join(knowledge(), 'Empty'), { recursive: true });
+      await writeFile(join(knowledge(), 'Empty', '.gitkeep'), '');
+      await writeFile(join(knowledge(), 'access.md'), '# Access\n');
+
+      const res = await startSession();
+
+      expect(res.sessionId).toBe('thread-xyz');
+      expect(res.firstRun).toBe(firstRunNote(`${KB_DIR}/KnowledgeBase`));
+      expect(res.firstRun).toContain(`\`${FIRST_RUN_SECTION_ID}\``);
+    });
+
+    it('is gone once another page exists beside the starter guide', async () => {
+      await writeFile(join(knowledge(), 'Glossary.md'), '# Glossary\n');
+
+      const res = await startSession();
+
+      expect(res.sessionId).toBe('thread-xyz');
+      expect(res).not.toHaveProperty('firstRun');
+    });
+
+    it('is gone once another page exists in a folder', async () => {
+      await mkdir(join(knowledge(), 'Company'), { recursive: true });
+      await writeFile(join(knowledge(), 'Company', 'About.md'), '# About us\n');
+
+      const res = await startSession();
+
+      expect(res.sessionId).toBe('thread-xyz');
+      expect(res).not.toHaveProperty('firstRun');
+    });
+
+    it("after a starter pack, stays while the pack's pages are untouched and names its suggestions", async () => {
+      await writeFile(join(knowledge(), 'Customers.md'), '# Customers\n');
+      const starter: FirstRunStarterSource = {
+        firstRunStarter: async () => ({
+          name: 'Sales',
+          suggestedPages: ['Customers', 'Pricing'],
+          pages: new Map([['Customers.md', '# Customers\n']]),
+        }),
+      };
+      const base = await startSessionApp('external', undefined, wsDir, starter);
+      const first = (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { firstRun?: string };
+      expect(first.firstRun).toBe(
+        firstRunNote(`${KB_DIR}/KnowledgeBase`, { name: 'Sales', suggestedPages: ['Customers', 'Pricing'] }),
+      );
+
+      await writeFile(join(knowledge(), 'Customers.md'), '# Customers\n\nAcme.\n');
+      const second = (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { firstRun?: string };
+      expect(second).not.toHaveProperty('firstRun');
+    });
+
+    /**
+     * The note is a read: it says what the knowledge folder holds. A caller
+     * who may not read the folder gets the id and the default branch alone, and a pack page the
+     * caller may not read is judged as anybody's page, so the note never
+     * tells them it is still a placeholder.
+     */
+    it('is withheld from a caller who may not read the knowledge folder', async () => {
+      const closed = { ...allowAll, canRead: async () => false } as unknown as IAccessControl;
+      const base = await startSessionApp('external', undefined, wsDir, undefined, closed);
+      const res = (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { firstRun?: string };
+      expect(res).toEqual({ sessionId: 'thread-xyz', defaultBranch: 'target-company-state' });
+    });
+
+    it('judges the folder as the caller may see it: a page they may not read leaves the note standing', async () => {
+      await mkdir(join(knowledge(), 'Leadership'), { recursive: true });
+      await writeFile(join(knowledge(), 'Leadership', 'Plan.md'), '# Plan\n');
+      const planClosed = {
+        ...allowAll,
+        canReadBatch: async (_w: string, _u: string, paths: string[]) =>
+          new Map(paths.map((p) => [p, !p.endsWith('Plan.md')])),
+      } as unknown as IAccessControl;
+      const base = await startSessionApp('external', undefined, wsDir, undefined, planClosed);
+      const res = (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { firstRun?: string };
+      expect(res.firstRun).toBe(firstRunNote(`${KB_DIR}/KnowledgeBase`));
+    });
+
+    it('says nothing of a pack whose page the caller may not read, in the checkout or gone from it', async () => {
+      // Absent from the checkout, so the folder reads as new — and the note
+      // would still name the pack and its suggestions.
+      const starter: FirstRunStarterSource = {
+        firstRunStarter: async () => ({
+          name: 'Sales',
+          suggestedPages: ['Customers'],
+          pages: new Map([['Customers.md', '# Customers\n']]),
+        }),
+      };
+      const pageClosed = {
+        ...allowAll,
+        canReadBatch: async (_w: string, _u: string, paths: string[]) =>
+          new Map(paths.map((p) => [p, !p.endsWith('Customers.md')])),
+      } as unknown as IAccessControl;
+      const base = await startSessionApp('external', undefined, wsDir, starter, pageClosed);
+      const res = (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { firstRun?: string };
+      expect(res).toEqual({ sessionId: 'thread-xyz', defaultBranch: 'target-company-state' });
+    });
+
+    it('never costs the session id: a workspace it cannot read answers with the id and the default branch', async () => {
+      await rm(wsDir, { recursive: true, force: true });
+
+      const res = await startSession();
+
+      expect(res).toEqual({ sessionId: 'thread-xyz', defaultBranch: 'target-company-state' });
+    });
   });
 });
 
@@ -2383,9 +2744,16 @@ describe('start_session', () => {
  * schema layer, complementing the handler-level guard exercised above.
  */
 describe('branch is a required parameter in the tool contract', () => {
+  /** Every extractor a registry was built with, closed after each test. */
+  const extractors: WorkerDocumentExtractor[] = [];
+  afterEach(async () => {
+    await Promise.all(extractors.splice(0).map((e) => e.close()));
+  });
   /** Register the workspace tools into a fresh registry (no server needed). */
   function buildRegistry(): ToolRegistry {
     const registry = new ToolRegistry();
+    const extractor = new WorkerDocumentExtractor();
+    extractors.push(extractor);
     const router = express.Router();
     const noopAuth: express.RequestHandler = (_req, _res, next) => next();
     // The handler factory is only invoked to build routes; its output is never
@@ -2397,12 +2765,22 @@ describe('branch is a required parameter in the tool contract', () => {
       noopAuth,
       toolHandler,
       new SpillStore(join(tmpdir(), 'bevel-test-spills')),
-      new DocExtractService(join(tmpdir(), 'bevel-test-doc-extract')),
+      new DocExtractService(join(tmpdir(), 'bevel-test-doc-extract'), extractor),
       allowAll,
       testKbContext({ kbDirName: KB_DIR }),
-      { recoveryBotEmail: RECOVERY_BOT, hooks: new WorkflowHooks(), notes: new ToolDescriptionNotes() },
+      { recoveryBotEmail: RECOVERY_BOT, hooks: new VersionControlHooks(), notes: new ToolDescriptionNotes() },
       new RoutineWritePolicyService(),
       {} as never,
+      // Skill check, change gate, uploads, guide, downloads, starter packs, disk: not this harness's business.
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      // So `grep` is mounted; it spawns no worker, as nothing here searches.
+      new RipgrepPatternMatcher(),
     );
     return registry;
   }
@@ -2412,19 +2790,6 @@ describe('branch is a required parameter in the tool contract', () => {
     const inputs = tool?.inputs as { properties?: { body?: { required?: string[] } } } | undefined;
     return inputs?.properties?.body?.required ?? [];
   }
-
-  it('execute_command declares branch required on the INTERNAL manual', async () => {
-    const internal = await buildRegistry().listInternal();
-    const exec = internal.find((t) => t.name === 'execute_command');
-    expect(exec).toBeDefined();
-    expect(bodyRequired(exec)).toContain('branch');
-    expect(bodyRequired(exec)).toContain('command');
-  });
-
-  it('execute_command is internal-only — never advertised on the external manual', async () => {
-    const external = await buildRegistry().listExternal();
-    expect(external.find((t) => t.name === 'execute_command')).toBeUndefined();
-  });
 
   it('every workspace file tool requires branch on BOTH manuals (one convention everywhere)', async () => {
     const registry = buildRegistry();
@@ -2555,6 +2920,7 @@ describe('the tools place an unprefixed path inside the repository', () => {
     expect(await (await tool(base, 'read_file', { path: 'Notes.md' })).json()).toEqual({
       path: `${KB_DIR}/Notes.md`,
       content: 'hello\nworld\n',
+      canWrite: true,
     });
     expect(await (await tool(base, 'file_stat', { path: 'Notes.md' })).json()).toMatchObject({ type: 'file' });
     const edited = await tool(base, 'edit_file', { path: 'Notes.md', old_string: 'world', new_string: 'earth' });
@@ -2872,7 +3238,8 @@ describe('preflight for moves and deletes', () => {
     if (rel === 'sealed.md' || rel.endsWith('/sealed.md')) return { read: true, write: false, download: false, owner: false };
     if (rel.startsWith('HR/')) return { read: true, write: true, download: false, owner: false };
     if (rel.startsWith('Locked/')) return { read: true, write: false, download: false, owner: false };
-    if (rel.startsWith('Secret/')) return { read: false, write: false, download: false, owner: false };
+    // The folder itself answers as its contents do, as the resolver's scopes do.
+    if (rel === 'Secret' || rel.startsWith('Secret/')) return { read: false, write: false, download: false, owner: false };
     return { read: true, write: true, download: true, owner: true };
   };
   const rules = {
@@ -2889,6 +3256,7 @@ describe('preflight for moves and deletes', () => {
     // preview learned to relocate them, which keeps every ordering and
     // oracle test below about what it is about.
     previewAccessAfterRelocation: async (_w: string, _u: string, _from: string, to: string) => verbsFor(to),
+    prospectiveHolderChanges: async () => NO_CHANGES,
   } as unknown as IAccessControl;
 
   const call = async (base: string, tool: string, body: Record<string, unknown>) => {
@@ -2945,6 +3313,110 @@ describe('preflight for moves and deletes', () => {
   });
 
   describe('move_file', () => {
+    describe('rewrites links', () => {
+      /** A node at Sales/deal.md, linked from a page beside it, a read-only page, and a page the caller cannot read. */
+      async function linked(): Promise<string> {
+        const base = await seeded();
+        await fs.writeFile(KB('NodeTypes/Deal.md'), '# Deal\n');
+        await fs.writeFile(KB('Sales/deal.md'), '---\nnodeType: "[Deal](../NodeTypes/Deal.md)"\nid: deal-a\n---\n\n# Deal\nSee [policy](../HR/policy.md).\n');
+        await fs.writeFile(KB('Sales/index.md'), `[d](deal.md "Deal") [r](/${KB_DIR}/Sales/deal.md#terms) [id](deal-a)\n\n\`deal.md\`\n`);
+        await fs.writeFile(KB('Locked/refs.md'), '[d](../Sales/deal.md)\n');
+        await fs.writeFile(KB('Secret/refs.md'), '[d](../Sales/deal.md)\n');
+        await fs.writeFile(KB('Sales/transcripts/01.md'), '[d](../deal.md)\n');
+        return base;
+      }
+      const args = { src: KB('Sales/deal.md'), dest: KB('Sales/2026/deal.md') };
+
+      it('by default: links in and out are rewritten, the dry run answering the plan the move carries out', async () => {
+        const base = await linked();
+        const dry = await call(base, 'move_file', { ...args, dryRun: true });
+        expect(dry.status).toBe(200);
+        expect(dry.body.links).toEqual({
+          filesEdited: 2,
+          linksRewritten: 4,
+          edits: [
+            { path: KB('Sales/2026/deal.md'), from: '../NodeTypes/Deal.md', to: '../../NodeTypes/Deal.md' },
+            { path: KB('Sales/2026/deal.md'), from: '../HR/policy.md', to: '../../HR/policy.md' },
+            { path: KB('Sales/index.md'), from: 'deal.md', to: '2026/deal.md' },
+            { path: KB('Sales/index.md'), from: `/${KB_DIR}/Sales/deal.md#terms`, to: `/${KB_DIR}/Sales/2026/deal.md#terms` },
+          ],
+          notRewritten: [{ path: KB('Locked/refs.md'), reason: 'no write access', links: ['../Sales/deal.md'] }],
+          unsearched: 'Links in files you cannot read were not searched, and may still point at the old path.',
+        });
+        // Nothing about the unreadable page leaks.
+        expect(JSON.stringify(dry.body)).not.toContain('Secret');
+        expect(await fs.readFile(KB('Sales/index.md'), { encoding: 'utf8' })).toContain('[d](deal.md "Deal")');
+
+        const run = await call(base, 'move_file', args);
+        expect(run.status).toBe(200);
+        expect(run.body).toMatchObject({ moved: true });
+        expect(run.body.links).toEqual(dry.body.links);
+        expect(await fs.readFile(KB('Sales/2026/deal.md'), { encoding: 'utf8' })).toBe(
+          '---\nnodeType: "[Deal](../../NodeTypes/Deal.md)"\nid: deal-a\n---\n\n# Deal\nSee [policy](../../HR/policy.md).\n',
+        );
+        expect(await fs.readFile(KB('Sales/index.md'), { encoding: 'utf8' })).toBe(
+          `[d](2026/deal.md "Deal") [r](/${KB_DIR}/Sales/2026/deal.md#terms) [id](deal-a)\n\n\`deal.md\`\n`,
+        );
+        // The read-only page, the unreadable page and the transcript keep the old path.
+        expect(await fs.readFile(KB('Locked/refs.md'), { encoding: 'utf8' })).toBe('[d](../Sales/deal.md)\n');
+        expect(await fs.readFile(KB('Secret/refs.md'), { encoding: 'utf8' })).toBe('[d](../Sales/deal.md)\n');
+        expect(await fs.readFile(KB('Sales/transcripts/01.md'), { encoding: 'utf8' })).toBe('[d](../deal.md)\n');
+      });
+
+      it('`rewriteLinks: false` moves exactly as before: no link touched, no `links` block', async () => {
+        const base = await linked();
+        const dry = await call(base, 'move_file', { ...args, dryRun: true, rewriteLinks: false });
+        expect(dry.body.links).toBeUndefined();
+        const run = await call(base, 'move_file', { ...args, rewriteLinks: false });
+        expect(run.body).toMatchObject({ moved: true });
+        expect(run.body.links).toBeUndefined();
+        expect(await fs.readFile(KB('Sales/index.md'), { encoding: 'utf8' })).toContain('[d](deal.md "Deal")');
+        expect(await fs.readFile(KB('Sales/2026/deal.md'), { encoding: 'utf8' })).toContain('../NodeTypes/Deal.md');
+      });
+
+      it('the pages the answer names reach the read hook, the edited ones the write hook, and a page merely searched neither', async () => {
+        const base = await linked();
+        const reads: string[] = [];
+        const writes: string[] = [];
+        hooks.onAgentRead(async (op) => {
+          reads.push(op.wsPath ?? '');
+        });
+        hooks.onPreWrite(async (op) => {
+          writes.push(op.wsPath ?? '');
+        });
+        expect((await call(base, 'move_file', args)).body).toMatchObject({ moved: true });
+        // The move's two ends first, as read_file tells it (what moves, and
+        // the folder it lands in); then `Locked/refs.md` is named (left for
+        // want of write access, its links listed), so the read hook hears of
+        // it; the unreadable page and the transcript are never named, so it
+        // never hears of them.
+        expect(reads.sort()).toEqual([KB('Locked/refs.md'), KB('Sales/2026'), KB('Sales/deal.md'), KB('Sales/deal.md'), KB('Sales/index.md')]);
+        expect([...new Set(writes)].sort()).toEqual([KB('Sales/2026/deal.md'), KB('Sales/deal.md'), KB('Sales/index.md')]);
+      });
+
+      it('a move that would edit more than 200 files is refused, and nothing changes', async () => {
+        const base = await seeded();
+        for (let i = 0; i < 201; i++) await fs.writeFile(KB(`Sales/pages/p${i}.md`), '[d](../deal.md)\n');
+        const dry = await call(base, 'move_file', { ...args, dryRun: true });
+        expect(dry.body).toMatchObject({ allowed: false });
+        expect(dry.body.reason).toMatch(/201 files.*rewriteLinks: false/s);
+        const run = await call(base, 'move_file', args);
+        expect(run.status).toBe(400);
+        expect(JSON.stringify(run.body)).toContain('rewriteLinks: false');
+        expect(await exists(args.src)).toBe(true);
+        expect(await fs.readFile(KB('Sales/pages/p0.md'), { encoding: 'utf8' })).toBe('[d](../deal.md)\n');
+      });
+
+      it('the description states the default, the opt-out, and that prose and code are not changed', async () => {
+        await start();
+        const def = (await toolRegistry.listInternal()).find((t) => t.name === 'move_file');
+        const description = typeof def?.description === 'string' ? def.description : '';
+        expect(description).toMatch(/rewritten by default/);
+        expect(description).toContain('`rewriteLinks: false`');
+        expect(description).toMatch(/plain prose or code are never changed/);
+      });
+    });
+
     it('a same-access move: the dry run changes nothing, the real call runs without confirm', async () => {
       const base = await seeded();
       const args = { src: KB('Sales/deal.md'), dest: KB('Sales/2026/deal.md') };
@@ -2962,6 +3434,32 @@ describe('preflight for moves and deletes', () => {
       expect(run.body).toMatchObject({ moved: true });
       expect(await exists(args.dest)).toBe(true);
       expect(await exists(args.src)).toBe(false);
+    });
+
+    it('a caller who cannot read what moves is refused as read_file refuses them, on a draft too, and nothing is looked at', async () => {
+      const resolved: string[] = [];
+      const base = await start('write', {
+        ...rules,
+        prospectiveHolderChanges: async (_w: string, from: string) => {
+          resolved.push(from);
+          return { lose: [{ kind: 'group', name: 'Board', verb: 'read' }], gain: [] };
+        },
+      } as unknown as IAccessControl);
+      await fs.writeFile(KB('Secret/plan.md'), 'plan');
+      // A draft is not write-gated, so only the read gate stands between a
+      // caller and a move of a file they may not open — and it does: the dry
+      // run, the unconfirmed move and the confirmed one are all read_file's
+      // own refusal, with nobody resolved and nothing moved.
+      const args = { branch: 'someone/draft', src: KB('Secret/plan.md'), dest: KB('Secret/old/plan.md') };
+      const read = await call(base, 'read_file', { branch: args.branch, path: args.src });
+      expect(read.status).toBe(403);
+      for (const body of [{ ...args, dryRun: true }, args, { ...args, confirm: true }]) {
+        const res = await call(base, 'move_file', body);
+        expect(res.status).toBe(403);
+        expect(res.body).toEqual(read.body);
+      }
+      expect(resolved).toEqual([]);
+      expect(await exists(args.src)).toBe(true);
     });
 
     it('an access-changing move shows before/after and runs only with confirm: true', async () => {
@@ -3162,13 +3660,18 @@ describe('preflight for moves and deletes', () => {
       expect(await exists(KB('Sales/moved'))).toBe(false);
     });
 
-    it('a denied move into a path the caller cannot read cannot be proposed, and says why', async () => {
+    it('a move into a folder the caller cannot read is refused as read_file refuses the folder, before the write verdict', async () => {
       const base = await seeded();
+      // The folder's rules are what a move preview would read back (the
+      // caller's verdicts there, who else is affected), so the read refusal
+      // comes first — not the write denial, which would say whether the path
+      // can be proposed and name the folder's contents on a collision.
       const run = await call(base, 'move_file', { src: KB('Sales/deal.md'), dest: KB('Secret/deal.md'), confirm: true });
       expect(run.status).toBe(403);
-      expect(run.body).toMatchObject({ kind: 'write-denied', canPropose: false });
+      expect(run.body.error).toContain(`permission to read "${KB('Secret')}"`);
+      expect(run.body.kind).toBeUndefined();
       expect(run.body.proposal).toBeUndefined();
-      expect(run.body.cannotProposeReason).toContain('you cannot read this path');
+      expect(await exists(KB('Sales/deal.md'))).toBe(true);
     });
 
     it('a draft branch is not write-gated, so the same move is allowed there', async () => {
@@ -3302,6 +3805,80 @@ describe('preflight for moves and deletes', () => {
       const run = await call(base, 'delete_file', { path: KB('Sales/deal.md') });
       expect(run.status).toBe(403);
       expect(run.body).toMatchObject({ kind: 'write-denied', path: KB('Sales/deal.md'), canPropose: true });
+    });
+
+    // A nested access.md is deleted the way a person deletes it in the app:
+    // by whoever may write it, through the same one-file delete (the locking
+    // filesystem's, which commits and pushes as the caller) as any file.
+    it('a nested access.md is deleted by a caller who may write it, like any file', async () => {
+      const base = await seeded();
+      await fs.writeFile(KB('Sales/access.md'), '---\nread: Admin\n---\n');
+      expect((await call(base, 'file_stat', { path: KB('Sales/access.md') })).body).toMatchObject({
+        managed: true, movable: false, deletable: true,
+      });
+      const deleted: string[] = [];
+      const deleteFile = fs.deleteFile.bind(fs);
+      fs.deleteFile = async (p: string) => { deleted.push(p); return deleteFile(p); };
+
+      const run = await call(base, 'delete_file', { path: KB('Sales/access.md') });
+
+      expect(run.status).toBe(200);
+      expect(run.body).toEqual({ path: KB('Sales/access.md'), deleted: true });
+      expect(deleted).toEqual([KB('Sales/access.md')]);
+      expect(await exists(KB('Sales/access.md'))).toBe(false);
+      expect(await exists(KB('Sales/deal.md'))).toBe(true);
+    });
+
+    it('a nested access.md the caller may not write is the ordinary write refusal, and stays', async () => {
+      const base = await seeded();
+      await fs.writeFile(KB('Locked/access.md'), '---\nread: everyone\n---\n');
+      expect((await call(base, 'file_stat', { path: KB('Locked/access.md') })).body).toMatchObject({
+        managed: true, deletable: false,
+      });
+
+      const run = await call(base, 'delete_file', { path: KB('Locked/access.md') });
+
+      expect(run.status).toBe(403);
+      expect(run.body).toMatchObject({ kind: 'write-denied', path: KB('Locked/access.md'), canPropose: true });
+      expect(JSON.stringify(run.body)).not.toContain('platform file');
+      expect(await exists(KB('Locked/access.md'))).toBe(true);
+    });
+
+    it('the root access.md and roles.yaml are the repository\'s own: refused for everyone, and they stay', async () => {
+      const base = await seeded();
+      await fs.writeFile(KB('roles.yaml'), 'roles: {}\n');
+      for (const name of ['access.md', 'roles.yaml']) {
+        // The caller here may write and own everything: the refusal is not about who asks.
+        expect((await call(base, 'file_stat', { path: KB(name) })).body).toMatchObject({
+          managed: true, movable: false, deletable: false,
+          access: { read: true, write: true, download: true, owner: true },
+        });
+        const run = await call(base, 'delete_file', { path: KB(name) });
+        expect(run.status).toBe(400);
+        expect(run.body.error).toBe(`${name} is the repository's own file and cannot be deleted.`);
+        expect(await exists(KB(name))).toBe(true);
+      }
+    });
+
+    it('a nested roles.yaml is content, and .bevelignore stays refused as before', async () => {
+      const base = await seeded();
+      await fs.writeFile(KB('Sales/roles.yaml'), 'content');
+      await fs.writeFile(KB('Sales/.bevelignore'), '*.tmp\n');
+      expect((await call(base, 'delete_file', { path: KB('Sales/roles.yaml') })).status).toBe(200);
+      const ignore = await call(base, 'delete_file', { path: KB('Sales/.bevelignore') });
+      expect(ignore.status).toBe(400);
+      expect(ignore.body.error).toBe('.bevelignore is a platform file and cannot be deleted through the agent tools.');
+      expect((await call(base, 'file_stat', { path: KB('Sales/.bevelignore') })).body).toMatchObject({ deletable: false });
+    });
+
+    it('delete_folder still refuses the repository root, which keeps its access.md', async () => {
+      const base = await seeded();
+      for (const args of [{ dryRun: true }, { confirm: true }]) {
+        const run = await call(base, 'delete_folder', { path: KB_DIR, ...args });
+        expect(run.body.allowed === false || run.status === 400).toBe(true);
+        expect(JSON.stringify(run.body)).toContain('The repository root is a platform folder and cannot be moved or deleted.');
+      }
+      expect(await exists(KB('access.md'))).toBe(true);
     });
   });
 
@@ -3635,7 +4212,7 @@ describe('preflight for moves and deletes', () => {
       expect(d.description).toMatch(/destination must not exist/);
       // What refuses a move, and the dry-run/confirm protocol it shares with the
       // deletes, are shared rules — stated once, in the two shared places.
-      const rules = sharedFileRulesSection(testKbContext().layout);
+      const rules = sharedFileRulesSection(testKbContext().layout, testKbContext().defaultBranch);
       expect(rules).toContain('is a platform file and stays in its folder.');
       expect(rules).toContain('`dryRun: true`');
       expect(rules).toContain('`confirm: true`');
@@ -3663,9 +4240,10 @@ describe('preflight for moves and deletes', () => {
       const d = await def('delete_folder');
       expect(d.description).toContain('a non-empty folder wants `confirm: true`');
       // The protocol itself, and what a platform folder does to it, are shared.
-      const rules = sharedFileRulesSection(testKbContext().layout);
+      const rules = sharedFileRulesSection(testKbContext().layout, testKbContext().defaultBranch);
       expect(rules).toContain('`dryRun: true`');
-      expect(rules).toContain('A non-empty folder is deleted, and a move that changes your access runs, only with `confirm: true`');
+      // Anyone's: a move asks when it changes who else may open or edit the file too (`holderChanges`).
+      expect(rules).toContain("A non-empty folder is deleted, and a move that changes anyone's access runs, only with `confirm: true`");
       expect(rules).toContain('platform folder');
       const dry = await call(base, 'delete_folder', { path: KB('Sales/archive'), dryRun: true });
       const unconfirmed = await call(base, 'delete_folder', { path: KB('Sales/archive') });
@@ -3687,7 +4265,7 @@ describe('preflight for moves and deletes', () => {
       expect(stat.description).toContain('shared rules on what these tools never move or delete');
       // The proposal route applies to every tool a permission can refuse, so it
       // is stated once in the shared rules rather than on each of them.
-      expect(sharedFileRulesSection(testKbContext().layout)).toContain('`write-denied`');
+      expect(sharedFileRulesSection(testKbContext().layout, testKbContext().defaultBranch)).toContain('`write-denied`');
       for (const name of ['move_file', 'delete_file', 'delete_folder']) {
         expect((await def(name)).description.startsWith(GUIDE_FIRST_SENTENCE), name).toBe(true);
       }
@@ -3731,6 +4309,7 @@ describe('a write refused for permissions says whether and how to propose it', (
       canOwner: async () => true,
       canWriteBatchAtRef: async () => null,
       previewAccessAfterRelocation: async () => ({ read: true, write: true, download: true, owner: true }),
+      prospectiveHolderChanges: async () => NO_CHANGES,
       eligibleWritersAtRef: async () => ({ roles: ['Sales Lead'], users: [{ name: 'Owner', email: 'owner@x' }] }),
     } as unknown as IAccessControl;
     return { ac, calls };
@@ -3804,7 +4383,7 @@ describe('a write refused for permissions says whether and how to propose it', (
     await fs.writeFile(DENIED, 'old text\n');
     await freeDestinationFor(tool);
     denyWrites();
-    const workflowCalls = workspacePathCalls.length;
+    const versionControlCalls = workspacePathCalls.length;
 
     const { status, json } = await call(base, tool, body);
 
@@ -3827,12 +4406,12 @@ describe('a write refused for permissions says whether and how to propose it', (
     // The read verdict was asked of the repo-relative path.
     expect(calls).toContain('Sales/deal.md');
     // Nothing was created: no workspace was resolved for the DRAFT the answer
-    // suggests, and the context's workflow service is an empty stub, so a
+    // suggests, and the context's version-control service is an empty stub, so a
     // create_branch or change request would have 500d. (The tools that
     // preflight do resolve the CALLER's own workspace on the way — to read
     // the on-disk spelling and refuse links — which is not a draft.)
     const forDraft = workspacePathCalls
-      .slice(workflowCalls)
+      .slice(versionControlCalls)
       .filter((b) => b.includes(draft) || b.includes(encodeURIComponent(draft)));
     expect(forDraft).toEqual([]);
   });
@@ -3943,8 +4522,8 @@ describe('a write refused for permissions says whether and how to propose it', (
     // stated in the handshake instructions and in the managed guide, and in no
     // description. The refusal ITSELF still spells the steps out — that is what
     // the tests above this one assert.
-    const rule = sharedFileRules(testKbContext().layout).find((r) => r.id === 'refused-for-permissions')!;
-    expect(sharedFileRulesSection(testKbContext().layout)).toContain(rule.body);
+    const rule = sharedFileRules(testKbContext().layout, testKbContext().defaultBranch).find((r) => r.id === 'refused-for-permissions')!;
+    expect(sharedFileRulesSection(testKbContext().layout, testKbContext().defaultBranch)).toContain(rule.body);
     for (const def of tools) {
       expect(def.description ?? '', def.name).not.toContain('If this is refused for permissions');
       expect(def.description ?? '', def.name).not.toContain(rule.body);
@@ -4207,6 +4786,47 @@ describe('agent read/write hooks', () => {
     expect(writes).toEqual([]);
   });
 
+  it("file_stat at the guide's name tells the read hook once when it reads the organisation's own file, and never for the guide alone", async () => {
+    guideText = 'THE PLATFORM GUIDE\n';
+    const base = await start();
+    record();
+    // Nothing of the organisation's there: the guide is everyone's and no
+    // file is read, so the hook hears nothing.
+    expect((await post(`${base}/api/agent/tools/file_stat`, { path: `${KB_DIR}/AGENTS.md`, sessionId: 's1' })).status).toBe(200);
+    expect(reads).toEqual([]);
+    // The organisation's own file: telling it from a stale copy reads it,
+    // and the hook hears of that read exactly once — as it does of a read_file.
+    await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Acme\n');
+    expect((await post(`${base}/api/agent/tools/file_stat`, { path: `${KB_DIR}/AGENTS.md`, sessionId: 's1' })).status).toBe(200);
+    expect(reads.map((op) => op.wsPath)).toEqual([`${KB_DIR}/AGENTS.md`]);
+    // A stale copy of the guide is read to be recognised, so it is heard of too.
+    await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Knowledge base\n\n> **This file is managed by the platform.** Stale.\n');
+    expect((await post(`${base}/api/agent/tools/file_stat`, { path: `${KB_DIR}/AGENTS.md`, sessionId: 's1' })).status).toBe(200);
+    expect(reads.map((op) => op.wsPath)).toEqual([`${KB_DIR}/AGENTS.md`, `${KB_DIR}/AGENTS.md`]);
+  });
+
+  it("grep at the guide's name tells the read hook the same way: never for the guide alone, once for the organisation's own file", async () => {
+    guideText = 'THE PLATFORM GUIDE\n';
+    const base = await start();
+    record();
+    // The guide alone: nothing of the organisation's is read, so the hook
+    // hears nothing — a search of the guide's path is not a read of a file.
+    expect((await post(`${base}/api/agent/tools/grep`, { pattern: 'GUIDE', path: `${KB_DIR}/AGENTS.md`, sessionId: 's1' })).status).toBe(200);
+    expect(reads).toEqual([]);
+    // The organisation's own file: once, as read_file tells it — not once
+    // for the search root and again for the file.
+    await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Acme GUIDE\n');
+    expect((await post(`${base}/api/agent/tools/grep`, { pattern: 'GUIDE', path: `${KB_DIR}/AGENTS.md`, sessionId: 's1' })).status).toBe(200);
+    expect(reads.map((op) => op.wsPath)).toEqual([`${KB_DIR}/AGENTS.md`]);
+    // A search of the whole knowledge base: the root once, then each file the
+    // walk opens once — the own AGENTS.md among them exactly once, from the
+    // composed search, never again from the walk.
+    reads = [];
+    expect((await post(`${base}/api/agent/tools/grep`, { pattern: 'GUIDE', sessionId: 's1' })).status).toBe(200);
+    expect(reads[0]?.wsPath).toBe(KB_DIR);
+    expect(reads.filter((op) => op.wsPath === `${KB_DIR}/AGENTS.md`)).toHaveLength(1);
+  });
+
   it('the read hook covers list_files, file_stat, grep, delete_file and delete_folder', async () => {
     const base = await start();
     record();
@@ -4226,17 +4846,38 @@ describe('agent read/write hooks', () => {
     expect(writes).toEqual([]);
   });
 
-  it('grep tells the read hook about every file the walk opens, not only its root', async () => {
+  it('grep tells the read hook about every file it opens — a file with no matching line included — not only its root', async () => {
     const base = await start();
     record();
     await fs.mkdir(`${KB_DIR}/KnowledgeBase/Product/Knowledge`, { recursive: true });
     await fs.mkdir(`${KB_DIR}/KnowledgeBase/Legal/Knowledge`, { recursive: true });
     await fs.writeFile(`${KB_DIR}/KnowledgeBase/Product/Knowledge/P.md`, 'needle');
     await fs.writeFile(`${KB_DIR}/KnowledgeBase/Legal/Knowledge/L.md`, 'needle');
+    // Searched and read by ripgrep like the others; it answers no line.
+    await fs.writeFile(`${KB_DIR}/KnowledgeBase/Legal/Knowledge/Quiet.md`, 'nothing of the sort');
     await post(`${base}/api/agent/tools/grep`, { pattern: 'needle', path: KB_DIR, sessionId: 's1' });
     const paths = reads.map((r) => r.wsPath);
     expect(paths).toContain(`${KB_DIR}/KnowledgeBase/Product/Knowledge/P.md`);
     expect(paths).toContain(`${KB_DIR}/KnowledgeBase/Legal/Knowledge/L.md`);
+    expect(paths).toContain(`${KB_DIR}/KnowledgeBase/Legal/Knowledge/Quiet.md`);
+    expect(paths.filter((p) => p === `${KB_DIR}/KnowledgeBase/Legal/Knowledge/Quiet.md`)).toHaveLength(1);
+  });
+
+  it('a read hook that refuses a file the search would open ends the grep as it ends a read_file, even one that matches nothing', async () => {
+    const base = await start();
+    record();
+    hooks.onAgentRead(async (op) => {
+      if (op.wsPath === `${KB_DIR}/KnowledgeBase/Legal/Knowledge/Quiet.md`) throw new ToolError('Quiet.md is off limits to this run', 403);
+    });
+    await fs.mkdir(`${KB_DIR}/KnowledgeBase/Product/Knowledge`, { recursive: true });
+    await fs.mkdir(`${KB_DIR}/KnowledgeBase/Legal/Knowledge`, { recursive: true });
+    await fs.writeFile(`${KB_DIR}/KnowledgeBase/Product/Knowledge/P.md`, 'needle');
+    await fs.writeFile(`${KB_DIR}/KnowledgeBase/Legal/Knowledge/Quiet.md`, 'nothing of the sort');
+    const res = await post(`${base}/api/agent/tools/grep`, { pattern: 'needle', path: KB_DIR, sessionId: 's1' });
+    expect(res.status).toBe(403);
+    expect(await res.json()).toMatchObject({ error: 'Quiet.md is off limits to this run' });
+    // The refusal came at admission: the hook heard of the file, and the search answered nothing from any file.
+    expect(reads.map((r) => r.wsPath)).toContain(`${KB_DIR}/KnowledgeBase/Legal/Knowledge/Quiet.md`);
   });
 
   it('the write hook covers write_file, edit_file and mkdir, once per path', async () => {
@@ -4273,16 +4914,6 @@ describe('agent read/write hooks', () => {
     expect(res.status).toBe(200);
     expect(reads.map((r) => r.wsPath)).toEqual([`${KB_DIR}/a.zip`]);
     expect(writes.map((w) => w.wsPath)).toEqual([`${KB_DIR}/out/one.md`, `${KB_DIR}/out/two.md`]);
-  });
-
-  it('execute_command calls the write hook once, with no path', async () => {
-    const base = await start();
-    record();
-    await post(`${base}/api/agent/tools/execute_command`, { branch: 'main', command: 'echo hi', sessionId: 's1' });
-    expect(writes).toHaveLength(1);
-    expect(writes[0].wsPath).toBeUndefined();
-    expect(writes[0]).toMatchObject({ sessionId: 's1', branch: 'main', source: 'internal' });
-    expect(reads).toEqual([]);
   });
 
   it('a write hook that throws refuses the write with its own message and status, and the file is unchanged', async () => {
@@ -4480,9 +5111,6 @@ describe('tool descriptions and the deployment note', () => {
       expect(all.get(name)!.description.endsWith(' One folder per conversation.'), name).toBe(true);
       expect(sessionIdDescriptionOf(all.get(name)!), name).toBe(`${SESSION_ID_DESCRIPTION} It also pins that folder.`);
     }
-    // `execute_command` is internal-only, so it is checked on that surface.
-    const internal = new Map((await toolRegistry.listInternal()).map((t) => [t.name, t]));
-    expect(internal.get('execute_command')!.description.endsWith(' One folder per conversation.')).toBe(true);
   });
 
   it('a tool that is not gated carries no note', async () => {
@@ -4525,7 +5153,7 @@ describe('a move preview judges the destination as it will be', () => {
           ensureRemotesFetched: async () => undefined,
         } as unknown as WorkspaceService,
         KB_DIR,
-        new NodeFs(),
+        realDisk(),
       );
     return {
       canRead: (w: string, u: string, r: string) => fresh().canRead(w, u, r),
@@ -4537,6 +5165,7 @@ describe('a move preview judges the destination as it will be', () => {
       previewAccessAfterRelocation: (
         w: string, u: string, from: string, to: string, opts?: { sourceRemains?: boolean },
       ) => fresh().previewAccessAfterRelocation(w, u, from, to, opts),
+      prospectiveHolderChanges: (w: string, from: string, to: string) => fresh().prospectiveHolderChanges(w, from, to),
     } as unknown as IAccessControl;
   };
 
@@ -4580,6 +5209,8 @@ describe('a move preview judges the destination as it will be', () => {
     expect(dry.body).toMatchObject({ kind: 'folder', accessChanges: false, allowed: true, moved: false });
     expect(dry.body.access.after).toEqual(dry.body.access.before);
     expect(dry.body.access.after.owner).toBe(true);
+    // A rename carries its own rules along: nobody else gains or loses either.
+    expect(dry.body.holderChanges).toBeUndefined();
     // Nothing moved and nothing was written to answer the question.
     expect(await fs.exists(args.dest)).toBe(false);
     expect(await fs.exists(KB('Sales/access.md'))).toBe(true);
@@ -4602,6 +5233,91 @@ describe('a move preview judges the destination as it will be', () => {
     expect((await call(base, 'move_file', args)).body).toMatchObject({ confirmationRequired: true, moved: false });
     expect((await call(base, 'move_file', { ...args, confirm: true })).body).toMatchObject({ moved: true });
     expect(await verbsAt(base, args.dest)).toEqual(dry.body.access.after);
+  });
+
+  it('a move that changes only who ELSE may edit it names them, and asks before it moves', async () => {
+    const base = await seeded();
+    // `Ops/` gives the caller what `Sales/` gives, and Ops Lead write as well.
+    await fs.writeFile(
+      KB('Ops/access.md'),
+      rules(`write:\n  - Mover <${MOVER}>\n  - Ops Lead <ops@x.io>\nowner:\n  - Mover <${MOVER}>\n`),
+    );
+    const args = { src: KB('Sales/deal.md'), dest: KB('Ops/deal.md') };
+
+    const dry = await call(base, 'move_file', { ...args, dryRun: true });
+    expect(dry.body).toMatchObject({ accessChanges: false, allowed: true });
+    // Everyone may read on both sides, so the only change is who may edit.
+    expect(dry.body.holderChanges).toEqual({
+      lose: [],
+      gain: [{ kind: 'person', name: 'ops@x.io', email: 'ops@x.io', verb: 'write' }],
+    });
+
+    const unconfirmed = await call(base, 'move_file', args);
+    expect(unconfirmed.body).toMatchObject({ confirmationRequired: true, moved: false });
+    expect(unconfirmed.body.message).toContain('`holderChanges`');
+    expect(await fs.exists(args.src)).toBe(true);
+    expect((await call(base, 'move_file', { ...args, confirm: true })).body).toMatchObject({ moved: true });
+  });
+
+  it('a source the read hook refuses is refused as read_file refuses it: no preview, not even that the move would ask', async () => {
+    const base = await seeded();
+    await fs.writeFile(
+      KB('Ops/access.md'),
+      rules(`write:\n  - Mover <${MOVER}>\n  - Ops Lead <ops@x.io>\nowner:\n  - Mover <${MOVER}>\n`),
+    );
+    const args = { src: KB('Sales/deal.md'), dest: KB('Ops/deal.md'), rewriteLinks: false };
+    // The rules let the caller read it; a deployment's read hook does not. The
+    // hook's refusal is the whole answer: a "this move asks for confirm" would
+    // already say what the comparison found behind the hook.
+    hooks.onAgentRead(async (op) => {
+      if (op.wsPath === args.src) throw new Error('not for agents');
+    });
+    const read = await call(base, 'read_file', { path: args.src });
+    expect(read.status).toBeGreaterThanOrEqual(400);
+    for (const body of [{ ...args, dryRun: true }, args, { ...args, confirm: true }]) {
+      const res = await call(base, 'move_file', body);
+      expect(res.status).toBe(read.status);
+      expect(res.body).toEqual(read.body);
+      expect(JSON.stringify(res.body)).not.toContain('ops@x.io');
+    }
+    expect(await fs.exists(args.src)).toBe(true);
+  });
+
+  it('a caller who reads what moves but not the folder it lands in is refused, on a draft too, and told nothing of the folder', async () => {
+    const base = await seeded();
+    // `Closed/` is somebody else's: its rules are what a move preview would
+    // read back (who it lets in, whom it denies). On a draft no write gate
+    // stands, so the read gate is what refuses — before anything is looked at.
+    await fs.writeFile(
+      KB('Closed/access.md'),
+      rules('read:\n  - Other <other@x.io>\n  - deny everyone\nwrite:\n  - Other <other@x.io>\n'),
+    );
+    await fs.writeFile(KB('Closed/deal.md'), 'taken');
+    const args = { branch: 'someone/draft', src: KB('Sales/deal.md'), dest: KB('Closed/deal.md'), rewriteLinks: false };
+
+    for (const body of [{ ...args, dryRun: true }, args, { ...args, confirm: true }]) {
+      const res = await call(base, 'move_file', body);
+      expect(res.status).toBe(403);
+      expect(res.body.error).toContain(`permission to read "${KB('Closed')}"`);
+      // Neither the folder's rules nor what sits in it: the name clash at
+      // `Closed/deal.md` is never reached.
+      const text = JSON.stringify(res.body);
+      expect(text).not.toContain('other@x.io');
+      expect(text).not.toContain('already exists');
+    }
+    expect(await fs.exists(args.src)).toBe(true);
+    expect(await fs.readFile(KB('Closed/deal.md'), { encoding: 'utf8' })).toBe('taken');
+  });
+
+  it('a move out of a folder names everyone it leaves behind', async () => {
+    const base = await seeded();
+    const args = { src: KB('Work/Notes'), dest: KB('Legal/Notes') };
+    const dry = await call(base, 'move_file', { ...args, dryRun: true });
+    // Everyone may still read it in Legal/: the caller loses editing, not opening.
+    expect(dry.body.holderChanges).toEqual({
+      lose: [{ kind: 'person', name: MOVER, email: MOVER, verb: 'write' }],
+      gain: [],
+    });
   });
 
   it('what the folder inherited is left behind; what its own access.md gives comes along', async () => {

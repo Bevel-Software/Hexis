@@ -3,13 +3,13 @@ import type { AddressInfo } from 'node:net';
 import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { testKbContext } from '../../../__tests__/kb-context.js';
-import { NodeFs } from '../../kb-fs/node-fs.js';
-import type { IWorkflowService } from '@bevel-software/platform-shared';
-import type { IAccessControl } from '../../access/access-control.interface.js';
-import type { ICreatorAccess } from '../../access-model/creator.js';
-import type { IAdminAccessService } from '../../admin/admin.interface.js';
-import type { WorkflowEventBus } from '../../workflow/event-bus.js';
-import type { AuthService } from '../../auth/auth.service.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
+import type { IVersionControlService } from '@bevel-software/platform-shared';
+import type { IAccessControl } from '../../access/index.js';
+import type { ICreatorAccess } from '../../access-model/index.js';
+import type { IAdminAccessService } from '../../admin/index.js';
+import type { VersionControlEventBus } from '../../version-control/index.js';
+import type { AuthService } from '../../auth/index.js';
 import { createWorkspaceRoutes } from '../workspace.routes.js';
 import type { WorkspaceService, ReadTreeFilter } from '../workspace.service.js';
 
@@ -47,7 +47,7 @@ interface Harness {
 async function makeHarness(opts: {
   kbFiles?: Record<string, string>;
   allowFn?: (p: string) => boolean;
-  /** Whether the caller is an admin — only `.bevelignore`'s visibility uses it. */
+  /** Whether the caller is an admin. The tree filter no longer reads it; the routes still take the service. */
   isAdmin?: boolean;
 } = {}): Promise<Harness> {
   const allowP = opts.allowFn ?? allow;
@@ -91,13 +91,13 @@ async function makeHarness(opts: {
     createWorkspaceRoutes(
       workspaceService,
       authService,
-      {} as unknown as IWorkflowService,
-      {} as unknown as WorkflowEventBus,
+      {} as unknown as IVersionControlService,
+      {} as unknown as VersionControlEventBus,
       accessControl,
       testKbContext({ kbDirName: KB }),
       stubCreatorAccess,
       { isAdmin: async () => opts.isAdmin === true } as unknown as IAdminAccessService,
-      new NodeFs(),
+      realDisk(),
     ),
   );
   const server = await new Promise<Server>((resolve) => {
@@ -201,7 +201,7 @@ describe('read-permission gates on human read routes', () => {
   it('keeps the structural root folders visible even when nothing is readable', async () => {
     // A user with no read grants: the access batch denies everything. The
     // structural top-level folders (KnowledgeBase, Skills, Data, Agents,
-    // Pipelines, Plugins) must still resolve readable (so the explorer renders
+    // Workflows, Plugins) must still resolve readable (so the explorer renders
     // its section view), while their contents stay gated. The retired Tools/
     // root gets NO structural treatment — it is an ordinary (denied) folder.
     h = await makeHarness({ allowFn: () => false });
@@ -211,7 +211,7 @@ describe('read-permission gates on human read routes', () => {
       `${KB}/KnowledgeBase`,
       `${KB}/Data`,
       `${KB}/Agents`,
-      `${KB}/Pipelines`,
+      `${KB}/Workflows`,
       `${KB}/Plugins`,
       `${KB}/Skills`,
       `${KB}/Tools`,
@@ -223,7 +223,7 @@ describe('read-permission gates on human read routes', () => {
     expect(verdict.get(`${KB}/KnowledgeBase`)).toBe(true);
     expect(verdict.get(`${KB}/Data`)).toBe(true);
     expect(verdict.get(`${KB}/Agents`)).toBe(true);
-    expect(verdict.get(`${KB}/Pipelines`)).toBe(true);
+    expect(verdict.get(`${KB}/Workflows`)).toBe(true);
     expect(verdict.get(`${KB}/Plugins`)).toBe(true);
     expect(verdict.get(`${KB}/Skills`)).toBe(true);
     // Retired root: no override, the deny-all batch verdict stands.
@@ -302,55 +302,35 @@ describe('read-permission gates on human read routes', () => {
 });
 
 /**
- * `.bevelignore` decides what the file tree and the agent view show at all, so
- * it is deployment configuration rather than knowledge. It also sits alone in
- * being visible — its siblings (`.gitignore`, `roles.yaml`, `access.md`,
- * `AGENTS.md`) are hidden from every reader by the shipped ignore rules.
- *
- * READ PERMISSION IS NOT THE LEVER, which is why this is a listing decision and
- * not an ACL one: everyone can read the file (it has to be readable to be
- * applied), so the tests below hold the read verdict at `true` throughout and
- * assert that admin-ness alone moves the outcome.
+ * `.bevelignore` is listed for whoever may read it, like any other file. It
+ * used to be admins only — a listing decision, since every reader can open it
+ * (it has to be readable to be applied) — until Razvan reversed that on
+ * 2026-10-23: being an admin moves nothing; the read verdict alone does.
  */
-describe('.bevelignore is admin-only in the file tree', () => {
+describe('.bevelignore is listed for whoever may read it', () => {
   let h: Harness | null = null;
   afterEach(async () => { if (h) await close(h.server); h = null; });
 
-  // The harness's default `allow` — none of the paths below contain "Secret",
-  // so every one of them is READABLE. That is the point: the read verdict is
-  // held constant and admin-ness alone moves the outcome.
-  const treeFilter = async (isAdmin: boolean) => {
-    h = await makeHarness({ isAdmin });
+  const treeFilter = async (opts: Parameters<typeof makeHarness>[0] = {}) => {
+    h = await makeHarness(opts);
     await fetch(`${h.baseUrl}/api/workspace/${WS}/files`);
     return h.listFilesFilter()!;
   };
 
-  it('hides it from a non-admin who can otherwise read everything', async () => {
-    const verdict = await (await treeFilter(false))([
+  it('shows the repository root file, and a nested one, to a non-admin who may read them', async () => {
+    const verdict = await (await treeFilter({ isAdmin: false }))([
       `${KB}/.bevelignore`,
+      `${KB}/KnowledgeBase/Product/.bevelignore`,
       `${KB}/Knowledge/Open/a.md`,
     ]);
-    // Unlisted, not denied: hiding it withholds no content, so it never
-    // counts toward the tree's `withheld`.
-    expect(verdict.get(`${KB}/.bevelignore`)).toBe('unlisted');
-    // Only that one file — the rest of the tree is untouched.
+    expect(verdict.get(`${KB}/.bevelignore`)).toBe(true);
+    expect(verdict.get(`${KB}/KnowledgeBase/Product/.bevelignore`)).toBe(true);
     expect(verdict.get(`${KB}/Knowledge/Open/a.md`)).toBe(true);
   });
 
-  it('shows it to an admin', async () => {
-    const verdict = await (await treeFilter(true))([`${KB}/.bevelignore`]);
-    expect(verdict.get(`${KB}/.bevelignore`)).toBe(true);
-  });
-
-  /** The stack is hierarchical — a nested one governs its own subtree. */
-  it('hides a nested one too, not just the repo-root file', async () => {
-    const verdict = await (await treeFilter(false))([`${KB}/KnowledgeBase/Product/.bevelignore`]);
-    expect(verdict.get(`${KB}/KnowledgeBase/Product/.bevelignore`)).toBe('unlisted');
-  });
-
-  /** Basename match, not substring: a file merely NAMED after it stays visible. */
-  it('does not hide files whose name only contains it', async () => {
-    const verdict = await (await treeFilter(false))([`${KB}/Knowledge/.bevelignore.md`]);
-    expect(verdict.get(`${KB}/Knowledge/.bevelignore.md`)).toBe(true);
+  it('hides it, counted as withheld like any file, from a reader the read rules refuse', async () => {
+    // The harness's `allow` refuses every path under "Secret".
+    const verdict = await (await treeFilter({ isAdmin: true }))([`${KB}/Knowledge/Secret/.bevelignore`]);
+    expect(verdict.get(`${KB}/Knowledge/Secret/.bevelignore`)).toBe(false);
   });
 });

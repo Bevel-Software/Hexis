@@ -102,7 +102,9 @@ describe('download implies read', () => {
         'access.md': '---\n---\ndownload:\n  - Product Manager\n',
       });
       expect(await svc.canRead(workspaceId, 'pm@x.io', 'Knowledge/Deal.md')).toBe(true);
-      expect(await svc.canRead(workspaceId, 'admin@x.io', 'Knowledge/Deal.md')).toBe(false);
+      // Nobody else: the fold adds no grant that was not written. (An admin
+      // reads here too, through the root floor, not through this fold.)
+      expect(await svc.canRead(workspaceId, 'mallory@x.io', 'Knowledge/Deal.md')).toBe(false);
     });
 
     it('for a GROUP grant', async () => {

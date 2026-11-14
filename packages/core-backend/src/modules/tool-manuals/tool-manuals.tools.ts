@@ -1,25 +1,41 @@
 import type { Router, RequestHandler } from 'express';
-import type { IToolRegistry, UtcpTool } from '../tool-registry/tool.contract.js';
+import type { IToolRegistry, UtcpTool } from '../tool-registry/index.js';
 import type { KbContext } from '../../shared/kb-context.js';
-import type { ToolContext } from '../tool-helpers/tool.contract.js';
-import { toolDef } from '../tool-helpers/tool-def.js';
-import type { ToolHandlerFactory } from '../tool-helpers/tool-handler.js';
-import type { IAccessControl } from '../access/access-control.interface.js';
+import type { ToolContext, ToolHandlerFactory } from '../tool-helpers/index.js';
+import { toolDef, declareRouteTool } from '../tool-helpers/index.js';
+import type { IAccessControl } from '../access/index.js';
 import { utcpNamespacedKey } from '../../shared/utcp-namespace.js';
-import type { IToolManualService } from './tool-manuals.contract.js';
+import type { ConnectorScope, IToolManualService } from './tool-manuals.contract.js';
 import type { HiddenToolSource } from '../../shared/hidden-tools.js';
+import { scopesCovered, userSecretGap } from '../secrets-vault/index.js';
 
 /**
  * What `list_tool_setup` needs from the secrets vault (structurally satisfied
  * by `ISecretsVaultService.statusFor`). A local port keeps this module free of
- * a secrets-vault import — the same decoupling discipline as
- * `McpAuthDiscoveryPort` in the service.
+ * the vault service — the same decoupling discipline as
+ * `McpAuthDiscoveryPort` in the service. Only the vault's pure readiness rule
+ * (`userSecretGap`, its exported contract) is imported, the one the MCP proxy
+ * hides tools by.
  */
 export interface VariableStatusPort {
   statusFor(
     userId: string,
     keys: string[],
-  ): Promise<{ key: string; adminConfigured: boolean; userConfigured: boolean; userAuthorized?: boolean }[]>;
+  ): Promise<
+    {
+      key: string;
+      adminConfigured: boolean;
+      /** What the owner's row is: a sign-in needs an `oauth` one, not a key left from when the variable was static. */
+      adminKind?: 'static' | 'oauth' | null;
+      userConfigured: boolean;
+      userAuthorized?: boolean;
+      /** For a shared (workspace) sign-in: the owner's row holds tokens, and what they were granted. */
+      adminAuthorized?: boolean;
+      adminGrantedScopes?: string;
+      userKind?: 'static' | 'oauth' | null;
+      grantedScopes?: string;
+    }[]
+  >;
 }
 
 /**
@@ -52,15 +68,32 @@ export function registerToolManualsTools(
     hiddenTools?: HiddenToolSource;
   },
 ): void {
-  registry.registerExternalTool((ctx) => buildListLocalToolsDef(toolManualService, ctx.userEmail));
+  registry.registerExternalTool((ctx) =>
+    buildListLocalToolsDef(toolManualService, ctx.userEmail, ctx.connectionScope?.connectorFilter()),
+  );
   registry.registerInternalTool((ctx) => buildListLocalToolsDef(toolManualService, ctx.userEmail));
+  // The def above is built per catalog listing (its description names the
+  // tools configured for THIS caller), so declare the arguments here as well:
+  // a direct REST call that lands before the first listing must be checked
+  // against them too.
+  declareRouteTool('list_local_tools', LIST_LOCAL_TOOLS_INPUTS);
 
+  // The local server's discovery read (`discovery`): it asks this route at
+  // startup for the connectors it must materialize, whatever tools the
+  // connection is offered — a connection made as an agent configuration that omits
+  // the tool is answered its connectors, not refused, or the local server
+  // could not start for that agent at all.
   router.post(
     '/agent/tools/list_local_tools',
     toolAuth,
-    toolHandler(async (_args, ctx: ToolContext) => ({
-      tools: await toolManualService.listLocalOnly(ctx.user.email),
-    })),
+    toolHandler(async (_args, ctx: ToolContext) => {
+      const within = ctx.connectionScope?.connectorFilter();
+      return {
+        tools: await (within
+          ? toolManualService.listLocalOnly(ctx.user.email, within)
+          : toolManualService.listLocalOnly(ctx.user.email)),
+      };
+    }, { discovery: true }),
   );
 
   // A FUNCTION, not a constant — this factory runs at boot, and on a
@@ -79,24 +112,22 @@ export function registerToolManualsTools(
     // answers and the four things an agent cannot read off a field.
     //
     // It sits a few characters under `TOOL_DESCRIPTION_CAP` WITH the guide-first
-    // sentence the registry puts in front of it (`tool-registry/guide-first.ts`),
+    // sentence the registry puts in front of it (`tool-registry/guide-first.ts`)
+    // and the `Call:` line generated ahead of everything,
     // which is why every sentence here is the short form: the `hiddenTools`
     // clause and that opener both came out of the same budget, and what a
     // hidden tool's entry CONTAINS is on the field below rather than here.
     description:
-      'Configuration status of every `.tool` the current user can access: what each tool needs set up and what is ' +
-      'already configured, as `{ tools, invalid, onBranchOnly, note? }`. Scoped to the CALLER: a `.tool` it cannot ' +
-      'READ is absent, and every flag is the caller\'s own. ' +
-      'Secret VALUES are never returned and can never be set through a tool: an admin enters them in the tool ' +
-      'editor; users sign in on /connect. ' +
-      'Setting a tool\'s shared secrets is gated by `canWrite` on the `.tool` FILE (its frontmatter ' +
-      '`write:`/`owner:` verbs and the access.md chain), NOT by a platform role: who manages the file configures ' +
-      'the tool. ' +
-      '`hiddenTools` names the tools Hexis hides from agents for an invalid schema. ' +
-      'The listing is the RELEASED catalog, built from the default branch only: a server or `.tool` you declared on a ' +
-      'draft is not listed, callable or signed-in-able until it is merged. Pass `branch` (the draft you wrote the ' +
-      'declaration on) and `onBranchOnly` names every tool declared there that the default branch does not serve ' +
-      'yet — open a change request and ask the user to merge it in the app to activate it.',
+      'Configuration status of every `.tool` the current user can access: what each needs set up and what is ' +
+      'configured, as `{ tools, invalid, onBranchOnly, note? }`. Scoped to the CALLER: a `.tool` it cannot READ is ' +
+      "absent, and a `user` variable's flags are the caller's own. An `admin` variable with `oauth` is a WORKSPACE " +
+      "connection: `authorized` is the owner's connection, which only a writer of the tool can make or remake. " +
+      'Secret VALUES are never returned or set through a tool: an admin enters them in the tool editor; users sign ' +
+      'in on /connect. Setting shared secrets is gated by `canWrite` on the `.tool` FILE (its frontmatter verbs and ' +
+      'the access.md chain), not by a platform role. `hiddenTools` names the tools Hexis hides for an invalid ' +
+      'schema. The listing is the RELEASED catalog (default branch only): a server or `.tool` declared on a draft is ' +
+      'not listed, callable or signed-in-able until merged. Pass `branch` and `onBranchOnly` names every tool ' +
+      'declared there that the default branch does not serve yet — open a change request and ask the user to merge it.',
     path: '/api/agent/tools/list_tool_setup',
     inputs: {
       type: 'object',
@@ -180,7 +211,22 @@ export function registerToolManualsTools(
                         'Shared value set (plain admin vars), or the owner finished provider setup (OAuth vars).',
                     },
                     userConfigured: { type: 'boolean' },
-                    authorized: { type: ['boolean', 'null'], description: 'OAuth vars: current user signed in.' },
+                    authorized: {
+                      type: ['boolean', 'null'],
+                      description:
+                        'OAuth vars: a token is stored that covers the declared scopes — the current user\'s for a `user` ' +
+                        'variable, the WORKSPACE connection an owner made for an `admin` one (a managed connector enabled ' +
+                        'as one shared connection; a reader cannot connect that, a writer of the tool can).',
+                    },
+                    managed: {
+                      type: 'object',
+                      description:
+                        'Present when the sign-in goes through a managed connector (the distribution\'s own OAuth app, a ' +
+                        'broker doing the round-trip): which connector and scope set. Members connect on /connect; an ' +
+                        'owner needs no client secret for it.',
+                      properties: { connectorId: { type: 'string' }, scopeSet: { type: 'string' } },
+                      required: ['connectorId', 'scopeSet'],
+                    },
                   },
                   required: ['name', 'scope', 'oauth', 'adminConfigured', 'userConfigured'],
                 },
@@ -223,7 +269,9 @@ export function registerToolManualsTools(
         },
         note: {
           type: 'string',
-          description: 'Present when `onBranchOnly` is non-empty: what it takes for those tools to go live.',
+          description:
+            'Present when something is left to do: what it takes for the tools in `onBranchOnly` to go live, and for ' +
+            'tools that need your own value or sign-in to work.',
         },
       },
       required: ['tools', 'invalid', 'onBranchOnly'],
@@ -238,12 +286,17 @@ export function registerToolManualsTools(
     toolHandler(async (args, ctx: ToolContext) => {
       // The in-app agent is focused on its own draft; an external caller names it.
       const branch = typeof args.branch === 'string' && args.branch ? args.branch : ctx.focusedBranch;
+      const within = ctx.connectionScope?.connectorFilter();
       // The catalog comes back whole — what parsed AND what was refused — from
       // ONE scan, so the refused files cost no second walk of the workspace and
       // the two halves cannot disagree about which files made it.
       const [{ tools: manuals, invalid }, pending] = await Promise.all([
-        toolManualService.listAccessibleCatalog(ctx.user.email),
-        branch ? toolManualService.listDeclaredOnlyOnBranch(ctx.user.email, branch) : Promise.resolve([]),
+        // Only the connectors the caller's connection loads: setup is counted
+        // for the tools this connection can call, not every one the person can.
+        within
+          ? toolManualService.listAccessibleCatalog(ctx.user.email, within)
+          : toolManualService.listAccessibleCatalog(ctx.user.email),
+        branch ? toolManualService.listDeclaredOnlyOnBranch(ctx.user.email, branch, within) : Promise.resolve([]),
       ]);
       const allKeys = manuals.flatMap((m) => (m.variables ?? []).map((v) => varKey(m.name, v.name)));
       const status = await deps.variableStatus.statusFor(ctx.user.id, allKeys);
@@ -266,6 +319,16 @@ export function registerToolManualsTools(
             variables: (m.variables ?? []).map((v) => {
               const st = statusByKey.get(varKey(m.name, v.name));
               const isOAuth = v.oauth != null;
+              // A sign-in counts as authorized when a token is stored AND it
+              // still covers what the tool declares — the one readiness rule,
+              // so this flag agrees with the sign-in note below. A shared
+              // sign-in (a managed workspace connection) reads the owner's
+              // row: it is everyone's once an owner has connected it.
+              const authorized = isOAuth
+                ? v.scope === 'admin'
+                  ? st?.adminAuthorized === true && scopesCovered(v.oauth?.scopes, st.adminGrantedScopes)
+                  : st?.userAuthorized === true && scopesCovered(v.oauth?.scopes, st.grantedScopes)
+                : null;
               return {
                 name: v.name,
                 scope: v.scope,
@@ -273,37 +336,64 @@ export function registerToolManualsTools(
                 oauth: isOAuth,
                 adminConfigured: st?.adminConfigured ?? false,
                 userConfigured: st?.userConfigured ?? false,
-                authorized: isOAuth ? (st?.userAuthorized ?? false) : null,
+                authorized,
+                ...(v.oauth?.managed ? { managed: v.oauth.managed } : {}),
               };
             }),
           };
         }),
       );
       const onBranchOnly = pending.map((p) => ({ ...p, branch: branch! }));
-      if (onBranchOnly.length === 0) return { tools, invalid, onBranchOnly };
-      return {
-        tools,
-        invalid,
-        onBranchOnly,
-        note:
+      const notes: string[] = [];
+      if (onBranchOnly.length > 0) {
+        notes.push(
           `${onBranchOnly.map((p) => `\`${p.name}\``).join(', ')} ${onBranchOnly.length === 1 ? 'is' : 'are'} declared on ` +
-          `\`${branch}\` only. Tools are served from \`${deps.kb.defaultBranch}\`, so ${onBranchOnly.length === 1 ? 'it stays' : 'they stay'} ` +
-          'unlisted, uncallable and without a sign-in until that branch is merged: open a change request with ' +
-          `\`open_change_request\` (target \`${deps.kb.defaultBranch}\`), then ask the user to review and merge it in the app.`,
-      };
+            `\`${branch}\` only. Tools are served from \`${deps.kb.defaultBranch}\`, so ${onBranchOnly.length === 1 ? 'it stays' : 'they stay'} ` +
+            'unlisted, uncallable and without a sign-in until that branch is merged: open a change request with ' +
+            `\`open_change_request\` (target \`${deps.kb.defaultBranch}\`), then ask the user to review and merge it in the app.`,
+        );
+      }
+      // The person's own part, said where the agent is when a tool "does not work": the
+      // reconnect step is the one agents leave out (the agent-guide benchmark, 2026-10-26).
+      // By the rule the proxy hides a tool by (`userSecretGap`), so the note
+      // names every tool that is hidden for want of the caller's own value. A
+      // sign-in waits on the owner's provider setup (an OAuth admin row, not a
+      // key left from when the variable was static — the Connect page counts
+      // that setup incomplete and the sign-in start refuses it): until then
+      // there is nothing to sign in to.
+      const needYou = manuals.filter((m) =>
+        (m.variables ?? []).some((v) => {
+          if (v.scope !== 'user') return false;
+          const st = statusByKey.get(varKey(m.name, v.name));
+          const gap = userSecretGap({ oauth: v.oauth != null, oauthScopes: v.oauth?.scopes }, st);
+          return gap !== null && (v.oauth == null || (st?.adminConfigured === true && st.adminKind === 'oauth'));
+        }),
+      );
+      if (needYou.length > 0) {
+        notes.push(
+          `${needYou.map((t) => `\`${t.name}\``).join(', ')} ${needYou.length === 1 ? 'needs' : 'need'} your own value or sign-in. ` +
+            'Set it yourself on the Connect page, never in the chat; then reconnect your assistant, or start a new chat, ' +
+            'so the tool is listed.',
+        );
+      }
+      if (notes.length === 0) return { tools, invalid, onBranchOnly };
+      return { tools, invalid, onBranchOnly, note: notes.join(' ') };
     }),
   );
 }
 
 /** "Local-only tools configured for you: `a`, `b`." (or a none note), filtered to what the caller may read. */
-async function localToolsLine(svc: IToolManualService, userEmail?: string): Promise<string> {
+async function localToolsLine(svc: IToolManualService, userEmail?: string, within?: ConnectorScope): Promise<string> {
   if (!userEmail) return 'No local-only tools are currently configured.';
-  const tools = await svc.listLocalOnly(userEmail);
+  const tools = await (within ? svc.listLocalOnly(userEmail, within) : svc.listLocalOnly(userEmail));
   if (tools.length === 0) return 'No local-only tools are currently configured.';
   return `Local-only tools configured for you: ${tools.map((t) => `\`${t.name}\``).join(', ')}.`;
 }
 
-async function buildListLocalToolsDef(svc: IToolManualService, userEmail?: string): Promise<UtcpTool> {
+/** `list_local_tools` takes nothing; a const so the route and the def share one declaration. */
+const LIST_LOCAL_TOOLS_INPUTS = { type: 'object' as const, properties: {}, additionalProperties: false };
+
+async function buildListLocalToolsDef(svc: IToolManualService, userEmail?: string, within?: ConnectorScope): Promise<UtcpTool> {
   return toolDef({
     name: 'list_local_tools',
     description:
@@ -316,9 +406,9 @@ async function buildListLocalToolsDef(svc: IToolManualService, userEmail?: strin
       'machine. Otherwise each entry gives the tool’s name and its `.tool` file ' +
       'path in the knowledge base — read that file with `read_file` and wire the tool into your local ' +
       'setup by hand. ' +
-      (await localToolsLine(svc, userEmail)),
+      (await localToolsLine(svc, userEmail, within)),
     path: '/api/agent/tools/list_local_tools',
-    inputs: { type: 'object', properties: {}, additionalProperties: false },
+    inputs: LIST_LOCAL_TOOLS_INPUTS,
     outputs: {
       type: 'object',
       properties: {

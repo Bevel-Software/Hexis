@@ -1,5 +1,5 @@
 import { authFetch } from '../../lib/api';
-import { handleApiResponse } from '../git/services/git.api';
+import { handleApiResponse } from '../git';
 
 /** The two levels the Manage access dialog can ask for. Owner covers Can edit. */
 export type RequestLevel = 'write' | 'owner';

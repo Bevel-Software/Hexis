@@ -1,5 +1,5 @@
 import express from 'express';
-import '../auth/auth.middleware.js'; // Express Request.userId / userEmail augmentation
+import '../auth/index.js'; // Express Request.userId / userEmail augmentation
 import type { KbContext } from '../../shared/kb-context.js';
 import type { IPendingSkillService, ISkillService, PluginMembership } from './skills.contract.js';
 import type { IAllowedToolsChecker } from './allowed-tools-check.js';

@@ -1,6 +1,6 @@
 /**
  * @bevel-software/platform-core-backend — the open-source core of the Bevel platform:
- * git-backed knowledge workspace, workflow (branches / change requests /
+ * git-backed knowledge workspace, version control (branches / change requests /
  * locks / SSE), skills, tool manuals + registry + auth, secrets vault, access
  * control, diff/backup ledger, code-mode and the remote MCP surface.
  *
@@ -26,7 +26,8 @@ export {
   type ServerExtensions,
   type ToolSurfaceCtx,
 } from './core/create-core-server.js';
-export { noopRecoveryAgent, type CorePorts } from './core/core-ports.js';
+export type { AppRole } from './modules/access/index.js';
+export { noopRecoveryAgent, type AgentScopeCollaborators, type CorePorts } from './core/core-ports.js';
 // Logging: the contract, the slot a shell installs its sink into, and the
 // tagged-logger lookup every module logs through. See shared/logging.ts.
 export { setLogger, logger, createConsoleLogger } from './shared/logging.js';
@@ -47,8 +48,8 @@ export {
   type LeasedWorker,
 } from './core/lifecycle.js';
 
-// Packaged assets (migrations/, kb-template/, agent-guide/) + the migration runners.
-export { agentGuideDir, coreMigrationsDir, defaultKbTemplateDir } from './assets.js';
+// Packaged assets (migrations/, kb-template/, agent-guide/, starter-packs/) + the migration runners.
+export { agentGuideDir, coreMigrationsDir, defaultKbTemplateDir, defaultStarterPacksDir } from './assets.js';
 export {
   runCoreMigrations,
   runEnterpriseMigrations,
@@ -122,7 +123,7 @@ export type { ISessionSink } from './modules/workspace/session-sink.js';
 export type {
   ISystemNoticeSink,
   RecoveryAgentRunner,
-} from './modules/workflow/pending-commits.worker.js';
+} from './modules/version-control/pending-commits.worker.js';
 export type { ILlmUsageMeter } from './modules/tool-auth/llm-usage-meter.js';
 export type { AuthProviderPlugin } from './modules/auth/auth.routes.js';
 export type { IErasureParticipant } from './modules/auth/account-erasure.service.js';
@@ -144,10 +145,17 @@ export {
   type IAccountAdmission,
 } from './modules/auth/account-admission.js';
 export {
-  WorkflowHooks,
+  VersionControlHooks,
   type CommitValidationHook,
   type CommitValidationContext,
   type AgentOperationContext,
   type AgentReadHook,
   type PreWriteHook,
-} from './modules/workflow/workflow-hooks.js';
+} from './modules/version-control/version-control-hooks.js';
+export {
+  ChangeRequestHooks,
+  type ChangeRequestOpenedEvent,
+  type ChangeRequestOpenedHook,
+  type ChangeRequestPerson,
+  type IChangeRequestHooks,
+} from './modules/version-control/change-request-hooks.js';

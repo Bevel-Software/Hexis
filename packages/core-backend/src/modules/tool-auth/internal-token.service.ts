@@ -33,7 +33,7 @@ export interface InternalTokenClaim {
    * connection key to pass through). The verifier resolves such tokens to
    * `source: 'external'`: the caller IS an external agent, and must be treated
    * like one everywhere — admitted to external-only surfaces (`start_session`,
-   * `ask`), refused from internal-only ones (`execute_command`, …), and
+   * `ask`), refused from internal-only ones (`switch_branch`, …), and
    * expected to carry `sessionId` on the tool body, not in the token.
    */
   externalProxy?: boolean;
@@ -47,6 +47,15 @@ export interface InternalTokenClaim {
    * internal token.
    */
   connectionId?: string;
+  /**
+   * The agent configuration the external caller's connection was made as (a
+   * repo-relative knowledge-base path), copied at mint from the verified
+   * grant or connection — the hosted proxy's loopback token and the local
+   * server's exchanged grant both carry it, so every agent surface narrows
+   * their calls to that agent's scope (`modules/agent-scope`). Absent is
+   * Everything. Carried, never decided, like `connectionId`.
+   */
+  agentPath?: string;
 }
 
 interface SignedPayload extends InternalTokenClaim {
@@ -148,6 +157,7 @@ export class InternalTokenService {
       ...(typeof payload.focusedBranch === 'string' ? { focusedBranch: payload.focusedBranch } : {}),
       ...(payload.externalProxy === true ? { externalProxy: true } : {}),
       ...(typeof payload.connectionId === 'string' ? { connectionId: payload.connectionId } : {}),
+      ...(typeof payload.agentPath === 'string' && payload.agentPath ? { agentPath: payload.agentPath } : {}),
     };
   }
 

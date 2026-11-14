@@ -103,6 +103,37 @@ describe('MarkdownDiffViewer', () => {
       await userEvent.click(screen.getByText('the process'));
       expect(onOpenNodeId).toHaveBeenCalledWith('order-intake');
     });
+
+    it("carry the target the caller resolves: the new tab's address, target=_blank, rel=noopener", () => {
+      const nodeIdLinkTarget = vi.fn(() => ({ href: '/workspace/main/order-intake', newTab: true }));
+      render(
+        <MarkdownDiffViewer payload={withIdLink} onOpenNodeId={vi.fn()} nodeIdLinkTarget={nodeIdLinkTarget} />,
+      );
+      const link = screen.getByRole('link', { name: 'the process' });
+      expect(nodeIdLinkTarget).toHaveBeenCalledWith('order-intake');
+      expect(link).toHaveAttribute('href', '/workspace/main/order-intake');
+      expect(link).toHaveAttribute('target', '_blank');
+      expect(link).toHaveAttribute('rel', 'noopener');
+    });
+  });
+
+  it("gives a file link the target the caller resolves, and follows a click through the caller", async () => {
+    const onOpenFile = vi.fn();
+    const fileLinkTarget = vi.fn(() => ({ href: '/workspace/main/Knowledge/Plan.md', newTab: true }));
+    render(
+      <MarkdownDiffViewer
+        payload={payload('Nothing\n', 'See [the plan](Plan.md)\n')}
+        onOpenFile={onOpenFile}
+        fileLinkTarget={fileLinkTarget}
+      />,
+    );
+    const link = screen.getByRole('link', { name: 'the plan' });
+    expect(fileLinkTarget).toHaveBeenCalledWith('Plan.md');
+    expect(link).toHaveAttribute('href', '/workspace/main/Knowledge/Plan.md');
+    expect(link).toHaveAttribute('target', '_blank');
+    expect(link).toHaveAttribute('rel', 'noopener');
+    await userEvent.click(link);
+    expect(onOpenFile).toHaveBeenCalledWith('Plan.md');
   });
 
   it('escapes spaces in link destinations so KB links resolve', () => {

@@ -7,15 +7,14 @@ import {
   PLUGIN_MCP_FILE,
   type AuthUser,
 } from '@bevel-software/platform-shared';
-import type { WorkspaceService } from '../workspace/workspace.service.js';
+import type { WorkspaceService } from '../workspace/index.js';
 import type { KbContext } from '../../shared/kb-context.js';
 import { utcpNamespacePrefix } from '../../shared/utcp-namespace.js';
-import type { IAccessControl } from '../access/access-control.interface.js';
+import type { IAccessControl } from '../access/index.js';
 import type { IFsProbe } from '../../shared/fs.contract.js';
-import type { ISkillService } from '../skills/skills.contract.js';
-import type { IPluginIndexService, PluginCatalogEntry } from '../plugins/plugins.contract.js';
-import type { PluginSource } from '../plugins/discovery/plugin-source.js';
-import type { ISecretsVaultService } from '../secrets-vault/secrets-vault.contract.js';
+import type { ISkillService } from '../skills/index.js';
+import type { IPluginIndexService, PluginCatalogEntry, PluginSource } from '../plugins/index.js';
+import type { ISecretsVaultService } from '../secrets-vault/index.js';
 import type { IToolManualService, ToolManualSummary } from './tool-manuals.contract.js';
 
 /**
@@ -332,7 +331,7 @@ export class ToolDeleteService {
       // THEN pushes, so a refused push leaves a commit that already removed
       // the file: renaming it back there would leave the working tree dirty
       // against HEAD — re-adding, on the next commit, the very tool this one
-      // deleted, which is the state the workflow layer's own recovery
+      // deleted, which is the state the version-control layer's own recovery
       // misreads (McpServerEditService refuses to touch the tree for the same
       // reason). A probe that itself fails counts as "a commit may exist": the
       // park survives, dot-prefixed and invisible to the scanner, for a person

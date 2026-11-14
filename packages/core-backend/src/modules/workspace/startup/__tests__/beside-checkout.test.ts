@@ -61,6 +61,17 @@ describe('noteBesideCheckout', () => {
     expect(notes).toEqual([]);
   });
 
+  it("says nothing about the platform's own tmp folder, and names a file or a link squatting its name", async () => {
+    await workspace('main', { dirs: ['tmp/u/chat-uploads'] });
+    await scan();
+    expect(notes).toEqual([]);
+    const dir = await workspace('bob%2Fdraft', { files: ['tmp'] });
+    await scan();
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toContain(`${BESIDE_CHECKOUT_NOTE} "tmp"`);
+    await expect(fs.stat(path.join(dir, 'tmp'))).resolves.toBeTruthy();
+  });
+
   it('marks the folders with a trailing slash so one line says which is which', async () => {
     await workspace('main', { dirs: ['Reports'], files: ['Reports.md'] });
     await scan();

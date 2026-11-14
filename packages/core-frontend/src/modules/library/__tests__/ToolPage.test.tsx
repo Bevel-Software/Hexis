@@ -62,6 +62,8 @@ vi.mock('../utils/navigate-external', () => ({ navigateExternal: vi.fn() }));
 import { ToolPage } from '../components/tool-page/ToolPage';
 import { NAME_MIN_WIDTH } from '../components/NameWithBadges';
 import { expectMenuAtTheEndOfTheTitleRow, expectTitleRowSpansTheDocumentColumn } from './title-row-actions';
+import { expectTitleKeepsItsInk } from '../../../__tests__/title-ink-room';
+import { PAGE_HEADER_TESTID } from '../../../shared/theme/header';
 import { TOOL_CREDENTIALS_STALE_EVENT } from '../../../core/events';
 
 const GITHUB: ToolSecrets = {
@@ -248,6 +250,12 @@ describe('ToolPage: frame', () => {
     expect(container.querySelector('article')!.className).not.toContain('max-w-');
   });
 
+  it('keeps the tails of its title\'s g, y and p: the room on the title and on the row that clips it', async () => {
+    renderPage();
+    await screen.findByRole('heading', { name: 'heyreach', level: 1 });
+    expectTitleKeepsItsInk(screen.getByTestId(PAGE_HEADER_TESTID));
+  });
+
   it('shows no kicker for a legacy ungrouped path either', async () => {
     secretsMock.listToolSecrets.mockResolvedValue([
       { ...GITHUB, slug: 'slack', name: 'slack', path: 'Tools/slack.tool' },
@@ -362,8 +370,9 @@ describe('ToolPage: tools hidden for an invalid schema', () => {
   });
 
   // Both cases wait for the DETAIL to be on screen, not for the heading: the
-  // heading comes from the route, so it is there before the response is, and
-  // asserting absence against it would pass on a page that had loaded nothing.
+  // heading's name comes from the secrets listing (`page.tool.name`), loaded
+  // in parallel with the detail, so it can settle first and asserting absence
+  // against it could pass on a page whose detail had not loaded yet.
   it('shows nothing when the server is healthy', async () => {
     toolsMock.getToolDetail.mockResolvedValue({ ...DETAIL, type: 'mcp', hiddenTools: [] });
     renderPage();

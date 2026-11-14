@@ -260,8 +260,10 @@ export class AgentUploadStore {
     });
     // AFTER the record exists, not before. The first sweep runs the moment the
     // timer starts, and started from an empty map it would be a sweep that
-    // believes nothing is live — this token's own id included.
-    this.startSweeping();
+    // believes nothing is live — this token's own id included. And never once
+    // the store is stopped: a token issued after shutdown's `stopSweeping`
+    // must not re-arm the sweeper that was stopped for good.
+    if (!this.stopped) this.startSweeping();
     return {
       uploadUrl: this.uploadUrlFor(token),
       token,
@@ -413,6 +415,24 @@ export class AgentUploadStore {
       record.claimed = false;
       record.claimedAt = undefined;
     }
+  }
+
+  /**
+   * Give `token` up unapplied: spend it and delete any bytes sent with it NOW,
+   * rather than when it expires. For a caller that will not retry — the app
+   * answering a page's `uploadFile`, which holds the token on the page's behalf
+   * and drops it when the upload or the apply is refused.
+   *
+   * Refused with the one refusal, like every unusable token, and also while
+   * the token is busy — bytes still arriving, or an apply holding it — so a
+   * discard never deletes a file somebody is writing or reading.
+   */
+  async discard(token: string): Promise<void> {
+    const record = this.find(token);
+    // `attaching` stays set once the bytes are in; only without `received` are they still arriving.
+    const arriving = record.attaching && record.received === undefined;
+    if (arriving || record.claimed) throw new UploadTokenError(UPLOAD_TOKEN_REFUSAL, 404);
+    await this.consume(token);
   }
 
   /** Spend the token and delete its bytes. Idempotent. */
@@ -621,24 +641,38 @@ function hash(token: string): string {
  * Both directions and both spellings: equal paths, either containing the
  * other, and the real paths, so a root that is a LINK into the workspaces tree
  * is refused too.
+ *
+ * `what` names the root being checked, for a boot failure that sends the
+ * operator to the right setting: the upload root by default; the download
+ * root (derived from it) says so itself.
  */
 export async function assertUploadsRootOutsideWorkspaces(
   uploadsRoot: string,
   workspacesRoot: string,
+  what: StagingRootDescription = UPLOADS_ROOT_DESCRIPTION,
 ): Promise<void> {
   for (const [uploads, workspaces] of [
     [path.resolve(uploadsRoot), path.resolve(workspacesRoot)],
     [await realBase(uploadsRoot), await realBase(workspacesRoot)],
   ]) {
     if (uploads === workspaces || contains(workspaces, uploads) || contains(uploads, workspaces)) {
-      throw new Error(
-        `AGENT_UPLOADS_ROOT ("${uploadsRoot}") must be outside WORKSPACES_ROOT ("${workspacesRoot}"): uploaded ` +
-          'bytes are staged there before any access or platform-file rule has judged them, so a root inside a ' +
-          'workspace would let the file tools read them. Point it at a sibling directory.',
-      );
+      throw new Error(`${what.name} ("${uploadsRoot}") must be outside WORKSPACES_ROOT ("${workspacesRoot}"): ${what.why}`);
     }
   }
 }
+
+/** A staging root {@link assertUploadsRootOutsideWorkspaces} checks: what it is called, and why and how to fix it. */
+export interface StagingRootDescription {
+  name: string;
+  why: string;
+}
+
+const UPLOADS_ROOT_DESCRIPTION: StagingRootDescription = {
+  name: 'AGENT_UPLOADS_ROOT',
+  why:
+    'uploaded bytes are staged there before any access or platform-file rule has judged them, so a root inside a ' +
+    'workspace would let the file tools read them. Point it at a sibling directory.',
+};
 
 /** Whether `child` is inside `parent`. Paths already resolved. */
 function contains(parent: string, child: string): boolean {

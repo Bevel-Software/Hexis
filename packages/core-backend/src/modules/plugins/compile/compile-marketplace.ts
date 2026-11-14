@@ -11,8 +11,8 @@ import {
 import { BUNDLE_FILE as BUNDLE_MANIFEST_FILE } from '../discovery/bundle-dialect/bundle.source.js';
 import type { ITreeWalker } from '../../../shared/fs.contract.js';
 import { containsVariableReference } from '../../../shared/variable-refs.js';
-import { judgeMcpServerEntry } from '../../tool-manuals/mcp-json-discovery.js';
-import type { SkillSummary } from '../../skills/skills.contract.js';
+import { judgeMcpServerEntry } from '../../tool-manuals/index.js';
+import type { SkillSummary } from '../../skills/index.js';
 import type { LinkMembership } from '../plugin-links.js';
 import type { DiscoveredPlugin } from '../discovery/plugin-source.js';
 

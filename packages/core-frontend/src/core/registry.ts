@@ -1,7 +1,7 @@
 /**
  * The app registry: the contract between the core shell (`CoreAppShell`) and
  * optional (enterprise) modules. The core owns workspace, git, pr, access,
- * auth, workflow/SSE, layout, secrets-vault, tools, toolbar and the admin
+ * auth, version control/SSE, layout, secrets-vault, tools, toolbar and the admin
  * roles page; everything else (chat, connectors, routines, watchlist, voice,
  * embed, review, onboarding, admin LLM/feedback pages) is contributed through
  * an `AppRegistry` instance passed to `<CoreAppShell registry={...} />`.
@@ -13,12 +13,14 @@
 import {
   createContext,
   useContext,
+  useMemo,
   type ComponentType,
   type ReactElement,
   type ReactNode,
 } from 'react';
-import type { FileTreeEntry } from '@bevel-software/platform-shared';
+import { currentKbLayout, type AuthUser, type FileTreeEntry } from '@bevel-software/platform-shared';
 import type { FileRendererProps } from '../modules/workspace/components/renderers/types';
+import type { CommandAction } from '../modules/toolbar/commands/actions';
 
 /** A route contributed to one of the shell's `<Routes>` blocks. */
 export interface RouteDef {
@@ -71,6 +73,8 @@ export interface AdminMenuItemHelpers {
   closeMenu(): void;
   /** react-router navigation. */
   navigate(to: string): void;
+  /** The signed-in person the menu belongs to. */
+  user: AuthUser;
 }
 
 /**
@@ -85,12 +89,31 @@ export interface AdminMenuItemHelpers {
  * Skills & Tools is NOT one of these. It is an `AppDef`, reached from the app
  * switcher.
  */
+/**
+ * A labelled section of the profile menu an app defines (see
+ * {@link AdminMenuItem.section}). Rows naming the same `id` share it; the
+ * label and order are the first such row's.
+ */
+export interface AdminMenuSection {
+  id: string;
+  /** The section's heading, such as "Infrastructure only". */
+  label: string;
+  /** Position among the app's sections; 100 when absent. */
+  order?: number;
+}
+
 export interface AdminMenuItem {
   id: string;
   label: ReactNode;
   icon?: ReactNode;
-  /** 'admin' rows render under the "Admin only" section (admin users only). */
-  section?: 'default' | 'admin';
+  /**
+   * 'admin' rows render under the "Admin only" section (admin users only).
+   * An {@link AdminMenuSection} puts the row under a section of the app's own,
+   * labelled, between the default rows and "Admin only" — for rows meant for
+   * the holders of a role the app defines. Who sees each row is still its
+   * `isShown`; the section shows while any of its rows does.
+   */
+  section?: 'default' | 'admin' | AdminMenuSection;
   /** Merge position among core + registered rows of the same section. */
   order?: number;
   /**
@@ -107,7 +130,35 @@ export interface AdminMenuItem {
    * typecheck for every row the enterprise shell already contributes.
    */
   path?: string;
+  /**
+   * The page this row opens at `path`: a settings page of the app's own.
+   *
+   * A row with a `path` and a `page` is mounted inside the settings layout
+   * beside core's pages, and listed in the settings nav under its section —
+   * so an app's settings are reached, linked to and switched between the way
+   * core's are, instead of each opening a dialog over whatever is behind it.
+   * `path` is one absolute address (`/agents-settings`), written as the
+   * browser and the router both read it. A row brings no page when its path
+   * is a route pattern (a parameter `:id`, a splat, an optional segment), has
+   * a query or a fragment, is relative, or is a spelling either of them would
+   * resolve to something else (`/teams/../secrets`, a doubled slash, a
+   * backslash, a percent-encoded letter). The page is mounted
+   * only at an address nothing else answers: not a settings page of core's,
+   * a route the shell answers itself, an app's path or anything under it, a
+   * top-level route of the registry, or a path an earlier row named (with or
+   * without a page), each as the router matches it (another case, a trailing
+   * slash and percent-encoding are the same address). A row that names such
+   * an address keeps its place in the dropdown, and its page is neither
+   * mounted nor listed in the settings nav.
+   */
+  page?: ReactElement;
   onSelect?(helpers: AdminMenuItemHelpers): void;
+  /**
+   * Whether the dropdown offers this row to `user` right now. Asked each time
+   * the panel renders, so a row can come and go with state the menu does not
+   * own (a preference in storage, say). Absent means always shown.
+   */
+  isShown?(user: AuthUser): boolean;
   dialog?(props: { open: boolean; onClose(): void }): ReactElement;
 }
 
@@ -330,6 +381,97 @@ export interface AppDef {
   description?: string;
   /** Sort order in the list (core: Knowledge 10, Skills & Tools 20). */
   order?: number;
+  /**
+   * Top-level folders of the knowledge base this app hosts, by name
+   * (`['Agents', 'Workflows', 'Data']`), compared case-insensitively. Core claims none.
+   *
+   * A claimed root leaves the Knowledge explorer, and a file URL under it
+   * (`/workspace/<branch>/<kbDir>/<root>/…`, the URL `kbFileUrl` builds) opens
+   * in THIS app: the shell renders `element` in place of the Knowledge surface
+   * and puts the switcher on this app. The URL space does not change, so every
+   * link to such a file lands here. `element` is then rendered under the
+   * `/workspace/*` route, so it must show its folder surface
+   * (`KnowledgeSurface` with `roots`) for a location it does not route itself.
+   *
+   * Two apps claiming one root is a composition error: the shell throws when
+   * it is mounted, naming the root and both apps. So is claiming a root core
+   * presents itself (the layout's knowledge, skills and plugins folders):
+   * Knowledge and Skills & Tools are built on those and cannot give them up.
+   */
+  roots?: string[];
+}
+
+/**
+ * Which app claims each root folder (see {@link AppDef.roots}), as
+ * `root → app id`. Throws when two apps claim the same root, or when an app
+ * claims one of core's own roots, so a misconfigured registry fails when the
+ * shell mounts, not when someone follows a link.
+ *
+ * Root names compare case-insensitively, as the layout's do: the workspaces
+ * live on case-insensitive filesystems, where `Agents` and `agents` are one
+ * folder. The map is keyed by the lowercased name; read it through
+ * {@link appClaimingRoot}.
+ */
+export function rootClaims(apps: readonly AppDef[]): ReadonlyMap<string, string> {
+  const layout = currentKbLayout();
+  const coreRoots = new Set(
+    [layout.knowledgeBaseDir, layout.skillsDir, layout.pluginsDir].map((n) => n.toLowerCase()),
+  );
+  const claims = new Map<string, string>();
+  for (const app of apps) {
+    for (const root of app.roots ?? []) {
+      // One top-level folder NAME: a path, a blank or a dot entry would be
+      // claimed and never matched (`appHostingPath` reads one segment), so
+      // the app would host nothing and Knowledge would keep the folder.
+      if (!root || root !== root.trim() || root === '.' || root === '..' || /[\\/]/.test(root)) {
+        throw new Error(`The root folder "${root}" claimed by the app "${app.id}" must be a single top-level folder name.`);
+      }
+      const key = root.toLowerCase();
+      if (coreRoots.has(key)) {
+        throw new Error(`The root folder "${root}" is core's own; the app "${app.id}" cannot claim it.`);
+      }
+      const holder = claims.get(key);
+      if (holder !== undefined && holder !== app.id) {
+        throw new Error(`The root folder "${root}" is claimed by two apps: "${holder}" and "${app.id}".`);
+      }
+      claims.set(key, app.id);
+    }
+  }
+  return claims;
+}
+
+/** The app that claims a root folder, by name in any case, or undefined. */
+export function appClaimingRoot(claims: ReadonlyMap<string, string>, root: string): string | undefined {
+  return claims.get(root.toLowerCase());
+}
+
+/**
+ * The app that hosts a workspace-relative path (`<kbDir>/<root>/…`), or
+ * undefined when its root is claimed by none. The one reading of a claim:
+ * the shell routes by it, the explorer hides by it, the file route keeps a
+ * hosted file's URL by it.
+ *
+ * A claim is on a root of the knowledge base, so a path outside the KB clone
+ * (a first segment other than `kbDirName`) is hosted by no app. Until the
+ * workspace has bootstrapped, `kbDirName` is null and the first segment is
+ * taken as the URL `kbFileUrl` builds it, so a pasted link opens in its app
+ * on the first render.
+ */
+export function appHostingPath(
+  claims: ReadonlyMap<string, string>,
+  workspacePath: string,
+  kbDirName: string | null,
+): string | undefined {
+  if (claims.size === 0) return undefined;
+  const [kbDir, root] = workspacePath.split('/').filter(Boolean);
+  if (root === undefined || (kbDirName !== null && kbDir !== kbDirName)) return undefined;
+  return appClaimingRoot(claims, root);
+}
+
+/** {@link rootClaims} for the registry in context. */
+export function useRootClaims(): ReadonlyMap<string, string> {
+  const { apps } = useAppRegistry();
+  return useMemo(() => rootClaims(apps), [apps]);
 }
 
 /**
@@ -363,6 +505,12 @@ export interface ToolbarItemDef {
   id: string;
   node: ReactNode;
   order?: number;
+}
+
+/** What the Connect page tells its distribution panel — see `AppRegistry.connectPanel`. */
+export interface ConnectPanelProps {
+  /** The panel changed what the page lists (enabled or disabled a connector): refetch. */
+  onChanged: () => void;
 }
 
 /** Props for the overlay-provided panel on the Groups settings page. */
@@ -445,10 +593,35 @@ export interface AppRegistry {
    */
   deploymentPanel?: ComponentType;
   /**
+   * A panel at the foot of the Connect page ("Connect your tools"). Core's
+   * page lists the sign-ins and keys the reader's tools need, managed
+   * connectors among them once they are enabled; which connectors a
+   * distribution offers, and enabling one in a plugin, is the distribution's
+   * to show. Rendered for every reader (the panel decides what an admin
+   * sees), and told when it changed something so the page refetches.
+   * Absent means the page ends with its lists, as it always has.
+   */
+  connectPanel?: ComponentType<ConnectPanelProps>;
+  /**
    * A way to sign in that the DISTRIBUTION runs, offered beside the
    * deployment's own identity provider. See {@link SignInOptionDef}.
    */
   signInOption?: SignInOptionDef;
+  /**
+   * What the first-run storage screen calls the repository the deployment
+   * keeps for itself: the card a new admin is steered towards.
+   *
+   * WHO keeps it is a property of the distribution, not of the screen. On a
+   * core deployment it is this server ("This server keeps it"); a hosted
+   * distribution keeps it on the admin's behalf and says so by name. Absent
+   * means core's words.
+   *
+   * The description travels WITH the title for the same reason the
+   * `welcomeExit` label travels with its path: a caller renaming the keeper
+   * without the sentence under it is how the card would come to contradict
+   * itself.
+   */
+  managedStorage?: { title: string; description: string };
   /**
    * How many unread items the gear menu's badge should show, if anything is
    * counting. CORE COUNTS NOTHING: the feedback inbox behind that badge is an
@@ -493,6 +666,81 @@ export interface AppRegistry {
    * the other is the likeliest way to produce it.
    */
   welcomeExit?: { path: string; label: string };
+  /**
+   * Where the maker's name in "Hexis by Bevel" leads (see `ProductName`):
+   * the login page, the first-run screen and the toolbar, where a wide
+   * toolbar links the name beside the apps and a compact one, whose name
+   * sits inside the menu's trigger, links it at the foot of the app menu.
+   * Absent or empty, it is the maker's own site. A distribution with a front
+   * door of its own points it there: the hosted cloud sends it to its
+   * Impressum, so the provider's details are one click from any workspace
+   * page on a wide toolbar and two on a compact one.
+   */
+  makerLink?: string;
+  /**
+   * What the app menu's own entry for `makerLink` says, where the name is
+   * not on screen as a link: the compact toolbar, and a wide one with more
+   * than three apps. Absent or empty, it says "Hexis by Bevel". The hosted
+   * cloud says "Impressum", so a page in the app names its Impressum as one
+   * a visitor recognises, not only behind the maker's name.
+   */
+  makerLinkLabel?: string;
+  /**
+   * Links under the sign-in card, on the login page only: the app behind it
+   * shows none. For a deployment whose provider must name itself to anyone
+   * who reaches it, such as the hosted cloud, which lists its Impressum and
+   * privacy policy here because German law wants them easy to recognise on
+   * every page of a commercial service. Absent or empty, there are none.
+   */
+  loginLinks?: { label: string; href: string }[];
+  /**
+   * A panel inside the invite dialog, between the role choice and the footer.
+   *
+   * Core invites by creating accounts and knows nothing about what a place in
+   * the deployment costs. A hosted deployment does: it renders its seat meter
+   * here (how many of the plan's seats these invites would fill — `inviting`
+   * is the number of valid addresses entered so far), and its "anyone at
+   * your domain can join" switch. Rendered inside a boundary, so a panel that
+   * throws costs its own place, never the invite form. Absent means core
+   * renders nothing there.
+   */
+  inviteExtras?: ComponentType<{ inviting: number }>;
+  /**
+   * Commands a distribution adds to the toolbar's command menu (Ctrl/⌘K),
+   * listed after core's own.
+   *
+   * Core's commands are the verbs every deployment has — Create new page,
+   * Invite people, the apps, the settings pages. A verb like "New ontology" belongs
+   * to the distribution that has ontologies, so core offers the place rather
+   * than the command, as it does for folder-menu entries. Each one is plain
+   * data plus `visible` and `run`, both handed the menu's context (router,
+   * admin verdict, page on screen) — see `CommandAction`. An id core already
+   * uses is dropped; a `visible` that throws costs only its own row. A
+   * command's `shortcut` is one letter, with or without Shift
+   * (`{ key: 'o', shift: true }`); one that is not, or that takes a key
+   * already bound, is dropped with its hint. Absent
+   * means the menu offers core's commands and no others.
+   */
+  commandActions?: CommandAction[];
+  /**
+   * Where a renderer that draws the knowledge graph (a dashboard's HTML)
+   * gets the graph from, on each surface it can be mounted on: the app,
+   * where the reader's session reads it, and the embed, where only the
+   * embed token does. Core has no graph; a distribution that has one
+   * registers both, and its renderer asks `useKbGraphLoader` — which
+   * answers `inEmbed` through the embed's surface and `inApp` in the app —
+   * rather than any address, so the same renderer draws inside a chat or an
+   * issue panel as it draws in the app.
+   */
+  kbGraphSource?: KbGraphSource;
+}
+
+/** See {@link AppRegistry.kbGraphSource}. What the graph is, is the distribution's; core carries it as is. */
+export interface KbGraphSource {
+  /** The graph as the signed-in reader may see it, for `workspaceId`. */
+  inApp(workspaceId: string): Promise<unknown>;
+  /** The graph as the embed token's viewer may see it. */
+  inEmbed(token: string): Promise<unknown>;
 }
 
 export const EMPTY_REGISTRY: AppRegistry = {

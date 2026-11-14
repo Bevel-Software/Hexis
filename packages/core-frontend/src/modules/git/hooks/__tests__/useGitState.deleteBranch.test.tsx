@@ -34,7 +34,7 @@ const mockFetchStatus = vi.mocked(fetchStatus);
 const mockDeleteBranch = vi.mocked(apiDeleteBranch);
 
 function mkBranch(name: string): BranchInfo {
-  return { name, isProtected: false, ahead: 0, behind: 0, hasRemote: true };
+  return { name, isProtected: false, hasRemote: true };
 }
 
 describe('useGitState: optimistic deleteBranch', () => {

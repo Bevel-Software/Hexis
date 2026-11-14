@@ -6,35 +6,15 @@ import {
   useFileNav,
   useNodeIdNav,
   useCanonicalFileUrl,
+  useFileNodeId,
 } from '../../routing/kb-routes';
 import { useRendererWorkspaceId } from './rendererWorkspace';
+import { useRendererSurface } from './rendererSurface';
 import { WorkspaceContext } from '../../state/workspace.context';
 import { markdownLinkForPaste } from '../../utils/pasteLink';
 import { useWorkspaceImageResolver } from '../../hooks/useWorkspaceImageResolver';
 import type { FileRendererProps, RendererSaveState } from './types';
-
-/** Decode a URL hash (`#some%20slug`) to its bare slug, tolerating bad escapes. */
-function safeDecodeHash(hash: string): string {
-  const raw = hash.replace(/^#/, '');
-  try {
-    return decodeURIComponent(raw);
-  } catch {
-    return raw;
-  }
-}
-
-/** Escape a slug for safe interpolation into an attribute-selector string. */
-function escapeForSelector(value: string): string {
-  return (
-    value
-      .replace(/["\\]/g, '\\$&')
-      // CSS-hex-escape control characters (newline, CR, …): a raw control char in
-      // a CSS string is a syntax error that would make querySelector throw. The
-      // trailing space terminates the hex escape.
-      // eslint-disable-next-line no-control-regex
-      .replace(/[\x00-\x1f\x7f]/g, (c) => `\\${c.charCodeAt(0).toString(16)} `)
-  );
-}
+import { scrollToHeading } from './scrollToHeading';
 
 /**
  * Markdown view/edit renderer driven entirely by the parent's `readOnly`
@@ -62,12 +42,13 @@ export function MarkdownRenderer({
   onSaveStateChange,
   readOnly = false,
 }: FileRendererProps) {
-  // openLink here is the navigating version: clicking a markdown link to a file
-  // updates the URL so the route reflects what's on screen.
-  const { openLink } = useFileNav();
-  // Shared id-link resolver (resolve-id → openFile, heading preserved) — same
+  // A link out of the page opens its file in a new tab and leaves this one
+  // where it is; a section link scrolls here. The hook decides which, and
+  // `linkTarget` is the same answer for the anchor to carry.
+  const { openLink, linkTarget } = useFileNav();
+  // Shared id-link follower (the node's id URL, heading preserved) — same
   // implementation the chat citation renderer uses.
-  const { openNodeId } = useNodeIdNav();
+  const { openNodeId, nodeIdTarget } = useNodeIdNav();
   // The URL hash carries a heading slug for citation deep-links
   // (`…/Node.md#goal`); we scroll the matching heading into view once the
   // rendered content is in the DOM.
@@ -125,19 +106,17 @@ export function MarkdownRenderer({
   // Deep-link scroll: when the URL has a `#heading-slug` fragment, scroll the
   // heading with that id (added by rehype-slug) into view. Re-runs when the
   // hash, the file, or the rendered value changes — the latter because the
-  // content may still be loading when the route first resolves.
+  // content may still be loading when the route first resolves. Also on
+  // `location.key`: a section link to this file navigates to this tab's own
+  // address plus the fragment, and when the tab is already there the hash
+  // string does not change — only the key, which `navigate` renews on every
+  // call — so a second click on the same link, after the reader scrolled
+  // away, scrolls again instead of doing nothing.
   useEffect(() => {
-    if (!readOnly) return;
-    const slug = location.hash ? safeDecodeHash(location.hash) : '';
-    if (!slug) return;
-    const raf = requestAnimationFrame(() => {
-      const container = scrollContainerRef.current;
-      if (!container) return;
-      const target = container.querySelector(`[id="${escapeForSelector(slug)}"]`);
-      target?.scrollIntoView({ block: 'start' });
-    });
+    if (!readOnly || !location.hash) return;
+    const raf = requestAnimationFrame(() => scrollToHeading(scrollContainerRef.current, location.hash));
     return () => cancelAnimationFrame(raf);
-  }, [location.hash, filePath, value, readOnly]);
+  }, [location.hash, location.key, filePath, value, readOnly]);
 
   // Citation deep-link for a heading: the node's canonical URL (its id URL when
   // it's a node, else the path URL) plus the heading's `#slug`. Matches the "copy
@@ -158,6 +137,23 @@ export function MarkdownRenderer({
     (href: string) => openLink(href, filePath),
     [openLink, filePath],
   );
+  const fileLinkTarget = useCallback(
+    (href: string) => linkTarget(href, filePath),
+    [linkTarget, filePath],
+  );
+  // An id-link to THIS node is a section link whatever the address bar says:
+  // the tab may still be on the path URL (the id not canonicalized yet, or a
+  // library frame that never canonicalizes), so the hook is told which node
+  // is on screen rather than reading it off the URL.
+  const ownNodeId = useFileNodeId(filePath);
+  const handleNodeIdLink = useCallback(
+    (idOrLink: string) => openNodeId(idOrLink, ownNodeId),
+    [openNodeId, ownNodeId],
+  );
+  const nodeIdLinkTarget = useCallback(
+    (idOrLink: string) => nodeIdTarget(idOrLink, ownNodeId),
+    [nodeIdTarget, ownNodeId],
+  );
 
   // An image in the page: the same grammar, but the bytes come from this
   // workspace's raw file route (a plain `<img>` authenticates through the
@@ -166,6 +162,8 @@ export function MarkdownRenderer({
   // new picture.
   const workspaceId = useRendererWorkspaceId();
   const resolveImage = useWorkspaceImageResolver(workspaceId, filePath);
+  // Whether this renderer is mounted outside the app — see `linkPolicy` below.
+  const surface = useRendererSurface();
 
   const save = useCallback(async (): Promise<boolean> => {
     if (readOnly || value === savedValue) return true;
@@ -263,9 +261,16 @@ export function MarkdownRenderer({
         <KbMarkdownView
           source={value}
           onOpenFile={handleFileLink}
-          onOpenNodeId={openNodeId}
+          onOpenNodeId={handleNodeIdLink}
+          fileLinkTarget={fileLinkTarget}
+          nodeIdLinkTarget={nodeIdLinkTarget}
           headingLink={headingLink}
           resolveImage={resolveImage}
+          // On a renderer surface (the embed) EVERY outgoing link is the
+          // surface's to open: there is no `allow-popups` inside a host's
+          // frame, so a plain `target="_blank"` anchor navigates the frame
+          // away instead of opening a tab. In the app the browser keeps them.
+          linkPolicy={surface ? 'surface' : 'browser'}
           containerRef={scrollContainerRef}
           // The document column scrolls; this view does not. See the prop's
           // docstring — the embed and the library dialog keep the default.

@@ -6,11 +6,12 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import type { IAccessControl } from '../access-control.interface.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { AuthService } from '../../auth/auth.service.js';
-import type { WorkflowService } from '../../workflow/workflow.service.js';
-import type { WorkflowEventBus } from '../../workflow/event-bus.js';
+import type { VersionControlService } from '../../version-control/version-control.service.js';
+import type { VersionControlEventBus } from '../../version-control/event-bus.js';
 import { createAccessRoutes } from '../access.routes.js';
 import { usersDbDouble } from './users-db-double.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
+import { NodeFs } from '../../kb-fs/node-fs.js';
 
 /**
  * HTTP contract for `POST /access/batch` — the verb dispatch. Existing callers
@@ -28,11 +29,14 @@ interface Harness {
   baseUrl: string;
   canWriteBatch: ReturnType<typeof vi.fn>;
   canOwnerBatch: ReturnType<typeof vi.fn>;
+  canReadBatch: ReturnType<typeof vi.fn>;
 }
 
-// Alice WRITES both skills but is named in the `owner:` grant of one.
+// Alice WRITES both skills but is named in the `owner:` grant of one, and
+// READS a folder she may not write.
 const WRITABLE = new Set(['Skills/a/SKILL.md', 'Skills/b/SKILL.md']);
 const OWNED = new Set(['Skills/a/SKILL.md']);
+const READABLE = new Set(['Skills/a/SKILL.md', 'Skills/b/SKILL.md', 'KnowledgeBase/Sales']);
 
 const verdicts = (set: Set<string>) =>
   vi.fn(async (_w: string, _e: string, paths: string[]) => new Map(paths.map((p) => [p, set.has(p)])));
@@ -40,7 +44,8 @@ const verdicts = (set: Set<string>) =>
 async function makeHarness(): Promise<Harness> {
   const canWriteBatch = verdicts(WRITABLE);
   const canOwnerBatch = verdicts(OWNED);
-  const accessControl = { canWriteBatch, canOwnerBatch } as unknown as IAccessControl;
+  const canReadBatch = verdicts(READABLE);
+  const accessControl = { canWriteBatch, canOwnerBatch, canReadBatch } as unknown as IAccessControl;
 
   const workspaceService = {} as unknown as WorkspaceService;
   const authService = { getUserById: vi.fn(async () => USER) } as unknown as AuthService;
@@ -57,10 +62,12 @@ async function makeHarness(): Promise<Harness> {
       accessControl,
       workspaceService,
       authService,
-      {} as unknown as WorkflowService,
-      { emit: vi.fn() } as unknown as WorkflowEventBus,
+      authService,
+      {} as unknown as VersionControlService,
+      { emit: vi.fn() } as unknown as VersionControlEventBus,
       usersDbDouble(),
       testKbContext({ kbDirName: KB }),
+      new NodeFs(),
     ),
   );
 
@@ -68,7 +75,7 @@ async function makeHarness(): Promise<Harness> {
     const s = app.listen(0, () => resolve(s));
   });
   const addr = server.address() as AddressInfo;
-  return { server, baseUrl: `http://127.0.0.1:${addr.port}`, canWriteBatch, canOwnerBatch };
+  return { server, baseUrl: `http://127.0.0.1:${addr.port}`, canWriteBatch, canOwnerBatch, canReadBatch };
 }
 
 function close(s: Server): Promise<void> {
@@ -119,16 +126,31 @@ describe('POST /access/batch', () => {
     expect(h.canWriteBatch).not.toHaveBeenCalled();
   });
 
+  it('answers READ for `verb: read` — a folder the caller may read but not write gets true', async () => {
+    h = await makeHarness();
+
+    const paths = [...PATHS, 'KnowledgeBase/Sales'];
+    const res = await post({ paths, verb: 'read' });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      results: { 'Skills/a/SKILL.md': true, 'Skills/b/SKILL.md': true, 'KnowledgeBase/Sales': true },
+    });
+    expect(h.canReadBatch).toHaveBeenCalledWith(WS, USER.email, paths);
+    expect(h.canWriteBatch).not.toHaveBeenCalled();
+    expect(h.canOwnerBatch).not.toHaveBeenCalled();
+  });
+
   it('400s a verb it does not dispatch, resolving nothing', async () => {
     h = await makeHarness();
 
-    for (const verb of ['read', 'admin', 42, null]) {
+    for (const verb of ['download', 'admin', 42, null]) {
       const res = await post({ paths: PATHS, verb });
       expect(res.status).toBe(400);
-      expect(await res.json()).toEqual({ error: 'verb must be "write" or "owner"' });
+      expect(await res.json()).toEqual({ error: 'verb must be "write", "owner" or "read"' });
     }
     expect(h.canWriteBatch).not.toHaveBeenCalled();
     expect(h.canOwnerBatch).not.toHaveBeenCalled();
+    expect(h.canReadBatch).not.toHaveBeenCalled();
   });
 
   it('keeps the paths validation ahead of the verb', async () => {

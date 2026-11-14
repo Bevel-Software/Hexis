@@ -11,10 +11,10 @@ import type { ToolContext } from '../../tool-helpers/tool.contract.js';
 import type { ToolAuth } from '../../tool-auth/tool-auth.middleware.js';
 import { registerWorkspaceTools } from '../../workspace/workspace.tools.js';
 import { RoutineWritePolicyService } from '../../workspace/routine-write-policy.js';
-import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
+import { VersionControlHooks } from '../../version-control/version-control-hooks.js';
 import { ToolDescriptionNotes } from '../../workspace/agent-access.gate.js';
 import { SpillStore } from '../../workspace/spill-store.js';
-import { DocExtractService } from '../../workspace/file-readers/doc-extract.service.js';
+import { DocExtractService, WorkerDocumentExtractor } from '../../workspace/index.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import type { ToolManualDetail, ToolManualSummary } from '../../tool-manuals/tool-manuals.contract.js';
 import { registerSkillsTools } from '../skills.tools.js';
@@ -96,7 +96,7 @@ async function start(): Promise<string> {
     sessionId,
     abortSignal: signal,
     workspaceService: {} as never,
-    workflowService: {} as never,
+    versionControlService: {} as never,
     events: {} as never,
     getFilesystem: async () => fs,
   });
@@ -111,8 +111,8 @@ async function start(): Promise<string> {
   const router = express.Router();
   registerWorkspaceTools(
     registry, router, fakeAuth, toolHandler,
-    new SpillStore(join(tmpdir(), 'bevel-test-spills')), new DocExtractService(join(tmpdir(), 'bevel-test-doc-extract')), allowAll, testKbContext({ kbDirName: KB_DIR }),
-    { recoveryBotEmail: 'recovery-bot@bevel.local', hooks: new WorkflowHooks(), notes: new ToolDescriptionNotes() },
+    new SpillStore(join(tmpdir(), 'bevel-test-spills')), new DocExtractService(join(tmpdir(), 'bevel-test-doc-extract'), new WorkerDocumentExtractor()), allowAll, testKbContext({ kbDirName: KB_DIR }),
+    { recoveryBotEmail: 'recovery-bot@bevel.local', hooks: new VersionControlHooks(), notes: new ToolDescriptionNotes() },
     new RoutineWritePolicyService(),
     {} as never,
     checker,

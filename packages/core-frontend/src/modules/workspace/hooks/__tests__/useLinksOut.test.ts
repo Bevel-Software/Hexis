@@ -43,6 +43,12 @@ describe('useLinksOut', () => {
     expect(out).toEqual([]);
   });
 
+  it('lists a page whose name merely starts with http', () => {
+    expect(run('Knowledge/A.md', 'The [notes](http-notes.md).')).toEqual([
+      { label: 'notes', target: 'http-notes.md' },
+    ]);
+  });
+
   it('lists a destination once however many times it is linked', () => {
     const out = run('Knowledge/A.md', '[One](Same.md) then [again](Same.md).');
     expect(out).toEqual([{ label: 'One', target: 'Same.md' }]);

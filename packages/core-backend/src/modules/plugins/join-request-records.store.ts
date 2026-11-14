@@ -1,7 +1,7 @@
 import { and, eq, inArray, isNotNull, sql } from 'drizzle-orm';
 import type { ChangeRequestState } from '@bevel-software/platform-shared';
-import type { Database } from '../database/connection.js';
-import { changeRequests, pluginJoinRequests } from '../database/schema.js';
+import type { Database } from '../database/index.js';
+import { changeRequests, pluginJoinRequests } from '../database/index.js';
 
 /**
  * A join request as the platform recorded it — the durable "this person

@@ -117,7 +117,6 @@ function detailWith(files: { path: string; status: PrFileStatus; previousPath?: 
       sha: '',
       rawUrl: '',
     })),
-    comments: [],
     approvals: files.map((f) => ({
       path: f.path,
       eligibleApprovers: { roles: ['Admin'], users: [] },

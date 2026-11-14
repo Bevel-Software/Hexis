@@ -13,14 +13,17 @@ import {
   type WorkspaceContextValue,
 } from '../../state/workspace.context';
 import { makeWorkspaceFixture } from '../../__tests__/testFixtures';
-import { GitContext, type GitContextValue } from '../../../git/state/git.context';
-import { AuthContext, type AuthContextValue } from '../../../auth/state/auth.context';
+import { GitContext, type GitContextValue } from '../../../git';
+import { AuthContext, type AuthContextValue } from '../../../auth';
 import { OpenChangeRequestsContext } from '../../state/open-change-requests.context';
-import { AdminContext, type AdminContextValue } from '../../../admin/state/admin.context';
+import { AdminContext, type AdminContextValue } from '../../../admin';
 import { PR_STALE_EVENT } from '../../../../core/events';
+import { EventBusProvider } from '../../../version-control';
+import type { VersionControlEvent } from '@bevel-software/platform-shared';
 import {
   AppRegistryContext,
   makeRegistry,
+  type AppDef,
   type FolderMenuContext,
   type FolderMenuItemDef,
   type FolderMenuTools,
@@ -42,10 +45,14 @@ const cancelMocks = vi.hoisted(() => ({
   cancelPullRequest: vi.fn(),
   deleteChangeRequest: vi.fn(),
 }));
-vi.mock('../../../pr/services/pr-cancel.api', () => cancelMocks);
+vi.mock('../../../pr', async (importOriginal) => ({ ...(await importOriginal<typeof import('../../../pr')>()), ...cancelMocks }));
 
 // The sheet itself is covered by the access module's own tests; here only
 // WHICH workspace and proposal the tree hands it matters.
+// A component is composed by importing its file, never through a module's
+// index (the Module Map's one allowance for React components), so the
+// component's file is the surface the tree reaches it through, and the one a
+// mock stands in for.
 vi.mock('../../../access/components/ManageAccessDialog', () => ({
   ManageAccessDialog: (props: {
     entry: FileTreeEntry;
@@ -194,6 +201,10 @@ interface RenderOptions {
    * empty, which is what every other test in this file renders against.
    */
   folderMenuItems?: FolderMenuItemDef[];
+  /** Apps in the registry — the ones whose `roots` claim top-level folders. */
+  apps?: AppDef[];
+  /** Render the narrowed tree an app mounts for its roots. */
+  roots?: string[];
   /** The workspace id — the encoded branch name, so it decides "protected". */
   workspaceId?: string;
   openFilePath?: string | null;
@@ -279,7 +290,7 @@ function renderExplorer(opts: RenderOptions = {}) {
     // the fixture must not hand out a pair that cannot exist.
     workspaceBranch: decodeURIComponent(opts.workspaceId ?? 'ws-1'),
   });
-  const registry = makeRegistry({ folderMenuItems: opts.folderMenuItems ?? [] });
+  const registry = makeRegistry({ folderMenuItems: opts.folderMenuItems ?? [], apps: opts.apps ?? [] });
   const ui = (ws: WorkspaceContextValue, mine: Map<string, number>) => (
       <MemoryRouter initialEntries={opts.initialEntries ?? ['/']}>
         <AppRegistryContext.Provider value={registry}>
@@ -316,7 +327,7 @@ function renderExplorer(opts: RenderOptions = {}) {
                     mineNumbers: new Set(opts.mineNumbers ?? [...mine.values()]),
                   }}
                 >
-                  <FileExplorer />
+                  <FileExplorer roots={opts.roots} />
                   <LocationProbe />
                 </OpenChangeRequestsContext.Provider>
             </GitContext.Provider>
@@ -966,6 +977,32 @@ describe('FileExplorer right-click: Download menu (per-path access)', () => {
   });
 });
 
+// A link INSIDE a file opens a new tab; the tree is the app's own navigation
+// and is not one. A click on a file row moves this tab to that file, as it
+// always has, whatever view the tab was in.
+describe('FileExplorer: a file click navigates this tab', () => {
+  beforeEach(() => {
+    cleanup();
+  });
+
+  it('opens the clicked file in place, with no new tab', async () => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    renderExplorer({
+      fileTree: {
+        name: '.',
+        relativePath: '.',
+        type: 'directory',
+        children: [{ name: 'Plan.md', relativePath: 'Plan.md', type: 'file' }],
+      },
+      initialEntries: [`/workspace/alice%2Fdraft/${kbPath('Other.md')}?fullscreen=1`],
+    });
+    await userEvent.setup().click(screen.getByText('Plan.md'));
+    expect(screen.getByTestId('location-pathname').textContent).toBe(`/workspace/alice%2Fdraft/${kbPath('Plan.md')}`);
+    expect(open).not.toHaveBeenCalled();
+    open.mockRestore();
+  });
+});
+
 // Regression coverage for the FileTreeNode collapse state machine. PR #113
 // derived `autoExpanded` reactively without an escape hatch, so clicking the
 // chevron on a folder that contained the open file did nothing — the user's
@@ -1131,6 +1168,17 @@ describe('FileExplorer sections: root folders', () => {
     cleanup();
   });
 
+  /**
+   * The root names on screen, in document order. Knowledge renders open, so
+   * a folder folded into it shows between it and the next section.
+   */
+  const sectionNames = () =>
+    ['Knowledge', 'Data', 'Agents', 'Workflows', 'Pipelines', 'Legal']
+      .map((name) => screen.queryByText(name))
+      .filter((el): el is HTMLElement => el !== null)
+      .sort((a, b) => (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1))
+      .map((el) => el.textContent);
+
   const dir = (name: string): FileTreeEntry => ({
     name,
     relativePath: name,
@@ -1139,23 +1187,111 @@ describe('FileExplorer sections: root folders', () => {
   });
 
   /**
-   * `Data/`, `Agents/` and `Pipelines/` are never created by core — a
+   * `Data/`, `Agents/` and `Workflows/` are never created by core — a
    * deployment that owns the agentic execution layer seeds them. When they ARE
    * there they get their own sections, and in particular must not fold into
    * Knowledge the way a stray content folder does.
    */
-  it('renders Data, Agents and Pipelines as their own sections when present', () => {
+  it('renders Data, Agents and Workflows as their own sections when present, in that order', () => {
     const tree: FileTreeEntry = {
       name: '.',
       relativePath: '.',
       type: 'directory',
-      children: [dir('KnowledgeBase'), dir('Data'), dir('Agents'), dir('Pipelines')],
+      children: [dir('Workflows'), dir('KnowledgeBase'), dir('Agents'), dir('Data')],
     };
     renderExplorer({ fileTree: tree });
-    expect(screen.getByText('Knowledge')).toBeInTheDocument();
-    expect(screen.getByText('Data')).toBeInTheDocument();
-    expect(screen.getByText('Agents')).toBeInTheDocument();
-    expect(screen.getByText('Pipelines')).toBeInTheDocument();
+    expect(sectionNames()).toEqual(['Knowledge', 'Data', 'Agents', 'Workflows']);
+  });
+
+  /** `Pipelines` is not a name core knows: a stray folder like any other. */
+  it('folds a Pipelines folder into Knowledge', () => {
+    const tree: FileTreeEntry = {
+      name: '.',
+      relativePath: '.',
+      type: 'directory',
+      children: [dir('Data'), dir('Pipelines'), dir('KnowledgeBase')],
+    };
+    renderExplorer({ fileTree: tree });
+    expect(sectionNames()).toEqual(['Knowledge', 'Pipelines', 'Data']);
+  });
+
+  const agentsApp = (roots: string[]): AppDef => ({
+    id: 'agents',
+    label: 'Agents',
+    path: '/agents',
+    element: <div />,
+    roots,
+  });
+
+  /**
+   * A root an app claims is that app's to show. Left out of Knowledge
+   * whether core reserves the name or not, and folded nowhere.
+   */
+  it('leaves out the roots an app claims, reserved or not', () => {
+    const tree: FileTreeEntry = {
+      name: '.',
+      relativePath: '.',
+      type: 'directory',
+      children: [dir('KnowledgeBase'), dir('Data'), dir('Agents'), dir('Workflows'), dir('Pipelines'), dir('Legal')],
+    };
+    renderExplorer({ fileTree: tree, apps: [agentsApp(['Agents', 'Workflows', 'Data', 'Pipelines'])] });
+    // The stray folder still folds in; the claimed ones show nowhere.
+    expect(sectionNames()).toEqual(['Knowledge', 'Legal']);
+  });
+
+  /**
+   * A tree with none of core's roots falls back to the flat tree: the
+   * checkout row, with its own path and actions. A claimed root is left out
+   * of it, and no other folder stands in for a Knowledge section.
+   */
+  it('keeps a claimed root out of a tree with none of core’s roots', () => {
+    const tree: FileTreeEntry = {
+      name: '.',
+      relativePath: '.',
+      type: 'directory',
+      children: [dir('Pipelines'), dir('Legal')],
+    };
+    renderExplorer({ fileTree: tree, apps: [agentsApp(['Pipelines'])] });
+    expect(screen.getByText('Legal')).toBeInTheDocument();
+    expect(screen.queryByText('Pipelines')).not.toBeInTheDocument();
+    expect(screen.queryByText('Knowledge')).not.toBeInTheDocument();
+  });
+
+  /** Root names compare case-insensitively, as the layout's do. */
+  it('leaves out a root claimed in another case', () => {
+    const tree: FileTreeEntry = {
+      name: '.',
+      relativePath: '.',
+      type: 'directory',
+      children: [dir('KnowledgeBase'), dir('Agents'), dir('Legal')],
+    };
+    renderExplorer({ fileTree: tree, apps: [agentsApp(['agents', 'LEGAL'])] });
+    expect(sectionNames()).toEqual(['Knowledge']);
+  });
+
+  /** The narrowed tree: its roots, in its order, and nothing else of the knowledge base. */
+  it('shows only its roots when narrowed', () => {
+    const tree: FileTreeEntry = {
+      name: '.',
+      relativePath: '.',
+      type: 'directory',
+      children: [
+        dir('KnowledgeBase'),
+        dir('Data'),
+        dir('Agents'),
+        dir('Workflows'),
+        dir('Legal'),
+        { name: 'roles.yaml', relativePath: 'roles.yaml', type: 'file' },
+      ],
+    };
+    renderExplorer({
+      fileTree: tree,
+      apps: [agentsApp(['Agents', 'Workflows'])],
+      roots: ['Workflows', 'Agents'],
+    });
+    expect(sectionNames()).toEqual(['Workflows', 'Agents']);
+    expect(screen.queryByText('Knowledge')).not.toBeInTheDocument();
+    expect(screen.queryByText('roles.yaml')).not.toBeInTheDocument();
   });
 
   /**
@@ -2028,16 +2164,36 @@ describe('FileExplorer: delete and move ask first', () => {
   const person = (name: string, email: string) => ({ kind: 'person', name, email });
 
   /**
-   * Answer the move dialog's access lookup with these before/after holders,
-   * and everything else (the destination-writable preflight) with a writable
-   * verdict — the warnings suite covers that one on its own.
+   * Answer the move dialog's access lookup with these before/after holders —
+   * and the `changes` the server derives from the resolver, which this stand-in
+   * derives from the two sides, since no rule here denies anyone by name — and
+   * everything else (the destination-writable preflight) with a writable
+   * verdict; the warnings suite covers that one on its own.
    */
   function answerAccess(before: Side, after: Side, opts: { canWrite?: boolean } = {}) {
     const side = (s: Side) => ({ read: s.read ?? [], write: s.write ?? [] });
+    const keyOf = (p: unknown) => {
+      const { kind, name, email } = p as { kind: string; name: string; email?: string };
+      return kind === 'person' ? `person:${(email ?? name).toLowerCase()}` : `${kind}:${name.toLowerCase()}`;
+    };
+    const changesOf = (b: Side, a: Side) => {
+      const lose: unknown[] = [];
+      const gain: unknown[] = [];
+      for (const verb of ['read', 'write'] as const) {
+        const had = new Set((b[verb] ?? []).map(keyOf));
+        const has = new Set((a[verb] ?? []).map(keyOf));
+        for (const p of b[verb] ?? []) if (!has.has(keyOf(p))) lose.push({ ...(p as object), verb });
+        for (const p of a[verb] ?? []) if (!had.has(keyOf(p))) gain.push({ ...(p as object), verb });
+      }
+      return { lose, gain };
+    };
     mockAuthFetch.mockImplementation(async (url: string) => {
       const u = String(url);
       if (u.includes('/access/prospective')) {
-        return { ok: true, json: async () => ({ before: side(before), after: side(after) }) };
+        return {
+          ok: true,
+          json: async () => ({ before: side(before), after: side(after), changes: changesOf(before, after) }),
+        };
       }
       if (u.includes('/access?')) {
         return { ok: true, json: async () => ({ canWrite: opts.canWrite ?? true }) };
@@ -3119,6 +3275,48 @@ describe('FileExplorer: an empty tree says why', () => {
     renderExplorer({ fileTree: null });
     expect(screen.queryByTestId('tree-empty-notice')).not.toBeInTheDocument();
   });
+
+  /**
+   * A root an app claims is not in Knowledge's tree, so what it holds does
+   * not make that tree non-empty: the notice and its hint still show.
+   */
+  const hostingApp = (roots: string[]): AppDef => ({
+    id: 'agents',
+    label: 'Agents',
+    path: '/agents',
+    element: <div />,
+    roots,
+  });
+
+  it('says "empty" when the only content is under a claimed root', () => {
+    renderExplorer({
+      fileTree: seeded([], {}, [dirAt(`${KBD}/Agents`, [fileAt(`${KBD}/Agents/Planner.md`)])]),
+      apps: [hostingApp(['Agents'])],
+      workspaceId: 'alice%2Fdraft',
+    });
+    expect(screen.getByTestId('tree-empty-notice')).toHaveTextContent('This knowledge base is empty.');
+    expect(screen.getByTestId('tree-empty-create-hint')).toBeInTheDocument();
+  });
+
+  it('says "empty" for a tree that predates the split whose only folder is claimed', () => {
+    renderExplorer({
+      fileTree: rootedAtCheckout(
+        dirAt('.', [dirAt(KBD, [dirAt(`${KBD}/Pipelines`, [fileAt(`${KBD}/Pipelines/run.workflow`)])])]),
+      ),
+      apps: [hostingApp(['Pipelines'])],
+      workspaceId: 'alice%2Fdraft',
+    });
+    expect(screen.queryByText('Pipelines')).not.toBeInTheDocument();
+    expect(screen.getByTestId('tree-empty-notice')).toHaveTextContent('This knowledge base is empty.');
+    expect(screen.getByTestId('tree-empty-create-hint')).toBeInTheDocument();
+  });
+
+  it('still counts that content when no app claims the root', () => {
+    renderExplorer({
+      fileTree: seeded([], {}, [dirAt(`${KBD}/Agents`, [fileAt(`${KBD}/Agents/Planner.md`)])]),
+    });
+    expect(screen.queryByTestId('tree-empty-notice')).not.toBeInTheDocument();
+  });
 });
 
 // The sidebar refuses a platform file's drag and its rename itself, with the
@@ -3162,6 +3360,8 @@ describe('FileExplorer: platform files stay put', () => {
   });
 
   const PLATFORM = ['access.md', 'roles.yaml', '.bevelignore'];
+  /** What a platform file's row says: access.md reads as "Who has access". */
+  const shown = (name: string) => (name === 'access.md' ? 'Who has access' : name);
 
   let alertSpy: ReturnType<typeof vi.spyOn>;
 
@@ -3180,7 +3380,7 @@ describe('FileExplorer: platform files stay put', () => {
 
   it.each(PLATFORM)('%s cannot be dragged: the row refuses to start one', (name) => {
     renderExplorer({ fileTree: TREE });
-    expect(row(name)).toHaveAttribute('draggable', 'false');
+    expect(row(shown(name))).toHaveAttribute('draggable', 'false');
   });
 
   it.each(PLATFORM)('a drop carrying %s is refused with the sentence, and nothing is sent', async (name) => {
@@ -3200,7 +3400,7 @@ describe('FileExplorer: platform files stay put', () => {
 
   it.each(PLATFORM)('the Rename action on %s says the sentence and opens nothing', async (name) => {
     const { moveEntry } = renderExplorer({ fileTree: TREE });
-    fireEvent.contextMenu(row(name));
+    fireEvent.contextMenu(row(shown(name)));
     const rename = screen.getByRole('menuitem', { name: /Rename/i });
     expect(rename).toHaveAttribute('aria-disabled', 'true');
     expect(rename).toHaveAttribute('title', sentence(name));
@@ -3208,7 +3408,7 @@ describe('FileExplorer: platform files stay put', () => {
       fireEvent.click(rename);
     });
     // No rename box: the row still shows its name, and nothing was sent.
-    expect(screen.getAllByText(name)[0]).toBeInTheDocument();
+    expect(screen.getAllByText(shown(name))[0]).toBeInTheDocument();
     expect(moveEntry).not.toHaveBeenCalled();
   });
 
@@ -3311,7 +3511,7 @@ describe('FileExplorer: platform files stay put', () => {
 
     it("the root's own copy still cannot be dragged, admin or not", () => {
       renderExplorer({ fileTree: MISPLACED, isAdmin: true });
-      expect(row('access.md')).toHaveAttribute('draggable', 'false');
+      expect(row('Who has access')).toHaveAttribute('draggable', 'false');
     });
 
     it('a non-admin gets no exception: the misplaced row is refused like any other', async () => {
@@ -3363,6 +3563,16 @@ describe('FileExplorer: platform files stay put', () => {
     const rename = screen.getByRole('menuitem', { name: /Rename/i });
     expect(rename).toHaveAttribute('aria-disabled', 'true');
     expect(rename).toHaveAttribute('title', sentence('access.md'));
+  });
+
+  it('an access.md row reads Who has access, with the file name on hover', () => {
+    renderExplorer({ fileTree: TREE });
+    const access = row('Who has access');
+    expect(access).toHaveAttribute('data-tree-path', `${KB}/access.md`);
+    expect(access).toHaveAttribute('title', 'access.md');
+    expect(screen.queryByText('access.md')).not.toBeInTheDocument();
+    // Other platform files are not renamed for display.
+    expect(row('roles.yaml')).not.toHaveAttribute('title');
   });
 
   it('an AGENTS.md is content, not a platform file, at the root and nested: it drags like any other row', () => {
@@ -4067,5 +4277,216 @@ describe("FileExplorer folder menu: a deployment's own entries", () => {
     });
     expect(run).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole('menu')).toBeNull();
+  });
+});
+
+// Delete follows its own rule, narrower than the move's: the root's
+// `access.md` and `roles.yaml` are the repository's own and deleted by nobody,
+// with the sentence the server refuses with; a nested `access.md` is deleted
+// like any file its caller may write — the server's write gate decides.
+describe('FileExplorer: deleting platform files', () => {
+  const KB = 'knowledge-base';
+  const sentence = (name: string) => `${name} is the repository's own file and cannot be deleted.`;
+  const file = (p: string): FileTreeEntry => ({ name: p.slice(p.lastIndexOf('/') + 1), relativePath: p, type: 'file' });
+
+  const TREE: FileTreeEntry = rootedAtCheckout({
+    name: '.',
+    relativePath: '.',
+    type: 'directory',
+    children: [
+      {
+        name: KB,
+        relativePath: KB,
+        type: 'directory',
+        children: [
+          file(`${KB}/access.md`),
+          file(`${KB}/roles.yaml`),
+          {
+            name: 'Team',
+            relativePath: `${KB}/Team`,
+            type: 'directory',
+            children: [file(`${KB}/Team/access.md`), file(`${KB}/Team/roles.yaml`)],
+          },
+        ],
+      },
+    ],
+  });
+
+  beforeEach(() => {
+    cleanup();
+    mockAuthFetch.mockReset();
+  });
+
+  // The rows show the file's plain name (`access.md` reads "Who has access");
+  // the sentence keeps the file's own.
+  it.each([
+    ['access.md', 'Who has access'],
+    ['roles.yaml', 'roles.yaml'],
+  ])('the root %s shows Delete disabled with the sentence, for an admin too', async (name, label) => {
+    const deleteEntry = vi.fn(async () => {});
+    renderExplorer({ fileTree: TREE, deleteEntry, isAdmin: true });
+    // The root's copy is the first row of that name.
+    fireEvent.contextMenu(screen.getAllByText(label)[0].closest('button')!);
+    const del = screen.getByRole('menuitem', { name: /Delete/i });
+    expect(del).toHaveAttribute('aria-disabled', 'true');
+    expect(del).toHaveAttribute('title', sentence(name));
+    await act(async () => {
+      fireEvent.click(del);
+    });
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(deleteEntry).not.toHaveBeenCalled();
+  });
+
+  it('a nested access.md offers Delete, and deletes once confirmed', async () => {
+    const deleteEntry = vi.fn(async () => {});
+    renderExplorer({ fileTree: TREE, deleteEntry, isAdmin: true });
+    const rows = screen.getAllByText('Who has access');
+    expect(rows).toHaveLength(2);
+    fireEvent.contextMenu(rows[1].closest('button')!);
+    const del = screen.getByRole('menuitem', { name: /Delete/i });
+    expect(del).not.toHaveAttribute('aria-disabled');
+    expect(del).not.toHaveAttribute('title');
+    await act(async () => {
+      fireEvent.click(del);
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
+    });
+    expect(deleteEntry).toHaveBeenCalledWith(`${KB}/Team/access.md`);
+  });
+});
+
+describe('FileExplorer: a document the server could not read', () => {
+  // Legal is open (a folder above depth 2 opens by default); Archive/Old is
+  // at depth 2 and starts closed, so its file has no row on screen until opened.
+  const TREE: FileTreeEntry = {
+    name: '.',
+    relativePath: '.',
+    type: 'directory',
+    children: [
+      {
+        name: 'Legal',
+        relativePath: 'Legal',
+        type: 'directory',
+        children: [
+          { name: 'Supplier-Agreement.pdf', relativePath: 'Legal/Supplier-Agreement.pdf', type: 'file' },
+          { name: 'Terms-2026.md', relativePath: 'Legal/Terms-2026.md', type: 'file' },
+        ],
+      },
+      {
+        name: 'Archive',
+        relativePath: 'Archive',
+        type: 'directory',
+        children: [
+          {
+            name: 'Old',
+            relativePath: 'Archive/Old',
+            type: 'directory',
+            children: [{ name: 'Hidden.pdf', relativePath: 'Archive/Old/Hidden.pdf', type: 'file' }],
+          },
+        ],
+      },
+    ],
+  };
+
+  /**
+   * The app's own event bus, driven as the server drives it. jsdom ships no
+   * EventSource, so the provider gets this stand-in for the stream it opens
+   * on mount; `deliver` hands it one server event the way the stream would.
+   */
+  class FakeEventSource {
+    static current: FakeEventSource | null = null;
+    private readonly listeners = new Map<string, ((e: Event) => void)[]>();
+    constructor() {
+      FakeEventSource.current = this;
+    }
+    addEventListener(type: string, fn: (e: Event) => void) {
+      this.listeners.set(type, [...(this.listeners.get(type) ?? []), fn]);
+    }
+    removeEventListener(type: string, fn: (e: Event) => void) {
+      this.listeners.set(type, (this.listeners.get(type) ?? []).filter((f) => f !== fn));
+    }
+    close() {}
+    deliver(event: VersionControlEvent) {
+      for (const fn of [...(this.listeners.get('message') ?? [])]) {
+        fn(new MessageEvent('message', { data: JSON.stringify(event) }));
+      }
+    }
+  }
+
+  beforeEach(() => {
+    FakeEventSource.current = null;
+    vi.stubGlobal('EventSource', FakeEventSource);
+    // The provider posts its focus to the server; nothing here reads the answer.
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ status: 'ok' }), { status: 200 })));
+    window.sessionStorage.setItem('bevel-event-bus-session-id', 'sess-explorer');
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    window.sessionStorage.clear();
+  });
+
+  function renderWithBus() {
+    const workspace = makeWorkspaceFixture({ fileTree: inCheckout(TREE) });
+    render(
+      <MemoryRouter>
+        <AuthContext.Provider value={makeAuth()}>
+          <WorkspaceContext.Provider value={workspace}>
+            <GitContext.Provider value={makeGit()}>
+              <EventBusProvider>
+                <FileExplorer />
+              </EventBusProvider>
+            </GitContext.Provider>
+          </WorkspaceContext.Provider>
+        </AuthContext.Provider>
+      </MemoryRouter>,
+    );
+    let id = 1;
+    const push = (payload: { workspaceId: string; path: string; reason: string }) =>
+      act(() => {
+        const event = { id: id++, ts: new Date().toISOString(), kind: 'document-unreadable', ...payload } as VersionControlEvent;
+        FakeEventSource.current!.deliver(event);
+      });
+    return { push };
+  }
+
+  const damaged = kbPath('Legal/Supplier-Agreement.pdf');
+
+  it('shows the notice under the row of the file, with the reason after "Could not be read:"', () => {
+    const { push } = renderWithBus();
+    push({ workspaceId: 'ws-1', path: damaged, reason: "could not extract the PDF's text (Bad (uncompressed) XRef entry: 4R)" });
+    const notice = screen.getByTestId('tree-unreadable-notice');
+    expect(notice).toHaveTextContent("Could not be read: could not extract the PDF's text (Bad (uncompressed) XRef entry: 4R)");
+    // Under THAT row: the row's own element is the one right before it.
+    const row = screen.getByText('Supplier-Agreement.pdf').closest('button')!;
+    expect(row.nextElementSibling).toBe(notice);
+    // The row itself carries no marker of its own.
+    expect(within(row).queryByTestId('tree-unreadable-notice')).toBeNull();
+  });
+
+  it('words a timeout as the mock does, and Dismiss removes it for good', () => {
+    const { push } = renderWithBus();
+    push({ workspaceId: 'ws-1', path: damaged, reason: 'extracting its text took longer than 10 seconds' });
+    expect(screen.getByTestId('tree-unreadable-notice')).toHaveTextContent(
+      'Could not be read: extracting its text took longer than 10 seconds.',
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss could not be read' }));
+    expect(screen.queryByTestId('tree-unreadable-notice')).toBeNull();
+  });
+
+  it('shows nothing for a file in another workspace, or for another file', () => {
+    const { push } = renderWithBus();
+    push({ workspaceId: 'someone%2Felse', path: damaged, reason: 'x' });
+    push({ workspaceId: 'ws-1', path: kbPath('Legal/Terms-2026.md.pdf'), reason: 'x' });
+    expect(screen.queryByTestId('tree-unreadable-notice')).toBeNull();
+  });
+
+  it('keeps nothing for a row that was not on screen when the failure was pushed', () => {
+    const { push } = renderWithBus();
+    expect(screen.queryByText('Hidden.pdf')).toBeNull();
+    push({ workspaceId: 'ws-1', path: kbPath('Archive/Old/Hidden.pdf'), reason: 'x' });
+    fireEvent.click(screen.getByText('Old'));
+    expect(screen.getByText('Hidden.pdf')).toBeInTheDocument();
+    expect(screen.queryByTestId('tree-unreadable-notice')).toBeNull();
   });
 });

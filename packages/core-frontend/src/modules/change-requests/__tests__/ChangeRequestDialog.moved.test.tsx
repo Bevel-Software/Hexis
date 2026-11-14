@@ -68,7 +68,6 @@ function detailWith(file: {
     headSha: 'h',
     baseSha: 'b',
     files: [{ ...file, additions: 1, deletions: 1, isBinary: false, sha: '', rawUrl: '' }],
-    comments: [],
     approvals: [],
     mergeableInBevel: true,
     mergeBlockedReasons: [],

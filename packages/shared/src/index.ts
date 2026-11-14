@@ -1,5 +1,6 @@
 // Auth
 export * from './auth/types.js';
+export * from './auth/password-policy.js';
 
 // Chat
 export * from './chat/types.js';
@@ -12,10 +13,14 @@ export * from './workspace/entry-exists.js';
 export * from './workspace/kb-layout.js';
 export * from './workspace/join-request.js';
 export * from './workspace/frontmatter.js';
+export * from './workspace/md-links.js';
 export * from './workspace/placeholder.js';
 export * from './workspace/frontmatter-carriers.js';
 export * from './workspace/platform-files.js';
 export * from './workspace/access-verbs.js';
+
+// Hashing
+export * from './hash/sha256.js';
 
 // Git
 export * from './git/types.js';
@@ -23,8 +28,9 @@ export * from './git/pr.types.js';
 export * from './git/protected.js';
 export * from './git/branchAuthor.js';
 export * from './git/review.types.js';
+export * from './git/legacy-change-request-body.js';
 
-// Workflow — abstraction layer over git/PR/review-workflow. See PLAN.md.
-export * from './workflow/types.js';
-export * from './workflow/interface.js';
-export * from './workflow/events.js';
+// Version control — abstraction layer over git/PR/change-request-review. See PLAN.md.
+export * from './version-control/types.js';
+export * from './version-control/interface.js';
+export * from './version-control/events.js';

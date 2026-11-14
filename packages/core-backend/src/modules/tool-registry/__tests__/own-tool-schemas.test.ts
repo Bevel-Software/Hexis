@@ -3,12 +3,14 @@ import express from 'express';
 import { describe, expect, it } from 'vitest';
 import { inputSchemaDefect } from '@bevel-software/platform-mcp-core';
 import { ToolRegistry } from '../tool-registry.js';
-import { registerWorkflowTools } from '../../workflow/agent-tools/workflow.tools.js';
-import { registerChangeRequestReadTools } from '../../workflow/agent-tools/change-request-read.tools.js';
+import { registerVersionControlTools } from '../../version-control/agent-tools/version-control.tools.js';
+import { registerChangeRequestReadTools } from '../../version-control/agent-tools/change-request-read.tools.js';
 import { registerWorkspaceTools } from '../../workspace/workspace.tools.js';
 import { registerSkillsTools } from '../../skills/skills.tools.js';
 import { registerPluginsTools } from '../../plugins/plugins.tools.js';
 import { registerToolManualsTools } from '../../tool-manuals/tool-manuals.tools.js';
+import { registerEmbedTools } from '../../embed/embed.tools.js';
+import { registerAgentGuideTool } from '../../agent-guide/agent-guide.tools.js';
 import { ToolDescriptionNotes } from '../../workspace/agent-access.gate.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 
@@ -56,8 +58,8 @@ const CORE_SERVER_SOURCE = new URL('../../../core/create-core-server.ts', import
 /** Every tool-registering module, by the name the server calls it under. */
 const MODULES: ReadonlyArray<{ name: string; register: (registry: ToolRegistry) => void }> = [
   {
-    name: 'registerWorkflowTools',
-    register: (registry) => registerWorkflowTools(registry, express.Router(), pass, handler, testKbContext()),
+    name: 'registerVersionControlTools',
+    register: (registry) => registerVersionControlTools(registry, express.Router(), pass, handler, testKbContext(), async () => true, { canRead: async () => true, canReadAtRef: async () => true, canReadBatch: async () => new Map(), canReadBatchAtRef: async () => new Map(), canWrite: async () => true } as never, { recoveryBotEmail: 'recovery@x', hooks: { runAgentRead: async () => undefined }, notes: { onChange: () => undefined } } as never),
   },
   {
     name: 'registerChangeRequestReadTools',
@@ -79,13 +81,31 @@ const MODULES: ReadonlyArray<{ name: string; register: (registry: ToolRegistry) 
         { recoveryBotEmail: 'recovery@bevel.software', hooks: nothing, notes: new ToolDescriptionNotes() },
         nothing,
         nothing,
+        undefined,
+        undefined,
+        // The upload store: the two upload tools are mounted only when one is
+        // supplied, and the server supplies one — so this harness does too,
+        // or their schemas would be the two it silently never checked.
+        nothing,
       ),
   },
   {
     name: 'registerSkillsTools',
     register: (registry) => registerSkillsTools(registry, express.Router(), pass, handler, nothing),
   },
-  { name: 'registerPluginsTools', register: (registry) => registerPluginsTools(registry) },
+  { name: 'registerPluginsTools', register: (registry) => registerPluginsTools(registry, testKbContext()) },
+  {
+    name: 'registerEmbedTools',
+    register: (registry) =>
+      registerEmbedTools(registry, express.Router(), pass, handler, {
+        embedService: nothing,
+        kb: testKbContext(),
+        readForTool: nothing,
+        canBeReached: () => true,
+        appUrlFor: (repoRelative) => `https://example.test/workspace/main/knowledge-base/${repoRelative}`,
+        notes: new ToolDescriptionNotes(),
+      }),
+  },
   {
     name: 'registerToolManualsTools',
     register: (registry) =>
@@ -94,6 +114,13 @@ const MODULES: ReadonlyArray<{ name: string; register: (registry: ToolRegistry) 
         variableStatus: nothing,
         kb: testKbContext(),
       }),
+  },
+  {
+    // The one module registering a single tool: a provider on both surfaces,
+    // built from the sections the reader answers — none here, which still
+    // builds the def.
+    name: 'registerAgentGuideTool',
+    register: (registry) => registerAgentGuideTool(registry, express.Router(), pass, handler, async () => []),
   },
 ];
 
@@ -116,7 +143,9 @@ describe("Hexis's own tool schemas", () => {
    */
   it('covers every tool module the server registers', () => {
     const source = readFileSync(CORE_SERVER_SOURCE, 'utf8');
-    const registered = [...source.matchAll(/\b(register\w*Tools)\s*\(/g)].map((m) => m[1]);
+    // `register…Tools` and `register…Tool` alike: a module registering one
+    // tool is a module whose schema this harness must check too.
+    const registered = [...source.matchAll(/\b(register\w+Tools?)\s*\(/g)].map((m) => m[1]);
     expect([...new Set(registered)].sort()).toEqual(MODULES.map((m) => m.name).sort());
   });
 

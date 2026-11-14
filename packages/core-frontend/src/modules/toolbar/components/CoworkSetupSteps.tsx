@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import { Banner } from '../../../shared/components';
 import { CopyBlock } from '../../../shared/mcp';
 import { marketplaceGitUrl } from '../../../shared/marketplace-url';
-import { fetchMarketplaceRegistration } from '../../settings/services/github-facade.api';
+import { fetchMarketplaceRegistration } from '../../settings';
 import { ClaudeMarketplaceCarousel } from './ClaudeMarketplaceCarousel';
 import { Prose } from './setup-step-parts';
 import { deploymentHost } from './deployment-address';

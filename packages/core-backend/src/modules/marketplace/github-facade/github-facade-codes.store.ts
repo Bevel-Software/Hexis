@@ -1,6 +1,6 @@
 import { and, eq, gt, isNull } from 'drizzle-orm';
-import type { Database } from '../../database/connection.js';
-import { githubFacadeCodes } from '../../database/schema.js';
+import type { Database } from '../../database/index.js';
+import { githubFacadeCodes } from '../../database/index.js';
 
 /**
  * A one-time code the consent page issued, waiting for Anthropic's backend

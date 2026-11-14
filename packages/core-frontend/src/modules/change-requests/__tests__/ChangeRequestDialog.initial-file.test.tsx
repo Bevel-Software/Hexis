@@ -60,7 +60,6 @@ const DETAIL = {
     sha: '',
     rawUrl: '',
   })),
-  comments: [],
   approvals: [],
   mergeableInBevel: true,
   mergeBlockedReasons: [],

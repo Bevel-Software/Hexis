@@ -257,16 +257,25 @@ describe('PluginsTree', () => {
     expect(row('Plugins').closest('[draggable]')).toHaveAttribute('draggable', 'false');
     expect(row('GTM')).toBeInTheDocument();
     expect(row('personal-u1')).toBeInTheDocument();
-    expect(screen.queryByText('plugin.json')).not.toBeInTheDocument();
+    expect(screen.queryByText('Plugin settings')).not.toBeInTheDocument();
   });
 
   it("opens a plugin's files at their canonical default-branch URL — the item route decides the page", () => {
     renderPlugins('/skills-and-tools');
     fireEvent.click(row('GTM'));
-    fireEvent.click(row('plugin.json'));
+    fireEvent.click(row('Plugin settings'));
     expect(screen.getByLabelText('pathname')).toHaveTextContent(
       `/workspace/${DEFAULT_BRANCH}/${KB}/Plugins/GTM/plugin.json`,
     );
+  });
+
+  it("names a plugin's plugin.json Plugin settings, with the real name on hover", () => {
+    renderPlugins('/skills-and-tools');
+    fireEvent.click(row('GTM'));
+    expect(row('Plugin settings')).toHaveAttribute('title', 'plugin.json');
+    expect(screen.queryByText('plugin.json')).not.toBeInTheDocument();
+    // Every other file keeps its own name and no extra tooltip.
+    expect(row('mcp.json')).not.toHaveAttribute('title');
   });
 
   it('draws the folder even when the knowledge base has none yet', () => {
@@ -299,8 +308,8 @@ describe('PluginsTree', () => {
     expect(onCreatePlugin).toHaveBeenLastCalledWith('GTM');
 
     fireEvent.click(row('GTM'));
-    fireEvent.contextMenu(row('plugin.json'));
-    expect(within(screen.getByRole('menu', { name: 'Actions for plugin.json' })).queryByRole('menuitem', { name: 'New plugin' })).toBeNull();
+    fireEvent.contextMenu(row('Plugin settings'));
+    expect(within(screen.getByRole('menu', { name: 'Actions for Plugin settings' })).queryByRole('menuitem', { name: 'New plugin' })).toBeNull();
   });
 
   it('offers New plugin only where a plugin may be made — the root and grouping folders, never a plugin or what is inside one', () => {

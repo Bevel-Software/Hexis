@@ -11,7 +11,7 @@ import {
   getOrCreateWorkspace,
   readFile,
   writeFile,
-} from '../../workspace/services/workspace.api';
+} from '../../workspace';
 
 // The caps, the file name and the comment rule come from
 // `@bevel-software/platform-shared`, the same module the backend composer

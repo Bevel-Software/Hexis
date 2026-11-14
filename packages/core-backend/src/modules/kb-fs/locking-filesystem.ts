@@ -1,12 +1,12 @@
 /**
- * A `LocalFilesystem` that wraps every mutating operation in a workflow
+ * A `LocalFilesystem` that wraps every mutating operation in a version-control
  * lock acquire → super-call → release-with-auto-commit-and-push cycle.
  * This is the agent's file edit surface — Mastra hands the agent the
  * workspace's filesystem tools (write_file / edit_file / etc.), and those
  * call directly into this class, so the agent's edits go through the same
  * lock + commit + push pipeline as the human editor's saves.
  *
- * Per the workflow spec (PLAN.md §2):
+ * Per the version-control spec (PLAN.md §2):
  *   - Each tool call is one acquire/release cycle. The agent never holds a
  *     lock while it's "thinking" between tool calls — a fast human editor
  *     can always grab a file the agent isn't actively writing.
@@ -14,11 +14,11 @@
  *     2-second intervals (~6s ceiling) then surface a structured error
  *     so the agent can skip the file and continue with the rest of its
  *     turn rather than aborting the whole call.
- *   - Lock-release inside `WorkflowService.releaseLock` is the thing that
+ *   - Lock-release inside `VersionControlService.releaseLock` is the thing that
  *     actually commits + pushes the file — see that method for the
  *     `commitFile → release → push` sequence. We don't repeat the commit
  *     step here; releasing IS committing.
- *   - `rmdir` is refused. The workflow invariant is "each change touches
+ *   - `rmdir` is refused. The version-control invariant is "each change touches
  *     exactly one file" and a recursive directory delete violates that.
  *     The agent must delete entries individually via `deleteFile`.
  *   - `mkdir` followed by a `.gitkeep` write is the canonical way to land
@@ -47,14 +47,14 @@ import {
   type RemoveOptions,
   type WriteOptions,
 } from '@mastra/core/workspace';
-import type { AuthUser, Change, IWorkflowService } from '@bevel-software/platform-shared';
+import type { AuthUser, Change, IVersionControlService } from '@bevel-software/platform-shared';
 import { PushNeedsAgentResolutionError } from '../../shared/domain-errors.js';
-import type { FileChangeNotifier } from './file-change-notifier.js';
 import { isAbsence } from '../../shared/fs.contract.js';
 import { DestinationTakenError, lstatOrNull, renameNoReplace, takenError } from '../../shared/rename-no-replace.js';
+import { linkedAncestor } from '../../shared/no-link-below.js';
 import { assertInsideRepo } from './repo-path.js';
 import { GitGuardedFilesystem } from './git-guarded-filesystem.js';
-import type { CreationGrantPlan, ICreatorAccess } from '../access-model/creator.js';
+import type { CreationGrantPlan, ICreatorAccess } from '../access-model/index.js';
 
 /** How many times to retry a contended acquire before giving up. */
 const ACQUIRE_RETRY_ATTEMPTS = 3;
@@ -71,6 +71,57 @@ class CheckRefusal {
 }
 
 /**
+ * `moveWithEdits` could not take a lock: another writer held `path` past the
+ * retries. Nothing was moved or written.
+ */
+export class MoveLockedError extends Error {
+  constructor(
+    readonly path: string,
+    readonly holderName: string | null,
+  ) {
+    super(
+      `"${path}" is being edited by ${holderName ?? 'another user'}, so nothing was moved and no link was changed. ` +
+        'Try the move again later.',
+    );
+    this.name = 'MoveLockedError';
+  }
+}
+
+/**
+ * `moveWithEdits` found a file in the folder that was not there when the
+ * locks were planned: somebody saved into the folder meanwhile. Nothing was
+ * moved; the caller plans again against the folder as it is now.
+ */
+export class MoveRacedError extends Error {
+  constructor(readonly path: string) {
+    super(`"${path}" was added to the folder while the move was being prepared, so nothing was moved. Run the move again.`);
+    this.name = 'MoveRacedError';
+  }
+}
+
+/**
+ * `moveWithEdits` failed after the rename and could not put the folder back.
+ * The locks were released with the discard, so the working tree is reset to
+ * the last commit rather than left half-moved; the error carries both
+ * failures for the log.
+ */
+export class MoveUndoError extends Error {
+  constructor(
+    readonly src: string,
+    readonly dest: string,
+    readonly cause: unknown,
+    readonly undoFailure: unknown,
+  ) {
+    super(
+      `Moving "${src}" to "${dest}" failed (${cause instanceof Error ? cause.message : String(cause)}), and the move ` +
+        `could not be undone (${undoFailure instanceof Error ? undoFailure.message : String(undoFailure)}). ` +
+        'The working copy has been reset to the last commit; check the folder before trying again.',
+    );
+    this.name = 'MoveUndoError';
+  }
+}
+
+/**
  * A pre-disk write validator: called with the (workspace-relative path, full
  * candidate content) of a write; throw (or reject) to refuse it. `appliesTo`
  * names the paths it guards — only a validator that declares it is also run
@@ -82,13 +133,13 @@ export type WriteValidator = ((path: string, content: FileContent) => void | Pro
 };
 
 /**
- * Dependencies the wrapper needs to talk to the workflow lock service.
+ * Dependencies the wrapper needs to talk to the version-control lock service.
  * Captured at construction time so every per-method call resolves to the
  * same `(workspace, branch, user)` triple — the agent can't accidentally
  * target a different workspace through this filesystem.
  */
 export interface LockingFilesystemContext {
-  workflow: IWorkflowService;
+  versionControl: IVersionControlService;
   workspaceId: string;
   branch: string;
   user: AuthUser;
@@ -115,12 +166,6 @@ export interface LockingFilesystemContext {
    * when the destination is a path the validator's `appliesTo` claims.
    */
   validateWrite?: WriteValidator;
-  /**
-   * Post-commit hook for the BATCH `writeFiles` path (which commits via
-   * `commitChanges` and so skips `runPendingCommit`'s emit). Single-file ops
-   * emit through the queue instead, so they don't need this. Optional.
-   */
-  fileChanges?: FileChangeNotifier;
   /**
    * Optional creator read-grant planner (see `modules/access/creator-access`).
    * When present, a write/mkdir that starts a NEW FOLDER directly under one
@@ -174,9 +219,15 @@ export class LockingFilesystem extends GitGuardedFilesystem {
     const plan = await this.planCreate(inputPath, 'file');
     if (plan?.kind === 'seed-access-md') await this.seedAccessMd(plan);
     const toWrite = content;
+    // An EXCLUSIVE write (`overwrite: false`, the `wx` flag) that finds the
+    // name taken is refused as a copy is (`asTakenRefusal`): the refusal is a
+    // `DestinationTakenError`, so the lock is released untouched. Left as the
+    // raw failure it would be a failed op, and the discard that follows resets
+    // the PATH — throwing away the winner's file, whose commit is still queued.
+    const land = () => super.writeFile(inputPath, toWrite, options);
     return this.withLock(
       inputPath,
-      () => super.writeFile(inputPath, toWrite, options),
+      () => (options?.overwrite === false ? this.asTakenRefusal(inputPath, land) : land()),
       (check || validate) &&
         (async () => {
           // The caller's verdict first: it decides whether this write happens
@@ -390,6 +441,231 @@ export class LockingFilesystem extends GitGuardedFilesystem {
   }
 
   /**
+   * A move and the link edits it brings, as ONE change: `move_file` with link
+   * rewriting on. Where `moveFile` lands a move as two queued single-path
+   * commits (a delete, a create), this takes every lock first — both ends of
+   * the move, every file a moved folder holds at its old and its new path, and
+   * every file it edits — in deterministic order, renames,
+   * writes the edits, and commits the whole set synchronously in one commit,
+   * so git sees the move as a rename beside the edits.
+   *
+   * `edits[].path` is where each file sits AFTER the move (a moved file's
+   * edit lands at its new path); `edits[].lockAt` is where it sits now, and is
+   * the path locked. `check` runs once every lock is held and before anything
+   * changes — the caller confirms there that the bytes its edits were computed
+   * from are still the bytes on disk.
+   *
+   * Fail-closed: a lock still held by another writer after the retries throws
+   * {@link MoveLockedError} naming that path, with nothing moved and nothing
+   * written; a failure after the rename puts every edited file's bytes back and
+   * the move undone before the error leaves. Only edited text passes through
+   * memory: a folder's other files, binaries among them, are renamed on disk.
+   */
+  async moveWithEdits(
+    src: string,
+    dest: string,
+    edits: { path: string; lockAt: string; content: string }[],
+    summary: string,
+    check?: () => Promise<void>,
+  ): Promise<Change | null> {
+    const { versionControl, workspaceId, branch, user } = this.lockContext;
+    await this.assertNotGitInternals(src);
+    await this.assertNotGitInternals(dest);
+    this.assertInsideRepo(dest);
+    for (const e of edits) {
+      await this.assertNotGitInternals(e.path);
+      this.assertInsideRepo(e.path);
+    }
+    await this.validateResultingWrite(dest, () => this.readFile(src));
+    if (this.lockContext.validateWrite) {
+      for (const e of edits) await this.lockContext.validateWrite(e.path, e.content);
+    }
+    // A folder's files are locked one by one at both ends: a save to one of
+    // them mid-move would otherwise recreate the old path, or ride this
+    // move's commit, whose scope names every one of them.
+    const movedNow = src === dest ? [] : await this.filesBelow(src);
+    const paths = [
+      ...new Set([
+        src,
+        dest,
+        ...movedNow.flatMap((f) => [f, dest + f.slice(src.length)]),
+        ...edits.map((e) => e.lockAt),
+      ]),
+    ].sort();
+    const acquired: string[] = [];
+    // Locked paths left holding bytes this move wrote and could not put back:
+    // released with the discard (reset to HEAD), so those bytes cannot ride
+    // the next save's commit as if they were this move's result.
+    const dirtyLeft = new Set<string>();
+    // The paths the commit names (set once it is built): the only ones a
+    // release with a commit may enqueue. The folder locks at either end
+    // coordinate and name nothing committed, so they go back untouched —
+    // enqueued, a later write under those folders would be this move's.
+    let scope: string[] = [];
+    const release = async (mode: 'untouched' | 'enqueue'): Promise<void> => {
+      for (const p of acquired) {
+        try {
+          if (mode === 'enqueue' && scope.includes(p)) await versionControl.releaseLock(workspaceId, branch, p, user);
+          else if (mode === 'enqueue') await versionControl.releaseLockUntouched(workspaceId, branch, p, user);
+          else if (dirtyLeft.has(p)) await versionControl.releaseLockNoCommit(workspaceId, branch, p, user);
+          else await versionControl.releaseLockUntouched(workspaceId, branch, p, user);
+        } catch (releaseErr) {
+          log.warn(`lock release failed for "${p}" during moveWithEdits:`, { err: releaseErr });
+        }
+      }
+    };
+    for (const p of paths) {
+      let holderName: string | null = null;
+      let ok = false;
+      try {
+        for (let attempt = 0; attempt < ACQUIRE_RETRY_ATTEMPTS; attempt++) {
+          const result = await versionControl.acquireLock(workspaceId, branch, p, user);
+          if (result.acquired) {
+            ok = true;
+            break;
+          }
+          holderName = result.lock.holderName;
+          if (attempt < ACQUIRE_RETRY_ATTEMPTS - 1) await sleep(ACQUIRE_RETRY_DELAY_MS);
+        }
+      } catch (err) {
+        // The lock store failing is no reason to keep the locks already held
+        // until their TTL runs out.
+        await release('untouched');
+        throw err;
+      }
+      if (!ok) {
+        await release('untouched');
+        throw new MoveLockedError(p, holderName);
+      }
+      acquired.push(p);
+    }
+    // Judged again under the locks, on the bytes that land: a validator that
+    // reads the current file must see the state each edit replaces.
+    try {
+      // The folder's files, listed again now that every lock is held: a file
+      // saved into it between the listing above and the locks would ride
+      // this move's commit without its lock — refused, and the caller tries
+      // again against the folder as it is now.
+      if (src !== dest) {
+        const locked = new Set(paths);
+        const arrived = (await this.filesBelow(src)).find((f) => !locked.has(f));
+        if (arrived !== undefined) throw new MoveRacedError(arrived);
+      }
+      // Placement, re-judged where the rename happens: a link introduced on
+      // the way to either end since the caller's preflight would carry the
+      // rename outside the repository.
+      // The entries themselves included: an edit destination replaced by a
+      // link since planning would have the write follow it.
+      await this.assertNoLinkBelowBase(src);
+      await this.assertNoLinkBelowBase(dest);
+      for (const e of edits) await this.assertNoLinkBelowBase(e.path);
+      await this.validateResultingWrite(dest, () => this.readFile(src));
+      if (this.lockContext.validateWrite) {
+        for (const e of edits) await this.lockContext.validateWrite(e.path, e.content);
+      }
+      await check?.();
+    } catch (err) {
+      await release('untouched');
+      throw err;
+    }
+
+    // Done in this order, and undone in the reverse one.
+    let moved = false;
+    const written: { path: string; lockAt: string; before: Buffer | null }[] = [];
+    try {
+      await this.moveNoReplace(src, dest);
+      moved = true;
+      for (const e of edits) {
+        const before = await this.readIfExists(e.path);
+        written.push({ path: e.path, lockAt: e.lockAt, before });
+        await super.writeFile(e.path, e.content);
+      }
+      // The commit names every file at both ends: a folder's files one by one,
+      // because the scope matches files, not the folders holding them. From
+      // the files LOCKED, not the destination as it is now: a file saved into
+      // the new place since the rename is somebody else's, under no lock of
+      // this move, and stays out of its commit.
+      const movedFiles = src === dest ? [] : movedNow.map((f) => dest + f.slice(src.length));
+      scope = [
+        ...new Set([
+          ...movedFiles.flatMap((f) => [f, src + f.slice(dest.length)]),
+          ...edits.map((e) => e.path),
+        ]),
+      ].sort();
+      const change = await versionControl.commitChanges(workspaceId, user, summary, scope);
+      await release('untouched');
+      return change;
+    } catch (err) {
+      if (err instanceof PushNeedsAgentResolutionError) {
+        // The commit landed; only its push needs help. Releasing with a commit
+        // arms the pending-commits worker's push retry (see `writeFiles`).
+        await release('enqueue');
+        throw err;
+      }
+      for (const w of written.reverse()) {
+        try {
+          if (w.before === null) {
+            const absolute = this.resolveAbsolutePath(w.path);
+            if (absolute) await fs.rm(absolute, { force: true });
+          } else {
+            await super.writeFile(w.path, w.before);
+          }
+        } catch (restoreErr) {
+          log.warn(`could not restore "${w.path}" after a failed move:`, { err: restoreErr });
+          dirtyLeft.add(w.path);
+          dirtyLeft.add(w.lockAt);
+        }
+      }
+      if (moved) {
+        try {
+          await this.moveNoReplace(dest, src);
+        } catch (undoErr) {
+          // The folder is still at its new place, holding bytes this move
+          // wrote. Nothing may release that as "untouched": every locked path
+          // is let go with the discard, so the half-done move is reset rather
+          // than left for a later writer to publish, and the failure says so.
+          log.warn(`could not undo the move of "${src}" after a failure:`, { err: undoErr });
+          for (const p of acquired) dirtyLeft.add(p);
+          await release('untouched');
+          throw new MoveUndoError(src, dest, err, undoErr);
+        }
+      }
+      await release('untouched');
+      throw err;
+    }
+  }
+
+  /**
+   * Refuse a path when any folder between this filesystem's root and it is a
+   * link — judged by `lstat` on each ancestor, under the locks, right before
+   * the rename that would otherwise follow the link out of the repository.
+   */
+  private async assertNoLinkBelowBase(inputPath: string): Promise<void> {
+    const absolute = this.resolveAbsolutePath(inputPath);
+    if (!absolute) return;
+    if ((await linkedAncestor(this.basePath, absolute)) !== null) {
+      throw new Error(`"${inputPath}" is reached through a link, so nothing was moved.`);
+    }
+  }
+
+  /** Every file at or under `inputPath` (workspace-relative), the path itself when it is a file. */
+  private async filesBelow(inputPath: string): Promise<string[]> {
+    const absolute = this.resolveAbsolutePath(inputPath);
+    if (!absolute) return [inputPath];
+    const stat = await lstatOrNull(absolute);
+    if (!stat?.isDirectory()) return [inputPath];
+    const out: string[] = [];
+    const walk = async (abs: string, rel: string): Promise<void> => {
+      for (const e of await fs.readdir(abs, { withFileTypes: true })) {
+        if (e.isDirectory()) await walk(path.join(abs, e.name), `${rel}/${e.name}`);
+        else out.push(`${rel}/${e.name}`);
+      }
+    };
+    await walk(absolute, inputPath);
+    return out;
+  }
+
+  /**
    * Write several files and commit them as ONE atomic change — the multi-file
    * counterpart to `writeFile`, for the rare case where a set of files must
    * land together or not at all (e.g. a role rename rewriting `roles.yaml` plus
@@ -397,7 +673,7 @@ export class LockingFilesystem extends GitGuardedFilesystem {
    * `writeFile` takes one lock cycle per file and lets the deferred queue commit
    * it, this wraps the WHOLE batch in one cycle: acquire every path's lock up
    * front, write every file to disk, then commit the whole set synchronously as
-   * one change via the workflow service's `commitChanges` (one `git add` + one
+   * one change via the version-control service's `commitChanges` (one `git add` + one
    * `git commit`, then push), and release WITHOUT a per-file commit. Fail-closed:
    * if any lock can't be acquired, or a write/commit throws, nothing is committed
    * (the failure-path `releaseLockNoCommit` discards the uncommitted bytes).
@@ -429,7 +705,7 @@ export class LockingFilesystem extends GitGuardedFilesystem {
       writes: readonly { path: string; content: FileContent }[],
     ) => Promise<{ path: string; content: FileContent }[]>,
   ): Promise<Change | null> {
-    const { workflow, workspaceId, branch, user } = this.lockContext;
+    const { versionControl, workspaceId, branch, user } = this.lockContext;
     // Fail the whole batch before any plan, validator or lock: one stray path
     // must not let its siblings land while it silently misses git.
     for (const w of writes) await this.assertNotGitInternals(w.path);
@@ -476,7 +752,7 @@ export class LockingFilesystem extends GitGuardedFilesystem {
     // with the discard so the corrupt bytes can't outlive the batch.
     const failedSeedDiscards = new Set<string>();
     // Release every acquired lock, each with the semantics its outcome
-    // earned. Three shapes (mirroring the three WorkflowService releases):
+    // earned. Three shapes (mirroring the three VersionControlService releases):
     //
     //   'discard'   → releaseLockNoCommit: resets the path's working tree to
     //     HEAD. Only for bytes this batch itself owns — its committed paths
@@ -499,11 +775,11 @@ export class LockingFilesystem extends GitGuardedFilesystem {
         try {
           const mode = modeOf(p);
           if (mode === 'discard') {
-            await workflow.releaseLockNoCommit(workspaceId, branch, p, user);
+            await versionControl.releaseLockNoCommit(workspaceId, branch, p, user);
           } else if (mode === 'enqueue') {
-            await workflow.releaseLock(workspaceId, branch, p, user);
+            await versionControl.releaseLock(workspaceId, branch, p, user);
           } else {
-            await workflow.releaseLockUntouched(workspaceId, branch, p, user);
+            await versionControl.releaseLockUntouched(workspaceId, branch, p, user);
           }
         } catch (releaseErr) {
           log.warn(`lock release failed for "${p}" during writeFiles:`, { err: releaseErr });
@@ -516,7 +792,7 @@ export class LockingFilesystem extends GitGuardedFilesystem {
       let holderName: string | null = null;
       let ok = false;
       for (let attempt = 0; attempt < ACQUIRE_RETRY_ATTEMPTS; attempt++) {
-        const result = await workflow.acquireLock(workspaceId, branch, p, user);
+        const result = await versionControl.acquireLock(workspaceId, branch, p, user);
         if (result.acquired) {
           ok = true;
           break;
@@ -580,7 +856,7 @@ export class LockingFilesystem extends GitGuardedFilesystem {
     // without it would leave that folder invisible to them.
     for (const p of [...seeds.keys()].sort()) {
       if (paths.includes(p)) continue; // already locked as a caller path
-      const result = await workflow.acquireLock(workspaceId, branch, p, user);
+      const result = await versionControl.acquireLock(workspaceId, branch, p, user);
       if (result.acquired) {
         acquired.push(p);
       } else {
@@ -683,7 +959,7 @@ export class LockingFilesystem extends GitGuardedFilesystem {
       // seeds): on the shared per-branch workspace another save's bytes may be
       // dirty with their commit still queued, and an unscoped commit would
       // sweep them in under this batch's author/summary.
-      change = await workflow.commitChanges(workspaceId, user, summary, touched);
+      change = await versionControl.commitChanges(workspaceId, user, summary, touched);
       if (seeds.size > 0) this.lockContext.creatorAccess?.noteAccessFileWritten(workspaceId);
     } catch (err) {
       if (err instanceof PushNeedsAgentResolutionError) {
@@ -743,16 +1019,10 @@ export class LockingFilesystem extends GitGuardedFilesystem {
     await releaseAll((p) =>
       committed.has(p) || failedSeedDiscards.has(p) ? 'discard' : 'untouched',
     );
-    // This batch path commits via `commitChanges`, NOT the per-file queue, so it
-    // skips `runPendingCommit`'s emit — fire the post-commit hook here with the
-    // WHOLE batch as one event, so an expensive subscriber (id-repair rebuilds the
-    // id index) reacts once per batch, not once per file. A no-op commit (clean
-    // tree) changed nothing, so it emits nothing.
-    if (change) {
-      // `touched` = caller paths + any creator-grant seeds that landed in the
-      // same commit — the exact set this batch may have touched.
-      this.lockContext.fileChanges?.emit({ workspaceId, branch, paths: touched, byUser: user });
-    }
+    // The commit, if one landed, was reported by the git layer as it landed
+    // (`VersionControlHooks.onCommitLanded`) with the paths it committed —
+    // `touched` plus any creator-grant seed in the same commit. Nothing to
+    // announce here.
     return change;
   }
 
@@ -768,7 +1038,7 @@ export class LockingFilesystem extends GitGuardedFilesystem {
     const plan = await this.planCreate(inputPath, 'dir');
     // mkdir itself is not a lockable op (it touches no file content), so we
     // do the bare super-call without acquiring. The lock + commit happens on
-    // the `.gitkeep` write below — that's the file the workflow change
+    // the `.gitkeep` write below — that's the file the version-control change
     // attaches to. If the dir already has content (rare; e.g. recursive
     // create where a sibling already exists), we skip the .gitkeep — empty-
     // folder placeholders are only useful for actually-empty folders.
@@ -896,7 +1166,7 @@ export class LockingFilesystem extends GitGuardedFilesystem {
 
   /**
    * Acquire the lock, run `op`, release. The release does the commit +
-   * push via `WorkflowService.releaseLock`. On contention we retry a few
+   * push via `VersionControlService.releaseLock`. On contention we retry a few
    * times before surfacing a structured failure — long enough to ride
    * out a human typing a quick edit, short enough that the agent doesn't
    * stall a whole turn waiting for someone to step away from a file.
@@ -930,12 +1200,12 @@ export class LockingFilesystem extends GitGuardedFilesystem {
     op: () => Promise<T>,
     check?: () => Promise<void>,
   ): Promise<T> {
-    const { workflow, workspaceId, branch, user } = this.lockContext;
+    const { versionControl, workspaceId, branch, user } = this.lockContext;
 
     let lastHolderName: string | null = null;
     let acquired = false;
     for (let attempt = 0; attempt < ACQUIRE_RETRY_ATTEMPTS; attempt++) {
-      const result = await workflow.acquireLock(workspaceId, branch, inputPath, user);
+      const result = await versionControl.acquireLock(workspaceId, branch, inputPath, user);
       if (result.acquired) {
         acquired = true;
         break;
@@ -979,9 +1249,9 @@ export class LockingFilesystem extends GitGuardedFilesystem {
       // caller actually cares about.
       try {
         if (err instanceof CheckRefusal || err instanceof DestinationTakenError) {
-          await workflow.releaseLockUntouched(workspaceId, branch, inputPath, user);
+          await versionControl.releaseLockUntouched(workspaceId, branch, inputPath, user);
         } else {
-          await workflow.releaseLockNoCommit(workspaceId, branch, inputPath, user);
+          await versionControl.releaseLockNoCommit(workspaceId, branch, inputPath, user);
         }
       } catch (releaseErr) {
         log.warn(`lock release failed for "${inputPath}" after op error:`, { err: releaseErr });
@@ -994,7 +1264,7 @@ export class LockingFilesystem extends GitGuardedFilesystem {
     // actual `commitFile + push` out of band. The agent's tool call
     // returns once disk + lock + enqueue are done — the commit lands
     // moments later (typically <1s) without blocking the agent's turn.
-    await workflow.releaseLock(workspaceId, branch, inputPath, user);
+    await versionControl.releaseLock(workspaceId, branch, inputPath, user);
     return result;
   }
 }

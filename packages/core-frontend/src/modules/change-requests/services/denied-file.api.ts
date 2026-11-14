@@ -1,5 +1,5 @@
-import { fetchFileAccess } from '../../access/api';
-import { getOrCreateWorkspace } from '../../workspace/services/workspace.api';
+import { fetchFileAccess } from '../../access';
+import { getOrCreateWorkspace } from '../../workspace';
 import { failureReason, isDenial, nearestRuleFolder, type ReadFailure } from '../utils/readFailure';
 
 /**

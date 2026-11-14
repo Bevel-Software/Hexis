@@ -135,6 +135,25 @@ export function createAgentUploadRoutes(deps: AgentUploadRouteDeps): express.Rou
   router.post(AGENT_UPLOAD_ROUTE, handle);
   router.post(AGENT_UPLOAD_HEADER_ROUTE, handle);
 
+  // `DELETE /api/agent/uploads` with the token in `x-upload-token`: give the
+  // token up unapplied, and its bytes with it, now rather than at its expiry
+  // (see `AgentUploadStore.discard`). The app sends it when a page's
+  // `uploadFile` was refused, since nobody else holds that token to retry.
+  // Header form only: the token stays out of the address here too.
+  router.delete(AGENT_UPLOAD_HEADER_ROUTE, async (req, res) => {
+    try {
+      await uploads.discard(tokenOf(req));
+      res.status(204).end();
+    } catch (err) {
+      if (err instanceof UploadTokenError) {
+        res.status(err.status).json({ error: err.message });
+        return;
+      }
+      log.error('discarding an upload failed:', { err });
+      res.status(500).json({ error: 'Discarding the upload failed' });
+    }
+  });
+
   return router;
 }
 

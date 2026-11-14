@@ -1,4 +1,4 @@
-import { LIBRARY_ROOT } from '../library/routes/library-paths';
+import { LIBRARY_ROOT } from '../library';
 
 /**
  * The welcome page lives INSIDE the Library surface (it renders in

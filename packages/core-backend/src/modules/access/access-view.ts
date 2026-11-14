@@ -13,8 +13,9 @@ import {
   EVERYONE_CANONICAL,
   KNOWN_VERBS,
   ROLE_TOKEN_PREFIX,
+  GROUP_TOKEN_PREFIX,
   type Verb,
-} from '../access-model/access-grammar.js';
+} from '../access-model/index.js';
 
 /**
  * The resolved access view of one target, as the Manage access dialog reads it
@@ -51,13 +52,12 @@ export async function resolveAccessView(
   // files). Keyed `u:<email>` / `r:<role>` / `g:<group>` to match the
   // dialog's row keys, so each row can show where its access comes from and
   // which verbs are removable here. Groups get their OWN `g:` namespace: a
-  // group and a role sharing a name are DIFFERENT principals (bare token vs
-  // `role/<name>`), and one shared `r:` entry could only describe one of
-  // them. Each kind resolves through the token spelling that IS that
-  // principal — a group through its bare token (group-first precedence), a
-  // role through its explicit `role/<name>` alias (correct whether or not a
-  // group shadows the name; the built-in `everyone` keeps its bare spelling,
-  // it has no alias). A row whose verbs resolve only via a
+  // group and a role sharing a name are DIFFERENT principals (`group/<name>`
+  // vs the bare name and `role/<name>`), and one shared `r:` entry could only
+  // describe one of them. Each kind resolves through the explicit token that
+  // IS that principal — a group through `group/<name>`, a role through
+  // `role/<name>` (the built-in `everyone` keeps its bare spelling, it has no
+  // alias); the bare spelling counts toward whichever kind owns it. A row whose verbs resolve only via a
   // group/everyone/rescue has no source (the verb is absent) and renders
   // non-actionable. Built over the union of every principal in the four
   // eligible lists (kinded `principals`, with the name-only `roles` list as
@@ -96,9 +96,11 @@ export async function resolveAccessView(
   await Promise.all([
     ...[...collectives.entries()].map(async ([key, p]) => {
       const token =
-        p.kind === 'role' && canonicalRoleName(p.name) !== EVERYONE_CANONICAL
-          ? `${ROLE_TOKEN_PREFIX}${p.name}`
-          : p.name;
+        p.kind === 'group'
+          ? `${GROUP_TOKEN_PREFIX}${p.name}`
+          : p.kind === 'role' && canonicalRoleName(p.name) !== EVERYONE_CANONICAL
+            ? `${ROLE_TOKEN_PREFIX}${p.name}`
+            : p.name;
       const principal = { kind: 'role' as const, role: token };
       const [grants, denied] = await Promise.all([
         accessControl.grantSources(workspaceId, kind, repoRelTarget, principal),

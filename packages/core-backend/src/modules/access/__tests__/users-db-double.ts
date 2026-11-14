@@ -48,12 +48,13 @@ function boundValues(node: unknown, depth = 0): string[] {
 const canonical = (email: string) => email.trim().toLowerCase();
 
 export function usersDbDouble(
-  accounts: readonly (string | { email: string; name?: string })[] = [],
+  accounts: readonly (string | { email: string; name?: string; deactivatedAt?: Date | null })[] = [],
 ): Database {
   const rows = accounts.map((a) => {
     const email = typeof a === 'string' ? a : a.email;
     const name = typeof a === 'string' ? undefined : a.name;
-    return { id: `u-${email}`, email, name: name ?? email.split('@')[0] };
+    const deactivatedAt = typeof a === 'string' ? null : (a.deactivatedAt ?? null);
+    return { id: `u-${email}`, email, name: name ?? email.split('@')[0], deactivatedAt };
   });
   const from = () => {
     // Thenable so a bare `await db.select().from(users)` resolves, with
@@ -68,5 +69,13 @@ export function usersDbDouble(
     };
     return query;
   };
-  return { select: () => ({ from }) } as unknown as Database;
+  const db = {
+    select: () => ({ from }),
+    // One connection, no isolation to model: the callback runs on the same
+    // double.
+    transaction: async <T>(cb: (tx: unknown) => Promise<T>) => cb(db),
+    // Locks taken with `execute` (advisory locks) answer nothing.
+    execute: async () => [],
+  };
+  return db as unknown as Database;
 }

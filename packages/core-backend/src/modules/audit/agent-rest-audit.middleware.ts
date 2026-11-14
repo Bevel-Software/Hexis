@@ -2,7 +2,7 @@ import type { RequestHandler } from 'express';
 import { logger } from '../../shared/logging.js';
 import type { IAgentEventRecorder } from './audit.contract.js';
 import { classifyToolCall, skillReadPath, type SkillFolder } from './event-classifier.js';
-import '../tool-auth/tool-auth.middleware.js'; // Express Request augmentation (req.toolAuth)
+import '../tool-auth/index.js'; // Express Request augmentation (req.toolAuth)
 
 const log = logger('audit');
 

@@ -2,16 +2,14 @@ import express from 'express';
 import { logger } from '../../shared/logging.js';
 
 const log = logger('skills');
-import '../auth/auth.middleware.js'; // Express Request.userId / userEmail augmentation
-import type { AuthUser, IWorkflowService } from '@bevel-software/platform-shared';
-import type { IAccessControl } from '../access/access-control.interface.js';
-import { folderTarget } from '../access/access-requests.contract.js';
-import { AccessRequestsService } from '../access/access-requests.service.js';
-import { WorkflowDomainError } from '../../shared/domain-errors.js';
+import '../auth/index.js'; // Express Request.userId / userEmail augmentation
+import type { AuthUser, IVersionControlService } from '@bevel-software/platform-shared';
+import type { IAccessControl, IAccessRequests } from '../access/index.js';
+import { folderTarget } from '../access/index.js';
+import { VersionControlDomainError } from '../../shared/domain-errors.js';
 import { domainErrorBody } from '../../shared/http-errors.js';
 import type { KbContext } from '../../shared/kb-context.js';
-import type { WorkspaceService } from '../workspace/workspace.service.js';
-import type { JoinRequestsService } from '../plugins/join-requests.service.js';
+import type { JoinRequestsService } from '../plugins/index.js';
 import type { ISkillService } from './skills.contract.js';
 
 /**
@@ -36,25 +34,20 @@ import type { ISkillService } from './skills.contract.js';
 export function createSkillAccessRequestRoutes(deps: {
   skillService: ISkillService;
   accessControl: IAccessControl;
-  workflow: IWorkflowService;
-  workspaceService: WorkspaceService;
+  versionControl: IVersionControlService;
+  /** Opens an access request — the same opener the Manage access dialog uses, wired by the composition root. */
+  requests: IAccessRequests;
   joinRequests: JoinRequestsService;
   kb: KbContext;
   resolveUser: (req: express.Request) => Promise<AuthUser | null>;
 }): express.Router {
-  const { skillService, accessControl, workflow, workspaceService, joinRequests, kb, resolveUser } = deps;
+  const { skillService, accessControl, versionControl, requests, joinRequests, kb, resolveUser } = deps;
   const router = express.Router();
   const wsId = () => kb.defaultWorkspaceId();
   const rulesOf = (folder: string) => `${folder}/access.md`;
-  // The same opener the Manage access dialog uses, pointed at a skill's
-  // folder. Keyed on that folder's PATH, which is what makes this button and
-  // a Can edit request on the same folder one request rather than two.
-  const requests = new AccessRequestsService({
-    workflow,
-    workspaceService,
-    lifecycle: joinRequests,
-    kb,
-  });
+  // `requests` is pointed at a skill's folder below. Keyed on that folder's
+  // PATH, which is what makes this button and a Can edit request on the same
+  // folder one request rather than two.
 
   /** The skill the caller may read, by name — or null after answering 404. */
   async function readableSkill(
@@ -92,7 +85,7 @@ export function createSkillAccessRequestRoutes(deps: {
       });
       res.json({ ok: true, number });
     } catch (err) {
-      if (err instanceof WorkflowDomainError) {
+      if (err instanceof VersionControlDomainError) {
         res.status(err.status).json(domainErrorBody(err));
         return;
       }
@@ -120,7 +113,7 @@ export function createSkillAccessRequestRoutes(deps: {
     try {
       const ctx = await requireEditor(req, res, () => res.json({ requests: [] }));
       if (!ctx) return;
-      const crs = await workflow.listChangeRequests();
+      const crs = await versionControl.listChangeRequests();
       res.json({ requests: await joinRequests.list(ctx.folder, folderTarget(ctx.folder), crs, ctx.user) });
     } catch (err) {
       log.error('failed to list access requests:', { err });
@@ -137,7 +130,7 @@ export function createSkillAccessRequestRoutes(deps: {
         res.status(400).json({ error: 'Invalid change request number' });
         return;
       }
-      const cr = await workflow.getChangeRequest(crNumber);
+      const cr = await versionControl.getChangeRequest(crNumber);
       if (!cr) {
         res.status(404).json({ error: 'Not found' });
         return;

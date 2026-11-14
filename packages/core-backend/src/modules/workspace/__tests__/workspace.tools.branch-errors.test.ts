@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import '@utcp/http'; // registers the http CallTemplate serializer + protocol
 import { UtcpManualSerializer } from '@utcp/sdk';
 import { HttpCallTemplateSerializer } from '@utcp/http';
+import { exampleArguments } from '@bevel-software/platform-mcp-core';
 import { CodeModeUtcpClient } from '../../code-mode/index.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import { NodeFs } from '../../kb-fs/node-fs.js';
@@ -19,14 +20,18 @@ import type { ToolAuth } from '../../tool-auth/tool-auth.middleware.js';
 import type { AuthService } from '../../auth/auth.service.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import type { ICreatorAccess } from '../../access-model/creator.js';
-import type { WorkflowEventBus } from '../../workflow/event-bus.js';
-import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
+import type { VersionControlEventBus } from '../../version-control/event-bus.js';
+import { VersionControlHooks } from '../../version-control/version-control-hooks.js';
 import { ToolDescriptionNotes } from '../../workspace/agent-access.gate.js';
 import { RoutineWritePolicyService } from '../routine-write-policy.js';
 import { SpillStore } from '../spill-store.js';
 import { DocExtractService } from '../file-readers/doc-extract.service.js';
+import { WorkerDocumentExtractor } from '../file-readers/extract-in-worker.js';
 import { registerWorkspaceTools } from '../workspace.tools.js';
+import { RipgrepPatternMatcher } from '../index.js';
+import { slowRipgrep } from '../../../__tests__/slow-ripgrep.js';
 import { WorkspaceService } from '../workspace.service.js';
+import { newWorkspaceService } from '../../../__tests__/workspace-service.js';
 
 const execFileAsync = promisify(execFile);
 const KB_DIR = 'knowledge-base';
@@ -68,6 +73,7 @@ describe('workspace tools — a branch that cannot be opened', () => {
   let workspaces: WorkspaceService | null = null;
   let spillRoot = '';
   let docCacheDir = '';
+  let patternMatcher: RipgrepPatternMatcher | undefined;
 
   afterEach(async () => {
     if (httpServer) {
@@ -77,6 +83,8 @@ describe('workspace tools — a branch that cannot be opened', () => {
       await new Promise<void>((r) => httpServer!.close(() => r()));
     }
     httpServer = undefined;
+    await patternMatcher?.close();
+    patternMatcher = undefined;
     workspaces = null;
     for (const dir of [root, spillRoot, docCacheDir]) {
       if (dir) await rm(dir, { recursive: true, force: true });
@@ -95,7 +103,13 @@ describe('workspace tools — a branch that cannot be opened', () => {
   let internalTools: { name: string; inputs: unknown }[] = [];
 
   async function start(
-    opts: { repoUrl?: 'origin' | 'unreachable'; scope?: 'read' | 'write'; source?: 'internal' | 'external' } = {},
+    opts: {
+      repoUrl?: 'origin' | 'unreachable';
+      scope?: 'read' | 'write';
+      source?: 'internal' | 'external';
+      /** More files committed at the repository's root — `knowledge-base/<name>` to the tools. */
+      files?: Record<string, string>;
+    } = {},
   ): Promise<string> {
     root = await mkdtemp(join(tmpdir(), 'ws-tools-branch-'));
     spillRoot = await mkdtemp(join(tmpdir(), 'ws-tools-spill-'));
@@ -111,13 +125,16 @@ describe('workspace tools — a branch that cannot be opened', () => {
     await runGit(seed, ['remote', 'add', 'origin', upstream]);
     await mkdir(join(seed, KB_DIR));
     await writeFile(join(seed, KB_DIR, 'a.md'), 'hello\n', 'utf-8');
+    for (const [name, content] of Object.entries(opts.files ?? {})) {
+      await writeFile(join(seed, name), content, 'utf-8');
+    }
     await runGit(seed, ['add', '.']);
     await runGit(seed, ['commit', '-m', 'init']);
     await runGit(seed, ['checkout', '-b', 'alice/draft']);
     await runGit(seed, ['commit', '--allow-empty', '-m', 'draft']);
     await runGit(seed, ['push', 'origin', 'target-company-state', 'alice/draft']);
 
-    workspaces = new WorkspaceService(
+    workspaces = newWorkspaceService(
       workspacesRoot,
       opts.repoUrl === 'unreachable' ? join(root, 'no-such-repo.git') : upstream,
       testKbContext({ kbDirName: KB_DIR }),
@@ -129,8 +146,8 @@ describe('workspace tools — a branch that cannot be opened', () => {
         getUserById: async () => ({ id: 'u', email: 'alice@example.com', name: 'Alice' }),
       } as unknown as AuthService,
       workspaceService: workspaces,
-      workflowService: {} as never,
-      events: { emit: () => {} } as unknown as WorkflowEventBus,
+      versionControlService: {} as never,
+      events: { emit: () => {} } as unknown as VersionControlEventBus,
       kbDirName: KB_DIR,
       creatorAccess: stubCreatorAccess,
     });
@@ -167,18 +184,32 @@ describe('workspace tools — a branch that cannot be opened', () => {
         } as ToolAuth;
         next();
       },
-      createToolHandlerFactory(resolve),
+      // Wired as the composition root wires it, so a missing branch is
+      // answered before the tool runs, as it is in production.
+      createToolHandlerFactory(resolve, undefined, {
+        defaultBranch: () => 'target-company-state',
+        isMissing: (branch) => workspaces!.isBranchMissing(branch),
+      }),
       new SpillStore(spillRoot),
-      new DocExtractService(docCacheDir),
+      new DocExtractService(docCacheDir, new WorkerDocumentExtractor()),
       allowAll,
       testKbContext({ kbDirName: KB_DIR }),
       {
         recoveryBotEmail: 'recovery-bot@bevel.local',
-        hooks: new WorkflowHooks(),
+        hooks: new VersionControlHooks(),
         notes: new ToolDescriptionNotes(),
       },
       new RoutineWritePolicyService(),
       {} as never,
+      // Skill check, change gate, uploads, guide, downloads, starter packs, disk: not this file's business.
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      (patternMatcher = new RipgrepPatternMatcher()),
     );
     app.use('/api', router);
     internalTools = (await registry.listInternal()) as unknown as { name: string; inputs: unknown }[];
@@ -271,6 +302,24 @@ describe('workspace tools — a branch that cannot be opened', () => {
         expect(await workspaceDirs()).toEqual([]);
       });
     }
+
+    /**
+     * The platform's file tools keep the refusal they had: `read_file` is
+     * still `required`, answered the same sentence by the tool handler that
+     * now answers it for every tool that takes a branch.
+     */
+    it('read_file refuses a call without a branch as before', async () => {
+      const base = await start();
+
+      const res = await callTool(base, 'read_file', { path: 'knowledge-base/a.md' });
+
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({
+        kind: 'branch-required',
+        error: '`branch` is required: pass the branch (draft) you are working on.',
+      });
+      expect(await workspaceDirs()).toEqual([]);
+    });
 
     it('never writes `undefined` or `null` as a branch name into the answer', async () => {
       const base = await start();
@@ -407,6 +456,23 @@ describe('workspace tools — a branch that cannot be opened', () => {
     expect(await workspaceDirs()).toEqual([]);
   });
 
+  it('404s a branch that does not exist on every mounted tool that takes one, before the tool runs', async () => {
+    const base = await start({ source: 'internal', scope: 'write' });
+    const takesBranch = internalTools
+      .map((t) => ({ name: t.name, body: (t.inputs as { properties?: { body?: { required?: string[] } } }).properties?.body }))
+      .filter(({ body }) => (body?.required ?? []).includes('branch'));
+
+    for (const { name: tool, body } of takesBranch) {
+      // Every other argument the tool requires, so the call matches the tool
+      // and it is the branch, not a missing argument, that is refused.
+      const args = { ...exampleArguments(body), branch: 'nobody/never-made-this' };
+      const res = await callTool(base, tool, args);
+      expect(res.status, `${tool} must 404 a branch that does not exist`).toBe(404);
+      expect(res.body, tool).toMatchObject({ kind: 'branch-not-found', branch: 'nobody/never-made-this' });
+    }
+    expect(await workspaceDirs()).toEqual([]);
+  });
+
   it('410s a branch a listing showed us and origin no longer has', async () => {
     const base = await start();
     workspaces!.noteBranchesListed(['target-company-state', 'alice/draft']);
@@ -425,6 +491,62 @@ describe('workspace tools — a branch that cannot be opened', () => {
 
     expect(status).toBe(200);
     expect((body.entries as { name: string }[]).map((e) => e.name)).toContain(KB_DIR);
+  });
+
+  /**
+   * Not about branches, but this file holds the real chain harness: a grep
+   * called from inside `call_tool_chain` reaches the same route, so the same
+   * bound stops a search there that would not finish — the chain answers the
+   * worded 400 rather than waiting out its own timeout. The walk that never
+   * finishes is a ripgrep that sleeps (`slowRipgrep`); a single file's text
+   * still goes to the real one.
+   */
+  it('stops a too-expensive grep from inside call_tool_chain, and a control search still matches', async () => {
+    const line = `${'a'.repeat(39)}!`;
+    const base = await start({ files: { 'redos.md': `${line}\n` } });
+    const slow = await slowRipgrep();
+    const client = await CodeModeUtcpClient.create(process.cwd(), {
+      variables: { bevel_API_URL: base, bevel_CONNECTION_KEY: 'internal-token' },
+    } as never);
+    try {
+      await client.registerManual(
+        new HttpCallTemplateSerializer().validateDict({
+          name: 'bevel',
+          call_template_type: 'http',
+          http_method: 'GET',
+          url: '${API_URL}/api/agent/internal/utcp',
+          content_type: 'application/json',
+          headers: { Authorization: 'Bearer ${CONNECTION_KEY}' },
+        }),
+      );
+      const { result } = await client.callToolChain(
+        `const grep = (pattern, path) => bevel.grep({ body: { branch: 'alice/draft', pattern, path } });
+         let expensive;
+         const started = Date.now();
+         try { expensive = { ok: grep('^a+!$', 'knowledge-base') }; } catch (err) { expensive = { failed: err.message }; }
+         const took = Date.now() - started;
+         return { expensive, took };`,
+        30_000,
+      );
+      // The search is stopped at the ticket's 5 s budget: timed around the call
+      // itself, inside the chain, so the chain runtime's own start-up (which
+      // varies by machine) is not what this measures.
+      expect(result.took).toBeLessThan(5_000 + 2_000);
+      expect(result.expensive.ok).toBeUndefined();
+      expect(result.expensive.failed).toContain('HTTP 400');
+      expect(result.expensive.failed).toContain('Pattern too expensive');
+      expect(await slow.alive()).toEqual([]);
+      // With the real ripgrep back, the same pattern matches the line.
+      await slow.remove();
+      const { result: control } = await client.callToolChain(
+        `return bevel.grep({ body: { branch: 'alice/draft', pattern: '^a+!$', path: 'knowledge-base/redos.md' } });`,
+        30_000,
+      );
+      expect(control.matches).toEqual([{ path: `${KB_DIR}/redos.md`, line: 1, text: line }]);
+    } finally {
+      await client.close();
+      await slow.remove();
+    }
   });
 
   it('500s an unreachable remote rather than blaming the branch', async () => {

@@ -1,0 +1,177 @@
+import { describe, expect, it, vi } from 'vitest';
+import type { SQL } from 'drizzle-orm';
+import { PgDialect } from 'drizzle-orm/pg-core';
+import { PendingCommitsService } from '../pending-commits.service.js';
+import type { Database } from '../../database/connection.js';
+
+/**
+ * Commits still queued for a branch when the knowledge-base repository is
+ * REPLACED.
+ *
+ * A release enqueues the bytes and only then drops its lock, so the moment the
+ * locks on a branch are dropped there may be rows already waiting — written
+ * against a working copy of the repository that is gone. Left `pending`, the
+ * worker picks them up after the re-clone and commits them onto a same-named
+ * branch of a DIFFERENT repository: somebody else's file, overwritten by a
+ * change nobody made to it.
+ *
+ * So they are escalated, never dropped: the bytes stay in the row, the reason
+ * is on it, and a person decides.
+ */
+function makeFakeDb(moved: Array<{ id: string }>) {
+  const sets: Record<string, unknown>[] = [];
+  const db = {
+    update: vi.fn(() => ({
+      set: (values: Record<string, unknown>) => {
+        sets.push(values);
+        return { where: () => ({ returning: async () => moved }) };
+      },
+    })),
+    // Queued bytes are never thrown away over this.
+    delete: () => {
+      throw new Error('a queued commit must never be deleted');
+    },
+  } as unknown as Database;
+  return { db, sets };
+}
+
+describe('PendingCommitsService.markNeedsAttentionOnBranch', () => {
+  it('escalates every queued commit on the branch, with the reason, and answers how many', async () => {
+    const { db, sets } = makeFakeDb([{ id: 'a' }, { id: 'b' }]);
+    const svc = new PendingCommitsService(db);
+
+    await expect(
+      svc.markNeedsAttentionOnBranch('alice/draft', 'The repository was replaced.'),
+    ).resolves.toBe(2);
+
+    expect(sets).toHaveLength(1);
+    // `needs_attention` is the status the admin surface reads — the row is out
+    // of the worker's reach and in front of a person.
+    expect(sets[0]?.status).toBe('needs_attention');
+    expect(sets[0]?.lastError).toBe('The repository was replaced.');
+    expect(sets[0]?.lastAttemptedAt).toBeInstanceOf(Date);
+  });
+
+  it('answers zero when nothing was queued for that branch', async () => {
+    const { db } = makeFakeDb([]);
+    const svc = new PendingCommitsService(db);
+    await expect(svc.markNeedsAttentionOnBranch('quiet/branch', 'whatever')).resolves.toBe(0);
+  });
+});
+
+/**
+ * The same, keyed on the WORKING COPY that was set aside. Closing change
+ * requests covers their branches and nothing else; a commit queued on the
+ * default branch was written against the repository that was left all the
+ * same, and the path it names is about to hold a clone of another one.
+ */
+describe('PendingCommitsService.markNeedsAttentionInWorkspace', () => {
+  it('escalates every queued commit for the working copy, with the reason, and answers how many', async () => {
+    const { db, sets } = makeFakeDb([{ id: 'a' }, { id: 'b' }, { id: 'c' }]);
+    const svc = new PendingCommitsService(db);
+
+    await expect(svc.markNeedsAttentionInWorkspace('main', 'The repository was replaced.')).resolves.toBe(3);
+
+    expect(sets).toHaveLength(1);
+    expect(sets[0]?.status).toBe('needs_attention');
+    expect(sets[0]?.lastError).toBe('The repository was replaced.');
+    expect(sets[0]?.lastAttemptedAt).toBeInstanceOf(Date);
+  });
+
+  /**
+   * Rows are stored under the encoded id, whichever spelling the caller
+   * enqueued with. The predicate is rendered and read, since the stub does
+   * not evaluate it: the id it compares must be the stored spelling, and it
+   * must match only the two statuses a worker could still write, `pending`
+   * and `running`.
+   */
+  it('looks for the working copy under the id the queue stores, and only for commits still queued', async () => {
+    const wheres: SQL[] = [];
+    const db = {
+      update: () => ({
+        set: () => ({
+          where: (predicate: SQL) => {
+            wheres.push(predicate);
+            return { returning: async () => [] };
+          },
+        }),
+      }),
+    } as unknown as Database;
+    await new PendingCommitsService(db).markNeedsAttentionInWorkspace('alice/feature', 'whatever');
+
+    const { sql: text, params } = new PgDialect().sqlToQuery(wheres[0]!);
+    expect(text).toContain('"workspace_id" =');
+    expect(params).toEqual(['alice%2Ffeature', 'pending', 'running']);
+  });
+
+  it('answers zero when nothing was queued for it', async () => {
+    const { db } = makeFakeDb([]);
+    await expect(new PendingCommitsService(db).markNeedsAttentionInWorkspace('main', 'whatever')).resolves.toBe(0);
+  });
+});
+
+/**
+ * What `mergeBranch` waits on: the commits still between a branch's saved
+ * files and its remote. `pending` and `running` both count — a row the worker
+ * holds is not pushed yet — and a `needs_attention` row is reported with its
+ * message, because nothing will land it without a person.
+ */
+describe('PendingCommitsService.queuedOnBranch', () => {
+  function selectDb(rows: Array<{ status: string; lastError: string | null }>) {
+    const orderBy = vi.fn(async () => rows);
+    const where = vi.fn(() => ({ orderBy }));
+    const db = { select: vi.fn(() => ({ from: () => ({ where }) })) } as unknown as Database;
+    return { db, where, orderBy };
+  }
+
+  it('counts pending and running rows, and reports no attention when none is stuck', async () => {
+    const { db, where } = selectDb([
+      { status: 'pending', lastError: null },
+      { status: 'running', lastError: null },
+    ]);
+    await expect(new PendingCommitsService(db).queuedOnBranch('alice/draft')).resolves.toEqual({
+      queued: 2,
+      stuck: 0,
+      needsAttention: null,
+    });
+    // Keyed on the branch column.
+    const sql = new PgDialect().sqlToQuery((where.mock.calls[0] as unknown as [SQL])[0]);
+    expect(sql.sql).toMatch(/"branch" = \$1/);
+    expect(sql.params).toEqual(['alice/draft']);
+  });
+
+  it('reports the oldest needs_attention row\'s message alongside the count', async () => {
+    const { db, orderBy } = selectDb([
+      { status: 'pending', lastError: null },
+      { status: 'needs_attention', lastError: 'push rejected' },
+      { status: 'needs_attention', lastError: 'later' },
+    ]);
+    await expect(new PendingCommitsService(db).queuedOnBranch('alice/draft')).resolves.toEqual({
+      queued: 1,
+      stuck: 2,
+      needsAttention: 'push rejected',
+    });
+    // "Oldest" is the query's order, so every call reports the same message.
+    const dialect = new PgDialect();
+    const order = (orderBy.mock.calls[0] as unknown as SQL[]).map((o) => dialect.sqlToQuery(o).sql);
+    expect(order).toEqual(['"pending_commits"."queued_at" asc', '"pending_commits"."id" asc']);
+  });
+
+  it('falls back to a message when a stuck row has an empty error, so it is never read as retryable', async () => {
+    const { db } = selectDb([{ status: 'needs_attention', lastError: '' }]);
+    await expect(new PendingCommitsService(db).queuedOnBranch('alice/draft')).resolves.toEqual({
+      queued: 0,
+      stuck: 1,
+      needsAttention: 'A queued commit on this branch failed and needs a person.',
+    });
+  });
+
+  it('answers nothing queued for a quiet branch', async () => {
+    const { db } = selectDb([]);
+    await expect(new PendingCommitsService(db).queuedOnBranch('quiet')).resolves.toEqual({
+      queued: 0,
+      stuck: 0,
+      needsAttention: null,
+    });
+  });
+});

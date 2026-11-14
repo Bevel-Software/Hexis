@@ -4,9 +4,9 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
+import type { WorkspaceService } from '../../workspace/index.js';
 import { AccessControlService } from '../access-control.service.js';
-import { registerAccessFrontmatterExtensions } from '../../access-model/access-grammar.js';
+import { registerAccessFrontmatterExtensions } from '../../access-model/index.js';
 
 const KB = 'knowledge-base';
 
@@ -74,12 +74,12 @@ describe('a file-own read grant on a whole-document configuration file', () => {
   beforeEach(async () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), 'own-read-'));
     repo = path.join(root, ws, KB);
-    await fs.mkdir(path.join(repo, 'Pipelines'), { recursive: true });
+    await fs.mkdir(path.join(repo, 'Workflows'), { recursive: true });
     await fs.mkdir(path.join(repo, 'Agents'), { recursive: true });
     await fs.writeFile(path.join(repo, 'roles.yaml'), ROLES_YAML);
     await fs.writeFile(path.join(repo, 'access.md'), '---\nwrite:\n  - Admin\ndownload:\n  - Admin\nowner: []\n---\n');
-    await fs.writeFile(path.join(repo, 'Pipelines', 'access.md'), '---\nwrite: []\n---\n');
-    await fs.writeFile(path.join(repo, 'Pipelines', 'Coding-Delivery.pipeline'), PIPELINE);
+    await fs.writeFile(path.join(repo, 'Workflows', 'access.md'), '---\nwrite: []\n---\n');
+    await fs.writeFile(path.join(repo, 'Workflows', 'Coding-Delivery.workflow'), PIPELINE);
     await fs.writeFile(path.join(repo, 'Agents', 'access.md'), '---\nwrite: []\n---\n');
     await fs.writeFile(path.join(repo, 'Agents', 'delivery-coder.agent'), AGENT);
   });
@@ -93,26 +93,26 @@ describe('a file-own read grant on a whole-document configuration file', () => {
     );
 
   it('the grantee reads the file (registered kinds)', async () => {
-    registerAccessFrontmatterExtensions(['.pipeline', '.agent']);
+    registerAccessFrontmatterExtensions(['.workflow', '.agent']);
     const s = svc();
-    expect(await s.canRead(ws, 'coding-agent@bevel.software', 'Pipelines/Coding-Delivery.pipeline')).toBe(true);
+    expect(await s.canRead(ws, 'coding-agent@bevel.software', 'Workflows/Coding-Delivery.workflow')).toBe(true);
     expect(await s.canRead(ws, 'coding-agent@bevel.software', 'Agents/delivery-coder.agent')).toBe(true);
-    expect(await s.canWrite(ws, 'coding-agent@bevel.software', 'Pipelines/Coding-Delivery.pipeline')).toBe(true);
+    expect(await s.canWrite(ws, 'coding-agent@bevel.software', 'Workflows/Coding-Delivery.workflow')).toBe(true);
     // Batch path, which the explorer and the tool catalog use.
     const batch = await s.canReadBatch(ws, 'coding-agent@bevel.software', [
-      'Pipelines/Coding-Delivery.pipeline',
+      'Workflows/Coding-Delivery.workflow',
       'Agents/delivery-coder.agent',
-      'Pipelines/README.md',
+      'Workflows/README.md',
     ]);
     expect([...batch.entries()]).toEqual([
-      ['Pipelines/Coding-Delivery.pipeline', true],
+      ['Workflows/Coding-Delivery.workflow', true],
       ['Agents/delivery-coder.agent', true],
-      ['Pipelines/README.md', false],
+      ['Workflows/README.md', false],
     ]);
   });
 
   it('a stranger does not', async () => {
-    registerAccessFrontmatterExtensions(['.pipeline', '.agent']);
-    expect(await svc().canRead(ws, 'someone@else.io', 'Pipelines/Coding-Delivery.pipeline')).toBe(false);
+    registerAccessFrontmatterExtensions(['.workflow', '.agent']);
+    expect(await svc().canRead(ws, 'someone@else.io', 'Workflows/Coding-Delivery.workflow')).toBe(false);
   });
 });

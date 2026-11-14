@@ -6,11 +6,9 @@ import { useEffect, useState } from 'react';
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-expect-error — mammoth ships no .d.ts
 import mammoth from 'mammoth/mammoth.browser.js';
-import { useRendererFileRef, useRendererWorkspaceId } from './rendererWorkspace';
 import { RetryReadButton } from './RetryReadButton';
 import { useReadRetry } from './useReadRetry';
-import { authFetch } from '../../../../lib/api';
-import { rawFileUrl } from '../../services/workspace.api';
+import { useRendererRawRead } from './rendererRawRead';
 import { sanitizeDocxHtml } from './sanitizeDocxHtml';
 import { DownloadFileButton } from './DownloadFileButton';
 import type { FileRendererProps } from './types';
@@ -33,16 +31,15 @@ import type { FileRendererProps } from './types';
  * ignores `onSave` / `onValueChange` / `readOnly`.
  */
 export function DocxRenderer({ filePath }: FileRendererProps) {
-  const workspaceId = useRendererWorkspaceId();
-  /** A past save, when Version history mounted this; null = the working tree. */
-  const fileRef = useRendererFileRef();
   /**
-   * The save as PRIMITIVES, hoisted out of the object so the read effect can
-   * depend on exactly what it reads. Depending on `fileRef` itself would put
-   * a context object in the dependency list.
+   * Where this file's bytes come from. In the app that is the workspace raw
+   * route under the session, for the workspace this viewer is pointed at and
+   * the save it is bound to; on a renderer surface (the embed) it is that
+   * surface's own route, with its own credential. Null until there is a
+   * workspace to read from — the same "nothing to read yet" the guard in the
+   * effect below has always had.
    */
-  const versionRef = fileRef?.ref ?? null;
-  const versionSide = fileRef?.side;
+  const rawRead = useRendererRawRead();
   const { attempt, retry } = useReadRetry();
   const [html, setHtml] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -50,14 +47,12 @@ export function DocxRenderer({ filePath }: FileRendererProps) {
   useEffect(() => {
     setHtml(null);
     setError(null);
-    if (!workspaceId) return;
+    if (!rawRead) return;
 
     let cancelled = false;
     (async () => {
       try {
-        const res = await authFetch(
-          rawFileUrl(workspaceId, filePath, { ref: versionRef, side: versionSide }),
-        );
+        const res = await rawRead.fetch(filePath);
         if (cancelled) return;
         if (!res.ok) {
           setError(`Failed to load Word document (HTTP ${res.status})`);
@@ -79,7 +74,7 @@ export function DocxRenderer({ filePath }: FileRendererProps) {
     return () => {
       cancelled = true;
     };
-  }, [workspaceId, filePath, versionRef, versionSide, attempt]);
+  }, [rawRead, filePath, attempt]);
 
   if (error) {
     return (

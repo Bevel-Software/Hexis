@@ -37,9 +37,9 @@
  */
 
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
-import type { WorkflowEventBus } from '../workflow/event-bus.js';
-import type { AuthUser, IWorkspaceService, IWorkflowService } from '@bevel-software/platform-shared';
-import { PushNeedsAgentResolutionError, WorkflowDomainError } from '../../shared/domain-errors.js';
+import type { VersionControlEventBus } from '../version-control/index.js';
+import type { AuthUser, IWorkspaceService, IVersionControlService } from '@bevel-software/platform-shared';
+import { PushNeedsAgentResolutionError, VersionControlDomainError } from '../../shared/domain-errors.js';
 import type { IAccessControl } from './access-control.interface.js';
 import {
   ADMIN_CANONICAL,
@@ -55,11 +55,8 @@ import {
   stripComment,
   type ParsedEntry,
   type Verb,
-} from '../access-model/access-grammar.js';
-import { spliceRevoke } from '../access-model/access-splice.js';
-import { scanFrontmatter } from '../access-model/frontmatter-lines.js';
-import { GROUPS_YAML, SYNCED_GROUPS_YAML, validateGroupsFile } from '../access-model/group-files.js';
-import { makeRolesYamlWriteValidator } from '../access-model/roles-yaml-guard.js';
+} from '../access-model/index.js';
+import { spliceRevoke, scanFrontmatter, GROUPS_YAML, SYNCED_GROUPS_YAML, validateGroupsFile, makeRolesYamlWriteValidator } from '../access-model/index.js';
 import { emitRolesModel, isGroupRefMember, parseRolesModel } from './roles-edit.js';
 import { emitGroupsModel, parseGroupsModel } from './groups-edit.js';
 import { AdminLockedCommits, type LockedWrite } from './admin-locked-commit.js';
@@ -95,7 +92,7 @@ async function mapPooled<T, R>(items: readonly T[], limit: number, fn: (item: T)
 }
 
 /** A removal this service refuses (guard) or cannot run. */
-export class UserAccessRemovalError extends WorkflowDomainError {
+export class UserAccessRemovalError extends VersionControlDomainError {
   constructor(message: string, status = 422, payload?: Record<string, unknown>) {
     super(message, status, payload);
     this.name = 'UserAccessRemovalError';
@@ -346,7 +343,7 @@ export class UserAccessRemovalService {
 
   constructor(
     private readonly workspaceService: IWorkspaceService,
-    workflowService: IWorkflowService,
+    versionControlService: IVersionControlService,
     private readonly accessControl: IAccessControl,
     /**
      * The resolver's own walk. NOT `workspaceService.listFiles`: that honours
@@ -357,13 +354,13 @@ export class UserAccessRemovalService {
     private readonly kbDirName: string,
     /** Live-binding thunk — DEFAULT_BRANCH stays empty until setup. */
     private readonly defaultBranchOf: () => string,
-    private readonly eventBus?: WorkflowEventBus,
+    private readonly eventBus?: VersionControlEventBus,
     /** The deployment owner(s) (`ADMIN_EMAIL`) — never removed this way. */
     private readonly deploymentOwners: readonly string[] = [],
   ) {
     this.locked = new AdminLockedCommits({
       workspaceService,
-      workflowService,
+      versionControlService,
       kbDirName,
       defaultBranchOf,
       makeError: (message, status, payload) => new UserAccessRemovalError(message, status, payload),
@@ -492,7 +489,7 @@ export class UserAccessRemovalService {
   /** Why `email` may not be removed from access files, or null when it may. */
   private blockedReason(rolesText: string | undefined, email: string): string | null {
     if (this.deploymentOwners.some((o) => canonicalEmail(o) === email)) {
-      return 'This is the deployment owner (ADMIN_EMAIL); their access cannot be removed here.';
+      return 'The owner stays in roles and access rules.';
     }
     const admin = rolesText
       ? (() => {

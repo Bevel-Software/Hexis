@@ -3,7 +3,7 @@ import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { FileTreeEntry } from '@bevel-software/platform-shared';
 import type { AccessResponse } from '../api';
-import { declarationsOf } from './tailwindDeclarations';
+import { declarationsOf } from '../../../__tests__/tailwindDeclarations';
 
 // --- Mock the API module ----------------------------------------------------
 const api = vi.hoisted(() => ({

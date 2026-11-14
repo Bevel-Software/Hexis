@@ -1,0 +1,338 @@
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import os from 'node:os';
+
+import { readRefSha, readRevSha } from '../index.js';
+
+const execFileAsync = promisify(execFile);
+
+async function git(cwd: string, ...args: string[]): Promise<string> {
+  const { stdout } = await execFileAsync('git', ['-C', cwd, ...args], {
+    encoding: 'utf-8',
+    env: {
+      ...process.env,
+      GIT_AUTHOR_NAME: 'Test',
+      GIT_AUTHOR_EMAIL: 't@x.com',
+      GIT_COMMITTER_NAME: 'Test',
+      GIT_COMMITTER_EMAIL: 't@x.com',
+    },
+  });
+  return stdout.trim();
+}
+
+/**
+ * The ref files are read exactly as git reads them, so every answer is
+ * checked against `git rev-parse` on the same repository: a loose ref, a
+ * packed one, a loose one shadowing a packed one, a symbolic ref, a
+ * worktree's own HEAD beside the refs it shares, and the three answers the
+ * reader gives when it cannot or must not decide.
+ */
+describe('readRefSha', () => {
+  let root: string;
+  let origin: string;
+  let clone: string;
+
+  beforeEach(async () => {
+    root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-ref-files-'));
+    origin = path.join(root, 'origin.git');
+    const seed = path.join(root, 'seed');
+    await execFileAsync('git', ['init', '--bare', '-b', 'main', origin]);
+    await fs.mkdir(seed);
+    await git(seed, 'init', '-q', '-b', 'main');
+    await fs.writeFile(path.join(seed, 'a.md'), 'a\n');
+    await git(seed, 'add', '-A');
+    await git(seed, 'commit', '-qm', 'one');
+    await git(seed, 'checkout', '-qb', 'feature');
+    await fs.writeFile(path.join(seed, 'b.md'), 'b\n');
+    await git(seed, 'add', '-A');
+    await git(seed, 'commit', '-qm', 'two');
+    await git(seed, 'tag', '-a', 'v1', '-m', 'v1');
+    await git(seed, 'tag', 'light');
+    await git(seed, 'checkout', '-q', 'main');
+    await git(seed, 'remote', 'add', 'origin', origin);
+    await git(seed, 'push', '-q', 'origin', 'main', 'feature', 'v1', 'light');
+    clone = path.join(root, 'clone');
+    await execFileAsync('git', ['clone', '-q', origin, clone]);
+  });
+
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  const expectSha = async (repo: string, ref: string) =>
+    expect(await readRefSha(repo, ref)).toEqual({ sha: await git(repo, 'rev-parse', '--verify', `${ref}^{commit}`) });
+
+  it('reads a loose ref, a remote-tracking ref and HEAD as git resolves them', async () => {
+    await expectSha(clone, 'refs/heads/main');
+    await expectSha(clone, 'refs/remotes/origin/feature');
+    await expectSha(clone, 'HEAD');
+  });
+
+  it('follows a symbolic ref', async () => {
+    // A clone writes `refs/remotes/origin/HEAD` as `ref: refs/remotes/origin/main`.
+    await expectSha(clone, 'refs/remotes/origin/HEAD');
+  });
+
+  it('reads a packed ref, and lets a newer loose ref shadow the packed one', async () => {
+    await git(clone, 'pack-refs', '--all');
+    await expect(fs.access(path.join(clone, '.git/refs/heads/main'))).rejects.toThrow();
+    await expectSha(clone, 'refs/heads/main');
+    await expectSha(clone, 'refs/remotes/origin/feature');
+    // A commit on main writes the loose file again; packed-refs still holds
+    // the old tip, and git reads the loose one first.
+    await fs.writeFile(path.join(clone, 'c.md'), 'c\n');
+    await git(clone, 'add', '-A');
+    await git(clone, 'commit', '-qm', 'three');
+    await expectSha(clone, 'refs/heads/main');
+  });
+
+  it("never decides a tag, loose or packed: what it peels to is git's to say", async () => {
+    // A clone packs the refs it fetched (with a peel line for the annotated
+    // tag); a tag made here is loose and its file holds the tag object's id.
+    // Neither is read: a tag may peel to a tree or a blob, which `^{commit}`
+    // refuses, and only git applies that rule.
+    expect(await readRefSha(clone, 'refs/tags/v1')).toBe('unreadable');
+    expect(await readRefSha(clone, 'refs/tags/light')).toBe('unreadable');
+    await git(clone, 'tag', '-a', 'v2', '-m', 'v2');
+    expect(await readRefSha(clone, 'refs/tags/v2')).toBe('unreadable');
+    await git(clone, 'pack-refs', '--all');
+    expect(await readRefSha(clone, 'refs/tags/v2')).toBe('unreadable');
+    expect(await readRevSha(clone, 'v1')).toBe('unreadable');
+  });
+
+  it('declines a repository whose refs live in a reftable', async () => {
+    // Git 2.45+ with `extensions.refStorage = reftable` keeps refs under
+    // `.git/reftable/`, not in files this reader understands: every name
+    // would read as missing. Both marks of that layout decline, so the
+    // caller asks git. Laid out by hand, so the check does not depend on
+    // the git on this machine knowing the format.
+    await fs.mkdir(path.join(clone, '.git/reftable'));
+    expect(await readRefSha(clone, 'refs/heads/main')).toBe('unreadable');
+    expect(await readRevSha(clone, 'main')).toBe('unreadable');
+    await fs.rm(path.join(clone, '.git/reftable'), { recursive: true });
+    await expectSha(clone, 'refs/heads/main');
+    await fs.appendFile(path.join(clone, '.git/config'), '[extensions]\n\trefStorage = reftable\n');
+    expect(await readRefSha(clone, 'refs/heads/main')).toBe('unreadable');
+  });
+
+  it('answers for a worktree: its own HEAD, and the refs it shares with the repository', async () => {
+    const wt = path.join(root, 'wt');
+    await git(clone, 'worktree', 'add', '-q', wt, 'feature');
+    const dotGit = await fs.stat(path.join(wt, '.git'));
+    expect(dotGit.isFile()).toBe(true);
+    await expectSha(wt, 'HEAD');
+    await expectSha(wt, 'refs/heads/feature');
+    await expectSha(wt, 'refs/heads/main');
+    await expectSha(wt, 'refs/remotes/origin/main');
+    expect(await readRefSha(wt, 'HEAD')).not.toEqual(await readRefSha(clone, 'HEAD'));
+    // A per-worktree ref lives in the worktree's own git directory: git
+    // resolves it there and nowhere else. It is not a branch, so the reader
+    // leaves it to git — but as something that exists, never as missing.
+    const sha = await git(wt, 'rev-parse', 'HEAD');
+    await git(wt, 'update-ref', 'refs/worktree/probe', sha);
+    expect(await git(wt, 'rev-parse', '--verify', 'refs/worktree/probe^{commit}')).toBe(sha);
+    expect(await readRefSha(wt, 'refs/worktree/probe')).toBe('unreadable');
+    expect(await readRevSha(wt, 'worktree/probe')).toBe('unreadable');
+    await expect(git(clone, 'rev-parse', '--verify', '--quiet', 'refs/worktree/probe^{commit}')).rejects.toThrow();
+    expect(await readRefSha(clone, 'refs/worktree/probe')).toBe('missing');
+    // The spellings that reach another worktree's refs are git's, never missing.
+    expect(await git(wt, 'rev-parse', '--verify', 'main-worktree/HEAD^{commit}')).toBe(await git(clone, 'rev-parse', 'HEAD'));
+    expect(await readRevSha(wt, 'main-worktree/HEAD')).toBe('unreadable');
+    expect(await git(clone, 'rev-parse', '--verify', 'worktrees/wt/HEAD^{commit}')).toBe(sha);
+    expect(await readRevSha(clone, 'worktrees/wt/HEAD')).toBe('unreadable');
+    expect(await readRevSha(clone, 'worktrees/wt/refs/worktree/probe')).toBe('unreadable');
+  });
+
+  it('says missing for a ref no file holds, before and after packing', async () => {
+    expect(await readRefSha(clone, 'refs/heads/nope')).toBe('missing');
+    expect(await readRefSha(clone, 'refs/remotes/origin/nope')).toBe('missing');
+    await git(clone, 'pack-refs', '--all');
+    expect(await readRefSha(clone, 'refs/heads/nope')).toBe('missing');
+  });
+
+  it('reads packed-refs at most once per resolution, however many candidates a name tries', async () => {
+    await git(clone, 'pack-refs', '--all');
+    const reads = vi.spyOn(fs, 'readFile');
+    try {
+      // `origin/main` misses two prefixes and lands on the third; `nope`
+      // misses all six: one parse of the table each.
+      expect(await readRevSha(clone, 'origin/main')).toEqual({
+        sha: await git(clone, 'rev-parse', '--verify', 'origin/main^{commit}'),
+      });
+      const packedReads = () =>
+        reads.mock.calls.filter((call) => String(call[0]).endsWith('packed-refs')).length;
+      expect(packedReads()).toBe(1);
+      reads.mockClear();
+      expect(await readRevSha(clone, 'nope')).toBe('missing');
+      expect(packedReads()).toBe(1);
+      reads.mockClear();
+      expect(await readRefSha(clone, 'refs/heads/nope')).toBe('missing');
+      expect(packedReads()).toBe(1);
+    } finally {
+      reads.mockRestore();
+    }
+  });
+
+  it('tries the prefixes git tries for a full name too, before calling it missing', async () => {
+    // `rev-parse refs/heads/alias` finds a branch literally named
+    // `refs/heads/alias`, at refs/heads/refs/heads/alias; so does the reader.
+    const sha = await git(clone, 'rev-parse', 'origin/feature');
+    await git(clone, 'branch', 'refs/heads/alias', sha);
+    expect(await git(clone, 'rev-parse', '--verify', 'refs/heads/alias^{commit}')).toBe(sha);
+    expect(await readRefSha(clone, 'refs/heads/alias')).toBe('unreadable');
+    expect(await readRevSha(clone, 'refs/heads/alias')).toEqual({ sha });
+    expect(await readRevSha(clone, 'refs/heads/nope')).toBe('missing');
+  });
+
+  it('says unreadable, never missing, on a read error that is not absence', async () => {
+    // A directory where the ref file should be fails the read with EISDIR —
+    // an error, not an absence — and so does one where packed-refs or HEAD
+    // should be. None of them may read as "no such ref": git decides.
+    const sha = await git(clone, 'rev-parse', 'refs/heads/main');
+    await fs.rm(path.join(clone, '.git/refs/heads/main'));
+    await fs.mkdir(path.join(clone, '.git/refs/heads/main'));
+    expect(await readRefSha(clone, 'refs/heads/main')).toBe('unreadable');
+    expect(await readRevSha(clone, 'main')).toBe('unreadable');
+    await fs.rmdir(path.join(clone, '.git/refs/heads/main'));
+    await fs.writeFile(path.join(clone, '.git/refs/heads/main'), `${sha}\n`);
+    await git(clone, 'pack-refs', '--all');
+    await fs.rm(path.join(clone, '.git/packed-refs'));
+    await fs.mkdir(path.join(clone, '.git/packed-refs'));
+    expect(await readRefSha(clone, 'refs/heads/main')).toBe('unreadable');
+    expect(await readRefSha(clone, 'refs/heads/nope')).toBe('unreadable');
+    await fs.rmdir(path.join(clone, '.git/packed-refs'));
+    // A packed-refs file with a record this reader does not understand is
+    // not read around: the skipped record could be the one asked for.
+    await fs.writeFile(path.join(clone, '.git/packed-refs'), `# pack-refs with: peeled fully-peeled sorted\nnot-a-sha refs/heads/main\n`);
+    expect(await readRefSha(clone, 'refs/heads/main')).toBe('unreadable');
+    expect(await readRefSha(clone, 'refs/heads/nope')).toBe('unreadable');
+    await fs.writeFile(path.join(clone, '.git/packed-refs'), `${sha} refs/heads/main\n^garbage\n`);
+    expect(await readRefSha(clone, 'refs/heads/nope')).toBe('unreadable');
+    await fs.rm(path.join(clone, '.git/packed-refs'));
+    await fs.rm(path.join(clone, '.git/HEAD'));
+    await fs.mkdir(path.join(clone, '.git/HEAD'));
+    expect(await readRefSha(clone, 'HEAD')).toBe('unreadable');
+  });
+
+  it('says unreadable where it cannot decide: not a repository, a corrupt file, a name it will not turn into a path', async () => {
+    expect(await readRefSha(path.join(root, 'nowhere'), 'refs/heads/main')).toBe('unreadable');
+    await fs.writeFile(path.join(clone, '.git/refs/heads/main'), 'not a sha\n');
+    expect(await readRefSha(clone, 'refs/heads/main')).toBe('unreadable');
+    expect(await readRefSha(clone, 'refs/../config')).toBe('unreadable');
+    expect(await readRefSha(clone, 'main')).toBe('unreadable');
+    expect(await readRefSha(clone, 'refs/heads/a\\b')).toBe('unreadable');
+  });
+});
+
+describe('readRevSha', () => {
+  let root: string;
+  let clone: string;
+
+  beforeEach(async () => {
+    root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-ref-rev-'));
+    const origin = path.join(root, 'origin.git');
+    const seed = path.join(root, 'seed');
+    await execFileAsync('git', ['init', '--bare', '-b', 'main', origin]);
+    await fs.mkdir(seed);
+    await git(seed, 'init', '-q', '-b', 'main');
+    await fs.writeFile(path.join(seed, 'a.md'), 'a\n');
+    await git(seed, 'add', '-A');
+    await git(seed, 'commit', '-qm', 'one');
+    await git(seed, 'checkout', '-qb', 'feature');
+    await fs.writeFile(path.join(seed, 'b.md'), 'b\n');
+    await git(seed, 'add', '-A');
+    await git(seed, 'commit', '-qm', 'two');
+    await git(seed, 'checkout', '-q', 'main');
+    await git(seed, 'remote', 'add', 'origin', origin);
+    await git(seed, 'push', '-q', 'origin', 'main', 'feature');
+    clone = path.join(root, 'clone');
+    await execFileAsync('git', ['clone', '-q', origin, clone]);
+  });
+
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it("takes the candidates in git's order when real refs compete for a name", async () => {
+    const want = async (rev: string) => ({ sha: await git(clone, 'rev-parse', '--verify', `${rev}^{commit}`) });
+    const first = await git(clone, 'rev-parse', 'origin/main');
+    const second = await git(clone, 'rev-parse', 'origin/feature');
+    // A local branch literally named `origin/main`, beside the remote-tracking
+    // ref: git takes refs/heads before refs/remotes, and so does the reader.
+    await git(clone, 'branch', 'origin/main', second);
+    expect(await readRevSha(clone, 'origin/main')).toEqual(await want('origin/main'));
+    expect(await readRevSha(clone, 'origin/main')).toEqual({ sha: second });
+    // A ref directly under refs/ comes before every namespace — and git does
+    // not guarantee what it names, so the reader steps aside for it.
+    await git(clone, 'update-ref', 'refs/main', second);
+    expect(await git(clone, 'rev-parse', 'main')).toBe(second);
+    expect(await readRevSha(clone, 'main')).toBe('unreadable');
+    await git(clone, 'update-ref', '-d', 'refs/main');
+    expect(await readRevSha(clone, 'main')).toEqual(await want('main'));
+    expect(first).not.toBe(second);
+    // A tag named like a branch comes before the branch — and a tag is git's
+    // to peel, so the reader steps aside rather than answer the branch.
+    await git(clone, 'tag', 'feature', first);
+    await git(clone, 'branch', 'feature', second);
+    expect(await readRevSha(clone, 'feature')).toBe('unreadable');
+  });
+
+  it('resolves the names a gate holds the way rev-parse does', async () => {
+    const want = async (rev: string) => ({ sha: await git(clone, 'rev-parse', '--verify', `${rev}^{commit}`) });
+    expect(await readRevSha(clone, 'main')).toEqual(await want('main'));
+    expect(await readRevSha(clone, 'origin/main')).toEqual(await want('origin/main'));
+    expect(await readRevSha(clone, 'origin/feature')).toEqual(await want('origin/feature'));
+    expect(await readRevSha(clone, 'HEAD')).toEqual(await want('HEAD'));
+    expect(await readRevSha(clone, 'refs/remotes/origin/feature')).toEqual(await want('refs/remotes/origin/feature'));
+  });
+
+  it('is missing only when every candidate is, which is what rev-parse answers nothing for', async () => {
+    // `feature` exists on origin but not as a local branch in this clone:
+    // git's own answer for the bare name is "no such rev".
+    await expect(git(clone, 'rev-parse', '--verify', '--quiet', 'feature^{commit}')).rejects.toThrow();
+    expect(await readRevSha(clone, 'feature')).toBe('missing');
+    expect(await readRevSha(clone, 'nope')).toBe('missing');
+  });
+
+  it('starts where git starts, at $GIT_DIR/<name>, and leaves whatever is there to git', async () => {
+    const sha = await git(clone, 'rev-parse', 'origin/feature');
+    // A pseudoref may name a commit (MERGE_HEAD) or a tree (AUTO_MERGE), and
+    // only git's ^{commit} tells them apart: anything found there is git's.
+    await fs.writeFile(path.join(clone, '.git/MERGE_HEAD'), `${sha}\n`);
+    expect(await readRevSha(clone, 'MERGE_HEAD')).toBe('unreadable');
+    await fs.writeFile(path.join(clone, '.git/AUTO_MERGE'), `${await git(clone, 'rev-parse', 'HEAD^{tree}')}\n`);
+    expect(await readRevSha(clone, 'AUTO_MERGE')).toBe('unreadable');
+    // A branch named like a pseudoref file that exists is git's too...
+    await git(clone, 'branch', 'ORIG_HEAD', sha);
+    await fs.writeFile(path.join(clone, '.git/ORIG_HEAD'), `${sha}\n`);
+    expect(await readRevSha(clone, 'ORIG_HEAD')).toBe('unreadable');
+    // ...and a name with no such file goes on to the refs/ candidates.
+    await fs.rm(path.join(clone, '.git/ORIG_HEAD'));
+    expect(await readRevSha(clone, 'ORIG_HEAD')).toEqual({ sha });
+    expect(await readRevSha(clone, 'CHERRY_PICK_HEAD')).toBe('missing');
+  });
+
+  it('leaves a dangling symbolic ref to git rather than read a packed entry it shadows', async () => {
+    await git(clone, 'pack-refs', '--all');
+    const packed = await git(clone, 'rev-parse', 'refs/heads/main');
+    // The loose file comes back as a symbolic ref to a branch that is gone:
+    // git reports the ref as dangling, not as the packed tip underneath.
+    await fs.writeFile(path.join(clone, '.git/refs/heads/main'), 'ref: refs/heads/gone\n');
+    await expect(git(clone, 'rev-parse', '--verify', '--quiet', 'refs/heads/main^{commit}')).rejects.toThrow();
+    expect(await readRefSha(clone, 'refs/heads/main')).toBe('unreadable');
+    expect(await readRevSha(clone, 'main')).toBe('unreadable');
+    expect(packed).toMatch(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/);
+  });
+
+  it('hands git what it does not resolve itself', async () => {
+    // `@` alone is git's shorthand for HEAD, `@{u}` an upstream: git's.
+    for (const rev of ['', '-x', '@', '@{u}', 'main^{commit}', 'HEAD~1', 'main@{1}', 'abc1234', 'a'.repeat(40), 'a b']) {
+      expect(await readRevSha(clone, rev)).toBe('unreadable');
+    }
+    expect(await readRevSha(clone, '@')).not.toBe('missing');
+    expect(await readRevSha(path.join(root, 'nowhere'), 'main')).toBe('unreadable');
+  });
+});

@@ -8,28 +8,28 @@ import express from 'express';
 import { afterEach, describe, expect, it } from 'vitest';
 import { LocalFilesystem } from '@mastra/core/workspace';
 import { testKbContext } from '../../../__tests__/kb-context.js';
-import { ToolRegistry } from '../../tool-registry/tool-registry.js';
-import { createToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
-import type { ToolContext } from '../../tool-helpers/tool.contract.js';
-import type { ToolAuth } from '../../tool-auth/tool-auth.middleware.js';
+import { ToolRegistry } from '../../tool-registry/index.js';
+import { createToolHandlerFactory, VersionControlHooks } from '../../../__tests__/tool-wiring.js';
+import type { ToolContext } from '../../tool-helpers/index.js';
+import type { ToolAuth } from '../../tool-auth/index.js';
+import type { IAccessControl } from '../../access/index.js';
+import { normalizeWorkspacePath } from '../../kb-fs/index.js';
+import { READ_ONLY_CODE, type IWriteAccess } from '../../write-access/index.js';
 import { registerWorkspaceTools } from '../workspace.tools.js';
 import { RoutineWritePolicyService } from '../routine-write-policy.js';
-import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
 import { ToolDescriptionNotes } from '../agent-access.gate.js';
 import { SpillStore } from '../spill-store.js';
 import { DocExtractService } from '../file-readers/doc-extract.service.js';
-import type { IAccessControl } from '../../access/access-control.interface.js';
-import { normalizeWorkspacePath } from '../../kb-fs/repo-path.js';
+import { WorkerDocumentExtractor } from '../file-readers/extract-in-worker.js';
 import {
   AgentUploadStore,
   assertUploadsRootOutsideWorkspaces,
   UPLOAD_TOKEN_REFUSAL,
 } from '../agent-upload.store.js';
 import { createAgentUploadRoutes, isAgentUploadRawBodyPath } from '../agent-upload.routes.js';
-import { READ_ONLY_CODE, type IWriteAccess } from '../../write-access/write-access.js';
 import { MAX_UPLOAD_BYTES } from '../upload-limits.js';
 import { DEFAULT_KB_LAYOUT } from '@bevel-software/platform-shared';
-import { sharedFileRules } from '../../agent-instructions/shared-file-rules.js';
+import { sharedFileRules } from '../../agent-instructions/index.js';
 
 /**
  * The upload route an agent lands files by, end to end: a token, bytes sent to
@@ -222,7 +222,7 @@ async function start(options: StartOptions = {}): Promise<string> {
         }
       },
     } as never,
-    workflowService: {} as never,
+    versionControlService: {} as never,
     events: {} as never,
     getFilesystem: async () => fs,
   });
@@ -243,10 +243,10 @@ async function start(options: StartOptions = {}): Promise<string> {
     fakeAuth,
     toolHandler,
     new SpillStore(join(tmpdir(), 'bevel-test-spills')),
-    new DocExtractService(docCacheDir),
+    new DocExtractService(docCacheDir, new WorkerDocumentExtractor()),
     access,
     testKbContext({ kbDirName: KB_DIR }),
-    { recoveryBotEmail: 'recovery-bot@bevel.local', hooks: new WorkflowHooks(), notes: new ToolDescriptionNotes() },
+    { recoveryBotEmail: 'recovery-bot@bevel.local', hooks: new VersionControlHooks(), notes: new ToolDescriptionNotes() },
     new RoutineWritePolicyService(),
     {} as never,
     undefined,
@@ -533,6 +533,83 @@ describe('the upload route', () => {
     expect(res.status).toBe(413);
     expect((await json<{ error: string }>(res)).error).toContain('1024 byte upload limit');
     expect(await readdir(uploadsDir)).toEqual([]);
+  });
+
+  it('discards a token on request, with the bytes sent against it, the token in a header', async () => {
+    const base = await start();
+    const discard = (token: string) =>
+      fetch(`${base}/api/agent/uploads`, { method: 'DELETE', headers: { 'x-upload-token': token } });
+    const { token } = await request(base);
+    expect((await send(base, token, 'a.md', Buffer.from('a'))).status).toBe(200);
+    expect(await readdir(uploadsDir)).toHaveLength(1);
+    expect((await discard(token)).status).toBe(204);
+    expect(await readdir(uploadsDir)).toEqual([]);
+    // Spent: neither an apply nor a second discard can use it.
+    const applied = await call(base, 'apply_file_upload', { branch: DRAFT, token, destination: KB_DIR });
+    expect(applied.ok).toBe(false);
+    expect(batches).toEqual([]);
+    const again = await discard(token);
+    expect(again.status).toBe(404);
+    expect((await json<{ error: string }>(again)).error).toBe(UPLOAD_TOKEN_REFUSAL);
+    // A token nothing was sent against goes the same way, and its slot with it.
+    const { token: unsent } = await request(base);
+    expect((await discard(unsent)).status).toBe(204);
+    expect((await send(base, unsent, 'b.md', Buffer.from('b'))).status).toBe(404);
+  });
+
+  it('refuses to discard a token an apply is holding, and leaves its bytes', async () => {
+    const base = await start();
+    const { token } = await request(base);
+    await send(base, token, 'a.md', Buffer.from('a'));
+    uploads.claim(token, 'u');
+    const res = await fetch(`${base}/api/agent/uploads`, { method: 'DELETE', headers: { 'x-upload-token': token } });
+    expect(res.status).toBe(404);
+    expect(await readdir(uploadsDir)).toHaveLength(1);
+    uploads.release(token);
+  });
+
+  it('refuses to discard a token whose bytes are still arriving, and the upload finishes whole', async () => {
+    const base = await start();
+    const { token } = await request(base);
+    const head = Buffer.from('the first half, ');
+    const tail = Buffer.from('and the second half');
+    let finish!: () => void;
+    const body = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        controller.enqueue(new Uint8Array(head));
+        await new Promise<void>((resolve) => {
+          finish = resolve;
+        });
+        controller.enqueue(new Uint8Array(tail));
+        controller.close();
+      },
+    });
+    const arriving = fetch(`${base}/api/agent/uploads?filename=held.md`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/octet-stream', 'x-upload-token': token },
+      body,
+      // Node's fetch requires this for a streamed request body.
+      duplex: 'half',
+    } as RequestInit & { duplex: 'half' });
+    // Waited for, not assumed from a delay: the body has reached the store
+    // and its first bytes are staged, with the request still open.
+    const staged = Date.now() + 5_000;
+    while ((await readdir(uploadsDir).catch(() => [])).length === 0) {
+      expect(Date.now(), 'the upload never reached the store').toBeLessThan(staged);
+      await new Promise((r) => setTimeout(r, 10));
+    }
+
+    const res = await fetch(`${base}/api/agent/uploads`, { method: 'DELETE', headers: { 'x-upload-token': token } });
+    expect(res.status).toBe(404);
+    expect((await json<{ error: string }>(res)).error).toBe(UPLOAD_TOKEN_REFUSAL);
+    // The file being written is still there, and the token still good.
+    expect(await readdir(uploadsDir)).toHaveLength(1);
+
+    finish();
+    expect((await arriving).status).toBe(200);
+    const whole = Buffer.concat([head, tail]);
+    expect((await apply(base, { branch: DRAFT, token, destination: `${KB_DIR}/Held` })).count).toBe(1);
+    expect(sha(await readFile(join(tempDir, KB_DIR, 'Held/held.md')))).toBe(sha(whole));
   });
 
   it('refuses a second upload against the same token', async () => {
@@ -1194,7 +1271,15 @@ describe('a token is good once, for one user, for a limited time', () => {
     const res = await call(base, 'apply_file_upload', { branch: DRAFT, token, destination: KB_DIR });
     expect(res.status).toBe(404);
     expect((await json<{ error: string }>(res)).error).toBe(UPLOAD_TOKEN_REFUSAL);
+    // The refusal drops the record and starts the delete without awaiting it,
+    // so a sweep run straight after no longer names the file and leaves it to
+    // that delete. Wait for the delete to land, under a deadline, instead of
+    // racing it: a readdir taken mid-`rm` failed CI on PR #457.
     await uploads.sweepNow();
+    const deadline = Date.now() + 2_000;
+    while (Date.now() < deadline && (await readdir(uploadsDir)).length > 0) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
     expect(await readdir(uploadsDir)).toEqual([]);
   });
 
@@ -1421,7 +1506,7 @@ describe('the write tools name the upload route', () => {
     // The three failures the route exists for are named where the full
     // explanation lives: said on each of three descriptions, it took every one
     // of them past the length a client cuts at.
-    const rule = sharedFileRules(DEFAULT_KB_LAYOUT).find((r) => r.id === 'upload-route');
+    const rule = sharedFileRules(DEFAULT_KB_LAYOUT, '').find((r) => r.id === 'upload-route');
     expect(rule).toBeDefined();
     expect(rule!.body).toMatch(/cut off mid-answer/);
     expect(rule!.body).toMatch(/escapes fails to parse/);

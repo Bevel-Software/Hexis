@@ -2,24 +2,27 @@ import express from 'express';
 import { logger } from '../../shared/logging.js';
 
 const log = logger('plugins');
-import '../auth/auth.middleware.js'; // Express Request.userId / userEmail augmentation
+import '../auth/index.js'; // Express Request.userId / userEmail augmentation
 import {
   joinBranchFor,
   type AuthUser,
   type ChangeRequest,
   type ChangeRequestState,
-  type IWorkflowService,
+  type IVersionControlService,
 } from '@bevel-software/platform-shared';
-import type { IAccessControl } from '../access/access-control.interface.js';
-import { WorkflowDomainError } from '../../shared/domain-errors.js';
+import type { IAccessControl } from '../access/index.js';
+import { VersionControlDomainError } from '../../shared/domain-errors.js';
 import { domainErrorBody } from '../../shared/http-errors.js';
 import { pluginFolderBelowRoot } from './plugins.service.js';
 import type { KbContext } from '../../shared/kb-context.js';
 import { PluginProvisionError, type PluginProvisionService } from './plugin-provision.service.js';
+import { argumentsRefusal } from '../tool-helpers/index.js';
+import { resolveConnectionScope, type IAgentScopeResolver } from '../agent-scope/index.js';
+import '../tool-auth/index.js'; // Express Request.toolAuth augmentation
 import { PluginLinkError, type PluginLinksService } from './plugin-links.service.js';
 import { PluginRenameError, type PluginRenameService } from './plugin-rename.service.js';
 import type { JoinRequestsService } from './join-requests.service.js';
-import { folderTarget } from '../access/access-requests.contract.js';
+import { folderTarget } from '../access/index.js';
 import type { PluginJoinRequestJobs } from './join-request-jobs.service.js';
 import type { JoinRequestRecord } from './join-request-records.store.js';
 import type {
@@ -65,6 +68,47 @@ import type {
  * with an agent connection key or a manual-auth bearer.
  */
 /**
+ * Answer the arguments-do-not-match refusal when the body does not match the
+ * tool hosted at this route; `true` when it answered. A body that is not a
+ * JSON object is refused here too, with the sentence `toolHandler` uses, so a
+ * `null` or an array never reaches the handler as if it were `{}`.
+ */
+function refuseMismatchedArguments(req: express.Request, res: express.Response): boolean {
+  const body: unknown = req.body === undefined ? {} : req.body;
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+    res.status(400).json({ error: 'Request body must be a JSON object.' });
+    return true;
+  }
+  const mismatch = argumentsRefusal(req.originalUrl, body as Record<string, unknown>, req.query);
+  if (!mismatch) return false;
+  res.status(mismatch.status).json({ ...mismatch.details, error: mismatch.message });
+  return true;
+}
+
+/**
+ * Answer the connection-scope refusal when the caller's connection was made
+ * as an agent configuration that does not list `toolName`; `true` when it answered.
+ * These routes ARE the `create_plugin` and `my_plugin` tools but are not
+ * hosted by `toolHandler`, so they ask the one policy it asks —
+ * `ConnectionScope.platformToolRefusal` — and answer what it answers. A
+ * session, or a key made as Everything, carries no `agentPath` and is never
+ * refused.
+ */
+async function refuseOutsideConnectionScope(
+  req: express.Request,
+  res: express.Response,
+  user: AuthUser,
+  toolName: string,
+  agentScope: Pick<IAgentScopeResolver, 'resolve'> | undefined,
+): Promise<boolean> {
+  const scope = await resolveConnectionScope(agentScope, user.email, req.toolAuth?.agentPath);
+  const refusal = scope.platformToolRefusal(toolName);
+  if (!refusal) return false;
+  res.status(403).json(refusal);
+  return true;
+}
+
+/**
  * The two doors through which plugin folders come to exist — ONE
  * implementation each, for the app and for agents alike:
  *
@@ -87,6 +131,8 @@ import type {
 export function createPluginCreationRoutes(
   provision: Pick<PluginProvisionService, 'createPlugin' | 'ensurePersonalPlugin'>,
   resolveUser: (req: express.Request) => Promise<AuthUser | null>,
+  /** Resolves a connection's agent choice to its scope; absent, a narrowed connection loads nothing. */
+  agentScope?: Pick<IAgentScopeResolver, 'resolve'>,
 ): express.Router {
   const router = express.Router();
 
@@ -96,6 +142,13 @@ export function createPluginCreationRoutes(
       res.status(401).json({ error: 'Unauthenticated' });
       return;
     }
+    // These two routes ARE the `create_plugin` and `my_plugin` tools, so an
+    // agent's call is checked against what those tools declare, exactly as a
+    // route-hosted tool's is in `toolHandler`: a call that does not match, or
+    // a connection whose agent does not list the tool, is refused before
+    // anything is provisioned.
+    if (await refuseOutsideConnectionScope(req, res, user, 'create_plugin', agentScope)) return;
+    if (refuseMismatchedArguments(req, res)) return;
     // `req.body` is undefined when no JSON body was sent at all — that is a
     // 400, not a destructuring crash.
     const { name, parent } = (req.body ?? {}) as { name?: string; parent?: unknown };
@@ -129,6 +182,13 @@ export function createPluginCreationRoutes(
       res.status(401).json({ error: 'Unauthenticated' });
       return;
     }
+    // These two routes ARE the `create_plugin` and `my_plugin` tools, so an
+    // agent's call is checked against what those tools declare, exactly as a
+    // route-hosted tool's is in `toolHandler`: a call that does not match, or
+    // a connection whose agent does not list the tool, is refused before
+    // anything is provisioned.
+    if (await refuseOutsideConnectionScope(req, res, user, 'my_plugin', agentScope)) return;
+    if (refuseMismatchedArguments(req, res)) return;
     try {
       res.json(await provision.ensurePersonalPlugin(user));
     } catch (err) {
@@ -149,7 +209,7 @@ export function createPluginCreationRoutes(
 export function createPluginsRoutes(
   pluginIndex: IPluginIndexService,
   accessControl: IAccessControl,
-  workflow: IWorkflowService,
+  versionControl: IVersionControlService,
   joinRequests: JoinRequestsService,
   /**
    * Where a join request is RECORDED, and what finishes it afterwards. The
@@ -197,7 +257,7 @@ export function createPluginsRoutes(
           res.status(err.status).json({ error: err.message, ...err.payload });
           return;
         }
-        if (err instanceof WorkflowDomainError) {
+        if (err instanceof VersionControlDomainError) {
           res.status(err.status).json(domainErrorBody(err));
           return;
         }
@@ -230,7 +290,7 @@ export function createPluginsRoutes(
         res.status(err.status).json({ error: err.message, ...err.payload });
         return;
       }
-      if (err instanceof WorkflowDomainError) {
+      if (err instanceof VersionControlDomainError) {
         res.status(err.status).json(domainErrorBody(err));
         return;
       }
@@ -343,7 +403,7 @@ export function createPluginsRoutes(
       // requested" and let the next load repair it.
       let mine: ChangeRequest[] = [];
       try {
-        mine = await workflow.listChangeRequestsAuthoredBy(email);
+        mine = await versionControl.listChangeRequestsAuthoredBy(email);
       } catch (err) {
         log.warn(`join-request lookup failed: ${err instanceof Error ? err.message : String(err)}`);
       }
@@ -564,7 +624,7 @@ export function createPluginsRoutes(
       // already on the wire, and the job records its own outcome on the row.
       void joinRequestJobs.start(record);
     } catch (err) {
-      if (err instanceof WorkflowDomainError) {
+      if (err instanceof VersionControlDomainError) {
         res.status(err.status).json(domainErrorBody(err));
         return;
       }
@@ -618,7 +678,7 @@ export function createPluginsRoutes(
     try {
       const ctx = await requireManager(req, res, () => res.json({ requests: [] }));
       if (!ctx) return;
-      const crs = await workflow.listChangeRequests();
+      const crs = await versionControl.listChangeRequests();
       res.json({
         requests: await joinRequests.list(joinKeyOf(ctx.plugin), folderTarget(ctx.folder), crs, ctx.user),
       });
@@ -645,7 +705,7 @@ export function createPluginsRoutes(
         res.status(400).json({ error: 'Invalid change request number' });
         return;
       }
-      const cr = await workflow.getChangeRequest(crNumber);
+      const cr = await versionControl.getChangeRequest(crNumber);
       if (!cr) {
         res.status(404).json({ error: 'Not found' });
         return;

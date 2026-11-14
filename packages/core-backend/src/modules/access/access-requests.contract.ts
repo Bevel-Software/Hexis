@@ -1,5 +1,5 @@
 import type { AuthUser, ChangeRequest } from '@bevel-software/platform-shared';
-import type { Verb } from '../access-model/access-grammar.js';
+import type { Verb } from '../access-model/index.js';
 import { accessMdPathForFolder, type TargetKind } from './access-mutation.service.js';
 
 /**

@@ -1,10 +1,11 @@
 import express from 'express';
-import type { IAdminAccessService } from '../admin/admin.interface.js';
+import type { IAdminAccessService } from '../admin/index.js';
 import { logger } from '../../shared/logging.js';
 
 const log = logger('setup');
+import type {
+  DeploymentSettingsService} from './deployment-settings.service.js';
 import {
-  DeploymentSettingsService,
   SettingsValidationError,
   validateHttpsRemote,
   type OidcCredentials,
@@ -31,10 +32,10 @@ import type { KbContext } from '../../shared/kb-context.js';
 import { failureOf, type GitFailure } from '../../shared/git-failure.js';
 import { redactSecret, urlQuerySecrets } from '../../shared/redact-secret.js';
 import { listRootFolders, pickListingBranch } from './git-root-folders.js';
-import { sameRepository } from '../kb-fs/remote-url.js';
+import { sameRepository } from '../kb-fs/index.js';
 import { MANAGED_DEFAULT_BRANCH } from './managed-repository.js';
 import { GIT_MODES, type GitHubAppRepository, type RepositorySource } from './repository-source.js';
-import '../auth/auth.middleware.js'; // Express Request augmentation
+import '../auth/index.js'; // Express Request augmentation
 
 /**
  * What setup needs of the ways a deployment can be given its repository:
@@ -64,10 +65,9 @@ const SECRET_FOR_THAT_PROVIDER =
   'Enter the application secret for that provider — the saved one is only sent to the provider it was saved for.';
 
 /**
- * The knowledge-base layout as setting keys: the three renameable roots (the
- * guide is served as `AGENTS.md` everywhere and has no key), and the consent
- * that rides with them — which the KB startup phase reads through a getter, so
- * the completing save puts it in effect along with the names.
+ * The knowledge-base layout as setting keys: the three renameable roots. The
+ * guide's file name is not one of them — the settings layer sets none, so the
+ * layout it produces carries the default, `AGENTS.md`.
  */
 const LAYOUT_KEYS: readonly string[] = [
   'knowledgeBaseDir',
@@ -207,7 +207,7 @@ export function createSetupRoutes(
    * What a change of the knowledge-base repository has to decide about, and
    * what to do when the admin decides to close.
    *
-   * Injected because the setup routes must stay free of the workflow module —
+   * Injected because the setup routes must stay free of the version-control module —
    * and a minimal mount (tests, a distribution without change requests) simply
    * has none: the default answers "no open requests", so the confirmation
    * offers no choice it cannot honour.

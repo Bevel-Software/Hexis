@@ -568,7 +568,7 @@ describe('the description names the namespace this connection exposes', () => {
   it('reads KNOWLEDGE_BASE.read_file on a deployment whose namespace is KNOWLEDGE_BASE', () => {
     const text = descriptions('KNOWLEDGE_BASE', HOSTED);
     expect(text).toContain('KNOWLEDGE_BASE.read_file');
-    expect(text).toContain('`KNOWLEDGE_BASE.<tool>({ body: { ...args } })`');
+    expect(text).toContain('every tool in `KNOWLEDGE_BASE` has one');
     expect(text).not.toContain('hexis.');
   });
 
@@ -584,7 +584,7 @@ describe('the description names the namespace this connection exposes', () => {
    */
   it('names hexis through the local server, in the form that is actually callable there', () => {
     const text = descriptions('hexis', LOCAL);
-    expect(text).toContain('`hexis.<tool>({ body: { ...args } })`');
+    expect(text).toContain('every tool in `hexis` has one');
     expect(text).toContain('hexis.hexis_read_file');
     expect(text).not.toContain('KNOWLEDGE_BASE');
     // Not the Scenario's literal spelling, because that one does not run.

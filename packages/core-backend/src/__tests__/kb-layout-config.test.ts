@@ -16,6 +16,7 @@ import {
   validateKbLayout,
   validateKbRootName,
   normalizeSkillRoot,
+  WORKFLOWS_DIR,
   type KbLayout,
 } from '@bevel-software/platform-shared';
 
@@ -69,6 +70,26 @@ describe('KB layout — validation', () => {
     expect(
       validateKbLayout({ knowledgeBaseDir: 'KnowledgeBase', skillsDir: 'data', pluginsDir: 'Plugins' }),
     ).toMatch(/reserved folder name/);
+  });
+
+  test('reserves Data, Agents and Workflows, in any letter case, and names them in the refusal', () => {
+    for (const name of ['Data', 'agents', 'Workflows', 'WORKFLOWS']) {
+      expect(
+        validateKbLayout({ knowledgeBaseDir: 'KnowledgeBase', skillsDir: name, pluginsDir: 'Plugins' }),
+        name,
+      ).toBe(`"${name.toLowerCase()}" is a reserved folder name (Data, Agents, Workflows).`);
+    }
+    expect(WORKFLOWS_DIR).toBe('Workflows');
+    expect([...reservedRootDirNames(DEFAULT_KB_LAYOUT)]).toEqual(
+      expect.arrayContaining(['Data', 'Agents', 'Workflows']),
+    );
+  });
+
+  test('no longer knows Pipelines: not reserved, and free to be a root', () => {
+    expect(reservedRootDirNames(DEFAULT_KB_LAYOUT).has('Pipelines')).toBe(false);
+    expect(
+      validateKbLayout({ knowledgeBaseDir: 'KnowledgeBase', skillsDir: 'Pipelines', pluginsDir: 'Plugins' }),
+    ).toBeNull();
   });
 
   test('renders placeholders without interpreting $-patterns in a folder name', () => {

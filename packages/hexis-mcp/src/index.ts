@@ -25,7 +25,14 @@
  * Normally run as a command (`npx @bevel-software/hexis-mcp`); the pieces are
  * exported for embedding it in another process.
  */
-export { type HexisMcpConfig, type ResolvedCliConfig, ConfigError, resolveConfig, USAGE } from './config.js';
+export {
+  type HexisMcpConfig,
+  type ResolvedCliConfig,
+  ConfigError,
+  SignInRefusedError,
+  resolveConfig,
+  USAGE,
+} from './config.js';
 export {
   DeploymentError,
   ConnectionKeyRejectedError,
@@ -35,6 +42,9 @@ export {
   type ResolvedDeployment,
   fetchAllManuals,
   fetchCatalogRevision,
+  fetchCatalogState,
+  type CatalogState,
+  NotAvailableToConnectionError,
   CatalogRevisionUnsupportedError,
   fetchLocalOnlyManuals,
   fetchLocalToolVariables,

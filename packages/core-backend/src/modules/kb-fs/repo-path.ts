@@ -1,6 +1,7 @@
 import path from 'node:path';
-import { WorkflowValidationError } from '../../shared/domain-errors.js';
+import { VersionControlValidationError } from '../../shared/domain-errors.js';
 import { sanitizedPath } from '../../shared/printable.js';
+import { assertTmpRefsTaken, isTmpRef } from './tmp-ref.js';
 
 /**
  * Workspace-relative paths and the repository folder.
@@ -111,7 +112,7 @@ export function assertInsideRepo(wsPath: string, kbDirName: string): void {
     // forge a second line of the answer, in the message and in the `path` a
     // JSON consumer reads.
     const shown = sanitizedPath(wsPath);
-    throw new WorkflowValidationError(
+    throw new VersionControlValidationError(
       `"${shown}" contains a control character: a line break, a NUL or another invisible byte is not part of any ` +
         'file name, and git reads a line break in a path as the end of one object name and the start of another. ' +
         'Remove it and send the name as it is written.',
@@ -126,7 +127,7 @@ export function assertInsideRepo(wsPath: string, kbDirName: string): void {
     .replace(/^(\.\.(\/|$))+/, '')
     .replace(/^\.$/, '');
   const corrected = isInsideRepo(normalized, kbDirName) ? normalized : `${kbDirName}/${normalized}`;
-  throw new WorkflowValidationError(
+  throw new VersionControlValidationError(
     `"${wsPath}" is outside the knowledge base repository: paths are workspace-relative, must start with "${kbDirName}/" and may not contain "." or ".." segments or backslashes. ` +
       `Use "${corrected}" instead. A file written without that prefix lands beside the repository, where it is never committed or pushed.`,
     { kind: 'path-outside-repo', path: wsPath, kbDirName, corrected },
@@ -182,7 +183,7 @@ export function normalizeWorkspacePath(wsPath: string, kbDirName: string): strin
   // `core-config` and the `kbDirName` setting validator both refuse this at
   // the point it is SET, so reaching here means the two drifted.
   if (CONTROL_CHARACTERS.test(kbDirName)) {
-    throw new WorkflowValidationError(
+    throw new VersionControlValidationError(
       `the configured checkout folder name (kbDirName / KB_DIR_NAME) contains a control character: "${sanitizedPath(kbDirName)}". ` +
         'Every workspace path is prefixed with it, so no path can be resolved until the setting is corrected.',
       { kind: 'kb-dir-name-control-character', kbDirName: sanitizedPath(kbDirName) },
@@ -236,7 +237,7 @@ export function assertRepoRootNameFree(wsPath: string, kbDirName: string): void 
   const segments = String(wsPath).replace(/\/+$/, '').split('/');
   const reserved = kbDirName.toLowerCase();
   if (segments[0] !== kbDirName || segments[1]?.toLowerCase() !== reserved) return;
-  throw new WorkflowValidationError(
+  throw new VersionControlValidationError(
     `"${segments[1]}" is reserved: it is the checkout folder's name. A folder of that name at the repository root ` +
       `could never be reached — every workspace path starting with "${kbDirName}/" names the checkout itself — so it cannot be created, moved to or renamed to.` +
       // Said only when the caller spelled it differently, so the ordinary
@@ -312,6 +313,16 @@ export function assertKbDirNameFree(
   );
 }
 
+/** How {@link normalizePathArgs} treats one tool's call. */
+export interface NormalizePathArgsOptions {
+  /** The tool the call is to, named in a tmp-ref refusal. */
+  tool: string;
+  /** The inputs of `tool` that take a tmp ref (`__tmp__/…`); every other refuses one. */
+  tmpRefInputs?: readonly string[];
+  /** A value that is no workspace path at all, passed to the handler as written. */
+  skip?: (value: string) => boolean;
+}
+
 /** The tool inputs that carry a workspace path. */
 const PATH_ARG_KEYS = ['path', 'src', 'dest', 'destination'] as const;
 
@@ -321,19 +332,34 @@ const PATH_ARG_KEYS = ['path', 'src', 'dest', 'destination'] as const;
  * copy. This is where the MCP surface meets the normaliser — one call, before
  * any handler runs, so no tool keeps a resolver of its own.
  *
- * `skip` is for the one input that is not a workspace path at all: `read_file`
- * also takes a `__tool_chain_spill__/…` ref, which belongs to no workspace and
- * must reach the handler as written. An absent or non-string value is left
- * alone too — the handler's own required-argument message is better than a
- * path refusal about `undefined`.
+ * It is also where a tmp ref (`__tmp__/…`) is admitted or refused, first:
+ * {@link assertTmpRefsTaken} refuses one in every input of `tool` that
+ * `tmpRefInputs` does not name, and a ref in an input that does name it
+ * reaches the handler as written — so no tool whose paths pass through here
+ * can read the ref as the repository path `<kbDirName>/__tmp__/…`.
+ *
+ * `skip` is for the other input that is not a workspace path at all:
+ * `read_file` also takes a `__tool_chain_spill__/…` ref, which belongs to no
+ * workspace and must reach the handler as written. An absent or non-string
+ * value is left alone too — the handler's own required-argument message is
+ * better than a path refusal about `undefined`.
+ *
+ * The earlier call form — a `skip` predicate (or nothing) as the third
+ * argument — is still taken, for a distribution's own tool written against
+ * it: such a call names no tool and takes a tmp ref in no input, so the ref is
+ * refused there as read-only, under the name "this tool".
  */
 export function normalizePathArgs(
   args: Record<string, unknown>,
   kbDirName: string,
-  skip?: (value: string) => boolean,
+  options?: NormalizePathArgsOptions | ((value: string) => boolean),
 ): Record<string, unknown> {
+  const { tool, tmpRefInputs, skip } =
+    typeof options === 'object' ? options : { tool: 'this tool', tmpRefInputs: undefined, skip: options };
+  assertTmpRefsTaken(tool, args, tmpRefInputs);
+  // Every tmp ref still here is in an input that takes one.
   const one = (value: unknown): unknown =>
-    typeof value !== 'string' || value.length === 0 || skip?.(value)
+    typeof value !== 'string' || value.length === 0 || isTmpRef(value) || skip?.(value)
       ? value
       : normalizeWorkspacePath(value, kbDirName);
   const out: Record<string, unknown> = { ...args };

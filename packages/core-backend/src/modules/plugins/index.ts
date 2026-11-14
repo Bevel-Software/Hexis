@@ -4,6 +4,7 @@ export {
   PluginProvisionError,
   pluginAccessMd,
   personalAccessMd,
+  withCreatorGrants,
 } from './plugin-provision.service.js';
 export { JoinRequestsService, type JoinRequest } from './join-requests.service.js';
 export {
@@ -18,7 +19,7 @@ export {
   type JoinRequestStatus,
   type JoinRequestStore,
 } from './join-request-records.store.js';
-export { PluginLinkIndex, type LinkMembership, type PluginLinks } from './plugin-links.js';
+export { PluginLinkIndex, type IPluginLinkIndex, type LinkMembership, type PluginLinks } from './plugin-links.js';
 export { PluginLinksService, PluginLinkError } from './plugin-links.service.js';
 export { PluginRenameService, PluginRenameError, renamePluginPrincipalInText } from './plugin-rename.service.js';
 export { compileMarketplace, type VirtualTree, type CompileInput, type MarketplaceOptions } from './compile/compile-marketplace.js';
@@ -38,3 +39,5 @@ export type {
   ResolvedPrincipals,
   ResolvedReaders,
 } from './plugins.contract.js';
+// Reached by other modules; exported here so they stop importing the files.
+export { BUNDLE_FILE } from './discovery/bundle-dialect/bundle.source.js';

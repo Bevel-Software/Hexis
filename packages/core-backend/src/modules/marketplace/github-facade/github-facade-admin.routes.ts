@@ -2,7 +2,7 @@ import express from 'express';
 import { logger } from '../../../shared/logging.js';
 
 const log = logger('github-facade');
-import '../../auth/auth.middleware.js'; // Express Request.userId / userEmail augmentation
+import '../../auth/index.js'; // Express Request.userId / userEmail augmentation
 import {
   GitHubFacadeUnavailableError,
   type GitHubFacadeCredentialsService,

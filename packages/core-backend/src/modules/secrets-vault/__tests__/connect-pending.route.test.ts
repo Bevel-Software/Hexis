@@ -3,6 +3,7 @@ import express from 'express';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createSecretsVaultRoutes } from '../secrets-vault.routes.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
+import { ConnectionScope } from '../../agent-scope/index.js';
 
 /**
  * The aggregated `/connect/pending` surface: everything standing between the
@@ -333,6 +334,118 @@ describe('GET /api/connect/pending — readability', () => {
     // …and `ownerOnly` is a verdict, not a constant: the readable tool this
     // caller CAN act on is listed in the same payload without it.
     expect(body.tools.find((t) => t.slug === 'weather')!.variables[0].ownerOnly).toBe(false);
+  });
+});
+
+describe('GET /api/connect/pending — narrowed to the agent the connection is made as', () => {
+  /**
+   * The consent step's "Connect as" choice: a connection made as an `.agent`
+   * file loads only the connectors the file lists, so the page that asks for
+   * sign-ins and keys lists only those. Two readable tools, one of which the
+   * agent loads; the agent is answered by a stub resolver over the REAL
+   * `ConnectionScope`, the one answer every agent surface asks.
+   */
+  const AGENT = { path: 'Agents/ops.agent', name: 'ops' };
+  const resolver = {
+    resolve: async (_email: string | undefined, agentPath: string | null | undefined) => {
+      if (!agentPath) return ConnectionScope.everything();
+      if (agentPath === AGENT.path) {
+        return ConnectionScope.narrowed(AGENT, { skills: [], connectors: ['Tools/weather.tool'], platformTools: null }, 'fp');
+      }
+      return ConnectionScope.gone(agentPath);
+    },
+  };
+  const twoTools = {
+    listAccessible: async () => [
+      {
+        slug: 'weather',
+        name: 'weather',
+        path: 'Tools/weather.tool',
+        type: 'http' as const,
+        variables: [{ name: 'API_KEY', scope: 'user' as const, label: null }],
+      },
+      {
+        slug: 'notion',
+        name: 'notion',
+        path: 'Tools/notion.tool',
+        type: 'mcp' as const,
+        variables: [
+          {
+            name: 'MCP_OAUTH',
+            scope: 'user' as const,
+            label: 'notion sign-in',
+            oauth: { authorizationUrl: 'https://a.example/auth', tokenUrl: 'https://a.example/token', clientId: 'cid' },
+          },
+        ],
+      },
+    ],
+  } as unknown as Parameters<typeof createSecretsVaultRoutes>[0]['toolManualService'];
+  const vault = {
+    statusFor: async (_u: string, keys: string[]) =>
+      keys.map((key) => ({
+        key,
+        adminConfigured: key === 'notion_MCP_OAUTH',
+        adminKind: key === 'notion_MCP_OAUTH' ? ('oauth' as const) : null,
+        userConfigured: false,
+        userKind: null,
+      })),
+    // A sign-in registered directly on the Secrets page: nobody's connector.
+    list: async () => [
+      { id: 's-own', key: 'MY_TOKEN', kind: 'oauth' as const, label: 'Mine', authorized: false, createdAt: new Date(), updatedAt: new Date() },
+    ],
+  } as unknown as Parameters<typeof createSecretsVaultRoutes>[0]['secretsVault'];
+
+  async function pendingAs(agent: string | null, withResolver = true) {
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => {
+      req.userId = 'u1';
+      req.userEmail = 'a@x.com';
+      next();
+    });
+    app.use(
+      '/api',
+      createSecretsVaultRoutes({
+        kb: testKbContext(),
+        secretsVault: vault,
+        toolManualService: twoTools,
+        accessControl,
+        ...(withResolver ? { agents: resolver } : {}),
+        connectionProbe: {
+          probe: async () => ({ status: 'unverifiable' as const, detail: null, checkedAt: new Date() }),
+        },
+        stateSecret: 'test-secret',
+        publicBackendUrl: 'http://localhost:3000',
+        publicFrontendUrl: 'http://localhost:5173',
+      }),
+    );
+    httpServer = await new Promise<HttpServer>((resolve) => {
+      const s = app.listen(0, () => resolve(s));
+    });
+    const port = (httpServer.address() as { port: number }).port;
+    const query = agent === null ? '' : `?agent=${encodeURIComponent(agent)}`;
+    const res = await fetch(`http://127.0.0.1:${port}/api/connect/pending${query}`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as PendingBody & { toolOAuth: { slug: string }[] };
+    return { tools: body.tools.map((t) => t.slug), signIns: body.toolOAuth.map((o) => o.slug), standalone: body.oauth.map((o) => o.id) };
+  }
+
+  it('lists everything without a choice, as before', async () => {
+    expect(await pendingAs(null)).toEqual({ tools: ['weather'], signIns: ['notion'], standalone: ['s-own'] });
+  });
+
+  it('lists only the connectors the agent loads, and no standalone sign-in', async () => {
+    expect(await pendingAs(AGENT.path)).toEqual({ tools: ['weather'], signIns: [], standalone: [] });
+  });
+
+  it('lists nothing for an agent the person cannot use: a narrowing that cannot be read is never Everything', async () => {
+    expect(await pendingAs('Agents/gone.agent')).toEqual({ tools: [], signIns: [], standalone: [] });
+    // …and the same with no resolver wired at all.
+    expect(await pendingAs(AGENT.path, false)).toEqual({ tools: [], signIns: [], standalone: [] });
+  });
+
+  it('reads an empty or blank choice as Everything', async () => {
+    expect(await pendingAs('  ')).toEqual({ tools: ['weather'], signIns: ['notion'], standalone: ['s-own'] });
   });
 });
 

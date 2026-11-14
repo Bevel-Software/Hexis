@@ -1,0 +1,10 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "general-starter",
+  "displayName": "General starter",
+  "description": "Keep a task list and build up memory of your workplace: the people, projects and shorthand your team uses, kept in the knowledge base so everyone's agent understands them.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Anthropic, adapted for Hexis by Bevel"
+  }
+}

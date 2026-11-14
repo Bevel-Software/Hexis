@@ -43,6 +43,11 @@ export interface ExternalApiKeySummary {
    * its row stays so the Audit log's events keep their principal.
    */
   deletedAt: number | null;
+  /**
+   * The agent configuration the key connects as (a repo-relative knowledge-base
+   * path), or null for Everything — chosen when the key was minted.
+   */
+  agentPath: string | null;
 }
 
 /** Who revoked a key: its owner, or an admin acting across the deployment. */
@@ -97,6 +102,11 @@ export interface KeyKindSpec {
  */
 export interface MintOptions {
   kind?: string;
+  /**
+   * The agent configuration the key connects as, already checked to be one the
+   * owner may choose (`IAgentScopeResolver.choosable`). Absent: Everything.
+   */
+  agentPath?: string;
 }
 
 /**
@@ -138,7 +148,16 @@ export interface IExternalApiKeyService {
    */
   verifyAndLoadToken(
     plaintext: string,
-  ): Promise<{ tokenId: string; user: AuthUser } | null>;
+  ): Promise<{ tokenId: string; user: AuthUser; agentPath?: string | null } | null>;
+
+  /**
+   * For a key {@link verifyAndLoadToken} refused: whether it is a live key
+   * whose account an admin switched off — the one refusal its holder must
+   * not be told to mint a new key over (they cannot; the account is off).
+   * Asked only on the refusal path, so a working key costs nothing more.
+   * Optional: without it every refused key is reported as invalid.
+   */
+  isKeyOfSwitchedOffAccount?(plaintext: string): Promise<boolean>;
 
   /** Active + revoked tokens for the user, newest-first. */
   listForUser(userId: string): Promise<ExternalApiKeySummary[]>;

@@ -14,8 +14,11 @@ import {
 import { cn } from '../../../lib/utils';
 import { Badge, Button, IconButton, MenuItem, MenuPanel } from '../../../shared/components';
 import { useDismissableMenu } from '../../../shared/components';
-import { HEADER_BAND, PAGE_HEADER_TESTID } from '../../../shared/theme/header';
+import { HEADER_BAND, PAGE_HEADER_TESTID, TITLE_INK_ROOM } from '../../../shared/theme/header';
 import { rootAnchoredPath } from '../utils/pasteLink';
+import { displayFileName, fileNameTooltip } from '../utils/display-file-name';
+import { SELF_HOLD_MESSAGE } from '../../version-control';
+import { FullScreenButton } from './FullScreenView';
 
 /**
  * The document's title, and the page's actions beside it.
@@ -36,7 +39,9 @@ import { rootAnchoredPath } from '../utils/pasteLink';
 const KNOWN_EXTENSIONS =
   /\.(md|markdown|txt|csv|tsv|json|yaml|yml|html|htm|pdf|docx|xlsx|pptx|doc|ppt|xls|odt|odp|ods|eml|msg|tool|png|jpe?g|gif|webp|svg)$/i;
 
-function titleOf(path: string): string {
+/** A platform file keeps its plain name whole: "Plugin settings", not a stripped file name. */
+function titleOf(path: string, kbDirName: string | null): string {
+  if (fileNameTooltip(path, kbDirName) !== undefined) return displayFileName(path, kbDirName);
   const base = path.slice(path.lastIndexOf('/') + 1);
   return base.replace(KNOWN_EXTENSIONS, '');
 }
@@ -44,6 +49,8 @@ function titleOf(path: string): string {
 export interface KbPageHeaderProps {
   /** Workspace-relative. */
   path: string;
+  /** The clone folder `path` starts with; what tells a plugin's own manifest from any other `plugin.json`. */
+  kbDirName: string | null;
   /**
    * `boolean | null` — NOT boolean. `useFileAccess` returns null while the
    * lookup is in flight, null when there is no path / kbDirName / workspaceId,
@@ -97,6 +104,11 @@ export interface KbPageHeaderProps {
   titleRef?: Ref<HTMLHeadingElement>;
   /** Disables Edit and explains why via `title`. */
   lockedBy: string | null;
+  /**
+   * The hold behind `lockedBy` is the viewer's own (another tab, their
+   * agent): the title says so instead of naming them as someone else.
+   */
+  lockedByYou?: boolean;
   historyAvailable: boolean;
   /** → "Unsaved" badge. */
   isDirty: boolean;
@@ -123,6 +135,12 @@ export interface KbPageHeaderProps {
   /** The canonical URL, via `useCanonicalFileUrl`. Its sibling, Copy path,
    *  needs nothing from the caller: it is `path`, root-anchored. */
   onCopyLink(): Promise<boolean>;
+  /**
+   * Fill the browser window with the renderer. Given only for a full-bleed
+   * file, which has no pane bar to carry the control; a prose document's bar
+   * carries it beside Edit. Absent, the header offers none.
+   */
+  onFullScreen?: () => void;
 }
 
 /**
@@ -145,6 +163,7 @@ const COPY_FEEDBACK_MS = 1800;
 
 export function KbPageHeader({
   path,
+  kbDirName,
   canWrite,
   editMode,
   entering,
@@ -158,6 +177,7 @@ export function KbPageHeader({
   historyButtonRef,
   titleRef,
   lockedBy,
+  lockedByYou = false,
   historyAvailable,
   isDirty,
   waitingOnAgentUpdate,
@@ -169,6 +189,7 @@ export function KbPageHeader({
   onShare,
   onCopyPage,
   onCopyLink,
+  onFullScreen,
 }: KbPageHeaderProps) {
   const [shareOpen, setShareOpen] = useState(false);
   const [copied, setCopied] = useState<Record<string, CopyState>>({});
@@ -233,8 +254,11 @@ export function KbPageHeader({
           band cannot wrap, so something has to give first, and a file name
           the reader can still hover for (`title`, below) is a far cheaper
           loss than a Share button pushed off the side of the page. The
-          chips clip from the right in the order they are least urgent. */}
-      <div className="flex min-w-0 flex-1 items-center gap-3 overflow-hidden">
+          chips clip from the right in the order they are least urgent. The
+          ink room is on this group as well as on the title inside it: the
+          group clips to the title's line box too, so the tails of g, y and p
+          that the title's own room uncovers would be cut off here instead. */}
+      <div className={`flex min-w-0 flex-1 items-center gap-3 overflow-hidden ${TITLE_INK_ROOM}`}>
         {/* `tabIndex={-1}` keeps the heading out of the tab order while letting
             `.focus()` land on it — the standard way to hand focus to a region
             after a view swap. No focus ring: this is a programmatic landing
@@ -243,11 +267,12 @@ export function KbPageHeader({
           ref={titleRef}
           tabIndex={-1}
           // `title` because `truncate` hides the rest of a long file name, and
-          // a heading you cannot finish reading needs somewhere to say it.
-          title={titleOf(path)}
-          className="min-w-0 truncate text-display font-semibold text-ink focus:outline-none"
+          // a heading you cannot finish reading needs somewhere to say it. A
+          // platform file shown by its plain name hovers its real one.
+          title={fileNameTooltip(path, kbDirName) ?? titleOf(path, kbDirName)}
+          className={`min-w-0 truncate text-display font-semibold text-ink focus:outline-none ${TITLE_INK_ROOM}`}
         >
-          {titleOf(path)}
+          {titleOf(path, kbDirName)}
         </h1>
 
         {/* The three chips the deleted strip used to carry. */}
@@ -420,9 +445,9 @@ export function KbPageHeader({
               disabled={!!lockedBy || entering}
               title={
                 lockedBy
-                  ? `Locked by ${lockedBy}`
+                  ? lockedByYou ? SELF_HOLD_MESSAGE : `${lockedBy} is editing this page`
                   : entering
-                    ? 'Acquiring lock and fetching latest content…'
+                    ? 'Getting the latest version…'
                     : 'Click to edit this file'
               }
               onClick={onEdit}
@@ -449,6 +474,7 @@ export function KbPageHeader({
             <History size={14} />
           </IconButton>
         )}
+        {onFullScreen && <FullScreenButton onEnter={onFullScreen} />}
       </div>
     </div>
   );

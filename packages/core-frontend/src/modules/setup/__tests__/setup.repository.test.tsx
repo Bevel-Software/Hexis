@@ -99,12 +99,12 @@ describe('SetupScreen: the ways of having a repository', () => {
   it('offers them as tabs, in the order the deployment gives', () => {
     show();
     const tabs = within(screen.getByRole('tablist', { name: 'Where the repository is' })).getAllByRole('tab');
-    expect(tabs.map((t) => t.textContent)).toEqual(['Managed for you', 'Address and token']);
+    expect(tabs.map((t) => t.textContent)).toEqual(['Hexis takes care of it', 'Address and token']);
   });
 
   it('opens a new deployment on the first: the repository it keeps itself', () => {
     show();
-    expect(tab('Managed for you')).toHaveAttribute('aria-selected', 'true');
+    expect(tab('Hexis takes care of it')).toHaveAttribute('aria-selected', 'true');
     expect(screen.getByTestId('managed-repository')).toHaveTextContent('There is nothing to connect and nothing to enter');
     // Nothing to type, nothing to test.
     expect(address()).toBeNull();
@@ -122,7 +122,7 @@ describe('SetupScreen: the ways of having a repository', () => {
 
   it('gives each tab a panel of its own', async () => {
     show();
-    for (const name of ['Managed for you', 'Address and token']) {
+    for (const name of ['Hexis takes care of it', 'Address and token']) {
       await userEvent.click(tab(name));
       const panel = document.getElementById(tab(name).getAttribute('aria-controls')!);
       expect(panel).toHaveAttribute('role', 'tabpanel');
@@ -161,7 +161,7 @@ describe('SetupScreen: saving a repository the deployment keeps', () => {
     await userEvent.click(tab('Address and token'));
     await userEvent.type(address()!, 'https://git.example.com/acme/kb.git');
     await userEvent.type(screen.getByLabelText('Access token', { exact: false }), 'a-token');
-    await userEvent.click(tab('Managed for you'));
+    await userEvent.click(tab('Hexis takes care of it'));
     await save();
     await waitFor(() => expect(api.saveSettings).toHaveBeenCalledWith({ gitMode: 'managed' }));
     expect(api.testConnection).not.toHaveBeenCalled();
@@ -177,7 +177,7 @@ describe('SetupScreen: saving a repository the deployment keeps', () => {
     await screen.findByText('The host turned that token down.');
     expect(screen.getByRole('button', { name: 'Save and continue' })).toBeDisabled();
 
-    await userEvent.click(tab('Managed for you'));
+    await userEvent.click(tab('Hexis takes care of it'));
     expect(screen.getByRole('button', { name: 'Save and continue' })).toBeEnabled();
     await save();
     await waitFor(() => expect(api.saveSettings).toHaveBeenCalled());
@@ -223,7 +223,7 @@ describe('SetupScreen: saving a repository reached by its address', () => {
   it('opens the tab a refused address or token is on', async () => {
     api.saveSettings.mockRejectedValue(new SettingsProblems({ gitToken: 'The host turned that token down.' }));
     show({ configured: true, mode: 'managed', variant: 'settings' });
-    expect(tab('Managed for you')).toHaveAttribute('aria-selected', 'true');
+    expect(tab('Hexis takes care of it')).toHaveAttribute('aria-selected', 'true');
     await save();
     expect(await screen.findByText('The host turned that token down.')).toBeInTheDocument();
     expect(tab('Address and token')).toHaveAttribute('aria-selected', 'true');
@@ -233,7 +233,7 @@ describe('SetupScreen: saving a repository reached by its address', () => {
 describe('SetupScreen: moving a deployment to another repository', () => {
   it('says what saving will do, before it is pressed', async () => {
     show({ configured: true, variant: 'settings' });
-    await userEvent.click(tab('Managed for you'));
+    await userEvent.click(tab('Hexis takes care of it'));
     const warning = screen.getByTestId('moves-repository');
     expect(warning).toHaveTextContent('moves this deployment to another repository');
     expect(warning).toHaveTextContent('Nothing is deleted');
@@ -263,13 +263,13 @@ describe('SetupScreen: moving a deployment to another repository', () => {
   it('does not move on a save the admin was not asked about', async () => {
     asksFirst();
     show({ configured: true, variant: 'settings' });
-    await userEvent.click(tab('Managed for you'));
+    await userEvent.click(tab('Hexis takes care of it'));
     await userEvent.type(screen.getByLabelText('Knowledge folder', { exact: false }), 'Docs');
     await save();
 
     // Asked at the button, naming what is left and what is moved to.
     const asked = await question();
-    expect(asked).toHaveTextContent('Move this deployment from “Address and token” to “Managed for you”?');
+    expect(asked).toHaveTextContent('Move this deployment from “Address and token” to “Hexis takes care of it”?');
     expect(asked).toHaveTextContent('Nothing is deleted');
     expect(asked).toHaveTextContent('with no restart');
     // One refused attempt, and the save button waits for the answer.
@@ -280,7 +280,7 @@ describe('SetupScreen: moving a deployment to another repository', () => {
   it('sends the move once the admin has said yes, and nothing of the repository it leaves', async () => {
     asksFirst();
     show({ configured: true, variant: 'settings' });
-    await userEvent.click(tab('Managed for you'));
+    await userEvent.click(tab('Hexis takes care of it'));
     await save();
     await question();
     await confirmMove();
@@ -300,7 +300,7 @@ describe('SetupScreen: moving a deployment to another repository', () => {
         repository={{ mode: 'token', chosen: 'token', modes: ['managed', 'github-app', 'token'] }}
       />,
     );
-    await userEvent.click(tab('Managed for you'));
+    await userEvent.click(tab('Hexis takes care of it'));
     await save();
     await question();
     await confirmMove();
@@ -325,7 +325,7 @@ describe('SetupScreen: moving a deployment to another repository', () => {
         repository={{ mode: 'token', chosen: 'token', modes: ['managed', 'github-app', 'token'] }}
       />,
     );
-    await userEvent.click(tab('Managed for you'));
+    await userEvent.click(tab('Hexis takes care of it'));
     await save();
     await question();
     await userEvent.click(tab('GitHub'));
@@ -336,7 +336,7 @@ describe('SetupScreen: moving a deployment to another repository', () => {
   it('closes the open change requests when the admin picks that, and says so', async () => {
     asksFirst(2);
     show({ configured: true, variant: 'settings' });
-    await userEvent.click(tab('Managed for you'));
+    await userEvent.click(tab('Hexis takes care of it'));
     await save();
     await question();
     await userEvent.click(screen.getByRole('radio', { name: /Close them as/ }));
@@ -354,7 +354,7 @@ describe('SetupScreen: moving a deployment to another repository', () => {
       return { ...saved('managed', true), repositoryChange: { choice: confirm, closedChangeRequests: 0 } };
     });
     show({ configured: true, variant: 'settings' });
-    await userEvent.click(tab('Managed for you'));
+    await userEvent.click(tab('Hexis takes care of it'));
     await save();
     await question();
     expect(screen.queryAllByRole('radio')).toEqual([]);
@@ -369,7 +369,7 @@ describe('SetupScreen: moving a deployment to another repository', () => {
   it('cancelling leaves the deployment where it is', async () => {
     asksFirst(2);
     show({ configured: true, variant: 'settings' });
-    await userEvent.click(tab('Managed for you'));
+    await userEvent.click(tab('Hexis takes care of it'));
     await save();
     expect(await question()).toHaveTextContent('There are 2 open change requests.');
     await userEvent.click(screen.getByRole('button', { name: 'Cancel' }));
@@ -381,7 +381,7 @@ describe('SetupScreen: moving a deployment to another repository', () => {
   it('asks nothing of a save that stays where the deployment is', async () => {
     api.saveSettings.mockResolvedValue(saved('token', true));
     show({ configured: true, variant: 'settings' });
-    await userEvent.click(tab('Managed for you'));
+    await userEvent.click(tab('Hexis takes care of it'));
     await userEvent.click(tab('Address and token'));
     await userEvent.type(screen.getByLabelText('Knowledge folder', { exact: false }), 'Docs');
     await save();
@@ -394,7 +394,7 @@ describe('SetupScreen: moving a deployment to another repository', () => {
     show();
     await userEvent.click(tab('Address and token'));
     expect(screen.queryByTestId('moves-repository')).toBeNull();
-    await userEvent.click(tab('Managed for you'));
+    await userEvent.click(tab('Hexis takes care of it'));
     await save();
     await waitFor(() => expect(api.saveSettings).toHaveBeenCalledWith({ gitMode: 'managed' }));
     expect(screen.queryByTestId('repository-change-confirm')).toBeNull();
@@ -409,7 +409,7 @@ describe('SetupScreen: moving a deployment to another repository', () => {
 describe('SetupScreen: a way chosen that is not in effect yet', () => {
   it('opens on the way chosen, and says the deployment is still on the one it has', () => {
     show({ configured: true, mode: 'token', chosen: 'managed', variant: 'settings' });
-    expect(tab('Managed for you')).toHaveAttribute('aria-selected', 'true');
+    expect(tab('Hexis takes care of it')).toHaveAttribute('aria-selected', 'true');
     const pending = screen.getByTestId('move-pending');
     expect(pending).toHaveTextContent('A restart is pending');
     expect(pending).toHaveTextContent('still working on “Address and token”');
@@ -446,12 +446,12 @@ describe('SetupScreen: a way chosen that is not in effect yet', () => {
 describe('SetupScreen: a way chosen by the environment', () => {
   it('shows the other ways as not the screen to choose, and says which variable chose', async () => {
     show({ mode: 'managed', pinned: 'GIT_MODE', variant: 'settings' });
-    expect(tab('Managed for you')).toHaveAttribute('aria-selected', 'true');
-    expect(tab('Managed for you')).toBeEnabled();
+    expect(tab('Hexis takes care of it')).toHaveAttribute('aria-selected', 'true');
+    expect(tab('Hexis takes care of it')).toBeEnabled();
     expect(tab('Address and token')).toBeDisabled();
     expect(screen.getByTestId('repository-pinned')).toHaveTextContent('Set by the GIT_MODE environment variable');
     await userEvent.click(tab('Address and token'));
-    expect(tab('Managed for you')).toHaveAttribute('aria-selected', 'true');
+    expect(tab('Hexis takes care of it')).toHaveAttribute('aria-selected', 'true');
     expect(screen.queryByTestId('repository-change-confirm')).toBeNull();
   });
 

@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useState } from 'react';
 import { Download } from 'lucide-react';
 import { Button } from '../../../../shared/components';
 import { useRendererFileRef, useRendererWorkspaceId } from './rendererWorkspace';
+import { useRendererSurface } from './rendererSurface';
 import { rawFileUrl } from '../../services/workspace.api';
 import { downloadViaBlob } from './downloadFile';
 
@@ -68,6 +69,7 @@ export function DownloadFileButton({
    */
   const versionRef = fileRef?.ref ?? null;
   const versionSide = fileRef?.side;
+  const surface = useRendererSurface();
   const canDownload = useContext(CanDownloadContext);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -97,6 +99,10 @@ export function DownloadFileButton({
       setBusy(false);
     }
   }, [workspaceId, busy, pending, filePath, fileName, versionRef, versionSide]);
+
+  // A surface that has no download route draws no download control — see
+  // `offersDownload`. After the hooks, never before them.
+  if (surface && !surface.offersDownload) return null;
 
   return (
     <span className="inline-flex items-center gap-2">

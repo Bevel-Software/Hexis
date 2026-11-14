@@ -16,6 +16,22 @@ export {
   useRendererFileRef,
   type RendererFileRef,
 } from './rendererWorkspace';
+// A surface that mounts these renderers outside the app (the embed) and
+// what a renderer asks of it: the one door for both, so a surface is built
+// and a renderer is tested through this module's entry, never its files.
+export { RendererSurfaceContext, useRendererSurface, type RendererRawRead, type RendererSurface } from './rendererSurface';
+export { CanDownloadContext } from './DownloadFileButton';
+// The page tool bridge, for every renderer that shows an HTML page: the one
+// controller a renderer calls for a page's `window.bevel.tools`, and the two
+// contexts a host provides it through (the file page's tools; a skill
+// page's way to the platform). A renderer and its tests need nothing else.
+export {
+  useHtmlToolBridge,
+  type HtmlToolBridgeOptions,
+  type HtmlToolBridgeResult,
+} from './useHtmlToolBridge';
+export { OpenPageInPlatformContext, PageToolsContext, type PageTools } from './htmlToolBridge';
+export { useKbGraphLoader } from './kbGraphLoader';
 
 /**
  * The document viewers are code-split: their parsers (xlsx ~141 KB gzip,
@@ -244,4 +260,30 @@ const VIEW_ONLY_EXTENSIONS = new Set([
 
 export function isViewOnlyFile(filePath: string): boolean {
   return VIEW_ONLY_EXTENSIONS.has(filePath.slice(filePath.lastIndexOf('.')).toLowerCase());
+}
+
+/**
+ * The renderer a surface should mount for `filePath`: a deployment's own
+ * override for that extension when it registered one, else the built-in map
+ * above.
+ *
+ * ONE lookup, because "which renderer draws this file" has to have one
+ * answer. The file page, Version history and the embed each used to spell the
+ * precedence out — and the embed is the reason it matters: the whole promise
+ * of the page-in-chat is that it renders with the app's renderer for the
+ * type, a registered one included, so a second spelling here would be a
+ * second answer and the embed would be the one that lagged.
+ */
+export function pickFileRenderer(
+  filePath: string,
+  overrides: readonly { extensions: string[]; Component: ComponentType<FileRendererProps> }[] = [],
+): ComponentType<FileRendererProps> {
+  // The access rules file is plain text on every surface, whatever a
+  // deployment registered for `.md`: rules rendered as a page could hide or
+  // misstate what they grant.
+  const name = filePath.slice(filePath.lastIndexOf('/') + 1).toLowerCase();
+  if (name === ACCESS_RULES_FILE) return TextRenderer;
+  const ext = filePath.slice(filePath.lastIndexOf('.')).toLowerCase();
+  const override = overrides.find((r) => r.extensions.includes(ext));
+  return override?.Component ?? getFileRenderer(filePath);
 }

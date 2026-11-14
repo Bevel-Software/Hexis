@@ -4,10 +4,9 @@ import {
   suggestionsBranchPrefixFor,
   type PullRequestSummary,
 } from '@bevel-software/platform-shared';
-import { createBranch, deleteBranch, GitApiError } from '../../git/services/git.api';
-import { getOrCreateWorkspace, writeFile } from '../../workspace/services/workspace.api';
-import { openChangeRequest } from '../../pr/services/pr-open.api';
-import { fetchPrDetail } from '../../pr/services/pr-detail.api';
+import { createBranch, deleteBranch, GitApiError } from '../../git';
+import { getOrCreateWorkspace, writeFile } from '../../workspace';
+import { openChangeRequest, fetchPrDetail } from '../../pr';
 import { listMyChangeRequests } from './change-requests.api';
 
 /** The default branch's workspace id (id = encodeURIComponent(branch)), read lazily. */

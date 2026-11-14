@@ -4,8 +4,8 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { NodeFs } from '../../kb-fs/node-fs.js';
-import { WorkspaceService } from '../workspace.service.js';
 import type { IGitRunner } from '../../../shared/git.contract.js';
+import { newWorkspaceService } from '../../../__tests__/workspace-service.js';
 
 /**
  * `ensureRemotesFetched` is one `git fetch --prune origin` for a whole clone,
@@ -42,7 +42,7 @@ describe('WorkspaceService.ensureRemotesFetched', () => {
   });
 
   const service = () =>
-    new WorkspaceService(
+    newWorkspaceService(
       root,
       'https://example.test/kb.git',
       testKbContext(),
@@ -105,5 +105,35 @@ describe('WorkspaceService.ensureRemotesFetched', () => {
     await both;
 
     expect(fetches().length - beforeTheRace).toBe(1);
+  });
+
+  // What an AUTHORIZING caller (`changeRequestDecisionGrant`) relies on: a
+  // warm cache must not stand in for a refresh that failed. `strict` alone
+  // answers from the window without fetching, so only `strict + force` turns
+  // an origin outage into a refusal instead of a check against older refs.
+  it('strict + force refuses when the refresh fails, even with a warm cache', async () => {
+    let failing = false;
+    runner = {
+      defaultTimeoutMs: 1000,
+      run: vi.fn(async (_cwd: string, args: string[]) => {
+        runs.push(args);
+        if (failing && args[0] === 'fetch') throw new Error('origin unreachable');
+        return { stdout: '', stderr: '' };
+      }),
+      // Read by the failure log, which redacts the token from the error.
+      credentials: { token: () => null },
+    } as unknown as IGitRunner;
+    const svc = service();
+    await svc.ensureRemotesFetched('main', { strict: true }); // warms the window
+    failing = true;
+
+    // Inside the window, strict alone does not even try the remote.
+    await expect(svc.ensureRemotesFetched('main', { strict: true })).resolves.toBeUndefined();
+    expect(fetches()).toHaveLength(1);
+
+    await expect(svc.ensureRemotesFetched('main', { strict: true, force: true })).rejects.toThrow(
+      /could not be refreshed/,
+    );
+    expect(fetches()).toHaveLength(2);
   });
 });

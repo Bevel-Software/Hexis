@@ -2,13 +2,17 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Badge, Banner, Button, Surface, TextField } from '../../../shared/components';
 import { cn } from '../../../lib/utils';
-import { LIBRARY_ROOT, pathForTool } from '../../library/routes/library-paths';
+import { pathForTool, readOAuthFragment } from '../../library';
 import { ToolLogo } from '../../library/components/ToolLogo';
 import { startOAuth } from '../services/secrets.api';
-import { setUserVar, setAdminVar, deleteUserVar, setOAuthClientSecret } from '../services/tool-secrets.api';
+import { setUserVar, setAdminVar, deleteUserVar, deleteAdminVar, setOAuthClientSecret } from '../services/tool-secrets.api';
 import { SavedKeyProbeResult } from '../probe/SavedKeyProbeResult';
 import { useSavedKeyProbe, type SavedKeyProbe } from '../probe/useSavedKeyProbe';
 import { announceToolCredentialsChanged } from '../../../core/events';
+import { useAppRegistry } from '../../../core/registry';
+import { SlotBoundary } from '../../../shared/components/SlotBoundary';
+import { useConnectAsChoice } from '../../agents';
+import { ConnectAsChoice } from '../../agents/components/ConnectAsChoice';
 import {
   getConnectPending,
   startToolOAuth,
@@ -18,6 +22,9 @@ import {
   type ConnectOAuth,
   type ConnectToolOAuth,
 } from '../services/connect.api';
+import { ManagedConnectorCard } from './ManagedConnectorCard';
+import { IncludeToggle } from './IncludeToggle';
+import { canBringOwnApp, isManagedRow } from '../utils/managed-card-state';
 import {
   isActionable,
   outstandingCount,
@@ -32,6 +39,20 @@ import {
  * alive across that round-trip. Cleared on Finish or when the state goes stale.
  */
 const MCP_OAUTH_STATE_KEY = 'mcp-oauth-state';
+/** The "Connect as" choice made on the way, kept beside the state for the same round-trip. */
+const MCP_OAUTH_AGENT_KEY = 'mcp-oauth-agent';
+
+/**
+ * The choice to start from: the one made earlier in THIS authorization (the
+ * page came back from a tool sign-in, its query stripped), else Everything —
+ * an authorization arriving in the address that is not the remembered one is
+ * a new connection, and starts at Everything.
+ */
+function rememberedConnectAs(): string | null {
+  const fromUrl = new URLSearchParams(window.location.search).get('oauth');
+  if (fromUrl && fromUrl !== sessionStorage.getItem(MCP_OAUTH_STATE_KEY)) return null;
+  return sessionStorage.getItem(MCP_OAUTH_AGENT_KEY);
+}
 
 /**
  * "Connect your tools" — the page a person lands on from the needs-authorization
@@ -84,10 +105,28 @@ export function ConnectToolsPage() {
   /** A refetch is in flight over a list that is already on screen. */
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  // The outcome of a sign-in that came back to this page, read ONCE from the
+  // fragment on arrival with the Library's reader (the contract the tool page
+  // follows: synchronously, before the effect below strips it).
+  const [outcome] = useState(readOAuthFragment);
+  // "Signed in", not "Connected": the sign-in landing here proves a token was
+  // issued, not that a call with it will succeed.
+  const [notice] = useState<string | null>(
+    outcome?.kind === 'authorized' ? 'Signed in. You can go back to your agent and try again.' : null,
+  );
+  // A sign-in's refusal. Its own state, like `notice`, because the first load
+  // answers moments later and a successful load clears `error` — which used to
+  // wipe this before anyone saw it.
+  const [returnError] = useState<string | null>(outcome?.kind === 'error' ? outcome.message : null);
   // Agent-connect mode: the signed authorization state + who is asking.
   const [agentState, setAgentState] = useState<string | null>(null);
   const [agentName, setAgentName] = useState<string | null>(null);
+  // "Connect as": the agents on offer and the choice — Everything unless the
+  // person picks one — kept across a tool sign-in's round-trip
+  // (`rememberedConnectAs`). Finish waits until the CURRENT request's agents
+  // have answered (before that it would approve Everything unseen), and for
+  // Everything to be confirmed when they could not be loaded.
+  const connectAs = useConnectAsChoice({ initial: rememberedConnectAs, expect: agentState });
   const [finishing, setFinishing] = useState(false);
   // Entries the user took OUT. Everything the server sent is in by default —
   // it used to be the other way round, and an unconfigured tool the reader had
@@ -95,6 +134,9 @@ export function ConnectToolsPage() {
   // from "4 integrations need setup" came to show two.
   const [skipped, setSkipped] = useState<Set<string>>(new Set());
   const [wiping, setWiping] = useState<Set<string>>(new Set());
+  // The distribution's foot of the page (which connectors it offers, and
+  // enabling one), when it registers one. See `AppRegistry.connectPanel`.
+  const ConnectPanel = useAppRegistry().connectPanel;
 
   /**
    * Which load is allowed to publish. Saving a key refreshes, and so does the
@@ -106,6 +148,14 @@ export function ConnectToolsPage() {
    * the probe itself follows, for the same reason.
    */
   const loadSeq = useRef(0);
+
+  // The agent the list is for: the "Connect as" choice, in agent-connect mode
+  // only. A connection made as an agent loads only the connectors its file
+  // lists, so the page asks for the sign-ins and keys of those and no other —
+  // asking for hubspot's sign-in on the way to an agent that never loads
+  // hubspot sends the person off to sign in for nothing. Everything (null)
+  // lists what it always listed.
+  const chosenAgent = agentState != null ? connectAs.value : null;
 
   /**
    * @param quiet keep the list on screen while it refetches.
@@ -121,7 +171,7 @@ export function ConnectToolsPage() {
     if (!quiet) setLoading(true);
     setRefreshing(true);
     try {
-      const pending = await getConnectPending();
+      const pending = await getConnectPending(chosenAgent);
       if (loadSeq.current !== mine) return;
       setTools(pending.tools);
       setOauth(pending.oauth);
@@ -137,17 +187,29 @@ export function ConnectToolsPage() {
         setRefreshing(false);
       }
     }
-  }, []);
+  }, [chosenAgent]);
 
+  // The first load, loud; and again, quietly, whenever the choice changes —
+  // `refresh` is remade for the chosen agent, and the list on screen is the
+  // other agent's until the new one answers, which is the one case a loud
+  // reload would have nothing to protect (no row holds a probe's verdict
+  // for a list that is about to be replaced) and still nothing to gain.
+  const loadedOnce = useRef(false);
   useEffect(() => {
-    void refresh();
+    const quiet = loadedOnce.current;
+    loadedOnce.current = true;
+    void refresh(quiet);
   }, [refresh]);
 
   // Pick up (and persist) the external-agent authorization state.
   useEffect(() => {
     const fromUrl = new URLSearchParams(window.location.search).get('oauth');
     if (fromUrl) {
+      // A NEW authorization starts at Everything (see `rememberedConnectAs`):
+      // a choice remembered from another one is not this connection's.
+      if (sessionStorage.getItem(MCP_OAUTH_STATE_KEY) !== fromUrl) sessionStorage.removeItem(MCP_OAUTH_AGENT_KEY);
       sessionStorage.setItem(MCP_OAUTH_STATE_KEY, fromUrl);
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- the query is read once, on arrival
       setAgentState(fromUrl);
     } else {
       setAgentState(sessionStorage.getItem(MCP_OAUTH_STATE_KEY));
@@ -156,46 +218,44 @@ export function ConnectToolsPage() {
 
   // Resolve who is asking; a stale/expired state silently drops the mode (the
   // agent restarts the flow if the user takes too long).
+  const settleConnectAs = connectAs.settle;
   useEffect(() => {
     if (!agentState) return;
     let cancelled = false;
     getMcpOAuthRequest(agentState)
       .then((r) => {
-        if (!cancelled) setAgentName(r.clientName);
+        if (cancelled) return;
+        setAgentName(r.clientName);
+        settleConnectAs({ agents: r.agents ?? [], failed: r.agentsUnavailable === true }, agentState);
       })
       .catch(() => {
         if (cancelled) return;
         sessionStorage.removeItem(MCP_OAUTH_STATE_KEY);
+        sessionStorage.removeItem(MCP_OAUTH_AGENT_KEY);
         setAgentState(null);
         setAgentName(null);
       });
     return () => {
       cancelled = true;
     };
-  }, [agentState]);
+  }, [agentState, settleConnectAs]);
 
-  // Surface the OAuth-callback outcome carried in the URL fragment (same contract
-  // the Secrets page uses — the callback lands on whichever page started it).
+  // A sign-in came back to this page (the callback lands on whichever page
+  // started it): the fragment it carried is stripped, now that it has been
+  // read, and the Library is told. Whichever way the round-trip went, a
+  // provider has just had its say about a sign-in this page did not perform
+  // itself — so the Library's view of the tool is from before the browser
+  // left.
   useEffect(() => {
-    const hash = window.location.hash.replace(/^#/, '');
-    if (!hash) return;
-    const params = new URLSearchParams(hash);
-    // "Signed in", not "Connected": the sign-in landing here proves a token was
-    // issued, not that a call with it will succeed.
-    if (params.has('authorized')) setNotice('Signed in. You can go back to your agent and try again.');
-    else if (params.has('error')) setError(params.get('error') || 'Authorization failed.');
-    if (params.has('authorized') || params.has('error')) {
-      window.history.replaceState(null, '', window.location.pathname + window.location.search);
-      // Whichever way the round-trip went, a provider has just had its say
-      // about a sign-in this page did not perform itself — so the Library's
-      // view of the tool is from before the browser left.
-      announceToolCredentialsChanged();
-    }
-  }, []);
+    if (!outcome) return;
+    window.history.replaceState(null, '', window.location.pathname + window.location.search);
+    announceToolCredentialsChanged();
+  }, [outcome]);
 
   const onAuthorize = async (id: string) => {
     try {
       const url = await startOAuth(id);
+      // eslint-disable-next-line react-hooks/immutability -- leaving for the provider is the point
       window.location.href = url;
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -205,18 +265,45 @@ export function ConnectToolsPage() {
   const onAuthorizeTool = async (slug: string, varName: string) => {
     try {
       const url = await startToolOAuth(slug, varName);
+      // eslint-disable-next-line react-hooks/immutability -- leaving for the provider is the point
       window.location.href = url;
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
   };
 
+  /**
+   * Disconnect a managed connector: the server revokes the token with the
+   * provider where it can, then deletes it here. A WORKSPACE connection is
+   * the shared row, which only a writer may remove (the server enforces it;
+   * the card offers the button to the same people).
+   */
+  const onDisconnectManaged = async (o: ConnectToolOAuth) => {
+    const id = signInId(o);
+    setWiping((s) => new Set(s).add(id));
+    try {
+      if (o.managed?.tokenScope === 'shared') await deleteAdminVar(o.slug, o.varName);
+      else await deleteUserVar(o.slug, o.varName);
+      announceToolCredentialsChanged();
+      await refresh(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setWiping((s) => {
+        const nextSet = new Set(s);
+        nextSet.delete(id);
+        return nextSet;
+      });
+    }
+  };
+
   const onFinish = async () => {
-    if (!agentState) return;
+    if (!agentState || !connectAs.mayConnect) return;
     setFinishing(true);
     try {
-      const redirectTo = await completeMcpOAuth(agentState);
+      const redirectTo = await completeMcpOAuth(agentState, connectAs.value);
       sessionStorage.removeItem(MCP_OAUTH_STATE_KEY);
+      sessionStorage.removeItem(MCP_OAUTH_AGENT_KEY);
       window.location.href = redirectTo;
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -296,19 +383,17 @@ export function ConnectToolsPage() {
   const outstanding = outstandingCount(listing) + standaloneOutstanding(listing);
   const nothingToDo =
     !loading && tools.length === 0 && oauth.length === 0 && toolOAuth.length === 0;
+  // Managed connectors get a card of their own (what they do, what they ask
+  // for); every other sign-in stays a row under "Sign-ins".
+  const connectors = toolOAuth.filter(isManagedRow);
+  const plainSignIns = toolOAuth.filter((o) => !o.managed);
 
+  // A document, like every Skills & Tools page: `LibraryLayout`'s pane is the
+  // scroller. The header sticks to the top of that pane, so the title and
+  // Refresh stay in reach down a long list instead of scrolling away with it.
   return (
-    <div className="flex h-full flex-col bg-canvas text-ink">
-      <header className="flex shrink-0 items-center gap-3 border-b border-line px-8 py-4">
-        {/* The one page that had NO way back: it is reached from the library's
-            "Finish setup" and from tool pages, and stranded everyone it
-            helped. The Library is where every one of those journeys starts. */}
-        <Link
-          to={LIBRARY_ROOT}
-          className="rounded-xs text-detail text-ink-muted hover:text-ink"
-        >
-          {'‹ Skills & tools'}
-        </Link>
+    <div className="flex flex-col bg-canvas text-ink">
+      <header className="sticky top-0 z-10 flex shrink-0 items-center gap-3 border-b border-line bg-canvas px-8 py-4">
         <h1 className="text-strong font-semibold text-ink">Connect your tools</h1>
         {/* Quiet, like the refetch a save triggers. A loud one drops the page
             to "Loading…", which unmounts the row holding the verdict of the
@@ -326,7 +411,7 @@ export function ConnectToolsPage() {
         </Button>
       </header>
 
-      <div className="flex-1 overflow-y-auto px-8 py-6">
+      <div className="px-8 py-6">
         <div className="max-w-2xl">
           {agentMode && (
             <Surface tone="surface" radius="xl" elevation="card" padded className="mb-4">
@@ -346,11 +431,25 @@ export function ConnectToolsPage() {
                   variant="primary"
                   size="sm"
                   className="shrink-0"
-                  disabled={finishing}
+                  disabled={finishing || !connectAs.mayConnect}
                   onClick={() => void onFinish()}
                 >
                   {finishing ? 'Finishing…' : 'Finish & return to your agent'}
                 </Button>
+              </div>
+              <div className="mt-4">
+                <ConnectAsChoice
+                  agents={connectAs.agents}
+                  value={connectAs.value}
+                  disabled={finishing}
+                  hint="What this connection loads. An agent narrows it to the tools, skills and plugins its configuration lists, and only those you may read."
+                  onChange={(path) => {
+                    connectAs.setValue(path);
+                    if (path) sessionStorage.setItem(MCP_OAUTH_AGENT_KEY, path);
+                    else sessionStorage.removeItem(MCP_OAUTH_AGENT_KEY);
+                  }}
+                  unavailable={connectAs.unavailable}
+                />
               </div>
             </Surface>
           )}
@@ -358,6 +457,11 @@ export function ConnectToolsPage() {
           {error && (
             <Banner role="alert" tone="danger" className="mb-3">
               {error}
+            </Banner>
+          )}
+          {returnError && (
+            <Banner role="alert" tone="danger" className="mb-3">
+              {returnError}
             </Banner>
           )}
           {notice && (
@@ -371,11 +475,13 @@ export function ConnectToolsPage() {
               so before they wonder why a row has no field. */}
           {!nothingToDo && (
             <p className="mb-5 text-ui text-ink-muted">
-              These tools need a sign-in or a key before they will work in your agent. Authorize
-              each connection and enter any keys below, then head back to your agent and run the
-              tool again. Anything greyed out is not yours to do — it is waiting on the tool&apos;s
-              owner, or you took it out yourself. Your values are stored securely and never shown
-              again after saving.
+              {chosenAgent
+                ? 'These are the tools the chosen agent loads that need a sign-in or a key before they will work in your agent. '
+                : 'These tools need a sign-in or a key before they will work in your agent. '}
+              Authorize each connection and enter any keys below, then head back to your agent and
+              run the tool again. Anything greyed out is not yours to do — it is waiting on the
+              tool&apos;s owner, or you took it out yourself. Your values are stored securely and
+              never shown again after saving.
             </p>
           )}
 
@@ -387,7 +493,9 @@ export function ConnectToolsPage() {
               // every shared tool works without a personal credential, so the
               // user's only job is to finish.
               <Banner role="status" tone="ok">
-                You&apos;re all set: none of your tools need a personal sign-in or key. Click
+                {chosenAgent
+                  ? 'You’re all set: none of the tools the chosen agent loads need a personal sign-in or key. Click '
+                  : 'You’re all set: none of your tools need a personal sign-in or key. Click '}
                 “Finish &amp; return to your agent” above to complete the connection.
               </Banner>
             ) : (
@@ -406,10 +514,49 @@ export function ConnectToolsPage() {
                 </Banner>
               )}
 
-              {(toolOAuth.length > 0 || oauth.length > 0) && (
+              {connectors.length > 0 && (
+                <Section title="Connectors">
+                  {connectors.map((o) => (
+                    <ManagedConnectorCard
+                      key={o.key}
+                      o={o}
+                      busy={wiping.has(signInId(o))}
+                      // Include/skip, as every sign-in row has it: skipping a
+                      // personal sign-in removes the caller's own token (the
+                      // same wipe as a row's). A workspace connection is
+                      // everyone's and cannot be "skipped by you": nothing
+                      // takes a shared token out of one agent's connection,
+                      // so the card offers no toggle rather than a hollow one.
+                      on={isOn(signInId(o))}
+                      onToggle={
+                        o.managed.tokenScope === 'shared'
+                          ? undefined
+                          : () =>
+                              void onToggle(signInId(o), o.authorized, async (removed) => {
+                                await deleteUserVar(o.slug, o.varName);
+                                removed();
+                              })
+                      }
+                      onConnect={() => void onAuthorizeTool(o.slug, o.varName)}
+                      onDisconnect={() => void onDisconnectManaged(o)}
+                      onOwnApp={
+                        canBringOwnApp(o)
+                          ? async (clientId, clientSecret) => {
+                              await setOAuthClientSecret(o.slug, o.varName, clientSecret, clientId);
+                              announceToolCredentialsChanged();
+                              await refresh(true);
+                            }
+                          : undefined
+                      }
+                    />
+                  ))}
+                </Section>
+              )}
+
+              {(plainSignIns.length > 0 || oauth.length > 0) && (
                 <Section title="Sign-ins">
                   {/* OAuth-backed tool variables — authorized via the tool-scoped flow. */}
-                  {toolOAuth.map((o) => {
+                  {plainSignIns.map((o) => {
                     const id = signInId(o);
                     const on = isOn(id);
                     // The provider was never registered, so there is no consent
@@ -589,6 +736,21 @@ export function ConnectToolsPage() {
               )}
             </>
           )}
+
+          {/* The distribution's foot of the page — which connectors it offers
+              and enabling one — rendered whatever the lists above hold: a
+              reader with nothing to set up is exactly who comes here to
+              enable something. */}
+          {ConnectPanel && !loading && (
+            <SlotBoundary label="connect panel">
+              <ConnectPanel
+                onChanged={() => {
+                  announceToolCredentialsChanged();
+                  void refresh(true);
+                }}
+              />
+            </SlotBoundary>
+          )}
         </div>
       </div>
     </div>
@@ -719,32 +881,6 @@ function ConnectRow(props: RowHeadProps) {
     <Surface tone="surface" radius="lg" elevation="none" padded className="border border-line">
       <ConnectRowHead {...props} />
     </Surface>
-  );
-}
-
-/** Include/skip checkbox for a tool or sign-in row. */
-function IncludeToggle({
-  on,
-  busy,
-  onChange,
-}: {
-  on: boolean;
-  busy: boolean;
-  onChange: () => void;
-}) {
-  const label = on
-    ? 'Skip this tool (removes your saved keys and sign-ins for it)'
-    : 'Include this tool';
-  return (
-    <input
-      type="checkbox"
-      checked={on}
-      disabled={busy}
-      onChange={onChange}
-      title={label}
-      aria-label={label}
-      className="size-3.5 shrink-0 accent-accent disabled:opacity-40"
-    />
   );
 }
 

@@ -75,6 +75,27 @@ describe('AccountPage', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Change password' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('Current password is incorrect');
   });
+
+  it('disables the submit while a change is in flight, and sends one change for a double click', async () => {
+    let finish!: () => void;
+    vi.mocked(changePassword).mockImplementation(
+      () => new Promise<void>((resolve) => (finish = resolve)),
+    );
+    renderPage();
+    await userEvent.type(screen.getByLabelText(/Current password/), 'old-password');
+    await userEvent.type(screen.getByLabelText(/New password/), 'new-password-1');
+    await userEvent.type(screen.getByLabelText(/Confirm new password/), 'new-password-1');
+    await userEvent.dblClick(screen.getByRole('button', { name: 'Change password' }));
+    // A second submit straight from the form, as a click landing before the
+    // disabled button rendered would be.
+    screen.getByRole('button', { name: 'Saving…' }).closest('form')!.requestSubmit();
+    expect(screen.getByRole('button', { name: 'Saving…' })).toBeDisabled();
+    expect(changePassword).toHaveBeenCalledTimes(1);
+
+    finish();
+    expect(await screen.findByRole('status')).toHaveTextContent('Password changed.');
+    expect(screen.getByRole('button', { name: 'Change password' })).toBeEnabled();
+  });
 });
 
 /**

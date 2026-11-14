@@ -1,7 +1,7 @@
 import { useId, useState, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import { Funnel, RotateCw, Trash2 } from 'lucide-react';
-import { useAdmin } from '../../admin/state/admin.context';
+import { useAdmin } from '../../admin';
 import { cn } from '../../../lib/utils';
 import { Banner, Button, Dialog, IconButton } from '../../../shared/components';
 import { pathForPluginsIndex } from '../routes/library-paths';

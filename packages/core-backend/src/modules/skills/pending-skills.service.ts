@@ -1,12 +1,11 @@
-import type { KbLayout } from '@bevel-software/platform-shared';
-import { type WorkspaceService } from '../workspace/workspace.service.js';
-import type { IAccessControl } from '../access/access-control.interface.js';
+import type { KbLayout, IVersionControlService } from '@bevel-software/platform-shared';
+import { type WorkspaceService } from '../workspace/index.js';
+import type { IAccessControl } from '../access/index.js';
 import type { KbContext } from '../../shared/kb-context.js';
 import { resolveDeclaredId } from '../../shared/frontmatter-id.js';
 import { visibleProposedFiles } from '../../shared/pending-proposals.js';
 import { isSafeSkillName, parseSkillFrontmatter } from './skills.service.js';
 import type { IPendingSkillService, ISkillService, PendingSkill } from './skills.contract.js';
-import type { IWorkflowService } from '@bevel-software/platform-shared';
 
 const SKILL_DOC = 'SKILL.md';
 
@@ -37,7 +36,7 @@ export class PendingSkillsService implements IPendingSkillService {
     private readonly workspaceService: WorkspaceService,
     private readonly accessControl: IAccessControl,
     private readonly skillService: ISkillService,
-    private readonly workflow: IWorkflowService,
+    private readonly versionControl: IVersionControlService,
     private readonly kb: KbContext,
   ) {}
 
@@ -58,7 +57,7 @@ export class PendingSkillsService implements IPendingSkillService {
       {
         workspaceService: this.workspaceService,
         accessControl: this.accessControl,
-        workflow: this.workflow,
+        versionControl: this.versionControl,
         kb: this.kb,
       },
       userEmail,

@@ -295,7 +295,9 @@ supported: save the file and link it.
 ## Local development (run from source)
 
 You need: **Node 22.13 or newer** (`.nvmrc`; the engine range is `>=22.13 <23`),
-**pnpm 10**, **git ≥ 2.41**, and a Postgres 17 (the bundled one is fine):
+**pnpm 10**, **git ≥ 2.41**, **ripgrep** (`rg` on your PATH — the agents' `grep` tool
+searches with it, and the server and the backend test suites refuse to run
+without it), and a Postgres 17 (the bundled one is fine):
 
 ```sh
 docker compose up -d db        # just the database

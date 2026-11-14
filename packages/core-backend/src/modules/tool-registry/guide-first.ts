@@ -1,3 +1,4 @@
+import { splitCallLine } from '@bevel-software/platform-mcp-core';
 import type { UtcpTool } from './tool.contract.js';
 
 /** The one tool that returns the platform's guide (see `modules/agent-guide`). */
@@ -19,9 +20,15 @@ export const GUIDE_FIRST_SENTENCE = `Call \`${GET_AGENT_GUIDE_TOOL}\` first and 
  * sentence is put in front of a description — the registry for the tools it
  * lists, the MCP service for the meta-tools it builds itself — so the two
  * cannot drift apart on what "once" means.
+ *
+ * Behind a `Call:` line, never ahead of it: the call example is the first
+ * line of every description (see mcp-core's `withCallExample`), and the
+ * sentence opens what follows it.
  */
 export function guideFirstDescription(description: string | undefined): string {
-  const own = description ?? '';
+  const { call, rest } = splitCallLine(description ?? '');
+  if (call !== null) return `${call}\n\n${guideFirstDescription(rest)}`;
+  const own = rest;
   if (own.startsWith(GUIDE_FIRST_SENTENCE)) return own;
   return own ? `${GUIDE_FIRST_SENTENCE} ${own}` : GUIDE_FIRST_SENTENCE;
 }

@@ -1,14 +1,13 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { LEGACY_AGENTS_FILE } from '@bevel-software/platform-shared';
 import type { IFsProbe, ITreeWalker } from '../../../../shared/fs.contract.js';
-import type { KbContext } from '../../../../shared/kb-context.js';
-import { renderRolesYaml } from '../../../access-model/render-roles-yaml.js';
+import { renderRolesYaml } from '../../../access-model/index.js';
 import { reservedRootDirs } from './template-files.step.js';
-import { TEMPLATE_SOURCE_FALLBACKS, TemplateSource, renderTemplateText } from './template-source.js';
+import { TEMPLATE_SOURCE_FALLBACKS, TemplateSource, renderTemplateText, type TemplateKb } from './template-source.js';
 import { assertNotGitInternals, hasGitInternalsSegment } from '../../../../shared/git-internals.js';
 import { GitInternalsError } from '../../../../shared/domain-errors.js';
-import { isManagedGuide } from '../../../agent-guide/agent-guide.js';
+import { isManagedGuide } from '../../../agent-guide/index.js';
+import { utf8Text } from '../../../../shared/utf8-text.js';
 
 /**
  * The empty-remote seed builder the runner takes as `buildSeedTree`: the full
@@ -35,7 +34,7 @@ export function buildSeedTree(
   extraRootDirs: readonly string[],
   seedAdminEmails: readonly string[],
   /** Read per seed, never captured: the setup-completing save may apply the layout after this builder was composed. */
-  kb: Pick<KbContext, 'layout'>,
+  kb: TemplateKb,
 ): (dir: string) => Promise<string[]> {
   // Validated eagerly; resolved per seed.
   reservedRootDirs(extraRootDirs, kb.layout);
@@ -57,7 +56,7 @@ class KbSeedTree {
     private readonly templates: TemplateSource,
     private readonly extraRootDirs: readonly string[],
     private readonly seedAdminEmails: readonly string[],
-    private readonly kb: Pick<KbContext, 'layout'>,
+    private readonly kb: TemplateKb,
   ) {}
 
   /** Fill `dir` with a complete knowledge base; resolve to what was GENERATED. */
@@ -147,14 +146,16 @@ class KbSeedTree {
     // code (see `modules/agent-guide`). A template that still carries one at
     // the root — a distribution's own, forked while the guide was a file — is
     // not seeded, or the first start would remove what the seed just wrote.
-    // Recognised by the platform's own header, so a template whose root
-    // `AGENTS.md` is the organisation's own text is seeded as the content it
-    // is.
-    if (relDir === '' && (name === LEGACY_AGENTS_FILE || name === this.kb.layout.agentsFile)) {
+    // Recognised by the platform's own header under ANY root Markdown name —
+    // the guide was written under a name a deployment chose, and a template
+    // forked then still carries it there — so a template whose root `.md` is
+    // the organisation's own text is seeded as the content it is. The same
+    // judgement the first start makes when it retires copies.
+    if (relDir === '' && /\.md$/i.test(name)) {
       // Judged the way the copy below judges: a binary under the name is
       // spotted from its first bytes and never read whole.
       const source = await this.templates.pathOf(name);
-      const text = (await headHasNul(source)) ? null : asText(await fs.readFile(source));
+      const text = (await headHasNul(source)) ? null : utf8Text(await fs.readFile(source));
       if (text !== null && isManagedGuide(text)) return;
     }
     await this.copyTemplateFile(relDir ? path.join(relDir, name) : name, dest);
@@ -178,11 +179,11 @@ class KbSeedTree {
     // A binary is spotted from its first bytes (a NUL turns up early in any
     // real one) and streamed across without ever being read whole; only what
     // may be text is read in full, and the full decode is still the judge.
-    const text = (await headHasNul(from)) ? null : asText(await fs.readFile(from));
+    const text = (await headHasNul(from)) ? null : utf8Text(await fs.readFile(from));
     if (text === null) {
       await fs.copyFile(from, to);
     } else {
-      await fs.writeFile(to, renderTemplateText(text, this.kb.layout), 'utf8');
+      await fs.writeFile(to, renderTemplateText(text, this.kb.layout, this.kb.defaultBranch), 'utf8');
     }
     await fs.chmod(to, (await fs.stat(from)).mode & 0o777);
   }
@@ -200,16 +201,6 @@ async function headHasNul(file: string): Promise<boolean> {
     return buf.subarray(0, bytesRead).includes(0);
   } finally {
     await handle.close();
-  }
-}
-
-/** The bytes as text when they ARE text — strict UTF-8, BOM kept, no NUL — else null. */
-function asText(bytes: Buffer): string | null {
-  if (bytes.includes(0)) return null;
-  try {
-    return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
-  } catch {
-    return null;
   }
 }
 

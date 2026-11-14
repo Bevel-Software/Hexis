@@ -3,6 +3,7 @@ import path from 'node:path';
 import { logger } from '../../../shared/logging.js';
 import { isAbsence } from '../../../shared/fs.contract.js';
 import { printable } from '../../../shared/printable.js';
+import { WORKSPACE_TMP_DIR } from '../workspace-tmp.js';
 
 const log = logger('kb-startup');
 
@@ -26,11 +27,14 @@ export const BESIDE_CHECKOUT_NOTE = 'Beside the checkout, not in the repository:
  * clone, and a boot that quietly removed it would be a data loss nobody asked
  * for. The operator cleans up, and the note stops on the next start.
  *
- * EVERYTHING other than the checkout folder is named, the platform's own
- * transient `tmp/` scratch included on the rare start that finds one (a run
- * clears it when it finishes). That is deliberate: the note's claim is about
- * what is not in the repository, and a note that quietly kept exceptions would
- * be a note an operator could not trust.
+ * EVERYTHING other than the checkout folder and the platform's own `tmp/`
+ * folder is named. `tmp/` is the one exception, stated here: it is the
+ * platform's (what the chat and the readers stage lives there, reached
+ * through the `__tmp__/` ref — see `workspace-tmp.ts`), it has a sweep of its
+ * own, and a note that told an operator to remove it by hand would be asking
+ * them to delete people's staged files. Everything else is a stray: the note's
+ * claim is about what is not in the repository, and a note that quietly kept
+ * further exceptions would be a note an operator could not trust.
  *
  * NOT a `OnServerStart` step, and deliberately outside the KB startup phase.
  * That phase is gated — it does nothing until the branch model and the
@@ -65,6 +69,10 @@ export async function noteBesideCheckout(
       // the service judges it: a clone mounted elsewhere is the operator's
       // business, here as it is there.
       if (entry.name === kbDirName && (await isDirectory(path.join(workspaceDir, entry.name)))) continue;
+      // The platform's own tmp folder, swept on its own (see the note above).
+      // Judged by `lstat`, as the sweep judges it: a `tmp` that is a link, or
+      // a file, is not that folder, and is named like any other stray.
+      if (entry.name === WORKSPACE_TMP_DIR && entry.isDirectory()) continue;
       // A trailing slash marks the folders, so one line says which is which
       // without the operator having to go and look. Then `printable`, because
       // every name here is disk-controlled text on its way into an operator's

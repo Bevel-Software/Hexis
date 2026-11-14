@@ -9,8 +9,8 @@ import { NodeFs } from '../../kb-fs/node-fs.js';
 
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { AuthService } from '../../auth/auth.service.js';
-import type { WorkflowService } from '../../workflow/workflow.service.js';
-import type { WorkflowEventBus } from '../../workflow/event-bus.js';
+import type { VersionControlService } from '../../version-control/version-control.service.js';
+import type { VersionControlEventBus } from '../../version-control/event-bus.js';
 import { usersDbDouble } from './users-db-double.js';
 import { AccessControlService } from '../access-control.service.js';
 import {
@@ -133,11 +133,31 @@ describe('Admin write floor at the repository root', () => {
       expect(await service().canWrite(WS, ADMIN, 'README.md')).toBe(true);
     });
 
-    it('is write only: read and download still answer to the access tree', async () => {
-      await write(repo, 'access.md', '---\n---\nwrite:\n  - deny Admin\n');
+    it('is write and the read it implies: download still answers to the access tree', async () => {
+      await write(repo, 'access.md', '---\n---\nwrite:\n  - deny Admin\nread:\n  - deny Admin\n');
       const svc = service();
-      expect(await svc.canDownload(WS, ADMIN, 'README.md')).toBe(false);
+      for (const who of [ADMIN, OWNER]) {
+        expect(await svc.canRead(WS, who, 'README.md')).toBe(true);
+        expect(await svc.canRead(WS, who, 'Knowledge/Foo.md')).toBe(true);
+        expect(await svc.canDownload(WS, who, 'README.md')).toBe(false);
+      }
       expect(await svc.canWrite(WS, ENGINEER, 'README.md')).toBe(false);
+      expect(await svc.canRead(WS, ENGINEER, 'README.md')).toBe(false);
+      // Who may read, for the banner: the floor's holders, and nobody else.
+      expect((await svc.eligibleReaders(WS, 'Knowledge/Foo.md')).roles).toEqual(['Admin']);
+    });
+
+    it('the deployment owner, absent from roles.yaml, reads where the Admin role reads and not where it is excluded', async () => {
+      await write(repo, 'access.md', '---\n---\nread:\n  - Engineer\n');
+      await write(repo, 'HR/access.md', '---\n---\nread:\n  - Engineer\n  - deny Admin\n');
+      await write(repo, 'Ops/access.md', '---\n---\nread:\n  - deny everyone\n  - Admin\n');
+      const svc = service();
+      for (const who of [ADMIN, OWNER]) {
+        expect(await svc.canRead(WS, who, 'Knowledge/Foo.md')).toBe(true);
+        expect(await svc.canRead(WS, who, 'HR/Salaries.md')).toBe(false);
+        expect(await svc.canRead(WS, who, 'Ops/Runbook.md')).toBe(true);
+      }
+      expect(await svc.canRead(WS, ENGINEER, 'Ops/Runbook.md')).toBe(false);
     });
 
     describe('a subfolder that excludes Admin', () => {
@@ -222,6 +242,17 @@ describe('Admin write floor at the repository root', () => {
       expect(await fs.readFile(path.join(repo, 'access.md'), 'utf-8')).toContain('write:\n  - Admin');
     });
 
+    it('lets the root drop a GROUP named Admin — group/Admin is never the role', async () => {
+      await write(repo, 'access.md', '---\n---\nwrite:\n  - Admin\n  - group/Admin\n');
+      const group = { kind: 'role' as const, role: 'group/Admin' };
+      await expect(mutation.revoke(WS, 'folder', '', group, ADMIN, 'write')).resolves.toMatchObject({
+        changed: true,
+      });
+      const after = await fs.readFile(path.join(repo, 'access.md'), 'utf-8');
+      expect(after).not.toContain('group/Admin');
+      expect(after).toContain('write:\n  - Admin'); // the role's line is untouched
+    });
+
     it('refuses deny-here on a PERSON who is an admin at the root, with the reason, and writes nothing', async () => {
       const before = await fs.readFile(path.join(repo, 'access.md'), 'utf-8');
       for (const email of [ADMIN, OWNER]) {
@@ -280,15 +311,17 @@ describe('Admin write floor at the repository root', () => {
           service(),
           { ...ws, getOrCreateForBranch: async () => ({ id: WS, kbDirName: KB }) } as unknown as WorkspaceService,
           { getUserById: async (id: string) => users[id as 'u-admin'] ?? null } as unknown as AuthService,
+          { whileSwitchedOn: async (_email: string, write: () => Promise<void>) => write() },
           {
             getLock: async () => null,
             acquireLock: async () => ({ acquired: true, lock: {} }),
             releaseLock: async () => undefined,
             releaseLockNoCommit: async () => undefined,
-          } as unknown as WorkflowService,
-          { emit: () => {} } as unknown as WorkflowEventBus,
+          } as unknown as VersionControlService,
+          { emit: () => {} } as unknown as VersionControlEventBus,
           usersDbDouble(),
           testKbContext({ kbDirName: KB }),
+          new NodeFs(),
         ),
       );
       server = await new Promise<Server>((resolve) => {

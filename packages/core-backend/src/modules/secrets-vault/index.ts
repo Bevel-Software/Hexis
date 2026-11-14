@@ -1,4 +1,5 @@
 export { DbSecretsVaultService } from './db-secrets-vault.service.js';
+export { managedSignInErasure } from './managed-sign-in-erasure.js';
 export { McpOAuthDiscoveryService, type McpAuthDiscovery } from './mcp-oauth-discovery.service.js';
 export {
   createSecretsVaultRoutes,
@@ -13,6 +14,12 @@ export type {
   PutStaticSecretInput,
   CreateOAuthSecretInput,
   ForcedRefreshOutcome,
+  ManagedSignInRef,
+  ManagedSignInCard,
+  ManagedSignInPort,
+  ManagedTokenRefresher,
+  ManagedTokenRevoker,
+  DeliveredTokenSet,
 } from './secrets-vault.contract.js';
 export {
   InvalidSecretError,
@@ -26,3 +33,5 @@ export {
   BEVEL_SECRETS_LOADER_TYPE,
   DEFAULT_SECRETS_SCOPE,
 } from './secrets-variable-loader.js';
+// Reached by other modules; exported here so they stop importing the files.
+export { scopesCovered, userSecretGap, type UserSecretGap } from './secrets-vault.contract.js';

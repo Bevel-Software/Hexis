@@ -1,0 +1,29 @@
+/**
+ * Git's public surface for the shell: what git contributes to the app outside
+ * its own components. Other modules compose these through the shell rather
+ * than reaching into git's files.
+ */
+import type { AdminMenuItem } from '../../core/registry';
+import { BRANCH_DELETE_CONFIRM_MENU_ITEM } from './branch-delete-menu-item';
+
+/**
+ * Git's profile-menu rows, merged into the registry by the shell
+ * (`withCoreModuleContributions`) ahead of registry-contributed rows. Today
+ * only "Ask before deleting branches", shown while this person's
+ * branch-delete question is off.
+ */
+export const GIT_MENU_ITEMS: readonly AdminMenuItem[] = [BRANCH_DELETE_CONFIRM_MENU_ITEM];
+
+/** The branch state a page reads (`useGit`), and the context a test provides it through. */
+export { GitContext, useGit, type GitContextValue } from './state/git.context';
+
+/**
+ * The HTTP helpers git's own services are built on, for the modules whose
+ * services talk to the same API: the response reader that turns a refusal
+ * into a thrown `GitApiError` carrying the server's words and status.
+ */
+export { GitApiError, handleApiResponse } from './services/git.api';
+// Reached by other modules; exported here so they stop importing the files.
+export { friendlyGitError, friendlyGitMessage } from './services/error-messages';
+export { createBranch, deleteBranch } from './services/git.api';
+export { getPullRequest } from './services/pr.api';

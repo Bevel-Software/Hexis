@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Button, Dialog, Surface } from '../../../shared/components';
-import { useAdmin } from '../../admin/state/admin.context';
+import { useAdmin } from '../../admin';
 import { NewSkillPanel } from './NewSkillPanel';
 import { AddDialogTabs, type AddKind } from './AddDialogTabs';
 import { useLibraryToast } from '../state/toast.context';

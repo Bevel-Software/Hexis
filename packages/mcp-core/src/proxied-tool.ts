@@ -1,5 +1,8 @@
 import type { Tool as McpTool } from '@modelcontextprotocol/sdk/types.js';
 import type { JsonSchema, Tool as UtcpTool } from '@utcp/sdk';
+import { withCallExample } from './tool-interface.js';
+import { toolUiMeta, type McpAppToolUi } from './mcp-app.js';
+import { toolTitle } from './tool-title.js';
 
 /** A tool discovered from a UTCP manual, flattened into what an MCP surface advertises. */
 export interface ProxiedTool {
@@ -10,6 +13,51 @@ export interface ProxiedTool {
   /** The UTCP manual this tool came from (the `<manual>` in `<manual>.<tool>`),
    * used to look up the manual's declared per-user credentials before dispatch. */
   manualName: string;
+  /**
+   * The MCP Apps view this tool's result renders in, when it carries one.
+   *
+   * Not part of the UTCP manual a tool is discovered from — UTCP has no place
+   * for it — so a surface attaches it by tool NAME from the deployment's app
+   * manifest (`McpAppManifest.tools`) after flattening. `toListedTool` turns
+   * it into the `_meta` an MCP client reads; a client without the extension
+   * ignores the field, so carrying it costs nothing.
+   */
+  ui?: McpAppToolUi;
+  /**
+   * Whether MCP clients are told this tool only reads (`annotations.readOnlyHint`).
+   *
+   * Set for the platform's own tools only, from the {@link READ_ONLY_TAG} the
+   * deployment's manual carries on each one whose write declaration makes it
+   * read-only; an admin's override is joined on per listing
+   * ({@link withReadOnlyOverride}). Left unset for a tool from
+   * anywhere else (a `.tool` manual, a plugin's MCP server): such a tool is
+   * listed conservatively with `readOnlyHint: false`, the MCP default for
+   * unknown effects. A name or a third-party tag cannot establish read-only.
+   */
+  readOnly?: boolean;
+}
+
+/**
+ * The UTCP tag the deployment's manual puts on a platform tool whose
+ * effective read-only hint is true. A tag rather than a field because tags are
+ * already part of the UTCP tool shape and survive the manual serializer.
+ */
+export const READ_ONLY_TAG = 'read-only';
+
+/**
+ * A tool with the deployment's override of its read-only hint, where it has
+ * one, joined on at LISTING time: the manual's tag carries the built-in value,
+ * in a surface that may be cached across listings, and an override baked into
+ * that would outlive the toggle that set it. Only a tool that carries a hint
+ * at all (the platform's own); any other keeps the conservative default.
+ */
+export function withReadOnlyOverride(
+  tool: ProxiedTool,
+  overrides: Readonly<Record<string, boolean>> | undefined,
+): ProxiedTool {
+  if (tool.readOnly === undefined || !overrides || !Object.hasOwn(overrides, tool.mcpName)) return tool;
+  const override = overrides[tool.mcpName];
+  return typeof override === 'boolean' ? { ...tool, readOnly: override } : tool;
 }
 
 /**
@@ -72,8 +120,22 @@ export function toListedTool(tool: ProxiedTool): McpTool | null {
   }
   return {
     name: tool.mcpName,
-    description: tool.description,
+    title: toolTitle(tool.mcpName),
+    // Every tool an agent can see opens with the one line that shows how it is
+    // called — generated from this tool's own input schema, so the platform's
+    // tools, a deployment's and a connected server's all get one and none of
+    // them can drift from the shape the tool really takes.
+    // From the schema as it is LISTED (sanitized, local `$ref`s inlined), so
+    // the example and the interface the client is shown agree.
+    description: withCallExample(tool.description, tool.utcpName, inputSchema),
     inputSchema: inputSchema as McpTool['inputSchema'],
+    // The MCP Apps view, when this tool carries one. `_meta` is an open map
+    // every client is required to tolerate, so a client without the
+    // extension reads the tool exactly as it did before.
+    ...(tool.ui ? { _meta: toolUiMeta(tool.ui) } : {}),
+    // Microsoft's federated connector submission requires a hint on every tool.
+    // Unknown effects remain conservative, matching MCP's omitted-field default.
+    annotations: { readOnlyHint: tool.readOnly === true },
   };
 }
 
@@ -193,6 +255,8 @@ export function sanitizeInputSchema(schema: unknown): unknown {
     for (const partRaw of pointer.slice(2).split('/')) {
       const part = partRaw.replace(/~1/g, '/').replace(/~0/g, '~');
       if (!node || typeof node !== 'object') return undefined;
+      // Own members only: `#/constructor` names nothing, not `Object`.
+      if (!Object.prototype.hasOwnProperty.call(node, part)) return undefined;
       node = (node as Record<string, unknown>)[part];
     }
     return node;
@@ -201,27 +265,66 @@ export function sanitizeInputSchema(schema: unknown): unknown {
   // at a schema we are already inside is recursive: JSON Schema says that with
   // the reference, and an inlined copy has no finite form.
   const inlining = new Set<string>();
-  // Nodes produced while inlining a `$ref`, against MAX_INLINED_NODES.
+  // Nodes charged to the expansion budget so far, against MAX_INLINED_NODES.
   let inlined = 0;
-  // `isPropertyMap` marks the value of `properties`/`patternProperties`: its
-  // keys are the tool's OWN field names, not schema keywords, so a field
-  // literally named `format`, `$ref` or `definitions` must survive untouched
-  // (its VALUE is still a schema and is walked as one).
+  // The size of each referenced target — objects, arrays, their entries and
+  // scalars, one count per pointer — stopped early past the budget, since
+  // past it the exact number no longer matters.
+  const costs = new Map<string, number>();
+  const costOf = (pointer: string): number => {
+    const known = costs.get(pointer);
+    if (known !== undefined) return known;
+    // Counted with a bounded frontier: children are pushed one at a time and
+    // only while the count is under the cap, so a target wider than the
+    // budget costs the cap in work and in memory, never its own width.
+    let count = 0;
+    const stack: unknown[] = [resolvePointer(pointer)];
+    const over = () => count + stack.length > MAX_INLINED_NODES;
+    while (stack.length > 0 && !over()) {
+      const item = stack.pop();
+      count += 1;
+      if (!item || typeof item !== 'object') continue;
+      if (Array.isArray(item)) {
+        for (let i = 0; i < item.length && !over(); i += 1) stack.push(item[i]);
+      } else {
+        for (const key in item as Record<string, unknown>) {
+          if (over()) break;
+          if (Object.prototype.hasOwnProperty.call(item, key)) stack.push((item as Record<string, unknown>)[key]);
+        }
+      }
+    }
+    const cost = over() ? MAX_INLINED_NODES + 1 : count;
+    costs.set(pointer, cost);
+    return cost;
+  };
+  // `isPropertyMap` marks the value of `properties`/`patternProperties`, and
+  // of `dependentSchemas`/`dependencies`: its keys are the tool's OWN field
+  // names, not schema keywords, so a field literally named `format`, `$ref`,
+  // `definitions` or `default` must survive untouched (its VALUE is still a
+  // schema and is walked as one).
   const walk = (node: unknown, depth: number, isPropertyMap = false): unknown => {
     // Stack guard, not a schema rule: `$ref` recursion is caught below, so
     // nothing a server legitimately sends reaches this. Stopping must never
     // make a schema INVALID — which is exactly what the old cap did, by
     // returning `{}` at whatever position it had reached.
     if (depth > MAX_SANITIZE_DEPTH) return stripPastDepth(node);
-    if (Array.isArray(node)) return node.map((item) => walk(item, depth + 1));
     if (!node || typeof node !== 'object') return node;
-    if (inlining.size > 0) inlined += 1;
+    if (Array.isArray(node)) return node.map((item) => walk(item, depth + 1));
     const obj = node as Record<string, unknown>;
-    if (!isPropertyMap && typeof obj.$ref === 'string') {
-      const pointer = obj.$ref;
+    // `$dynamicRef` is a reference like `$ref` (2020-12's late-bound form):
+    // resolved the same way when it is a local pointer, degraded the same way
+    // when it is not — never left standing, because the `$defs` block it
+    // reaches into is dropped below and a dangling reference is what clients
+    // reject. Both at once is legal and both apply, so both are inlined, as
+    // the `allOf` they amount to.
+    const references = (['$ref', '$dynamicRef'] as const)
+      .map((keyword) => obj[keyword])
+      .filter((value): value is string => typeof value === 'string');
+    if (!isPropertyMap && references.length > 0) {
       // JSON Schema allows siblings next to $ref; keep them, target wins ties.
       const siblings: Record<string, unknown> = { ...obj };
       delete siblings.$ref;
+      delete siblings.$dynamicRef;
       // Sanitized ONCE, here, because every path below can return them: the
       // siblings are schema keywords in their own right, and an unsupported
       // `format` or a nested `$ref` left in them is precisely what this
@@ -234,16 +337,49 @@ export function sanitizeInputSchema(schema: unknown): unknown {
       // is valid JSON Schema. The reference itself has to go — the `$defs`
       // block it points into is dropped below, and a dangling `$ref` is what
       // clients reject.
-      if (inlining.has(pointer) || inlined > MAX_INLINED_NODES) return kept ?? {};
-      inlining.add(pointer);
-      try {
-        const resolved = walk(resolvePointer(pointer) ?? {}, depth + 1);
-        return resolved && typeof resolved === 'object' && !Array.isArray(resolved)
-          ? { ...(kept ?? {}), ...(resolved as Record<string, unknown>) }
-          : (kept ?? resolved ?? {});
-      } finally {
-        inlining.delete(pointer);
+      //
+      // The budget is charged AT THE REFERENCE, by the whole size of what it
+      // would copy — every object, array, array entry and scalar in the
+      // target, counted once per pointer — before a byte of it is copied. A
+      // target that does not fit the remaining budget is `{}` whole, never a
+      // partial copy: the only thing a copy can cost is what the reference
+      // multiplies, and that is the target's full size whatever shapes it is
+      // made of (a `required` list of ten thousand names as much as ten
+      // thousand properties).
+      const resolveOne = (pointer: string): unknown => {
+        if (inlining.has(pointer)) return {};
+        const cost = costOf(pointer);
+        if (inlined + cost > MAX_INLINED_NODES) return {};
+        inlined += cost;
+        inlining.add(pointer);
+        try {
+          return walk(resolvePointer(pointer) ?? {}, depth + 1);
+        } finally {
+          inlining.delete(pointer);
+        }
+      };
+      const asObject = (value: unknown): Record<string, unknown> =>
+        value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+      if (references.length === 1) {
+        const resolved = resolveOne(references[0]!);
+        // An object target merges over the siblings; a boolean target is a
+        // schema in its own right (`false` rejects everything) and stands
+        // alone, or under `allOf` beside siblings; anything else a pointer
+        // can land on — a string, a number, an array — is not a schema and
+        // becomes `{}`, never the raw value.
+        if (typeof resolved === 'boolean') {
+          return kept ? { ...kept, allOf: [...(Array.isArray(kept.allOf) ? kept.allOf : []), resolved] } : resolved;
+        }
+        return { ...(kept ?? {}), ...asObject(resolved) };
       }
+      // A boolean target is a schema too (`false` rejects everything) and is
+      // kept as it is; anything that is not an object schema is `{}`.
+      const targets = references.map((pointer) => {
+        const resolved = resolveOne(pointer);
+        return typeof resolved === 'boolean' ? resolved : asObject(resolved);
+      });
+      const allOf = Array.isArray(kept?.allOf) ? (kept!.allOf as unknown[]) : [];
+      return { ...(kept ?? {}), allOf: [...allOf, ...targets] };
     }
     const out: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(obj)) {
@@ -266,7 +402,11 @@ export function sanitizeInputSchema(schema: unknown): unknown {
       if (key === 'format' && (typeof value !== 'string' || !SUPPORTED_SCHEMA_FORMATS.has(value))) {
         continue;
       }
-      out[key] = walk(value, depth + 1, key === 'properties' || key === 'patternProperties');
+      out[key] = walk(
+        value,
+        depth + 1,
+        key === 'properties' || key === 'patternProperties' || key === 'dependentSchemas' || key === 'dependencies',
+      );
     }
     return out;
   };
@@ -307,6 +447,9 @@ export function flattenManualTool(tool: UtcpTool, kbManualName: string): Proxied
     description: tool.description,
     inputSchema: tool.inputs,
     manualName: manual,
+    // Only the platform's own manual speaks for its tools' effect; every other
+    // manual's tags are its author's, so they cannot establish read-only effects.
+    ...(manual === kbManualName ? { readOnly: (tool.tags ?? []).includes(READ_ONLY_TAG) } : {}),
   };
 }
 

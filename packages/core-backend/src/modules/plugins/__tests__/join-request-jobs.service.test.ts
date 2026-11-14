@@ -1,11 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { DEFAULT_BRANCH, joinBranchFor } from '@bevel-software/platform-shared';
-import {
-  PluginJoinRequestJobs,
-  JoinRequestNotReadyError,
-  type JoinRequestJobsDeps,
-  CLAIM_STALE_AFTER_MS,
-} from '../join-request-jobs.service.js';
+import { DrizzleQueryError } from 'drizzle-orm';
+import { PluginJoinRequestJobs, JoinRequestNotReadyError, type JoinRequestJobsDeps } from '../index.js';
+// The claim window is not part of the module's surface: a test that moves
+// the clock past it reads the number the service itself uses.
+import { CLAIM_STALE_AFTER_MS } from '../join-request-jobs.service.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { FakeJoinRequestStore } from './fake-join-request-store.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
@@ -25,7 +24,7 @@ const KB = 'knowledge-base';
 const ACCESS_MD = '---\nread:\n  - everyone\n---\nread: []\n';
 
 function harness(over: Partial<JoinRequestJobsDeps> = {}, sharedStore?: FakeJoinRequestStore) {
-  const workflow = {
+  const versionControl = {
     listChangeRequestsAuthoredBy: vi.fn(async () => [] as never[]),
     createBranch: vi.fn(async () => ({ name: 'x', isDefault: false, isProtected: false })),
     listBranches: vi.fn(async () => [] as { name: string }[]),
@@ -39,14 +38,14 @@ function harness(over: Partial<JoinRequestJobsDeps> = {}, sharedStore?: FakeJoin
   };
   const store = sharedStore ?? new FakeJoinRequestStore();
   const jobs = new PluginJoinRequestJobs(store, {
-    workflow: workflow as never,
+    versionControl: versionControl as never,
     workspaceService: workspaceService as never,
     kb: testKbContext({ kbDirName: KB }),
     target: async () => ({ folder: 'Plugins/Finance', displayName: 'Finance' }),
     requester: async (mail) => ({ ...ALI_USER, email: mail }),
     ...over,
   });
-  return { workflow, workspaceService, store, jobs };
+  return { versionControl, workspaceService, store, jobs };
 }
 
 function pendingRow(store: FakeJoinRequestStore) {
@@ -87,7 +86,7 @@ describe('PluginJoinRequestJobs', () => {
     await h.jobs.start(pendingRow(h.store));
 
     const branch = joinBranchFor(ALI, 'Finance');
-    expect(h.workflow.createBranch).toHaveBeenCalledWith(
+    expect(h.versionControl.createBranch).toHaveBeenCalledWith(
       workspaceIdForBranch(DEFAULT_BRANCH),
       branch,
       DEFAULT_BRANCH,
@@ -95,8 +94,8 @@ describe('PluginJoinRequestJobs', () => {
     const write = h.workspaceService.writeFile.mock.calls[0] as unknown as [string, string, string];
     expect(write[1]).toBe(`${KB}/Plugins/Finance/access.md`);
     expect(write[2]).toContain('Ali Baba <ali@bevel.software>');
-    expect(h.workflow.commitChanges).toHaveBeenCalled();
-    expect(h.workflow.openChangeRequest).toHaveBeenCalledWith(
+    expect(h.versionControl.commitChanges).toHaveBeenCalled();
+    expect(h.versionControl.openChangeRequest).toHaveBeenCalledWith(
       workspaceIdForBranch(branch),
       expect.objectContaining({ email: ALI }),
       expect.objectContaining({ title: 'Join request: Finance', sourceBranch: branch }),
@@ -108,7 +107,7 @@ describe('PluginJoinRequestJobs', () => {
     const h = harness();
     const record = pendingRow(h.store);
     await Promise.all([h.jobs.start(record), h.jobs.start(record)]);
-    expect(h.workflow.openChangeRequest).toHaveBeenCalledTimes(1);
+    expect(h.versionControl.openChangeRequest).toHaveBeenCalledTimes(1);
   });
 
   it('a start on a record another flight already opened does nothing at all', async () => {
@@ -118,7 +117,7 @@ describe('PluginJoinRequestJobs', () => {
     // The SAME stale snapshot a second tab would hold: still `pending` in
     // this object, `opened` in the store.
     await h.jobs.start(record);
-    expect(h.workflow.openChangeRequest).toHaveBeenCalledTimes(1);
+    expect(h.versionControl.openChangeRequest).toHaveBeenCalledTimes(1);
   });
 
   it('leaves the branch alone when the grant is already on it', async () => {
@@ -128,14 +127,14 @@ describe('PluginJoinRequestJobs', () => {
     );
     await h.jobs.start(pendingRow(h.store));
     expect(h.workspaceService.writeFile).not.toHaveBeenCalled();
-    expect(h.workflow.commitChanges).not.toHaveBeenCalled();
+    expect(h.versionControl.commitChanges).not.toHaveBeenCalled();
     // Still opens the request: the branch carries the proposal either way.
-    expect(h.workflow.openChangeRequest).toHaveBeenCalledTimes(1);
+    expect(h.versionControl.openChangeRequest).toHaveBeenCalledTimes(1);
   });
 
   it('records a failure in the words the git work used, with credentials stripped', async () => {
     const h = harness();
-    h.workflow.openChangeRequest.mockRejectedValue(
+    h.versionControl.openChangeRequest.mockRejectedValue(
       new Error("fatal: unable to access 'https://x-access-token:ghp_secret@github.com/acme/kb'"),
     );
     await h.jobs.start(pendingRow(h.store));
@@ -146,13 +145,55 @@ describe('PluginJoinRequestJobs', () => {
     expect(row.failureReason).not.toContain('ghp_secret');
   });
 
+  it("logs a database failure as the database's reason, and shows the requester one stable sentence", async () => {
+    const h = harness();
+    // What Drizzle throws: its own error class, the SQL in the message, the
+    // driver's error as the cause.
+    h.versionControl.openChangeRequest.mockRejectedValue(
+      new DrizzleQueryError(
+        'insert into "change_requests" ("id", "number", "title", "body", "source_branch", "target_branch", "author_id", "status", "created_at", "updated_at") values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)',
+        [],
+        new Error('relation "change_requests" does not exist'),
+      ),
+    );
+    await h.jobs.start(pendingRow(h.store));
+
+    // The operator gets the reason, not the wrapper's cut-off SQL…
+    const logged = consoleError.mock.calls.map((c) => String(c[0]));
+    // (`printable` renders the reason as a JSON string, so its own quotes come escaped.)
+    expect(logged).toContainEqual(expect.stringMatching(/failed: "relation \\"change_requests\\" does not exist"/));
+    expect(logged.some((l) => l.includes('Failed query'))).toBe(false);
+    // …and the requester's card names no table.
+    const [row] = h.store.all();
+    expect(row.status).toBe('failed');
+    expect(row.failureReason).toBe('the request could not be recorded; an admin can find the reason in the server log');
+  });
+
+  it("shows the requester a wrapped failure's own words when it is not the database's", async () => {
+    const h = harness();
+    // The git work failing behind a wrapper of its own: the cause is what is
+    // logged, and what the requester reads, credentials stripped — the
+    // database's stable sentence would hide the detail they can act on.
+    h.versionControl.openChangeRequest.mockRejectedValue(
+      new Error('opening the change request failed', {
+        cause: new Error('fatal: unable to access https://x:ghp_secret@github.com/acme/kb: could not resolve host'),
+      }),
+    );
+    await h.jobs.start(pendingRow(h.store));
+    const [row] = h.store.all();
+    expect(row.status).toBe('failed');
+    expect(row.failureReason).toContain('unable to access');
+    expect(row.failureReason).not.toContain('ghp_secret');
+    expect(row.failureReason).not.toContain('could not be recorded');
+  });
+
   it('fails the record rather than throwing when the plugin is gone', async () => {
     const h = harness({ target: async () => null });
     await expect(h.jobs.start(pendingRow(h.store))).resolves.toBeUndefined();
     expect(h.store.all()).toMatchObject([
       { status: 'failed', failureReason: 'the plugin is no longer available' },
     ]);
-    expect(h.workflow.createBranch).not.toHaveBeenCalled();
+    expect(h.versionControl.createBranch).not.toHaveBeenCalled();
   });
 
   it('fails the record when no account answers to the address that asked', async () => {
@@ -169,7 +210,7 @@ describe('PluginJoinRequestJobs', () => {
       requester: async (mail) => ({ ...ALI_USER, id: asked++ === 0 ? 'u-1' : 'u-2', email: mail }),
     });
     await h.jobs.start(pendingRow(h.store));
-    expect(h.workflow.openChangeRequest).not.toHaveBeenCalled();
+    expect(h.versionControl.openChangeRequest).not.toHaveBeenCalled();
     expect(h.store.all()).toMatchObject([{ status: 'failed' }]);
   });
 
@@ -177,7 +218,7 @@ describe('PluginJoinRequestJobs', () => {
     const h = harness();
     h.jobs.stopSweeping();
     await h.jobs.start(pendingRow(h.store));
-    expect(h.workflow.createBranch).not.toHaveBeenCalled();
+    expect(h.versionControl.createBranch).not.toHaveBeenCalled();
     expect(h.store.all()).toMatchObject([{ status: 'pending' }]);
   });
 
@@ -189,8 +230,8 @@ describe('PluginJoinRequestJobs', () => {
       requester: async (mail) => (asked++ === 0 ? { ...ALI_USER, email: mail } : null),
     });
     await h.jobs.start(pendingRow(h.store));
-    expect(h.workflow.commitChanges).toHaveBeenCalled();
-    expect(h.workflow.openChangeRequest).not.toHaveBeenCalled();
+    expect(h.versionControl.commitChanges).toHaveBeenCalled();
+    expect(h.versionControl.openChangeRequest).not.toHaveBeenCalled();
     expect(h.store.all()).toMatchObject([
       { status: 'failed', failureReason: 'the account that asked no longer exists' },
     ]);
@@ -221,7 +262,7 @@ describe('PluginJoinRequestJobs', () => {
     await h.jobs.sweep();
     await h.jobs.drain();
 
-    expect(h.workflow.openChangeRequest).toHaveBeenCalledTimes(1);
+    expect(h.versionControl.openChangeRequest).toHaveBeenCalledTimes(1);
     expect(h.store.all().map((r) => r.status)).toEqual(['opened', 'opened', 'failed']);
   });
 
@@ -230,7 +271,7 @@ describe('PluginJoinRequestJobs', () => {
     // A first request from a person is a full clone; the boot must not queue
     // behind one, so `sweep` resolves once the work is under way.
     let release = () => {};
-    h.workflow.createBranch.mockReturnValue(
+    h.versionControl.createBranch.mockReturnValue(
       new Promise((resolve) => {
         release = () => resolve({ name: 'x', isDefault: false, isProtected: false });
       }) as never,
@@ -258,8 +299,8 @@ describe('PluginJoinRequestJobs', () => {
     // pushing the same branch into one shared workspace is the thing the
     // claim exists to prevent, and neither one's single-flight map can see
     // the other.
-    expect(h.workflow.createBranch).not.toHaveBeenCalled();
-    expect(h.workflow.openChangeRequest).not.toHaveBeenCalled();
+    expect(h.versionControl.createBranch).not.toHaveBeenCalled();
+    expect(h.versionControl.openChangeRequest).not.toHaveBeenCalled();
     expect(h.store.all()[0].status).toBe('pending');
   });
 
@@ -299,7 +340,7 @@ describe('PluginJoinRequestJobs', () => {
     await fresh.jobs.drain();
 
     expect(h.store.all()[0]).toMatchObject({ status: 'opened', changeRequestNumber: 42 });
-    expect(fresh.workflow.openChangeRequest).toHaveBeenCalledTimes(1);
+    expect(fresh.versionControl.openChangeRequest).toHaveBeenCalledTimes(1);
   });
 
   it('a live process keeps its claim however long the work takes, by its own heartbeat', async () => {
@@ -317,7 +358,7 @@ describe('PluginJoinRequestJobs', () => {
     // stale window, which is the case the heartbeat exists for: without it
     // the work would be stolen out from under the process doing it.
     let finishClone = (): void => {};
-    h.workflow.createBranch.mockReturnValue(
+    h.versionControl.createBranch.mockReturnValue(
       new Promise((resolve) => {
         finishClone = () => resolve({ name: 'x', isDefault: false, isProtected: false });
       }) as never,
@@ -331,14 +372,14 @@ describe('PluginJoinRequestJobs', () => {
     // Four windows in, and still held — by the interval, and nothing else.
     const other = harness({}, h.store);
     await other.jobs.start({ ...record });
-    expect(other.workflow.createBranch).not.toHaveBeenCalled();
+    expect(other.versionControl.createBranch).not.toHaveBeenCalled();
     expect(h.store.all()[0].status).toBe('pending');
 
     // And it still completes: the beats did not disturb the work.
     finishClone();
     await flight;
     expect(h.store.all()[0]).toMatchObject({ status: 'opened', changeRequestNumber: 42 });
-    expect(h.workflow.openChangeRequest).toHaveBeenCalledTimes(1);
+    expect(h.versionControl.openChangeRequest).toHaveBeenCalledTimes(1);
   });
 
   it('stops before the change request when the row was erased under it', async () => {
@@ -348,7 +389,7 @@ describe('PluginJoinRequestJobs', () => {
     // comes next is the one step that leaves something a manager sees.
     const h = harness();
     const record = pendingRow(h.store);
-    h.workflow.commitChanges.mockImplementation(async () => {
+    h.versionControl.commitChanges.mockImplementation(async () => {
       h.store.deleteFor(ALI, 'Finance');
       return null;
     });
@@ -357,7 +398,7 @@ describe('PluginJoinRequestJobs', () => {
 
     // No change request in a deleted person's name — and no row written back,
     // which would resurrect the ask the erasure just removed.
-    expect(h.workflow.openChangeRequest).not.toHaveBeenCalled();
+    expect(h.versionControl.openChangeRequest).not.toHaveBeenCalled();
     expect(h.store.all()).toEqual([]);
   });
 
@@ -369,7 +410,7 @@ describe('PluginJoinRequestJobs', () => {
     // that replaced it.
     const h = harness();
     const record = pendingRow(h.store);
-    h.workflow.commitChanges.mockImplementation(async () => {
+    h.versionControl.commitChanges.mockImplementation(async () => {
       // A zero window is "the claim has lapsed", without minutes of fake time.
       await h.store.claim(record.id, 0);
       return null;
@@ -377,7 +418,7 @@ describe('PluginJoinRequestJobs', () => {
 
     await h.jobs.start(record);
 
-    expect(h.workflow.openChangeRequest).not.toHaveBeenCalled();
+    expect(h.versionControl.openChangeRequest).not.toHaveBeenCalled();
     // Still pending, under the NEW claim: not `failed`, which is what an
     // unfenced worker would have written over a run that is going fine.
     expect(h.store.all()[0]).toMatchObject({ status: 'pending', failureReason: null });
@@ -403,8 +444,8 @@ describe('PluginJoinRequestJobs', () => {
     // Nothing was written to the branch and nothing was opened — and the row
     // is left exactly as it was, pending, for the next sweep to redo.
     expect(h.workspaceService.writeFile).not.toHaveBeenCalled();
-    expect(h.workflow.commitChanges).not.toHaveBeenCalled();
-    expect(h.workflow.openChangeRequest).not.toHaveBeenCalled();
+    expect(h.versionControl.commitChanges).not.toHaveBeenCalled();
+    expect(h.versionControl.openChangeRequest).not.toHaveBeenCalled();
     expect(h.store.all()[0]).toMatchObject({ status: 'pending', failureReason: null });
   });
 
@@ -425,7 +466,7 @@ describe('PluginJoinRequestJobs', () => {
     };
 
     let finishClone = (): void => {};
-    h.workflow.createBranch.mockReturnValue(
+    h.versionControl.createBranch.mockReturnValue(
       new Promise((resolve) => {
         finishClone = () => resolve({ name: 'x', isDefault: false, isProtected: false });
       }) as never,
@@ -461,8 +502,8 @@ describe('PluginJoinRequestJobs', () => {
     // The branch was created under a claim this process did hold — that is
     // idempotent and harmless — but nothing after the clone ran.
     expect(h.workspaceService.writeFile).not.toHaveBeenCalled();
-    expect(h.workflow.commitChanges).not.toHaveBeenCalled();
-    expect(h.workflow.openChangeRequest).not.toHaveBeenCalled();
+    expect(h.versionControl.commitChanges).not.toHaveBeenCalled();
+    expect(h.versionControl.openChangeRequest).not.toHaveBeenCalled();
   });
 
   it('a superseded token can neither beat nor decide the row', async () => {
@@ -521,18 +562,44 @@ describe('PluginJoinRequestJobs', () => {
     await vi.advanceTimersByTimeAsync(5000);
     await h.jobs.drain();
 
-    expect(h.workflow.openChangeRequest).not.toHaveBeenCalled();
+    expect(h.versionControl.openChangeRequest).not.toHaveBeenCalled();
+  });
+
+  it("a sweep that cannot read the table logs the database's reason, not the wrapper's cut-off SQL", async () => {
+    vi.useFakeTimers();
+    const warned = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const h = harness();
+      // What Drizzle throws: its own error class, the SQL in the message, the driver's error underneath.
+      const wrapped = new DrizzleQueryError(
+        'select "id", "requester_email", "requester_email_bidx", "requester_name", "plugin_key", "status", "failure_reason", "change_request_number", "claimed_at", "claim_token", "created_at" from "plugin_join_requests" where status = $1',
+        [],
+        new Error('Cannot use a pool after calling end on the pool'),
+      );
+      h.store.pending = async () => {
+        throw wrapped;
+      };
+      h.jobs.startSweeping(1000);
+      await vi.advanceTimersByTimeAsync(0);
+      h.jobs.stopSweeping();
+      const lines = warned.mock.calls.map((c) => String(c[0]));
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain('could not look at the join requests still owed: "Cannot use a pool after calling end on the pool"');
+      expect(lines[0]).not.toContain('Failed query');
+    } finally {
+      warned.mockRestore();
+    }
   });
 
   it('proceeds past a createBranch failure only when the branch is really there', async () => {
     const h = harness();
     const branch = joinBranchFor(ALI, 'Finance');
-    h.workflow.createBranch.mockRejectedValue(new Error('a branch named that already exists'));
-    h.workflow.listBranches.mockResolvedValue([{ name: branch }]);
+    h.versionControl.createBranch.mockRejectedValue(new Error('a branch named that already exists'));
+    h.versionControl.listBranches.mockResolvedValue([{ name: branch }]);
 
     await h.jobs.start(pendingRow(h.store));
 
-    expect(h.workflow.listBranches).toHaveBeenCalledWith(expect.any(String), {
+    expect(h.versionControl.listBranches).toHaveBeenCalledWith(expect.any(String), {
       freshFetch: true,
       strictFetch: true,
     });
@@ -541,8 +608,8 @@ describe('PluginJoinRequestJobs', () => {
 
   it('fails the record when createBranch refuses and no branch exists to work against', async () => {
     const h = harness();
-    h.workflow.createBranch.mockRejectedValue(new Error('remote: permission denied'));
-    h.workflow.listBranches.mockResolvedValue([]);
+    h.versionControl.createBranch.mockRejectedValue(new Error('remote: permission denied'));
+    h.versionControl.listBranches.mockResolvedValue([]);
 
     await h.jobs.start(pendingRow(h.store));
 
@@ -553,7 +620,7 @@ describe('PluginJoinRequestJobs', () => {
       status: 'failed',
       failureReason: 'remote: permission denied',
     });
-    expect(h.workflow.openChangeRequest).not.toHaveBeenCalled();
+    expect(h.versionControl.openChangeRequest).not.toHaveBeenCalled();
   });
 
   it('refuses to splice when access.md is unreadable for any reason but absence', async () => {
@@ -603,7 +670,7 @@ describe('PluginJoinRequestJobs', () => {
     // A cached listing taken before an earlier attempt opened its change
     // request shows nothing to adopt, which is how a retry becomes a
     // duplicate.
-    expect(h.workflow.listChangeRequestsAuthoredBy).toHaveBeenCalledWith(ALI, { fresh: true });
+    expect(h.versionControl.listChangeRequestsAuthoredBy).toHaveBeenCalledWith(ALI, { fresh: true });
   });
 
 });

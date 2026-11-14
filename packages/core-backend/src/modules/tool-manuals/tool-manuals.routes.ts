@@ -5,20 +5,21 @@ const log = logger('tool-manuals');
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import AdmZip from 'adm-zip';
-import type { WorkspaceService } from '../workspace/workspace.service.js';
+import type { WorkspaceService } from '../workspace/index.js';
 import type { KbContext } from '../../shared/kb-context.js';
 import { isAbsence, type IFsProbe, type ITreeWalker } from '../../shared/fs.contract.js';
-import type { IAccessControl } from '../access/access-control.interface.js';
-import type { IPluginIndexService } from '../plugins/plugins.contract.js';
+import type { IAccessControl } from '../access/index.js';
+import type { IPluginIndexService } from '../plugins/index.js';
 import '@utcp/http'; // side effect: register the 'http' call-template type
 import { CallTemplateSerializer, type CallTemplate } from '@utcp/sdk';
 import { type IPendingToolService, type IToolManualService, EXTERNAL_KB_MANUAL_NAME } from './tool-manuals.contract.js';
 import { McpServerEditError, type McpServerEditService, type McpServerWrite } from './mcp-server-edit.service.js';
 import { ToolDeleteError, type ToolDeleteService } from './tool-delete.service.js';
 import type { AuthUser } from '@bevel-software/platform-shared';
-import '../auth/auth.middleware.js'; // Express Request augmentation (req.userId / req.userEmail)
-import '../tool-auth/tool-auth.middleware.js'; // Express Request augmentation (req.toolAuth)
+import '../auth/index.js'; // Express Request augmentation (req.userId / req.userEmail)
+import '../tool-auth/index.js'; // Express Request augmentation (req.toolAuth)
 import { hasGitInternalsSegment } from '../../shared/git-internals.js';
+import { NOT_AVAILABLE_TO_CONNECTION, resolveConnectionScope, type IAgentScopeResolver } from '../agent-scope/index.js';
 
 /** Resolve a connection-key/internal-token user id to its email (per-caller ACL). */
 export type ResolveUserEmail = (userId: string) => Promise<string | undefined>;
@@ -64,6 +65,11 @@ export function createToolManualsAgentRoutes(
      */
     pluginIndex?: Pick<IPluginIndexService, 'catalog'>;
   },
+  /**
+   * Resolves the scope of a connection made as an agent configuration, so
+   * `all-tools` lists only the connectors it loads (`modules/agent-scope`).
+   */
+  agentScope?: Pick<IAgentScopeResolver, 'resolve'>,
 ): express.Router {
   const router = express.Router();
 
@@ -83,9 +89,18 @@ export function createToolManualsAgentRoutes(
       // Default remote-safe: exclude local-only manuals unless the caller (a locally
       // installed MCP server) explicitly opts in with `?remote=false`.
       const remoteOnly = req.query.remote !== 'false';
-      const userManuals = email ? await toolManualService.toManualCallTemplates(email, { remoteOnly }) : [];
+      // A connection made as an agent configuration lists only the connectors that
+      // file loads, and says which agent it is — the MCP proxy words its
+      // refusals and its handshake from that. Everything lists as it always
+      // did, with no `connection` at all.
+      const scope = await resolveConnectionScope(agentScope, email, req.toolAuth?.agentPath);
+      const within = scope.connectorFilter();
+      const userManuals = email
+        ? await toolManualService.toManualCallTemplates(email, within ? { remoteOnly, within } : { remoteOnly })
+        : [];
       const manuals: CallTemplate[] = [kbManualTemplate(), ...userManuals];
-      res.json({ manuals });
+      const connection = scope.toWire();
+      res.json(connection ? { manuals, connection } : { manuals });
     } catch (err) {
       log.error('all-tools failed:', { err });
       res.status(500).json({ error: 'Failed to list tools' });
@@ -171,6 +186,24 @@ export function createToolManualsAgentRoutes(
         email,
         rels.map((r) => `${pluginRel}/${r}`),
       );
+      // A folder with nothing the person may read is absent to them, whatever
+      // the connection — so that 404 comes first, and the connection's own
+      // refusal below never confirms a folder the person could not see.
+      if (![...verdicts.values()].some((v) => v === true)) {
+        return void res.status(404).json({ error: 'Not found' });
+      }
+      // A connection made as an agent configuration materializes only a plugin
+      // that defines a connector the file loads — the archive is how the
+      // local MCP server runs one, and nothing else asks for it. Checked
+      // before any file is opened.
+      const scope = await resolveConnectionScope(agentScope, email, req.toolAuth?.agentPath);
+      if (!scope.loadsConnectorIn(pluginRel)) {
+        const why = scope.describe();
+        return void res.status(403).json({
+          error: `The plugin "${folder}" is not available to this connection.${why ? ` ${why}` : ''}`,
+          code: NOT_AVAILABLE_TO_CONNECTION,
+        });
+      }
       const zip = new AdmZip();
       let included = 0;
       let bytes = 0;
@@ -269,7 +302,11 @@ export function createToolManualsAgentRoutes(
       const email = await callerEmail(req);
       if (!email) return void res.status(403).json({ error: 'Forbidden' });
       const slug = Array.isArray(req.params.slug) ? req.params.slug[0] : req.params.slug;
-      const manual = await toolManualService.resolveInlineManual(email, String(slug));
+      // A connection made as an agent configuration reads only the manuals of the
+      // connectors it loads; another is as absent as one the person cannot read.
+      const scope = await resolveConnectionScope(agentScope, email, req.toolAuth?.agentPath);
+      const within = scope.connectorFilter();
+      const manual = await toolManualService.resolveInlineManual(email, String(slug), within ? { within } : undefined);
       if (!manual) return void res.status(404).json({ error: 'Not found' });
       res.json(manual);
     } catch (err) {

@@ -4,9 +4,12 @@ import {
   ListToolsRequestSchema,
   ListPromptsRequestSchema,
   GetPromptRequestSchema,
+  ListResourcesRequestSchema,
+  ReadResourceRequestSchema,
   McpError,
   ErrorCode,
   type CallToolResult,
+  type ListToolsResult,
   type Tool as McpTool,
   type Prompt,
   type GetPromptResult,
@@ -35,16 +38,25 @@ import {
   seedBevelHostedManualVars,
   printable,
   skillPromptText,
+  toListedResource,
+  toReadResourceResult,
+  CONNECTION_META_KEY,
+  connectionRefusal,
+  describeConnection,
+  type ConnectionScopeWire,
+  type McpAppManifest,
   type ProxiedTool,
   type SkillSummary,
   type LoadedSkill,
 } from '@bevel-software/platform-mcp-core';
-import type { HexisMcpConfig } from './config.js';
+import { SignInRefusedError, type HexisMcpConfig } from './config.js';
 import {
   callKbTool,
   ConnectionKeyRejectedError,
   fetchAllManuals,
-  fetchCatalogRevision,
+  fetchCatalogState,
+  fetchMcpApps,
+  fetchToolHints,
   fetchLocalOnlyManuals,
   resolveDeployment,
   fetchAgentInstructions,
@@ -237,13 +249,35 @@ export function withoutRemoteMetaTools(tools: ProxiedTool[]): ProxiedTool[] {
  * client rejects the whole listing over one bad entry rather than telling
  * anyone which one.
  */
-export function listedTools(tools: ProxiedTool[]): McpTool[] {
+export function listedTools(
+  tools: ProxiedTool[],
+  /**
+   * The views the deployment's tools carry, by tool name — `McpAppManifest.tools`.
+   *
+   * Joined on HERE because a UTCP manual has nowhere to carry it: a tool
+   * arrives from discovery with a name, a description and a schema, and this
+   * is the one point where it becomes a listing entry a client reads.
+   */
+  views: Record<string, { resourceUri: string }> = {},
+  /**
+   * The read-only hint of each platform tool and meta-tool, by name, as the
+   * deployment serves them (`fetchToolHints`). Joined on here for the same
+   * reason as the views: the deployment's tools reach this process through its
+   * MCP endpoint, and the UTCP MCP protocol keeps no annotation on the way in.
+   * A tool from a local manual is never in it, and lists a conservative false hint.
+   */
+  hints: Readonly<Record<string, boolean>> = {},
+): McpTool[] {
   const seen = new Set<string>(META_TOOL_NAMES);
   const listed: McpTool[] = [];
   const dropped: string[] = [];
   const examplePool: ProxiedTool[] = [];
   for (const tool of tools) {
-    const entry = toListedTool(tool); // logs its own reason on a name/schema drop
+    // Own keys only: a tool named `constructor` or `toString` is not one an
+    // app view was published for.
+    const view = Object.hasOwn(views, tool.mcpName) ? views[tool.mcpName] : undefined;
+    const hinted = withReadOnlyHint(tool, hints);
+    const entry = toListedTool(view ? { ...hinted, ui: view } : hinted); // logs its own reason on a name/schema drop
     if (!entry) {
       dropped.push(tool.mcpName);
       continue;
@@ -269,7 +303,7 @@ export function listedTools(tools: ProxiedTool[]): McpTool[] {
   // the deployment under (`hexis`), not the one the hosted endpoint uses
   // (`KNOWLEDGE_BASE`). One fixed example was wrong here, and a chain copied
   // out of it died of `ReferenceError: KNOWLEDGE_BASE is not defined`.
-  const metaTools = codeModeMetaTools(REMOTE_MANUAL_NAME, examplePool);
+  const metaTools = codeModeMetaTools(REMOTE_MANUAL_NAME, examplePool, { readOnly: hints });
   if (dropped.length) {
     console.error(
       `[hexis-mcp] serving ${metaTools.length + listed.length} tool(s); ` +
@@ -277,6 +311,19 @@ export function listedTools(tools: ProxiedTool[]): McpTool[] {
     );
   }
   return [...metaTools, ...listed];
+}
+
+/**
+ * A tool with the hint the deployment serves for it: the deployment's own
+ * tools only, by name, and none when the deployment named none (an older one,
+ * or a read that failed) — never the `false` an empty tag list would read as.
+ */
+function withReadOnlyHint(tool: ProxiedTool, hints: Readonly<Record<string, boolean>>): ProxiedTool {
+  const rest: ProxiedTool = { ...tool };
+  delete rest.readOnly;
+  if (tool.manualName !== REMOTE_MANUAL_NAME) return rest;
+  const hint = Object.hasOwn(hints, tool.mcpName) ? hints[tool.mcpName] : undefined;
+  return typeof hint === 'boolean' ? { ...rest, readOnly: hint } : rest;
 }
 
 /**
@@ -324,7 +371,9 @@ async function prepareLocalManuals(
       out.push(template);
     } catch (err) {
       // A dead key is not one broken server: it fails startup in its own words.
-      if (err instanceof ConnectionKeyRejectedError) throw err;
+      // Nor is a sign-in refused for good: it fails discovery, which leaves
+      // the saying of it to renewal.ts.
+      if (err instanceof ConnectionKeyRejectedError || err instanceof SignInRefusedError) throw err;
       console.error(
         `[hexis-mcp] skipping local server "${String(template.name)}": ${err instanceof Error ? err.message : String(err)}`,
       );
@@ -371,10 +420,25 @@ export const DISCOVERY_NOTICE_TOOL = 'hexis_unavailable';
 export function discoveryNoticeTool(reason: string): McpTool {
   return {
     name: DISCOVERY_NOTICE_TOOL,
+    title: 'Hexis unavailable',
     description:
       `hexis-mcp could not load this workspace's tools: ${reason} ` +
       'Fix the cause and restart this server; the same sentence is on its stderr log.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    // This diagnostic only reports the existing discovery failure.
+    annotations: { readOnlyHint: true },
+  };
+}
+
+/**
+ * The one-tool listing once the workspace has refused this process's sign-in
+ * for good (OAuth mode, see renewal.ts): the same notice tool, saying that
+ * the tools DID load and what brings them back.
+ */
+function signInRefusedNoticeTool(sentence: string): McpTool {
+  return {
+    ...discoveryNoticeTool(sentence),
+    description: `hexis-mcp can no longer reach this workspace: ${sentence} The same sentence is on its stderr log.`,
   };
 }
 
@@ -431,7 +495,30 @@ export async function createHexisMcpServer(
     catalogCheck?: false | { minIntervalMs?: number };
   } = {},
 ): Promise<HexisMcpHandle> {
-  const { mcpUrl, agentInstructions, catalogRevision: catalogRevisionAdvertised } = await resolveDeployment(config);
+  /**
+   * SIGN-IN REFUSED FOR GOOD (OAuth mode). renewal.ts calls this once, when
+   * the workspace refused the refresh and the store held nothing newer: from
+   * then on every listing is the notice and every call answers the sentence.
+   * Installed FIRST, before the handshake's own reads, because any read this
+   * server makes may be the one that meets the refusal, and renewal.ts says
+   * it to the listener only that once.
+   */
+  let signInRefused: string | null = null;
+  let announceSignInRefused = (): void => {};
+  // An embedding host's own listener is told as well, never replaced.
+  const hostSignInEnded = config.onSignInEnded;
+  const reportSignInRefused = (sentence: string): void => {
+    signInRefused = sentence;
+    announceSignInRefused();
+    hostSignInEnded?.(sentence);
+  };
+  if (config.renewConnectionKey) config.onSignInEnded = reportSignInRefused;
+  const {
+    mcpUrl,
+    agentInstructions,
+    catalogRevision: catalogRevisionAdvertised,
+    toolHints: toolHintsAdvertised,
+  } = await resolveDeployment(config);
   // Fetched here rather than alongside the manuals below: it is part of the
   // handshake's own answer, so it cannot wait behind `ready` the way the
   // catalog can.
@@ -442,6 +529,34 @@ export async function createHexisMcpServer(
         'sessions start without them.',
     );
   }
+  // The catalog's state, read once ahead of the handshake from a deployment
+  // that advertises the route (an older one would answer the unknown path
+  // through its JWT mounts with a 401, which reads as a dead credential):
+  // its revision is the catalog watch's baseline below, and what the
+  // connection is narrowed to goes into the `initialize` result — a
+  // connection made as an agent configuration is told so, as the hosted endpoint
+  // tells it, and one that loads nothing is told why there. Never fatal: a
+  // deployment that cannot answer is one whose tools still work, frozen at
+  // what discovery finds, an unknown baseline costs exactly one refresh (see
+  // `createCatalogCheck`), and Everything is told nothing new, so its
+  // handshake is exactly what it was.
+  const catalogAtStart = catalogRevisionAdvertised
+    ? await fetchCatalogState(config).then(
+        (state) => state,
+        (err: unknown) => {
+          // A rejected key is the deployment's verdict on the whole run: said as such.
+          if (err instanceof ConnectionKeyRejectedError) throw err;
+          return null;
+        },
+      )
+    : null;
+  const connectionAtStart = catalogAtStart?.connection;
+  const connectionLine = describeConnection(connectionAtStart);
+  const handshakeInstructions = connectionLine
+    ? instructions
+      ? `${instructions}\n\n${connectionLine}`
+      : connectionLine
+    : instructions;
 
   /**
    * CREDENTIAL SWAP (OAuth mode). The remote manual's MCP session captured
@@ -499,6 +614,35 @@ export async function createHexisMcpServer(
   let tools: ProxiedTool[] = [];
   /** Why discovery failed, if it did: the sentence every handler answers with. */
   let discoveryError: string | null = null;
+  /**
+   * The agent this connection is narrowed to, as the deployment last said it
+   * (with the manual list, at discovery and at every refresh): words the
+   * refusal of a tool off the surface, and — for a file that cannot be used
+   * — the one sentence the listing and every call answer. Undefined for
+   * Everything, which lists and refuses exactly as before.
+   */
+  let connection: ConnectionScopeWire | undefined = connectionAtStart;
+  /**
+   * The deployment's MCP Apps: the `ui://` views its tools carry, which this
+   * server forwards on `tools/list` and serves on `resources/read`.
+   *
+   * Read once, with discovery. Empty is the honest default and the degraded
+   * one at the same time — a deployment that serves no app, and one too old
+   * to be asked, look identical from here, and in both cases every tool is
+   * listed and answers its text.
+   */
+  let apps: McpAppManifest = { tools: {}, resources: [] };
+  /** The read-only hints last read from the deployment, kept through a failed read. */
+  let hints: Record<string, boolean> = {};
+  /**
+   * How many hint reads have started, and which of them last updated `hints`.
+   * Two listings can overlap, and their reads can finish out of order: only a
+   * read newer than the one already cached may replace it, so an older answer
+   * never reverts an admin's newer change — each listing still answers with
+   * the hints its own read returned.
+   */
+  let hintReadsStarted = 0;
+  let hintReadCached = 0;
   /**
    * The SDK server, declared up here rather than beside `shutdown`: the
    * catalog refresh below sends notifications on it, and a closure defined
@@ -621,6 +765,12 @@ export async function createHexisMcpServer(
       console.error('[hexis-mcp] remote manual re-registered with the renewed credential.');
     });
   };
+  // From here a refused sign-in also tells the client the list changed, so
+  // it re-lists and shows the notice.
+  announceSignInRefused = (): void => {
+    if (closed) return;
+    void server?.sendToolListChanged().catch(() => {});
+  };
   if (config.renewConnectionKey) {
     config.onConnectionKeyRenewed = swapRemoteCredential;
   }
@@ -687,10 +837,11 @@ export async function createHexisMcpServer(
       // them. `materializePlugin` refreshes a plugin from scratch on every
       // call, so a local server whose files were committed is spawned below
       // from the committed files, in a root its old child no longer holds.
-      const [allManuals, localOnlyNow] = await Promise.all([
+      const [{ manuals: allManuals, connection: connectionNow }, localOnlyNow] = await Promise.all([
         fetchAllManuals(config),
         fetchLocalOnlyManuals(config),
       ]);
+      connection = connectionNow;
       const local = await prepareLocalManuals(
         config,
         localManualTemplates(allManuals, new Set(localOnlyNow.keys())),
@@ -744,6 +895,11 @@ export async function createHexisMcpServer(
       tools = withoutRemoteMetaTools(
         (await live.getTools()).map((tool: UtcpTool) => flattenManualTool(tool, REMOTE_MANUAL_NAME)),
       );
+      // The views go with the tools: a tool that gained or re-pointed its
+      // `ui://` view since startup must be listed — and its view served — as
+      // the deployment serves it now, not as it did when this process began.
+      // A failed read keeps the views already served (see `fetchMcpApps`).
+      apps = await fetchMcpApps(config, apps);
       console.error(
         `[hexis-mcp] the workspace's catalog changed — ${tools.length} tool(s) now served ` +
           `(${localByName.size} local-only manual(s) registered here, the rest served by the workspace).`,
@@ -800,27 +956,19 @@ export async function createHexisMcpServer(
     // discovery registers: a commit landing between the two reads would then
     // be inside the baseline and outside the toolset, and the first poll —
     // seeing the revision it already holds — would report no change, leaving
-    // that commit's tool invisible until a restart. Read first, the error is
-    // the harmless one: a commit in the gap makes the baseline stale, the
-    // first poll calls it a change, and one refresh settles it.
-    //
-    // Only when the deployment ADVERTISES the route: an older one would answer
-    // the unknown path through its JWT mounts with a 401, which reads as a
-    // dead credential. Never fatal either way — a deployment that cannot
-    // answer it is one whose tools still work, frozen at what discovery found,
-    // and an unknown baseline costs exactly one refresh (see `createCatalogCheck`).
-    const baselineRevision = catalogRevisionAdvertised
-      ? await fetchCatalogRevision(config).then(
-          (r) => r,
-          () => null,
-        )
-      : null;
+    // that commit's tool invisible until a restart. Read first — at startup,
+    // ahead of the handshake, as the one read that also tells the handshake
+    // what the connection is narrowed to — the error is the harmless one: a
+    // commit in the gap makes the baseline stale, the first poll calls it a
+    // change, and one refresh settles it.
+    const baselineRevision = catalogAtStart?.revision ?? null;
     if (closed) return;
-    const [allManuals, localOnlyFound] = await Promise.all([
+    const [{ manuals: allManuals, connection: connectionFound }, localOnlyFound] = await Promise.all([
       fetchAllManuals(config),
       fetchLocalOnlyManuals(config),
     ]);
     if (closed) return;
+    connection = connectionFound;
     for (const [name, info] of localOnlyFound) localOnly.set(name, info);
     const local = await prepareLocalManuals(
       config,
@@ -884,6 +1032,10 @@ export async function createHexisMcpServer(
       await swapRemoteCredential(config.connectionKey);
     }
     tools = discovered;
+    // The views the discovered tools carry. After `tools`, and never fatal:
+    // `fetchMcpApps` answers an empty manifest for anything but a rejected
+    // key, so a deployment without the route still starts and serves tools.
+    apps = await fetchMcpApps(config);
 
     console.error(
       `[hexis-mcp] ${config.baseUrl} — ${tools.length} tool(s) ready ` +
@@ -932,11 +1084,14 @@ export async function createHexisMcpServer(
       // newline in it would start a line of its own in the operator log and an
       // ANSI escape would paint their terminal. The CLIENT-facing copies below
       // keep the reason verbatim — they travel inside a JSON-RPC string, where
-      // it is already data rather than a line.
-      console.error(
-        `[hexis-mcp] tool discovery failed: ${printable(discoveryError)} ` +
-          'The server stays connected and answers tools/list with this notice; restart it once the cause is fixed.',
-      );
+      // it is already data rather than a line. A sign-in refused for good
+      // mid-discovery is not said here: renewal.ts said it once already.
+      if (!(err instanceof SignInRefusedError)) {
+        console.error(
+          `[hexis-mcp] tool discovery failed: ${printable(discoveryError)} ` +
+            'The server stays connected and answers tools/list with this notice; restart it once the cause is fixed.',
+        );
+      }
       // Whatever got built before the failure — including any stdio children
       // already spawned — goes now. The SDK server does not: it is how the
       // client learns any of this.
@@ -968,6 +1123,9 @@ export async function createHexisMcpServer(
     closeRenewal(config);
     if (config.onConnectionKeyRenewed === swapRemoteCredential) {
       config.onConnectionKeyRenewed = undefined;
+    }
+    if (config.onSignInEnded === reportSignInRefused) {
+      config.onSignInEnded = hostSignInEnded;
     }
     // Discovery now runs in the BACKGROUND, so teardown can land in the
     // middle of it — mid-download, mid-spawn. `closed` is already true, so
@@ -1018,12 +1176,32 @@ export async function createHexisMcpServer(
       // reconnect (see `refreshCatalog`), and declaring the capability
       // is what permits the notification that says so.
       {
-        capabilities: { tools: { listChanged: true }, prompts: { listChanged: true } },
-        ...(instructions !== undefined ? { instructions } : {}),
+        capabilities: {
+          tools: { listChanged: true },
+          prompts: { listChanged: true },
+          // Resources are declared UNCONDITIONALLY here, unlike on the hosted
+          // endpoint, because this server builds its capabilities BEFORE
+          // discovery has told it whether the deployment serves any view —
+          // and the handshake happens once. The two handlers below answer an
+          // empty list and a plain "no such resource" while there is nothing,
+          // which is what a client must tolerate from any resource server.
+          resources: {},
+        },
+        ...(handshakeInstructions !== undefined ? { instructions: handshakeInstructions } : {}),
       },
     );
 
+    // A refused sign-in decides every answer the listing gives: any read it
+    // makes — discovery, the catalog check, the tool hints — may be the one
+    // that met the refusal. Applied at each return rather than by awaiting
+    // the listing from a wrapper, whose extra tick would let a closing
+    // transport answer a parked listing first (see the shutdown guard below).
+    const answered = (listing: ListToolsResult): ListToolsResult =>
+      signInRefused !== null ? { tools: [signInRefusedNoticeTool(signInRefused)] } : listing;
+
     server.setRequestHandler(ListToolsRequestSchema, async () => {
+      // Before anything that could ask the workspace: nothing is left to ask it with.
+      if (signInRefused !== null) return answered({ tools: [] });
       await ready;
       // A listing is the one moment a stale toolset is answered out loud, so
       // the check is AWAITED here: the list handed back is the current one, a
@@ -1038,7 +1216,13 @@ export async function createHexisMcpServer(
       // The failure goes IN the listing, not into an empty one: an empty
       // toolset is what a tool-less workspace looks like, and a client that
       // shows one gives its reader nothing to act on.
-      if (discoveryError !== null) return { tools: [discoveryNoticeTool(discoveryError)] };
+      if (discoveryError !== null) return answered({ tools: [discoveryNoticeTool(discoveryError)] });
+      // A connection whose agent configuration cannot be used loads NOTHING — not
+      // Everything — and the one sentence saying why rides the listing's
+      // `_meta`, as it does on the hosted endpoint (the handshake carries it too).
+      if (connection?.unavailable) {
+        return answered({ tools: [], _meta: { [CONNECTION_META_KEY]: connection.unavailable } });
+      }
       // Shutdown can land DURING discovery: every phase boundary then returns
       // early, which is a clean return — no error, and `tools` still empty.
       // Answering that with an empty listing would show the reader exactly
@@ -1046,7 +1230,41 @@ export async function createHexisMcpServer(
       // look the notice above exists to prevent. The truth is the same one
       // the call handler gives: this server is going away.
       if (closed) throw new McpError(ErrorCode.ConnectionClosed, 'hexis-mcp is shutting down.');
-      return { tools: listedTools(tools) };
+      // The hints are read per listing, so an admin's change on the Tools page
+      // is in the very next one (see `fetchToolHints`) — from a deployment
+      // that serves them; an older one keeps the conservative false default.
+      // Not once the sign-in is refused: the answer is the notice regardless.
+      let listedHints: Record<string, boolean> = {};
+      if (toolHintsAdvertised && signInRefused === null) {
+        const read = ++hintReadsStarted;
+        listedHints = await fetchToolHints(config, hints);
+        if (read > hintReadCached) {
+          hintReadCached = read;
+          hints = listedHints;
+        }
+      }
+      if (closed) throw new McpError(ErrorCode.ConnectionClosed, 'hexis-mcp is shutting down.');
+      return answered({ tools: listedTools(tools, apps.tools, listedHints) });
+    });
+
+    // The deployment's MCP App views, served from here so a host connected
+    // through this server renders a page exactly as one connected straight to
+    // the deployment does.
+    server.setRequestHandler(ListResourcesRequestSchema, async () => {
+      await ready;
+      return { resources: apps.resources.map((r) => toListedResource(r)) };
+    });
+    server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+      await ready;
+      const resource = apps.resources.find((r) => r.uri === request.params.uri);
+      if (!resource) {
+        throw new McpError(
+          ErrorCode.InvalidParams,
+          `No resource at ${request.params.uri}. This server serves the workspace's MCP App views ` +
+            `and nothing else${apps.resources.length ? `: ${apps.resources.map((r) => r.uri).join(', ')}` : ' — and this workspace serves none'}.`,
+        );
+      }
+      return toReadResourceResult(resource);
     });
 
     server.setRequestHandler(CallToolRequestSchema, async (request, extra): Promise<CallToolResult> => {
@@ -1054,16 +1272,22 @@ export async function createHexisMcpServer(
       // must not be told it does not exist because the catalog is still
       // arriving. (After the first list this is already settled.)
       await ready;
+      if (signInRefused !== null) throw new McpError(ErrorCode.InternalError, signInRefused);
       if (discoveryError !== null) {
         throw new McpError(
           ErrorCode.InternalError,
           `hexis-mcp could not load this workspace's tools: ${discoveryError}`,
         );
       }
+      // Nothing is callable on a connection that loads nothing, meta-tools
+      // included: every call is answered with the reason.
+      if (connection?.unavailable) return toolError(connection.unavailable);
       // Never start a call mid-re-registration — a swap or a recovery may have
       // the manual between its deregister and its register, where a repository
       // lookup finds nothing.
       while (reregisterInProgress) await reregisterInProgress;
+      // The sign-in may have ended while this call waited.
+      if (signInRefused !== null) throw new McpError(ErrorCode.InternalError, signInRefused);
       // Shutdown can land while a call waits here, and `shutdown` waits only
       // for the re-registration, not for callers parked behind it. Dispatching
       // now would run against a client being torn down, so the caller gets the
@@ -1085,17 +1309,27 @@ export async function createHexisMcpServer(
         const retired = retiredToolMessage(name);
         if (retired) return toolError(retired);
         const tool = tools.find((t) => t.mcpName === name);
-        if (!tool) return toolError(`Unknown tool "${name}".`);
+        // On a narrowed connection, a tool off the surface is one its agent
+        // does not load: refused by name and agent, never "unknown" — the tool
+        // may well exist, for this person, on another connection.
+        if (!tool) return toolError(connection ? connectionRefusal(name, connection) : `Unknown tool "${name}".`);
         const progressToken = request.params._meta?.progressToken;
-        return await dispatchToolCall(live, tool, request.params.arguments ?? {}, (progress, message) =>
-          extra.sendNotification({
-            method: 'notifications/progress',
-            params: {
-              ...(progressToken !== undefined ? { progressToken } : {}),
-              progress,
-              message,
-            },
-          } as never),
+        return await dispatchToolCall(
+          live,
+          tool,
+          request.params.arguments ?? {},
+          (progress, message) =>
+            extra.sendNotification({
+              method: 'notifications/progress',
+              params: {
+                ...(progressToken !== undefined ? { progressToken } : {}),
+                progress,
+                message,
+              },
+            } as never),
+          // A tool with a view answers structured content as well: the view
+          // reads its fields from there, not from the text the model reads.
+          { structured: Object.hasOwn(apps.tools, name) },
         );
       } finally {
         inflightCalls -= 1;

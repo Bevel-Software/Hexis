@@ -3,7 +3,7 @@ import type { PullRequestSummary } from '@bevel-software/platform-shared';
 import { readFileAtForkPoint, readFileOnBranch, type ForkPointFile } from '../services/change-requests.api';
 import { subscribePrStale } from '../../../core/events';
 import { isBinaryFile } from '../../workspace/components/renderers';
-import { WorkspaceApiError } from '../../workspace/services/workspace.api';
+import { WorkspaceApiError } from '../../workspace';
 import { diffLines, hasChanges, type DiffLine } from '../utils/diff';
 
 /**

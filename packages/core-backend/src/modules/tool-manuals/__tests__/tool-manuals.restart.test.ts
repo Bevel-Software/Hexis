@@ -207,7 +207,7 @@ describe('external tools and their sign-ins across a restart', () => {
       createToolContextResolver({
         authService: { getUserById: async (id: string) => (id === USER.id ? { ...USER, name: 'User' } : null) } as never,
         workspaceService: { getWorkspacePath: async () => root } as never,
-        workflowService: {} as never,
+        versionControlService: {} as never,
         events: {} as never,
         kbDirName: KB_DIR,
         creatorAccess: { planForCreate: async () => null, grantInExtractedFile: async () => null, noteAccessFileWritten: () => {} },

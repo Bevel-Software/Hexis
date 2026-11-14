@@ -1,5 +1,5 @@
 import { Link2 } from 'lucide-react';
-import type { AccessEligible } from '../../access/api';
+import type { AccessEligible } from '../../access';
 import { Badge } from '../../../shared/components';
 import type { LinkOut } from '../hooks/useLinksOut';
 

@@ -1,0 +1,484 @@
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { testKbContext } from '../../../../__tests__/kb-context.js';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import os from 'node:os';
+import type { AuthUser } from '@bevel-software/platform-shared';
+import type { WorkspaceService } from '../../../workspace/workspace.service.js';
+import { VersionControlHooks } from '../../version-control-hooks.js';
+import type { IAccessControl } from '../../../access/access-control.interface.js';
+import { GitService } from '../git.service.js';
+import {
+  BranchAuthorshipError,
+  BranchDeleteRefusedError,
+  ProtectedBranchError,
+  VersionControlValidationError,
+} from '../../../../shared/domain-errors.js';
+
+const execFileAsync = promisify(execFile);
+
+async function mkTmpRoot(): Promise<string> {
+  return fs.mkdtemp(path.join(os.tmpdir(), 'bevel-git-deleteBranch-'));
+}
+
+async function runGit(cwd: string, args: string[]): Promise<void> {
+  await execFileAsync('git', args, {
+    cwd,
+    env: {
+      ...process.env,
+      GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 't@x.com',
+      GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 't@x.com',
+    },
+  });
+}
+
+async function gitOut(cwd: string, args: string[]): Promise<string> {
+  const { stdout } = await execFileAsync('git', args, { cwd });
+  return stdout.trim();
+}
+
+async function remoteHasRef(upstream: string, ref: string): Promise<boolean> {
+  const out = await gitOut(upstream, ['for-each-ref', `refs/heads/${ref}`, '--format', '%(refname)']);
+  return out.length > 0;
+}
+
+/**
+ * Seeds a bare upstream + a clone with three pushed branches:
+ *   - target-company-state (protected, the workspace's HEAD)
+ *   - alice/my-draft (owned by alice@example.com)
+ *   - bob/other-draft (owned by someone else)
+ */
+async function seedWorkspace(root: string, workspaceId: string): Promise<{
+  upstream: string;
+  repo: string;
+}> {
+  const upstream = path.join(root, 'upstream.git');
+  await runGit(root, ['init', '--bare', '-b', 'target-company-state', upstream]);
+
+  const seed = path.join(root, '.seed');
+  await fs.mkdir(seed);
+  await runGit(seed, ['init', '-b', 'target-company-state']);
+  await runGit(seed, ['remote', 'add', 'origin', upstream]);
+  await runGit(seed, ['commit', '--allow-empty', '-m', 'init']);
+  await runGit(seed, ['branch', 'alice/my-draft']);
+  await runGit(seed, ['branch', 'bob/other-draft']);
+  await runGit(seed, ['push', 'origin', 'target-company-state', 'alice/my-draft', 'bob/other-draft']);
+  await runGit(upstream, ['symbolic-ref', 'HEAD', 'refs/heads/target-company-state']);
+
+  const workspaceDir = path.join(root, workspaceId);
+  const repo = path.join(workspaceDir, 'knowledge-base');
+  await fs.mkdir(workspaceDir, { recursive: true });
+  await runGit(root, ['clone', upstream, repo]);
+  // Realistic production state: the user has worked on alice/my-draft from
+  // this workspace at some point, so a local tracking ref exists alongside
+  // the remote ref. bob/other-draft is remote-only (alice has never opened
+  // it). This forces deleteBranch to handle the "delete both refs" case.
+  await runGit(repo, ['branch', 'alice/my-draft', 'origin/alice/my-draft']);
+  return { upstream, repo };
+}
+
+
+function stubWorkspaceService(workspaceId: string, workspaceDir: string): WorkspaceService {
+  return {
+    getWorkspacePath: async (id: string) => {
+      if (id !== workspaceId) throw new Error(`unexpected workspace ${id}`);
+      return workspaceDir;
+    },
+  } as unknown as WorkspaceService;
+}
+
+const ALICE: AuthUser = {
+  id: 'u-alice',
+  email: 'alice@example.com',
+  name: 'Alice Test',
+};
+
+const CAROL: AuthUser = {
+  id: 'u-carol',
+  email: 'carol@example.com',
+  name: 'Carol Admin',
+};
+
+/**
+ * Minimal `IAccessControl` stub. `deleteBranch` only consults `canWrite` with
+ * a `relativePath` of `'roles.yaml'` — which the production service already
+ * uses as the admin-membership signal. Returns true for that path iff the
+ * caller's email is in the admin allowlist; every other method throws so an
+ * unexpected dependency surfaces loudly in the test rather than silently
+ * passing through.
+ */
+function fakeAccessControl(adminEmails: string[]): IAccessControl {
+  const admins = new Set(adminEmails.map((e) => e.trim().toLowerCase()));
+  const notImpl = () => {
+    throw new Error('IAccessControl method not stubbed for this test');
+  };
+  return {
+    canWrite: async (_ws, email, relativePath) => {
+      if (relativePath !== 'roles.yaml') {
+        throw new Error(`unexpected canWrite path "${relativePath}" in deleteBranch test`);
+      }
+      return admins.has(email.trim().toLowerCase());
+    },
+    canWriteBatch: async () => notImpl(),
+    eligibleWriters: async () => notImpl(),
+    eligibleOwners: async () => notImpl(),
+    eligibleDownloaders: async () => notImpl(),
+    eligibleWriterEmails: async () => notImpl(),
+    eligibleOwnerEmails: async () => notImpl(),
+    grantSources: async () => notImpl(),
+    canDownload: async () => notImpl(),
+    canRead: async () => notImpl(),
+    canReadBatch: async () => notImpl(),
+    eligibleReaders: async () => notImpl(),
+    canReadAtRef: async () => notImpl(),
+    canOwner: async () => notImpl(),
+    invalidate: () => {},
+    findEmailByHash: async () => null,
+    kbPrincipals: async () => ({ plugins: [], people: [] }),
+    validateRolesYaml: () => ({ ok: true }),
+    canWriteAtRef: async () => null,
+    canWriteBatchAtRef: async () => null,
+    eligibleWritersAtRef: async () => null,
+    eligibleWritersForPathsAtRef: async () => null,
+  };
+}
+
+describe('GitService.deleteBranch — authorship + remote delete', () => {
+  let root: string;
+  const workspaceId = 'target-company-state';
+
+  beforeEach(async () => {
+    root = await mkTmpRoot();
+  });
+
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  });
+
+  function makeService(): GitService {
+    return new GitService(
+      stubWorkspaceService(workspaceId, path.join(root, workspaceId)),
+      new VersionControlHooks(),
+      testKbContext(),
+    );
+  }
+
+  it('lets the author delete their own draft — removes both local and remote refs', async () => {
+    const { upstream } = await seedWorkspace(root, workspaceId);
+    const svc = makeService();
+
+    await svc.deleteBranch(workspaceId, 'alice/my-draft', ALICE);
+
+    // Local ref gone — `for-each-ref` returns empty when ref is missing
+    const localRefs = await gitOut(
+      path.join(root, workspaceId, 'knowledge-base'),
+      ['for-each-ref', 'refs/heads/alice/my-draft', '--format', '%(refname)'],
+    );
+    expect(localRefs).toBe('');
+
+    // Remote ref ALSO gone — this is the new behaviour, the original
+    // implementation only deleted locally and left the orphan on origin.
+    expect(await remoteHasRef(upstream, 'alice/my-draft')).toBe(false);
+  });
+
+  it('when the host refuses the remote deletion, deletes nothing and says so (409, no git output)', async () => {
+    const { upstream, repo } = await seedWorkspace(root, workspaceId);
+    // The host turns every push away, as GitHub did during its incident.
+    const hook = path.join(upstream, 'hooks', 'pre-receive');
+    await fs.writeFile(hook, '#!/bin/sh\necho "Internal Server Error" >&2\nexit 1\n');
+    await fs.chmod(hook, 0o755);
+    const svc = makeService();
+
+    const err = await svc.deleteBranch(workspaceId, 'alice/my-draft', ALICE).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(BranchDeleteRefusedError);
+    const refusal = err as BranchDeleteRefusedError;
+    expect(refusal.status).toBe(409);
+    expect(refusal.message).toBe(
+      'The repository host refused to delete "alice/my-draft"; it is still there. Try again later.',
+    );
+    expect(JSON.stringify({ ...refusal.payload, error: refusal.message })).not.toMatch(
+      /Internal Server Error|remote rejected|pre-receive|upstream\.git/,
+    );
+    // Still there — remotely AND locally.
+    expect(await remoteHasRef(upstream, 'alice/my-draft')).toBe(true);
+    expect(
+      await gitOut(repo, ['for-each-ref', 'refs/heads/alice/my-draft', '--format', '%(refname)']),
+    ).toBe('refs/heads/alice/my-draft');
+  });
+
+  it('when the host cannot be reached, the local branch stays too', async () => {
+    const { repo } = await seedWorkspace(root, workspaceId);
+    await runGit(repo, ['remote', 'set-url', 'origin', path.join(root, 'gone.git')]);
+    const svc = makeService();
+
+    await expect(svc.deleteBranch(workspaceId, 'alice/my-draft', ALICE)).rejects.toBeInstanceOf(
+      BranchDeleteRefusedError,
+    );
+    expect(
+      await gitOut(repo, ['for-each-ref', 'refs/heads/alice/my-draft', '--format', '%(refname)']),
+    ).toBe('refs/heads/alice/my-draft');
+  });
+
+  it('deletes the remote branch even when this clone has no tracking ref for it (pushed from elsewhere since the last fetch)', async () => {
+    const { upstream, repo } = await seedWorkspace(root, workspaceId);
+    await runGit(repo, ['update-ref', '-d', 'refs/remotes/origin/alice/my-draft']);
+    const svc = makeService();
+
+    await svc.deleteBranch(workspaceId, 'alice/my-draft', ALICE);
+
+    expect(await remoteHasRef(upstream, 'alice/my-draft')).toBe(false);
+    expect(
+      await gitOut(repo, ['for-each-ref', 'refs/heads/alice/my-draft', '--format', '%(refname)']),
+    ).toBe('');
+  });
+
+  it("refuses when the user isn't the author — leaves the remote ref intact", async () => {
+    const { upstream } = await seedWorkspace(root, workspaceId);
+    const svc = makeService();
+
+    await expect(
+      svc.deleteBranch(workspaceId, 'bob/other-draft', ALICE),
+    ).rejects.toBeInstanceOf(BranchAuthorshipError);
+
+    // Refused delete must not push to origin — bob's draft must still be
+    // there for him.
+    expect(await remoteHasRef(upstream, 'bob/other-draft')).toBe(true);
+  });
+
+  it('refuses to delete a branch with no recognisable author prefix', async () => {
+    const { repo } = await seedWorkspace(root, workspaceId);
+    // Create a `fix/...` style branch (no email prefix) locally + push.
+    await runGit(repo, ['branch', 'fix/no-author']);
+    await runGit(repo, ['push', 'origin', 'fix/no-author']);
+
+    const svc = makeService();
+    await expect(
+      svc.deleteBranch(workspaceId, 'fix/no-author', ALICE),
+    ).rejects.toBeInstanceOf(BranchAuthorshipError);
+  });
+
+  it('still rejects protected branches with ProtectedBranchError (regression guard)', async () => {
+    await seedWorkspace(root, workspaceId);
+    const svc = makeService();
+
+    await expect(
+      svc.deleteBranch(workspaceId, 'target-company-state', ALICE),
+    ).rejects.toBeInstanceOf(ProtectedBranchError);
+  });
+
+  it('still rejects deleting the currently-checked-out branch (regression guard)', async () => {
+    const { repo } = await seedWorkspace(root, workspaceId);
+    // Switch to alice's draft so it's the checked-out branch.
+    await runGit(repo, ['checkout', 'alice/my-draft']);
+
+    const svc = makeService();
+    await expect(
+      svc.deleteBranch(workspaceId, 'alice/my-draft', ALICE),
+    ).rejects.toBeInstanceOf(VersionControlValidationError);
+  });
+
+  it('onlyIfNoRemote: true bypasses the authorship check (orphan-tidy-up path stays open)', async () => {
+    const { repo, upstream } = await seedWorkspace(root, workspaceId);
+    // Simulate an orphan: branch exists locally but its remote counterpart
+    // was already pruned (e.g. PR merged + remote head deleted on GitHub).
+    await runGit(repo, ['branch', 'someone-else/orphan']);
+    // Don't push it — so origin never had it.
+
+    const svc = makeService();
+    await svc.deleteBranch(workspaceId, 'someone-else/orphan', ALICE, { onlyIfNoRemote: true });
+
+    const localRefs = await gitOut(repo, [
+      'for-each-ref', 'refs/heads/someone-else/orphan', '--format', '%(refname)',
+    ]);
+    expect(localRefs).toBe('');
+    // Origin never had it; sanity check the workspace clone's remote cache too.
+    expect(await remoteHasRef(upstream, 'someone-else/orphan')).toBe(false);
+  });
+
+  it('refuses orphan delete when remote still has the ref (onlyIfNoRemote contract)', async () => {
+    // Regression: even with onlyIfNoRemote, if origin still has the ref the
+    // delete is refused — preserves the existing safety property.
+    await seedWorkspace(root, workspaceId);
+    const svc = makeService();
+
+    await expect(
+      svc.deleteBranch(workspaceId, 'alice/my-draft', ALICE, { onlyIfNoRemote: true }),
+    ).rejects.toBeInstanceOf(VersionControlValidationError);
+  });
+
+  // Admin-can-delete: when the user is in the `Admin` role per `roles.yaml`
+  // (detected via canWrite on that file — its existing source of truth), the
+  // gate opens for any non-protected, non-current branch, including teammates'
+  // drafts and unprefixed CLI branches with no recognisable author.
+  function makeServiceWithAccess(ac: IAccessControl): GitService {
+    return new GitService(
+      stubWorkspaceService(workspaceId, path.join(root, workspaceId)),
+      new VersionControlHooks(),
+      testKbContext(),
+      undefined,
+      ac,
+    );
+  }
+
+  it("lets an admin delete another user's draft — removes both local and remote refs", async () => {
+    const { repo, upstream } = await seedWorkspace(root, workspaceId);
+    // Realistic state: carol has opened bob's draft from this workspace at
+    // some point, so a local tracking ref exists. deleteBranch must clean
+    // both sides.
+    await runGit(repo, ['branch', 'bob/other-draft', 'origin/bob/other-draft']);
+    const svc = makeServiceWithAccess(fakeAccessControl([CAROL.email]));
+
+    await svc.deleteBranch(workspaceId, 'bob/other-draft', CAROL);
+
+    const localRefs = await gitOut(repo, [
+      'for-each-ref', 'refs/heads/bob/other-draft', '--format', '%(refname)',
+    ]);
+    expect(localRefs).toBe('');
+    expect(await remoteHasRef(upstream, 'bob/other-draft')).toBe(false);
+  });
+
+  it('lets an admin delete an unprefixed CLI branch (no recognisable author)', async () => {
+    const { repo, upstream } = await seedWorkspace(root, workspaceId);
+    await runGit(repo, ['branch', 'fix/no-author']);
+    await runGit(repo, ['push', 'origin', 'fix/no-author']);
+
+    const svc = makeServiceWithAccess(fakeAccessControl([CAROL.email]));
+    await svc.deleteBranch(workspaceId, 'fix/no-author', CAROL);
+
+    expect(await remoteHasRef(upstream, 'fix/no-author')).toBe(false);
+  });
+
+  it("still refuses a non-admin non-author — the gate didn't widen for everyone", async () => {
+    const { upstream } = await seedWorkspace(root, workspaceId);
+    // Alice is not admin and not bob's author → must still reject.
+    const svc = makeServiceWithAccess(fakeAccessControl([CAROL.email]));
+
+    await expect(
+      svc.deleteBranch(workspaceId, 'bob/other-draft', ALICE),
+    ).rejects.toBeInstanceOf(BranchAuthorshipError);
+    expect(await remoteHasRef(upstream, 'bob/other-draft')).toBe(true);
+  });
+
+  it('admin power does NOT extend to protected branches', async () => {
+    await seedWorkspace(root, workspaceId);
+    const svc = makeServiceWithAccess(fakeAccessControl([CAROL.email]));
+
+    await expect(
+      svc.deleteBranch(workspaceId, 'target-company-state', CAROL),
+    ).rejects.toBeInstanceOf(ProtectedBranchError);
+  });
+});
+
+/**
+ * The pieces an agent's `delete_branch` and the leftover cleanup decide with:
+ * where a branch stands against the default branch, whether a commit is
+ * contained in another, and a delete leased on the tip the checks saw.
+ */
+describe('GitService — branch state for a checked delete', () => {
+  let root: string;
+  const workspaceId = 'target-company-state';
+
+  beforeEach(async () => {
+    root = await mkTmpRoot();
+  });
+
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  });
+
+  function makeService(): GitService {
+    return new GitService(
+      stubWorkspaceService(workspaceId, path.join(root, workspaceId)),
+      new VersionControlHooks(),
+      testKbContext(),
+    );
+  }
+
+  /** Push `n` commits onto `branch` from a separate clone, as a colleague would. */
+  async function pushCommits(upstream: string, branch: string, n: number): Promise<string> {
+    const other = path.join(root, `.other-${Math.random().toString(36).slice(2)}`);
+    await runGit(root, ['clone', '-b', branch, upstream, other]);
+    for (let i = 0; i < n; i++) await runGit(other, ['commit', '--allow-empty', '-m', `work ${i}`]);
+    await runGit(other, ['push', 'origin', branch]);
+    return gitOut(other, ['rev-parse', 'HEAD']);
+  }
+
+  it('counts the commits not on the default branch, and reads the tip', async () => {
+    const { upstream, repo } = await seedWorkspace(root, workspaceId);
+    const tip = await pushCommits(upstream, 'bob/other-draft', 3);
+    await runGit(repo, ['fetch', 'origin']);
+    const svc = makeService();
+
+    const state = await svc.branchState(workspaceId, 'bob/other-draft', 'target-company-state');
+    expect(state).toEqual({ exists: true, lastCommit: tip, unmergedCommits: 3 });
+
+    // A branch with nothing of its own counts none.
+    const merged = await svc.branchState(workspaceId, 'alice/my-draft', 'target-company-state');
+    expect(merged.exists).toBe(true);
+    expect(merged.unmergedCommits).toBe(0);
+  });
+
+  it('a name that is not a branch does not exist', async () => {
+    await seedWorkspace(root, workspaceId);
+    const state = await makeService().branchState(workspaceId, 'alice/no-such-branch', 'target-company-state');
+    expect(state).toEqual({ exists: false, lastCommit: null, unmergedCommits: 0 });
+  });
+
+  it('isAncestor: yes for a contained commit, no for one that is not, and throws for an unknown commit', async () => {
+    const { upstream, repo } = await seedWorkspace(root, workspaceId);
+    const base = await gitOut(repo, ['rev-parse', 'HEAD']);
+    const tip = await pushCommits(upstream, 'bob/other-draft', 1);
+    await runGit(repo, ['fetch', 'origin']);
+    const svc = makeService();
+
+    expect(await svc.isAncestor(workspaceId, base, tip)).toBe(true);
+    expect(await svc.isAncestor(workspaceId, tip, base)).toBe(false);
+    await expect(svc.isAncestor(workspaceId, 'f'.repeat(40), base)).rejects.toThrow();
+  });
+
+  it('removes the branch from the shared repository even when this clone never fetched it, and answers its tip', async () => {
+    const { upstream, repo } = await seedWorkspace(root, workspaceId);
+    // Created from elsewhere after this clone was made: no tracking ref here.
+    const other = path.join(root, '.creator');
+    await runGit(root, ['clone', upstream, other]);
+    await runGit(other, ['checkout', '-b', 'alice/new-elsewhere']);
+    await runGit(other, ['commit', '--allow-empty', '-m', 'elsewhere']);
+    await runGit(other, ['push', 'origin', 'alice/new-elsewhere']);
+    const tip = await gitOut(other, ['rev-parse', 'HEAD']);
+    expect(await gitOut(repo, ['for-each-ref', 'refs/remotes/origin/alice/new-elsewhere'])).toBe('');
+
+    const result = await makeService().deleteBranch(workspaceId, 'alice/new-elsewhere', ALICE);
+    expect(result).toEqual({ lastCommit: tip });
+    expect(await remoteHasRef(upstream, 'alice/new-elsewhere')).toBe(false);
+  });
+
+  it('a delete leased on a tip refuses a branch that moved since, and leaves it in place', async () => {
+    const { upstream } = await seedWorkspace(root, workspaceId);
+    const seen = await gitOut(upstream, ['rev-parse', 'refs/heads/alice/my-draft']);
+    // A colleague pushes after the checks were made.
+    await pushCommits(upstream, 'alice/my-draft', 1);
+
+    const err = await makeService()
+      .deleteBranch(workspaceId, 'alice/my-draft', ALICE, { expectTip: seen })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(BranchDeleteRefusedError);
+    expect(await remoteHasRef(upstream, 'alice/my-draft')).toBe(true);
+  });
+
+  it('a delete leased on the current tip goes through', async () => {
+    const { upstream } = await seedWorkspace(root, workspaceId);
+    const seen = await gitOut(upstream, ['rev-parse', 'refs/heads/alice/my-draft']);
+    const result = await makeService().deleteBranch(workspaceId, 'alice/my-draft', ALICE, { expectTip: seen });
+    expect(result.lastCommit).toBe(seen);
+    expect(await remoteHasRef(upstream, 'alice/my-draft')).toBe(false);
+  });
+
+  it('mayDeleteBranch: the author yes, anyone else without the Admin role no', async () => {
+    await seedWorkspace(root, workspaceId);
+    const svc = makeService();
+    expect(await svc.mayDeleteBranch(workspaceId, 'alice/my-draft', ALICE)).toBe(true);
+    expect(await svc.mayDeleteBranch(workspaceId, 'bob/other-draft', ALICE)).toBe(false);
+  });
+});

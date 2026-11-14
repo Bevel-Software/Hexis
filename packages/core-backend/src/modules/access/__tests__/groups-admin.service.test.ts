@@ -1,16 +1,19 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { NodeFs } from '../../kb-fs/node-fs.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import type { WorkflowService } from '../../workflow/workflow.service.js';
+import type { WorkspaceService } from '../../workspace/index.js';
+import type { VersionControlService } from '../../version-control/index.js';
 import type { AuthUser, FileTreeEntry } from '@bevel-software/platform-shared';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { AccessControlService } from '../access-control.service.js';
 import { GroupsAdminService, GroupsAdminError } from '../groups-admin.service.js';
 import { createGroup, addGroupMember, GroupsEditError } from '../groups-edit.js';
+import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
+import { AccessDeniedError } from '../../access-model/index.js';
+import { UNSHOWN_REFERENCE_REFUSAL } from '../reference-scan.js';
 
 const KB = 'knowledge-base';
 const ADMIN: AuthUser = { id: 'u-admin', email: 'admin@x.io', name: 'Admin' } as AuthUser;
@@ -58,7 +61,7 @@ function stubWorkspace(workspaceDir: string): WorkspaceService {
   } as unknown as WorkspaceService;
 }
 
-function stubWorkflow() {
+function stubVersionControl() {
   const commits: { summary: string }[] = [];
   // Strict per-path locks — a live row is contended even for the same user,
   // exactly like FileLockService (nesting bugs must fail here too).
@@ -85,7 +88,7 @@ function stubWorkflow() {
       commits.push({ summary });
       return {} as unknown;
     },
-  } as unknown as WorkflowService;
+  } as unknown as VersionControlService;
   return { svc, commits };
 }
 
@@ -102,12 +105,13 @@ describe('GroupsAdminService', () => {
     await write(repo, 'groups.yaml', GROUPS);
     await write(repo, 'access.md', '---\nwrite:\n  - Admin\n---\n');
     const workspace = stubWorkspace(root);
-    const workflow = stubWorkflow();
-    commits = workflow.commits;
+    const versionControl = stubVersionControl();
+    commits = versionControl.commits;
     service = new GroupsAdminService(
       workspace,
-      workflow.svc,
-      new AccessControlService(workspace as never, KB, new NodeFs()),
+      versionControl.svc,
+      new AccessControlService(workspace as never, KB, realDisk()),
+      realDisk(),
       KB,
       () => DEFAULT_BRANCH,
     );
@@ -126,7 +130,7 @@ describe('GroupsAdminService', () => {
       'roles.yaml',
       'roles:\n  Admin:\n    - admin@x.io\n  Reviewer:\n    - rev@x.io\n    - group:gtm team\n',
     );
-    const roster = await service.getRoster();
+    const roster = await service.getRoster('admin@x.io');
     expect(roster.mode).toBe('manual');
     expect(roster.groupsHealth).toEqual({ ok: true });
     expect(roster.groups.map((g) => g.displayName).sort()).toEqual(['GTM Team', 'Product']);
@@ -141,7 +145,7 @@ describe('GroupsAdminService', () => {
 
   it('a broken MANUAL groups.yaml answers the roster with 422 + the parse message', async () => {
     await write(repo, 'groups.yaml', 'groups:\n  - not\n  - a\n  - mapping\n');
-    const err = await service.getRoster().catch((e: unknown) => e);
+    const err = await service.getRoster('admin@x.io').catch((e: unknown) => e);
     expect(err).toBeInstanceOf(GroupsAdminError);
     expect((err as GroupsAdminError).status).toBe(422);
     expect((err as GroupsAdminError).message).toMatch(/groups.yaml/);
@@ -152,7 +156,7 @@ describe('GroupsAdminService', () => {
 
   it('a broken SYNCED file keeps IdP mode: empty roster + groupsHealth marker (no manual fallback)', async () => {
     await write(repo, 'synced-groups.yaml', 'groups:\n  - not\n  - a\n  - mapping\n');
-    const roster = await service.getRoster();
+    const roster = await service.getRoster('admin@x.io');
     expect(roster.mode).toBe('idp');
     // Falling back to groups.yaml would resurrect retired manual groups.
     expect(roster.groups).toEqual([]);
@@ -218,7 +222,7 @@ describe('GroupsAdminService', () => {
 
   it('IdP mode: mutations refuse with the typed 409; reads still work', async () => {
     await write(repo, 'synced-groups.yaml', 'groups:\n  Engineering:\n    - ada@x.io\n');
-    const roster = await service.getRoster();
+    const roster = await service.getRoster('admin@x.io');
     expect(roster.mode).toBe('idp');
     // The roster IS the synced file now — not the retired manual list.
     expect(roster.groups.map((g) => g.canonical)).toEqual(['engineering']);
@@ -241,16 +245,104 @@ describe('GroupsAdminService', () => {
   });
 
   it('canonical-changing rename rewrites grant references in ONE commit', async () => {
-    await write(repo, 'Knowledge/Sales/access.md', '---\nread:\n  - GTM Team\nwrite:\n  - deny GTM Team\n---\n');
+    await write(
+      repo,
+      'Knowledge/Sales/access.md',
+      '---\nread:\n  - GTM Team\n  - group/GTM Team\nwrite:\n  - deny GTM Team\n---\n',
+    );
     await service.renameGroup(ADMIN, 'gtm team', 'Go To Market');
 
     expect(await groupsYaml()).toContain('Go To Market:');
     const rewritten = await fs.readFile(path.join(repo, 'Knowledge/Sales/access.md'), 'utf-8');
-    expect(rewritten).toContain('- Go To Market');
-    expect(rewritten).toContain('- deny Go To Market');
+    // Rewritten as the explicit group token, whatever the old spelling.
+    expect(rewritten).toContain('- group/Go To Market');
+    expect(rewritten).toContain('- deny group/Go To Market');
     expect(rewritten).not.toContain('GTM Team');
     expect(commits).toHaveLength(1);
     expect(commits[0].summary).toContain('gtm team → Go To Market');
+  });
+
+  // Another person's private plugin is closed to the Admin: the rewrite still
+  // covers it (no reference left behind). Whether the Admin may WRITE it is
+  // the commit gate's call — see the gated cases below; this stub allows it.
+  it('rename rewrites a file the Admin cannot read when the commit allows it', async () => {
+    await write(
+      repo,
+      'Plugins/Sara/access.md',
+      '---\nread:\n  - deny everyone\n  - Sara <sara@x.io>\nwrite:\n  - Sara <sara@x.io>\n---\n',
+    );
+    await write(repo, 'Plugins/Sara/Notes.md', "---\nread: ['group/GTM Team']\n---\n# Notes\n");
+    const access = new AccessControlService(stubWorkspace(root) as never, KB, realDisk());
+    expect(await access.canRead(workspaceIdForBranch(DEFAULT_BRANCH), ADMIN.email, 'Plugins/Sara/Notes.md')).toBe(false);
+
+    await service.renameGroup(ADMIN, 'gtm team', 'Go To Market');
+
+    expect(await fs.readFile(path.join(repo, 'Plugins/Sara/Notes.md'), 'utf-8')).toBe(
+      "---\nread: ['group/Go To Market']\n---\n# Notes\n",
+    );
+    expect(commits).toHaveLength(1);
+  });
+
+  describe('rename against the commit write gate', () => {
+    // The real commit gates every touched path on the actor's write rules and
+    // refuses the first one they may not write (git.service
+    // `assertCanWriteAtRef`); this stub does the same through the live model.
+    function gatedService(): { gated: GroupsAdminService; gatedCommits: { summary: string }[] } {
+      const workspace = stubWorkspace(root);
+      const access = new AccessControlService(workspace as never, KB, realDisk());
+      const versionControl = stubVersionControl();
+      const svc = versionControl.svc as unknown as Record<string, unknown>;
+      svc.commitChanges = async (ws: string, user: AuthUser, summary: string, onlyPaths: string[] = []) => {
+        const rel = onlyPaths.map((p) => p.slice(KB.length + 1));
+        const verdicts = await access.canWriteBatch(ws, user.email, rel);
+        const denied = rel.find((p) => verdicts.get(p) !== true);
+        if (denied) throw new AccessDeniedError({ path: denied, eligibleRoles: [], eligibleUsers: [] });
+        versionControl.commits.push({ summary });
+        return {} as unknown;
+      };
+      const gated = new GroupsAdminService(workspace, versionControl.svc, access, realDisk(), KB, () => DEFAULT_BRANCH);
+      return { gated, gatedCommits: versionControl.commits };
+    }
+
+    const SARA_ACCESS = '---\nread:\n  - deny everyone\n  - Sara <sara@x.io>\nwrite:\n  - Sara <sara@x.io>\n---\n';
+
+    it('a file the Admin cannot read refuses generically, never naming it, and writes nothing', async () => {
+      await write(repo, 'Plugins/Sara/access.md', SARA_ACCESS);
+      const notes = "---\nread: ['group/GTM Team']\n---\n# Notes\n";
+      await write(repo, 'Plugins/Sara/Notes.md', notes);
+      const { gated, gatedCommits } = gatedService();
+
+      const err = await gated.renameGroup(ADMIN, 'gtm team', 'Go To Market').catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(GroupsAdminError);
+      expect((err as GroupsAdminError).status).toBe(422);
+      expect((err as Error).message).toBe(UNSHOWN_REFERENCE_REFUSAL);
+      expect((err as Error).message).not.toContain('Sara');
+      // Restored: the hidden file, and the roster, as they were.
+      expect(await fs.readFile(path.join(repo, 'Plugins/Sara/Notes.md'), 'utf-8')).toBe(notes);
+      expect(await groupsYaml()).toBe(GROUPS);
+      expect(gatedCommits).toHaveLength(0);
+    });
+
+    it('a file the Admin can read but not write keeps the refusal that names it', async () => {
+      await write(repo, 'Knowledge/Locked/access.md', '---\nread:\n  - everyone\nwrite:\n  - deny Admin\n---\n');
+      await write(repo, 'Knowledge/Locked/Plan.md', '---\nread:\n  - group/GTM Team\n---\n# Plan\n');
+      const { gated } = gatedService();
+
+      const err = await gated.renameGroup(ADMIN, 'gtm team', 'Go To Market').catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(AccessDeniedError);
+      expect((err as AccessDeniedError).access.path).toMatch(/^Knowledge\/Locked\//);
+    });
+
+    it('a hidden file that names something else does not block the rename', async () => {
+      await write(repo, 'Plugins/Sara/access.md', SARA_ACCESS);
+      await write(repo, 'Plugins/Sara/Notes.md', "---\nread: ['group/Product']\n---\n# Notes\n");
+      await write(repo, 'Knowledge/Sales/access.md', '---\nread:\n  - group/GTM Team\n---\n');
+      const { gated, gatedCommits } = gatedService();
+
+      await gated.renameGroup(ADMIN, 'gtm team', 'Go To Market');
+      expect(await fs.readFile(path.join(repo, 'Knowledge/Sales/access.md'), 'utf-8')).toContain('group/Go To Market');
+      expect(gatedCommits).toHaveLength(1);
+    });
   });
 
   it('rename rewrites a BODY-GOVERNED access.md (rules live below the frontmatter)', async () => {
@@ -262,14 +354,15 @@ describe('GroupsAdminService', () => {
       '---\nwrite:\n  - Admin\n---\nread:\n  - GTM Team\nwrite:\n  - deny GTM Team\n',
     );
     // The scan must see the body rule too (delete warnings / referencedBy).
-    const roster = await service.getRoster();
+    const roster = await service.getRoster('admin@x.io');
     const gtm = roster.groups.find((g) => g.canonical === 'gtm team');
     expect(gtm?.referencedBy).toContainEqual({ path: 'Knowledge/Sales/access.md', verb: 'read' });
 
     await service.renameGroup(ADMIN, 'gtm team', 'Go To Market');
     const rewritten = await fs.readFile(path.join(repo, 'Knowledge/Sales/access.md'), 'utf-8');
-    expect(rewritten).toContain('- Go To Market');
-    expect(rewritten).toContain('- deny Go To Market');
+    // Rewritten as the explicit group token, whatever the old spelling.
+    expect(rewritten).toContain('- group/Go To Market');
+    expect(rewritten).toContain('- deny group/Go To Market');
     expect(rewritten).not.toContain('GTM Team');
     // The frontmatter self-rule is a rule source too, and Admin is untouched.
     expect(rewritten).toContain('- Admin');
@@ -295,14 +388,15 @@ describe('GroupsAdminService', () => {
   it('rollback of a failed commit DELETES a file this edit created (no empty artifact)', async () => {
     await fs.rm(path.join(repo, 'groups.yaml'));
     const workspace = stubWorkspace(root);
-    const workflow = stubWorkflow();
-    (workflow.svc as unknown as { commitChanges: unknown }).commitChanges = async () => {
+    const versionControl = stubVersionControl();
+    (versionControl.svc as unknown as { commitChanges: unknown }).commitChanges = async () => {
       throw new Error('commit exploded');
     };
     const svc = new GroupsAdminService(
       workspace,
-      workflow.svc,
-      new AccessControlService(workspace as never, KB, new NodeFs()),
+      versionControl.svc,
+      new AccessControlService(workspace as never, KB, realDisk()),
+      realDisk(),
       KB,
       () => DEFAULT_BRANCH,
     );
@@ -314,8 +408,8 @@ describe('GroupsAdminService', () => {
 
   it('a path whose restore failed is released WITHOUT commit (discard, never partial publish)', async () => {
     const workspace = stubWorkspace(root);
-    const workflow = stubWorkflow();
-    const wf = workflow.svc as unknown as {
+    const versionControl = stubVersionControl();
+    const wf = versionControl.svc as unknown as {
       commitChanges: (...a: unknown[]) => Promise<unknown>;
       releaseLock: (...a: unknown[]) => Promise<void>;
       releaseLockNoCommit: (...a: unknown[]) => Promise<void>;
@@ -325,8 +419,8 @@ describe('GroupsAdminService', () => {
     };
     const committingReleases: string[] = [];
     const discardingReleases: string[] = [];
-    const origRelease = wf.releaseLock.bind(workflow.svc);
-    const origNoCommit = wf.releaseLockNoCommit.bind(workflow.svc);
+    const origRelease = wf.releaseLock.bind(versionControl.svc);
+    const origNoCommit = wf.releaseLockNoCommit.bind(versionControl.svc);
     wf.releaseLock = async (...a) => {
       committingReleases.push(a[2] as string);
       return origRelease(...a);
@@ -347,8 +441,9 @@ describe('GroupsAdminService', () => {
     };
     const svc = new GroupsAdminService(
       workspace,
-      workflow.svc,
-      new AccessControlService(workspace as never, KB, new NodeFs()),
+      versionControl.svc,
+      new AccessControlService(workspace as never, KB, realDisk()),
+      realDisk(),
       KB,
       () => DEFAULT_BRANCH,
     );
@@ -373,11 +468,11 @@ describe('GroupsAdminService', () => {
     // away. Checked under the lock, the just-created file is seen and retired.
     await fs.rm(path.join(repo, 'groups.yaml'));
     const workspace = stubWorkspace(root);
-    const workflow = stubWorkflow();
-    const wf = workflow.svc as unknown as {
+    const versionControl = stubVersionControl();
+    const wf = versionControl.svc as unknown as {
       acquireLock: (w: string, b: string, p: string, u: AuthUser) => Promise<unknown>;
     };
-    const origAcquire = wf.acquireLock.bind(workflow.svc);
+    const origAcquire = wf.acquireLock.bind(versionControl.svc);
     wf.acquireLock = async (w, b, p, u) => {
       if (p === `${KB}/groups.yaml`) {
         await write(repo, 'groups.yaml', 'groups:\n  Late Team:\n    - late@x.io\n');
@@ -386,14 +481,15 @@ describe('GroupsAdminService', () => {
     };
     const svc = new GroupsAdminService(
       workspace,
-      workflow.svc,
-      new AccessControlService(workspace as never, KB, new NodeFs()),
+      versionControl.svc,
+      new AccessControlService(workspace as never, KB, realDisk()),
+      realDisk(),
       KB,
       () => DEFAULT_BRANCH,
     );
     expect(await svc.retireManualGroups(ADMIN)).toBe(true);
     await expect(groupsYaml()).rejects.toMatchObject({ code: 'ENOENT' });
-    expect(workflow.commits.some((c) => c.summary.includes('Retire manual groups'))).toBe(true);
+    expect(versionControl.commits.some((c) => c.summary.includes('Retire manual groups'))).toBe(true);
   });
 });
 
@@ -421,27 +517,124 @@ describe('groups-edit guardrails', () => {
 });
 
 describe('groups roster referencedBy — the mirror of the roles roster attribution', () => {
-  it('a group shadowed BY a role name still owns its bare-token hits; role/<name> hits are never the group’s', async () => {
+  it('a group sharing a role name owns only its group/ hits; bare and role/ hits are the role’s', async () => {
     const root2 = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-groups-shadow-'));
     try {
       const repo2 = path.join(root2, KB);
-      // A group named Reviewer shares the Reviewer role's name. Group-first
-      // precedence gives the GROUP the bare key, so the bare hit is its
-      // reference; the explicit role/ hit belongs to the ROLE roster only.
+      // A group named Reviewer shares the Reviewer role's name. Role-first
+      // precedence gives the ROLE the bare key, so the bare and role/ hits
+      // belong to the ROLE roster; the group's reference is its group/ hit.
+      // The bare hit is reported so an Admin can rewrite it if the group
+      // was meant.
       await write(repo2, 'roles.yaml', ROLES); // declares role Reviewer
-      await write(repo2, 'groups.yaml', 'groups:\n  Reviewer:\n    - pat@x.io\n');
-      await write(repo2, 'team/access.md', '---\nread:\n  - Reviewer\nwrite:\n  - role/Reviewer\n---\n');
+      await write(repo2, 'groups.yaml', 'groups:\n  Reviewer:\n    - pat@x.io\n  Ops:\n    - ops@x.io\n');
+      await write(repo2, 'ops/access.md', '---\nread:\n  - Ops\nwrite:\n  - group/Ops\n---\n');
+      await write(
+        repo2,
+        'team/access.md',
+        '---\nread:\n  - Reviewer\nwrite:\n  - role/Reviewer\nowner:\n  - group/Reviewer\ndownload:\n  - deny Reviewer\n---\n',
+      );
       const workspace = stubWorkspace(root2);
       const svc = new GroupsAdminService(
         workspace,
-        stubWorkflow().svc,
-        new AccessControlService(workspace as never, KB, new NodeFs()),
+        stubVersionControl().svc,
+        new AccessControlService(workspace as never, KB, realDisk()),
+        realDisk(),
         KB,
         () => DEFAULT_BRANCH,
       );
-      const roster = await svc.getRoster();
+      // rev@x.io holds the Reviewer role, so it can read team/access.md.
+      const roster = await svc.getRoster('rev@x.io');
       const reviewer = roster.groups.find((g) => g.canonical === 'reviewer')!;
-      expect(reviewer.referencedBy).toEqual([{ path: 'team/access.md', verb: 'read' }]);
+      expect(reviewer.referencedBy).toEqual([{ path: 'team/access.md', verb: 'owner' }]);
+      // A bare DENIAL changed meaning too (it now denies the role, not the
+      // group), so it is reported alongside the bare grant.
+      expect(reviewer.bareNameResolvesToRole).toEqual([
+        { path: 'team/access.md', verb: 'read' },
+        { path: 'team/access.md', verb: 'download' },
+      ]);
+      // A group no role shares a name with keeps its bare hits, and has nothing
+      // to report. ops@x.io is in Ops, so it can read ops/access.md.
+      const ops = (await svc.getRoster('ops@x.io')).groups.find((g) => g.canonical === 'ops')!;
+      expect(ops.referencedBy).toEqual(
+        expect.arrayContaining([
+          { path: 'ops/access.md', verb: 'read' },
+          { path: 'ops/access.md', verb: 'write' },
+        ]),
+      );
+      expect(ops.referencedBy).toHaveLength(2);
+      expect(ops.bareNameResolvesToRole).toEqual([]);
+    } finally {
+      await fs.rm(root2, { recursive: true, force: true });
+    }
+  });
+
+  it('bareNameResolvesToRole names only the files the viewer can read', async () => {
+    const root2 = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-groups-disclose-'));
+    try {
+      const repo2 = path.join(root2, KB);
+      await write(repo2, 'roles.yaml', ROLES); // Admin: admin@x.io, Reviewer: rev@x.io
+      await write(repo2, 'groups.yaml', 'groups:\n  Reviewer:\n    - pat@x.io\n');
+      await write(repo2, 'access.md', '---\nread:\n  - everyone\nwrite:\n  - Admin\n---\n');
+      // Two bare Reviewer rules: one in an open folder, one in a node only
+      // the Reviewer role may read.
+      await write(repo2, 'team/access.md', '---\nwrite:\n  - Reviewer\n---\n');
+      await write(repo2, 'secret/Plan.md', '---\nread:\n  - deny everyone\n  - Reviewer\n---\n# Plan\n');
+      const workspace = stubWorkspace(root2);
+      const access = new AccessControlService(workspace as never, KB, realDisk());
+      const svc = new GroupsAdminService(workspace, stubVersionControl().svc, access, realDisk(), KB, () => DEFAULT_BRANCH);
+      const rowsFor = async (email: string) =>
+        (await svc.getRoster(email)).groups.find((g) => g.canonical === 'reviewer')!.bareNameResolvesToRole;
+
+      expect(await rowsFor('rev@x.io')).toEqual(
+        expect.arrayContaining([
+          { path: 'team/access.md', verb: 'write' },
+          { path: 'secret/Plan.md', verb: 'read' },
+        ]),
+      );
+      // pat@x.io is in the Reviewer GROUP, not the role: the bare grant is the
+      // role's, so the secret file is closed to pat, and so is its path.
+      expect(await access.canRead(workspaceIdForBranch(DEFAULT_BRANCH), 'pat@x.io', 'secret/Plan.md')).toBe(false);
+      expect(await rowsFor('pat@x.io')).toEqual([{ path: 'team/access.md', verb: 'write' }]);
+    } finally {
+      await fs.rm(root2, { recursive: true, force: true });
+    }
+  });
+
+  it('referencedBy names only the files the viewer can read and omits the rest entirely, uncounted', async () => {
+    const root2 = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-groups-disclose-refs-'));
+    try {
+      const repo2 = path.join(root2, KB);
+      await write(repo2, 'roles.yaml', ROLES); // Admin: admin@x.io, Reviewer: rev@x.io
+      await write(repo2, 'groups.yaml', 'groups:\n  Ops:\n    - ops@x.io\n');
+      await write(repo2, 'access.md', '---\nread:\n  - everyone\nwrite:\n  - Admin\n---\n');
+      // Two group/Ops rules: one in an open folder, one in a node only the
+      // Reviewer role may read.
+      await write(repo2, 'team/access.md', '---\nwrite:\n  - group/Ops\n---\n');
+      await write(
+        repo2,
+        'secret/Plan.md',
+        '---\nread:\n  - deny everyone\n  - Reviewer\nowner:\n  - deny group/Ops\n---\n# Plan\n',
+      );
+      const workspace = stubWorkspace(root2);
+      const svc = new GroupsAdminService(
+        workspace,
+        stubVersionControl().svc,
+        new AccessControlService(workspace as never, KB, realDisk()),
+        realDisk(),
+        KB,
+        () => DEFAULT_BRANCH,
+      );
+      const opsFor = async (email: string) =>
+        (await svc.getRoster(email)).groups.find((g) => g.canonical === 'ops')!;
+
+      const asReviewer = await opsFor('rev@x.io');
+      expect(asReviewer.referencedBy.map((r) => r.path).sort()).toEqual(['secret/Plan.md', 'team/access.md']);
+      // The Admin cannot read secret/Plan.md: its rule is left out entirely —
+      // not named, and not counted either (Admin status does not grant read).
+      const asAdmin = await opsFor('admin@x.io');
+      expect(asAdmin.referencedBy).toEqual([{ path: 'team/access.md', verb: 'write' }]);
+      expect(asAdmin).not.toHaveProperty('referencesHidden');
     } finally {
       await fs.rm(root2, { recursive: true, force: true });
     }

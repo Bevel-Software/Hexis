@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { cn } from '../../../lib/utils';
-import { HEADER_BAND, PAGE_HEADER_TESTID } from '../../../shared/theme/header';
+import { HEADER_BAND, PAGE_HEADER_TESTID, TITLE_INK_ROOM } from '../../../shared/theme/header';
 import { Badge, Button, Surface } from '../../../shared/components';
 import { adminNamesOf, ownersTextOf, primaryFolderOf } from '../utils/plugin-summary';
 import { AlreadyReadableError, requestPluginAccess, type PluginSummary } from '../services/plugins.api';
@@ -103,7 +103,7 @@ export function LockedPluginView({ plugin, onRequested, onUnlocked, onManage }: 
       <div data-testid={PAGE_HEADER_TESTID} className={cn(HEADER_BAND, 'gap-2.5')}>
         <PluginBreadcrumb />
         <h1
-          className="min-w-0 truncate text-display font-semibold"
+          className={`min-w-0 truncate text-display font-semibold ${TITLE_INK_ROOM}`}
           title={plugin.displayName || plugin.name}
         >
           {plugin.displayName || plugin.name}

@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { NodeGitRunner } from '../../workflow/git/node-git-runner.js';
+import { NodeGitRunner } from '../../version-control/git/node-git-runner.js';
 import { ManagedRepository, MANAGED_REPOSITORY_DIR } from '../managed-repository.js';
 import { RepositorySource, type GitHubAppRepository } from '../repository-source.js';
 
@@ -122,6 +122,15 @@ describe('RepositorySource: a repository reached through a GitHub App', () => {
     await source(HOSTED, { githubApp }).source.credentials.prepare?.();
     await source({ gitMode: 'managed' }, { githubApp }).source.credentials.prepare?.();
     expect(renewed).toBe(1);
+  });
+
+  it("hands the app the runner's word that the host refused the token", async () => {
+    const seen: unknown[] = [];
+    const githubApp = app({ prepare: async (opts) => void seen.push(opts) });
+    const { source: s } = source({ gitMode: 'github-app' }, { githubApp });
+    await s.credentials.prepare?.({ refused: true });
+    await s.credentials.prepare?.();
+    expect(seen).toEqual([{ refused: true }, undefined]);
   });
 
   it('is unanswered on a deployment that has no such app', () => {

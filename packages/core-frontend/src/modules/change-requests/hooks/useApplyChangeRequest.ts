@@ -1,9 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { PullRequestSummary } from '@bevel-software/platform-shared';
-import { useEventBus } from '../../workflow/state/event-bus.context';
-import { fetchPrDetail } from '../../pr/services/pr-detail.api';
-import { approvePrFile } from '../../pr/services/pr-approvals.api';
-import { mergePullRequest } from '../../pr/services/pr-merge.api';
+import { useEventBus } from '../../version-control';
+import { fetchPrDetail, approvePrFile, mergePullRequest } from '../../pr';
+import { friendlyGitError, friendlyGitMessage } from '../../git';
 
 /**
  * Safety net for the async apply: if neither a `change-request-merged` nor a
@@ -45,7 +44,9 @@ export function refusalLine(
   const own = refusals.get(cr.number);
   const persisted = cr.lastApplyFailure ?? null;
   if (own && !isLater(persisted?.at, own.at)) return own.conflicts ? null : own.reason;
-  return persisted?.reason ?? null;
+  // The server stored this one as the gate said it; the reader gets it in the
+  // same words the dialog's banner uses.
+  return persisted?.reason ? friendlyGitMessage(persisted.reason) : null;
 }
 
 /** True when `a` is a strictly later instant than `b`; unknown is never later. */
@@ -165,7 +166,7 @@ export function useApplyChangeRequest(opts: {
     const offFailed = bus.subscribe('change-request-merge-failed', (e) => {
       if (runningRef.current !== e.number) return;
       fail(e.number, {
-        reason: e.reason || "Couldn't apply this change.",
+        reason: e.reason ? friendlyGitMessage(e.reason) : "Couldn't apply this change.",
         conflicts: e.conflicts === true,
         at: e.at,
       });
@@ -257,7 +258,7 @@ export function useApplyChangeRequest(opts: {
           // instead of waiting for an event that will never come.
           if (runningRef.current !== cr.number) return;
           fail(cr.number, {
-            reason: err instanceof Error ? err.message : "Couldn't apply this change.",
+            reason: err instanceof Error ? friendlyGitError(err) : "Couldn't apply this change.",
             conflicts: false,
           });
         }

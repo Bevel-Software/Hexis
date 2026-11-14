@@ -1,0 +1,95 @@
+import type { AuthUser } from '@bevel-software/platform-shared';
+import { logger } from '../../shared/logging.js';
+import { ListenerSeam, type NotifyingListener } from '../../shared/listener-seam.js';
+
+const log = logger('accounts');
+
+/**
+ * An admin invited somebody: a NEW account was made for the address. Never
+ * raised for an account that was already there (an invite that only set a
+ * starting password, a password reset, a rename), and never for a first
+ * single sign-on, which provisions by itself: the person is already in.
+ */
+export interface AccountInvitedEvent {
+  /** The new account, as the admin's answer carries it. */
+  account: Pick<AuthUser, 'id' | 'email' | 'name'>;
+  /** The admin who invited them. */
+  invitedBy: Pick<AuthUser, 'id' | 'email' | 'name'>;
+  /**
+   * Whether the account was created with a starting password the admin
+   * typed. The password itself never travels: a listener that writes to the
+   * person says it comes from the admin separately.
+   */
+  passwordSet: boolean;
+}
+
+/**
+ * A listener answers how it reached the person — a non-empty channel name,
+ * `'email'` say — or null when it did not; the rule is {@link NotifyingListener}'s:
+ * awaited, a throw logged and counted as null, never failing the invite.
+ */
+export type AccountInvitedHook = NotifyingListener<AccountInvitedEvent>;
+
+/**
+ * Core's seam for "an account was invited": a deployment (the cloud with its
+ * mail, an enterprise overlay) registers how to tell the person, and core
+ * says in its answer whether somebody did. Core registers nothing, so a
+ * core-only deployment notifies nobody and the admin is handed the link and
+ * the message to send, as before.
+ */
+export interface IAccountHooks {
+  onAccountInvited(hook: AccountInvitedHook): void;
+  /** Run every listener in registration order; the channels that reached the person, in that order. */
+  runAccountInvited(event: AccountInvitedEvent): Promise<string[]>;
+  onAccountDeactivated(hook: AccountDeactivatedHook): void;
+  /** Run every listener in registration order; what each cleaned up, in that order. */
+  runAccountDeactivated(event: AccountDeactivatedEvent): Promise<string[]>;
+}
+
+/**
+ * An admin switched an account off (or a directory told the deployment the
+ * person left). The account keeps its row; what it HOLDS elsewhere — the
+ * sign-ins it made to outside systems — is what listeners let go of.
+ */
+export interface AccountDeactivatedEvent {
+  userId: string;
+  email: string;
+}
+
+/**
+ * A listener answers what it cleaned up — `'managed-connections'`, say — or
+ * null when there was nothing; same rule as {@link AccountInvitedHook}.
+ */
+export type AccountDeactivatedHook = NotifyingListener<AccountDeactivatedEvent>;
+
+export class AccountHooks implements IAccountHooks {
+  // The account exists whether or not the person was told: the admin's
+  // answer says they were not, and the admin sends the link themselves.
+  private readonly invited = new ListenerSeam<AccountInvitedEvent>(
+    log,
+    'an account-invited listener failed; the person was not notified by it:',
+  );
+  // The account is off whether or not a listener cleaned up after it: a
+  // failure here is logged, and the sign-ins it left are refused on use
+  // like everything else a deactivated account holds.
+  private readonly deactivated = new ListenerSeam<AccountDeactivatedEvent>(
+    log,
+    'an account-deactivated listener failed; what it cleans up is still there:',
+  );
+
+  onAccountInvited(hook: AccountInvitedHook): void {
+    this.invited.add(hook);
+  }
+
+  runAccountInvited(event: AccountInvitedEvent): Promise<string[]> {
+    return this.invited.run(event);
+  }
+
+  onAccountDeactivated(hook: AccountDeactivatedHook): void {
+    this.deactivated.add(hook);
+  }
+
+  runAccountDeactivated(event: AccountDeactivatedEvent): Promise<string[]> {
+    return this.deactivated.run(event);
+  }
+}

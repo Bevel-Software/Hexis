@@ -204,7 +204,7 @@ describe('AccessControlService.grantSources', () => {
   });
 });
 
-describe('grantSources — principal kind under group shadowing', () => {
+describe('grantSources — principal kind when a group shares a role name', () => {
   let root: string;
   let repo: string;
   let svc: AccessControlService;
@@ -216,8 +216,8 @@ describe('grantSources — principal kind under group shadowing', () => {
     repo = path.join(workspaceDir, PROCESS_MAP_DIR);
     await fs.mkdir(repo, { recursive: true });
     await writeFile(repo, 'roles.yaml', ROLES_YAML);
-    // A GROUP named Engineer shadows the Engineer ROLE: the bare token is the
-    // group's, `role/engineer` is the role's.
+    // A GROUP named Engineer shares the Engineer ROLE's name: the bare token
+    // and `role/engineer` are the role's, `group/engineer` is the group's.
     await writeFile(repo, 'groups.yaml', 'groups:\n  Engineer:\n    - pat@x.io\n');
     svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR, new NodeFs());
   });
@@ -226,13 +226,13 @@ describe('grantSources — principal kind under group shadowing', () => {
     await fs.rm(root, { recursive: true, force: true });
   });
 
-  it("a shadowed BARE grant belongs to the GROUP — it must not hide the role's ancestor grant", async () => {
-    // The cubic case: bare (group) grant on the target, role/ grant on the
-    // ancestor. Attributing the bare token to the role would report the role
-    // as `direct` here — hiding the real role/<Name> ancestor grant and
-    // making its revoke a false no-op.
+  it("a group/ grant belongs to the GROUP — it must not hide the role's ancestor grant", async () => {
+    // group/ grant on the target, role/ grant on the ancestor. Attributing the
+    // group's token to the role would report the role as `direct` here —
+    // hiding the real role/<Name> ancestor grant and making its revoke a
+    // false no-op.
     await writeFile(repo, 'access.md', '---\nwrite:\n  - role/Engineer\n---\n');
-    await writeFile(repo, 'Knowledge/access.md', '---\nwrite:\n  - Engineer\n---\n');
+    await writeFile(repo, 'Knowledge/access.md', '---\nwrite:\n  - group/Engineer\n---\n');
 
     const roleSrc = await svc.grantSources(workspaceId, 'folder', 'Knowledge', {
       kind: 'role',
@@ -243,23 +243,28 @@ describe('grantSources — principal kind under group shadowing', () => {
 
     const groupSrc = await svc.grantSources(workspaceId, 'folder', 'Knowledge', {
       kind: 'role',
-      role: 'Engineer', // bare = whoever owns the bare key = the group
+      role: 'group/Engineer',
     });
-    // The GROUP's only entry is the direct bare grant.
+    // The GROUP's only entry is the direct group/ grant.
     expect(groupSrc.write).toEqual([{ kind: 'direct' }]);
   });
 
-  it("a shadowed role/ grant is never attributed to the GROUP principal", async () => {
+  it('a BARE grant of a shared name is the ROLE\'s, never attributed to the GROUP principal', async () => {
     await writeFile(repo, 'access.md', '---\nwrite:\n  - Admin\n---\n');
-    await writeFile(repo, 'Knowledge/access.md', '---\nwrite:\n  - role/Engineer\n---\n');
+    await writeFile(repo, 'Knowledge/access.md', '---\nwrite:\n  - Engineer\n---\n');
     const groupSrc = await svc.grantSources(workspaceId, 'folder', 'Knowledge', {
       kind: 'role',
-      role: 'Engineer',
+      role: 'group/Engineer',
     });
     expect(groupSrc).toEqual({}); // the group holds nothing here
+    const roleSrc = await svc.grantSources(workspaceId, 'folder', 'Knowledge', {
+      kind: 'role',
+      role: 'role/Engineer',
+    });
+    expect(roleSrc.write).toEqual([{ kind: 'direct' }]);
   });
 
-  it('UNSHADOWED both spellings still count as the role (legacy bare grants stay removable)', async () => {
+  it('with no group of the name, both spellings count as the role (legacy bare grants stay removable)', async () => {
     await fs.rm(path.join(repo, 'groups.yaml'));
     await writeFile(repo, 'access.md', '---\nwrite:\n  - role/Engineer\n---\n');
     await writeFile(repo, 'Knowledge/access.md', '---\nwrite:\n  - Engineer\n---\n');

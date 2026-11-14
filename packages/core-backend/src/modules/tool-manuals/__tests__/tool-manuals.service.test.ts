@@ -183,6 +183,15 @@ describe('ToolManualService', () => {
     expect(manual).toBeNull();
   });
 
+  test("does not resolve a readable inline manual outside a connection's connectors", async () => {
+    // The narrowing applies after the read gate, on the manual's own path.
+    const paths: string[] = [];
+    const within = (p: string) => (paths.push(p), false);
+    expect(await svc().resolveInlineManual('user@x.eu', 'weather', { within })).toBeNull();
+    expect(paths).toEqual([expect.stringMatching(/weather\.tool$/)]);
+    expect(await svc().resolveInlineManual('user@x.eu', 'weather', { within: () => true })).not.toBeNull();
+  });
+
   test('resolves an inline tool that calls Google as a service account, and surfaces the key variable', async () => {
     // The auth block is what makes the call; the key it names has to reach the
     // secrets UI as a shared variable or nobody can store it.
@@ -483,6 +492,30 @@ describe('ToolManualService', () => {
       const lines = await svc(denyBilling).catalogFingerprints('user@x.eu');
       expect(lines).toHaveLength(1);
       expect(lines[0]).toContain('weather');
+    });
+  });
+
+  /**
+   * A connection made as an `.agent` file narrows the catalog (`within`) —
+   * AFTER the read gate, on every read an agent surface makes, so it can take
+   * a manual away and never give one.
+   */
+  describe('narrowed to a connection’s connectors', () => {
+    const onlyBilling = (p: string) => p === 'Plugins/billing.tool';
+    const everything = () => true;
+
+    test('every agent-facing read answers only what is both readable and within', async () => {
+      const s = svc();
+      expect((await s.toManualCallTemplates('user@x.eu', { within: onlyBilling })).map((t) => t.name)).toEqual(['billing']);
+      expect((await s.listAccessibleCatalog('user@x.eu', onlyBilling)).tools.map((t) => t.name)).toEqual(['billing']);
+      expect(await s.catalogFingerprints('user@x.eu', onlyBilling)).toHaveLength(1);
+      expect(await s.listLocalOnly('user@x.eu', () => false)).toEqual([]);
+    });
+
+    test('an entry naming a manual the person may not read loads nothing for it', async () => {
+      const s = svc(denyBilling);
+      expect(await s.toManualCallTemplates('user@x.eu', { within: onlyBilling })).toEqual([]);
+      expect((await s.toManualCallTemplates('user@x.eu', { within: everything })).map((t) => t.name)).toEqual(['weather']);
     });
   });
 
@@ -918,6 +951,15 @@ describe('ToolManualService.listDeclaredOnlyOnBranch', () => {
     expect(await svc().listDeclaredOnlyOnBranch('user@example.com', DRAFT)).toEqual([
       { name: 'crm', path: 'Plugins/Sales/mcp.json', type: 'mcp' },
     ]);
+  });
+
+  test("narrowed to a connection's connectors, after the read gate", async () => {
+    await writeMcpJson(draftWs, 'Ops', ['pager']);
+    expect(await svc().listDeclaredOnlyOnBranch('user@example.com', DRAFT, (p) => p.startsWith('Plugins/Ops/'))).toEqual([
+      { name: 'pager', path: 'Plugins/Ops/mcp.json', type: 'mcp' },
+    ]);
+    // Naming an unreadable declaration does not let it through.
+    expect(await svc().listDeclaredOnlyOnBranch('user@example.com', DRAFT, (p) => p.startsWith('Plugins/Secret Plugin/'))).toEqual([]);
   });
 
   test('is empty for the default branch itself and for a branch without a workspace', async () => {

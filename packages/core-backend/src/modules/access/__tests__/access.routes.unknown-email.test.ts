@@ -6,12 +6,13 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import type { IAccessControl } from '../access-control.interface.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { AuthService } from '../../auth/auth.service.js';
-import type { WorkflowService } from '../../workflow/workflow.service.js';
-import type { WorkflowEventBus } from '../../workflow/event-bus.js';
+import type { VersionControlService } from '../../version-control/version-control.service.js';
+import type { VersionControlEventBus } from '../../version-control/event-bus.js';
 import { createAccessRoutes } from '../access.routes.js';
 import type { Database } from '../../database/connection.js';
 import { usersDbDouble } from './users-db-double.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
+import { NodeFs } from '../../kb-fs/node-fs.js';
 
 /**
  * A grant to an email with NO ACCOUNT says so, and stays allowed.
@@ -55,6 +56,8 @@ async function makeHarness(opts: {
     grantSources: vi.fn(async () => ({ read: [{ kind: 'direct' }] })),
     invalidate: vi.fn(),
     kbPrincipals: vi.fn(async () => ({ roles: [], groups: [], people: opts.kbPeople ?? [] })),
+    // No groups in this source, so the answer is the empty list the service gives for one.
+    visibleGroups: vi.fn(async (_w: string, _e: string, groups: readonly string[]) => [...groups]),
     eligibleWriters: vi.fn(async () => ({ roles: [], users: granted })),
     eligibleReaders: vi.fn(async () => ({ restricted: true, roles: [], users: granted })),
     eligibleOwners: vi.fn(async () => ({ roles: [], users: [] })),
@@ -86,12 +89,12 @@ async function makeHarness(opts: {
   } as unknown as WorkspaceService;
 
   const authService = { getUserById: vi.fn(async () => USER) } as unknown as AuthService;
-  const workflowService = {
+  const versionControlService = {
     getLock: vi.fn(async () => null),
     acquireLock: vi.fn(async () => ({ acquired: true, lock: {} })),
     releaseLock: vi.fn(async () => undefined),
     releaseLockNoCommit: vi.fn(async () => undefined),
-  } as unknown as WorkflowService;
+  } as unknown as VersionControlService;
 
   const app = express();
   app.use(express.json());
@@ -105,10 +108,12 @@ async function makeHarness(opts: {
       accessControl,
       workspaceService,
       authService,
-      workflowService,
-      { emit: vi.fn() } as unknown as WorkflowEventBus,
+      authService,
+      versionControlService,
+      { emit: vi.fn() } as unknown as VersionControlEventBus,
       opts.db ?? usersDbDouble(opts.accounts ?? []),
       testKbContext({ kbDirName: KB }),
+      new NodeFs(),
     ),
   );
 

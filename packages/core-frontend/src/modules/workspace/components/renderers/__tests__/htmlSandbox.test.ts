@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import vm from 'node:vm';
 import { sanitizeAgentHtml, buildSandboxedHtml } from '../htmlSandbox';
+import { runBridge } from './bridgeHarness';
 
 describe('sanitizeAgentHtml', () => {
   it('keeps inline scripts and tags them as modules so they run after the lib', () => {
@@ -418,50 +419,238 @@ describe('buildSandboxedHtml', () => {
     // Posts to the parent rather than navigating the (sandboxed) host window.
     expect(out).toContain("type: 'bevel.navigate'");
     expect(out).toContain('parent.postMessage');
-    // Delegated anchor-click interception, leaving in-page fragments alone.
+    // Delegated anchor-click interception; a bare fragment is jumped to here.
     expect(out).toContain("a[href]");
-    expect(out).toContain("href.charAt(0) === '#'");
+    expect(out).toContain('jumpTo(href)');
+  });
+
+  // A key pressed inside the frame never reaches the app, so the app's
+  // Escape (a card's close, leaving full screen) would go deaf once the
+  // reader clicked into the page. The frame hands the parent an Escape the
+  // page did not use, and nothing else.
+  it('hands the parent an Escape the page left alone, and no other key', async () => {
+    const bridge = runBridge();
+    await bridge.press('Escape');
+    await bridge.press('a');
+    await bridge.press('Enter');
+    expect(bridge.posted).toEqual([{ type: 'bevel.key', key: 'Escape' }]);
+  });
+
+  it('keeps an Escape the page cancelled to the page', async () => {
+    const bridge = runBridge();
+    await bridge.press('Escape', { alreadyPrevented: true });
+    expect(bridge.posted).toEqual([]);
+  });
+
+  // A handler the page adds after the bridge ran comes after the bridge's in
+  // the same phase; the page's word on the key is final only once the
+  // dispatch is over, so that is when the bridge reads it.
+  it('keeps an Escape to the page when a handler of its own cancels it after the bridge\'s', async () => {
+    const bridge = runBridge();
+    await bridge.press('Escape', { preventedAfter: true });
+    expect(bridge.posted).toEqual([]);
+  });
+
+  it('injects no height reporter: the frame tells its parent where a link goes, never how tall it is', () => {
+    // The frame's height is the reader's (`frameResizeHandle.ts`), never
+    // read off the page: a page laid out in the frame and measured there
+    // feeds the frame's height back into itself.
+    const out = buildSandboxedHtml({ title: 't', libModuleSources: [], bodyHtml: '' });
+    expect(out).not.toContain('bevel.height');
+    expect(out).not.toContain('ResizeObserver');
   });
 
   // The bridge half of the one-rule promise. The sanitizer keeps a padded
   // href by reading past the padding; the bridge has to hand the parent the
   // same reading, or the resolver builds a path out of the spaces. A padded
-  // `#goal` is still an in-page anchor and stays with the browser to scroll.
-  it('posts the href a browser would follow, and leaves a padded fragment alone', () => {
-    // No lib sources: `okOpts` carries an `export`, which a vm script cannot
-    // parse. The bridge is appended after the lib either way.
-    const out = buildSandboxedHtml({ ...okOpts, libModuleSources: [] });
-    const scriptBody = out.match(/<script type="module">([\s\S]*?)<\/script>/)![1];
+  // `#goal` is still an in-page anchor, scrolled to in the frame.
+  it('posts the href a browser would follow, and scrolls to a padded fragment', () => {
+    const bridge = runBridge({ ids: ['goal'] });
 
-    type ClickEvent = { target: { closest: () => unknown }; preventDefault: () => void };
-    const handlers: ((e: ClickEvent) => void)[] = [];
-    const posted: unknown[] = [];
-    const ctx: Record<string, unknown> = {
-      document: {
-        addEventListener: (type: string, fn: (e: ClickEvent) => void) => {
-          if (type === 'click') handlers.push(fn);
-        },
-      },
-      parent: { postMessage: (msg: unknown) => posted.push(msg) },
-    };
-    vm.createContext(ctx);
-    vm.runInContext(`"use strict"; (function(){ ${scriptBody} }).call(undefined);`, ctx);
-    expect(handlers).toHaveLength(1);
+    bridge.click('\n      Board.html\n    ');
+    bridge.click('  #goal  ');
+    bridge.click('  https://example.com/docs  ');
+    // An empty href goes nowhere, and its default is still cancelled: left to
+    // the browser it would reload the frame against the app's URL.
+    expect(bridge.click('  ')).toEqual({ prevented: true });
+    expect(bridge.click('')).toEqual({ prevented: true });
 
-    const click = (href: string) => {
-      const anchor = { getAttribute: () => href };
-      handlers[0]({ target: { closest: () => anchor }, preventDefault: () => {} });
-    };
-
-    click('\n      Board.html\n    ');
-    click('  #goal  ');
-    click('  https://example.com/docs  ');
-    click('  ');
-
-    expect(posted).toEqual([
+    expect(bridge.posted).toEqual([
       { type: 'bevel.navigate', href: 'Board.html' },
       { type: 'bevel.navigate', href: 'https://example.com/docs' },
     ]);
+    expect(bridge.scrolled).toEqual(['goal']);
+  });
+
+  /**
+   * A click the reader asked a new tab of. The frame's sandbox has no
+   * allow-popups, so the browser cannot open one from inside it: the bridge
+   * cancels the click and asks the parent, saying so (`newTab: true`), for
+   * every destination, a fragment of this page included. A plain click and
+   * an Alt click are followed as before.
+   */
+  describe('a modified or middle click asks the parent for a new tab', () => {
+    it('posts newTab for Ctrl, Cmd, Shift and the middle button, to another file and to a section of this page', () => {
+      const bridge = runBridge({ ids: ['totals'] });
+      expect(bridge.click('Board.html', { ctrlKey: true })).toEqual({ prevented: true });
+      expect(bridge.click('Board.html#q3', { metaKey: true })).toEqual({ prevented: true });
+      expect(bridge.click('  https://example.com/docs  ', { shiftKey: true })).toEqual({ prevented: true });
+      expect(bridge.click('#totals', { button: 1 })).toEqual({ prevented: true });
+      expect(bridge.posted).toEqual([
+        { type: 'bevel.navigate', href: 'Board.html', newTab: true },
+        { type: 'bevel.navigate', href: 'Board.html#q3', newTab: true },
+        { type: 'bevel.navigate', href: 'https://example.com/docs', newTab: true },
+        { type: 'bevel.navigate', href: '#totals', newTab: true },
+      ]);
+      // A section asked for in a new tab does not scroll this one.
+      expect(bridge.scrolled).toEqual([]);
+    });
+
+    it('follows a plain or an Alt click as before, and leaves the right button alone', () => {
+      const bridge = runBridge({ ids: ['totals'] });
+      bridge.click('Board.html');
+      bridge.click('Board.html', { altKey: true });
+      bridge.click('#totals');
+      expect(bridge.click('Board.html', { button: 2 })).toEqual({ prevented: false });
+      expect(bridge.posted).toEqual([
+        { type: 'bevel.navigate', href: 'Board.html' },
+        { type: 'bevel.navigate', href: 'Board.html' },
+      ]);
+      expect(bridge.scrolled).toEqual(['totals']);
+    });
+
+    it('leaves a modified click the page already cancelled to the page', () => {
+      const bridge = runBridge();
+      bridge.click('Board.html', { ctrlKey: true, alreadyPrevented: true });
+      bridge.click('Board.html', { button: 1, alreadyPrevented: true });
+      expect(bridge.posted).toEqual([]);
+    });
+  });
+
+  /**
+   * A bare fragment is an in-page jump by either route. Left to the browser, a
+   * `srcdoc` frame resolves `#totals` against the APP's URL and navigates
+   * itself away; handed to the parent, the app re-opens the same file with
+   * the fragment on its URL and the page does not move. So the bridge
+   * cancels the click, scrolls in the frame, and posts nothing.
+   */
+  describe('a bare fragment scrolls the page inside the frame', () => {
+    it('on a click: the element scrolls into view, the default is cancelled, nothing is posted', () => {
+      const bridge = runBridge({ ids: ['totals'] });
+      expect(bridge.click('#totals')).toEqual({ prevented: true });
+      expect(bridge.scrolled).toEqual(['totals']);
+      expect(bridge.posted).toEqual([]);
+    });
+
+    it('through window.bevel.openNode and window.bevel.navigate the same', () => {
+      for (const member of ['openNode', 'navigate']) {
+        const bridge = runBridge({ ids: ['totals'] });
+        (bridge.bevel[member] as (href: string) => void)('#totals');
+        expect(bridge.scrolled, member).toEqual(['totals']);
+        expect(bridge.posted, member).toEqual([]);
+      }
+    });
+
+    it('a fragment naming no element does nothing: no scroll, no navigation, and the default still cancelled', () => {
+      const bridge = runBridge({ ids: ['totals'] });
+      expect(bridge.click('#nowhere')).toEqual({ prevented: true });
+      (bridge.bevel.openNode as (href: string) => void)('#nowhere');
+      expect(bridge.scrolled).toEqual([]);
+      expect(bridge.scrolledToTop()).toBe(0);
+      expect(bridge.posted).toEqual([]);
+    });
+
+    it('`#` and `#top` with no such element scroll to the top; an element named top wins', () => {
+      const bridge = runBridge();
+      bridge.click('#');
+      bridge.click('#top');
+      bridge.click('#TOP');
+      expect(bridge.scrolledToTop()).toBe(3);
+      expect(bridge.posted).toEqual([]);
+      // An id and a named anchor both win over the top of the page.
+      for (const page of [{ ids: ['top'] }, { names: ['top'] }]) {
+        const withTop = runBridge(page);
+        withTop.click('#top');
+        expect(withTop.scrolled, JSON.stringify(page)).toEqual(['top']);
+        expect(withTop.scrolledToTop(), JSON.stringify(page)).toBe(0);
+      }
+    });
+
+    it('finds the target by a percent-encoded id and by an anchor name', () => {
+      const bridge = runBridge({ ids: ['Q3 totals'], names: ['legacy'] });
+      bridge.click('#Q3%20totals');
+      bridge.click('#legacy');
+      expect(bridge.scrolled).toEqual(['Q3 totals', 'legacy']);
+      // A malformed escape is looked up as written, and nothing breaks.
+      bridge.click('#100%');
+      expect(bridge.scrolled).toEqual(['Q3 totals', 'legacy']);
+      expect(bridge.posted).toEqual([]);
+    });
+
+    // The standard's fallback is the named ANCHOR: a form control carrying
+    // the name is not a target, even when it comes first in the document.
+    it('a name on a form control is not a fragment target; only <a name> is', () => {
+      const bridge = runBridge({ names: ['legacy'], namedControls: ['legacy', 'query'] });
+      const { prevented } = bridge.click('#query');
+      expect(bridge.scrolled).toEqual([]);
+      expect(prevented).toBe(true);
+      // The control comes first in document order; the anchor is the target.
+      bridge.click('#legacy');
+      expect(bridge.scrolled).toEqual(['legacy']);
+      expect(bridge.scrolledTags).toEqual(['A']);
+      expect(bridge.posted).toEqual([]);
+    });
+
+    it('leaves a click that is not on a link alone — a button, a div — whatever it carries', () => {
+      const bridge = runBridge({ ids: ['goal'] });
+      const { prevented } = bridge.click('#goal', { noAnchor: true });
+      expect(prevented).toBe(false);
+      expect(bridge.scrolled).toEqual([]);
+      expect(bridge.posted).toEqual([]);
+    });
+
+    // The HTML standard's order: the fragment as written names the target
+    // first, its decoding only when that finds nothing.
+    it('prefers the id as written over its percent-decoding, as a browser does', () => {
+      const bridge = runBridge({ ids: ['Q3%20totals', 'Q3 totals'] });
+      bridge.click('#Q3%20totals');
+      expect(bridge.scrolled).toEqual(['Q3%20totals']);
+    });
+
+    it('leaves a click the page already cancelled to the page: no scroll, nothing posted', () => {
+      const bridge = runBridge({ ids: ['panel'] });
+      bridge.click('#panel', { alreadyPrevented: true });
+      bridge.click('#', { alreadyPrevented: true });
+      bridge.click('../Knowledge/Alice.md', { alreadyPrevented: true });
+      expect(bridge.scrolled).toEqual([]);
+      expect(bridge.scrolledToTop()).toBe(0);
+      expect(bridge.posted).toEqual([]);
+    });
+
+    it('a document link with a trailing fragment still goes to the app, and scrolls nothing', () => {
+      const bridge = runBridge({ ids: ['goal'] });
+      expect(bridge.click('../Knowledge/Alice.md#goal')).toEqual({ prevented: true });
+      (bridge.bevel.openNode as (href: string) => void)('../Knowledge/Alice.md#goal');
+      expect(bridge.posted).toEqual([
+        { type: 'bevel.navigate', href: '../Knowledge/Alice.md#goal' },
+        { type: 'bevel.navigate', href: '../Knowledge/Alice.md#goal' },
+      ]);
+      expect(bridge.scrolled).toEqual([]);
+    });
+
+    it('a fragment the parent hands back (a link to this page by its own name) scrolls as a bare one does', async () => {
+      const bridge = runBridge({ ids: ['q3'] });
+      await bridge.deliver({ type: 'bevel.jump', hash: '#q3' });
+      expect(bridge.scrolled).toEqual(['q3']);
+      expect(bridge.posted).toEqual([]);
+    });
+
+    it('takes a jump from the parent only: a message from anywhere else scrolls nothing', async () => {
+      const bridge = runBridge({ ids: ['q3'] });
+      await bridge.deliver({ type: 'bevel.jump', hash: '#q3' }, { fromParent: false });
+      await bridge.deliver({ type: 'bevel.jump', hash: 'q3' });
+      expect(bridge.scrolled).toEqual([]);
+    });
   });
 
   it('embeds the body HTML verbatim (sanitization happens upstream)', () => {
@@ -493,5 +682,99 @@ describe('buildSandboxedHtml', () => {
     vm.runInContext(`"use strict"; (function(){ ${scriptBody} }).call(undefined);`, ctx);
 
     expect(ctx.__coreLibRan).toBe(true);
+  });
+});
+
+describe('window.bevel.tools in the frame', () => {
+  type Tools = Record<'searchTools' | 'toolsInfo' | 'callTool' | 'callToolChain' | 'uploadFile', (...a: unknown[]) => Promise<unknown>>;
+  const toolsOf = (bridge: ReturnType<typeof runBridge>) => bridge.bevel.tools as Tools | null;
+
+  it('has the five functions where the app answers tools, each posting a call with a request id', async () => {
+    const bridge = runBridge({}, { toolBridge: true });
+    const tools = toolsOf(bridge)!;
+    expect(Object.keys(tools).sort()).toEqual(['callTool', 'callToolChain', 'searchTools', 'toolsInfo', 'uploadFile']);
+    void tools.searchTools('change request');
+    void tools.toolsInfo(['read_file']);
+    void tools.callTool('read_file', { body: { path: 'a.md' } });
+    void tools.callToolChain('return 1');
+    const file = new Blob(['a,b\n']);
+    void tools.uploadFile(file, { name: 'Budget.csv', branch: 'main', destination: 'Data', mode: 'overwrite', all: true });
+    const posted = bridge.posted as Array<{ type: string; requestId: string; fn: string; args: unknown[] }>;
+    expect(posted.map((m) => [m.type, m.fn, m.args])).toEqual([
+      ['bevel.tool.call', 'searchTools', ['change request']],
+      ['bevel.tool.call', 'toolsInfo', [['read_file']]],
+      ['bevel.tool.call', 'callTool', ['read_file', { body: { path: 'a.md' } }]],
+      ['bevel.tool.call', 'callToolChain', ['return 1']],
+      // The file itself, for the parent to clone; of the options, only the four it reads.
+      ['bevel.tool.call', 'uploadFile', [file, { name: 'Budget.csv', branch: 'main', destination: 'Data', mode: 'overwrite' }]],
+    ]);
+    expect((posted[4]!.args as unknown[])[0]).toBe(file);
+    expect(new Set(posted.map((m) => m.requestId)).size).toBe(5);
+  });
+
+  it('stamps every message with the identity the app built the document with, and none without one', async () => {
+    // The real runtime, given the identity the app minted for this document:
+    // tool calls and requireTools alike carry it, so the app can tell this
+    // document's messages from a replaced document's. Built with `true`, the
+    // runtime posts no identity; built with `tools: false`, the document has
+    // no tools but still asks `requireTools` as itself.
+    const named = runBridge({}, { toolBridge: { documentId: 'doc-abc' } });
+    void toolsOf(named)!.callTool('read_file', { body: { path: 'a.md' } });
+    void (named.bevel.requireTools as () => Promise<boolean>)();
+    expect((named.posted as Array<Record<string, unknown>>).map((m) => [m.type, m.documentId])).toEqual([
+      ['bevel.tool.call', 'doc-abc'],
+      ['bevel.tools.require', 'doc-abc'],
+    ]);
+
+    const anonymous = runBridge({}, { toolBridge: true });
+    void toolsOf(anonymous)!.callTool('read_file', {});
+    void (anonymous.bevel.requireTools as () => Promise<boolean>)();
+    expect((anonymous.posted as Array<Record<string, unknown>>).every((m) => !('documentId' in m))).toBe(true);
+
+    const toolless = runBridge({}, { toolBridge: { documentId: 'doc-xyz', tools: false } });
+    expect(toolsOf(toolless)).toBeNull();
+    void (toolless.bevel.requireTools as () => Promise<boolean>)();
+    expect((toolless.posted as Array<Record<string, unknown>>).map((m) => [m.type, m.documentId])).toEqual([
+      ['bevel.tools.require', 'doc-xyz'],
+    ]);
+  });
+
+  it("resolves with the parent's answer and rejects with its error and code, matched by request id", async () => {
+    const bridge = runBridge({}, { toolBridge: true });
+    const tools = toolsOf(bridge)!;
+    const read = tools.callTool('read_file', {});
+    const write = tools.callTool('edit_file', {});
+    const [readMsg, writeMsg] = bridge.posted as Array<{ requestId: string }>;
+    // Handled before the answer arrives, so the rejection is never unhandled.
+    const writeRejects = expect(write).rejects.toMatchObject({ message: 'denied', code: 'denied' });
+    await bridge.deliver({ type: 'bevel.tool.response', requestId: writeMsg!.requestId, ok: false, error: 'denied', code: 'denied' });
+    await bridge.deliver({ type: 'bevel.tool.response', requestId: readMsg!.requestId, ok: true, result: { content: 'hi' } });
+    await expect(read).resolves.toEqual({ content: 'hi' });
+    await writeRejects;
+  });
+
+  it('believes no answer that does not come from the parent', async () => {
+    const bridge = runBridge({}, { toolBridge: true });
+    let settled = false;
+    void toolsOf(bridge)!.callTool('read_file', {}).finally(() => (settled = true));
+    const [msg] = bridge.posted as Array<{ requestId: string }>;
+    await bridge.deliver({ type: 'bevel.tool.response', requestId: msg!.requestId, ok: true, result: 'forged' }, { fromParent: false });
+    expect(settled).toBe(false);
+  });
+
+  it('is null where the app answers no tools, and requireTools asks the parent and resolves with its answer', async () => {
+    const bridge = runBridge();
+    expect(bridge.bevel.tools).toBeNull();
+    const required = (bridge.bevel.requireTools as () => Promise<boolean>)();
+    const [msg] = bridge.posted as Array<{ type: string; requestId: string }>;
+    expect(msg!.type).toBe('bevel.tools.require');
+    await bridge.deliver({ type: 'bevel.tools.require.response', requestId: msg!.requestId, ok: true, result: false });
+    await expect(required).resolves.toBe(false);
+
+    const onFilePage = runBridge({}, { toolBridge: true });
+    const yes = (onFilePage.bevel.requireTools as () => Promise<boolean>)();
+    const [ask] = onFilePage.posted as Array<{ requestId: string }>;
+    await onFilePage.deliver({ type: 'bevel.tools.require.response', requestId: ask!.requestId, ok: true, result: true });
+    await expect(yes).resolves.toBe(true);
   });
 });

@@ -235,7 +235,7 @@ async function readError(res: Response): Promise<never> {
 const SYNC_RESPONSE_HEADER = 'x-hexis-sync';
 const SYNC_RESPONSE_MARKER = 'result';
 
-/** What "Sync now" came back with. A 409 or 503 still carries per-branch results. */
+/** What "Update now" came back with. A 409 or 503 still carries per-branch results. */
 export interface SyncNowResult {
   /** True for 200 — every branch current. */
   ok: boolean;
@@ -267,11 +267,11 @@ export async function syncNow(): Promise<SyncNowResult> {
   try {
     body = await res.json();
   } catch {
-    throw new Error(`Sync failed (${res.status})`);
+    throw new Error(`Couldn’t get the latest changes (${res.status})`);
   }
   const data = body as { status?: 'synced' | 'partial'; results?: SyncBranchOutcome[]; error?: string };
   if (!Array.isArray(data.results)) {
-    return { ok: false, results: [], error: data.error || `Sync failed (${res.status})` };
+    return { ok: false, results: [], error: data.error || `Couldn’t get the latest changes (${res.status})` };
   }
   return { ok: res.status === 200, status: data.status, results: data.results };
 }

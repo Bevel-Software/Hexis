@@ -116,9 +116,11 @@ describe('the example call satisfies the schema of the tool it names', () => {
       (t) => t.name === 'call_tool_chain',
     )!.description!;
     expect(description).not.toContain('works exactly as written');
-    // The shape and the pointer at `tools_info` are still there, and so is the
-    // warning that made this a bug in the first place.
-    expect(description).toContain('`KNOWLEDGE_BASE.<tool>({ body: { ...args } })`');
+    // The namespace and the pointer at `tools_info` are still there, and so is
+    // the warning that made this a bug in the first place. (The one calling
+    // shape it used to state is gone: a tool is called as its own `Call:` line
+    // shows — see Tool-Calls-Checked-Against-Interface.)
+    expect(description).toContain('every tool in `KNOWLEDGE_BASE` has one');
     expect(description).toContain('branch');
     expect(description).toContain('tools_info');
   });
@@ -236,7 +238,7 @@ describe('the example name', () => {
       expect(tool.description, tool.name).not.toContain('(e.g. `hexis.');
     }
     expect(tools.find((t) => t.name === 'list_tools')!.description).toBe(
-      'List every UTCP tool currently registered, in TypeScript-accessible form for use inside `call_tool_chain`.',
+      'Call: list_tools({})\n\nList every UTCP tool currently registered, in TypeScript-accessible form for use inside `call_tool_chain`.',
     );
   });
 

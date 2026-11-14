@@ -47,17 +47,27 @@ export const oneLine = displayPath;
  */
 export type FileKind = 'text' | 'document' | 'image' | 'archive' | 'binary';
 
+/** Where a read came from: the workspace whose file it is. A document reader reports a failed extraction there. */
+export interface ReadOrigin {
+  workspaceId: string;
+}
+
 /** A per-format file reader. Register implementations in `createFileReaderRegistry`. */
 export interface FileReader {
   /** The extensions this reader owns — lowercase, with the dot. Empty for the default (fallback) reader. */
   readonly extensions: readonly string[];
-  /** Read `bytes` (read at `path`) into what the read tools return. Must not throw for bad file content. */
-  read(bytes: Buffer, path: string): Promise<ReadResult>;
+  /**
+   * Read `bytes` (read at `path`) into what the read tools return. Must not
+   * throw for bad file content. `origin`, when the caller has one, is the
+   * workspace the read happened in.
+   */
+  read(bytes: Buffer, path: string, origin?: ReadOrigin): Promise<ReadResult>;
   /**
    * Text `grep` may search, or null when there is nothing (cheaply) searchable.
    * Default readers: the decoded text content (TextReader; null on NUL bytes) /
-   * the CACHED extraction (DocumentReader — cold extraction is grep's call,
-   * under its per-walk budget) / absent = never greppable (ImageReader).
+   * absent = never greppable this way (ImageReader; DocumentReader, whose
+   * remembered extraction grep asks for through `cachedRead` — cold
+   * extraction is grep's call, under its per-walk budget).
    */
   greppableText?(bytes: Buffer, path: string): Promise<string | null>;
   /** May the agent TEXT-editing tools (write_file/write_files/edit_file) touch this file? */

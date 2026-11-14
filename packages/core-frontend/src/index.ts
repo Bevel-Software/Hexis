@@ -20,5 +20,13 @@ import './html-extensions';
 
 export { loadServerConfig, renderConfigFailure } from './core/bootstrap';
 export { CoreAppShell, AuthGate } from './core/CoreAppShell';
+// The Knowledge surface; with `roots`, the folder surface an app mounts for
+// the root folders it claims (`AppDef.roots`).
+export { KnowledgeSurface } from './core/KnowledgeSurface';
+// The embed, mounted OUTSIDE the app: what a deployment's `embed` entry calls
+// when the MCP App view loads it into a chat host's sandbox (see
+// `modules/embed/mount.tsx`).
+export { mountEmbed, type MountEmbedOptions } from './modules/embed/mount';
+export { readEmbedHandoff, EMBED_HANDOFF_GLOBAL, type EmbedHandoff } from './modules/embed/embed-config';
 export * from './core/registry';
 export * from './core/events';

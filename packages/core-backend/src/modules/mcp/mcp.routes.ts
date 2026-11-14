@@ -9,13 +9,15 @@ import {
   InvalidTokenLabelError,
   TokenNotFoundError,
   TokenStillActiveError,
-} from '../tool-auth/external-api-key.errors.js';
-import type { IExternalApiKeyService } from '../tool-auth/external-api-key.interface.js';
-import type { InternalTokenService } from '../tool-auth/internal-token.service.js';
+} from '../tool-auth/index.js';
+import type { IExternalApiKeyService, InternalTokenService, ILlmUsageMeter } from '../tool-auth/index.js';
 import { MCP_LOOPBACK_TOKEN_TTL_MS, type McpService } from './mcp.service.js';
 import type { BevelOAuthProvider } from './oauth/bevel-oauth-provider.js';
-import type { ILlmUsageMeter } from '../tool-auth/llm-usage-meter.js';
-import '../tool-auth/external-api-key.interface.js'; // req.externalApiKeyId augmentation
+import '../tool-auth/index.js'; // req.externalApiKeyId augmentation
+import './mcp-auth.middleware.js'; // req.mcpCallerKind augmentation
+import { isPagePath } from '../audit/index.js';
+import type { IAgentScopeResolver } from '../agent-scope/index.js';
+import { NOT_AN_AGENT_CHOICE } from './oauth/oauth-consent.routes.js';
 
 /** Pull the raw bearer token off an already-authenticated request. */
 function extractBearer(req: Request): string {
@@ -43,6 +45,33 @@ function jsonRpcError(res: Response, status: number, code: number, message: stri
   res.status(status).json({ jsonrpc: '2.0', error: { code, message }, id: null });
 }
 
+/** The header a page's calls carry: the page's knowledge-base path, URI-encoded. */
+export const PAGE_HEADER = 'x-bevel-page';
+
+/**
+ * The page a request names, decoded: null when it names none, an error
+ * message when it names one it may not.
+ *
+ * Only a session — the person signed in to the app, whose app is relaying a
+ * page's calls — may name one. A connection key, an OAuth token or an
+ * internal token belongs to an agent, which has an Audit log row of its own;
+ * letting it name a page would let it write its calls into a page's history.
+ */
+function pageOf(req: Request): { page: string | null } | { error: string } {
+  const raw = req.headers[PAGE_HEADER];
+  if (raw === undefined) return { page: null };
+  if (req.mcpCallerKind !== 'session') {
+    return { error: 'X-Bevel-Page names the page a signed-in person\'s call comes from; it is not accepted with this credential.' };
+  }
+  let page: string;
+  try {
+    page = decodeURIComponent(Array.isArray(raw) ? (raw[0] ?? '') : raw);
+  } catch {
+    return { error: 'X-Bevel-Page is not a URI-encoded path.' };
+  }
+  return isPagePath(page) ? { page } : { error: 'X-Bevel-Page is not a knowledge-base path.' };
+}
+
 /**
  * Routes for the remote MCP server + the connection-key management endpoints.
  *
@@ -57,6 +86,8 @@ function jsonRpcError(res: Response, status: number, code: number, message: stri
  *
  *   POST   /mcp/local-token               — exchange an MCP OAuth access token
  *                                           for a loopback internal token
+ *   POST   /mcp/page-refusals             — record a page's call its viewer
+ *                                           refused (session only)
  *
  * The `/mcp` POST accepts either a connection key or a JWT/OAuth token (see
  * McpAuthMiddleware). The `/mcp/external-api-keys/*` endpoints accept only the JWT —
@@ -75,6 +106,11 @@ export function createMcpRoutes(
   // RFC 9728 pointer carried on this router's own 401 challenges (the
   // local-token exchange), same value McpAuthMiddleware advertises.
   resourceMetadataUrl: string,
+  /**
+   * The "Connect as" choices a key may be minted as (`modules/agent-scope`).
+   * Absent: keys are minted as Everything only, and no choices are listed.
+   */
+  agents?: Pick<IAgentScopeResolver, 'listChoices' | 'choosable'>,
 ): express.Router {
   const router = express.Router();
 
@@ -100,6 +136,11 @@ export function createMcpRoutes(
    * closes — finished, or abandoned by the client mid-call.
    */
   router.post('/mcp', mcpAuthMiddleware, async (req, res) => {
+    const named = pageOf(req);
+    if ('error' in named) {
+      jsonRpcError(res, 400, TRANSPORT_ERROR, named.error);
+      return;
+    }
     let server: Server | undefined;
     res.on('close', () => {
       // Closing the server closes its transport too.
@@ -119,9 +160,16 @@ export function createMcpRoutes(
           // exchanged grant; undefined for keys/JWTs) — the Audit log's other
           // principal, resolved per request like the key id.
           connectionId: req.agentConnectionId ?? null,
+          // The agent configuration the credential connects as (a key's, an agent
+          // connection's, or the one an exchanged grant carries); null is
+          // Everything. Resolved per request like the ids above.
+          ...(req.mcpAgentPath ? { agentPath: req.mcpAgentPath } : {}),
           // The proxy authenticates its loopback calls with the SAME bearer the
           // client used here, so it acts on the request exactly as the caller would.
           bearer: extractBearer(req),
+          // The page whose script made the call, when the app relays one —
+          // its calls are audited under the page (see pageOf).
+          ...(named.page ? { page: named.page } : {}),
         },
         req.body,
       );
@@ -165,7 +213,47 @@ export function createMcpRoutes(
   router.get('/mcp', methodNotAllowed);
   router.delete('/mcp', methodNotAllowed);
 
+  /**
+   * A call a page asked to make and its viewer refused. It never ran, so it
+   * never reached `/mcp`; the app reports it so the Audit log lists it
+   * under the page, as refused, beside the page's allowed calls.
+   *
+   * Body: `{ page, tool, args? }` — the page's knowledge-base path and the
+   * tool's name as the page called it. Session only, like the page header.
+   */
+  router.post('/mcp/page-refusals', mcpAuthMiddleware, async (req, res) => {
+    if (req.mcpCallerKind !== 'session') {
+      res.status(403).json({ error: 'Only the app records a page\'s refused calls.' });
+      return;
+    }
+    const body = (req.body ?? {}) as { page?: unknown; tool?: unknown; args?: unknown };
+    if (typeof body.page !== 'string' || !isPagePath(body.page) || typeof body.tool !== 'string' || !body.tool) {
+      res.status(400).json({ error: 'page (a knowledge-base path) and tool are required' });
+      return;
+    }
+    const args =
+      body.args && typeof body.args === 'object' && !Array.isArray(body.args) ? (body.args as Record<string, unknown>) : {};
+    try {
+      await mcpService.recordPageRefusal({ userId: req.userId!, bearer: extractBearer(req) }, body.page, body.tool, args);
+      res.status(204).end();
+    } catch (err) {
+      log.error('recording a page refusal failed:', { err });
+      res.status(500).json({ error: 'Failed to record the refusal' });
+    }
+  });
+
   // ── Connection-key management (JWT-only) ───────────────────────────────
+
+  // The agents a key may be minted as — the same choices the OAuth consent
+  // step offers below Everything, for the key-mint dialog.
+  router.get('/mcp/agent-choices', jwtAuthMiddleware, async (req, res) => {
+    try {
+      res.json({ agents: agents && req.userEmail ? await agents.listChoices(req.userEmail) : [] });
+    } catch (err) {
+      log.error('listing the agents to connect as failed:', { err });
+      res.status(500).json({ error: 'Failed to list the agents' });
+    }
+  });
 
   router.get('/mcp/external-api-keys', jwtAuthMiddleware, async (req, res) => {
     try {
@@ -198,12 +286,23 @@ export function createMcpRoutes(
         res.status(400).json({ error: 'JSON body required' });
         return;
       }
-      const { label } = req.body as { label?: string };
+      const { label, agentPath: asked } = req.body as { label?: string; agentPath?: unknown };
       if (!label) {
         res.status(400).json({ error: 'label is required' });
         return;
       }
-      const minted = await externalApiKeyService.mint(req.userId!, label);
+      // "Connect as", exactly as on the consent step: absent, null or empty is
+      // Everything; anything else must be an agent the owner may choose now.
+      let agentPath: string | null = null;
+      if (asked !== undefined && asked !== null && asked !== '') {
+        agentPath =
+          typeof asked === 'string' && agents && req.userEmail ? await agents.choosable(req.userEmail, asked) : null;
+        if (agentPath === null) {
+          res.status(400).json({ error: NOT_AN_AGENT_CHOICE });
+          return;
+        }
+      }
+      const minted = await externalApiKeyService.mint(req.userId!, label, agentPath ? { agentPath } : {});
       // The plaintext field is the *only* read path for the raw key. The
       // frontend must store it nowhere — it shows the dialog once and then
       // discards. Subsequent fetches return only `summary`-shaped rows.
@@ -362,8 +461,11 @@ export function createMcpRoutes(
       // The grant's agent connection rides along, so the local server's
       // calls with this token stay attributed to the agent in the Audit log.
       const connectionId = typeof info.extra?.connectionId === 'string' ? info.extra.connectionId : undefined;
+      // So does the agent the connection was made as: the local server's
+      // calls see the same narrowed surface as the hosted endpoint's.
+      const agentPath = typeof info.extra?.agentPath === 'string' && info.extra.agentPath ? info.extra.agentPath : undefined;
       const minted = internalTokens.mint(
-        { userId, externalProxy: true, ...(connectionId ? { connectionId } : {}) },
+        { userId, externalProxy: true, ...(connectionId ? { connectionId } : {}), ...(agentPath ? { agentPath } : {}) },
         ttlMs,
       );
       // The ACTUAL lifetime, not the constant — the caller schedules its

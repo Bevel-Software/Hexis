@@ -302,12 +302,13 @@ describe('round-trip — every granted entry parses back', () => {
   });
 });
 
-describe('token-kind family — exact-token grants, shadow-aware revokes', () => {
-  // One name, two spellings, two possible principals: the bare token is the
-  // GROUP's whenever a group shadows the name (group-first precedence), the
-  // `role/` token is always the ROLE's. Grants must be exact-token idempotent;
-  // revokes are alias-tolerant ONLY when unshadowed (the caller passes
-  // tokenMatch: 'exact' when a group owns the bare name).
+describe('token-kind family — exact-token grants, kind-aware revokes', () => {
+  // One name, three spellings, two possible principals: `role/` is always the
+  // ROLE's, `group/` always the GROUP's, and the bare token is the role's when
+  // one exists, else the group's. Grants must be exact-token idempotent;
+  // revokes are alias-tolerant (explicit + bare, never the other kind's
+  // explicit spelling) only when the bare name is the principal's — the
+  // caller passes tokenMatch: 'exact' otherwise.
   const SHARED = `---
 write:
   - role/Sales
@@ -360,10 +361,51 @@ write:
     expect(lines).not.toContain('  - Sales');
   });
 
-  it("REVOKE unshadowed bare principal (group since vanished): 'name' matching strips both spellings", () => {
+  it("REVOKE bare principal: 'name' matching strips both role spellings", () => {
     const r = spliceRevoke(SHARED, 'write', { kind: 'role', role: 'Sales' });
     expect(r.changed).toBe(true);
-    expect(r.text).not.toContain('Sales'); // bare token falls back to the role — same principal
+    expect(r.text).not.toContain('Sales'); // the bare token is the role — same principal
+  });
+
+  const ALL = `---
+write:
+  - role/Sales
+  - Sales
+  - group/Sales
+  - Admin
+---
+`;
+
+  it('GRANT is exact-token: a group/<Name> grant goes through beside the bare and role/ spellings', () => {
+    const md = '---\nwrite:\n  - role/Sales\n  - Sales\n---\n';
+    const r = spliceGrant(md, 'write', { kind: 'role', role: 'group/Sales' });
+    expect(r.changed).toBe(true);
+    expect(r.text.split('\n')).toContain('  - group/Sales');
+    expect(spliceGrant(ALL, 'write', { kind: 'role', role: 'group/Sales' }).changed).toBe(false);
+  });
+
+  it("REVOKE 'name' never crosses kinds: the role's revoke keeps group/, the group's keeps role/", () => {
+    const asRole = spliceRevoke(ALL, 'write', { kind: 'role', role: 'role/Sales' });
+    expect(asRole.text.split('\n')).toEqual(['---', 'write:', '  - group/Sales', '  - Admin', '---', '']);
+
+    // The service asks 'name' for a GROUP only while no role shares the name
+    // (with one, as in ALL, it picks 'exact' — the last test below), so the
+    // group's case is a file where the bare token can only be the group.
+    const GROUP_ONLY = '---\nwrite:\n  - Sales\n  - group/Sales\n  - Admin\n---\n';
+    const asGroup = spliceRevoke(GROUP_ONLY, 'write', { kind: 'role', role: 'group/Sales' });
+    expect(asGroup.text.split('\n')).toEqual(['---', 'write:', '  - Admin', '---', '']);
+  });
+
+  it('REVOKE matches a spaced `group/ <Name>` request against the parsed `group/<name>` entry', () => {
+    const r = spliceRevoke(ALL, 'write', { kind: 'role', role: 'group/ Sales' }, { tokenMatch: 'exact' });
+    expect(r.text.split('\n')).toEqual(['---', 'write:', '  - role/Sales', '  - Sales', '  - Admin', '---', '']);
+    const md = '---\nwrite:\n  - group/ Sales\n---\n';
+    expect(spliceRevoke(md, 'write', { kind: 'role', role: 'group/Sales' }).changed).toBe(true);
+  });
+
+  it("REVOKE 'exact' of group/<Name> strips only that spelling", () => {
+    const r = spliceRevoke(ALL, 'write', { kind: 'role', role: 'group/Sales' }, { tokenMatch: 'exact' });
+    expect(r.text.split('\n')).toEqual(['---', 'write:', '  - role/Sales', '  - Sales', '  - Admin', '---', '']);
   });
 });
 

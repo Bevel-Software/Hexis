@@ -1,4 +1,4 @@
-import type { ChangeRequest, IWorkflowService } from '@bevel-software/platform-shared';
+import type { ChangeRequest, IVersionControlService } from '@bevel-software/platform-shared';
 import type { WorkspaceService } from '../modules/workspace/workspace.service.js';
 import type { KbContext } from './kb-context.js';
 import type { IAccessControl } from '../modules/access/access-control.interface.js';
@@ -33,7 +33,7 @@ const log = logger('pending-proposals');
 export interface ProposalSources {
   workspaceService: Pick<WorkspaceService, 'ensureRemotesFetched' | 'readFileAtRef'>;
   accessControl: Pick<IAccessControl, 'canWriteBatch'>;
-  workflow: Pick<IWorkflowService, 'listChangeRequests'>;
+  versionControl: Pick<IVersionControlService, 'listChangeRequests'>;
   /** Which branch is the released one, and its clone. */
   kb: Pick<KbContext, 'defaultBranch' | 'defaultWorkspaceId'>;
 }
@@ -62,7 +62,7 @@ export interface ProposedFile {
  * runs BEFORE the access batch, also where it drops what it already serves from
  * the default branch, so the batch stays as small as the answer.
  *
- * Order follows the change requests as the workflow service listed them; a
+ * Order follows the change requests as the version-control service listed them; a
  * caller that wants a stable reading order sorts the result itself.
  */
 export async function visibleProposedFiles(
@@ -81,7 +81,7 @@ export async function visibleProposedFiles(
     // other branch is not a proposal these surfaces can speak about: merging it
     // puts nothing in the catalog, and the card would never resolve.
     const defaultBranch = sources.kb.defaultBranch;
-    crs = (await sources.workflow.listChangeRequests()).filter(
+    crs = (await sources.versionControl.listChangeRequests()).filter(
       (c) => c.state === 'open' && c.base === defaultBranch,
     );
   } catch {

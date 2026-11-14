@@ -161,3 +161,76 @@ describe('canReadAsGroupBatch', () => {
     expect(verdict?.get('Plugins/GTM')).toBe(false);
   });
 });
+
+describe('groupsOfUser', () => {
+  let root: string;
+  const workspaceId = 'ws-groups-of-user-1';
+
+  beforeEach(async () => {
+    root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-groups-of-user-'));
+  });
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  async function makeService() {
+    const workspaceDir = path.join(root, workspaceId);
+    const repo = path.join(workspaceDir, KB_DIR);
+    await fs.mkdir(repo, { recursive: true });
+    // `lee@x.io` holds Leads, the role that lists `group:Sales Team`, without
+    // being in the group: the role reaches the group, not the other way round.
+    await fs.writeFile(path.join(repo, 'roles.yaml'), ROLES_YAML.replace('    - group:Sales Team\n', '    - group:Sales Team\n    - lee@x.io\n'));
+    await fs.writeFile(
+      path.join(repo, 'groups.yaml'),
+      `groups:\n  Sales Team:\n    - sam@x.io\n    - sue@x.io\n  Design:\n    - dee@x.io\n    - sue@x.io\n`,
+    );
+    await fs.writeFile(path.join(repo, 'access.md'), rules('write:\n  - Admin\n'));
+    return new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), KB_DIR, new NodeFs());
+  }
+
+  it('names the groups a person is in, as groups.yaml spells them', async () => {
+    const svc = await makeService();
+    expect(await svc.groupsOfUser(workspaceId, 'sam@x.io')).toEqual(['Sales Team']);
+    expect((await svc.groupsOfUser(workspaceId, 'sue@x.io')).sort()).toEqual(['Design', 'Sales Team']);
+  });
+
+  it('matches the email in any case', async () => {
+    const svc = await makeService();
+    expect(await svc.groupsOfUser(workspaceId, 'Sam@X.io')).toEqual(['Sales Team']);
+  });
+
+  it('is empty for someone in no group, however many roles they hold', async () => {
+    const svc = await makeService();
+    expect(await svc.groupsOfUser(workspaceId, 'eng@x.io')).toEqual([]);
+    expect(await svc.groupsOfUser(workspaceId, 'admin@x.io')).toEqual([]);
+  });
+
+  it('does not count holding a role that names a group as being in it', async () => {
+    const svc = await makeService();
+    expect(await svc.groupsOfUser(workspaceId, 'lee@x.io')).toEqual([]);
+  });
+
+  describe('visibleGroups: the one answer the Groups tab, the share dialog and a grant use', () => {
+    // The active source's groups, in the order a caller happens to hold them.
+    const listed = ['Sales Team', 'Design'];
+
+    it('is every group, as given, for an admin', async () => {
+      const svc = await makeService();
+      expect(await svc.visibleGroups(workspaceId, 'admin@x.io', listed)).toEqual(listed);
+    });
+
+    it('is only the groups a person is in, in the order given, for anyone else', async () => {
+      const svc = await makeService();
+      expect(await svc.visibleGroups(workspaceId, 'sue@x.io', listed)).toEqual(['Sales Team', 'Design']);
+      expect(await svc.visibleGroups(workspaceId, 'sam@x.io', listed)).toEqual(['Sales Team']);
+      expect(await svc.visibleGroups(workspaceId, 'dee@x.io', listed)).toEqual(['Design']);
+    });
+
+    it('is empty for someone in no group, a role that names a group included', async () => {
+      const svc = await makeService();
+      expect(await svc.visibleGroups(workspaceId, 'eng@x.io', listed)).toEqual([]);
+      expect(await svc.visibleGroups(workspaceId, 'lee@x.io', listed)).toEqual([]);
+      expect(await svc.visibleGroups(workspaceId, 'admin@x.io', [])).toEqual([]);
+    });
+  });
+});

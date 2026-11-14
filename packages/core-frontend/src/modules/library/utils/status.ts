@@ -1,6 +1,6 @@
 import { skillUnderRoot } from '@bevel-software/platform-shared';
-import { probeWords } from '../../secrets-vault/probe/probe-verdict';
-import type { ProbeVerdict, ToolSecrets, ToolVarStatus } from '../../secrets-vault/services/tool-secrets.api';
+import { probeWords } from '../../secrets-vault';
+import type { ProbeVerdict, ToolSecrets, ToolVarStatus } from '../../secrets-vault';
 
 /**
  * Status derivation for the Library. Everything the cards, gems and loadout

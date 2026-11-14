@@ -39,7 +39,7 @@ import {
   canonicalEmail,
   EMAIL_REGEX,
   GROUP_REF_PREFIX,
-} from '../access-model/access-grammar.js';
+} from '../access-model/index.js';
 
 /** Bad-input failure when editing roles.yaml (invalid name/email, unknown role). */
 export class RolesEditError extends Error {
@@ -135,6 +135,19 @@ export function emitRolesModel(model: RolesModel): string {
 
 function findRole(model: RolesModel, canonical: string): RoleModel | undefined {
   return model.find((r) => canonicalRoleName(r.displayName) === canonical);
+}
+
+/**
+ * `text` with the role `displayName` in it: unchanged when the file has it
+ * already, else with the role appended, empty. A role the app defines exists
+ * whether or not roles.yaml names it yet, so the first member an admin gives
+ * it is what writes its entry; every other edit then finds the role there.
+ */
+export function withRole(text: string, displayName: string): string {
+  const model = parseRolesModel(text);
+  if (findRole(model, canonicalRoleName(displayName))) return text;
+  model.push({ displayName: displayName.trim(), members: [] });
+  return emitRolesModel(model);
 }
 
 function reemit(original: string, model: RolesModel): EditResult {

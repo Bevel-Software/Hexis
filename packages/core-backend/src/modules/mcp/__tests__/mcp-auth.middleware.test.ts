@@ -53,8 +53,8 @@ function makeExternalApiKeyService(
 
 function makeOAuthProvider(
   verify?: (t: string) => Promise<{ extra?: Record<string, unknown> }>,
-  /** Whether an agent connection still admits requests — true unless a test says otherwise. */
-  live?: (connectionId: string) => Promise<boolean>,
+  /** A live agent connection's current choice, or null when revoked — live as Everything unless a test says otherwise. */
+  live?: (connectionId: string) => Promise<{ agentPath: string | null } | null>,
 ) {
   return {
     looksLikeAccessToken: (t: string) => typeof t === 'string' && t.startsWith('bevel-mcp_'),
@@ -64,7 +64,7 @@ function makeOAuthProvider(
           throw new InvalidTokenError('unknown token');
         }),
     ),
-    isConnectionLive: vi.fn(live ?? (async () => true)),
+    liveConnectionChoice: vi.fn(live ?? (async () => ({ agentPath: null }))),
     noteConnectionUse: vi.fn(),
   } as unknown as BevelOAuthProvider;
 }
@@ -318,8 +318,32 @@ describe('createMcpAuthMiddleware', () => {
       expect(req.agentConnectionId).toBe('conn-7');
       // Every request through the exchanged grant asks whether the
       // connection still admits one, and counts as a use of it.
-      expect((oauth as any).isConnectionLive).toHaveBeenCalledWith('conn-7');
+      expect((oauth as any).liveConnectionChoice).toHaveBeenCalledWith('conn-7');
       expect((oauth as any).noteConnectionUse).toHaveBeenCalledWith('conn-7');
+    });
+
+    it("serves an exchanged grant as its connection's CURRENT choice, not the one it was minted with", async () => {
+      const auth = makeAuthService();
+      (auth.getUserById as ReturnType<typeof vi.fn>) = vi.fn(async () => ({
+        id: 'user-7',
+        email: 'seven@example.com',
+      }));
+      // Minted as Everything; the person has since re-consented as an agent.
+      const everything = internal.mint({ userId: 'user-7', externalProxy: true, connectionId: 'conn-7' }, 60_000);
+      const narrowed = makeOAuthProvider(undefined, async () => ({ agentPath: 'Agents/narrow.agent' }));
+      const first = makeReqRes(`Bearer ${everything}`);
+      await makeMw({ internal, auth, oauth: narrowed })(first.req, first.res, first.next);
+      expect(first.next).toHaveBeenCalled();
+      expect(first.req.mcpAgentPath).toBe('Agents/narrow.agent');
+      // Minted as an agent; the person has since re-consented as Everything.
+      const asAgent = internal.mint(
+        { userId: 'user-7', externalProxy: true, connectionId: 'conn-7', agentPath: 'Agents/narrow.agent' },
+        60_000,
+      );
+      const second = makeReqRes(`Bearer ${asAgent}`);
+      await makeMw({ internal, auth, oauth: makeOAuthProvider() })(second.req, second.res, second.next);
+      expect(second.next).toHaveBeenCalled();
+      expect(second.req.mcpAgentPath).toBeUndefined();
     });
 
     it('401s an exchanged grant whose agent connection was revoked — the token is stateless, the connection is not', async () => {
@@ -329,7 +353,7 @@ describe('createMcpAuthMiddleware', () => {
         id: 'user-7',
         email: 'seven@example.com',
       }));
-      const oauth = makeOAuthProvider(undefined, async () => false);
+      const oauth = makeOAuthProvider(undefined, async () => null);
       const mw = makeMw({ internal, auth, oauth });
       const { req, res, next, status, setHeader } = makeReqRes(`Bearer ${token}`);
       await mw(req, res, next);

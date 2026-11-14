@@ -35,7 +35,7 @@ const validateToken = createToolValidator({
   internalTokenService: internalToken,
   authService,
   workspaceService,
-  workflowService: {} as never,
+  versionControlService: {} as never,
   events: {} as never,
   kbDirName: 'knowledge-base',
   creatorAccess: { planForCreate: async () => null, grantInExtractedFile: async () => null, noteAccessFileWritten: () => {} },

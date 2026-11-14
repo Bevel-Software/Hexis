@@ -1,12 +1,18 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { randomBytes } from 'node:crypto';
+import type { SQL } from 'drizzle-orm';
+import { PgDialect } from 'drizzle-orm/pg-core';
 import {
   DeploymentSettingsService,
   SettingsValidationError,
   CORE_SETTINGS,
   LEGACY_LAYOUT_ENV_VARS,
+  retireMergedBranchesOn,
+  parseToolReadOnlyOverrides,
 } from '../deployment-settings.service.js';
 import type { Database } from '../../database/connection.js';
+import { ToolReadOnlyHints, ToolRegistry } from '../../tool-registry/index.js';
+import { toolDef } from '../../tool-helpers/index.js';
 
 const ENC_KEY = randomBytes(32).toString('base64');
 
@@ -19,7 +25,16 @@ const ENC_KEY = randomBytes(32).toString('base64');
 function makeDb() {
   const rows: { key: string; value: string; encrypted: boolean }[] = [];
   const db = {
-    select: () => ({ from: () => Promise.resolve(rows.map((r) => ({ ...r }))) }),
+    // `select … from` is every row; `… where key = ?` (a `reload`) is that key's.
+    select: () => ({
+      from: () =>
+        Object.assign(Promise.resolve(rows.map((r) => ({ ...r }))), {
+          where: (predicate: unknown) => {
+            const [key] = boundParams(predicate);
+            return Promise.resolve(rows.filter((r) => r.key === key).map((r) => ({ ...r })));
+          },
+        }),
+    }),
     insert: () => ({
       values: (v: { key: string; value: string; encrypted: boolean }) => ({
         onConflictDoUpdate: () => {
@@ -28,11 +43,52 @@ function makeDb() {
           else rows.push({ key: v.key, value: v.value, encrypted: v.encrypted });
           return Promise.resolve();
         },
+        onConflictDoNothing: () => ({
+          returning: () => {
+            if (rows.some((r) => r.key === v.key)) return Promise.resolve([]);
+            rows.push({ key: v.key, value: v.value, encrypted: v.encrypted });
+            return Promise.resolve([{ key: v.key }]);
+          },
+        }),
       }),
     }),
-    delete: () => ({ where: () => Promise.resolve() }),
+    // `delete … where … returning` / `update … set … where … returning`: the
+    // conditional swap. The fake applies the one predicate the service sends,
+    // key AND value, by reading the bound parameters off the drizzle `where`.
+    delete: () => ({
+      where: (predicate: unknown) => {
+        const done = Promise.resolve();
+        return Object.assign(done, {
+          returning: () => {
+            const [key, value] = boundParams(predicate);
+            const at = rows.findIndex((r) => r.key === key && r.value === value);
+            if (at === -1) return Promise.resolve([]);
+            rows.splice(at, 1);
+            return Promise.resolve([{ key }]);
+          },
+        });
+      },
+    }),
+    update: () => ({
+      set: (v: { value: string }) => ({
+        where: (predicate: unknown) => ({
+          returning: () => {
+            const [key, value] = boundParams(predicate);
+            const row = rows.find((r) => r.key === key && r.value === value);
+            if (!row) return Promise.resolve([]);
+            row.value = v.value;
+            return Promise.resolve([{ key }]);
+          },
+        }),
+      }),
+    }),
   } as unknown as Database;
   return { db, rows };
+}
+
+/** The parameters a drizzle predicate binds, in order — what the fake table matches on. */
+function boundParams(predicate: unknown): unknown[] {
+  return new PgDialect().sqlToQuery(predicate as SQL).params;
 }
 
 let saved: NodeJS.ProcessEnv;
@@ -116,6 +172,56 @@ describe('DeploymentSettingsService — a blank that means the default', () => {
     for (const ok of ['3650', '0', '-1', '99999']) {
       await expect(settings.save({ auditRetentionDays: ok }, null)).resolves.toBeDefined();
     }
+  });
+});
+
+describe('DeploymentSettingsService — the leftover-branch cleanup switch', () => {
+  /**
+   * On by default; an admin switches it off on the Deployment page, and the
+   * environment variable wins over the page, as for every setting.
+   */
+  it('is on by default, off once saved as false, and on again when cleared — after a reload too', async () => {
+    const { db, rows } = makeDb();
+    // Clearing deletes the row: the fake does so for real, so a reload proves it.
+    (db as unknown as { delete: () => unknown }).delete = () => ({
+      where: () => {
+        const at = rows.findIndex((r) => r.key === 'retireMergedBranches');
+        if (at >= 0) rows.splice(at, 1);
+        return Promise.resolve();
+      },
+    });
+    const settings = new DeploymentSettingsService(db, ENC_KEY);
+    const on = (s: DeploymentSettingsService) => retireMergedBranchesOn(s.resolve('retireMergedBranches'));
+    const reloaded = async () => {
+      const fresh = new DeploymentSettingsService(db, ENC_KEY);
+      await fresh.load();
+      return fresh;
+    };
+    expect(on(settings)).toBe(true);
+    await settings.save({ retireMergedBranches: 'false' }, null);
+    expect(on(settings)).toBe(false);
+    expect(on(await reloaded())).toBe(false);
+    await settings.save({ retireMergedBranches: '' }, null);
+    expect(on(settings)).toBe(true);
+    expect(rows.some((r) => r.key === 'retireMergedBranches')).toBe(false);
+    expect(on(await reloaded())).toBe(true);
+  });
+
+  it('lets RETIRE_MERGED_BRANCHES win over the page', async () => {
+    const { db } = makeDb();
+    const settings = new DeploymentSettingsService(db, ENC_KEY);
+    await settings.save({ retireMergedBranches: 'true' }, null);
+    process.env.RETIRE_MERGED_BRANCHES = 'false';
+    expect(settings.sourceOf('retireMergedBranches')).toBe('env');
+    expect(retireMergedBranchesOn(settings.resolve('retireMergedBranches'))).toBe(false);
+  });
+
+  it('saves only true or false, and reads the ways a person writes "off" as off', async () => {
+    const { db } = makeDb();
+    const settings = new DeploymentSettingsService(db, ENC_KEY);
+    await expect(settings.save({ retireMergedBranches: 'maybe' }, null)).rejects.toBeInstanceOf(SettingsValidationError);
+    for (const off of ['false', 'FALSE', '0', 'off', 'no']) expect(retireMergedBranchesOn(off), off).toBe(false);
+    for (const on of ['', 'true', '1', 'yes']) expect(retireMergedBranchesOn(on), on).toBe(true);
   });
 });
 
@@ -526,5 +632,135 @@ describe('DeploymentSettingsService — an environment of its own', () => {
     const shared = new DeploymentSettingsService(db, ENC_KEY);
     await shared.load();
     expect(shared.resolve('kbRepoUrl')).toBe('https://host.example/leaks-into-every-tenant.git');
+  });
+});
+
+describe('DeploymentSettingsService — recordIfAbsent', () => {
+  /**
+   * The claim a once-only flow rests on: the row is the lock, and the
+   * database — shared by every replica — lets exactly one insert through.
+   */
+  it('claims a setting once, and tells the second caller it was not theirs', async () => {
+    const { db, rows } = makeDb();
+    const one = new DeploymentSettingsService(db, ENC_KEY);
+    const two = new DeploymentSettingsService(db, ENC_KEY);
+    await one.load();
+    await two.load();
+
+    expect(await one.recordIfAbsent('starterPack', 'sales', 'u-ada')).toBe(true);
+    expect(await two.recordIfAbsent('starterPack', 'none', 'u-bo')).toBe(false);
+
+    expect(rows.filter((r) => r.key === 'starterPack')).toEqual([{ key: 'starterPack', value: 'sales', encrypted: false }]);
+    expect(one.resolve('starterPack')).toBe('sales');
+    // The loser's cache was not touched: it reads the winner's row on its next `reload`.
+    expect(two.resolve('starterPack')).toBe('');
+  });
+
+  it('is no claim at all with a blank value, which would be a clear', async () => {
+    const { db, rows } = makeDb();
+    const settings = new DeploymentSettingsService(db, ENC_KEY);
+    await settings.load();
+    expect(await settings.recordIfAbsent('starterPack', '', null)).toBe(false);
+    expect(rows).toEqual([]);
+  });
+
+  /**
+   * The conditional swap the claim flows rest on: a value is replaced, or
+   * removed, only while it still reads what the caller saw — so two
+   * replicas acting on one read cannot both succeed.
+   */
+  it('swaps a value only while it still reads what was expected, and removes it the same way', async () => {
+    const { db, rows } = makeDb();
+    const settings = new DeploymentSettingsService(db, ENC_KEY);
+    await settings.load();
+    expect(await settings.recordIfAbsent('starterPackClaim', 'u-a 1', 'u-a')).toBe(true);
+
+    // The value moved under the second caller: refused, untouched.
+    expect(await settings.swapIfValue('starterPackClaim', 'u-z 0', 'u-b 2', 'u-b')).toBe(false);
+    expect(await settings.swapIfValue('starterPackClaim', 'u-a 1', 'u-b 2', 'u-b')).toBe(true);
+    expect(rows.find((r) => r.key === 'starterPackClaim')?.value).toBe('u-b 2');
+    expect(settings.resolve('starterPackClaim')).toBe('u-b 2');
+
+    // A release names its own claim: the holder's row stays for a stale one.
+    expect(await settings.swapIfValue('starterPackClaim', 'u-a 1', null, null)).toBe(false);
+    expect(rows.find((r) => r.key === 'starterPackClaim')?.value).toBe('u-b 2');
+    expect(await settings.swapIfValue('starterPackClaim', 'u-b 2', null, null)).toBe(true);
+    expect(rows.find((r) => r.key === 'starterPackClaim')).toBeUndefined();
+    expect(settings.resolve('starterPackClaim')).toBe('');
+  });
+});
+
+describe('DeploymentSettingsService — the read-only overrides', () => {
+  /** A registry with one reader and one writer, as the Tools page would show them. */
+  function registry(): ToolRegistry {
+    const r = new ToolRegistry();
+    const inputs = { type: 'object', properties: {} } as const;
+    r.registerExternalTool(toolDef({ name: 'read_file', description: 'r', path: '/api/agent/tools/read_file', inputs }));
+    r.registerExternalTool(
+      toolDef({ name: 'write_file', description: 'w', path: '/api/agent/tools/write_file', inputs, tags: ['write'] }),
+    );
+    return r;
+  }
+
+  it('survives a restart: a new process over the same table reads the override back', async () => {
+    const { db, rows } = makeDb();
+    const before = new DeploymentSettingsService(db, ENC_KEY);
+    await before.load();
+    await new ToolReadOnlyHints(registry(), before).set('write_file', true, '00000000-0000-4000-8000-00000000000a');
+    expect(rows.find((r) => r.key === 'toolReadOnlyOverrides')?.value).toBe('{"write_file":true}');
+
+    const after = new DeploymentSettingsService(db, ENC_KEY);
+    await after.load();
+    const hints = new ToolReadOnlyHints(registry(), after);
+    expect((await hints.describe()).find((e) => e.name === 'write_file')).toMatchObject({ override: true, readOnly: true });
+
+    // And the reset removes the row, every tool back on its built-in value.
+    await hints.set('write_file', null, '00000000-0000-4000-8000-00000000000a');
+    expect(rows.find((r) => r.key === 'toolReadOnlyOverrides')).toBeUndefined();
+  });
+
+  it('is read per use, so a change written by another replica is in the next answer', async () => {
+    const { db } = makeDb();
+    const one = new DeploymentSettingsService(db, ENC_KEY);
+    const two = new DeploymentSettingsService(db, ENC_KEY);
+    await one.load();
+    await two.load();
+    await new ToolReadOnlyHints(registry(), one).set('read_file', false, null);
+    expect(await new ToolReadOnlyHints(registry(), two).overrides()).toEqual({ read_file: false });
+  });
+
+  it('is not a field of the setup screen: a save naming it is refused, and the screen is not told of it', async () => {
+    const { db, rows } = makeDb();
+    const settings = new DeploymentSettingsService(db, ENC_KEY);
+    await settings.load();
+    await expect(settings.save({ toolReadOnlyOverrides: '{"write_file":true}' }, null)).rejects.toBeInstanceOf(
+      SettingsValidationError,
+    );
+    expect(rows).toEqual([]);
+    expect(settings.describe().some((s) => s.key === 'toolReadOnlyOverrides')).toBe(false);
+  });
+
+  it('refuses a stored value that is not a map of tool names to booleans', async () => {
+    const { db } = makeDb();
+    const settings = new DeploymentSettingsService(db, ENC_KEY);
+    await settings.load();
+    await expect(settings.recordIfAbsent('toolReadOnlyOverrides', '{"write_file":"yes"}', null)).rejects.toBeInstanceOf(
+      SettingsValidationError,
+    );
+  });
+});
+
+describe('the read-only overrides setting holds only a map of tool names to booleans', () => {
+  it('accepts a map, and blank as no override', () => {
+    expect(parseToolReadOnlyOverrides('{"read_file":false,"call_tool_chain":true}')).toEqual({
+      read_file: false,
+      call_tool_chain: true,
+    });
+    expect(parseToolReadOnlyOverrides('')).toEqual({});
+    expect(Object.hasOwn(parseToolReadOnlyOverrides('{"__proto__":true}')!, '__proto__')).toBe(true);
+  });
+
+  it.each(['[]', 'true', '{"read_file":"false"}', '{"bad name":true}', 'not json'])('refuses %s', (raw) => {
+    expect(parseToolReadOnlyOverrides(raw)).toBeNull();
   });
 });

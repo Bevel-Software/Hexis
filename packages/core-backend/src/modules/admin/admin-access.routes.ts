@@ -1,6 +1,6 @@
 import express from 'express';
 import type { IAdminAccessService } from './admin.interface.js';
-import '../auth/auth.middleware.js'; // Express Request augmentation
+import '../auth/index.js'; // Express Request augmentation
 
 /**
  * The CORE slice of the admin surface: just the admin-status resolver the

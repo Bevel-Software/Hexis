@@ -4,14 +4,16 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import express from 'express';
+import { PgDialect } from 'drizzle-orm/pg-core';
+import type { SQL } from 'drizzle-orm';
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { NodeFs } from '../../kb-fs/node-fs.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
 
 import type { IAccessControl } from '../access-control.interface.js';
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import type { AuthService } from '../../auth/auth.service.js';
-import type { WorkflowService } from '../../workflow/workflow.service.js';
-import type { WorkflowEventBus } from '../../workflow/event-bus.js';
+import type { WorkspaceService } from '../../workspace/index.js';
+import { realAuthService } from '../../../__tests__/real-auth.js';
+import type { VersionControlService } from '../../version-control/index.js';
+import type { VersionControlEventBus } from '../../version-control/index.js';
 import type { FileTreeEntry } from '@bevel-software/platform-shared';
 import { createAccessRoutes } from '../access.routes.js';
 import { usersDbDouble } from './users-db-double.js';
@@ -40,7 +42,9 @@ const ROLES = `roles:
 /** Temp workspace dirs to clean up after each test. */
 const tmpDirs: string[] = [];
 
-async function makeHarness(opts: { isAdmin?: boolean } = {}): Promise<{ server: Server; baseUrl: string }> {
+async function makeHarness(
+  opts: { isAdmin?: boolean; switchOffOnRolesLock?: string } = {},
+): Promise<{ server: Server; baseUrl: string; txLog: string[] }> {
   const isAdmin = opts.isAdmin ?? true;
 
   // Back the harness with a REAL temp workspace dir: the service's single-file
@@ -60,7 +64,7 @@ async function makeHarness(opts: { isAdmin?: boolean } = {}): Promise<{ server: 
   const realAccess = new AccessControlService(
     { getWorkspacePath: async () => workspaceDir, readFile: async () => ROLES } as unknown as WorkspaceService,
     KB,
-    new NodeFs(),
+    realDisk(),
   );
   const accessControl = {
     // Admin gate: the route's assertCanMutate calls canWrite('roles.yaml').
@@ -103,15 +107,13 @@ async function makeHarness(opts: { isAdmin?: boolean } = {}): Promise<{ server: 
     }),
   } as unknown as WorkspaceService;
 
-  const authService = { getUserById: vi.fn(async () => ADMIN) } as unknown as AuthService;
-
   // Lock holder tracked so the service's getLock pre-check passes; the single-
   // file write itself lands on disk via LockingFilesystem → LocalFilesystem.
   // Strict per-path locks — a live row is contended even for the same user,
   // exactly like FileLockService (nesting bugs must fail here too).
   const locks = new Map<string, { id: string; name: string }>();
   const lockRow = (h: { id: string; name: string }) => ({ holderUserId: h.id, holderName: h.name });
-  const workflowService = {
+  const versionControlService = {
     getLock: vi.fn(async (_w: string, _b: string, p: string) => {
       const h = locks.get(p);
       return h ? lockRow(h) : null;
@@ -119,6 +121,8 @@ async function makeHarness(opts: { isAdmin?: boolean } = {}): Promise<{ server: 
     acquireLock: vi.fn(async (_w: string, _b: string, p: string, user: { id: string; name: string }) => {
       const h = locks.get(p);
       if (h) return { acquired: false, lock: lockRow(h) };
+      // An account switched off while the promotion waited for the lock.
+      if (p.endsWith('roles.yaml')) rolesLocked = true;
       locks.set(p, user);
       return { acquired: true, lock: lockRow(user) };
     }),
@@ -127,10 +131,50 @@ async function makeHarness(opts: { isAdmin?: boolean } = {}): Promise<{ server: 
     // Write-free: the lock-aware filesystem writes to disk; this just commits the
     // dirty tree. Not exercised by these route tests (no rename), but kept honest.
     commitChanges: vi.fn(async () => ({})),
-  } as unknown as WorkflowService;
+  } as unknown as VersionControlService;
 
-  const eventBus = { emit: vi.fn() } as unknown as WorkflowEventBus;
-  const db = usersDbDouble();
+  const eventBus = { emit: vi.fn() } as unknown as VersionControlEventBus;
+  const accounts = [
+    { email: 'off@example.com', deactivatedAt: new Date('2026-09-01T00:00:00Z') },
+    'on@example.com',
+  ];
+  const before = usersDbDouble(accounts);
+  const after = usersDbDouble(
+    accounts.map((a) =>
+      a === opts.switchOffOnRolesLock ? { email: a, deactivatedAt: new Date('2026-10-10T00:00:00Z') } : a,
+    ),
+  );
+  let rolesLocked = false;
+  const current = () => (rolesLocked ? after : before);
+  // What happened inside each users transaction, in order: the lock taken
+  // with `execute` (rendered), and what roles.yaml held when it ended.
+  const txLog: string[] = [];
+  const rolesOnDisk = () => fs.readFile(path.join(repoDir, 'roles.yaml'), 'utf-8');
+  const db = {
+    select: () => current().select(),
+    transaction: async <T>(cb: (tx: unknown) => Promise<T>): Promise<T> => {
+      txLog.push('begin');
+      const tx = {
+        execute: async (query: SQL) => {
+          const { sql, params } = new PgDialect().sqlToQuery(query);
+          txLog.push(`${sql} ${JSON.stringify(params)}`);
+          return [];
+        },
+        select: () => current().select(),
+      };
+      try {
+        return await cb(tx);
+      } finally {
+        const onDisk = await rolesOnDisk();
+        txLog.push(`end: ${['on@example.com', 'new@example.com'].filter((e) => onDisk.includes(e)).join(', ') || 'none'}`);
+      }
+    },
+  } as unknown as typeof before;
+
+  // The real auth service over the same double, so the promotion's switch
+  // lock and read run as they do in production (`whileSwitchedOn`).
+  const authService = realAuthService(db, { jwtSecret: 'test', adminEmail: '', adminPassword: '', allowedEmailDomains: [] });
+  vi.spyOn(authService, 'getUserById').mockImplementation(async () => ADMIN);
 
   const app = express();
   app.use(express.json());
@@ -138,13 +182,13 @@ async function makeHarness(opts: { isAdmin?: boolean } = {}): Promise<{ server: 
     (req as unknown as { userId: string }).userId = ADMIN.id;
     next();
   });
-  app.use('/api', createAccessRoutes(accessControl, workspaceService, authService, workflowService, eventBus, db, testKbContext({ kbDirName: KB })));
+  app.use('/api', createAccessRoutes(accessControl, workspaceService, authService, authService, versionControlService, eventBus, db, testKbContext({ kbDirName: KB }), realDisk()));
 
   const server = await new Promise<Server>((resolve) => {
     const s = app.listen(0, () => resolve(s));
   });
   const addr = server.address() as AddressInfo;
-  return { server, baseUrl: `http://127.0.0.1:${addr.port}` };
+  return { server, baseUrl: `http://127.0.0.1:${addr.port}`, txLog };
 }
 
 function close(s: Server): Promise<void> {
@@ -257,5 +301,86 @@ describe('/api/access/roles routes', () => {
     expect(add.status).toBe(200);
     const body = (await add.json()) as { roles: { canonical: string; members: string[] }[] };
     expect(body.roles.find((r) => r.canonical === 'sales')!.members).toContain('mkt@example.com');
+  });
+
+  // The invite's promotion (`ifActive`) reads whether the account is switched
+  // off inside the roles lock, not from the list the dialog read before the
+  // send nor before the lock was waited for.
+  async function addAdmin(baseUrl: string, body: unknown) {
+    return fetch(`${baseUrl}/api/access/roles/admin/members`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  }
+
+  it('ifActive refuses a switched-off account (409 deactivated) and writes nothing', async () => {
+    const h = await makeHarness();
+    server = h.server;
+    const res = await addAdmin(h.baseUrl, { email: 'Off@Example.com', ifActive: true });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: 'This account is switched off', kind: 'deactivated' });
+    const roster = (await (await fetch(`${h.baseUrl}/api/access/roles`)).json()) as {
+      roles: { canonical: string; members: string[] }[];
+    };
+    expect(roster.roles.find((r) => r.canonical === 'admin')!.members).not.toContain('off@example.com');
+  });
+
+  it('ifActive promotes a switched-on account, and one with no account yet', async () => {
+    const h = await makeHarness();
+    server = h.server;
+    expect((await addAdmin(h.baseUrl, { email: 'on@example.com', ifActive: true })).status).toBe(200);
+    const res = await addAdmin(h.baseUrl, { email: 'new@example.com', ifActive: true });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { roles: { canonical: string; members: string[] }[] };
+    expect(body.roles.find((r) => r.canonical === 'admin')!.members).toEqual(
+      expect.arrayContaining(['on@example.com', 'new@example.com']),
+    );
+  });
+
+  it('ifActive reads the account once the roles lock is held: one switched off while it waited is refused', async () => {
+    const h = await makeHarness({ switchOffOnRolesLock: 'on@example.com' });
+    server = h.server;
+    const res = await addAdmin(h.baseUrl, { email: 'on@example.com', ifActive: true });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: 'This account is switched off', kind: 'deactivated' });
+    const roster = (await (await fetch(`${h.baseUrl}/api/access/roles`)).json()) as {
+      roles: { canonical: string; members: string[] }[];
+    };
+    expect(roster.roles.find((r) => r.canonical === 'admin')!.members).not.toContain('on@example.com');
+  });
+
+  // Every switch-off (and an account created switched off) takes the same
+  // lock first; see account-deactivation.test for that side.
+  it.each([
+    ['an existing account', 'On@Example.com', 'on@example.com'],
+    ['an address with no account yet', 'new@example.com', 'new@example.com'],
+  ])(
+    'ifActive holds the address switch lock until roles.yaml is written, for %s',
+    async (_label, email, canonical) => {
+      const h = await makeHarness();
+      server = h.server;
+      expect((await addAdmin(h.baseUrl, { email, ifActive: true })).status).toBe(200);
+      expect(h.txLog).toEqual([
+        'begin',
+        `select set_config('lock_timeout', $1, true) ["15000"]`,
+        `select pg_advisory_xact_lock(hashtext($1)) ["account-switch:${canonical}"]`,
+        `end: ${canonical}`,
+      ]);
+    },
+  );
+
+  it('without ifActive, adding a switched-off account works as before', async () => {
+    const h = await makeHarness();
+    server = h.server;
+    expect((await addAdmin(h.baseUrl, { email: 'off@example.com' })).status).toBe(200);
+  });
+
+  it('refuses a non-boolean ifActive (400)', async () => {
+    const h = await makeHarness();
+    server = h.server;
+    for (const ifActive of ['true', 1, null]) {
+      expect((await addAdmin(h.baseUrl, { email: 'on@example.com', ifActive })).status).toBe(400);
+    }
   });
 });

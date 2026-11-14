@@ -1,9 +1,9 @@
-import { eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 import { logger } from '../../shared/logging.js';
 
 const log = logger('settings');
-import type { Database } from '../database/connection.js';
-import { deploymentSettings } from '../database/core-schema.js';
+import type { Database } from '../database/index.js';
+import { deploymentSettings } from '../database/index.js';
 import {
   DEFAULT_KB_LAYOUT,
   type KbLayout,
@@ -13,8 +13,8 @@ import {
 } from '@bevel-software/platform-shared';
 import { createHmac } from 'node:crypto';
 import { TokenCrypto } from '../../shared/token-crypto.js';
-import { assertKbDirNameFree, hasControlCharacter } from '../kb-fs/repo-path.js';
-import { parseRetentionWindow } from '../audit/audit.contract.js';
+import { assertKbDirNameFree, hasControlCharacter } from '../kb-fs/index.js';
+import { parseRetentionWindow } from '../audit/index.js';
 import { normalizeIssuerUrl } from './oidc-check.js';
 import { GIT_MODES, isGitMode } from './repository-source.js';
 
@@ -109,6 +109,39 @@ export const validateHttpsRemote = (value: string): string | null => {
 /**
  * The core catalogue. Order is the order the setup screen renders them in.
  */
+/**
+ * What the `retireMergedBranches` value in effect means: on, unless it says
+ * off. The page saves only `true` or `false`; the environment variable is
+ * typed by a person, so `0`, `off` and `no` (any case) mean off too, and
+ * anything else — unset included — leaves the cleanup on.
+ */
+export function retireMergedBranchesOn(raw: string): boolean {
+  return !/^(false|0|off|no)$/i.test(raw.trim());
+}
+
+/**
+ * The `toolReadOnlyOverrides` setting read as a map, or null when it is not
+ * one: a JSON object whose keys are tool names (MCP's name grammar) and whose
+ * values are booleans. Blank is no override at all.
+ */
+export function parseToolReadOnlyOverrides(raw: string): Record<string, boolean> | null {
+  if (!raw.trim()) return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+  const entries = Object.entries(parsed as Record<string, unknown>);
+  for (const [name, value] of entries) {
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(name) || typeof value !== 'boolean') return null;
+  }
+  // Built with `fromEntries`, which defines own properties: assigning into a
+  // plain object would send a valid name like `__proto__` to its prototype.
+  return Object.fromEntries(entries) as Record<string, boolean>;
+}
+
 export const CORE_SETTINGS: SettingDef[] = [
   {
     /**
@@ -291,6 +324,23 @@ export const CORE_SETTINGS: SettingDef[] = [
 
   {
     /**
+     * Whether the server removes, on its own, the branches merged change
+     * requests left behind (`VersionControlService.retireLeftoverMergedBranches`).
+     * On unless set to `false`; a blanked field puts the default back. Read
+     * at every round, so it applies without a restart. It covers that cleanup
+     * only: the removal of a branch when its change request is merged does
+     * not ask it.
+     */
+    key: 'retireMergedBranches',
+    envVar: 'RETIRE_MERGED_BRANCHES',
+    section: 'knowledge-base',
+    blankMeansDefault: true,
+    unsetMeans: 'true',
+    validate: (v) => (v === 'true' || v === 'false' ? null : 'Either true or false.'),
+  },
+
+  {
+    /**
      * The credential a git host's webhook or a pipeline presents to
      * `POST /api/sync` (see `modules/kb-sync/`). Deployment-level on purpose:
      * a person's connection key would stop the pipeline the day they leave.
@@ -371,6 +421,52 @@ export const CORE_SETTINGS: SettingDef[] = [
     blankMeansDefault: true,
     validate: (v) =>
       parseRetentionWindow(v) === null ? 'Enter a whole number of days, or 0 to keep events forever.' : null,
+  },
+
+  {
+    /**
+     * The read-only hints an admin set on the Tools page, overriding a
+     * platform tool's or a code-mode meta-tool's built-in one: a JSON map from
+     * tool name to `true`/`false`. Written by the Tools page's admin route
+     * alone (see `modules/tool-registry/read-only-hints.ts`), which also judges
+     * the NAMES against the catalog; here only the shape is. Internal: not a
+     * field of the setup screen. A blank clears it, which is every tool back
+     * on its built-in value.
+     */
+    key: 'toolReadOnlyOverrides',
+    section: 'knowledge-base',
+    internal: true,
+    blankMeansDefault: true,
+    validate: (v) => (parseToolReadOnlyOverrides(v) === null ? 'A map from tool name to true or false.' : null),
+  },
+
+  {
+    /**
+     * Which starter pack the first admin chose for a new knowledge base — a
+     * pack's id, or `none` for "I'll start from scratch" — written once, by
+     * the deployment, when the choice landed (see
+     * `modules/onboarding/starter-pack.service.ts`). Its presence is what
+     * retires the "What does your team do?" card for good; its value is what
+     * the first-page prompt and the agent's first-run note follow. Internal:
+     * a fact about what happened, not something the setup screen offers.
+     */
+    key: 'starterPack',
+    section: 'knowledge-base',
+    internal: true,
+    validate: (v) => (/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(v) ? null : 'A starter pack id is lowercase letters, digits and hyphens.'),
+  },
+  {
+    /**
+     * The claim an admin holds while their starter-pack choice is being
+     * written: `<user id> <epoch ms>`, inserted only if absent so two replicas
+     * cannot both write, and released once the choice is recorded. A claim
+     * nobody released in time is a process that died mid-write and is taken
+     * over (see `starter-pack.service.ts`). Internal, like the choice.
+     */
+    key: 'starterPackClaim',
+    section: 'knowledge-base',
+    internal: true,
+    validate: (v) => (/^\S+ \d+$/.test(v) ? null : 'A claim is a user id and a time.'),
   },
 ];
 
@@ -724,6 +820,61 @@ export class DeploymentSettingsService {
     await this.save(entries, updatedBy, 'deployment');
   }
 
+  /**
+   * {@link record} one value ONLY IF NOTHING IS THERE, and say whether it was
+   * this call that put it there. The row is the claim for a flow that must
+   * happen once across every replica (the starter-pack choice): the insert
+   * yields to a row already there, so of two replicas claiming at once the
+   * database lets exactly one through. Validated as `record` is; a blank
+   * value is no claim (it would be a clear) and answers false.
+   */
+  async recordIfAbsent(key: string, value: string, updatedBy: string | null): Promise<boolean> {
+    const write = this.plan({ [key]: value }, 'deployment').toWrite.find((w) => w.key === key);
+    if (!write) return false;
+    const encrypted = write.def.secret === true;
+    const stored = encrypted ? this.crypto!.encrypt(write.value) : write.value;
+    const inserted = await this.db
+      .insert(deploymentSettings)
+      .values({ key, value: stored, encrypted, updatedBy })
+      .onConflictDoNothing({ target: deploymentSettings.key })
+      .returning({ key: deploymentSettings.key });
+    if (inserted.length === 0) return false;
+    this.stored.set(key, write.value);
+    return true;
+  }
+
+  /**
+   * Replace a plain setting's value ONLY IF it still reads `expected` —
+   * with `next`, or with nothing when `next` is null — and say whether it
+   * was this call that did it. One statement, so of two replicas acting on
+   * what they both read, the database lets exactly one through: the other
+   * finds the value gone or changed and answers false. For the claim flows
+   * that {@link recordIfAbsent} opens: taking over a claim that expired, and
+   * releasing one's own without touching a successor's. Plain settings only;
+   * `next` is validated as {@link record} would.
+   */
+  async swapIfValue(key: string, expected: string, next: string | null, updatedBy: string | null): Promise<boolean> {
+    const def = this.defs.get(key);
+    if (!def || def.secret) return false;
+    const same = and(eq(deploymentSettings.key, key), eq(deploymentSettings.value, expected));
+    if (next === null) {
+      const gone = await this.db.delete(deploymentSettings).where(same).returning({ key: deploymentSettings.key });
+      if (gone.length === 0) return false;
+      this.stored.delete(key);
+      return true;
+    }
+    const write = this.plan({ [key]: next }, 'deployment').toWrite.find((w) => w.key === key);
+    if (!write) return false;
+    const swapped = await this.db
+      .update(deploymentSettings)
+      .set({ value: write.value, updatedBy, updatedAt: new Date() })
+      .where(same)
+      .returning({ key: deploymentSettings.key });
+    if (swapped.length === 0) return false;
+    this.stored.set(key, write.value);
+    return true;
+  }
+
   /** Validate a batch and return the writes (and the clears) it amounts to; throws on any problem. */
   private plan(
     entries: Record<string, string>,
@@ -950,6 +1101,25 @@ export class DeploymentSettingsService {
       .update(tuple)
       .digest('hex');
     return `${OIDC_VERIFICATION_PREFIX}${fingerprint}`;
+  }
+
+  /**
+   * One plain (never sealed) setting as the DATABASE has it now, taken into
+   * this replica's cache on the way: for the rare setting a running
+   * deployment writes, so a replica that did not serve the write still
+   * answers with it. The environment still wins, as in {@link resolve}.
+   */
+  async reload(key: string): Promise<string> {
+    const def = this.defs.get(key);
+    if (!def || def.secret) return this.resolve(key);
+    const rows = await this.db
+      .select({ value: deploymentSettings.value, encrypted: deploymentSettings.encrypted })
+      .from(deploymentSettings)
+      .where(eq(deploymentSettings.key, key));
+    const row = rows.find((r) => !r.encrypted);
+    if (row) this.stored.set(key, row.value);
+    else this.stored.delete(key);
+    return this.resolve(key);
   }
 
   /** Remove one stored row (used by tests and by `prune`). */

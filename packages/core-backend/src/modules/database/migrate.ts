@@ -1,6 +1,8 @@
 import { migrate } from 'drizzle-orm/node-postgres/migrator';
-import { sql } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
+import { parseLegacyChangeRequestBody } from '@bevel-software/platform-shared';
 import { logger } from '../../shared/logging.js';
+import { changeRequests, dataMigrations } from './core-schema.js';
 
 const log = logger('database');
 import { DEFAULT_DB_SCHEMA, dbSchemaOf, piiKeysOf, type Database } from './connection.js';
@@ -74,9 +76,85 @@ export async function runCoreMigrations(db: Database, folder: string): Promise<v
       // Under the same lock, before anything reads or writes a PII column:
       // the data half of migration 0016, which SQL cannot do (see below).
       await runPiiEncryptionBackfill(db);
+      // And the data half of 0020, recorded in `data_migrations` by the
+      // transaction that does it: a start that crashed between the SQL
+      // history's ledger and this pass finds no row and runs it.
+      await moveLegacyRequestBodies(db);
     },
     { tenantKey },
   );
+}
+
+/** The `data_migrations` row of the body move: present exactly when the move has been committed. */
+const LEGACY_REQUEST_BODIES_MOVED = '0020_change_request_body_is_the_description';
+
+/**
+ * The data half of migration 0020, which makes a request's body nothing but
+ * its description. Bodies written before it carried three other things: an
+ * `## Affected owners` block `openChangeRequest` appended (a snapshot of the
+ * eligible approvers that nothing read back — they are resolved live, per
+ * file), an access request's level and note in hidden markers (which the
+ * access-request flow parsed back out of the prose), and identity markers
+ * from the time a service account opened requests for people. Every body is
+ * read once here, under the handle's key, the level and the note are moved
+ * onto their own columns, and the prose is written back without the rest.
+ *
+ * ONE transaction: the rows it rewrites and the `data_migrations` row that
+ * records it commit together, or not at all. So the pass runs exactly once —
+ * on the start that first finds no ledger row, which is the start that applies
+ * 0020 or, if that start died between drizzle's own ledger and this pass, the
+ * next one — and never again: a body of the new shape is already clean, and
+ * the grammar this reads is written by nothing. A start that finds the row
+ * reads nothing.
+ *
+ * What the transaction does NOT do is fence the old version: its rows are
+ * read `FOR UPDATE`, which only makes an old-version edit of an existing row
+ * wait for the move, and a request the old version opens after the move has
+ * committed is stored in the old shape and never rewritten. That is why the
+ * upgrade requires the old version to be stopped before the new one starts
+ * (UPGRADING.md, "Stop the old version before the new one starts"), as the
+ * personal-data backfill of 0016 already did; this pass adds no mechanism of
+ * its own, and a rolling update across this release is not supported.
+ *
+ * Walked row by row rather than in one UPDATE because the column is sealed:
+ * SQL can neither read the marker nor write the cleaned text. Reached only
+ * through {@link runCoreMigrations}, and observed through what it leaves:
+ * the rows and the ledger.
+ */
+async function moveLegacyRequestBodies(db: Database): Promise<void> {
+  await db.transaction(async (tx) => {
+    const done = await tx
+      .select({ name: dataMigrations.name })
+      .from(dataMigrations)
+      .where(eq(dataMigrations.name, LEGACY_REQUEST_BODIES_MOVED))
+      .limit(1);
+    if (done.length > 0) return;
+
+    const rows = await tx
+      .select({ id: changeRequests.id, body: changeRequests.body })
+      .from(changeRequests)
+      .orderBy(changeRequests.id)
+      .for('update');
+    let moved = 0;
+    for (const row of rows) {
+      const legacy = parseLegacyChangeRequestBody(row.body);
+      if (!legacy.changed) continue;
+      await tx
+        .update(changeRequests)
+        .set({
+          body: legacy.description,
+          ...(legacy.accessRequestLevel ? { accessRequestLevel: legacy.accessRequestLevel } : {}),
+          ...(legacy.accessRequestNote ? { accessRequestNote: legacy.accessRequestNote } : {}),
+        })
+        .where(eq(changeRequests.id, row.id));
+      moved += 1;
+    }
+    await tx.insert(dataMigrations).values({
+      name: LEGACY_REQUEST_BODIES_MOVED,
+      note: `${moved} of ${rows.length} change-request bodies moved to the description-only shape`,
+    });
+    log.info(`Change-request bodies: ${moved} of ${rows.length} moved to the description-only shape.`);
+  });
 }
 
 /**
@@ -220,7 +298,6 @@ const PII_BACKFILL_TABLES: PiiBackfillTable[] = [
   { table: 'users', key: ['id'], encrypted: ['email', 'name', 'avatar_url'], bidx: { source: 'email', column: 'email_bidx' } },
   { table: 'pr_file_approvals', key: ['id'], encrypted: ['approver_email', 'approver_name'], bidx: { source: 'approver_email', column: 'approver_email_bidx' } },
   { table: 'pr_merge_log', key: ['id'], encrypted: ['triggered_by_email', 'triggered_by_name', 'error'], bidx: { source: 'triggered_by_email', column: 'triggered_by_email_bidx' } },
-  { table: 'pr_comments', key: ['id'], encrypted: ['author_email', 'author_name', 'body'], bidx: { source: 'author_email', column: 'author_email_bidx' } },
   { table: 'change_requests', key: ['id'], encrypted: ['author_email', 'author_name', 'title', 'body', 'apply_failure_reason', 'apply_failed_by_name'], bidx: { source: 'author_email', column: 'author_email_bidx' } },
   { table: 'pending_commits', key: ['id'], encrypted: ['author_email', 'author_name', 'last_error'], bidx: { source: 'author_email', column: 'author_email_bidx' } },
   { table: 'file_locks', key: ['workspace_id', 'branch', 'path'], encrypted: ['holder_name'] },
@@ -529,7 +606,6 @@ const PII_FINALIZE_STATEMENTS = [
   'CREATE UNIQUE INDEX IF NOT EXISTS "pr_file_approvals_bidx_unq" ON "pr_file_approvals" ("pr_number","path","approver_email_bidx","head_sha")',
   'DROP INDEX IF EXISTS "pr_file_approvals_unq"',
   'ALTER TABLE "pr_merge_log" ALTER COLUMN "triggered_by_email_bidx" SET NOT NULL',
-  'ALTER TABLE "pr_comments" ALTER COLUMN "author_email_bidx" SET NOT NULL',
   'ALTER TABLE "change_requests" ALTER COLUMN "author_email_bidx" SET NOT NULL',
   'ALTER TABLE "pending_commits" ALTER COLUMN "author_email_bidx" SET NOT NULL',
   'ALTER TABLE "plugin_join_requests" ALTER COLUMN "requester_email_bidx" SET NOT NULL',

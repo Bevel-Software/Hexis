@@ -260,43 +260,75 @@ describe('group files as access principals', () => {
     expect(await svc.canRead(workspaceId, 'ada@x.io', 'Knowledge/Doc.md')).toBe(false);
   });
 
-  it('a bare name shared by a group and a role resolves to the GROUP (grant side)', async () => {
+  it('a bare name shared by a group and a role resolves to the ROLE (grant side)', async () => {
     const svc = await makeService({
       'roles.yaml': `roles:\n  Admin:\n    - admin@x.io\n  Engineering:\n    - lead@x.io\n`,
       // The group "Engineering" collides with the ROLE Engineering.
       'groups.yaml': GROUPS_YAML_TEXT,
       'access.md': '---\nread:\n  - Engineering\n---\n',
     });
-    // Group-first precedence: the group's members read; the role's member no
-    // longer resolves through the bare token (use role/Engineering for that).
-    expect(await svc.canRead(workspaceId, 'ada@x.io', 'Knowledge/Doc.md')).toBe(true);
-    expect(await svc.canRead(workspaceId, 'lead@x.io', 'Knowledge/Doc.md')).toBe(false);
-    // The display surface resolves the bare token to the group too — and says
-    // WHAT it is, so the dialog badges the row "Group", not "Role".
+    // Role-first precedence: the role's member reads; the group's members do
+    // not resolve through the bare token (group/Engineering is the group).
+    expect(await svc.canRead(workspaceId, 'lead@x.io', 'Knowledge/Doc.md')).toBe(true);
+    expect(await svc.canRead(workspaceId, 'ada@x.io', 'Knowledge/Doc.md')).toBe(false);
+    // The display surface resolves the bare token to the role too — and says
+    // WHAT it is, so the dialog badges the row "Role", not "Group".
     const readers = await svc.eligibleReaders(workspaceId, 'Knowledge/Doc.md');
     expect(readers.roles).toContain('Engineering');
+    expect(readers.principals).toContainEqual({ name: 'Engineering', kind: 'role' });
+    expect(readers.principals).not.toContainEqual({ name: 'Engineering', kind: 'group' });
+  });
+
+  it('a bare name with no role of that name still resolves to the group (existing files keep working)', async () => {
+    const svc = await makeService({
+      'roles.yaml': ROLES_YAML,
+      'groups.yaml': GROUPS_YAML_TEXT,
+      'access.md': '---\nread:\n  - Engineering\n---\n',
+    });
+    expect(await svc.canRead(workspaceId, 'ada@x.io', 'Knowledge/Doc.md')).toBe(true);
+    const readers = await svc.eligibleReaders(workspaceId, 'Knowledge/Doc.md');
     expect(readers.principals).toContainEqual({ name: 'Engineering', kind: 'group' });
   });
 
-  it('a bare-name DENY resolves to the group; role/<Name> reaches the role (writers included)', async () => {
+  it('group/<Name> always means the group, role/<Name> always the role', async () => {
     const svc = await makeService({
       'roles.yaml': `roles:\n  Admin:\n    - admin@x.io\n  Engineering:\n    - lead@x.io\n`,
       'groups.yaml': GROUPS_YAML_TEXT,
       'access.md':
-        '---\nread:\n  - everyone\n  - deny Engineering\nwrite:\n  - role/Engineering\n---\n',
+        '---\nread:\n  - everyone\n  - deny group/Engineering\nwrite:\n  - role/Engineering\nowner:\n  - group/Sales\n---\n',
     });
-    // The deny bites the GROUP's members, not the role's.
+    // The explicit group deny bites the GROUP's members, not the role's.
     expect(await svc.canRead(workspaceId, 'ada@x.io', 'Knowledge/Doc.md')).toBe(false);
     expect(await svc.canRead(workspaceId, 'lead@x.io', 'Knowledge/Doc.md')).toBe(true);
-    // The explicit token grants the ROLE write.
+    // The explicit role token grants the ROLE write.
     expect(await svc.canWrite(workspaceId, 'lead@x.io', 'Knowledge/Doc.md')).toBe(true);
     expect(await svc.canWrite(workspaceId, 'ada@x.io', 'Knowledge/Doc.md')).toBe(false);
-    // eligibleWriters resolves the explicit token to the role's display name —
-    // and carries kind 'role': the `role/` alias always means the role, even
-    // with a same-named group in play.
     const writers = await svc.eligibleWriters(workspaceId, 'Knowledge/Doc.md');
-    expect(writers.roles).toContain('Engineering');
     expect(writers.principals).toContainEqual({ name: 'Engineering', kind: 'role' });
+    // An unshared group name spelled group/ is the group too.
+    const owners = await svc.eligibleOwners(workspaceId, 'Knowledge/Doc.md');
+    expect(owners.principals).toContainEqual({ name: 'Sales', kind: 'group' });
+  });
+
+  it('a bare-name DENY resolves to the role when one exists, never the same-named group', async () => {
+    const svc = await makeService({
+      'roles.yaml': `roles:\n  Admin:\n    - admin@x.io\n  Engineering:\n    - lead@x.io\n`,
+      'groups.yaml': GROUPS_YAML_TEXT,
+      'access.md': '---\nread:\n  - everyone\n  - deny Engineering\n---\n',
+    });
+    expect(await svc.canRead(workspaceId, 'lead@x.io', 'Knowledge/Doc.md')).toBe(false);
+    // ada is in the Engineering GROUP only; a bare denial means the role.
+    expect(await svc.canRead(workspaceId, 'ada@x.io', 'Knowledge/Doc.md')).toBe(true);
+  });
+
+  it('a group/<Name> naming no group grants nobody', async () => {
+    const svc = await makeService({
+      'roles.yaml': `roles:\n  Admin:\n    - admin@x.io\n  Reviewer:\n    - rev@x.io\n`,
+      'groups.yaml': GROUPS_YAML_TEXT,
+      'access.md': '---\nread:\n  - group/Reviewer\n---\n',
+    });
+    // A role of that name exists, but group/ never reaches a role.
+    expect(await svc.canRead(workspaceId, 'rev@x.io', 'Knowledge/Doc.md')).toBe(false);
   });
 
   it('role/Admin resolves to the ROLE even when a synced group is named Admin', async () => {
@@ -308,8 +340,9 @@ describe('group files as access principals', () => {
     // The explicit token is the role — the shadowing group gets nothing here.
     expect(await svc.canWrite(workspaceId, 'admin@x.io', 'Knowledge/Doc.md')).toBe(true);
     expect(await svc.canWrite(workspaceId, 'attacker@evil.io', 'Knowledge/Doc.md')).toBe(false);
-    // The BARE token is the group now (group-first): its member reads.
-    expect(await svc.canRead(workspaceId, 'attacker@evil.io', 'Knowledge/Doc.md')).toBe(true);
+    // The BARE token is the role too (role-first): the group's member gets nothing.
+    expect(await svc.canRead(workspaceId, 'attacker@evil.io', 'Knowledge/Doc.md')).toBe(false);
+    expect(await svc.canRead(workspaceId, 'admin@x.io', 'Knowledge/Doc.md')).toBe(true);
     // Admin CAPABILITY never leaks to the group: roles.yaml write is a pure
     // is-admin check keyed on the role, and admin-rescue keeps working.
     expect(await svc.canWrite(workspaceId, 'attacker@evil.io', 'roles.yaml')).toBe(false);
@@ -403,14 +436,14 @@ describe('group files as access principals', () => {
   });
 
   it('eligible holders keep BOTH kinds when a group and a role share a name', async () => {
-    // A group named Engineering shadows the role Engineering. When a file
-    // grants BOTH spellings — the bare token (the group's) and role/… (the
-    // role's) — the eligible list must carry two entries, one per kind:
-    // collapsing them hides the role's live role/<name> grant entirely.
+    // A group named Engineering shares the role Engineering's name. When a
+    // file grants BOTH — group/… (the group's) and the bare or role/… token
+    // (the role's) — the eligible list must carry two entries, one per kind:
+    // collapsing them hides one of the live grants entirely.
     const svc = await makeService({
       'roles.yaml': `roles:\n  Admin:\n    - admin@x.io\n  Engineering:\n    - lead@x.io\n`,
       'groups.yaml': GROUPS_YAML_TEXT,
-      'access.md': '---\nread:\n  - Engineering\n  - role/Engineering\n---\n',
+      'access.md': '---\nread:\n  - group/Engineering\n  - Engineering\n---\n',
     });
     const readers = await svc.eligibleReaders(workspaceId, 'Knowledge/Doc.md');
     expect(readers.principals).toContainEqual({ name: 'Engineering', kind: 'group' });

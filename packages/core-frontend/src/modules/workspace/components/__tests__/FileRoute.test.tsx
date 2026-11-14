@@ -20,7 +20,7 @@ vi.mock('../../routing/kb-routes', async (importOriginal) => {
 import type { WorkingTreeStatus } from '@bevel-software/platform-shared';
 import { FileRoute } from '../FileRoute';
 import { WorkspaceApiError } from '../../services/workspace.api';
-import { GitContext, type GitContextValue } from '../../../git/state/git.context';
+import { GitContext, type GitContextValue } from '../../../git';
 import {
   WorkspaceContext,
   type WorkspaceContextValue,
@@ -29,7 +29,8 @@ import {
 } from '../../state/workspace.context';
 import { makeWorkspaceFixture } from '../../__tests__/testFixtures';
 import { ReviewContext, type ReviewContextValue } from '../../../review/state/review.context';
-import { AuthContext, type AuthContextValue } from '../../../auth/state/auth.context';
+import { AuthContext, type AuthContextValue } from '../../../auth';
+import { AppRegistryContext, makeRegistry, type AppDef } from '../../../../core/registry';
 
 function makeStatus(branch = 'alice/draft'): WorkingTreeStatus {
   return { branch, hasUpstream: true, unmergedFromUpstream: false };
@@ -101,7 +102,13 @@ function makeHydrateResult(overrides: Partial<HydrateResult> = {}): HydrateResul
 
 function LocationProbe() {
   const location = useLocation();
-  return <div aria-label="pathname">{location.pathname}</div>;
+  return (
+    <>
+      <div aria-label="pathname">{location.pathname}</div>
+      <div aria-label="location-state">{JSON.stringify(location.state)}</div>
+      <div aria-label="search">{location.search}</div>
+    </>
+  );
 }
 
 /** Stands in for a file-tree click: navigates to a clean file URL. */
@@ -133,7 +140,15 @@ function SameBranchClickProbe() {
 
 function renderAt(
   url: string,
-  opts: { git?: GitContextValue; workspace?: WorkspaceContextValue; canonicalize?: boolean } = {},
+  opts: {
+    git?: GitContextValue;
+    workspace?: WorkspaceContextValue;
+    canonicalize?: boolean;
+    /** Router state on the first entry, as a navigation would have left it. */
+    state?: unknown;
+    /** Apps in the registry — the ones whose `roots` claim top-level folders. */
+    apps?: AppDef[];
+  } = {},
 ): {
   workspace: WorkspaceContextValue;
   git: GitContextValue;
@@ -177,8 +192,10 @@ function renderAt(
     logout: () => {},
   };
 
+  const registry = makeRegistry({ apps: opts.apps ?? [] });
   function Tree({ children }: { children: ReactNode }) {
     return (
+      <AppRegistryContext.Provider value={registry}>
       <AuthContext.Provider value={auth}>
         <WorkspaceContext.Provider value={workspace}>
           <GitContext.Provider value={git}>
@@ -188,11 +205,12 @@ function renderAt(
           </GitContext.Provider>
         </WorkspaceContext.Provider>
       </AuthContext.Provider>
+      </AppRegistryContext.Provider>
     );
   }
 
   const tree = () => (
-    <MemoryRouter initialEntries={[url]}>
+    <MemoryRouter initialEntries={[opts.state === undefined ? url : { pathname: url, state: opts.state }]}>
       <Tree>
         <Routes>
           <Route path="/workspace/:branch/*" element={<FileRoute canonicalize={opts.canonicalize} />} />
@@ -247,6 +265,25 @@ describe('FileRoute: the canonical id URL', () => {
     );
   });
 
+  it('keeps the entry’s router state across the swap, so a request not yet acted on survives it', async () => {
+    routesMock.fetchNodeId.mockResolvedValue('web_search');
+    renderAt(`/workspace/main/${PATH}`, { ...openOn(), state: { rawFile: true } });
+    await waitFor(() =>
+      expect(screen.getByLabelText('pathname')).toHaveTextContent('/workspace/main/web_search'),
+    );
+    expect(screen.getByLabelText('location-state')).toHaveTextContent('{"rawFile":true}');
+  });
+
+  it('keeps the query across the swap, so a link that asked for full screen still has it on the id URL', async () => {
+    routesMock.fetchNodeId.mockResolvedValue('web_search');
+    renderAt(`/workspace/main/${PATH}?fullscreen=1`, openOn());
+    await waitFor(() =>
+      expect(screen.getByLabelText('pathname')).toHaveTextContent('/workspace/main/web_search'),
+    );
+    expect(screen.getByLabelText('search')).toHaveTextContent('?fullscreen=1');
+    expect(screen.getByTestId('exit-full-screen')).toBeInTheDocument();
+  });
+
   it('keeps the path URL when canonicalising is off — the Library frame renders it there, and an id URL is no library location', async () => {
     routesMock.fetchNodeId.mockResolvedValue('web_search');
     renderAt(`/workspace/main/${PATH}`, { ...openOn(), canonicalize: false });
@@ -254,6 +291,48 @@ describe('FileRoute: the canonical id URL', () => {
     await new Promise((r) => setTimeout(r, 50));
     expect(screen.getByLabelText('pathname')).toHaveTextContent(`/workspace/main/${PATH}`);
     expect(routesMock.fetchNodeId).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * A file under a root an app claims opens in that app by its PATH URL, so the
+ * route never trades it for the id URL, and an id URL that resolves to one is
+ * traded for the path URL instead.
+ */
+describe('FileRoute: a file under a claimed root', () => {
+  const PATH = 'knowledge-base/Data/Tickets/T-1.md';
+  const apps: AppDef[] = [{ id: 'agents', label: 'Agents', path: '/agents', element: <div />, roots: ['Data'] }];
+  function openOn(): { workspace: WorkspaceContextValue; git: GitContextValue } {
+    const tab = makeTab({ path: PATH });
+    const workspace = makeWorkspace({
+      openTabs: [tab],
+      activeTab: tab,
+      hydrateTabs: vi.fn<WorkspaceContextValue['hydrateTabs']>(async () => makeHydrateResult({ surviving: [PATH] })),
+    });
+    return { workspace, git: makeGit({ status: makeStatus('main') }) };
+  }
+
+  it('keeps the path URL of an id-bearing file', async () => {
+    routesMock.fetchNodeId.mockResolvedValue('t-1');
+    renderAt(`/workspace/main/${PATH}`, { ...openOn(), apps });
+    await settle();
+    expect(screen.getByLabelText('pathname')).toHaveTextContent(`/workspace/main/${PATH}`);
+    expect(routesMock.fetchNodeId).not.toHaveBeenCalled();
+  });
+
+  it('replaces an id URL that resolves to it with its path URL, keeping the query', async () => {
+    routesMock.fetchNodeWorkspacePath.mockResolvedValue(PATH);
+    renderAt('/workspace/main/t-1?fullscreen=1', { ...openOn(), apps });
+    await waitFor(() =>
+      expect(screen.getByLabelText('pathname')).toHaveTextContent(`/workspace/main/${PATH}`),
+    );
+    expect(screen.getByLabelText('search')).toHaveTextContent('?fullscreen=1');
+  });
+
+  it('canonicalises as before when no app claims the root', async () => {
+    routesMock.fetchNodeId.mockResolvedValue('t-1');
+    renderAt(`/workspace/main/${PATH}`, openOn());
+    await waitFor(() => expect(screen.getByLabelText('pathname')).toHaveTextContent('/workspace/main/t-1'));
   });
 });
 

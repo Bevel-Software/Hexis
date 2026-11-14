@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
+import { PgDialect } from 'drizzle-orm/pg-core';
+import type { SQL } from 'drizzle-orm';
 import type { Database } from '../../database/connection.js';
 import type { CoreConfig } from '../../../core-config.js';
 import { AuthService } from '../auth.service.js';
@@ -11,15 +13,31 @@ import {
   type IAccountAdmission,
 } from '../account-admission.js';
 import { hashPassword } from '../password-hash.js';
-import { RECOVERY_BOT_EMAIL } from '../../workflow/recovery-bot.js';
+import { RECOVERY_BOT_EMAIL } from '../../version-control/recovery-bot.js';
 
 /**
  * Drizzle chain stub, as in `auth.service.test.ts`: each db.select() /
  * insert() / update() consumes the next queued result; awaiting any point of
- * the chain resolves it. Records what was inserted and set.
+ * the chain resolves it. Records what was inserted and set, and, in order,
+ * every write and lock (`execute`) with the handle it went through: `db`
+ * itself, or the `tx` a transaction hands its callback (a different object,
+ * between `begin` and `commit`), so a lock taken outside the transaction
+ * shows up as `db:`.
  */
 function makeFakeDb(queue: unknown[]) {
-  const captured: { values: Record<string, unknown>[]; set: Record<string, unknown>[] } = { values: [], set: [] };
+  const captured: {
+    values: Record<string, unknown>[];
+    set: Record<string, unknown>[];
+    order: string[];
+    /** Every `where` predicate, rendered to the SQL it would send. */
+    where: { sql: string; params: unknown[] }[];
+  } = {
+    values: [],
+    set: [],
+    order: [],
+    where: [],
+  };
+  const dialect = new PgDialect();
   function nextChain(): unknown {
     const result = queue.shift();
     const chain: Record<string, unknown> = {};
@@ -31,7 +49,10 @@ function makeFakeDb(queue: unknown[]) {
     Object.assign(chain, {
       values: passthrough((a) => captured.values.push(a)),
       set: passthrough((a) => captured.set.push(a)),
-      where: passthrough(),
+      where: passthrough((a) => {
+        const { sql, params } = dialect.sqlToQuery(a as unknown as SQL);
+        captured.where.push({ sql, params });
+      }),
       limit: passthrough(),
       from: passthrough(),
       orderBy: passthrough(),
@@ -42,12 +63,27 @@ function makeFakeDb(queue: unknown[]) {
     });
     return chain;
   }
-  const db = {
-    insert: vi.fn(() => nextChain()),
+  const handle = (tag: 'db' | 'tx') => ({
+    insert: vi.fn(() => (captured.order.push(`${tag}:insert`), nextChain())),
     select: vi.fn(() => nextChain()),
-    update: vi.fn(() => nextChain()),
-  } as unknown as Database;
-  return { db, captured };
+    update: vi.fn(() => (captured.order.push(`${tag}:update`), nextChain())),
+    execute: vi.fn(async (query: SQL) => {
+      const { sql, params } = dialect.sqlToQuery(query);
+      captured.order.push(`${tag}:${sql} ${JSON.stringify(params)}`);
+      return [];
+    }),
+  });
+  const tx = handle('tx');
+  const db = {
+    ...handle('db'),
+    transaction: async <T,>(cb: (t: typeof tx) => Promise<T>) => {
+      captured.order.push('begin');
+      const out = await cb(tx);
+      captured.order.push('commit');
+      return out;
+    },
+  };
+  return { db: db as unknown as Database, captured };
 }
 
 function makeConfig(over: Partial<CoreConfig> = {}): CoreConfig {
@@ -95,6 +131,32 @@ describe('signing in with a switched-off account', () => {
     const { db } = makeFakeDb([[OFF]]);
     const svc = new AuthService(db, makeConfig());
     await expect(svc.getOrCreateByEmail('alice@example.com')).rejects.toBeInstanceOf(AccountDeactivatedError);
+  });
+});
+
+describe('the accounts a change request\'s approvers resolve to', () => {
+  it('are read in one indexed query through the email blind index, live accounts only, keyed by canonical address', async () => {
+    const { db, captured } = makeFakeDb([[{ id: 'user-1', email: 'Alice@Example.com', name: 'Alice' }]]);
+    const svc = new AuthService(db, makeConfig());
+    const found = await svc.findActiveAccountsByEmail(['ALICE@example.com', 'alice@example.com', 'bob@example.com']);
+    // One read, by the blind index, with the addresses canonicalised and
+    // deduplicated, and a switched-off account excluded in the query itself.
+    expect((db as unknown as { select: ReturnType<typeof vi.fn> }).select).toHaveBeenCalledTimes(1);
+    expect(captured.where).toHaveLength(1);
+    expect(captured.where[0]!.sql).toMatch(/"users"."email_bidx" in \(\$1, \$2\) and "users"."deactivated_at" is null/);
+    // The blind-index column hashes each address with the handle's key as
+    // the query is sent; what was asked for is the canonical plain address.
+    expect(captured.where[0]!.params.map((p) => (p as { plain: string }).plain)).toEqual(['alice@example.com', 'bob@example.com']);
+    // Keyed by the canonical address, whatever spelling the row holds.
+    expect([...found.keys()]).toEqual(['alice@example.com']);
+    expect(found.get('alice@example.com')).toEqual({ id: 'user-1', email: 'Alice@Example.com', name: 'Alice' });
+  });
+
+  it('asks nothing for no addresses', async () => {
+    const { db } = makeFakeDb([]);
+    const svc = new AuthService(db, makeConfig());
+    expect(await svc.findActiveAccountsByEmail([])).toEqual(new Map());
+    expect((db as unknown as { select: ReturnType<typeof vi.fn> }).select).not.toHaveBeenCalled();
   });
 });
 
@@ -156,6 +218,64 @@ describe('AuthService.isActive', () => {
   });
 });
 
+// An earlier version could switch off an owner without a server-held
+// password; nothing in the product can switch them back on for a workspace
+// whose only admin they are. Their way in clears it.
+describe('an owner switched off by an earlier version', () => {
+  const OWNER_OFF = { ...OFF, id: 'owner-1', email: 'root@example.com' };
+
+  for (const [label, adminPassword] of [
+    ['with ADMIN_PASSWORD', 'sup3r-secret'],
+    ['without ADMIN_PASSWORD (the cloud)', ''],
+  ] as const) {
+    const config = makeConfig({ adminEmail: 'root@example.com', adminPassword });
+
+    it(`signs in with single sign-on, and the switch-off is cleared on the row, ${label}`, async () => {
+      const { db, captured } = makeFakeDb([[OWNER_OFF], []]);
+      const { user } = await new AuthService(db, config).loginWithSso('root@example.com', 'Root');
+      expect(user.id).toBe('owner-1');
+      expect(captured.set).toEqual([expect.objectContaining({ deactivatedAt: null })]);
+    });
+
+    it(`is let in as an embed identity, ${label}`, async () => {
+      const { db, captured } = makeFakeDb([[OWNER_OFF], []]);
+      await expect(new AuthService(db, config).getOrCreateByEmail('root@example.com')).resolves.toMatchObject({ id: 'owner-1' });
+      expect(captured.set).toEqual([expect.objectContaining({ deactivatedAt: null })]);
+    });
+
+    it(`keeps a session they already hold, ${label}`, async () => {
+      const { db, captured } = makeFakeDb([[{ id: 'owner-1', email: 'root@example.com', deactivatedAt: new Date() }], []]);
+      expect(await new AuthService(db, config).isActive('owner-1')).toBe(true);
+      expect(captured.set).toEqual([expect.objectContaining({ deactivatedAt: null })]);
+    });
+  }
+
+  it('signs in with a password they hold on the row, without ADMIN_PASSWORD', async () => {
+    const passwordHash = await hashPassword('a-long-enough-password');
+    const { db, captured } = makeFakeDb([[{ ...OWNER_OFF, passwordHash }], []]);
+    const svc = new AuthService(db, makeConfig({ adminEmail: 'root@example.com' }));
+    const { user } = await svc.loginWithPassword('root@example.com', 'a-long-enough-password');
+    expect(user.id).toBe('owner-1');
+    expect(captured.set).toEqual([expect.objectContaining({ deactivatedAt: null })]);
+  });
+
+  it('signs in with ADMIN_PASSWORD, and the switch-off is cleared on the row', async () => {
+    // The lookup, the upsert, then the clearing update.
+    const { db, captured } = makeFakeDb([[OWNER_OFF], [OWNER_OFF], []]);
+    const svc = new AuthService(db, makeConfig({ adminEmail: 'root@example.com', adminPassword: 'sup3r-secret' }));
+    const { user } = await svc.loginWithPassword('root@example.com', 'sup3r-secret');
+    expect(user.id).toBe('owner-1');
+    expect(captured.set).toEqual([expect.objectContaining({ deactivatedAt: null })]);
+  });
+
+  it('leaves a switched-off account that is not an owner switched off', async () => {
+    const { db, captured } = makeFakeDb([[OFF]]);
+    const svc = new AuthService(db, makeConfig({ adminEmail: 'root@example.com' }));
+    await expect(svc.loginWithSso('alice@example.com', 'Alice')).rejects.toBeInstanceOf(AccountDeactivatedError);
+    expect(captured.set).toEqual([]);
+  });
+});
+
 describe('AuthService.deactivate', () => {
   it('records when the account was switched off', async () => {
     const { db, captured } = makeFakeDb([[ROW], []]);
@@ -163,22 +283,59 @@ describe('AuthService.deactivate', () => {
     expect(captured.set[0].deactivatedAt).toBeInstanceOf(Date);
   });
 
+  it('switches off under the address switch lock, taken before the update', async () => {
+    const { db, captured } = makeFakeDb([[{ ...ROW, email: 'Alice@Example.com' }], []]);
+    await new AuthService(db, makeConfig()).deactivate(ROW.id);
+    expect(captured.order).toEqual([
+      'begin',
+      // The wait for the lock is bounded, inside the transaction.
+      `tx:select set_config('lock_timeout', $1, true) ["15000"]`,
+      'tx:select pg_advisory_xact_lock(hashtext($1)) ["account-switch:alice@example.com"]',
+      'tx:update',
+      'commit',
+    ]);
+  });
+
   it('answers false for an account that does not exist', async () => {
     const { db } = makeFakeDb([[]]);
     expect(await new AuthService(db, makeConfig()).deactivate('nobody')).toBe(false);
   });
 
-  it('refuses the deployment admin, whose environment password is the way back in', async () => {
-    const config = makeConfig({ adminEmail: 'root@example.com', adminPassword: 'sup3r-secret' });
-    const { db } = makeFakeDb([[{ ...ROW, email: 'root@example.com' }]]);
-    await expect(new AuthService(db, config).deactivate(ROW.id)).rejects.toBeInstanceOf(AccountChangeRefusedError);
-    expect(vi.mocked(db.update)).not.toHaveBeenCalled();
+  // With a server-held owner password (self-hosted) and without one (the
+  // cloud's configuration): the owner is never switched off, and the refusal
+  // comes before any lock or write (`captured.order` stays empty).
+  for (const [label, adminPassword] of [
+    ['with ADMIN_PASSWORD', 'sup3r-secret'],
+    ['without ADMIN_PASSWORD (the cloud)', ''],
+  ] as const) {
+    it(`refuses the owner, ${label}, and says why`, async () => {
+      const config = makeConfig({ adminEmail: 'root@example.com', adminPassword });
+      const { db, captured } = makeFakeDb([[{ ...ROW, email: 'root@example.com' }]]);
+      const refusal = new AuthService(db, config).deactivate(ROW.id);
+      await expect(refusal).rejects.toBeInstanceOf(AccountChangeRefusedError);
+      await expect(refusal).rejects.toThrow("The owner can't be switched off.");
+      expect(captured.order).toEqual([]);
+    });
+
+    it(`still switches off an account that is not the owner, ${label}`, async () => {
+      const config = makeConfig({ adminEmail: 'root@example.com', adminPassword });
+      const { db, captured } = makeFakeDb([[ROW], []]);
+      expect(await new AuthService(db, config).deactivate(ROW.id)).toBe(true);
+      expect(captured.set[0].deactivatedAt).toBeInstanceOf(Date);
+    });
+  }
+
+  it('refuses the owner even with password sign-in switched off', async () => {
+    const config = makeConfig({ adminEmail: 'root@example.com', adminPassword: 'sup3r-secret', loginPasswordEnabled: false });
+    const { db, captured } = makeFakeDb([[{ ...ROW, email: 'root@example.com' }]]);
+    await expect(new AuthService(db, config).deactivate(ROW.id)).rejects.toThrow("The owner can't be switched off.");
+    expect(captured.order).toEqual([]);
   });
 
   it('refuses the accounts the platform runs its own work as', async () => {
-    const { db } = makeFakeDb([[{ ...ROW, email: RECOVERY_BOT_EMAIL }]]);
+    const { db, captured } = makeFakeDb([[{ ...ROW, email: RECOVERY_BOT_EMAIL }]]);
     await expect(new AuthService(db, makeConfig()).deactivate(ROW.id)).rejects.toThrow('platform itself');
-    expect(vi.mocked(db.update)).not.toHaveBeenCalled();
+    expect(captured.order).toEqual([]);
   });
 });
 
@@ -221,17 +378,25 @@ describe('a first sign-in the port would rather keep waiting', () => {
     expect(captured.values).toHaveLength(1);
     expect(captured.values[0]).toMatchObject({ email: 'new@example.com' });
     expect(captured.values[0].deactivatedAt).toBeInstanceOf(Date);
+    // Created switched off, so under the address's switch lock.
+    expect(captured.order).toEqual([
+      'begin',
+      `tx:select set_config('lock_timeout', $1, true) ["15000"]`,
+      'tx:select pg_advisory_xact_lock(hashtext($1)) ["account-switch:new@example.com"]',
+      'tx:insert',
+      'commit',
+    ]);
   });
 
   it('is a plain refusal when an admin creates the account', async () => {
     const { port } = recordingPort(waiting);
-    const { db } = makeFakeDb([[]]);
+    const { db, captured } = makeFakeDb([[]]);
     const err = await new AuthService(db, makeConfig(), port)
       .createAccount('new@example.com', 'New')
       .catch((e: unknown) => e);
     expect(err).toBeInstanceOf(AccountAdmissionRefusedError);
     expect((err as AccountAdmissionRefusedError).waitingForAdmin).toBe(false);
-    expect(vi.mocked(db.insert)).not.toHaveBeenCalled();
+    expect(captured.order).toEqual([]);
   });
 });
 

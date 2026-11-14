@@ -1,14 +1,14 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { logger } from '../../shared/logging.js';
+import { isStandardAuthorizationErrorCode } from '../../shared/oauth-token-error.js';
 
 const log = logger('oidc');
 import type express from 'express';
 import type { AuthProviderPlugin } from './auth.routes.js';
-import { AUTH_COOKIE_MAX_AGE_S } from './auth.routes.js';
-import { AUTH_COOKIE_NAME } from './auth.middleware.js';
+import { setAuthCookie } from './auth.middleware.js';
 import type { AuthService } from './auth.service.js';
 import { AccountAdmissionRefusedError, AccountDeactivatedError } from './account-admission.js';
-import { normalizeIssuerUrl } from '../settings/oidc-check.js';
+import { normalizeIssuerUrl } from '../settings/index.js';
 
 // Short-lived CSRF state + PKCE verifier for the OAuth round-trip: set before
 // redirecting to the provider, verified/consumed on callback.
@@ -230,11 +230,30 @@ export class OidcAuthProvider implements AuthProviderPlugin {
       const fail = (reason: string) =>
         res.redirect(`${publicFrontendUrl}/auth/oidc/callback#error=${reason}`);
       try {
-        const { code, state } = req.query as { code?: string; state?: string };
+        const { code, state, error } = req.query as { code?: string; state?: string; error?: string };
         const cookie = readCookie(req, OAUTH_STATE_COOKIE);
         res.clearCookie(OAUTH_STATE_COOKIE, { path: '/' });
         const [expectedState, verifier] = cookie?.split('.') ?? [];
-        if (!code || !state || !expectedState || !verifier || state !== expectedState) {
+        if (!state || !expectedState || !verifier || state !== expectedState) {
+          fail('state');
+          return;
+        }
+        // The provider answered with an error instead of a code (RFC 6749
+        // §4.1.2.1). Checked after the state, so a forged response is still a
+        // state failure. `access_denied` means the provider (or the person, at
+        // a consent screen) said no: the state was fine, so the screen names
+        // the refusal instead of asking to verify the sign-in again. Its
+        // `error_description` is the provider's own text and is not shown.
+        if (typeof error === 'string' && error) {
+          // Logged only when it is a standard code; anything else is text of
+          // the provider's choosing.
+          log.warn('OIDC provider refused the sign-in:', {
+            error: isStandardAuthorizationErrorCode(error) ? error : 'non-standard',
+          });
+          fail(error === 'access_denied' ? 'denied' : 'auth');
+          return;
+        }
+        if (!code) {
           fail('state');
           return;
         }
@@ -311,13 +330,7 @@ export class OidcAuthProvider implements AuthProviderPlugin {
         } catch (error) {
           log.error('OIDC sign-in record failed:', { err: error });
         }
-        res.cookie(AUTH_COOKIE_NAME, token, {
-          httpOnly: true,
-          sameSite: 'lax',
-          secure: cookieSecure,
-          maxAge: AUTH_COOKIE_MAX_AGE_S * 1000,
-          path: '/',
-        });
+        setAuthCookie(res, token, cookieSecure);
         res.redirect(`${publicFrontendUrl}/auth/oidc/callback#token=${encodeURIComponent(token)}`);
       } catch (error) {
         // A refused provisioning is not a failed sign-in: the identity was

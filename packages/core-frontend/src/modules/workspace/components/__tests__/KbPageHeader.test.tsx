@@ -2,10 +2,13 @@ import { describe, it, expect, vi } from 'vitest';
 import { render, screen, act, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { KbPageHeader, type KbPageHeaderProps } from '../KbPageHeader';
+import { PAGE_HEADER_TESTID } from '../../../../shared/theme/header';
+import { expectTitleKeepsItsInk } from '../../../../__tests__/title-ink-room';
 
 function renderHeader(overrides: Partial<KbPageHeaderProps> = {}) {
   const props: KbPageHeaderProps = {
     path: 'knowledge-base/Knowledge/Invariant.md',
+    kbDirName: 'knowledge-base',
     canWrite: true,
     editMode: false,
     entering: false,
@@ -35,6 +38,25 @@ describe('KbPageHeader', () => {
   it('leads with the basename, minus a known extension', () => {
     renderHeader();
     expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Invariant');
+  });
+
+  it('keeps the tails of the title: it truncates, with room for its ink on it and on the group that clips it', () => {
+    renderHeader();
+    expectTitleKeepsItsInk(screen.getByTestId(PAGE_HEADER_TESTID));
+  });
+
+  it("titles a plugin's plugin.json Plugin settings, with the file name on hover", () => {
+    renderHeader({ path: 'knowledge-base/Plugins/GTM/plugin.json' });
+    const h1 = screen.getByRole('heading', { level: 1 });
+    expect(h1).toHaveTextContent('Plugin settings');
+    expect(h1).toHaveAttribute('title', 'plugin.json');
+  });
+
+  it("titles a folder's access.md Who has access, with the file name on hover", () => {
+    renderHeader({ path: 'knowledge-base/KnowledgeBase/Legal/access.md' });
+    const h1 = screen.getByRole('heading', { level: 1 });
+    expect(h1).toHaveTextContent('Who has access');
+    expect(h1).toHaveAttribute('title', 'access.md');
   });
 
   it('leaves an unknown extension alone', () => {
@@ -95,11 +117,23 @@ describe('KbPageHeader', () => {
     expect(screen.getByRole('button', { name: 'Edit' })).toBeInTheDocument();
   });
 
-  it('disables Edit while someone else holds the lock and names the holder', () => {
+  it('disables Edit while someone else is editing and names them', () => {
     renderHeader({ lockedBy: 'Ali Raza' });
     const edit = screen.getByRole('button', { name: 'Edit' });
     expect(edit).toBeDisabled();
-    expect(edit).toHaveAttribute('title', 'Locked by Ali Raza');
+    expect(edit).toHaveAttribute('title', 'Ali Raza is editing this page');
+  });
+
+  // A hold under the viewer's own id (another tab, their agent) is not
+  // "someone else": the title says it is theirs and never names them.
+  it('disables Edit for the viewer\'s own hold without naming them', () => {
+    renderHeader({ lockedBy: 'Juan V.', lockedByYou: true });
+    const edit = screen.getByRole('button', { name: 'Edit' });
+    expect(edit).toBeDisabled();
+    expect(edit).toHaveAttribute(
+      'title',
+      'You have this page open for editing somewhere else, in another tab or through your agent. You can edit it here in a moment.',
+    );
   });
 
   it('swaps Edit for Done in edit mode', () => {

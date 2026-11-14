@@ -1,14 +1,15 @@
 import jwt from 'jsonwebtoken';
-import { and, eq, isNotNull, isNull } from 'drizzle-orm';
-import type { Database } from '../database/connection.js';
-import { users } from '../database/schema.js';
+import { and, eq, getTableColumns, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
+import type { Database } from '../database/index.js';
+import { users } from '../database/index.js';
 import type { AuthUser } from '@bevel-software/platform-shared';
-import { canonicalEmail, hashEmail } from '../../shared/email-identity.js';
+import { canonicalEmail } from '../../shared/email-identity.js';
 import {
   AccountAdmissionRefusedError,
   AccountChangeRefusedError,
   AccountDeactivatedError,
   AuthBackendError,
+  SessionEndedError,
   admitEveryone,
   type AccountProvisionReason,
   type IAccountAdmission,
@@ -19,8 +20,11 @@ import {
   timingSafeStringEqual,
   MIN_PASSWORD_LENGTH,
 } from './password-hash.js';
-import { RECOVERY_BOT_EMAIL } from '../workflow/recovery-bot.js';
-import { DIRECTORY_SYNC_BOT_EMAIL } from '../access/directory-sync-bot.js';
+import { RECOVERY_BOT_EMAIL } from '../version-control/index.js';
+import { DIRECTORY_SYNC_BOT_EMAIL } from '../access/index.js';
+import { takeAccountSwitchLock } from './account-switch-lock.js';
+import type { IAccountSwitchGuard } from './account-switch-guard.js';
+import { VersionControlDomainError } from '../../shared/domain-errors.js';
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -29,11 +33,29 @@ const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
  * request carrying a credential asks, so the answer is kept briefly rather
  * than read each time; switching an account off or on in THIS process
  * forgets it at once, and another replica sees the change within this long.
+ * A session token never waits on it: {@link AuthService.resolveSession}
+ * reads the row each time, so a password change ends it everywhere at once.
  */
 const ACTIVE_CACHE_MS = 30_000;
 
 /** The accounts core runs its own work as. Nobody signs in with them, and nobody switches them off. */
 const SYSTEM_ACCOUNT_EMAILS: readonly string[] = [RECOVERY_BOT_EMAIL, DIRECTORY_SYNC_BOT_EMAIL];
+
+/**
+ * Whether an upsert's returned row was INSERTED rather than updated, from the
+ * one statement that did it: Postgres leaves `xmax` at zero on a row the
+ * statement inserted and sets it on one its `ON CONFLICT DO UPDATE` touched.
+ * So "is this account new" is answered by the write itself, never by a read
+ * before it that a concurrent create could make a lie of.
+ */
+const CREATED = sql<boolean>`(xmax = 0)`;
+
+/**
+ * What every password write refuses for the accounts the platform runs its own
+ * work as: a stored hash would make them able to sign in. One guard,
+ * {@link AuthService.assertNotSystemAccount}, on every path that writes one.
+ */
+const SYSTEM_ACCOUNT_PASSWORD_REFUSAL = 'System accounts cannot be given a password';
 
 /**
  * What every caller is told when it tries to give the deployment admin a
@@ -43,6 +65,39 @@ const SYSTEM_ACCOUNT_EMAILS: readonly string[] = [RECOVERY_BOT_EMAIL, DIRECTORY_
  */
 const ENV_ADMIN_PASSWORD_REFUSAL =
   "This account's password is set in the deployment environment and cannot be changed here";
+
+/** What an admin is told when they try to switch an owner off. */
+export const OWNER_SWITCH_OFF_REFUSAL = "The owner can't be switched off.";
+
+/** What an admin is told when deleting an owner's account would leave them no way to sign in. */
+export const OWNER_DELETE_REFUSAL = "The owner's account can't be deleted: they would have no way to sign in.";
+
+/**
+ * A password change refused because the password it proved is no longer the
+ * account's: another session changed it between this change's read and its
+ * write. Nothing was written; the routes answer it with a 409 and its words.
+ */
+export class PasswordChangedMeanwhileError extends Error {
+  constructor() {
+    super('Your password was changed from another session while this change was being made, so nothing was changed. Sign in with the new password.');
+    this.name = 'PasswordChangedMeanwhileError';
+  }
+}
+
+/**
+ * A password write the service refuses on purpose: the policy, a wrong
+ * current password, an account whose password is not kept here. The message
+ * is written for the caller, and a route answers it with a 400 — unlike any
+ * other error a password write raises, which is a fault and answered generic.
+ */
+export class PasswordRefusedError extends Error {
+  readonly status = 400;
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'PasswordRefusedError';
+  }
+}
 
 /**
  * Decoy hash verified when the email is unknown or has no password set, so
@@ -119,7 +174,7 @@ export interface SsoLoginOptions {
   admittedByProvider?: boolean;
 }
 
-export class AuthService {
+export class AuthService implements IAccountSwitchGuard {
   constructor(
     private readonly db: Database,
     private readonly config: AuthConfig,
@@ -150,16 +205,20 @@ export class AuthService {
     // is put on file, switched off, for an admin to switch on — and is still
     // refused now, with the port's words. Only for single sign-on, the one
     // provisioning nobody asked for (see `AccountAdmissionVerdict`).
+    // Created switched off, so under the switch lock (see account-switch-lock).
     if (verdict.waitForAdmin && reason === 'sso') {
-      await this.db
-        .insert(users)
-        .values({
-          email: normalizedEmail,
-          emailBidx: normalizedEmail,
-          name: normalizedEmail.split('@')[0] || normalizedEmail,
-          deactivatedAt: new Date(),
-        })
-        .onConflictDoNothing({ target: users.emailBidx });
+      await this.db.transaction(async (tx) => {
+        await takeAccountSwitchLock(tx, normalizedEmail);
+        await tx
+          .insert(users)
+          .values({
+            email: normalizedEmail,
+            emailBidx: normalizedEmail,
+            name: normalizedEmail.split('@')[0] || normalizedEmail,
+            deactivatedAt: new Date(),
+          })
+          .onConflictDoNothing({ target: users.emailBidx });
+      });
       throw new AccountAdmissionRefusedError(verdict.message, { waitingForAdmin: true });
     }
     throw new AccountAdmissionRefusedError(verdict.message);
@@ -236,11 +295,13 @@ export class AuthService {
       }
       // Never refused for being switched off: the environment password is
       // the deployment's way back in, and {@link deactivate} refuses this
-      // account for that reason.
+      // account for that reason. A switch-off left on the row by an earlier
+      // version is cleared here too, so the credentials that read the column
+      // directly come back with this sign-in ({@link clearOwnerSwitchOff}).
       const defaultName = normalizedEmail.split('@')[0] || normalizedEmail;
       await this.assertAdmitted(normalizedEmail, 'bootstrap');
-      const admin = await this.upsertUserByEmail(normalizedEmail, defaultName);
-      return { token: this.signToken(admin.id, admin.email), user: this.toClientUser(admin) };
+      const admin = await this.clearOwnerSwitchOff(await this.upsertUserByEmail(normalizedEmail, defaultName));
+      return { token: this.signToken(admin), user: this.toClientUser(admin) };
     }
 
     // Always run one scrypt verification — against the stored hash when there
@@ -254,8 +315,9 @@ export class AuthService {
     }
     // Only now, with the password proven: telling a stranger that an address
     // is switched off would tell them it has an account.
-    if (user.deactivatedAt) throw new AccountDeactivatedError();
-    return { token: this.signToken(user.id, user.email), user: this.toClientUser(user) };
+    const signedIn = await this.clearOwnerSwitchOff(user);
+    if (signedIn.deactivatedAt) throw new AccountDeactivatedError();
+    return { token: this.signToken(signedIn), user: this.toClientUser(signedIn) };
   }
 
   /**
@@ -285,9 +347,9 @@ export class AuthService {
     if (!opts.admittedByProvider) this.assertAllowedDomain(normalizedEmail);
     await this.assertAdmitted(normalizedEmail, 'sso');
     const displayName = (name ?? '').trim() || normalizedEmail.split('@')[0] || normalizedEmail;
-    const user = await this.upsertUserByEmail(normalizedEmail, displayName);
+    const user = await this.clearOwnerSwitchOff(await this.upsertUserByEmail(normalizedEmail, displayName));
     if (user.deactivatedAt) throw new AccountDeactivatedError();
-    return { token: this.signToken(user.id, user.email), user: this.toClientUser(user) };
+    return { token: this.signToken(user), user: this.toClientUser(user) };
   }
 
   /**
@@ -302,7 +364,10 @@ export class AuthService {
    * Password sign-in refuses it until a password is set. For an address that
    * already has an account it changes nothing but an explicitly given name.
    *
-   * WITH a password, the deployment admin is the one target this refuses, for the reason
+   * WITH a password, this refuses two kinds of target. The accounts the
+   * platform runs its own work as are refused first
+   * ({@link assertNotSystemAccount}): a password would make them able to sign
+   * in. The deployment admin is refused for the reason
    * {@link changePassword} refuses it: that account's password is the
    * environment's, so a stored hash would not replace it but ADD a second
    * credential — one that keeps signing in after `ADMIN_PASSWORD` is rotated,
@@ -321,22 +386,12 @@ export class AuthService {
     }
     const suppliedName = (name ?? '').trim();
     const displayName = suppliedName || normalizedEmail.split('@')[0] || normalizedEmail;
-    if (!password) {
-      await this.assertAdmitted(normalizedEmail, 'admin-create');
-      const [created] = await this.db
-        .insert(users)
-        .values({ email: normalizedEmail, emailBidx: normalizedEmail, name: displayName })
-        .onConflictDoUpdate({
-          target: users.emailBidx,
-          set: suppliedName ? { name: suppliedName, updatedAt: new Date() } : { updatedAt: new Date() },
-        })
-        .returning();
-      return this.toClientUser(created);
-    }
+    if (!password) return (await this.createAccountWithoutPassword(email, name)).user;
     // Before the policy check, so the refusal names the real reason rather
     // than sending the admin off to pick a longer password first.
+    this.assertNotSystemAccount(normalizedEmail);
     if (this.isEnvAdminEmail(normalizedEmail)) {
-      throw new Error(ENV_ADMIN_PASSWORD_REFUSAL);
+      throw new PasswordRefusedError(ENV_ADMIN_PASSWORD_REFUSAL);
     }
     this.assertPasswordPolicy(password);
     await this.assertAdmitted(normalizedEmail, 'admin-create');
@@ -345,17 +400,110 @@ export class AuthService {
     // EXPLICITLY supplied name is persisted too; a blank name keeps the
     // existing display name rather than clobbering it with the local-part
     // fallback. `returning()` yields the authoritative row either way.
+    // A reset is a password change like any other: the session generation
+    // moves on with it, so every session opened with the old password ends,
+    // and a self-service change that read the row before it is refused
+    // rather than overwriting the reset (see {@link changePassword}).
+    const sessionVersion = sql`${users.sessionVersion} + 1`;
     const [row] = await this.db
       .insert(users)
       .values({ email: normalizedEmail, emailBidx: normalizedEmail, name: displayName, passwordHash })
       .onConflictDoUpdate({
         target: users.emailBidx,
         set: suppliedName
-          ? { passwordHash, name: suppliedName, updatedAt: new Date() }
-          : { passwordHash, updatedAt: new Date() },
+          ? { passwordHash, sessionVersion, name: suppliedName, updatedAt: new Date() }
+          : { passwordHash, sessionVersion, updatedAt: new Date() },
       })
       .returning();
+    this.activeCache.delete(row.id);
     return this.toClientUser(row);
+  }
+
+  /**
+   * An account for single sign-on, or for a password somebody sets later:
+   * created without one, and for an address that already has an account,
+   * nothing changes but an explicitly given name. `created` says which
+   * happened, from the one statement that did it (see {@link CREATED}): an
+   * invite is only an invite when the account is new.
+   */
+  async createAccountWithoutPassword(
+    email: string,
+    name: string | undefined,
+  ): Promise<{ user: AuthUser; created: boolean }> {
+    const normalizedEmail = canonicalEmail(email ?? '');
+    if (!EMAIL_REGEX.test(normalizedEmail)) {
+      throw new Error('Invalid email');
+    }
+    const suppliedName = (name ?? '').trim();
+    const displayName = suppliedName || normalizedEmail.split('@')[0] || normalizedEmail;
+    await this.assertAdmitted(normalizedEmail, 'admin-create');
+    const [row] = await this.db
+      .insert(users)
+      .values({ email: normalizedEmail, emailBidx: normalizedEmail, name: displayName })
+      .onConflictDoUpdate({
+        target: users.emailBidx,
+        set: suppliedName ? { name: suppliedName, updatedAt: new Date() } : { updatedAt: new Date() },
+      })
+      .returning({ ...getTableColumns(users), created: CREATED });
+    return { user: this.toClientUser(row), created: row.created === true };
+  }
+
+  /**
+   * An invite's starting password: create the account with it, or give it to
+   * an existing account that is switched on and has no password yet — never
+   * to one that has a password of its own or is switched off. The test and
+   * the write are ONE statement (the upsert's `setWhere`), so a password the
+   * person sets between the admin reading the account list and sending the
+   * invite is never overwritten; `passwordSet` says which happened, and
+   * `created` whether the account is new (see {@link CREATED}).
+   *
+   * The deployment admin has its own password (the environment's): it is
+   * left as it is, as {@link createAccount} would refuse to store one. The
+   * accounts the platform runs its own work as are refused outright: a
+   * password would make them able to sign in.
+   *
+   * When nothing was written, `deactivated` tells a switched-off account
+   * apart from one that has a password of its own.
+   */
+  async createAccountWithStartingPassword(
+    email: string,
+    password: string,
+  ): Promise<{ user: AuthUser; created: boolean; passwordSet: boolean; deactivated: boolean }> {
+    const normalizedEmail = canonicalEmail(email ?? '');
+    if (!EMAIL_REGEX.test(normalizedEmail)) {
+      throw new Error('Invalid email');
+    }
+    this.assertNotSystemAccount(normalizedEmail);
+    if (this.isEnvAdminEmail(normalizedEmail)) {
+      const [existing] = await this.db.select().from(users).where(eq(users.emailBidx, normalizedEmail)).limit(1);
+      if (existing) {
+        return { user: this.toClientUser(existing), created: false, passwordSet: false, deactivated: existing.deactivatedAt != null };
+      }
+      throw new PasswordRefusedError(ENV_ADMIN_PASSWORD_REFUSAL);
+    }
+    this.assertPasswordPolicy(password);
+    await this.assertAdmitted(normalizedEmail, 'admin-create');
+    const passwordHash = await hashPassword(password);
+    const displayName = normalizedEmail.split('@')[0] || normalizedEmail;
+    // A first password on an existing account is a password write like any
+    // other, so the session generation moves on with it: a self-service
+    // first password that read the row before this one is refused rather
+    // than overwriting it (see {@link changePassword}).
+    const [row] = await this.db
+      .insert(users)
+      .values({ email: normalizedEmail, emailBidx: normalizedEmail, name: displayName, passwordHash })
+      .onConflictDoUpdate({
+        target: users.emailBidx,
+        set: { passwordHash, sessionVersion: sql`${users.sessionVersion} + 1`, updatedAt: new Date() },
+        setWhere: and(isNull(users.passwordHash), isNull(users.deactivatedAt)),
+      })
+      .returning({ ...getTableColumns(users), created: CREATED });
+    if (row) this.activeCache.delete(row.id);
+    if (row) return { user: this.toClientUser(row), created: row.created === true, passwordSet: true, deactivated: false };
+    // The conflicting account has a password or is switched off: untouched.
+    const [existing] = await this.db.select().from(users).where(eq(users.emailBidx, normalizedEmail)).limit(1);
+    if (!existing) throw new Error('Could not set the password');
+    return { user: this.toClientUser(existing), created: false, passwordSet: false, deactivated: existing.deactivatedAt != null };
   }
 
   /**
@@ -378,6 +526,64 @@ export class AuthService {
       this.config.adminPassword.length > 0 &&
       email === this.config.adminEmail
     );
+  }
+
+  /**
+   * Is `email` an owner of this deployment — an address it is configured
+   * with as its owner (`ADMIN_EMAIL`; on Hexis by Bevel cloud, whoever
+   * created the workspace)? Unlike {@link isEnvAdminEmail} this asks nothing
+   * of `ADMIN_PASSWORD`: the cloud never sets one, and its owner must be
+   * protected all the same. Behind {@link deactivate} (which always refuses
+   * an owner) and {@link assertDeletable} (which refuses one who could not
+   * sign back in). Canonicalises both sides, so `email` may be raw.
+   */
+  isOwnerEmail(email: string): boolean {
+    // Not trusted to be text: the accounts API passes a request body's value
+    // in before validating it, and a non-string is simply not an owner.
+    const candidate = typeof email === 'string' ? canonicalEmail(email) : '';
+    return candidate.length > 0 && this.ownerEmails().includes(candidate);
+  }
+
+  /**
+   * An owner is never switched off, but an earlier version did switch off an
+   * owner without a server-held password, and no admin can undo that for a
+   * workspace's only owner. So wherever an owner's row is read to let them
+   * in, a switch-off left on it is cleared — on the row itself, so that the
+   * credentials that read the column directly (API keys, MCP tokens) are
+   * honoured again too. Returns `row` as it now stands; anyone else's row
+   * unchanged.
+   */
+  private async clearOwnerSwitchOff<T extends { id: string; email: string; deactivatedAt: Date | null }>(
+    row: T,
+  ): Promise<T> {
+    if (!row.deactivatedAt || !this.isOwnerEmail(row.email)) return row;
+    await this.db
+      .update(users)
+      .set({ deactivatedAt: null, updatedAt: new Date() })
+      .where(and(eq(users.id, row.id), isNotNull(users.deactivatedAt)));
+    this.activeCache.delete(row.id);
+    return { ...row, deactivatedAt: null };
+  }
+
+  /**
+   * The configured owner addresses, canonical, blanks dropped. One today
+   * (`ADMIN_EMAIL` is a single string); a list so that every owner is
+   * treated alike should the configuration ever carry more.
+   */
+  private ownerEmails(): string[] {
+    return [this.config.adminEmail].map((e) => canonicalEmail(e ?? '')).filter((e) => e.length > 0);
+  }
+
+  /**
+   * Refuse to delete `email`'s account when it is an owner who could not
+   * sign back in afterwards: only an owner whose password the server holds,
+   * with password sign-in on (exactly {@link reportsAsEnvAdmin}), still has a
+   * way in once the row is gone. Anyone else's account passes.
+   */
+  assertDeletable(email: string): void {
+    if (this.isOwnerEmail(email) && !this.reportsAsEnvAdmin(canonicalEmail(email ?? ''))) {
+      throw new AccountChangeRefusedError(OWNER_DELETE_REFUSAL);
+    }
   }
 
   /**
@@ -421,30 +627,49 @@ export class AuthService {
    * environment password is the platform's rescue path into a deployment and
    * is changed there, which is what the Account page says in place of the
    * form.
+   *
+   * A change ends every session opened before it: the row's
+   * `sessionVersion` moves on in the same write, so every token issued
+   * before it is refused at its next request (see {@link resolveSession}).
+   * The caller's own session is the one exception: the token returned here
+   * carries the new generation and is what the caller keeps using.
+   *
+   * The write only lands on the row as it was read. If another session
+   * changed the password between the read and the write, the current
+   * password this one proved is no longer current, so it is refused with
+   * {@link PasswordChangedMeanwhileError} and nothing is written. Two clicks
+   * of one form are the same race.
    */
   async changePassword(
     userId: string,
     currentPassword: string | undefined,
     newPassword: string,
-  ): Promise<void> {
+  ): Promise<{ token: string }> {
     const [user] = await this.db.select().from(users).where(eq(users.id, userId)).limit(1);
-    if (!user) throw new Error('User not found');
+    if (!user) throw new PasswordRefusedError('User not found');
     // Before the policy check, so the deployment admin is told the real reason
     // rather than being sent to fix a password that would be refused anyway.
+    this.assertNotSystemAccount(user.email);
     if (this.isEnvAdminEmail(user.email)) {
-      throw new Error(ENV_ADMIN_PASSWORD_REFUSAL);
+      throw new PasswordRefusedError(ENV_ADMIN_PASSWORD_REFUSAL);
     }
     this.assertPasswordPolicy(newPassword);
     if (user.passwordHash) {
       if (!currentPassword || !(await verifyPassword(currentPassword, user.passwordHash))) {
-        throw new Error('Current password is incorrect');
+        throw new PasswordRefusedError('Current password is incorrect');
       }
     }
     const passwordHash = await hashPassword(newPassword);
-    await this.db
+    const [changed] = await this.db
       .update(users)
-      .set({ passwordHash, updatedAt: new Date() })
-      .where(eq(users.id, userId));
+      .set({ passwordHash, sessionVersion: sql`${users.sessionVersion} + 1`, updatedAt: new Date() })
+      .where(and(eq(users.id, userId), eq(users.sessionVersion, user.sessionVersion)))
+      .returning();
+    if (!changed) throw new PasswordChangedMeanwhileError();
+    // Sessions read the row fresh (see resolveSession); the cached entry is
+    // dropped so nothing in this process keeps the old generation either.
+    this.activeCache.delete(userId);
+    return { token: this.signToken(changed) };
   }
 
   /**
@@ -461,6 +686,10 @@ export class AuthService {
       name: string;
       hasPassword: boolean;
       isEnvAdmin: boolean;
+      /** One of the deployment's owners (`ADMIN_EMAIL`), with or without a server-held password. */
+      isOwner: boolean;
+      /** An owner whose account may be deleted, since they can sign back in (see {@link assertDeletable}); false for everyone else. */
+      ownerCanBeDeleted: boolean;
       /** When an admin switched the account off; null while it is on. */
       deactivatedAt: Date | null;
       /** One of the accounts the platform runs its own work as: never switched off, nobody signs in with it. */
@@ -472,27 +701,46 @@ export class AuthService {
     // would sort by IV noise. The table is one row per team member.
     const rows = await this.db.select().from(users);
     return rows
-      .map((row) => ({
-        id: row.id,
-        email: row.email,
-        name: row.name,
-        hasPassword: row.passwordHash != null,
-        isEnvAdmin: this.reportsAsEnvAdmin(row.email),
-        deactivatedAt: row.deactivatedAt,
-        isSystem: SYSTEM_ACCOUNT_EMAILS.includes(row.email),
-        createdAt: row.createdAt,
-      }))
+      .map((row) => {
+        const isEnvAdmin = this.reportsAsEnvAdmin(row.email);
+        const isOwner = this.isOwnerEmail(row.email);
+        return {
+          id: row.id,
+          email: row.email,
+          name: row.name,
+          hasPassword: row.passwordHash != null,
+          isEnvAdmin,
+          isOwner,
+          ownerCanBeDeleted: isOwner && isEnvAdmin,
+          deactivatedAt: row.deactivatedAt,
+          isSystem: SYSTEM_ACCOUNT_EMAILS.includes(row.email),
+          createdAt: row.createdAt,
+        };
+      })
       .sort((a, b) => a.email.localeCompare(b.email));
+  }
+
+  /** Every password write calls this first: the system accounts never get one. */
+  private assertNotSystemAccount(normalizedEmail: string): void {
+    if (SYSTEM_ACCOUNT_EMAILS.includes(normalizedEmail)) {
+      throw new PasswordRefusedError(SYSTEM_ACCOUNT_PASSWORD_REFUSAL);
+    }
   }
 
   private assertPasswordPolicy(password: string): void {
     if ((password ?? '').length < MIN_PASSWORD_LENGTH) {
-      throw new Error(`Password must be at least ${MIN_PASSWORD_LENGTH} characters`);
+      throw new PasswordRefusedError(`Password must be at least ${MIN_PASSWORD_LENGTH} characters`);
     }
   }
 
-  private signToken(userId: string, email: string): string {
-    return jwt.sign({ userId, email }, this.config.jwtSecret, { expiresIn: '7d' });
+  /**
+   * A session token for `user`, stamped with the session generation its row
+   * is at (`sv`): {@link resolveSession} refuses it once the row moves on.
+   */
+  private signToken(user: { id: string; email: string; sessionVersion: number }): string {
+    return jwt.sign({ userId: user.id, email: user.email, sv: user.sessionVersion }, this.config.jwtSecret, {
+      expiresIn: '7d',
+    });
   }
 
   /**
@@ -511,7 +759,7 @@ export class AuthService {
     if (!EMAIL_REGEX.test(normalizedEmail)) return null;
     await this.assertAdmitted(normalizedEmail, 'embed');
     const displayName = (name ?? '').trim() || normalizedEmail.split('@')[0] || normalizedEmail;
-    const user = await this.upsertUserByEmail(normalizedEmail, displayName);
+    const user = await this.clearOwnerSwitchOff(await this.upsertUserByEmail(normalizedEmail, displayName));
     if (user.deactivatedAt) throw new AccountDeactivatedError();
     return { id: user.id, email: user.email, name: user.name };
   }
@@ -527,39 +775,55 @@ export class AuthService {
 
   /**
    * The signature and expiry of a session token, and nothing else — whether
-   * its account is still on is {@link resolveSession}'s question. Every
+   * its account is still on, and whether the session is still honoured, are
+   * {@link resolveSession}'s questions. Every
    * place a session is ACCEPTED goes through that one.
    */
   verifyToken(token: string): { userId: string; email: string } {
+    const { userId, email } = this.decodeSession(token);
+    return { userId, email };
+  }
+
+  /** {@link verifyToken} plus the session generation the token was issued at. */
+  private decodeSession(token: string): { userId: string; email: string; sessionVersion: number } {
     const decoded = jwt.verify(token, this.config.jwtSecret) as {
       userId: string;
       email: string;
+      sv?: number;
     };
-    return { userId: decoded.userId, email: decoded.email };
+    // A token issued before sessions had generations carries none: it is of
+    // the first one, which is where every row started.
+    return { userId: decoded.userId, email: decoded.email, sessionVersion: decoded.sv ?? 0 };
   }
 
   /**
-   * A session token that may still be used: signed by us, not expired, and
-   * its account still on. A token outlives a deactivation by up to seven
+   * A session token that may still be used: signed by us, not expired, its
+   * account still on, and issued since the account's password last changed.
+   * A token outlives a deactivation or a password change by up to seven
    * days, so the signature alone no longer says the bearer may enter.
-   * Throws for an invalid token, {@link AccountDeactivatedError} for one
-   * whose account was switched off.
+   * Throws for an invalid token, {@link SessionEndedError} for one a
+   * password change ended, {@link AccountDeactivatedError} for one whose
+   * account was switched off.
    */
   async resolveSession(token: string): Promise<{ userId: string; email: string }> {
-    const claim = this.verifyToken(token);
-    let active: boolean;
+    const { sessionVersion, ...claim } = this.decodeSession(token);
+    let account: { active: boolean; sessionVersion: number };
     try {
-      active = await this.isActive(claim.userId);
+      // Read fresh, never from the cache: a password changed on another
+      // replica must end this token at its very next request, and only the
+      // row can say it was.
+      account = await this.accountState(claim.userId, { fresh: true });
     } catch (err) {
       // The token is fine; the database is not. Said apart from a refusal, so
       // an outage is a 500 and not a sign-out (see `AuthBackendError`).
       throw new AuthBackendError(err);
     }
-    if (!active) throw new AccountDeactivatedError();
+    if (!account.active) throw new AccountDeactivatedError();
+    if (sessionVersion !== account.sessionVersion) throw new SessionEndedError();
     return claim;
   }
 
-  private readonly activeCache = new Map<string, { active: boolean; at: number }>();
+  private readonly activeCache = new Map<string, { active: boolean; sessionVersion: number; at: number }>();
 
   /**
    * Whether the account behind a credential is on: it exists and no admin
@@ -574,20 +838,67 @@ export class AuthService {
    * environment password signs it in regardless (see `loginWithPassword`),
    * and a session that sign-in mints must then be usable too, or the way
    * back into a deployment would lead nowhere. {@link deactivate} refuses
-   * the account, but a host may write the column itself.
+   * the account, but a host may write the column itself. Any owner's
+   * leftover switch-off is cleared here, as at sign-in
+   * ({@link clearOwnerSwitchOff}).
    */
   async isActive(userId: string): Promise<boolean> {
+    return (await this.accountState(userId)).active;
+  }
+
+  /**
+   * {@link isActive}'s answer and the session generation the account is at,
+   * read and cached together; a password change in this process forgets the
+   * entry at once, as switching an account off does. `fresh` reads the row
+   * whatever the cache holds (and refreshes it): {@link resolveSession}'s
+   * question, since a session's generation must hold on every replica.
+   */
+  private async accountState(
+    userId: string,
+    { fresh = false }: { fresh?: boolean } = {},
+  ): Promise<{ active: boolean; sessionVersion: number }> {
     const now = Date.now();
     const hit = this.activeCache.get(userId);
-    if (hit && now - hit.at < ACTIVE_CACHE_MS) return hit.active;
-    const [row] = await this.db
-      .select({ email: users.email, deactivatedAt: users.deactivatedAt })
+    if (!fresh && hit && now - hit.at < ACTIVE_CACHE_MS) return hit;
+    const [found] = await this.db
+      .select({
+        id: users.id,
+        email: users.email,
+        deactivatedAt: users.deactivatedAt,
+        sessionVersion: users.sessionVersion,
+      })
       .from(users)
       .where(eq(users.id, userId))
       .limit(1);
+    const row = found && (await this.clearOwnerSwitchOff(found));
     const active = row !== undefined && (!row.deactivatedAt || this.isEnvAdminEmail(row.email ?? ''));
-    this.activeCache.set(userId, { active, at: now });
-    return active;
+    const entry = { active, sessionVersion: row?.sessionVersion ?? 0, at: now };
+    this.activeCache.set(userId, entry);
+    return entry;
+  }
+
+  /**
+   * Run `write` only while `email` is not switched off, and keep it so until
+   * `write` has finished: a transaction takes the address's switch lock (see
+   * account-switch-lock), reads the account and stays open across `write`.
+   * Every write that switches an account off, or creates one switched off,
+   * takes the same lock first, so it either committed before the read (and
+   * `write` is refused) or waits until `write` is done. An address with no
+   * account yet counts as switched on. A switched-off account throws a 409
+   * `deactivated` and `write` never runs.
+   */
+  async whileSwitchedOn(email: string, write: () => Promise<void>): Promise<void> {
+    await this.db.transaction(async (tx) => {
+      await takeAccountSwitchLock(tx, email);
+      const [account] = await tx
+        .select({ deactivatedAt: users.deactivatedAt })
+        .from(users)
+        .where(eq(users.emailBidx, canonicalEmail(email)));
+      if (account?.deactivatedAt) {
+        throw new VersionControlDomainError('This account is switched off', 409, { kind: 'deactivated' });
+      }
+      await write();
+    });
   }
 
   /**
@@ -596,9 +907,10 @@ export class AuthService {
    * {@link isActive}). Idempotent: an account already off keeps the moment
    * it was first switched off.
    *
-   * The deployment admin is refused: the environment password is the way
-   * back into a deployment whose every other admin is gone, and switching
-   * it off would close that door from inside. So are the machine accounts
+   * An owner is refused, on every deployment, whether or not the server
+   * holds a password for them: switching the owner off locks them out of
+   * their own workspace (and, where `ADMIN_PASSWORD` is set, closes the
+   * way back into a deployment whose every other admin is gone). So are the machine accounts
    * core runs its own work as. Refusing an admin's own account is the
    * route's concern, since it knows who is asking.
    *
@@ -607,16 +919,21 @@ export class AuthService {
   async deactivate(userId: string): Promise<boolean> {
     const [row] = await this.db.select().from(users).where(eq(users.id, userId)).limit(1);
     if (!row) return false;
-    if (this.isEnvAdminEmail(row.email)) {
-      throw new AccountChangeRefusedError('The deployment admin cannot be switched off: its password in the environment is the way back in.');
+    if (this.isOwnerEmail(row.email)) {
+      throw new AccountChangeRefusedError(OWNER_SWITCH_OFF_REFUSAL);
     }
     if (SYSTEM_ACCOUNT_EMAILS.includes(row.email)) {
       throw new AccountChangeRefusedError('This account belongs to the platform itself and cannot be switched off.');
     }
-    await this.db
-      .update(users)
-      .set({ deactivatedAt: new Date(), updatedAt: new Date() })
-      .where(and(eq(users.id, userId), isNull(users.deactivatedAt)));
+    // Under the switch lock, so a promotion that checked this account was
+    // on is written before this lands (see account-switch-lock).
+    await this.db.transaction(async (tx) => {
+      await takeAccountSwitchLock(tx, row.email);
+      await tx
+        .update(users)
+        .set({ deactivatedAt: new Date(), updatedAt: new Date() })
+        .where(and(eq(users.id, userId), isNull(users.deactivatedAt)));
+    });
     this.activeCache.delete(userId);
     return true;
   }
@@ -647,26 +964,27 @@ export class AuthService {
   }
 
   /**
-   * Resolve a set of `authorId` hashes back to the app users that produced
-   * them. Used by the PR list to display the human who triggered each PR
-   * instead of the shared GitHub service account.
+   * The live accounts behind a set of addresses — the approvers of a change
+   * request just opened, which the version-control module hands to the deployment's
+   * notification listeners as people with accounts (`ApproverAccounts`).
    *
-   * Loads all users and hashes them in-process rather than indexing on a
-   * stored hash column — the user table is small (one row per team member)
-   * and refreshes are infrequent (PR list polls at 60s), so the cost is
-   * negligible and we avoid carrying a denormalised hash column.
+   * One indexed read through the email's blind index, never a scan of every
+   * account: this is asked on every change request opened, and a deployment
+   * is as large as it is. Switched-off accounts are left out — a person who
+   * cannot act on a request is not told of it — so a caller that needs them
+   * asks another way. Keyed by the canonical address asked for.
    */
-  async findUsersByEmailHash(
-    hashes: Set<string>,
+  async findActiveAccountsByEmail(
+    emails: readonly string[],
   ): Promise<Map<string, { id: string; email: string; name: string }>> {
     const result = new Map<string, { id: string; email: string; name: string }>();
-    if (hashes.size === 0) return result;
-    const rows = await this.db.select().from(users);
-    for (const row of rows) {
-      const h = hashEmail(row.email);
-      if (!hashes.has(h)) continue;
-      result.set(h, { id: row.id, email: row.email, name: row.name });
-    }
+    const canonical = [...new Set(emails.map((e) => canonicalEmail(e)).filter(Boolean))];
+    if (canonical.length === 0) return result;
+    const rows = await this.db
+      .select({ id: users.id, email: users.email, name: users.name })
+      .from(users)
+      .where(and(inArray(users.emailBidx, canonical), isNull(users.deactivatedAt)));
+    for (const row of rows) result.set(canonicalEmail(row.email), { id: row.id, email: row.email, name: row.name });
     return result;
   }
 

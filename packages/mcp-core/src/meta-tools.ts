@@ -4,6 +4,8 @@ import { utcpNameToTsInterfaceName, findToolsByNames, sanitizeIdentifier } from 
 import { chainExample, type ChainExample, type ChainExampleTool } from './chain-example.js';
 import { toCallToolResult, toolError, describeToolFailure, withTransportDetail, omitImagePayloads } from './results.js';
 import { retiredToolInFailure } from './retired-tools.js';
+import { withCallExample } from './tool-interface.js';
+import { toolTitle } from './tool-title.js';
 import {
   CHAIN_TIMEOUT_DEFAULT_MS,
   CHAIN_TIMEOUT_MAX_MS,
@@ -85,7 +87,7 @@ export const CHAIN_FAILURES_RULE = `Failures are answered, never dropped: a chai
 
 /** What a chain does with a result too large to return. Placed as {@link CHAIN_FAILURES_RULE} is. */
 export const CHAIN_LARGE_RESULTS_RULE =
-  'Large results: if the combined result+logs exceed `max_output_size` (default 200000 chars) the full JSON is spilled to a shared store and you get back a `__tool_chain_spill__/…` ref instead. Read it with `read_file` (pass that ref as `path` — `branch` is ignored — plus `offset`/`limit` to slice it), or better, re-run a narrower chain that returns only what you need.';
+  'Large results: if the combined result+logs exceed `max_output_size` (default 200000 chars) the full JSON is spilled to a shared store and you get back a `__tool_chain_spill__/…` ref instead. Read it with `read_file` (pass that ref as `path`, any existing branch as `branch`, plus `offset`/`limit` to slice it), or better, re-run a narrower chain that returns only what you need.';
 
 /**
  * What a chained read of an IMAGE gives back. On a surface with the shared
@@ -119,7 +121,8 @@ function callToolChainDescription(example: ChainExample, sharedRulesPointer?: st
   // A name the catalog really has, or no name: see `ChainExample.name`.
   const forInstance = name ? ` (e.g. \`${name}\`)` : '';
   const howToWriteOne = [
-    `Execute a short JavaScript program with direct access to every registered UTCP tool as a synchronous function. Call tools as \`${ns}.<tool>({ body: { ...args } })\` with NO \`await\` (results are already resolved), and \`return\` the final value.${worked} Every argument a tool declares REQUIRED must be present — \`tools_info\` gives the exact shapes, and for the knowledge-base tools that includes \`branch\`. The runtime is plain JavaScript (no type annotations / no TypeScript-only syntax), plus \`atob\`, \`btoa\`, \`TextEncoder\` and \`TextDecoder\` for base64 and UTF-8 bytes, as in a browser. There is no \`Buffer\`, no \`fetch\` and no \`require\`.`,
+    `Execute a short JavaScript program with direct access to every registered UTCP tool as a synchronous function, with NO \`await\` (results are already resolved), and \`return\` the final value.${worked} The runtime is plain JavaScript (no type annotations / no TypeScript-only syntax), plus \`atob\`, \`btoa\`, \`TextEncoder\` and \`TextDecoder\` for base64 and UTF-8 bytes, as in a browser. There is no \`Buffer\`, no \`fetch\` and no \`require\`.`,
+    `There is NO single calling shape: call each tool as the \`Call:\` line atop its description shows; every tool in \`${ns}\` has one. Mismatched arguments are refused before anything runs.`,
     `Discover first: \`list_tools\` lists every tool in callable form${forInstance}; \`tools_info\` returns their exact argument + return shapes — do not guess. Batch multiple tool calls into one chain to avoid a round-trip per call. The chain runs with your own connection key, so it can only reach the tools you can already call directly.`,
   ];
   if (sharedRulesPointer !== undefined) return `${howToWriteOne.join('\n\n')}${sharedRulesPointer}`;
@@ -136,7 +139,24 @@ export interface CodeModeMetaToolsOptions {
    * Absent, the description carries the chain's rules itself.
    */
   sharedRulesPointer?: string;
+  /**
+   * The read-only hint each meta-tool is listed with, by name, where the
+   * deployment overrides it. A name left out lists its built-in value
+   * ({@link META_TOOL_READ_ONLY}).
+   */
+  readOnly?: Readonly<Record<string, boolean>>;
 }
+
+/**
+ * Each meta-tool's built-in read-only hint. `list_tools` and `tools_info`
+ * describe the registry and change nothing; `call_tool_chain` runs code that
+ * can call any tool, writers included, so it is not read-only.
+ */
+export const META_TOOL_READ_ONLY: Readonly<Record<string, boolean>> = Object.freeze({
+  list_tools: true,
+  tools_info: true,
+  call_tool_chain: false,
+});
 
 /**
  * The three meta-tools, with every example written against the namespace this
@@ -158,7 +178,7 @@ export function codeModeMetaTools(
 ): McpTool[] {
   const example = chainExample(namespace, tools);
   const { name } = example;
-  return [
+  const metaTools = withCallExamples([
     {
       name: 'list_tools',
       description: `List every UTCP tool currently registered, in TypeScript-accessible form${name ? ` (e.g. \`${name}\`)` : ''} for use inside \`call_tool_chain\`.`,
@@ -196,7 +216,27 @@ export function codeModeMetaTools(
         additionalProperties: false,
       } as McpTool['inputSchema'],
     },
-  ];
+  ]);
+  // The one annotation the platform emits (see `toListedTool`): the
+  // deployment's override where it has one, the built-in value otherwise.
+  return metaTools.map((t) => {
+    const override = options.readOnly && Object.hasOwn(options.readOnly, t.name) ? options.readOnly[t.name] : undefined;
+    const readOnlyHint = typeof override === 'boolean' ? override : META_TOOL_READ_ONLY[t.name] === true;
+    return { ...t, title: toolTitle(t.name), annotations: { readOnlyHint } };
+  });
+}
+
+/**
+ * Each of the three with its call example ahead of its description, from the
+ * same generator every other tool's comes from — so "every description opens
+ * with its call" holds with no exception an agent has to learn.
+ *
+ * These three are called DIRECTLY over MCP rather than from inside a chain, so
+ * the example shows that shape: the tool's name and its required arguments,
+ * with no namespace in front.
+ */
+function withCallExamples(tools: McpTool[]): McpTool[] {
+  return tools.map((t) => ({ ...t, description: withCallExample(t.description, t.name, t.inputSchema) }));
 }
 
 /**
@@ -267,8 +307,18 @@ export async function dispatchMetaTool(
       const resolved = await findToolsByNames(client, names);
       for (const n of names) {
         const found = resolved.get(n);
-        if (found) interfaces.push(client.toolToTypeScriptInterface(found.tool));
-        else notFound.push(n);
+        // The call example travels with the interface too: `tools_info` is
+        // where an agent writing a chain reads the shape, and reading it there
+        // without the example is how a flat tool's arguments end up in a
+        // `body`. Added to a COPY — the repository's tool is not ours to edit.
+        if (found) {
+          interfaces.push(
+            client.toolToTypeScriptInterface({
+              ...found.tool,
+              description: withCallExample(found.tool.description, found.utcpName, found.tool.inputs),
+            }),
+          );
+        } else notFound.push(n);
       }
       return toCallToolResult({ interfaces: interfaces.join('\n\n'), not_found: notFound });
     }
@@ -347,7 +397,7 @@ export async function dispatchMetaTool(
       truncated: true,
       result_ref: ref,
       result_bytes: bytes,
-      message: `Result+logs payload was ${fullJson.length} characters (exceeded max_output_size of ${maxOutputSize}). Full JSON saved to the shared spill store as \`${ref}\`. Read it back with \`read_file\` (pass that ref as \`path\`, \`branch\` ignored, plus \`offset\`/\`limit\` to slice), or re-run a narrower chain that returns only what you need.`,
+      message: `Result+logs payload was ${fullJson.length} characters (exceeded max_output_size of ${maxOutputSize}). Full JSON saved to the shared spill store as \`${ref}\`. Read it back with \`read_file\` (pass that ref as \`path\`, any existing branch as \`branch\`, plus \`offset\`/\`limit\` to slice), or re-run a narrower chain that returns only what you need.`,
     });
   } catch (err) {
     // `runToolChain` answers rather than throws, so a chain no longer reaches

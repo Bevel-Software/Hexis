@@ -1,0 +1,10 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "engineering-starter",
+  "displayName": "Engineering starter",
+  "description": "Think an idea through before building it, pressure-test a plan's scope, lock a plan's architecture and tests, and review a diff before it lands.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Garry Tan (gstack), adapted for Hexis by Bevel"
+  }
+}

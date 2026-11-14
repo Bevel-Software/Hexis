@@ -18,7 +18,10 @@ export interface GroupRosterEntry {
   canonical: string;
   displayName: string;
   members: string[];
-  /** Every access rule referencing this group — drives the delete warning. */
+  /**
+   * Every access rule referencing this group in a file the viewer can read —
+   * drives the delete warning.
+   */
   referencedBy: { path: string; verb: string }[];
   /**
    * Canonical names of roles carrying an assignment to this group — deleting
@@ -27,6 +30,13 @@ export interface GroupRosterEntry {
    * defensively: a skewed server may omit it, and rendering must not throw.
    */
   assignedToRoles?: string[];
+  /**
+   * Access rules naming this group's name BARE while a role of the same name
+   * exists — a bare name means the role, so these grant the role, not this
+   * group. Rewritten as `group/<Name>` if the group was meant. Optional
+   * defensively, like `assignedToRoles`.
+   */
+  bareNameResolvesToRole?: { path: string; verb: string }[];
 }
 
 /**

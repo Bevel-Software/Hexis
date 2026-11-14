@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react';
+import { useRef, useState, type FormEvent } from 'react';
 import { PageShell } from '../../../shared/components/PageShell';
 import { useAuth } from '../state/auth.context';
 import { changePassword } from '../services/account.api';
@@ -25,15 +25,20 @@ export function AccountPage() {
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  // Set synchronously, so a second click landing before the disabled button
+  // renders is dropped too: one change at a time, never two racing.
+  const inFlight = useRef(false);
 
   async function handleSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
+    if (inFlight.current) return;
     setError(null);
     setSaved(false);
     if (newPassword !== confirmPassword) {
       setError('New passwords do not match');
       return;
     }
+    inFlight.current = true;
     setSubmitting(true);
     try {
       await changePassword(currentPassword || undefined, newPassword);
@@ -44,6 +49,7 @@ export function AccountPage() {
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not change password');
     } finally {
+      inFlight.current = false;
       setSubmitting(false);
     }
   }
@@ -113,7 +119,7 @@ export function AccountPage() {
             )}
             {saved && (
               <div className="text-sm text-emerald-700" role="status">
-                Password changed.
+                Password changed. Every other session has been signed out.
               </div>
             )}
 

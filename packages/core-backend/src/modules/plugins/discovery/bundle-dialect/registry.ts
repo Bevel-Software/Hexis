@@ -18,7 +18,7 @@ import {
   judgeMcpServerEntry,
   type PortableHttpEntry,
   type PortableStdioEntry,
-} from '../../../tool-manuals/mcp-json-discovery.js';
+} from '../../../tool-manuals/index.js';
 
 export interface RegistryServer {
   /** The registry's own key: what a profile lists, unique across the file. */

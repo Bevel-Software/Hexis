@@ -62,6 +62,8 @@ FROM node:22-slim AS production
 RUN corepack enable && corepack prepare pnpm@10.33.3 --activate
 
 # git backs every workspace operation (clone/commit/push of the KB repo).
+# ripgrep (`rg`) is what the agents' grep tool searches with; the server
+# refuses to start without it (`ripgrep-version.ts`).
 # tini is PID 1: the reaper. The server spawns git, MCP servers and the
 # shell tool's commands; a grandchild that outlives its parent reparents to
 # PID 1, and a node process there never reaps it — zombies accumulate until
@@ -74,7 +76,7 @@ RUN corepack enable && corepack prepare pnpm@10.33.3 --activate
 # ENTRYPOINT registers it as a child subreaper for exactly that case, so it
 # still reaps its subtree instead of warning on every boot.)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      git ca-certificates tini \
+      git ca-certificates tini ripgrep \
     && rm -rf /var/lib/apt/lists/*
 
 # tsx runs the TypeScript server shell at runtime. It lives in apps/server's
@@ -100,8 +102,9 @@ COPY apps/web/package.json apps/web/
 RUN pnpm install --frozen-lockfile --prod
 
 # Compiled packages + their packaged assets. `coreMigrationsDir()` /
-# `defaultKbTemplateDir()` / `agentGuideDir()` (src/assets.ts) resolve these
-# relative to the package root, so the layout must mirror the source tree.
+# `defaultKbTemplateDir()` / `agentGuideDir()` / `mcpAppDir()` /
+# `defaultStarterPacksDir()` (src/assets.ts) resolve these relative to the
+# package root, so the layout must mirror the source tree.
 # Every folder assets.ts names must be copied here: a missing one is not found
 # until the first request that reads it, and `agent-guide` is read while the
 # tool list is built, so leaving it out took every agent surface down on the
@@ -113,6 +116,8 @@ COPY --from=builder /app/packages/core-backend/dist packages/core-backend/dist
 COPY --from=builder /app/packages/core-backend/migrations packages/core-backend/migrations
 COPY --from=builder /app/packages/core-backend/kb-template packages/core-backend/kb-template
 COPY --from=builder /app/packages/core-backend/agent-guide packages/core-backend/agent-guide
+COPY --from=builder /app/packages/core-backend/mcp-app packages/core-backend/mcp-app
+COPY --from=builder /app/packages/core-backend/starter-packs packages/core-backend/starter-packs
 
 # The server shell (tsx runs TypeScript directly) + the built SPA it serves.
 COPY --from=builder /app/apps/server/src apps/server/src

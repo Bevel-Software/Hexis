@@ -296,45 +296,270 @@ function escapeForScriptBody(source: string): string {
  * (`HtmlRenderer` / the embed) decides whether and how to navigate.
  *
  * Two entry points:
- *   - `window.bevel.openNode(href)` — for programmatic viewers (e.g. a d3 graph
- *     whose node `click` handler wants to open the underlying node).
- *   - A delegated click listener on `<a href>` — for plain HTML links. Pure
- *     in-page anchors (`#…`) are left alone so they still scroll the document.
+ *   - `window.bevel.openNode(href)` (and its alias `window.bevel.navigate`) —
+ *     for programmatic viewers (e.g. a d3 graph whose node `click` handler
+ *     wants to open the underlying node).
+ *   - A delegated click listener on `<a href>` — for plain HTML links.
+ *
+ * A bare fragment (`#totals`) is the one address the bridge keeps to itself,
+ * by either route: it scrolls the element with that id into view inside the
+ * frame and posts nothing. The browser cannot be left to do it — a `srcdoc`
+ * frame resolves `#totals` against the APP's URL, so the default action
+ * navigates the frame away and unloads the page. A fragment naming no element
+ * does nothing, except `#` and `#top`, which scroll to the top as a browser
+ * would. A click whose default a handler of the page already cancelled is
+ * left to that handler. The `html-views` section of the agent guide states this rule, and
+ * `htmlViewsGuide.test.ts` holds the two together.
  */
 const NAV_BRIDGE = `
 ;(function () {
+  // A written href is read the way a browser reads it before the bridge
+  // decides anything — the same rule as \`normalizeHref\` in the parent, kept
+  // here in ES5 because this source is a string injected into the iframe and
+  // cannot import. Without it a padded '  #goal  ' would be posted to the
+  // parent instead of scrolled to here.
+  function normalize(url) {
+    var s = url.replace(/[\\t\\n\\r]/g, '');
+    var start = 0;
+    var end = s.length;
+    while (start < end && s.charCodeAt(start) <= 0x20) start++;
+    while (end > start && s.charCodeAt(end - 1) <= 0x20) end--;
+    return s.slice(start, end);
+  }
+  function findTarget(id) {
+    if (id === '') return null;
+    var el = document.getElementById(id);
+    if (el) return el;
+    // The standard's fallback is the first <a name="…"> — an anchor, and only
+    // an anchor. A form control's name is not a fragment target: a browser
+    // leaves '#query' alone when only <input name="query"> carries it.
+    var named = document.getElementsByName ? document.getElementsByName(id) : null;
+    for (var i = 0; named && i < named.length; i++) {
+      if (named[i].tagName && named[i].tagName.toUpperCase() === 'A') return named[i];
+    }
+    return null;
+  }
+  // A bare fragment is an in-page jump, scrolled here inside the frame. The
+  // target is found as the HTML standard finds it: the fragment as written
+  // first, its percent-decoding only when that names nothing.
+  function jumpTo(fragment) {
+    if (typeof document === 'undefined') return;
+    var id = fragment.slice(1);
+    var el = findTarget(id);
+    if (!el) {
+      var decoded = id;
+      try {
+        decoded = decodeURIComponent(id);
+      } catch (err) {
+        decoded = id;
+      }
+      if (decoded !== id) el = findTarget(decoded);
+    }
+    if (el) {
+      el.scrollIntoView();
+      return;
+    }
+    if (id === '' || id.toLowerCase() === 'top') globalThis.scrollTo(0, 0);
+  }
   function navigate(target) {
-    if (typeof target !== 'string' || target === '') return;
+    if (typeof target !== 'string') return;
+    var href = normalize(target);
+    if (href === '') return;
+    if (href.charAt(0) === '#') {
+      jumpTo(href);
+      return;
+    }
     parent.postMessage({ type: 'bevel.navigate', href: target }, '*');
   }
   globalThis.bevel.openNode = navigate;
   globalThis.bevel.navigate = navigate;
-  if (typeof document !== 'undefined') {
-    // A written href is read the way a browser reads it before the bridge
-    // decides anything — the same rule as \`normalizeHref\` in the parent, kept
-    // here in ES5 because this source is a string injected into the iframe and
-    // cannot import. Without it a padded '  #goal  ' would be posted to the
-    // parent instead of left to the browser to scroll.
-    function normalize(url) {
-      var s = url.replace(/[\\t\\n\\r]/g, '');
-      var start = 0;
-      var end = s.length;
-      while (start < end && s.charCodeAt(start) <= 0x20) start++;
-      while (end > start && s.charCodeAt(end - 1) <= 0x20) end--;
-      return s.slice(start, end);
+  // A link that names this page's own file with a fragment
+  // ('Roadmap.html#q3') is posted like any path; the parent recognises the
+  // file and hands the fragment back to be scrolled here, as '#q3' is.
+  if (typeof globalThis.addEventListener === 'function') globalThis.addEventListener('message', function (event) {
+    if (event.source !== parent) return;
+    var msg = event.data;
+    if (!msg || typeof msg !== 'object' || msg.type !== 'bevel.jump' || typeof msg.hash !== 'string') return;
+    var hash = normalize(msg.hash);
+    if (hash.charAt(0) === '#') jumpTo(hash);
+  });
+  // A click the reader asked a NEW TAB of — Ctrl, Cmd or Shift held, or the
+  // middle button (an 'auxclick'; it never fires 'click') — is what a browser
+  // opens a new tab for. The frame cannot: the sandbox has no allow-popups,
+  // so left to the browser it opens nothing, or navigates the frame away.
+  // The parent is asked instead, for any destination, a fragment of this
+  // page included (the parent opens this page at that section).
+  function followLink(e) {
+    if (e.type === 'auxclick' && e.button !== 1) return;
+    var el = e.target;
+    var a = el && el.closest ? el.closest('a[href]') : null;
+    if (!a) return;
+    // A handler of the page's own that already cancelled this click owns
+    // it (a toggle, a hash router); the bridge stays out of its way.
+    if (e.defaultPrevented) return;
+    // Cancelled even when there is nowhere to go: left to the browser, an
+    // empty href reloads the frame against the app's URL, as '#…' would.
+    e.preventDefault();
+    var href = normalize(a.getAttribute('href') || '');
+    if (!href) return;
+    if (e.button === 1 || e.ctrlKey || e.metaKey || e.shiftKey) {
+      parent.postMessage({ type: 'bevel.navigate', href: href, newTab: true }, '*');
+      return;
     }
-    document.addEventListener('click', function (e) {
-      var el = e.target;
-      var a = el && el.closest ? el.closest('a[href]') : null;
-      if (!a) return;
-      var href = normalize(a.getAttribute('href') || '');
-      if (!href || href.charAt(0) === '#') return;
-      e.preventDefault();
-      navigate(href);
-    });
+    navigate(href);
+  }
+  if (typeof document !== 'undefined') {
+    document.addEventListener('click', followLink);
+    document.addEventListener('auxclick', followLink);
   }
 })();
 `;
+
+/**
+ * Runtime that hands an Escape the page did not use to the parent.
+ *
+ * A key pressed while focus is inside the frame never reaches the app: the
+ * frame is its own document, and the sandbox gives the parent no way to
+ * listen in. So once a reader has clicked into a page, the app's Escape — a
+ * card's close, the file page's way out of full screen — went deaf. The frame
+ * posts `bevel.key` instead, and the parent decides what Escape means there
+ * (see `ExitFullScreenButton`).
+ *
+ * Only Escape, and only one the page left alone: an Escape one of the page's
+ * handlers cancelled (closing the page's own popup) is the page's. Which
+ * handlers run before this one is not the bridge's to choose — a handler the
+ * page adds to the window after the bridge ran (a module of its own, a popup
+ * that listens only while open) comes after it in the same phase — so the
+ * bridge does not decide while the key is still being dispatched. It looks
+ * on the next task, once the dispatch is over, every handler of the page's
+ * has had its turn and `defaultPrevented` is final.
+ */
+const KEY_BRIDGE = `
+;(function () {
+  if (typeof globalThis.addEventListener !== 'function') return;
+  globalThis.addEventListener('keydown', function (e) {
+    if (e.key !== 'Escape') return;
+    setTimeout(function () {
+      if (e.defaultPrevented) return;
+      parent.postMessage({ type: 'bevel.key', key: 'Escape' }, '*');
+    }, 0);
+  });
+})();
+`;
+
+/**
+ * How long a page waits for the app to answer one of its tool calls. Long,
+ * because the answer may wait on a person: the first writing call shows a
+ * card, and nothing answers until they choose. A chain runs for up to two
+ * minutes on its own.
+ */
+export const TOOL_CALL_TIMEOUT_MS = 15 * 60 * 1000;
+
+/**
+ * Runtime appended after the nav bridge: `window.bevel.tools`, the viewer's own
+ * tools, and `window.bevel.requireTools()`.
+ *
+ * The frame has no network (`connect-src 'none'`), so a page reaches tools the
+ * way it reaches navigation: it posts `bevel.tool.call` `{ requestId, fn, args }`
+ * to the parent and awaits `bevel.tool.response` `{ requestId, ok, result |
+ * error, code? }`. The parent (an HTML renderer, through `useHtmlToolBridge`)
+ * answers each one over the hosted MCP server with the viewer's session —
+ * after asking the viewer, on the first call that writes. Nothing about the
+ * consent lives in the frame: the card is the app's, drawn outside it, and a
+ * page can neither see nor answer it.
+ *
+ * `uploadFile(file, options)` posts the `File` (or `Blob`) itself, by
+ * structured clone, beside the four options it reads (`name`, `branch`,
+ * `destination`, `mode`); the parent judges both, runs the agent upload path
+ * and posts back only `apply_file_upload`'s answer — the upload token never
+ * enters the frame.
+ *
+ * `tools` exists only where the app can answer it — the hosts that provide
+ * `PageToolsContext` (`htmlToolBridge.ts` lists them: the file page, the skill
+ * page). Everywhere else (the embed, the change-request and history previews)
+ * it is `null`, so a page checks `window.bevel && window.bevel.tools` before
+ * every use and renders without tools when it is null. `requireTools()` is how
+ * a page that needs them asks: it posts `bevel.tools.require` and resolves with the
+ * parent's answer — `true` at once where tools are answered, `false` after the
+ * parent's card offered the way to the platform and the viewer chose either.
+ *
+ * Every response is matched to its request by id, and only from `parent`.
+ * The `html-views` section of the agent guide documents the members, and
+ * `htmlViewsGuide.test.ts` holds the two together.
+ */
+/**
+ * `toolBridge`: what the document's runtime posts as, and whether it gets the
+ * tools. An object carries `documentId`, the identity the app minted for THIS
+ * document, which the runtime stamps on every message it posts (tool calls
+ * and `requireTools()` alike) — so the app can tell a message queued by a
+ * document it has since replaced (the frame's window survives a rebuild in
+ * place) from one the current document posts; `tools: false` gives such a
+ * document `bevel.tools = null` while it still asks as itself. `true` builds
+ * the tools without an identity, for a host that answers one document only;
+ * `false` or absent builds neither.
+ */
+export type ToolBridgeOption = boolean | { documentId: string; tools?: boolean };
+
+function toolBridgeRuntime(option: ToolBridgeOption | undefined): string {
+  const withIdentity = typeof option === 'object' && option !== null ? option : null;
+  const enabled = option === true || (withIdentity !== null && withIdentity.tools !== false);
+  const documentId = withIdentity?.documentId ?? null;
+  return `
+;(function () {
+  var pending = {};
+  var seq = 0;
+  var documentId = ${JSON.stringify(documentId)};
+  function request(type, payload) {
+    return new Promise(function (resolve, reject) {
+      seq += 1;
+      var requestId = 'bevel-tool-' + seq + '-' + Math.random().toString(36).slice(2);
+      var timer = setTimeout(function () {
+        delete pending[requestId];
+        reject(new Error('The app did not answer in time.'));
+      }, ${TOOL_CALL_TIMEOUT_MS});
+      pending[requestId] = { resolve: resolve, reject: reject, timer: timer };
+      var message = { type: type, requestId: requestId };
+      if (documentId !== null) message.documentId = documentId;
+      for (var key in payload) message[key] = payload[key];
+      parent.postMessage(message, '*');
+    });
+  }
+  if (typeof globalThis.addEventListener === 'function') globalThis.addEventListener('message', function (event) {
+    if (event.source !== parent) return;
+    var msg = event.data;
+    if (!msg || typeof msg !== 'object') return;
+    if (msg.type !== 'bevel.tool.response' && msg.type !== 'bevel.tools.require.response') return;
+    var waiting = pending[msg.requestId];
+    if (!waiting) return;
+    delete pending[msg.requestId];
+    clearTimeout(waiting.timer);
+    if (msg.ok) {
+      waiting.resolve(msg.result);
+      return;
+    }
+    var error = new Error(typeof msg.error === 'string' ? msg.error : 'The tool call failed.');
+    if (msg.code) error.code = msg.code;
+    waiting.reject(error);
+  });
+  function call(fn, args) {
+    return request('bevel.tool.call', { fn: fn, args: args });
+  }
+  globalThis.bevel.tools = ${enabled ? `Object.freeze({
+    searchTools: function (query) { return call('searchTools', [query === undefined ? '' : query]); },
+    toolsInfo: function (names) { return call('toolsInfo', [names]); },
+    callTool: function (name, args) { return call('callTool', [name, args === undefined ? {} : args]); },
+    callToolChain: function (code) { return call('callToolChain', [code]); },
+    uploadFile: function (file, options) {
+      var o = options && typeof options === 'object' ? options : {};
+      return call('uploadFile', [file, { name: o.name, branch: o.branch, destination: o.destination, mode: o.mode }]);
+    }
+  })` : 'null'};
+  globalThis.bevel.requireTools = function () {
+    return request('bevel.tools.require', {}).then(function (answer) { return answer === true; });
+  };
+})();
+`;
+}
 
 interface BuildSandboxedHtmlOptions {
   /** Display title (rendered in the iframe doc's <title>). */
@@ -350,6 +575,21 @@ interface BuildSandboxedHtmlOptions {
   includeRuntime?: boolean;
   /** Sanitized agent HTML, body content only. */
   bodyHtml: string;
+  /**
+   * Give the page `window.bevel.tools`: only where the parent answers tool
+   * calls — the hosts `PageToolsContext` lists in `htmlToolBridge.ts`.
+   * Absent or false, the member is `null`; `requireTools()` exists either
+   * way.
+   */
+  toolBridge?: ToolBridgeOption;
+  /**
+   * The branch the page is viewed on — `window.bevel.branch` inside the frame,
+   * so a page that reads its data through the tools and links to what they
+   * name does both on the branch it is shown on, rather than on one written
+   * into its script. Absent where the host has no branch for the page (the
+   * embed, a mail body), where the member is `null`.
+   */
+  branch?: string;
 }
 
 /**
@@ -360,8 +600,10 @@ interface BuildSandboxedHtmlOptions {
  */
 export function buildSandboxedHtml(opts: BuildSandboxedHtmlOptions): string {
   const lib = opts.libModuleSources.map(stripRelativeImports).join('\n\n');
-  const exposeGlobals = `\n;globalThis.bevel = { ${BEVEL_GLOBAL_EXPORTS.join(', ')} };\n`;
-  const inlineLib = escapeForScriptBody(lib + exposeGlobals + NAV_BRIDGE);
+  // `branch` is data, not code: serialized as JSON into the literal, so a
+  // branch name can hold nothing the script would read as source.
+  const exposeGlobals = `\n;globalThis.bevel = { ${BEVEL_GLOBAL_EXPORTS.join(', ')} };\nglobalThis.bevel.branch = ${JSON.stringify(opts.branch ?? null)};\n`;
+  const inlineLib = escapeForScriptBody(lib + exposeGlobals + NAV_BRIDGE + KEY_BRIDGE + toolBridgeRuntime(opts.toolBridge));
 
   // Title and body are content-only — `srcDoc` already isolates them, but we
   // still want to escape the few characters that would terminate the parent

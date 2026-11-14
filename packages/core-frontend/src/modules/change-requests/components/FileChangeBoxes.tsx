@@ -1,8 +1,8 @@
 import { useCallback, useState } from 'react';
 import type { PullRequestSummary } from '@bevel-software/platform-shared';
 import { Banner, Button } from '../../../shared/components';
-import { cancelPullRequest } from '../../pr/services/pr-cancel.api';
-import { useOpenChangeRequests } from '../../workspace/hooks/useOpenChangeRequests';
+import { cancelPullRequest } from '../../pr';
+import { useOpenChangeRequests, displayFileName, fileNameTooltip } from '../../workspace';
 import { PR_STALE_EVENT } from '../../../core/events';
 import { refusalLine, useApplyChangeRequest } from '../hooks/useApplyChangeRequest';
 import { useCrFileDiffs } from '../hooks/useCrFileDiffs';
@@ -105,7 +105,7 @@ export function FileChangeBoxes({
       {applied && (
         <Banner role="status" tone="ok" aria-live="polite" className="mt-3">
           <div className="flex items-center gap-2">
-            <span className="flex-1">Applied: the file now reads with that change.</span>
+            <span className="flex-1">Published: the file now reads with that change.</span>
             <Button variant="quiet" size="sm" title="Dismiss" onClick={() => setApplied(false)}>
               Dismiss
             </Button>
@@ -128,7 +128,8 @@ export function FileChangeBoxes({
         return (
           <ChangeBox
             key={cr.number}
-            file={repoRelativePath.slice(repoRelativePath.lastIndexOf('/') + 1)}
+            file={displayFileName(repoRelativePath)}
+            fileTitle={fileNameTooltip(repoRelativePath)}
             author={changeAuthorName(cr)}
             when={formatWhen(cr.createdAt)}
             mine={mine}

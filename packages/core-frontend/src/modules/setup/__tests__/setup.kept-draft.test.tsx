@@ -163,7 +163,7 @@ describe('what was typed, across the trip to GitHub', () => {
     show();
     await typeThenLeave('Create the GitHub App');
     comeBack();
-    await userEvent.click(screen.getByRole('tab', { name: 'Managed for you' }));
+    await userEvent.click(screen.getByRole('tab', { name: 'Hexis takes care of it' }));
     await userEvent.click(screen.getByRole('button', { name: 'Save and continue' }));
     await waitFor(() => expect(api.saveSettings).toHaveBeenCalled());
     expect(api.saveSettings.mock.calls[0]![0]).toEqual({

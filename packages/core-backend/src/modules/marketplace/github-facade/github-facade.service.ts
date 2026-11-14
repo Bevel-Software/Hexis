@@ -2,8 +2,8 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { logger } from '../../../shared/logging.js';
 
 const log = logger('github-facade');
-import type { KeyKindSpec, MintedExternalApiKey } from '../../tool-auth/external-api-key.interface.js';
-import { signAuthRequest, type McpAuthRequestState } from '../../mcp/oauth/oauth-state.js';
+import type { KeyKindSpec, MintedExternalApiKey } from '../../tool-auth/index.js';
+import { signAuthRequest, type McpAuthRequestState } from '../../mcp/index.js';
 import type { GitHubFacadeCredentialsService } from './github-facade-credentials.service.js';
 import type { GitHubFacadeCodeStore } from './github-facade-codes.store.js';
 import { printable } from '../../../shared/printable.js';

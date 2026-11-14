@@ -8,6 +8,7 @@ import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { WorkspaceMutex } from '../../kb-fs/mutex.js';
 import { DiffService } from '../diff.service.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
+import { newWorkspaceService } from '../../../__tests__/workspace-service.js';
 
 /**
  * Atomic-seed regression suite.
@@ -53,7 +54,7 @@ async function setup(): Promise<Fixture> {
   const workspaceDir = path.join(workspacesRoot, workspaceId);
   const repoDir = path.join(workspaceDir, 'knowledge-base');
   await fs.mkdir(path.join(repoDir, '.git'), { recursive: true });
-  const workspaceService = new WorkspaceService(
+  const workspaceService = newWorkspaceService(
     workspacesRoot,
     'https://github.com/Bevel-Software/knowledge-base.git',
     testKbContext(),

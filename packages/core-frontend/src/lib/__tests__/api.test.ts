@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-import { authFetch, API_UNREACHABLE_EVENT } from '../api';
+import { authFetch, API_UNREACHABLE_EVENT, getToken, setToken } from '../api';
 
 /** Counts API_UNREACHABLE_EVENT dispatches for the span of one test. */
 function watchUnreachable(): { seen: () => number; stop: () => void } {
@@ -129,5 +129,32 @@ describe('authFetch application-level responses', () => {
       authFetch('/api/sync', { method: 'POST' }, { isApplicationResponse: () => true }),
     ).rejects.toThrow('Failed to fetch');
     expect(watcher.seen()).toBe(1);
+  });
+});
+
+describe('authFetch on a 401', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    localStorage.clear();
+  });
+
+  it('clears the token the request carried', async () => {
+    setToken('old');
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response('', { status: 401 }));
+    await authFetch('/api/me');
+    expect(getToken()).toBeNull();
+  });
+
+  it('keeps a replacement stored while the refused request was in flight', async () => {
+    // A password change hands back a new token while requests sent with the
+    // old one are still out; their 401s arrive after it is stored.
+    setToken('old');
+    let answer: (r: Response) => void = () => {};
+    vi.spyOn(globalThis, 'fetch').mockReturnValueOnce(new Promise<Response>((resolve) => { answer = resolve; }));
+    const inFlight = authFetch('/api/me');
+    setToken('replacement');
+    answer(new Response('', { status: 401 }));
+    await inFlight;
+    expect(getToken()).toBe('replacement');
   });
 });

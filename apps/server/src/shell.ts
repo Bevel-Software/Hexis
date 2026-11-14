@@ -3,16 +3,28 @@ import { createShutdown, logger, type ShutdownDeps } from '@bevel-software/platf
 
 const log = logger('server');
 
-/** One knowledge base's graph, as the shell lets go of it: exactly what the shutdown needs. */
-export interface ShellGraph {
-  commitWorker: ShutdownDeps['commitWorker'];
-  db: ShutdownDeps['db'];
-  pluginJoinRequestJobs?: ShutdownDeps['backgroundJobs'];
-  /** The agent upload store, whose sweep stops with the graph. */
-  agentUploadStore?: ShutdownDeps['agentUploadStore'];
-  /** The startup phase's retry, when the boot left one asking. */
-  startupRetry?: ShutdownDeps['startupRetry'];
-}
+/**
+ * One knowledge base's graph, as the shell lets go of it: everything the
+ * stop sequence knows how to release, by the names `CoreServices` gives
+ * them, so the graph the boot built is passed through whole. A stoppable
+ * thing the sequence learns is let go of here too, without this file
+ * changing — a hand-kept subset once left the tmp sweeper running into the
+ * process's exit.
+ */
+export type ShellGraph = Pick<ShutdownDeps, 'commitWorker' | 'db'> &
+  Partial<
+    Pick<
+      ShutdownDeps,
+      | 'pluginJoinRequestJobs'
+      | 'agentUploadStore'
+      | 'agentDownloadStore'
+      | 'tmpSweeper'
+      | 'patternMatcher'
+      | 'documentExtractor'
+      | 'versionControlService'
+      | 'startupRetry'
+    >
+  >;
 
 /**
  * A host of many graphs (see `createTenantHost`): stopping it stops every
@@ -97,12 +109,12 @@ export async function runShell<Core extends ShellCore>(io: ShellIo<Core>): Promi
     const noPool = { $client: { end: async () => undefined } } as unknown as ShutdownDeps['db'];
     const graph = asGraph(core);
     const host = asHost(core);
+    // The graph whole, then what stands in for the parts a host or an
+    // unfinished boot does not have.
     const shutdown = createShutdown({
+      ...graph,
       server: server ?? notListening,
       commitWorker: graph?.commitWorker ?? { stop: () => host?.stop() ?? Promise.resolve() },
-      backgroundJobs: graph?.pluginJoinRequestJobs,
-      agentUploadStore: graph?.agentUploadStore,
-      startupRetry: graph?.startupRetry,
       db: graph?.db ?? noPool,
     });
     shutdown(reason)

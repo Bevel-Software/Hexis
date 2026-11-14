@@ -2,20 +2,20 @@ import {
   isJoinBranchFor,
   type AuthUser,
   type ChangeRequest,
-  type IWorkflowService,
+  type IVersionControlService,
 } from '@bevel-software/platform-shared';
-import { type WorkspaceService } from '../workspace/workspace.service.js';
+import { type WorkspaceService } from '../workspace/index.js';
 import { logger } from '../../shared/logging.js';
 
 const log = logger('plugins');
 import type { KbContext } from '../../shared/kb-context.js';
-import type { IAccessControl } from '../access/access-control.interface.js';
+import type { IAccessControl } from '../access/index.js';
 import {
   rulesFileFor,
   type AccessRequestTarget,
   type IAccessRequestLifecycle,
-} from '../access/access-requests.contract.js';
-import type { Verb } from '../access-model/access-grammar.js';
+} from '../access/index.js';
+import type { Verb } from '../access-model/index.js';
 import { pendingProposals, type JoinProposal } from './join-proposals.js';
 
 /** One open join change request, with what it still proposes. */
@@ -57,7 +57,7 @@ export interface JoinRequest {
 export class JoinRequestsService implements IAccessRequestLifecycle {
   constructor(
     private readonly workspaceService: WorkspaceService,
-    private readonly workflow: IWorkflowService,
+    private readonly versionControl: IVersionControlService,
     private readonly kb: Pick<KbContext, 'defaultBranch' | 'defaultWorkspaceId'>,
     /**
      * Read-only, and asked one question only: does this person already hold
@@ -284,7 +284,7 @@ export class JoinRequestsService implements IAccessRequestLifecycle {
   private async settle(cr: ChangeRequest, actor: AuthUser): Promise<void> {
     const wsId = this.kb.defaultWorkspaceId();
     try {
-      await this.workflow.rejectChangeRequest(
+      await this.versionControl.rejectChangeRequest(
         cr.number,
         actor,
         cr.state,
@@ -301,7 +301,7 @@ export class JoinRequestsService implements IAccessRequestLifecycle {
       return;
     }
     try {
-      await this.workflow.deleteBranch(wsId, cr.branch, actor);
+      await this.versionControl.deleteBranch(wsId, cr.branch, actor);
     } catch (err) {
       // The request is closed either way; a leftover branch is cosmetic and
       // the author can still delete it themselves.

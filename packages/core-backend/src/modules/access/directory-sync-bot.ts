@@ -3,8 +3,8 @@ import { logger } from '../../shared/logging.js';
 
 const log = logger('directory-sync');
 import type { AuthUser } from '@bevel-software/platform-shared';
-import type { Database } from '../database/connection.js';
-import { users } from '../database/core-schema.js';
+import type { Database } from '../database/index.js';
+import { users } from '../database/index.js';
 
 /**
  * Synthetic identity for the synced-groups materializer's commits: every
@@ -35,7 +35,7 @@ export async function ensureDirectorySyncBot(db: Database): Promise<AuthUser> {
     .returning();
   if (inserted.length > 0) {
     const row = inserted[0];
-    log.info(`created sync-bot user id=${row.id} email=${row.email}`);
+    log.info(`created sync-bot user id=${row.id}`);
     return { id: row.id, email: row.email, name: row.name, avatarUrl: row.avatarUrl ?? undefined };
   }
   const [row] = await db

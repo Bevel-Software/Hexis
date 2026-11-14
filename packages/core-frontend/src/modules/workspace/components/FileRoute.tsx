@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { useWorkspace } from '../state/workspace.context';
 import { WorkspaceApiError } from '../services/workspace.api';
-import { useGit } from '../../git/state/git.context';
+import { useGit } from '../../git';
 import { readPersistedTabs } from '../utils/tab-persistence';
 import { syncFileTraceFlag, traceFiles } from '../utils/file-trace';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
@@ -13,8 +13,9 @@ import {
   fetchNodeWorkspacePath,
   fetchNodeId,
 } from '../routing/kb-routes';
-import { Banner, Button, Surface } from '../../../shared/components';
+import { Banner, Button, Surface, useLatestRef } from '../../../shared/components';
 import { FileViewer } from './FileViewer';
+import { appHostingPath, useRootClaims } from '../../../core/registry';
 
 type SyncError =
   | { kind: 'dirty'; current: string; target: string; dirtyFilenames: string[] }
@@ -33,6 +34,10 @@ type SyncError =
  * `.tool` behind "Edit the tool file", a note with a frontmatter id — back to
  * the Knowledge surface, which is exactly the switch that frame exists to
  * avoid. The path URL stays; the file is the same.
+ *
+ * A file under a root an app claims (`AppDef.roots`) is the same case, and
+ * needs no flag: its path URL is what opens it in that app, so it is never
+ * replaced, and an id URL that resolves to it is replaced by its path URL.
  */
 export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = {}) {
   const params = useParams<{ branch: string; '*': string }>();
@@ -54,6 +59,7 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
   // to be a node is canonicalized to its id URL (the redirect effect).
   const segment = params['*'] ?? '';
   const segmentIsId = NODE_ID_LINK_RE.test(segment);
+  const claims = useRootClaims();
 
   const workspace = useWorkspace();
   const git = useGit();
@@ -123,26 +129,56 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
     };
   }, [segmentIsId, segment, branchFromUrl]);
 
+  // ── An id URL for a hosted file → its path URL ───────────────────────────
+  // The path URL is the one that opens the file in the app hosting its root;
+  // the id URL would keep it here. Same entry, same state and query, as the
+  // canonical swap below.
+  const hostedPath =
+    segmentIsId && idResolved?.seg === segment && idResolved.branch === branchFromUrl && idResolved.path
+      ? appHostingPath(claims, idResolved.path, workspace.kbDirName) && idResolved.path
+      : undefined;
+  useEffect(() => {
+    if (!hostedPath) return;
+    navigate(kbFileUrl(branchFromUrl, hostedPath) + location.search + location.hash, {
+      replace: true,
+      state: location.state,
+    });
+  }, [hostedPath, branchFromUrl, navigate, location.search, location.hash, location.state]);
+
   // ── Canonicalize a path URL → the node's id URL ──────────────────────────
   // Once the file is the active tab, look up its node id and replace the path
   // URL with `/workspace/<branch>/<id>`. Non-node files (no id) stay path-based.
   // Guarded by `segmentIsId` so an already-canonical id URL no-ops and this can't
   // ping-pong; gated on `openFilePath === segment` so the subsequent id→path
   // load reuses the already-open tab instead of racing a second fetch.
+  //
+  // The swap is the SAME history entry under its canonical name, so it keeps
+  // the entry's router state — a `startEditing` request (or `rawFile`) not yet
+  // acted on must survive it. Read through a ref, at the moment of the swap,
+  // so a request the viewer has consumed in the meantime is not put back.
+  // The query rides along for the same reason: it is the entry's view
+  // (`?fullscreen=1`), and a link that asked for it must still have it once
+  // the path has become an id.
+  const routerStateRef = useLatestRef<unknown>(location.state);
+  const searchRef = useLatestRef(location.search);
   useEffect(() => {
     if (!canonicalize || segmentIsId || !segment || !branchFromUrl) return;
+    if (appHostingPath(claims, segment, workspace.kbDirName)) return;
     if (openFilePath !== segment) return;
     let cancelled = false;
     (async () => {
       const nodeId = await fetchNodeId(branchFromUrl, segment);
       if (!cancelled && nodeId) {
-        navigate(kbNodeUrl(branchFromUrl, nodeId) + location.hash, { replace: true });
+        navigate(kbNodeUrl(branchFromUrl, nodeId) + searchRef.current + location.hash, {
+          replace: true,
+          state: routerStateRef.current,
+        });
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [canonicalize, segmentIsId, segment, branchFromUrl, openFilePath, location.hash, navigate]);
+  }, [canonicalize, segmentIsId, segment, branchFromUrl, openFilePath, location.hash, navigate, routerStateRef, searchRef, claims, workspace.kbDirName]);
 
   // ── Branch sync + hydrate + URL → state (forward direction) ──────────────
 
@@ -561,8 +597,7 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
           unsaved changes on{' '}
           <span className="font-mono text-ink">{error.current}</span>. Save the
           files below first (Ctrl/Cmd+S, or click <span className="font-medium">Save</span>{' '}
-          in the editor toolbar). That releases the lock and auto-commits and auto-pushes
-          your changes: then this link will open.
+          in the editor toolbar), and then this link will open.
         </p>
         {error.dirtyFilenames.length > 0 && (
           <Surface tone="sunken" radius="md" elevation="none" className="px-3 py-2 text-left text-detail text-ink">
@@ -583,7 +618,7 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
       <ErrorScreen title="This branch no longer exists">
         <p className="text-ui text-ink-muted">
           <span className="font-mono text-ink">{goneBranch}</span> was deleted in the git
-          repository. Anything merged from it lives on{' '}
+          repository. Anything published from it lives on{' '}
           <span className="font-mono text-ink">{DEFAULT_BRANCH}</span>.
         </p>
         <Button onClick={() => navigate(kbFileUrl(DEFAULT_BRANCH))}>Go to {DEFAULT_BRANCH}</Button>
@@ -599,7 +634,7 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
           <span className="font-mono text-ink">{unknownBranch}</span>.
         </p>
         <p className="text-meta text-ink-faint">
-          It may never have been pushed, or this link may have the name wrong.
+          It may never have been published, or this link may have the name wrong.
         </p>
         <Button onClick={() => navigate(kbFileUrl(DEFAULT_BRANCH))}>Go to {DEFAULT_BRANCH}</Button>
       </ErrorScreen>

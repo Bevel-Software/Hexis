@@ -1,6 +1,6 @@
 import type { Verb } from '@bevel-software/platform-shared';
 import { authFetch } from '../../lib/api';
-import { GitApiError, handleApiResponse } from '../git/services/git.api';
+import { GitApiError, handleApiResponse } from '../git';
 
 /**
  * A collective grantee with WHAT it is — role (capability), group (audience),
@@ -209,10 +209,9 @@ export function asInheritedError(err: unknown): InheritedRevokeError | null {
 /**
  * A grantable principal — a person (by email), a role (an app-defined
  * capability from the registry, or a legacy roles.yaml role), or a group (a
- * people-set from the active group source — IdP-synced or manual). Groups are
- * written as bare-name tokens (bare names resolve group-first); the backend
- * writes role grants as explicit `role/<Name>` tokens itself — the dialog
- * just sends `kind: 'role'`. The separate kinds exist so the backend
+ * people-set from the active group source — IdP-synced or manual). The backend
+ * writes groups as explicit `group/<Name>` tokens and roles as `role/<Name>`
+ * tokens itself, never a bare name — the dialog just sends the kind. The separate kinds exist so the backend
  * validates each against the right namespace.
  */
 export type Principal =
@@ -355,15 +354,16 @@ export async function fetchFileAccess(
 
 /**
  * Batch lookup — one round trip resolves one verb for multiple paths: write
- * permission by default, or `owner` — membership in an `owner:` grant, which
- * a writer (an Admin included) does not have by writing.
+ * permission by default, `owner` — membership in an `owner:` grant, which
+ * a writer (an Admin included) does not have by writing — or `read`, the
+ * verdict `fetchFileAccess` gives as `canRead`.
  * Caller-supplied path strings are the keys of the returned record. Throws if
  * any path is rejected by the backend.
  */
 export async function fetchFileAccessBatch(
   workspaceId: string,
   relativePaths: string[],
-  verb: 'write' | 'owner' = 'write',
+  verb: 'write' | 'owner' | 'read' = 'write',
 ): Promise<{ results: Record<string, boolean> }> {
   return handleApiResponse(
     await authFetch(`/api/workspace/${workspaceId}/access/batch`, {
@@ -392,19 +392,39 @@ export interface PathPrincipals {
   write: AccessPrincipalRef[];
 }
 
-/** One file's or folder's holders where it is now and where a move would put it. */
+/** One principal that loses or gains one verb in a move; a person with no display name is named by their address. */
+export interface HolderChangeRef extends AccessPrincipalRef {
+  verb: 'read' | 'write';
+}
+
+/**
+ * Who loses and who gains opening or editing a file or folder in a move, as
+ * the resolver judges each of them on both sides — the one answer the move
+ * dialog and the agent's `move_file` both show. Not a diff of the two holder
+ * lists: those name grants, so they miss a person the destination denies by
+ * name and show a writer leaving a folder everyone reads as losing `read`.
+ */
+export interface HolderChanges {
+  lose: HolderChangeRef[];
+  gain: HolderChangeRef[];
+}
+
+/** One file's or folder's holders where it is now and where a move would put it, and who the move costs and serves. */
 export interface ProspectiveAccess {
   before: PathPrincipals;
   after: PathPrincipals;
+  changes: HolderChanges;
 }
 
 /**
  * Resolve who holds read and write on `relativePath` today and who would hold
  * them once it sits in `toDir` — the destination's folder rules with what the
  * move carries layered on top: a file's own frontmatter, or the `access.md`
- * files inside a folder, counted at the paths they land on. Both paths are
- * repo-relative (`Knowledge/Foo.md`, `Knowledge/Sales`); `toDir` is `''` for
- * the repo root.
+ * files inside a folder, counted at the paths they land on — and who loses
+ * and who gains in between (`changes`). Both paths are repo-relative
+ * (`Knowledge/Foo.md`, `Knowledge/Sales`); `toDir` is `''` for the repo root.
+ * The route answers 403 when the caller may not read the file or the
+ * destination folder: the dialog then says it could not work the change out.
  *
  * `signal` lets the move dialog give up on it: the answer decorates the
  * confirmation and must never hold it open.
@@ -470,3 +490,18 @@ export async function fetchAccessOverrides(
   );
 }
 
+
+/** One admin, as `GET /api/access/admins` names them to anyone signed in. */
+export interface AdminContact {
+  name: string;
+  email: string;
+}
+
+/**
+ * Who the admins are — names and emails, nothing else about roles. Open to
+ * everyone signed in, so someone who is not an admin knows whom to ask.
+ */
+export async function fetchAdmins(): Promise<AdminContact[]> {
+  const body = await handleApiResponse<{ admins: AdminContact[] }>(await authFetch('/api/access/admins'));
+  return body.admins;
+}

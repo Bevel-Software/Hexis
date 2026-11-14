@@ -6,16 +6,17 @@ import os from 'node:os';
 import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { testKbContext } from '../../../__tests__/kb-context.js';
-import type { FileTreeEntry, IWorkflowService } from '@bevel-software/platform-shared';
+import type { FileTreeEntry, IVersionControlService } from '@bevel-software/platform-shared';
 import { NodeFs } from '../../kb-fs/node-fs.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
-import type { WorkflowEventBus } from '../../workflow/event-bus.js';
+import type { VersionControlEventBus } from '../../version-control/event-bus.js';
 import type { AuthService } from '../../auth/auth.service.js';
 import type { IAdminAccessService } from '../../admin/admin.interface.js';
 import type { ICreatorAccess } from '../../access-model/creator.js';
 import { createWorkspaceRoutes } from '../workspace.routes.js';
 import { WorkspaceService } from '../workspace.service.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
+import { newWorkspaceService } from '../../../__tests__/workspace-service.js';
 
 /**
  * A folder exists until someone deletes it, and its placeholder is never shown
@@ -56,7 +57,7 @@ async function makeHarness(): Promise<Harness> {
   const workspaceDir = path.join(root, workspaceId);
   // The inner `.git` lets the service accept the workspace without cloning.
   await fs.mkdir(path.join(workspaceDir, KB, '.git'), { recursive: true });
-  const workspaceService = new WorkspaceService(root, 'https://example.invalid/kb.git', testKbContext({ kbDirName: KB }), new NodeFs());
+  const workspaceService = newWorkspaceService(root, 'https://example.invalid/kb.git', testKbContext({ kbDirName: KB }), new NodeFs());
   await workspaceService.getWorkspacePath(workspaceId);
 
   const releaseLock = vi.fn<(...args: unknown[]) => Promise<never>>(async () => undefined as never);
@@ -64,12 +65,12 @@ async function makeHarness(): Promise<Harness> {
     acquired: true,
     lock: {} as never,
   }));
-  const workflowService = {
+  const versionControlService = {
     getLock: vi.fn(async () => null),
     acquireLock,
     releaseLock,
     releaseLockNoCommit: vi.fn(async () => undefined as never),
-  } as unknown as IWorkflowService;
+  } as unknown as IVersionControlService;
 
   const emit = vi.fn();
   const app = express();
@@ -83,8 +84,8 @@ async function makeHarness(): Promise<Harness> {
     createWorkspaceRoutes(
       workspaceService,
       { getUserById: vi.fn(async () => USER) } as unknown as AuthService,
-      workflowService,
-      { emit } as unknown as WorkflowEventBus,
+      versionControlService,
+      { emit } as unknown as VersionControlEventBus,
       allowAll,
       testKbContext({ kbDirName: KB }),
       stubCreatorAccess,
@@ -335,7 +336,7 @@ describe('WorkspaceService.writeFolderPlaceholder', () => {
     const workspaceId = workspaceIdForBranch('placeholders');
     const kbDir = path.join(root, workspaceId, KB);
     await fs.mkdir(path.join(kbDir, '.git'), { recursive: true });
-    return { svc: new WorkspaceService(root, 'https://example.invalid/kb.git', testKbContext({ kbDirName: KB }), new NodeFs()), workspaceId, kbDir };
+    return { svc: newWorkspaceService(root, 'https://example.invalid/kb.git', testKbContext({ kbDirName: KB }), new NodeFs()), workspaceId, kbDir };
   }
 
   it('writes into an empty folder, and leaves a full or a vanished one alone', async () => {
@@ -378,7 +379,7 @@ describe('WorkspaceService.withFolderTurn', () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), 'folder-turn-'));
     const workspaceId = workspaceIdForBranch('turns');
     await fs.mkdir(path.join(root, workspaceId, KB, '.git'), { recursive: true });
-    const svc = new WorkspaceService(root, 'https://example.invalid/kb.git', testKbContext({ kbDirName: KB }), new NodeFs());
+    const svc = newWorkspaceService(root, 'https://example.invalid/kb.git', testKbContext({ kbDirName: KB }), new NodeFs());
 
     const events: string[] = [];
     let open!: () => void;

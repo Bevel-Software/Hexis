@@ -9,6 +9,8 @@ import { ConflictHelp } from './ConflictHelp';
 export interface ChangeBoxProps {
   /** File the proposal is against, relative to the skill folder. */
   file: string;
+  /** The file's real name, for hover, when `file` is a platform file's plain name. */
+  fileTitle?: string;
   /** Display name of whoever proposed it. */
   author: string;
   /** Already-formatted, e.g. "today" or "2 Aug". */
@@ -105,6 +107,7 @@ export interface ChangeBoxProps {
  */
 export function ChangeBox({
   file,
+  fileTitle,
   author,
   when,
   mine,
@@ -143,7 +146,9 @@ export function ChangeBox({
         <span className="text-detail text-ink">
           <b className="font-semibold">{who}</b> proposed a change · {when}
         </span>
-        <span className="ml-auto truncate font-mono text-meta text-ink-faint">{file}</span>
+        <span className="ml-auto truncate font-mono text-meta text-ink-faint" title={fileTitle}>
+          {file}
+        </span>
       </div>
 
       {/* No diff area when there is no difference — an empty pane under a

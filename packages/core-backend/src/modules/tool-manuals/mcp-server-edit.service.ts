@@ -6,12 +6,12 @@ import {
   PLUGIN_MCP_FILE,
   type AuthUser,
 } from '@bevel-software/platform-shared';
-import type { WorkspaceService } from '../workspace/workspace.service.js';
+import type { WorkspaceService } from '../workspace/index.js';
 import type { KbContext } from '../../shared/kb-context.js';
 import { validatedVariables } from './mcp-json-discovery.js';
 import { assertSafeFetchUrl } from '../../shared/ssrf.js';
 import { containsVariableReference, findReservedVariableRef } from '../../shared/variable-refs.js';
-import type { IAccessControl } from '../access/access-control.interface.js';
+import type { IAccessControl } from '../access/index.js';
 import type { IFsProbe } from '../../shared/fs.contract.js';
 import type { IToolManualService, ToolVariable } from './tool-manuals.contract.js';
 
@@ -368,7 +368,7 @@ export class McpServerEditService {
     // COMMIT must not — the pending-commit pipeline may already have created
     // a local commit before the push refused, and rewriting the working tree
     // to pre-edit bytes would leave it dirty AGAINST that commit, a state the
-    // workflow layer's own pull-rebase recovery then misreads. Commit-stage
+    // version-control layer's own pull-rebase recovery then misreads. Commit-stage
     // failures propagate as-is and the pipeline's recovery owns the cleanup.
     const [mcpBefore, manifestBefore] = await Promise.all([
       fs.readFile(mcpAbs, 'utf8').catch(() => null),

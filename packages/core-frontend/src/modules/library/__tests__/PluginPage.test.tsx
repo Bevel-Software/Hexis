@@ -424,10 +424,17 @@ describe('PluginPage', () => {
     expect(screen.queryByRole('menuitem', { name: 'Rename plugin' })).toBeNull();
   });
 
+  it('offers no Edit plugin settings for a plugin read from the bundle format — its manifest is not editable here', async () => {
+    pluginsMock.listPlugins.mockResolvedValue([gtm({ name: 'gtm', canWrite: true, linksAreManaged: false })]);
+    renderPlugin('gtm');
+    await screen.findByRole('button', { name: 'More actions' });
+    expect(screen.queryByRole('button', { name: 'Edit plugin settings' })).toBeNull();
+  });
+
   it('opens the manifest at the plugin FOLDER, which is not its identity', async () => {
     pluginsMock.listPlugins.mockResolvedValue([gtm({ name: 'go-to-market', displayName: 'GTM', canWrite: true })]);
     renderPlugin('go-to-market');
-    fireEvent.click(await screen.findByRole('button', { name: 'Manifest' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit plugin settings' }));
     await waitFor(() =>
       expect(href()).toBe(`/workspace/${DEFAULT_BRANCH}/knowledge-base/Plugins/GTM/plugin.json`),
     );
@@ -525,7 +532,7 @@ describe('PluginPage', () => {
       ),
     ).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Finish setup' }));
-    await waitFor(() => expect(href()).toBe('/connect'));
+    await waitFor(() => expect(href()).toBe('/skills-and-tools/connect'));
   });
 
   it('names a linked skill the members cannot read, above the integrations banner', async () => {

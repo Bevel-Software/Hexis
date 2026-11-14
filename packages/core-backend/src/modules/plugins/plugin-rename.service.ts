@@ -10,14 +10,14 @@ import {
 import type { AuthUser } from '@bevel-software/platform-shared';
 import { PushNeedsAgentResolutionError } from '../../shared/domain-errors.js';
 import type { ITreeWalker, WalkListener } from '../../shared/fs.contract.js';
-import type { IAccessControl } from '../access/access-control.interface.js';
+import type { IAccessControl } from '../access/index.js';
 import {
   PLUGIN_TOKEN_PREFIX,
   canonicalPluginToken,
   hasAccessFrontmatterExtension,
   parsePluginPrincipalKey,
-} from '../access-model/access-grammar.js';
-import type { WorkspaceService } from '../workspace/workspace.service.js';
+} from '../access-model/index.js';
+import type { WorkspaceService } from '../workspace/index.js';
 import type { KbContext } from '../../shared/kb-context.js';
 import type { PluginSource } from './discovery/plugin-source.js';
 
@@ -246,7 +246,7 @@ export class PluginRenameService {
       );
     } catch (err) {
       // One failure is NOT a failed commit: the commit landed locally and only
-      // the push did not (the typed hand-off the workflow throws). Restoring
+      // the push did not (the typed hand-off the version-control service throws). Restoring
       // the old bytes then would stack an uncommitted inverse of a real
       // commit; the recovery flow owns that state, so it is left alone — and
       // since the tree DID change, every cache keyed on the old identity is

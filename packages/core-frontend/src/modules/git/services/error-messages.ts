@@ -112,8 +112,16 @@ export function friendlyGitError(err: unknown): string {
     }
   }
 
-  const raw = rawMessage(err);
+  return friendlyGitMessage(rawMessage(err));
+}
 
+/**
+ * The string half of {@link friendlyGitError}: a backend message, as text,
+ * in plain words. For the places a message reaches the UI as a string, not an
+ * error — an event's `reason`, a reason the server stored, a warning in a
+ * change request's detail.
+ */
+export function friendlyGitMessage(raw: string): string {
   // Protected-branch rejections — `branch` is always quoted. Under the
   // current model the agent's writes against the official versions are NOT
   // hard-rejected on the name alone; path-level access control decides at
@@ -238,7 +246,56 @@ export function friendlyGitError(err: unknown): string {
     return "Couldn't cancel this change request right now. Try again in a moment.";
   }
 
+  // Applying a change request. The backend merges it and says so; what the
+  // reader cares about is whether it was published. Approving stays the
+  // reader's own act, so only the outcome is renamed.
+  const gate = raw.match(/^Merge gate rejected: (.+)$/s);
+  if (gate) return `Can't publish this yet. ${plainGateReasons(gate[1])}`;
+  if (raw === 'Merge failed') return "Couldn't publish this change.";
+  const mergeFailed = raw.match(/^Merge failed: (.+)$/s);
+  if (mergeFailed) return `Couldn't publish this change: ${mergeFailed[1]}`;
+  if (raw === 'This pull request has already been merged.' || raw === 'This change request has already been merged.') {
+    return 'This change request is already published.';
+  }
+  if (raw === 'This pull request is closed.') return 'This change request is closed.';
+  if (raw === 'This pull request has no file changes to approve.') {
+    return 'This change request changes no files, so there is nothing to publish.';
+  }
+  if (raw === 'This draft conflicts with the target and needs resolving first.') {
+    return "Files changed after this was proposed, so it can't be published as it is.";
+  }
+  if (/^Only admins can merge with bypass\./.test(raw)) {
+    return 'Only an admin can publish a change before everyone has approved it.';
+  }
+  if (/ need to re-approve .+ after the latest push\.$/s.test(raw)) return plainGateReasons(raw);
+  if (raw === 'change request not found') return 'That change request no longer exists.';
+
+  // Nobody can approve a file whose folder grants no one edit access. The
+  // server names the rules file; the reader needs the folder's access.
+  if (/^No one is eligible to approve this file/.test(raw)) {
+    return "No one can approve this file yet: nobody has edit access to its folder. Ask an admin to change who has access.";
+  }
+
   return raw;
+}
+
+/**
+ * The merge gate's reasons in plain words. The backend joins them with `; `,
+ * and a reason can carry that same separator inside it (a role and a named
+ * approver), so they are not split apart and rejoined: each phrase is
+ * replaced where it stands, and every separator stays exactly where it was.
+ * "must" rather than "need", which reads right for one approver and for many.
+ */
+function plainGateReasons(reasons: string): string {
+  return reasons
+    .replace(/This (?:pull|change) request has already been merged\./g, 'This change request is already published.')
+    .replace(/This pull request is closed\./g, 'This change request is closed.')
+    .replace(
+      /This pull request has no file changes to approve\./g,
+      'This change request changes no files, so there is nothing to publish.',
+    )
+    .replace(/ need to re-approve /g, ' must re-approve ')
+    .replace(/ after the latest push\./g, ' after the latest changes.');
 }
 
 function rawMessage(err: unknown): string {

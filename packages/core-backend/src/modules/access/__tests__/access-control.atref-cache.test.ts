@@ -18,11 +18,16 @@ import { AccessUnreadableError } from '../../access-model/access-errors.js';
  * the process boundary, which is the cost this cache exists to remove.
  * `injected.failNext` makes ONE matching spawn fail the way a transient git
  * error does, so the cache's behaviour under a failed read can be pinned
- * without a flaky fixture.
+ * without a flaky fixture. `injected.rewriteNext` lets ONE matching spawn
+ * run for real and rewrites what it printed before the service reads it,
+ * for replies a healthy git cannot be made to give.
  */
 const { spawnLog, injected } = vi.hoisted(() => ({
   spawnLog: [] as string[][],
-  injected: { failNext: null as null | ((argv: string[]) => boolean) },
+  injected: {
+    failNext: null as null | ((argv: string[]) => boolean),
+    rewriteNext: null as null | ((argv: string[]) => null | ((stdout: Buffer, stdin: string) => Buffer)),
+  },
 }));
 
 vi.mock('node:child_process', async (importOriginal) => {
@@ -64,6 +69,41 @@ vi.mock('node:child_process', async (importOriginal) => {
     });
     return child as unknown as ReturnType<typeof actual.spawn>;
   };
+  type Child = ReturnType<typeof actual.spawn>;
+  const realSpawn = actual.spawn as unknown as (...a: unknown[]) => Child;
+  /**
+   * The real child, with what it was fed on stdin recorded and its stdout
+   * handed to `fn` whole, once it has exited, before the service sees it.
+   */
+  const rewriting = (file: string, args: string[], options: unknown, fn: (stdout: Buffer, stdin: string) => Buffer) => {
+    const real = realSpawn(file, args, options);
+    const fed: Buffer[] = [];
+    const out: Buffer[] = [];
+    const child = Object.assign(new EventEmitter(), {
+      pid: real.pid,
+      exitCode: null as number | null,
+      signalCode: null,
+      stdin: Object.assign(new EventEmitter(), {
+        write: (chunk: string | Buffer) => {
+          fed.push(Buffer.from(chunk));
+          return real.stdin!.write(chunk);
+        },
+        end: () => real.stdin!.end(),
+      }),
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+      kill: (signal?: NodeJS.Signals | number) => real.kill(signal),
+    });
+    real.stdout!.on('data', (chunk: Buffer) => out.push(chunk));
+    real.stderr!.pipe(child.stderr);
+    real.on('error', (err) => child.emit('error', err));
+    real.on('close', (code, signal) => {
+      child.stdout.end(fn(Buffer.concat(out), Buffer.concat(fed).toString('utf-8')));
+      child.exitCode = code;
+      child.emit('close', code, signal);
+    });
+    return child as unknown as Child;
+  };
   const spawn = ((file: string, args: string[], options: unknown) => {
     if (file === 'git') {
       spawnLog.push(args ?? []);
@@ -71,8 +111,13 @@ vi.mock('node:child_process', async (importOriginal) => {
         injected.failNext = null;
         return failing();
       }
+      const rewrite = injected.rewriteNext?.(args);
+      if (rewrite) {
+        injected.rewriteNext = null;
+        return rewriting(file, args, options, rewrite);
+      }
     }
-    return (actual.spawn as unknown as (...a: unknown[]) => unknown)(file, args, options);
+    return realSpawn(file, args, options);
   }) as unknown as typeof actual.spawn;
   return { ...actual, execFile, spawn };
 });
@@ -84,20 +129,63 @@ function lsTreeBuilds(): number {
   return spawnLog.filter((argv) => argv.includes('ls-tree')).length;
 }
 
-function rolesReads(): number {
-  return spawnLog.filter((argv) => argv.includes('show') && argv.some((a) => a.endsWith(':roles.yaml')))
-    .length;
+/** Ref resolutions through git: none, since the ref files answer. */
+function revParses(): number {
+  return spawnLog.filter((argv) => argv.includes('rev-parse')).length;
+}
+
+/** Batched reads of a commit's access tree: one per build. */
+function catFileBatches(): number {
+  return spawnLog.filter((argv) => argv.includes('cat-file')).length;
+}
+
+/**
+ * Single-file reads of the MODEL's files at a ref (roles, groups, any
+ * access.md, any plugin manifest): none, since the build reads them in one
+ * batch. The one `show` a single-path gate makes afterwards, for the asked
+ * file's own frontmatter, is not the model's and is not counted.
+ */
+function fileShows(): number {
+  return spawnLog.filter(
+    (argv) =>
+      argv.includes('show') &&
+      argv.some((a) => /:(roles\.yaml|groups\.yaml|synced-groups\.yaml|(.*\/)?access\.md|.*\/plugin\.json)$/.test(a)),
+  ).length;
+}
+
+/**
+ * Rewrite ONE record of a `git cat-file --batch` reply — the one answering
+ * the stdin spec `which` matches — as `<spec> missing`, or as the same
+ * object reported with type `tree`. The reply is index-aligned with the
+ * specs fed on stdin, each record `<oid> <type> <size>\n<size bytes>\n` or
+ * `<spec> missing\n`, so the records are walked by the specs.
+ */
+function rewriteBatchRecord(which: RegExp, as: 'missing' | 'tree') {
+  return (stdout: Buffer, stdin: string): Buffer => {
+    const parts: Buffer[] = [];
+    let off = 0;
+    for (const spec of stdin.split('\n').filter(Boolean)) {
+      const nl = stdout.indexOf(0x0a, off);
+      const header = stdout.subarray(off, nl).toString('utf-8');
+      const end = header.endsWith(' missing') ? nl + 1 : nl + 1 + Number(header.split(' ')[2]) + 1;
+      if (!which.test(spec)) parts.push(stdout.subarray(off, end));
+      else if (as === 'missing') parts.push(Buffer.from(`${spec} missing\n`));
+      else parts.push(Buffer.from(header.replace(' blob ', ' tree ')), stdout.subarray(nl, end));
+      off = end;
+    }
+    return Buffer.concat(parts);
+  };
 }
 
 /**
  * The at-ref access model — `canWriteAtRef` / `canWriteBatchAtRef` /
  * `eligibleWritersForPathsAtRef`, the gates every change-request read and
  * every approval click run — is a pure function of the tree at the commit
- * the ref resolves to. Building it costs one `ls-tree` plus one `git show`
- * per `access.md`, so it must be built ONCE per commit and shared by every
- * gate call that lands on that commit, while a push that moves the ref is
- * still seen on the very next call, and a build that saw a git read fail
- * is never pinned.
+ * the ref resolves to. Building it costs two git calls, one `ls-tree` plus
+ * one `cat-file --batch` for every file the model reads, so it must be built
+ * ONCE per commit and shared by every gate call that lands on that commit,
+ * while a push that moves the ref is still seen on the very next call, and a
+ * build that saw a git read fail is never pinned.
  *
  * Every test seeds its own bare origin, workspace clone, and second clone
  * (`other`, standing in for another user's push), so each one holds alone.
@@ -107,9 +195,12 @@ describe('AccessControlService — at-ref model cache', () => {
   let repo: string;
   let other: string;
   let svc: AccessControlService;
+  let stub: WorkspaceService;
   const workspaceId = 'ws-atref-cache';
   const admin = 'razvan@bevel.software';
   const DOC = 'Team/Doc.md';
+  const QUOTED_DIR = 'Équipe';
+  const QUOTED_DOC = `${QUOTED_DIR}/Doc.md`;
 
   async function git(cwd: string, ...args: string[]): Promise<string> {
     const { stdout } = await execFileAsync('git', ['-C', cwd, ...args], { encoding: 'utf-8' });
@@ -137,6 +228,14 @@ describe('AccessControlService — at-ref model cache', () => {
     await fs.writeFile(path.join(repo, 'access.md'), '---\nwrite:\n  - Admin\n---\n');
     await fs.writeFile(path.join(repo, 'Team/access.md'), '---\nwrite:\n  - Admin\n---\n');
     await fs.writeFile(path.join(repo, DOC), '# doc\n');
+    // A folder git would C-quote in its default listing, with an access.md
+    // that DENIES the admin: read as it is, or the denial is missed.
+    await fs.mkdir(path.join(repo, QUOTED_DIR), { recursive: true });
+    await fs.writeFile(path.join(repo, QUOTED_DIR, 'access.md'), '---\nwrite:\n  - deny Admin\n---\n');
+    await fs.writeFile(path.join(repo, QUOTED_DOC), '# doc\n');
+    // A plugin, whose manifest the model reads too.
+    await fs.mkdir(path.join(repo, 'Plugins/Demo'), { recursive: true });
+    await fs.writeFile(path.join(repo, 'Plugins/Demo/plugin.json'), '{ "name": "Demo" }\n');
     await execFileAsync('git', ['init', '-b', 'main', repo]);
     await git(repo, 'config', 'user.email', 'test@example.com');
     await git(repo, 'config', 'user.name', 'Test');
@@ -149,7 +248,7 @@ describe('AccessControlService — at-ref model cache', () => {
     await git(other, 'config', 'user.email', 'other@example.com');
     await git(other, 'config', 'user.name', 'Other');
 
-    const stub = {
+    stub = {
       getWorkspacePath: async () => workspaceDir,
       // The real service TTLs this at 30s; the stub always fetches so a push
       // from `other` is visible on the next gate call.
@@ -160,10 +259,12 @@ describe('AccessControlService — at-ref model cache', () => {
     svc = new AccessControlService(stub, PROCESS_MAP_DIR, new NodeFs());
     spawnLog.length = 0;
     injected.failNext = null;
+    injected.rewriteNext = null;
   });
 
   afterEach(async () => {
     injected.failNext = null;
+    injected.rewriteNext = null;
     // Spies are restored here, not at the end of the test that made them:
     // a failing assertion would otherwise leave a console.warn mock in place
     // for every test after it (this config sets no `restoreMocks`).
@@ -233,10 +334,13 @@ describe('AccessControlService — at-ref model cache', () => {
     const map = await svc.eligibleWritersForPathsAtRef(workspaceId, 'feature', [DOC]);
     expect(map).not.toBeNull();
     expect(map!.get(DOC)!.roles).toContain('Admin');
-    expect(lsTreeBuilds()).toBe(1);
-    // ...and the fallthrough result is cached under origin/feature's commit.
+    // Two commits were read: the local tip, found to carry no roles.yaml,
+    // then origin/feature's.
+    expect(lsTreeBuilds()).toBe(2);
+    // ...and both answers are remembered: the fallthrough result under
+    // origin/feature's commit, the local tip as a commit with no roles.
     expect(await svc.canWriteAtRef(workspaceId, 'feature', admin, DOC)).toBe(true);
-    expect(lsTreeBuilds()).toBe(1);
+    expect(lsTreeBuilds()).toBe(2);
   });
 
   it('refuses to decide from a build that lost a git read, and never caches it', async () => {
@@ -246,18 +350,19 @@ describe('AccessControlService — at-ref model cache', () => {
       fs.writeFile(path.join(other, 'Team/access.md'), '---\nwrite:\n  - deny Admin\n---\n'),
     );
 
-    // Lose exactly that read, once, to a simulated transient failure. The
-    // gate must not answer from the partial tree (which would grant what the
-    // lost file denies): it fails closed with an AccessUnreadableError...
-    injected.failNext = (argv) => argv.includes('show') && argv.some((a) => a.endsWith(':Team/access.md'));
+    // Lose the batched read of the tree, once, to a simulated transient
+    // failure. The gate must not answer from a partial tree (which would
+    // grant what the lost file denies): it fails closed with an
+    // AccessUnreadableError...
+    injected.failNext = (argv) => argv.includes('cat-file');
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     await expect(svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).rejects.toBeInstanceOf(
       AccessUnreadableError,
     );
     expect(injected.failNext).toBeNull();
     expect(lsTreeBuilds()).toBe(1);
-    // ...and says so in the logs, naming the read it lost.
-    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/Team\/access\.md failed; refusing to decide/));
+    // ...and says so in the logs.
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/access tree failed; refusing to decide/));
 
     // Nothing was pinned: the next call rebuilds, answers correctly, and
     // that healthy build is the one that gets cached.
@@ -267,7 +372,7 @@ describe('AccessControlService — at-ref model cache', () => {
     expect(lsTreeBuilds()).toBe(2);
   });
 
-  it('does not cache a commit with no roles.yaml, and keeps answering null for it', async () => {
+  it('remembers a commit with no roles.yaml, and keeps answering null for it without another read', async () => {
     await git(other, 'checkout', '-qb', 'bare');
     await git(other, 'rm', '-q', 'roles.yaml');
     await git(other, 'commit', '-qm', 'no roles here');
@@ -276,9 +381,322 @@ describe('AccessControlService — at-ref model cache', () => {
     spawnLog.length = 0;
     expect(await svc.canWriteAtRef(workspaceId, 'origin/bare', admin, DOC)).toBeNull();
     expect(await svc.canWriteAtRef(workspaceId, 'origin/bare', admin, DOC)).toBeNull();
-    // Each call went back to git for roles.yaml (nothing was remembered),
-    // and neither ever got as far as walking the tree.
-    expect(rolesReads()).toBe(2);
+    // Git said "missing" for roles.yaml at that commit once, which is as
+    // final as the commit; the second call read nothing.
+    expect(lsTreeBuilds()).toBe(1);
+    expect(catFileBatches()).toBe(1);
+    expect(fileShows()).toBe(0);
+  });
+
+  it('reads the whole access tree at a commit in two git calls, never one per file', async () => {
+    // The seed holds roles.yaml and two access.md files; a read per file was
+    // what the build used to cost, and what a server forking a large heap
+    // cannot afford.
+    // One listing and one batch build the model; a second batch reads the
+    // asked path's own entries, once per commit and path (see the memo test).
+    expect(await svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).toBe(true);
+    expect(lsTreeBuilds()).toBe(1);
+    expect(catFileBatches()).toBe(2);
+    expect(fileShows()).toBe(0);
+    // Both access files were read through the batch: Team's denial is seen.
+    await pushFromOther('deny Admin in Team', () =>
+      fs.writeFile(path.join(other, 'Team/access.md'), '---\nwrite:\n  - deny Admin\n---\n'),
+    );
+    expect(await svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).toBe(false);
+    expect(lsTreeBuilds()).toBe(2);
+    expect(catFileBatches()).toBe(4);
+    expect(fileShows()).toBe(0);
+  });
+
+  it('honours an access.md under a folder git would quote in its listing', async () => {
+    // `git ls-tree` prints "\303\211quipe/access.md" unless told `-z`; read
+    // under that spelling nothing comes back, and a denial would be missed.
+    expect(await svc.canWriteAtRef(workspaceId, 'origin/main', admin, QUOTED_DOC)).toBe(false);
+    expect(await svc.canWriteBatchAtRef(workspaceId, 'origin/main', admin, [QUOTED_DOC, DOC])).toEqual(
+      new Map([
+        [QUOTED_DOC, false],
+        [DOC, true],
+      ]),
+    );
+    expect(lsTreeBuilds()).toBe(1);
+    expect(fileShows()).toBe(0);
+  });
+
+  it('answers null for a ref whose roles.yaml is a directory, and never falls through to origin for it', async () => {
+    // `feature` on origin grants the admin; the LOCAL `feature` replaced
+    // roles.yaml with a directory of that name. That is malformed config, as
+    // a roles file that does not parse is: the gate answers null for the
+    // ref, rather than reading the next candidate and granting from it.
+    await git(repo, 'checkout', '-q', '-b', 'feature');
+    await git(repo, 'push', '-q', '-u', 'origin', 'feature');
+    await git(repo, 'rm', '-q', 'roles.yaml');
+    await fs.mkdir(path.join(repo, 'roles.yaml'));
+    await fs.writeFile(path.join(repo, 'roles.yaml/README.md'), 'not roles\n');
+    await git(repo, 'add', '-A');
+    await git(repo, 'commit', '-qm', 'roles.yaml is a folder now');
+
+    spawnLog.length = 0;
+    expect(await svc.canWriteAtRef(workspaceId, 'feature', admin, DOC)).toBeNull();
+    expect(lsTreeBuilds()).toBe(1);
+  });
+
+  it('refuses to decide, twice, for a ref whose roles.yaml blob is lost, and never falls through to a granting origin', async () => {
+    // `feature` on origin carries a roles.yaml that grants the admin. The
+    // LOCAL `feature` is one commit ahead, with a roles.yaml of its own
+    // whose blob is then lost from the object store (real git: the loose
+    // object file removed). The tree still names roles.yaml, so the batch's
+    // "missing" is an unreadable file, not an absent one: the build must
+    // fail closed on both attempts, remember nothing for the commit, and
+    // never read the next candidate, origin/feature, which would grant.
+    await git(repo, 'checkout', '-q', '-b', 'feature');
+    await fs.writeFile(path.join(repo, 'roles.yaml'), 'roles:\n  Admin:\n    - razvan@bevel.software\n# on origin\n');
+    await git(repo, 'commit', '-qam', 'roles on origin/feature');
+    await git(repo, 'push', '-q', '-u', 'origin', 'feature');
+    await fs.writeFile(path.join(repo, 'roles.yaml'), 'roles:\n  Admin:\n    - razvan@bevel.software\n# local only\n');
+    await git(repo, 'commit', '-qam', 'roles on the local feature tip');
+    const lost = await git(repo, 'rev-parse', 'HEAD:roles.yaml');
+    await fs.rm(path.join(repo, '.git/objects', lost.slice(0, 2), lost.slice(2)));
+
+    spawnLog.length = 0;
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    for (const attempt of [1, 2]) {
+      await expect(svc.canWriteAtRef(workspaceId, 'feature', admin, DOC)).rejects.toBeInstanceOf(
+        AccessUnreadableError,
+      );
+      // One listing per attempt: the local tip, and never origin/feature.
+      expect(lsTreeBuilds()).toBe(attempt);
+      expect(catFileBatches()).toBe(attempt);
+    }
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/roles\.yaml is in the tree but its blob could not be read/));
+  });
+
+  it.each(['synced-groups.yaml', 'groups.yaml'])(
+    'refuses to decide, twice, for a ref whose %s blob is lost, and never reads it as absent',
+    async (file) => {
+      // The groups source the model reads at origin/main — the synced file,
+      // which supersedes a manual one still naming a retired team, or the
+      // manual file alone — has its blob lost from the workspace's object
+      // store (real git: the loose object file removed after the fetch).
+      // The tree still names it, so the batch's "missing" is an unreadable
+      // file, not an absent one: the build fails closed on both attempts and
+      // remembers nothing. Reading the synced file as absent would revive
+      // the manual groups; reading the manual one as absent would drop what
+      // it grants.
+      await pushFromOther(`${file} on main`, async () => {
+        if (file === 'synced-groups.yaml') {
+          await fs.writeFile(path.join(other, 'synced-groups.yaml'), 'groups:\n  Platform:\n    - zoe@x.io\n');
+        }
+        await fs.writeFile(path.join(other, 'groups.yaml'), 'groups:\n  Retired Team:\n    - ghost@x.io\n');
+      });
+      await git(repo, 'fetch', '-q', 'origin');
+      const lost = await git(repo, 'rev-parse', `origin/main:${file}`);
+      await fs.rm(path.join(repo, '.git/objects', lost.slice(0, 2), lost.slice(2)));
+
+      spawnLog.length = 0;
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      for (const attempt of [1, 2]) {
+        await expect(svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).rejects.toBeInstanceOf(
+          AccessUnreadableError,
+        );
+        expect(lsTreeBuilds()).toBe(attempt);
+        expect(catFileBatches()).toBe(attempt);
+      }
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringMatching(new RegExp(`${file.replaceAll('.', '\\.')} is in the tree but its blob could not be read`)),
+      );
+    },
+  );
+
+  it('refuses to decide when a groups source is a directory rather than a file', async () => {
+    await pushFromOther('groups.yaml as a folder', async () => {
+      await fs.mkdir(path.join(other, 'groups.yaml'));
+      await fs.writeFile(path.join(other, 'groups.yaml/README.md'), 'not groups\n');
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    await expect(svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).rejects.toBeInstanceOf(
+      AccessUnreadableError,
+    );
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/groups\.yaml is a tree, not a file; refusing to decide/));
+  });
+
+  it.each([
+    ['access.md', 'missing', /:Team\/access\.md$/, /Team\/access\.md is in the tree but its blob could not be read/],
+    ['access.md', 'a tree', /:Team\/access\.md$/, /Team\/access\.md is a tree, not a file/],
+    ['plugin manifest', 'missing', /:Plugins\/Demo\/plugin\.json$/, /Plugins\/Demo\/plugin\.json is in the tree but its blob could not be read/],
+    ['plugin manifest', 'a tree', /:Plugins\/Demo\/plugin\.json$/, /Plugins\/Demo\/plugin\.json is a tree, not a file/],
+  ])('refuses to decide when a listed %s comes back %s from the batch, and never caches it', async (_what, how, spec, warned) => {
+    // A healthy git cannot be made to answer this: the listing names blobs
+    // only, and a commit's objects do not change between two reads of it.
+    // The batch's reply is rewritten at the process boundary instead, so the
+    // build's refusal of a listed path it could not read is pinned all the
+    // same: a model missing that file could grant what the file denies.
+    injected.rewriteNext = (argv) =>
+      argv.includes('cat-file') ? rewriteBatchRecord(spec, how === 'missing' ? 'missing' : 'tree') : null;
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const batchesBefore = catFileBatches();
+    await expect(svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).rejects.toBeInstanceOf(
+      AccessUnreadableError,
+    );
+    expect(injected.rewriteNext).toBeNull();
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(warned));
+    // ...and nothing was pinned: the next call, with git answering in full,
+    // builds again and answers.
+    expect(await svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).toBe(true);
+    // Three batches: the refused build, then the build that answered and the
+    // asked path's own entries.
+    expect(catFileBatches()).toBe(batchesBefore + 3);
+  });
+
+  it('resolves refs from the ref files and remembers own entries at a commit: a repeated gate call starts no git', async () => {
+    // First call at this commit: the model is built (two git calls) and the
+    // asked path's own entries are read (one batch). The refs themselves —
+    // `origin/main`, and the candidates a short name tries — come from the
+    // ref files, so no `rev-parse` runs at all.
+    expect(await svc.canWriteBatchAtRef(workspaceId, 'origin/main', admin, [DOC])).toEqual(new Map([[DOC, true]]));
+    expect(revParses()).toBe(0);
+    expect(lsTreeBuilds()).toBe(1);
+    expect(catFileBatches()).toBe(2);
+
+    // The same gate again, and the single-path gate for the same path: the
+    // model and the own entries are both remembered, so apart from the
+    // fixture's own fetch nothing is started.
+    spawnLog.length = 0;
+    expect(await svc.canWriteBatchAtRef(workspaceId, 'origin/main', admin, [DOC])).toEqual(new Map([[DOC, true]]));
+    expect(await svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).toBe(true);
+    expect(await svc.canWriteAtRef(workspaceId, 'main', admin, DOC)).toBe(true);
+    expect(spawnLog.filter((argv) => !argv.includes('fetch'))).toEqual([]);
+
+    // A path not asked before at this commit is read, and only that path.
+    spawnLog.length = 0;
+    expect(await svc.canWriteBatchAtRef(workspaceId, 'origin/main', admin, [DOC, QUOTED_DOC])).toEqual(
+      new Map([
+        [DOC, true],
+        [QUOTED_DOC, false],
+      ]),
+    );
+    expect(catFileBatches()).toBe(1);
+    expect(revParses()).toBe(0);
+  });
+
+  it('asks git for a ref the files cannot decide, instead of reading it as missing', async () => {
+    // An annotated tag names a tag object, not a commit; the reader steps
+    // aside and the gate resolves it through `rev-parse <tag>^{commit}` —
+    // one process, the answer git gives, never "no such ref".
+    await git(repo, 'tag', '-a', 'v1', '-m', 'v1', 'origin/main');
+    expect(await svc.canWriteAtRef(workspaceId, 'v1', admin, DOC)).toBe(true);
+    expect(revParses()).toBe(1);
+    expect(lsTreeBuilds()).toBe(1);
+    // The same commit under its branch name: resolved from the files, the
+    // model already held.
+    spawnLog.length = 0;
+    expect(await svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).toBe(true);
+    expect(revParses()).toBe(0);
     expect(lsTreeBuilds()).toBe(0);
   });
+
+  it('knows from the tree that a path is absent at a commit, and reads nothing for it', async () => {
+    // A change request that adds a file asks about it at the base, where it
+    // does not exist yet. The model's listing already named every path the
+    // commit carries, so the absence is a fact about the commit: remembered,
+    // and not read — on the first call or any later one.
+    const NEW = 'Team/New.md';
+    expect(await svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).toBe(true);
+    spawnLog.length = 0;
+    expect(await svc.canWriteBatchAtRef(workspaceId, 'origin/main', admin, [NEW])).toEqual(new Map([[NEW, true]]));
+    expect(await svc.canWriteAtRef(workspaceId, 'origin/main', admin, NEW)).toBe(true);
+    expect(catFileBatches()).toBe(0);
+    expect(spawnLog.filter((argv) => !argv.includes('fetch'))).toEqual([]);
+  });
+
+  it("keeps a commit's tree up to the cap and not past it, as an absent path's cost shows", async () => {
+    // The seed carries seven paths. A service that may hold seven keeps the
+    // tree, so an absent path is answered without a read; one that may hold
+    // six does not keep it, so the same path is read on every call.
+    const NEW = 'Team/New.md';
+    const limited = (treeIndexMaxPaths: number) =>
+      new AccessControlService(stub, PROCESS_MAP_DIR, new NodeFs(), [], undefined, undefined, { treeIndexMaxPaths });
+    const keeps = limited(7);
+    expect(await keeps.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).toBe(true);
+    spawnLog.length = 0;
+    expect(await keeps.canWriteAtRef(workspaceId, 'origin/main', admin, NEW)).toBe(true);
+    expect(await keeps.canWriteAtRef(workspaceId, 'origin/main', admin, NEW)).toBe(true);
+    expect(catFileBatches()).toBe(0);
+    const drops = limited(6);
+    expect(await drops.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).toBe(true);
+    spawnLog.length = 0;
+    expect(await drops.canWriteAtRef(workspaceId, 'origin/main', admin, NEW)).toBe(true);
+    expect(await drops.canWriteAtRef(workspaceId, 'origin/main', admin, NEW)).toBe(true);
+    expect(catFileBatches()).toBe(2);
+  });
+
+  it('lets the oldest models give their tree up past the budget, and they still answer', async () => {
+    // Seven paths at the first commit, eight at the second, a budget of ten:
+    // remembering the second puts the first past the budget. The first
+    // model keeps answering gates without a rebuild; only an absent path at
+    // it is read again, while at the second it costs nothing.
+    const NEW = 'Team/New.md';
+    const budgeted = new AccessControlService(stub, PROCESS_MAP_DIR, new NodeFs(), [], undefined, undefined, {
+      treeIndexBudget: 10,
+    });
+    const first = await git(repo, 'rev-parse', 'origin/main');
+    expect(await budgeted.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).toBe(true);
+    await pushFromOther('a later page', () => fs.writeFile(path.join(other, 'Team/Later.md'), '# later\n'));
+    expect(await budgeted.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).toBe(true);
+    const second = await git(repo, 'rev-parse', 'origin/main');
+    expect(second).not.toBe(first);
+    spawnLog.length = 0;
+    expect(await budgeted.canWriteAtRef(workspaceId, second, admin, NEW)).toBe(true);
+    expect(lsTreeBuilds()).toBe(0);
+    expect(catFileBatches()).toBe(0);
+    spawnLog.length = 0;
+    expect(await budgeted.canWriteAtRef(workspaceId, first, admin, NEW)).toBe(true);
+    expect(lsTreeBuilds()).toBe(0);
+    expect(catFileBatches()).toBe(1);
+  });
+
+  it('remembers what a blob declares for itself, never a blob the batch could not read', async () => {
+    const SECRET = 'Team/Secret.md';
+    await pushFromOther('a page that denies the admin for itself', () =>
+      fs.writeFile(path.join(other, SECRET), '---\nwrite:\n  - deny Admin\n---\n# secret\n'),
+    );
+    // Build the model first, so the next batch is the own-entries read.
+    expect(await svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).toBe(true);
+    // The own-entries batch loses the blob (a lost object reads as missing,
+    // exactly like an absent path): answered as no own entries, as before —
+    // the inherited write stands — but NOT remembered for the commit.
+    injected.rewriteNext = (argv) => (argv.includes('cat-file') ? rewriteBatchRecord(/:Team\/Secret\.md$/, 'missing') : null);
+    expect(await svc.canWriteAtRef(workspaceId, 'origin/main', admin, SECRET)).toBe(true);
+    expect(injected.rewriteNext).toBeNull();
+    // The next call reads the blob again, and its own denial now holds...
+    spawnLog.length = 0;
+    expect(await svc.canWriteAtRef(workspaceId, 'origin/main', admin, SECRET)).toBe(false);
+    expect(catFileBatches()).toBe(1);
+    // ...and that answer, a fact about the commit, is remembered.
+    spawnLog.length = 0;
+    expect(await svc.canWriteAtRef(workspaceId, 'origin/main', admin, SECRET)).toBe(false);
+    expect(catFileBatches()).toBe(0);
+  });
+
+  it('holds the models of far more commits than one listing resolves', async () => {
+    // A listing resolves access at every open change request's two refs: a
+    // knowledge base with a hundred open requests spans a hundred commits.
+    // Under the old bound of 64 that evicted in a cycle, so every listing
+    // rebuilt every model. Each commit here is a distinct tip; after seventy
+    // of them, past that old bound, the first is still held.
+    const shas: string[] = [];
+    for (let i = 0; i < 70; i++) {
+      await fs.writeFile(path.join(other, 'Team/Doc.md'), `# doc ${i}\n`);
+      await git(other, 'add', '-A');
+      await git(other, 'commit', '-qm', `edit ${i}`);
+      shas.push(await git(other, 'rev-parse', 'HEAD'));
+    }
+    await git(other, 'push', '-q', 'origin', 'HEAD');
+    await git(repo, 'fetch', '-q', 'origin');
+    spawnLog.length = 0;
+    for (const sha of shas) expect(await svc.canWriteAtRef(workspaceId, sha, admin, DOC)).toBe(true);
+    expect(lsTreeBuilds()).toBe(70);
+    expect(await svc.canWriteAtRef(workspaceId, shas[0]!, admin, DOC)).toBe(true);
+    expect(await svc.canWriteAtRef(workspaceId, shas[35]!, admin, DOC)).toBe(true);
+    expect(lsTreeBuilds()).toBe(70);
+  }, 120_000);
 });

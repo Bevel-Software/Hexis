@@ -1,4 +1,4 @@
-import { ToolError } from '../tool-helpers/tool.contract.js';
+import { ToolError } from '../tool-helpers/index.js';
 import { isAbsence } from '../../shared/fs.contract.js';
 import { NOT_FOUND_NEXT_STEP, PathNotFoundError } from '../../shared/domain-errors.js';
 import { sanitizedPath } from '../../shared/printable.js';

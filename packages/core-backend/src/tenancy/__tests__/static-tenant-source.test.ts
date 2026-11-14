@@ -11,6 +11,7 @@ const settings: TenantHostSettings = {
   trustProxy: '1',
   workspacesRoot: path.resolve('/srv/hexis/workspaces'),
   kbTemplateDir: '/srv/hexis/template',
+  starterPacksDir: '/srv/hexis/starter-packs',
   gitTimeoutMs: 120_000,
   updateCheckEnabled: false,
   masterKey: 'a-master-key-that-is-long-enough-to-count-as-random',

@@ -3,7 +3,7 @@
  *
  * They used to be appended, in full, to every tool description that they
  * covered: the content rule rode on all twelve file tools, the agent-guide
- * reminder on all of them plus the shell, the write-mode and escape-sequence
+ * reminder on all of them, the write-mode and escape-sequence
  * paragraphs on two or three apiece. A description then ran to two or three
  * thousand characters, most of it text the agent had already read on the tool
  * above — and clients cut long descriptions from the END, which is where the
@@ -26,9 +26,11 @@
  * which copy is current. Each description opens instead with the one
  * sentence sending the agent to the guide (`tool-registry/guide-first.ts`).
  *
- * Pure text, a function of the layout only: the guide's name is a deployment
- * setting (an alias a deployment chose before the guide left the disk), so
- * nothing here may snapshot `AGENTS.md`.
+ * Pure text, a function of the layout and the default branch: both are
+ * deployment settings, so every caller passes the values in effect when it
+ * composes, and nothing here may snapshot a folder name or a branch name.
+ * The branch defaults to `''` (no branch named), so a caller that passes only
+ * the layout gets the text it got before the branch was named.
  */
 
 import {
@@ -61,8 +63,18 @@ const PRE_RENAME_AGENTS_FILE = 'CLAUDE.md';
  * of every call rather than of how to write one, and why large, escape-heavy
  * and binary content goes by upload, which three write tools each said in
  * full.
+ *
+ * 7,400 since the `__tmp__/` ref: four tools take it, so what it reaches and
+ * that it is read-only is said once here rather than in each description, and
+ * the section had no room left for it.
+ *
+ * 7,900 since the conventions rule names the default branch: the guide's start
+ * names it too, but only to an agent that calls `get_agent_guide`, and the
+ * sentence is ~165 characters plus the name. A CEILING, not a sample: measured
+ * with the longest branch name the platform accepts (255 characters, the
+ * bound `kb-fs` enforces), so no deployment's name can push the rules past it.
  */
-export const SHARED_FILE_RULES_CAP = 7_000;
+export const SHARED_FILE_RULES_CAP = 7_900;
 
 /** One shared rule: how the guide heads it, and the rule itself. */
 export interface SharedFileRule {
@@ -83,12 +95,12 @@ export interface SharedFileRule {
  * than rewritten wherever the wording still reads outside its old tool — the
  * ones that said "this tool" or "this call" name the tools instead.
  */
-export function sharedFileRules(layout: KbLayout): readonly SharedFileRule[] {
+export function sharedFileRules(layout: KbLayout, defaultBranch = ''): readonly SharedFileRule[] {
   return [
     {
       id: 'agent-guide',
       heading: "This knowledge base's own conventions",
-      body: conventionsRule(),
+      body: conventionsRule(defaultBranch),
     },
     {
       id: 'content-kinds',
@@ -113,6 +125,18 @@ export function sharedFileRules(layout: KbLayout): readonly SharedFileRule[] {
         'text). Images come back only on a DIRECT read_file: inside `call_tool_chain` an image read yields an ' +
         '`{ image_omitted, note }` stub instead, so read an image outside a chain when you mean to look at it. Any other ' +
         'binary file reads as a one-line description rather than raw bytes.',
+    },
+    {
+      // What `__tmp__/` reaches and what it does not (see
+      // `workspace/workspace-tmp.ts`) — four tools take the ref, so it is a
+      // shared rule rather than a sentence in each description.
+      id: 'workspace-tmp',
+      heading: "Files staged in the workspace's tmp folder",
+      body:
+        "`__tmp__/<path>` names ONE file YOU staged in the branch workspace's `tmp/` folder (chat attachments land " +
+        'there; nobody else\'s staged files are reachable). read_file, file_stat, grep (`path`) and copy_file (`src`) ' +
+        'read it as a repository file; it is read-only and never listed — copy_file it to a repository path to keep ' +
+        'it. An entry stays up to seven days.',
     },
     {
       id: 'write-mode',
@@ -145,15 +169,15 @@ export function sharedFileRules(layout: KbLayout): readonly SharedFileRule[] {
       // that take content as a JSON string names the route in one sentence of
       // its own; WHY a file should go that way, and how, is here.
       id: 'upload-route',
-      heading: 'Large, escape-heavy and binary content goes by upload',
+      heading: 'Large, escape-heavy and binary content: upload in, download out',
       body:
-        'write_file, write_files and edit_file take content as a JSON string you have to type out in full, so a long ' +
-        'file is cut off mid-answer, a file full of backslashes or `\\u` escapes fails to parse as a parameter, and ' +
-        'an image, a PDF or a zip cannot be sent at all. For any of those: call `request_file_upload`, POST the file — ' +
-        'or one zip holding many files — to the address it answers with any HTTP client ' +
-        '(`curl -X POST --data-binary @<file> "<uploadUrl>?filename=<name>"`), then `apply_file_upload` to land it on ' +
-        'a branch in one commit. The bytes never pass through the conversation, so nothing is cut or mangled on the ' +
-        'way. A person can also use Upload in the app.',
+        'write_file, write_files and edit_file take content as a JSON string you type out in full, so a long file ' +
+        'is cut off mid-answer, a file full of backslashes or `\\u` escapes fails to parse as a parameter, and an ' +
+        'image, a PDF or a zip cannot be sent at all. For those, call `request_file_upload`, POST the file (or one ' +
+        'zip of many) with any HTTP client (`curl -X POST --data-binary @<file> ' +
+        '"<uploadUrl>?filename=<name>"`), then `apply_file_upload` lands it in one commit. To take copies OUT, ' +
+        '`request_file_download` answers a one-time link per file and a zip per folder (`curl -o <name> ' +
+        '"<downloadUrl>"`). Either way no bytes pass through the conversation.',
     },
     {
       id: 'dry-run-confirm',
@@ -161,30 +185,30 @@ export function sharedFileRules(layout: KbLayout): readonly SharedFileRule[] {
       body:
         'move_file, copy_file and delete_folder take `dryRun: true`: it changes nothing and answers the impact — ' +
         'what the call would touch, `allowed`, and `reason` when it may not run. A non-empty folder is deleted, and a ' +
-        'move that changes your access runs, only with `confirm: true`; without it the call changes nothing and ' +
+        'move that changes anyone\'s access runs, only with `confirm: true`; without it the call changes nothing and ' +
         'returns the same impact with `confirmationRequired: true`. Do NOT set `confirm: true` on your first call — ' +
-        'dry-run, check the impact, then confirm. delete_file takes neither: it removes the one file you named, so ' +
-        'check it first with file_stat (`deletable`) if you are unsure.',
+        'dry-run, check the impact, then confirm. delete_file takes neither: check it first with file_stat ' +
+        '(`deletable`). delete_branch has its own `dryRun`.',
     },
     {
       id: 'managed-items',
       heading: 'What these tools never move or delete',
       body:
-        `A platform file (${platformFileList(layout)}) is refused with ` +
-        '"<name> is a platform file and stays in its folder." — a folder that moves ' +
-        'takes its own platform files along, still in their folder, and a folder that is deleted takes them with it in ' +
-        'the same one change, so its files are never left ungoverned part-way. A platform folder (the repository root ' +
-        `or a reserved root folder such as \`${layout.knowledgeBaseDir}/\`) and git metadata are refused, and so is creating a ` +
-        'platform file or folder at a destination (renaming a note to `access.md` is refused). A path that is, or goes ' +
-        'through, a symbolic link is refused: links are never followed or removed. On a protected branch you must be ' +
-        'able to write everything the call touches — for a folder, every file under it, at its old and its new path. ' +
-        'file_stat reports `managed`, `movable` and `deletable` so you can tell before the call.',
+        `A platform file (${platformFileList(layout)}) is never moved: "<name> is a platform file and stays in its folder." ` +
+        'A folder moved or deleted takes its own along, in one change. delete_file deletes a nested `access.md` for ' +
+        "whoever may write it (its folder then follows its parent's rules) and refuses `.bevelignore`; the repository " +
+        "root's `access.md` and `roles.yaml` are deleted by nobody: \"<name> is the repository's own file and cannot be " +
+        'deleted." A platform folder (the root, or a reserved one like ' +
+        `\`${layout.knowledgeBaseDir}/\`), git metadata, and making a platform file or folder at a destination are ` +
+        'refused; so is a path that is or crosses a symlink: links are never followed or removed. On a protected ' +
+        'branch you must be able to write all a call touches — for a folder, every file under it, at its old and new ' +
+        'path. file_stat reports `managed`, `movable` and `deletable` up front.',
     },
     {
       id: 'refused-for-permissions',
       heading: 'When a write is refused for permissions',
       body:
-        'A refusal is not necessarily the end of the road: the `write-denied` error says whether you may propose the ' +
+        'The `write-denied` error says whether you may propose the ' +
         'change instead (create a branch from this one, repeat the call on it, then `open_change_request` into this ' +
         'branch) and lists those steps.',
     },
@@ -222,20 +246,55 @@ function platformFileList(layout: KbLayout): string {
  * The conventions reminder — where the platform's guide is, that the
  * organisation's own conventions file comes with it, and to read both first.
  *
- * The guide is read by name at the repository root, where coding agents look
- * for an `AGENTS.md` by convention, and `get_agent_guide` returns it alone. A
- * deployment that once gave the guide a name of its own still answers to that
- * name, so the rule names it when it differs. `CLAUDE.md` is named as a
- * fallback because a knowledge base seeded before the rename may still carry
- * one its people edited.
+ * The guide's start is read by name at the repository root, where coding
+ * agents look for an `AGENTS.md` by convention, and `get_agent_guide` returns
+ * it or any one section.
+ * One name on every deployment, so the rule takes no layout. `CLAUDE.md` is
+ * named as a fallback because a knowledge base seeded before the rename may
+ * still carry one its people edited.
  */
-function conventionsRule(): string {
+function conventionsRule(defaultBranch: string): string {
+  const guide =
+    "Before your first read or change in a workspace, call `get_agent_guide`: it answers the guide's start, " +
+    "which names the default branch and the section for each question. " +
+    `read_file on \`${LEGACY_AGENTS_FILE}\` at the KB root answers with ` +
+    "that start, after the organisation's own conventions file of that name when it has one: follow both. A " +
+    `\`${PRE_RENAME_AGENTS_FILE}\` at the KB root is the organisation's own too; read it if it exists.`;
+  const branch = defaultBranchSentence(defaultBranch);
+  return branch ? `${guide}\n\n${branch}` : guide;
+}
+
+/**
+ * The one sentence naming the deployment's default branch. The guide's start
+ * names it too, but only once an agent calls `get_agent_guide`; every file
+ * tool asks for "the branch you are working on", and an agent left to guess
+ * guesses `main`, which on a deployment whose default is another branch
+ * writes where nobody reads. So the rules every channel carries name it.
+ *
+ * Empty while the deployment has no branch model (`KbContext.defaultBranch` is
+ * `''` until setup is answered): there is no name to give yet.
+ */
+function defaultBranchSentence(defaultBranch: string): string {
+  const name = defaultBranch.trim();
+  if (!name) return '';
   return (
-    "Before your first read or change in a workspace, call `get_agent_guide` and read the platform's guide " +
-    `(whole, or one section). read_file on \`${LEGACY_AGENTS_FILE}\` at the KB root answers with the same ` +
-    "guide, after the organisation's own conventions file of that name when it has one: follow both. A " +
-    `\`${PRE_RENAME_AGENTS_FILE}\` at the KB root is the organisation's own too; read it if it exists.`
+    `This knowledge base's default branch is ${markdownCodeSpan(name)}: the branch people read and the usual target of a ` +
+    'change request; pass it as `branch` unless you are working on a draft.'
   );
+}
+
+/**
+ * `text` as one Markdown code span whatever it contains: a fence one backtick
+ * longer than the longest run inside it, padded with a space where the text
+ * starts or ends with a backtick (CommonMark strips one such space). A branch
+ * name may hold a backtick, and a plain `` `name` `` would end the span early
+ * and leave the rest of the sentence naming half a branch.
+ */
+function markdownCodeSpan(text: string): string {
+  const longestRun = Math.max(0, ...(text.match(/`+/g) ?? []).map((run) => run.length));
+  const fence = '`'.repeat(longestRun + 1);
+  const padded = text.startsWith('`') || text.endsWith('`') ? ` ${text} ` : text;
+  return `${fence}${padded}${fence}`;
 }
 
 /**
@@ -243,8 +302,8 @@ function conventionsRule(): string {
  * byte for byte. A `##` section so it drops into the managed guide at that
  * level and still reads as a block in the instructions blob.
  */
-export function sharedFileRulesSection(layout: KbLayout): string {
-  const body = sharedFileRules(layout)
+export function sharedFileRulesSection(layout: KbLayout, defaultBranch = ''): string {
+  const body = sharedFileRules(layout, defaultBranch)
     .map((rule) => `### ${rule.heading}\n\n${rule.body}`)
     .join('\n\n');
   return `## ${SHARED_RULES_SECTION}\n\n${body}`;

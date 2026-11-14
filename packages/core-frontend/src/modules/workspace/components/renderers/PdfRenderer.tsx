@@ -4,11 +4,9 @@ import { getDocument, GlobalWorkerOptions } from 'pdfjs-dist';
 import type { PDFDocumentLoadingTask, PDFDocumentProxy, PDFPageProxy } from 'pdfjs-dist';
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { Button } from '../../../../shared/components';
-import { useRendererFileRef, useRendererWorkspaceId } from './rendererWorkspace';
 import { RetryReadButton } from './RetryReadButton';
 import { useReadRetry } from './useReadRetry';
-import { authFetch } from '../../../../lib/api';
-import { rawFileUrl } from '../../services/workspace.api';
+import { useRendererRawRead } from './rendererRawRead';
 import { DownloadFileButton } from './DownloadFileButton';
 import type { FileRendererProps } from './types';
 
@@ -38,16 +36,15 @@ GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
  * `onSave` / `onValueChange` / `readOnly`.
  */
 export function PdfRenderer({ filePath }: FileRendererProps) {
-  const workspaceId = useRendererWorkspaceId();
-  /** A past save, when Version history mounted this; null = the working tree. */
-  const fileRef = useRendererFileRef();
   /**
-   * The save as PRIMITIVES, hoisted out of the object so the read effect can
-   * depend on exactly what it reads. Depending on `fileRef` itself would put
-   * a context object in the dependency list.
+   * Where this file's bytes come from. In the app that is the workspace raw
+   * route under the session, for the workspace this viewer is pointed at and
+   * the save it is bound to; on a renderer surface (the embed) it is that
+   * surface's own route, with its own credential. Null until there is a
+   * workspace to read from — the same "nothing to read yet" the guard in the
+   * effect below has always had.
    */
-  const versionRef = fileRef?.ref ?? null;
-  const versionSide = fileRef?.side;
+  const rawRead = useRendererRawRead();
   const { attempt, retry } = useReadRetry();
   const [doc, setDoc] = useState<PDFDocumentProxy | null>(null);
   const [pageNumber, setPageNumber] = useState(1);
@@ -75,23 +72,21 @@ export function PdfRenderer({ filePath }: FileRendererProps) {
   const [width, setWidth] = useState(0);
 
   useEffect(() => {
-    // Reset stale state from a prior filePath / workspaceId before starting
-    // the new load — including teardown (workspaceId → null). The rendered-
-    // page ref dies with its document (task.destroy frees the pages).
+    // Reset stale state from a prior filePath / raw source before starting
+    // the new load — teardown (no source at all) included. The rendered-page
+    // ref dies with its document (task.destroy frees the pages).
     setDoc(null);
     setPageNumber(1);
     setError(null);
     renderedPageRef.current = null;
 
-    if (!workspaceId) return;
+    if (!rawRead) return;
 
     let cancelled = false;
     let loadingTask: PDFDocumentLoadingTask | null = null;
     (async () => {
       try {
-        const res = await authFetch(
-          rawFileUrl(workspaceId, filePath, { ref: versionRef, side: versionSide }),
-        );
+        const res = await rawRead.fetch(filePath);
         if (cancelled) return;
         if (!res.ok) {
           setError(`Failed to load PDF (HTTP ${res.status})`);
@@ -140,7 +135,7 @@ export function PdfRenderer({ filePath }: FileRendererProps) {
       loadingTask?.destroy().catch(() => {});
       loadingTaskRef.current = null;
     };
-  }, [workspaceId, filePath, versionRef, versionSide, attempt]);
+  }, [rawRead, filePath, attempt]);
 
   // Track the page column's width so the canvas re-renders to fit it. The
   // container only mounts once the document is loaded, hence the `doc` dep.

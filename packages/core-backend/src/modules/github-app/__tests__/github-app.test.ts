@@ -9,6 +9,8 @@ import { DeploymentSettingsService, SettingsValidationError } from '../../settin
 import { GitHubAppClient, GitHubAppError, appJwt, normalizePrivateKey } from '../github-app.client.js';
 import { GitHubAppConnection } from '../github-app.connection.js';
 import { createGitHubAppRoutes, githubAppManifest } from '../github-app.routes.js';
+import { setLogger } from '../../../shared/logging.js';
+import type { ILogger, LogFields } from '../../../shared/logger.contract.js';
 
 const ENC_KEY = 'kToAi8FXWDpDn3A6yQ/60O39bv05N7XzVOIu/0CJrFc=';
 const { privateKey: PEM, publicKey: PUBLIC } = generateKeyPairSync('rsa', {
@@ -392,6 +394,80 @@ describe('GitHubAppConnection: the token git presents', () => {
     await connection.prepare();
     await settled();
     expect(connection.token()).toBe('installation-token-1');
+  });
+
+  /**
+   * The git runner reporting that the host threw the token out. The clock
+   * may still give it fifty minutes: the host's verdict wins, the token is
+   * dropped, and GitHub is asked for another at once — past the backoff a
+   * recent failure would otherwise impose. When GitHub will not replace it,
+   * NO token remains: that is what keeps the runner from offering the
+   * refused one again.
+   */
+  it('replaces a token the host refused, with time to spare or not, and drops it when GitHub will not', async () => {
+    const world: Parameters<typeof github>[0] = {};
+    const { connection, hub, clock } = connected(world);
+    await connection.prepare();
+    expect(connection.token()).toBe('installation-token-1');
+    clock.now += 5 * 60_000;
+    await connection.prepare({ refused: true });
+    expect(connection.token()).toBe('installation-token-2');
+    expect(hub.tokensIssued()).toBe(2);
+
+    // Inside a remembered failure's backoff, the refusal still asks.
+    world.down = true;
+    await expect(connection.prepare({ refused: true })).rejects.toThrow();
+    expect(connection.token()).toBeNull();
+    world.down = false;
+    await expect(connection.prepare({ refused: true })).resolves.toBeUndefined();
+    expect(connection.token()).toBe('installation-token-3');
+  });
+
+  /**
+   * A deployment whose app settings are incomplete used to run every git
+   * call without a credential and say nothing about it — for hours, with
+   * every push failing. It says so now: once per state, not before every
+   * call, and again if the state changes.
+   */
+  it('says ONCE which settings keep it from asking for a token, and says it again when they change', async () => {
+    const lines: string[] = [];
+    const capture = (bindings: LogFields = {}): ILogger => {
+      const line = (level: string) => (message: string, fields?: LogFields) =>
+        void lines.push(`${level} ${message} ${JSON.stringify({ ...bindings, ...fields })}`);
+      return { debug: line('debug'), info: line('info'), warn: line('warn'), error: line('error'), child: (m) => capture({ ...bindings, ...m }) };
+    };
+    const previous = setLogger(capture());
+    try {
+      const { connection, values } = connected();
+      const key = values.githubAppPrivateKey!;
+      values.githubAppPrivateKey = '';
+      await connection.prepare();
+      await connection.prepare();
+      await connection.prepare();
+      const said = lines.filter((l) => l.includes('no installation token can be asked for'));
+      expect(said).toHaveLength(1);
+      expect(said[0]).toContain('githubAppPrivateKey');
+      expect(said[0]).not.toContain('githubInstallationId');
+      expect(connection.token()).toBeNull();
+
+      // The state changes: a second setting goes too. Said again, naming both.
+      values.githubInstallationId = '';
+      await connection.prepare();
+      await connection.prepare();
+      expect(lines.filter((l) => l.includes('no installation token can be asked for'))).toHaveLength(2);
+      expect(lines.at(-1)).toContain('githubAppPrivateKey, githubInstallationId');
+
+      // Settings back: a token is asked for, and the next gap is said afresh.
+      values.githubAppPrivateKey = key;
+      values.githubInstallationId = '77';
+      await connection.prepare();
+      expect(connection.token()).toBe('installation-token-1');
+      values.githubInstallationId = '';
+      await connection.prepare();
+      expect(lines.filter((l) => l.includes('no installation token can be asked for'))).toHaveLength(3);
+    } finally {
+      setLogger(previous);
+    }
   });
 });
 

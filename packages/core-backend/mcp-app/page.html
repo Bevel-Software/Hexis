@@ -1,0 +1,483 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Knowledge base page</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        background: transparent;
+        font: 13px/1.5 -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial,
+          sans-serif;
+        color: #3f3f46;
+      }
+      #root {
+        display: block;
+        height: 100%;
+      }
+      #notice {
+        padding: 16px;
+        white-space: pre-wrap;
+      }
+      #notice a {
+        color: #2563eb;
+      }
+      /* !important: #root's display rule is an id selector and outranks a
+         class, so without it a "hidden" root keeps its full height and
+         pushes the notice below the fold. */
+      .hidden {
+        display: none !important;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- One of the two is shown, never both: the page, drawn by the
+         deployment's embed bundle into #root, or a sentence saying why there
+         is no page. -->
+    <div id="root" class="hidden"></div>
+    <p id="notice">Opening the page…</p>
+
+    <script>
+      // The MCP Apps view. It speaks the extension's protocol directly — no
+      // SDK, by decision: what an SDK would hide is the four message names
+      // below (see the Specification's Decision 10).
+      //
+      // Its whole job is to run the deployment's own embed — the app's
+      // renderers — on the page `open_page` answered with. It does NOT frame
+      // the deployment's `/embed` page: a chat host's sandbox forbids it
+      // (Claude pins the sandbox's `frame-src` to `'self'` and drops the
+      // `frameDomains` a view declares), and a blocked frame is a blank box.
+      // What the sandbox does allow is fetching from and loading scripts off
+      // the origins a view declares — so the view fetches the deployment's
+      // build manifest, loads its embed bundle into THIS document, and hands
+      // the bundle the token, the origin and the host's way of opening a
+      // link. The view still renders nothing itself: a second rendering path
+      // would have to be kept in step with the app's, and would be the one
+      // that is wrong.
+      (function () {
+        'use strict';
+
+        var root = document.getElementById('root');
+        var notice = document.getElementById('notice');
+        var hostOrigin = null;
+        var shown = false;
+        /**
+         * Whether a page is already on its way into #root. One view shows
+         * ONE page: a second tool result (a host re-delivering the first, or
+         * one for another call) must not load a second bundle into the same
+         * root, where whichever finished last would win. The first result
+         * owns the view; later ones are ignored.
+         */
+        var loading = false;
+        /**
+         * What the view calls `open_page` with to renew its token: the path
+         * and heading the result that owns the view echoed. Null until then,
+         * and when the result echoed no path (nothing to ask for).
+         */
+        var pageArgs = null;
+        /** The deployment the owning result named; a renewed token must name the same one. */
+        var deployment = null;
+        /**
+         * Whether the host runs a server tool for the view (`tools/call`,
+         * app to host): true or false when the handshake's reply said so in
+         * `hostCapabilities.serverTools`, null when it said nothing — then
+         * the view tries once, and a refusal is the answer.
+         */
+        var serverTools = null;
+        /** Replies the view is waiting for, by request id. */
+        var pending = {};
+        var callCount = 0;
+        /** The one renewal in flight, shared by every call refused meanwhile. */
+        var renewing = null;
+
+        /** The name the deployment's Vite build gives the embed entry. */
+        var EMBED_ENTRY = 'embed';
+        /** Where the deployment serves its build manifest, beside the bundle. */
+        var MANIFEST_PATH = '/embed-manifest.json';
+        /** The global the bundle reads its handoff from (see `embed-config.ts`). */
+        var HANDOFF_GLOBAL = '__HEXIS_EMBED__';
+        /**
+         * The height the view asks its host for once the page is on screen,
+         * in CSS pixels. A host starts an app view small — Claude at a few
+         * lines — and grows it only when the view says what it needs
+         * (`ui/notifications/size-changed`, which a host with flexible
+         * dimensions MUST honour). The page scrolls inside the view, so this
+         * is the reading height of a document pane, not the page's length:
+         * tall enough to read a section at a time, short enough to stay a
+         * part of the conversation rather than the whole screen.
+         */
+        var PREFERRED_HEIGHT = 640;
+        /** The tool that minted the token, and the one that renews it. */
+        var OPEN_PAGE_TOOL = 'open_page';
+        /**
+         * How long a renewal waits for the host before it gives up and the
+         * view says it has expired. A host that never answers must not leave
+         * a save spinning.
+         */
+        var RENEW_TIMEOUT_MS = 20000;
+
+        function send(message) {
+          // The host is this view's parent; it told us its origin on the
+          // handshake. Before that there is nowhere to send to but '*', and
+          // the only thing sent then is the handshake itself, which carries
+          // nothing.
+          try {
+            window.parent.postMessage(message, hostOrigin || '*');
+          } catch (err) {
+            /* the host went away; nothing to do */
+          }
+        }
+
+        function say(text) {
+          notice.textContent = text;
+          notice.classList.remove('hidden');
+          root.classList.add('hidden');
+        }
+
+        /** Ask the host for a view this tall. It resizes the frame; the page fills it. */
+        function requestHeight(px) {
+          send({
+            jsonrpc: '2.0',
+            method: 'ui/notifications/size-changed',
+            params: { height: px },
+          });
+        }
+
+        /** Open a URL the way the host opens links: a new tab, through it. */
+        function openLink(url) {
+          send({
+            jsonrpc: '2.0',
+            id: 'open-' + Date.now(),
+            method: 'ui/open-link',
+            params: { url: url },
+          });
+        }
+
+        /**
+         * Ask the host to call one of this server's tools for the view, over
+         * the connection the chat already holds — and so as the identity
+         * that connection authenticated. Resolves with the CallToolResult;
+         * rejects when the host refuses or does not answer in time.
+         */
+        function callServerTool(name, args) {
+          return new Promise(function (resolve, reject) {
+            callCount += 1;
+            var id = 'call-' + callCount;
+            var timer = setTimeout(function () {
+              delete pending[id];
+              var silent = new Error('the chat app did not answer');
+              silent.timedOut = true;
+              reject(silent);
+            }, RENEW_TIMEOUT_MS);
+            pending[id] = function (message) {
+              clearTimeout(timer);
+              delete pending[id];
+              if (message.error || !message.result) reject(message.error || new Error('no result'));
+              else resolve(message.result);
+            };
+            send({ jsonrpc: '2.0', id: id, method: 'tools/call', params: { name: name, arguments: args } });
+          });
+        }
+
+        /**
+         * A fresh token for the page this view shows, or null when there is
+         * none to be had. The view cannot mint one — minting needs the
+         * identity, which lives on the chat's connection — so it asks the
+         * host to call `open_page` again for the same path and heading and
+         * takes the token out of the `embedUrl` it answers. That call goes
+         * through `open_page`'s own gate: a reader whose access was
+         * withdrawn is refused there exactly as on a first call, and gets
+         * null here.
+         *
+         * Null without asking when the host said it runs no server tools for
+         * a view, or after a host that said nothing refused once. The bundle
+         * calls this at most once per refused call (see `embed-config.ts`).
+         */
+        function renew() {
+          if (renewing) return renewing;
+          if (serverTools === false || !pageArgs || !deployment) return Promise.resolve(null);
+          // Every Hexis tool takes its arguments under `body`; flat ones are
+          // refused ("takes its arguments under body") and no token comes back.
+          renewing = callServerTool(OPEN_PAGE_TOOL, { body: pageArgs })
+            .then(
+              function (result) {
+                var data = (result && result.structuredContent) || {};
+                if (result && result.isError) return null;
+                var url;
+                try {
+                  url = new URL(data.embedUrl);
+                } catch (err) {
+                  return null;
+                }
+                // The same deployment, or nothing: the bundle already runs
+                // against this one, and its API is the token's.
+                if (baseOf(url) !== deployment) return null;
+                var token = url.searchParams.get('token');
+                if (!token) return null;
+                var handoff = window[HANDOFF_GLOBAL];
+                if (handoff && typeof handoff === 'object') handoff.token = token;
+                return token;
+              },
+              function (err) {
+                // The host refused the call: one that said nothing about
+                // server tools has now said no. One that did not answer in
+                // time has said nothing, and is asked again on the next
+                // refused call.
+                if (serverTools === null && !(err && err.timedOut)) serverTools = false;
+                return null;
+              },
+            )
+            .then(function (token) {
+              renewing = null;
+              return token;
+            });
+          return renewing;
+        }
+
+        /** The text blocks of a CallToolResult, one line each. */
+        function textOf(result) {
+          var out = [];
+          var content = Array.isArray(result.content) ? result.content : [];
+          for (var i = 0; i < content.length; i++) {
+            var block = content[i];
+            if (block && block.type === 'text' && typeof block.text === 'string' && block.text) {
+              out.push(block.text);
+            }
+          }
+          return out;
+        }
+
+        /** A sentence instead of the page, and the page's app address to click. */
+        function sayWithLink(lines, data) {
+          say(lines.join('\n'));
+          if (typeof data.appUrl === 'string' && data.appUrl) {
+            var link = document.createElement('a');
+            link.href = data.appUrl;
+            link.textContent = 'Open it in the knowledge base';
+            link.addEventListener('click', function (event) {
+              event.preventDefault();
+              openLink(data.appUrl);
+            });
+            notice.appendChild(document.createElement('br'));
+            notice.appendChild(link);
+          }
+        }
+
+        /** The manifest chunk of the embed entry, or null. */
+        function embedEntry(manifest) {
+          if (!manifest || typeof manifest !== 'object') return null;
+          var keys = Object.keys(manifest);
+          for (var i = 0; i < keys.length; i++) {
+            var chunk = manifest[keys[i]];
+            if (!chunk || !chunk.isEntry || typeof chunk.file !== 'string') continue;
+            if (chunk.name === EMBED_ENTRY || /(^|\/)embed\.[jt]sx?$/.test(keys[i])) return chunk;
+          }
+          return null;
+        }
+
+        /** Every stylesheet the entry needs: its own and those of the chunks it imports. */
+        function stylesOf(manifest, entry) {
+          var seen = {};
+          var out = [];
+          (function walk(chunk) {
+            if (!chunk) return;
+            var css = Array.isArray(chunk.css) ? chunk.css : [];
+            for (var i = 0; i < css.length; i++) {
+              if (!seen[css[i]]) {
+                seen[css[i]] = true;
+                out.push(css[i]);
+              }
+            }
+            var imports = Array.isArray(chunk.imports) ? chunk.imports : [];
+            for (var j = 0; j < imports.length; j++) {
+              if (!seen['#' + imports[j]]) {
+                seen['#' + imports[j]] = true;
+                walk(manifest[imports[j]]);
+              }
+            }
+          })(entry);
+          return out;
+        }
+
+        /**
+         * The deployment's address — origin plus the path prefix it is served
+         * under, if any — from the embed address `open_page` answered with:
+         * `https://host/embed?token=…` names `https://host`, and
+         * `https://host/hexis/embed?token=…` names `https://host/hexis`. The
+         * manifest, the bundle and the API all live under it.
+         */
+        function baseOf(url) {
+          return url.origin + url.pathname.replace(/\/embed\/?$/, '').replace(/\/+$/, '');
+        }
+
+        /**
+         * Load the deployment's embed bundle into this document and let it
+         * draw the page. The deployment is whichever one minted the token —
+         * read off the embed address `open_page` answered with, which is the
+         * one origin the view's sandbox metadata lets us reach.
+         */
+        function loadBundle(data) {
+          var url;
+          try {
+            url = new URL(data.embedUrl);
+          } catch (err) {
+            sayWithLink(['The page address could not be read.'], data);
+            return;
+          }
+          var base = baseOf(url);
+          var token = url.searchParams.get('token');
+          if (!token) {
+            sayWithLink(['The page address carries no token.'], data);
+            return;
+          }
+          if (loading) return;
+          loading = true;
+          deployment = base;
+          // What the view calls `open_page` with again when the token runs
+          // out: the arguments this result was answered for, as it echoed them.
+          if (typeof data.path === 'string' && data.path) {
+            pageArgs = { path: data.path };
+            if (typeof data.heading === 'string' && data.heading) pageArgs.heading = data.heading;
+          }
+          // The handoff, before the bundle: it reads this the moment it runs.
+          window[HANDOFF_GLOBAL] = { baseUrl: base, token: token, openLink: openLink, renew: renew };
+
+          fetch(base + MANIFEST_PATH, { credentials: 'omit' })
+            .then(function (res) {
+              if (!res.ok) throw new Error('the build manifest answered HTTP ' + res.status);
+              return res.json();
+            })
+            .then(function (manifest) {
+              var entry = embedEntry(manifest);
+              if (!entry) throw new Error('the build manifest names no embed entry');
+              var styles = stylesOf(manifest, entry);
+              for (var i = 0; i < styles.length; i++) {
+                var link = document.createElement('link');
+                link.rel = 'stylesheet';
+                link.href = base + '/' + styles[i];
+                document.head.appendChild(link);
+              }
+              var script = document.createElement('script');
+              script.type = 'module';
+              script.crossOrigin = 'anonymous';
+              script.src = base + '/' + entry.file;
+              script.addEventListener('load', function () {
+                // A module's load fires after it ran, so the bundle has mounted.
+                root.classList.remove('hidden');
+                notice.classList.add('hidden');
+                shown = true;
+                // Now that there is a page to show, ask for room to read it.
+                // Asked AFTER the mount, not at the handshake: a notice or a
+                // refusal is a sentence and needs no document pane.
+                requestHeight(PREFERRED_HEIGHT);
+              });
+              script.addEventListener('error', function () {
+                blocked(data, 'This chat app did not let the page load.');
+              });
+              document.body.appendChild(script);
+            })
+            .catch(function (err) {
+              blocked(data, 'This chat app did not let the page load (' + (err && err.message ? err.message : String(err)) + ').');
+            });
+        }
+
+        /** The sandbox would not load the page: say so, and offer the app. */
+        function blocked(data, reason) {
+          if (shown) return;
+          sayWithLink([reason, 'The page is in the knowledge base.'], data);
+        }
+
+        function show(result) {
+          var data = (result && result.structuredContent) || {};
+          if (typeof data.embedUrl === 'string' && data.embedUrl) {
+            loadBundle(data);
+            return;
+          }
+          // No embed address: the deployment's public address is plain http,
+          // which an https sandbox will not load from (see Decision 8). The
+          // tool's own answer already carries the page's text and its address
+          // in the app — say the same thing here, and make the address
+          // clickable.
+          var lines = [];
+          if (typeof data.note === 'string' && data.note) lines.push(data.note);
+          // A refused call (no such page, no access) carries its reason only
+          // as text — errors never get structuredContent. Show that reason
+          // rather than a generic sentence.
+          if (!lines.length && result && result.isError) lines = textOf(result);
+          if (!lines.length) lines.push('This page cannot be shown here.');
+          sayWithLink(lines, data);
+        }
+
+        window.addEventListener('message', function (event) {
+          var message = event.data;
+          if (!message || typeof message !== 'object') return;
+          // Only the host's half of the extension protocol arrives here.
+          if (event.source !== window.parent) return;
+          if (hostOrigin === null && event.origin) hostOrigin = event.origin;
+
+          // A reply to a request the view sent (a server tool call): it has
+          // the request's id and no method of its own.
+          if (!message.method && typeof message.id === 'string' && pending[message.id]) {
+            pending[message.id](message);
+            return;
+          }
+
+          if (message.method === 'ui/notifications/tool-result') {
+            // The params ARE the CallToolResult. A `result` wrapper is
+            // accepted too, for a host that wrapped it.
+            var params = message.params || {};
+            show(params.structuredContent || !params.result ? params : params.result);
+            return;
+          }
+          if (message.method === 'ui/notifications/container-size-changed') {
+            // The page fills the view, so the host's own sizing is the
+            // whole of the layout; nothing to recompute.
+            return;
+          }
+          // The handshake's reply carries the host's capabilities. The one
+          // read here is `serverTools`: whether the host runs this server's
+          // tools for the view, which is how the view renews its token. And a
+          // host that sends the first tool result only after the handshake
+          // completes needs us to have sent it.
+          if (!message.method && message.id === INITIALIZE_ID) {
+            // A rejected handshake is not advertised as ready — and the
+            // reader is told, rather than left at "Opening the page…".
+            if (message.error || !message.result) {
+              if (!shown) say('The chat app refused to open this page.');
+              return;
+            }
+            // Only a `serverTools` the host named decides: present is yes,
+            // false or null is no. Capabilities that leave it out have said
+            // nothing about it, and the view tries once.
+            var caps = message.result.hostCapabilities;
+            if (caps && typeof caps === 'object' && caps.serverTools !== undefined) {
+              serverTools = !!caps.serverTools;
+            }
+            send({ jsonrpc: '2.0', method: 'ui/notifications/initialized', params: {} });
+            if (!shown) say('Opening the page…');
+          }
+        });
+
+        var INITIALIZE_ID = 'initialize';
+        send({
+          jsonrpc: '2.0',
+          id: INITIALIZE_ID,
+          method: 'ui/initialize',
+          params: {
+            protocolVersion: '2026-01-26',
+            appInfo: { name: 'hexis-knowledge-page', version: '1.0.0' },
+            // Declares nothing. The extension has no way for a view to say
+            // it CALLS server tools (`tools` here would mean the view
+            // exposes tools of its own); whether the host runs them for a
+            // view is the host's to say, in the reply's `serverTools`.
+            // Links go out through ui/open-link, which every host offers.
+            appCapabilities: {},
+          },
+        });
+      })();
+    </script>
+  </body>
+</html>

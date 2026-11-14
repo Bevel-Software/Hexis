@@ -5,7 +5,7 @@ import {
   protectedBranchDisplayName,
 } from '@bevel-software/platform-shared';
 import { Dialog } from '../../../shared/components/Dialog';
-import { useGit } from '../../git/state/git.context';
+import { useGit } from '../../git';
 import { openChangeRequest } from '../services/pr-open.api';
 import { PR_STALE_EVENT } from '../../../core/events';
 

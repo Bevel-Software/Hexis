@@ -28,6 +28,8 @@
 
 export {
   type ProxiedTool,
+  READ_ONLY_TAG,
+  withReadOnlyOverride,
   toListedTool,
   sanitizeInputSchema,
   flattenManualTool,
@@ -41,6 +43,21 @@ export {
 } from './schema-validity.js';
 
 export {
+  MCP_APP_UI_META_KEY,
+  MCP_APP_MIME_TYPE,
+  MCP_APP_URI_SCHEME,
+  type McpAppToolUi,
+  type McpAppResourceUi,
+  type McpAppResource,
+  type McpAppManifest,
+  toolUiMeta,
+  resourceUiMeta,
+  toListedResource,
+  toReadResourceResult,
+  parseMcpAppManifest,
+} from './mcp-app.js';
+
+export {
   describeToolFailure,
   withTransportDetail,
   toCallToolResult,
@@ -52,12 +69,15 @@ export {
   mcpImageResult,
   isMcpImageResult,
   omitImagePayloads,
+  NOT_JSON_KIND,
+  pageInsteadOfJson,
 } from './results.js';
 
 export {
   codeModeMetaTools,
   chainNamespaceExample,
   META_TOOL_NAMES,
+  META_TOOL_READ_ONLY,
   CALL_TOOL_CHAIN_MAX_OUTPUT,
   CALL_TOOL_CHAIN_NAME,
   CHAIN_FAILURES_RULE,
@@ -92,6 +112,27 @@ export {
 export { registerManual, dispatchToolCall } from './dispatch.js';
 
 export {
+  CALL_LINE_PREFIX,
+  ARGUMENTS_DO_NOT_MATCH_KIND,
+  BODY_AT_TOP_LEVEL_LINE,
+  ARGS_UNDER_BODY_LINE,
+  callExample,
+  exampleArguments,
+  callLine,
+  withCallExample,
+  splitCallLine,
+  describeInterface,
+  argumentsDoNotMatchMessage,
+  compileCheck,
+  checkFor,
+  type CompiledCheck,
+} from './tool-interface.js';
+
+export { installCallGuards, argumentRefusal, ArgumentsDoNotMatchError } from './call-guards.js';
+
+export { installGetHasNoBody, withoutBodyOnGet, NO_BODY_FIELD } from './get-has-no-body.js';
+
+export {
   RETIRED_TOOL_MESSAGES,
   RETIRED_TOOL_NAMES,
   retiredToolMessage,
@@ -108,13 +149,18 @@ export {
 export {
   type SkillSummary,
   type LoadedSkill,
+  type PromptSummary,
   skillPromptText,
+  ONBOARDING_GUIDE_SECTION_ID,
+  ONBOARD_PROMPT,
+  promptsForSkills,
 } from './skills.js';
 
 export {
   utcpNamespacePrefix,
   utcpNamespacedKey,
   seedBevelHostedManualVars,
+  isPlatformHostedUrl,
 } from './utcp-namespace.js';
 
 export {
@@ -126,6 +172,19 @@ export {
 } from './code-mode-names.js';
 
 export { printable } from './printable.js';
+
+// A connection made as an `.agent` file, as the deployment says it on the
+// wire and as both MCP servers word it: one module, so the hosted proxy and
+// the local server cannot describe or refuse the same connection differently.
+export {
+  CONNECTION_META_KEY,
+  NOT_AVAILABLE_TO_CONNECTION,
+  connectionRefusal,
+  connectionWireOf,
+  describeConnection,
+  type ConnectionScopeWire,
+  type ScopeAgent,
+} from './connection-scope-wire.js';
 
 // Loading this package teaches UTCP `auth_type: google_service_account`, on
 // both surfaces alike: the auth type validates and the `http` protocol mints

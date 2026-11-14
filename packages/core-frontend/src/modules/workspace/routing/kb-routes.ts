@@ -1,7 +1,9 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useContext, useEffect, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { useGit } from '../../git/state/git.context';
-import { useWorkspace } from '../state/workspace.context';
+import { GitContext } from '../../git';
+import { WorkspaceContext } from '../state/workspace.context';
+import { useRendererSurface } from '../components/renderers/rendererSurface';
+import type { KbLinkTarget } from '../components/renderers/KbAppLink';
 import { authFetch } from '../../../lib/api';
 import {
   isExternalHref,
@@ -60,6 +62,26 @@ export function kbFileUrl(branch: string, relativePath: string = ''): string {
     .map(encodeURIComponent)
     .join('/');
   return `${KB_ROUTE_PREFIX}/${branchPart}/${pathPart}`;
+}
+
+/**
+ * The query that asks for a file's FILE PAGE whatever its path would
+ * otherwise open as — under `Skills/` and `Plugins/` every file in a skill's
+ * folder is that skill's page. Router state (`rawFile`) does this within one
+ * tab; a page opened in a NEW tab — the embed's "Open in the platform" —
+ * carries nothing but its URL, so the ask has to ride in it.
+ */
+const FILE_PAGE_PARAM = 'as';
+const FILE_PAGE_VALUE = 'file';
+
+/** `kbFileUrl`, asking for the file page itself (see `FILE_PAGE_PARAM`). */
+export function kbFilePageUrl(branch: string, relativePath: string): string {
+  return `${kbFileUrl(branch, relativePath)}?${FILE_PAGE_PARAM}=${FILE_PAGE_VALUE}`;
+}
+
+/** Whether a location's query is `kbFilePageUrl`'s ask for the file page. */
+export function asksForFilePage(searchParams: URLSearchParams): boolean {
+  return searchParams.get(FILE_PAGE_PARAM) === FILE_PAGE_VALUE;
 }
 
 /**
@@ -128,19 +150,22 @@ export function fetchNodeId(branch: string, workspacePath: string): Promise<stri
 }
 
 /**
- * The canonical absolute URL for a file, for the "copy link" affordances: a node's
- * id URL (`<origin>/workspace/<branch>/<id>`) when the file is an id-bearing node,
- * else its path URL. Resolves the id in the background and falls back to the path
- * URL until it resolves (and permanently for non-node files). Null when there's no
- * branch or path yet. Callers append any `#heading` themselves. This makes copied
- * links id-based on their own, independent of the `FileRoute` path→id redirect.
+ * The frontmatter id of the file at `workspacePath` on the checked-out branch,
+ * as the backend answers it ({@link fetchNodeId}), or null — not a node, not
+ * resolved yet, or a renderer surface, which has no git status to ask with.
+ * `onBranch` names another branch the file was read from: the skill page
+ * renders its files from the default branch whatever is checked out.
+ * The one answer to "which node is this file", shared by the copy-link URL
+ * below and the id-link rule in {@link useNodeIdNav}, so neither re-reads the
+ * frontmatter its own way.
  */
-export function useCanonicalFileUrl(workspacePath: string | null): string | null {
-  const git = useGit();
-  const branch = git.status?.branch ?? null;
+export function useFileNodeId(workspacePath: string | null, onBranch?: string): string | null {
+  const surface = useRendererSurface();
+  const git = useContext(GitContext);
+  const branch = surface ? null : (onBranch ?? git?.status?.branch ?? null);
   // Tie the resolved id to the exact (branch, path) it was fetched for. Inputs
-  // change a render before the effect re-resolves, so without this key the URL
-  // would briefly pair the new path with the *previous* node's id.
+  // change a render before the effect re-resolves, so without this key the
+  // answer would briefly pair the new path with the *previous* node's id.
   const key = branch && workspacePath ? `${branch}\n${workspacePath}` : null;
   const [resolved, setResolved] = useState<{ key: string; id: string | null } | null>(null);
 
@@ -156,8 +181,28 @@ export function useCanonicalFileUrl(workspacePath: string | null): string | null
     };
   }, [key, branch, workspacePath]);
 
+  return resolved && resolved.key === key ? resolved.id : null;
+}
+
+/**
+ * The canonical absolute URL for a file, for the "copy link" affordances: a node's
+ * id URL (`<origin>/workspace/<branch>/<id>`) when the file is an id-bearing node,
+ * else its path URL. Resolves the id in the background and falls back to the path
+ * URL until it resolves (and permanently for non-node files). Null when there's no
+ * branch or path yet. Callers append any `#heading` themselves. This makes copied
+ * links id-based on their own, independent of the `FileRoute` path→id redirect.
+ */
+export function useCanonicalFileUrl(workspacePath: string | null): string | null {
+  // A surface outside the app knows the address of the file it is showing —
+  // it was told it by whatever opened it — and has no git status to resolve
+  // one from. Asked FIRST, and before `useGit`, which has no provider there.
+  const surface = useRendererSurface();
+  const git = useContext(GitContext);
+  const branch = surface ? null : (git?.status?.branch ?? null);
+  const nodeId = useFileNodeId(workspacePath);
+
+  if (surface) return workspacePath ? surface.canonicalUrlFor(workspacePath) : null;
   if (!branch || !workspacePath) return null;
-  const nodeId = resolved && resolved.key === key ? resolved.id : null;
   const relative = nodeId ? kbNodeUrl(branch, nodeId) : kbFileUrl(branch, workspacePath);
   return `${window.location.origin}${relative}`;
 }
@@ -304,6 +349,60 @@ export function openExternalHref(href: string): boolean {
 }
 
 /**
+ * Open an in-app address in a new tab: the one way a link inside rendered
+ * file content leaves the file it sits in. The tab gets the plain address;
+ * whatever view this tab is in (full screen, a query of its own) stays here.
+ *
+ * `window.open(url, '_blank', 'noopener')` answers `null` whether or not the
+ * tab opened, so a tab the browser refused (no user gesture left, a popup
+ * blocker) would be a click swallowed without a word. The tab is opened
+ * without the feature instead and its `opener` severed at once: the address
+ * is this app's own, and a tab just opened has run nothing before this line.
+ */
+function openInNewTab(url: string): void {
+  const opened = window.open(url, '_blank');
+  if (!opened) {
+    console.warn(`[useFileNav] the browser did not open a new tab for ${url}`);
+    return;
+  }
+  opened.opener = null;
+}
+
+/** Follow a content link where its target says: a new tab, or this tab by its fragment. */
+function followLinkTarget(target: KbLinkTarget | null, navigate: (to: string) => void): void {
+  if (!target) return;
+  if (target.newTab) openInNewTab(target.href);
+  else navigate(target.href);
+}
+
+/**
+ * A link to the file on screen: this tab's OWN address with the link's
+ * fragment — an id URL stays an id URL, and the query (`?fullscreen=1`)
+ * stays — so following it scrolls and changes nothing else.
+ */
+function sectionOfThisTab(location: { pathname: string; search: string }, hash: string): KbLinkTarget {
+  return { href: location.pathname + location.search + hash, newTab: false };
+}
+
+const noLinkTarget = (): KbLinkTarget | null => null;
+
+/** How `useFileNav().openLink` follows one link, beyond the rule itself. */
+export interface OpenLinkOptions {
+  /** The branch the link's file was read from, when not this tab's (see `linkTarget`). */
+  homeBranch?: string;
+  /** Follow a link to a section of the same file here, given its fragment, instead of moving this tab. */
+  onSection?(hash: string): void;
+  /**
+   * The reader asked for a new tab — a modified or middle click a host had
+   * to relay, because it could not leave the click to the browser (the HTML
+   * page's sandboxed frame). Every in-app destination then opens in a new
+   * tab at its plain address, a section of this file included, as the
+   * browser opens a new-tab link: this tab stays as it is.
+   */
+  newTab?: boolean;
+}
+
+/**
  * The branch segment of a `/workspace/<branch>/…` pathname, decoded, or null
  * when this location is not a workspace URL. The pathname from the router is
  * still percent-encoded (unlike `useParams`, which decodes for you), so this
@@ -317,10 +416,19 @@ export function branchFromPathname(pathname: string): string | null {
 }
 
 export function useFileNav() {
+  // Outside the app every opener is the surface's: the embed opens a page in
+  // a NEW TAB through its host and never navigates itself. Read before the
+  // two app contexts, which have no provider there — so they are read
+  // non-throwing and asserted only on the app path below.
+  const surface = useRendererSurface();
   const navigate = useNavigate();
   const location = useLocation();
-  const git = useGit();
-  const { kbDirName } = useWorkspace();
+  const git = useContext(GitContext);
+  const workspace = useContext(WorkspaceContext);
+  if (!surface && (!git || !workspace)) {
+    throw new Error('useFileNav must be used within GitContext/WorkspaceContext or a RendererSurface');
+  }
+  const kbDirName = surface?.kbDirName ?? workspace?.kbDirName ?? '';
   // The URL's branch first, the git status second. During a branch switch the
   // status still reports the branch being LEFT — it only catches up once the
   // destination workspace has bootstrapped and answered — so building a click
@@ -329,7 +437,7 @@ export function useFileNav() {
   // which branch is on screen (`FileRoute` bootstraps to match it), so a click
   // lands on the branch being switched TO. Off a workspace route there is no
   // branch in the URL and the status is the only answer there is.
-  const branch = branchFromPathname(location.pathname) ?? git.status?.branch ?? null;
+  const branch = branchFromPathname(location.pathname) ?? git?.status?.branch ?? null;
 
   const openFile = useCallback(
     (pathOrUrl: string) => {
@@ -361,6 +469,34 @@ export function useFileNav() {
   );
 
   /**
+   * Where an in-app link destination written inside `basePath` leads, as
+   * {@link openLink} follows it: the file it sits in keeps THIS tab's own
+   * address with the link's fragment (an id URL stays an id URL, and the
+   * query — `?fullscreen=1` — stays), any other file opens in a new tab at
+   * its plain `kbFileUrl`. Null for an external or unresolvable destination,
+   * which is not this rule's.
+   *
+   * `homeBranch` is the branch the file the link sits in was read from, when
+   * that is not the branch this tab stands on: the skill page renders its
+   * files from the default branch whatever is checked out, so a relative link
+   * there resolves on the default branch. Omitted, it is this tab's branch.
+   */
+  const linkTarget = useCallback(
+    (href: string, basePath: string, homeBranch?: string): KbLinkTarget | null => {
+      const target = resolveKbHref(href, { basePath, kbDirName });
+      if (target?.kind !== 'workspace') return null;
+      const home = homeBranch ?? branch;
+      const onBranch = target.branch ?? home;
+      if (!onBranch) return null;
+      if (onBranch === home && target.path === basePath) {
+        return sectionOfThisTab(location, target.hash);
+      }
+      return { href: kbFileUrl(onBranch, target.path) + target.hash, newTab: true };
+    },
+    [branch, kbDirName, location],
+  );
+
+  /**
    * Follow a link DESTINATION out of a rendered document: the href as the
    * author wrote it (or as react-markdown encoded it), resolved against
    * `basePath`, the file the link sits in. The one entry for the markdown,
@@ -368,6 +504,16 @@ export function useFileNav() {
    * drifted (one decoded, one did not). An absolute app URL keeps its own
    * branch; a relative one opens on the branch you are standing on. See
    * {@link resolveKbHref}.
+   *
+   * A LINK INSIDE A FILE NEVER NAVIGATES AWAY FROM IT. Another file opens in
+   * a new tab at its plain address, and this tab — its location, its scroll,
+   * its full-screen view — stays as it was; only a link to the file it sits
+   * in (a section link) moves this tab, by its fragment. {@link linkTarget}
+   * decides which, and the markdown pipeline renders its anchors from the
+   * same answer, so a click and a middle-click go to one place. This is the
+   * rule for content, not for the app's own navigation: the tree, the tabs,
+   * search and the library reach `openFile` and `openWorkspacePath`, which
+   * navigate in place.
    *
    * AN EXTERNAL LINK IS OPENED HERE TOO, in a new tab. It used to be dropped
    * on the floor — "not ours to open" — which is true of a link the browser
@@ -394,20 +540,35 @@ export function useFileNav() {
    * URL as a `Referer`, and the scheme allowlist is what keeps the sandbox
    * sealed — see {@link isOpenableExternalHref}. A destination that is
    * external but not openable stays a no-op, as it was.
+   *
+   * `onSection` is how a host whose file does not scroll to this tab's
+   * fragment follows a section link instead: the HTML page's frame (a
+   * fragment on the app's address never reaches it) and the skill page (its
+   * address has no heading scroll). It is handed the link's fragment —
+   * `#steps`, or `''` for the file itself — and this tab's address stays as
+   * it is. Without it the tab moves to its own address plus the fragment,
+   * which the markdown file page scrolls to.
    */
   const openLink = useCallback(
-    (href: string, basePath: string) => {
-      const target = resolveKbHref(href, { basePath, kbDirName });
-      if (target?.kind === 'external') {
+    (href: string, basePath: string, options: OpenLinkOptions = {}) => {
+      const resolved = resolveKbHref(href, { basePath, kbDirName });
+      if (resolved?.kind === 'external') {
         openExternalHref(href);
         return;
       }
-      if (target?.kind !== 'workspace') return;
-      const onBranch = target.branch ?? branch;
-      if (!onBranch) return;
-      navigate(kbFileUrl(onBranch, target.path) + target.hash);
+      if (options.newTab && resolved) {
+        const onBranch = resolved.branch ?? options.homeBranch ?? branch;
+        if (onBranch) openInNewTab(kbFileUrl(onBranch, resolved.path) + resolved.hash);
+        return;
+      }
+      const target = linkTarget(href, basePath, options.homeBranch);
+      if (target && !target.newTab && resolved && options.onSection) {
+        options.onSection(resolved.hash);
+        return;
+      }
+      followLinkTarget(target, navigate);
     },
-    [branch, kbDirName, navigate],
+    [branch, kbDirName, linkTarget, navigate],
   );
 
   /**
@@ -423,13 +584,45 @@ export function useFileNav() {
    * later segment happens to equal `kbDirName` — which a real folder inside
    * the tree is allowed to be. A path that came from the tree needs no
    * repair, so applying one could only ever open the wrong file.
+   *
+   * `edit` asks the viewer to open the file straight into edit mode — for a
+   * page the caller has just created, which is there to be written, not read.
+   * It travels as router state (`startEditing`, the key the skill page
+   * already answers to), not in the URL, so a shared or bookmarked link never
+   * drops anyone into the editor; `FileViewer` honours it once and clears it.
+   * The path rides along (`startEditingPath`) because the URL does not keep
+   * naming it: `FileRoute` swaps a node's path URL for its id URL.
+   *
+   * `replace` swaps the current history entry instead of adding one — for
+   * asking to edit the page already on screen, where a second entry for the
+   * same URL would make Back look like it did nothing.
    */
   const openWorkspacePath = useCallback(
-    (path: string) => {
+    (path: string, options?: { edit?: boolean; replace?: boolean }) => {
       if (!branch) return;
-      navigate(kbFileUrl(branch, path));
+      const url = kbFileUrl(branch, path);
+      const replace = options?.replace === true;
+      const state = { startEditing: true, startEditingPath: path };
+      if (options?.edit) navigate(url, replace ? { state, replace } : { state });
+      else if (replace) navigate(url, { replace });
+      else navigate(url);
     },
     [branch, navigate],
+  );
+
+  // The file page for a path a skill's page would otherwise claim (see
+  // `FILE_PAGE_PARAM`): an HTML page's "Open in the platform", whose tools
+  // are answered there and nowhere else. The page asked for it from inside
+  // itself, so it opens in a new tab like any other way out of a page.
+  // `homeBranch` as in `linkTarget`: the skill page's files are read from the
+  // default branch, whatever this tab stands on.
+  const openFilePage = useCallback(
+    (path: string, homeBranch?: string) => {
+      const onBranch = homeBranch ?? branch;
+      if (!onBranch) return;
+      openInNewTab(kbFilePageUrl(onBranch, path));
+    },
+    [branch],
   );
 
   const closeFile = useCallback(() => {
@@ -437,44 +630,105 @@ export function useFileNav() {
     navigate(kbFileUrl(branch));
   }, [branch, navigate]);
 
-  return { openFile, openLink, openWorkspacePath, closeFile };
+  // One return for the app, one for a surface. The surface's verbs are
+  // substituted WHOLESALE rather than branched inside each opener: "open it
+  // in a new tab, never navigate" is a different behaviour, not a parameter
+  // of this one, and a half-overridden navigator is how an embed ends up on
+  // a page no token was minted for.
+  if (surface) {
+    return {
+      openFile: (pathOrUrl: string) => surface.openLink(pathOrUrl, ''),
+      openLink: surface.openLink,
+      // A surface takes every click itself (`linkPolicy: 'surface'`), so its
+      // anchors carry no app address of their own.
+      linkTarget: noLinkTarget,
+      openWorkspacePath: surface.openWorkspacePath,
+      openFilePage: surface.openFilePage,
+      closeFile: () => undefined,
+      // A surface stands on no branch of its own (an embed shows one page).
+      branch: null,
+    };
+  }
+  // `branch`: the one this tab stands on, as the URL says it — what a page
+  // shown on it is told as `window.bevel.branch`.
+  return { openFile, openLink, linkTarget, openWorkspacePath, openFilePage, closeFile, branch };
 }
 
 /**
- * Navigate to a node referenced by its frontmatter id (`<id>` or `<id#heading>`).
- * Resolves the id → its file location via the backend (the same `resolve-id`
- * route the in-KB markdown renderer uses; it 404s fail-closed for ids the caller
- * may not read), then opens the file, preserving any heading anchor as a real
- * URL fragment so the deep-link scroll fires. Shared by the file renderer and
- * the chat citation renderer so both resolve id-links identically.
+ * Follow a node referenced by its frontmatter id (`<id>` or `<id#heading>`), a
+ * link inside rendered content — so it follows {@link useFileNav}'s rule for
+ * those: a node other than the one on screen opens in a NEW TAB at its
+ * canonical id URL (`kbNodeUrl`, plus any heading as a real fragment so the
+ * deep-link scroll fires there), and this tab stays as it was. The id is
+ * resolved by that tab's `FileRoute`, through the same `resolve-id` route this
+ * hook used to call first (it 404s fail-closed for ids the reader may not
+ * read, and the tab shows not-found). Resolving here first would put a round
+ * trip between the click and `window.open`, and a browser lets a click open a
+ * tab only for so long — and the address would be one a middle-click on the
+ * same anchor never reaches.
+ *
+ * A link to the node on screen is a section link and moves this tab by its
+ * fragment only. Which node is on screen is decided by its ID, not by this
+ * tab's address: `ownId` is the id of the file the link sits in, as the
+ * renderer read it from that file, so a tab still on the file's PATH URL —
+ * the id not canonicalized yet, or a `FileRoute` that never canonicalizes
+ * (the library's) — knows the node too. Without one, the node whose id URL
+ * this tab is at (where `FileRoute` puts a node) is the one on screen.
+ * Shared by the file renderer and the chat citation renderer so both follow
+ * id-links identically.
+ *
+ * `onSection` is `OpenLinkOptions.onSection` for an id-link: a host whose
+ * address has no heading scroll (the skill page) scrolls to the fragment of a
+ * link to its own node itself, and this tab's address stays as it is.
+ *
+ * `homeBranch` is `linkTarget`'s, for an id-link: the branch the file the
+ * link sits in was read from, when not this tab's. The skill page renders
+ * its files from the default branch whatever is checked out, so an id there
+ * names a node on the default branch, not on somebody's draft. Omitted, it
+ * is this tab's branch.
  */
 export function useNodeIdNav() {
-  const { openFile } = useFileNav();
-  const git = useGit();
-  const branch = git.status?.branch ?? null;
+  const surface = useRendererSurface();
+  const navigate = useNavigate();
+  const git = useContext(GitContext);
+  const location = useLocation();
+  // The URL's branch first, the git status second — the same order as
+  // `useFileNav`: during a branch switch the status still names the branch
+  // being left, and an id resolved against it would open the wrong tree.
+  const branch = branchFromPathname(location.pathname) ?? git?.status?.branch ?? null;
 
-  const openNodeId = useCallback(
-    async (idOrLink: string) => {
-      if (!branch) return;
+  const nodeIdTarget = useCallback(
+    (idOrLink: string, ownId?: string | null, homeBranch?: string): KbLinkTarget | null => {
+      const onBranch = homeBranch ?? branch;
+      if (!onBranch) return null;
       const hashIdx = idOrLink.indexOf('#');
       const id = hashIdx >= 0 ? idOrLink.slice(0, hashIdx) : idOrLink;
       const hash = hashIdx >= 0 ? idOrLink.slice(hashIdx) : '';
-      try {
-        const r = await authFetch(
-          `/api/workspace/${encodeURIComponent(branch)}/resolve-id/${encodeURIComponent(id)}`,
-        );
-        if (!r.ok) {
-          console.warn(`[useNodeIdNav] unresolved id-link '${id}' (HTTP ${r.status})`);
-          return;
-        }
-        const { workspacePath } = (await r.json()) as { workspacePath: string };
-        openFile(workspacePath + hash);
-      } catch (err) {
-        console.error('[useNodeIdNav] id-link resolve failed:', err);
+      const url = kbNodeUrl(onBranch, id);
+      if (id === ownId || url === location.pathname) {
+        return sectionOfThisTab(location, hash);
       }
+      return { href: url + hash, newTab: true };
     },
-    [branch, openFile],
+    [branch, location],
   );
 
-  return { openNodeId };
+  const openNodeId = useCallback(
+    (idOrLink: string, ownId?: string | null, options: OpenLinkOptions = {}) => {
+      const target = nodeIdTarget(idOrLink, ownId, options.homeBranch);
+      if (target && !target.newTab && options.onSection) {
+        const hashIdx = idOrLink.indexOf('#');
+        options.onSection(hashIdx >= 0 ? idOrLink.slice(hashIdx) : '');
+        return;
+      }
+      followLinkTarget(target, navigate);
+    },
+    [nodeIdTarget, navigate],
+  );
+
+  // The surface resolves an id its own way — the embed hands it to its host
+  // as an app address, which the app then resolves with the reader's own
+  // session. Resolving it HERE would need a session the embed does not have.
+  if (surface) return { openNodeId: surface.openNodeId, nodeIdTarget: noLinkTarget };
+  return { openNodeId, nodeIdTarget };
 }

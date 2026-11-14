@@ -1,4 +1,6 @@
 import { branchModelFromEnv, configureBranchModel } from '@bevel-software/platform-shared';
+import { afterAll } from 'vitest';
+import { removeTestRepositoryRoots } from './__tests__/test-repositories.js';
 
 /**
  * Apply the branch model before any suite imports something that reads it.
@@ -16,3 +18,6 @@ import { branchModelFromEnv, configureBranchModel } from '@bevel-software/platfo
  * place the historical two-branch pair is written.
  */
 configureBranchModel(branchModelFromEnv());
+
+// The repositories `testKbRepository` placed beside each suite's fixture root.
+afterAll(removeTestRepositoryRoots);

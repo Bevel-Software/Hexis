@@ -4,8 +4,9 @@ import type { AdvisoryLease } from '../modules/database/advisory-lock.js';
 import { bootMaySurvive, type KbStartupRunner } from '../modules/workspace/startup/kb-startup-runner.js';
 import { noteBesideCheckout } from '../modules/workspace/startup/beside-checkout.js';
 import { unregisterBevelSecretsVariableLoader } from '../modules/secrets-vault/secrets-variable-loader.js';
-import type { WorkflowService } from '../modules/workflow/workflow.service.js';
+import type { VersionControlService } from '../modules/version-control/version-control.service.js';
 import type { PluginJoinRequestJobs } from '../modules/plugins/join-request-jobs.service.js';
+import type { TmpSweeper } from '../modules/workspace/workspace-tmp.js';
 import { printable } from '../shared/printable.js';
 import { logger } from '../shared/logging.js';
 
@@ -291,8 +292,10 @@ export interface BootableCore {
   config: { workspacesRoot: string };
   kbDirName: string;
   kbStartupRunner: Pick<KbStartupRunner, 'runAll' | 'retryUntilMaintained'>;
-  workflowService: Pick<WorkflowService, 'closeChangeRequestsWithDeletedBranches'>;
+  versionControlService: Pick<VersionControlService, 'closeChangeRequestsWithDeletedBranches' | 'tidyAfterSweep'>;
   pluginJoinRequestJobs: Pick<PluginJoinRequestJobs, 'startSweeping'>;
+  /** The periodic sweep of every workspace's `tmp/` folder, started here and stopped by {@link stopCore}. */
+  tmpSweeper: Pick<TmpSweeper, 'startSweeping'>;
   /**
    * The startup phase's retry, when the boot survived an unreachable remote
    * and is asking again on a timer; null otherwise. Set by {@link startCore},
@@ -335,6 +338,13 @@ export async function startCore<C extends BootableCore>(
       detail: printable(err instanceof Error ? err.message : String(err)),
     });
   }
+
+  // The seven-day sweep of every workspace's `tmp/` folder (see
+  // `workspace-tmp.ts`), now and hourly. Needs nothing the startup phase
+  // provides — it reads the workspaces root and nothing else — so it is not
+  // held behind it, and a remote that is down does not leave staged files to
+  // pile up. Stopped by `stopCore`.
+  core.tmpSweeper.startSweeping();
 
   // The KB startup phase — AFTER the distribution's onBoot, because a FATAL
   // template finding raised there must stop the boot before anything seeds
@@ -383,14 +393,18 @@ export async function startCore<C extends BootableCore>(
   // have been unusable since the branch went away, so landing a few seconds
   // into uptime is soon enough. Errors are swallowed inside the sweep, which
   // fails safe by closing nothing.
-  void core.workflowService
+  void core.versionControlService
     .closeChangeRequestsWithDeletedBranches()
     .then((n) => {
       if (n > 0) {
         crLog.info(`closed ${n} change request${n === 1 ? '' : 's'} with a deleted branch`);
       }
     })
-    .catch((err) => crLog.warn('deleted-branch sweep failed:', { err }));
+    .catch((err) => crLog.warn('deleted-branch sweep failed:', { err }))
+    // Then the tidy-up: open requests that propose nothing are closed, and the
+    // branches merged requests left behind removed (behind its own setting).
+    // Fails safe on a failed fetch, and never throws.
+    .then(() => core.versionControlService.tidyAfterSweep());
 
   // Recorded join requests that are still owed, resumed — now, and then on a
   // timer. SEQUENCED AFTER the startup phase for the same reason as the sweep
@@ -421,13 +435,18 @@ export interface CoreStopDeps {
   /** The lease loop from {@link holdCommitWorkerLease}: its stop finishes the in-flight commit and releases the lease. */
   commitWorker: Pick<LeaseLoopHandle, 'stop'>;
   /**
-   * Background work to wind down before the pool goes — the join-request
-   * sweep and its jobs, today. The timer is stopped first so nothing new is
-   * scheduled, then the jobs already running are awaited (within the budget)
-   * so the pool is not ended under a clone or a push that is still writing
-   * to it. Optional: a caller that has not built them yet passes nothing.
+   * The plugin join-request jobs, whose sweep must be wound down before the
+   * pool goes. The timer is stopped first so nothing new is scheduled, then
+   * the jobs already running are awaited (within the budget) so the pool is
+   * not ended under a clone or a push that is still writing to it. Optional:
+   * a caller that has not built them yet passes nothing.
+   *
+   * Named as `CoreServices` names it, because the graph IS what is passed
+   * here (`stopCore(graph.core)`): under another name the slot stayed empty,
+   * the sweep outlived every stopped graph, and a multi-tenant host gained
+   * one more sweeper querying an ended pool, every minute, per eviction.
    */
-  backgroundJobs?: { stopSweeping(): void; drain(): Promise<void> };
+  pluginJoinRequestJobs?: { stopSweeping(): void; drain(): Promise<void> };
   /**
    * The agent upload store, whose own sweep deletes staged bytes nobody
    * applied. Stopped with this graph because the next graph for the same
@@ -437,6 +456,37 @@ export interface CoreStopDeps {
    * Optional: a caller that has not built one passes nothing.
    */
   agentUploadStore?: { stopSweeping(): void; drainSweep(): Promise<void> };
+  /** The agent download store, whose sweep deletes captured bytes nobody fetched — stopped for the same reason. */
+  agentDownloadStore?: { stopSweeping(): void; drainSweep(): Promise<void> };
+  /**
+   * The sweep of the workspaces' `tmp/` folders: stopped with this graph, so
+   * an evicted tenant's graph leaves no timer behind, and its sweep in flight
+   * cancelled (it removes nothing more) and then awaited within the stop's
+   * deadline, so the next graph over the same root does not meet it still
+   * walking there — unless one filesystem call outlasts that deadline, after
+   * which the cancelled sweep still removes nothing. Optional: a caller that
+   * has not built one passes nothing.
+   */
+  tmpSweeper?: { stopSweeping(): void; drainSweep(): Promise<void> };
+  /**
+   * The grep pattern matcher, whose worker threads are this graph's own: ended
+   * here so a graph a tenant host evicts leaves no worker behind. Optional: a
+   * caller that has not built one passes nothing.
+   */
+  patternMatcher?: { close(): Promise<void> };
+  /**
+   * The document extractor, whose worker threads are this graph's own for the
+   * same reason: ended here, so no extraction worker outlives its graph.
+   * Optional like the matcher.
+   */
+  documentExtractor?: { close(): Promise<void> };
+  /**
+   * The version-control service, for the tidy-up it runs after each sweep (closing
+   * empty requests, removing leftover branches): detached from whatever
+   * started it, so stopped and awaited here before the pool goes. Optional:
+   * a caller that has not built one passes nothing.
+   */
+  versionControlService?: { stopTidying(): void; drainTidy(): Promise<void> };
   /** The startup phase's retry, if the boot left one asking — see {@link BootableCore.startupRetry}. */
   startupRetry?: { stop(): void } | null;
   /** The database — its pool is ended last, once nothing above can still need it. */
@@ -519,29 +569,61 @@ async function releaseCore(deps: CoreStopDeps, remaining: () => number, log: (m:
   // server is closed (or the tenant is no longer routed to), so this is the
   // earliest point the interval is dead weight. Synchronous and unfailing
   // — it just clears an interval — so it needs no budget of its own.
-  deps.backgroundJobs?.stopSweeping();
+  deps.pluginJoinRequestJobs?.stopSweeping();
   // And the upload store's sweep, for the same reason and in the same breath:
   // synchronous, and it only clears an interval and tells a sweep already
   // running to stop deleting.
   deps.agentUploadStore?.stopSweeping();
+  deps.agentDownloadStore?.stopSweeping();
+  deps.tmpSweeper?.stopSweeping();
   // A startup phase still asking for an unreachable remote stops asking:
   // synchronous, and nothing after it must be able to clone into a
   // workspaces folder that is about to belong to nobody.
   deps.startupRetry?.stop();
+  // The post-sweep tidy-up: no new round, and the one under way stops at its
+  // next request or branch. Synchronous.
+  deps.versionControlService?.stopTidying();
   // Clearing the interval stops future ticks; it does nothing to a job a
   // tick already started, which holds a claim it heartbeats through the
   // pool and is mid-clone or mid-push. Awaited here, in the budget: a job
-  // that finishes releases or marks its row; one that cannot in time is
-  // killed with the process and its claim goes stale for the next sweep
-  // — which is the recovery every crash already gets.
-  if (deps.backgroundJobs) {
-    await bounded(deps.backgroundJobs.drain(), remaining(), 'finishing the background jobs', log);
+  // that finishes releases or marks its row. One that cannot in time is
+  // NOT cancelled — the bounded wait only stops waiting — and what becomes
+  // of it depends on who is stopping: a process shutting down takes it
+  // along; a tenant host evicting one graph ends the pool under it, which
+  // cancels nothing already running — a clone or push in flight finishes
+  // on its own — but its next heartbeat or database write fails, so from
+  // there the job records nothing and stops. Either way its claim goes
+  // stale and the next sweep — the next boot's, or a live graph's — picks
+  // the row up and does the whole thing again, which is the recovery every
+  // crash already gets (and why each step is written to be redone).
+  if (deps.pluginJoinRequestJobs) {
+    await bounded(deps.pluginJoinRequestJobs.drain(), remaining(), 'finishing the join-request jobs', log);
   }
   // The sweep in flight when the interval was cleared: awaited so the next
   // graph for this tenant cannot start staging bytes while a store it has
   // never heard of is still walking the same directory.
   if (deps.agentUploadStore) {
     await bounded(deps.agentUploadStore.drainSweep(), remaining(), 'finishing the upload sweep', log);
+  }
+  if (deps.agentDownloadStore) {
+    await bounded(deps.agentDownloadStore.drainSweep(), remaining(), 'finishing the download sweep', log);
+  }
+  if (deps.tmpSweeper) {
+    await bounded(deps.tmpSweeper.drainSweep(), remaining(), "finishing the workspaces' tmp sweep", log);
+  }
+  // The tidy-up in flight fetches and deletes branches through the pool and
+  // the default branch's checkout: awaited, so the next graph for this
+  // tenant cannot find a branch deletion still running under it.
+  if (deps.versionControlService) {
+    await bounded(deps.versionControlService.drainTidy(), remaining(), 'finishing the branch tidy-up', log);
+  }
+  // Its ripgrep runs end with the graph; a search still running is answered busy or stopped.
+  if (deps.patternMatcher) {
+    await bounded(deps.patternMatcher.close(), remaining(), 'ending the running searches', log);
+  }
+  // Likewise: an extraction still running is answered busy, and nothing about its file is remembered.
+  if (deps.documentExtractor) {
+    await bounded(deps.documentExtractor.close(), remaining(), 'ending the extraction workers', log);
   }
   await bounded(deps.commitWorker.stop(), remaining(), 'stopping the commit worker', log);
   if (deps.secretsScope !== undefined) unregisterBevelSecretsVariableLoader(deps.secretsScope);

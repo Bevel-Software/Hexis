@@ -34,13 +34,23 @@ export interface ExtractedDoc {
  */
 export type ExtractResult =
   | ({ ok: true } & ExtractedDoc)
-  | { ok: false; message: string };
+  | {
+      ok: false;
+      message: string;
+      /**
+       * Set when the failure is the reader's, not the file's — the parser
+       * itself did not load — so it is not remembered as the file's answer
+       * the way a refusal of its bytes is.
+       */
+      transient?: true;
+    };
 
 /**
  * A format's PURE extract function — bytes in, `ExtractResult` out (async for
  * pdf.js). One per supported format (extract-docx.ts and friends); each is
- * paired with its extension by a `DocumentReader` entry in the file-reader
- * registry, and cache-wrapped by `DocExtractService`.
+ * paired with its extension in the extraction worker's table
+ * (`document-extractors.ts`), run there under a budget, and cache-wrapped by
+ * `DocExtractService`.
  */
 export type ExtractFn = (bytes: Buffer) => ExtractResult | Promise<ExtractResult>;
 

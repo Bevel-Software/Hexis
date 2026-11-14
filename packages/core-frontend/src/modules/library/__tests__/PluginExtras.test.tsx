@@ -73,7 +73,7 @@ describe('ManifestSection', () => {
         <ManifestSection kbDirName="knowledge-base" folder="GTM" managed canWrite={false} />
       </MemoryRouter>,
     );
-    const header = screen.getByRole('button', { name: /^Manifest plugin\.json$/ });
+    const header = screen.getByRole('button', { name: 'Plugin settings' });
     expect(header).toHaveAttribute('aria-expanded', 'false');
     expect(apiMock.readFile).not.toHaveBeenCalled();
 
@@ -85,7 +85,7 @@ describe('ManifestSection', () => {
     );
     await waitFor(() => expect(screen.getByText(/"version": "1\.2\.0"/)).toBeInTheDocument());
     // A reader gets no editor link.
-    expect(screen.queryByRole('button', { name: 'Edit the manifest' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Edit plugin settings' })).not.toBeInTheDocument();
   });
 
   it("reads the bundle dialect's file for an unmanaged plugin, and offers no editor even to a writer", async () => {
@@ -101,18 +101,18 @@ describe('ManifestSection', () => {
       'knowledge-base/Plugins/functional/cluster/example/plugin.bundle.json',
     );
     await waitFor(() => expect(screen.getByText(/"name": "example"/)).toBeInTheDocument());
-    expect(screen.queryByRole('button', { name: 'Edit the manifest' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Edit plugin settings' })).not.toBeInTheDocument();
   });
 
-  it('a writer gets "Edit the manifest", which asks for the raw file by state', async () => {
+  it('a writer gets "Edit plugin settings", which asks for the raw file by state', async () => {
     apiMock.readFile.mockResolvedValue(MANIFEST);
     render(
       <MemoryRouter>
         <ManifestSection kbDirName="knowledge-base" folder="GTM" managed canWrite />
       </MemoryRouter>,
     );
-    fireEvent.click(screen.getByRole('button', { name: /^Manifest plugin\.json$/ }));
-    fireEvent.click(await screen.findByRole('button', { name: 'Edit the manifest' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Plugin settings' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit plugin settings' }));
     expect(navigateMock).toHaveBeenLastCalledWith(
       expect.stringContaining('Plugins/GTM/plugin.json'),
       { state: { rawFile: true } },
@@ -126,7 +126,7 @@ describe('ManifestSection', () => {
         <ManifestSection kbDirName="knowledge-base" folder="GTM" managed canWrite={false} />
       </MemoryRouter>,
     );
-    fireEvent.click(screen.getByRole('button', { name: /^Manifest plugin\.json$/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Plugin settings' }));
     await waitFor(() => expect(screen.getByText('not json {')).toBeInTheDocument());
     unmount();
 
@@ -136,8 +136,8 @@ describe('ManifestSection', () => {
         <ManifestSection kbDirName="knowledge-base" folder="GTM" managed canWrite={false} />
       </MemoryRouter>,
     );
-    fireEvent.click(screen.getByRole('button', { name: /^Manifest plugin\.json$/ }));
-    await waitFor(() => expect(screen.getByText("Couldn't read plugin.json.")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: 'Plugin settings' }));
+    await waitFor(() => expect(screen.getByText("Couldn't read the plugin settings.")).toBeInTheDocument());
   });
 });
 

@@ -119,7 +119,7 @@ export function describeToolFailure(err: unknown): string {
       return inner;
     }
   }
-  if (typeof data === 'string' && data.length > 0) return data;
+  if (typeof data === 'string' && data.length > 0) return nonJsonFailure(err, data) ?? data;
   // Total, like `safeJsonText`: a thrown value whose own `toString` throws
   // (e.g. a null-prototype object) must still come back as a description —
   // this function runs inside catch paths, where a second throw would turn
@@ -129,6 +129,105 @@ export function describeToolFailure(err: unknown): string {
   } catch {
     return '(indescribable tool failure)';
   }
+}
+
+/** The `kind` an answer that was not JSON where JSON was expected carries. */
+export const NOT_JSON_KIND = 'not-json';
+
+/** How much of a non-JSON answer reaches the agent. The rest is a web page, not information. */
+const NON_JSON_MAX = 200;
+
+/** Collapse every run of whitespace, so a page's indentation doesn't fill the budget. */
+function firstLine(text: string): string {
+  const collapsed = text.replace(/\s+/g, ' ').trim();
+  return collapsed.length > NON_JSON_MAX ? `${collapsed.slice(0, NON_JSON_MAX - 1)}…` : collapsed;
+}
+
+function looksLikeJson(text: string): boolean {
+  try {
+    JSON.parse(text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A SUCCESSFUL answer that is a web page rather than JSON, cut to its first
+ * {@link NON_JSON_MAX} characters — or `undefined` when the value is not a
+ * page. Used by the call guards, which know whether the tool answers over HTTP
+ * at all; a markdown file that happens to start with a tag is not a page, and
+ * only an http-family tool's bare string body can be one.
+ */
+export function pageInsteadOfJson(value: string): string | undefined {
+  if (!/^\s*<(!doctype|html|\?xml|head|body)\b/i.test(value)) return undefined;
+  return firstLine(value);
+}
+
+/**
+ * The short form of a failure whose body was not JSON: the status, the host
+ * that answered, and the first {@link NON_JSON_MAX} characters.
+ *
+ * A service's edge answers a refused request with its own HTML page, and that
+ * page used to reach the agent whole — thousands of characters of markup in
+ * place of a reason. The status and the first line of it say everything the
+ * agent can act on. A body that IS JSON keeps today's wording: it is the
+ * service's own message, however long, and cutting it would lose the reason.
+ */
+function nonJsonFailure(err: unknown, body: string): string | undefined {
+  if (looksLikeJson(body)) return undefined;
+  const status = readNumber(err, ['response', 'status']) ?? readNumber(err, ['status']);
+  const host = failureHost(err);
+  const where = [status === undefined ? '' : String(status), host === undefined ? '' : `from ${host}`]
+    .filter((p) => p !== '')
+    .join(' ');
+  const line = firstLine(body);
+  return where === '' ? line : `${where}: ${line}`;
+}
+
+function readNumber(source: unknown, path: string[]): number | undefined {
+  let node: unknown = source;
+  for (const key of path) {
+    if (node === null || typeof node !== 'object') return undefined;
+    try {
+      node = (node as Record<string, unknown>)[key];
+    } catch {
+      return undefined;
+    }
+  }
+  return typeof node === 'number' ? node : undefined;
+}
+
+/** The host that answered, from wherever the transport left the request's URL. */
+function failureHost(err: unknown): string | undefined {
+  for (const path of [
+    ['response', 'config', 'url'],
+    ['config', 'url'],
+    ['response', 'url'],
+    ['url'],
+  ]) {
+    let node: unknown = err;
+    for (const key of path) {
+      if (node === null || typeof node !== 'object') {
+        node = undefined;
+        break;
+      }
+      try {
+        node = (node as Record<string, unknown>)[key];
+      } catch {
+        node = undefined;
+        break;
+      }
+    }
+    if (typeof node === 'string' && node.length > 0) {
+      try {
+        return new URL(node).host;
+      } catch {
+        // not an absolute URL — nothing to name, try the next place
+      }
+    }
+  }
+  return undefined;
 }
 
 /**
@@ -319,7 +418,19 @@ function noteText(value: unknown): string | undefined {
   return undefined;
 }
 
-export function toCallToolResult(value: unknown): CallToolResult {
+export function toCallToolResult(
+  value: unknown,
+  options?: {
+    /**
+     * Also answer a plain-object result as `structuredContent`. Asked for by
+     * a tool that carries an MCP App view: the view reads the result's fields
+     * from `structuredContent` (it has no other place to read them), while
+     * the model keeps reading the text block. Off for every other tool, so no
+     * client is handed each result twice.
+     */
+    structured?: boolean;
+  },
+): CallToolResult {
   // An image sentinel (see McpImageResult): the tool's result IS a picture.
   // Emit a native image content block so a multimodal client renders it, plus
   // the note as a text block so the transcript stays self-describing.
@@ -374,7 +485,22 @@ export function toCallToolResult(value: unknown): CallToolResult {
     return value as CallToolResult;
   }
   const text = typeof value === 'string' ? value : safeJsonText(value ?? null);
-  return { content: [{ type: 'text', text: text || '(tool produced no output)' }] };
+  const result: CallToolResult = { content: [{ type: 'text', text: text || '(tool produced no output)' }] };
+  if (options?.structured && value !== null && typeof value === 'object' && !Array.isArray(value)) {
+    // The JSON-safe reading of the value, the same one the text block carries:
+    // the object itself may hold a BigInt, a cycle or a `toJSON` that throws,
+    // and the response serializer would fail on it where the text did not. A
+    // value with no JSON object reading carries no structured content.
+    try {
+      const structured: unknown = JSON.parse(text);
+      if (structured !== null && typeof structured === 'object' && !Array.isArray(structured)) {
+        result.structuredContent = structured as Record<string, unknown>;
+      }
+    } catch {
+      /* text was not JSON: nothing structured to attach */
+    }
+  }
+  return result;
 }
 
 /**
