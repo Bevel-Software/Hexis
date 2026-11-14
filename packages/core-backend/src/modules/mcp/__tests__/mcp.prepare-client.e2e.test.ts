@@ -11,6 +11,7 @@ import { McpService, type McpClientHook } from '../mcp.service.js';
 import { SpillStore } from '../../workspace/spill-store.js';
 import { createManualRoutes } from '../../tool-registry/manual.routes.js';
 import { ToolRegistry } from '../../tool-registry/tool-registry.js';
+import { startFakeDownstreamMcpServer, type FakeDownstreamMcpServer } from './fake-downstream-mcp-server.js';
 
 /**
  * `prepareClient`, over the real MCP transport: the deployment's hook runs on
@@ -55,6 +56,25 @@ function fileBodyHook(builtFor: string[]): McpClientHook {
   };
 }
 
+/**
+ * The same, for a third-party MCP server's `echo` tool, whose input is `text`:
+ * the named file's contents go out in its place, so the echo shows whether the
+ * call went through the hook.
+ */
+function fileTextHook(builtFor: string[]): McpClientHook {
+  return (client, userId) => {
+    builtFor.push(userId);
+    const withContents = (args: Record<string, unknown>) =>
+      typeof args.text === 'string' && FILES[args.text] ? { ...args, text: FILES[args.text] } : args;
+    const callTool = client.callTool.bind(client);
+    client.callTool = async (toolName, args) => callTool(toolName, withContents(args));
+    const callToolStreaming = client.callToolStreaming.bind(client);
+    client.callToolStreaming = async function* (toolName, args) {
+      yield* callToolStreaming(toolName, withContents(args));
+    };
+  };
+}
+
 interface Platform {
   baseUrl: string;
   /** The bytes each upload received, as text. */
@@ -65,7 +85,16 @@ interface Platform {
 const platforms: Platform[] = [];
 const cleanups: Array<() => Promise<void>> = [];
 
-async function startPlatform(prepareClient?: McpClientHook): Promise<Platform> {
+/** The deployment's own tool, an `http` manual whose `upload` body is declared a file path. */
+const THIRD_PARTY_MANUAL = {
+  name: 'THIRD_PARTY',
+  call_template_type: 'http',
+  http_method: 'GET',
+  url: '${API_URL}/api/third-party/manual',
+  content_type: 'application/json',
+};
+
+async function startPlatform(prepareClient?: McpClientHook, manuals: unknown[] = [THIRD_PARTY_MANUAL]): Promise<Platform> {
   const uploads: string[] = [];
   const app = express();
   app.post('/api/third-party/upload', express.raw({ type: 'application/octet-stream' }), (req, res) => {
@@ -101,17 +130,7 @@ async function startPlatform(prepareClient?: McpClientHook): Promise<Platform> {
     }),
   );
   app.get('/api/agent/all-tools', (_req, res) => {
-    res.json({
-      manuals: [
-        {
-          name: 'THIRD_PARTY',
-          call_template_type: 'http',
-          http_method: 'GET',
-          url: '${API_URL}/api/third-party/manual',
-          content_type: 'application/json',
-        },
-      ],
-    });
+    res.json({ manuals });
   });
 
   const httpServer = await new Promise<HttpServer>((resolve) => {
@@ -199,5 +218,47 @@ describe('prepareClient: the deployment wraps each caller\'s tool client', () =>
     const client = await connect(platform.baseUrl);
     await client.callTool({ name: 'THIRD_PARTY_upload', arguments: { body: 'Reports/q3.pdf' } });
     expect(platform.uploads).toEqual(['Reports/q3.pdf']);
+  });
+});
+
+describe('prepareClient: a third-party MCP server the caller reaches through the pool', () => {
+  let downstream: FakeDownstreamMcpServer | undefined;
+  afterEach(async () => {
+    await downstream?.stop();
+    downstream = undefined;
+  });
+
+  /** One `mcp.json`-style manual at the fake server: its tools are called on a pooled client, not the surface's. */
+  const atDownstream = (server: FakeDownstreamMcpServer) => [
+    { name: 'notion', call_template_type: 'mcp', config: { mcpServers: { srv: { transport: 'http', url: server.url } } } },
+  ];
+
+  it('runs on the pooled client too, with the caller\'s user id, and a direct call goes out through it', async () => {
+    downstream = await startFakeDownstreamMcpServer();
+    const builtFor: string[] = [];
+    const platform = await startPlatform(fileTextHook(builtFor), atDownstream(downstream));
+    const client = await connect(platform.baseUrl);
+    const res = await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'Reports/q3.pdf' } });
+    expect(res.isError).toBeFalsy();
+    expect(toolText(res)).toContain('%PDF-1.7 the third quarter');
+    // Once for the surface's client, once for the pooled one.
+    expect(builtFor).toEqual(['user-A', 'user-A']);
+    expect(downstream.executions()).toBe(1);
+  });
+
+  it('wraps a pooled call from a chain the same way', async () => {
+    downstream = await startFakeDownstreamMcpServer();
+    const platform = await startPlatform(fileTextHook([]), atDownstream(downstream));
+    const client = await connect(platform.baseUrl);
+    const res = await client.callTool({ name: 'call_tool_chain', arguments: { code: "return notion.srv_echo({ text: 'Reports/q3.pdf' });" } });
+    expect(toolText(res)).toContain('%PDF-1.7 the third quarter');
+  });
+
+  it('without a hook, a pooled call goes out as it was made', async () => {
+    downstream = await startFakeDownstreamMcpServer();
+    const platform = await startPlatform(undefined, atDownstream(downstream));
+    const client = await connect(platform.baseUrl);
+    const res = await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'Reports/q3.pdf' } });
+    expect(toolText(res)).toContain('Reports/q3.pdf');
   });
 });

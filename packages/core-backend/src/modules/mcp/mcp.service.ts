@@ -88,15 +88,15 @@ import {
 // Still offered from here, as this module's tests and callers learnt it.
 export { CONNECTION_META_KEY };
 
+/** What a deployment runs on each tool client built for a caller: see {@link McpProxyOptions.prepareClient}. */
+export type McpClientHook = (client: CodeModeUtcpClient, userId: string) => void;
+
 /**
  * Configuration for the loopback proxy. `loopbackBaseUrl` is the backend's own
  * address (`http://127.0.0.1:<port>`) and `manualName` is BOTH the UTCP manual
  * namespace the per-request client registers under AND the prefix its `${VAR}`
  * placeholders resolve through (`<manualName>_API_URL` / `_CONNECTION_KEY`).
  */
-/** What a deployment runs on each tool client built for a caller: see {@link McpProxyOptions.prepareClient}. */
-export type McpClientHook = (client: CodeModeUtcpClient, userId: string) => void;
-
 export interface McpProxyOptions {
   loopbackBaseUrl: string;
   manualName: string;
@@ -152,14 +152,16 @@ export interface McpProxyOptions {
    */
   readOnlyOverrides?: () => Promise<Readonly<Record<string, boolean>>>;
   /**
-   * Run on each tool client built for a caller's surface, with the caller's
-   * user id, before any tool is registered on it: where a deployment wraps the
+   * Run on each tool client built for a caller, with the caller's user id,
+   * before any tool is registered on it: where a deployment wraps the
    * client's calls the way it wraps its own in-process agent's client (a
    * distribution that sends a file's bytes as the body of a tool that
-   * declares that body a file path, read as the caller). The argument checks
-   * are installed when the tools are registered, after this, so they stay
-   * outermost and check the call as the agent made it. Absent, the client is
-   * used as built.
+   * declares that body a file path, read as the caller). That is the client
+   * of the caller's surface AND each pooled client of a third-party `mcp`
+   * manual the caller reaches (a call to such a tool is made on the pooled
+   * client, not the surface's). The argument checks are installed when the
+   * tools are registered, after this, so they stay outermost and check the
+   * call as the agent made it. Absent, the client is used as built.
    */
   prepareClient?: McpClientHook;
 }
@@ -1547,6 +1549,12 @@ export class McpService {
     // Third-party manuals are never seeded loopback credentials (see
     // `buildClient`), so a pooled client carries no request-scoped bearer.
     const client = await CodeModeUtcpClient.create(process.cwd(), utcpClientConfig(userId, {}, this.opts.secretsScope));
+    // The deployment's wrapper, before the manual is registered, as on the
+    // surface's client (`buildClient`): a call to this manual's tools is routed
+    // to THIS client (`routeToDownstream`), past the surface's, so without it
+    // the caller's calls here would skip the wrapper. The pool key carries the
+    // user, so this client serves this caller alone.
+    this.opts.prepareClient?.(client, userId);
     // Our own copy: registration renames the template in place, and recovery
     // re-registers from exactly what discovery used.
     const own = structuredClone(template);
