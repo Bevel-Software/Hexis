@@ -62,6 +62,24 @@ describe('createAuthMiddleware', async () => {
     expect(next).toHaveBeenCalledTimes(1);
   });
 
+  it('falls back to the cookie when the Bearer header is empty', async () => {
+    const { next, resolveSession } = await run({
+      authorization: 'Bearer   ',
+      cookie: `${AUTH_COOKIE_NAME}=${GOOD_TOKEN}`,
+    });
+    expect(resolveSession).toHaveBeenCalledWith(GOOD_TOKEN);
+    expect(next).toHaveBeenCalledTimes(1);
+  });
+
+  it('reads no token from another Authorization scheme: the cookie, or a 401 without one', async () => {
+    const withCookie = await run({ authorization: 'Basic abc', cookie: `${AUTH_COOKIE_NAME}=${GOOD_TOKEN}` });
+    expect(withCookie.resolveSession).toHaveBeenCalledWith(GOOD_TOKEN);
+    expect(withCookie.next).toHaveBeenCalledTimes(1);
+    const alone = await run({ authorization: 'Basic abc' });
+    expect(alone.resolveSession).not.toHaveBeenCalled();
+    expect(alone.status).toHaveBeenCalledWith(401);
+  });
+
   it('refuses a request with neither', async () => {
     const { next, status, json } = await run({});
     expect(next).not.toHaveBeenCalled();

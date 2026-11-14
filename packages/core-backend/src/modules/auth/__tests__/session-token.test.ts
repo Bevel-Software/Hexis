@@ -6,7 +6,8 @@ import { AUTH_COOKIE_NAME } from '../session-token.js';
 /**
  * `sessionTokenOf`, the rule offered on auth's entry for a route mounted before
  * the session middleware: it reads a request the way the middleware does
- * (`auth.middleware.test.ts` pins the middleware on the same cases), so such a
+ * (`auth.middleware.test.ts` pins the middleware on the same cases: Bearer,
+ * cookie, both, an empty Bearer, another scheme, neither, an empty cookie), so such a
  * route and the middleware never disagree on which token a request carries.
  */
 
