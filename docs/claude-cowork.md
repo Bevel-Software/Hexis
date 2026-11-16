@@ -29,8 +29,8 @@ they may read.
    and read replicas stay empty. Choose **Add configuration** to save them.
 
 3. Back in the Marketplace section, choose **Mark as registered**. Until an
-   admin does, **External agent access** shows people a notice that an admin
-   has to configure the marketplace instead of the steps below.
+   admin does, **External agent access** offers people no Cowork steps, and
+   points admins here instead.
 
 The webhook URL Claude generates can be ignored. Rotate the credentials from
 the same section if they are ever exposed; the Owner then re-enters them.
@@ -51,8 +51,9 @@ they can add the marketplace.
    the registered platform. You do not need to start a Claude Code task; this
    is only where Claude exposes the connection. You land on the platform's
    sign-in: approve, and you are back in Claude.
-2. Copy the marketplace URL from **External agent access → Marketplaces**.
-   It is the same URL Claude Code clones.
+2. Copy the marketplace URL from **External agent access → Install skills as
+   native plugins → Cowork and claude.ai**. It is the same URL Claude Code
+   clones.
 3. In Cowork (or claude.ai), open **Customize → Plugins**, then **Add → Add
    marketplace**, paste the URL and choose **Sync**.
 4. Syncing lists the plugins, it installs none of them. Open **Discover** and
@@ -89,7 +90,8 @@ it again to re-run the sign-in. If approving never lands you back in Claude at
 all, that is the account connection in step 1, not the connector.
 
 The same steps are a six-screen walkthrough on the **External agent access**
-page in the app, identical for admins and everyone else once the deployment is
+page in the app (open **Install skills as native plugins**, then **Cowork and
+claude.ai**), identical for admins and everyone else once the deployment is
 marked registered. The registration half lives in **Deployment → Marketplace**
 and ends on the same connector step.
 
