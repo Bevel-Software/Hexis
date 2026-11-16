@@ -467,14 +467,14 @@ describe('GitService — push gate reads raw paths and judges each commit by its
     expect(await originTip(originDir)).toBe(await localTip(repo));
   });
 
-  it("refuses when a commit's own author may not write a file it changed, as the platform, naming the file and its writers", async () => {
-    const { svc, repo, originDir } = await setup({
+  it('refuses when neither a commit’s author nor the pusher may write a file it changed, as the platform, naming the file and its writers', async () => {
+    const { svc, repo, originDir, gateCalls } = await setup({
       users: [BOB],
-      // The pusher could write it; its author could not. The author decides.
-      writable: (email, p) => email === USER.email || !p.startsWith('Restricted/'),
+      writable: (_email, p) => !p.startsWith('Restricted/'),
     });
     const before = await originTip(originDir);
     await commitAs(repo, BOB, 'Restricted/x.md', 'bob\n');
+    await commitAs(repo, BOB, 'Bob/fine.md', 'bob\n');
     await commitAs(repo, USER.email, 'Alice/mine.md', 'alice\n');
 
     const err = await svc.push(workspaceId, USER).catch((e: unknown) => e);
@@ -488,14 +488,89 @@ describe('GitService — push gate reads raw paths and judges each commit by its
       eligibleRoles: ['Editors'],
       eligibleUsers: [{ name: 'Bob', email: BOB }],
     });
+    // Each was asked about everything of their own; of the author's, the
+    // pusher was asked only about what the author may not write.
+    expect(gateCalls()).toEqual([
+      { email: USER.email, paths: ['Alice/mine.md'] },
+      { email: BOB, paths: ['Bob/fine.md', 'Restricted/x.md'] },
+      { email: USER.email, paths: ['Restricted/x.md'] },
+    ]);
     // Nothing left this server.
+    expect(await originTip(originDir)).toBe(before);
+  });
+
+  it('the record form of a refusal names the file and the roles, and counts the people instead of naming them', async () => {
+    const { svc, repo } = await setup({ users: [BOB], writable: () => false });
+    await commitAs(repo, BOB, 'Restricted/x.md', 'bob\n');
+
+    const refusal = (await svc.push(workspaceId, USER).catch((e: unknown) => e)) as PushAccessRefusedError;
+    expect(refusal).toBeInstanceOf(PushAccessRefusedError);
+    expect(refusal.recordMessage).toBe(
+      `The platform's access check refused the push of "${BRANCH}": "Restricted/x.md" may be written by Editors and 1 named person.`,
+    );
+    expect(refusal.recordReason).toBe('"Restricted/x.md" may be written by Editors and 1 named person');
+  });
+
+  it('a commit its author may not write lands when the PUSHER may write that file: one such commit does not block the branch', async () => {
+    const { svc, repo, originDir, gateCalls } = await setup({
+      users: [BOB],
+      // Bob may write nothing under Restricted/; Alice, pushing, may.
+      writable: (email, p) => email === USER.email || !p.startsWith('Restricted/'),
+    });
+    await commitAs(repo, BOB, 'Restricted/x.md', 'bob\n');
+    await commitAs(repo, BOB, 'Bob/fine.md', 'bob\n');
+
+    await expect(svc.push(workspaceId, USER)).resolves.toBeUndefined();
+    expect(gateCalls()).toEqual([
+      { email: BOB, paths: ['Bob/fine.md', 'Restricted/x.md'] },
+      { email: USER.email, paths: ['Restricted/x.md'] },
+    ]);
+    expect(await originTip(originDir)).toBe(await localTip(repo));
+  });
+
+  it('the pusher vouches file by file: one file neither may write still refuses the push', async () => {
+    const { svc, repo, originDir } = await setup({
+      users: [BOB],
+      writable: (email, p) => email === USER.email && p === 'Restricted/alice-may.md',
+    });
+    const before = await originTip(originDir);
+    await commitAs(repo, BOB, 'Restricted/alice-may.md', 'bob\n');
+    await commitAs(repo, BOB, 'Restricted/nobody-may.md', 'bob\n');
+
+    const err = await svc.push(workspaceId, USER).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PushAccessRefusedError);
+    expect((err as PushAccessRefusedError).blocked.path).toBe('Restricted/nobody-may.md');
+    expect(await originTip(originDir)).toBe(before);
+  });
+
+  it('a moved file is checked where it left as well as where it arrived', async () => {
+    const { svc, repo, originDir, gateCalls } = await setup({
+      // Alice may write under Open/ and nothing else: she may not remove a
+      // file from Locked/ by moving it out.
+      writable: (_email, p) => p.startsWith('Open/'),
+    });
+    const body = Array.from({ length: 40 }, (_, i) => `line ${i}`).join('\n') + '\n';
+    await writeFile(repo, 'Locked/plan.md', body);
+    await runGit(repo, ['add', '--', 'Locked/plan.md']);
+    await runGit(repo, ['commit', '-m', 'seed the locked file']);
+    await runGit(repo, ['push', 'origin', BRANCH]);
+    const before = await originTip(originDir);
+
+    await fs.mkdir(path.join(repo, 'Open'));
+    await runGit(repo, ['mv', 'Locked/plan.md', 'Open/plan.md']);
+    await runGit(repo, ['commit', `--author=Alice <${USER.email}>`, '-m', 'move it out']);
+
+    const err = await svc.push(workspaceId, USER).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PushAccessRefusedError);
+    expect((err as PushAccessRefusedError).blocked.path).toBe('Locked/plan.md');
+    expect(gateCalls()).toEqual([{ email: USER.email, paths: ['Locked/plan.md', 'Open/plan.md'] }]);
     expect(await originTip(originDir)).toBe(before);
   });
 
   it('a refused file the pusher may not read is not named, nor are its writers', async () => {
     const { svc, repo, readCalls } = await setup({
       users: [BOB],
-      writable: (email, p) => email === USER.email || !p.startsWith('Secret/'),
+      writable: (_email, p) => !p.startsWith('Secret/'),
       readable: (email, p) => !(email === USER.email && p.startsWith('Secret/')),
     });
     await commitAs(repo, BOB, 'Secret/plan.md', 'bob\n');

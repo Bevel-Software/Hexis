@@ -148,7 +148,13 @@ export interface GitSyncFailedEvent {
   kind: 'git-sync-failed';
   workspaceId: string;
   branch: string;
-  /** Sanitised git error — safe to display, tokens already redacted. */
+  /**
+   * What the banner's detail line shows, safe to display. For a failure at
+   * the repository host: one of the platform's fixed sentences about it,
+   * never the host's own words. With `conflictedPaths`: what conflicted.
+   * With `accessRefusal`: the platform's own sentence that its access check
+   * refused the push.
+   */
   reason: string;
   /**
    * Present when the failure is a REMOTE-SYNC CONFLICT (`POST /api/sync`
@@ -159,8 +165,8 @@ export interface GitSyncFailedEvent {
   conflictedPaths?: string[];
   /**
    * Present when the PLATFORM's own access check refused the push before it
-   * left the server (an unpushed commit changes a file its author may not
-   * write), so the repository host was never asked and the banner must not
+   * left the server (an unpushed commit changes a file that neither its
+   * author nor the pusher may write), so the repository host was never asked and the banner must not
    * blame it. `reason` then says the platform refused. `path` is the
    * repo-relative file that blocks the branch; it, and the writers `reason`
    * names, reach only a person who may read that file at the branch's

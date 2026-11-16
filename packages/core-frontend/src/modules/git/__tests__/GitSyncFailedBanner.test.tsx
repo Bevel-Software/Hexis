@@ -40,7 +40,14 @@ function makeBus() {
   } as unknown as EventBusContextValue;
   return {
     ctx,
-    emit(event: { kind: string; workspaceId: string; branch: string; reason?: string }) {
+    emit(event: {
+      kind: string;
+      workspaceId: string;
+      branch: string;
+      reason?: string;
+      conflictedPaths?: string[];
+      accessRefusal?: { path?: string };
+    }) {
       act(() => {
         for (const h of handlers.get(event.kind) ?? []) h(event);
       });
@@ -74,6 +81,10 @@ const FAILED = {
   branch: 'feat/x',
   reason: 'git push failed: fatal: Authentication failed',
 };
+
+/** The backend's sentence for a viewer who may not read the blocking file. */
+const UNNAMED_REFUSAL =
+  'The platform’s access check refused the push of "feat/x": an unshared commit on it changes a file you may not read.';
 
 describe('GitSyncFailedBanner', () => {
   it('renders nothing until a failure arrives — the healthy case is invisible', () => {
@@ -123,27 +134,29 @@ describe('GitSyncFailedBanner', () => {
     const bus = renderBanner();
     const reason =
       'The platform’s access check refused the push of "feat/x": "G/a.md" may be written by Admin; qa-b@example.com.';
-    bus.emit({ ...FAILED, reason, accessRefusal: { path: 'G/a.md' } } as Parameters<typeof bus.emit>[0]);
+    bus.emit({ ...FAILED, reason, accessRefusal: { path: 'G/a.md' } });
 
     const text = screen.getByRole('alert').textContent ?? '';
     expect(text).toContain('feat/x');
-    expect(text).toContain('saved here');
-    expect(text).toContain('access check refused the push');
+    expect(text).toContain('saved here but were not shared');
     expect(text).toContain(reason);
+    // Who refused is said once, by the detail line.
+    expect(text.match(/access check refused the push/g)).toHaveLength(1);
     expect(text).not.toMatch(/git host|server logs/i);
   });
 
   it('keeps the platform headline when the file was withheld from this person', () => {
     const bus = renderBanner();
-    bus.emit({ ...FAILED, reason: 'unnamed', accessRefusal: {} } as Parameters<typeof bus.emit>[0]);
+    bus.emit({ ...FAILED, reason: UNNAMED_REFUSAL, accessRefusal: {} });
     const text = screen.getByRole('alert').textContent ?? '';
-    expect(text).toContain('access check refused the push');
-    expect(text).not.toMatch(/git host/i);
+    expect(text).toContain('saved here but were not shared');
+    expect(text).toContain(UNNAMED_REFUSAL);
+    expect(text).not.toMatch(/git host|server logs/i);
   });
 
   it('a host failure after a platform refusal goes back to the git-host headline', () => {
     const bus = renderBanner();
-    bus.emit({ ...FAILED, reason: 'unnamed', accessRefusal: {} } as Parameters<typeof bus.emit>[0]);
+    bus.emit({ ...FAILED, reason: UNNAMED_REFUSAL, accessRefusal: {} });
     bus.emit(FAILED);
     expect(screen.getByRole('alert').textContent).toContain('aren’t reaching your git host');
   });

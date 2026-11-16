@@ -1187,6 +1187,14 @@ describe('VersionControlService — revertChangeRequestFile / closeEmptyChangeRe
       expect(refusal.message).toContain("the platform's access check refused the push");
       expect(refusal.message).toContain('"Docs/rejected ü.md" may be written by Editors; Bea <bea@example.com>');
       expect(refusal.message).not.toMatch(/repository host/i);
+      // What a record keeps (the log, the queue, a prompt): the same
+      // sentence with the people counted, never named, and the same on the
+      // detail fields the server log prints.
+      expect(refusal.recordMessage).toBe(
+        `Saved locally on "ali/x" but couldn't share with the team automatically — the platform's access check refused the push: "Docs/rejected ü.md" may be written by Editors and 1 named person.`,
+      );
+      expect(refusal.originalDetail).toBe(gateRefusal().recordMessage);
+      expect(`${refusal.recordMessage} ${refusal.originalDetail} ${refusal.recoveryDetail}`).not.toMatch(/Bea|bea@/);
 
       // The banner says the same, in the gate's own words.
       const failed = emit.mock.calls.map((c) => c[0] as Record<string, unknown>).find((e) => e.kind === 'git-sync-failed');

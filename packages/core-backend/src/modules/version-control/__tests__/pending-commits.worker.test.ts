@@ -189,41 +189,72 @@ describe('PendingCommitsWorker.drainOnce', () => {
     expect(feedback.send).not.toHaveBeenCalled();
   });
 
-  it("records a refusal by the platform's access check whole: the platform's words, the file and its writers", async () => {
+  /** The gate's refusal as `runPendingCommit` throws it: a long path, twelve roles, six named writers. */
+  function accessRefusal(path: string): PushNeedsAgentResolutionError {
+    const gate = new PushAccessRefusedError('main', {
+      path: `Kunden/${'Übertragung '.repeat(12)}per SFTP.docx`,
+      eligibleRoles: Array.from({ length: 12 }, (_, i) => `Team ${i}`),
+      eligibleUsers: Array.from({ length: 6 }, (_, i) => ({ name: `Writer ${i}`, email: `writer${i}@example.com` })),
+    }, true);
+    return new PushNeedsAgentResolutionError('main', path, gate.recordMessage, '(cooperative path not attempted)', 'access', {
+      told: gate.reason,
+      recorded: gate.recordReason,
+    });
+  }
+
+  it("records a refusal by the platform's access check whole, with the file and the roles, and counts the people instead of naming them", async () => {
     const row = makeRow({ attempts: 0 });
     (service.claimNext as ReturnType<typeof vi.fn>).mockResolvedValueOnce(row);
-    const writers = Array.from({ length: 6 }, (_, i) => ({ name: `Writer ${i}`, email: `writer${i}@example.com` }));
-    const gate = new PushAccessRefusedError('main', {
-      path: 'Kunden/DE_Katalogübertragung per SFTP.docx',
-      eligibleRoles: ['Admin', 'Editors'],
-      eligibleUsers: writers,
-    }, true);
-    versionControl.runPendingCommit.mockRejectedValueOnce(
-      new PushNeedsAgentResolutionError('main', row.path, gate.message, '(cooperative path not attempted)', 'access', gate.reason),
-    );
+    const refusal = accessRefusal(row.path);
+    versionControl.runPendingCommit.mockRejectedValueOnce(refusal);
 
     await worker.drainOnce();
 
     const recorded = (service.markTransientFailure as ReturnType<typeof vi.fn>).mock.calls[0][1] as string;
+    // Past the default cap of 200, and whole: the cap would cut the roles off.
+    expect(recorded).toBe(refusal.recordMessage);
     expect(recorded.length).toBeGreaterThan(200);
     expect(recorded).toContain("the platform's access check refused the push");
-    expect(recorded).toContain('"Kunden/DE_Katalogübertragung per SFTP.docx" may be written by Admin, Editors;');
-    expect(recorded).toContain('Writer 5 <writer5@example.com>');
+    expect(recorded).toContain('per SFTP.docx" may be written by Team 0, ');
+    expect(recorded).toContain('Team 11 and 6 named people.');
+    // The person who saved is told who; a record is not.
+    expect(refusal.message).toContain('Writer 5 <writer5@example.com>');
+    expect(recorded).not.toMatch(/Writer|@example\.com/);
     expect(recorded).not.toMatch(/repository host/i);
   });
 
-  it('a push the host refused is recorded in the host wording, capped as before', async () => {
-    const row = makeRow({ attempts: 0 });
+  it('an access refusal past the transient budget is escalated at once: no recovery agent, and a notice that names no person', async () => {
+    const row = makeRow({ attempts: N_TRANSIENT - 1, recoveryAgentRuns: 0 });
     (service.claimNext as ReturnType<typeof vi.fn>).mockResolvedValueOnce(row);
-    versionControl.runPendingCommit.mockRejectedValueOnce(
-      new PushNeedsAgentResolutionError('main', row.path, 'remote: Internal Server Error ' + 'x'.repeat(400), '', 'refused'),
-    );
+    const refusal = accessRefusal(row.path);
+    versionControl.runPendingCommit.mockRejectedValueOnce(refusal);
 
     await worker.drainOnce();
 
-    const recorded = (service.markTransientFailure as ReturnType<typeof vi.fn>).mock.calls[0][1] as string;
-    expect(recorded).toContain('the repository host refused the push');
-    expect(recorded.length).toBeLessThanOrEqual(200);
+    expect(recoveryAgent.run).not.toHaveBeenCalled();
+    expect(service.markRecoveryStarted).not.toHaveBeenCalled();
+    expect(service.markNeedsAttention).toHaveBeenCalledWith('row-1', refusal.recordMessage);
+    expect(feedback.send).toHaveBeenCalledTimes(1);
+    const notice = (feedback.send as ReturnType<typeof vi.fn>).mock.calls[0][0].message as string;
+    expect(notice).toContain("Push refused by the platform's access check");
+    expect(notice).toContain(refusal.recordMessage);
+    expect(notice).toContain('No recovery agent was run');
+    expect(notice).not.toMatch(/Terminal commit failure|Writer|@example\.com/);
+  });
+
+  it('a push the host refused is recorded in the host wording and still goes to the recovery agent', async () => {
+    const row = makeRow({ attempts: N_TRANSIENT - 1, recoveryAgentRuns: 0 });
+    (service.claimNext as ReturnType<typeof vi.fn>).mockResolvedValueOnce(row);
+    versionControl.runPendingCommit.mockRejectedValueOnce(
+      new PushNeedsAgentResolutionError('main', row.path, 'remote: Internal Server Error', '', 'refused'),
+    );
+    recoveryAgent.run.mockResolvedValueOnce(undefined);
+
+    await worker.drainOnce();
+
+    expect(recoveryAgent.run).toHaveBeenCalledTimes(1);
+    expect(recoveryAgent.run.mock.calls[0][0].lastError).toContain('the repository host refused the push');
+    expect(service.markNeedsAttention).not.toHaveBeenCalled();
   });
 
   it('exhausting transient budget spawns the recovery agent (within recovery budget)', async () => {

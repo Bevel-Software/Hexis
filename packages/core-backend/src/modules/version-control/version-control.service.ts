@@ -112,6 +112,17 @@ import { printable } from '../../shared/printable.js';
 
 const execFileAsync = promisify(execFile);
 
+/**
+ * What a failed push says of itself in the server log and on the error's
+ * detail fields: the error's own words, but for the push gate's refusal,
+ * which goes in its record form — its message names the people who may write
+ * the file, and log lines carry no names or email addresses.
+ */
+function pushFailureDetail(err: unknown): string {
+  if (err instanceof PushAccessRefusedError) return err.recordMessage;
+  return err instanceof Error ? err.message : String(err);
+}
+
 /** The partial unique index that enforces one OPEN change request per (source, target) pair. */
 const OPEN_PAIR_CONSTRAINT = 'change_requests_open_pair_unq';
 
@@ -1572,7 +1583,7 @@ export class VersionControlService implements IVersionControlService {
         // surface a structured `PushNeedsAgentResolutionError` at the
         // moment the user actually closes their edit, which is when
         // the agent should step in.
-        const detail = err instanceof Error ? err.message : String(err);
+        const detail = pushFailureDetail(err);
         // The platform's own access refusal is no divergence, whatever its
         // file names spell: a pull cannot change who may write a file.
         const looksLikeNonFastForward =
@@ -1590,7 +1601,9 @@ export class VersionControlService implements IVersionControlService {
             recoveryError = recoveryErr;
             log.warn(
               'autosave cooperative recovery (pull-rebase) failed; leaving the unpushed commit for the next save / releaseLock to surface:',
-              { err: recoveryErr },
+              // The gate's refusal goes to the log in its record form: the
+              // error itself names the people who may write the file.
+              recoveryErr instanceof PushAccessRefusedError ? { detail: recoveryErr.recordMessage } : { err: recoveryErr },
             );
           }
         }
@@ -1950,7 +1963,7 @@ export class VersionControlService implements IVersionControlService {
       await push();
       this.noteGitSyncOk(workspaceId, branch);
     } catch (firstPushErr) {
-      const firstDetail = firstPushErr instanceof Error ? firstPushErr.message : String(firstPushErr);
+      const firstDetail = pushFailureDetail(firstPushErr);
       // The platform's own access refusal is no divergence, whatever its file
       // names spell: a pull cannot change who may write a file.
       const looksLikeNonFastForward =
@@ -1973,7 +1986,7 @@ export class VersionControlService implements IVersionControlService {
           try {
             await push();
           } catch (retryErr) {
-            retryDetail = retryErr instanceof Error ? retryErr.message : String(retryErr);
+            retryDetail = pushFailureDetail(retryErr);
             throw retryErr;
           }
           recovered = true;
@@ -1983,7 +1996,7 @@ export class VersionControlService implements IVersionControlService {
           );
         } catch (recoveryErr) {
           recoveryError = recoveryErr;
-          recoveryDetail = recoveryErr instanceof Error ? recoveryErr.message : String(recoveryErr);
+          recoveryDetail = pushFailureDetail(recoveryErr);
           log.warn(
             `cooperative recovery (pull-rebase) failed for workspace=${workspaceId} user=${user.id}; handing off to agent:`,
             { detail: recoveryDetail },
@@ -2016,7 +2029,10 @@ export class VersionControlService implements IVersionControlService {
         // the sentence says the platform refused and names what it named.
         const current = recoveryError ?? firstPushErr;
         if (current instanceof PushAccessRefusedError) {
-          throw new PushNeedsAgentResolutionError(branch, targetPath, firstDetail, recoveryDetail, 'access', current.reason);
+          throw new PushNeedsAgentResolutionError(branch, targetPath, firstDetail, recoveryDetail, 'access', {
+            told: current.reason,
+            recorded: current.recordReason,
+          });
         }
         throw new PushNeedsAgentResolutionError(
           branch,

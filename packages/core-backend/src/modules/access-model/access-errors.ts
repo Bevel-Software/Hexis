@@ -83,6 +83,19 @@ function eligibleWritersPhrase(roles: string[], users: { name: string; email: st
   return [rolesPart, usersPart].filter(Boolean).join('; ');
 }
 
+/**
+ * The same writers for a RECORD (a log line, the pending-commit queue, the
+ * recovery agent's prompt, an operator's notice): the roles, and how many
+ * people are named beside them, never who. Log lines carry no names or
+ * email addresses; the count still tells an operator that the roles are not
+ * the whole list.
+ */
+function eligibleWritersForRecord(roles: string[], users: { name: string; email: string }[]): string {
+  const people = users.length ? `${users.length} named ${users.length === 1 ? 'person' : 'people'}` : '';
+  if (roles.length === 0) return people || 'none';
+  return people ? `${roles.join(', ')} and ${people}` : roles.join(', ');
+}
+
 /** The file a push-gate refusal names, and who may write it at the published state. */
 export interface PushAccessRefusal {
   /** Repo-relative POSIX path of the file the unpushed commit changed. */
@@ -95,25 +108,36 @@ export interface PushAccessRefusal {
  * The sentence a push-gate refusal is told in: the platform refused (never
  * the repository host) and, given the refusal, which file and who may write
  * it. Given null, the file goes unnamed, for a person who may not read it.
- * One composition for the person who pushed, the sync banner each viewer
- * sees and the pending-commit queue, so they never say it differently.
+ * One composition for the person who pushed and the sync banner each viewer
+ * sees, so they never say it differently.
  */
 export function pushAccessRefusalSentence(branch: string, refusal: PushAccessRefusal | null): string {
-  return `The platform's access check refused the push of "${branch}": ${pushAccessRefusalClause(refusal)}.`;
+  return `The platform's access check refused the push of "${branch}": ${pushAccessRefusalClause(refusal, 'person')}.`;
 }
 
-function pushAccessRefusalClause(refusal: PushAccessRefusal | null): string {
-  return refusal
-    ? `"${sanitizedPath(refusal.path)}" may be written by ${eligibleWritersPhrase(refusal.eligibleRoles, refusal.eligibleUsers)}`
-    : 'an unshared commit on it changes a file you may not read, which its author may not write there; someone who may write that file can share the branch';
+/**
+ * The clause after "refused the push:". `person`: for someone reading it in
+ * the app, with the people who may write the file named. `record`: for a log
+ * line, the queue or a prompt, with the roles and a count of the people.
+ * The unnamed clause is the same for both: it names nobody.
+ */
+function pushAccessRefusalClause(refusal: PushAccessRefusal | null, audience: 'person' | 'record'): string {
+  if (!refusal) {
+    return 'an unshared commit on it changes a file you may not read, which neither its author nor the person sharing may write there; someone who may write that file can share the branch';
+  }
+  const writers =
+    audience === 'person'
+      ? eligibleWritersPhrase(refusal.eligibleRoles, refusal.eligibleUsers)
+      : eligibleWritersForRecord(refusal.eligibleRoles, refusal.eligibleUsers);
+  return `"${sanitizedPath(refusal.path)}" may be written by ${writers}`;
 }
 
 /**
  * The platform's own access check refused to push a protected branch: an
- * unpushed commit changes a file that the commit's author (or the pusher,
- * for an author the platform cannot match to a user) may not write at the
- * branch's published state. The push never left this server, so this is NOT
- * the repository host refusing, and nothing that relays it may say so.
+ * unpushed commit changes a file that neither the commit's author nor the
+ * pusher may write at the branch's published state. The push never left this
+ * server, so this is NOT the repository host refusing, and nothing that
+ * relays it may say so.
  *
  * `blocked` is the file and who may write it, always. What the PUSHER is
  * told is `refusal`: the same, or null when they may not read the file — a
@@ -125,11 +149,17 @@ function pushAccessRefusalClause(refusal: PushAccessRefusal | null): string {
  *
  * `reason` is the clause after "refused the push:", composed here from
  * repository paths and principals only (never git output), so the
- * saved-locally sentence and the pending-commit queue can carry it verbatim.
+ * saved-locally sentence can carry it verbatim to the person who saved.
+ * `recordReason` and `recordMessage` are the same clause and sentence for a
+ * record (a log line, the pending-commit queue, a prompt): scoped to the
+ * pusher the same way, with the people who may write the file counted, not
+ * named.
  */
 export class PushAccessRefusedError extends VersionControlDomainError {
   readonly kind = 'push-access-refused' as const;
   readonly reason: string;
+  readonly recordReason: string;
+  readonly recordMessage: string;
   /** What the pusher may be told: `blocked`, or null when they may not read its file. */
   readonly refusal: PushAccessRefusal | null;
 
@@ -154,7 +184,9 @@ export class PushAccessRefusedError extends VersionControlDomainError {
     );
     this.name = 'PushAccessRefusedError';
     this.refusal = refusal;
-    this.reason = pushAccessRefusalClause(refusal);
+    this.reason = pushAccessRefusalClause(refusal, 'person');
+    this.recordReason = pushAccessRefusalClause(refusal, 'record');
+    this.recordMessage = `The platform's access check refused the push of "${branch}": ${this.recordReason}.`;
   }
 }
 

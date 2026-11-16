@@ -19,7 +19,7 @@ const REDACTED_REASON = 'The last push did not land.';
 /** What a push-gate refusal says to a person who may not read its file. */
 const UNNAMED_PLATFORM_REFUSAL =
   `The platform's access check refused the push of "main": an unshared commit on it changes a file you may not read, ` +
-  `which its author may not write there; someone who may write that file can share the branch.`;
+  `which neither its author nor the person sharing may write there; someone who may write that file can share the branch.`;
 
 /**
  * The events route writes an event to a session only when the session's

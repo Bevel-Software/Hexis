@@ -285,9 +285,10 @@ async function existsForCommitCheck(absolutePath: string): Promise<boolean> {
 
 /**
  * Who the platform knows, as the protected-branch push gate asks it. The gate
- * judges each unpushed commit by the user who authored it; an author address
- * this answers `false` for is held to the PUSHER's access instead, so a
- * commit by an address nobody owns is never let through unchecked. A lookup
+ * asks first whether the user who authored an unpushed commit may write what
+ * it changed; an author address this answers `false` for is never asked, and
+ * the commit is held to the PUSHER's access alone, so a commit by an address
+ * nobody owns is never let through unchecked. A lookup
  * that fails rejects, and the push fails with it: an unanswered question is
  * never read as "unknown author".
  */
@@ -2401,6 +2402,11 @@ export class GitService implements IGitService {
    * merger, answers for them. Walking into the merged branch instead would
    * hold a draft's authors to the protected branch's rules, which a merge
    * through review exists to spare them.
+   *
+   * `--no-renames`: with rename detection `--name-only` prints a moved file
+   * under its new path alone, and the path it was removed from would go
+   * unchecked. A move is a removal there and an addition here, and both are
+   * listed.
    */
   private async unpushedCommits(cwd: string): Promise<UnpushedCommit[]> {
     let range: string[];
@@ -2411,19 +2417,38 @@ export class GitService implements IGitService {
       range = ['HEAD', '--not', '--remotes'];
     }
     const { stdout } = await this.git(cwd, [
-      'log', '-z', '-m', '--first-parent', '--name-only', '--format=%x00%H%x00%ae', ...range,
+      'log', '-z', '-m', '--first-parent', '--no-renames', '--name-only', '--format=%x00%H%x00%ae', ...range,
     ]);
     return parseUnpushedLog(stdout);
   }
 
   /**
-   * The protected-branch push gate. Every unpushed commit is judged by the
-   * user who authored it: a push that carries a colleague's earlier commits
-   * (stranded by a failed push of theirs) lands when THEY could write what
-   * they changed, whatever the pusher's own access to those files. The
-   * pusher's own commits, and a commit whose author the platform cannot match
-   * to a user, are held to the pusher's access. Access is resolved at
-   * `origin/<branch>`, the published state, as before.
+   * The paths of `paths` that `email` may not write at `ref`, in the order
+   * given. None when the ref holds no access rules yet (bootstrap:
+   * default-allow, as `assertCanWriteAtRef` reads it).
+   */
+  private async unwritableAtRef(workspaceId: string, ref: string, email: string, paths: string[]): Promise<string[]> {
+    if (!this.accessControl || paths.length === 0) return [];
+    const result = await this.accessControl.canWriteBatchAtRef(workspaceId, ref, email, paths);
+    return result ? paths.filter((p) => !result.get(p)) : [];
+  }
+
+  /**
+   * The protected-branch push gate. A file an unpushed commit changed may
+   * land when the user who authored the commit may write it, or the pusher
+   * may:
+   *
+   *   - the author, so a push that carries a colleague's earlier commits
+   *     (stranded by a failed push of theirs) lands when THEY could write
+   *     what they changed, whatever the pusher's own access to those files;
+   *   - the pusher, so a commit nobody else can vouch for (its author lost
+   *     the right since, or never had it) does not block the branch for
+   *     everyone: a person who may write the file themselves shares it by
+   *     pushing, as they could by saving it.
+   *
+   * The pusher's own commits, and a commit whose author the platform cannot
+   * match to a user, are held to the pusher's access alone. Access is
+   * resolved at `origin/<branch>`, the published state, as before.
    *
    * A refusal is a `PushAccessRefusedError`: the platform refused, not the
    * repository host, and it names the file and its writers when the pusher
@@ -2459,18 +2484,23 @@ export class GitService implements IGitService {
       for (const p of commit.paths) entry.paths.add(p);
       judged.set(key, entry);
     }
-    for (const { email, paths } of judged.values()) {
-      try {
-        await this.assertCanWriteAtRef(workspaceId, ref, email, [...paths]);
-      } catch (err) {
-        if (!(err instanceof AccessDeniedError)) throw err;
-        const { path: refused, eligibleRoles, eligibleUsers } = err.access;
-        // Named only to a pusher who may read it: the commit may be someone
-        // else's, on a file the pusher cannot see. Null (no rules at the
-        // ref) reads as deny, as every caller of the at-ref reads treats it.
-        const readable = (await this.accessControl.canReadAtRef(workspaceId, ref, user.email, refused)) === true;
-        throw new PushAccessRefusedError(branch, { path: refused, eligibleRoles, eligibleUsers }, readable);
-      }
+    for (const [key, { email, paths }] of judged) {
+      let refusedPaths = await this.unwritableAtRef(workspaceId, ref, email, [...paths]);
+      // What a colleague may not write, the pusher may still carry when they
+      // may write it themselves.
+      if (key !== pusher) refusedPaths = await this.unwritableAtRef(workspaceId, ref, user.email, refusedPaths);
+      if (refusedPaths.length === 0) continue;
+      const refused = refusedPaths[0];
+      const eligible = await this.accessControl.eligibleWritersAtRef(workspaceId, ref, refused);
+      // Named only to a pusher who may read it: the commit may be someone
+      // else's, on a file the pusher cannot see. Null (no rules at the
+      // ref) reads as deny, as every caller of the at-ref reads treats it.
+      const readable = (await this.accessControl.canReadAtRef(workspaceId, ref, user.email, refused)) === true;
+      throw new PushAccessRefusedError(
+        branch,
+        { path: refused, eligibleRoles: eligible?.roles ?? [], eligibleUsers: eligible?.users ?? [] },
+        readable,
+      );
     }
   }
 

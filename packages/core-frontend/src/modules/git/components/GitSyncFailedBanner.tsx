@@ -191,9 +191,11 @@ export function GitSyncFailedBanner({ workspaceId: forWorkspaceId }: { workspace
   }
 
   // The platform's own access check refused the push: the git host was never
-  // asked, and an operator's logs are not where the answer is. The detail
-  // line says which file blocks the branch and who may write it, as far as
-  // this person may be told.
+  // asked, and an operator's logs are not where the answer is. The headline
+  // says only that the work is safe and not shared; the detail line is the
+  // backend's sentence, which says who refused (the platform) and, as far as
+  // this person may be told, which file blocks the branch and who may write
+  // it. Saying who refused in both would name the same actor twice.
   if (failure.refusedByPlatform) {
     return (
       <div
@@ -204,7 +206,7 @@ export function GitSyncFailedBanner({ workspaceId: forWorkspaceId }: { workspace
           <AlertTriangle size={13} className="shrink-0" />
           <span className="flex-1">
             Changes on <span className="font-mono font-semibold">{failure.branch}</span> are saved
-            here but were not shared: Hexis’s access check refused the push.
+            here but were not shared.
           </span>
         </div>
         <div className="mt-1 ml-5 text-ink-muted break-words">{failure.reason}</div>
