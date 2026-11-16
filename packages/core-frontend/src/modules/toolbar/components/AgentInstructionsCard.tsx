@@ -176,7 +176,7 @@ export function AgentInstructionsCard() {
           </Button>
         )}
       </div>
-      <p className="text-meta leading-normal text-ink-faint">
+      <p className="text-meta leading-normal text-ink-muted">
         Every agent that connects gets this at the start of each session, whatever it may read in the repository. A
         fixed platform message goes first, then your description of what is here.
       </p>

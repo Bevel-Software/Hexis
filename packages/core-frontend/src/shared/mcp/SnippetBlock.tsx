@@ -33,6 +33,7 @@ export function SnippetBlock({
   className?: string;
 }) {
   const [copied, setCopied] = useState<'idle' | 'ok' | 'fail'>('idle');
+  const textRef = useRef<HTMLDivElement>(null);
 
   // One timer, cleared before it is replaced: a second copy inside the 1.5s
   // window would otherwise inherit the FIRST copy's expiry and blank the
@@ -49,7 +50,16 @@ export function SnippetBlock({
     // says nothing to a screen reader.
     setCopied('idle');
     window.setTimeout(() => setCopied(ok ? 'ok' : 'fail'), 0);
-    resetTimer.current = window.setTimeout(() => setCopied('idle'), 1500);
+    if (ok) {
+      resetTimer.current = window.setTimeout(() => setCopied('idle'), 1500);
+      return;
+    }
+    // A refused copy stays said until the next try, and the text is selected,
+    // so the way round (the keyboard's own copy) is one key away. A cross that
+    // flashed for a second and a half looked the same as nothing happening.
+    const text = textRef.current;
+    const selection = typeof window.getSelection === 'function' ? window.getSelection() : null;
+    if (text && selection) selection.selectAllChildren(text);
   }
 
   return (
@@ -61,6 +71,7 @@ export function SnippetBlock({
       <div className="relative">
         <div className="rounded-lg border border-line bg-sunken">
           <div
+            ref={textRef}
             className={cn(
               'mr-10 overflow-x-auto py-2.5 pl-3',
               'font-mono text-detail text-ink',
@@ -90,6 +101,9 @@ export function SnippetBlock({
           {copied === 'ok' ? 'Copied' : copied === 'fail' ? 'Copy failed' : ''}
         </span>
       </div>
+      {copied === 'fail' && (
+        <p className="mt-1.5 text-meta text-danger">Your browser did not allow copying. The text is selected: press ⌘C or Ctrl+C.</p>
+      )}
     </div>
   );
 }

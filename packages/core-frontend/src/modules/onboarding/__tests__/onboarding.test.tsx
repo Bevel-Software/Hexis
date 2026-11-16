@@ -305,6 +305,9 @@ describe('WelcomePage', () => {
     expect(config.textContent).toContain('https://kb.acme.com/api/mcp');
     await userEvent.click(screen.getByRole('button', { name: 'Copy: As a JSON configuration' }));
     expect(writeText).toHaveBeenLastCalledWith(config.textContent);
+    // Copying is not Done: no server write, no navigation.
+    expect(authFetchMock).not.toHaveBeenCalled();
+    expect(screen.getByTestId('pathname')).toHaveTextContent(WELCOME_PATH);
   });
 
   /**

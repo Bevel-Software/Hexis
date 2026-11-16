@@ -98,7 +98,7 @@ export const AGENT_CLIENTS: AgentClient[] = [
       [
         `Connect yourself to my company's knowledge base, "${MCP_DISPLAY_NAME}". It is an MCP server.`,
         '',
-        'First check that `node --version` prints 22.13 or newer. If it does not, stop and tell me.',
+        'First check `node --version`: it must be 22.13 or a later 22, or any 24. On any other version, stop and tell me.',
         '',
         'If you are Claude Code, run this command. It adds the server for all my projects:',
         '',

@@ -58,9 +58,10 @@ interface DialogProps {
    */
   busy?: boolean;
   /**
-   * Leave the cross out of the header. For a dialog whose footer button is the
-   * only way out (a one-time key): a cross that does nothing teaches people
-   * the dialog is stuck.
+   * Leave the cross out of the header. Pair it with `busy` for a dialog whose
+   * footer button must be the only way out (a one-time key): `busy` makes
+   * Escape and the backdrop inert, `hideClose` removes the cross that would
+   * otherwise sit there doing nothing. On its own it only hides the cross.
    */
   hideClose?: boolean;
   /**

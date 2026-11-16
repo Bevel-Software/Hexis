@@ -51,9 +51,9 @@ they can add the marketplace.
    the registered platform. You do not need to start a Claude Code task; this
    is only where Claude exposes the connection. You land on the platform's
    sign-in: approve, and you are back in Claude.
-2. Copy the marketplace URL from **External agent access → Install skills as
-   native plugins → Cowork and claude.ai**. It is the same URL Claude Code
-   clones.
+2. On **External agent access**, open **Install skills as native plugins**,
+   choose **show the steps**, and copy the **Marketplace URL**. It is the same
+   URL Claude Code clones.
 3. In Cowork (or claude.ai), open **Customize → Plugins**, then **Add → Add
    marketplace**, paste the URL and choose **Sync**.
 4. Syncing lists the plugins, it installs none of them. Open **Discover** and
@@ -69,8 +69,9 @@ they can add the marketplace.
    Claude you are offered the connector for yourself instead, which works the
    same for you; ask an admin to add it for the team.
 
-Your connection appears under **Marketplaces → Your Claude connections**,
-where you can disconnect it. Disconnecting stops updates; connecting again
+Your connection appears under **Your Claude connections** in those same steps
+(**External agent access → Install skills as native plugins → show the
+steps**), where you can disconnect it. Disconnecting stops updates; connecting again
 from Claude resumes them. "Repository not found" or "GitHub access is
 required" on the marketplace means Claude has no usable connection for your
 account: step 1 has not happened, or the connection it made was since

@@ -110,21 +110,27 @@ export function ExternalAgentAccessPage() {
   // notice about something they cannot change, so they are not sent there.
   const [pluginsOpen, setPluginsOpen] = useState(false);
   const [coworkRegistered, setCoworkRegistered] = useState(false);
+  // A failed check is said, with a way to ask again: hiding the route would
+  // read as "not set up" when nobody knows.
+  const [registrationError, setRegistrationError] = useState(false);
+  const [registrationAsk, setRegistrationAsk] = useState(0);
   useEffect(() => {
     if (!pluginsOpen) return;
     let live = true;
     fetchMarketplaceRegistration().then(
       (registered) => {
-        if (live) setCoworkRegistered(registered);
+        if (!live) return;
+        setRegistrationError(false);
+        setCoworkRegistered(registered);
       },
       () => {
-        /* The route stays hidden for members; an admin still reaches it and sees the error there. */
+        if (live) setRegistrationError(true);
       },
     );
     return () => {
       live = false;
     };
-  }, [pluginsOpen]);
+  }, [pluginsOpen, registrationAsk]);
   const [keyUse, setKeyUse] = useState<KeyUse>('key');
   // The reader followed the link or copied the snippet: only then does the
   // page wait for their agent.
@@ -205,17 +211,23 @@ export function ExternalAgentAccessPage() {
 
   /** Mint a key and show it once, opened on the place it is meant for. */
   async function createKey(name: string, use: KeyUse) {
-    if (name.length === 0 || name.length > MAX_LABEL_LEN || creating || !connectAs.mayConnect) return;
+    // A key for plugins always loads everything you may read: the Connect-as
+    // choice belongs to the API keys row, which the reader of this row cannot
+    // see, so it neither narrows this key nor holds its button back.
+    const plugins = use === 'plugins';
+    if (name.length === 0 || name.length > MAX_LABEL_LEN || creating || (!plugins && !connectAs.mayConnect)) return;
     setCreating(true);
     setCreateError(null);
     setCreateErrorFor(use);
     returnFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     try {
-      const minted = await createExternalApiKey(name, connectAs.value);
+      const minted = await createExternalApiKey(name, plugins ? null : connectAs.value);
       setReveal(minted);
       setKeyUse(use);
-      setLabel('');
-      connectAs.setValue(null);
+      if (!plugins) {
+        setLabel('');
+        connectAs.setValue(null);
+      }
       // Optimistic-ish: refresh the list so the new row shows up underneath
       // the reveal modal.
       void refresh();
@@ -481,7 +493,7 @@ export function ExternalAgentAccessPage() {
             <Button
               className="mt-3"
               onClick={() => void createKey(pluginKeyName(), 'plugins')}
-              disabled={creating || !connectAs.mayConnect}
+              disabled={creating}
             >
               {creating ? 'Creating…' : 'Create install command'}
             </Button>
@@ -493,7 +505,14 @@ export function ExternalAgentAccessPage() {
             {/* Cowork and claude.ai install from a marketplace an admin sets
                 up once. Registered: the steps. Not registered: an admin is
                 sent where it is set up, and a member sees nothing to do. */}
-            {coworkRegistered ? (
+            {registrationError ? (
+              <p className={`mt-3 ${HINT}`} role="alert">
+                Could not check whether Cowork and claude.ai are set up.{' '}
+                <button type="button" className="underline hover:text-ink" onClick={() => setRegistrationAsk((n) => n + 1)}>
+                  Try again
+                </button>
+              </p>
+            ) : coworkRegistered ? (
               <p className={`mt-3 ${HINT}`}>
                 In Cowork and claude.ai:{' '}
                 <button type="button" className="underline hover:text-ink" onClick={() => setCoworkOpen(true)}>

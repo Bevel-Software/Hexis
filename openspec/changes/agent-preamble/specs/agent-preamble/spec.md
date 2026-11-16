@@ -73,7 +73,7 @@ The Deployment page SHALL end with a section titled "What agents are told", in t
 
 #### Scenario: Comment left open
 - **WHEN** the file contains an unterminated `<!--`
-- **THEN** the section warns that everything after it is withheld from agents and names a fix the reader can reach: for an admin the editor on this page, which closes the comment on save even when the visible text is unchanged, and for a non-admin that an admin can do it here
+- **THEN** the section warns that everything after it is withheld from agents and names the fix: the editor on this page, which closes the comment on save even when the visible text is unchanged. The section is on Deployment, which only admins open, so there is no non-admin wording
 
 #### Scenario: The tool-description channel is cutting the first paragraph
 - **WHEN** the composed result reports the tool prefix as truncated

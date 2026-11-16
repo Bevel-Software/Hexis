@@ -33,8 +33,11 @@ export function CopyPromptButton({
     const ok = await copyToClipboard(value);
     if (!ok) onCopyFailed?.();
     setRefused(!ok);
-    setCopied(ok);
     window.clearTimeout(resetTimer.current);
+    // Back to idle FIRST, so a repeat copy is a real state change and the live
+    // region announces it again (as SnippetBlock does).
+    setCopied(false);
+    window.setTimeout(() => setCopied(ok), 0);
     resetTimer.current = window.setTimeout(() => setCopied(false), 1500);
   }
 

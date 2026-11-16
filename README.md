@@ -370,7 +370,7 @@ local-only tools to everything the hosted endpoint serves. That command needs
 and a client launched from the Dock or a desktop icon may not see `npx` on PATH
 at all: run `which npx` (`where npx` on Windows) and use the full path it
 prints as the `"command"`. See
-[Troubleshooting](docs/troubleshooting.md#desktop-agents-the-local-mcp-server).
+[Troubleshooting](docs/troubleshooting.md#coding-agents-the-local-mcp-server).
 </details>
 
 <details>

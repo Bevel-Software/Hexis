@@ -380,6 +380,8 @@ describe('API keys', () => {
     const list = await screen.findByRole('list', { name: 'Your API keys' });
     await user.click(within(list).getByRole('button', { name: 'Delete' }));
     const confirm = await screen.findByRole('dialog', { name: 'Delete API key' });
+    expect(confirm).toHaveTextContent('removes it and its usage history for good');
+    expect(keysApi.deleteExternalApiKey).not.toHaveBeenCalled();
     await user.click(within(confirm).getByRole('button', { name: 'Delete' }));
     expect(keysApi.deleteExternalApiKey).toHaveBeenCalledWith('k1');
   });
@@ -470,6 +472,34 @@ describe('skills as native plugins: optional, and never a command that cannot ru
     expect(within(dialog).getByRole('button', { name: 'Done' })).toBeInTheDocument();
     // The API keys row stays closed: nothing jumps to another card.
     expect(row('keys-section').open).toBe(false);
+  });
+
+  it('makes the plugin key for everything, whatever the API keys row has picked, and even when agents failed to load', async () => {
+    agentChoicesMock.mockRejectedValue(new Error('agents down'));
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    await user.click(within(row('plugins-row')).getByText('Install skills as native plugins'));
+    await waitFor(() => expect(agentChoicesMock).toHaveBeenCalled());
+    const create = within(row('plugins-row')).getByRole('button', { name: 'Create install command' });
+    expect(create).toBeEnabled();
+    await user.click(create);
+    await screen.findByRole('dialog', { name: 'Install your skills' });
+    expect(createMock).toHaveBeenCalledWith(expect.stringMatching(/^Plugins, /), null);
+  });
+
+  it('says when the Cowork check failed, and asks again on request', async () => {
+    adminState.isAdmin = true;
+    registrationMock.mockRejectedValueOnce(new Error('down'));
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    await user.click(within(row('plugins-row')).getByText('Install skills as native plugins'));
+    const alert = await within(row('plugins-row')).findByRole('alert');
+    expect(alert).toHaveTextContent('Could not check whether Cowork and claude.ai are set up.');
+    expect(within(row('plugins-row')).queryByRole('link', { name: 'set it up in Deployment' })).not.toBeInTheDocument();
+
+    await user.click(within(alert).getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(registrationMock).toHaveBeenCalledTimes(2));
+    expect(await within(row('plugins-row')).findByRole('link', { name: 'set it up in Deployment' })).toBeInTheDocument();
   });
 
   it('reads the registration only when the row is opened, and never the admin credentials', async () => {
