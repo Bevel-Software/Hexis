@@ -1,23 +1,21 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Check, Copy, X } from 'lucide-react';
-import { cn } from '../../../lib/utils';
-import { Button, IconButton } from '../../../shared/components';
+import { Button } from '../../../shared/components';
 import { useAuth } from '../../auth';
-import { useLibraryToast, copyToClipboard, COPY_FAILED_TOAST, pathForLibraryFilter, displayFirstName } from '../../library';
+import { useLibraryToast, COPY_FAILED_TOAST, pathForLibraryFilter, displayFirstName } from '../../library';
 import { useAppRegistry } from '../../../core/registry';
-import { ChatGptInstallLink, ClaudeInstallLink, mcpEndpointUrl } from '../../../shared/mcp';
-import { AGENT_CLIENTS, type AgentClient } from '../agent-clients';
+import { AgentClientPicker, mcpEndpointUrl } from '../../../shared/mcp';
 import { useOnboarding } from '../state/onboarding';
 import { useAgentConnection } from '../state/agent-connection';
+import { AgentConnectionStatus } from './AgentConnectionStatus';
 
 /**
  * The welcome page: how to connect your agent.
  *
  * Three beats and nothing else (prototype `renderWelcome`): your name (so the
  * page is addressed, not broadcast), one sentence of what this place is, and
- * the single action the account still needs. The client picker re-renders in
- * place.
+ * the single action the account still needs. The client picker is
+ * `AgentClientPicker`, the same one the External agent access page shows.
  *
  * Nobody is sent here: `/` lands on Knowledge (see `RootLanding`), so every
  * arrival is a visit — no entrance to play, no sidebar to fold away, no
@@ -34,47 +32,11 @@ export function WelcomePage() {
   const onboarding = useOnboarding();
   const toast = useLibraryToast();
   const navigate = useNavigate();
-  const [clientId, setClientId] = useState<AgentClient['id']>('claude');
-
-  const client = AGENT_CLIENTS.find((c) => c.id === clientId) ?? AGENT_CLIENTS[0]!;
-  // The deployment's own address, not the browser's — see `shared/mcp`.
+  // The deployment's own address, not the browser's: see `shared/mcp`.
   const mcpUrl = mcpEndpointUrl();
-  const snippet = client.snip(mcpUrl);
   // Capitalized here rather than at the call site — "Welcome, juan" is the app
   // misspelling someone to their face on the one page addressed to them.
   const firstName = displayFirstName(user?.name) || 'there';
-
-  const radios = useRef<(HTMLButtonElement | null)[]>([]);
-
-  /**
-   * Arrow keys move the choice, because `role="radiogroup"` promised they
-   * would. The role is not decoration — it tells a screen reader "these are
-   * exclusive, one is always on", and the same standard that defines it also
-   * defines how it is driven: arrows select, Tab leaves. Claiming the role
-   * while only answering clicks describes a control the keyboard cannot work.
-   *
-   * Selection FOLLOWS focus, which is the pattern's default for a plugin this
-   * cheap to change — picking a client re-renders one snippet, nothing is
-   * submitted, so there is no cost to arriving on an option and no reason to
-   * make people confirm. Wraps at both ends: four options in a row have no
-   * meaningful edge to stop at.
-   *
-   * Paired with the roving `tabIndex` below — one stop for the whole plugin,
-   * not one per option, so Tab moves past the picker rather than through it.
-   */
-  function onRadioKeyDown(event: React.KeyboardEvent, index: number) {
-    const step =
-      event.key === 'ArrowRight' || event.key === 'ArrowDown'
-        ? 1
-        : event.key === 'ArrowLeft' || event.key === 'ArrowUp'
-          ? -1
-          : 0;
-    if (step === 0) return;
-    event.preventDefault();
-    const next = (index + step + AGENT_CLIENTS.length) % AGENT_CLIENTS.length;
-    setClientId(AGENT_CLIENTS[next]!.id);
-    radios.current[next]?.focus();
-  }
 
   // Both exits land in the same place. Whether you connected an agent or
   // walked past it, where you want to be next is somewhere you can start —
@@ -107,6 +69,9 @@ export function WelcomePage() {
    */
   const { showPill, markDone } = onboarding;
   const agent = useAgentConnection({ enabled: showPill });
+  // The page waits for the agent once the reader has followed the link or
+  // copied the snippet, not from the moment it opens.
+  const [acted, setActed] = useState(false);
   const concluded = useRef(false);
   useEffect(() => {
     if (!agent.connected || concluded.current) return;
@@ -137,95 +102,17 @@ export function WelcomePage() {
 
         <div className="mt-9 text-label uppercase text-ink-faint">Connect your agent</div>
 
-        {/* One snippet, chosen, instead of three printed at once: which client
-            you use is a decision made before this page existed, so it is a
-            control rather than something to scroll past.
+        {/* A failed copy is reported, never swallowed: the toast names the
+            alternative (select the text) instead of leaving a button that
+            silently did nothing. */}
+        <AgentClientPicker
+          mcpUrl={mcpUrl}
+          onCopyFailed={() => toast(COPY_FAILED_TOAST, 'danger')}
+          onAct={() => setActed(true)}
+          className="mt-2.5"
+        />
 
-            A radiogroup, not three `aria-pressed` toggles: these are mutually
-            exclusive and one is always chosen, which is what `radio` means and
-            what `pressed` does not — three independent toggles tell a screen
-            reader that any combination, including none, is possible. */}
-        <div
-          role="radiogroup"
-          aria-label="Your agent"
-          className="mt-2.5 flex gap-0.5 rounded-lg bg-sunken p-0.5"
-        >
-          {AGENT_CLIENTS.map((c, i) => (
-            <button
-              key={c.id}
-              type="button"
-              role="radio"
-              aria-checked={c.id === client.id}
-              // Roving: only the chosen option is a tab stop, so the plugin
-              // costs ONE Tab rather than one per client.
-              tabIndex={c.id === client.id ? 0 : -1}
-              ref={(el) => {
-                radios.current[i] = el;
-              }}
-              onKeyDown={(e) => onRadioKeyDown(e, i)}
-              onClick={() => setClientId(c.id)}
-              className={cn(
-                'flex-1 whitespace-nowrap rounded-md px-2 py-1.5 text-detail transition-colors',
-                c.id === client.id
-                  ? 'bg-surface font-semibold text-ink shadow-card'
-                  : 'text-ink-muted hover:text-ink',
-              )}
-            >
-              {c.label}
-            </button>
-          ))}
-        </div>
-
-        {Array.isArray(client.hint) ? (
-          <ol className="mt-2.5 list-decimal space-y-0.5 pl-5 text-meta leading-normal text-ink-faint">
-            {client.hint.map((step) => (
-              <li key={step}>{step}</li>
-            ))}
-          </ol>
-        ) : (
-          <p className="mt-2.5 text-meta leading-normal text-ink-faint">{client.hint}</p>
-        )}
-
-        {/* The web assistants only: Claude's link prefills the connector,
-            ChatGPT's opens the settings pane it is created in. Both render
-            nothing at all when this deployment is one their vendor could not
-            reach, rather than offering a shortcut that dead-ends. No
-            `showHint`: the reader here is a new employee, and naming an env
-            var they cannot change is noise. The copy block below is the route
-            that always works. */}
-        {client.id === 'claude' && <ClaudeInstallLink mcpUrl={mcpUrl} className="mt-3.5" />}
-        {client.id === 'chatgpt' && <ChatGptInstallLink mcpUrl={mcpUrl} className="mt-3.5" />}
-
-        {/* Other tools: the hint ends on "paste this instead:", so the bare
-            address comes first, then the configuration it points back to.
-            Many tools take a URL and nothing else. */}
-        {client.id === 'other' && (
-          <SnippetBlock value={mcpUrl} copyLabel="Copy address" className="mt-3.5" />
-        )}
-
-        {/* Keyed by client, so a checkmark earned on one option does not
-            linger on the next option's snippet. */}
-        <SnippetBlock key={client.id} value={snippet} copyLabel="Copy" className="mt-3.5" />
-
-        {/* Quiet while it waits — a dot and a line, not a spinner demanding
-            attention while someone is busy in another window — and plain
-            about it when the agent arrives. Empty until the first answer is
-            in, so someone already connected never sees "Waiting" flash past.
-            The region exists from the start: a live region that appears
-            together with its text is often not announced at all. */}
-        <p role="status" aria-live="polite" className="mt-3.5 flex min-h-5 items-center gap-2 text-detail">
-          {agent.connected ? (
-            <>
-              <Check size={13} aria-hidden className="flex-none text-ok" />
-              <span className="text-ok">Connected. Your agent reached this knowledge base.</span>
-            </>
-          ) : agent.settled ? (
-            <>
-              <span aria-hidden className="size-1.5 flex-none rounded-full bg-wait-dot motion-safe:animate-pulse" />
-              <span className="text-ink-faint">Waiting for your agent…</span>
-            </>
-          ) : null}
-        </p>
+        <AgentConnectionStatus agent={agent} waiting={acted} className="mt-3.5" />
 
         <div className="mt-4 flex items-center gap-4">
           <Button
@@ -248,81 +135,6 @@ export function WelcomePage() {
           </button>
         </div>
       </div>
-    </div>
-  );
-}
-
-/**
- * One snippet and the button that copies it — the copy rides the block it
- * copies. Its own component so a tab can carry two (Other tools shows the
- * bare address AND the configuration), each with its own checkmark.
- *
- * Copying says so as a checkmark for anyone watching and as a live-region
- * announcement for anyone not. A failure is reported, never swallowed: the
- * toast names the alternative (select the text) instead of leaving a button
- * that silently did nothing.
- */
-function SnippetBlock({
-  value,
-  copyLabel,
-  className,
-}: {
-  value: string;
-  /** The button's accessible name — distinct per block when a tab has two. */
-  copyLabel: string;
-  className?: string;
-}) {
-  const toast = useLibraryToast();
-  const [copied, setCopied] = useState<'idle' | 'ok' | 'fail'>('idle');
-
-  // One timer, cleared before it is replaced: a second copy inside the 1.5s
-  // window would otherwise inherit the FIRST copy's expiry and blank the
-  // checkmark almost immediately.
-  const resetTimer = useRef<number | undefined>(undefined);
-  useEffect(() => () => window.clearTimeout(resetTimer.current), []);
-
-  async function copy() {
-    const ok = await copyToClipboard(value);
-    if (!ok) toast(COPY_FAILED_TOAST, 'danger');
-    window.clearTimeout(resetTimer.current);
-    // Back to idle FIRST, so a repeat copy is a real state change and the
-    // live region announces it again — setting 'ok' over 'ok' is a no-op that
-    // says nothing to a screen reader.
-    setCopied('idle');
-    window.setTimeout(() => setCopied(ok ? 'ok' : 'fail'), 0);
-    resetTimer.current = window.setTimeout(() => setCopied('idle'), 1500);
-  }
-
-  return (
-    <div className={cn('relative', className)}>
-      <div
-        className={cn(
-          'overflow-x-auto rounded-lg border border-line bg-sunken py-2.5 pl-3 pr-10',
-          'font-mono text-detail text-ink',
-          value.includes('\n') ? 'whitespace-pre' : 'whitespace-nowrap',
-        )}
-      >
-        {value}
-      </div>
-      <IconButton
-        size={24}
-        aria-label={copyLabel}
-        title={copyLabel}
-        onClick={() => void copy()}
-        className="absolute right-2 top-2"
-      >
-        {copied === 'ok' ? (
-          <Check size={13} className="text-ok" />
-        ) : copied === 'fail' ? (
-          <X size={13} className="text-danger" />
-        ) : (
-          <Copy size={13} />
-        )}
-      </IconButton>
-      {/* The icon's answer, said out loud for anyone not watching it. */}
-      <span role="status" aria-live="polite" className="sr-only">
-        {copied === 'ok' ? 'Copied' : copied === 'fail' ? 'Copy failed' : ''}
-      </span>
     </div>
   );
 }

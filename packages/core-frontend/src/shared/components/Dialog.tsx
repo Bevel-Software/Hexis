@@ -58,6 +58,12 @@ interface DialogProps {
    */
   busy?: boolean;
   /**
+   * Leave the cross out of the header. For a dialog whose footer button is the
+   * only way out (a one-time key): a cross that does nothing teaches people
+   * the dialog is stuck.
+   */
+  hideClose?: boolean;
+  /**
    * Drop the default padded/scrolling body wrapper and render `children`
    * flush against the panel. For panels that own their own internal layout
    * (their own scroll regions, toolbars, split panes).
@@ -77,6 +83,7 @@ export function Dialog({
   headerActions,
   size = '2xl',
   busy = false,
+  hideClose = false,
   bare = false,
   bodyClassName = '',
 }: DialogProps) {
@@ -190,17 +197,19 @@ export function Dialog({
           </h2>
           <div className="flex items-center gap-2">
             {headerActions}
-            <button
-              onClick={() => {
-                if (busy) return;
-                onClose();
-              }}
-              disabled={busy}
-              className="p-1 rounded hover:bg-hover text-ink-muted hover:text-ink disabled:opacity-50"
-              aria-label="Close"
-            >
-              <X size={16} />
-            </button>
+            {!hideClose && (
+              <button
+                onClick={() => {
+                  if (busy) return;
+                  onClose();
+                }}
+                disabled={busy}
+                className="p-1 rounded hover:bg-hover text-ink-muted hover:text-ink disabled:opacity-50"
+                aria-label="Close"
+              >
+                <X size={16} />
+              </button>
+            )}
           </div>
         </div>
 

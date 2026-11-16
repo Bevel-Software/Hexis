@@ -5,6 +5,7 @@ import { useAdmin } from '../../admin';
 import { useSetupStatus } from '../../setup';
 import { SetupScreen } from '../../setup/components/SetupScreen';
 import { useAppRegistry } from '../../../core/registry';
+import { AgentInstructionsCard } from '../../toolbar/components/AgentInstructionsCard';
 
 /**
  * Deployment settings, routed at `/deployment` — the first-run setup screen
@@ -94,6 +95,14 @@ export function DeploymentPage() {
           the page and not the form above — the form is where an admin fixes
           the sign-in or the repository connection, and must not go down with
           a panel it has nothing to do with. */}
+      {/* What every connecting agent is told about this knowledge base. A
+          workspace setting, so it sits with the other workspace settings and
+          not on the page each member opens to connect their own agent. */}
+      {/* The form's own column, so the two share one right edge. */}
+      <div className="w-full max-w-2xl">
+        <AgentInstructionsCard />
+      </div>
+
       {DeploymentPanel && (
         <div className="mt-10" data-testid="deployment-panel">
           <SlotBoundary label="workspace panel">
