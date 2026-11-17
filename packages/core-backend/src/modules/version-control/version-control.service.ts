@@ -123,6 +123,18 @@ function pushFailureDetail(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/**
+ * Whether a failed push is worth the cooperative pull-and-retry: the host
+ * turned it away in words that read like a moved remote. One rule for every
+ * push that recovers this way (the autosave's and `pushWithRecoveryVia`'s).
+ * The platform's own access refusal never is, whatever its file names
+ * spell: a pull cannot change who may write a file.
+ */
+function worthCooperativeRetry(err: unknown): boolean {
+  if (err instanceof PushAccessRefusedError) return false;
+  return /non-fast-forward|rejected|fetch first|updates were rejected/i.test(pushFailureDetail(err));
+}
+
 /** The partial unique index that enforces one OPEN change request per (source, target) pair. */
 const OPEN_PAIR_CONSTRAINT = 'change_requests_open_pair_unq';
 
@@ -1584,10 +1596,7 @@ export class VersionControlService implements IVersionControlService {
         // moment the user actually closes their edit, which is when
         // the agent should step in.
         const detail = pushFailureDetail(err);
-        // The platform's own access refusal is no divergence, whatever its
-        // file names spell: a pull cannot change who may write a file.
-        const looksLikeNonFastForward =
-          !(err instanceof PushAccessRefusedError) && /non-fast-forward|rejected|fetch first|updates were rejected/i.test(detail);
+        const looksLikeNonFastForward = worthCooperativeRetry(err);
         let recovered = false;
         let recoveryError: unknown = null;
         if (looksLikeNonFastForward) {
@@ -1964,10 +1973,7 @@ export class VersionControlService implements IVersionControlService {
       this.noteGitSyncOk(workspaceId, branch);
     } catch (firstPushErr) {
       const firstDetail = pushFailureDetail(firstPushErr);
-      // The platform's own access refusal is no divergence, whatever its file
-      // names spell: a pull cannot change who may write a file.
-      const looksLikeNonFastForward =
-        !(firstPushErr instanceof PushAccessRefusedError) && /non-fast-forward|rejected|fetch first|updates were rejected/i.test(firstDetail);
+      const looksLikeNonFastForward = worthCooperativeRetry(firstPushErr);
       let recovered = false;
       let recoveryDetail = '(cooperative path not attempted)';
       let recoveryError: unknown = null;
