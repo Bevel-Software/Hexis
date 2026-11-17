@@ -9,9 +9,8 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { createMcpRoutes } from '../mcp.routes.js';
 import { McpService } from '../mcp.service.js';
 import { FileBodyError } from '../../code-mode/index.js';
-import { SpillStore } from '../../workspace/spill-store.js';
-import { createManualRoutes } from '../../tool-registry/manual.routes.js';
-import { ToolRegistry } from '../../tool-registry/tool-registry.js';
+import { SpillStore } from '../../workspace/index.js';
+import { createManualRoutes, ToolRegistry } from '../../tool-registry/index.js';
 
 /**
  * A tool that sends a file, over the real MCP transport: a call to an `http`

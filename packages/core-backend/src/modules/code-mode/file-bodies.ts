@@ -22,6 +22,7 @@ import { canReadWorkspacePath } from '../access-model/index.js';
 import { isTmpRef, normalizeWorkspacePath } from '../kb-fs/index.js';
 import type { WorkspaceService } from '../workspace/index.js';
 import { PathNotFoundError, VersionControlDomainError } from '../../shared/domain-errors.js';
+import { isAbsence } from '../../shared/fs.contract.js';
 import { logger } from '../../shared/logging.js';
 
 const log = logger('code-mode');
@@ -68,9 +69,13 @@ export interface FileBodyOwner {
 /** The answer for a file the person may not read, or that is not there: one refusal for both, so probing discloses nothing. */
 const notReadable = (ref: string) => new FileBodyError(`"${ref}" is not a file you can read, so it cannot be sent`);
 
-/** Whether a read failed because nothing (or a folder) is at the path: the file system's own error names the path on disk, so it never reaches the agent. */
+/**
+ * Whether a read failed because no file is at the path: nothing there (the shared `isAbsence`, or core's own
+ * `PathNotFoundError`), or a folder (`EISDIR`), which is no file to send either. The file system's own error names
+ * the path on disk, so it never reaches the agent.
+ */
 const isMissing = (err: unknown) =>
-  err instanceof PathNotFoundError || ['ENOENT', 'EISDIR', 'ENOTDIR'].includes(String((err as { code?: unknown } | null)?.code));
+  isAbsence(err) || err instanceof PathNotFoundError || (err as { code?: unknown } | null)?.code === 'EISDIR';
 
 /** `read`, with a missing file answered as the one refusal. */
 async function orNotReadable(ref: string, read: () => Promise<Uint8Array>): Promise<Uint8Array> {
