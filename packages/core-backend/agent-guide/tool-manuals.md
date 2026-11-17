@@ -164,12 +164,13 @@ tools:
 
 ### A tool that sends a file
 
-To send a file's bytes as an http call's body, declare the body input
-(`body_field`, `body` by default) `format: file-path` and set `content_type`
-to raw bytes (`application/octet-stream`). The call names a knowledge-base
+To send a file's bytes as an http call's body, add `format: file-path` to the
+body input's schema under `inputs.properties` (the input `body_field` in
+`tool_call_template` names, `body` by default), and set the template's
+`content_type` to `application/octet-stream`. The call names a knowledge-base
 path or a `__tmp__/…` ref, and the platform sends the file, read as the person
 on the default branch; one they cannot read refuses the call. A
-`remote: false` tool sends the path as written.
+`remote: false` tool runs in the local server, which sends the path as written.
 
 ### Adding a third-party tool
 

@@ -102,11 +102,15 @@ describe('installFileBodies', () => {
       kind: 'file-body',
       data: { error: '"Finance/Payroll.xlsx" is not a file you can read, so it cannot be sent' },
     });
-    const { client: other } = fakeClient([upload], async () => {
-      throw new Error('the disk is full');
+    // Any other failure may name a place on the server: the agent gets the plain reason, never the error's text.
+    const { client: other, calls: otherCalls } = fakeClient([upload], async () => {
+      throw new Error("EACCES: permission denied, open '/srv/kb/main/tmp/u1/x'");
     });
-    await expect(other.callTool('drive.upload_file', { name: 'a.png', body: '__tmp__/x' })).rejects.toThrow('"__tmp__/x" could not be read as the file to send: the disk is full');
+    const refusal = await other.callTool('drive.upload_file', { name: 'a.png', body: '__tmp__/x' }).catch((err: unknown) => err as Error);
+    expect(refusal).toBeInstanceOf(FileBodyError);
+    expect((refusal as Error).message).toBe('"__tmp__/x" could not be read as the file to send. Try again, or send another file.');
     expect(calls).toEqual([]);
+    expect(otherCalls).toEqual([]);
   });
 
   it('installs once', async () => {
@@ -170,6 +174,12 @@ describe('fileBodyReader', () => {
     expect(refusal).toBeInstanceOf(FileBodyError);
     expect((refusal as Error).message).toBe('"Sales/gone.pdf" is not a file you can read, so it cannot be sent');
     await expect(r.read(owner, '__tmp__/teams/gone.png')).rejects.toThrow('"__tmp__/teams/gone.png" is not a file you can read, so it cannot be sent');
+  });
+
+  it('reads nothing for a caller whose account is gone', async () => {
+    const { r, asked, read, staged } = reader();
+    await expect(r.read(null, 'Sales/Price list.pdf')).rejects.toThrow('"Sales/Price list.pdf" is not a file you can read, so it cannot be sent');
+    expect([...asked, ...read, ...staged]).toEqual([]);
   });
 
   it("reads a staged file from the person's own folder without asking the gate, and refuses a path that climbs out", async () => {

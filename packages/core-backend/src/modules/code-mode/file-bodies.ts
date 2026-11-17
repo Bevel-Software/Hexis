@@ -21,7 +21,10 @@ import type { IAccessControl } from '../access/index.js';
 import { canReadWorkspacePath } from '../access-model/index.js';
 import { isTmpRef, normalizeWorkspacePath } from '../kb-fs/index.js';
 import type { WorkspaceService } from '../workspace/index.js';
-import { PathNotFoundError } from '../../shared/domain-errors.js';
+import { PathNotFoundError, VersionControlDomainError } from '../../shared/domain-errors.js';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('code-mode');
 
 /** The JSON-schema `format` a body property carries to say "a file's path, sent as its bytes". */
 export const FILE_PATH_FORMAT = 'file-path';
@@ -86,9 +89,11 @@ async function orNotReadable(ref: string, read: () => Promise<Uint8Array>): Prom
  * character), judged by `canReadWorkspacePath` (the single-path read verdict core's content routes share), then read,
  * so no spelling of a closed file passes on the root's grant.
  */
-export function fileBodyReader(source: FileBodySource): { read(owner: FileBodyOwner, ref: string): Promise<Uint8Array> } {
+export function fileBodyReader(source: FileBodySource): { read(owner: FileBodyOwner | null, ref: string): Promise<Uint8Array> } {
   return {
+    // A caller whose account is gone (`owner` null) reads nothing: the same refusal.
     read: async (owner, ref) => {
+      if (!owner) throw notReadable(ref);
       const workspaceId = source.workspaceId();
       if (isTmpRef(ref)) return orNotReadable(ref, () => source.workspaces.readTmpFile(workspaceId, owner.id, ref));
       const wsPath = normalizeWorkspacePath(ref, source.kbDirName);
@@ -133,7 +138,11 @@ export function installFileBodies(client: ClientLike, read: FileBodyRead): void 
       bytes = await read(ref.trim());
     } catch (err) {
       if (err instanceof FileBodyError) throw err;
-      throw new FileBodyError(`"${ref.trim()}" could not be read as the file to send: ${err instanceof Error ? err.message : String(err)}`);
+      // Core's own path refusals are written for the agent and name nothing on disk; any other error may, so it is
+      // logged here and the agent gets the plain reason.
+      if (err instanceof VersionControlDomainError) throw new FileBodyError(`"${ref.trim()}" could not be read as the file to send: ${err.message}`);
+      log.warn(`a tool call's file "${ref.trim()}" could not be read: ${err instanceof Error ? err.message : String(err)}`);
+      throw new FileBodyError(`"${ref.trim()}" could not be read as the file to send. Try again, or send another file.`);
     }
     return { ...toolArgs, [field]: Buffer.from(bytes) };
   };
