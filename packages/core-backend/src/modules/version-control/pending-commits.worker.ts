@@ -49,7 +49,16 @@ import {
   canonicalWorkspaceId,
 } from './pending-commits.service.js';
 import { sanitizeError } from './sanitize-error.js';
-import { VersionControlDomainError } from '../../shared/domain-errors.js';
+import { sanitizedPath } from '../../shared/printable.js';
+import { PushNeedsAgentResolutionError, VersionControlDomainError } from '../../shared/domain-errors.js';
+
+/** How much of a platform access refusal the queue keeps: the file and the roles that may write it, whole. */
+const ACCESS_REFUSAL_MAX_LEN = 2000;
+
+/** The platform's own push access check refused: retried like any failure, but never handed to an agent, which cannot change who may write a file. */
+function isAccessRefusal(err: unknown): err is PushNeedsAgentResolutionError {
+  return err instanceof PushNeedsAgentResolutionError && err.cause === 'access';
+}
 
 /**
  * Where the worker escalates terminal failures — the narrow, version-control-owned
@@ -372,7 +381,16 @@ export class PendingCommitsWorker {
       // LLM prompt, AND the user-facing feedback notice. Git stderr can
       // contain credentialed URLs ("https://x-access-token:ghp_…@…"); we
       // can't undo a persisted leak, so mask before any of them sees it.
-      const message = sanitizeError(err);
+      // A refusal by the platform's own access check is recorded in its
+      // record form: the file and the roles that may write it, with the
+      // people who may counted and never named (every one of those sinks is
+      // an operator's record, and log lines carry no names or email
+      // addresses). The
+      // default cap would cut the file or the roles off, and the sentence is
+      // ours (paths and roles, no git output).
+      const message = isAccessRefusal(err)
+        ? sanitizeError(err.recordMessage, { maxLen: ACCESS_REFUSAL_MAX_LEN })
+        : sanitizeError(err);
 
       const corrected = pathOutsideRepoCorrection(err);
       if (corrected !== null) {
@@ -395,6 +413,16 @@ export class PendingCommitsWorker {
         log.warn(
           `transient failure ws=${row.workspaceId} branch=${row.branch} path=${row.path} attempt=${nextAttempts}/${N_TRANSIENT}: ${message}`,
         );
+        return;
+      }
+
+      if (isAccessRefusal(err)) {
+        // The retries above are worth their backoff: the branch's next push
+        // by someone who may write the blocking file carries this commit
+        // too, and the retry then finds it shared. A recovery agent is not:
+        // it cannot change who may write a file, so its runs would only
+        // delay this notice. Escalate with what an operator can act on.
+        await this.escalate(row, message, accessRefusalNotice(row, message), 'refused by the access check');
         return;
       }
 
@@ -472,13 +500,26 @@ function pathOutsideRepoCorrection(err: unknown): string | null {
   return typeof corrected === 'string' && corrected.length > 0 ? corrected : '(see error)';
 }
 
-function strayPathNotice(row: PendingCommit, error: string, corrected: string): string {
+/**
+ * The lines every notice opens with: where the row is. A file name and a
+ * branch name are the caller's text and may carry a line break or a control
+ * character; each is escaped to stay on its own line, so a name cannot forge
+ * a line of the notice.
+ */
+function rowLines(row: PendingCommit): string[] {
+  return [
+    `Workspace: ${sanitizedPath(row.workspaceId)}`,
+    `Branch:    ${sanitizedPath(row.branch)}`,
+    `Path:      ${sanitizedPath(row.path)}`,
+  ];
+}
+
+function strayPathNotice(row: PendingCommit, error: string, correctedPath: string): string {
+  const corrected = sanitizedPath(correctedPath);
   return [
     '[pending_commits] Commit refused: the file is outside the repository.',
     '',
-    `Workspace: ${row.workspaceId}`,
-    `Branch:    ${row.branch}`,
-    `Path:      ${row.path}`,
+    ...rowLines(row),
     `Use instead: ${corrected}`,
     `Queue row: ${row.id} (names the author; log lines carry no email addresses)`,
     `Queued at: ${row.queuedAt.toISOString()}`,
@@ -495,15 +536,37 @@ function strayPathNotice(row: PendingCommit, error: string, corrected: string): 
   ].join('\n');
 }
 
+function accessRefusalNotice(row: PendingCommit, error: string): string {
+  return [
+    "[pending_commits] Push refused by the platform's access check.",
+    '',
+    ...rowLines(row),
+    `Queue row: ${row.id} (names the author; log lines carry no email addresses)`,
+    `Queued at: ${row.queuedAt.toISOString()}`,
+    `Error: ${error}`,
+    '',
+    'The file is saved in the workspace, and the repository host was never',
+    'asked: an unshared commit on the branch changes a file that neither its',
+    'author nor the person sharing may write. No recovery agent was run for',
+    'this refusal; an agent cannot change who may write a file.',
+    '',
+    'Resolve:',
+    '  - someone who may write the file the error names saves on the branch:',
+    '    their push carries it, and every other unshared commit whose files',
+    '    its author or they may write. Or change the access rule so the',
+    '    author may write the file. If the next push is refused again, it',
+    '    names the next file.',
+    '  - then delete the row from pending_commits.',
+  ].join('\n');
+}
+
 function terminalFailureNotice(row: PendingCommit, error: string): string {
   const elapsedMs = Date.now() - row.queuedAt.getTime();
   const elapsed = formatElapsed(elapsedMs);
   return [
     `[pending_commits] Terminal commit failure after ${N_RECOVERY} recovery attempts.`,
     '',
-    `Workspace: ${row.workspaceId}`,
-    `Branch:    ${row.branch}`,
-    `Path:      ${row.path}`,
+    ...rowLines(row),
     `Queue row: ${row.id} (names the author; log lines carry no email addresses)`,
     `Queued at: ${row.queuedAt.toISOString()} (${elapsed} ago)`,
     `Last error: ${error}`,

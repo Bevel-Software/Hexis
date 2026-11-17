@@ -103,6 +103,13 @@ export class BranchAuthorshipError extends VersionControlDomainError {
  */
 export class PushNeedsAgentResolutionError extends VersionControlDomainError {
   readonly kind = 'push-needs-resolution' as const;
+  /**
+   * The sentence for a RECORD: a log line, the pending-commit queue, the
+   * recovery agent's prompt, an operator's notice. The message itself, but
+   * for an `access` refusal, where the people who may write the file are
+   * counted instead of named: log lines carry no names or email addresses.
+   */
+  readonly recordMessage: string;
   constructor(
     readonly branch: string,
     readonly path: string,
@@ -113,16 +120,19 @@ export class PushNeedsAgentResolutionError extends VersionControlDomainError {
      * cooperative rebase could not reconcile. `refused`: the host turned the
      * push away for any other reason (an outage, credentials, a dropped
      * connection) — nothing to reconcile, the next push of the branch carries
-     * the commits. The opening clause is the same either way.
+     * the commits. `access`: the platform's own access check refused the push
+     * before it left this server (an unpushed commit changes a file that
+     * neither its author nor the pusher may write); the host was never
+     * asked, so the sentence says the platform refused and carries the
+     * gate's own clause naming the file and who may write it: `told` for the
+     * person who saved, `recorded` for `recordMessage`. The opening clause
+     * is the same every way.
      */
-    readonly cause: 'diverged' | 'refused' = 'diverged',
+    readonly cause: 'diverged' | 'refused' | 'access' = 'diverged',
+    readonly accessRefusal?: { told: string; recorded: string },
   ) {
     super(
-      `Saved locally on "${branch}" but couldn't share with the team automatically — ` +
-        (cause === 'refused'
-          ? `the repository host refused the push; the next save on this branch will try sharing it again.`
-          : `the remote diverged on "${path}" and the cooperative rebase couldn't reconcile. ` +
-            `The agent will resolve this.`),
+      savedLocallySentence(branch, path, cause, accessRefusal?.told),
       409,
       // The two details are raw git output — stderr can quote a credentialed
       // URL, server paths, the host's own error page. They stay on the error
@@ -130,7 +140,26 @@ export class PushNeedsAgentResolutionError extends VersionControlDomainError {
       { kind: 'push-needs-resolution', branch, path },
     );
     this.name = 'PushNeedsAgentResolutionError';
+    this.recordMessage = cause === 'access' ? savedLocallySentence(branch, path, cause, accessRefusal?.recorded) : this.message;
   }
+}
+
+/** The one sentence `PushNeedsAgentResolutionError` says, for each cause; `accessClause` is the push gate's own. */
+function savedLocallySentence(
+  branch: string,
+  path: string,
+  cause: 'diverged' | 'refused' | 'access',
+  accessClause: string | undefined,
+): string {
+  return (
+    `Saved locally on "${branch}" but couldn't share with the team automatically — ` +
+    (cause === 'access'
+      ? `the platform's access check refused the push` + (accessClause ? `: ${accessClause}.` : '.')
+      : cause === 'refused'
+      ? `the repository host refused the push; the next save on this branch will try sharing it again.`
+      : `the remote diverged on "${path}" and the cooperative rebase couldn't reconcile. ` +
+        `The agent will resolve this.`)
+  );
 }
 
 /**
