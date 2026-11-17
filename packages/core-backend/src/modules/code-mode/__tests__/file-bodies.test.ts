@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { FILE_PATH_FORMAT, FileBodyError, fileBodyField, fileBodyReader, installFileBodies } from '../index.js';
+import { FILE_PATH_FORMAT, FileBodyError, fileBodyField, fileBodyReader, installFileBodies } from '../file-bodies.js';
 import { PathNotFoundError } from '../../../shared/domain-errors.js';
 
 /**
