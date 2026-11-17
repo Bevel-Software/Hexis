@@ -132,10 +132,13 @@ export interface DocumentUnreadableEvent {
  * exactly how one self-hosted install got 136 commits and two days deep
  * before anyone noticed.
  *
- * `reason` is the sanitised git error, for the log-shaped detail line under
- * the banner; anything credential-bearing is already masked out of it. The UI
- * should point at the server logs rather than try to explain git to the user —
- * every actionable cause here is an operator concern, not an author's.
+ * `reason` is the detail line under the banner: a sentence of the platform's
+ * own about the failure, never the host's words (see the field). For a
+ * failure at the repository host the UI should point at the server logs
+ * rather than try to explain git to the user — every actionable cause there
+ * is an operator concern, not an author's. A refusal by the platform's own
+ * access check (`accessRefusal`) is the exception: the banner says so and
+ * points at no logs.
  *
  * Workspace-scoped: everyone editing this branch has work sitting unpushed,
  * not just whoever happened to trigger the failing push.

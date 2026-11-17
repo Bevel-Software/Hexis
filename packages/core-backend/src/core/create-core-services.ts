@@ -944,9 +944,11 @@ export async function createCoreServices(
     workspaceMutex,
     accessControl,
     gitRunner,
-    // The protected-branch push gate judges each unpushed commit by its
-    // author when the author is one of the deployment's users.
-    { isPlatformUser: async (email) => (await authService.getUserByEmail(email)) !== null },
+    // The protected-branch push gate asks an unpushed commit's author when
+    // the author is a live account of the deployment. A switched-off account
+    // is not one: its old grants vouch for nothing, and the commit is held to
+    // the pusher, like a commit by an address nobody owns.
+    { isPlatformUser: async (email) => (await authService.findActiveAccountsByEmail([email])).size > 0 },
   );
   // `get_skill` with a `version` reads the skill out of the default branch's
   // history; the skill service is built before git exists, so git is handed

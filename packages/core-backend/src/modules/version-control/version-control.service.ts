@@ -2032,6 +2032,7 @@ export class VersionControlService implements IVersionControlService {
           throw new PushNeedsAgentResolutionError(branch, targetPath, firstDetail, recoveryDetail, 'access', {
             told: current.reason,
             recorded: current.recordReason,
+            shared: current.sharedReason,
           });
         }
         throw new PushNeedsAgentResolutionError(

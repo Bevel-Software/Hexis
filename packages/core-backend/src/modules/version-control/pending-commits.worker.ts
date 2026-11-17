@@ -381,16 +381,19 @@ export class PendingCommitsWorker {
       // LLM prompt, AND the user-facing feedback notice. Git stderr can
       // contain credentialed URLs ("https://x-access-token:ghp_…@…"); we
       // can't undo a persisted leak, so mask before any of them sees it.
-      // A refusal by the platform's own access check is recorded in its
-      // record form: the file and the roles that may write it, with the
-      // people who may counted and never named (every one of those sinks is
-      // an operator's record, and log lines carry no names or email
-      // addresses). The
-      // default cap would cut the file or the roles off, and the sentence is
-      // ours (paths and roles, no git output).
-      const message = isAccessRefusal(err)
-        ? sanitizeError(err.recordMessage, { maxLen: ACCESS_REFUSAL_MAX_LEN })
-        : sanitizeError(err);
+      //
+      // A refusal by the platform's own access check goes two ways, because
+      // its readers differ. `message` is what the queue KEEPS: `last_error`
+      // is handed, as `needsAttention`, to whoever next merges or updates
+      // the branch, who may not be allowed to read the blocking file, so it
+      // names no file and no writer. `logged` is the operator's record (the
+      // log line and the notice): the file and the roles that may write it,
+      // with the people who may counted and never named, since log lines
+      // carry no names or email addresses. The default cap would cut the
+      // file or the roles off, and the sentence is ours (paths and roles, no
+      // git output).
+      const message = isAccessRefusal(err) ? sanitizeError(err.sharedMessage, { maxLen: ACCESS_REFUSAL_MAX_LEN }) : sanitizeError(err);
+      const logged = isAccessRefusal(err) ? sanitizeError(err.recordMessage, { maxLen: ACCESS_REFUSAL_MAX_LEN }) : message;
 
       const corrected = pathOutsideRepoCorrection(err);
       if (corrected !== null) {
@@ -411,7 +414,7 @@ export class PendingCommitsWorker {
         // the backoff elapsed.
         await this.deps.service.markTransientFailure(row.id, message);
         log.warn(
-          `transient failure ws=${row.workspaceId} branch=${row.branch} path=${row.path} attempt=${nextAttempts}/${N_TRANSIENT}: ${message}`,
+          `transient failure ws=${row.workspaceId} branch=${row.branch} path=${row.path} attempt=${nextAttempts}/${N_TRANSIENT}: ${logged}`,
         );
         return;
       }
@@ -422,7 +425,7 @@ export class PendingCommitsWorker {
         // too, and the retry then finds it shared. A recovery agent is not:
         // it cannot change who may write a file, so its runs would only
         // delay this notice. Escalate with what an operator can act on.
-        await this.escalate(row, message, accessRefusalNotice(row, message), 'refused by the access check');
+        await this.escalate(row, message, accessRefusalNotice(row, logged), 'refused by the access check', logged);
         return;
       }
 
@@ -463,11 +466,12 @@ export class PendingCommitsWorker {
   /**
    * The last step of every terminal path: flag the row `needs_attention`
    * and tell the dashboard. `why` is the log line's reason; `notice` is the
-   * body the admin reads.
+   * body the admin reads. `message` is what the row keeps; `logged` is what
+   * the log line says, when the two differ.
    */
-  private async escalate(row: PendingCommit, message: string, notice: string, why: string): Promise<void> {
+  private async escalate(row: PendingCommit, message: string, notice: string, why: string, logged = message): Promise<void> {
     await this.deps.service.markNeedsAttention(row.id, message);
-    log.error(`TERMINAL ws=${row.workspaceId} branch=${row.branch} path=${row.path} ${why}: ${message}`);
+    log.error(`TERMINAL ws=${row.workspaceId} branch=${row.branch} path=${row.path} ${why}: ${logged}`);
     try {
       await this.deps.feedback.send({
         source: 'system',

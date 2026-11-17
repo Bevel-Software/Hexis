@@ -655,7 +655,9 @@ describe('EventDelivery', () => {
     };
     const refusal = stamp({
       kind: 'git-sync-failed',
-      workspaceId: 'ali/x',
+      // Not the branch's name: a lookup made against the workspace instead
+      // of the branch would show in `asked`.
+      workspaceId: 'checkout-of-ali-x',
       branch: 'ali/x',
       reason: 'named',
       accessRefusal: { path: 'Docs/Prüfung.md' },

@@ -104,12 +104,20 @@ export class BranchAuthorshipError extends VersionControlDomainError {
 export class PushNeedsAgentResolutionError extends VersionControlDomainError {
   readonly kind = 'push-needs-resolution' as const;
   /**
-   * The sentence for a RECORD: a log line, the pending-commit queue, the
-   * recovery agent's prompt, an operator's notice. The message itself, but
-   * for an `access` refusal, where the people who may write the file are
-   * counted instead of named: log lines carry no names or email addresses.
+   * The sentence for the operator's RECORD: the server log and an operator's
+   * notice. The message itself, but for an `access` refusal, where it always
+   * names the file and the people who may write it are counted instead of
+   * named: log lines carry no names or email addresses.
    */
   readonly recordMessage: string;
+  /**
+   * The sentence for text that is KEPT and shown to others later: the
+   * pending-commit queue's last error, which reaches whoever next merges or
+   * updates the branch. The message itself, but for an `access` refusal,
+   * where it names no file and no writer, since that reader may not read
+   * the file.
+   */
+  readonly sharedMessage: string;
   constructor(
     readonly branch: string,
     readonly path: string,
@@ -125,11 +133,12 @@ export class PushNeedsAgentResolutionError extends VersionControlDomainError {
      * neither its author nor the pusher may write); the host was never
      * asked, so the sentence says the platform refused and carries the
      * gate's own clause naming the file and who may write it: `told` for the
-     * person who saved, `recorded` for `recordMessage`. The opening clause
-     * is the same every way.
+     * person who saved, `recorded` for `recordMessage`, and `shared`, which
+     * names neither, for `sharedMessage`. The opening clause is the same
+     * every way.
      */
     readonly cause: 'diverged' | 'refused' | 'access' = 'diverged',
-    readonly accessRefusal?: { told: string; recorded: string },
+    readonly accessRefusal?: { told: string; recorded: string; shared: string },
   ) {
     super(
       savedLocallySentence(branch, path, cause, accessRefusal?.told),
@@ -141,6 +150,7 @@ export class PushNeedsAgentResolutionError extends VersionControlDomainError {
     );
     this.name = 'PushNeedsAgentResolutionError';
     this.recordMessage = cause === 'access' ? savedLocallySentence(branch, path, cause, accessRefusal?.recorded) : this.message;
+    this.sharedMessage = cause === 'access' ? savedLocallySentence(branch, path, cause, accessRefusal?.shared) : this.message;
   }
 }
 

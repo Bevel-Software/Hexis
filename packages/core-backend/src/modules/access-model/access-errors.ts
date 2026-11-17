@@ -124,11 +124,15 @@ export function pushAccessRefusalSentence(
  * The clause after "refused the push:". `person`: for someone reading it in
  * the app, with the people who may write the file named. `record`: for a log
  * line, the queue or a prompt, with the roles and a count of the people.
- * The unnamed clause is the same for both: it names nobody.
+ * Given null, neither names a file or a writer; only the person's says "a
+ * file you may not read", since a record's reader is not known.
  */
 function pushAccessRefusalClause(refusal: PushAccessRefusal | null, audience: 'person' | 'record'): string {
   if (!refusal) {
-    return 'an unshared commit on it changes a file you may not read, which neither its author nor the person sharing may write there; someone who may write that file can share the branch';
+    const remedy = 'someone who may write that file can share the branch';
+    return audience === 'person'
+      ? `an unshared commit on it changes a file you may not read, which neither its author nor the person sharing may write there; ${remedy}`
+      : `an unshared commit on it changes a file that neither its author nor the person sharing may write there; ${remedy}`;
   }
   const writers =
     audience === 'person'
@@ -156,18 +160,23 @@ function pushAccessRefusalClause(refusal: PushAccessRefusal | null, audience: 'p
  * repository paths and principals only (never git output), so the
  * saved-locally sentence can carry it verbatim to the person who saved.
  * `recordReason` and `recordMessage` are the same clause and sentence for a
- * record (a log line, the pending-commit queue, an operator's notice). A
- * record is read by whoever runs the deployment, not by the pusher, so it
- * always names the file and the roles that may write it, whatever the pusher
- * may read: an operator told only that "a file" blocks the branch has
- * nothing to act on. The people who may write the file are counted there,
- * never named.
+ * record that only whoever runs the deployment reads (the server log, an
+ * operator's notice). It always names the file and the roles that may write
+ * it, whatever the pusher may read: an operator told only that "a file"
+ * blocks the branch has nothing to act on. The people who may write the
+ * file are counted there, never named.
+ *
+ * `sharedReason` is the clause for text that is kept and later shown to
+ * people this error cannot judge: the pending-commit queue's last error
+ * reaches whoever next merges or updates the branch. It names no file and
+ * no writer.
  */
 export class PushAccessRefusedError extends VersionControlDomainError {
   readonly kind = 'push-access-refused' as const;
   readonly reason: string;
   readonly recordReason: string;
   readonly recordMessage: string;
+  readonly sharedReason: string;
   /** What the pusher may be told: `blocked`, or null when they may not read its file. */
   readonly refusal: PushAccessRefusal | null;
 
@@ -195,6 +204,7 @@ export class PushAccessRefusedError extends VersionControlDomainError {
     this.reason = pushAccessRefusalClause(refusal, 'person');
     this.recordReason = pushAccessRefusalClause(blocked, 'record');
     this.recordMessage = pushAccessRefusalSentence(branch, blocked, 'record');
+    this.sharedReason = pushAccessRefusalClause(null, 'record');
   }
 }
 

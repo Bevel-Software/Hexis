@@ -463,19 +463,6 @@ export class SecretOAuthError extends Error {
   }
 }
 
-/**
- * Whether an OAuth token's granted scopes cover a tool's currently-required scopes:
- * every required scope must be among the granted ones, except the request-only
- * scopes (`offline_access`, see `REQUEST_ONLY_SCOPES` below), which are never
- * required back. No required scopes, or only request-only ones → trivially covered.
- * Granted scopes unknown (a token minted before we recorded them, `undefined`)
- * → NOT covered when any scope other than a request-only one is required, so the
- * caller is safely routed to re-auth rather than hitting an opaque provider error.
- * `granted` is the space-delimited string
- * the provider echoed (`SecretConfigStatus.grantedScopes`); `required` is the manual's
- * declared list. Lives here (a leaf, dependency-free) so both the MCP pre-check and the
- * connect route can share one definition without crossing module boundaries.
- */
 // Google canonicalizes the OIDC convenience aliases `email`/`profile` to its
 // userinfo.* URLs in the `scope` string it echoes at token grant, so a token asked
 // for `email` comes back carrying `https://www.googleapis.com/auth/userinfo.email`.
@@ -526,6 +513,19 @@ export function missingScopes(required: string[] | undefined, granted: string | 
   return required.filter((s) => !REQUEST_ONLY_SCOPES.has(s) && !grantedSet.has(canonicalizeScope(s)));
 }
 
+/**
+ * Whether an OAuth token's granted scopes cover a tool's currently-required scopes:
+ * every required scope must be among the granted ones, except the request-only
+ * scopes (`offline_access`, see `REQUEST_ONLY_SCOPES` above), which are never
+ * required back. No required scopes, or only request-only ones → trivially covered.
+ * Granted scopes unknown (a token minted before we recorded them, `undefined`)
+ * → NOT covered when any scope other than a request-only one is required, so the
+ * caller is safely routed to re-auth rather than hitting an opaque provider error.
+ * `granted` is the space-delimited string
+ * the provider echoed (`SecretConfigStatus.grantedScopes`); `required` is the manual's
+ * declared list. Lives here (a leaf, dependency-free) so both the MCP pre-check and the
+ * connect route can share one definition without crossing module boundaries.
+ */
 export function scopesCovered(required: string[] | undefined, granted: string | undefined): boolean {
   return missingScopes(required, granted).length === 0;
 }

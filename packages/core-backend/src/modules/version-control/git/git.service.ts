@@ -288,7 +288,9 @@ async function existsForCommitCheck(absolutePath: string): Promise<boolean> {
  * asks first whether the user who authored an unpushed commit may write what
  * it changed; an author address this answers `false` for is never asked, and
  * the commit is held to the PUSHER's access alone, so a commit by an address
- * nobody owns is never let through unchecked. A lookup
+ * nobody owns is never let through unchecked. Which accounts count is the
+ * implementation's to say; the composition root answers for live accounts
+ * only, so a switched-off author is not asked either. A lookup
  * that fails rejects, and the push fails with it: an unanswered question is
  * never read as "unknown author".
  */
