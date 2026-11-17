@@ -567,7 +567,7 @@ describe('GitService — push gate reads raw paths and judges each commit by its
     expect(await originTip(originDir)).toBe(before);
   });
 
-  it('a refused file the pusher may not read is not named, nor are its writers', async () => {
+  it('the pusher is not told a refused file they may not read, nor its writers; the operator’s record still names the file and its roles', async () => {
     const { svc, repo, readCalls } = await setup({
       users: [BOB],
       writable: (_email, p) => !p.startsWith('Secret/'),
