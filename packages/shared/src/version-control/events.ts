@@ -132,10 +132,13 @@ export interface DocumentUnreadableEvent {
  * exactly how one self-hosted install got 136 commits and two days deep
  * before anyone noticed.
  *
- * `reason` is the sanitised git error, for the log-shaped detail line under
- * the banner; anything credential-bearing is already masked out of it. The UI
- * should point at the server logs rather than try to explain git to the user —
- * every actionable cause here is an operator concern, not an author's.
+ * `reason` is the detail line under the banner: a sentence of the platform's
+ * own about the failure, never the host's words (see the field). For a
+ * failure at the repository host the UI should point at the server logs
+ * rather than try to explain git to the user — every actionable cause there
+ * is an operator concern, not an author's. A refusal by the platform's own
+ * access check (`accessRefusal`) is the exception: the banner says so and
+ * points at no logs.
  *
  * Workspace-scoped: everyone editing this branch has work sitting unpushed,
  * not just whoever happened to trigger the failing push.
@@ -148,7 +151,13 @@ export interface GitSyncFailedEvent {
   kind: 'git-sync-failed';
   workspaceId: string;
   branch: string;
-  /** Sanitised git error — safe to display, tokens already redacted. */
+  /**
+   * What the banner's detail line shows, safe to display. For a failure at
+   * the repository host: one of the platform's fixed sentences about it,
+   * never the host's own words. With `conflictedPaths`: what conflicted.
+   * With `accessRefusal`: the platform's own sentence that its access check
+   * refused the push.
+   */
   reason: string;
   /**
    * Present when the failure is a REMOTE-SYNC CONFLICT (`POST /api/sync`
@@ -157,6 +166,17 @@ export interface GitSyncFailedEvent {
    * this is the author's to act on, so the banner offers to open them.
    */
   conflictedPaths?: string[];
+  /**
+   * Present when the PLATFORM's own access check refused the push before it
+   * left the server (an unpushed commit changes a file that neither its
+   * author nor the pusher may write), so the repository host was never asked and the banner must not
+   * blame it. `reason` then says the platform refused. `path` is the
+   * repo-relative file that blocks the branch; it, and the writers `reason`
+   * names, reach only a person who may read that file at the branch's
+   * published state. Everyone else gets the platform's sentence without the
+   * file and no `path`.
+   */
+  accessRefusal?: { path?: string };
 }
 
 /**
