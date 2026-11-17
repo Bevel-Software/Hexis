@@ -284,18 +284,22 @@ async function existsForCommitCheck(absolutePath: string): Promise<boolean> {
 }
 
 /**
- * Who the platform knows, as the protected-branch push gate asks it. The gate
- * asks first whether the user who authored an unpushed commit may write what
- * it changed; an author address this answers `false` for is never asked, and
- * the commit is held to the PUSHER's access alone, so a commit by an address
- * nobody owns is never let through unchecked. Which accounts count is the
- * implementation's to say; the composition root answers for live accounts
- * only, so a switched-off author is not asked either. A lookup
- * that fails rejects, and the push fails with it: an unanswered question is
- * never read as "unknown author".
+ * The deployment's live accounts, as the protected-branch push gate asks for
+ * them. The gate asks first whether the user who authored an unpushed commit
+ * may write what it changed; an author who is not a live account — an address
+ * nobody owns, or an account that was switched off, whose old grants vouch
+ * for nothing — is never asked, and the commit is held to the PUSHER's access
+ * alone, so it is never let through unchecked.
+ *
+ * The one question is `AuthService.findActiveAccountsByEmail`, and the port
+ * has its shape so the composition root hands the auth service over as it
+ * is: which accounts are live is answered there, in one place. A lookup that
+ * fails rejects, and the push fails with it: an unanswered question is never
+ * read as "unknown author".
  */
 export interface CommitAuthorDirectory {
-  isPlatformUser(email: string): Promise<boolean>;
+  /** The live accounts among `emails`, keyed by canonical address; switched-off and unknown addresses are left out. */
+  findActiveAccountsByEmail(emails: readonly string[]): Promise<ReadonlyMap<string, unknown>>;
 }
 
 /** One commit the next push would publish: who authored it, and the files it changed. */
@@ -2476,7 +2480,9 @@ export class GitService implements IGitService {
       if (author !== '' && author !== pusher) {
         let isUser = matched.get(author);
         if (isUser === undefined) {
-          isUser = this.commitAuthors ? await this.commitAuthors.isPlatformUser(commit.authorEmail) : false;
+          isUser = this.commitAuthors
+            ? (await this.commitAuthors.findActiveAccountsByEmail([commit.authorEmail])).size > 0
+            : false;
           matched.set(author, isUser);
         }
         if (isUser) email = commit.authorEmail;

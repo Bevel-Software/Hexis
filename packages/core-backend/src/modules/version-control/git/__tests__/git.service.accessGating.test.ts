@@ -383,13 +383,15 @@ describe('GitService — push gate reads raw paths and judges each commit by its
   /**
    * A published protected branch with a bare origin, and a GitService whose
    * access stub grants write by `writable(email, path)` and whose directory
-   * knows `users`.
+   * answers, as the auth service does, with the live accounts among the
+   * addresses asked: `users`. An address that is not in it is unknown or
+   * switched off; the directory does not say which, and the gate does not ask.
    */
   async function setup(opts: {
     writable: (email: string, p: string) => boolean;
     readable?: (email: string, p: string) => boolean;
     users?: string[];
-    directory?: { isPlatformUser(email: string): Promise<boolean> } | null;
+    directory?: { findActiveAccountsByEmail(emails: readonly string[]): Promise<ReadonlyMap<string, unknown>> } | null;
   }) {
     const { workspaceDir, repo } = await seedWorkspace(root, workspaceId);
     const originDir = path.join(root, 'origin.git');
@@ -413,9 +415,9 @@ describe('GitService — push gate reads raw paths and judges each commit by its
     const directory =
       opts.directory === undefined
         ? {
-            isPlatformUser: async (email: string) => {
-              lookups.push(email);
-              return users.has(email.toLowerCase());
+            findActiveAccountsByEmail: async (emails: readonly string[]) => {
+              lookups.push(...emails);
+              return new Map(emails.filter((e) => users.has(e.toLowerCase())).map((e) => [e.toLowerCase(), { email: e }]));
             },
           }
         : opts.directory;
@@ -596,8 +598,9 @@ describe('GitService — push gate reads raw paths and judges each commit by its
     expect(readCalls).toEqual([{ ref: `origin/${BRANCH}`, email: USER.email, path: 'Secret/plan.md' }]);
   });
 
-  it('a commit whose author is not a platform user is held to the pusher', async () => {
+  it('a commit whose author is not a live account (unknown, or switched off) is held to the pusher', async () => {
     const { svc, repo, gateCalls, lookups } = await setup({
+      // Carol is not among the live accounts the directory answers with.
       users: [BOB],
       writable: () => true,
     });
@@ -660,7 +663,7 @@ describe('GitService — push gate reads raw paths and judges each commit by its
 
   it('a directory that cannot answer fails the push; it is never read as an unknown author', async () => {
     const { svc, repo, originDir, gateCalls } = await setup({
-      directory: { isPlatformUser: async () => { throw new Error('user store unavailable'); } },
+      directory: { findActiveAccountsByEmail: async () => { throw new Error('user store unavailable'); } },
       writable: () => true,
     });
     const before = await originTip(originDir);
