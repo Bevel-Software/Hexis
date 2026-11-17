@@ -101,23 +101,6 @@ export class BranchAuthorshipError extends VersionControlDomainError {
  * The payload carries enough context that the prompt builder can phrase
  * the resolution request to the agent without further server round-trips.
  */
-function savedLocallySentence(
-  branch: string,
-  path: string,
-  cause: 'diverged' | 'refused' | 'access',
-  accessClause: string | undefined,
-): string {
-  return (
-    `Saved locally on "${branch}" but couldn't share with the team automatically — ` +
-    (cause === 'access'
-      ? `the platform's access check refused the push` + (accessClause ? `: ${accessClause}.` : '.')
-      : cause === 'refused'
-      ? `the repository host refused the push; the next save on this branch will try sharing it again.`
-      : `the remote diverged on "${path}" and the cooperative rebase couldn't reconcile. ` +
-        `The agent will resolve this.`)
-  );
-}
-
 export class PushNeedsAgentResolutionError extends VersionControlDomainError {
   readonly kind = 'push-needs-resolution' as const;
   /**
@@ -159,6 +142,24 @@ export class PushNeedsAgentResolutionError extends VersionControlDomainError {
     this.name = 'PushNeedsAgentResolutionError';
     this.recordMessage = cause === 'access' ? savedLocallySentence(branch, path, cause, accessRefusal?.recorded) : this.message;
   }
+}
+
+/** The one sentence `PushNeedsAgentResolutionError` says, for each cause; `accessClause` is the push gate's own. */
+function savedLocallySentence(
+  branch: string,
+  path: string,
+  cause: 'diverged' | 'refused' | 'access',
+  accessClause: string | undefined,
+): string {
+  return (
+    `Saved locally on "${branch}" but couldn't share with the team automatically — ` +
+    (cause === 'access'
+      ? `the platform's access check refused the push` + (accessClause ? `: ${accessClause}.` : '.')
+      : cause === 'refused'
+      ? `the repository host refused the push; the next save on this branch will try sharing it again.`
+      : `the remote diverged on "${path}" and the cooperative rebase couldn't reconcile. ` +
+        `The agent will resolve this.`)
+  );
 }
 
 /**

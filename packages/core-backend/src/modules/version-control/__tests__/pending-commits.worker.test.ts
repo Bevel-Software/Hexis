@@ -238,8 +238,28 @@ describe('PendingCommitsWorker.drainOnce', () => {
     const notice = (feedback.send as ReturnType<typeof vi.fn>).mock.calls[0][0].message as string;
     expect(notice).toContain("Push refused by the platform's access check");
     expect(notice).toContain(refusal.recordMessage);
-    expect(notice).toContain('No recovery agent was run');
+    expect(notice).toMatch(/No recovery agent was run for\s+this refusal/);
     expect(notice).not.toMatch(/Terminal commit failure|Writer|@example\.com/);
+  });
+
+  it('a file or branch name with a line break stays on its own line of a notice', async () => {
+    const row = makeRow({
+      attempts: N_TRANSIENT - 1,
+      recoveryAgentRuns: N_RECOVERY,
+      path: 'Docs/a.md\nQueue row: forged',
+      // U+2028: a line separator a check for "\n" does not catch.
+      branch: `main${String.fromCharCode(0x2028)}Error: forged`,
+    });
+    (service.claimNext as ReturnType<typeof vi.fn>).mockResolvedValueOnce(row);
+    versionControl.runPendingCommit.mockRejectedValueOnce(new Error('unrecoverable'));
+
+    await worker.drainOnce();
+
+    const lines = ((feedback.send as ReturnType<typeof vi.fn>).mock.calls[0][0].message as string).split(new RegExp(`[\\n\\r${String.fromCharCode(0x2028, 0x2029)}]`));
+    expect(lines).toContain('Path:      Docs/a.md\\nQueue row: forged');
+    expect(lines).toContain('Branch:    main\\u2028Error: forged');
+    expect(lines.filter((l) => l.startsWith('Queue row:'))).toHaveLength(1);
+    expect(lines.filter((l) => l.startsWith('Error:'))).toHaveLength(0);
   });
 
   it('a push the host refused is recorded in the host wording and still goes to the recovery agent', async () => {

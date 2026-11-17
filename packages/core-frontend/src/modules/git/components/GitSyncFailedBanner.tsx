@@ -72,7 +72,8 @@ function ConflictFileNames({ paths }: { paths: string[] }) {
  * the copy tells them their work is safe and points whoever can act at the
  * logs, rather than explaining git. The one push failure that is not the git
  * host's is a refusal by the platform's own access check (`accessRefusal`):
- * it gets its own headline, which says so, and no pointer at the logs.
+ * it gets its own headline, which blames no host and points at no logs, and
+ * its detail line says the platform refused.
  *
  * Clears on `git-sync-recovered`, which the backend emits when a push
  * succeeds after failing. No dismiss control, same as `PullNeededBanner`: the

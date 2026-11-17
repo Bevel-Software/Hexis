@@ -586,6 +586,12 @@ describe('GitService — push gate reads raw paths and judges each commit by its
     expect(refusal.message).not.toContain('Secret/plan.md');
     expect(refusal.message).not.toContain(BOB);
     expect(JSON.stringify(refusal.payload)).not.toMatch(/Secret|bob@/);
+    expect(refusal.reason).not.toMatch(/Secret|Bob|bob@/);
+    // The operator's record names the file and the roles whatever the
+    // pusher may read, and still no person.
+    expect(refusal.recordMessage).toBe(
+      `The platform's access check refused the push of "${BRANCH}": "Secret/plan.md" may be written by Editors and 1 named person.`,
+    );
     // Asked of the PUSHER, at the published state.
     expect(readCalls).toEqual([{ ref: `origin/${BRANCH}`, email: USER.email, path: 'Secret/plan.md' }]);
   });

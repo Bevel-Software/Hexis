@@ -108,11 +108,16 @@ export interface PushAccessRefusal {
  * The sentence a push-gate refusal is told in: the platform refused (never
  * the repository host) and, given the refusal, which file and who may write
  * it. Given null, the file goes unnamed, for a person who may not read it.
- * One composition for the person who pushed and the sync banner each viewer
- * sees, so they never say it differently.
+ * One composition for the person who pushed, the sync banner each viewer
+ * sees and (as `record`) the operator's records, so they never say it
+ * differently.
  */
-export function pushAccessRefusalSentence(branch: string, refusal: PushAccessRefusal | null): string {
-  return `The platform's access check refused the push of "${branch}": ${pushAccessRefusalClause(refusal, 'person')}.`;
+export function pushAccessRefusalSentence(
+  branch: string,
+  refusal: PushAccessRefusal | null,
+  audience: 'person' | 'record' = 'person',
+): string {
+  return `The platform's access check refused the push of "${branch}": ${pushAccessRefusalClause(refusal, audience)}.`;
 }
 
 /**
@@ -151,9 +156,12 @@ function pushAccessRefusalClause(refusal: PushAccessRefusal | null, audience: 'p
  * repository paths and principals only (never git output), so the
  * saved-locally sentence can carry it verbatim to the person who saved.
  * `recordReason` and `recordMessage` are the same clause and sentence for a
- * record (a log line, the pending-commit queue, a prompt): scoped to the
- * pusher the same way, with the people who may write the file counted, not
- * named.
+ * record (a log line, the pending-commit queue, an operator's notice). A
+ * record is read by whoever runs the deployment, not by the pusher, so it
+ * always names the file and the roles that may write it, whatever the pusher
+ * may read: an operator told only that "a file" blocks the branch has
+ * nothing to act on. The people who may write the file are counted there,
+ * never named.
  */
 export class PushAccessRefusedError extends VersionControlDomainError {
   readonly kind = 'push-access-refused' as const;
@@ -185,8 +193,8 @@ export class PushAccessRefusedError extends VersionControlDomainError {
     this.name = 'PushAccessRefusedError';
     this.refusal = refusal;
     this.reason = pushAccessRefusalClause(refusal, 'person');
-    this.recordReason = pushAccessRefusalClause(refusal, 'record');
-    this.recordMessage = `The platform's access check refused the push of "${branch}": ${this.recordReason}.`;
+    this.recordReason = pushAccessRefusalClause(blocked, 'record');
+    this.recordMessage = pushAccessRefusalSentence(branch, blocked, 'record');
   }
 }
 
