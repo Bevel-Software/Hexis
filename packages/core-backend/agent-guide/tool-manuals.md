@@ -162,6 +162,15 @@ tools:
 ---
 ```
 
+### A tool that sends a file
+
+To send a file's bytes as an http call's body, declare the body input
+(`body_field`, `body` by default) `format: file-path` and set `content_type`
+to raw bytes (`application/octet-stream`). The call names a knowledge-base
+path or a `__tmp__/…` ref, and the platform sends the file, read as the person
+on the default branch; one they cannot read refuses the call. A
+`remote: false` tool sends the path as written.
+
 ### Adding a third-party tool
 
 When asked to add a product as a tool ("add Notion", "wire up Linear"), never

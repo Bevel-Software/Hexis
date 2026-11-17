@@ -12,7 +12,8 @@ import { sql } from 'drizzle-orm';
 import { DEFAULT_DB_SCHEMA, assertSearchPath } from '../modules/database/connection.js';
 import { DEFAULT_SECRETS_SCOPE } from '../modules/secrets-vault/secrets-variable-loader.js';
 import { KbContext } from '../shared/kb-context.js';
-import { branchForWorkspaceId } from '../shared/workspace-id.js';
+import { branchForWorkspaceId, workspaceIdForBranch } from '../shared/workspace-id.js';
+import { FileBodyError, fileBodyReader } from '../modules/code-mode/index.js';
 import { getDb, type Database } from '../modules/database/connection.js';
 import { runCoreMigrations } from '../modules/database/migrate.js';
 import { coreMigrationsDir } from '../assets.js';
@@ -1444,6 +1445,15 @@ export async function createCoreServices(
   // The `ui://` view `open_page` carries, with the one origin it may frame:
   // this deployment own public origin.
   const mcpAppService = new McpAppService({ publicFrontendUrl: config.publicFrontendUrl });
+  // The file a tool call names as its body, read as the caller on the branch
+  // people read: a staged file of theirs, or a knowledge-base file their access
+  // lets them read (core's single-path read verdict, asked by their email).
+  const fileBodies = fileBodyReader({
+    workspaces: workspaceService,
+    access: accessControl,
+    workspaceId: () => workspaceIdForBranch(kb.defaultBranch),
+    kbDirName,
+  });
   const mcpService = new McpService(
     {
       // Loopback to our own REST tool surface — 127.0.0.1 (not localhost) to pin
@@ -1467,8 +1477,13 @@ export async function createCoreServices(
       secretsScope,
       // Read at listing time, by when the hints below exist.
       readOnlyOverrides: () => readOnlyHints.overrides(),
-      // The distribution's wrapper for each caller's tool client, when it has one.
-      ...(ports.prepareMcpClient ? { prepareClient: ports.prepareMcpClient } : {}),
+      // A tool whose body is declared a file path sends the file's bytes. A
+      // caller whose account is gone reads nothing.
+      readFileBody: async (userId, ref) => {
+        const user = await authService.getUserById(userId);
+        if (!user) throw new FileBodyError(`"${ref}" is not a file you can read, so it cannot be sent`);
+        return fileBodies.read(user, ref);
+      },
     },
     // Pre-dispatch per-user credential check: the vault answers "has this caller
     // set it?" and the manual catalog answers "which user-scoped vars does this

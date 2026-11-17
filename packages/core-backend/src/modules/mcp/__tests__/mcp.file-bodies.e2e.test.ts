@@ -7,19 +7,18 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { createMcpRoutes } from '../mcp.routes.js';
-import { McpService, type McpClientHook } from '../mcp.service.js';
+import { McpService } from '../mcp.service.js';
+import { FileBodyError } from '../../code-mode/index.js';
 import { SpillStore } from '../../workspace/spill-store.js';
 import { createManualRoutes } from '../../tool-registry/manual.routes.js';
 import { ToolRegistry } from '../../tool-registry/tool-registry.js';
-import { startFakeDownstreamMcpServer, type FakeDownstreamMcpServer } from './fake-downstream-mcp-server.js';
 
 /**
- * `prepareClient`, over the real MCP transport: the deployment's hook runs on
- * the tool client built for each caller, with the caller's user id, and every
- * call that caller makes goes through what it installed, a direct call and a
- * call from a chain alike. The hook here does what a distribution's does with
- * a body its tool declares a file path: the bytes of the file it names go out
- * in its place. The argument check still sees the call as the agent made it.
+ * A tool that sends a file, over the real MCP transport: a call to an `http`
+ * tool whose body is declared a file path goes out with the bytes of the file
+ * it names, read as the caller, a direct call and a call from a chain alike.
+ * The argument check still sees the call as the agent made it, and a file the
+ * caller cannot read refuses the call before anything is sent.
  */
 
 const KEY = 'bevel_key_user_a';
@@ -37,41 +36,16 @@ const fakeAuth: RequestHandler = (req, res, next) => {
 
 const passthrough: RequestHandler = (_req, _res, next) => next();
 
-/** The files a hook may read, by the path a call names. */
+/** The files the caller may read, by the path a call names. */
 const FILES: Record<string, string> = { 'Reports/q3.pdf': '%PDF-1.7 the third quarter' };
 
-/** A hook that sends the named file's bytes as the body, and remembers whom each client was built for. */
-function fileBodyHook(builtFor: string[]): McpClientHook {
-  return (client, userId) => {
-    builtFor.push(userId);
-    const withBytes = (args: Record<string, unknown>) =>
-      typeof args.body === 'string' && FILES[args.body] ? { ...args, body: Buffer.from(FILES[args.body]) } : args;
-    // A direct call streams, a chain's does not: both are wrapped, as a distribution wraps them.
-    const callTool = client.callTool.bind(client);
-    client.callTool = async (toolName, args) => callTool(toolName, withBytes(args));
-    const callToolStreaming = client.callToolStreaming.bind(client);
-    client.callToolStreaming = async function* (toolName, args) {
-      yield* callToolStreaming(toolName, withBytes(args));
-    };
-  };
-}
-
-/**
- * The same, for a third-party MCP server's `echo` tool, whose input is `text`:
- * the named file's contents go out in its place, so the echo shows whether the
- * call went through the hook.
- */
-function fileTextHook(builtFor: string[]): McpClientHook {
-  return (client, userId) => {
-    builtFor.push(userId);
-    const withContents = (args: Record<string, unknown>) =>
-      typeof args.text === 'string' && FILES[args.text] ? { ...args, text: FILES[args.text] } : args;
-    const callTool = client.callTool.bind(client);
-    client.callTool = async (toolName, args) => callTool(toolName, withContents(args));
-    const callToolStreaming = client.callToolStreaming.bind(client);
-    client.callToolStreaming = async function* (toolName, args) {
-      yield* callToolStreaming(toolName, withContents(args));
-    };
+/** A reader over {@link FILES} that remembers each read, as `user:ref`. */
+function filesReader(reads: string[]) {
+  return async (userId: string, ref: string): Promise<Uint8Array> => {
+    reads.push(`${userId}:${ref}`);
+    const text = FILES[ref];
+    if (text === undefined) throw new FileBodyError(`"${ref}" is not a file you can read, so it cannot be sent`);
+    return Buffer.from(text);
   };
 }
 
@@ -94,7 +68,7 @@ const THIRD_PARTY_MANUAL = {
   content_type: 'application/json',
 };
 
-async function startPlatform(prepareClient?: McpClientHook, manuals: unknown[] = [THIRD_PARTY_MANUAL]): Promise<Platform> {
+async function startPlatform(readFileBody?: (userId: string, ref: string) => Promise<Uint8Array>): Promise<Platform> {
   const uploads: string[] = [];
   const app = express();
   app.post('/api/third-party/upload', express.raw({ type: 'application/octet-stream' }), (req, res) => {
@@ -102,7 +76,6 @@ async function startPlatform(prepareClient?: McpClientHook, manuals: unknown[] =
     res.json({ stored: true });
   });
   app.use(express.json());
-  // A deployment's tool that sends a file: its body is declared a file path.
   app.get('/api/third-party/manual', (_req, res) =>
     res.json({
       utcp_version: '1.1.0',
@@ -130,7 +103,7 @@ async function startPlatform(prepareClient?: McpClientHook, manuals: unknown[] =
     }),
   );
   app.get('/api/agent/all-tools', (_req, res) => {
-    res.json({ manuals });
+    res.json({ manuals: [THIRD_PARTY_MANUAL] });
   });
 
   const httpServer = await new Promise<HttpServer>((resolve) => {
@@ -144,7 +117,7 @@ async function startPlatform(prepareClient?: McpClientHook, manuals: unknown[] =
     manualName: 'KNOWLEDGE_BASE',
     spillStore: new SpillStore(join(tmpdir(), 'bevel-test-spills')),
     publicFrontendUrl: 'http://localhost:5173',
-    ...(prepareClient ? { prepareClient } : {}),
+    ...(readFileBody ? { readFileBody } : {}),
   });
   const stub = {} as never;
   app.use('/api', createMcpRoutes(service, stub, fakeAuth, fakeAuth, stub, stub, stub, ''));
@@ -170,7 +143,7 @@ async function connect(baseUrl: string): Promise<Client> {
   const transport = new StreamableHTTPClientTransport(new URL(`${baseUrl}/api/mcp`), {
     requestInit: { headers: { Authorization: `Bearer ${KEY}` } },
   });
-  const client = new Client({ name: 'prepare-client-e2e', version: '0.0.0' }, { capabilities: {} });
+  const client = new Client({ name: 'file-bodies-e2e', version: '0.0.0' }, { capabilities: {} });
   await client.connect(transport);
   cleanups.push(async () => {
     await client.close();
@@ -185,80 +158,49 @@ afterEach(async () => {
   for (const p of platforms.splice(0)) await p.stop().catch(() => {});
 });
 
-describe('prepareClient: the deployment wraps each caller\'s tool client', () => {
-  it('runs on the client built for the caller, and a direct call goes out through what it installed', async () => {
-    const builtFor: string[] = [];
-    const platform = await startPlatform(fileBodyHook(builtFor));
+describe('a tool that sends a file, called through the MCP endpoint', () => {
+  it('sends the bytes of the file a direct call names, read as the caller', async () => {
+    const reads: string[] = [];
+    const platform = await startPlatform(filesReader(reads));
     const client = await connect(platform.baseUrl);
     const res = await client.callTool({ name: 'THIRD_PARTY_upload', arguments: { body: 'Reports/q3.pdf' } });
     expect(res.isError).toBeFalsy();
-    expect(builtFor).toEqual(['user-A']);
+    expect(reads).toEqual(['user-A:Reports/q3.pdf']);
     expect(platform.uploads).toEqual(['%PDF-1.7 the third quarter']);
   });
 
-  it('wraps a call from a chain the same way', async () => {
-    const platform = await startPlatform(fileBodyHook([]));
+  it('does the same for a call from a chain', async () => {
+    const platform = await startPlatform(filesReader([]));
     const client = await connect(platform.baseUrl);
     const res = await client.callTool({ name: 'call_tool_chain', arguments: { code: "return THIRD_PARTY.upload({ body: 'Reports/q3.pdf' });" } });
     expect(JSON.parse(toolText(res)).result).toEqual({ stored: true });
     expect(platform.uploads).toEqual(['%PDF-1.7 the third quarter']);
   });
 
-  it('leaves the argument check outermost: a call that does not match its tool is refused before the hook sees it', async () => {
-    const platform = await startPlatform(fileBodyHook([]));
+  it('refuses a call for a file the caller cannot read, with the reason, and sends nothing', async () => {
+    const platform = await startPlatform(filesReader([]));
+    const client = await connect(platform.baseUrl);
+    const res = await client.callTool({ name: 'THIRD_PARTY_upload', arguments: { body: 'Finance/Payroll.xlsx' } });
+    expect(res.isError).toBe(true);
+    expect(toolText(res)).toContain('"Finance/Payroll.xlsx" is not a file you can read, so it cannot be sent');
+    expect(platform.uploads).toEqual([]);
+  });
+
+  it('checks the arguments first: a call that does not match its tool is refused before any file is read', async () => {
+    const reads: string[] = [];
+    const platform = await startPlatform(filesReader(reads));
     const client = await connect(platform.baseUrl);
     const res = await client.callTool({ name: 'THIRD_PARTY_upload', arguments: { body: 'Reports/q3.pdf', extra: 1 } });
     expect(res.isError).toBe(true);
     expect(toolText(res)).toContain('The arguments do not match the "upload" tool.');
+    expect(reads).toEqual([]);
     expect(platform.uploads).toEqual([]);
   });
 
-  it('without a hook, sends the call as it was made', async () => {
+  it('without a reader, sends the path as the agent wrote it', async () => {
     const platform = await startPlatform();
     const client = await connect(platform.baseUrl);
     await client.callTool({ name: 'THIRD_PARTY_upload', arguments: { body: 'Reports/q3.pdf' } });
     expect(platform.uploads).toEqual(['Reports/q3.pdf']);
-  });
-});
-
-describe('prepareClient: a third-party MCP server the caller reaches through the pool', () => {
-  let downstream: FakeDownstreamMcpServer | undefined;
-  afterEach(async () => {
-    await downstream?.stop();
-    downstream = undefined;
-  });
-
-  /** One `mcp.json`-style manual at the fake server: its tools are called on a pooled client, not the surface's. */
-  const atDownstream = (server: FakeDownstreamMcpServer) => [
-    { name: 'notion', call_template_type: 'mcp', config: { mcpServers: { srv: { transport: 'http', url: server.url } } } },
-  ];
-
-  it('runs on the pooled client too, with the caller\'s user id, and a direct call goes out through it', async () => {
-    downstream = await startFakeDownstreamMcpServer();
-    const builtFor: string[] = [];
-    const platform = await startPlatform(fileTextHook(builtFor), atDownstream(downstream));
-    const client = await connect(platform.baseUrl);
-    const res = await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'Reports/q3.pdf' } });
-    expect(res.isError).toBeFalsy();
-    expect(toolText(res)).toContain('%PDF-1.7 the third quarter');
-    // Once for the surface's client, once for the pooled one.
-    expect(builtFor).toEqual(['user-A', 'user-A']);
-    expect(downstream.executions()).toBe(1);
-  });
-
-  it('wraps a pooled call from a chain the same way', async () => {
-    downstream = await startFakeDownstreamMcpServer();
-    const platform = await startPlatform(fileTextHook([]), atDownstream(downstream));
-    const client = await connect(platform.baseUrl);
-    const res = await client.callTool({ name: 'call_tool_chain', arguments: { code: "return notion.srv_echo({ text: 'Reports/q3.pdf' });" } });
-    expect(toolText(res)).toContain('%PDF-1.7 the third quarter');
-  });
-
-  it('without a hook, a pooled call goes out as it was made', async () => {
-    downstream = await startFakeDownstreamMcpServer();
-    const platform = await startPlatform(undefined, atDownstream(downstream));
-    const client = await connect(platform.baseUrl);
-    const res = await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'Reports/q3.pdf' } });
-    expect(toolText(res)).toContain('Reports/q3.pdf');
   });
 });

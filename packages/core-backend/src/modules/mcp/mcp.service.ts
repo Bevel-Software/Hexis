@@ -56,6 +56,7 @@ import { bevelSecretsLoaderConfig, type ForcedRefreshOutcome, type ISecretsVault
 import { EXTERNAL_KB_MANUAL_NAME } from '../tool-manuals/index.js';
 import type { IToolManualService } from '../tool-manuals/index.js';
 import type { SpillStore } from '../workspace/index.js';
+import { installFileBodies } from '../code-mode/index.js';
 import type { HiddenToolSource } from '../../shared/hidden-tools.js';
 import { seedBevelHostedManualVars } from '../../shared/utcp-namespace.js';
 import type { InternalTokenService } from '../tool-auth/index.js';
@@ -87,9 +88,6 @@ import {
 
 // Still offered from here, as this module's tests and callers learnt it.
 export { CONNECTION_META_KEY };
-
-/** What a deployment runs on each tool client built for a caller: see {@link McpProxyOptions.prepareClient}. */
-export type McpClientHook = (client: CodeModeUtcpClient, userId: string) => void;
 
 /**
  * Configuration for the loopback proxy. `loopbackBaseUrl` is the backend's own
@@ -152,18 +150,14 @@ export interface McpProxyOptions {
    */
   readOnlyOverrides?: () => Promise<Readonly<Record<string, boolean>>>;
   /**
-   * Run on each tool client built for a caller, with the caller's user id,
-   * before any tool is registered on it: where a deployment wraps the
-   * client's calls the way it wraps its own in-process agent's client (a
-   * distribution that sends a file's bytes as the body of a tool that
-   * declares that body a file path, read as the caller). That is the client
-   * of the caller's surface AND each pooled client of a third-party `mcp`
-   * manual the caller reaches (a call to such a tool is made on the pooled
-   * client, not the surface's). The argument checks are installed when the
-   * tools are registered, after this, so they stay outermost and check the
-   * call as the agent made it. Absent, the client is used as built.
+   * Reads the file a tool call names as its body, as the caller with this user
+   * id: a knowledge-base path their access lets them read, or a staged file of
+   * theirs (`__tmp__/…`). Set, a call to an `http` tool whose body property is
+   * declared `format: file-path` sends that file's bytes instead of the path
+   * (`installFileBodies` in `modules/code-mode`). Absent, the path goes out as
+   * the agent wrote it.
    */
-  prepareClient?: McpClientHook;
+  readFileBody?: (userId: string, ref: string) => Promise<Uint8Array>;
 }
 
 /** Who a request is from — everything the proxy needs, resolved from that request's own bearer. */
@@ -1233,7 +1227,13 @@ export class McpService {
       utcpClientConfig(userId, variables, this.opts.secretsScope),
     );
     bindRequestBearer(client);
-    this.opts.prepareClient?.(client, userId);
+    // A tool whose body is declared a file path sends the file's bytes, read as
+    // this caller. Installed before any manual is registered, so the argument
+    // checks registration installs sit over it and see the path as the agent
+    // gave it. Only here: the swap acts on `http` tools, and a pooled client
+    // carries a third-party MCP server's tools alone.
+    const readFileBody = this.opts.readFileBody;
+    if (readFileBody) installFileBodies(client, (ref) => readFileBody(userId, ref));
     return client;
   }
 
@@ -1549,12 +1549,6 @@ export class McpService {
     // Third-party manuals are never seeded loopback credentials (see
     // `buildClient`), so a pooled client carries no request-scoped bearer.
     const client = await CodeModeUtcpClient.create(process.cwd(), utcpClientConfig(userId, {}, this.opts.secretsScope));
-    // The deployment's wrapper, before the manual is registered, as on the
-    // surface's client (`buildClient`): a call to this manual's tools is routed
-    // to THIS client (`routeToDownstream`), past the surface's, so without it
-    // the caller's calls here would skip the wrapper. The pool key carries the
-    // user, so this client serves this caller alone.
-    this.opts.prepareClient?.(client, userId);
     // Our own copy: registration renames the template in place, and recovery
     // re-registers from exactly what discovery used.
     const own = structuredClone(template);
