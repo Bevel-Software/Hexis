@@ -63,6 +63,8 @@ const NOT_THE_REGISTRYS: Readonly<Record<string, string>> = {
   access_type: 'a Google sign-in parameter, in an `authParams` example',
   tool_call_template: 'a `.tool` field',
   call_template_type: 'a `.tool` field',
+  body_field: 'a `.tool` http call template field',
+  content_type: 'a `.tool` http call template field',
   mcpServers: 'a `plugin.json` / `mcp.json` key',
   clientId: 'an `oauth` block field',
   authorizationUrl: 'an `oauth` block field',
