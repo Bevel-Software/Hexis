@@ -306,6 +306,19 @@ describe('what the guide tells an agent', () => {
   });
 
   /**
+   * The area's own README. Two agent sessions made conflicting structural
+   * choices in one person's folder within a quarter of an hour: the space's
+   * README said how it is organised, and neither session read it first.
+   */
+  it("says to read an area's README before structuring files there, and to keep it current", async () => {
+    const placement = section(await composeAgentGuide(DEFAULT_KB_LAYOUT), '## Where a new file goes').replace(/\s+/g, ' ');
+    expect(placement).toContain("**Read the area's `README.md` first.**");
+    expect(placement).toContain('the `README.md` of that folder and of each folder above it');
+    expect(placement).toContain('they never widen what you may read or write');
+    expect(placement).toContain('create or update that README in the same change');
+  });
+
+  /**
    * The personal plugin, where the placement rule was being read backwards.
    * Nothing under the plugins root is in the knowledge graph, and a personal
    * plugin is readable only by its owner — so a note filed there is never found
