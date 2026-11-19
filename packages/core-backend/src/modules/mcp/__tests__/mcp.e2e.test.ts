@@ -16,7 +16,7 @@ import { SpillStore } from '../../workspace/index.js';
 import { ToolRegistry, createManualRoutes } from '../../tool-registry/index.js';
 import { toolDef } from '../../tool-helpers/index.js';
 import { DEFAULT_KB_LAYOUT } from '@bevel-software/platform-shared';
-import { platformInstructions } from '../../agent-instructions/index.js';
+import { GUIDE_FIRST_LINE, platformInstructions } from '../../agent-instructions/index.js';
 import { startFakeDownstreamMcpServer, type FakeDownstreamMcpServer } from './fake-downstream-mcp-server.js';
 import { registerBevelSecretsVariableLoader } from '../../secrets-vault/index.js';
 import type { ForcedRefreshOutcome, ISecretsVaultService } from '../../secrets-vault/index.js';
@@ -497,6 +497,8 @@ describe('agent instructions over the real transport', () => {
       `${platformInstructions(DEFAULT_KB_LAYOUT, 'target-company-state')}\n\nAcme builds solar farms.\n\nLook in Projects/ first.`,
     );
     expect(instructions).not.toContain('private');
+    // The first line a client shows the model sends it to the guide.
+    expect(instructions!.split('\n')[0]).toBe(GUIDE_FIRST_LINE);
     // The deployment's default branch, by its own name — not `main`.
     expect(instructions).toContain("This knowledge base's default branch is `target-company-state`");
   });

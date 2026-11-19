@@ -7,10 +7,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CONNECTION_META_KEY, McpService, type McpCaller } from '../mcp.service.js';
 import { SpillStore } from '../../workspace/index.js';
-import { createManualRoutes } from '../../tool-registry/manual.routes.js';
-import { ToolRegistry } from '../../tool-registry/tool-registry.js';
+import { ToolRegistry, createManualRoutes } from '../../tool-registry/index.js';
 import { toolDef } from '../../tool-helpers/index.js';
 import type { ConnectionScopeWire } from '../../agent-scope/index.js';
+import { GUIDE_FIRST_LINE } from '../../agent-instructions/index.js';
 
 /**
  * The MCP proxy's half of connecting as an agent. The surfaces behind the
@@ -39,14 +39,22 @@ const CONNECTIONS: Record<string, ConnectionScopeWire | undefined> = {
 
 let httpServer: HttpServer | undefined;
 const cleanups: Array<() => Promise<void>> = [];
+// The one owner of the test server: harness() closes the previous one before it
+// opens another, and afterEach closes the last.
+async function closeHttpServer(): Promise<void> {
+  const open = httpServer;
+  httpServer = undefined;
+  if (open) await new Promise<void>((r) => open.close(() => r()));
+}
+
 afterEach(async () => {
   for (const c of cleanups.splice(0)) await c().catch(() => {});
-  if (httpServer) await new Promise<void>((r) => httpServer!.close(() => r()));
-  httpServer = undefined;
+  await closeHttpServer();
   vi.restoreAllMocks();
 });
 
 async function harness() {
+  await closeHttpServer();
   const state = { builds: 0, base: '' };
   const connectionOf = (req: express.Request) => CONNECTIONS[(req.headers.authorization ?? '').replace(/^Bearer /, '')];
   const registry = new ToolRegistry();
@@ -164,6 +172,9 @@ describe('a narrowed connection', () => {
         'platform tools, connectors, skills and plugins that file lists, and of those only what you may read.',
     );
     expect(everything).not.toContain('connected as the agent');
+    // Both open with the line that sends the agent to the guide, which names
+    // the connection whole; the connection line stays last.
+    for (const text of [narrowed, everything]) expect(text!.split('\n')[0]).toBe(GUIDE_FIRST_LINE);
   });
 
   it('two connections of one person made as different agents never share a built surface', async () => {
