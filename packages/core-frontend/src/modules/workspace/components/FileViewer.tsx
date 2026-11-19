@@ -51,6 +51,7 @@ import { KbDocumentShell } from './KbDocumentShell';
 import { FilePaneCard } from './FilePaneCard';
 import {
   ExitFullScreenButton,
+  FULL_BLEED_FULL_SCREEN_SURFACE,
   FULL_SCREEN_ENTRY_SELECTOR,
   FULL_SCREEN_SURFACE,
   FullScreenButton,
@@ -1766,7 +1767,8 @@ export function FileViewer() {
           {/* Full screen is THIS element's classes changing, not a second
               tree: fixed over the whole viewport, above the app's chrome, on
               the page background. A full-bleed renderer takes the viewport's
-              definite height; a prose one keeps its reading column, centred,
+              definite height, its toolbar in one row with the exit control;
+              a prose one keeps its reading column, centred,
               with its card's edges and bar withdrawn. While it fills the window
               it is modal, and says so: everything else of the app is covered,
               so the shortcuts that open something in that chrome (the command
@@ -1782,7 +1784,7 @@ export function FileViewer() {
             className={
               shellVariant === 'full-bleed'
                 ? filling
-                  ? `${FULL_SCREEN_SURFACE} flex flex-col`
+                  ? FULL_BLEED_FULL_SCREEN_SURFACE
                   : 'flex min-h-0 flex-1 flex-col'
                 : filling
                   ? `${FULL_SCREEN_SURFACE} ${documentSideGutters(false)} py-10`
