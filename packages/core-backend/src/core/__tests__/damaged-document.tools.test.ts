@@ -163,7 +163,7 @@ async function startPlatform(extractorOpts: WorkerDocumentExtractorOptions = {})
     publicFrontendUrl: 'http://localhost:5173',
   });
   const stub = {} as never;
-  app.use('/api', createMcpRoutes(mcp, stub, fakeAuth, fakeAuth, stub, stub, stub, ''));
+  app.use('/api', createMcpRoutes(mcp, stub, fakeAuth, fakeAuth, stub, stub, stub, '', stub));
   app.use('/api', createManualRoutes(registry, passthrough));
 
   const write = async (path: string, bytes: Buffer | string) => {

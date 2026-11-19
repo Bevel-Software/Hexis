@@ -97,7 +97,7 @@ async function connect(opts: { serveApps?: boolean } = {}) {
     opts.serveApps === false ? undefined : new McpAppService({ publicFrontendUrl: PUBLIC }),
   );
   const stub = {} as never;
-  app.use('/api', createMcpRoutes(service, stub, fakeAuth, fakeAuth, stub, stub, stub, ''));
+  app.use('/api', createMcpRoutes(service, stub, fakeAuth, fakeAuth, stub, stub, stub, '', stub));
   app.use('/api', toolRoutes);
 
   client = new Client({ name: 'test-host', version: '1.0.0' });

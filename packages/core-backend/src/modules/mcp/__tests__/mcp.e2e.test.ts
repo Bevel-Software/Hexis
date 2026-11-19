@@ -190,7 +190,7 @@ async function startPlatform(opts: PlatformOptions = {}): Promise<Platform> {
     downstreamPool: opts.poolNow ? { now: opts.poolNow } : undefined,
   }, opts.secretsVault, opts.toolManuals);
   const stub = {} as never;
-  app.use('/api', createMcpRoutes(service, stub, fakeAuth, fakeAuth, stub, stub, stub, ''));
+  app.use('/api', createMcpRoutes(service, stub, fakeAuth, fakeAuth, stub, stub, stub, '', stub));
   // The loopback catalog is served per caller, from the bearer it carries.
   app.use('/api', (req, res, next) => (bearerOf(req) === KEY_B ? routesB : routesA)(req, res, next));
 
