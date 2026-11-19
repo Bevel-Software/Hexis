@@ -47,6 +47,8 @@ export {
   type LeaseLoopHandle,
   type LeasedWorker,
 } from './core/lifecycle.js';
+// The idle keep-alive a shell applies to the server its `app.listen` returns.
+export { applyHttpServerTimeouts, HTTP_KEEP_ALIVE_TIMEOUT_MS } from './core/http-server-timeouts.js';
 
 // Packaged assets (migrations/, kb-template/, agent-guide/, starter-packs/) + the migration runners.
 export { agentGuideDir, coreMigrationsDir, defaultKbTemplateDir, defaultStarterPacksDir } from './assets.js';

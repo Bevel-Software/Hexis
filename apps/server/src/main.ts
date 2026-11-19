@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 import {
   CoreConfig,
   StaticTenantSource,
+  applyHttpServerTimeouts,
   createCoreServices,
   createCoreServer,
   createTenantHost,
@@ -60,9 +61,11 @@ const boot = hostEnv.tenantsFile
         return { host, stop: () => host.stop() };
       },
       listen: (core) =>
-        core.host.app.listen(hostEnv.port, () => {
-          log.info(`Bevel core tenant host listening on http://localhost:${hostEnv.port}`, { port: hostEnv.port });
-        }),
+        applyHttpServerTimeouts(
+          core.host.app.listen(hostEnv.port, () => {
+            log.info(`Bevel core tenant host listening on http://localhost:${hostEnv.port}`, { port: hostEnv.port });
+          }),
+        ),
       process,
     })
   : runShell({
@@ -73,9 +76,11 @@ const boot = hostEnv.tenantsFile
       },
       listen: async (core) => {
         const app = await createCoreServer(core, {}, { staticDir: staticDirFor(core.config.nodeEnv) });
-        return app.listen(core.config.port, () => {
-          log.info(`Bevel core server listening on http://localhost:${core.config.port}`, { port: core.config.port });
-        });
+        return applyHttpServerTimeouts(
+          app.listen(core.config.port, () => {
+            log.info(`Bevel core server listening on http://localhost:${core.config.port}`, { port: core.config.port });
+          }),
+        );
       },
       process,
     });
