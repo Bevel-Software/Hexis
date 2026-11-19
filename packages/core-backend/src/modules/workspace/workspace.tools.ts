@@ -41,7 +41,7 @@ import { displayPath, type FileKind, type FileReader, type FileReaderRegistry, t
 import { fileTypeOf, needsContent } from './file-readers/content-mode.js';
 import { createFileReaderRegistry } from './file-readers/file-reader.registry.js';
 import { DocumentReader } from './file-readers/document-reader.js';
-import { TextReader } from './file-readers/text-reader.js';
+import { TextReader, isTextBytes } from './file-readers/text-reader.js';
 import { mcpImageResult } from '@bevel-software/platform-mcp-core';
 import {
   folderPlaceholderPath,
@@ -473,8 +473,10 @@ function assertBytesTextEditable(readers: FileReaderRegistry, path: string, exis
  * where, and nothing lands.
  */
 function assertTextContent(path: string, text: string, argument: 'content' | 'new_string'): void {
+  // Whether this is text is `isTextBytes`' answer, the same one every reader
+  // gives about the file afterwards. `indexOf` only says where the NUL is.
+  if (isTextBytes(Buffer.from(text, 'utf8'))) return;
   const offset = text.indexOf('\u0000');
-  if (offset === -1) return;
   throw new ToolError(
     `"${displayPath(path)}" was not written: \`${argument}\` holds a NUL character (U+0000) at offset ${offset}, and a file ` +
       'holding one is binary, not text. Send the text again without it. [nul_in_text]',
