@@ -364,7 +364,7 @@ describe('a failed fetch', () => {
     fetchMock.mockRejectedValue(new Error('boom'));
     mount();
     expect(await screen.findByRole('alert')).toHaveTextContent('boom');
-    expect(screen.getByRole('heading', { name: 'What agents are told about this knowledge base' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'What agents are told' })).toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: 'Your description' })).toBeNull();
   });
 });

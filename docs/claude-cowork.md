@@ -29,8 +29,8 @@ they may read.
    and read replicas stay empty. Choose **Add configuration** to save them.
 
 3. Back in the Marketplace section, choose **Mark as registered**. Until an
-   admin does, **External agent access** shows people a notice that an admin
-   has to configure the marketplace instead of the steps below.
+   admin does, **External agent access** offers people no Cowork steps, and
+   points admins here instead.
 
 The webhook URL Claude generates can be ignored. Rotate the credentials from
 the same section if they are ever exposed; the Owner then re-enters them.
@@ -51,8 +51,9 @@ they can add the marketplace.
    the registered platform. You do not need to start a Claude Code task; this
    is only where Claude exposes the connection. You land on the platform's
    sign-in: approve, and you are back in Claude.
-2. Copy the marketplace URL from **External agent access → Marketplaces**.
-   It is the same URL Claude Code clones.
+2. On **External agent access**, open **Install skills as native plugins**,
+   choose **show the steps**, and copy the **Marketplace URL**. It is the same
+   URL Claude Code clones.
 3. In Cowork (or claude.ai), open **Customize → Plugins**, then **Add → Add
    marketplace**, paste the URL and choose **Sync**.
 4. Syncing lists the plugins, it installs none of them. Open **Discover** and
@@ -68,8 +69,9 @@ they can add the marketplace.
    Claude you are offered the connector for yourself instead, which works the
    same for you; ask an admin to add it for the team.
 
-Your connection appears under **Marketplaces → Your Claude connections**,
-where you can disconnect it. Disconnecting stops updates; connecting again
+Your connection appears under **Your Claude connections** in those same steps
+(**External agent access → Install skills as native plugins → show the
+steps**), where you can disconnect it. Disconnecting stops updates; connecting again
 from Claude resumes them. "Repository not found" or "GitHub access is
 required" on the marketplace means Claude has no usable connection for your
 account: step 1 has not happened, or the connection it made was since
@@ -89,7 +91,8 @@ it again to re-run the sign-in. If approving never lands you back in Claude at
 all, that is the account connection in step 1, not the connector.
 
 The same steps are a six-screen walkthrough on the **External agent access**
-page in the app, identical for admins and everyone else once the deployment is
+page in the app (open **Install skills as native plugins**, then **Cowork and
+claude.ai**), identical for admins and everyone else once the deployment is
 marked registered. The registration half lives in **Deployment → Marketplace**
 and ends on the same connector step.
 

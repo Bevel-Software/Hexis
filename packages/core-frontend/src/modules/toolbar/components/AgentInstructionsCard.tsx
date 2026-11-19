@@ -41,15 +41,15 @@ const DESCRIPTION_MARKDOWN =
   '[&_p]:my-1.5 [&_ul]:my-1.5 [&_ol]:my-1.5 [&_li]:my-0.5';
 
 /**
- * "What agents are told about this knowledge base": the text every MCP
+ * "What agents are told": the text every MCP
  * session starts with, organised around the part the admin owns. The fixed
  * platform message sits in a closed drawer (it is sent first, and nobody here
  * can change it); the admin's description is the centrepiece, with its count
  * against the cap right beside it.
  *
- * Sits in its own card below connection setup: it applies to every connection
- * type, but it is a separate administrative concern rather than part of the
- * user's setup flow.
+ * Sits at the end of the Deployment page: it applies to every connection
+ * type, and it is a workspace setting, not part of anyone's own setup, so it
+ * stays off the page each member opens to connect their agent.
  *
  * Both contexts are read WITHOUT their hooks' provider guard: the page renders
  * in tests and in shells that mount no admin or workspace provider, and a
@@ -157,13 +157,13 @@ export function AgentInstructionsCard() {
   const displayedPreambleTruncated = editor ? displayedPreambleChars > PREAMBLE_CAP : state.status === 'ready' && state.data.truncated;
   return (
     <section
-      className="bg-white border border-line rounded-lg px-4 py-3 space-y-3"
+      className="mt-12 space-y-3"
       aria-labelledby="agent-instructions-title"
       data-testid="agent-instructions-section"
     >
       <div className="flex items-center justify-between gap-3">
-        <h2 id="agent-instructions-title" className="text-xs font-medium text-ink">
-          What agents are told about this knowledge base
+        <h2 id="agent-instructions-title" className="text-label uppercase text-ink-faint">
+          What agents are told
         </h2>
         {canEdit && !editor && (
           <Button
@@ -176,9 +176,9 @@ export function AgentInstructionsCard() {
           </Button>
         )}
       </div>
-      <p className="text-meta text-ink-muted leading-snug">
-        Every agent that connects, on either tab, gets this at the start of each session, whatever it may read in
-        the repository. A fixed platform message goes first, then your description of what is here.
+      <p className="text-meta leading-normal text-ink-muted">
+        Every agent that connects gets this at the start of each session, whatever it may read in the repository. A
+        fixed platform message goes first, then your description of what is here.
       </p>
 
       {state.status === 'loading' && <p className="text-meta text-ink-muted">Loading…</p>}

@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Banner } from '../../../shared/components';
-import { CopyBlock } from '../../../shared/mcp';
+import { SnippetBlock } from '../../../shared/mcp';
 import { marketplaceGitUrl } from '../../../shared/marketplace-url';
 import { fetchMarketplaceRegistration } from '../../settings';
 import { ClaudeMarketplaceCarousel } from './ClaudeMarketplaceCarousel';
@@ -78,7 +78,7 @@ export function CoworkSetupSteps({ isAdmin, opened }: { isAdmin: boolean; opened
         ) : (
           <>
             Cowork and claude.ai are not set up for this deployment yet. An admin has to configure
-            the marketplace before you can add it there. Claude Code and Codex work already, below.
+            the marketplace before you can add it there. Claude Code and Codex work already: create a key for plugins.
           </>
         )}
       </Banner>
@@ -93,7 +93,7 @@ export function CoworkSetupSteps({ isAdmin, opened }: { isAdmin: boolean; opened
         here registers it once. If the first step does not list this deployment, ask an admin to
         register it.
       </Prose>
-      <CopyBlock label="Marketplace URL" value={marketplaceGitUrl()} rows={2} />
+      <SnippetBlock label="Marketplace URL" value={marketplaceGitUrl()} copyLabel="Copy: Marketplace URL" />
       <ClaudeMarketplaceCarousel host={deploymentHost()} />
     </div>
   );

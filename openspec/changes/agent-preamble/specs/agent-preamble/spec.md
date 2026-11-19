@@ -1,10 +1,10 @@
 ## ADDED Requirements
 
 ### Requirement: The deployment preamble is a file at the repository root
-The admin-written part of the agent instructions SHALL be the file `mcp-description.md` at the root of the knowledge-base repository, read from the default branch. It is a plain markdown file with no required frontmatter or structure. Under the template's root access policy only admins can read and write it. The app SHALL expose the admin's part through the inline editor on External agent access rather than as an ordinary workspace-tree document.
+The admin-written part of the agent instructions SHALL be the file `mcp-description.md` at the root of the knowledge-base repository, read from the default branch. It is a plain markdown file with no required frontmatter or structure. Under the template's root access policy only admins can read and write it. The app SHALL expose the admin's part through the inline editor on the Deployment page rather than as an ordinary workspace-tree document.
 
 #### Scenario: Admin edits the description in the app
-- **WHEN** an admin edits and saves "Your description" on External agent access
+- **WHEN** an admin edits and saves "Your description" on the Deployment page
 - **THEN** the app writes `mcp-description.md` through the normal default-branch workspace save path, with history, and the next MCP session carries the new text
 
 ### Requirement: The file is seeded, never rewritten
@@ -57,15 +57,15 @@ This requirement covers only an agent working in a git clone of the repository w
 - **THEN** it finds a line directing it to `mcp-description.md` before the platform mechanics
 
 ### Requirement: The app shows what connected agents are told
-The External agent access page SHALL put its connection setup first in a card containing Your agent, Marketplaces and Autonomous agents. A separate peer card below it SHALL be titled "What agents are told about this knowledge base" and show the fixed platform message in a closed drawer (sent first, not editable) followed by "Your description": the preamble body as sent with its character count against the 6,000 cap, or an empty state saying agents get the platform message only. It SHALL omit the old "Short version" preview and repository implementation copy. The card SHALL warn when the preamble is truncated and when a comment is left open, and SHALL state that every connected agent sees the text whatever its repository access. A failed composed-preview fetch SHALL show an inline message and leave connection tabs and the admin editor working.
+The Deployment page SHALL end with a section titled "What agents are told", in the column of the Deployment form. It is a workspace setting, so the External agent access page, which every member opens to connect their own agent, SHALL NOT show it. The section SHALL show the fixed platform message in a closed drawer (sent first, not editable) followed by "Your description": the preamble body as sent with its character count against the 6,000 cap, or an empty state saying agents get the platform message only. It SHALL omit the old "Short version" preview and repository implementation copy. The card SHALL warn when the preamble is truncated and when a comment is left open, and SHALL state that every connected agent sees the text whatever its repository access. A failed composed-preview fetch SHALL show an inline message and leave the rest of the Deployment page and the admin editor working.
 
 #### Scenario: Admin views the page
-- **WHEN** an admin opens External agent access
-- **THEN** connection setup appears first, the separate instructions card shows the platform drawer and description count such as `1,240 / 6,000 characters`, and an Edit description button is present without navigating to the backing file
+- **WHEN** an admin opens Deployment
+- **THEN** the section at the end of the page shows the platform drawer and description count such as `1,240 / 6,000 characters`, and an Edit description button is present without navigating to the backing file
 
-#### Scenario: Non-admin views the page
-- **WHEN** a non-admin opens External agent access
-- **THEN** the instructions card shows the same read-only platform and description text with no Edit action and no repository implementation copy
+#### Scenario: A member opens External agent access
+- **WHEN** anyone opens External agent access
+- **THEN** the page shows connecting an agent, API keys and installing skills as plugins, and no section about what agents are told
 
 #### Scenario: Preamble over the cap
 - **WHEN** the preamble exceeds 6,000 characters
@@ -73,7 +73,7 @@ The External agent access page SHALL put its connection setup first in a card co
 
 #### Scenario: Comment left open
 - **WHEN** the file contains an unterminated `<!--`
-- **THEN** the section warns that everything after it is withheld from agents and names a fix the reader can reach: for an admin the editor on this page, which closes the comment on save even when the visible text is unchanged, and for a non-admin that an admin can do it here
+- **THEN** the section warns that everything after it is withheld from agents and names the fix: the editor on this page, which closes the comment on save even when the visible text is unchanged. The section is on Deployment, which only admins open, so there is no non-admin wording
 
 #### Scenario: The tool-description channel is cutting the first paragraph
 - **WHEN** the composed result reports the tool prefix as truncated
@@ -85,7 +85,7 @@ The External agent access page SHALL put its connection setup first in a card co
 
 #### Scenario: Fetch fails
 - **WHEN** the instructions request fails
-- **THEN** the section shows an inline error, the connection tabs keep working, and an admin can still open the inline description editor
+- **THEN** the section shows an inline error, the rest of the Deployment page keeps working, and an admin can still open the inline description editor
 
 ### Requirement: Admins edit the public description inline
 When `isAdmin` is true and `kbDirName` is known, the card SHALL load `${kbDirName}/mcp-description.md` from the default-branch workspace and show only its agent-visible text in an inline textarea. A missing file SHALL open as an empty description, and nothing else SHALL: the file route reports 404 for an absent file alone and gives any other read failure its own status, so an unreadable file SHALL surface as an inline error rather than an empty editor. Saving SHALL use the normal workspace write route, retain all private HTML comments from the source, and refresh the composed preview. The save SHALL carry the loaded bytes as a precondition so a file changed since it loaded is refused rather than overwritten. The precondition SHALL be answered only to a caller who may READ the file, under the same gate the file route uses: its answer is a fact about content, write authorisation is checked later, and an ungated precondition would tell a caller whether a file they cannot see holds a guessed value. A save failure SHALL keep the editor and unsaved value open. Cancel SHALL discard the textarea value without writing. Non-admins SHALL have no inline edit action.

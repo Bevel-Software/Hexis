@@ -354,7 +354,7 @@ followed by `mcp-description.md` from the root of your repository, where an
 admin describes what the knowledge base holds and when to consult it. Clients
 that read the handshake (Claude Code, Claude Desktop, Cursor) put it in the
 system prompt; for the ones that do not, the first line is also shown on the
-four core tools. The External agent access page shows exactly what agents get.
+four core tools. The end of the Deployment page shows admins exactly what agents get.
 </details>
 
 <details>
@@ -370,7 +370,7 @@ local-only tools to everything the hosted endpoint serves. That command needs
 and a client launched from the Dock or a desktop icon may not see `npx` on PATH
 at all: run `which npx` (`where npx` on Windows) and use the full path it
 prints as the `"command"`. See
-[Troubleshooting](docs/troubleshooting.md#desktop-agents-the-local-mcp-server).
+[Troubleshooting](docs/troubleshooting.md#coding-agents-the-local-mcp-server).
 </details>
 
 <details>
