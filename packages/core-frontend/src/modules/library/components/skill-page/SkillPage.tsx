@@ -587,8 +587,20 @@ export function SkillPage({
    * save the Knowledge editor performs, minus the app switch.
    */
   async function saveDirect(content: string) {
+    // The text the editor opened on, read now: the write lands only while the
+    // file still holds it (`ifMatch`, compared by the server inside the
+    // path's turn). A skill deleted while the save is on its way reads there
+    // as empty and is refused (409), not re-created; so is a file changed on
+    // the default branch since the editor opened, which this save would
+    // otherwise overwrite. The editor keeps the text and shows the refusal.
+    const expected = editorBase;
     const { workspace } = await getOrCreateWorkspace(DEFAULT_BRANCH);
-    const saved = await writeFile(workspace.id, `${workspace.kbDirName}/${fileRepoPath}`, content);
+    const saved = await writeFile(
+      workspace.id,
+      `${workspace.kbDirName}/${fileRepoPath}`,
+      content,
+      expected !== null ? { ifMatch: expected } : undefined,
+    );
     // Only a SKILL.md save has a say: a bundled file's answer carries no
     // warnings, and taking it as "none" would hide the loaded skill's.
     if (active === 'SKILL.md') setSavedWarnings(saved?.warnings ?? []);
