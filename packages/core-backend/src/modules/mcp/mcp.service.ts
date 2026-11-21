@@ -56,6 +56,7 @@ import { bevelSecretsLoaderConfig, type ForcedRefreshOutcome, type ISecretsVault
 import { EXTERNAL_KB_MANUAL_NAME } from '../tool-manuals/index.js';
 import type { IToolManualService } from '../tool-manuals/index.js';
 import type { SpillStore } from '../workspace/index.js';
+import { installFileBodies } from '../code-mode/index.js';
 import type { HiddenToolSource } from '../../shared/hidden-tools.js';
 import { seedBevelHostedManualVars } from '../../shared/utcp-namespace.js';
 import type { InternalTokenService } from '../tool-auth/index.js';
@@ -148,6 +149,15 @@ export interface McpProxyOptions {
    * tool lists its built-in hint.
    */
   readOnlyOverrides?: () => Promise<Readonly<Record<string, boolean>>>;
+  /**
+   * Reads the file a tool call names as its body, as the caller with this user
+   * id: a knowledge-base path their access lets them read, or a staged file of
+   * theirs (`__tmp__/…`). Set, a call to an `http` tool whose body property is
+   * declared `format: file-path` sends that file's bytes instead of the path
+   * (`installFileBodies` in `modules/code-mode`). Absent, the path goes out as
+   * the agent wrote it.
+   */
+  readFileBody?: (userId: string, ref: string) => Promise<Uint8Array>;
 }
 
 /** Who a request is from — everything the proxy needs, resolved from that request's own bearer. */
@@ -1219,6 +1229,13 @@ export class McpService {
       utcpClientConfig(userId, variables, this.opts.secretsScope),
     );
     bindRequestBearer(client);
+    // A tool whose body is declared a file path sends the file's bytes, read as
+    // this caller. Installed before any manual is registered, so the argument
+    // checks registration installs sit over it and see the path as the agent
+    // gave it. Only here: the swap acts on `http` tools, and a pooled client
+    // carries a third-party MCP server's tools alone.
+    const readFileBody = this.opts.readFileBody;
+    if (readFileBody) installFileBodies(client, (ref) => readFileBody(userId, ref));
     return client;
   }
 

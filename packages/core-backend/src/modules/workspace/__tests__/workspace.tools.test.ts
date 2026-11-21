@@ -2268,6 +2268,54 @@ describe('office documents and PDFs', () => {
       expect((await post(`${base}/api/agent/tools/file_stat`, { path: `${KB_DIR}/new.png` })).status).not.toBe(200);
     });
 
+    // A NUL in the text handed to a write would land and make the page binary: read_file would then answer with a
+    // notice, and no text tool could put it right. So the write is refused, and the page stays the text it was.
+    it('write_file, write_files and edit_file refuse text that holds a NUL, and the file stays text', async () => {
+      const base = await start();
+      (fs as unknown as { writeFiles: (writes: { path: string; content: string }[]) => Promise<void> }).writeFiles = async (writes) => {
+        for (const w of writes) await fs.writeFile(w.path, w.content);
+      };
+      const page = `${KB_DIR}/notes.md`;
+      await fs.writeFile(page, 'verdict: `supported`\n');
+      const withNul = 'verdict: \u0000no evidence found\u0000\n';
+      interface NulRefusal { error: string; kind: string; path: string; argument: string; offset: number }
+
+      const write = await post(`${base}/api/agent/tools/write_file`, { path: page, content: withNul, mode: 'overwrite' });
+      expect(write.status).toBe(400);
+      const writeBody = (await write.json()) as NulRefusal;
+      expect(writeBody).toMatchObject({ kind: 'nul_in_text', path: page, argument: 'content', offset: 9 });
+      expect(writeBody.error).toContain('`content` holds a NUL character (U+0000) at offset 9');
+
+      // A new page is refused the same way: nothing is created.
+      const created = await post(`${base}/api/agent/tools/write_file`, { path: `${KB_DIR}/new-page.md`, content: withNul });
+      expect(created.status).toBe(400);
+      expect((await post(`${base}/api/agent/tools/file_stat`, { path: `${KB_DIR}/new-page.md` })).status).not.toBe(200);
+
+      // In a batch it is that path's outcome and no more: the clean file beside it lands.
+      const batch = await post(`${base}/api/agent/tools/write_files`, {
+        files: [{ path: page, content: withNul }, { path: `${KB_DIR}/clean.md`, content: 'fine\n' }],
+        mode: 'overwrite',
+      });
+      expect(batch.status).toBe(200);
+      const batchBody = (await batch.json()) as { count: number; files: { path: string; outcome: string; error?: string; message?: string }[] };
+      expect(batchBody.count).toBe(1);
+      expect(batchBody.files[0]).toMatchObject({ path: page, outcome: 'refused', error: 'nul_in_text' });
+      expect(batchBody.files[0].message).toContain('NUL character (U+0000)');
+      expect(batchBody.files[1]).toMatchObject({ path: `${KB_DIR}/clean.md`, outcome: 'created' });
+      expect((await onDisk(`${KB_DIR}/clean.md`)).toString('utf8')).toBe('fine\n');
+
+      const edit = await post(`${base}/api/agent/tools/edit_file`, { path: page, old_string: '`supported`', new_string: '\u0000no evidence found\u0000' });
+      expect(edit.status).toBe(400);
+      expect(await edit.json()).toMatchObject({ kind: 'nul_in_text', path: page, argument: 'new_string', offset: 0 });
+
+      // Nothing landed on the page, and it is still text every tool can read and edit.
+      expect((await onDisk(page)).toString('utf8')).toBe('verdict: `supported`\n');
+      expect(await (await post(`${base}/api/agent/tools/file_stat`, { path: page })).json()).toMatchObject({ contentMode: 'text', textEditable: true });
+      const repaired = await post(`${base}/api/agent/tools/edit_file`, { path: page, old_string: '`supported`', new_string: '`no evidence found`' });
+      expect(repaired.status).toBe(200);
+      expect((await onDisk(page)).toString('utf8')).toBe('verdict: `no evidence found`\n');
+    });
+
     it('copy_file and move_file carry every kind byte-for-byte', async () => {
       const base = await start();
       for (const f of await seed()) {
