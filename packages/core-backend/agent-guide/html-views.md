@@ -18,11 +18,10 @@ read.
   itself, or read it through `window.bevel.tools` where the app offers it
   (below).
 - **Inline scripts and styles only.** `<script src>`, `<link>`, `<iframe>`,
-  `<object>`, `<embed>`, `<base>` and `<meta>` are removed. Write CSS in a
-  `<style>` element and code in an inline `<script>`. An image is a `data:`
-  URL. Code added at runtime runs only if its text is already in the page: a
-  new script, `on…` attribute or `javascript:` URL does not, even through
-  `innerHTML`. Use `addEventListener`.
+  `<object>`, `<embed>`, `<base>` and `<meta>` are removed. An image is a
+  `data:` URL. A script, `on…` attribute or `javascript:` URL added at runtime,
+  even through `innerHTML`, runs only if its text is already in the page: use
+  `addEventListener`.
 - **The body is the page.** The app shows the sanitised contents of `<body>`
   in a document of its own: `<style>` and inline `<script>` in `<head>` are
   kept, moved to the start of the body; everything else in `<head>` and the
@@ -82,11 +81,9 @@ returning a promise:
 - `window.bevel.tools.uploadFile(file, options)` — what `apply_file_upload`
   answers after the app has uploaded `file` for the viewer (below).
 
-The two kinds of name differ. `searchTools` and `toolsInfo` use the
-namespaced name a chain calls (`KNOWLEDGE_BASE.read_file`); `callTool` takes
-the bare name `tools/call` takes (`read_file`). Passing a `searchTools`
-result straight to `callTool` fails as an unknown tool. Drop the prefix, or
-call it from `callToolChain`.
+`searchTools` and `toolsInfo` name a tool as a chain calls it
+(`KNOWLEDGE_BASE.read_file`); `callTool` takes the bare name (`read_file`), so
+drop the prefix, or call it from `callToolChain`.
 
 `window.bevel.tools` is `null` wherever tools are not available: on the
 embed (a page shown on another site, or in a chat's MCP App pane), and in a
