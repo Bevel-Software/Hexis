@@ -5,7 +5,7 @@ import { useLocation } from 'react-router-dom';
 import type { FileTreeEntry } from '@bevel-software/platform-shared';
 import type { WorkspaceContextValue } from '../../modules/workspace';
 import type { GitContextValue } from '../../modules/git';
-import { makeWorkspaceFixture } from '../../modules/workspace/__tests__/testFixtures';
+import { makeShellWorkspace } from './workspaceFixture';
 import { toggleSidebar } from '../../modules/layout';
 import { CoreAppShell } from '../CoreAppShell';
 import { KnowledgeSurface } from '../KnowledgeSurface';
@@ -96,7 +96,7 @@ const TREE = folder('', [
 /** The workspace with one file open, as the tab system would hold it. */
 function workspaceOn(path: string, content: string): WorkspaceContextValue {
   const tab = { path, content, savedContent: content, isDirty: false, pendingFileContent: null };
-  return makeWorkspaceFixture({
+  return makeShellWorkspace({
     fileTree: TREE,
     openTabs: [tab],
     activeTab: tab,
