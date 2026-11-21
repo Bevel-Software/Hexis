@@ -1,4 +1,4 @@
-import { useContext, useMemo } from 'react';
+import { useContext, useMemo, type ReactNode } from 'react';
 import { Routes, Route } from 'react-router-dom';
 import { FileExplorer } from '../modules/workspace/components/FileExplorer';
 import { FileViewer } from '../modules/workspace/components/FileViewer';
@@ -34,22 +34,35 @@ const CORE_PANES: PaneDef[] = [
  * mounted under the shell's change-request provider, which it shares with
  * the library; a narrowed surface is mounted by its app, outside it, so it
  * brings its own.
+ *
+ * An app with screens of its own beside its folders keeps the one sidebar
+ * with two more props. `nav` is its navigation, drawn above its folders in
+ * the sidebar (see `FileExplorer`'s `lead`). `page` is the screen it shows
+ * in place of the file viewer, at a location that is not a file: the surface
+ * is then the sidebar and that page alone, without the registry's panes, so
+ * no pane built around a file sits beside a page that is not one, and the
+ * phone layout, which gives the screen to the chat pane, is not chosen for
+ * it. Leave `page` undefined at a file's location and the viewer is back.
+ * Both go into the pane list, so hand in the same element on every render
+ * (one component each, which reads the location itself), as `roots` is one
+ * array: a fresh element each time rebuilds the panes each time.
  */
-export function KnowledgeSurface({ roots }: { roots?: readonly string[] } = {}) {
+export function KnowledgeSurface({
+  roots,
+  nav,
+  page,
+}: { roots?: readonly string[]; nav?: ReactNode; page?: ReactNode } = {}) {
   const registry = useAppRegistry();
   const setController = useContext(PaneControllerContext);
-  const panes = useMemo(
-    () =>
-      [
-        ...(roots
-          ? CORE_PANES.map((pane) =>
-              pane.id === 'explorer' ? { ...pane, node: <FileExplorer roots={roots} /> } : pane,
-            )
-          : CORE_PANES),
-        ...registry.panes,
-      ].sort((a, b) => (a.order ?? 100) - (b.order ?? 100)),
-    [registry, roots],
-  );
+  const onPage = page !== undefined;
+  const panes = useMemo(() => {
+    const core = CORE_PANES.map((pane) => {
+      if (pane.id === 'explorer') return { ...pane, node: <FileExplorer roots={roots} lead={nav} fileOnScreen={!onPage} /> };
+      if (pane.id === 'viewer' && onPage) return { ...pane, node: page };
+      return pane;
+    });
+    return [...core, ...(onPage ? [] : registry.panes)].sort((a, b) => (a.order ?? 100) - (b.order ?? 100));
+  }, [registry, roots, nav, page, onPage]);
   const layout = (
     /* The connect-your-agent reminder rides Knowledge's sidebar too, and
        the shell is where that is decided: `layout` is the app's generic
