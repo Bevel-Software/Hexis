@@ -1,6 +1,7 @@
 import { useContext, useMemo, type ReactNode } from 'react';
 import { Routes, Route } from 'react-router-dom';
-import { FileExplorer, type GivenNode } from '../modules/workspace/components/FileExplorer';
+import { FileExplorer } from '../modules/workspace/components/FileExplorer';
+import type { GivenNode } from '../modules/workspace';
 import { FileViewer } from '../modules/workspace/components/FileViewer';
 import { FileRoute } from '../modules/workspace/components/FileRoute';
 import { OpenChangeRequestsProvider } from '../modules/workspace/state/open-change-requests';
