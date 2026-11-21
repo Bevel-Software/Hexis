@@ -327,6 +327,9 @@ describe('CoreAppShell: a claiming app with screens of its own', () => {
     const folders = explorer().getByText('Workflows');
     expect(nav.compareDocumentPosition(heading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(heading.compareDocumentPosition(folders) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // The heading stands in place of the rule a tree without app rows draws
+    // over its folders (this tree has no loose files, which draw one too).
+    expect(screen.getByTestId('file-explorer-root').querySelector('.border-t.border-line')).toBeNull();
     // And no second heading over nothing: nothing is pinned.
     expect(explorer().queryByText('Company Context')).not.toBeInTheDocument();
   }
@@ -358,6 +361,36 @@ describe('CoreAppShell: a claiming app with screens of its own', () => {
     expect(screen.queryByRole('heading', { name: 'The workflows page' })).not.toBeInTheDocument();
     expect(screen.getByTestId('chat-pane')).toBeInTheDocument();
     expect(agentRow()).toHaveAttribute('aria-current', 'true');
+  });
+
+  describe('with a folder pinned', () => {
+    const PINS = 'bevel-pinned-folders';
+    const WORKFLOWS = `${KB}/Workflows`;
+    afterEach(() => window.localStorage.removeItem(PINS));
+
+    it.each([
+      ['its page', '/agents', 'The workflows page'],
+      ['a hosted file', `/workspace/main/${AGENT}`, null],
+    ])('draws "Company Context" over the pins, between its navigation and "Files", at %s', async (_, url, pageHeading) => {
+      window.localStorage.setItem(PINS, JSON.stringify([WORKFLOWS]));
+      session.workspace = workspaceOn(AGENT, 'role: coder');
+      renderShellAt(url, [screensApp]);
+      if (pageHeading) await screen.findByRole('heading', { name: pageHeading });
+      else await screen.findByTestId('agent-renderer');
+
+      const nav = explorer().getByRole('navigation', { name: 'Agents' });
+      const pinsHeading = explorer().getByText('Company Context');
+      const filesHeading = explorer().getByText('Files');
+      // The pinned row, then the same folder again in the tree under "Files".
+      const [pinned, inTree] = Array.from(
+        screen.getByTestId('file-explorer-root').querySelectorAll(`[data-tree-path="${WORKFLOWS}"]`),
+      );
+      const follows = (a: Node, b: Node) => Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
+      expect(follows(nav, pinsHeading)).toBe(true);
+      expect(follows(pinsHeading, pinned)).toBe(true);
+      expect(follows(pinned, filesHeading)).toBe(true);
+      expect(follows(filesHeading, inTree)).toBe(true);
+    });
   });
 });
 
@@ -437,9 +470,12 @@ describe('CoreAppShell: a claiming app with screens of its own, on a narrow scre
   it('makes the sidebar with the app’s navigation the drawer, opened by the sidebar button', async () => {
     setViewportWidth(375);
     session.workspace = workspaceOn(AGENT, 'role: coder');
-    renderShellAt('/agents', [screensApp]);
+    renderShellAt('/agents', [screensApp], [chatPane]);
 
+    // The page has the screen: the phone layout, which gives it to the chat
+    // pane, is not chosen for a page that is not a file.
     expect(await screen.findByRole('heading', { name: 'The workflows page' })).toBeInTheDocument();
+    expect(screen.queryByTestId('chat-pane')).not.toBeInTheDocument();
     const sidebar = screen.getByTestId('file-explorer-root').closest('aside')!;
     expect(sidebar).toContainElement(screen.getByRole('navigation', { name: 'Agents', hidden: true }));
     // Closed, and out of reach, until asked for.
