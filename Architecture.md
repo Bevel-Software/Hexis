@@ -6,7 +6,7 @@ The codebase is organized by **domain**, not by technical layer. Each domain mod
 
 ```
 packages/
-  shared/            # cross-cutting contracts (IWorkspaceService, git/auth/workflow types)
+  shared/            # cross-cutting contracts (IWorkspaceService, git/auth/version-control types)
   core-backend/
     src/modules/
       workspace/     # branches, files, the file readers behind read_file/grep

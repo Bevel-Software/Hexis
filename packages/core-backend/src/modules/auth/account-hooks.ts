@@ -41,7 +41,26 @@ export interface IAccountHooks {
   onAccountInvited(hook: AccountInvitedHook): void;
   /** Run every listener in registration order; the channels that reached the person, in that order. */
   runAccountInvited(event: AccountInvitedEvent): Promise<string[]>;
+  onAccountDeactivated(hook: AccountDeactivatedHook): void;
+  /** Run every listener in registration order; what each cleaned up, in that order. */
+  runAccountDeactivated(event: AccountDeactivatedEvent): Promise<string[]>;
 }
+
+/**
+ * An admin switched an account off (or a directory told the deployment the
+ * person left). The account keeps its row; what it HOLDS elsewhere — the
+ * sign-ins it made to outside systems — is what listeners let go of.
+ */
+export interface AccountDeactivatedEvent {
+  userId: string;
+  email: string;
+}
+
+/**
+ * A listener answers what it cleaned up — `'managed-connections'`, say — or
+ * null when there was nothing; same rule as {@link AccountInvitedHook}.
+ */
+export type AccountDeactivatedHook = NotifyingListener<AccountDeactivatedEvent>;
 
 export class AccountHooks implements IAccountHooks {
   // The account exists whether or not the person was told: the admin's
@@ -50,6 +69,13 @@ export class AccountHooks implements IAccountHooks {
     log,
     'an account-invited listener failed; the person was not notified by it:',
   );
+  // The account is off whether or not a listener cleaned up after it: a
+  // failure here is logged, and the sign-ins it left are refused on use
+  // like everything else a deactivated account holds.
+  private readonly deactivated = new ListenerSeam<AccountDeactivatedEvent>(
+    log,
+    'an account-deactivated listener failed; what it cleans up is still there:',
+  );
 
   onAccountInvited(hook: AccountInvitedHook): void {
     this.invited.add(hook);
@@ -57,5 +83,13 @@ export class AccountHooks implements IAccountHooks {
 
   runAccountInvited(event: AccountInvitedEvent): Promise<string[]> {
     return this.invited.run(event);
+  }
+
+  onAccountDeactivated(hook: AccountDeactivatedHook): void {
+    this.deactivated.add(hook);
+  }
+
+  runAccountDeactivated(event: AccountDeactivatedEvent): Promise<string[]> {
+    return this.deactivated.run(event);
   }
 }

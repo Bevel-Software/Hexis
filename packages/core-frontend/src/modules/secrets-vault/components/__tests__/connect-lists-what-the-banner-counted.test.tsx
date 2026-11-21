@@ -48,6 +48,7 @@ function v(over: Partial<ToolVarStatus> & { name: string }): ToolVarStatus {
     label: null,
     key: `k_${over.name}`,
     adminConfigured: false,
+    adminKind: null,
     userConfigured: false,
     ...over,
   };

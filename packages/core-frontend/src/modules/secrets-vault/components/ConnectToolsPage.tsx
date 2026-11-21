@@ -2,12 +2,15 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Badge, Banner, Button, Surface, TextField } from '../../../shared/components';
 import { cn } from '../../../lib/utils';
-import { pathForTool, readOAuthFragment, ToolLogo } from '../../library';
+import { pathForTool, readOAuthFragment } from '../../library';
+import { ToolLogo } from '../../library/components/ToolLogo';
 import { startOAuth } from '../services/secrets.api';
-import { setUserVar, setAdminVar, deleteUserVar, setOAuthClientSecret } from '../services/tool-secrets.api';
+import { setUserVar, setAdminVar, deleteUserVar, deleteAdminVar, setOAuthClientSecret } from '../services/tool-secrets.api';
 import { SavedKeyProbeResult } from '../probe/SavedKeyProbeResult';
 import { useSavedKeyProbe, type SavedKeyProbe } from '../probe/useSavedKeyProbe';
 import { announceToolCredentialsChanged } from '../../../core/events';
+import { useAppRegistry } from '../../../core/registry';
+import { SlotBoundary } from '../../../shared/components/SlotBoundary';
 import { useConnectAsChoice } from '../../agents';
 import { ConnectAsChoice } from '../../agents/components/ConnectAsChoice';
 import {
@@ -19,6 +22,9 @@ import {
   type ConnectOAuth,
   type ConnectToolOAuth,
 } from '../services/connect.api';
+import { ManagedConnectorCard } from './ManagedConnectorCard';
+import { IncludeToggle } from './IncludeToggle';
+import { canBringOwnApp, isManagedRow } from '../utils/managed-card-state';
 import {
   isActionable,
   outstandingCount,
@@ -128,6 +134,9 @@ export function ConnectToolsPage() {
   // from "4 integrations need setup" came to show two.
   const [skipped, setSkipped] = useState<Set<string>>(new Set());
   const [wiping, setWiping] = useState<Set<string>>(new Set());
+  // The distribution's foot of the page (which connectors it offers, and
+  // enabling one), when it registers one. See `AppRegistry.connectPanel`.
+  const ConnectPanel = useAppRegistry().connectPanel;
 
   /**
    * Which load is allowed to publish. Saving a key refreshes, and so does the
@@ -263,6 +272,31 @@ export function ConnectToolsPage() {
     }
   };
 
+  /**
+   * Disconnect a managed connector: the server revokes the token with the
+   * provider where it can, then deletes it here. A WORKSPACE connection is
+   * the shared row, which only a writer may remove (the server enforces it;
+   * the card offers the button to the same people).
+   */
+  const onDisconnectManaged = async (o: ConnectToolOAuth) => {
+    const id = signInId(o);
+    setWiping((s) => new Set(s).add(id));
+    try {
+      if (o.managed?.tokenScope === 'shared') await deleteAdminVar(o.slug, o.varName);
+      else await deleteUserVar(o.slug, o.varName);
+      announceToolCredentialsChanged();
+      await refresh(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setWiping((s) => {
+        const nextSet = new Set(s);
+        nextSet.delete(id);
+        return nextSet;
+      });
+    }
+  };
+
   const onFinish = async () => {
     if (!agentState || !connectAs.mayConnect) return;
     setFinishing(true);
@@ -349,6 +383,10 @@ export function ConnectToolsPage() {
   const outstanding = outstandingCount(listing) + standaloneOutstanding(listing);
   const nothingToDo =
     !loading && tools.length === 0 && oauth.length === 0 && toolOAuth.length === 0;
+  // Managed connectors get a card of their own (what they do, what they ask
+  // for); every other sign-in stays a row under "Sign-ins".
+  const connectors = toolOAuth.filter(isManagedRow);
+  const plainSignIns = toolOAuth.filter((o) => !o.managed);
 
   // A document, like every Skills & Tools page: `LibraryLayout`'s pane is the
   // scroller. The header sticks to the top of that pane, so the title and
@@ -476,10 +514,49 @@ export function ConnectToolsPage() {
                 </Banner>
               )}
 
-              {(toolOAuth.length > 0 || oauth.length > 0) && (
+              {connectors.length > 0 && (
+                <Section title="Connectors">
+                  {connectors.map((o) => (
+                    <ManagedConnectorCard
+                      key={o.key}
+                      o={o}
+                      busy={wiping.has(signInId(o))}
+                      // Include/skip, as every sign-in row has it: skipping a
+                      // personal sign-in removes the caller's own token (the
+                      // same wipe as a row's). A workspace connection is
+                      // everyone's and cannot be "skipped by you": nothing
+                      // takes a shared token out of one agent's connection,
+                      // so the card offers no toggle rather than a hollow one.
+                      on={isOn(signInId(o))}
+                      onToggle={
+                        o.managed.tokenScope === 'shared'
+                          ? undefined
+                          : () =>
+                              void onToggle(signInId(o), o.authorized, async (removed) => {
+                                await deleteUserVar(o.slug, o.varName);
+                                removed();
+                              })
+                      }
+                      onConnect={() => void onAuthorizeTool(o.slug, o.varName)}
+                      onDisconnect={() => void onDisconnectManaged(o)}
+                      onOwnApp={
+                        canBringOwnApp(o)
+                          ? async (clientId, clientSecret) => {
+                              await setOAuthClientSecret(o.slug, o.varName, clientSecret, clientId);
+                              announceToolCredentialsChanged();
+                              await refresh(true);
+                            }
+                          : undefined
+                      }
+                    />
+                  ))}
+                </Section>
+              )}
+
+              {(plainSignIns.length > 0 || oauth.length > 0) && (
                 <Section title="Sign-ins">
                   {/* OAuth-backed tool variables — authorized via the tool-scoped flow. */}
-                  {toolOAuth.map((o) => {
+                  {plainSignIns.map((o) => {
                     const id = signInId(o);
                     const on = isOn(id);
                     // The provider was never registered, so there is no consent
@@ -659,6 +736,21 @@ export function ConnectToolsPage() {
               )}
             </>
           )}
+
+          {/* The distribution's foot of the page — which connectors it offers
+              and enabling one — rendered whatever the lists above hold: a
+              reader with nothing to set up is exactly who comes here to
+              enable something. */}
+          {ConnectPanel && !loading && (
+            <SlotBoundary label="connect panel">
+              <ConnectPanel
+                onChanged={() => {
+                  announceToolCredentialsChanged();
+                  void refresh(true);
+                }}
+              />
+            </SlotBoundary>
+          )}
         </div>
       </div>
     </div>
@@ -789,32 +881,6 @@ function ConnectRow(props: RowHeadProps) {
     <Surface tone="surface" radius="lg" elevation="none" padded className="border border-line">
       <ConnectRowHead {...props} />
     </Surface>
-  );
-}
-
-/** Include/skip checkbox for a tool or sign-in row. */
-function IncludeToggle({
-  on,
-  busy,
-  onChange,
-}: {
-  on: boolean;
-  busy: boolean;
-  onChange: () => void;
-}) {
-  const label = on
-    ? 'Skip this tool (removes your saved keys and sign-ins for it)'
-    : 'Include this tool';
-  return (
-    <input
-      type="checkbox"
-      checked={on}
-      disabled={busy}
-      onChange={onChange}
-      title={label}
-      aria-label={label}
-      className="size-3.5 shrink-0 accent-accent disabled:opacity-40"
-    />
   );
 }
 

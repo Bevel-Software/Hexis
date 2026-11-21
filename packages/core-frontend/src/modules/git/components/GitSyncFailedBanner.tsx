@@ -1,6 +1,6 @@
 import { useCallback, useContext, useState } from 'react';
 import { AlertTriangle, CloudOff } from 'lucide-react';
-import { useEventBusSubscription, canonicalizeWorkspaceId } from '../../workflow';
+import { useEventBusSubscription, canonicalizeWorkspaceId } from '../../version-control';
 import { useWorkspace, WorkspaceContext, useFileNav } from '../../workspace';
 
 /**
@@ -70,7 +70,10 @@ function ConflictFileNames({ paths }: { paths: string[] }) {
  * an expired token, a revoked repo grant, an unreachable host — is an operator
  * concern, and there is nothing the person writing a page can do about it. So
  * the copy tells them their work is safe and points whoever can act at the
- * logs, rather than explaining git.
+ * logs, rather than explaining git. The one push failure that is not the git
+ * host's is a refusal by the platform's own access check (`accessRefusal`):
+ * it gets its own headline, which blames no host and points at no logs, and
+ * its detail line says the platform refused.
  *
  * Clears on `git-sync-recovered`, which the backend emits when a push
  * succeeds after failing. No dismiss control, same as `PullNeededBanner`: the
@@ -106,7 +109,7 @@ export function GitSyncFailedBanner({ workspaceId: forWorkspaceId }: { workspace
   // transition). The alternative — clearing on switch — hides real, still-
   // broken state, which is the exact failure mode this PR exists to fix.
   const [failures, setFailures] = useState<
-    ReadonlyMap<string, { branch: string; reason: string; conflictedPaths?: string[] }>
+    ReadonlyMap<string, { branch: string; reason: string; conflictedPaths?: string[]; refusedByPlatform: boolean }>
   >(new Map());
 
   useEventBusSubscription(
@@ -122,6 +125,7 @@ export function GitSyncFailedBanner({ workspaceId: forWorkspaceId }: { workspace
             branch: e.branch,
             reason: e.reason,
             conflictedPaths: e.conflictedPaths,
+            refusedByPlatform: e.accessRefusal !== undefined,
           }),
         );
       },
@@ -183,6 +187,30 @@ export function GitSyncFailedBanner({ workspaceId: forWorkspaceId }: { workspace
         ) : (
           <ConflictFiles paths={failure.conflictedPaths} />
         )}
+      </div>
+    );
+  }
+
+  // The platform's own access check refused the push: the git host was never
+  // asked, and an operator's logs are not where the answer is. The headline
+  // says only that the work is safe and not shared; the detail line is the
+  // backend's sentence, which says who refused (the platform) and, as far as
+  // this person may be told, which file blocks the branch and who may write
+  // it. Saying who refused in both would name the same actor twice.
+  if (failure.refusedByPlatform) {
+    return (
+      <div
+        role="alert"
+        className="px-3 py-1.5 bg-sunken border-b border-line text-xs text-ink shrink-0"
+      >
+        <div className="flex items-center gap-2">
+          <AlertTriangle size={13} className="shrink-0" />
+          <span className="flex-1">
+            Changes on <span className="font-mono font-semibold">{failure.branch}</span> are saved
+            here but were not shared.
+          </span>
+        </div>
+        <div className="mt-1 ml-5 text-ink-muted break-words">{failure.reason}</div>
       </div>
     );
   }

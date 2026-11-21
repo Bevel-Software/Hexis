@@ -12,7 +12,7 @@ import { useModalLayer } from '../../../shared/components/useModalLayer';
 import { cn } from '../../../lib/utils';
 import { PR_STALE_EVENT } from '../../../core/events';
 import { AuthContext } from '../../auth';
-import { useEventBus } from '../../workflow';
+import { useEventBus } from '../../version-control';
 import {
   approvePrFile,
   deleteChangeRequest,

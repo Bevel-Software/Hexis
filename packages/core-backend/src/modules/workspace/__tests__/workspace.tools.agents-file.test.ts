@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { DEFAULT_KB_LAYOUT } from '@bevel-software/platform-shared';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import { GUIDE_FIRST_SENTENCE, ToolRegistry } from '../../tool-registry/index.js';
-import { WorkflowHooks, createToolHandlerFactory } from '../../../__tests__/tool-wiring.js';
+import { VersionControlHooks, createToolHandlerFactory } from '../../../__tests__/tool-wiring.js';
 import type { ToolAuth } from '../../tool-auth/index.js';
 import type { IAccessControl } from '../../access/index.js';
 import { DocExtractService } from '../file-readers/doc-extract.service.js';
@@ -51,7 +51,7 @@ async function descriptions(registry: ToolRegistry = new ToolRegistry()): Promis
     kb,
     {
       recoveryBotEmail: 'recovery-bot@bevel.local',
-      hooks: new WorkflowHooks(),
+      hooks: new VersionControlHooks(),
       notes: new ToolDescriptionNotes(),
     },
     new RoutineWritePolicyService(),

@@ -68,8 +68,8 @@ import { expectMenuAtTheEndOfTheTitleRow, expectTitleRowSpansTheDocumentColumn }
 import { expectTitleKeepsItsInk } from '../../../__tests__/title-ink-room';
 import { PAGE_HEADER_TESTID } from '../../../shared/theme/header';
 import { TOOL_CREDENTIALS_STALE_EVENT } from '../../../core/events';
-import { DEFAULT_BRANCH, type WorkflowEvent } from '@bevel-software/platform-shared';
-import { EventBusProvider } from '../../workflow';
+import { DEFAULT_BRANCH, type VersionControlEvent } from '@bevel-software/platform-shared';
+import { EventBusProvider } from '../../version-control';
 import { stubServerEventStream } from '../../../__tests__/server-event-stream';
 
 const GITHUB: ToolSecrets = {
@@ -767,7 +767,7 @@ describe('ToolPage: deleted by someone else', () => {
     );
   }
 
-  const deleted = (byUserName: string): WorkflowEvent => ({
+  const deleted = (byUserName: string): VersionControlEvent => ({
     id: 1,
     ts: '',
     kind: 'file-changed',
@@ -804,7 +804,7 @@ describe('ToolPage: deleted by someone else', () => {
     await screen.findByRole('heading', { name: 'heyreach', level: 1 });
 
     fileRoute.gone = true;
-    act(() => bus.emit({ ...deleted('Git sync'), byUserId: 'system' } as WorkflowEvent));
+    act(() => bus.emit({ ...deleted('Git sync'), byUserId: 'system' } as VersionControlEvent));
 
     expect(await screen.findByRole('heading', { name: 'This file was deleted' })).toBeInTheDocument();
     expect(screen.getByText(/was deleted from/).textContent).toBe(

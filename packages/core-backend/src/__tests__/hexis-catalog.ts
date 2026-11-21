@@ -11,11 +11,11 @@ import { agentGuideSections, registerAgentGuideTool } from '../modules/agent-gui
 import {
   RoutineWritePolicyService,
   UuidSessionSink,
-  WorkflowHooks,
+  VersionControlHooks,
   createToolHandlerFactory,
   registerChangeRequestReadTools,
   registerEmbedTools,
-  registerWorkflowTools,
+  registerVersionControlTools,
   registerWorkspaceTools,
 } from './tool-wiring.js';
 
@@ -72,7 +72,7 @@ export async function hexisCatalog(
   const toolAuth = ((_req, _res, next) => next()) as unknown as ToolAuth;
   const toolHandler = createToolHandlerFactory(unused());
   const kb = testKbContext();
-  const gate = { recoveryBotEmail: 'bot@x', hooks: new WorkflowHooks(), notes: new ToolDescriptionNotes() };
+  const gate = { recoveryBotEmail: 'bot@x', hooks: new VersionControlHooks(), notes: new ToolDescriptionNotes() };
 
   // The change-request readers come first, as the root mounts them: they
   // gate their whole payload on the caller's read access and take the access
@@ -106,7 +106,7 @@ export async function hexisCatalog(
     undefined,
     new RipgrepPatternMatcher(),
   );
-  registerWorkflowTools(registry, router, toolAuth, toolHandler, kb, async () => true, { canRead: async () => true, canReadAtRef: async () => true, canReadBatch: async () => new Map(), canReadBatchAtRef: async () => new Map(), canWrite: async () => true } as never, { recoveryBotEmail: 'recovery@x', hooks: { runAgentRead: async () => undefined }, notes: { onChange: () => undefined } } as never);
+  registerVersionControlTools(registry, router, toolAuth, toolHandler, kb, async () => true, { canRead: async () => true, canReadAtRef: async () => true, canReadBatch: async () => new Map(), canReadBatchAtRef: async () => new Map(), canWrite: async () => true } as never, { recoveryBotEmail: 'recovery@x', hooks: { runAgentRead: async () => undefined }, notes: { onChange: () => undefined } } as never);
   registerPluginsTools(registry, kb);
   registerSkillsTools(registry, router, toolAuth, toolHandler, skills);
   registerToolManualsTools(registry, router, toolAuth, toolHandler, emptyManuals, {

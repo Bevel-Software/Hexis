@@ -7,7 +7,7 @@ import type { IAccessControl } from '../access/index.js';
 import { utcpNamespacedKey } from '../../shared/utcp-namespace.js';
 import type { ConnectorScope, IToolManualService } from './tool-manuals.contract.js';
 import type { HiddenToolSource } from '../../shared/hidden-tools.js';
-import { userSecretGap } from '../secrets-vault/index.js';
+import { scopesCovered, userSecretGap } from '../secrets-vault/index.js';
 
 /**
  * What `list_tool_setup` needs from the secrets vault (structurally satisfied
@@ -29,6 +29,9 @@ export interface VariableStatusPort {
       adminKind?: 'static' | 'oauth' | null;
       userConfigured: boolean;
       userAuthorized?: boolean;
+      /** For a shared (workspace) sign-in: the owner's row holds tokens, and what they were granted. */
+      adminAuthorized?: boolean;
+      adminGrantedScopes?: string;
       userKind?: 'static' | 'oauth' | null;
       grantedScopes?: string;
     }[]
@@ -116,18 +119,15 @@ export function registerToolManualsTools(
     // hidden tool's entry CONTAINS is on the field below rather than here.
     description:
       'Configuration status of every `.tool` the current user can access: what each needs set up and what is ' +
-      'configured, as `{ tools, invalid, onBranchOnly, note? }`. Scoped to the CALLER: a `.tool` it cannot ' +
-      'READ is absent, and every flag is the caller\'s own. ' +
-      'Secret VALUES are never returned and can never be set through a tool: an admin enters them in the tool ' +
-      'editor; users sign in on /connect. ' +
-      'Setting a tool\'s shared secrets is gated by `canWrite` on the `.tool` FILE (its frontmatter ' +
-      '`write:`/`owner:` verbs and the access.md chain), NOT by a platform role: who manages the file configures ' +
-      'the tool. ' +
-      '`hiddenTools` names the tools Hexis hides from agents for an invalid schema. ' +
-      'The listing is the RELEASED catalog, built from the default branch only: a server or `.tool` you declared on a ' +
-      'draft is not listed, callable or signed-in-able until it is merged. Pass `branch` (the draft you wrote the ' +
-      'declaration on) and `onBranchOnly` names every tool declared there that the default branch does not serve ' +
-      'yet — open a change request and ask the user to merge it.',
+      'configured, as `{ tools, invalid, onBranchOnly, note? }`. Scoped to the CALLER: a `.tool` it cannot READ is ' +
+      "absent, and a `user` variable's flags are the caller's own. An `admin` variable with `oauth` is a WORKSPACE " +
+      "connection: `authorized` is the owner's connection, which only a writer of the tool can make or remake. " +
+      'Secret VALUES are never returned or set through a tool: an admin enters them in the tool editor; users sign ' +
+      'in on /connect. Setting shared secrets is gated by `canWrite` on the `.tool` FILE (its frontmatter verbs and ' +
+      'the access.md chain), not by a platform role. `hiddenTools` names the tools Hexis hides for an invalid ' +
+      'schema. The listing is the RELEASED catalog (default branch only): a server or `.tool` declared on a draft is ' +
+      'not listed, callable or signed-in-able until merged. Pass `branch` and `onBranchOnly` names every tool ' +
+      'declared there that the default branch does not serve yet — open a change request and ask the user to merge it.',
     path: '/api/agent/tools/list_tool_setup',
     inputs: {
       type: 'object',
@@ -211,7 +211,22 @@ export function registerToolManualsTools(
                         'Shared value set (plain admin vars), or the owner finished provider setup (OAuth vars).',
                     },
                     userConfigured: { type: 'boolean' },
-                    authorized: { type: ['boolean', 'null'], description: 'OAuth vars: current user signed in.' },
+                    authorized: {
+                      type: ['boolean', 'null'],
+                      description:
+                        'OAuth vars: a token is stored that covers the declared scopes — the current user\'s for a `user` ' +
+                        'variable, the WORKSPACE connection an owner made for an `admin` one (a managed connector enabled ' +
+                        'as one shared connection; a reader cannot connect that, a writer of the tool can).',
+                    },
+                    managed: {
+                      type: 'object',
+                      description:
+                        'Present when the sign-in goes through a managed connector (the distribution\'s own OAuth app, a ' +
+                        'broker doing the round-trip): which connector and scope set. Members connect on /connect; an ' +
+                        'owner needs no client secret for it.',
+                      properties: { connectorId: { type: 'string' }, scopeSet: { type: 'string' } },
+                      required: ['connectorId', 'scopeSet'],
+                    },
                   },
                   required: ['name', 'scope', 'oauth', 'adminConfigured', 'userConfigured'],
                 },
@@ -304,6 +319,16 @@ export function registerToolManualsTools(
             variables: (m.variables ?? []).map((v) => {
               const st = statusByKey.get(varKey(m.name, v.name));
               const isOAuth = v.oauth != null;
+              // A sign-in counts as authorized when a token is stored AND it
+              // still covers what the tool declares — the one readiness rule,
+              // so this flag agrees with the sign-in note below. A shared
+              // sign-in (a managed workspace connection) reads the owner's
+              // row: it is everyone's once an owner has connected it.
+              const authorized = isOAuth
+                ? v.scope === 'admin'
+                  ? st?.adminAuthorized === true && scopesCovered(v.oauth?.scopes, st.adminGrantedScopes)
+                  : st?.userAuthorized === true && scopesCovered(v.oauth?.scopes, st.grantedScopes)
+                : null;
               return {
                 name: v.name,
                 scope: v.scope,
@@ -311,7 +336,8 @@ export function registerToolManualsTools(
                 oauth: isOAuth,
                 adminConfigured: st?.adminConfigured ?? false,
                 userConfigured: st?.userConfigured ?? false,
-                authorized: isOAuth ? (st?.userAuthorized ?? false) : null,
+                authorized,
+                ...(v.oauth?.managed ? { managed: v.oauth.managed } : {}),
               };
             }),
           };

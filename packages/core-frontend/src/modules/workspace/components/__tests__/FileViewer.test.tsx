@@ -88,8 +88,8 @@ vi.mock('../../../access/components/ManageAccessDialog', () => ({
 // `recordActivity`, which has no other visible effect (it resets a timer), so
 // there is no way to assert the scroll→lock wiring without a spy on it.
 const lockActivity = vi.hoisted(() => ({ recordActivity: vi.fn() }));
-vi.mock('../../../workflow', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../../../workflow')>();
+vi.mock('../../../version-control', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../version-control')>();
   const { useCallback } = await import('react');
   return {
     ...actual,
@@ -180,7 +180,7 @@ afterEach(() => {
 });
 
 import { FileViewer } from '../FileViewer';
-import { LockApiError, SELF_HOLD_MESSAGE } from '../../../workflow';
+import { LockApiError, SELF_HOLD_MESSAGE } from '../../../version-control';
 import { WorkspaceContext, type WorkspaceContextValue } from '../../state/workspace.context';
 import { GitContext, type GitContextValue } from '../../../git';
 import { AuthContext, type AuthContextValue } from '../../../auth';

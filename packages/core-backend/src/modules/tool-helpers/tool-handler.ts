@@ -7,7 +7,7 @@ import {
   assertBranchProvided,
   BranchNotFoundError,
   DefaultBranchUnsetError,
-  WorkflowDomainError,
+  VersionControlDomainError,
 } from '../../shared/domain-errors.js';
 import { branchHandlingFor, type BranchHandling } from './tool-def.js';
 import { domainErrorBody } from '../../shared/http-errors.js';
@@ -323,7 +323,7 @@ export function createToolHandlerFactory(
           // payload) — so a tool caller
           // switching on `branch-not-found` vs `remote-branch-gone` does not
           // have to read the prose to tell them apart.
-          if (err instanceof WorkflowDomainError) {
+          if (err instanceof VersionControlDomainError) {
             res.status(err.status).json(domainErrorBody(err));
             return;
           }

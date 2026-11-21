@@ -1,8 +1,8 @@
 import { onTestFinished } from 'vitest';
-import type { WorkflowEvent } from '@bevel-software/platform-shared';
+import type { VersionControlEvent } from '@bevel-software/platform-shared';
 
 export interface ServerEventStream {
-  emit(event: WorkflowEvent): void;
+  emit(event: VersionControlEvent): void;
 }
 
 let installed: ServerEventStream | null = null;
@@ -39,7 +39,7 @@ export function stubServerEventStream(): ServerEventStream {
     close() {
       open.delete(this);
     }
-    deliver(event: WorkflowEvent) {
+    deliver(event: VersionControlEvent) {
       for (const fn of [...(this.listeners.get('message') ?? [])]) {
         fn(new MessageEvent('message', { data: JSON.stringify(event) }));
       }

@@ -56,7 +56,7 @@ async function startSession(kb: KbContext, defaultWorkspaceDir?: string): Promis
     workspaceService: (defaultWorkspaceDir
       ? { hasBootstrappedWorkspace: async () => true, getWorkspacePath: async () => defaultWorkspaceDir }
       : {}) as never,
-    workflowService: {} as never,
+    versionControlService: {} as never,
     events: {} as never,
     getFilesystem: async () => ({}) as never,
     getWriteValidator: async () => ({}) as never,

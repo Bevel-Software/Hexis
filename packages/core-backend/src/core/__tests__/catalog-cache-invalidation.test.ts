@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { FileChangeNotifier } from '../../modules/kb-fs/file-change-notifier.js';
-import { WorkflowEventBus } from '../../modules/workflow/event-bus.js';
+import { VersionControlEventBus } from '../../modules/version-control/event-bus.js';
 import { registerCatalogCacheInvalidation } from '../catalog-cache-invalidation.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import { testKbContext } from '../../__tests__/kb-context.js';
@@ -15,7 +15,7 @@ const USER = {
 } as unknown as Parameters<Parameters<FileChangeNotifier['onFilesChanged']>[0]>[0]['byUser'];
 
 function setup() {
-  const eventBus = new WorkflowEventBus();
+  const eventBus = new VersionControlEventBus();
   const fileChangeNotifier = new FileChangeNotifier();
   const catalogs = [
     { invalidate: vi.fn() },
@@ -132,7 +132,7 @@ describe('registerCatalogCacheInvalidation', () => {
      * working-tree write does — NOT as a `change-request-merged` special
      * case. That a pull of the default workspace actually emits this event
      * (only after it resolves, and only when it changed the tree's content) is the emitter's
-     * own contract, pinned in workflow.service.releaseLock.test.ts under
+     * own contract, pinned in version-control.service.releaseLock.test.ts under
      * "the tree-change announcement".
      */
     it('drops the catalogs when the default tree changes (write or post-merge pull alike)', () => {

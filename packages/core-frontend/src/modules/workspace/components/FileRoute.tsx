@@ -18,6 +18,7 @@ import { Banner, Button, Surface, useLatestRef } from '../../../shared/component
 import { FileViewer } from './FileViewer';
 import { DeletedFileNotice } from './DeletedFileNotice';
 import { ErrorScreen } from './ErrorScreen';
+import { appHostingPath, useRootClaims } from '../../../core/registry';
 
 type SyncError =
   | { kind: 'dirty'; current: string; target: string; dirtyFilenames: string[] }
@@ -62,6 +63,10 @@ function rememberIdPath(branch: string, id: string, path: string) {
  * `.tool` behind "Edit the tool file", a note with a frontmatter id — back to
  * the Knowledge surface, which is exactly the switch that frame exists to
  * avoid. The path URL stays; the file is the same.
+ *
+ * A file under a root an app claims (`AppDef.roots`) is the same case, and
+ * needs no flag: its path URL is what opens it in that app, so it is never
+ * replaced, and an id URL that resolves to it is replaced by its path URL.
  */
 export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = {}) {
   const params = useParams<{ branch: string; '*': string }>();
@@ -83,6 +88,7 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
   // to be a node is canonicalized to its id URL (the redirect effect).
   const segment = params['*'] ?? '';
   const segmentIsId = NODE_ID_LINK_RE.test(segment);
+  const claims = useRootClaims();
 
   const workspace = useWorkspace();
   const git = useGit();
@@ -170,6 +176,22 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
     };
   }, [segmentIsId, segment, branchFromUrl, openTabsRef]);
 
+  // ── An id URL for a hosted file → its path URL ───────────────────────────
+  // The path URL is the one that opens the file in the app hosting its root;
+  // the id URL would keep it here. Same entry, same state and query, as the
+  // canonical swap below.
+  const hostedPath =
+    segmentIsId && idResolved?.seg === segment && idResolved.branch === branchFromUrl && idResolved.path
+      ? appHostingPath(claims, idResolved.path, workspace.kbDirName) && idResolved.path
+      : undefined;
+  useEffect(() => {
+    if (!hostedPath) return;
+    navigate(kbFileUrl(branchFromUrl, hostedPath) + location.search + location.hash, {
+      replace: true,
+      state: location.state,
+    });
+  }, [hostedPath, branchFromUrl, navigate, location.search, location.hash, location.state]);
+
   // ── Canonicalize a path URL → the node's id URL ──────────────────────────
   // Once the file is the active tab, look up its node id and replace the path
   // URL with `/workspace/<branch>/<id>`. Non-node files (no id) stay path-based.
@@ -188,6 +210,7 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
   const searchRef = useLatestRef(location.search);
   useEffect(() => {
     if (!canonicalize || segmentIsId || !segment || !branchFromUrl) return;
+    if (appHostingPath(claims, segment, workspace.kbDirName)) return;
     if (openFilePath !== segment) return;
     let cancelled = false;
     (async () => {
@@ -203,7 +226,7 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
     return () => {
       cancelled = true;
     };
-  }, [canonicalize, segmentIsId, segment, branchFromUrl, openFilePath, location.hash, navigate, routerStateRef, searchRef]);
+  }, [canonicalize, segmentIsId, segment, branchFromUrl, openFilePath, location.hash, navigate, routerStateRef, searchRef, claims, workspace.kbDirName]);
 
   // ── Branch sync + hydrate + URL → state (forward direction) ──────────────
 

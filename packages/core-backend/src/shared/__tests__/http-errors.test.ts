@@ -3,8 +3,8 @@ import { domainErrorBody } from '../http-errors.js';
 import {
   PathTraversalError,
   UnreadableArchiveError,
-  WorkflowDomainError,
-  WorkflowValidationError,
+  VersionControlDomainError,
+  VersionControlValidationError,
 } from '../domain-errors.js';
 
 /**
@@ -24,7 +24,7 @@ describe('domainErrorBody', () => {
   });
 
   it('is just the message when the error carries no payload', () => {
-    expect(domainErrorBody(new WorkflowValidationError('Only .zip files can be extracted'))).toEqual({
+    expect(domainErrorBody(new VersionControlValidationError('Only .zip files can be extracted'))).toEqual({
       error: 'Only .zip files can be extracted',
     });
   });
@@ -33,7 +33,7 @@ describe('domainErrorBody', () => {
     // Spread payload-last and the client renders "something else entirely"
     // instead of the refusal. `payload` is a Record<string, unknown>, so this
     // key is expressible and nothing but ordering prevents it.
-    const err = new WorkflowDomainError('The real refusal.', 409, {
+    const err = new VersionControlDomainError('The real refusal.', 409, {
       error: 'something else entirely',
       kind: 'contended',
     });

@@ -3,7 +3,7 @@ export type {
   LastSync,
   SyncRequest,
   SyncResult,
-  SyncWorkflowPort,
+  SyncVersionControlPort,
   SyncWorkspacePort,
 } from './kb-sync.interface.js';
 export { KbSyncService } from './kb-sync.service.js';

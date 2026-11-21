@@ -507,7 +507,7 @@ export function readableReferences(
 const SCAN_TTL_MS = 30_000;
 
 /**
- * The slice of the workflow event bus the scanner taps for cache
+ * The slice of the version-control event bus the scanner taps for cache
  * invalidation. Structural (not the concrete class) so test doubles and the
  * services' optional bus stay compatible.
  */

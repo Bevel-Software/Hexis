@@ -1,8 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { act, renderHook, waitFor } from '@testing-library/react';
 import type { ReactNode } from 'react';
-import type { WorkflowEvent } from '@bevel-software/platform-shared';
-import { EventBusProvider } from '../../../workflow';
+import type { VersionControlEvent } from '@bevel-software/platform-shared';
+import { EventBusProvider } from '../../../version-control';
 import { stubServerEventStream } from '../../../../__tests__/server-event-stream';
 import { WorkspaceContext, type WorkspaceContextValue } from '../../state/workspace.context';
 import { WorkspaceApiError } from '../../services/workspace.api';
@@ -19,7 +19,7 @@ const WS = 'main';
 const TOOL_A = 'kb/Tools/a.json';
 const TOOL_B = 'kb/Tools/b.json';
 
-const changed = (path: string): WorkflowEvent => ({
+const changed = (path: string): VersionControlEvent => ({
   id: 1,
   ts: '',
   kind: 'file-changed',

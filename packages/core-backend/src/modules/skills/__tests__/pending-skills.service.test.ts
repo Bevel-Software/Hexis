@@ -1,5 +1,5 @@
 import { describe, test, expect } from 'vitest';
-import { DEFAULT_BRANCH, type ChangeRequest, type IWorkflowService } from '@bevel-software/platform-shared';
+import { DEFAULT_BRANCH, type ChangeRequest, type IVersionControlService } from '@bevel-software/platform-shared';
 import { PendingSkillsService } from '../pending-skills.service.js';
 import { hashEmail } from '../../../shared/email-identity.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
@@ -74,11 +74,11 @@ function harness(opts: {
     listSkills: async () => opts.released ?? [],
   } as unknown as ISkillService;
 
-  const workflow = {
+  const versionControl = {
     listChangeRequests: async () => opts.crs,
-  } as unknown as IWorkflowService;
+  } as unknown as IVersionControlService;
 
-  return new PendingSkillsService(workspaceService, accessControl, skillService, workflow, testKbContext());
+  return new PendingSkillsService(workspaceService, accessControl, skillService, versionControl, testKbContext());
 }
 
 const ADMIN_WRITES = {
@@ -197,20 +197,20 @@ describe('PendingSkillsService', () => {
   });
 
   /**
-   * This hangs off the library's list load. A workflow service that cannot
+   * This hangs off the library's list load. A version-control service that cannot
    * answer must cost the reader an empty review shelf, not their whole library.
    */
   test('degrades to nothing pending when the change requests cannot be listed', async () => {
-    const workflow = {
+    const versionControl = {
       listChangeRequests: async () => {
         throw new Error('offline');
       },
-    } as unknown as IWorkflowService;
+    } as unknown as IVersionControlService;
     const svc = new PendingSkillsService(
       {} as unknown as WorkspaceService,
       {} as unknown as IAccessControl,
       { listSkills: async () => [] } as unknown as ISkillService,
-      workflow,
+      versionControl,
       testKbContext(),
     );
     await expect(svc.listPendingSkills(AUTHOR)).resolves.toEqual([]);

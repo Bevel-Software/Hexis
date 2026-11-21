@@ -93,7 +93,7 @@ async function start(): Promise<string> {
       source: auth.source,
       abortSignal: signal,
       workspaceService: {} as never,
-      workflowService: {} as never,
+      versionControlService: {} as never,
       events: {} as never,
       getFilesystem: async () => ({}) as never,
     }) as unknown as ToolContext;

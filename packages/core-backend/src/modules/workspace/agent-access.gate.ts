@@ -2,7 +2,7 @@
  * Agent access gate — the per-call seam every gated agent tool runs through.
  *
  * It decides nothing of its own. It calls the hooks a DEPLOYMENT registered
- * (`WorkflowHooks`): one before an agent read of a knowledge-base path, one
+ * (`VersionControlHooks`): one before an agent read of a knowledge-base path, one
  * before an agent write. A hook that throws refuses the operation and the
  * caller sees that hook's own message and status. With no hook registered —
  * every core-only deployment — nothing is refused and nothing is recorded, and
@@ -21,7 +21,7 @@
 
 import type { JsonSchema } from '../tool-registry/index.js';
 import type { ToolContext } from '../tool-helpers/index.js';
-import type { WorkflowHooks } from '../workflow/index.js';
+import type { VersionControlHooks } from '../version-control/index.js';
 
 /**
  * What the `sessionId` input says on its own, before any deployment note. The
@@ -97,11 +97,11 @@ export interface AgentAccessGate {
   /** Lowercased email of the recovery/merge bot, which never reaches the hooks. */
   recoveryBotEmail: string;
   /**
-   * The workflow lifecycle-hook registry holding the BLOCKING `agentRead` and
+   * The version-control lifecycle-hook registry holding the BLOCKING `agentRead` and
    * `preWrite` hooks. Core registers none; a deployment registers against
-   * `workflowService.hooks` — pass that same instance here.
+   * `versionControlService.hooks` — pass that same instance here.
    */
-  hooks: WorkflowHooks;
+  hooks: VersionControlHooks;
   /** The notes a deployment adds to what agents read about these tools. */
   notes: ToolDescriptionNotes;
 }

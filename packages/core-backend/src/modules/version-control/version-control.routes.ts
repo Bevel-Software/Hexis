@@ -1,0 +1,1254 @@
+/**
+ * `/workflow/*` HTTP surface — the route family the frontend and agent
+ * should reach for instead of `/git/*` and `/pr/*`. Today these are additive
+ * (the old families keep working); migration plan in `bevel-platform/PLAN.md`.
+ *
+ * URL layout:
+ *   /workspace/:id/workflow/...     — workspace-scoped ops (branches, changes, locks, compare)
+ *   /workflow/change-requests/...   — change-request ops (list/detail/edit/approvals/merge/reject)
+ * The `/workflow/` prefix is kept for API compatibility until a core major.
+ *
+ * Workspace ids are `encodeURIComponent(branch)` (PLAN §3) — branches are
+ * shared by every user editing them, so route handlers gate on
+ * authentication only. Coordination of concurrent edits happens via the
+ * file-lock service, not via per-user clones.
+ *
+ * Error mapping: every version-control error class extends `VersionControlDomainError`
+ * which exposes `.status` + optional `.payload`, so a single `toHttpError`
+ * covers all branches/changes/CR errors uniformly.
+ */
+
+import express from 'express';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('workflow.routes');
+const crLog = logger('cr');
+import type {
+  AuthUser,
+  ChangeInput,
+  ChangeRequest,
+  ChangeRequestApplyFailureKind,
+  IVersionControlService,
+  OpenChangeRequestInput,
+} from '@bevel-software/platform-shared';
+import type { AuthService } from '../auth/index.js';
+import type { IAccessControl } from '../access/index.js';
+import { canReadWorkspacePath, toKbRelative } from '../access-model/index.js';
+import type { WorkspaceService } from '../workspace/index.js';
+import { branchForWorkspaceId } from '../../shared/workspace-id.js';
+import type { VersionControlEventBus } from './event-bus.js';
+import { VersionControlDomainError } from '../../shared/domain-errors.js';
+import { assertReadableAtCommits } from './read-on-branch.js';
+import { assertValidRelativePath } from '../kb-fs/index.js';
+import { domainErrorBody } from '../../shared/http-errors.js';
+import { canonicalFileIdentity } from '../../shared/canonical-file-identity.js';
+import '../auth/index.js'; // Express Request augmentation
+
+function toHttpError(
+  err: unknown,
+): { status: number; body: Record<string, unknown> } {
+  if (err instanceof VersionControlDomainError) {
+    return { status: err.status, body: domainErrorBody(err) };
+  }
+  log.error('unhandled error:', { err });
+  return { status: 500, body: { error: 'Internal server error' } };
+}
+
+/**
+ * What a viewer who cannot read every touched file reads in place of a
+ * refusal's reason — one string, shared with the agent read tools, which
+ * withhold on the same predicate.
+ */
+export { APPLY_FAILURE_REASON_WITHHELD } from './agent-tools/change-request-read-shape.js';
+import { APPLY_FAILURE_REASON_WITHHELD } from './agent-tools/change-request-read-shape.js';
+
+function parsePrNumber(raw: string): number | null {
+  if (!/^\d+$/.test(raw)) return null;
+  const n = Number(raw);
+  return n > 0 && Number.isSafeInteger(n) ? n : null;
+}
+
+function isTruthyQuery(v: unknown): boolean {
+  return v === '1' || v === 'true';
+}
+
+export function createVersionControlRoutes(
+  versionControl: IVersionControlService,
+  workspaceService: WorkspaceService,
+  authService: AuthService,
+  events: VersionControlEventBus,
+  accessControl: IAccessControl,
+  kbDirName: string,
+): express.Router {
+  const router = express.Router({ mergeParams: true });
+
+  /**
+   * Authentication gate. Per PLAN §3, branches are shared workspaces —
+   * any authenticated user can access any branch. Authorization for
+   * mutations happens at the version-control / git layer (access tree, file
+   * locks, change-request approval gate). This helper just resolves the
+   * caller's `AuthUser` record; route bodies pass it to version-control methods
+   * for per-operation auth.
+   */
+  async function requireUser(
+    req: express.Request,
+    res: express.Response,
+  ): Promise<AuthUser | null> {
+    if (!req.userId) {
+      res.status(401).json({ error: 'Unauthenticated' });
+      return null;
+    }
+    try {
+      const user = await authService.getUserById(req.userId);
+      if (!user) {
+        res.status(401).json({ error: 'User not found' });
+        return null;
+      }
+      return user;
+    } catch (err) {
+      log.error('requireUser failed:', { err });
+      res.status(500).json({ error: 'Internal server error' });
+      return null;
+    }
+  }
+
+  /**
+   * Gate a history read on the same `read:` verb the content routes enforce.
+   * The history endpoints below serve a file's past — its commit list, its
+   * diffs, its full content at a commit — and a file's past IS its content,
+   * with a time axis. They used to check only "is authenticated", so any
+   * logged-in user could pull a read-denied file's history by path, straight
+   * past the default-deny read model that hides the file everywhere else.
+   * Same rules as the content read (`workspace.routes` /
+   * `diff.routes.canReadPath`): the FULL `canRead` (per-node frontmatter
+   * honoured), non-KB paths ungated (they carry no `read:` rules), and both
+   * denial and any error fail closed with the content route's 403.
+   */
+  async function requireReadPermission(
+    req: express.Request,
+    res: express.Response,
+    workspaceId: string,
+    relativePath: string,
+  ): Promise<boolean> {
+    const user = await requireUser(req, res);
+    if (!user) return false;
+    // No ungated path form here, unlike the content routes: the git layer
+    // accepts BOTH the workspace-relative form (`knowledge-base/GTM/x.md`)
+    // and the repo-relative one (`GTM/x.md` — it strips the prefix when
+    // present, `stripRepoPrefix`), so treating an unprefixed path as
+    // "non-KB, no rules" would let the same repository object through
+    // without its gate. History exists only for tracked files and every
+    // tracked file lives in the repository — a path without the prefix is
+    // refused, not exempted. (Workspace scratch files outside the repo are
+    // untracked; their "history" was always an empty list.)
+    if (toKbRelative(relativePath, kbDirName) === null) {
+      res.status(400).json({
+        error: `History is served for repository files — pass the workspace-relative path (starting "${kbDirName}/").`,
+      });
+      return false;
+    }
+    let allowed: boolean;
+    try {
+      allowed = await canReadWorkspacePath(
+        (w, e, p) => accessControl.canRead(w, e, p),
+        workspaceId,
+        user.email,
+        kbDirName,
+        relativePath,
+      );
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+      return false;
+    }
+    if (!allowed) {
+      res.status(403).json({ error: `You don't have permission to read "${relativePath}".` });
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * A saved apply refusal is git's or the gate's own text, and it names files
+   * ("Waiting on approval for Plugins/x/SKILL.md …"). Every viewer still learns
+   * THAT the apply failed, who tried and when; the reason itself only reaches a
+   * viewer who can read every file the request touches. Anyone else — an
+   * unauthenticated read, or a reader of the folder's `access.md` but not its
+   * content — gets a withheld line instead. Fails closed: an access lookup that
+   * errors withholds, and so does a request with NO resolved touched paths,
+   * since read access to its files cannot be proven. Returns copies; the
+   * cached objects are never touched.
+   */
+  async function scopeApplyFailures<T extends ChangeRequest>(
+    req: express.Request,
+    items: T[],
+    knownUser?: AuthUser,
+  ): Promise<T[]> {
+    const failing = items.filter((c) => c.lastApplyFailure);
+    if (failing.length === 0) return items;
+    let readable: Map<string, boolean> | null = null;
+    try {
+      const user = knownUser ?? (req.userId ? await authService.getUserById(req.userId) : null);
+      if (user) {
+        const workspace = await workspaceService.getOrCreateForUser(user);
+        const paths = [...new Set(failing.flatMap((c) => c.touchedNodePaths))];
+        readable = paths.length > 0 ? await accessControl.canReadBatch(workspace.id, user.email, paths) : new Map();
+      }
+    } catch (err) {
+      log.warn('apply-failure read scope lookup failed; withholding reasons:', { err });
+      readable = null;
+    }
+    return items.map((c) => {
+      const failure = c.lastApplyFailure;
+      if (!failure) return c;
+      const mayRead = readable !== null && readsEveryPath(readable, c.touchedNodePaths);
+      return mayRead ? c : { ...c, lastApplyFailure: { ...failure, reason: APPLY_FAILURE_REASON_WITHHELD } };
+    });
+  }
+
+  /**
+   * The one predicate both scopes apply: a non-empty path set, every path
+   * readable. An empty set proves nothing, so it never grants the reason.
+   */
+  function readsEveryPath(readable: Map<string, boolean>, paths: string[]): boolean {
+    return paths.length > 0 && paths.every((p) => readable.get(p) === true);
+  }
+
+  /**
+   * Whether `user` may read the reason of a refusal on a request touching
+   * `paths` — the clicker's own answer on the bus is scoped exactly like the
+   * persisted one the read endpoints serve. Fails closed.
+   */
+  async function mayReadApplyFailureReason(user: AuthUser, workspaceId: string, paths: string[]): Promise<boolean> {
+    if (paths.length === 0) return false;
+    try {
+      return readsEveryPath(await accessControl.canReadBatch(workspaceId, user.email, paths), paths);
+    } catch (err) {
+      log.warn('apply-failure read scope lookup failed; withholding the reason:', { err });
+      return false;
+    }
+  }
+
+  // ── Branches ──────────────────────────────────────────────────────────────
+
+  router.get('/workspace/:id/workflow/branches', async (req, res) => {
+    if (!(await requireUser(req, res))) return;
+    try {
+      // `?fresh=1` forces a `git fetch --prune` (bypasses the implicit-fetch
+      // TTL) so a user-initiated refresh — e.g. opening the branch selector —
+      // immediately reflects branches another workspace just created/deleted.
+      const freshFetch = isTruthyQuery(req.query.fresh);
+      res.json(await versionControl.listBranches(req.params.id, { freshFetch }));
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
+  router.post('/workspace/:id/workflow/branches', async (req, res) => {
+    if (!(await requireUser(req, res))) return;
+    const { name, fromBase } = req.body as { name?: string; fromBase?: string };
+    if (!name) {
+      res.status(400).json({ error: 'name is required' });
+      return;
+    }
+    try {
+      res.json(await versionControl.createBranch(req.params.id, name, fromBase));
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
+  router.delete('/workspace/:id/workflow/branches/:name', async (req, res) => {
+    const user = await requireUser(req, res);
+    if (!user) return;
+    const onlyIfNoRemote = isTruthyQuery(req.query.onlyIfNoRemote);
+    try {
+      await versionControl.deleteBranch(req.params.id, req.params.name, user, { onlyIfNoRemote });
+      res.json({ status: 'deleted' });
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
+  // The legacy `POST /workspace/:id/workflow/switch` route is gone. Under
+  // the per-branch workspace model the UI switches branches by navigating
+  // the URL — the frontend's workspace bootstrap clones (or selects) the
+  // destination branch's per-branch workspace dir. There is no separate
+  // server-side "switch" step on the source workspace's clone, which was
+  // the only place a dirty working tree could leak as a user-facing 409.
+
+  // `POST /workspace/:id/workflow/fork-draft` removed: the dirty-tree
+  // carry-along escape hatch has no callers under save=share + per-branch
+  // workspaces. Use `POST /workflow/branches` (createBranch) instead.
+
+  router.get('/workspace/:id/workflow/branch-status', async (req, res) => {
+    if (!(await requireUser(req, res))) return;
+    try {
+      // Make sure the per-branch workspace is fully cloned before we run any
+      // git command against it. Without this, a frontend hitting branch-status
+      // on first load can race the cold clone and `git rev-parse HEAD` returns
+      // "ambiguous argument 'HEAD'" against a half-initialised .git directory.
+      // The call is idempotent and ~free in the warm case (Map lookup), so it
+      // costs nothing once the workspace is already on disk.
+      await workspaceService.getOrCreateForBranch(branchForWorkspaceId(req.params.id));
+      res.json(await versionControl.branchStatus(req.params.id));
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
+  // `POST /workspace/:id/workflow/discard` removed: under save=share the
+  // working tree is never dirty, so there's nothing to discard.
+
+  router.post('/workspace/:id/workflow/share', async (req, res) => {
+    const user = await requireUser(req, res);
+    if (!user) return;
+    try {
+      await versionControl.shareCurrentBranch(req.params.id, user);
+      res.json({ status: 'shared' });
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
+  router.post('/workspace/:id/workflow/refresh-remotes', async (req, res) => {
+    if (!(await requireUser(req, res))) return;
+    try {
+      await versionControl.refreshRemotes(req.params.id);
+      res.json({ status: 'refreshed' });
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
+  router.post('/workspace/:id/workflow/update-from-remote', async (req, res) => {
+    // The user is threaded through so a pull-conflict recovery row is
+    // attributed to whoever triggered the sync (see updateFromRemote).
+    const user = await requireUser(req, res);
+    if (!user) return;
+    try {
+      await versionControl.updateFromRemote(req.params.id, user);
+      res.json({ status: 'updated' });
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
+  router.get('/workspace/:id/workflow/fork-base', async (req, res) => {
+    if (!(await requireUser(req, res))) return;
+    const branch = typeof req.query.branch === 'string' ? req.query.branch : '';
+    if (!branch) {
+      res.status(400).json({ error: 'branch is required' });
+      return;
+    }
+    try {
+      const base = await versionControl.resolveForkBase(req.params.id, branch);
+      res.json({ base });
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
+  router.get('/workspace/:id/workflow/pending-changes', async (req, res) => {
+    if (!(await requireUser(req, res))) return;
+    try {
+      const paths = await versionControl.listPendingChangePaths(req.params.id);
+      res.json({ paths });
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
+  // `GET /workspace/:id/workflow/working-changes` + `working-diff` removed:
+  // working-tree dirty state is always empty under save=share.
+
+  // ── Changes ───────────────────────────────────────────────────────────────
+
+  router.post('/workspace/:id/workflow/changes', async (req, res) => {
+    const user = await requireUser(req, res);
+    if (!user) return;
+    const input = req.body as ChangeInput;
+    try {
+      res.json(await versionControl.commitChange(req.params.id, user, input));
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
+  router.get('/workspace/:id/workflow/changes', async (req, res) => {
+    const pathParam = typeof req.query.path === 'string' ? req.query.path : '';
+    if (!pathParam) {
+      res.status(400).json({ error: 'path is required' });
+      return;
+    }
+    if (!(await requireReadPermission(req, res, req.params.id, pathParam))) return;
+    const rawLimit = Number.parseInt(String(req.query.limit ?? '20'), 10);
+    const limit = Number.isFinite(rawLimit) ? Math.max(1, Math.min(rawLimit, 100)) : 20;
+    try {
+      res.json({ changes: await versionControl.listChangesForFile(req.params.id, pathParam, limit) });
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
+  router.get('/workspace/:id/workflow/compare-file', async (req, res) => {
+    const pathParam = typeof req.query.path === 'string' ? req.query.path : '';
+    const fromBranch = typeof req.query.from === 'string' ? req.query.from : '';
+    const toBranch = typeof req.query.to === 'string' ? req.query.to : '';
+    if (!pathParam || !fromBranch || !toBranch) {
+      res.status(400).json({ error: 'path, from, and to are required' });
+      return;
+    }
+    if (!(await requireReadPermission(req, res, req.params.id, pathParam))) return;
+    // The other history endpoints serve commits of the URL workspace's own
+    // branch, so its working-tree verdict covers what they return. This one
+    // serves content of TWO caller-named branches — the verdict must come
+    // from the commits actually served (`readableAtCommits`, the one rule
+    // this route and the agent's history tools share): the service pins the
+    // commit each side is read at and asks this verdict inside its
+    // reservation, before anything is said about the path at either, with
+    // every commit the branch resolves to — its local head and its published
+    // tip, all of which must grant, as this route has always required of
+    // both refs — never at a branch ref a fetch may move between a verdict
+    // and a read. (The
+    // working-tree side is additionally covered by the workspace `canRead`
+    // above.) An access-model failure keeps its own status: an unreadable
+    // access tree is the documented 503 a client retries, not a permanent
+    // 403 denial.
+    const user = await requireUser(req, res);
+    if (!user) return;
+    const repoRelative = toKbRelative(pathParam, kbDirName)!;
+    try {
+      const compared = await versionControl.compareFile(req.params.id, pathParam, fromBranch, toBranch, async (sides) => {
+        await assertReadableAtCommits(accessControl, req.params.id, user.email, repoRelative, sides.from, fromBranch, pathParam);
+        await assertReadableAtCommits(accessControl, req.params.id, user.email, repoRelative, sides.to, toBranch, pathParam);
+      });
+      res.json({ diff: compared.diff });
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
+  router.get('/workspace/:id/workflow/show-file', async (req, res) => {
+    const pathParam = typeof req.query.path === 'string' ? req.query.path : '';
+    const sha = typeof req.query.sha === 'string' ? req.query.sha : '';
+    if (!pathParam || !sha) {
+      res.status(400).json({ error: 'path and sha are required' });
+      return;
+    }
+    if (!(await requireReadPermission(req, res, req.params.id, pathParam))) return;
+    try {
+      const diff = await versionControl.showFileAtChange(req.params.id, pathParam, sha);
+      res.json({ diff });
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
+  router.get('/workspace/:id/workflow/file-at-change', async (req, res) => {
+    const pathParam = typeof req.query.path === 'string' ? req.query.path : '';
+    const sha = typeof req.query.sha === 'string' ? req.query.sha : '';
+    if (!pathParam || !sha) {
+      res.status(400).json({ error: 'path and sha are required' });
+      return;
+    }
+    if (!(await requireReadPermission(req, res, req.params.id, pathParam))) return;
+    try {
+      const { baseline, current } = await versionControl.fileAtChange(req.params.id, pathParam, sha);
+      res.json({ baseline, current });
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
+  // ── File locks ────────────────────────────────────────────────────────────
+
+  // These routes hand the caller's spelling straight to the version-control service,
+  // which is where ONE file identity is decided (`canonicalFileIdentity`), so
+  // `./x//a.md` and `x/a.md` are the same lock on every verb below. Refusals
+  // arrive here as `VersionControlDomainError`s carrying the status the file verbs
+  // answer for that same input, and `toHttpError` passes it through unchanged.
+  // Nothing is canonicalised at this layer on purpose: a route-level fix would
+  // leave any other caller of the service coordinating on its own identity.
+  // (The status read canonicalises once for its read gate only; the lookup
+  // still takes the caller's spelling.)
+
+  router.post('/workspace/:id/workflow/locks', async (req, res) => {
+    const user = await requireUser(req, res);
+    if (!user) return;
+    const { branch, path: targetPath } = req.body as { branch?: string; path?: string };
+    if (!branch || !targetPath) {
+      res.status(400).json({ error: 'branch and path are required' });
+      return;
+    }
+    try {
+      res.json(await versionControl.acquireLock(req.params.id, branch, targetPath, user));
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
+  // Release: branch + path travel via the body, not the query string,
+  // because DELETE bodies are reliable for our own clients. Under the
+  // pending-commits queue the release no longer returns a `Change` — the
+  // commit hasn't happened yet (the background worker drains the queue
+  // out of band). The route's `{ queued: true }` reply just signals
+  // "lock released, commit scheduled."
+  router.delete('/workspace/:id/workflow/locks', async (req, res) => {
+    const user = await requireUser(req, res);
+    if (!user) return;
+    const body = (req.body ?? {}) as { branch?: string; path?: string };
+    const branch = body.branch ?? (typeof req.query.branch === 'string' ? req.query.branch : '');
+    const targetPath = body.path ?? (typeof req.query.path === 'string' ? req.query.path : '');
+    if (!branch || !targetPath) {
+      res.status(400).json({ error: 'branch and path are required' });
+      return;
+    }
+    try {
+      await versionControl.releaseLock(req.params.id, branch, targetPath, user);
+      res.json({ queued: true });
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
+  // Commit-while-locked — autosave checkpoint. Lock stays held; the
+  // file's accumulated edits land as a one-file change.
+  router.post('/workspace/:id/workflow/locks/checkpoint', async (req, res) => {
+    const user = await requireUser(req, res);
+    if (!user) return;
+    const { branch, path: targetPath, summary } = req.body as {
+      branch?: string;
+      path?: string;
+      summary?: string;
+    };
+    if (!branch || !targetPath) {
+      res.status(400).json({ error: 'branch and path are required' });
+      return;
+    }
+    try {
+      const change = await versionControl.commitFileWhileLocked(
+        req.params.id,
+        branch,
+        targetPath,
+        user,
+        summary,
+      );
+      res.json({ change });
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
+  router.post('/workspace/:id/workflow/locks/heartbeat', async (req, res) => {
+    const user = await requireUser(req, res);
+    if (!user) return;
+    const { branch, path: targetPath } = req.body as { branch?: string; path?: string };
+    if (!branch || !targetPath) {
+      res.status(400).json({ error: 'branch and path are required' });
+      return;
+    }
+    try {
+      res.json(await versionControl.heartbeatLock(req.params.id, branch, targetPath, user));
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
+  router.get('/workspace/:id/workflow/locks', async (req, res) => {
+    const user = await requireUser(req, res);
+    if (!user) return;
+    const branch = typeof req.query.branch === 'string' ? req.query.branch : '';
+    const targetPath = typeof req.query.path === 'string' ? req.query.path : '';
+    if (!branch || !targetPath) {
+      res.status(400).json({ error: 'branch and path are required' });
+      return;
+    }
+    try {
+      // A lock names who is editing the file, so a caller who may not read
+      // the file is refused before the lookup: the answer is the same whether
+      // or not it is held. The gate judges the canonical spelling, which is
+      // the one the lock is found under (`./kb//x.md` would otherwise slip
+      // past the KB-prefix test), and a refused spelling keeps the file
+      // verbs' status. A path without the KB prefix is not exempted as
+      // non-KB: the git layer also takes the repo-relative form (`GTM/x.md`
+      // for `knowledge-base/GTM/x.md`, see `requireReadPermission`), so it is
+      // judged as the repository file it would name.
+      const canonical = canonicalFileIdentity(targetPath);
+      const readable = await accessControl.canRead(
+        req.params.id,
+        user.email,
+        toKbRelative(canonical, kbDirName) ?? canonical,
+      );
+      if (!readable) {
+        res.status(403).json({ error: `You don't have permission to read "${targetPath}".` });
+        return;
+      }
+      res.json({ lock: await versionControl.getLock(req.params.id, branch, targetPath) });
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
+  // ── Change Requests ───────────────────────────────────────────────────────
+
+  router.get('/workflow/change-requests', async (req, res) => {
+    const fresh = isTruthyQuery(req.query.fresh);
+    try {
+      res.json(await scopeApplyFailures(req, await versionControl.listChangeRequests({ fresh })));
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
+  router.get('/workflow/change-requests/mine', async (req, res) => {
+    const user = await requireUser(req, res);
+    if (!user) return;
+    // `?fresh=1` bypasses the 30s list cache — event-driven refreshes (a
+    // proposal or suggestion-routed upload just landed) ask because they KNOW
+    // the list changed, and a cached answer would hide their own change.
+    const fresh = isTruthyQuery(req.query.fresh);
+    try {
+      res.json(await scopeApplyFailures(req, await versionControl.listChangeRequestsAuthoredBy(user.email, { fresh }), user));
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
+  router.get('/workflow/change-requests/for-me', async (req, res) => {
+    const user = await requireUser(req, res);
+    if (!user) return;
+    const fresh = isTruthyQuery(req.query.fresh);
+    try {
+      const workspace = await workspaceService.getOrCreateForUser(user);
+      res.json(
+        await scopeApplyFailures(req, await versionControl.listChangeRequestsForUser(workspace.id, user.email, { fresh }), user),
+      );
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
+  /**
+   * A KB-repo-relative folder from the request, or null (400 sent) when it is
+   * not a path git may be handed. The contract is `assertValidRelativePath`'s
+   * — the one every path reaching git meets (relative, no drive letter, no
+   * backslash, no `.`/`..`, no leading `-`, at most 1024 characters) — plus
+   * what a folder spelling adds: no empty segment and no control character.
+   * A malformed spelling matches no request, so letting it through would
+   * answer "nothing to remove" instead of saying the path is wrong.
+   */
+  function folderParam(raw: unknown, res: express.Response): string | null {
+    const folder = typeof raw === 'string' ? raw.replace(/\/+$/, '') : '';
+    let valid = true;
+    try {
+      assertValidRelativePath(folder);
+    } catch {
+      valid = false;
+    }
+    if (
+      !valid
+      || folder.split('/').includes('')
+      || [...folder].some((c) => c.charCodeAt(0) < 0x20 || c.charCodeAt(0) === 0x7f)
+    ) {
+      res.status(400).json({ error: 'path must be a folder inside the knowledge base' });
+      return null;
+    }
+    return folder;
+  }
+
+  /**
+   * Before a folder delete: the open change requests proposing files under
+   * the folder, and whether the caller may take those files out of each.
+   * Registered before `/:number`, which would otherwise claim the segment.
+   */
+  router.get('/workflow/change-requests/under-folder', async (req, res) => {
+    const folder = folderParam(req.query.path, res);
+    if (folder === null) return;
+    const user = await requireUser(req, res);
+    if (!user) return;
+    try {
+      res.json({ requests: await versionControl.changeRequestsUnderFolder(folder, user) });
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
+  /**
+   * "Delete folder and its proposed changes", the request half: every file
+   * under the folder leaves every open request proposing it, and a request
+   * left empty is withdrawn. All or nothing on permission (403).
+   */
+  router.post('/workflow/change-requests/under-folder/remove', async (req, res) => {
+    const folder = folderParam((req.body ?? {}).path, res);
+    if (folder === null) return;
+    const user = await requireUser(req, res);
+    if (!user) return;
+    try {
+      res.json({ results: await versionControl.removeFolderFromChangeRequests(folder, user) });
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
+  router.get('/workflow/change-requests/:number', async (req, res) => {
+    const num = parsePrNumber(req.params.number);
+    if (num === null) {
+      res.status(400).json({ error: 'invalid change request number' });
+      return;
+    }
+    try {
+      const cr = await versionControl.getChangeRequest(num);
+      if (!cr) {
+        res.status(404).json({ error: 'change request not found' });
+        return;
+      }
+      const [scoped] = await scopeApplyFailures(req, [cr]);
+      res.json(scoped);
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
+  router.get('/workflow/change-requests/:number/detail', async (req, res) => {
+    const num = parsePrNumber(req.params.number);
+    if (num === null) {
+      res.status(400).json({ error: 'invalid change request number' });
+      return;
+    }
+    try {
+      const fresh = isTruthyQuery(req.query.fresh);
+      let workspaceId: string | undefined;
+      let viewerEmail: string | undefined;
+      // Best-effort caller resolution — anonymous detail fetches still work
+      // (mirroring the legacy /pr/:n/detail behaviour), they just don't get
+      // `viewerCanApprove` populated.
+      if (req.userId) {
+        try {
+          const user = await authService.getUserById(req.userId);
+          if (user) {
+            const ws = await workspaceService.getOrCreateForUser(user);
+            workspaceId = ws.id;
+            viewerEmail = user.email;
+          }
+        } catch {
+          // Swallow — keeps the detail fetch resilient to a transient auth
+          // blip when the caller's workspace isn't yet provisioned.
+        }
+      }
+      let detail = await versionControl.getChangeRequestDetail(num, {
+        fresh,
+        workspaceId,
+        viewerEmail,
+      });
+      if (!detail) {
+        res.status(404).json({ error: 'change request not found' });
+        return;
+      }
+      // Lazy reconcile (the join-requests pattern): an OPEN request whose
+      // diff has emptied — everything it proposed has since landed, been
+      // reverted, or been undone on its branch — closes itself on
+      // observation and its branch retires. The close re-verifies the
+      // emptiness authoritatively and never fires on a failed diff.
+      if (detail.state === 'open' && detail.files.length === 0 && req.userId) {
+        try {
+          const user = await authService.getUserById(req.userId);
+          if (user && (await versionControl.closeEmptyChangeRequest(num, user))) {
+            detail =
+              (await versionControl.getChangeRequestDetail(num, {
+                fresh: true,
+                workspaceId,
+                viewerEmail,
+              })) ?? detail;
+          }
+        } catch (err) {
+          crLog.warn(`lazy empty-close of #${num} failed (non-fatal):`, { err });
+        }
+      }
+      const [scoped] = await scopeApplyFailures(req, [detail]);
+      res.json(scoped);
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
+  /**
+   * Delete a change request outright — close it and retire its source
+   * branch. The request's author or an admin: their own proposal to throw
+   * away, and the moderation verb for a shared deployment. The changed files'
+   * owners are NOT included — they keep reject, which leaves the branch.
+   */
+  router.delete('/workflow/change-requests/:number', async (req, res) => {
+    const num = parsePrNumber(req.params.number);
+    if (num === null) {
+      res.status(400).json({ error: 'invalid change request number' });
+      return;
+    }
+    const user = await requireUser(req, res);
+    if (!user) return;
+    try {
+      await versionControl.deleteChangeRequest(num, user);
+      res.json({ deleted: true });
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
+  /**
+   * Change an open request's title and/or description. Its author, or anyone
+   * who may merge it (an admin, or the holder of write on every changed file);
+   * anyone else gets a worded 403, and a merged or closed request a worded
+   * 409 — `VersionControlService.updateChangeRequest` decides both. Answers the
+   * updated request. `appendDescription` (the app's own later-round note) adds
+   * a paragraph to the description as stored, instead of replacing it.
+   */
+  router.patch('/workflow/change-requests/:number', async (req, res) => {
+    const num = parsePrNumber(req.params.number);
+    if (num === null) {
+      res.status(400).json({ error: 'invalid change request number' });
+      return;
+    }
+    const body = (req.body ?? {}) as { title?: unknown; description?: unknown; appendDescription?: unknown };
+    if (
+      (body.title !== undefined && typeof body.title !== 'string') ||
+      (body.description !== undefined && typeof body.description !== 'string') ||
+      (body.appendDescription !== undefined && typeof body.appendDescription !== 'string')
+    ) {
+      res.status(400).json({ error: 'title, description and appendDescription must be strings' });
+      return;
+    }
+    const user = await requireUser(req, res);
+    if (!user) return;
+    try {
+      const updated = await versionControl.updateChangeRequest(num, user, {
+        title: body.title as string | undefined,
+        description: body.description as string | undefined,
+        appendDescription: body.appendDescription as string | undefined,
+      });
+      const [scoped] = await scopeApplyFailures(req, [updated], user);
+      res.json(scoped);
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
+  /**
+   * Decline ONE file of a change request: restore its merge-base version on
+   * the source branch, dropping it from the request's diff. Takes the same
+   * permission as approving the file. When the last file is declined the
+   * request closes itself and its branch retires (`closed: true`).
+   */
+  router.post('/workflow/change-requests/:number/files/revert', async (req, res) => {
+    const num = parsePrNumber(req.params.number);
+    if (num === null) {
+      res.status(400).json({ error: 'invalid change request number' });
+      return;
+    }
+    const user = await requireUser(req, res);
+    if (!user) return;
+    const body = (req.body ?? {}) as { path?: string };
+    if (typeof body.path !== 'string' || !body.path) {
+      res.status(400).json({ error: 'path is required' });
+      return;
+    }
+    try {
+      res.json(await versionControl.revertChangeRequestFile(num, user, body.path));
+    } catch (err) {
+      const { status, body: errBody } = toHttpError(err);
+      res.status(status).json(errBody);
+    }
+  });
+
+  router.post('/workflow/change-requests', async (req, res) => {
+    const user = await requireUser(req, res);
+    if (!user) return;
+    const body = req.body as Partial<OpenChangeRequestInput>;
+    if (!body.sourceBranch || !body.targetBranch || !body.title) {
+      res.status(400).json({ error: 'sourceBranch, targetBranch and title are required' });
+      return;
+    }
+    try {
+      // Resolve the source-branch workspace — `git.mergeFromOrigin`
+      // requires the clone to be checked out to `sourceBranch`, and with
+      // workspace-per-branch the right clone is `workspaces/<encoded
+      // sourceBranch>/...`. Falling back to `getOrCreateForUser` returned
+      // the default workspace (target-company-state), which broke CRs
+      // whose source wasn't the default. `getOrCreateForBranch` lazily
+      // bootstraps the clone if this is the first request for it.
+      const workspace = await workspaceService.getOrCreateForBranch(body.sourceBranch);
+      res.json(
+        await versionControl.openChangeRequest(workspace.id, user, {
+          sourceBranch: body.sourceBranch,
+          targetBranch: body.targetBranch,
+          title: body.title,
+          description: body.description,
+        }),
+      );
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
+  router.post('/workflow/change-requests/:number/update-from-target', async (req, res) => {
+    const num = parsePrNumber(req.params.number);
+    if (num === null) {
+      res.status(400).json({ error: 'invalid change request number' });
+      return;
+    }
+    const user = await requireUser(req, res);
+    if (!user) return;
+    try {
+      // `updateFromTarget` re-runs the `target → source` merge, which
+      // needs the source branch's workspace (the on-disk clone checked
+      // out to that branch). Discover the source branch from the CR
+      // first, then resolve the matching workspace — same reasoning as
+      // `openChangeRequest` above. `getOrCreateForBranch` lazily clones
+      // if the source branch hasn't been touched on this replica yet.
+      const cr = await versionControl.getChangeRequest(num);
+      if (!cr) {
+        res.status(404).json({ error: 'change request not found' });
+        return;
+      }
+      const workspace = await workspaceService.getOrCreateForBranch(cr.branch);
+      res.json(await versionControl.updateFromTarget(workspace.id, user, num));
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
+  /**
+   * One file as it stood at the request's fork point — the "before" side of
+   * every diff of the request. `sha` is the detail's `mergeBaseSha` when the
+   * caller holds one (the dialog: its diff and its file list then describe
+   * the same fork point); the git layer refuses any commit that is not on the
+   * target's history. Without `sha` the request's CURRENT fork point is
+   * resolved here (the file page's change boxes, which see only summaries).
+   * Answers `{ content, forkSha }`; `forkSha: null` means the branches share
+   * no history, so there is no fork point to read. `path` is repo-relative. Read authority comes from the target branch's
+   * access tree (`origin/<base>`), the tree the fork point belongs to; an
+   * unresolvable verdict is a denial.
+   */
+  router.get('/workflow/change-requests/:number/fork-point-file', async (req, res) => {
+    const num = parsePrNumber(req.params.number);
+    if (num === null) {
+      res.status(400).json({ error: 'invalid change request number' });
+      return;
+    }
+    const repoPath = typeof req.query.path === 'string' ? req.query.path : '';
+    const sha = typeof req.query.sha === 'string' ? req.query.sha : '';
+    if (!repoPath) {
+      res.status(400).json({ error: 'path is required' });
+      return;
+    }
+    // Repo-relative ONLY. The git layer strips a leading `<kbDirName>/`, so a
+    // prefixed spelling would be authorized under one path and read as
+    // another — refused rather than normalised.
+    if (repoPath.startsWith(`${kbDirName}/`)) {
+      res.status(400).json({ error: 'path must be repository-relative' });
+      return;
+    }
+    const user = await requireUser(req, res);
+    if (!user) return;
+    try {
+      const cr = await versionControl.getChangeRequest(num);
+      if (!cr) {
+        res.status(404).json({ error: 'change request not found' });
+        return;
+      }
+      const workspace = await workspaceService.getOrCreateForUser(user);
+      const allowed = await accessControl.canReadAtRef(
+        workspace.id,
+        `origin/${cr.base}`,
+        user.email,
+        repoPath,
+      );
+      if (allowed !== true) {
+        res.status(403).json({ error: `You don't have permission to read "${repoPath}".` });
+        return;
+      }
+      const forkSha =
+        sha || (await versionControl.changeRequestForkPoint(workspace.id, cr.base, cr.branch));
+      if (!forkSha) {
+        res.json({ content: null, forkSha: null });
+        return;
+      }
+      const content = await versionControl.fileAtForkPoint(workspace.id, cr.base, forkSha, repoPath);
+      res.json({ content, forkSha });
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
+  // Approve / unapprove. Both fetch fresh detail so the approval pins to the
+  // current head — a stale cached head could let the gate accept an approval
+  // the user never actually saw.
+  router.post('/workflow/change-requests/:number/files/approve', async (req, res) => {
+    const num = parsePrNumber(req.params.number);
+    if (num === null) {
+      res.status(400).json({ error: 'invalid change request number' });
+      return;
+    }
+    const user = await requireUser(req, res);
+    if (!user) return;
+    const body = (req.body ?? {}) as { path?: string };
+    if (typeof body.path !== 'string' || !body.path) {
+      res.status(400).json({ error: 'path is required' });
+      return;
+    }
+    try {
+      const workspace = await workspaceService.getOrCreateForUser(user);
+      const detail = await versionControl.getChangeRequestDetail(num, {
+        fresh: true,
+        workspaceId: workspace.id,
+        viewerEmail: user.email,
+        // Internal read: this route pins its work on the detail and never
+        // reads a patch; skipping them is one git subprocess per file saved
+        // on every click, and the result stays out of the client cache.
+        patches: false,
+      });
+      if (!detail) {
+        res.status(404).json({ error: 'change request not found' });
+        return;
+      }
+      const approvals = await versionControl.approveFile(
+        num,
+        body.path,
+        user,
+        detail.files,
+        detail.headSha,
+        detail.base,
+        detail.authorId ?? null,
+        workspace.id,
+      );
+      res.json({ approvals });
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
+  router.delete('/workflow/change-requests/:number/files/approve', async (req, res) => {
+    const num = parsePrNumber(req.params.number);
+    if (num === null) {
+      res.status(400).json({ error: 'invalid change request number' });
+      return;
+    }
+    const user = await requireUser(req, res);
+    if (!user) return;
+    const targetPath = typeof req.query.path === 'string' ? req.query.path : '';
+    if (!targetPath) {
+      res.status(400).json({ error: 'path is required' });
+      return;
+    }
+    try {
+      const workspace = await workspaceService.getOrCreateForUser(user);
+      const detail = await versionControl.getChangeRequestDetail(num, {
+        fresh: true,
+        workspaceId: workspace.id,
+        viewerEmail: user.email,
+        // Internal read: this route pins its work on the detail and never
+        // reads a patch; skipping them is one git subprocess per file saved
+        // on every click, and the result stays out of the client cache.
+        patches: false,
+      });
+      if (!detail) {
+        res.status(404).json({ error: 'change request not found' });
+        return;
+      }
+      const approvals = await versionControl.unapproveFile(
+        num,
+        targetPath,
+        user,
+        detail.files,
+        detail.headSha,
+        detail.base,
+        detail.authorId ?? null,
+        workspace.id,
+      );
+      res.json({ approvals });
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
+  router.post('/workflow/change-requests/:number/reject', async (req, res) => {
+    const num = parsePrNumber(req.params.number);
+    if (num === null) {
+      res.status(400).json({ error: 'invalid change request number' });
+      return;
+    }
+    const user = await requireUser(req, res);
+    if (!user) return;
+    try {
+      const workspace = await workspaceService.getOrCreateForUser(user);
+      const detail = await versionControl.getChangeRequestDetail(num, {
+        fresh: true,
+        workspaceId: workspace.id,
+        viewerEmail: user.email,
+        // Internal read: this route pins its work on the detail and never
+        // reads a patch; skipping them is one git subprocess per file saved
+        // on every click, and the result stays out of the client cache.
+        patches: false,
+      });
+      if (!detail) {
+        res.status(404).json({ error: 'change request not found' });
+        return;
+      }
+      const result = await versionControl.rejectChangeRequest(
+        num,
+        user,
+        detail.state,
+        detail.authorId ?? null,
+        detail.base,
+        workspace.id,
+      );
+      res.json(result);
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
+  router.post('/workflow/change-requests/:number/merge', async (req, res) => {
+    const num = parsePrNumber(req.params.number);
+    if (num === null) {
+      res.status(400).json({ error: 'invalid change request number' });
+      return;
+    }
+    const user = await requireUser(req, res);
+    if (!user) return;
+    const body = (req.body ?? {}) as { bypass?: unknown };
+    const bypass = body.bypass === true;
+
+    // Async merge. The gate re-validation fetches the PR's full file list from
+    // GitHub (paginated — slow on a large change request) and `gh pr merge` can
+    // itself take tens of seconds, long enough to outlive the gateway's idle
+    // timeout — surfacing to the user as a 502 even while the merge is still
+    // running. So we ack with 202 and run the merge in the background, reporting
+    // the result over the event bus: `change-request-merged` on success (emitted
+    // by the version-control service; the PR viewer refreshes off it), and a
+    // user-scoped `change-request-merge-failed` on a gate block / conflict /
+    // merge error so the UI that kicked it off can react. A failure on a
+    // request that exists is ALSO persisted and broadcast (`recordApplyFailure`)
+    // — the request stays open, and its author and other viewers must see why.
+    // Nothing is cleared as an attempt starts: a caller the merge then refuses
+    // must not be able to erase the verdict everyone else reads. A landed apply
+    // needs no clearing (only an open request reports a refusal), and a newer
+    // refusal simply overwrites the old one.
+    res.status(202).json({ status: 'merging', number: num });
+    const attempt = versionControl.beginApplyAttempt(num);
+    // What the clicker's reason is scoped against, once the request is loaded.
+    // Unset (a failure before that) means read access is unproven: withheld.
+    let readScope: { workspaceId: string; paths: string[] } | null = null;
+    const reportFailure = async (reason: string, kind: ChangeRequestApplyFailureKind, persist = true) => {
+      const conflicts = kind === 'conflicts';
+      const at = new Date();
+      // The raw reason is persisted below and scoped per viewer on read; the
+      // clicker's direct answer must not bypass that scope.
+      const clickerMayRead =
+        readScope !== null && (await mayReadApplyFailureReason(user, readScope.workspaceId, readScope.paths));
+      events.emit({
+        kind: 'change-request-merge-failed',
+        forUserId: user.id,
+        number: num,
+        reason: clickerMayRead ? reason : APPLY_FAILURE_REASON_WITHHELD,
+        conflicts,
+        at: at.toISOString(),
+      });
+      if (!persist) return;
+      try {
+        await versionControl.recordApplyFailure(num, { reason, kind, at }, user, attempt);
+      } catch (err) {
+        // The clicker already has the reason; only the other viewers lose it.
+        log.warn(`could not record the failed apply of change request #${num}:`, { err });
+      }
+    };
+    void (async () => {
+      try {
+        const workspace = await workspaceService.getOrCreateForUser(user);
+        const detail = await versionControl.getChangeRequestDetail(num, {
+          fresh: true,
+          workspaceId: workspace.id,
+          viewerEmail: user.email,
+        });
+        if (!detail) {
+          events.emit({
+            kind: 'change-request-merge-failed',
+            forUserId: user.id,
+            number: num,
+            reason: 'change request not found',
+            conflicts: false,
+          });
+          return;
+        }
+        readScope = { workspaceId: workspace.id, paths: detail.touchedNodePaths };
+        const outcome = await versionControl.mergeChangeRequest(
+          num,
+          user,
+          detail.headSha,
+          detail.approvals,
+          detail.state,
+          detail.title,
+          detail.base,
+          workspace.id,
+          { bypass },
+        );
+        if (outcome.kind === 'conflicts-need-resolution') {
+          await reportFailure('This draft conflicts with the target and needs resolving first.', 'conflicts');
+        }
+        // Success path: `versionControl.mergeChangeRequest` emits `change-request-merged`.
+      } catch (err) {
+        const { status, body: errBody } = toHttpError(err);
+        log.error(`async merge of change request #${num} failed:`, { err });
+        // A refusal of the CALLER (not allowed, nothing to act on) says nothing
+        // about the request itself — it goes to the clicker alone.
+        const aboutTheCaller = status === 401 || status === 403 || status === 404;
+        // The gate's refusal carries the reasons it still waits on; an approval
+        // can answer it. Anything else (a push, the roles.yaml guard, an internal
+        // error) an approval does not touch.
+        const gateRefusal = Array.isArray(errBody.mergeBlockedReasons);
+        await reportFailure(
+          typeof errBody.error === 'string' ? errBody.error : 'Merge failed',
+          gateRefusal ? 'gate' : 'error',
+          !aboutTheCaller,
+        );
+      } finally {
+        versionControl.endApplyAttempt(num, attempt);
+      }
+    })();
+  });
+
+  return router;
+}

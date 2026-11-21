@@ -192,6 +192,21 @@ describe('the guide is composed from the platform\'s sections', () => {
     expect(guideStartText(without)).toBe(joinGuideSections(without));
   });
 
+  it("refuses a hook that drops or empties the onboarding section, which the platform's onboard prompt points at", async () => {
+    await expect(
+      composeAgentGuide(DEFAULT_KB_LAYOUT, (sections) => sections.filter((s) => s.id !== 'onboarding')),
+    ).rejects.toThrow(/dropped the "onboarding" section, which the platform's `onboard` prompt points at/);
+    await expect(
+      composeAgentGuide(DEFAULT_KB_LAYOUT, (sections) => sections.map((s) => (s.id === 'onboarding' ? { id: s.id, body: ' \n' } : s))),
+    ).rejects.toThrow(/emptied the "onboarding" section/);
+    // Replacing it under the same id is the hook's right: an organisation
+    // ships its own onboarding.
+    const own = await composeAgentGuide(DEFAULT_KB_LAYOUT, (sections) =>
+      sections.map((s) => (s.id === 'onboarding' ? { id: s.id, body: '## Welcome\n\nOur own flow.' } : s)),
+    );
+    expect(own).toContain('Our own flow.');
+  });
+
   it('refuses a hook that drops or empties the shared file rules, which every file tool points at', async () => {
     await expect(
       composeAgentGuide(DEFAULT_KB_LAYOUT, (sections) => sections.filter((s) => s.id !== WORKING_WITH_FILES_SECTION_ID)),
@@ -478,8 +493,14 @@ describe('the HTML views section', () => {
     expect(text).toContain("on the app's file page and on a skill's page");
     expect(text).not.toMatch(/on a skill page and in any preview/);
     expect(text).toContain('**Reading runs at once; writing asks first.**');
-    expect(text).toContain('"<page name> wants to write to the knowledge base"');
-    expect(text).toContain('Allow while open and Deny');
+    expect(text).toContain('"You\'re allowing changes using your account. Do you want to allow that?"');
+    expect(text).toContain("the buttons Don't allow and Allow");
+    expect(text).toContain("remembers an Allow for the signed-in account and the page's exact content");
+    expect(text).toContain('Signing out clears what the account kept.');
+    // pageConsentMemory.ts keeps 500 per account and keeps nothing where storage fails.
+    expect(text).toContain('never rely on an Allow being kept');
+    expect(text).not.toContain('wants to write to the knowledge base');
+    expect(text).not.toContain('Allow while open');
     expect(text).toContain('rejects the call with `denied`');
     expect(text).toContain('"<page name> uses tools that are only available in the platform"');
     expect(text).toContain('Continue without tools and Open in the platform');

@@ -1,4 +1,4 @@
-import type { KbLayout, IWorkflowService } from '@bevel-software/platform-shared';
+import type { KbLayout, IVersionControlService } from '@bevel-software/platform-shared';
 import { type WorkspaceService } from '../workspace/index.js';
 import type { IAccessControl } from '../access/index.js';
 import type { KbContext } from '../../shared/kb-context.js';
@@ -36,7 +36,7 @@ export class PendingSkillsService implements IPendingSkillService {
     private readonly workspaceService: WorkspaceService,
     private readonly accessControl: IAccessControl,
     private readonly skillService: ISkillService,
-    private readonly workflow: IWorkflowService,
+    private readonly versionControl: IVersionControlService,
     private readonly kb: KbContext,
   ) {}
 
@@ -57,7 +57,7 @@ export class PendingSkillsService implements IPendingSkillService {
       {
         workspaceService: this.workspaceService,
         accessControl: this.accessControl,
-        workflow: this.workflow,
+        versionControl: this.versionControl,
         kb: this.kb,
       },
       userEmail,

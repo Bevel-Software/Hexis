@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, render, act, waitFor, screen, within, fireEvent } from '@testing-library/react';
 import { useEffect, useRef, type ReactNode } from 'react';
-import type { WorkflowEvent } from '@bevel-software/platform-shared';
+import type { VersionControlEvent } from '@bevel-software/platform-shared';
 import { ConfirmProvider } from '../../../../shared/components';
 
 // One error class shared by the mock module and the tests, hoisted so
@@ -30,7 +30,7 @@ const apiMocks = vi.hoisted(() => {
 });
 vi.mock('../../services/workspace.api', () => apiMocks);
 
-import { EventBusProvider } from '../../../workflow';
+import { EventBusProvider } from '../../../version-control';
 import { stubServerEventStream } from '../../../../__tests__/server-event-stream';
 import { useWorkspaceState } from '../useWorkspaceState';
 const WorkspaceApiError = apiMocks.WorkspaceApiError;
@@ -50,7 +50,7 @@ function treeOf(paths: string[]) {
   };
 }
 
-function fileChanged(path: string, by: { id: string; name: string } = { id: 'u-sam', name: 'Sam Rivera' }): WorkflowEvent {
+function fileChanged(path: string, by: { id: string; name: string } = { id: 'u-sam', name: 'Sam Rivera' }): VersionControlEvent {
   return {
     ...envelope(),
     kind: 'file-changed',
@@ -63,7 +63,7 @@ function fileChanged(path: string, by: { id: string; name: string } = { id: 'u-s
   };
 }
 const GIT_SYNC = { id: 'system', name: 'Git sync' };
-const treeChanged = (): WorkflowEvent => ({ ...envelope(), kind: 'fs-tree-changed', workspaceId: 'ws-1', branch: 'main' });
+const treeChanged = (): VersionControlEvent => ({ ...envelope(), kind: 'fs-tree-changed', workspaceId: 'ws-1', branch: 'main' });
 
 let eventId = 0;
 function envelope() {
@@ -464,7 +464,7 @@ describe('a file deleted by someone else', () => {
     await waitFor(() => expect(result.current.workspaceId).toBe('ws-2'));
     await open(result, 'KB/Draft.md');
     disk.delete('KB/Draft.md');
-    act(() => bus.emit({ ...treeChanged(), workspaceId: 'ws-2', branch: 'feature' } as WorkflowEvent));
+    act(() => bus.emit({ ...treeChanged(), workspaceId: 'ws-2', branch: 'feature' } as VersionControlEvent));
 
     await waitFor(() => expect(tabAt(result, 'KB/Draft.md')?.deletedBy).toMatchObject({ name: null }));
   });
@@ -1007,7 +1007,7 @@ describe('a file deleted by someone else', () => {
       await waitFor(() => expect(result.current.workspaceId).toBe('ws-2'));
       await open(result, 'KB/Draft.md');
     }
-    const changedOnFeature = () => ({ ...fileChanged('KB/Draft.md'), workspaceId: 'ws-2', branch: 'feature' }) as WorkflowEvent;
+    const changedOnFeature = () => ({ ...fileChanged('KB/Draft.md'), workspaceId: 'ws-2', branch: 'feature' }) as VersionControlEvent;
 
     it("does not make this branch's read of the same path stale", async () => {
       const result = await mountReady();
@@ -1063,7 +1063,7 @@ describe('a file deleted by someone else', () => {
     await open(result, 'KB/Keep.md', 'KB/Draft.md');
     disk.delete('KB/Draft.md');
 
-    act(() => bus.emit({ ...envelope(), kind: 'lock-released', workspaceId: 'ws-1', branch: 'main', path: 'KB/Draft.md' } as WorkflowEvent));
+    act(() => bus.emit({ ...envelope(), kind: 'lock-released', workspaceId: 'ws-1', branch: 'main', path: 'KB/Draft.md' } as VersionControlEvent));
 
     await waitFor(() => expect(result.current.activeTab?.deletedBy).toMatchObject({ name: null }));
     expect(result.current.activeTab?.path).toBe('KB/Draft.md');
@@ -1079,7 +1079,7 @@ describe('a file deleted by someone else', () => {
     apiMocks.writeFile.mockClear();
     disk.delete('KB/Draft.md');
 
-    act(() => bus.emit({ ...envelope(), kind: 'lock-released', workspaceId: 'ws-1', branch: 'main', path: 'KB/Draft.md' } as WorkflowEvent));
+    act(() => bus.emit({ ...envelope(), kind: 'lock-released', workspaceId: 'ws-1', branch: 'main', path: 'KB/Draft.md' } as VersionControlEvent));
 
     await waitFor(() => expect(result.current.activeTab?.deletedBy).toMatchObject({ name: null }));
     expect(result.current.activeTab?.path).toBe('KB/Draft.md');
@@ -1095,7 +1095,7 @@ describe('a file deleted by someone else', () => {
     await typeInto(result, 'my unsaved edits');
     disk.set('KB/Draft.md', 'changed meanwhile');
 
-    act(() => bus.emit({ ...envelope(), kind: 'lock-released', workspaceId: 'ws-1', branch: 'main', path: 'KB/Draft.md' } as WorkflowEvent));
+    act(() => bus.emit({ ...envelope(), kind: 'lock-released', workspaceId: 'ws-1', branch: 'main', path: 'KB/Draft.md' } as VersionControlEvent));
     await settle();
 
     expect(apiMocks.readFile).toHaveBeenLastCalledWith('ws-1', 'KB/Draft.md');
@@ -1114,7 +1114,7 @@ describe('a file deleted by someone else', () => {
       apiMocks.readFile.mockImplementationOnce(() => new Promise((resolve) => {
         held.answer = () => resolve('# Draft\n\nA page to delete, changed.');
       }));
-      act(() => bus.emit({ ...envelope(), kind: 'lock-released', workspaceId: 'ws-1', branch: 'main', path: 'KB/Draft.md' } as WorkflowEvent));
+      act(() => bus.emit({ ...envelope(), kind: 'lock-released', workspaceId: 'ws-1', branch: 'main', path: 'KB/Draft.md' } as VersionControlEvent));
       expect(apiMocks.readFile).toHaveBeenCalledExactlyOnceWith('ws-1', 'KB/Draft.md');
       return held;
     }
@@ -1172,7 +1172,7 @@ describe('a file deleted by someone else', () => {
     expect(apiMocks.readFile).toHaveBeenCalledExactlyOnceWith('ws-1', 'KB/Draft.md');
 
     // A newer read loads the tab, and the person types into it.
-    act(() => bus.emit({ ...envelope(), kind: 'lock-released', workspaceId: 'ws-1', branch: 'main', path: 'KB/Draft.md' } as WorkflowEvent));
+    act(() => bus.emit({ ...envelope(), kind: 'lock-released', workspaceId: 'ws-1', branch: 'main', path: 'KB/Draft.md' } as VersionControlEvent));
     await waitFor(() => expect(result.current.activeTab?.content).toBe('# Draft\n\nA page to delete.'));
     await typeInto(result, 'my unsaved edits');
     // A newer read still finds the file gone.
@@ -1210,7 +1210,7 @@ describe('a file deleted by someone else', () => {
 
     // The file changes, and a newer read brings the new bytes.
     disk.set('KB/Draft.md', '# Draft\n\nChanged since.');
-    act(() => bus.emit({ ...envelope(), kind: 'lock-released', workspaceId: 'ws-1', branch: 'main', path: 'KB/Draft.md' } as WorkflowEvent));
+    act(() => bus.emit({ ...envelope(), kind: 'lock-released', workspaceId: 'ws-1', branch: 'main', path: 'KB/Draft.md' } as VersionControlEvent));
     await waitFor(() => expect(result.current.activeTab?.content).toBe('# Draft\n\nChanged since.'));
 
     await act(async () => { held.answer(); });
@@ -1445,7 +1445,7 @@ describe('a change pulled from the git host onto the open file', () => {
     const held = holdFileChangedRead(pulled);
 
     // A newer read finds the file but keeps off the edited tab.
-    act(() => bus.emit({ ...envelope(), kind: 'lock-released', workspaceId: 'ws-1', branch: 'main', path: 'KB/Notes.md' } as WorkflowEvent));
+    act(() => bus.emit({ ...envelope(), kind: 'lock-released', workspaceId: 'ws-1', branch: 'main', path: 'KB/Notes.md' } as VersionControlEvent));
     await waitFor(() => expect(apiMocks.readFile).toHaveBeenCalledTimes(2));
     await settle();
     expect(result.current.activeTab?.savedContent).toBe(BASE);
@@ -2488,7 +2488,7 @@ describe('a late 404 about a file that came back since', () => {
     const result = await mountReady();
     await open(result, 'KB/Draft.md');
     const read = holdNext404();
-    act(() => bus.emit({ ...envelope(), kind: 'lock-released', workspaceId: 'ws-1', branch: 'main', path: 'KB/Draft.md' } as WorkflowEvent));
+    act(() => bus.emit({ ...envelope(), kind: 'lock-released', workspaceId: 'ws-1', branch: 'main', path: 'KB/Draft.md' } as VersionControlEvent));
     expect(apiMocks.readFile).toHaveBeenCalledExactlyOnceWith('ws-1', 'KB/Draft.md');
 
     await closeAndReopen(result);

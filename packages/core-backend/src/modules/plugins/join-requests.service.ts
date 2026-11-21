@@ -2,7 +2,7 @@ import {
   isJoinBranchFor,
   type AuthUser,
   type ChangeRequest,
-  type IWorkflowService,
+  type IVersionControlService,
 } from '@bevel-software/platform-shared';
 import { type WorkspaceService } from '../workspace/index.js';
 import { logger } from '../../shared/logging.js';
@@ -57,7 +57,7 @@ export interface JoinRequest {
 export class JoinRequestsService implements IAccessRequestLifecycle {
   constructor(
     private readonly workspaceService: WorkspaceService,
-    private readonly workflow: IWorkflowService,
+    private readonly versionControl: IVersionControlService,
     private readonly kb: Pick<KbContext, 'defaultBranch' | 'defaultWorkspaceId'>,
     /**
      * Read-only, and asked one question only: does this person already hold
@@ -284,7 +284,7 @@ export class JoinRequestsService implements IAccessRequestLifecycle {
   private async settle(cr: ChangeRequest, actor: AuthUser): Promise<void> {
     const wsId = this.kb.defaultWorkspaceId();
     try {
-      await this.workflow.rejectChangeRequest(
+      await this.versionControl.rejectChangeRequest(
         cr.number,
         actor,
         cr.state,
@@ -301,7 +301,7 @@ export class JoinRequestsService implements IAccessRequestLifecycle {
       return;
     }
     try {
-      await this.workflow.deleteBranch(wsId, cr.branch, actor);
+      await this.versionControl.deleteBranch(wsId, cr.branch, actor);
     } catch (err) {
       // The request is closed either way; a leftover branch is cosmetic and
       // the author can still delete it themselves.

@@ -7,9 +7,9 @@ import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import { NodeFs } from '../../kb-fs/node-fs.js';
-import type { IWorkflowService } from '@bevel-software/platform-shared';
+import type { IVersionControlService } from '@bevel-software/platform-shared';
 import type { IAccessControl } from '../../access/access-control.interface.js';
-import type { WorkflowEventBus } from '../../workflow/event-bus.js';
+import type { VersionControlEventBus } from '../../version-control/event-bus.js';
 import type { AuthService } from '../../auth/auth.service.js';
 import type { IAdminAccessService } from '../../admin/admin.interface.js';
 import { createWorkspaceRoutes } from '../workspace.routes.js';
@@ -80,20 +80,20 @@ async function makeHarness(): Promise<Harness> {
   };
   const workspaceService = workspaceServiceMock as WorkspaceService;
 
-  const workflowServiceMock: Partial<IWorkflowService> = {
+  const versionControlServiceMock: Partial<IVersionControlService> = {
     getLock: vi.fn(async () => null),
     acquireLock: vi.fn(async () => ({ acquired: true, lock: {} as never })),
     releaseLock: vi.fn(async () => undefined as never),
     releaseLockNoCommit: vi.fn(async () => undefined as never),
   };
-  const workflowService = workflowServiceMock as unknown as IWorkflowService;
+  const versionControlService = versionControlServiceMock as unknown as IVersionControlService;
 
   const authServiceMock: Partial<AuthService> = {
     getUserById: vi.fn(async () => USER),
   };
   const authService = authServiceMock as AuthService;
 
-  const eventBus = { emit: vi.fn() } as unknown as WorkflowEventBus;
+  const eventBus = { emit: vi.fn() } as unknown as VersionControlEventBus;
 
   const app = express();
   app.use(express.json());
@@ -104,7 +104,7 @@ async function makeHarness(): Promise<Harness> {
   app.use('/api', createWorkspaceRoutes(
     workspaceService,
     authService,
-    workflowService,
+    versionControlService,
     eventBus,
     accessControl,
     testKbContext({ kbDirName: KB }),
@@ -128,7 +128,7 @@ async function makeHarness(): Promise<Harness> {
     workspaceDir,
     repoDir: path.join(workspaceDir, KB),
     deleteFileMock: workspaceServiceMock.deleteFile as unknown as ReturnType<typeof vi.fn>,
-    acquireLockMock: workflowServiceMock.acquireLock as unknown as ReturnType<typeof vi.fn>,
+    acquireLockMock: versionControlServiceMock.acquireLock as unknown as ReturnType<typeof vi.fn>,
   };
 }
 
@@ -199,7 +199,7 @@ describe('DELETE /workspace/:id/file — recursive folder delete (BEVA-132)', ()
 
 describe('DELETE /workspace/:id/file — one file identity', () => {
   it('deletes the canonical path, whichever accepted spelling was sent', async () => {
-    // The workflow lock row is keyed by this path, so a delete spelled
+    // The version-control lock row is keyed by this path, so a delete spelled
     // `.//note.md` must not coordinate separately from a save on `note.md`.
     const h = await makeHarness();
     try {

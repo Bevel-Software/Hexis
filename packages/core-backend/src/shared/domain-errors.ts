@@ -1,18 +1,18 @@
 /**
- * Workflow domain errors. This is the single source of truth — every error
- * raised by the workflow domain (branches, changes, change requests, access
+ * Version-control domain errors. This is the single source of truth — every error
+ * raised by the version-control domain (branches, changes, change requests, access
  * control, locks) lives here. Route handlers shape responses via the
  * `.status` + `.payload` contract on the base class.
  *
- * Lives in `src/shared` (not `modules/workflow`) because the classes are
+ * Lives in `src/shared` (not `modules/version-control`) because the classes are
  * consumed across module boundaries — access, diff, plugins and workspace all
  * catch or raise them — and `src/shared` is the layer with no module imports.
  * Only a type from `@bevel-software/platform-shared` comes in; nothing else.
  *
- * Naming: classes use workflow vocabulary. `WorkflowDomainError` is the
- * abstract base; specific subclasses describe the workflow concept that
+ * Naming: classes use version-control vocabulary. `VersionControlDomainError` is the
+ * abstract base; specific subclasses describe the version-control concept that
  * went wrong (`BranchNameError`, `ProtectedBranchError`, etc.). Where a
- * concept is purely git mechanics with no workflow analogue
+ * concept is purely git mechanics with no version-control analogue
  * (`NoSharedHistoryError`), the name keeps its git flavour because
  * consumers actually need to discriminate on it.
  */
@@ -20,25 +20,25 @@
 import type { ValidationReport } from '@bevel-software/platform-shared';
 import { sanitizedPath } from './printable.js';
 
-export class WorkflowDomainError extends Error {
+export class VersionControlDomainError extends Error {
   readonly status: number;
   readonly payload?: Record<string, unknown>;
   constructor(message: string, status: number, payload?: Record<string, unknown>) {
     super(message);
-    this.name = 'WorkflowDomainError';
+    this.name = 'VersionControlDomainError';
     this.status = status;
     this.payload = payload;
   }
 }
 
-export class BranchNameError extends WorkflowDomainError {
+export class BranchNameError extends VersionControlDomainError {
   constructor(reason: string, readonly branchName: string) {
     super(`Invalid branch name "${branchName}": ${reason}`, 400);
     this.name = 'BranchNameError';
   }
 }
 
-export class ProtectedBranchError extends WorkflowDomainError {
+export class ProtectedBranchError extends VersionControlDomainError {
   constructor(readonly branchName: string, readonly action: string) {
     super(`Branch "${branchName}" is protected — ${action} is not allowed.`, 403);
     this.name = 'ProtectedBranchError';
@@ -56,7 +56,7 @@ export class ProtectedBranchError extends WorkflowDomainError {
  * the only way for someone else to delete a non-author's branch is to push
  * the delete via git CLI directly.
  */
-export class BranchAuthorshipError extends WorkflowDomainError {
+export class BranchAuthorshipError extends VersionControlDomainError {
   readonly kind = 'branch-authorship' as const;
   constructor(readonly branchName: string) {
     super(
@@ -69,7 +69,7 @@ export class BranchAuthorshipError extends WorkflowDomainError {
 }
 
 // `DirtyWorkingTreeError` removed: under save=share + per-branch workspaces
-// no operation in the workflow can legitimately encounter a dirty working
+// no operation in the version-control can legitimately encounter a dirty working
 // tree. The two former callers (`switchBranch` and `mergeFromOrigin`'s
 // pre-flight) are gone / relaxed; if a dirty tree ever shows up it's an
 // internal bug that gets server-side-logged in `statusInternal`, never
@@ -83,7 +83,7 @@ export class BranchAuthorshipError extends WorkflowDomainError {
  * rebase conflicts.
  *
  * Per the "disk is the source of truth" rule we do NOT auto-force-push
- * from the workflow layer (that's a destructive history rewrite that can
+ * from the version-control layer (that's a destructive history rewrite that can
  * lose teammate work irrecoverably). Instead we surface this structured
  * error so the frontend can seed an agent prompt — the agent has git + gh
  * CLI access plus the lock-aware write tool, so it can read both sides,
@@ -101,8 +101,23 @@ export class BranchAuthorshipError extends WorkflowDomainError {
  * The payload carries enough context that the prompt builder can phrase
  * the resolution request to the agent without further server round-trips.
  */
-export class PushNeedsAgentResolutionError extends WorkflowDomainError {
+export class PushNeedsAgentResolutionError extends VersionControlDomainError {
   readonly kind = 'push-needs-resolution' as const;
+  /**
+   * The sentence for the operator's RECORD: the server log and an operator's
+   * notice. The message itself, but for an `access` refusal, where it always
+   * names the file and the people who may write it are counted instead of
+   * named: log lines carry no names or email addresses.
+   */
+  readonly recordMessage: string;
+  /**
+   * The sentence for text that is KEPT and shown to others later: the
+   * pending-commit queue's last error, which reaches whoever next merges or
+   * updates the branch. The message itself, but for an `access` refusal,
+   * where it names no file and no writer, since that reader may not read
+   * the file.
+   */
+  readonly sharedMessage: string;
   constructor(
     readonly branch: string,
     readonly path: string,
@@ -113,16 +128,20 @@ export class PushNeedsAgentResolutionError extends WorkflowDomainError {
      * cooperative rebase could not reconcile. `refused`: the host turned the
      * push away for any other reason (an outage, credentials, a dropped
      * connection) — nothing to reconcile, the next push of the branch carries
-     * the commits. The opening clause is the same either way.
+     * the commits. `access`: the platform's own access check refused the push
+     * before it left this server (an unpushed commit changes a file that
+     * neither its author nor the pusher may write); the host was never
+     * asked, so the sentence says the platform refused and carries the
+     * gate's own clause naming the file and who may write it: `told` for the
+     * person who saved, `recorded` for `recordMessage`, and `shared`, which
+     * names neither, for `sharedMessage`. The opening clause is the same
+     * every way.
      */
-    readonly cause: 'diverged' | 'refused' = 'diverged',
+    readonly cause: 'diverged' | 'refused' | 'access' = 'diverged',
+    readonly accessRefusal?: { told: string; recorded: string; shared: string },
   ) {
     super(
-      `Saved locally on "${branch}" but couldn't share with the team automatically — ` +
-        (cause === 'refused'
-          ? `the repository host refused the push; the next save on this branch will try sharing it again.`
-          : `the remote diverged on "${path}" and the cooperative rebase couldn't reconcile. ` +
-            `The agent will resolve this.`),
+      savedLocallySentence(branch, path, cause, accessRefusal?.told),
       409,
       // The two details are raw git output — stderr can quote a credentialed
       // URL, server paths, the host's own error page. They stay on the error
@@ -130,7 +149,27 @@ export class PushNeedsAgentResolutionError extends WorkflowDomainError {
       { kind: 'push-needs-resolution', branch, path },
     );
     this.name = 'PushNeedsAgentResolutionError';
+    this.recordMessage = cause === 'access' ? savedLocallySentence(branch, path, cause, accessRefusal?.recorded) : this.message;
+    this.sharedMessage = cause === 'access' ? savedLocallySentence(branch, path, cause, accessRefusal?.shared) : this.message;
   }
+}
+
+/** The one sentence `PushNeedsAgentResolutionError` says, for each cause; `accessClause` is the push gate's own. */
+function savedLocallySentence(
+  branch: string,
+  path: string,
+  cause: 'diverged' | 'refused' | 'access',
+  accessClause: string | undefined,
+): string {
+  return (
+    `Saved locally on "${branch}" but couldn't share with the team automatically — ` +
+    (cause === 'access'
+      ? `the platform's access check refused the push` + (accessClause ? `: ${accessClause}.` : '.')
+      : cause === 'refused'
+      ? `the repository host refused the push; the next save on this branch will try sharing it again.`
+      : `the remote diverged on "${path}" and the cooperative rebase couldn't reconcile. ` +
+        `The agent will resolve this.`)
+  );
 }
 
 /**
@@ -143,7 +182,7 @@ export class PushNeedsAgentResolutionError extends WorkflowDomainError {
  * `detail` is the raw git failure, for the server log only; it never enters
  * the message or the payload.
  */
-export class BranchDeleteRefusedError extends WorkflowDomainError {
+export class BranchDeleteRefusedError extends VersionControlDomainError {
   readonly kind = 'branch-delete-refused' as const;
   constructor(readonly branchName: string, readonly detail: string) {
     super(
@@ -166,7 +205,7 @@ export class BranchDeleteRefusedError extends WorkflowDomainError {
  * conflict, and the local commits (someone's saved content, under
  * save=share) stay unshared until the divergence is reconciled. The service
  * layer therefore reacts by queueing a background recovery run (see
- * `WorkflowService.updateFromRemote`); this error tells the caller what
+ * `VersionControlService.updateFromRemote`); this error tells the caller what
  * happened and which paths are contested.
  *
  * 409 like the other conflict errors — the operation needs the divergence
@@ -174,7 +213,7 @@ export class BranchDeleteRefusedError extends WorkflowDomainError {
  * credential-redacted by `GitService.git`) is kept OFF the payload; it's for
  * server logs and the recovery pipeline, not the client.
  */
-export class PullRebaseConflictError extends WorkflowDomainError {
+export class PullRebaseConflictError extends VersionControlDomainError {
   readonly kind = 'pull-rebase-conflict' as const;
   constructor(
     readonly branch: string,
@@ -223,7 +262,7 @@ export const BRANCH_REQUIRED_MESSAGE =
  * 400 with kind `branch-required`, so a client tells it apart from the 404
  * (no such branch) and the 410 (the branch was deleted) without reading prose.
  */
-export class BranchRequiredError extends WorkflowDomainError {
+export class BranchRequiredError extends VersionControlDomainError {
   readonly kind = 'branch-required' as const;
   constructor() {
     super(BRANCH_REQUIRED_MESSAGE, 400, { kind: 'branch-required' });
@@ -273,7 +312,7 @@ export function branchProvided(branch: unknown): branch is string {
  * once did. 404, and the message names the branch and nothing else: no git
  * output, no remote URL.
  */
-export class BranchNotFoundError extends WorkflowDomainError {
+export class BranchNotFoundError extends VersionControlDomainError {
   readonly kind = 'branch-not-found' as const;
   constructor(readonly branch: string) {
     super(`There is no branch named ${branch}.`, 404, {
@@ -291,7 +330,7 @@ export class BranchNotFoundError extends WorkflowDomainError {
  * misdescribe the call — the caller did nothing wrong, the deployment is not
  * set up. 503 with kind `default-branch-unset`; passing a branch works.
  */
-export class DefaultBranchUnsetError extends WorkflowDomainError {
+export class DefaultBranchUnsetError extends VersionControlDomainError {
   readonly kind = 'default-branch-unset' as const;
   constructor() {
     super('This deployment has no default branch configured: pass `branch` to name the one to use.', 503, {
@@ -312,7 +351,7 @@ export class DefaultBranchUnsetError extends WorkflowDomainError {
  * `BranchNotFoundError` — see `WorkspaceService.hasHeardOfBranch`. A sync
  * always has the clone in hand, so it is always this one.
  */
-export class RemoteBranchGoneError extends WorkflowDomainError {
+export class RemoteBranchGoneError extends VersionControlDomainError {
   readonly kind = 'remote-branch-gone' as const;
   constructor(readonly branch: string) {
     super(`Branch "${branch}" no longer exists on the remote.`, 410, {
@@ -345,11 +384,11 @@ export function isMissingRemoteBranchFailure(message: string): boolean {
  * `WorkspaceService.assertWithinWorkspace` throws a bare `Error` with this
  * text and `workspace.routes.sendError` maps that text to 403. The lock
  * service raises this instead of a bare `Error`, because `toHttpError` on the
- * workflow routes reads the status off the class and would otherwise call it
+ * version-control routes reads the status off the class and would otherwise call it
  * a 500. Both surfaces then answer identically for the same input. See
  * `canonicalFileIdentity`.
  */
-export class PathTraversalError extends WorkflowDomainError {
+export class PathTraversalError extends VersionControlDomainError {
   readonly kind = 'path-traversal' as const;
   constructor() {
     super('Path traversal detected', 403, { kind: 'path-traversal' });
@@ -365,7 +404,7 @@ export class PathTraversalError extends WorkflowDomainError {
  */
 export const GIT_INTERNALS_MESSAGE = "That path is inside the repository's internal git data and is not available.";
 
-export class GitInternalsError extends WorkflowDomainError {
+export class GitInternalsError extends VersionControlDomainError {
   readonly kind = 'git-internals' as const;
   constructor() {
     super(GIT_INTERNALS_MESSAGE, 403, { kind: 'git-internals' });
@@ -374,15 +413,15 @@ export class GitInternalsError extends WorkflowDomainError {
 }
 
 /**
- * Generic 400 for workflow-input validation (malformed branch names, missing
+ * Generic 400 for version-control-input validation (malformed branch names, missing
  * fields, etc.). Carries an optional payload so callers can attach typed
  * discriminators (`kind: '...'`) when the frontend needs to switch on the
  * specific failure mode.
  */
-export class WorkflowValidationError extends WorkflowDomainError {
+export class VersionControlValidationError extends VersionControlDomainError {
   constructor(message: string, payload?: Record<string, unknown>) {
     super(message, 400, payload);
-    this.name = 'WorkflowValidationError';
+    this.name = 'VersionControlValidationError';
   }
 }
 
@@ -407,7 +446,7 @@ export type BranchDeleteBlockedReason =
   | 'saves-landing'
   | 'state-unconfirmed';
 
-export class BranchDeleteBlockedError extends WorkflowDomainError {
+export class BranchDeleteBlockedError extends VersionControlDomainError {
   readonly kind = 'branch-delete-blocked' as const;
   constructor(
     readonly reason: BranchDeleteBlockedReason,
@@ -435,7 +474,7 @@ export class BranchDeleteBlockedError extends WorkflowDomainError {
  * because it never mends: a reader may remember it, where a commit the clone
  * merely does not hold yet must be asked for again after the next fetch.
  */
-export class AppliedChangeMismatchError extends WorkflowValidationError {
+export class AppliedChangeMismatchError extends VersionControlValidationError {
   constructor(message: string, payload?: Record<string, unknown>) {
     super(message, payload);
     this.name = 'AppliedChangeMismatchError';
@@ -473,7 +512,7 @@ export const NOT_FOUND_NEXT_STEP = 'Check the path with list_files.';
  * Sanitizing the path and appending the next step in the constructor is what
  * makes those two answers the same answer.
  */
-export class PathNotFoundError extends WorkflowDomainError {
+export class PathNotFoundError extends VersionControlDomainError {
   readonly kind = 'not_found' as const;
   /** The requested path, sanitized — never the path on disk. */
   readonly path: string;
@@ -512,7 +551,7 @@ export const VERSION_NOT_ON_BRANCH_MESSAGE =
  * into an oracle for "does this commit exist in the repository", which is
  * exactly the reading a branch-scoped rule exists to prevent.
  */
-export class VersionNotOnBranchError extends WorkflowDomainError {
+export class VersionNotOnBranchError extends VersionControlDomainError {
   readonly kind = 'version-not-on-branch' as const;
   constructor() {
     super(VERSION_NOT_ON_BRANCH_MESSAGE, 404, { kind: 'version-not-on-branch' });
@@ -529,7 +568,7 @@ export class VersionNotOnBranchError extends WorkflowDomainError {
  * file` prefix its message happens to start with, and a reworded message
  * would silently have turned it into a 500.
  */
-export class UnreadableArchiveError extends WorkflowDomainError {
+export class UnreadableArchiveError extends VersionControlDomainError {
   constructor(reason: string) {
     super(`Could not read zip file: ${reason}`, 422, { kind: 'unreadable-archive' });
     this.name = 'UnreadableArchiveError';
@@ -542,7 +581,7 @@ export class UnreadableArchiveError extends WorkflowDomainError {
  * a structured payload so the frontend's typed-error parser can route into
  * the agent recovery flow.
  */
-export class NoSharedHistoryError extends WorkflowDomainError {
+export class NoSharedHistoryError extends VersionControlDomainError {
   readonly kind = 'no-shared-history' as const;
   constructor(readonly head: string, readonly base: string) {
     super(
@@ -561,7 +600,7 @@ export class NoSharedHistoryError extends WorkflowDomainError {
  * carries the structured report so the UI / agent can render the items
  * the user must fix without re-running the validator.
  */
-export class ValidationFailedError extends WorkflowDomainError {
+export class ValidationFailedError extends VersionControlDomainError {
   readonly validation: ValidationReport;
   constructor(report: ValidationReport) {
     super(
@@ -581,26 +620,26 @@ export class ValidationFailedError extends WorkflowDomainError {
 }
 
 /**
- * Method exists on the workflow interface but has no backing implementation
+ * Method exists on the version-control interface but has no backing implementation
  * yet. 501 so the frontend can light up "coming soon" affordances without
- * confusing them with 5xx infra failures. `feature` is the workflow method
+ * confusing them with 5xx infra failures. `feature` is the version-control method
  * name; clients switch on it to render targeted copy.
  */
-export class NotImplementedWorkflowError extends WorkflowDomainError {
+export class NotImplementedVersionControlError extends VersionControlDomainError {
   readonly kind = 'not-implemented' as const;
   constructor(readonly feature: string) {
     super(
-      `Workflow feature "${feature}" is not yet implemented in this build.`,
+      `Version-control feature "${feature}" is not yet implemented in this build.`,
       501,
       { kind: 'not-implemented', feature },
     );
-    this.name = 'NotImplementedWorkflowError';
+    this.name = 'NotImplementedVersionControlError';
   }
 }
 
 /**
  * Attempting to reconcile two branches (opening a change request, refreshing
- * one from target, or executing a merge) hit conflicts that the workflow
+ * one from target, or executing a merge) hit conflicts that the version-control service
  * cannot auto-resolve. The structured payload carries the list of
  * conflicting paths so the frontend / agent can route into the resolution
  * flow without a second round-trip.
@@ -609,7 +648,7 @@ export class NotImplementedWorkflowError extends WorkflowDomainError {
  * resolving + committing on the source branch) before the operation can
  * succeed — same semantics git itself uses for merge conflicts.
  */
-export class ChangeRequestConflictsError extends WorkflowDomainError {
+export class ChangeRequestConflictsError extends VersionControlDomainError {
   readonly kind = 'change-request-conflicts' as const;
   constructor(
     readonly sourceBranch: string,
@@ -637,7 +676,7 @@ export class ChangeRequestConflictsError extends WorkflowDomainError {
  * waiting for a person to do: merge `sourceBranch` into `targetBranch`.
  * Carries the request's number so the caller can point the person at it.
  */
-export class OpenChangeRequestBlocksMergeError extends WorkflowDomainError {
+export class OpenChangeRequestBlocksMergeError extends VersionControlDomainError {
   readonly kind = 'open-change-request-blocks-merge' as const;
   constructor(
     readonly sourceBranch: string,
@@ -660,7 +699,7 @@ export class OpenChangeRequestBlocksMergeError extends WorkflowDomainError {
  * the existing CR number so the UI / agent can deep-link to it instead of
  * trying to recover.
  */
-export class DuplicateChangeRequestError extends WorkflowDomainError {
+export class DuplicateChangeRequestError extends VersionControlDomainError {
   readonly kind = 'duplicate-change-request' as const;
   constructor(
     readonly sourceBranch: string,
@@ -690,7 +729,7 @@ export class DuplicateChangeRequestError extends WorkflowDomainError {
  * rather than risk landing the CR's version on a protected branch. 502: the
  * failure is an internal git/push hiccup, not the caller's fault.
  */
-export class RolesYamlPreservationError extends WorkflowDomainError {
+export class RolesYamlPreservationError extends VersionControlDomainError {
   readonly kind = 'roles-yaml-preservation-failed' as const;
   /**
    * The underlying git/push failure. Kept OFF the client-facing message (which

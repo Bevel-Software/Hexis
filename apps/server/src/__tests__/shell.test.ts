@@ -32,9 +32,9 @@ function fakeCore(): ShellGraph & { order: string[] } {
       stopSweeping: () => void order.push('tmp.stopSweeping'),
       drainSweep: async () => void order.push('tmp.drain'),
     },
-    workflowService: {
-      stopTidying: () => void order.push('workflow.stopTidying'),
-      drainTidy: async () => void order.push('workflow.drainTidy'),
+    versionControlService: {
+      stopTidying: () => void order.push('versionControl.stopTidying'),
+      drainTidy: async () => void order.push('versionControl.drainTidy'),
     },
     patternMatcher: { close: async () => void order.push('matcher.close') },
     documentExtractor: { close: async () => void order.push('extractor.close') },
@@ -45,10 +45,10 @@ function fakeCore(): ShellGraph & { order: string[] } {
 const RELEASE_ORDER = [
   'jobs.stopSweeping',
   'tmp.stopSweeping',
-  'workflow.stopTidying',
+  'versionControl.stopTidying',
   'jobs.drain',
   'tmp.drain',
-  'workflow.drainTidy',
+  'versionControl.drainTidy',
   'matcher.close',
   'extractor.close',
   'commitWorker.stop',

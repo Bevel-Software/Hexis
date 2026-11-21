@@ -15,9 +15,9 @@ import type { IRoutineWritePolicy } from './routine-write-policy.js';
 import type { ToolHandlerFactory } from '../tool-helpers/index.js';
 import { requireInternalSource, requireExternalSource } from '../tool-auth/index.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
-import { GitInternalsError, WorkflowValidationError } from '../../shared/domain-errors.js';
+import { GitInternalsError, VersionControlValidationError } from '../../shared/domain-errors.js';
 // Leaf-level shared primitive (same exception `workspace.service.ts` already
-// relies on) — not a workflow service, so this stays inside the module boundary.
+// relies on) — not a version-control service, so this stays inside the module boundary.
 import {
   assertInsideRepo,
   assertRepoRootNameFree,
@@ -41,7 +41,7 @@ import { displayPath, type FileKind, type FileReader, type FileReaderRegistry, t
 import { fileTypeOf, needsContent } from './file-readers/content-mode.js';
 import { createFileReaderRegistry } from './file-readers/file-reader.registry.js';
 import { DocumentReader } from './file-readers/document-reader.js';
-import { TextReader } from './file-readers/text-reader.js';
+import { TextReader, isTextBytes } from './file-readers/text-reader.js';
 import { mcpImageResult } from '@bevel-software/platform-mcp-core';
 import {
   folderPlaceholderPath,
@@ -462,6 +462,29 @@ function assertBytesTextEditable(readers: FileReaderRegistry, path: string, exis
   if (refusal !== null) throw binaryNotWritable('binary', refusal);
 }
 
+/**
+ * The write-refusal for the TEXT a tool was handed, as opposed to what the
+ * path's extension means or what it already holds (the gates above). A NUL
+ * character is the one thing a string can carry that is not text by
+ * `isTextBytes`: written, it makes the file binary from then on, so
+ * `read_file` answers with a notice instead of the content and the text tools
+ * refuse every attempt to repair it. A model writes one now and then where it
+ * meant another character, so the refusal says which argument holds it and
+ * where, and nothing lands.
+ */
+function assertTextContent(path: string, text: string, argument: 'content' | 'new_string'): void {
+  // Whether this is text is `isTextBytes`' answer, the same one every reader
+  // gives about the file afterwards. `indexOf` only says where the NUL is.
+  if (isTextBytes(Buffer.from(text, 'utf8'))) return;
+  const offset = text.indexOf('\u0000');
+  throw new ToolError(
+    `"${displayPath(path)}" was not written: \`${argument}\` holds a NUL character (U+0000) at offset ${offset}, and a file ` +
+      'holding one is binary, not text. Send the text again without it. [nul_in_text]',
+    400,
+    { kind: 'nul_in_text', path, argument, offset },
+  );
+}
+
 /** What a write is ALLOWED to do at a path. `create` is the default everywhere. */
 export type WriteMode = 'create' | 'overwrite' | 'update';
 
@@ -669,7 +692,7 @@ function refuseEntry(entry: Record<string, unknown>, err: unknown): void {
     entry.message = err.message;
     return;
   }
-  if (err instanceof GitInternalsError || err instanceof WorkflowValidationError) {
+  if (err instanceof GitInternalsError || err instanceof VersionControlValidationError) {
     entry.error = (err.payload as { kind?: string } | undefined)?.kind ?? 'refused';
     entry.message = err.message;
     return;
@@ -1534,7 +1557,7 @@ export function registerWorkspaceTools(
 
   /**
    * The paths among `paths` the caller may NOT write, judged exactly as the
-   * lock gate judges them (`WorkflowService.acquireLock`): on a protected
+   * lock gate judges them (`VersionControlService.acquireLock`): on a protected
    * branch only, against the access tree at HEAD, with no rules at HEAD
    * meaning allow. Empty on a draft branch — changes there reach a protected
    * branch only through a change request.
@@ -2967,6 +2990,7 @@ export function registerWorkspaceTools(
     proposable: true,
     handler: async (a, ctx: ToolContext) => {
       assertNotDocumentEdit(readers, a.path as string);
+      assertTextContent(a.path as string, a.content as string, 'content');
       // NB: this is a no-op for chat + `ontology_ingest` — it only bites when a
       // routine executor has explicitly restricted THIS session's `ctx.sessionId`
       // (today only `watchlist_check`, to `.html`). Unrestricted sessions pass straight
@@ -3091,7 +3115,7 @@ export function registerWorkspaceTools(
       for (const f of files) writePolicy.assertPathWritable(ctx.sessionId, f.path);
       const fs = await ctx.getFilesystem(a.branch as string);
       // `write: true` guarantees a LockingFilesystem here; `writeFiles` lands the
-      // batch as one commit. Structural cast avoids a workflow-internal import.
+      // batch as one commit. Structural cast avoids a version-control-internal import.
       const batching = fs as unknown as {
         writeFiles(
           writes: { path: string; content: string }[],
@@ -3131,6 +3155,7 @@ export function registerWorkspaceTools(
         }
         try {
           assertNotDocumentEdit(readers, f.path);
+          assertTextContent(f.path, f.content, 'content');
           await assertNotBinaryOverwrite(readers, f.path, fs);
           // An earlier entry in this same batch counts as existing: two `create`
           // entries for one path are a mistake the commit would otherwise hide.
@@ -3223,6 +3248,7 @@ export function registerWorkspaceTools(
     proposable: true,
     handler: async (a, ctx: ToolContext) => {
       assertNotDocumentEdit(readers, a.path as string);
+      assertTextContent(a.path as string, a.new_string as string, 'new_string');
       writePolicy.assertPathWritable(ctx.sessionId, a.path as string);
       await assertAgentWriteAllowed(agentAccessGate, ctx, a.branch as string, a.path as string);
       const fs = await ctx.getFilesystem(a.branch as string);
@@ -3438,7 +3464,7 @@ export function registerWorkspaceTools(
         // ordering trick to keep the rest governed on the way — nothing lands
         // until all of it does. The placeholders go too: this is the one
         // operation that removes a folder. Structural cast, as `write_files`
-        // does, to avoid importing the workflow-internal class here.
+        // does, to avoid importing the version-control-internal class here.
         if (files.length > 0) {
           const batch = fs as unknown as {
             writeFiles(

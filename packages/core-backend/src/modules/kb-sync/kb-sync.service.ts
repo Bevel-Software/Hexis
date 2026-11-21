@@ -2,13 +2,13 @@ import type { BranchSyncOutcome } from '@bevel-software/platform-shared';
 import { logger } from '../../shared/logging.js';
 
 const log = logger('sync');
-import { sanitizeError } from '../workflow/index.js';
+import { sanitizeError } from '../version-control/index.js';
 import type {
   IKbSyncService,
   LastSync,
   SyncRequest,
   SyncResult,
-  SyncWorkflowPort,
+  SyncVersionControlPort,
   SyncWorkspacePort,
 } from './kb-sync.interface.js';
 
@@ -44,7 +44,7 @@ export class KbSyncService implements IKbSyncService {
   private last: LastSync | null = null;
 
   constructor(
-    private readonly workflow: SyncWorkflowPort,
+    private readonly versionControl: SyncVersionControlPort,
     private readonly workspaces: SyncWorkspacePort,
     private readonly now: () => number = () => Date.now(),
   ) {}
@@ -152,9 +152,9 @@ export class KbSyncService implements IKbSyncService {
       }
       let outcome: BranchSyncOutcome;
       try {
-        outcome = await this.workflow.syncWorkspaceFromRemote(id);
+        outcome = await this.versionControl.syncWorkspaceFromRemote(id);
       } catch (err) {
-        // The workflow step promises outcomes, not throws — but one broken
+        // The version-control sync step promises outcomes, not throws — but one broken
         // clone must never take the other branches, the sweep, or every
         // coalesced caller down with it, so the promise is enforced here too.
         const message = sanitizeError(err);
@@ -165,11 +165,11 @@ export class KbSyncService implements IKbSyncService {
       if (outcome.outcome === 'remote-gone') {
         // The host deleted the branch. Left in place, the stale clone would
         // fail its fetch on every following full sync — and a webhook host
-        // disables a subscription that keeps failing. The workflow retires it
+        // disables a subscription that keeps failing. The version-control service retires it
         // under the branch-lifecycle lock, after asking origin again, so a
         // branch recreated since the pull keeps its clone. Best-effort.
         try {
-          const removed = await this.workflow.retireRemoteGoneClone(id);
+          const removed = await this.versionControl.retireRemoteGoneClone(id);
           if (removed) log.info(`removed the clone of "${branch}" — deleted on the host`);
           else log.info(`kept the clone of "${branch}" — it is back on the host, or already gone`);
         } catch (err) {
@@ -183,7 +183,7 @@ export class KbSyncService implements IKbSyncService {
     // pointed at it. Best-effort — it fails safe by closing nothing.
     let closedDeletedBranch = 0;
     try {
-      closedDeletedBranch = await this.workflow.closeChangeRequestsWithDeletedBranches();
+      closedDeletedBranch = await this.versionControl.closeChangeRequestsWithDeletedBranches();
     } catch (err) {
       log.warn('deleted-branch sweep failed:', { err });
     }
@@ -192,7 +192,7 @@ export class KbSyncService implements IKbSyncService {
     // large repository, and the sync (often a webhook with a short timeout)
     // must not wait on it. It never throws; the catch is for a mock or a
     // future change that does.
-    void this.workflow.tidyAfterSweep().catch((err: unknown) => log.warn('post-sync tidy-up failed:', { err }));
+    void this.versionControl.tidyAfterSweep().catch((err: unknown) => log.warn('post-sync tidy-up failed:', { err }));
 
     const result: SyncResult = {
       status: KbSyncService.statusOf(results),

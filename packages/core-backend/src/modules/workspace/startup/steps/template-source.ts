@@ -49,6 +49,14 @@ export const TEMPLATE_SOURCE_FALLBACKS: ReadonlyMap<string, string> = new Map([
 export const SHARED_FILE_RULES_PLACEHOLDER = '{{sharedFileRules}}';
 
 /**
+ * What rendering a template reads of the knowledge base: its layout, and the
+ * default branch the shared rules name. The branch is optional so a caller
+ * that hands only `{ layout }` keeps compiling and gets the rules without the
+ * branch sentence, as before the branch was named.
+ */
+export type TemplateKb = Pick<KbContext, 'layout'> & Partial<Pick<KbContext, 'defaultBranch'>>;
+
+/**
  * Every placeholder a template file carries, filled: the layout's names on the
  * text an author wrote, THEN the shared file rules dropped into the hole they
  * left. ONE function, because the two writers of template content — the top-up
@@ -70,14 +78,6 @@ export const SHARED_FILE_RULES_PLACEHOLDER = '{{sharedFileRules}}';
  * a template writes) that a string replacement would read as capture-group
  * syntax.
  */
-/**
- * What rendering a template reads of the knowledge base: its layout, and the
- * default branch the shared rules name. The branch is optional so a caller
- * that hands only `{ layout }` keeps compiling and gets the rules without the
- * branch sentence, as before the branch was named.
- */
-export type TemplateKb = Pick<KbContext, 'layout'> & Partial<Pick<KbContext, 'defaultBranch'>>;
-
 export function renderTemplateText(text: string, layout: KbLayout, defaultBranch = ''): string {
   return renderKbLayoutPlaceholders(text, layout).replaceAll(
     SHARED_FILE_RULES_PLACEHOLDER,

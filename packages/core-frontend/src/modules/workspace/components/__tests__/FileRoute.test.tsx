@@ -29,6 +29,7 @@ import {
 } from '../../state/workspace.context';
 import { makeWorkspaceFixture } from '../../__tests__/testFixtures';
 import { AuthContext, type AuthContextValue } from '../../../auth';
+import { AppRegistryContext, makeRegistry, type AppDef } from '../../../../core/registry';
 
 function makeStatus(branch = 'alice/draft'): WorkingTreeStatus {
   return { branch, hasUpstream: true, unmergedFromUpstream: false };
@@ -154,6 +155,8 @@ function renderAt(
     canonicalize?: boolean;
     /** Router state on the first entry, as a navigation would have left it. */
     state?: unknown;
+    /** Apps in the registry — the ones whose `roots` claim top-level folders. */
+    apps?: AppDef[];
   } = {},
 ): {
   workspace: WorkspaceContextValue;
@@ -183,8 +186,10 @@ function renderAt(
     logout: () => {},
   };
 
+  const registry = makeRegistry({ apps: opts.apps ?? [] });
   function Tree({ children }: { children: ReactNode }) {
     return (
+      <AppRegistryContext.Provider value={registry}>
       <AuthContext.Provider value={auth}>
         <WorkspaceContext.Provider value={workspace}>
           <GitContext.Provider value={git}>
@@ -192,6 +197,7 @@ function renderAt(
           </GitContext.Provider>
         </WorkspaceContext.Provider>
       </AuthContext.Provider>
+      </AppRegistryContext.Provider>
     );
   }
 
@@ -277,6 +283,48 @@ describe('FileRoute: the canonical id URL', () => {
     await new Promise((r) => setTimeout(r, 50));
     expect(screen.getByLabelText('pathname')).toHaveTextContent(`/workspace/main/${PATH}`);
     expect(routesMock.fetchNodeId).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * A file under a root an app claims opens in that app by its PATH URL, so the
+ * route never trades it for the id URL, and an id URL that resolves to one is
+ * traded for the path URL instead.
+ */
+describe('FileRoute: a file under a claimed root', () => {
+  const PATH = 'knowledge-base/Data/Tickets/T-1.md';
+  const apps: AppDef[] = [{ id: 'agents', label: 'Agents', path: '/agents', element: <div />, roots: ['Data'] }];
+  function openOn(): { workspace: WorkspaceContextValue; git: GitContextValue } {
+    const tab = makeTab({ path: PATH });
+    const workspace = makeWorkspace({
+      openTabs: [tab],
+      activeTab: tab,
+      hydrateTabs: vi.fn<WorkspaceContextValue['hydrateTabs']>(async () => makeHydrateResult({ surviving: [PATH] })),
+    });
+    return { workspace, git: makeGit({ status: makeStatus('main') }) };
+  }
+
+  it('keeps the path URL of an id-bearing file', async () => {
+    routesMock.fetchNodeId.mockResolvedValue('t-1');
+    renderAt(`/workspace/main/${PATH}`, { ...openOn(), apps });
+    await settle();
+    expect(screen.getByLabelText('pathname')).toHaveTextContent(`/workspace/main/${PATH}`);
+    expect(routesMock.fetchNodeId).not.toHaveBeenCalled();
+  });
+
+  it('replaces an id URL that resolves to it with its path URL, keeping the query', async () => {
+    routesMock.fetchNodeWorkspacePath.mockResolvedValue(PATH);
+    renderAt('/workspace/main/t-1?fullscreen=1', { ...openOn(), apps });
+    await waitFor(() =>
+      expect(screen.getByLabelText('pathname')).toHaveTextContent(`/workspace/main/${PATH}`),
+    );
+    expect(screen.getByLabelText('search')).toHaveTextContent('?fullscreen=1');
+  });
+
+  it('canonicalises as before when no app claims the root', async () => {
+    routesMock.fetchNodeId.mockResolvedValue('t-1');
+    renderAt(`/workspace/main/${PATH}`, openOn());
+    await waitFor(() => expect(screen.getByLabelText('pathname')).toHaveTextContent('/workspace/main/t-1'));
   });
 });
 

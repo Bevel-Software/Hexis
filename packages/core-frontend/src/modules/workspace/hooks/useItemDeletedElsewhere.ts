@@ -1,7 +1,7 @@
 import { useContext, useEffect, useState } from 'react';
 import { pathUnderRoot } from '@bevel-software/platform-shared';
 import { useLatestRef } from '../../../shared/components';
-import { canonicalizeWorkspaceId, useEventBus } from '../../workflow';
+import { canonicalizeWorkspaceId, useEventBus } from '../../version-control';
 import { readFile, WorkspaceApiError } from '../services/workspace.api';
 import { WorkspaceContext } from '../state/workspace.context';
 import type { DeletedBy } from '../components/DeletedFileNotice';

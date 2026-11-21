@@ -6,8 +6,8 @@ import { WorkspaceContext, type WorkspaceContextValue } from '../../workspace';
 import { AuthContext, type AuthContextValue } from '../../auth';
 import { GitContext, type GitContextValue } from '../../git';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
-import type { PullRequestSummary, WorkflowEvent } from '@bevel-software/platform-shared';
-import { EventBusProvider } from '../../workflow';
+import type { PullRequestSummary, VersionControlEvent } from '@bevel-software/platform-shared';
+import { EventBusProvider } from '../../version-control';
 import { stubServerEventStream } from '../../../__tests__/server-event-stream';
 import type { ToolSecrets } from '../../secrets-vault';
 import type { LibraryContextValue } from '../state/library-data';
@@ -1988,7 +1988,7 @@ describe('SkillPage: Share', () => {
  */
 describe('SkillPage: deleted by someone else', () => {
   const SKILL_MD = 'knowledge-base/Skills/newsletter/SKILL.md';
-  const changed = (over: { path?: string } = {}): WorkflowEvent => ({
+  const changed = (over: { path?: string } = {}): VersionControlEvent => ({
     id: 1,
     ts: '',
     kind: 'file-changed',

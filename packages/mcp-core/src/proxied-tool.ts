@@ -2,6 +2,7 @@ import type { Tool as McpTool } from '@modelcontextprotocol/sdk/types.js';
 import type { JsonSchema, Tool as UtcpTool } from '@utcp/sdk';
 import { withCallExample } from './tool-interface.js';
 import { toolUiMeta, type McpAppToolUi } from './mcp-app.js';
+import { toolTitle } from './tool-title.js';
 
 /** A tool discovered from a UTCP manual, flattened into what an MCP surface advertises. */
 export interface ProxiedTool {
@@ -30,7 +31,8 @@ export interface ProxiedTool {
    * read-only; an admin's override is joined on per listing
    * ({@link withReadOnlyOverride}). Left unset for a tool from
    * anywhere else (a `.tool` manual, a plugin's MCP server): such a tool is
-   * listed with no annotation at all, exactly as before.
+   * listed conservatively with `readOnlyHint: false`, the MCP default for
+   * unknown effects. A name or a third-party tag cannot establish read-only.
    */
   readOnly?: boolean;
 }
@@ -47,7 +49,7 @@ export const READ_ONLY_TAG = 'read-only';
  * one, joined on at LISTING time: the manual's tag carries the built-in value,
  * in a surface that may be cached across listings, and an override baked into
  * that would outlive the toggle that set it. Only a tool that carries a hint
- * at all (the platform's own); any other stays unannotated whatever its name.
+ * at all (the platform's own); any other keeps the conservative default.
  */
 export function withReadOnlyOverride(
   tool: ProxiedTool,
@@ -118,6 +120,7 @@ export function toListedTool(tool: ProxiedTool): McpTool | null {
   }
   return {
     name: tool.mcpName,
+    title: toolTitle(tool.mcpName),
     // Every tool an agent can see opens with the one line that shows how it is
     // called — generated from this tool's own input schema, so the platform's
     // tools, a deployment's and a connected server's all get one and none of
@@ -130,9 +133,9 @@ export function toListedTool(tool: ProxiedTool): McpTool | null {
     // every client is required to tolerate, so a client without the
     // extension reads the tool exactly as it did before.
     ...(tool.ui ? { _meta: toolUiMeta(tool.ui) } : {}),
-    // The read-only hint, and no other annotation: only for a tool whose
-    // effect the platform knows (see `ProxiedTool.readOnly`).
-    ...(tool.readOnly !== undefined ? { annotations: { readOnlyHint: tool.readOnly } } : {}),
+    // Microsoft's federated connector submission requires a hint on every tool.
+    // Unknown effects remain conservative, matching MCP's omitted-field default.
+    annotations: { readOnlyHint: tool.readOnly === true },
   };
 }
 
@@ -445,7 +448,7 @@ export function flattenManualTool(tool: UtcpTool, kbManualName: string): Proxied
     inputSchema: tool.inputs,
     manualName: manual,
     // Only the platform's own manual speaks for its tools' effect; every other
-    // manual's tags are its author's, and its tools stay unannotated.
+    // manual's tags are its author's, so they cannot establish read-only effects.
     ...(manual === kbManualName ? { readOnly: (tool.tags ?? []).includes(READ_ONLY_TAG) } : {}),
   };
 }

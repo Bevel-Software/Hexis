@@ -133,7 +133,7 @@ async function start(opts: { agentScope?: boolean } = {}): Promise<string> {
   const resolve = createToolContextResolver({
     authService: { getUserById: async () => ADA } as never,
     workspaceService: {} as never,
-    workflowService: {} as never,
+    versionControlService: {} as never,
     events: {} as never,
     kbDirName: 'knowledge-base',
     creatorAccess: {} as never,

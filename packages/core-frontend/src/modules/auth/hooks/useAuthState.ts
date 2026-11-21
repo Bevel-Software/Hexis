@@ -3,6 +3,7 @@ import type { AuthUser } from '@bevel-software/platform-shared';
 import type { AuthContextValue } from '../state/auth.context';
 import { loginWithPassword, fetchCurrentUser } from '../services/auth.api';
 import { getToken, setToken, clearToken } from '../../../lib/api';
+import { clearAccountStorage } from '../state/accountStorage';
 import { consumeSsoCallback, OAUTH_ERROR_KEY } from '../services/sso';
 
 export function useAuthState(): AuthContextValue {
@@ -44,10 +45,12 @@ export function useAuthState(): AuthContextValue {
   }, []);
 
   const logout = useCallback(() => {
+    // What the account kept in this browser leaves with it.
+    if (user) clearAccountStorage(user.id);
     clearToken();
     setTokenState(null);
     setUser(null);
-  }, []);
+  }, [user]);
 
   return useMemo(() => ({
     user,

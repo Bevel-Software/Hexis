@@ -12,8 +12,8 @@ import type { IAccessControl } from '../../access/access-control.interface.js';
 import { readFile as fsReadFile } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
-import { GitService } from '../../workflow/git/git.service.js';
+import { VersionControlHooks } from '../../version-control/version-control-hooks.js';
+import { GitService } from '../../version-control/git/git.service.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 
 const execFileAsync = promisify(execFile);
@@ -423,7 +423,7 @@ describe('SkillService', () => {
 
     const versioned = (access: IAccessControl = allowAll) => {
       const service = svc(access);
-      service.setHistory(new GitService(workspaceService, new WorkflowHooks(), testKbContext({ kbDirName: KB_DIR })));
+      service.setHistory(new GitService(workspaceService, new VersionControlHooks(), testKbContext({ kbDirName: KB_DIR })));
       return service;
     };
 

@@ -2,14 +2,14 @@ import { get as httpGet, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import type { IWorkflowService } from '@bevel-software/platform-shared';
+import type { IVersionControlService } from '@bevel-software/platform-shared';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import { NodeFs } from '../../kb-fs/node-fs.js';
 import { VersionNotOnBranchError, VERSION_NOT_ON_BRANCH_MESSAGE } from '../../../shared/domain-errors.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import type { ICreatorAccess } from '../../access-model/creator.js';
 import type { IAdminAccessService } from '../../admin/admin.interface.js';
-import type { WorkflowEventBus } from '../../workflow/event-bus.js';
+import type { VersionControlEventBus } from '../../version-control/event-bus.js';
 import type { AuthService } from '../../auth/auth.service.js';
 import { createWorkspaceRoutes } from '../workspace.routes.js';
 import type { WorkspaceService } from '../workspace.service.js';
@@ -53,7 +53,7 @@ async function makeHarness(
   opts: {
     canRead?: boolean;
     canDownload?: boolean;
-    /** What the workflow service answers; default is the past bytes. */
+    /** What the version-control service answers; default is the past bytes. */
     atRef?: () => Promise<{ bytes: Uint8Array; blobId: string } | null>;
   } = {},
 ): Promise<Harness> {
@@ -73,7 +73,7 @@ async function makeHarness(
   const fileBytesAtChange = vi.fn(
     opts.atRef ?? (async () => ({ bytes: PAST_BYTES, blobId: 'deadbeef'.repeat(5) })),
   );
-  const workflowService = { fileBytesAtChange } as unknown as IWorkflowService;
+  const versionControlService = { fileBytesAtChange } as unknown as IVersionControlService;
 
   const authService = { getUserById: vi.fn(async () => USER) } as unknown as AuthService;
 
@@ -88,8 +88,8 @@ async function makeHarness(
     createWorkspaceRoutes(
       workspaceService,
       authService,
-      workflowService,
-      {} as unknown as WorkflowEventBus,
+      versionControlService,
+      {} as unknown as VersionControlEventBus,
       accessControl,
       testKbContext({ kbDirName: KB }),
       stubCreatorAccess,

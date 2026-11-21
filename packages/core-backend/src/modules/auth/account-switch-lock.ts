@@ -1,7 +1,7 @@
 import { sql } from 'drizzle-orm';
 import type { Database } from '../database/index.js';
 import { canonicalEmail } from '../../shared/email-identity.js';
-import { WorkflowDomainError } from '../../shared/domain-errors.js';
+import { VersionControlDomainError } from '../../shared/domain-errors.js';
 import { pgErrorCode } from '../database/index.js';
 
 /** The handle `db.transaction` hands its callback. */
@@ -51,7 +51,7 @@ export async function takeAccountSwitchLock(
   } catch (err) {
     // Drizzle wraps the driver's error, so the SQLSTATE is on its cause.
     if (pgErrorCode(err) === LOCK_NOT_AVAILABLE) {
-      throw new WorkflowDomainError(ACCOUNT_BUSY_MESSAGE, 409, { kind: 'account-busy' });
+      throw new VersionControlDomainError(ACCOUNT_BUSY_MESSAGE, 409, { kind: 'account-busy' });
     }
     throw err;
   }

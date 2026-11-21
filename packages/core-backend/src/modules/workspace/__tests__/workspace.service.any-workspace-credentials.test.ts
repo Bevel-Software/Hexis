@@ -6,7 +6,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import { NodeFs } from '../../kb-fs/node-fs.js';
-import { NodeGitRunner } from '../../workflow/git/node-git-runner.js';
+import { NodeGitRunner } from '../../version-control/git/node-git-runner.js';
 import { gitCredentials } from '../../../shared/git.contract.js';
 import { newWorkspaceService } from '../../../__tests__/workspace-service.js';
 
