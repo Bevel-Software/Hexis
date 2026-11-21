@@ -110,6 +110,12 @@ export interface AuthFetchOptions {
    * Network failures always signal, whatever this returns.
    */
   isApplicationResponse?: (response: Response) => boolean;
+  /**
+   * The session token to send instead of reading the stored one now: a caller
+   * that checked whose token it is sends exactly that token, never one another
+   * tab put in its place between the check and the request. `null` sends none.
+   */
+  token?: string | null;
 }
 
 /**
@@ -123,7 +129,7 @@ export async function authFetch(
   init?: RequestInit,
   opts: AuthFetchOptions = {},
 ): Promise<Response> {
-  const token = getToken();
+  const token = opts.token !== undefined ? opts.token : getToken();
   const headers = new Headers(init?.headers);
   if (token) headers.set('Authorization', `Bearer ${token}`);
 

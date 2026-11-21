@@ -4,5 +4,5 @@
  * layout and free to move. Export what another module needs; nothing more.
  */
 export { fetchMarketplaceRegistration } from './services/github-facade.api';
-export { isSettingsNavPath, useMenuSections } from './settings-nav-items';
+export { isSettingsNavPath, registrySettingsPages, useMenuSections, useSettingsNavPaths } from './settings-nav-items';
 export type { MenuSections } from './settings-nav-items';

@@ -4,10 +4,12 @@ import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { SettingsLayout } from '../SettingsLayout';
-import { AdminContext, type AdminContextValue } from '../../../admin/state/admin.context';
-import { SIDEBAR_DOM_ID } from '../../../layout/components/SidebarFrame';
-import { setSidebarCollapsed } from '../../../layout/state/sidebar';
+import { isSettingsNavPath, registrySettingsPages, useSettingsNavPaths } from '../../settings-nav-items';
+import { AdminContext, type AdminContextValue } from '../../../admin';
+import { setSidebarCollapsed } from '../../../layout';
 import { AppRegistryContext, makeRegistry, type AdminMenuItem } from '../../../../core/registry';
+import { AuthContext, type AuthContextValue } from '../../../auth';
+import type { AuthUser } from '@bevel-software/platform-shared';
 
 /**
  * The settings nav's contract.
@@ -230,7 +232,8 @@ describe('SettingsLayout', () => {
     it('fills the app sidebar frame on a wide window', () => {
       stubMatchMedia(false);
       renderAt('/secrets');
-      const frame = document.getElementById(SIDEBAR_DOM_ID);
+      // The app's one sidebar frame: an `<aside>` named for the surface it holds.
+      const frame = screen.queryByRole('complementary', { name: 'Settings' });
       expect(frame).not.toBeNull();
       expect(frame).toContainElement(nav());
       vi.unstubAllGlobals();
@@ -241,10 +244,268 @@ describe('SettingsLayout', () => {
     it('becomes a strip with no sidebar frame on a narrow window', () => {
       stubMatchMedia(true);
       renderAt('/secrets');
-      expect(document.getElementById(SIDEBAR_DOM_ID)).toBeNull();
+      expect(screen.queryByRole('complementary', { name: 'Settings' })).toBeNull();
       expect(noNav()).not.toBeNull();
       expect(within(nav()).getAllByRole('link')).toHaveLength(5);
       vi.unstubAllGlobals();
     });
+  });
+});
+
+/**
+ * An app's own settings pages (`AdminMenuItem.page`): rows of the registry
+ * that bring a page are listed in the nav like core's, under the section they
+ * name, to the people they are shown to.
+ */
+describe('SettingsLayout with pages the registry brings', () => {
+  const INFRASTRUCTURE = { id: 'infrastructure', label: 'Infrastructure only' };
+  const ada = { id: 'u1', email: 'ada@example.com', name: 'Ada' } as AuthUser;
+  const pageRows: AdminMenuItem[] = [
+    { id: 'connected-apps', order: 60, label: 'Connected apps', path: '/connected-apps', page: <div>Connected apps page</div> },
+    { id: 'executors', section: INFRASTRUCTURE, label: 'Executors', path: '/executors/', page: <div>Executors page</div>, isShown: (user) => user.email === 'ada@example.com' },
+    { id: 'llm', section: 'admin', order: 30, label: 'LLM configuration', path: '/llm-configuration', page: <div>LLM page</div> },
+    // A path with no page is somewhere else in the app.
+    { id: 'elsewhere', label: 'No page', path: '/agents/workflows' },
+    // Rows that must NOT be linked: a page at a built-in address, at the old Connection keys address, at a path an
+    // earlier row took, and a page row that also runs an action (the menu runs the action; a link would go around it).
+    { id: 'takeover', label: 'Not the secrets page', path: '/secrets', page: <div>Never mounted</div> },
+    { id: 'old-keys', label: 'Not the keys page', path: '/connection-keys', page: <div>Never mounted</div> },
+    { id: 'second', label: 'Second at the same path', path: '/connected-apps', page: <div>Never mounted</div> },
+    { id: 'acts', label: 'Runs an action', path: '/acts', page: <div>Acts page</div>, onSelect: () => {} },
+    // A page row that also opens a dialog: the menu opens the dialog, so the row stays in the menu only.
+    { id: 'opens', label: 'Opens a dialog', path: '/opens', page: <div>Opens page</div>, dialog: () => <></> },
+    // Addresses the router reads as one already taken: the `/connect` redirect, core's page in other
+    // case, and an earlier row's path in other case and with a trailing slash.
+    { id: 'connect', label: 'Not the connect redirect', path: '/connect', page: <div>Never mounted</div> },
+    { id: 'shouting', label: 'Not the secrets page either', path: '/SECRETS', page: <div>Never mounted</div> },
+    { id: 'recased', label: 'Connected apps again', path: '/Connected-Apps/', page: <div>Never mounted</div> },
+    // An address belongs to the first row that names it, page or not: a page for the address `elsewhere`
+    // points to is not mounted, and a later row that merely names a mounted page's address is not a second link to it.
+    { id: 'late-claim', label: 'Page at a named address', path: '/agents/workflows', page: <div>Never mounted</div> },
+    { id: 'alias', label: 'Another name for connected apps', path: '/connected-apps' },
+  ];
+
+  function renderPages(route: string, { user = ada, isAdmin = false }: { user?: AuthUser | null; isAdmin?: boolean } = {}) {
+    const tree = (
+      <AppRegistryContext.Provider value={makeRegistry({ adminMenuItems: pageRows })}>
+        <MemoryRouter initialEntries={[route]}>
+          <Routes>
+            <Route element={<SettingsLayout />}>
+              <Route path="/secrets" element={<div>Secrets stub</div>} />
+              {/* The app's pages as the shell mounts them: from the rows, through the one function that decides which are. */}
+              {registrySettingsPages(makeRegistry({ adminMenuItems: pageRows })).map((row) => (
+                <Route key={row.path} path={row.path} element={row.page} />
+              ))}
+            </Route>
+          </Routes>
+        </MemoryRouter>
+      </AppRegistryContext.Provider>
+    );
+    return render(
+      <AuthContext.Provider value={(user ? { user } : null) as AuthContextValue | null}>{withAdmin(isAdmin, tree)}</AuthContext.Provider>,
+    );
+  }
+
+  it('lists them with core\'s rows, in their order, each under its own section', () => {
+    renderPages('/secrets', { isAdmin: true });
+    expect(within(nav()).getAllByRole('link').map((l) => l.textContent)).toEqual([
+      'External agent access',
+      'Audit log',
+      'Secrets',
+      'Connected apps',
+      'Browse available tools',
+      'Account',
+      'Executors',
+      'Deployment',
+      'App roles',
+      'Groups & Members',
+      'User accounts',
+      'LLM configuration',
+    ]);
+    // The app's section is labelled, between the default rows and "Admin only".
+    expect(within(nav()).getByText('Infrastructure only')).toBeInTheDocument();
+    expect(within(nav()).getAllByRole('link', { name: 'Secrets' })).toHaveLength(1);
+    expect(within(nav()).queryByRole('link', { name: 'No page' })).toBeNull();
+    expect(within(nav()).queryByRole('link', { name: 'Page at a named address' })).toBeNull();
+    expect(within(nav()).queryByRole('link', { name: 'Another name for connected apps' })).toBeNull();
+    // One link per page: the row whose page is mounted there.
+    expect(within(nav()).getAllByRole('link').filter((l) => l.getAttribute('href') === '/connected-apps')).toHaveLength(1);
+  });
+
+  it('mounts a page per row that brings one, at its own path: never at a built-in address, and one page per path', () => {
+    expect(registrySettingsPages(makeRegistry({ adminMenuItems: pageRows })).map((row) => `${row.id} ${row.path}`)).toEqual([
+      'connected-apps /connected-apps',
+      'executors /executors',
+      'llm /llm-configuration',
+      'acts /acts',
+      'opens /opens',
+    ]);
+  });
+
+  it('mounts no page at an address something else answers: a shell route, an app, a top-level route', () => {
+    const page = (id: string, path: string): AdminMenuItem => ({ id, label: id, path, page: <div>{id}</div> });
+    const registry = makeRegistry({
+      apps: [{ id: 'knowledge', label: 'Knowledge', path: '/workspace', element: <div /> }],
+      topLevelRoutes: [{ path: '/onboarding', element: <div /> }],
+      adminMenuItems: [
+        // One request's address, which the shell's `/change-requests/:number` answers.
+        page('one-request', '/change-requests/123'),
+        page('landing', '/'),
+        page('sign-in-return', '/auth/oidc/callback'),
+        page('embed', '/embed/link'),
+        // An app's surface is its path and everything under it.
+        page('app-root', '/workspace'),
+        page('inside-app', '/workspace/main/settings'),
+        page('top-level', '/onboarding'),
+        page('free', '/change-requests'),
+      ],
+    });
+    expect(registrySettingsPages(registry).map((row) => row.id)).toEqual(['free']);
+  });
+
+  it('mounts a page only at one absolute address, never at a route pattern, and such a row holds no address', () => {
+    const page = (id: string, path: string): AdminMenuItem => ({ id, label: id, path, page: <div>{id}</div> });
+    const rows = [
+      page('parameter', '/teams/:id'),
+      page('splat', '/teams/*'),
+      page('optional', '/teams/all?'),
+      page('query', '/teams?tab=all'),
+      page('fragment', '/teams#all'),
+      page('relative', 'teams'),
+      // Spellings the browser or the router resolves to another address.
+      page('parent-segment', '/teams/../secrets'),
+      page('same-segment', '/teams/./all'),
+      page('ends-in-parent', '/teams/..'),
+      page('doubled-slash', '/teams//all'),
+      page('backslash', '/teams\\all'),
+      page('tab', '/teams\tall'),
+      page('another-origin', '//elsewhere.example/teams'),
+      page('encoded-letter', '/%74eams'),
+      // After them all, and still free: none of the rows above took it.
+      page('one-address', '/teams/1'),
+      page('colon-inside', '/teams/a:b'),
+      page('not-ascii', '/übersicht'),
+      page('trailing-slash', '/groups/'),
+    ];
+    expect(registrySettingsPages(makeRegistry({ adminMenuItems: rows })).map((row) => `${row.id} ${row.path}`)).toEqual([
+      'one-address /teams/1',
+      'colon-inside /teams/a:b',
+      'not-ascii /übersicht',
+      'trailing-slash /groups',
+    ]);
+  });
+
+  it('lists no row whose path is a route pattern, or resolves to another page', () => {
+    const rows: AdminMenuItem[] = [
+      { id: 'pattern', label: 'A pattern', path: '/teams/:id', page: <div>Teams</div> },
+      // A link to this would land on the Secrets page under the row's own name.
+      { id: 'elsewhere', label: 'Lands on secrets', path: '/teams/../secrets', page: <div>Teams</div> },
+      { id: 'elsewhere-no-page', label: 'Points at secrets', path: '/teams/../secrets' },
+    ];
+    render(
+      <AppRegistryContext.Provider value={makeRegistry({ adminMenuItems: rows })}>
+        <MemoryRouter initialEntries={['/secrets']}>
+          <Routes>
+            <Route element={<SettingsLayout />}>
+              <Route path="/secrets" element={<div>Secrets stub</div>} />
+            </Route>
+          </Routes>
+        </MemoryRouter>
+      </AppRegistryContext.Provider>,
+    );
+    expect(within(nav()).queryByRole('link', { name: 'A pattern' })).toBeNull();
+    expect(within(nav()).queryByRole('link', { name: 'Lands on secrets' })).toBeNull();
+    expect(within(nav()).queryByRole('link', { name: 'Points at secrets' })).toBeNull();
+    expect(within(nav()).getAllByRole('link').filter((l) => l.getAttribute('href') === '/secrets')).toHaveLength(1);
+  });
+
+  it('an app that claims the root takes no address from a page', () => {
+    const registry = makeRegistry({
+      apps: [{ id: 'everything', label: 'Everything', path: '/', element: <div /> }],
+      adminMenuItems: [{ id: 'free', label: 'Free', path: '/executors', page: <div /> }],
+    });
+    expect(registrySettingsPages(registry).map((row) => row.id)).toEqual(['free']);
+  });
+
+  it('marks the row current and shows its page when the URL spells the path percent-encoded', () => {
+    renderPages('/%65xecutors');
+    expect(screen.getByText('Executors page')).toBeInTheDocument();
+    expect(within(nav()).getByRole('link', { name: 'Executors' })).toHaveAttribute('aria-current', 'page');
+  });
+
+  it('marks the row current and shows its page when the URL spells the path in another case', () => {
+    renderPages('/Executors/');
+    expect(screen.getByText('Executors page')).toBeInTheDocument();
+    expect(within(nav()).getByRole('link', { name: 'Executors' })).toHaveAttribute('aria-current', 'page');
+  });
+
+  it("counts an app's pages as settings paths through useSettingsNavPaths, and only core's without it", () => {
+    function Probe() {
+      const paths = useSettingsNavPaths();
+      return (
+        <>
+          <output aria-label="with the app's pages">{String(isSettingsNavPath('/executors', paths))}</output>
+          <output aria-label="percent-encoded">{String(isSettingsNavPath('/%65xecutors/', paths))}</output>
+          <output aria-label="core only">{String(isSettingsNavPath('/executors'))}</output>
+        </>
+      );
+    }
+    render(
+      <AppRegistryContext.Provider value={makeRegistry({ adminMenuItems: pageRows })}>
+        <Probe />
+      </AppRegistryContext.Provider>,
+    );
+    expect(screen.getByRole('status', { name: "with the app's pages" })).toHaveTextContent('true');
+    // What the toolbar's sidebar toggle goes by, for a URL the router reads as that page.
+    expect(screen.getByRole('status', { name: 'percent-encoded' })).toHaveTextContent('true');
+    expect(screen.getByRole('status', { name: 'core only' })).toHaveTextContent('false');
+  });
+
+  it('shows the row\'s own page at its path and marks it current, whatever slashes the row was written with', () => {
+    renderPages('/executors');
+    expect(screen.getByText('Executors page')).toBeInTheDocument();
+    expect(within(nav()).getByRole('link', { name: 'Executors' })).toHaveAttribute('aria-current', 'page');
+    // Its section is a named group, so a link is heard with the section it is in.
+    expect(within(screen.getByRole('group', { name: 'Infrastructure only' })).getByRole('link', { name: 'Executors' })).toBeInTheDocument();
+  });
+
+  it('asks who a row is shown to on every render, not once', () => {
+    let role = false;
+    const rows: AdminMenuItem[] = [{ id: 'late', label: 'Learnt later', path: '/late', page: <div>Late page</div>, isShown: () => role }];
+    const tree = () => (
+      <AuthContext.Provider value={{ user: ada } as AuthContextValue}>
+        <AppRegistryContext.Provider value={registry}>
+          <MemoryRouter initialEntries={['/secrets']}>
+            <Routes>
+              <Route element={<SettingsLayout />}>
+                <Route path="/secrets" element={<div>Secrets stub</div>} />
+              </Route>
+            </Routes>
+          </MemoryRouter>
+        </AppRegistryContext.Provider>
+      </AuthContext.Provider>
+    );
+    // The same registry object across both renders: nothing the layout memoizes on changes, only the answer does.
+    const registry = makeRegistry({ adminMenuItems: rows });
+    const { rerender } = render(tree());
+    expect(within(nav()).queryByRole('link', { name: 'Learnt later' })).toBeNull();
+    role = true;
+    rerender(tree());
+    expect(within(nav()).getByRole('link', { name: 'Learnt later' })).toBeInTheDocument();
+  });
+
+  it('offers a row to the people it is shown to, and its section only while a row of it shows', () => {
+    renderPages('/secrets', { user: { ...ada, email: 'ben@example.com' } as AuthUser });
+    expect(within(nav()).queryByRole('link', { name: 'Executors' })).toBeNull();
+    expect(within(nav()).queryByText('Infrastructure only')).toBeNull();
+    expect(within(nav()).getByRole('link', { name: 'Connected apps' })).toBeInTheDocument();
+    // Not an admin either: a page the registry puts under "Admin only" is not advertised to them.
+    expect(within(nav()).queryByRole('link', { name: 'LLM configuration' })).toBeNull();
+  });
+
+  it('with nobody signed in, offers none of the rows that ask who is', () => {
+    renderPages('/secrets', { user: null });
+    expect(within(nav()).queryByRole('link', { name: 'Executors' })).toBeNull();
+    expect(within(nav()).getByRole('link', { name: 'Connected apps' })).toBeInTheDocument();
   });
 });

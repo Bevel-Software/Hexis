@@ -58,15 +58,17 @@ export const SECTION_TOKEN_BUDGETS: Readonly<Record<string, number>> = Object.fr
   'drafts-and-change-requests': SECTION_TOKEN_BUDGET,
   skills: SECTION_TOKEN_BUDGET,
   tools: SECTION_TOKEN_BUDGET,
-  'tool-manuals': SECTION_TOKEN_BUDGET,
+  // A tool that sends a file (`format: file-path`) is declared in the `.tool`
+  // itself, and the section was at its ceiling before that paragraph.
+  'tool-manuals': 2_700,
   // The page contract is long by nature (the frame, the bridge, the link
   // rules, pages that load live data), and an agent fetches it only to build
   // a page. 5,650 since code added at runtime runs only if the page
   // already holds its text (a handler set through `innerHTML` no longer
   // does, which breaks a common way of writing a page) and an Allow covers
   // that code but not the files it reads; two restatements were cut to make
-  // part of the room. 5,600 since a page reaches platform tools only and an
-  // Allow is remembered by the page's content; 5,500 before.
+  // part of the room. 5,600 since an Allow is remembered by the page's
+  // content (a rule a page author must know); 5,500 before.
   'html-views': 5_650,
   conventions: SECTION_TOKEN_BUDGET,
   'new-knowledge-base': SECTION_TOKEN_BUDGET,

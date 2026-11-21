@@ -9,9 +9,8 @@
 import { createRoot } from 'react-dom/client';
 import { MemoryRouter } from 'react-router-dom';
 import { SignedIn } from './SignedIn';
-import { PageToolsContext, getFileRenderer } from '../../src/modules/workspace/components/renderers';
 import { GitContext, type GitContextValue } from '../../src/modules/git';
-import { WorkspaceContext, type WorkspaceContextValue } from '../../src/modules/workspace';
+import { PageToolsContext, WorkspaceContext, pickFileRenderer, type WorkspaceContextValue } from '../../src/modules/workspace';
 
 declare global {
   interface Window {
@@ -26,7 +25,7 @@ const git = { status: { branch: 'main' } } as unknown as GitContextValue;
 window.mountHtmlPage = ({ content, filePath, pagePath, signedIn }) => {
   const host = document.getElementById('root');
   if (!host) throw new Error('no #root to mount on');
-  const HtmlRenderer = getFileRenderer(filePath);
+  const HtmlRenderer = pickFileRenderer(filePath);
   const page = (
     <MemoryRouter initialEntries={[`/workspace/main/${filePath}`]}>
       <WorkspaceContext.Provider value={workspace}>

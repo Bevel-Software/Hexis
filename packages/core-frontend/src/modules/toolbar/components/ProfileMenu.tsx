@@ -89,7 +89,7 @@ export function ProfileMenu() {
   const navigate = useNavigate();
   const { user, logout } = useAuth();
   const { isAdmin, unreadCount } = useAdmin();
-  const { defaultItems, adminItems } = useMenuSections();
+  const { defaultItems, adminItems, appSections } = useMenuSections();
   const [open, setOpen] = useState(false);
   // Per-row dialog open flags, keyed by item id. A plain map (rather than one
   // "active dialog" slot) preserves the historical behavior where two dialogs
@@ -184,6 +184,10 @@ export function ProfileMenu() {
   // Rows offered to this person right now (see `AdminMenuItem.isShown`).
   const shownDefaultItems = defaultItems.filter((item) => item.isShown?.(user) ?? true);
   const shownAdminItems = adminItems.filter((item) => item.isShown?.(user) ?? true);
+  // The app's sections, each with the rows offered to this person; a section none of whose rows is shown is left out.
+  const shownAppSections = appSections
+    .map((section) => ({ ...section, items: section.items.filter((item) => item.isShown?.(user) ?? true) }))
+    .filter((section) => section.items.length > 0);
 
   return (
     <div className="relative">
@@ -271,6 +275,13 @@ export function ProfileMenu() {
 
           {shownDefaultItems.map(renderRow)}
 
+          {shownAppSections.map((section) => (
+            <div key={section.id} role="group" aria-labelledby={`profile-menu-section-${section.id}-label`}>
+              <MenuLabel id={`profile-menu-section-${section.id}-label`}>{section.label}</MenuLabel>
+              {section.items.map(renderRow)}
+            </div>
+          ))}
+
           {isAdmin && shownAdminItems.length > 0 && (
             <div role="group" aria-labelledby="profile-menu-admin-section-label">
               <MenuLabel id="profile-menu-admin-section-label">Admin only</MenuLabel>
@@ -293,6 +304,7 @@ export function ProfileMenu() {
       {/* Dialogs opened by the menu rows above. Mounted at the menu root so they
           persist independently of the (transient) dropdown. */}
       {renderDialogs(defaultItems)}
+      {renderDialogs(appSections.flatMap((section) => section.items))}
       {isAdmin && renderDialogs(adminItems)}
     </div>
   );
