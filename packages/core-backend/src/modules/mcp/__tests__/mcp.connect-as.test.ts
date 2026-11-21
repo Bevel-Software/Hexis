@@ -10,7 +10,6 @@ import { SpillStore } from '../../workspace/index.js';
 import { ToolRegistry, createManualRoutes } from '../../tool-registry/index.js';
 import { toolDef } from '../../tool-helpers/index.js';
 import type { ConnectionScopeWire } from '../../agent-scope/index.js';
-import { GUIDE_FIRST_LINE } from '../../agent-instructions/index.js';
 
 /**
  * The MCP proxy's half of connecting as an agent. The surfaces behind the
@@ -174,7 +173,11 @@ describe('a narrowed connection', () => {
     expect(everything).not.toContain('connected as the agent');
     // Both open with the line that sends the agent to the guide, which names
     // the connection whole; the connection line stays last.
-    for (const text of [narrowed, everything]) expect(text!.split('\n')[0]).toBe(GUIDE_FIRST_LINE);
+    for (const text of [narrowed, everything]) {
+      expect(text!.split('\n')[0]).toBe(
+        'Before anything else, call `get_agent_guide` and read the guide: it says what this deployment is and what this connection loads.',
+      );
+    }
   });
 
   it('two connections of one person made as different agents never share a built surface', async () => {
