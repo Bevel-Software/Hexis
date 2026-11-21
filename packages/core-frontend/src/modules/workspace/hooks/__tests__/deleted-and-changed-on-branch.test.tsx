@@ -126,7 +126,12 @@ beforeEach(() => {
     if (bytes === undefined) throw new WorkspaceApiError(404, 'Not found');
     return bytes;
   });
-  apiMocks.writeFile.mockImplementation(async (_ws: string, path: string, content: string) => {
+  // As the server answers: a write with `ifMatch` lands only while the file
+  // holds those bytes, a missing file reading as empty; otherwise 409.
+  apiMocks.writeFile.mockImplementation(async (_ws: string, path: string, content: string, options?: { ifMatch?: string }) => {
+    if (options?.ifMatch !== undefined && (disk.get(path) ?? '') !== options.ifMatch) {
+      throw new WorkspaceApiError(409, `"${path}" changed since you opened it.`);
+    }
     disk.set(path, content);
   });
   apiMocks.deleteFile.mockImplementation(async (_ws: string, path: string) => {
@@ -532,6 +537,8 @@ describe('a file deleted by someone else', () => {
     const result = await mountReady();
     await open(result, 'KB/Draft.md');
     const baseline = result.current.activeTab?.savedContent;
+    // The agent's tool call wrote its version to disk before the preview.
+    disk.set('KB/Draft.md', '# Draft\n\nThe agent rewrote this.');
     await act(async () => { result.current.setPendingContent('# Draft\n\nThe agent rewrote this.'); });
 
     await act(async () => { await result.current.rejectPendingContent(); });
@@ -1050,11 +1057,11 @@ describe('a file deleted by someone else', () => {
       act(() => { mainReload = reloadOnMain('KB/Draft.md'); });
       // Saved on feature while main's read is still out: not waited on.
       await act(async () => { await result.current.saveFile('KB/Draft.md', 'edited on feature'); });
-      expect(apiMocks.writeFile).toHaveBeenLastCalledWith('ws-2', 'KB/Draft.md', 'edited on feature');
+      expect(apiMocks.writeFile).toHaveBeenLastCalledWith('ws-2', 'KB/Draft.md', 'edited on feature', { ifMatch: '# Draft\n\nA page to delete.' });
 
       await act(async () => { answerGoneOnMain(); await mainReload; });
       await act(async () => { await result.current.saveFile('KB/Draft.md', 'edited again'); });
-      expect(apiMocks.writeFile).toHaveBeenLastCalledWith('ws-2', 'KB/Draft.md', 'edited again');
+      expect(apiMocks.writeFile).toHaveBeenLastCalledWith('ws-2', 'KB/Draft.md', 'edited again', { ifMatch: 'edited on feature' });
     });
   });
 
@@ -1615,7 +1622,7 @@ describe('a write that answers after a branch switch', () => {
     const held = holdNextWrite();
     let saving!: Promise<void>;
     act(() => { saving = result.current.saveFile('KB/Draft.md', 'edited on main'); });
-    await waitFor(() => expect(apiMocks.writeFile).toHaveBeenCalledWith('ws-1', 'KB/Draft.md', 'edited on main'));
+    await waitFor(() => expect(apiMocks.writeFile).toHaveBeenCalledWith('ws-1', 'KB/Draft.md', 'edited on main', { ifMatch: '# Draft\n\nA page to delete.' }));
 
     await switchToFeatureAndOpen(result, 'KB/Draft.md', 'as on feature');
     await act(async () => { result.current.setPendingContent('the agent, on feature'); });
@@ -1661,7 +1668,7 @@ describe('a write that answers after a branch switch', () => {
     const held = holdNextWrite();
     let rejecting!: Promise<void>;
     act(() => { rejecting = result.current.rejectPendingContent(); });
-    await waitFor(() => expect(apiMocks.writeFile).toHaveBeenCalledWith('ws-1', 'KB/Draft.md', expect.any(String)));
+    await waitFor(() => expect(apiMocks.writeFile).toHaveBeenCalledWith('ws-1', 'KB/Draft.md', expect.any(String), { ifMatch: 'the agent, on main' }));
 
     await switchToFeatureAndOpen(result, 'KB/Draft.md', 'as on feature');
     await act(async () => { result.current.setPendingContent('the agent, on feature'); });
@@ -2537,5 +2544,137 @@ describe('a late 404 about a file that came back since', () => {
     disk.delete('KB/Draft.md');
     act(() => bus.emit(fileChanged('KB/Draft.md')));
     await waitFor(() => expect(result.current.activeTab?.deletedBy).toMatchObject({ name: 'Sam Rivera' }));
+  });
+});
+
+/**
+ * The checks before a write decide on what the client knows; a delete it
+ * learns of only after they answered is stopped at the write itself, where
+ * the server compares `ifMatch` inside the path's turn. Each test holds the
+ * write past every check (the server has it), deletes the file, and only
+ * then lets the server answer it.
+ */
+describe('a write already on its way when the file is deleted', () => {
+  /** The next write reaches the server and waits there until `deliver`. */
+  function holdWriteAtServer() {
+    const server = apiMocks.writeFile.getMockImplementation()!;
+    const held = { deliver: () => { throw new Error('No write was started'); } };
+    apiMocks.writeFile.mockImplementationOnce((...args: unknown[]) => new Promise((resolve, reject) => {
+      held.deliver = () => { Promise.resolve(server(...args)).then(resolve, reject); };
+    }));
+    return held;
+  }
+  const someoneElseDeletes = async (path: string) => {
+    disk.delete(path);
+    act(() => bus.emit(fileChanged(path)));
+    await settle();
+  };
+
+  it('a save (Done) delivered after someone else deleted the file does not re-create it, and the edits stay', async () => {
+    const result = await mountReady();
+    await open(result, 'KB/Draft.md');
+    await typeInto(result, 'edited');
+    const held = holdWriteAtServer();
+    let saving!: Promise<void>;
+    act(() => {
+      saving = result.current.saveFile('KB/Draft.md', 'edited');
+      // Done marks the tab clean as the editor closes.
+      result.current.setHasUnsavedFileChanges?.(false);
+    });
+    await waitFor(() => expect(apiMocks.writeFile).toHaveBeenCalledOnce());
+
+    await someoneElseDeletes('KB/Draft.md');
+    expect(tabAt(result, 'KB/Draft.md')?.deletedBy).toBeTruthy();
+    await act(async () => {
+      held.deliver();
+      await expect(saving).rejects.toThrow('changed since you opened it');
+    });
+
+    expect(disk.has('KB/Draft.md')).toBe(false);
+    const tab = tabAt(result, 'KB/Draft.md')!;
+    expect(tab.isDirty).toBe(true);
+    expect(tab.content).toBe('edited');
+  });
+
+  it('a save delivered after our own delete does not re-create the file', async () => {
+    const result = await mountReady();
+    await open(result, 'KB/Keep.md', 'KB/Draft.md');
+    const held = holdWriteAtServer();
+    let saving!: Promise<void>;
+    act(() => { saving = result.current.saveFile('KB/Draft.md', 'edited'); });
+    await waitFor(() => expect(apiMocks.writeFile).toHaveBeenCalledOnce());
+
+    await act(async () => { await result.current.deleteEntry('KB/Draft.md'); });
+    await act(async () => {
+      held.deliver();
+      await expect(saving).rejects.toThrow();
+    });
+
+    expect(disk.has('KB/Draft.md')).toBe(false);
+    expect(result.current.activeTab?.path).toBe('KB/Keep.md');
+  });
+
+  it('a save queued behind another, when our delete is confirmed while it queues, writes nothing, even past the own-delete window', async () => {
+    const result = await mountReady();
+    await open(result, 'KB/Keep.md', 'KB/Draft.md');
+    const held = holdWriteAtServer();
+    let first!: Promise<void>;
+    let second!: Promise<void>;
+    act(() => {
+      first = result.current.saveFile('KB/Draft.md', 'edited');
+      second = result.current.saveFile('KB/Draft.md', 'edited more');
+    });
+    await waitFor(() => expect(apiMocks.writeFile).toHaveBeenCalledOnce());
+
+    await act(async () => { await result.current.deleteEntry('KB/Draft.md'); });
+    // The tab has closed and the marker of our delete has run out.
+    const now = Date.now();
+    vi.spyOn(Date, 'now').mockReturnValue(now + 61_000);
+    await act(async () => {
+      held.deliver();
+      await expect(first).rejects.toThrow();
+      await expect(second).rejects.toThrow('Draft.md was deleted from this branch');
+    });
+
+    expect(apiMocks.writeFile).toHaveBeenCalledOnce();
+    expect(disk.has('KB/Draft.md')).toBe(false);
+  });
+
+  it("a Reject delivered after someone else deleted the file does not re-create it, and the agent's version stays", async () => {
+    const AGENT = '# Draft\n\nThe agent rewrote this.';
+    const result = await mountReady();
+    await open(result, 'KB/Draft.md');
+    disk.set('KB/Draft.md', AGENT);
+    await act(async () => { result.current.setPendingContent(AGENT); });
+    const held = holdWriteAtServer();
+    let rejecting!: Promise<void>;
+    act(() => { rejecting = result.current.rejectPendingContent(); });
+    await waitFor(() => expect(apiMocks.writeFile).toHaveBeenCalledOnce());
+
+    await someoneElseDeletes('KB/Draft.md');
+    await act(async () => {
+      held.deliver();
+      await expect(rejecting).rejects.toThrow('changed since you opened it');
+    });
+
+    expect(disk.has('KB/Draft.md')).toBe(false);
+    expect(tabAt(result, 'KB/Draft.md')?.pendingFileContent).toBe(AGENT);
+  });
+
+  it('two saves of one file sent together both land, each over what the one before wrote', async () => {
+    const result = await mountReady();
+    await open(result, 'KB/Draft.md');
+    await typeInto(result, 'edited more');
+    let first!: Promise<void>;
+    let second!: Promise<void>;
+    act(() => {
+      first = result.current.saveFile('KB/Draft.md', 'edited');
+      second = result.current.saveFile('KB/Draft.md', 'edited more');
+    });
+    await act(async () => { await first; await second; });
+
+    expect(disk.get('KB/Draft.md')).toBe('edited more');
+    expect(apiMocks.writeFile).toHaveBeenLastCalledWith('ws-1', 'KB/Draft.md', 'edited more', { ifMatch: 'edited' });
+    expect(tabAt(result, 'KB/Draft.md')?.isDirty).toBe(false);
   });
 });

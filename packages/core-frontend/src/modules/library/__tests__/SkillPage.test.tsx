@@ -856,6 +856,9 @@ describe('SkillPage', () => {
         'target-company-state',
         'knowledge-base/Skills/newsletter/SKILL.md',
         'rewritten body',
+        // Only over the text the editor opened on: a skill deleted or changed
+        // meanwhile is refused, not overwritten.
+        { ifMatch: RAW_MAIN },
       ),
     );
     expect(await screen.findByText(/Saved: the skill now reads with your change/)).toBeInTheDocument();
