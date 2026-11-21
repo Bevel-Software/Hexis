@@ -2392,6 +2392,9 @@ export function UploadNotices() {
 // (`checkoutRoot` lives in `../utils/fileTree` — the one lookup every
 // surface that reads the workspace tree goes through.)
 
+/** A node that is there: `ReactNode` without what renders nothing by being `null`, `undefined` or a boolean. */
+export type GivenNode = Exclude<ReactNode, null | undefined | boolean>;
+
 /**
  * The Knowledge app's file tree. With `roots`, the tree of the folder surface
  * an app mounts for the roots it claims (see `AppDef.roots`): those
@@ -2402,13 +2405,15 @@ export function UploadNotices() {
  * in the same scrolling column, so the app has one sidebar and not a column
  * of its own beside this one. `fileOnScreen` is false while that app shows a
  * page of its own in place of the viewer: a tab may still be open behind the
- * page, and its row is not the current place.
+ * page, and its row is not the current place. `lead` is a `GivenNode`, so
+ * absent is `undefined` and nothing else: a `null` or `false` from the app
+ * is turned into `undefined` by the surface before it gets here.
  */
 export function FileExplorer({
   roots,
   lead,
   fileOnScreen = true,
-}: { roots?: readonly string[]; lead?: ReactNode; fileOnScreen?: boolean } = {}) {
+}: { roots?: readonly string[]; lead?: GivenNode; fileOnScreen?: boolean } = {}) {
   const { openFilePath, dispatchUpload, kbDirName } = useWorkspace();
   const claims = useRootClaims();
   const { openFile } = useFileNav();

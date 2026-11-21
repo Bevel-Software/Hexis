@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { useLocation } from 'react-router-dom';
 import type { FileTreeEntry } from '@bevel-software/platform-shared';
 import type { WorkspaceContextValue } from '../../modules/workspace';
 import type { GitContextValue } from '../../modules/git';
 import { makeWorkspaceFixture } from '../../modules/workspace/__tests__/testFixtures';
+import { toggleSidebar } from '../../modules/layout';
 import { CoreAppShell } from '../CoreAppShell';
 import { KnowledgeSurface } from '../KnowledgeSurface';
 import { makeRegistry, useActiveAppId, type AppDef, type FileRendererDef, type PaneDef } from '../registry';
@@ -148,6 +149,17 @@ const screensApp: AppDef = {
     </div>
   ),
 };
+/** The app handing the surface what React renders as nothing, for `nav`, `page` or both. */
+function appPassing(props: { nav?: ReactNode; page?: ReactNode }): AppDef {
+  return {
+    ...agentsApp,
+    element: (
+      <div data-testid="agents-frame">
+        <KnowledgeSurface roots={['Agents', 'Workflows']} {...props} />
+      </div>
+    ),
+  };
+}
 /** A pane a distribution registers beside the viewer, as the chat is. */
 const chatPane: PaneDef = { id: 'chat', order: 30, node: <div data-testid="chat-pane" />, collapsible: true };
 
@@ -346,5 +358,98 @@ describe('CoreAppShell: a claiming app with screens of its own', () => {
     expect(screen.queryByRole('heading', { name: 'The workflows page' })).not.toBeInTheDocument();
     expect(screen.getByTestId('chat-pane')).toBeInTheDocument();
     expect(agentRow()).toHaveAttribute('aria-current', 'true');
+  });
+});
+
+/*
+ * `null` and `false` are how React code says "nothing here" (`cond && <Nav />`,
+ * `onFile ? null : <Page />`). Each means the prop was not given.
+ */
+describe('CoreAppShell: a claiming app passing nothing as nav or page', () => {
+  const PINS = 'bevel-pinned-folders';
+  afterEach(() => window.localStorage.removeItem(PINS));
+
+  /** The explorer's markup, mounted at a hosted file with one folder pinned. */
+  async function explorerMarkup(app: AppDef): Promise<string> {
+    window.localStorage.setItem(PINS, JSON.stringify([`${KB}/Agents`]));
+    session.workspace = workspaceOn(AGENT, 'role: coder');
+    renderShellAt(`/workspace/main/${AGENT}`, [app]);
+    await screen.findByTestId('agent-renderer');
+    const markup = screen.getByTestId('file-explorer-root').innerHTML;
+    cleanup();
+    return markup;
+  }
+
+  it.each([
+    ['null', null],
+    ['false', false],
+  ])('renders the explorer exactly as without nav when nav is %s', async (_, nav) => {
+    const without = await explorerMarkup(agentsApp);
+
+    session.workspace = workspaceOn(AGENT, 'role: coder');
+    window.localStorage.setItem(PINS, JSON.stringify([`${KB}/Agents`]));
+    renderShellAt(`/workspace/main/${AGENT}`, [appPassing({ nav })]);
+    await screen.findByTestId('agent-renderer');
+
+    // The headings of a tree with no app rows above it: "Company Context"
+    // over the pins, the rule over the folders, and no "Files" heading.
+    expect(explorer().getByText('Company Context')).toBeInTheDocument();
+    expect(explorer().queryByText('Files')).not.toBeInTheDocument();
+    expect(screen.getByTestId('file-explorer-root').innerHTML).toBe(without);
+  });
+
+  it.each([
+    ['null', null],
+    ['false', false],
+  ])('keeps "Company Context" with nothing pinned when nav is %s', async (_, nav) => {
+    session.workspace = workspaceOn(AGENT, 'role: coder');
+    renderShellAt(`/workspace/main/${AGENT}`, [appPassing({ nav })]);
+    await screen.findByTestId('agent-renderer');
+
+    expect(explorer().getByText('Company Context')).toBeInTheDocument();
+    expect(explorer().queryByText('Files')).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ['null', null],
+    ['false', false],
+  ])('shows the viewer and the panes, as at a file, when page is %s', async (_, page) => {
+    session.workspace = workspaceOn(AGENT, 'role: coder');
+    renderShellAt(`/workspace/main/${AGENT}`, [appPassing({ nav: SCREENS_NAV, page })], [chatPane]);
+
+    expect(await screen.findByTestId('agent-renderer')).toHaveTextContent('role: coder');
+    expect(screen.getByTestId('chat-pane')).toBeInTheDocument();
+    expect(
+      screen.getByTestId('file-explorer-root').querySelector(`[data-tree-path="${AGENT}"]`),
+    ).toHaveAttribute('aria-current', 'true');
+  });
+});
+
+/*
+ * Last in the file: the sidebar's breakpoint is module state, so a narrow
+ * mount leaves it narrow for whatever mounts after it.
+ */
+describe('CoreAppShell: a claiming app with screens of its own, on a narrow screen', () => {
+  const setViewportWidth = (width: number) =>
+    (window as typeof window & { happyDOM: { setInnerWidth(value: number): void } }).happyDOM.setInnerWidth(width);
+  afterEach(() => setViewportWidth(1400));
+
+  it('makes the sidebar with the app’s navigation the drawer, opened by the sidebar button', async () => {
+    setViewportWidth(375);
+    session.workspace = workspaceOn(AGENT, 'role: coder');
+    renderShellAt('/agents', [screensApp]);
+
+    expect(await screen.findByRole('heading', { name: 'The workflows page' })).toBeInTheDocument();
+    const sidebar = screen.getByTestId('file-explorer-root').closest('aside')!;
+    expect(sidebar).toContainElement(screen.getByRole('navigation', { name: 'Agents', hidden: true }));
+    // Closed, and out of reach, until asked for.
+    expect(sidebar).toHaveAttribute('inert');
+
+    // What the toolbar's sidebar button calls.
+    act(() => toggleSidebar());
+    expect(sidebar).not.toHaveAttribute('inert');
+    expect(sidebar).toHaveAttribute('role', 'dialog');
+    expect(sidebar).toHaveAttribute('aria-modal', 'true');
+    expect(within(sidebar).getByRole('navigation', { name: 'Agents' })).toBeInTheDocument();
   });
 });
