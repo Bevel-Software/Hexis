@@ -25,7 +25,7 @@ import {
 } from '../../../shared/domain-errors.js';
 import type { WorkspaceService } from '../../workspace/index.js';
 import { canonicalEmail, hashEmail } from '../../../shared/email-identity.js';
-import { madeByColumns } from '../../../shared/made-by.js';
+import { madeByColumns } from '../made-by.js';
 import type {
   IChangeRequestReviewService,
   MergeGateInput,

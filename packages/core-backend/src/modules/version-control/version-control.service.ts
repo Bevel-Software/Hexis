@@ -91,7 +91,7 @@ import {
 } from './change-request-hooks.js';
 import { WorkspaceMutex, assertValidBranchName } from '../kb-fs/index.js';
 import { canonicalEmail, hashEmail } from '../../shared/email-identity.js';
-import { madeByColumns } from '../../shared/made-by.js';
+import { madeByColumns } from './made-by.js';
 import {
   BranchAuthorshipError,
   BranchDeleteBlockedError,

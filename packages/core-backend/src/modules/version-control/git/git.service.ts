@@ -27,7 +27,7 @@ import type { VersionControlHooks, CommitValidationContext } from '../version-co
 import type { IAccessControl } from '../../access/index.js';
 import { AccessDeniedError, PushAccessRefusedError } from '../../access-model/index.js';
 import { canonicalEmail } from '../../../shared/email-identity.js';
-import { madeByTrailer } from '../../../shared/made-by.js';
+import { madeByTrailer } from '../made-by.js';
 import { WorkspaceIdMutex, type WorkspaceMutex, assertInsideRepo, cloneTrackingConfigArgs, SAFE_IMPLICIT_FETCH_ARGS, readRefSha } from '../../kb-fs/index.js';
 import { isAbsence } from '../../../shared/fs.contract.js';
 import { utf8Text } from '../../../shared/utf8-text.js';
