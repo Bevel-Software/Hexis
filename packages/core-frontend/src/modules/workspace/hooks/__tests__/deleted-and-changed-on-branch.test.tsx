@@ -1524,6 +1524,83 @@ describe('a change pulled from the git host onto the open file', () => {
     expect(tab.changedOnBranch).toBe('discarded');
   });
 
+  describe('two saves queued before a held change read answers', () => {
+    /** Both saves are asked for before the change read answers; then it does. */
+    async function queueTwoSaves(result: Hook, first: string, second: string, pulled: string) {
+      disk.set('KB/Notes.md', pulled);
+      const held = holdFileChangedRead(pulled);
+      let one!: Promise<void>;
+      let two!: Promise<void>;
+      act(() => {
+        one = result.current.saveFile('KB/Notes.md', first);
+        two = result.current.saveFile('KB/Notes.md', second);
+      });
+      await act(async () => { held.answer(); await one; await two; });
+    }
+
+    it('after the first merges onto the pulled bytes, the second keeps them too', async () => {
+      const result = await editedTab();
+      const first = `${BASE}\n\nMy new closing line.`;
+      const second = `${first}\n\nAnd one more.`;
+      await typeInto(result, second);
+      const pulled = BASE.replace('First paragraph.', 'First paragraph, rewritten upstream.');
+      await queueTwoSaves(result, first, second, pulled);
+
+      const merged = `${pulled}\n\nMy new closing line.\n\nAnd one more.`;
+      expect(disk.get('KB/Notes.md')).toBe(merged);
+      // The second write expected what the first one wrote.
+      expect(apiMocks.writeFile).toHaveBeenLastCalledWith(
+        'ws-1', 'KB/Notes.md', merged, { ifMatch: `${pulled}\n\nMy new closing line.` },
+      );
+      const tab = result.current.activeTab!;
+      expect(tab.content).toBe(merged);
+      expect(tab.savedContent).toBe(merged);
+      expect(tab.isDirty).toBe(false);
+      expect(tab.changedOnBranch).toBe('merged');
+    });
+
+    it('after the first gives its colliding edits up, the second writes nothing over the pulled bytes', async () => {
+      const result = await editedTab();
+      const first = BASE.replace('Second paragraph.', 'Second paragraph, my way.');
+      const second = `${first}\n\nAnd one more.`;
+      await typeInto(result, second);
+      const pulled = BASE.replace('Second paragraph.', 'Second paragraph, their way.');
+      apiMocks.writeFile.mockClear();
+      await queueTwoSaves(result, first, second, pulled);
+
+      expect(apiMocks.writeFile).not.toHaveBeenCalled();
+      expect(disk.get('KB/Notes.md')).toBe(pulled);
+      const tab = result.current.activeTab!;
+      expect(tab.content).toBe(pulled);
+      expect(tab.isDirty).toBe(false);
+      expect(tab.changedOnBranch).toBe('discarded');
+    });
+
+    it('when the pull already holds the first, the second still lands its own edit on it', async () => {
+      const result = await editedTab();
+      const pulled = BASE.replace('First paragraph.', 'First paragraph, rewritten upstream.');
+      const second = `${pulled}\n\nAnd one more.`;
+      await typeInto(result, second);
+      await queueTwoSaves(result, pulled, second, pulled);
+
+      expect(disk.get('KB/Notes.md')).toBe(second);
+      expect(result.current.activeTab?.isDirty).toBe(false);
+    });
+
+    it('a second save with nothing new writes nothing and keeps the banner the first one set', async () => {
+      const result = await editedTab();
+      const edited = `${BASE}\n\nMy new closing line.`;
+      await typeInto(result, edited);
+      const pulled = BASE.replace('First paragraph.', 'First paragraph, rewritten upstream.');
+      apiMocks.writeFile.mockClear();
+      await queueTwoSaves(result, edited, edited, pulled);
+
+      expect(apiMocks.writeFile).toHaveBeenCalledOnce();
+      expect(disk.get('KB/Notes.md')).toBe(`${pulled}\n\nMy new closing line.`);
+      expect(result.current.activeTab?.changedOnBranch).toBe('merged');
+    });
+  });
+
   it('Done during a colliding change read still says the edits were discarded', async () => {
     const result = await editedTab();
     const edited = BASE.replace('Second paragraph.', 'Second paragraph, my way.');
