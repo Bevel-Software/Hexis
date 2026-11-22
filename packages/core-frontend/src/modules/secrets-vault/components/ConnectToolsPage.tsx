@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Badge, Banner, Button, Surface, TextField } from '../../../shared/components';
 import { cn } from '../../../lib/utils';
@@ -13,7 +13,7 @@ import { useAppRegistry } from '../../../core/registry';
 import { SlotBoundary } from '../../../shared/components/SlotBoundary';
 import { useConnectAsChoice } from '../../agents';
 import { ConnectAsChoice } from '../../agents/components/ConnectAsChoice';
-import { actForBot, botFromLocation } from '../services/acting-for';
+import { ActingForBot, botFromLocation, useActingForBot } from '../services/acting-for';
 import {
   getConnectPending,
   startToolOAuth,
@@ -153,12 +153,13 @@ export function ConnectToolsPage() {
   // Whose tools, keys and sign-ins the page shows: the bot chosen to connect
   // as, in agent-connect mode; else the bot the page was opened for by its
   // link (`?bot=<id>`); else the person's own. A connection made as a bot
-  // uses the bot's sign-ins, so those are the ones it needs. Set for the
-  // requests before the list loads (a layout effect runs first), and
-  // released when the page leaves: no other page acts for the bot.
+  // uses the bot's sign-ins, so those are the ones it needs. The page passes
+  // it to its own calls and provides it to the rows it renders
+  // (`ActingForBot`); nothing outside the page sees it, so no other page —
+  // nor the Library's lists, refetched while this one is open — acts for the
+  // bot.
   const [linkedBot] = useState(() => botFromLocation());
   const chosenAgent = agentState != null ? connectAs.value : linkedBot;
-  useLayoutEffect(() => actForBot(chosenAgent), [chosenAgent]);
 
   /**
    * @param quiet keep the list on screen while it refetches.
@@ -174,7 +175,7 @@ export function ConnectToolsPage() {
     if (!quiet) setLoading(true);
     setRefreshing(true);
     try {
-      const pending = await getConnectPending();
+      const pending = await getConnectPending(chosenAgent);
       if (loadSeq.current !== mine) return;
       setTools(pending.tools);
       setOauth(pending.oauth);
@@ -190,9 +191,7 @@ export function ConnectToolsPage() {
         setRefreshing(false);
       }
     }
-    // Remade when the choice changes: the list is whom the page acts for, which
-    // the requests carry (set by the layout effect above), not an argument.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // Remade when the choice changes: the list is whom the page acts for.
   }, [chosenAgent]);
 
   // The first load, loud; and again, quietly, whenever the choice changes —
@@ -260,7 +259,7 @@ export function ConnectToolsPage() {
 
   const onAuthorize = async (id: string) => {
     try {
-      const url = await startOAuth(id);
+      const url = await startOAuth(id, chosenAgent);
       // eslint-disable-next-line react-hooks/immutability -- leaving for the provider is the point
       window.location.href = url;
     } catch (err) {
@@ -270,7 +269,7 @@ export function ConnectToolsPage() {
 
   const onAuthorizeTool = async (slug: string, varName: string) => {
     try {
-      const url = await startToolOAuth(slug, varName);
+      const url = await startToolOAuth(slug, varName, undefined, chosenAgent);
       // eslint-disable-next-line react-hooks/immutability -- leaving for the provider is the point
       window.location.href = url;
     } catch (err) {
@@ -288,8 +287,8 @@ export function ConnectToolsPage() {
     const id = signInId(o);
     setWiping((s) => new Set(s).add(id));
     try {
-      if (o.managed?.tokenScope === 'shared') await deleteAdminVar(o.slug, o.varName);
-      else await deleteUserVar(o.slug, o.varName);
+      if (o.managed?.tokenScope === 'shared') await deleteAdminVar(o.slug, o.varName, chosenAgent);
+      else await deleteUserVar(o.slug, o.varName, chosenAgent);
       announceToolCredentialsChanged();
       await refresh(true);
     } catch (err) {
@@ -398,6 +397,7 @@ export function ConnectToolsPage() {
   // scroller. The header sticks to the top of that pane, so the title and
   // Refresh stay in reach down a long list instead of scrolling away with it.
   return (
+    <ActingForBot.Provider value={chosenAgent}>
     <div className="flex flex-col bg-canvas text-ink">
       <header className="sticky top-0 z-10 flex shrink-0 items-center gap-3 border-b border-line bg-canvas px-8 py-4">
         <h1 className="text-strong font-semibold text-ink">Connect your tools</h1>
@@ -538,7 +538,7 @@ export function ConnectToolsPage() {
                           ? undefined
                           : () =>
                               void onToggle(signInId(o), o.authorized, async (removed) => {
-                                await deleteUserVar(o.slug, o.varName);
+                                await deleteUserVar(o.slug, o.varName, chosenAgent);
                                 removed();
                               })
                       }
@@ -547,7 +547,7 @@ export function ConnectToolsPage() {
                       onOwnApp={
                         canBringOwnApp(o)
                           ? async (clientId, clientSecret) => {
-                              await setOAuthClientSecret(o.slug, o.varName, clientSecret, clientId);
+                              await setOAuthClientSecret(o.slug, o.varName, clientSecret, clientId, chosenAgent);
                               announceToolCredentialsChanged();
                               await refresh(true);
                             }
@@ -614,7 +614,7 @@ export function ConnectToolsPage() {
                         }
                         onToggle={() =>
                           void onToggle(id, o.authorized, async (removed) => {
-                            await deleteUserVar(o.slug, o.varName);
+                            await deleteUserVar(o.slug, o.varName, chosenAgent);
                             removed();
                           })
                         }
@@ -710,7 +710,7 @@ export function ConnectToolsPage() {
                               : () =>
                                   void onToggle(id, configured, async (removed) => {
                                     for (const v of actionable.filter((x) => x.configured)) {
-                                      await deleteUserVar(tool.slug, v.name);
+                                      await deleteUserVar(tool.slug, v.name, chosenAgent);
                                       removed();
                                     }
                                   })
@@ -759,6 +759,7 @@ export function ConnectToolsPage() {
         </div>
       </div>
     </div>
+    </ActingForBot.Provider>
   );
 }
 
@@ -911,6 +912,7 @@ function ToolKeyList({
   onError: (m: string) => void;
 }) {
   const probe = useSavedKeyProbe(tool.slug);
+  const bot = useActingForBot();
   return (
     <ul className="mt-3 flex flex-col gap-2">
       {tool.variables.map((v) => (
@@ -921,7 +923,9 @@ function ToolKeyList({
           configured={v.configured}
           ownerOnly={v.ownerOnly}
           save={(value) =>
-            v.scope === 'admin' ? setAdminVar(tool.slug, v.name, value) : setUserVar(tool.slug, v.name, value)
+            v.scope === 'admin'
+              ? setAdminVar(tool.slug, v.name, value, null, bot)
+              : setUserVar(tool.slug, v.name, value, null, bot)
           }
           probe={probe}
           onSaved={onSaved}
@@ -949,6 +953,7 @@ function SignInOwnerSecret({
   onError: (m: string) => void;
 }) {
   const probe = useSavedKeyProbe(o.slug);
+  const bot = useActingForBot();
   return (
     <Surface tone="surface" radius="lg" elevation="none" padded className="border border-line">
       <ConnectRowHead
@@ -966,7 +971,7 @@ function SignInOwnerSecret({
           label={`${o.varName} (client secret)`}
           configured={false}
           ownerOnly={false}
-          save={(value) => setOAuthClientSecret(o.slug, o.varName, value)}
+          save={(value) => setOAuthClientSecret(o.slug, o.varName, value, undefined, bot)}
           probe={probe}
           onSaved={onSaved}
           onError={onError}

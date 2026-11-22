@@ -23,7 +23,8 @@ const log = logger('bots');
 /** The settings the bots read and write (`DeploymentSettingsService` is one). */
 export interface BotSettings {
   resolve(key: string): string;
-  record(entries: Record<string, string>, updatedBy: string | null): Promise<void>;
+  /** `updatedByUserId` is a users row id (a uuid), never an address: the store keys it to `users.id`. */
+  record(entries: Record<string, string>, updatedByUserId: string | null): Promise<void>;
 }
 
 /** A bot id that can be the local part of an address: lowercase letters, digits, dots, hyphens and underscores. */
@@ -260,7 +261,7 @@ export class BotService implements IBots {
     const refusal = botsDomainRefusal(domain, people.map((p) => p.email), current);
     if (refusal) throw new BotsDomainRefusedError(refusal);
 
-    await this.settings.record({ botsDomain: domain, botsPreviousDomain: current, botsDomainChangeRequest: '0' }, by.email);
+    await this.settings.record({ botsDomain: domain, botsPreviousDomain: current, botsDomainChangeRequest: '0' }, by.id);
     const now = new Date();
     await this.db.transaction(async (tx) => {
       for (const row of this.rows.values()) {
@@ -277,7 +278,7 @@ export class BotService implements IBots {
     } catch (err) {
       log.warn("opening the change request that rewrites the bots' grants failed; the previous domain keeps counting", { err });
     }
-    if (changeRequest !== null) await this.settings.record({ botsDomainChangeRequest: String(changeRequest) }, by.email);
+    if (changeRequest !== null) await this.settings.record({ botsDomainChangeRequest: String(changeRequest) }, by.id);
     await this.refreshAddresses();
     log.info(`bots' domain changed from ${current} to ${domain}`);
     return { domain, changeRequest };

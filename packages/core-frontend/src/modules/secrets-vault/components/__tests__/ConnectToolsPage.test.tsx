@@ -4,7 +4,6 @@ import { MemoryRouter } from 'react-router-dom';
 import type { ConnectPending } from '../../services/connect.api';
 import { ConnectToolsPage } from '../ConnectToolsPage';
 import { TOOL_CREDENTIALS_STALE_EVENT } from '../../../../core/events';
-import { actingForBot } from '../../services/acting-for';
 
 /**
  * What this page owes the Library.
@@ -119,7 +118,7 @@ describe('ConnectToolsPage: telling the Library a credential landed', () => {
       }),
     );
 
-    await waitFor(() => expect(varsMock.deleteUserVar).toHaveBeenCalledWith('heyreach', 'API_KEY'));
+    await waitFor(() => expect(varsMock.deleteUserVar).toHaveBeenCalledWith('heyreach', 'API_KEY', null));
     await waitFor(() => expect(heard).toHaveBeenCalledTimes(1));
   });
 
@@ -219,7 +218,7 @@ describe('ConnectToolsPage: telling the Library a credential landed', () => {
       expect(row).toHaveTextContent('Connected');
       expect(row).toHaveAttribute('data-probe-state', 'connected');
       // The probe is the tool's, by slug — the row is only where the answer lands.
-      expect(varsMock.checkToolConnection).toHaveBeenCalledWith('heyreach');
+      expect(varsMock.checkToolConnection).toHaveBeenCalledWith('heyreach', null);
       // Quiet: a working tool needs nobody.
       expect(screen.queryByRole('alert')).toBeNull();
     });
@@ -278,7 +277,7 @@ describe('ConnectToolsPage: telling the Library a credential landed', () => {
       await saveKey('k');
 
       // Stored, announced, and the field emptied — all while the probe hangs.
-      await waitFor(() => expect(varsMock.setUserVar).toHaveBeenCalledWith('heyreach', 'API_KEY', 'k'));
+      await waitFor(() => expect(varsMock.setUserVar).toHaveBeenCalledWith('heyreach', 'API_KEY', 'k', null, null));
       await waitFor(() => expect(heard).toHaveBeenCalledTimes(1));
       await waitFor(() =>
         expect(screen.getByLabelText('API_KEY value')).toHaveValue(''),
@@ -553,7 +552,7 @@ describe('ConnectToolsPage: inside Skills & Tools', () => {
       loadedFor = [];
       const answer = connectMock.getConnectPending.getMockImplementation();
       connectMock.getConnectPending.mockImplementation(async (...args: unknown[]) => {
-        loadedFor.push(actingForBot());
+        loadedFor.push((args[0] as string | null | undefined) ?? null);
         return answer ? answer(...(args as [])) : pending(false);
       });
     });
@@ -604,16 +603,16 @@ describe('ConnectToolsPage: inside Skills & Tools', () => {
       renderPage();
       await screen.findByLabelText('API_KEY value');
       expect(loadedFor.at(-1)).toBeNull();
-      connectMock.getConnectPending.mockImplementation(async () => {
-        loadedFor.push(actingForBot());
+      connectMock.getConnectPending.mockImplementation(async (bot?: string | null) => {
+        loadedFor.push(bot ?? null);
         return { tools: [], oauth: [], toolOAuth: [] };
       });
       fireEvent.click(await screen.findByRole('radio', { name: /ops/ }));
       await waitFor(() => expect(loadedFor.at(-1)).toBe('ops'));
       expect(await screen.findByRole('status')).toHaveTextContent(/none of the tools the bot ops may reach/);
       expect(screen.queryByText('Loading…')).not.toBeInTheDocument();
-      connectMock.getConnectPending.mockImplementation(async () => {
-        loadedFor.push(actingForBot());
+      connectMock.getConnectPending.mockImplementation(async (bot?: string | null) => {
+        loadedFor.push(bot ?? null);
         return pending(false);
       });
       fireEvent.click(screen.getByRole('radio', { name: /Myself/ }));
@@ -641,8 +640,8 @@ describe('ConnectToolsPage: inside Skills & Tools', () => {
     it('acts for that bot while it is open, and for the person again once it leaves', async () => {
       window.history.replaceState(null, '', '/skills-and-tools/connect?bot=ops');
       const seen: (string | null)[] = [];
-      connectMock.getConnectPending.mockImplementation(async () => {
-        seen.push(actingForBot());
+      connectMock.getConnectPending.mockImplementation(async (bot?: string | null) => {
+        seen.push(bot ?? null);
         return pending(false);
       });
       const page = renderPage();
@@ -650,7 +649,6 @@ describe('ConnectToolsPage: inside Skills & Tools', () => {
       expect(seen[0]).toBe('ops');
       expect(screen.getByText(/the bot ops may reach/)).toBeInTheDocument();
       page.unmount();
-      expect(actingForBot()).toBeNull();
     });
   });
 });

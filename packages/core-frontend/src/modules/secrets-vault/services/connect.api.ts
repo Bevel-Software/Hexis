@@ -1,6 +1,6 @@
 import { authFetch } from '../../../lib/api';
 import type { BotChoice } from '../../agents';
-import { secretsPath } from './acting-for';
+import { secretsPath, type ActingFor } from './acting-for';
 
 /**
  * The aggregated "connect your tools" surface: everything standing between the
@@ -141,11 +141,10 @@ async function fail(res: Response, fallback: string): Promise<never> {
 
 /**
  * The caller's outstanding per-user credentials across every accessible tool:
- * the person's, or — on a page acting for a bot (see `acting-for.ts`) — the
- * bot's.
+ * the person's (`bot` null, the default), or a bot's (see `acting-for.ts`).
  */
-export async function getConnectPending(): Promise<ConnectPending> {
-  const res = await authFetch(secretsPath('/api/connect/pending'));
+export async function getConnectPending(bot: ActingFor = null): Promise<ConnectPending> {
+  const res = await authFetch(secretsPath('/api/connect/pending', bot));
   if (!res.ok) await fail(res, "Couldn't load your tools.");
   return (await res.json()) as ConnectPending;
 }
@@ -167,6 +166,8 @@ export async function startToolOAuth(
   slug: string,
   varName: string,
   opts?: { returnTo?: string },
+  /** Whose sign-in (see `acting-for.ts`); null, the default, is the person's. */
+  bot: ActingFor = null,
 ): Promise<string> {
   const init: RequestInit = { method: 'POST' };
   if (opts?.returnTo) {
@@ -174,7 +175,7 @@ export async function startToolOAuth(
     init.body = JSON.stringify({ returnTo: opts.returnTo });
   }
   const res = await authFetch(
-    secretsPath(`/api/secrets/tools/${encodeURIComponent(slug)}/vars/${encodeURIComponent(varName)}/oauth/start`),
+    secretsPath(`/api/secrets/tools/${encodeURIComponent(slug)}/vars/${encodeURIComponent(varName)}/oauth/start`, bot),
     init,
   );
   if (!res.ok) await fail(res, "Couldn't start sign-in.");

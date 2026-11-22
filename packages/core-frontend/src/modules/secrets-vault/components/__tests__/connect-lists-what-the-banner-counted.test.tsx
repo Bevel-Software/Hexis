@@ -343,7 +343,7 @@ describe('the Connect page says why, when the reader cannot act', () => {
     // The WORKSPACE value, not a personal one — the owner is setting it for
     // everybody, which is the whole reason the other reader could not.
     await waitFor(() =>
-      expect(varsMock.setAdminVar).toHaveBeenCalledWith('salesforce', 'ORG_TOKEN', 's3cret'),
+      expect(varsMock.setAdminVar).toHaveBeenCalledWith('salesforce', 'ORG_TOKEN', 's3cret', null, null),
     );
     expect(varsMock.setUserVar).not.toHaveBeenCalled();
   });

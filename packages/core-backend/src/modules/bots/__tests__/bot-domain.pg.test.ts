@@ -7,6 +7,8 @@ import { PG_ADMIN_URL, PG_TEST_TIMEOUT, dropScratchDatabases, openMigratedScratc
 import { BotService } from '../bot.service.js';
 import { BotAddressBook } from '../bot-address-book.js';
 import { botsDomainRefusal, rewriteBotGrants } from '../bot-domain.js';
+import { DeploymentSettingsService } from '../../settings/deployment-settings.service.js';
+import { deploymentSettings } from '../../database/index.js';
 import { createBotsRoutes } from '../bots.routes.js';
 import { isAccessFile } from '../../access-model/index.js';
 import type { BotDefinition } from '../index.js';
@@ -19,17 +21,6 @@ import type { BotDefinition } from '../index.js';
  */
 
 const def = (id: string): BotDefinition => ({ id, name: id, description: '', source: `Agents/${id}.agent`, problem: null, platformTools: null });
-
-function settings() {
-  const values = new Map<string, string>();
-  return {
-    values,
-    resolve: (k: string) => values.get(k) ?? '',
-    record: async (entries: Record<string, string>) => {
-      for (const [k, v] of Object.entries(entries)) values.set(k, v);
-    },
-  };
-}
 
 describe('rewriting grants and refusing domains', () => {
   it('rewrites a bot\'s grants at the old domain in access files and in frontmatter only', () => {
@@ -59,17 +50,27 @@ describe.skipIf(!PG_ADMIN_URL)('the bots\' domain on a real Postgres', () => {
   let closeDb: () => Promise<void>;
   let server: Server;
   let base: string;
-  const store = settings();
+  // The REAL settings store: `deployment_settings.updated_by` is a uuid
+  // keyed to `users.id`, and a fake that ignores who recorded the change hid
+  // a domain change that answered 500 on a real deployment.
+  let store: DeploymentSettingsService;
   const book = new BotAddressBook();
   let service: BotService;
   const merged = { value: false };
   const rewriter = { open: vi.fn(async () => 42) };
-  const admin = { id: '00000000-0000-4000-8000-0000000000aa', email: 'admin@acme.com', name: 'Admin' };
+  let admin: { id: string; email: string; name: string };
 
   beforeAll(async () => {
     ({ db, close: closeDb } = await openMigratedScratchDb('hexis_bot_domain'));
     vi.spyOn(console, 'log').mockImplementation(() => undefined);
     await db.insert(users).values({ email: 'dana@acme.com', emailBidx: 'dana@acme.com', name: 'Dana' });
+    const [adminRow] = await db
+      .insert(users)
+      .values({ email: 'admin@acme.com', emailBidx: 'admin@acme.com', name: 'Admin' })
+      .returning({ id: users.id });
+    admin = { id: adminRow!.id, email: 'admin@acme.com', name: 'Admin' };
+    store = new DeploymentSettingsService(db, '', undefined, { env: {} });
+    await store.load();
     service = new BotService(db, store, { definitions: async () => [def('release-helper')], mayActAs: async () => true }, book, async () => merged.value);
     await service.load();
     await service.sync();
@@ -132,6 +133,10 @@ describe.skipIf(!PG_ADMIN_URL)('the bots\' domain on a real Postgres', () => {
     expect(row!.email).toBe('release-helper@bots.acme.com');
     expect(book.addressesOf('release-helper@bots.acme.com')).toEqual(['release-helper@bots.acme.com', 'release-helper@agent.hexis']);
     expect(book.isBot('release-helper@agent.hexis')).toBe(true);
+    // Recorded in the real store, by the admin's row.
+    const saved = await db.select().from(deploymentSettings).where(eq(deploymentSettings.key, 'botsDomain'));
+    expect(saved[0]).toMatchObject({ value: 'bots.acme.com', updatedBy: admin.id });
+    expect(store.resolve('botsDomainChangeRequest')).toBe('42');
 
     // The rewrite is merged: the next look drops the old spelling.
     merged.value = true;

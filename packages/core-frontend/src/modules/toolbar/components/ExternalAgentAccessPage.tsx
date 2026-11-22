@@ -531,9 +531,20 @@ export function ExternalAgentAccessPage() {
           <div className="px-4 py-3 space-y-4">
             <p className="text-xs text-ink-muted leading-snug">
               For autonomous agents and pipelines (CI, scheduled jobs) that can't open a browser to
-              sign in. Create an external API key and give it to the agent. Each key carries your
-              identity, so any saves the agent makes appear under your name. And it only gets the
-              tools you've already connected on the Connect your tools page.
+              sign in. Create an external API key and give it to the agent.{' '}
+              {connectAs.value === null ? (
+                <>
+                  A key made as yourself carries your identity, so any saves the agent makes appear
+                  under your name. And it only gets the tools you've already connected on the Connect
+                  your tools page.
+                </>
+              ) : (
+                <>
+                  A key made as a bot carries the bot's identity, not yours: the agent reaches only what
+                  the bot is granted, its saves appear under the bot's name with you recorded as the
+                  person who made the key, and it uses the bot's own tool sign-ins.
+                </>
+              )}
             </p>
 
             <div className="border border-line rounded p-3 space-y-2">

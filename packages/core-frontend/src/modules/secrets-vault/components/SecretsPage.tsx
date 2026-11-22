@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Badge, Banner, Button, Surface, TextField } from '../../../shared/components';
 import { PageShell } from '../../../shared/components/PageShell';
@@ -12,7 +12,7 @@ import {
 } from '../services/secrets.api';
 import { listToolSecrets, type ToolSecrets } from '../services/tool-secrets.api';
 import { ToolSecretsPanel } from './ToolSecretsPanel';
-import { actForBot, botFromLocation } from '../services/acting-for';
+import { ActingForBot, botFromLocation, useActingForBot } from '../services/acting-for';
 
 /**
  * The Secrets page, routed standalone at `/secrets` (below the persistent
@@ -63,17 +63,18 @@ export function SecretsPage() {
    * `useToolPage` made for the tool page, for the same reason.
    */
   // Opened for a bot by a link naming it (`?bot=<id>`): every request this
-  // page makes reads and writes that bot's secrets, set before the first
-  // load (a layout effect runs first) and released when the page leaves.
+  // page and what it renders makes reads and writes that bot's secrets — the
+  // page passes the bot to its own calls and provides it to its panels
+  // (`ActingForBot`). Nothing outside the page sees it, so nothing is "as
+  // the bot" once the page is left.
   const [bot] = useState(() => botFromLocation());
-  useLayoutEffect(() => actForBot(bot), [bot]);
 
   const refresh = useCallback(async (quiet = false) => {
     const mine = ++loadSeq.current;
     if (!quiet) setLoading(true);
     setRefreshing(true);
     try {
-      const [t, s] = await Promise.all([listToolSecrets(), listSecrets()]);
+      const [t, s] = await Promise.all([listToolSecrets(undefined, bot), listSecrets(bot)]);
       if (loadSeq.current !== mine) return;
       setTools(t);
       setSecrets(s);
@@ -90,7 +91,7 @@ export function SecretsPage() {
         setRefreshing(false);
       }
     }
-  }, []);
+  }, [bot]);
 
   useEffect(() => {
     void refresh();
@@ -98,7 +99,8 @@ export function SecretsPage() {
 
   // Strip the consumed fragment so a refresh doesn't re-announce the outcome.
   useEffect(() => {
-    if (oauthOutcome) window.history.replaceState(null, '', window.location.pathname);
+    // The query stays: it names the bot the page was opened for.
+    if (oauthOutcome) window.history.replaceState(null, '', window.location.pathname + window.location.search);
   }, [oauthOutcome]);
 
   // A live API error wins over the (historical) callback outcome; otherwise
@@ -110,7 +112,7 @@ export function SecretsPage() {
 
   const onDelete = async (id: string) => {
     try {
-      await deleteSecret(id);
+      await deleteSecret(id, bot);
       await refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -119,7 +121,7 @@ export function SecretsPage() {
 
   const onAuthorize = async (id: string) => {
     try {
-      const url = await startOAuth(id);
+      const url = await startOAuth(id, bot);
       window.location.href = url;
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -127,6 +129,7 @@ export function SecretsPage() {
   };
 
   return (
+    <ActingForBot.Provider value={bot}>
     <PageShell
       title="Secrets"
       // The header's Refresh is QUIET, like the refetch a save triggers: a loud
@@ -264,6 +267,7 @@ export function SecretsPage() {
         </div>
       </details>
     </PageShell>
+    </ActingForBot.Provider>
   );
 }
 
@@ -278,6 +282,7 @@ function OAuthSecretForm({ onSaved, onError }: { onSaved: () => void; onError: (
   // implement it ignores the extra parameters — off is the rare exception.
   const [pkce, setPkce] = useState(true);
   const [busy, setBusy] = useState(false);
+  const bot = useActingForBot();
 
   const submit = async () => {
     setBusy(true);
@@ -292,7 +297,7 @@ function OAuthSecretForm({ onSaved, onError }: { onSaved: () => void; onError: (
           scopes: scopes.split(/[\s,]+/).filter(Boolean),
           pkce,
         },
-      });
+      }, bot);
       onSaved();
     } catch (err) {
       onError(err instanceof Error ? err.message : String(err));

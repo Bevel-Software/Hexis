@@ -414,7 +414,7 @@ describe('ToolConnectionSection', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Test connection: github' }));
 
       await waitFor(() => expect(screen.getByTestId('tool-health')).toHaveTextContent('Connected'));
-      expect(checkToolConnection).toHaveBeenCalledWith('github');
+      expect(checkToolConnection).toHaveBeenCalledWith('github', null);
     });
 
     it("goes red with the provider's own words when the credential is rejected", async () => {

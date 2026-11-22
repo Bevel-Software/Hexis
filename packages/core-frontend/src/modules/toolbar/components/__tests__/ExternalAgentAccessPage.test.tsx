@@ -830,6 +830,17 @@ describe('minting a key as a bot ("Connect as")', () => {
     expect(within(group).queryByText(/Everything/)).toBeNull();
   });
 
+  it('says whose identity the key carries: yours for Myself, the bot\'s once a bot is picked', async () => {
+    agentChoicesMock.mockResolvedValue([OPS]);
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    await user.click(screen.getByRole('tab', { name: 'Autonomous agents' }));
+    expect(screen.getByText(/carries your identity/)).toBeInTheDocument();
+    await user.click(await screen.findByRole('radio', { name: /ops/ }));
+    expect(screen.queryByText(/carries your identity/)).toBeNull();
+    expect(screen.getByText(/carries the bot's identity, not yours/)).toBeInTheDocument();
+  });
+
   it('asks nothing when there is no bot to mint as: the key is the person\'s, as it always was', async () => {
     agentChoicesMock.mockResolvedValue([]);
     const user = userEvent.setup();

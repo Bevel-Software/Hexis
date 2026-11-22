@@ -1,6 +1,7 @@
 import { useCallback, useRef, useState } from 'react';
 import { checkToolConnection, type ProbeVerdict } from '../services/tool-secrets.api';
 import { PROBE_UNREACHABLE } from './probe-verdict';
+import { useActingForBot } from '../services/acting-for';
 
 /**
  * Probe a tool's credential after it is SAVED, and hold the answer.
@@ -112,6 +113,9 @@ export interface SavedKeyProbe {
  *   nothing and every stamp is 0.
  */
 export function useSavedKeyProbe(slug: string, stamp = 0): SavedKeyProbe {
+  // The credential probed is the one just saved: the bot's on a page acting
+  // for one, else the person's.
+  const bot = useActingForBot();
   const [answer, setAnswer] = useState<Stamped | null>(null);
   /** What the probe in flight is about, or null — `checking` is DERIVED from it. */
   const [inFlight, setInFlight] = useState<Asked | null>(null);
@@ -151,7 +155,7 @@ export function useSavedKeyProbe(slug: string, stamp = 0): SavedKeyProbe {
         : null,
     );
     try {
-      const verdict = await checkToolConnection(slug);
+      const verdict = await checkToolConnection(slug, bot);
       // Newest-probe guard only: everything published is STAMPED and compared
       // at render, so a probe that raced a definition change stores state that
       // simply never shows — no clock to synchronise, no ref read mid-render.
@@ -189,7 +193,7 @@ export function useSavedKeyProbe(slug: string, stamp = 0): SavedKeyProbe {
       // must not clear a newer probe's in-flight marker.
       if (seq.current === mine) setInFlight(null);
     }
-  }, [slug, stamp]);
+  }, [slug, stamp, bot]);
 
   const forget = useCallback(() => {
     seq.current++;

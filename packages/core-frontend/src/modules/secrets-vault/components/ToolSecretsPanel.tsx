@@ -11,6 +11,7 @@ import {
   deleteUserVar,
 } from '../services/tool-secrets.api';
 import { startToolOAuth } from '../services/connect.api';
+import { useActingForBot } from '../services/acting-for';
 import { SavedKeyProbeResult } from '../probe/SavedKeyProbeResult';
 import { useSavedKeyProbe, type SavedKeyProbe } from '../probe/useSavedKeyProbe';
 import { announceToolCredentialsChanged } from '../../../core/events';
@@ -51,6 +52,8 @@ export function ToolSecretsPanel({ tool, onChanged }: { tool: ToolSecrets; onCha
    * component has to remember to key it.
    */
   const probe = useSavedKeyProbe(tool.slug);
+  // Whose values: the bot the Secrets page was opened for, else the person.
+  const bot = useActingForBot();
 
   /**
    * Every write in this panel funnels through here, which is why the Library
@@ -96,8 +99,8 @@ export function ToolSecretsPanel({ tool, onChanged }: { tool: ToolSecrets; onCha
           vars={adminVars}
           editable={tool.canWrite}
           configured={(v) => v.adminConfigured}
-          onSave={(v, value) => setAdminVar(tool.slug, v.name, value)}
-          onDelete={(v) => deleteAdminVar(tool.slug, v.name)}
+          onSave={(v, value) => setAdminVar(tool.slug, v.name, value, null, bot)}
+          onDelete={(v) => deleteAdminVar(tool.slug, v.name, bot)}
           onChanged={changed}
           probe={probe}
         />
@@ -115,8 +118,8 @@ export function ToolSecretsPanel({ tool, onChanged }: { tool: ToolSecrets; onCha
           // and pasting one would overwrite the discovered provider row.
           ownerCanWrite={tool.canWrite && tool.setup?.kind !== 'oauth-auto'}
           configured={(v) => v.userConfigured}
-          onSave={(v, value) => setUserVar(tool.slug, v.name, value)}
-          onDelete={(v) => deleteUserVar(tool.slug, v.name)}
+          onSave={(v, value) => setUserVar(tool.slug, v.name, value, null, bot)}
+          onDelete={(v) => deleteUserVar(tool.slug, v.name, bot)}
           onChanged={changed}
           probe={probe}
         />
@@ -356,12 +359,13 @@ function OAuthVarRow({
   const [error, setError] = useState<string | null>(null);
   const [secret, setSecret] = useState('');
   const ownerConfigured = v.adminConfigured;
+  const bot = useActingForBot();
 
   const authorize = async () => {
     setBusy(true);
     setError(null);
     try {
-      const url = await startToolOAuth(slug, v.name);
+      const url = await startToolOAuth(slug, v.name, undefined, bot);
       window.location.href = url; // provider consent, returns to this app
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -373,7 +377,7 @@ function OAuthVarRow({
     setBusy(true);
     setError(null);
     try {
-      await setOAuthClientSecret(slug, v.name, secret);
+      await setOAuthClientSecret(slug, v.name, secret, undefined, bot);
       setSecret('');
       onChanged();
     } catch (err) {
