@@ -4768,7 +4768,8 @@ export class VersionControlService implements IVersionControlService {
   ): Promise<boolean> {
     if (this.applyAttempts.get(number) !== attempt) return false;
     const at = failure.at ?? new Date();
-    // Who could not apply it (`writeNamingActor`: a bot at the address its row has now).
+    // Who could not apply it (`writeNamingActor`: a bot at the address its row has now;
+    // the bot alone is named, so an erased maker does not refuse the note).
     const updated = await writeNamingActor(this.db, user, async (q, by) =>
       q
         .update(changeRequests)
@@ -4790,7 +4791,8 @@ export class VersionControlService implements IVersionControlService {
             or(isNull(changeRequests.applyFailedAt), lt(changeRequests.applyFailedAt, at)),
           ),
         )
-        .returning({ number: changeRequests.number })
+        .returning({ number: changeRequests.number }),
+      { namesMaker: false },
     );
     if (updated.length === 0) return false;
     this.prs.invalidateDetailCache(number);

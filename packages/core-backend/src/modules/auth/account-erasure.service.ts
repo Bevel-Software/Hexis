@@ -350,9 +350,11 @@ export class AccountErasureService implements IAccountErasureService {
       );
 
     // And the person behind a bot, on the four records that name them beside
-    // it: a bot's request, approval, merge or queued save in flight when the
-    // erasure committed can land in their name after the rewrite above (its
-    // own writer checks the bot's row, not theirs). Same statement, same
+    // it. Each of those writers joins the lock above and asks for the
+    // person's account before it writes (`holdMaker` in version control),
+    // so one in flight either landed before the rewrite or is refused. This
+    // is the belt to that, as for the approvals above: the guarantee does not
+    // rest on a future writer remembering the check. Same statement, same
     // guard, same reason.
     for (const table of [changeRequests, prFileApprovals, pendingCommits, prMergeLog] as const) {
       await this.db

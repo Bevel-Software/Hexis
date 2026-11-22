@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { changeRequests, pendingCommits, prFileApprovals, prMergeLog, users, type Database } from '../../../database/index.js';
 import { PG_ADMIN_URL, PG_TEST_TIMEOUT, dropScratchDatabases, openMigratedScratchDb } from '../../../../__tests__/pg-scratch.js';
 import { hashEmail } from '../../../../shared/email-identity.js';
@@ -171,6 +171,8 @@ describe.skipIf(!PG_ADMIN_URL)("readdressing a bot's recorded identity", () => {
         .insert(users)
         .values({ email: BOT_OLD, emailBidx: BOT_OLD, name: 'Coder', botId: 'coder' })
         .returning({ id: users.id });
+      // The person who made the connection, with an account (`holdMaker` asks).
+      await db.insert(users).values({ email: PERSON, emailBidx: PERSON, name: 'Dana' });
       // The identity a connection resolved before the change: the old address.
       botUser = { id: row!.id, email: BOT_OLD, name: 'Coder', madeBy: { name: 'Dana', email: PERSON } };
     });
@@ -183,7 +185,30 @@ describe.skipIf(!PG_ADMIN_URL)("readdressing a bot's recorded identity", () => {
         await afterRow?.();
         await svc.readdressIdentity(tx, BOT_OLD, BOT_NEW);
       });
-    const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    /**
+     * Resolves once another transaction of this database is blocked on a
+     * lock: the barrier that says the competing transaction has reached the
+     * lock the test is about, read from Postgres rather than guessed from a
+     * pause. Fails after ten seconds, so a race that never forms is a
+     * failure, not a pass.
+     */
+    const blockedOnLock = async (): Promise<void> => {
+      const deadline = Date.now() + 10_000;
+      while (Date.now() < deadline) {
+        const { rows } = await db.execute(
+          sql`select count(*)::int as n from pg_stat_activity
+              where datname = current_database() and pid <> pg_backend_pid() and wait_event_type = 'Lock'`,
+        );
+        if (Number((rows[0] as { n: number }).n) > 0) return;
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      throw new Error('no transaction is waiting on a lock');
+    };
+    const signal = () => {
+      let open!: () => void;
+      const opened = new Promise<void>((r) => (open = r));
+      return { open, opened };
+    };
 
     it('names the address the row has now, not the one the call resolved', async () => {
       await db.transaction((tx) => svc.readdressIdentity(tx, BOT_OLD, BOT_NEW));
@@ -201,17 +226,21 @@ describe.skipIf(!PG_ADMIN_URL)("readdressing a bot's recorded identity", () => {
       let release!: () => void;
       const held = new Promise<void>((r) => (release = r));
       let changed = false;
+      const rowHeld = signal();
       // A change request opened as the bot: it reads the row, then is slow to insert.
       const writer = db.transaction(async (tx) => {
         const author = await recordedAddress(tx, botUser);
+        rowHeld.open();
         await held;
         await tx.insert(changeRequests).values({ ...request(author, PERSON, 'racing'), authorEmail: author, authorEmailBidx: author });
       });
-      await pause(50);
+      // The change starts only once the writer holds the row, and the insert
+      // is let go only once the change is blocked on it.
+      await rowHeld.opened;
       const change = changeDomain().then(() => {
         changed = true;
       });
-      await pause(300);
+      await blockedOnLock();
       // Held back by the writer's hold on the row, not finished before the insert.
       const heldBack = !changed;
       release();
@@ -225,15 +254,20 @@ describe.skipIf(!PG_ADMIN_URL)("readdressing a bot's recorded identity", () => {
       let release!: () => void;
       const held = new Promise<void>((r) => (release = r));
       // The change has taken the record writers and the row, and has not committed yet.
-      const change = changeDomain(() => held);
-      await pause(50);
+      const changeHolds = signal();
+      const change = changeDomain(() => {
+        changeHolds.open();
+        return held;
+      });
+      await changeHolds.opened;
       // An approval as the bot: the approval lock, then the bot's row, then the insert.
       const writer = db.transaction(async (tx) => {
         await takeApprovalLock(tx, 1);
         const approver = await recordedAddress(tx, botUser);
         await tx.insert(prFileApprovals).values(approval('Team/z.md', approver, PERSON));
       });
-      await pause(200);
+      // The change commits only once the approval is blocked behind it.
+      await blockedOnLock();
       release();
       await change;
       await writer;

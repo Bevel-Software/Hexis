@@ -25,7 +25,7 @@ import {
 } from '../../../shared/domain-errors.js';
 import type { WorkspaceService } from '../../workspace/index.js';
 import { canonicalEmail, hashEmail } from '../../../shared/email-identity.js';
-import { madeByColumns, recordedAddress, writeNamingActor } from '../made-by.js';
+import { holdMaker, madeByColumns, recordedAddress, writeNamingActor } from '../made-by.js';
 import type {
   IChangeRequestReviewService,
   MergeGateInput,
@@ -448,16 +448,10 @@ export class ChangeRequestReviewService implements IChangeRequestReviewService {
         .limit(1);
       if (!account) throw new ApprovalAccountGoneError();
       // A bot's approval names the person behind it too, and their erasure
-      // rewrites that name under this same lock: asked here as well, so an
-      // erasure that committed first is not undone by this insert. By
-      // address, which is all the approval records of them.
-      if (user.madeBy) {
-        const madeBy = canonicalEmail(user.madeBy.email);
-        const [maker] = await tx.select({ id: users.id }).from(users).where(eq(users.emailBidx, madeBy)).limit(1);
-        if (!maker) {
-          throw new ApprovalAccountGoneError('The person who made this connection no longer has an account, so the bot cannot approve in their name.');
-        }
-      }
+      // rewrites that name under this same lock: asked here as well
+      // (`holdMaker`, as every record that names them asks), so an erasure
+      // that committed first is not undone by this insert.
+      await holdMaker(tx, user.madeBy);
       // The approver's address as their row has it now: a bot's may have
       // moved with a domain change since this call resolved it.
       const approver = await recordedAddress(tx, user);

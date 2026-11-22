@@ -18,6 +18,7 @@ import type { Database } from '../../database/index.js';
 interface SelectChain extends PromiseLike<unknown> {
   from: (...args: unknown[]) => SelectChain;
   where: (...args: unknown[]) => SelectChain;
+  limit: (...args: unknown[]) => SelectChain;
 }
 
 interface InsertChain extends PromiseLike<unknown> {
@@ -29,6 +30,10 @@ function makeFakeDb(existingCount: number) {
   const selectChain: SelectChain = {
     from: vi.fn(() => selectChain),
     where: vi.fn(() => selectChain),
+    // A bot's save first asks whether the person behind it has an account
+    // (`holdMaker`); any row answers yes here. The refusal is pinned on a
+    // real Postgres (`made-by-erasure.pg.test.ts`).
+    limit: vi.fn(() => selectChain),
     then: (onF, onR) => Promise.resolve([{ count: existingCount }]).then(onF, onR),
   };
   const insertChain: InsertChain = {
@@ -41,6 +46,8 @@ function makeFakeDb(existingCount: number) {
   const db = {
     select: vi.fn(() => selectChain),
     insert: vi.fn(() => insertChain),
+    execute: vi.fn(async () => undefined),
+    transaction: vi.fn(async (cb: (tx: unknown) => Promise<unknown>) => cb(db)),
   } as unknown as Database;
   return { db, inserted };
 }

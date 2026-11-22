@@ -40,7 +40,7 @@ import { logger } from '../../shared/logging.js';
 const log = logger('pending-commits');
 import type { Database } from '../database/index.js';
 import { canonicalEmail } from '../../shared/email-identity.js';
-import { madeByColumns } from './made-by.js';
+import { holdMaker, madeByColumns } from './made-by.js';
 import { pendingCommits } from '../database/index.js';
 import { canonicalWorkspaceId } from '../../shared/workspace-id.js';
 
@@ -179,7 +179,30 @@ export class PendingCommitsService {
     // (see `database/schema.ts` near the `pendingCommits` definition), so a
     // racing INSERT just produces a second row the worker will collapse on its
     // next idempotent commit pass — no constraint violation, no double-commit.
-    const updated = await this.db
+    await this.namingMaker(input, (q) => this.refreshOrInsert(q, input, email, workspaceId));
+  }
+
+  /**
+   * Run `write` on `this.db`, or, for a bot's save, in a transaction that
+   * first makes sure the person behind the bot still has an account
+   * (`holdMaker`): the row names them, and their erasure rewrites that
+   * name, so a save queued after the erasure committed is refused rather
+   * than naming them in a commit's trailer for good. A pull-conflict
+   * recovery queued for a save whose row the erasure already rewrote names
+   * no account either and is refused the same way; that dispatch is
+   * best-effort and logs it (`queuePullConflictRecovery`).
+   */
+  private async namingMaker<T>(input: EnqueueInput, write: (q: Database) => Promise<T>): Promise<T> {
+    const madeBy = input.madeBy;
+    if (!madeBy) return write(this.db);
+    return this.db.transaction(async (tx) => {
+      await holdMaker(tx, madeBy);
+      return write(tx as unknown as Database);
+    });
+  }
+
+  private async refreshOrInsert(q: Database, input: EnqueueInput, email: string, workspaceId: string): Promise<void> {
+    const updated = await q
       .update(pendingCommits)
       .set({
         queuedAt: new Date(),
@@ -202,7 +225,7 @@ export class PendingCommitsService {
       )
       .returning({ id: pendingCommits.id });
     if (updated.length > 0) return;
-    await this.db.insert(pendingCommits).values({
+    await q.insert(pendingCommits).values({
       workspaceId,
       branch: input.branch,
       path: input.path,
@@ -243,15 +266,17 @@ export class PendingCommitsService {
       );
     if ((rows[0]?.count ?? 0) > 0) return false;
     const email = canonicalEmail(input.authorEmail);
-    await this.db.insert(pendingCommits).values({
-      workspaceId,
-      branch: input.branch,
-      path: input.path,
-      authorEmail: email,
-      authorEmailBidx: email,
-      authorName: input.authorName,
-      ...madeByColumns(input.madeBy),
-    });
+    await this.namingMaker(input, (q) =>
+      q.insert(pendingCommits).values({
+        workspaceId,
+        branch: input.branch,
+        path: input.path,
+        authorEmail: email,
+        authorEmailBidx: email,
+        authorName: input.authorName,
+        ...madeByColumns(input.madeBy),
+      }),
+    );
     return true;
   }
 
