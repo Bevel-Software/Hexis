@@ -536,8 +536,11 @@ export class ChangeRequestReviewService implements IChangeRequestReviewService {
        * inside the merge's reservation, against the target and source commits
        * this attempt actually merges (see `GitService.mergeChangeRequest`), in
        * the clone the merge runs in (`workspaceId`), which holds both commits.
-       * Throwing refuses the merge, and the refusal reaches the caller as it
-       * was thrown.
+       * Throwing a domain error refuses the merge, and the refusal reaches
+       * the caller as it was thrown; any other error is a failed merge.
+       * Not called when this attempt merges nothing because an earlier one
+       * already merged and failed to record it (`finalizeAlreadyApplied`):
+       * that merge passed the check when it ran.
        */
       authorize?: (target: { sha: string; sourceSha: string; changedPaths: string[]; workspaceId: string }) => Promise<void>;
     } = {},
@@ -667,7 +670,10 @@ export class ChangeRequestReviewService implements IChangeRequestReviewService {
               }
               await opts.authorize?.({ ...target, workspaceId: baseWorkspace.id });
             } catch (err) {
-              refusal = err;
+              // Only a refusal is the caller's answer. A git or infrastructure
+              // failure inside the check takes the redacted path below, like
+              // any other failure of the merge.
+              if (err instanceof VersionControlDomainError) refusal = err;
               throw err;
             }
           },

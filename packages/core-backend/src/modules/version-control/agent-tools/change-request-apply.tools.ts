@@ -180,7 +180,8 @@ export function registerChangeRequestApplyTools(
     name: 'apply_change_request',
     description:
       'Apply (merge) an open change request into its target as the bot this connection acts as. Accepted only when ' +
-      "the request's merge gate passes — every file approved by someone eligible at the current head — and refused " +
+      "the request's merge gate passes — every file approved by someone eligible at the current head — and the bot " +
+      'may write every file it changes; refused ' +
       'whole when it changes access (`roles.yaml`, an `access.md`, a group file, or the access lines of a file): a bot ' +
       'never changes access. Answers `merged`, or `conflicts-need-resolution` with the conflicting paths (nothing is ' +
       'written: resolve them on the source branch and apply again). Offered only to a connection made as a bot.',

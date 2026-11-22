@@ -39,7 +39,12 @@ type MergeHook = (t: { sha: string; sourceSha: string; changedPaths: string[]; w
  * way the real ones do — inside the merge, before anything lands — and record
  * whether the merge landed.
  */
-function makeService(changed: Record<string, { base: string | null; head: string | null }> = {}, db: unknown = {}) {
+function makeService(
+  changed: Record<string, { base: string | null; head: string | null }> = {},
+  db: unknown = {},
+  /** Who may write a path, as the access rules at the target commit answer it. */
+  mayWrite: (email: string, path: string) => boolean = () => true,
+) {
   const acquire = vi.fn(async () => ({ acquired: true, lock: {} as never }));
   const gate: IChangeReadGate = { judge: vi.fn(), assertMayChange: vi.fn(async () => undefined) };
   const landed = { count: 0 };
@@ -63,13 +68,16 @@ function makeService(changed: Record<string, { base: string | null; head: string
     landed.count += 1;
     return { merged: true };
   });
+  const canWriteBatchAtRef = vi.fn(async (_ws: string, sha: string, email: string, paths: string[]) =>
+    sha === 'target-tip' ? new Map(paths.map((p) => [p, mayWrite(email, p)])) : null,
+  );
   const svc = new VersionControlService(
     db as Database,
     git,
     prs,
     { mergePr } as unknown as IChangeRequestReviewService,
     { getOrCreateForBranch: vi.fn(async () => ({ id: 'ws-draft' })) } as unknown as WorkspaceService,
-    { canWriteBatchAtRef: vi.fn(async (_ws: string, _sha: string, _e: string, paths: string[]) => new Map(paths.map((p) => [p, true]))) } as unknown as IAccessControl,
+    { canWriteBatchAtRef } as unknown as IAccessControl,
     { acquire, get: vi.fn(async () => null) } as unknown as FileLockService,
     { queuedOnBranch: vi.fn(async () => ({ queued: 0, stuck: 0, needsAttention: null })) } as unknown as PendingCommitsService,
     testKbContext({ kbDirName: KB }),
@@ -80,7 +88,7 @@ function makeService(changed: Record<string, { base: string | null; head: string
     undefined,
     isBot,
   );
-  return { svc, acquire, mergePr, landed, git };
+  return { svc, acquire, mergePr, landed, git, canWriteBatchAtRef };
 }
 
 describe('a bot at the lock', () => {
@@ -145,6 +153,35 @@ describe('a bot merging a change request', () => {
     });
     await merge(svc, BOT);
     expect(landed.count).toBe(1);
+  });
+
+  it("is refused one that changes a file it may not write, though others approved it, naming the file; a person's Apply is not asked", async () => {
+    const changed = {
+      'Team/page.md': { base: '# p\n', head: '# p, edited\n' },
+      'Ops/runbook.md': { base: '# r\n', head: '# r, edited\n' },
+    };
+    const mayWrite = (email: string, p: string) => email !== BOT.email || p.startsWith('Team/');
+    const { svc, landed, canWriteBatchAtRef } = makeService(changed, {}, mayWrite);
+    const refused = merge(svc, BOT);
+    await expect(refused).rejects.toMatchObject({
+      status: 403,
+      payload: { kind: 'bot-merge-outside-grant', deniedPaths: ['Ops/runbook.md'] },
+    });
+    expect(landed.count).toBe(0);
+    // Judged for the bot, at the target commit the merge is built on.
+    expect(canWriteBatchAtRef).toHaveBeenCalledWith('ws-main', 'target-tip', BOT.email, Object.keys(changed));
+
+    const person = makeService(changed, {}, () => false);
+    await merge(person.svc, PERSON);
+    expect(person.landed.count).toBe(1);
+    expect(person.canWriteBatchAtRef).not.toHaveBeenCalled();
+  });
+
+  it('is refused when its write access cannot be read at the target commit', async () => {
+    const { svc, landed, canWriteBatchAtRef } = makeService({ 'Team/page.md': { base: '# p\n', head: '# q\n' } });
+    canWriteBatchAtRef.mockResolvedValueOnce(null);
+    await expect(merge(svc, BOT)).rejects.toMatchObject({ payload: { kind: 'bot-merge-outside-grant' } });
+    expect(landed.count).toBe(0);
   });
 });
 

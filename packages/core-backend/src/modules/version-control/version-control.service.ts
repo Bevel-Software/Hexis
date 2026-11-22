@@ -4356,7 +4356,15 @@ export class VersionControlService implements IVersionControlService {
         title,
         baseBranch,
         workspaceId,
-        { ...opts, authorize: bot ? (target) => this.assertBotMergeLeavesAccess(target) : undefined },
+        {
+          ...opts,
+          authorize: bot
+            ? async (target) => {
+                await this.assertBotMergeLeavesAccess(target);
+                await this.assertBotMayWriteMerged(user.email, target);
+              }
+            : undefined,
+        },
       );
     } catch (err) {
       // The local merge hit conflicts — hand the caller (agent/UI) the actual
@@ -4855,6 +4863,32 @@ export class VersionControlService implements IVersionControlService {
       ]);
       if (changesOwnAccessLines(before, after)) throw new BotChangesAccessError(p, 'lines');
     }
+  }
+
+  /**
+   * A bot merges a change request only where it is granted: it must be able
+   * to write every file the merge changes, judged at the target commit the
+   * merge is built on — the rule a merge into a protected branch applies to
+   * every caller (`mergeBranch`). A person's Apply is authorized by the
+   * approval gate alone; a bot is held to its own grants as well, so a bot
+   * that may only read cannot land a request because others approved it.
+   */
+  private async assertBotMayWriteMerged(
+    email: string,
+    target: { sha: string; changedPaths: string[]; workspaceId: string },
+  ): Promise<void> {
+    const { sha, changedPaths, workspaceId } = target;
+    if (changedPaths.length === 0) return;
+    const allowed = await this.accessControl.canWriteBatchAtRef(workspaceId, sha, email, changedPaths);
+    const denied = allowed ? changedPaths.filter((p) => !allowed.get(p)) : changedPaths;
+    if (denied.length === 0) return;
+    throw new VersionControlDomainError(
+      `A bot merges a change request only where it may write every file it changes: ` +
+        `${denied.length} changed file(s) are outside its write access (${denied.join(', ')}). ` +
+        `Ask the user to apply it in the app.`,
+      403,
+      { kind: 'bot-merge-outside-grant', deniedPaths: denied },
+    );
   }
 
   /**

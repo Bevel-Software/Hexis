@@ -9,6 +9,7 @@ import type { WorkspaceService } from '../../../workspace/workspace.service.js';
 import type { GitService } from '../../git/git.service.js';
 import type { AppliedMergeResult, AuthUser, FileApprovalState } from '@bevel-software/platform-shared';
 import type { IAccessControl } from '../../../access/access-control.interface.js';
+import { VersionControlDomainError } from '../../../../shared/domain-errors.js';
 
 /**
  * What `mergePr` records as a change request's `merged_sha`, which is the only
@@ -458,11 +459,23 @@ describe('mergePr — the head the approvals were read at', () => {
   });
 
   it("passes the caller's refusal through as it was thrown, not as a failed merge", async () => {
-    const refusal = Object.assign(new Error('a bot cannot change access'), { status: 403 });
+    const refusal = new VersionControlDomainError('a bot cannot change access', 403, { kind: 'bot-cannot-change-access' });
     const { merge, landed } = makeMergingAt(HEAD_SHA, async () => {
       throw refusal;
     });
     await expect(merge()).rejects.toBe(refusal);
     expect(landed.count).toBe(0);
+  });
+
+  it("takes a failure inside the caller's check as a failed merge: wrapped, with the token redacted", async () => {
+    const { merge, landed, captured } = makeMergingAt(HEAD_SHA, async () => {
+      throw new Error('git cat-file failed: https://x-access-token:ghs_secret@github.com/acme/kb');
+    });
+    const failed = merge();
+    await expect(failed).rejects.toMatchObject({ status: 502 });
+    await expect(failed).rejects.not.toThrow(/ghs_secret/);
+    expect(landed.count).toBe(0);
+    const log = captured.find((c) => c.kind === 'update' && c.table === prMergeLog);
+    expect(String(log?.values.error)).not.toContain('ghs_secret');
   });
 });
