@@ -43,13 +43,13 @@ const workspaceService = {
     p: string,
     d?: string,
     guardWrite?: (target: string, content?: Buffer) => Promise<void>,
-    landEntry?: (target: string, content: Buffer, write: () => Promise<void>) => Promise<void>,
+    landEntry?: (target: string, content: Buffer, write: () => Promise<void>) => Promise<string | undefined>,
   ) => {
     recorded.push(['unzip', ws, p, d]);
     if (archiveEntries.length === 0) return { extracted: [p], skipped: [] };
     // Mirrors the real extraction: a guard refusal skips that entry with its
     // message, and a file that passed lands through `landEntry` (a refusal
-    // there skips it too).
+    // it answers skips it too; a throw would fail the extraction).
     const extracted: string[] = [];
     const skipped: { path: string; reason: string }[] = [];
     for (const target of archiveEntries) {
@@ -63,7 +63,11 @@ const workspaceService = {
             await mkdir(path.dirname(path.join(workspaceDir, target)), { recursive: true });
             await writeFile(path.join(workspaceDir, target), bytes);
           };
-          await (landEntry ? landEntry(target, bytes, write) : write());
+          const refused = landEntry ? await landEntry(target, bytes, write) : (await write(), undefined);
+          if (refused !== undefined) {
+            skipped.push({ path: target, reason: refused });
+            continue;
+          }
         }
         extracted.push(target);
       } catch (err) {

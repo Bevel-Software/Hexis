@@ -328,17 +328,40 @@ export class LockingFilesystem extends GitGuardedFilesystem {
    * untouched whatever happens: the landing's bytes are left on disk
    * uncommitted, as `unzip` leaves them, and no prior save's queued bytes
    * are reset or re-attributed. A refusal lands nothing.
+   *
+   * A REFUSAL is answered, not thrown: the validator saying no (before the
+   * lock or under it) or the lock staying held by somebody else resolves
+   * with that sentence, and the caller skips the file. Anything else throws
+   * as it came — the lock store failing, or `land` itself failing (a full
+   * disk, a permission error) — so a caller never reports a failure as a
+   * file it chose to skip. `land` is the caller's to make safe at the moment
+   * it runs (under the lock): it is where a check of the target's placement
+   * belongs, since only the caller knows how it writes.
    */
-  async landUnderLock(inputPath: string, content: Buffer, land: () => Promise<void>): Promise<void> {
+  async landUnderLock(inputPath: string, content: Buffer, land: () => Promise<void>): Promise<string | undefined> {
+    // The path's own rules throw, as for every write here: a caller hands over
+    // only paths it has already placed, so reaching one is a caller's bug.
     await this.assertNotGitInternals(inputPath);
     this.assertInsideRepo(inputPath);
     const validate = this.lockContext.validateWrite;
-    await validate?.(inputPath, content);
-    await this.acquireOrSkip(inputPath);
+    const refusal = async (): Promise<string | undefined> => {
+      try {
+        await validate?.(inputPath, content);
+        return undefined;
+      } catch (err) {
+        return err instanceof Error ? err.message : String(err);
+      }
+    };
+    const before = await refusal();
+    if (before !== undefined) return before;
+    const held = await this.acquireOrHeldReason(inputPath);
+    if (held !== null) return held;
     const { versionControl, workspaceId, branch, user } = this.lockContext;
     try {
-      await validate?.(inputPath, content);
+      const under = await refusal();
+      if (under !== undefined) return under;
       await land();
+      return undefined;
     } finally {
       try {
         await versionControl.releaseLockUntouched(workspaceId, branch, inputPath, user);
@@ -1354,19 +1377,30 @@ export class LockingFilesystem extends GitGuardedFilesystem {
    * "Skipped editing … locked by …" refusal every single-path write answers.
    */
   private async acquireOrSkip(inputPath: string): Promise<void> {
+    const held = await this.acquireOrHeldReason(inputPath);
+    if (held !== null) throw new Error(held);
+  }
+
+  /**
+   * Take `inputPath`'s lock, retrying a held one a few times. Answers `null`
+   * once it is held, or the "Skipped editing … locked by …" sentence when
+   * somebody else kept it. A lock store that FAILS (rather than answering
+   * that the lock is held) throws, so a caller can tell the two apart.
+   */
+  private async acquireOrHeldReason(inputPath: string): Promise<string | null> {
     const { versionControl, workspaceId, branch, user } = this.lockContext;
     let lastHolderName: string | null = null;
     for (let attempt = 0; attempt < ACQUIRE_RETRY_ATTEMPTS; attempt++) {
       const result = await versionControl.acquireLock(workspaceId, branch, inputPath, user);
-      if (result.acquired) return;
+      if (result.acquired) return null;
       lastHolderName = result.lock.holderName;
       if (attempt < ACQUIRE_RETRY_ATTEMPTS - 1) {
         await sleep(ACQUIRE_RETRY_DELAY_MS);
       }
     }
-    throw new Error(
+    return (
       `Skipped editing "${inputPath}" — locked by ${lastHolderName ?? 'another user'}. ` +
-        `Continuing with other edits; try this one again later.`,
+      `Continuing with other edits; try this one again later.`
     );
   }
 }

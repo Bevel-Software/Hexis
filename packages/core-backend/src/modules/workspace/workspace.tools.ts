@@ -144,26 +144,28 @@ interface ReadGate {
 }
 
 /** Throw a 403 ToolError if the gate denies reading `wsPath` (a KB node). */
-/**
- * `unzip`'s landing for each extracted file: under the file's lock, with the
- * agent's write gate asked again there (`LockingFilesystem.landUnderLock`).
- * The agent's write filesystem is always a locking one (`write: true`); one
- * that is not lands directly, as the service would.
- */
-async function landingUnderLock(
-  ctx: ToolContext,
-  branch: string,
-): Promise<((wsRelPath: string, content: Buffer, write: () => Promise<void>) => Promise<void>) | undefined> {
-  const fs = (await ctx.getFilesystem(branch)) as LocalFilesystem & { landUnderLock?: LockingFilesystem['landUnderLock'] };
-  if (typeof fs.landUnderLock !== 'function') return undefined;
-  return (wsRelPath, content, write) => fs.landUnderLock!(wsRelPath, content, write);
-}
-
 async function assertCanRead(gate: ReadGate, wsPath: string): Promise<void> {
   const rel = toKbRelative(wsPath, gate.kbDirName);
   if (rel === null) return; // not a KB node — not governed by read rules
   const ok = await gate.accessControl.canRead(gate.workspaceId, gate.userEmail, rel);
   if (!ok) throw new ToolError(`You don't have permission to read "${wsPath}".`, 403);
+}
+
+/**
+ * `unzip`'s landing for each extracted file: under the file's lock, with the
+ * agent's write gate asked again there (`LockingFilesystem.landUnderLock`).
+ * Resolves with the reason when the file is refused (the gate, or a lock
+ * somebody else holds) and throws only when landing failed. The agent's
+ * write filesystem is always a locking one (`write: true`); one that is not
+ * lands directly, as the service would.
+ */
+async function landingUnderLock(
+  ctx: ToolContext,
+  branch: string,
+): Promise<((wsRelPath: string, content: Buffer, write: () => Promise<void>) => Promise<string | undefined>) | undefined> {
+  const fs = (await ctx.getFilesystem(branch)) as LocalFilesystem & { landUnderLock?: LockingFilesystem['landUnderLock'] };
+  if (typeof fs.landUnderLock !== 'function') return undefined;
+  return (wsRelPath, content, write) => fs.landUnderLock!(wsRelPath, content, write);
 }
 
 /**

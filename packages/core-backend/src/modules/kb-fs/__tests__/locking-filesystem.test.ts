@@ -625,9 +625,11 @@ describe('LockingFilesystem — the caller judges under the lock', () => {
     const versionControl = makeVersionControl();
     const held = trackHeldLocks(versionControl);
     const judged: boolean[] = [];
+    const judgedBytes: string[] = [];
     let refuseUnderLock = false;
-    const validateWrite = async (p: string) => {
+    const validateWrite = async (p: string, content: string | Uint8Array) => {
       judged.push(held.has(p));
+      judgedBytes.push(typeof content === 'string' ? content : Buffer.from(content).toString('utf-8'));
       if (refuseUnderLock && held.has(p)) throw new Error('changed meanwhile');
     };
     const guarded = new LockingFilesystem(
@@ -640,20 +642,61 @@ describe('LockingFilesystem — the caller judges under the lock', () => {
       landedLocked = held.has(target);
       await fs.writeFile(path.join(root, target), 'x\n');
     };
-    await guarded.landUnderLock(target, Buffer.from('x\n'), land);
+    expect(await guarded.landUnderLock(target, Buffer.from('x\n'), land)).toBeUndefined();
     expect(judged).toEqual([false, true]);
+    // Both looks judge the bytes the landing writes, not some other content.
+    expect(judgedBytes).toEqual(['x\n', 'x\n']);
     expect(landedLocked).toBe(true);
     expect(versionControl.releaseLockUntouched).toHaveBeenCalledWith('ws-feat', 'feat', target, USER);
     expect(versionControl.releaseLock).not.toHaveBeenCalled();
 
+    // A refusal under the lock is ANSWERED with its sentence, lands nothing
+    // and releases the lock.
     await fs.rm(path.join(root, target));
     refuseUnderLock = true;
     landedLocked = null;
-    await expect(guarded.landUnderLock(target, Buffer.from('x\n'), land)).rejects.toThrow('changed meanwhile');
+    expect(await guarded.landUnderLock(target, Buffer.from('x\n'), land)).toBe('changed meanwhile');
     expect(landedLocked).toBeNull();
     await expect(fs.access(path.join(root, target))).rejects.toThrow();
     expect(held.size).toBe(0);
   });
+
+  it('landUnderLock throws a failure of the landing or of the lock store, and answers a held lock as a refusal', async () => {
+    await fs.mkdir(path.join(root, 'knowledge-base'), { recursive: true });
+    const target = 'knowledge-base/x.md';
+    const make = (versionControl: IVersionControlService) =>
+      new LockingFilesystem(
+        { basePath: root, contained: true },
+        { versionControl, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB, validateWrite: async () => {} },
+      );
+
+    // The landing itself failing (a full disk) is a failure, never a skip,
+    // and the lock is still released.
+    const failing = makeVersionControl();
+    const held = trackHeldLocks(failing);
+    const full = Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' });
+    await expect(
+      make(failing).landUnderLock(target, Buffer.from('x\n'), async () => {
+        throw full;
+      }),
+    ).rejects.toBe(full);
+    expect(held.size).toBe(0);
+    expect(failing.releaseLockUntouched).toHaveBeenCalledWith('ws-feat', 'feat', target, USER);
+
+    // The lock store failing is a failure too.
+    const broken = makeVersionControl();
+    (broken.acquireLock as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('connection terminated'));
+    const land = vi.fn(async () => {});
+    await expect(make(broken).landUnderLock(target, Buffer.from('x\n'), land)).rejects.toThrow('connection terminated');
+    expect(land).not.toHaveBeenCalled();
+
+    // A lock somebody else keeps is a refusal: answered, after the retries.
+    const taken = makeVersionControl();
+    (taken.acquireLock as ReturnType<typeof vi.fn>).mockResolvedValue({ acquired: false, lock: { holderName: 'Bob' } });
+    expect(await make(taken).landUnderLock(target, Buffer.from('x\n'), land)).toMatch(/locked by Bob/);
+    expect(land).not.toHaveBeenCalled();
+    expect(taken.releaseLockUntouched).not.toHaveBeenCalled();
+  }, 10_000);
 
   it('rewriteFile refuses a path outside the repository before any lock', async () => {
     const versionControl = makeVersionControl();

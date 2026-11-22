@@ -2275,11 +2275,12 @@ export class WorkspaceService implements IWorkspaceService {
     /**
      * How a file entry that passed the guard is put on disk: called with its
      * target, its bytes and the write itself, and expected to run `write`
-     * (under the caller's lock, judged again there) or throw to skip the
-     * entry with the thrown message as the reason. Absent, the write runs
-     * directly, as it always has for non-agent callers.
+     * (under the caller's lock, judged again there) or to RESOLVE with a
+     * reason to skip the entry. A throw is a failure, not a refusal, and fails
+     * the extraction. Absent, the write runs directly, as it always has for
+     * non-agent callers.
      */
-    landEntry?: (wsRelativePath: string, content: Buffer, write: () => Promise<void>) => Promise<void>,
+    landEntry?: (wsRelativePath: string, content: Buffer, write: () => Promise<void>) => Promise<string | undefined>,
   ): Promise<UnzipResult> {
     const { workspaceDir, relativePath: zipRelativePath, absolutePath: zipAbsolute } =
       await this.resolveInsideRepo(workspaceId, zipWsPath);
@@ -2479,19 +2480,59 @@ export class WorkspaceService implements IWorkspaceService {
         continue;
       }
       if (!(await allowEntry(data))) continue;
+      // The placement rules asked above (git internals, no link on the way)
+      // are asked again HERE, at the moment of writing — under the caller's
+      // lock when there is one — so a link put on the path since the first
+      // look cannot redirect the bytes. Their refusal skips the entry, as
+      // above; any other failure of the write (a full disk, a permission
+      // error) fails the extraction rather than reading as a skipped entry.
+      let placementRefusal: string | null = null;
+      const placedOrRefused = async (): Promise<boolean> => {
+        try {
+          await assertNotGitInternals(workspaceDir, trimmed, targetAbsolute);
+          await this.assertNotThroughLink(targetAbsolute, workspaceDir);
+          return true;
+        } catch (err) {
+          if (err instanceof PathTraversalError || err instanceof GitInternalsError) {
+            placementRefusal = err.message;
+            return false;
+          }
+          throw err;
+        }
+      };
       const write = async (): Promise<void> => {
+        if (!(await placedOrRefused())) return;
         await fs.mkdir(path.dirname(targetAbsolute), { recursive: true });
-        await fs.writeFile(targetAbsolute, data);
+        // Once more after the folders exist: `mkdir` made the missing ones, and
+        // the write below must land in exactly those.
+        if (!(await placedOrRefused())) return;
+        // `O_NOFOLLOW`: a link put at the name itself after that look fails the
+        // open (ELOOP) instead of receiving the bytes, and reads as the same
+        // refusal the look gives.
+        try {
+          await fs.writeFile(targetAbsolute, data, {
+            flag: fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC | (fs.constants.O_NOFOLLOW ?? 0),
+          });
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException | null)?.code === 'ELOOP') {
+            placementRefusal = new PathTraversalError().message;
+            return;
+          }
+          throw err;
+        }
       };
       if (landEntry) {
-        try {
-          await landEntry(relForReport, data, write);
-        } catch (err) {
-          skipped.push({ path: rawName, reason: err instanceof Error ? err.message : 'Refused before it was written' });
+        const refused = await landEntry(relForReport, data, write);
+        if (refused !== undefined) {
+          skipped.push({ path: rawName, reason: refused });
           continue;
         }
       } else {
         await write();
+      }
+      if (placementRefusal !== null) {
+        skipped.push({ path: rawName, reason: placementRefusal });
+        continue;
       }
       totalUncompressed += data.byteLength;
       extracted.push(relForReport);
