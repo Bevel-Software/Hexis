@@ -2084,28 +2084,54 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       markWritten(workspaceId, relativePath);
       const wrote: SaveLeft = { onDisk: toWrite, editBase: content };
       if (!stillHere()) return wrote;
-      // Update the matching tab — both the cached current value and the on-disk
-      // baseline now equal what was written; clear dirty. A save that merged
-      // onto a pulled commit keeps the banner: the person has not seen it yet.
-      // Its text is not the editor's, which an autosave leaves open, so the
-      // editor reloads it; otherwise its next save writes over the pull.
+      // Update the matching tab: its on-disk baseline is now what was written.
+      // A save that merged onto a pulled commit keeps the banner: the person
+      // has not seen it yet. Its text is not the editor's, which an autosave
+      // leaves open, so the editor reloads it; otherwise its next save writes
+      // over the pull.
+      // The tab's text is the editor's newest: what the person typed while
+      // this write was on its way (an autosave leaves the editor open) was
+      // edited from `content`, never from what was written. It stays, unsaved:
+      // as it is when nothing was merged (the editor holds it already), merged
+      // onto the written bytes when the write merged onto a pull; when it
+      // collides with the pull it is given up, and the banner says so, as the
+      // `file-changed` read decides for edits that collide.
       setOpenTabs((prev) => {
         const idx = prev.findIndex((t) => t.path === relativePath);
         if (idx < 0) return prev;
         const next = prev.slice();
-        const t = next[idx];
-        next[idx] = {
-          ...t,
-          content: toWrite,
-          savedContent: toWrite,
-          isDirty: false,
-          changedOnBranch: mergedOntoPull ? 'merged' : null,
-          ...(mergedOntoPull ? { remoteRevision: (t.remoteRevision ?? 0) + 1 } : {}),
-        };
+        next[idx] = afterWrite(next[idx]);
         return next;
       });
       bumpFs();
       return wrote;
+
+      function afterWrite(t: OpenTab): OpenTab {
+        const typedSince = t.content !== null && t.content !== content ? t.content : null;
+        if (typedSince === null) {
+          return {
+            ...t,
+            content: toWrite,
+            savedContent: toWrite,
+            isDirty: false,
+            changedOnBranch: mergedOntoPull ? 'merged' : null,
+            ...(mergedOntoPull ? { remoteRevision: (t.remoteRevision ?? 0) + 1 } : {}),
+          };
+        }
+        if (!mergedOntoPull) {
+          return { ...t, savedContent: toWrite, isDirty: typedSince !== toWrite, changedOnBranch: null };
+        }
+        const kept = threeWayMerge(content, typedSince, toWrite);
+        if (kept === null) return takePulledOverEdits(t, toWrite, 'discarded');
+        return {
+          ...t,
+          content: kept,
+          savedContent: toWrite,
+          isDirty: kept !== toWrite,
+          changedOnBranch: 'merged',
+          remoteRevision: (t.remoteRevision ?? 0) + 1,
+        };
+      }
     }
   }, [bumpFs, markWritten, awaitStillOnBranch, isStaleLanding]);
 

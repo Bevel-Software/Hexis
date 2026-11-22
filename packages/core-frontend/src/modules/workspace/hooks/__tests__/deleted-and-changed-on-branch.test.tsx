@@ -1601,6 +1601,99 @@ describe('a change pulled from the git host onto the open file', () => {
     });
   });
 
+  describe('typing while an autosave is on its way', () => {
+    /**
+     * Saves `saved`; once its PUT has started (the change read, when one is
+     * held, answered first and merged onto the tab, reloading the editor) the
+     * person types on the editor's text: `typed` of it; then the PUT lands.
+     */
+    async function typeDuringWrite(
+      result: Hook, saved: string, typed: (now: string) => string, held?: { answer: () => void },
+    ) {
+      const write = apiMocks.writeFile.getMockImplementation()!;
+      let land!: () => void;
+      const landed = new Promise<void>((r) => { land = r; });
+      apiMocks.writeFile.mockClear();
+      apiMocks.writeFile.mockImplementationOnce(async (...args: Parameters<typeof write>) => {
+        await landed;
+        return write(...args);
+      });
+      let saving!: Promise<void>;
+      act(() => { saving = result.current.saveFile('KB/Notes.md', saved); });
+      if (held) await act(async () => { held.answer(); });
+      await waitFor(() => expect(apiMocks.writeFile).toHaveBeenCalledOnce());
+      await typeInto(result, typed(result.current.activeTab!.content!));
+      await act(async () => { land(); await saving; });
+    }
+
+    it('a write that merged onto a pull keeps the later typing, merged onto what it wrote, and the next save lands both', async () => {
+      const result = await editedTab();
+      const edited = `${BASE}\n\nMy new closing line.`;
+      await typeInto(result, edited);
+      const pulled = BASE.replace('First paragraph.', 'First paragraph, rewritten upstream.');
+      disk.set('KB/Notes.md', pulled);
+      const held = holdFileChangedRead(pulled);
+
+      await typeDuringWrite(result, edited, (now) => `${now}\n\nTyped while it saved.`, held);
+
+      const written = `${pulled}\n\nMy new closing line.`;
+      expect(disk.get('KB/Notes.md')).toBe(written);
+      const tab = result.current.activeTab!;
+      // The editor reloads (remoteRevision) onto the pull AND the later typing.
+      expect(tab.content).toBe(`${written}\n\nTyped while it saved.`);
+      expect(tab.savedContent).toBe(written);
+      expect(tab.isDirty).toBe(true);
+      expect(tab.changedOnBranch).toBe('merged');
+      // Once for the change read merged onto the tab, once for the write.
+      expect(tab.remoteRevision).toBe(2);
+
+      await act(async () => { await result.current.saveFile('KB/Notes.md', tab.content!); });
+
+      expect(disk.get('KB/Notes.md')).toBe(`${written}\n\nTyped while it saved.`);
+      expect(apiMocks.writeFile).toHaveBeenLastCalledWith(
+        'ws-1', 'KB/Notes.md', `${written}\n\nTyped while it saved.`, { ifMatch: written },
+      );
+      expect(result.current.activeTab?.isDirty).toBe(false);
+    });
+
+    it('later typing that collides with the pull is given up, and the tab says so', async () => {
+      const result = await editedTab();
+      const edited = `${BASE}\n\nMy new closing line.`;
+      await typeInto(result, edited);
+      const pulled = BASE.replace('First paragraph.', 'First paragraph, rewritten upstream.');
+      disk.set('KB/Notes.md', pulled);
+      const held = holdFileChangedRead(pulled);
+
+      await typeDuringWrite(
+        result, edited, (now) => now.replace('First paragraph, rewritten upstream.', 'First paragraph, my way.'), held,
+      );
+
+      const written = `${pulled}\n\nMy new closing line.`;
+      const tab = result.current.activeTab!;
+      expect(tab.content).toBe(written);
+      expect(tab.savedContent).toBe(written);
+      expect(tab.isDirty).toBe(false);
+      expect(tab.changedOnBranch).toBe('discarded');
+      expect(tab.remoteRevision).toBe(2);
+    });
+
+    it('a write with no pull keeps the later typing unsaved, without reloading the editor', async () => {
+      const result = await editedTab();
+      const edited = `${BASE}\n\nMy new closing line.`;
+      await typeInto(result, edited);
+      const typed = `${edited}\n\nTyped while it saved.`;
+
+      await typeDuringWrite(result, edited, () => typed);
+
+      expect(disk.get('KB/Notes.md')).toBe(edited);
+      const tab = result.current.activeTab!;
+      expect(tab.content).toBe(typed);
+      expect(tab.savedContent).toBe(edited);
+      expect(tab.isDirty).toBe(true);
+      expect(tab.remoteRevision ?? 0).toBe(0);
+    });
+  });
+
   it('Done during a colliding change read still says the edits were discarded', async () => {
     const result = await editedTab();
     const edited = BASE.replace('Second paragraph.', 'Second paragraph, my way.');
