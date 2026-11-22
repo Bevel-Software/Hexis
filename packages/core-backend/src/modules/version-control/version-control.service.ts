@@ -2302,11 +2302,54 @@ export class VersionControlService implements IVersionControlService {
     return { number: row.number, state: row.state as ChangeRequestState };
   }
 
-  getChangeRequestDetail(
+  /**
+   * A change request as `viewerEmail` sees it. For a BOT viewer of an open
+   * request, the bot's own refusals of an apply — a change to access, a file
+   * outside its write access — are among its `mergeBlockedReasons`, judged by
+   * the checks its merge runs (`assertBotMergeLeavesAccess`,
+   * `assertBotMayWriteMerged`) at the head and target the detail was read
+   * at. So whatever a reader derives from the blockers ("may I apply this?")
+   * says what the merge would answer for the bot; the merge itself still asks
+   * again, inside its reservation.
+   */
+  async getChangeRequestDetail(
     number: number,
     opts?: { fresh?: boolean; workspaceId?: string; viewerEmail?: string; patches?: boolean },
   ): Promise<ChangeRequestDetail | null> {
-    return this.prs.getPrDetail(number, opts);
+    const detail = await this.prs.getPrDetail(number, opts);
+    if (!detail || detail.state !== 'open' || !opts?.viewerEmail || !opts.workspaceId || !this.isBot(opts.viewerEmail)) {
+      return detail;
+    }
+    const refusal = await this.botApplyRefusal(opts.viewerEmail, {
+      sha: detail.baseSha,
+      sourceSha: detail.headSha,
+      changedPaths: [...new Set(detail.files.flatMap((f) => (f.previousPath ? [f.path, f.previousPath] : [f.path])))],
+      workspaceId: opts.workspaceId,
+    });
+    return refusal === null
+      ? detail
+      : { ...detail, mergeableInBevel: false, mergeBlockedReasons: [...detail.mergeBlockedReasons, refusal] };
+  }
+
+  /**
+   * The sentence a bot's apply would be refused with at `target`, or null when
+   * its two checks pass. A check that cannot be answered (a read of either
+   * commit fails) is a refusal too, worded as such: "may apply" is never
+   * claimed unchecked.
+   */
+  private async botApplyRefusal(
+    email: string,
+    target: { sha: string; sourceSha: string; changedPaths: string[]; workspaceId: string },
+  ): Promise<string | null> {
+    try {
+      await this.assertBotMergeLeavesAccess(target);
+      await this.assertBotMayWriteMerged(email, target);
+      return null;
+    } catch (err) {
+      if (err instanceof VersionControlDomainError) return err.message;
+      mergeLog.warn('could not judge whether a bot may apply a change request:', { err: sanitizeError(err) });
+      return 'Whether this bot may apply the request could not be checked right now.';
+    }
   }
 
   /**

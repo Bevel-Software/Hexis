@@ -4,15 +4,14 @@ import type { AuthUser } from '@bevel-software/platform-shared';
 import type { GitService } from '../git/git.service.js';
 import type { PullRequestService } from '../git/pull-request.service.js';
 import type { IChangeRequestReviewService } from '../change-request-review/change-request-review.interface.js';
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import type { IAccessControl } from '../../access/access-control.interface.js';
+import type { WorkspaceService } from '../../workspace/index.js';
+import type { IAccessControl } from '../../access/index.js';
 import type { FileLockService } from '../file-lock.service.js';
 import type { PendingCommitsService } from '../pending-commits.service.js';
 import { VersionControlEventBus } from '../event-bus.js';
 import { VersionControlService } from '../version-control.service.js';
-import type { Database } from '../../database/connection.js';
-import type { IChangeReadGate } from '../../access-model/change-gate.js';
-import { BotChangesAccessError } from '../../access-model/index.js';
+import type { Database } from '../../database/index.js';
+import { BotChangesAccessError, type IChangeReadGate } from '../../access-model/index.js';
 
 /**
  * A bot never changes access, at the two places every change of it passes:
@@ -61,7 +60,21 @@ function makeService(
       return { kind: 'conflicts', paths: [] };
     }),
   } as unknown as GitService;
-  const prs = { getPr: vi.fn(async () => ({ base: 'main', branch: DRAFT })), invalidateDetailCache: vi.fn() } as unknown as PullRequestService;
+  const prs = {
+    getPr: vi.fn(async () => ({ base: 'main', branch: DRAFT })),
+    invalidateDetailCache: vi.fn(),
+    // The detail as the gate reads it: open and mergeable, at the two tips the
+    // merge would use, changing every path of `changed` (a rename named by both ends).
+    getPrDetail: vi.fn(async () => ({
+      state: 'open',
+      baseSha: 'target-tip',
+      headSha: 'source-tip',
+      files: Object.keys(changed).map((path) => ({ path })),
+      mergeableInBevel: true,
+      mergeBlockedReasons: [],
+      mergeWarnings: [],
+    })),
+  } as unknown as PullRequestService;
   const mergePr = vi.fn(async (...args: unknown[]) => {
     const opts = args[8] as { authorize?: MergeHook } | undefined;
     await opts?.authorize?.(target('ws-main'));
@@ -216,5 +229,43 @@ describe('a bot merging a branch that an open change request proposes', () => {
     expect(forBot.message).not.toMatch(/ask the user/);
     const forPerson = await svc.mergeBranch(PERSON, DRAFT, 'main').catch((e: unknown) => e as Error);
     expect(forPerson.message).toMatch(/A change request is merged by a person: ask the user to review #12 in the app\./);
+  });
+});
+
+describe("a change request as a bot reads it: its own refusals are among the blockers", () => {
+  const detail = (svc: VersionControlService, viewer: AuthUser) =>
+    svc.getChangeRequestDetail(7, { workspaceId: 'ws-main', viewerEmail: viewer.email });
+
+  it('names a change to access as a blocker, so nothing derived from the blockers claims the bot may apply it', async () => {
+    const { svc } = makeService({ 'Team/access.md': { base: 'read:\n  - Eng\n', head: 'read:\n  - everyone\n' } });
+    const d = await detail(svc, BOT);
+    expect(d?.mergeableInBevel).toBe(false);
+    expect(d?.mergeBlockedReasons).toEqual([expect.stringMatching(/A bot cannot change access: "Team\/access\.md"/)]);
+  });
+
+  it("names a change to a file's own access lines, and a file outside the bot's write access", async () => {
+    const lines = makeService({ 'Team/page.md': { base: '---\nread:\n  - Eng\n---\n', head: '---\nread:\n  - everyone\n---\n' } });
+    expect((await detail(lines.svc, BOT))?.mergeBlockedReasons).toEqual([expect.stringMatching(/access lines/)]);
+    const outside = makeService({ 'Ops/runbook.md': { base: '# a\n', head: '# b\n' } }, {}, (email) => email !== BOT.email);
+    expect((await detail(outside.svc, BOT))?.mergeBlockedReasons).toEqual([
+      expect.stringMatching(/outside its write access \(Ops\/runbook\.md\)/),
+    ]);
+  });
+
+  it('says the check could not be made when a commit cannot be read, rather than leaving the bot cleared', async () => {
+    const { svc, git } = makeService({ 'Team/page.md': { base: '# a\n', head: '# b\n' } });
+    (git.readFileAtRef as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('fatal: bad object'));
+    const d = await detail(svc, BOT);
+    expect(d?.mergeableInBevel).toBe(false);
+    expect(d?.mergeBlockedReasons).toEqual(['Whether this bot may apply the request could not be checked right now.']);
+  });
+
+  it('adds nothing for a request the bot may apply, nor for a person reading one it would refuse', async () => {
+    const plain = makeService({ 'Team/page.md': { base: '# a\n', head: '# b\n' } });
+    expect((await detail(plain.svc, BOT))?.mergeBlockedReasons).toEqual([]);
+    const access = makeService({ 'Team/access.md': { base: 'read:\n  - Eng\n', head: 'read:\n  - everyone\n' } });
+    const d = await detail(access.svc, PERSON);
+    expect(d?.mergeBlockedReasons).toEqual([]);
+    expect(d?.mergeableInBevel).toBe(true);
   });
 });
