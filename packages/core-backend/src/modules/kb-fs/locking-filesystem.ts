@@ -450,7 +450,7 @@ export class LockingFilesystem extends GitGuardedFilesystem {
       if (src !== dest && (await this.isFolder(src))) {
         throw new MoveRacedError(src, `"${src}" became a folder while the move was being prepared, so nothing was moved. Run the move again.`);
       }
-      await this.validateMove(src, dest, [src]);
+      await this.validateMove(src, dest, src === dest ? undefined : [src]);
     };
     const move = () => this.moveNoReplace(src, dest, options);
     if (src === dest) {
@@ -546,7 +546,7 @@ export class LockingFilesystem extends GitGuardedFilesystem {
     // move's commit, whose scope names every one of them. The same listing is
     // what the move is judged on, file by file at both ends.
     const movedNow = src === dest ? [] : await this.filesBelow(src);
-    await this.validateMove(src, dest, src === dest ? [src] : movedNow);
+    await this.validateMove(src, dest, src === dest ? undefined : movedNow);
     if (this.lockContext.validateWrite) {
       for (const e of edits) await this.lockContext.validateWrite(e.path, e.content);
     }
@@ -613,7 +613,7 @@ export class LockingFilesystem extends GitGuardedFilesystem {
       // this move's commit without its lock — refused, and the caller tries
       // again against the folder as it is now.
       // Judged below on this listing: every file in it is locked.
-      let movingNow = [src];
+      let movingNow: string[] | undefined;
       if (src !== dest) {
         const locked = new Set(paths);
         movingNow = await this.filesBelow(src);
