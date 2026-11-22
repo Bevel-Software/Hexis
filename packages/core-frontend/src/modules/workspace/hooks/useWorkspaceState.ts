@@ -104,6 +104,14 @@ function fingerprint(bytes: string): Fingerprint {
 const EMPTY_FINGERPRINT = fingerprint('');
 
 /**
+ * Which write of ours an ambiguous answer was read again for
+ * (`rereadAfterAmbiguous`): a save, or a Reject writing the baseline back
+ * over the agent's version. A Reject that the read finds landed on a file
+ * still there ends the agent preview its notice kept; a save leaves it.
+ */
+type OwnWrite = 'save' | 'reject';
+
+/**
  * The answer `found` (bytes, or `null` for a 404) of a read sent while a
  * write that replaced the bytes fingerprinted `replaced` was on its way
  * cannot say on which side of the write the server answered it: before it
@@ -488,28 +496,32 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
    * on its way: one that found anything but the bytes the write replaced
    * (the write's own bytes, a commit pulled on top, a 404 for a delete
    * since) was answered after the write; one that found them may have been
-   * answered before it, and is read again. See `isStaleLanding`.
+   * answered before it, and is read again (`kind` says for which write).
+   * See `isStaleLanding`.
    */
-  const writeWindowRef = useRef<Map<string, { after: number; before: number; replaced: Fingerprint }>>(new Map());
+  const writeWindowRef = useRef<Map<string, { after: number; before: number; replaced: Fingerprint; kind: OwnWrite }>>(new Map());
   /**
    * Reads the open tab's file again as a `file-changed` event for it does
-   * (merging onto unsaved edits, or the deleted notice), naming nobody. Set
-   * by the bus subscription below for the workspace it subscribed to.
+   * (merging onto unsaved edits, or the deleted notice), naming nobody, after
+   * the write of ours `kind`. Set by the bus subscription below for the
+   * workspace it subscribed to.
    */
-  const rereadOpenFileRef = useRef<((readFrom: string, path: string) => void) | null>(null);
+  const rereadOpenFileRef = useRef<((readFrom: string, path: string, kind: OwnWrite) => void) | null>(null);
   /** By workspace and path, the newest read whose ambiguous answer was read again (`isStaleLanding`). */
   const rereadForSeqRef = useRef<Map<string, number>>(new Map());
   /**
    * Read the open file at `path` again, once for each ambiguous answer
    * (`seq`). The read is sent after the write answered, so its answer is
    * ordered as any other: a revert merges onto unsaved edits, a delete shows
-   * the notice (naming nobody), the write's own bytes change nothing.
+   * the notice (naming nobody), the write's own bytes change nothing, and a
+   * file found after a Reject (`kind`) whose notice a 404 answered before
+   * the write put up is a file again, the agent's version rejected.
    */
-  const rereadAfterAmbiguous = useCallback((readFrom: string, path: string, seq: number) => {
+  const rereadAfterAmbiguous = useCallback((readFrom: string, path: string, seq: number, kind: OwnWrite) => {
     const key = existenceKey(readFrom, path);
     if ((rereadForSeqRef.current.get(key) ?? -1) >= seq) return;
     rereadForSeqRef.current.set(key, seq);
-    queueMicrotask(() => rereadOpenFileRef.current?.(readFrom, path));
+    queueMicrotask(() => rereadOpenFileRef.current?.(readFrom, path, kind));
   }, []);
   /**
    * A tracked read (`seq`) that answered `found` (its bytes, or `null` for a
@@ -529,7 +541,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       const w = writeWindowRef.current.get(key);
       if (w === undefined || seq <= w.after || seq >= w.before) return false;
       const ambiguous = isAmbiguousAnswer(found, w.replaced);
-      if (ambiguous) rereadAfterAmbiguous(readFrom, path, seq);
+      if (ambiguous) rereadAfterAmbiguous(readFrom, path, seq, w.kind);
       return ambiguous;
     },
     [rereadAfterAmbiguous],
@@ -588,7 +600,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
   const markWritten = useCallback((
     readFrom: string,
     path: string,
-    write?: { sent: number; replaced: string | null },
+    write?: { sent: number; replaced: string | null; kind: OwnWrite },
   ) => {
     const answeredAt = ++existenceReadSeqRef.current;
     if (!write || write.replaced === null) {
@@ -598,10 +610,10 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     markLanded(readFrom, path, write.sent);
     const key = existenceKey(readFrom, path);
     const replaced = fingerprint(write.replaced);
-    writeWindowRef.current.set(key, { after: write.sent, before: answeredAt, replaced });
+    writeWindowRef.current.set(key, { after: write.sent, before: answeredAt, replaced, kind: write.kind });
     const answered = newestAnswerRef.current.get(key);
     if (answered && answered.seq > write.sent && isAmbiguousAnswer(answered.bytes, replaced)) {
-      rereadAfterAmbiguous(readFrom, path, answered.seq);
+      rereadAfterAmbiguous(readFrom, path, answered.seq, write.kind);
     }
   }, [markLanded, rereadAfterAmbiguous]);
   const isStaleFind = useCallback(
@@ -2306,7 +2318,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       let seen: { seq: number; bytes: string | null } | undefined;
       try {
         await writeFile(workspaceId, relativePath, toWrite, expected !== null ? { ifMatch: expected } : undefined);
-        markWritten(workspaceId, relativePath, { sent, replaced: expected });
+        markWritten(workspaceId, relativePath, { sent, replaced: expected, kind: 'save' });
         // A read sent after this write that found neither the bytes the write
         // replaced (`expected`, which the server held when it wrote) nor the
         // write's own read the disk after the write: a commit pulled from the
@@ -2533,7 +2545,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     const sent = beginWrite(workspaceId, path);
     try {
       await writeFile(workspaceId, path, baseline, agentVersion !== null ? { ifMatch: agentVersion } : undefined);
-      markWritten(workspaceId, path, { sent, replaced: agentVersion });
+      markWritten(workspaceId, path, { sent, replaced: agentVersion, kind: 'reject' });
     } finally {
       endWrite(workspaceId, path);
     }
@@ -2544,7 +2556,10 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       // A read sent after this write found the file gone, and answered
       // first: someone deleted it after the write. The agent's version stays
       // with the notice, for Copy agent's version; only the baseline is what
-      // this write left.
+      // this write left. When the 404 may have been answered before the
+      // write (the agent's version was empty), `markWritten` has the file
+      // read again, and that read ends the notice and the preview if the
+      // file is there (`refetchOpenTab`).
       if (t.deletedBy) return { ...t, savedContent: baseline };
       return { ...t, content: baseline, savedContent: baseline, pendingFileContent: null, isDirty: false };
     }));
@@ -2770,12 +2785,13 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
      * Reads an open tab's file after a change to it and brings the tab up to
      * it: bytes merged onto unsaved edits or taken by a clean tab, a 404 as
      * the deleted notice naming `deletedBy` (null names nobody).
-     * `afterOwnWrite`: the re-read after an ambiguous answer to a write of
+     * `afterOwnWrite`: the re-read after an ambiguous answer to that write of
      * ours (`rereadAfterAmbiguous`). It is sent as that write answers, before
-     * a Reject's landing clears the agent's version from `openTabsRef`: the
-     * check inside the update below, on the tab as it is then, decides.
+     * a Reject's landing clears the agent's version from `openTabsRef`, so it
+     * is sent whatever the tab holds: the check inside the update below, on
+     * the tab as it is then, decides.
      */
-    const refetchOpenTab = (path: string, deletedBy: string | null, afterOwnWrite = false) => {
+    const refetchOpenTab = (path: string, deletedBy: string | null, afterOwnWrite: OwnWrite | null = null) => {
       const matchingTab = openTabsRef.current.find((t) => t.path === path);
       if (!matchingTab) return;
       // Don't clobber a pending agent preview the user is reviewing.
@@ -2783,7 +2799,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       // them against the current accepted content. Overwriting with
       // freshly-fetched disk bytes (which may include the agent's
       // write) would silently end their review.
-      if (matchingTab.pendingFileContent !== null && !(afterOwnWrite && !matchingTab.deletedBy)) return;
+      if (matchingTab.pendingFileContent !== null && afterOwnWrite === null) return;
       const issuedAt = Date.now();
       const read = readFile(subscribedWorkspaceId, path);
       const seq = trackExistenceCheck(subscribedWorkspaceId, path, read);
@@ -2810,13 +2826,27 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
             return;
           }
           setOpenTabs((tabs) =>
-            tabs.map((t) => {
-              if (t.path !== path) return t;
+            tabs.map((current) => {
+              if (current.path !== path) return current;
               // Re-check pending status inside the updater — `setPendingContent`
-              // may have landed during the readFile await.
-              if (t.pendingFileContent !== null) return t;
-              if (isStaleLanding(subscribedWorkspaceId, path, seq, content)) return t;
+              // may have landed during the readFile await. A preview the
+              // deleted notice keeps is the exception for the re-read after a
+              // write of ours: it was sent after that write answered, so the
+              // file it finds is there, and the notice is false.
+              const keptByNotice = current.pendingFileContent !== null && !!current.deletedBy;
+              if (current.pendingFileContent !== null && !(afterOwnWrite && keptByNotice)) return current;
+              if (isStaleLanding(subscribedWorkspaceId, path, seq, content)) return current;
+              // After a save, the agent's version is still the one on review:
+              // the tab is a file again, its preview and text as they are.
+              if (current.pendingFileContent !== null && afterOwnWrite === 'save') return { ...current, deletedBy: null };
               markLanded(subscribedWorkspaceId, path, seq);
+              // After a Reject, the baseline it wrote replaced the agent's
+              // version, on a file that is there: the tab is what a Reject's
+              // landing leaves on such a file (its landing on the tab the
+              // notice marked moved only the baseline).
+              const t = current.pendingFileContent !== null
+                ? { ...current, content: current.savedContent ?? current.content, pendingFileContent: null, isDirty: false }
+                : current;
               // The file is there after all (re-created, or the delete was
               // undone): the tab is a file again.
               const base = t.deletedBy ? { ...t, deletedBy: null } : t;
@@ -2880,8 +2910,8 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
           console.warn(`[workspace] refetch on file-changed failed for "${path}":`, err);
         });
     };
-    rereadOpenFileRef.current = (readFrom, path) => {
-      if (readFrom === subscribedWorkspaceId) refetchOpenTab(path, null, true);
+    rereadOpenFileRef.current = (readFrom, path, kind) => {
+      if (readFrom === subscribedWorkspaceId) refetchOpenTab(path, null, kind);
     };
     const offFileChanged = bus.subscribe('file-changed', (event) => {
       if (canonicalizeWorkspaceId(event.workspaceId) !== subscribedCanon) return;

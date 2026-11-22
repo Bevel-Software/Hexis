@@ -3827,6 +3827,98 @@ describe('a write already on its way when the file is deleted', () => {
     expect(disk.has('KB/Draft.md')).toBe(false);
   });
 
+  it("a Reject over an empty agent version, whose 404 answered before the write put the file back, clears the notice once the file is read again", async () => {
+    const BASELINE = '# Draft\n\nA page to delete.';
+    const result = await mountReady();
+    await open(result, 'KB/Draft.md');
+    // The agent emptied the file.
+    disk.set('KB/Draft.md', '');
+    await act(async () => { result.current.setPendingContent(''); });
+    const held = holdWriteAtServer();
+    let rejecting!: Promise<void>;
+    act(() => { rejecting = result.current.rejectPendingContent(); });
+    await waitFor(() => expect(apiMocks.writeFile).toHaveBeenCalledOnce());
+    // Served before the write: the file is missing, and the write over empty
+    // bytes (the server reads a missing file as empty) puts the baseline back.
+    await someoneElseDeletes('KB/Draft.md');
+    expect(tabAt(result, 'KB/Draft.md')?.deletedBy).toBeTruthy();
+    const readsBefore = apiMocks.readFile.mock.calls.length;
+    await act(async () => { held.deliver(); await rejecting; });
+    expect(disk.get('KB/Draft.md')).toBe(BASELINE);
+
+    await waitFor(() => expect(tabAt(result, 'KB/Draft.md')?.deletedBy ?? null).toBeNull());
+    expect(apiMocks.readFile.mock.calls.length).toBeGreaterThan(readsBefore);
+    const tab = tabAt(result, 'KB/Draft.md')!;
+    expect(tab.content).toBe(BASELINE);
+    expect(tab.savedContent).toBe(BASELINE);
+    expect(tab.pendingFileContent).toBeNull();
+    expect(tab.isDirty).toBe(false);
+
+    // The next Save and Reject work on the file that is there.
+    await act(async () => { await result.current.saveFile('KB/Draft.md', 'edited'); });
+    expect(apiMocks.writeFile).toHaveBeenLastCalledWith('ws-1', 'KB/Draft.md', 'edited', { ifMatch: BASELINE });
+    expect(disk.get('KB/Draft.md')).toBe('edited');
+    disk.set('KB/Draft.md', 'the agent again');
+    await act(async () => { result.current.setPendingContent('the agent again'); });
+    await act(async () => { await result.current.rejectPendingContent(); });
+    expect(apiMocks.writeFile).toHaveBeenLastCalledWith('ws-1', 'KB/Draft.md', 'edited', { ifMatch: 'the agent again' });
+    expect(disk.get('KB/Draft.md')).toBe('edited');
+    expect(tabAt(result, 'KB/Draft.md')?.pendingFileContent).toBeNull();
+    expect(tabAt(result, 'KB/Draft.md')?.deletedBy ?? null).toBeNull();
+  });
+
+  it("a Reject over an empty agent version whose re-read finds the file gone keeps the notice and the agent's version", async () => {
+    const result = await mountReady();
+    await open(result, 'KB/Draft.md');
+    disk.set('KB/Draft.md', '');
+    await act(async () => { result.current.setPendingContent(''); });
+    // The write puts the baseline back, and someone deletes it again before
+    // its answer arrives, so before the re-read it is followed by.
+    const server = apiMocks.writeFile.getMockImplementation()!;
+    let deliver!: () => void;
+    apiMocks.writeFile.mockImplementationOnce((...args: Parameters<typeof server>) => new Promise<void>((resolve, reject) => {
+      deliver = () => {
+        Promise.resolve(server(...args)).then(() => { disk.delete('KB/Draft.md'); resolve(); }, reject);
+      };
+    }));
+    let rejecting!: Promise<void>;
+    act(() => { rejecting = result.current.rejectPendingContent(); });
+    await waitFor(() => expect(apiMocks.writeFile).toHaveBeenCalledOnce());
+    await someoneElseDeletes('KB/Draft.md');
+    expect(tabAt(result, 'KB/Draft.md')?.deletedBy).toBeTruthy();
+    const readsBefore = apiMocks.readFile.mock.calls.length;
+    await act(async () => { deliver(); await rejecting; });
+    await settle();
+
+    expect(apiMocks.readFile.mock.calls.length).toBeGreaterThan(readsBefore);
+
+    const tab = tabAt(result, 'KB/Draft.md')!;
+    expect(tab.deletedBy).toBeTruthy();
+    expect(tab.pendingFileContent).toBe('');
+    expect(disk.has('KB/Draft.md')).toBe(false);
+  });
+
+  it("a save under the agent's preview, whose 404 over an empty file answered before the write, clears the notice and keeps the preview", async () => {
+    disk.set('KB/Draft.md', '');
+    const result = await mountReady();
+    await open(result, 'KB/Draft.md');
+    await typeInto(result, 'edited');
+    await act(async () => { result.current.setPendingContent('the agent'); });
+    const held = holdWriteAtServer();
+    let saving!: Promise<void>;
+    act(() => { saving = result.current.saveFile('KB/Draft.md', 'edited'); });
+    await waitFor(() => expect(apiMocks.writeFile).toHaveBeenCalledOnce());
+    await someoneElseDeletes('KB/Draft.md');
+    expect(tabAt(result, 'KB/Draft.md')?.deletedBy).toBeTruthy();
+    await act(async () => { held.deliver(); await saving; });
+    expect(disk.get('KB/Draft.md')).toBe('edited');
+
+    await waitFor(() => expect(tabAt(result, 'KB/Draft.md')?.deletedBy ?? null).toBeNull());
+    const tab = tabAt(result, 'KB/Draft.md')!;
+    expect(tab.pendingFileContent).toBe('the agent');
+    expect(tab.content).toBe('edited');
+  });
+
   describe('refused after a change pulled from the git host moved the tab under it', () => {
     const BASE = 'First paragraph.\n\nSecond paragraph.\n\nThird paragraph.';
 
