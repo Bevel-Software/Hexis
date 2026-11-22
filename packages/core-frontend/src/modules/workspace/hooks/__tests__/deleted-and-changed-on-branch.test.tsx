@@ -3872,8 +3872,9 @@ describe('a write already on its way when the file is deleted', () => {
     await open(result, 'KB/Draft.md');
     disk.set('KB/Draft.md', '');
     await act(async () => { result.current.setPendingContent(''); });
-    // The write puts the baseline back, and someone deletes it again before
-    // its answer arrives, so before the re-read it is followed by.
+    // The write puts the baseline back on the server, then someone deletes
+    // the file again before the write's answer resolves, so the re-read that
+    // follows the write finds the file missing.
     const server = apiMocks.writeFile.getMockImplementation()!;
     let deliver!: () => void;
     apiMocks.writeFile.mockImplementationOnce((...args: Parameters<typeof server>) => new Promise<void>((resolve, reject) => {

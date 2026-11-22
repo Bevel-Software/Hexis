@@ -492,8 +492,9 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
    * disk (`ifMatch`) and completed: the read numbers taken just before it was
    * sent (`after`) and when its answer arrived (`before`), and the
    * fingerprint of the bytes it replaced (never the bytes: this outlives the
-   * write, for reads still on their way). A read numbered between the two was sent while the write was
-   * on its way: one that found anything but the bytes the write replaced
+   * write, for reads still on their way). A read numbered between the two
+   * was sent while the write was on its way: one that found anything but
+   * the bytes the write replaced
    * (the write's own bytes, a commit pulled on top, a 404 for a delete
    * since) was answered after the write; one that found them may have been
    * answered before it, and is read again (`kind` says for which write).
@@ -513,9 +514,10 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
    * Read the open file at `path` again, once for each ambiguous answer
    * (`seq`). The read is sent after the write answered, so its answer is
    * ordered as any other: a revert merges onto unsaved edits, a delete shows
-   * the notice (naming nobody), the write's own bytes change nothing, and a
-   * file found after a Reject (`kind`) whose notice a 404 answered before
-   * the write put up is a file again, the agent's version rejected.
+   * the notice (naming nobody), and the write's own bytes change nothing.
+   * When a 404 answered before the write put up the deleted notice and this
+   * read finds the file, the notice goes; after a Reject (`kind`) the
+   * agent's version goes with it, as rejected.
    */
   const rereadAfterAmbiguous = useCallback((readFrom: string, path: string, seq: number, kind: OwnWrite) => {
     const key = existenceKey(readFrom, path);
