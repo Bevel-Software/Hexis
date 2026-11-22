@@ -9,6 +9,8 @@ import { createInvitationRoutes } from '../invitation.routes.js';
 import { AccountHooks } from '../account-hooks.js';
 import { admitEveryone, type IAccountAdmission } from '../index.js';
 import { hashPassword } from '../password-hash.js';
+import { RECOVERY_BOT_EMAIL } from '../../version-control/index.js';
+import { DIRECTORY_SYNC_BOT_EMAIL } from '../../access/index.js';
 
 // The real hash, counted: an invite of an address that already has an
 // account must not pay for one.
@@ -71,6 +73,17 @@ async function startApp(
   const address = server.address();
   if (typeof address === 'string' || !address) throw new Error('no port');
   return { base: `http://127.0.0.1:${address.port}`, auth, db, close: () => server.close() };
+}
+
+/** Listeners that record what each invited event carried about a password. */
+function recordingInvites(): { hooks: AccountHooks; events: { passwordSet: boolean; startingPassword?: string }[] } {
+  const hooks = new AccountHooks();
+  const events: { passwordSet: boolean; startingPassword?: string }[] = [];
+  hooks.onAccountInvited(async (event) => {
+    events.push({ passwordSet: event.passwordSet, startingPassword: event.startingPassword });
+    return 'email';
+  });
+  return { hooks, events };
 }
 
 function invite(base: string, body: unknown): Promise<Response> {
@@ -137,11 +150,13 @@ describe.skipIf(!PG_ADMIN_URL)('invitations on a real Postgres', () => {
   it(
     "never stores a hash for the deployment admin's address: that account signs in with the environment's password",
     async () => {
-      const app = await startApp({ adminEmail: 'owner@acme.test' });
+      const { hooks, events } = recordingInvites();
+      const app = await startApp({ adminEmail: 'owner@acme.test', hooks });
       try {
         const res = await invite(app.base, { email: 'owner@acme.test' });
         expect(res.status).toBe(201);
         expect(await res.json()).not.toHaveProperty('startingPassword');
+        expect(events).toEqual([{ passwordSet: false, startingPassword: undefined }]);
         const [row] = await app.db.select().from(users).where(eq(users.emailBidx, 'owner@acme.test'));
         expect(row!.passwordHash).toBeNull();
       } finally {
@@ -154,13 +169,47 @@ describe.skipIf(!PG_ADMIN_URL)('invitations on a real Postgres', () => {
   it(
     "gives an owner's address no password with ADMIN_PASSWORD unset either, so a member can't sign in as an owner who hasn't yet",
     async () => {
-      const app = await startApp({ adminEmail: 'owner@acme.test', adminPassword: '' });
+      const { hooks, events } = recordingInvites();
+      const app = await startApp({ adminEmail: 'owner@acme.test', adminPassword: '', hooks });
       try {
         const res = await invite(app.base, { email: 'Owner@Acme.test', startingPassword: true });
         expect(res.status).toBe(201);
         expect(await res.json()).not.toHaveProperty('startingPassword');
+        expect(events).toEqual([{ passwordSet: false, startingPassword: undefined }]);
         const [row] = await app.db.select().from(users).where(eq(users.emailBidx, 'owner@acme.test'));
         expect(row!.passwordHash).toBeNull();
+      } finally {
+        app.close();
+      }
+    },
+    PG_TEST_TIMEOUT,
+  );
+
+  it(
+    'gives the platform accounts no password: none returned, none on the event, no hash stored',
+    async () => {
+      const hooks = new AccountHooks();
+      const events: { email: string; passwordSet: boolean; startingPassword?: string }[] = [];
+      hooks.onAccountInvited(async (event) => {
+        events.push({ email: event.account.email, passwordSet: event.passwordSet, startingPassword: event.startingPassword });
+        return 'email';
+      });
+      const app = await startApp({ hooks });
+      try {
+        for (const email of [RECOVERY_BOT_EMAIL, DIRECTORY_SYNC_BOT_EMAIL]) {
+          const res = await invite(app.base, { email: email.toUpperCase(), startingPassword: true });
+          expect(res.status).toBe(201);
+          const body = (await res.json()) as Record<string, unknown>;
+          expect(body.status).toBe('created');
+          expect(body).not.toHaveProperty('startingPassword');
+          expect(body).not.toHaveProperty('passwordDeliveredBy');
+          const [row] = await app.db.select().from(users).where(eq(users.emailBidx, email));
+          expect(row!.passwordHash).toBeNull();
+        }
+        expect(events).toEqual([
+          { email: RECOVERY_BOT_EMAIL, passwordSet: false, startingPassword: undefined },
+          { email: DIRECTORY_SYNC_BOT_EMAIL, passwordSet: false, startingPassword: undefined },
+        ]);
       } finally {
         app.close();
       }
