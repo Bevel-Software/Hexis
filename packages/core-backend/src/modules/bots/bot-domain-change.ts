@@ -1,6 +1,7 @@
 import path from 'node:path';
 import type { AuthUser, IVersionControlService } from '@bevel-software/platform-shared';
 import { logger } from '../../shared/logging.js';
+import { redactSecret } from '../../shared/redact-secret.js';
 import type { ITreeWalker } from '../../shared/fs.contract.js';
 import { rewriteBotGrants } from './bot-domain.js';
 
@@ -46,11 +47,17 @@ export interface IGrantRewriter {
  * folder the walk cannot list refuses the whole rewrite: a request that
  * rewrote only the grants it happened to see would leave the rest at the
  * old domain once merged.
+ *
+ * It reads them from the new branch's own checkout, the committed default
+ * branch, never from the default branch's working copy: a file there that is
+ * not committed is not the target's, and a request carrying it cannot merge.
+ * A branch no request comes from (nothing to rewrite, or the rewrite failed
+ * before the request) is removed again.
  */
 export class GrantRewriteChangeRequests implements IGrantRewriter {
   constructor(
     private readonly deps: {
-      versionControl: Pick<IVersionControlService, 'createBranch' | 'commitChanges' | 'openChangeRequest'>;
+      versionControl: Pick<IVersionControlService, 'createBranch' | 'deleteBranch' | 'commitChanges' | 'openChangeRequest'>;
       workspace: GrantRewriteWorkspace;
       walker: Pick<ITreeWalker, 'walkKb'>;
       kb: { readonly defaultBranch: string; readonly kbDirName: string; defaultWorkspaceId(): string };
@@ -86,18 +93,39 @@ export class GrantRewriteChangeRequests implements IGrantRewriter {
   async open(by: AuthUser, from: string, to: string, botIds: readonly string[]): Promise<number | null> {
     const { versionControl, workspace, kb, isAccessFile } = this.deps;
     const live = kb.defaultWorkspaceId();
-    const texts = await this.grantCarryingFiles(live);
-    const rewritten = Object.entries(texts).flatMap(([rel, text]) => {
-      const next = rewriteBotGrants(rel, text, botIds, from, to, isAccessFile);
-      return next === null ? [] : [[rel, next] as const];
-    });
-    if (rewritten.length === 0) return null;
-
+    // The branch first, and the grants read from ITS checkout: a fresh clone
+    // of the committed default branch, the very tree the request merges into.
+    // The default branch's own working copy also holds what is not committed
+    // (an unzip's extracted files, a save still landing); read from there, a
+    // file the target does not hold would be added by the request, whose
+    // merge then fails on the untracked copy and, once that is saved,
+    // conflicts add/add.
     const branch = `bots/domain-${to.replace(/[^a-z0-9.-]/g, '-')}-${Date.now().toString(36)}`;
     await versionControl.createBranch(live, branch, kb.defaultBranch);
-    const ws = await workspace.getOrCreateForBranch(branch);
-    for (const [rel, text] of rewritten) await workspace.writeFile(ws.id, `${kb.kbDirName}/${rel}`, text);
-    await versionControl.commitChanges(ws.id, by, `Address bots at ${to} instead of ${from}`);
+    let rewritten: (readonly [string, string])[];
+    let ws: { id: string };
+    try {
+      ws = await workspace.getOrCreateForBranch(branch);
+      const texts = await this.grantCarryingFiles(ws.id);
+      rewritten = Object.entries(texts).flatMap(([rel, text]) => {
+        const next = rewriteBotGrants(rel, text, botIds, from, to, isAccessFile);
+        return next === null ? [] : [[rel, next] as const];
+      });
+      if (rewritten.length > 0) {
+        for (const [rel, text] of rewritten) await workspace.writeFile(ws.id, `${kb.kbDirName}/${rel}`, text);
+        await versionControl.commitChanges(ws.id, by, `Address bots at ${to} instead of ${from}`);
+      }
+    } catch (err) {
+      // No request will come from the branch: it goes, and the failure that
+      // stopped the rewrite is what the caller hears.
+      await this.dropBranch(live, branch, by);
+      throw err;
+    }
+    if (rewritten.length === 0) {
+      await this.dropBranch(live, branch, by);
+      return null;
+    }
+
     const detail = await versionControl.openChangeRequest(ws.id, by, {
       sourceBranch: branch,
       targetBranch: kb.defaultBranch,
@@ -109,5 +137,22 @@ export class GrantRewriteChangeRequests implements IGrantRewriter {
     });
     log.info(`bots' domain change: change request #${detail.number} rewrites ${rewritten.length} file(s)`);
     return detail.number;
+  }
+
+  /**
+   * Removes a rewrite branch no request comes from. Its failure is logged
+   * (scrubbed: git quotes its remote back) and not thrown: the caller's answer
+   * — the request, none, or the failure that stopped it — is already decided
+   * and stays true; what is left is an unreferenced branch an admin can delete.
+   */
+  private async dropBranch(live: string, branch: string, by: AuthUser): Promise<void> {
+    try {
+      await this.deps.versionControl.deleteBranch(live, branch, by);
+    } catch (err) {
+      log.warn(
+        `bots' domain change: could not remove the unused branch ${branch}: ` +
+          redactSecret(err instanceof Error ? err.message : String(err)),
+      );
+    }
   }
 }
