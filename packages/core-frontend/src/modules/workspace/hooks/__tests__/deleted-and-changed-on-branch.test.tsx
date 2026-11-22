@@ -2557,6 +2557,114 @@ describe('a change pulled from the git host onto the open file', () => {
       expect(apiMocks.writeFile).not.toHaveBeenCalled();
       expect(disk.has('KB/Notes.md')).toBe(false);
     });
+
+    describe("answered before the save's answer", () => {
+      /** The person types while the save is out, then its answer arrives. */
+      async function typeThenAnswer(result: Hook, write: ReturnType<typeof holdWrite>, saving: Promise<void>) {
+        await typeInto(result, TYPED_DURING);
+        await act(async () => { write.answer(); await saving; });
+        await settle();
+      }
+
+      it('a commit that put back the bytes the write replaced is read again, and merged onto the typing', async () => {
+        const result = await editedTab();
+        const { write, saving } = await autosave(result);
+        write.land();
+        await waitFor(() => expect(disk.get('KB/Notes.md')).toBe(SAVED));
+        // Reverted on the git host; the read finds BASE and answers before
+        // the write does, which a read served before the write would too.
+        disk.set('KB/Notes.md', BASE);
+        act(() => bus.emit(fileChanged('KB/Notes.md', GIT_SYNC)));
+        await settle();
+        const readsBefore = apiMocks.readFile.mock.calls.length;
+
+        await typeThenAnswer(result, write, saving);
+
+        // The write's answer found that answer ambiguous and read once more.
+        expect(apiMocks.readFile.mock.calls.length).toBe(readsBefore + 1);
+        const merged = TYPED_DURING.replace('Second paragraph, saved.', 'Second paragraph.');
+        const tab = result.current.activeTab!;
+        expect(tab.content).toBe(merged);
+        expect(tab.savedContent).toBe(BASE);
+        expect(tab.isDirty).toBe(true);
+        expect(tab.changedOnBranch).toBe('merged');
+
+        await act(async () => { await result.current.saveFile('KB/Notes.md', merged); });
+        expect(apiMocks.writeFile).toHaveBeenLastCalledWith('ws-1', 'KB/Notes.md', merged, { ifMatch: BASE });
+        expect(disk.get('KB/Notes.md')).toBe(merged);
+      });
+
+      it('the write\'s own bytes found again change nothing', async () => {
+        const result = await editedTab();
+        const { write, saving } = await autosave(result);
+        // Served before the write landed: it finds BASE, the bytes the write replaces.
+        act(() => bus.emit(fileChanged('KB/Notes.md', GIT_SYNC)));
+        await settle();
+        write.land();
+        await waitFor(() => expect(disk.get('KB/Notes.md')).toBe(SAVED));
+        const readsBefore = apiMocks.readFile.mock.calls.length;
+
+        await typeThenAnswer(result, write, saving);
+
+        expect(apiMocks.readFile.mock.calls.length).toBe(readsBefore + 1);
+        const tab = result.current.activeTab!;
+        expect(tab.content).toBe(TYPED_DURING);
+        expect(tab.savedContent).toBe(SAVED);
+        expect(tab.isDirty).toBe(true);
+        expect(tab.changedOnBranch ?? null).toBeNull();
+      });
+
+      it('a delete after the write keeps the deleted notice and the unsaved edits, and the next save writes nothing', async () => {
+        const result = await editedTab();
+        const { write, saving } = await autosave(result);
+        write.land();
+        await waitFor(() => expect(disk.get('KB/Notes.md')).toBe(SAVED));
+        // Nothing typed since: the tab's unsaved text is the save's own.
+        disk.delete('KB/Notes.md');
+        act(() => bus.emit(fileChanged('KB/Notes.md')));
+        await waitFor(() => expect(result.current.activeTab?.deletedBy).toMatchObject({ name: 'Sam Rivera' }));
+
+        await act(async () => { write.answer(); await saving; });
+        await settle();
+
+        const tab = result.current.activeTab!;
+        expect(tab.deletedBy).toMatchObject({ name: 'Sam Rivera' });
+        expect(tab.content).toBe(SAVED);
+        expect(tab.isDirty).toBe(true);
+
+        apiMocks.writeFile.mockClear();
+        await act(async () => {
+          await expect(result.current.saveFile('KB/Notes.md', SAVED)).rejects.toThrow('Notes.md was deleted from this branch');
+        });
+        expect(apiMocks.writeFile).not.toHaveBeenCalled();
+        expect(disk.has('KB/Notes.md')).toBe(false);
+      });
+
+      it('a 404 over an empty file is read again, and the file the write put back clears the notice', async () => {
+        disk.set('KB/Notes.md', '');
+        const result = await mountReady();
+        await open(result, 'KB/Notes.md');
+        const { write, saving } = await autosave(result);
+        // Served before the write: the file is missing, and the write over
+        // empty bytes (the server reads a missing file as empty) puts it back.
+        disk.delete('KB/Notes.md');
+        act(() => bus.emit(fileChanged('KB/Notes.md')));
+        await waitFor(() => expect(result.current.activeTab?.deletedBy).toBeTruthy());
+        write.land();
+        await waitFor(() => expect(disk.get('KB/Notes.md')).toBe(SAVED));
+
+        await typeThenAnswer(result, write, saving);
+
+        const tab = result.current.activeTab!;
+        expect(tab.deletedBy ?? null).toBeNull();
+        expect(tab.content).toBe(TYPED_DURING);
+        expect(tab.savedContent).toBe(SAVED);
+        expect(tab.isDirty).toBe(true);
+        await act(async () => { await result.current.saveFile('KB/Notes.md', TYPED_DURING); });
+        expect(apiMocks.writeFile).toHaveBeenLastCalledWith('ws-1', 'KB/Notes.md', TYPED_DURING, { ifMatch: SAVED });
+        expect(disk.get('KB/Notes.md')).toBe(TYPED_DURING);
+      });
+    });
   });
 
   it('an echo of our own save does not touch edits typed after it', async () => {
@@ -3679,6 +3787,44 @@ describe('a write already on its way when the file is deleted', () => {
 
     expect(disk.has('KB/Draft.md')).toBe(false);
     expect(tabAt(result, 'KB/Draft.md')?.pendingFileContent).toBe(AGENT);
+  });
+
+  it("a Reject that landed before someone else deleted the file, answering after the 404, keeps the agent's version and the notice", async () => {
+    const AGENT = '# Draft\n\nThe agent rewrote this.';
+    const BASELINE = '# Draft\n\nA page to delete.';
+    const result = await mountReady();
+    await open(result, 'KB/Draft.md');
+    disk.set('KB/Draft.md', AGENT);
+    await act(async () => { result.current.setPendingContent(AGENT); });
+    // The write reaches the disk at once; its answer waits.
+    const server = apiMocks.writeFile.getMockImplementation()!;
+    let answer!: () => void;
+    const answered = new Promise<void>((r) => { answer = r; });
+    apiMocks.writeFile.mockImplementationOnce(async (...args: Parameters<typeof server>) => {
+      const wrote = await server(...args);
+      await answered;
+      return wrote;
+    });
+    let rejecting!: Promise<void>;
+    act(() => { rejecting = result.current.rejectPendingContent(); });
+    await waitFor(() => expect(disk.get('KB/Draft.md')).toBe(BASELINE));
+
+    await someoneElseDeletes('KB/Draft.md');
+    expect(tabAt(result, 'KB/Draft.md')?.deletedBy).toBeTruthy();
+    await act(async () => { answer(); await rejecting; });
+    await settle();
+
+    const tab = tabAt(result, 'KB/Draft.md')!;
+    expect(tab.deletedBy).toBeTruthy();
+    expect(tab.pendingFileContent).toBe(AGENT);
+    expect(disk.has('KB/Draft.md')).toBe(false);
+
+    apiMocks.writeFile.mockClear();
+    await act(async () => {
+      await expect(result.current.rejectPendingContent()).rejects.toThrow('Draft.md was deleted from this branch');
+    });
+    expect(apiMocks.writeFile).not.toHaveBeenCalled();
+    expect(disk.has('KB/Draft.md')).toBe(false);
   });
 
   describe('refused after a change pulled from the git host moved the tab under it', () => {
