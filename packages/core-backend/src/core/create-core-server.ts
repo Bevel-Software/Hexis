@@ -59,7 +59,7 @@ import {
 import { keyOrSessionAuth } from '../modules/tool-auth/key-or-session.middleware.js';
 import { createBotsRoutes } from '../modules/bots/bots.routes.js';
 import { GrantRewriteChangeRequests } from '../modules/bots/bot-domain-change.js';
-import { GROUPS_YAML, SYNCED_GROUPS_YAML, isAccessFile } from '../modules/access-model/index.js';
+import { hasAccessFrontmatterExtension, isAccessFile } from '../modules/access-model/index.js';
 import { ToolDescriptionNotes, type AgentAccessGate } from '../modules/workspace/agent-access.gate.js';
 import {
   createSecretsVaultRoutes,
@@ -826,9 +826,10 @@ export async function createCoreServer(
       rewriter: new GrantRewriteChangeRequests({
         versionControl: core.versionControlService,
         workspace: core.workspaceService,
+        walker: core.disk,
         kb: core.kb,
         isAccessFile,
-        yamlAccessFiles: ['roles.yaml', GROUPS_YAML, SYNCED_GROUPS_YAML],
+        hasOwnAccessLines: hasAccessFrontmatterExtension,
       }),
     }),
   );
