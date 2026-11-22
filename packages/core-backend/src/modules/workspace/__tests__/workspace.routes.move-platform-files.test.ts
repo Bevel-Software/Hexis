@@ -7,9 +7,9 @@ import express from 'express';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import { NodeFs } from '../../kb-fs/node-fs.js';
-import type { IWorkflowService } from '@bevel-software/platform-shared';
+import type { IVersionControlService } from '@bevel-software/platform-shared';
 import type { IAccessControl } from '../../access/access-control.interface.js';
-import type { WorkflowEventBus } from '../../workflow/event-bus.js';
+import type { VersionControlEventBus } from '../../version-control/event-bus.js';
 import type { AuthService } from '../../auth/auth.service.js';
 import type { IAdminAccessService } from '../../admin/admin.interface.js';
 import { createWorkspaceRoutes } from '../workspace.routes.js';
@@ -68,16 +68,16 @@ async function makeHarness(): Promise<Harness> {
   const workspaceService = workspaceServiceMock as WorkspaceService;
 
   const acquireLock = vi.fn(async () => ({ acquired: true, lock: {} as never }));
-  const workflowServiceMock: Partial<IWorkflowService> = {
+  const versionControlServiceMock: Partial<IVersionControlService> = {
     getLock: vi.fn(async () => null),
-    acquireLock: acquireLock as unknown as IWorkflowService['acquireLock'],
+    acquireLock: acquireLock as unknown as IVersionControlService['acquireLock'],
     releaseLock: vi.fn(async () => undefined as never),
     releaseLockNoCommit: vi.fn(async () => undefined as never),
   };
-  const workflowService = workflowServiceMock as unknown as IWorkflowService;
+  const versionControlService = versionControlServiceMock as unknown as IVersionControlService;
 
   const authService = { getUserById: vi.fn(async () => USER) } as unknown as AuthService;
-  const eventBus = { emit: vi.fn() } as unknown as WorkflowEventBus;
+  const eventBus = { emit: vi.fn() } as unknown as VersionControlEventBus;
   const creatorAccess: ICreatorAccess = {
     planForCreate: async () => null,
     grantInExtractedFile: async () => null,
@@ -93,7 +93,7 @@ async function makeHarness(): Promise<Harness> {
   app.use('/api', createWorkspaceRoutes(
     workspaceService,
     authService,
-    workflowService,
+    versionControlService,
     eventBus,
     accessControl,
     testKbContext({ kbDirName: KB }),

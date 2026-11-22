@@ -7,7 +7,7 @@ import express, { type RequestHandler } from 'express';
 import { afterEach, describe, expect, it } from 'vitest';
 import { LocalFilesystem } from '@mastra/core/workspace';
 import { ToolRegistry, createManualRoutes, GUIDE_FIRST_SENTENCE } from '../../tool-registry/index.js';
-import { createToolHandlerFactory, WorkflowHooks, createMcpRoutes, McpService } from '../../../__tests__/tool-wiring.js';
+import { createToolHandlerFactory, VersionControlHooks, createMcpRoutes, McpService } from '../../../__tests__/tool-wiring.js';
 import type { ToolContext } from '../../tool-helpers/index.js';
 import type { ToolAuth } from '../../tool-auth/index.js';
 import type { IAccessControl } from '../../access/index.js';
@@ -117,7 +117,7 @@ async function startPlatform(): Promise<Platform> {
     sessionId,
     abortSignal: signal,
     workspaceService: {} as never,
-    workflowService: {} as never,
+    versionControlService: {} as never,
     events: {} as never,
     getFilesystem: async () => fs,
   });
@@ -135,7 +135,7 @@ async function startPlatform(): Promise<Platform> {
     new DocExtractService(join(tempDir, 'doc-extract'), new WorkerDocumentExtractor()),
     allowAll,
     testKbContext({ kbDirName: KB_DIR }),
-    { recoveryBotEmail: 'recovery-bot@bevel.local', hooks: new WorkflowHooks(), notes: new ToolDescriptionNotes() },
+    { recoveryBotEmail: 'recovery-bot@bevel.local', hooks: new VersionControlHooks(), notes: new ToolDescriptionNotes() },
     new RoutineWritePolicyService(),
     {} as never,
   );

@@ -13,7 +13,7 @@ import {
   type IAccountAdmission,
 } from '../account-admission.js';
 import { hashPassword } from '../password-hash.js';
-import { RECOVERY_BOT_EMAIL } from '../../workflow/recovery-bot.js';
+import { RECOVERY_BOT_EMAIL } from '../../version-control/recovery-bot.js';
 
 /**
  * Drizzle chain stub, as in `auth.service.test.ts`: each db.select() /

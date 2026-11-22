@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest';
 import { composeAgentGuide } from '../../agent-guide/index.js';
 import { createAgentInstructionsRoutes } from '../agent-instructions.routes.js';
 import {
+  GUIDE_FIRST_LINE,
   INSTRUCTIONS_CAP,
   PLATFORM_HEADER,
   PREAMBLE_TRUNCATION_MARKER,
@@ -155,6 +156,24 @@ describe('the default branch is named', () => {
     expect(rule).not.toContain('default branch is');
   });
 
+  it('keeps a name holding a backtick inside one code span', () => {
+    // A valid ref name may carry a backtick; a plain span would end at it.
+    const rule = sharedFileRules(DEFAULT_KB_LAYOUT, 'release`candidate').find((r) => r.id === 'agent-guide')!.body;
+    expect(rule).toContain("default branch is ``release`candidate``: the branch");
+    const edge = sharedFileRules(DEFAULT_KB_LAYOUT, '`main`').find((r) => r.id === 'agent-guide')!.body;
+    expect(edge).toContain('default branch is `` `main` ``: the branch');
+  });
+
+  it('fits the caps with the longest branch name the platform accepts, so the caps are ceilings and not samples', () => {
+    // kb-fs refuses a branch name over 255 characters; the caps are measured
+    // with one of exactly that length, not with a typical name.
+    const longest = 'b'.repeat(255);
+    expect(sharedFileRulesSection(DEFAULT_KB_LAYOUT, longest).length).toBeLessThanOrEqual(SHARED_FILE_RULES_CAP);
+    expect(composeAgentInstructions('x'.repeat(PREAMBLE_CAP * 2), DEFAULT_KB_LAYOUT, longest).instructions.length).toBeLessThanOrEqual(
+      INSTRUCTIONS_CAP,
+    );
+  });
+
   it('keeps a call that passes no branch working, naming none', () => {
     // The helpers are exported: a caller written before the branch was named
     // gets the text it got then, not a throw on an undefined name.
@@ -227,9 +246,10 @@ describe('the handshake text stays inside the length it pins', () => {
   });
 
   it('holds the worst-case instructions under the cap the caps add up to', () => {
-    // Header + the shared rules at their cap + a preamble at ITS cap + the
-    // marker a cut appends + the two blank lines between the three parts.
-    const worstCase = PLATFORM_HEADER.length + 2 + SHARED_FILE_RULES_CAP + 2 + PREAMBLE_CAP + 1 + PREAMBLE_TRUNCATION_MARKER.length;
+    // The guide-first line + header + the shared rules at their cap + a
+    // preamble at ITS cap + the marker a cut appends + the three blank lines
+    // between the four parts.
+    const worstCase = GUIDE_FIRST_LINE.length + 2 + PLATFORM_HEADER.length + 2 + SHARED_FILE_RULES_CAP + 2 + PREAMBLE_CAP + 1 + PREAMBLE_TRUNCATION_MARKER.length;
     expect(worstCase).toBeLessThanOrEqual(INSTRUCTIONS_CAP);
     // And what an actual over-long preamble produces is under it too.
     const composed = composeAgentInstructions('x'.repeat(PREAMBLE_CAP * 2));

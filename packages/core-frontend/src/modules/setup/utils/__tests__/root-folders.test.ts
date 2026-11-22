@@ -65,8 +65,12 @@ describe('isRootFolderSuggestion', () => {
   });
 
   it('holds back names the save would refuse: dot-folders and the reserved roots', () => {
-    for (const name of ['.github', '.bevel', 'Data', 'agents', 'PIPELINES']) {
+    for (const name of ['.github', '.bevel', 'Data', 'agents', 'WORKFLOWS']) {
       expect(isRootFolderSuggestion(name)).toBe(false);
     }
+  });
+
+  it('offers Pipelines, a name core no longer reserves', () => {
+    expect(isRootFolderSuggestion('Pipelines')).toBe(true);
   });
 });

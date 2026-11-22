@@ -12,7 +12,7 @@ import { SkillService } from '../../skills/skills.service.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { PluginLinkIndex } from '../plugin-links.js';
 import { MarketplaceCompilerService } from '../compile/marketplace-compiler.service.js';
-import { NodeGitRunner } from '../../workflow/git/node-git-runner.js';
+import { NodeGitRunner } from '../../version-control/git/node-git-runner.js';
 import express from 'express';
 import { ToolRegistry } from '../../tool-registry/tool-registry.js';
 import { registerSkillsTools } from '../../skills/skills.tools.js';

@@ -65,3 +65,33 @@ For each evaluation task in design.md, `start-here` SHALL route it to at most tw
 #### Scenario: A fact is removed
 - **WHEN** an edit removes a fact an evaluation task relies on
 - **THEN** the evaluation test fails, naming the task and the fact
+
+### Requirement: New people are pointed at the onboarding section
+The guide SHALL have an `onboarding` section with the flow for welcoming someone new, and `start-here` SHALL route that question to it. The server instructions SHALL NOT repeat the routing: they tell an agent to read the guide first, and the guide's start is where the question is routed. A distribution's hook SHALL NOT drop or empty the section, since the platform's `onboard` prompt points at it by id.
+
+#### Scenario: Someone says "onboard me"
+- **WHEN** an agent reads the guide's start
+- **THEN** its routing table sends "someone is new, asks what this is or what you can do for them, or asks to be onboarded" to the `onboarding` section
+
+#### Scenario: A hook drops the section
+- **WHEN** a distribution's hook returns the sections without `onboarding`, or with an empty one
+- **THEN** composing the guide fails, naming the section and the prompt that points at it
+
+#### Scenario: The section is fetched
+- **WHEN** an agent calls `get_agent_guide` with `section: "onboarding"`
+- **THEN** it gets the onboarding flow with the deployment's folder names and default branch filled in
+
+### Requirement: The hosted endpoint offers a platform `onboard` prompt
+On a connection not narrowed to an agent, the hosted MCP endpoint SHALL list a prompt named `onboard` first, beside the workspace's skills, and `prompts/get` for it SHALL return one message pointing at the `onboarding` section. A skill named `onboard` SHALL replace it. A connection narrowed to an agent SHALL list its agent's skills and nothing beside them. The local `hexis-mcp` server does not offer the prompt.
+
+#### Scenario: A connection that is not narrowed
+- **WHEN** a person's connection lists prompts
+- **THEN** `onboard` comes first, and getting it returns a message to read the guide's `onboarding` section and follow it
+
+#### Scenario: A workspace has its own onboarding
+- **WHEN** a skill named `onboard` is released
+- **THEN** the prompt list carries that skill under the name, and not the platform's prompt
+
+#### Scenario: A connection narrowed to an agent
+- **WHEN** a connection narrowed to an agent lists prompts or gets `onboard`
+- **THEN** it lists only its agent's skills, and `onboard` answers "Unknown skill" unless the agent's skills include one of that name

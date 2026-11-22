@@ -14,12 +14,12 @@ import { validateFilename } from './filename.js';
  *   ├── Plugins/         ← one folder per plugin: manifest, MCP servers, tools, links
  *   ├── Data/            ← agent-produced records; parsed like KnowledgeBase/
  *   ├── Agents/          ← .agent files — agent role configurations (not the graph)
- *   ├── Pipelines/       ← .pipeline files — execution-layer processes (not the graph)
+ *   ├── Workflows/       ← .workflow files — execution-layer processes (not the graph)
  *   ├── roles.yaml       ← identity → role mapping
  *   └── access.md        ← repo-root access-control rules
  *
  * RESERVED IS NOT THE SAME AS CREATED. Core seeds the first two only
- * (`CORE_REQUIRED_DIRS`); `Data/`, `Agents/` and `Pipelines/` scaffold an
+ * (`CORE_REQUIRED_DIRS`); `Data/`, `Agents/` and `Workflows/` scaffold an
  * agentic execution layer that a distribution layers on. Their names stay here
  * regardless, because reserving a name is what stops a KB that HAS the folder
  * from having it treated as ordinary content — the file tree would otherwise
@@ -27,7 +27,7 @@ import { validateFilename } from './filename.js';
  *
  * These names are the single source of truth for both sides of the app:
  *  - Backend: the graph parser discovers its content under `KnowledgeBase/`
- *    and `Data/`; `Plugins/`, `Agents/`, `Pipelines/` (and anything else at
+ *    and `Data/`; `Plugins/`, `Agents/`, `Workflows/` (and anything else at
  *    the root) are ignored by parsing, validation, and the diagram.
  *  - Frontend: the file tree renders these root folders as distinct
  *    top-level sections.
@@ -302,9 +302,9 @@ export function validateKbLayout(layout: KbLayout): string | null {
   }
   // The fixed reserved roots are taken too: naming the skills folder `Data`
   // would give one directory two reserved roles.
-  const fixed = [DATA_DIR, AGENTS_DIR, PIPELINES_DIR].map((n) => n.toLowerCase());
+  const fixed = [DATA_DIR, AGENTS_DIR, WORKFLOWS_DIR].map((n) => n.toLowerCase());
   const clash = names.find((n) => fixed.includes(n));
-  if (clash) return `"${clash}" is a reserved folder name (${[DATA_DIR, AGENTS_DIR, PIPELINES_DIR].join(', ')}).`;
+  if (clash) return `"${clash}" is a reserved folder name (${[DATA_DIR, AGENTS_DIR, WORKFLOWS_DIR].join(', ')}).`;
   // Judged against the roots THIS layout declares, not the ones in effect: a
   // save that renames the plugins folder and the guide together must be read
   // as the pair it is.
@@ -716,7 +716,7 @@ export function pluginOfPath(repoRelativePath: string, layout: KbLayout): string
 }
 
 /**
- * Folder under the repo root for agent-produced records (pipeline instances,
+ * Folder under the repo root for agent-produced records (workflow runs,
  * work items, intermediate outputs). Parsed exactly like `KnowledgeBase/`:
  * its direct subfolders are self-contained ontologies.
  */
@@ -725,15 +725,15 @@ export const DATA_DIR = 'Data';
 /** Folder under the repo root that holds `.agent` files — agent role configurations (not graph nodes). */
 export const AGENTS_DIR = 'Agents';
 
-/** Folder under the repo root that holds `.pipeline` files — execution-layer processes (not graph nodes). */
-export const PIPELINES_DIR = 'Pipelines';
+/** Folder under the repo root that holds `.workflow` files — execution-layer processes (not graph nodes). */
+export const WORKFLOWS_DIR = 'Workflows';
 
 /**
  * Every reserved root name under `layout` — the set the file tree renders as
  * its own sections rather than folding into Knowledge.
  */
 export function reservedRootDirNames(layout: KbLayout): ReadonlySet<string> {
-  return new Set([layout.knowledgeBaseDir, layout.skillsDir, layout.pluginsDir, DATA_DIR, AGENTS_DIR, PIPELINES_DIR]);
+  return new Set([layout.knowledgeBaseDir, layout.skillsDir, layout.pluginsDir, DATA_DIR, AGENTS_DIR, WORKFLOWS_DIR]);
 }
 
 /**

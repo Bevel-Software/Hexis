@@ -6,7 +6,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { KbRepository, repositoryDirFor } from '../kb-repository.js';
 import { fetchInstant } from '../fetch-instant.js';
-import { NodeGitRunner } from '../../workflow/git/node-git-runner.js';
+import { NodeGitRunner } from '../../version-control/git/node-git-runner.js';
 import type { IGitRunner } from '../../../shared/git.contract.js';
 
 /**

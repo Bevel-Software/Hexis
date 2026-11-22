@@ -332,7 +332,7 @@ function statusFor(err: unknown): number {
   if (err instanceof EmbedNodeNotFoundError) return 404;
   if (err instanceof EmbedLockedError) return 409;
   if (err instanceof EmbedRefParseError) return 400;
-  // A domain error from the workflow layer (a protected-branch refusal, a
+  // A domain error from the version-control layer (a protected-branch refusal, a
   // duplicate request) already carries the status it deserves.
   const status = (err as { status?: unknown })?.status;
   if (typeof status === 'number' && status >= 400 && status < 600) return status;

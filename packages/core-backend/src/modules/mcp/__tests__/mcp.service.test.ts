@@ -54,6 +54,10 @@ async function setup(deps?: {
   auditRecorder?: IAgentEventRecorder;
   /** The agent connection an OAuth caller arrived through (with `tokenId: null`). */
   connectionId?: string | null;
+  /** The agent the credential connects as; absent = Everything. */
+  agentPath?: string | null;
+  /** Released skills listed beside `rfi` — listed only: `get_skill` answers not-found for them. */
+  listedOnly?: { name: string; description: string; path: string }[];
 }) {
   skillRequests = [];
   const registry = new ToolRegistry();
@@ -115,7 +119,7 @@ async function setup(deps?: {
   app.post('/api/agent/tools/list_skills', (req, res) => {
     const b = (req.body ?? {}) as Record<string, unknown>;
     skillRequests.push({ tool: 'list_skills', body: b });
-    const released = [{ name: 'rfi', description: 'RFI answers', path: 'Plugins/Sales/rfi' }];
+    const released = [{ name: 'rfi', description: 'RFI answers', path: 'Plugins/Sales/rfi' }, ...(deps?.listedOnly ?? [])];
     res.json({
       skills:
         typeof b.branch === 'string'
@@ -192,6 +196,10 @@ async function setup(deps?: {
   httpServer = await new Promise<HttpServer>((resolve) => {
     const s = app.listen(0, () => resolve(s));
   });
+  // Every server a test opens is closed after it, not only the last: a test
+  // that sets up twice would otherwise leave the first one listening.
+  const opened = httpServer;
+  cleanups.push(() => new Promise<void>((r) => opened.close(() => r())));
   const port = (httpServer.address() as { port: number }).port;
   loopbackBase = `http://127.0.0.1:${port}`;
 
@@ -213,7 +221,7 @@ async function setup(deps?: {
   );
   lastService = mcp;
   const tokenId = deps?.tokenId === undefined ? 'tok-1' : deps.tokenId;
-  return connectClient(mcp, tokenId, deps?.connectionId ?? null);
+  return connectClient(mcp, tokenId, deps?.connectionId ?? null, deps?.agentPath ?? null);
 }
 
 /** The service `setup` built last — for a test that needs a SECOND request against the same service. */
@@ -226,9 +234,14 @@ let lastService: McpService | undefined;
  * The initialize message is passed so the server carries instructions,
  * exactly as the route's initialize request would.
  */
-async function connectClient(mcp: McpService, tokenId: string | null, connectionId: string | null = null): Promise<Client> {
+async function connectClient(
+  mcp: McpService,
+  tokenId: string | null,
+  connectionId: string | null = null,
+  agentPath: string | null = null,
+): Promise<Client> {
   const server = await mcp.createRequestServer(
-    { userId: 'user-A', tokenId, connectionId, bearer: 'bevel_testkey' },
+    { userId: 'user-A', tokenId, connectionId, agentPath, bearer: 'bevel_testkey' },
     { jsonrpc: '2.0', id: 0, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test-client', version: '0.0.0' } } },
   );
 
@@ -354,12 +367,14 @@ describe('McpService — per-user credential pre-check', () => {
       keys.map((key) => ({ key, adminConfigured: false, userConfigured, userAuthorized, grantedScopes })),
   });
   const manualsWithUserVar = {
+    sharedSignInKeysForManual: async () => [],
     userScopedKeysForManual: async (manual: string) =>
       manual === 'KNOWLEDGE_BASE'
         ? [{ key: 'KNOWLEDGE_BASE_API_KEY', name: 'API_KEY', label: 'Your API key', oauth: false }]
         : [],
   };
   const manualsWithOAuthVar = {
+    sharedSignInKeysForManual: async () => [],
     userScopedKeysForManual: async (manual: string) =>
       manual === 'KNOWLEDGE_BASE'
         ? [{ key: 'KNOWLEDGE_BASE_GOOGLE', name: 'GOOGLE', label: 'Google', oauth: true }]
@@ -367,6 +382,7 @@ describe('McpService — per-user credential pre-check', () => {
   };
   // An OAuth var that requires two scopes — for the scope-coverage cases.
   const manualsWithScopedOAuthVar = {
+    sharedSignInKeysForManual: async () => [],
     userScopedKeysForManual: async (manual: string) =>
       manual === 'KNOWLEDGE_BASE'
         ? [
@@ -381,9 +397,46 @@ describe('McpService — per-user credential pre-check', () => {
         : [],
   };
   const manualsNoUserVar = {
+    sharedSignInKeysForManual: async () => [],
     userScopedKeysForManual: async () =>
       [] as { key: string; name: string; label: string | null; oauth: boolean }[],
   };
+  // A WORKSPACE connection (a managed connector an owner connects once for
+  // everyone): no personal variable, one shared sign-in.
+  const manualsWithSharedSignIn = {
+    sharedSignInKeysForManual: async (manual: string) =>
+      manual === 'KNOWLEDGE_BASE'
+        ? [{ key: 'KNOWLEDGE_BASE_ACCESS_TOKEN', name: 'ACCESS_TOKEN', label: 'HubSpot sign-in', oauthScopes: ['crm.objects.contacts.read'] }]
+        : [],
+    userScopedKeysForManual: async () => [] as { key: string; name: string; label: string | null; oauth: boolean }[],
+  };
+  const sharedVault = (adminAuthorized: boolean, adminGrantedScopes?: string) => ({
+    statusFor: async (_userId: string, keys: string[]) =>
+      keys.map((key) => ({ key, adminConfigured: adminAuthorized, userConfigured: false, adminAuthorized, adminGrantedScopes })),
+  });
+
+  describe('a workspace connection nobody has made', () => {
+    it('refuses the call with words that say an owner connects it, without resetting the caller’s own grant', async () => {
+      const revokeOAuthAccess = vi.fn(async () => undefined);
+      const client = await setup({ secretsVault: sharedVault(false), toolManuals: manualsWithSharedSignIn, tokenId: null, revokeOAuthAccess });
+      const res = await client.callTool({ name: 'ask', arguments: { body: { prompt: 'hello' } } });
+      expect(res.isError).toBe(true);
+      const text = (res.content as Array<{ text: string }>)[0].text;
+      expect(text).toMatch(/HubSpot sign-in \(a tool owner connects this for the workspace\)/);
+      expect(text).toMatch(/\/connect/);
+      expect(revokeOAuthAccess).not.toHaveBeenCalled();
+    });
+
+    it('is hidden from a connection-key listing until an owner connects it with a covering token', async () => {
+      const names = async (c: Awaited<ReturnType<typeof setup>>) => (await c.listTools()).tools.map((t) => t.name).sort();
+      const unconnected = await setup({ secretsVault: sharedVault(false), toolManuals: manualsWithSharedSignIn });
+      expect(await names(unconnected)).toEqual(['call_tool_chain', 'list_tools', 'tools_info']);
+      const underScoped = await setup({ secretsVault: sharedVault(true, 'oauth'), toolManuals: manualsWithSharedSignIn });
+      expect(await names(underScoped)).toEqual(['call_tool_chain', 'list_tools', 'tools_info']);
+      const connected = await setup({ secretsVault: sharedVault(true, 'oauth crm.objects.contacts.read'), toolManuals: manualsWithSharedSignIn });
+      expect(await names(connected)).toEqual(['ask', 'boom', 'call_tool_chain', 'list_tools', 'refy', 'tools_info']);
+    });
+  });
 
   it('gates a tool whose personal credential is unset — returns the setup link, not the tool', async () => {
     const client = await setup({ secretsVault: vault(false), toolManuals: manualsWithUserVar });
@@ -655,7 +708,7 @@ describe('McpService — agent instructions', () => {
     // The listing filter registers only ready tools; the fake manual catalog
     // says every tool is ready, so the four survive it and carry the prefix.
     const vault = { statusFor: async (_u: string, keys: string[]) => keys.map((key) => ({ key, userConfigured: true })) };
-    const manuals = { userScopedKeysForManual: async () => [{ key: 'KNOWLEDGE_BASE_X', name: 'X', oauth: false }] };
+    const manuals = { sharedSignInKeysForManual: async () => [], userScopedKeysForManual: async () => [{ key: 'KNOWLEDGE_BASE_X', name: 'X', oauth: false }] };
     const client = await setup({
       readAgentPreamble: async () => 'Acme.',
       extraTools: KB_TOOLS,
@@ -884,7 +937,7 @@ describe('McpService — the Audit log records what an agent calls', () => {
   it('serves prompts from the default branch only, never a draft', async () => {
     const client = await setup();
     const { prompts } = await client.listPrompts();
-    expect(prompts.map((p) => p.name)).toEqual(['rfi']);
+    expect(prompts.map((p) => p.name)).toEqual(['onboard', 'rfi']);
 
     const got = await client.getPrompt({ name: 'rfi' });
     const text = got.messages[0].content.text as string;
@@ -897,10 +950,37 @@ describe('McpService — the Audit log records what an agent calls', () => {
     expect(skillRequests.every((r) => r.body.branch === undefined)).toBe(true);
   });
 
+  it('offers the platform onboard prompt, pointing at the guide section, while no skill takes its name', async () => {
+    const client = await setup();
+    const got = await client.getPrompt({ name: 'onboard' });
+    expect(got.messages[0].content.text).toContain('get_agent_guide({ body: { section: "onboarding" } })');
+  });
+
+  it("serves a workspace's own onboard skill in the platform prompt's place, and never the platform text when reading it fails", async () => {
+    const client = await setup({ listedOnly: [{ name: 'onboard', description: 'Our own onboarding', path: 'Plugins/People/onboard' }] });
+    const { prompts } = await client.listPrompts();
+    // The workspace's skill, in the catalog's own order; the platform's prompt is not added beside it.
+    expect(prompts.map((p) => [p.name, p.description])).toEqual([
+      ['rfi', 'RFI answers'],
+      ['onboard', 'Our own onboarding'],
+    ]);
+    // The skill is listed but its read answers not-found (the harness knows
+    // only `rfi`): the same failed read any prompt gets, never the platform's
+    // onboarding text under the workspace's name.
+    await expect(client.getPrompt({ name: 'onboard' })).rejects.toThrow(/Unknown skill "onboard"/);
+  });
+
+  it('serves a connection narrowed to an agent its skills and nothing beside them', async () => {
+    const client = await setup({ agentPath: 'Agents/support.agent' });
+    expect((await client.listPrompts()).prompts.map((p) => p.name)).toEqual(['rfi']);
+    await expect(client.getPrompt({ name: 'onboard' })).rejects.toThrow(/Unknown skill "onboard"/);
+  });
+
   it('records a call refused for a missing sign-in as denied, without running the tool', async () => {
     const recorder = spyRecorder();
     const vault = { statusFor: async (_u: string, keys: string[]) => keys.map((key) => ({ key, adminConfigured: false, userConfigured: false })) };
     const manuals = {
+      sharedSignInKeysForManual: async () => [],
       userScopedKeysForManual: async (manual: string) =>
         manual === 'KNOWLEDGE_BASE' ? [{ key: 'KNOWLEDGE_BASE_API_KEY', name: 'API_KEY', label: 'Your API key', oauth: false }] : [],
     };

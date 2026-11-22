@@ -39,6 +39,14 @@ export const NO_PANES_LAYOUT: LayoutController = {
 
 export const LayoutContext = createContext<LayoutController | null>(null);
 
+/**
+ * Setter through which a surface's pane layout reports its controller to the
+ * shell's chrome, whose {@link LayoutContext} provider wraps the toolbar.
+ */
+export const PaneControllerContext = createContext<(c: LayoutController | null) => void>(
+  () => {},
+);
+
 export function useLayout(): LayoutController {
   const ctx = useContext(LayoutContext);
   if (!ctx) throw new Error('useLayout must be used within LayoutContext.Provider');

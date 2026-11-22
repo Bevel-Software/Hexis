@@ -13,7 +13,7 @@ import type { ToolContext } from '../../modules/tool-helpers/tool.contract.js';
 import type { ToolAuth } from '../../modules/tool-auth/tool-auth.middleware.js';
 import { registerWorkspaceTools } from '../../modules/workspace/workspace.tools.js';
 import { RoutineWritePolicyService } from '../../modules/workspace/routine-write-policy.js';
-import { WorkflowHooks } from '../../modules/workflow/workflow-hooks.js';
+import { VersionControlHooks } from '../../modules/version-control/version-control-hooks.js';
 import { ToolDescriptionNotes } from '../../modules/workspace/agent-access.gate.js';
 import { SpillStore } from '../../modules/workspace/spill-store.js';
 import { RipgrepPatternMatcher } from '../../modules/workspace/index.js';
@@ -92,7 +92,7 @@ async function startPlatform(extractorOpts: WorkerDocumentExtractorOptions = {})
     sessionId,
     abortSignal: signal,
     workspaceService: { getWorkspacePath: async () => tempDir } as never,
-    workflowService: {} as never,
+    versionControlService: {} as never,
     events: {} as never,
     getFilesystem: async () => fs,
   });
@@ -123,7 +123,7 @@ async function startPlatform(extractorOpts: WorkerDocumentExtractorOptions = {})
     docExtract,
     allowAll,
     testKbContext({ kbDirName: KB }),
-    { recoveryBotEmail: 'recovery-bot@bevel.local', hooks: new WorkflowHooks(), notes: new ToolDescriptionNotes() },
+    { recoveryBotEmail: 'recovery-bot@bevel.local', hooks: new VersionControlHooks(), notes: new ToolDescriptionNotes() },
     new RoutineWritePolicyService(),
     {} as never,
     undefined,

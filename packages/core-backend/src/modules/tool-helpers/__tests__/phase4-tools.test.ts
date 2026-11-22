@@ -9,7 +9,7 @@ import { createToolHandlerFactory } from '../tool-handler.js';
 import { createManualRoutes } from '../../tool-registry/manual.routes.js';
 import { registerWorkspaceTools } from '../../workspace/workspace.tools.js';
 import { RoutineWritePolicyService } from '../../workspace/routine-write-policy.js';
-import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
+import { VersionControlHooks } from '../../version-control/version-control-hooks.js';
 import { ToolDescriptionNotes } from '../../workspace/agent-access.gate.js';
 import { SpillStore } from '../../workspace/spill-store.js';
 import { DocExtractService, WorkerDocumentExtractor } from '../../workspace/index.js';
@@ -45,7 +45,7 @@ const workspaceService = {
     throw new Error('no such file');
   },
 } as never;
-const workflowService = {} as never;
+const versionControlService = {} as never;
 const events = {} as never;
 const accessControl = {
   canRead: async () => true,
@@ -58,7 +58,7 @@ let httpServer: HttpServer | undefined;
 async function start(): Promise<string> {
   const registry = new ToolRegistry();
   const toolAuth = createToolAuthMiddleware(externalApiKeyService, internalToken);
-  const resolve = createToolContextResolver({ authService, workspaceService, workflowService, events, kbDirName: 'knowledge-base', creatorAccess: { planForCreate: async () => null, grantInExtractedFile: async () => null, noteAccessFileWritten: () => {} } });
+  const resolve = createToolContextResolver({ authService, workspaceService, versionControlService, events, kbDirName: 'knowledge-base', creatorAccess: { planForCreate: async () => null, grantInExtractedFile: async () => null, noteAccessFileWritten: () => {} } });
   const th = createToolHandlerFactory(resolve);
   const router = express.Router();
   // NOTE (core split): this suite used to register the search, feedback and
@@ -68,7 +68,7 @@ async function start(): Promise<string> {
   registerWorkspaceTools(registry, router, toolAuth, th, new SpillStore('/tmp/bevel-test-spills'), new DocExtractService('/tmp/bevel-test-doc-extract', new WorkerDocumentExtractor()), accessControl, testKbContext(), {
     // No hook registered: the agent-access gate refuses nothing here.
     recoveryBotEmail: 'recovery-bot@bevel.local',
-    hooks: new WorkflowHooks(),
+    hooks: new VersionControlHooks(),
     notes: new ToolDescriptionNotes(),
   }, new RoutineWritePolicyService(), {} as never /* sessionSink — start_session not exercised here */);
   router.use(createManualRoutes(registry, toolAuth));

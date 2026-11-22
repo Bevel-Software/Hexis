@@ -1,8 +1,8 @@
 import { describe, it, expect, vi } from 'vitest';
 
 import { AdminLockedCommits } from '../admin-locked-commit.js';
-import { PushNeedsAgentResolutionError, WorkflowDomainError } from '../../../shared/domain-errors.js';
-import type { AuthUser, IWorkspaceService, IWorkflowService } from '@bevel-software/platform-shared';
+import { PushNeedsAgentResolutionError, VersionControlDomainError } from '../../../shared/domain-errors.js';
+import type { AuthUser, IWorkspaceService, IVersionControlService } from '@bevel-software/platform-shared';
 
 const KB = 'knowledge-base';
 const BRANCH = 'main';
@@ -41,7 +41,7 @@ function makeHarness(opts: {
     deleteFile: async (_id: string, wsRel: string) => void files.delete(wsRel),
   } as unknown as IWorkspaceService;
 
-  const workflowService = {
+  const versionControlService = {
     acquireLock: vi.fn(async (_w: string, _b: string, p: string, user: AuthUser) => {
       if (locks.has(p)) return { acquired: false, lock: { holderUserId: 'x', holderName: 'X' } };
       locks.set(p, user);
@@ -60,14 +60,14 @@ function makeHarness(opts: {
       if (opts.commitError) throw opts.commitError;
       return {};
     }),
-  } as unknown as IWorkflowService;
+  } as unknown as IVersionControlService;
 
   const locked = new AdminLockedCommits({
     workspaceService,
-    workflowService,
+    versionControlService,
     kbDirName: KB,
     defaultBranchOf: () => BRANCH,
-    makeError: (message, status, payload) => new WorkflowDomainError(message, status, payload),
+    makeError: (message, status, payload) => new VersionControlDomainError(message, status, payload),
     logTag: 'test-admin',
     contendedSubject: 'Things',
   });

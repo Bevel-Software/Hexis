@@ -10,7 +10,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import { createSetupRoutes } from '../setup.routes.js';
 import { DeploymentSettingsService } from '../deployment-settings.service.js';
-import { NodeGitRunner } from '../../workflow/git/node-git-runner.js';
+import { NodeGitRunner } from '../../version-control/git/node-git-runner.js';
 import { TemplateFilesStep } from '../../workspace/startup/steps/template-files.step.js';
 import { NodeFs } from '../../kb-fs/node-fs.js';
 import { defaultKbTemplateDir } from '../../../assets.js';

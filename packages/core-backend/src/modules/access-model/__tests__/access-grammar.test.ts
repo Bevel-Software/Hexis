@@ -145,7 +145,7 @@ describe('the access-frontmatter extension set', () => {
   it('throws on a malformed extension rather than skipping it', () => {
     // A typo would otherwise leave capability-granting files ungoverned, at
     // boot, with nothing to distinguish it from a successful registration.
-    expect(() => registerAccessFrontmatterExtensions(['pipeline'])).toThrow(/malformed/);
+    expect(() => registerAccessFrontmatterExtensions(['workflow'])).toThrow(/malformed/);
     expect(() => registerAccessFrontmatterExtensions(['.two.dots'])).toThrow(/malformed/);
     expect(() => registerAccessFrontmatterExtensions([''])).toThrow(/malformed/);
     expect(hasAccessFrontmatterExtension('x.pipeline_typo_guard')).toBe(false);
@@ -186,7 +186,7 @@ describe('the access-frontmatter extension set', () => {
 });
 
 describe('parseOwnAccessEntries — whole-document YAML the subset parser cannot read', () => {
-  // A `.tool` / `.pipeline` / `.agent` is one `---` fenced YAML document, and
+  // A `.tool` / `.workflow` / `.agent` is one `---` fenced YAML document, and
   // real ones use folded and literal scalars and nested maps. The subset
   // parser stops at the first such line; the verbs must still be read.
   const doc = [

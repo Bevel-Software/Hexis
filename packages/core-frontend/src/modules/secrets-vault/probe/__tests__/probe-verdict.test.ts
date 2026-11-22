@@ -104,6 +104,7 @@ describe('the tool page and the rows agree, verdict for verdict', () => {
         label: null,
         key: 'github_API_KEY',
         adminConfigured: true,
+        adminKind: 'static',
         userConfigured: true,
       },
     ],

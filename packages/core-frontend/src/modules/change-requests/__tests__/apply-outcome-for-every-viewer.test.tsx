@@ -4,8 +4,8 @@ import type { ReactNode } from 'react';
 import type {
   ChangeRequestApplyFailure,
   PullRequestSummary,
-  WorkflowEvent,
-  WorkflowEventPayload,
+  VersionControlEvent,
+  VersionControlEventPayload,
 } from '@bevel-software/platform-shared';
 
 const detailMock = vi.hoisted(() => ({ fetchPrDetail: vi.fn() }));
@@ -30,7 +30,7 @@ import { ChangeRequestDialog } from '../components/ChangeRequestDialog';
 import {
   EventBusContext,
   type EventBusContextValue,
-} from '../../workflow/state/event-bus.context';
+} from '../../version-control/state/event-bus.context';
 
 /**
  * The other half of the ticket: a FAILED apply used to be told only to the
@@ -64,20 +64,20 @@ const FAILURE: ChangeRequestApplyFailure = {
 };
 
 function fakeBus() {
-  const handlers = new Map<string, Set<(e: WorkflowEvent) => void>>();
+  const handlers = new Map<string, Set<(e: VersionControlEvent) => void>>();
   const value: EventBusContextValue = {
     subscribe: (kind, handler) => {
       const set = handlers.get(kind) ?? new Set();
-      set.add(handler as (e: WorkflowEvent) => void);
+      set.add(handler as (e: VersionControlEvent) => void);
       handlers.set(kind, set);
-      return () => set.delete(handler as (e: WorkflowEvent) => void);
+      return () => set.delete(handler as (e: VersionControlEvent) => void);
     },
     setFocus: () => {},
     watchWorkspace: () => () => {},
   };
-  const emit = (event: WorkflowEventPayload) => {
+  const emit = (event: VersionControlEventPayload) => {
     for (const h of handlers.get(event.kind) ?? []) {
-      h({ id: 1, ts: new Date().toISOString(), ...event } as WorkflowEvent);
+      h({ id: 1, ts: new Date().toISOString(), ...event } as VersionControlEvent);
     }
   };
   return { value, emit };

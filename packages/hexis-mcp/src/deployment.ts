@@ -1,4 +1,4 @@
-import type { HexisMcpConfig } from './config.js';
+import { SignInRefusedError, type HexisMcpConfig } from './config.js';
 import { renewConnectionKeyNow } from './renewal.js';
 import {
   NOT_AVAILABLE_TO_CONNECTION,
@@ -321,6 +321,8 @@ export async function fetchAgentInstructions(config: HexisMcpConfig): Promise<st
     return body.instructions;
   } catch (err) {
     if (err instanceof ConnectionKeyRejectedError) throw err;
+    // A sign-in refused for good was said once by renewal.ts; not again here.
+    if (err instanceof SignInRefusedError) return undefined;
     console.error(
       `[hexis-mcp] could not fetch the agent instructions: ${err instanceof Error ? err.message : String(err)}; ` +
         'sessions start without them.',
@@ -562,9 +564,10 @@ export async function fetchLocalToolVariables(
     }
     return { ok: true, values: out };
   } catch (err) {
-    // A dead key is not a missing secret: the call fails with the plain
-    // sentence instead of running without its credentials.
-    if (err instanceof ConnectionKeyRejectedError) throw err;
+    // A dead key, or a sign-in refused for good, is not a missing secret: the
+    // call fails with the plain sentence instead of running without its
+    // credentials.
+    if (err instanceof ConnectionKeyRejectedError || err instanceof SignInRefusedError) throw err;
     console.error(
       `[hexis-mcp] could not resolve variables for local tool "${slug}": ` +
         `${err instanceof Error ? err.message : String(err)}`,
@@ -675,6 +678,8 @@ export async function fetchMcpApps(
     const reason = err instanceof Error ? err.message : String(err);
     const definite = err instanceof DeploymentError && MANIFEST_GONE.has(err.status ?? 0);
     const kept = definite ? NO_APPS : previous;
+    // A sign-in refused for good was said once by renewal.ts; not again here.
+    if (err instanceof SignInRefusedError) return kept;
     console.error(
       `[hexis-mcp] could not read the deployment's MCP App manifest (${reason}); ` +
         (kept.resources.length
@@ -729,7 +734,8 @@ export async function fetchToolHints(
     const kept = gone ? {} : { ...previous };
     const reason = err instanceof Error ? err.message : String(err);
     const key = gone ? 'gone' : reason;
-    if (lastToolHintsFailure.get(config.baseUrl) !== key) {
+    // A sign-in refused for good was said once by renewal.ts; not again here.
+    if (!(err instanceof SignInRefusedError) && lastToolHintsFailure.get(config.baseUrl) !== key) {
       lastToolHintsFailure.set(config.baseUrl, key);
       console.error(
         `[hexis-mcp] could not read the deployment's tool hints (${reason}); ` +

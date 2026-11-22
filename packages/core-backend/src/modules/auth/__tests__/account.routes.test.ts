@@ -2,13 +2,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import express from 'express';
 import type { Server } from 'node:http';
 import { createAccountRoutes } from '../account.routes.js';
-import type { AccountInvitedEvent } from '../account-hooks.js';
+import { AccountHooks, type AccountInvitedEvent } from '../account-hooks.js';
 import { AuthService } from '../auth.service.js';
 import { AccountAdmissionRefusedError, AccountChangeRefusedError } from '../account-admission.js';
-import { WorkflowDomainError } from '../../../shared/domain-errors.js';
+import { VersionControlDomainError } from '../../../shared/domain-errors.js';
 import { hashPassword } from '../password-hash.js';
-import type { Database } from '../../database/connection.js';
-import type { IAdminAccessService } from '../../admin/admin.interface.js';
+import type { Database } from '../../database/index.js';
+import type { IAdminAccessService } from '../../admin/index.js';
 
 const authService = {
   listAccounts: vi.fn(async () => [
@@ -38,9 +38,10 @@ const accountErasure = {
 /** The invite listeners: nobody registered unless a test says so (see "an invite tells the listeners"). */
 const accountHooks = {
   runAccountInvited: vi.fn<(event: AccountInvitedEvent) => Promise<string[]>>(async () => []),
+  runAccountDeactivated: vi.fn<(event: { userId: string; email: string }) => Promise<string[]>>(async () => []),
 };
 
-function makeApp(opts: { admin: boolean; email?: string }) {
+function makeApp(opts: { admin: boolean; email?: string; hooks?: typeof accountHooks | AccountHooks }) {
   const adminAccess: IAdminAccessService = {
     isAdmin: vi.fn(async () => opts.admin),
   };
@@ -53,7 +54,7 @@ function makeApp(opts: { admin: boolean; email?: string }) {
     req.userEmail = opts.email ?? 'caller@example.com';
     next();
   });
-  app.use('/api', createAccountRoutes(authService, adminAccess, accountErasure, accountHooks));
+  app.use('/api', createAccountRoutes(authService, adminAccess, accountErasure, opts.hooks ?? accountHooks));
   return app;
 }
 
@@ -487,9 +488,9 @@ describe('account routes — removing the erased address from access files', () 
 
   it('the guards refuse up front: nothing is erased', async () => {
     const { app, accessRemoval } = makeRemovalApp();
-    const { WorkflowDomainError } = await import('../../../shared/domain-errors.js');
+    const { VersionControlDomainError } = await import('../../../shared/domain-errors.js');
     accessRemoval.assertRemovable.mockRejectedValueOnce(
-      new WorkflowDomainError('This is the last Admin; the Admin role must keep at least one direct email member.', 409),
+      new VersionControlDomainError('This is the last Admin; the Admin role must keep at least one direct email member.', 409),
     );
     const base = await listen(app);
     const res = await fetch(`${base}/api/admin/accounts/u2?removeFromAccess=1`, { method: 'DELETE' });
@@ -503,12 +504,73 @@ describe('account routes — removing the erased address from access files', () 
 describe('account routes — switching an account off and on', () => {
   const post = (base: string, path: string) => fetch(`${base}/api/admin/accounts/${path}`, { method: 'POST' });
 
-  it('switches another account off and back on', async () => {
+  it('switches another account off and back on, telling the deactivated listeners and waiting for them', async () => {
+    // The listeners settle when the test says: the answer must not come first.
+    let settle!: () => void;
+    const settled = new Promise<string[]>((resolve) => {
+      settle = () => resolve(['managed-connections']);
+    });
+    vi.mocked(accountHooks.runAccountDeactivated).mockReset().mockReturnValueOnce(settled);
     const base = await listen(makeApp({ admin: true }));
-    expect((await post(base, 'u2/deactivate')).status).toBe(204);
+    let answered = false;
+    const pending = post(base, 'u2/deactivate').then((res) => {
+      answered = true;
+      return res;
+    });
+    await vi.waitFor(() => expect(accountHooks.runAccountDeactivated).toHaveBeenCalledTimes(1));
+    expect(accountHooks.runAccountDeactivated).toHaveBeenCalledWith({ userId: 'u2', email: 'u2@example.com' });
+    expect(answered).toBe(false);
+    settle();
+    expect((await pending).status).toBe(204);
     expect(authService.deactivate).toHaveBeenCalledWith('u2');
+    vi.mocked(accountHooks.runAccountDeactivated).mockResolvedValue([]);
     expect((await post(base, 'u2/reactivate')).status).toBe(204);
     expect(authService.reactivate).toHaveBeenCalledWith('u2');
+  });
+
+  it('reads the address again after the switch when the first read failed, and tells the listeners \'\' only when both do', async () => {
+    vi.mocked(accountHooks.runAccountDeactivated).mockReset().mockResolvedValue([]);
+    const base = await listen(makeApp({ admin: true }));
+    // First read away, second one back: the listeners get the address.
+    vi.mocked(authService.getUserById).mockRejectedValueOnce(new Error('users table is away'));
+    expect((await post(base, 'u2/deactivate')).status).toBe(204);
+    expect(accountHooks.runAccountDeactivated).toHaveBeenLastCalledWith({ userId: 'u2', email: 'u2@example.com' });
+    // Both reads away: the switch-off still happens, the listeners get ''.
+    vi.mocked(authService.getUserById)
+      .mockRejectedValueOnce(new Error('users table is away'))
+      .mockRejectedValueOnce(new Error('users table is still away'));
+    expect((await post(base, 'u2/deactivate')).status).toBe(204);
+    expect(accountHooks.runAccountDeactivated).toHaveBeenLastCalledWith({ userId: 'u2', email: '' });
+  });
+
+  it('a deactivation listener that throws is logged and skipped: the later listeners run and the switch-off still answers 204', async () => {
+    // The real seam, not the mock: the account is off whether or not a
+    // listener cleaned up after it, and one that fails must not keep the next
+    // from running or turn the admin's answer into an error.
+    const hooks = new AccountHooks();
+    const ran: string[] = [];
+    hooks.onAccountDeactivated(async () => {
+      ran.push('first');
+      throw new Error('the broker is down');
+    });
+    hooks.onAccountDeactivated(async (event) => {
+      ran.push(`second:${event.userId}`);
+      return 'managed-connections';
+    });
+    // Logged, so a listener that let go of nothing is diagnosable from the
+    // server's log (the seam writes through the default logger, which prints
+    // to the console) — the same way the invite seam's failures are pinned.
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const base = await listen(makeApp({ admin: true, hooks }));
+      expect((await post(base, 'u2/deactivate')).status).toBe(204);
+      expect(authService.deactivate).toHaveBeenCalledWith('u2');
+      expect(ran).toEqual(['first', 'second:u2']);
+      const lines = logged.mock.calls.map((args) => args.map(String).join(' '));
+      expect(lines.some((l) => l.includes('an account-deactivated listener failed') && l.includes('the broker is down'))).toBe(true);
+    } finally {
+      logged.mockRestore();
+    }
   });
 
   it('refuses an admin switching off their own account, so an admin who can sign in always remains', async () => {
@@ -543,7 +605,7 @@ describe('account routes — switching an account off and on', () => {
 
   it('answers a switch lock that timed out with the 409 account-busy the lock promises, not a 500', async () => {
     vi.mocked(authService.deactivate).mockRejectedValueOnce(
-      new WorkflowDomainError('Another change to this account is still being saved; try again in a moment.', 409, {
+      new VersionControlDomainError('Another change to this account is still being saved; try again in a moment.', 409, {
         kind: 'account-busy',
       }),
     );

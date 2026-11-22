@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AuthUser } from '@bevel-software/platform-shared';
-import { FileLockService } from '../../workflow/file-lock.service.js';
-import { makeFakeLockDb, type FakeLockDb } from '../../workflow/__tests__/fake-file-lock-db.js';
+import { FileLockService } from '../../version-control/file-lock.service.js';
+import { makeFakeLockDb, type FakeLockDb } from '../../version-control/__tests__/fake-file-lock-db.js';
 import { createFileReaderRegistry } from '../../workspace/file-readers/file-reader.registry.js';
 import type { DocExtractOutcome, DocExtractService } from '../../workspace/file-readers/doc-extract.service.js';
 import { makeRolesYamlWriteValidator } from '../../access-model/roles-yaml-guard.js';
@@ -19,8 +19,8 @@ import { EmbedLockedError } from '../embed.errors.js';
  * shares the human's user id, and must not steal their edit). On a real boot
  * every Save from the embed answered 409 against the writer's own Edit lock.
  *
- * So the lock half of the workflow service here is the real `FileLockService`
- * over the in-memory `file_locks` table the workflow suites use — the
+ * So the lock half of the version-control service here is the real `FileLockService`
+ * over the in-memory `file_locks` table the version-control suites use — the
  * contention rules come from the code that enforces them.
  */
 
@@ -55,7 +55,7 @@ function build() {
   };
   // The lock verbs go straight to the real service; release drops the row as
   // the real `releaseLock` does once it has enqueued the commit.
-  const workflowService = {
+  const versionControlService = {
     getLock: vi.fn((id: string, branch: string, path: string) => locks.get(id, branch, path)),
     acquireLock: vi.fn((id: string, branch: string, path: string, user: AuthUser) =>
       locks.acquire(id, branch, path, user),
@@ -80,13 +80,13 @@ function build() {
       isEmailDomainAllowed: () => true,
       isActive: async () => true,
     } as never,
-    workflowService as never,
+    versionControlService as never,
     { remoteBranchExists: async () => false } as never,
     { getUserId: async () => null } as never,
     createFileReaderRegistry(noDocExtract()),
     makeRolesYamlWriteValidator(KB),
   );
-  return { service, workspaceService, workflowService };
+  return { service, workspaceService, versionControlService };
 }
 
 beforeEach(() => {

@@ -1,6 +1,6 @@
 import { useContext, useEffect, useState, useSyncExternalStore } from 'react';
 import { AuthContext } from '../../auth';
-import { useEventBus } from '../../workflow';
+import { useEventBus } from '../../version-control';
 import { fetchAgentConnection, type AgentConnection } from '../services/agent-connection.api';
 
 /**

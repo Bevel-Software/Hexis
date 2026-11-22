@@ -6,7 +6,7 @@ import { formatRelativeTime } from '../../../lib/utils';
 import { MarkdownDiffViewer } from '../../review/components/MarkdownDiffViewer';
 import { HistoryVersionPreview } from './HistoryVersionPreview';
 import { friendlyGitError } from '../services/error-messages';
-import { useEventBus, canonicalizeWorkspaceId } from '../../workflow';
+import { useEventBus, canonicalizeWorkspaceId } from '../../version-control';
 import { useWorkspace } from '../../workspace';
 
 function shortSha(sha: string): string {

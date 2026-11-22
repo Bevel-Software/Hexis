@@ -368,7 +368,7 @@ export class McpServerEditService {
     // COMMIT must not — the pending-commit pipeline may already have created
     // a local commit before the push refused, and rewriting the working tree
     // to pre-edit bytes would leave it dirty AGAINST that commit, a state the
-    // workflow layer's own pull-rebase recovery then misreads. Commit-stage
+    // version-control layer's own pull-rebase recovery then misreads. Commit-stage
     // failures propagate as-is and the pipeline's recovery owns the cleanup.
     const [mcpBefore, manifestBefore] = await Promise.all([
       fs.readFile(mcpAbs, 'utf8').catch(() => null),

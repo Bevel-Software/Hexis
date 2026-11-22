@@ -38,9 +38,9 @@ vi.mock('../../../access/api', () => ({
 // real endpoints. In these tests we just need the acquire to succeed so the
 // save flow can finish; lock contention paths are exercised in lock-specific
 // tests, not here.
-vi.mock('../../../workflow/services/lock.api', async (importOriginal) => ({
+vi.mock('../../../version-control/services/lock.api', async (importOriginal) => ({
   // The sentences (SELF_HOLD_MESSAGE, EDITING_ENDED_MESSAGE) stay real.
-  ...(await importOriginal<typeof import('../../../workflow/services/lock.api')>()),
+  ...(await importOriginal<typeof import('../../../version-control/services/lock.api')>()),
   acquireLock: vi.fn(async () => ({
     acquired: true,
     lock: {
@@ -108,8 +108,8 @@ vi.mock('../../../access/components/ManageAccessDialog', () => ({
 // `recordActivity`, which has no other visible effect (it resets a timer), so
 // there is no way to assert the scroll→lock wiring without a spy on it.
 const lockActivity = vi.hoisted(() => ({ recordActivity: vi.fn() }));
-vi.mock('../../../workflow/hooks/useFileLock', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../../../workflow/hooks/useFileLock')>();
+vi.mock('../../../version-control/hooks/useFileLock', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../version-control/hooks/useFileLock')>();
   const { useCallback } = await import('react');
   return {
     ...actual,
@@ -148,7 +148,7 @@ import {
   releaseLock as releaseLockMock,
   LockApiError,
   SELF_HOLD_MESSAGE,
-} from '../../../workflow/services/lock.api';
+} from '../../../version-control/services/lock.api';
 import { WorkspaceContext, type WorkspaceContextValue } from '../../state/workspace.context';
 import { GitContext, type GitContextValue } from '../../../git/state/git.context';
 import { ReviewContext, type ReviewContextValue } from '../../../review/state/review.context';

@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from 'react';
 import { Badge, Button, ListRow, TextField } from '../../../../shared/components';
-import { startToolOAuth } from '../../../secrets-vault';
+import { canStartSignIn, startToolOAuth } from '../../../secrets-vault';
 import {
   deleteAdminVar,
   setAdminVar,
@@ -29,10 +29,18 @@ import { navigateExternal } from '../../utils/navigate-external';
  *  - Every OTHER sign-in offers its owner the client secret in every state of
  *    the row: "Replace client secret" while one is stored, "Set client secret"
  *    while none is. The secret belongs to the tool, not to the caller's own
- *    sign-in, so whether the owner is signed in has no say in it.
+ *    sign-in, so whether the owner is signed in has no say in it. A MANAGED
+ *    sign-in is the second exception: its client is the broker's, so the row
+ *    offers no secret at all — an owner's own app is brought on the Connect
+ *    page's card, where the client id is asked for beside it.
  *  - Whose problem is it? A user-scope gap is the caller's to fix and always
  *    shows an action. An admin-scope gap is the OWNER's, so a non-writer sees a
- *    chip that explains the state and no button they can't act on.
+ *    chip that explains the state and no button they can't act on. A managed
+ *    WORKSPACE connection (an `admin` variable with a sign-in) is an owner's
+ *    gap in the same way: a reader sees its state and no control.
+ *  - A start is offered only where it can be opened: a managed sign-in follows
+ *    `canStartSignIn` (the broker, or an owner's own app on a personal
+ *    sign-in), the same rule the Connect page's card applies.
  *
  * Secret values are write-only throughout: `type="password"`, held in local
  * state, cleared on save or cancel. Nothing here ever reads a stored value.
@@ -129,20 +137,45 @@ export function ToolVarRow({
   let description: string;
 
   if (variable.oauth) {
-    // An OAuth client secret only exists for a MANUALLY declared provider.
-    const mayEditClientSecret = canWrite && setupKind !== 'oauth-auto';
+    // An OAuth client secret only exists for a MANUALLY declared provider. A
+    // MANAGED sign-in has none to set here either: its client is the broker's,
+    // and an owner who brings the deployment's own app does so on the Connect
+    // page's card, where the client id is asked for beside the secret.
+    const mayEditClientSecret = canWrite && setupKind !== 'oauth-auto' && !variable.managed;
+    // A WORKSPACE connection (a managed sign-in on an `admin` variable) is one
+    // connection for everyone, made and remade by a writer of the tool: a
+    // reader sees its state and no control the server would refuse.
+    const workspaceConnection = variable.managed != null && variable.scope === 'admin';
+    const mayAct = !workspaceConnection || canWrite;
+    const whose = workspaceConnection ? 'One connection for the whole workspace, made by a tool owner' : 'Each person sets their own';
+    // Whether a sign-in can be STARTED from this row. A managed one answers
+    // to the same rule as the Connect page's card (`canStartSignIn`: the
+    // broker, or an owner's own app on a personal sign-in) and to who may
+    // make it; an ordinary one always offers its caller the flow.
+    const mayStart = variable.managed ? canStartSignIn({ managed: variable.managed }) && mayAct : true;
+    // The owner's half is done when a client secret is stored on a row of the
+    // OAuth kind (a key left from when the variable was static is not one) —
+    // or, for a MANAGED sign-in, when a start can be opened from here: there
+    // is no secret to store for the broker's app.
+    const ownerReady = variable.managed ? mayStart : variable.adminConfigured && variable.adminKind === 'oauth';
 
     if (variable.authorized && !variable.needsReauth) {
-      description = 'Each person sets their own';
+      description = whose;
       // Connected is not final: a provider can widen what it grants after the
       // fact (HubSpot's MCP tools do, and answer REQUIRES_REAUTHORIZATION
       // until the user consents again), a grant can be revoked provider-side,
       // or the owner can rotate the client. The caller needs a way back into
-      // consent that doesn't wait for the scope check to notice.
+      // consent that doesn't wait for the scope check to notice. A stored
+      // managed token keeps working while the broker is away; the way back
+      // into consent does not, so the button waits with it.
+      if (mayStart) {
+        meta.push(
+          <Button key="reconnect" size="sm" variant="quiet" disabled={busy} onClick={() => void signIn()}>
+            Reconnect
+          </Button>,
+        );
+      }
       meta.push(
-        <Button key="reconnect" size="sm" variant="quiet" disabled={busy} onClick={() => void signIn()}>
-          Reconnect
-        </Button>,
         // "Signed in", not "Connected": at ROW level all we know is that a token
         // exists. Whether it still works is the tool-level health line's claim,
         // and it is the only place in the UI allowed to say "Connected" — one
@@ -152,14 +185,20 @@ export function ToolVarRow({
         </Badge>,
       );
     } else if (variable.authorized) {
-      description = 'Each person sets their own';
+      description = whose;
       meta.push(
-        <Button key="reauth" size="sm" disabled={busy} onClick={() => void signIn()}>
-          Sign in again
-        </Button>,
+        mayStart ? (
+          <Button key="reauth" size="sm" disabled={busy} onClick={() => void signIn()}>
+            Sign in again
+          </Button>
+        ) : (
+          <Badge key="chip" tone="wait">
+            Needs reconnect
+          </Badge>
+        ),
       );
-    } else if (variable.adminConfigured) {
-      description = 'Each person sets their own';
+    } else if (ownerReady) {
+      description = whose;
       meta.push(
         <Button key="signin" size="sm" disabled={busy} onClick={() => void signIn()}>
           Sign in
@@ -167,9 +206,37 @@ export function ToolVarRow({
       );
     } else {
       // The owner hasn't declared the provider (or hasn't set its secret), so
-      // there is nothing for anyone to sign in to yet.
-      description = "The tool owner hasn't finished the sign-in setup yet.";
-      if (!mayEditClientSecret) {
+      // there is nothing for anyone to sign in to yet. For a managed sign-in
+      // the missing half is the broker (the admin's), an own app pinned on a
+      // workspace connection (the owner's to remove), or the connection is a
+      // writer's to make: the row says which.
+      const pinnedOnWorkspace = variable.managed?.ownApp === true && workspaceConnection;
+      description = !variable.managed
+        ? "The tool owner hasn't finished the sign-in setup yet."
+        : !mayAct
+          ? whose
+          : pinnedOnWorkspace
+            ? 'This workspace connection has your own OAuth app pinned, which a workspace connection cannot use.'
+            : 'This deployment is not connected to a connector broker yet. Ask your admin.';
+      // The one way out of a pinned app on a workspace connection is to
+      // remove it, and this row is the only place that shows the owner it is
+      // there: the control sits beside the words.
+      if (pinnedOnWorkspace && mayAct) {
+        meta.push(
+          <Button
+            key="unpin"
+            size="sm"
+            variant="quiet"
+            disabled={busy}
+            onClick={() => void run(() => deleteAdminVar(slug, variable.name))}
+          >
+            Remove our own app
+          </Button>,
+        );
+      }
+      // "Not set" is the chip for a row with nothing behind it; a pinned app
+      // is something, and the words beside it already say what.
+      if (!mayEditClientSecret && !pinnedOnWorkspace) {
         meta.push(
           <Badge key="chip" tone="neutral">
             Not set
