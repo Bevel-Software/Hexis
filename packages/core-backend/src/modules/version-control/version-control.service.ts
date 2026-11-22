@@ -107,7 +107,7 @@ import {
   VersionControlValidationError,
 } from '../../shared/domain-errors.js';
 import { RECOVERY_BOT_EMAIL, RECOVERY_BOT_NAME } from './recovery-bot.js';
-import { AccessDeniedError, EVERYONE_CANONICAL, PushAccessRefusedError, pushAccessRefusalSentence, type IChangeReadGate } from '../access-model/index.js';
+import { AccessDeniedError, BotChangesAccessError, EVERYONE_CANONICAL, PushAccessRefusedError, changesOwnAccessLines, hasAccessFrontmatterExtension, isAccessFile, pushAccessRefusalSentence, type IChangeReadGate } from '../access-model/index.js';
 import { printable } from '../../shared/printable.js';
 
 const execFileAsync = promisify(execFile);
@@ -1479,6 +1479,14 @@ export class VersionControlService implements IVersionControlService {
     // and `commitFileWhileLocked` / `releaseLock` refuse to treat a
     // coordination hold as write possession (see those methods).
     if (!opts?.coordination) {
+      // A bot never changes access, on any branch: every write acquires this
+      // lock first, so a bot is refused an access file here whatever surface
+      // it writes through. (A file's own access lines are content, judged by
+      // the agent's pre-disk check and by the merge.)
+      if (this.accessControl.isBot(user.email)) {
+        const rel = targetPath.startsWith(`${this.kbDirName}/`) ? targetPath.slice(this.kbDirName.length + 1) : targetPath;
+        if (isAccessFile(rel)) throw new BotChangesAccessError(rel, 'file');
+      }
       let via: 'granted' | 'restore' = 'granted';
       if (this.kb.isProtectedBranch(branch)) {
         // `assertCanWriteAtPath` throws AccessDeniedError on denial, with the
@@ -4291,6 +4299,11 @@ export class VersionControlService implements IVersionControlService {
     // App roles surface (itself admin-gated). The rest of the CR merges
     // normally. Best-effort by design is NOT acceptable here — a failure to
     // neutralise must abort the merge, never fall through.
+    //
+    // A bot may merge where it is granted, but never a change to access: the
+    // request is refused whole when it touches an access file or a file's own
+    // access lines (`modules/bots`). Asked before anything is rewritten.
+    if (this.accessControl.isBot(user.email)) await this.assertBotMergeLeavesAccess(number, baseBranch);
     const preserved = await this.preserveBaseRolesYaml(number, user, baseBranch);
 
     // When preservation pushed a restore commit, the source-branch head advanced,
@@ -4809,6 +4822,34 @@ export class VersionControlService implements IVersionControlService {
    * {@link RolesYamlPreservationError}, aborting the merge. We must never let a
    * roles.yaml change slip through because the neutralisation step failed.
    */
+  /**
+   * Refuse a BOT's merge of change request `number` when it changes access:
+   * an access file among its changed paths, or a changed file whose own
+   * access lines differ between the base and the request's head. Read from
+   * the published refs, fetched first; a request that cannot be read is
+   * refused rather than merged unchecked.
+   */
+  private async assertBotMergeLeavesAccess(number: number, baseBranch: string): Promise<void> {
+    const summary = await this.prs.getPr(number);
+    if (!summary || summary.base !== baseBranch) {
+      throw new VersionControlDomainError(`Change request #${number} could not be read, so a bot may not merge it.`, 409);
+    }
+    const ws = await this.workspaceService.getOrCreateForBranch(summary.branch);
+    await this.git.fetch(ws.id);
+    const paths = await this.git.changedPathsForPr(ws.id, summary.base, summary.branch);
+    for (const p of paths) {
+      if (isAccessFile(p)) throw new BotChangesAccessError(p, 'file');
+    }
+    for (const p of paths) {
+      if (!p.endsWith('.md') && !hasAccessFrontmatterExtension(p)) continue;
+      const [before, after] = await Promise.all([
+        this.git.readFileAtRef(ws.id, `origin/${summary.base}`, p),
+        this.git.readFileAtRef(ws.id, `origin/${summary.branch}`, p),
+      ]);
+      if (changesOwnAccessLines(before, after)) throw new BotChangesAccessError(p, 'lines');
+    }
+  }
+
   private async preserveBaseRolesYaml(
     number: number,
     user: AuthUser,

@@ -516,6 +516,13 @@ export class RolesAdminService {
     opts?: { aroundWrite?: (write: () => Promise<void>) => Promise<void> },
   ): Promise<RoleRosterEntry[]> {
     this.assertNotFixedAdmin(canonical, email);
+    // A bot holds no role, Admin least of all: it is granted by its address
+    // and through the groups it is in (`modules/bots`).
+    if (this.accessControl.isBot(email)) {
+      throw new RolesAdminError('A bot cannot hold a role. Grant it access by its address, or add it to a group.', 422, {
+        kind: 'bot-cannot-hold-role',
+      });
+    }
     await this.runEdit(actor, (text) => editAddMember(this.withDeclaredRole(text, canonical), canonical, email), opts?.aroundWrite);
     return this.getRoster(actor.email);
   }

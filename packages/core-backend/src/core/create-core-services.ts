@@ -930,6 +930,7 @@ export async function createCoreServices(
       loginPasswordEnabled: config.loginPasswordEnabled,
     },
     ports.accountAdmission,
+    botAddresses,
   );
   const authMiddleware = createAuthMiddleware(authService);
   // Who tells an invited person: the composition root of a distribution
@@ -1577,6 +1578,7 @@ export async function createCoreServices(
     kbDirName: kbDirName,
     creatorAccess,
     loadActiveGroups,
+    isBot: (email) => accessControl.isBot(email),
   });
   const writeAccess = ports.writeAccess ?? alwaysWritable;
   // The branch every tool call runs on is resolved by the handler, before the

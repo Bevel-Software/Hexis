@@ -2504,6 +2504,10 @@ export class AccessControlService implements IAccessControl {
     return eligibleHoldersResolved(loaded.model, 'write', relativePath, own);
   }
 
+  isBot(email: string): boolean {
+    return this.bots.isBot(canonicalEmail(email));
+  }
+
   async holdsAdminRootWrite(workspaceId: string, userEmail: string): Promise<boolean> {
     const model = await this.loadModel(workspaceId);
     return isAdminEmail(model, canonicalEmail(userEmail));

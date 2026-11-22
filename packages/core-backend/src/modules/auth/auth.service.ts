@@ -66,6 +66,24 @@ const SYSTEM_ACCOUNT_PASSWORD_REFUSAL = 'System accounts cannot be given a passw
 const ENV_ADMIN_PASSWORD_REFUSAL =
   "This account's password is set in the deployment environment and cannot be changed here";
 
+/**
+ * What every path that would make, invite, sign in or sync a PERSON at an
+ * address that is a bot's (or at the bots' domain) is told. A bot is an
+ * identity of its own (`modules/bots`): it never signs in, holds no session,
+ * has no password, is never invited and is never mailed.
+ */
+export const BOT_ADDRESS_REFUSAL = 'This address belongs to a bot. Bots cannot sign in, be invited or be given a password.';
+
+/** Which addresses are bots', as the auth service asks it. */
+export interface BotAddressCheck {
+  /** Whether `email` (canonical) is a bot's address. */
+  isBot(email: string): boolean;
+  /** The bots' domain in effect; an address at it can never be a person's. */
+  domain(): string;
+}
+
+const NO_BOT_ADDRESSES: BotAddressCheck = { isBot: () => false, domain: () => '' };
+
 /** What an admin is told when they try to switch an owner off. */
 export const OWNER_SWITCH_OFF_REFUSAL = "The owner can't be switched off.";
 
@@ -183,7 +201,28 @@ export class AuthService implements IAccountSwitchGuard {
      * Core admits everyone; a host that sells seats answers from its plan.
      */
     private readonly admission: IAccountAdmission = admitEveryone,
+    /**
+     * Which addresses are bots' — refused on every path that signs in,
+     * makes, invites or syncs a person. Defaulted for the many fixtures that
+     * construct this service without bots.
+     */
+    private readonly bots: BotAddressCheck = NO_BOT_ADDRESSES,
   ) {}
+
+  /**
+   * Whether `normalizedEmail` may never be a person's: a bot's address, or
+   * any address at the bots' domain.
+   */
+  private isBotAddress(normalizedEmail: string): boolean {
+    if (this.bots.isBot(normalizedEmail)) return true;
+    const domain = this.bots.domain();
+    return domain !== '' && normalizedEmail.endsWith(`@${domain}`);
+  }
+
+  /** Refuse to make, invite, sign in or sync a person at a bot's address. */
+  private assertNotBotAddress(normalizedEmail: string): void {
+    if (this.isBotAddress(normalizedEmail)) throw new AccountChangeRefusedError(BOT_ADDRESS_REFUSAL);
+  }
 
   /**
    * Ask the admission port before an account is CREATED: an address that
@@ -310,7 +349,9 @@ export class AuthService implements IAccountSwitchGuard {
     // password and can't be enumerated via response timing.
     const stored = user?.passwordHash ?? (await decoyHash());
     const matches = await verifyPassword(provided, stored);
-    if (!user?.passwordHash || !matches) {
+    // A bot's row never signs in, whatever it carries: the same answer as a
+    // wrong password, so the address's being a bot's is not disclosed either.
+    if (!user?.passwordHash || !matches || user.botId !== null) {
       throw new Error('Invalid credentials');
     }
     // Only now, with the password proven: telling a stranger that an address
@@ -344,6 +385,9 @@ export class AuthService implements IAccountSwitchGuard {
     if (!EMAIL_REGEX.test(normalizedEmail)) {
       throw new Error('Sign-in returned an invalid email');
     }
+    // An identity provider never presents a bot: an address that is a bot's,
+    // or at the bots' domain, is refused before any row is made or read.
+    this.assertNotBotAddress(normalizedEmail);
     if (!opts.admittedByProvider) this.assertAllowedDomain(normalizedEmail);
     await this.assertAdmitted(normalizedEmail, 'sso');
     const displayName = (name ?? '').trim() || normalizedEmail.split('@')[0] || normalizedEmail;
@@ -384,6 +428,7 @@ export class AuthService implements IAccountSwitchGuard {
     if (!EMAIL_REGEX.test(normalizedEmail)) {
       throw new Error('Invalid email');
     }
+    this.assertNotBotAddress(normalizedEmail);
     const suppliedName = (name ?? '').trim();
     const displayName = suppliedName || normalizedEmail.split('@')[0] || normalizedEmail;
     if (!password) return (await this.createAccountWithoutPassword(email, name)).user;
@@ -434,6 +479,7 @@ export class AuthService implements IAccountSwitchGuard {
     if (!EMAIL_REGEX.test(normalizedEmail)) {
       throw new Error('Invalid email');
     }
+    this.assertNotBotAddress(normalizedEmail);
     const suppliedName = (name ?? '').trim();
     const displayName = suppliedName || normalizedEmail.split('@')[0] || normalizedEmail;
     await this.assertAdmitted(normalizedEmail, 'admin-create');
@@ -474,6 +520,7 @@ export class AuthService implements IAccountSwitchGuard {
       throw new Error('Invalid email');
     }
     this.assertNotSystemAccount(normalizedEmail);
+    this.assertNotBotAddress(normalizedEmail);
     if (this.isEnvAdminEmail(normalizedEmail)) {
       const [existing] = await this.db.select().from(users).where(eq(users.emailBidx, normalizedEmail)).limit(1);
       if (existing) {
@@ -650,6 +697,7 @@ export class AuthService implements IAccountSwitchGuard {
     // Before the policy check, so the deployment admin is told the real reason
     // rather than being sent to fix a password that would be refused anyway.
     this.assertNotSystemAccount(user.email);
+    if (user.botId !== null) throw new PasswordRefusedError(BOT_ADDRESS_REFUSAL);
     if (this.isEnvAdminEmail(user.email)) {
       throw new PasswordRefusedError(ENV_ADMIN_PASSWORD_REFUSAL);
     }
@@ -699,7 +747,9 @@ export class AuthService implements IAccountSwitchGuard {
   > {
     // Sorted in-process: `email` is ciphertext in the database, so ORDER BY
     // would sort by IV noise. The table is one row per team member.
-    const rows = await this.db.select().from(users);
+    // People only: a bot's row is an identity of its own, never a person and
+    // never a seat (`modules/bots`), so it is not an account here.
+    const rows = (await this.db.select().from(users)).filter((row) => row.botId === null);
     return rows
       .map((row) => {
         const isEnvAdmin = this.reportsAsEnvAdmin(row.email);
@@ -757,6 +807,7 @@ export class AuthService implements IAccountSwitchGuard {
   ): Promise<{ id: string; email: string; name: string } | null> {
     const normalizedEmail = canonicalEmail(email ?? '');
     if (!EMAIL_REGEX.test(normalizedEmail)) return null;
+    this.assertNotBotAddress(normalizedEmail);
     await this.assertAdmitted(normalizedEmail, 'embed');
     const displayName = (name ?? '').trim() || normalizedEmail.split('@')[0] || normalizedEmail;
     const user = await this.clearOwnerSwitchOff(await this.upsertUserByEmail(normalizedEmail, displayName));
@@ -807,7 +858,7 @@ export class AuthService implements IAccountSwitchGuard {
    */
   async resolveSession(token: string): Promise<{ userId: string; email: string }> {
     const { sessionVersion, ...claim } = this.decodeSession(token);
-    let account: { active: boolean; sessionVersion: number };
+    let account: { active: boolean; sessionVersion: number; bot: boolean };
     try {
       // Read fresh, never from the cache: a password changed on another
       // replica must end this token at its very next request, and only the
@@ -819,11 +870,15 @@ export class AuthService implements IAccountSwitchGuard {
       throw new AuthBackendError(err);
     }
     if (!account.active) throw new AccountDeactivatedError();
+    // A bot holds no session: no sign-in mints one, and a token naming a
+    // bot's row (forged with the secret, or minted by a path that missed the
+    // refusal) is not one either.
+    if (account.bot) throw new SessionEndedError();
     if (sessionVersion !== account.sessionVersion) throw new SessionEndedError();
     return claim;
   }
 
-  private readonly activeCache = new Map<string, { active: boolean; sessionVersion: number; at: number }>();
+  private readonly activeCache = new Map<string, { active: boolean; sessionVersion: number; bot: boolean; at: number }>();
 
   /**
    * Whether the account behind a credential is on: it exists and no admin
@@ -856,7 +911,7 @@ export class AuthService implements IAccountSwitchGuard {
   private async accountState(
     userId: string,
     { fresh = false }: { fresh?: boolean } = {},
-  ): Promise<{ active: boolean; sessionVersion: number }> {
+  ): Promise<{ active: boolean; sessionVersion: number; bot: boolean }> {
     const now = Date.now();
     const hit = this.activeCache.get(userId);
     if (!fresh && hit && now - hit.at < ACTIVE_CACHE_MS) return hit;
@@ -866,13 +921,14 @@ export class AuthService implements IAccountSwitchGuard {
         email: users.email,
         deactivatedAt: users.deactivatedAt,
         sessionVersion: users.sessionVersion,
+        botId: users.botId,
       })
       .from(users)
       .where(eq(users.id, userId))
       .limit(1);
     const row = found && (await this.clearOwnerSwitchOff(found));
     const active = row !== undefined && (!row.deactivatedAt || this.isEnvAdminEmail(row.email ?? ''));
-    const entry = { active, sessionVersion: row?.sessionVersion ?? 0, at: now };
+    const entry = { active, sessionVersion: row?.sessionVersion ?? 0, bot: row?.botId != null, at: now };
     this.activeCache.set(userId, entry);
     return entry;
   }
@@ -980,10 +1036,12 @@ export class AuthService implements IAccountSwitchGuard {
     const result = new Map<string, { id: string; email: string; name: string }>();
     const canonical = [...new Set(emails.map((e) => canonicalEmail(e)).filter(Boolean))];
     if (canonical.length === 0) return result;
+    // Bots are left out with the switched-off: nothing is ever sent to a
+    // bot's address, and a bot's commit is judged by its pusher's access.
     const rows = await this.db
       .select({ id: users.id, email: users.email, name: users.name })
       .from(users)
-      .where(and(inArray(users.emailBidx, canonical), isNull(users.deactivatedAt)));
+      .where(and(inArray(users.emailBidx, canonical), isNull(users.deactivatedAt), isNull(users.botId)));
     for (const row of rows) result.set(canonicalEmail(row.email), { id: row.id, email: row.email, name: row.name });
     return result;
   }
