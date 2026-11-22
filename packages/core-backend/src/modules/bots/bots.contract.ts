@@ -103,12 +103,15 @@ export type BotsTx = Parameters<Parameters<Database['transaction']>[0]>[0];
 
 /**
  * What else records a bot by its address, moved with its row when the bots'
- * domain changes (the change-request module answers it): the approvals the
- * bot made and the change requests it authored or made. Called in the
- * transaction that re-addresses the row, so the row and what names it never
- * disagree, and a failure leaves both at the old address.
+ * domain changes (version control answers it): the approvals, change
+ * requests, merge attempts and queued saves that name it. In the
+ * transaction that re-addresses the rows, in this order: `holdRecordWriters`
+ * once, before any row is touched; then, per bot, its row and
+ * `readdressIdentity`. So the rows and what names them never disagree, and a
+ * failure leaves both at the old address.
  */
 export interface IRecordedIdentity {
+  holdRecordWriters(tx: BotsTx): Promise<void>;
   readdressIdentity(tx: BotsTx, from: string, to: string): Promise<void>;
 }
 

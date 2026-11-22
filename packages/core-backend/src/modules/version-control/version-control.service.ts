@@ -91,7 +91,7 @@ import {
 } from './change-request-hooks.js';
 import { WorkspaceMutex, assertValidBranchName } from '../kb-fs/index.js';
 import { canonicalEmail, hashEmail } from '../../shared/email-identity.js';
-import { madeByColumns } from './made-by.js';
+import { madeByColumns, writeNamingActor } from './made-by.js';
 import {
   BranchAuthorshipError,
   BranchDeleteBlockedError,
@@ -2523,22 +2523,26 @@ export class VersionControlService implements IVersionControlService {
 
     let prNumber: number;
     try {
-      const [row] = await this.db
-        .insert(changeRequests)
-        .values({
-          sourceBranch: input.sourceBranch,
-          targetBranch: input.targetBranch,
-          title: input.title.trim(),
-          body: input.description?.trim() ?? '',
-          authorEmail: canonicalEmail(user.email),
-          authorEmailBidx: user.email,
-          authorName: user.name,
-          // A bot opening it: the person behind the bot is in its history too.
-          ...madeByColumns(user.madeBy),
-          accessRequestLevel: input.accessRequest?.level ?? null,
-          accessRequestNote: note ? note : null,
-        })
-        .returning({ number: changeRequests.number });
+      // The author (`writeNamingActor`): a bot at the address its row has now,
+      // which may have moved with a domain change since this call resolved it.
+      const [row] = await writeNamingActor(this.db, user, async (q, author) =>
+        q
+          .insert(changeRequests)
+          .values({
+            sourceBranch: input.sourceBranch,
+            targetBranch: input.targetBranch,
+            title: input.title.trim(),
+            body: input.description?.trim() ?? '',
+            authorEmail: author,
+            authorEmailBidx: author,
+            authorName: user.name,
+            // A bot opening it: the person behind the bot is in its history too.
+            ...madeByColumns(user.madeBy),
+            accessRequestLevel: input.accessRequest?.level ?? null,
+            accessRequestNote: note ? note : null,
+          })
+          .returning({ number: changeRequests.number })
+      );
       prNumber = row.number;
     } catch (err) {
       // The partial unique index (source, target WHERE state='open') is the
@@ -4764,27 +4768,30 @@ export class VersionControlService implements IVersionControlService {
   ): Promise<boolean> {
     if (this.applyAttempts.get(number) !== attempt) return false;
     const at = failure.at ?? new Date();
-    const updated = await this.db
-      .update(changeRequests)
-      .set({
-        applyFailureReason: sanitizeError(failure.reason, { maxLen: APPLY_FAILURE_MAX_LEN }),
-        applyFailureConflicts: failure.kind === 'conflicts',
-        applyFailureKind: failure.kind,
-        applyFailedAt: at,
-        applyFailedByName: user.name,
-        applyFailedByEmailBidx: user.email,
-      })
-      // The write itself refuses to go backwards: the attempt map above is an
-      // early exit within this process, but an older UPDATE still in flight (or
-      // one from another replica) must never replace a newer refusal.
-      .where(
-        and(
-          eq(changeRequests.number, number),
-          eq(changeRequests.state, 'open'),
-          or(isNull(changeRequests.applyFailedAt), lt(changeRequests.applyFailedAt, at)),
-        ),
-      )
-      .returning({ number: changeRequests.number });
+    // Who could not apply it (`writeNamingActor`: a bot at the address its row has now).
+    const updated = await writeNamingActor(this.db, user, async (q, by) =>
+      q
+        .update(changeRequests)
+        .set({
+          applyFailureReason: sanitizeError(failure.reason, { maxLen: APPLY_FAILURE_MAX_LEN }),
+          applyFailureConflicts: failure.kind === 'conflicts',
+          applyFailureKind: failure.kind,
+          applyFailedAt: at,
+          applyFailedByName: user.name,
+          applyFailedByEmailBidx: by,
+        })
+        // The write itself refuses to go backwards: the attempt map above is an
+        // early exit within this process, but an older UPDATE still in flight (or
+        // one from another replica) must never replace a newer refusal.
+        .where(
+          and(
+            eq(changeRequests.number, number),
+            eq(changeRequests.state, 'open'),
+            or(isNull(changeRequests.applyFailedAt), lt(changeRequests.applyFailedAt, at)),
+          ),
+        )
+        .returning({ number: changeRequests.number })
+    );
     if (updated.length === 0) return false;
     this.prs.invalidateDetailCache(number);
     this.events?.emit({ kind: 'change-request-apply-failed', number });

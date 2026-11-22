@@ -12,7 +12,7 @@ import type {
   PullRequestState,
 } from '@bevel-software/platform-shared';
 import type { Database } from '../../database/index.js';
-import { changeRequests, prFileApprovals, prMergeLog, users } from '../../database/index.js';
+import { changeRequests, pendingCommits, prFileApprovals, prMergeLog, users } from '../../database/index.js';
 import { AccessUnreadableError } from '../../access-model/index.js';
 import type { IAccessControl } from '../../access/index.js';
 import type { GitService } from '../git/git.service.js';
@@ -25,7 +25,7 @@ import {
 } from '../../../shared/domain-errors.js';
 import type { WorkspaceService } from '../../workspace/index.js';
 import { canonicalEmail, hashEmail } from '../../../shared/email-identity.js';
-import { madeByColumns } from '../made-by.js';
+import { madeByColumns, recordedAddress, writeNamingActor } from '../made-by.js';
 import type {
   IChangeRequestReviewService,
   MergeGateInput,
@@ -417,7 +417,6 @@ export class ChangeRequestReviewService implements IChangeRequestReviewService {
     );
     if (canApprove === null) throw new ApprovalAuthError('no-eligible-approvers');
     if (!canApprove) throw new ApprovalAuthError('not-eligible');
-    const callerEmail = canonicalEmail(user.email);
 
     // Unique index on (prNumber, path, approverEmail, headSha) makes this
     // idempotent — `onConflictDoNothing` turns a double-click into a no-op.
@@ -459,13 +458,16 @@ export class ChangeRequestReviewService implements IChangeRequestReviewService {
           throw new ApprovalAccountGoneError('The person who made this connection no longer has an account, so the bot cannot approve in their name.');
         }
       }
+      // The approver's address as their row has it now: a bot's may have
+      // moved with a domain change since this call resolved it.
+      const approver = await recordedAddress(tx, user);
       await tx
         .insert(prFileApprovals)
         .values({
           prNumber,
           path,
-          approverEmail: callerEmail,
-          approverEmailBidx: callerEmail,
+          approverEmail: approver,
+          approverEmailBidx: approver,
           approverName: user.name,
           // A bot approving: the person behind the bot is in the approval too.
           ...madeByColumns(user.madeBy),
@@ -508,11 +510,22 @@ export class ChangeRequestReviewService implements IChangeRequestReviewService {
   }
 
   /**
+   * See the interface. The lock `eraseApprover` takes, exclusively, for the
+   * rest of the caller's transaction.
+   */
+  async holdRecordWriters(tx: ApprovalTx): Promise<void> {
+    await takeEveryApprovalLock(tx);
+  }
+
+  /**
    * See the interface. Same lock, same order and same matching as
    * `eraseApprover`: the every-request approval lock first, so a copy of
    * approvals onto a new head that read a row a moment earlier cannot put the
    * old address back after this; rows found by the blind index of the old
-   * address, and the index rewritten with the address.
+   * address, and the index rewritten with the address. The columns are the
+   * ones account erasure rewrites, less the names (a domain change keeps the
+   * name): the `readdressIdentity` suite (`erase-approver.test.ts`) holds the
+   * list to the schema.
    */
   async readdressIdentity(tx: ApprovalTx, from: string, to: string): Promise<void> {
     const old = canonicalEmail(from);
@@ -523,10 +536,6 @@ export class ChangeRequestReviewService implements IChangeRequestReviewService {
       .update(prFileApprovals)
       .set({ approverEmail: now, approverEmailBidx: now })
       .where(eq(prFileApprovals.approverEmailBidx, old));
-    await tx
-      .update(prFileApprovals)
-      .set({ madeByEmail: now, madeByEmailBidx: now })
-      .where(eq(prFileApprovals.madeByEmailBidx, old));
     // Authorship: every check of "is this the author" (edit, cancel, the
     // author filter, `mine`, self-approval) hashes the stored address, so the
     // stored address is what moves.
@@ -534,10 +543,30 @@ export class ChangeRequestReviewService implements IChangeRequestReviewService {
       .update(changeRequests)
       .set({ authorEmail: now, authorEmailBidx: now })
       .where(eq(changeRequests.authorEmailBidx, old));
+    // The refusal a still-open request shows names who could not apply it.
     await tx
       .update(changeRequests)
-      .set({ madeByEmail: now, madeByEmailBidx: now })
-      .where(eq(changeRequests.madeByEmailBidx, old));
+      .set({ applyFailedByEmailBidx: now })
+      .where(eq(changeRequests.applyFailedByEmailBidx, old));
+    // Who started each merge attempt.
+    await tx
+      .update(prMergeLog)
+      .set({ triggeredByEmail: now, triggeredByEmailBidx: now })
+      .where(eq(prMergeLog.triggeredByEmailBidx, old));
+    // Saves queued and not yet committed: the commit is authored at the address
+    // the row has when the worker takes it.
+    await tx
+      .update(pendingCommits)
+      .set({ authorEmail: now, authorEmailBidx: now })
+      .where(eq(pendingCommits.authorEmailBidx, old));
+    // The person behind a bot's action, wherever it is recorded (a bot acting
+    // as another bot is that person).
+    for (const table of [prFileApprovals, changeRequests, prMergeLog, pendingCommits] as const) {
+      await tx
+        .update(table)
+        .set({ madeByEmail: now, madeByEmailBidx: now })
+        .where(eq(table.madeByEmailBidx, old));
+    }
   }
 
   /**
@@ -641,21 +670,23 @@ export class ChangeRequestReviewService implements IChangeRequestReviewService {
       ]);
     }
 
-    const triggeredByEmail = canonicalEmail(user.email);
-    const [logRow] = await this.db
-      .insert(prMergeLog)
-      .values({
-        prNumber,
-        triggeredByEmail,
-        triggeredByEmailBidx: triggeredByEmail,
-        triggeredByName: user.name,
-        // A bot merging: the person behind the bot is in the merge's history too.
-        ...madeByColumns(user.madeBy),
-        headShaAtMerge: headSha,
-        mergeMethod: MERGE_METHOD,
-        succeeded: false,
-      })
-      .returning({ id: prMergeLog.id });
+    // Who started it (`writeNamingActor`: a bot at the address its row has now).
+    const [logRow] = await writeNamingActor(this.db, user, async (q, triggeredByEmail) =>
+      q
+        .insert(prMergeLog)
+        .values({
+          prNumber,
+          triggeredByEmail,
+          triggeredByEmailBidx: triggeredByEmail,
+          triggeredByName: user.name,
+          // A bot merging: the person behind the bot is in the merge's history too.
+          ...madeByColumns(user.madeBy),
+          headShaAtMerge: headSha,
+          mergeMethod: MERGE_METHOD,
+          succeeded: false,
+        })
+        .returning({ id: prMergeLog.id })
+    );
 
     // Attribution lives on the merge commit itself (authored as the human
     // triggerer). When bypass is used, the bypassed warnings are appended so the
@@ -866,25 +897,27 @@ export class ChangeRequestReviewService implements IChangeRequestReviewService {
     // merge path logs its own: a log write that fails must not leave a request
     // recorded as merged with no attempt behind it, and failing here fails
     // before anything is committed, so the retry is clean (cubic P2 on #347).
-    const triggeredByEmail = canonicalEmail(user.email);
-    const [logRow] = await this.db
-      .insert(prMergeLog)
-      .values({
-        prNumber,
-        triggeredByEmail,
-        triggeredByEmailBidx: triggeredByEmail,
-        triggeredByName: user.name,
-        // A bot merging: the person behind the bot is in the merge's history too.
-        ...madeByColumns(user.madeBy),
-        headShaAtMerge: headSha,
-        mergeMethod: MERGE_METHOD,
-        succeeded: false,
-        // Not an error — the one thing a reader of this row has to know is that
-        // no merge was performed under it, because it had already been
-        // performed. Written at the start so it survives a crash in between.
-        error: `Finalizing an earlier attempt's merge commit ${own}; nothing is merged by this one.`,
-      })
-      .returning({ id: prMergeLog.id });
+    // Who started it (`writeNamingActor`: a bot at the address its row has now).
+    const [logRow] = await writeNamingActor(this.db, user, async (q, triggeredByEmail) =>
+      q
+        .insert(prMergeLog)
+        .values({
+          prNumber,
+          triggeredByEmail,
+          triggeredByEmailBidx: triggeredByEmail,
+          triggeredByName: user.name,
+          // A bot merging: the person behind the bot is in the merge's history too.
+          ...madeByColumns(user.madeBy),
+          headShaAtMerge: headSha,
+          mergeMethod: MERGE_METHOD,
+          succeeded: false,
+          // Not an error — the one thing a reader of this row has to know is that
+          // no merge was performed under it, because it had already been
+          // performed. Written at the start so it survives a crash in between.
+          error: `Finalizing an earlier attempt's merge commit ${own}; nothing is merged by this one.`,
+        })
+        .returning({ id: prMergeLog.id })
+    );
 
     // Same CAS as the merge path: a concurrent finalization wins and we say so
     // rather than overwriting its terminal state.
@@ -1129,8 +1162,6 @@ export class ChangeRequestReviewService implements IChangeRequestReviewService {
     assertValidPath(path);
     if (!headSha) throw new VersionControlValidationError('head sha is required');
 
-    const callerEmail = canonicalEmail(user.email);
-
     // Only revoke the caller's OWN approval — never someone else's. Filter on
     // (PR, path, approverEmail) without pinning the SHA so a user revoking
     // after a force-push can drop their stale row in one click.
@@ -1140,6 +1171,9 @@ export class ChangeRequestReviewService implements IChangeRequestReviewService {
     // the new one, and a delete that interleaved with that copy would be
     // undone by it — the revoked approval would come back at the new head.
     await this.withApprovalLock(prNumber, async (tx) => {
+      // Found at the address the caller's row has now, as the approval was
+      // recorded (`recordedAddress`).
+      const callerEmail = await recordedAddress(tx, user);
       await tx
         .delete(prFileApprovals)
         .where(

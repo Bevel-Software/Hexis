@@ -910,10 +910,11 @@ export async function createCoreServices(
     const state = row?.state;
     return state === 'open' || state === 'merged' || state === 'closed' ? state : null;
   }, {
-    // A bot's approvals and the requests it authored move with its row on a
+    // What version control records of a bot by its address moves with its row on a
     // domain change. The review service is built further down (it needs the
     // git service); this is called only by a domain change, long after this
     // function has returned, so it is always there by then.
+    holdRecordWriters: (tx) => changeRequestReviewService.holdRecordWriters(tx),
     readdressIdentity: (tx, from, to) => changeRequestReviewService.readdressIdentity(tx, from, to),
   });
   // The rows made so far. A bot the distribution names since the last boot

@@ -163,14 +163,31 @@ export interface IChangeRequestReviewService {
   eraseApprover(tx: ApprovalTx, email: string, erased: { email: string; name: string }): Promise<void>;
 
   /**
-   * Move everything a change request records under the address `from` to the
-   * address `to`, inside the caller's transaction (`tx`): the approvals made
-   * under it, as approver and as the person behind a bot's approval, and the
-   * requests it authored or made. A bots' domain change calls this for each
-   * bot in the transaction that re-addresses the bot's row, so the bot stays
-   * the author of its requests and its approvals keep counting at its new
-   * address. Takes the every-request approval lock first, as `eraseApprover`
-   * does, and for the same reason. A no-op when the addresses are the same.
+   * Hold off, for the rest of `tx`, every writer of this module that takes
+   * the approval lock: the every-request approval lock, exclusively. A bots'
+   * domain change calls this FIRST in its transaction, before it touches a
+   * bot's row: an approval reads its bot's row (`recordedAddress`) while it
+   * holds the approval lock, so a change that took the row first and the
+   * lock second could wait on an approval that waits on it.
+   */
+  holdRecordWriters(tx: ApprovalTx): Promise<void>;
+
+  /**
+   * Move every address this module records under `from` to `to`, inside the
+   * caller's transaction (`tx`): approvals (as approver and as the person
+   * behind a bot's approval), change requests (author, the person behind a
+   * bot's request, and who a refusal to apply names), merge attempts (who
+   * started one, and the person behind a bot's), and saves queued and not yet
+   * committed (author, and the person behind a bot's). The names stay as they
+   * are. A bots' domain change calls this for each bot after it re-addresses
+   * the bot's row, in the same transaction, so the bot stays the author of
+   * its requests and its approvals keep counting at its new address. A record
+   * a call writes later names the address the bot's row has then
+   * (`recordedAddress`), except a queued save, which keeps the address the
+   * call was made under: its commit is authored there, as a commit that
+   * landed a moment before the change is. Takes the every-request approval
+   * lock first, as `eraseApprover` does, and for the same reason. A no-op
+   * when the addresses are the same.
    */
   readdressIdentity(tx: ApprovalTx, from: string, to: string): Promise<void>;
 

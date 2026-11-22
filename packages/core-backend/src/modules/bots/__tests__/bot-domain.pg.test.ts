@@ -243,6 +243,10 @@ describe.skipIf(!PG_ADMIN_URL)('a domain change on a real Postgres: every bot na
   it('moves what names each bot with its row, from its stored address to its new one, and back when the settings cannot be recorded', async () => {
     const calls: string[] = [];
     const recorded = {
+      // Once per transaction, before any row is touched.
+      holdRecordWriters: vi.fn(async () => {
+        calls.push('hold');
+      }),
       readdressIdentity: vi.fn(async (_tx: unknown, from: string, to: string) => {
         calls.push(`${from} -> ${to}`);
       }),
@@ -251,7 +255,8 @@ describe.skipIf(!PG_ADMIN_URL)('a domain change on a real Postgres: every bot na
     await ok.load();
     const before = ok.domain();
     await ok.changeDomain(admin, 'bots-c.acme.com');
-    expect(calls.sort()).toEqual([`first@${before} -> first@bots-c.acme.com`, `second@${before} -> second@bots-c.acme.com`]);
+    expect(calls[0]).toBe('hold');
+    expect(calls.slice(1).sort()).toEqual([`first@${before} -> first@bots-c.acme.com`, `second@${before} -> second@bots-c.acme.com`]);
 
     calls.length = 0;
     const failing = {
@@ -260,19 +265,47 @@ describe.skipIf(!PG_ADMIN_URL)('a domain change on a real Postgres: every bot na
         throw new Error('settings store down');
       },
     };
-    const down = new BotService(db, failing as never, { definitions: async () => [def('first')], mayActAs: async () => true }, undefined, undefined, recorded);
+    const down = new BotService(db, failing as never, { definitions: async () => [def('first'), def('second')], mayActAs: async () => true }, undefined, undefined, recorded);
     await down.load();
+    const firstRow = (await db.select().from(users).where(eq(users.botId, 'first')))[0]!;
     await expect(down.changeDomain(admin, 'bots-d.acme.com')).rejects.toThrow('settings store down');
-    // There and back, in that order: the second transaction puts back what the first moved.
-    expect(calls.filter((c) => c.startsWith('first@'))).toEqual([
-      'first@bots-c.acme.com -> first@bots-d.acme.com',
-      'first@bots-d.acme.com -> first@bots-c.acme.com',
-    ]);
+    // There and back for EVERY bot: the first transaction moves each, the second puts each back.
+    expect(calls).toHaveLength(6);
+    expect(calls[0]).toBe('hold');
+    expect(calls.slice(1, 3).sort()).toEqual(['first@bots-c.acme.com -> first@bots-d.acme.com', 'second@bots-c.acme.com -> second@bots-d.acme.com']);
+    expect(calls[3]).toBe('hold');
+    expect(calls.slice(4).sort()).toEqual(['first@bots-d.acme.com -> first@bots-c.acme.com', 'second@bots-d.acme.com -> second@bots-c.acme.com']);
     expect(await emailOf('first')).toBe('first@bots-c.acme.com');
+    expect(await emailOf('second')).toBe('second@bots-c.acme.com');
+    // And what a connection resolves is back at the address the row has.
+    const resolved = await down.resolveConnection({ id: admin.id, email: admin.email }, { botUserId: firstRow.id, agentPath: null });
+    expect(resolved.kind === 'bot' ? resolved.actor.email : resolved.kind).toBe('first@bots-c.acme.com');
+  });
+
+  it('resolves a bot at its new address as soon as its row has moved, before the settings are written', async () => {
+    const seen: string[] = [];
+    let firstId = '';
+    const watching = {
+      resolve: (key: string) => store.resolve(key),
+      record: async (values: Record<string, string>, by: string) => {
+        if (values.botsDomain) {
+          const resolved = await service.resolveConnection({ id: admin.id, email: admin.email }, { botUserId: firstId, agentPath: null });
+          seen.push(resolved.kind === 'bot' ? resolved.actor.email : resolved.kind);
+        }
+        return store.record(values, by);
+      },
+    };
+    // Read by `watching` only once the change is under way.
+    const service = new BotService(db, watching as never, { definitions: async () => [def('first'), def('second')], mayActAs: async () => true });
+    await service.load();
+    firstId = (await db.select().from(users).where(eq(users.botId, 'first')))[0]!.id;
+    await service.changeDomain(admin, 'bots-f.acme.com');
+    expect(seen).toEqual(['first@bots-f.acme.com']);
   });
 
   it('leaves every row where it was when moving what names a bot fails, and changes no setting', async () => {
     const recorded = {
+      holdRecordWriters: vi.fn(async () => undefined),
       readdressIdentity: vi.fn(async (_tx: unknown, from: string) => {
         if (from.startsWith('second@')) throw new Error('approval lock timed out');
       }),

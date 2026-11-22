@@ -321,12 +321,15 @@ export class BotService implements IBots {
     // The rows first, in one transaction, and the settings only once they
     // are written: a failed transaction leaves both as they were. Settings
     // that cannot be recorded put the rows back, so the two never disagree.
-    // What names a bot by its address (its approvals, the requests it
-    // authored) moves in the same transaction as its row, and back with it.
+    // What names a bot by its address (see `IRecordedIdentity`) moves in the
+    // same transaction as its row, and back with it: the record writers are
+    // held off before any row is touched, then each row and what names it.
     const now = new Date();
-    const moves = [...this.rows.values()].map((row) => ({ id: row.id, from: row.email, to: botAddress(row.botId, domain) }));
+    const before = new Map(this.rows);
+    const moves = [...before.values()].map((row) => ({ id: row.id, from: row.email, to: botAddress(row.botId, domain) }));
     const readdress = (back: boolean) =>
       this.db.transaction(async (tx) => {
+        await this.recorded?.holdRecordWriters(tx);
         for (const move of moves) {
           const [from, to] = back ? [move.to, move.from] : [move.from, move.to];
           await tx.update(users).set({ email: to, emailBidx: to, updatedAt: now }).where(eq(users.id, move.id));
@@ -334,13 +337,20 @@ export class BotService implements IBots {
         }
       });
     await readdress(false);
+    // What a connection resolves from now on is the new address, the moment
+    // the rows say so, not once the settings below are written: the book
+    // takes the new domain, and the old one still counts (its rewrite is not
+    // open yet).
+    for (const row of before.values()) this.rows.set(row.botId, { ...row, email: botAddress(row.botId, domain) });
+    this.addresses.replace({ domain, botIds: [...this.rows.keys()], previousDomain: current });
     try {
       await this.settings.record({ botsDomain: domain, botsPreviousDomain: current, botsDomainChangeRequest: '0' }, by.id);
     } catch (err) {
       await readdress(true);
+      for (const [id, row] of before) this.rows.set(id, row);
+      await this.refreshAddresses();
       throw err;
     }
-    for (const row of this.rows.values()) this.rows.set(row.botId, { ...row, email: botAddress(row.botId, domain) });
     await this.refreshAddresses();
 
     let changeRequest: number | null = null;
