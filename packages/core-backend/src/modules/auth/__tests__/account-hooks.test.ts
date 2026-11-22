@@ -65,8 +65,10 @@ describe('AccountHooks: an account was invited', () => {
       expect(error).toHaveBeenCalledTimes(1);
       const logged = error.mock.calls[0]!.map((arg) => inspect(arg, { depth: 6 })).join(' ');
       expect(logged).toContain('an account-invited listener failed');
-      // Still diagnosable: the mailer's own words stay, only the secret goes.
-      expect(logged).toContain('550 rejected');
+      // Diagnosable by its shape (what failed, where), never by its words.
+      expect(logged).toContain('Error (message withheld)');
+      expect(logged).toContain('account-hooks.test.ts:'); // a stack frame: where it failed
+      expect(logged).not.toContain('550 rejected');
       expect(logged).not.toContain(password);
       expect(logged).not.toContain(password.slice(0, 12));
     } finally {
@@ -91,14 +93,36 @@ describe('AccountHooks: an account was invited', () => {
       expect(await hooks.runAccountInvited({ ...EVENT, startingPassword: password })).toEqual([]);
       expect(error).toHaveBeenCalledTimes(1);
       const logged = error.mock.calls[0]!.map((arg) => inspect(arg, { depth: 6 })).join(' ');
-      expect(logged).toContain('550 rejected');
       expect(logged).toContain('EENVELOPE');
-      expect(logged).toContain('caused by: Error: smtp');
+      expect(logged).toContain('caused by: Error (message withheld)');
       for (const form of [password, Buffer.from(password).toString('hex'), Buffer.from(password).toString('base64')]) {
         expect(logged).not.toContain(form);
       }
       // Buffer bytes as inspect prints them (`<Buffer 4b 71 ...>`).
       expect(logged).not.toContain('<Buffer');
+    } finally {
+      error.mockRestore();
+    }
+  });
+
+  it('a listener error quoting the password encoded in its message never logs it', async () => {
+    const hooks = new AccountHooks();
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const password = 'Kq7mZt3xWp9rHs4v';
+    const encoded = [
+      Buffer.from(password).toString('base64'),
+      Buffer.from(password).toString('hex'),
+    ];
+    try {
+      // A mailer quoting its encoded body in the message, with a line that looks like a frame.
+      const failure = new Error(`550 rejected: ${encoded.join(' ')}\n    at body (${encoded[0]})`);
+      hooks.onAccountInvited(async () => {
+        throw failure;
+      });
+      expect(await hooks.runAccountInvited({ ...EVENT, startingPassword: password })).toEqual([]);
+      const logged = error.mock.calls[0]!.map((arg) => inspect(arg, { depth: 6 })).join(' ');
+      expect(logged).toContain('Error (message withheld)');
+      for (const form of [password, ...encoded]) expect(logged).not.toContain(form);
     } finally {
       error.mockRestore();
     }

@@ -124,10 +124,10 @@ function authValue(): AuthContextValue {
   };
 }
 
-function adminValue(isAdmin: boolean): AdminContextValue {
+function adminValue(isAdmin: boolean, isAdminLoading = false): AdminContextValue {
   return {
     isAdmin,
-    isAdminLoading: false,
+    isAdminLoading,
     unreadCount: 0,
     lastSeen: null,
     markSeen: () => {},
@@ -145,6 +145,8 @@ async function mountDialog(
     initialEmails?: string[];
     settle?: boolean;
     admin?: boolean;
+    /** The admin verdict is not in yet. */
+    adminLoading?: boolean;
   } = {},
 ) {
   const onInvited = vi.fn();
@@ -152,7 +154,7 @@ async function mountDialog(
   render(
     <AppRegistryContext.Provider value={opts.registry ?? makeRegistry({})}>
       <AuthContext.Provider value={authValue()}>
-        <AdminContext.Provider value={adminValue(opts.admin ?? true)}>
+        <AdminContext.Provider value={adminValue(opts.admin ?? true, opts.adminLoading)}>
           <InviteDialog open onClose={onClose} onInvited={onInvited} initialEmails={opts.initialEmails} />
         </AdminContext.Provider>
       </AuthContext.Provider>
@@ -333,6 +335,16 @@ describe('InviteDialog: the Role choice is an admin’s', () => {
   });
 });
 
+describe('InviteDialog: the admin verdict comes first', () => {
+  it('sends nothing until the verdict is in, so an admin is never invited down to Member', async () => {
+    await mountDialog({ admin: false, adminLoading: true, initialEmails: ['ana@acme.com'] });
+    const button = screen.getByRole('button', { name: 'Invite 1 person' });
+    expect(button).toBeDisabled();
+    fireEvent.click(button);
+    expect(invitations).toEqual([]);
+  });
+});
+
 describe('InviteDialog: how people sign in here', () => {
   it('stays disabled while it is still asking', async () => {
     providers = () => new Promise(() => {});
@@ -436,6 +448,35 @@ describe('InviteDialog: how people sign in here', () => {
     expect(messages[0]).toHaveTextContent('with Duende Demo, or with your work email and the password');
     expect(messages[1]).not.toHaveTextContent('Duende Demo');
     expect(messages[1]).toHaveTextContent('with your work email and the password I’ll send you separately');
+  });
+
+  it('a single sign-on provider with a blank label still lets its addresses in, named "single sign-on"', async () => {
+    answerProviders({ password: true, sso: [{ ...DUENDE, label: '' }] });
+    const { input } = await mountDialog();
+    await invite(input, ['ana@acme.com'], 'Invite 1 person');
+    await screen.findByRole('dialog', { name: '1 person is invited' });
+    expect(screen.getByText('They can sign in now with single sign-on. Send them the link.')).toBeInTheDocument();
+    expect(screen.queryByText(/can’t sign in yet/)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Copy message' })).toBeInTheDocument();
+  });
+
+  it('when only some new accounts got a password, the summary sends the reader to the rows', async () => {
+    invitationAnswers.set('pw@acme.com', () =>
+      json(201, {
+        status: 'created',
+        account: { id: 'id-pw', email: 'pw@acme.com', name: 'pw' },
+        startingPassword: GENERATED,
+        notified: [],
+        singleSignOn: true,
+      }),
+    );
+    const { input } = await mountDialog();
+    await invite(input, ['ana@acme.com', 'pw@acme.com'], 'Invite 2 people');
+    await screen.findByRole('dialog', { name: '2 people are invited' });
+    expect(
+      screen.getByText('They can sign in now. Each row says how. Send them the link, and the password on the rows that show one.'),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Send them the link and their password/)).not.toBeInTheDocument();
   });
 
   it('names several single sign-on providers', async () => {

@@ -56,6 +56,8 @@ const sso: AuthProviderPlugin = {
 };
 
 let server: Server | undefined;
+/** The admin lookups the last `start` wired in, to assert what was asked. */
+let adminLookups: { isAdmin: ReturnType<typeof vi.fn>; holdsAdmin: ReturnType<typeof vi.fn> };
 beforeEach(() => {
   lines = [];
   previousLogger = setLogger(capturingLogger());
@@ -86,14 +88,18 @@ async function start(opts: {
 }): Promise<string> {
   const holds = (email: string | undefined) =>
     email === 'inviter@acme.test' ? opts.admin : (opts.admins ?? []).includes(email ?? '');
-  const adminAccess: IAdminAccessService & IAdminRoleLookup = {
+  const lookups = {
     // Like the real check: a failed read answers "not admin".
-    isAdmin: vi.fn(async (email) => (opts.adminLookupFails && email !== 'inviter@acme.test' ? false : holds(email))),
-    holdsAdmin: vi.fn(async (email) => {
+    isAdmin: vi.fn(async (email: string | undefined) =>
+      opts.adminLookupFails && email !== 'inviter@acme.test' ? false : holds(email),
+    ),
+    holdsAdmin: vi.fn(async (email: string) => {
       if (opts.adminLookupFails) throw new Error('roles.yaml unreadable');
       return holds(email);
     }),
   };
+  adminLookups = lookups;
+  const adminAccess: IAdminAccessService & IAdminRoleLookup = lookups;
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
@@ -201,12 +207,29 @@ describe('POST /api/invitations — who may invite as what', () => {
     expect((await res.json()).startingPassword).toBe(GENERATED);
   });
 
-  it("answers 503 and writes nothing when a member's invite cannot tell whether the address holds Admin", async () => {
+  it("withholds the password from a member, as if the address held Admin, when the lookup fails", async () => {
     const base = await start({ admin: false, adminLookupFails: true });
     const res = await invite(base, { email: 'boss@acme.test' });
-    expect(res.status).toBe(503);
-    expect(createInvitedAccount).not.toHaveBeenCalled();
-    expect(deliverAccountInvited).not.toHaveBeenCalled();
+    expect(res.status).toBe(201);
+    expect(await res.json()).not.toHaveProperty('startingPassword');
+    expect(deliverAccountInvited.mock.calls[0]![0].startingPassword).toBe(GENERATED);
+    expect(discardStartingPassword).toHaveBeenCalledWith('new-1', GENERATED);
+    expect(lines.some((l) => l.level === 'warn' && l.message.includes('withheld from the inviter'))).toBe(true);
+  });
+
+  it("answers an existing address 'existing' even when the Admin lookup would fail, and does not ask it", async () => {
+    createInvitedAccount.mockResolvedValueOnce({ created: false });
+    const base = await start({ admin: false, adminLookupFails: true });
+    const res = await invite(base, { email: 'boss@acme.test' });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ status: 'existing' });
+    expect(adminLookups.holdsAdmin).not.toHaveBeenCalled();
+  });
+
+  it('asks whether the address holds Admin only when a password was made', async () => {
+    const base = await start({ admin: false, signIn: { providers: [sso] } });
+    expect((await invite(base, { email: 'a@acme.test' })).status).toBe(201);
+    expect(adminLookups.holdsAdmin).not.toHaveBeenCalled();
   });
 
   it("does not ask when an admin invites, so a failed lookup does not stop the admin's invite", async () => {
@@ -353,6 +376,17 @@ describe('POST /api/invitations — the event, the audit line and the refusals',
     });
   });
 
+  it('names the inviter on the event by id, email and name only, whatever else their account carries', async () => {
+    getUserById.mockResolvedValueOnce({ id: 'inviter-1', email: 'inviter@acme.test', name: 'Inviter', isEnvAdmin: true });
+    const base = await start({ admin: false });
+    await invite(base, { email: 'new@acme.test' });
+    expect(deliverAccountInvited.mock.calls[0]![0].invitedBy).toStrictEqual({
+      id: 'inviter-1',
+      email: 'inviter@acme.test',
+      name: 'Inviter',
+    });
+  });
+
   it('leaves startingPassword off the event when none was generated', async () => {
     const base = await start({ admin: false, signIn: { providers: [sso] } });
     await invite(base, { email: 'new@acme.test' });
@@ -412,13 +446,17 @@ describe('POST /api/invitations — the event, the audit line and the refusals',
 });
 
 describe('POST /api/invitations — the per-inviter budget', () => {
-  it('answers 429 past the budget, before any account is looked at', async () => {
+  it('answers 429 past the budget, before any role, account or password work', async () => {
     const base = await start({ admin: false, limiter: new FixedWindowRateLimiter(2, 60_000) });
     expect((await invite(base, { email: 'a@acme.test' })).status).toBe(201);
     createInvitedAccount.mockResolvedValueOnce({ created: false });
     expect((await invite(base, { email: 'a@acme.test' })).status).toBe(200);
+    adminLookups.isAdmin.mockClear();
+    adminLookups.holdsAdmin.mockClear();
     const res = await invite(base, { email: 'b@acme.test' });
     expect(res.status).toBe(429);
+    expect(adminLookups.isAdmin).not.toHaveBeenCalled();
+    expect(adminLookups.holdsAdmin).not.toHaveBeenCalled();
     expect(createInvitedAccount).toHaveBeenCalledTimes(2);
     expect(deliverAccountInvited).toHaveBeenCalledTimes(1);
   });

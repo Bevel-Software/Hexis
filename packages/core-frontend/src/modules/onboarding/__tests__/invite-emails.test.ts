@@ -16,7 +16,17 @@ const PW = 'Gen3ratedPassw0rd';
 /** Addresses that already have an account, as the server would answer them. */
 const EXISTING = new Set(['old@acme.com', 'boss@acme.com', 'off@acme.com']);
 
-function makeApi() {
+/**
+ * How the stand-in deployment signs people in, which decides — as the server
+ * does — whether a new account gets a password: always with password sign-in
+ * and no single sign-on, on request with both, never with password sign-in
+ * off. Single sign-on and password sign-in both, unless a test says.
+ */
+type SignInShape = 'password-only' | 'sso-and-password' | 'sso-only';
+
+function makeApi(shape: SignInShape = 'sso-and-password') {
+  const generates = (request: InvitationRequest) =>
+    shape === 'password-only' || (shape === 'sso-and-password' && request.startingPassword === true);
   return {
     sendInvitation: vi.fn<(request: InvitationRequest) => Promise<InvitationResult>>(async (request) =>
       EXISTING.has(request.email)
@@ -24,7 +34,7 @@ function makeApi() {
         : {
             status: 'created',
             account: { id: `id-${request.email}`, email: request.email, name: request.email.split('@')[0]! },
-            ...(request.startingPassword ? { startingPassword: PW } : {}),
+            ...(generates(request) ? { startingPassword: PW } : {}),
             notified: [],
             singleSignOn: false,
           },
@@ -65,6 +75,14 @@ describe('sendInvites', () => {
     const outcomes = await sendInvites(['new@acme.com'], 'member', api);
     expect(api.sendInvitation).toHaveBeenCalledWith({ email: 'new@acme.com', role: 'member' });
     expect(outcomes).toEqual([{ email: 'new@acme.com', status: 'created', role: 'member' }]);
+  });
+
+  it('on a password-only deployment, the generated password reaches the row though no flag was sent', async () => {
+    api = makeApi('password-only');
+    const outcomes = await sendInvites(['new@acme.com'], 'member', api);
+    expect(api.sendInvitation).toHaveBeenCalledWith({ email: 'new@acme.com', role: 'member' });
+    expect(outcomes).toEqual([{ email: 'new@acme.com', status: 'created', role: 'member', startingPassword: PW }]);
+    expect(outcomes.map(gotPassword)).toEqual([true]);
   });
 
   it("an admin's Admin invite promotes new and existing accounts through the roles route, ifActive", async () => {

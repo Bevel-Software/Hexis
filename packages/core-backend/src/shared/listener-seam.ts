@@ -29,9 +29,10 @@ export class ListenerSeam<E> {
    *   ("an account-invited listener failed; the person was not notified by it:").
    * @param secretsOf The values in an event that must never reach the log
    *   (a generated starting password). A listener's error often quotes what
-   *   it was sending (a mailer echoes its payload), so when the event has
-   *   any, the failure is logged as {@link describeFailure} — selected text
-   *   fields only, each of them scrubbed — never as the raw error.
+   *   it was sending (a mailer echoes its payload), in any encoding, so when
+   *   the event has any, the failure is logged as {@link describeFailure} —
+   *   its shape only (names, codes, stack frames), no text the error carries
+   *   — never as the raw error.
    */
   constructor(
     private readonly log: ILogger,
@@ -63,12 +64,18 @@ export class ListenerSeam<E> {
 /** How deep a chain of `cause`s is followed when a failure is described. */
 const MAX_CAUSE_DEPTH = 4;
 
+/** An error's name or code as it is logged: identifier-shaped, or not at all. */
+const IDENTIFIER = /^[\w.$-]{1,64}$/;
+
 /**
- * A thrown value as text for a log line that must be scrubbed: for the error
- * and each `cause` under it, its stack (or name and message) and a string or
- * numeric `code` — nothing else. Arbitrary fields are left out on purpose: a
- * mailer can carry its payload as a Buffer or an encoded body, where the
- * secret is no longer the literal text the scrub looks for.
+ * A thrown value as text for a log line next to a secret: for the error and
+ * each `cause` under it, its name, an identifier-shaped `code` and its stack
+ * FRAMES (the `at …` lines) — and no text the error carries. Not its
+ * message, which a stack's first line repeats, and not its fields: a mailer
+ * quotes its payload there, and as base64, hex or a Buffer the secret is no
+ * longer the literal text a scrub could find. Where it failed and what kind
+ * of failure it was is what stays to diagnose it by; a thrown non-Error is
+ * named by its type only.
  */
 function describeFailure(err: unknown): string {
   const lines: string[] = [];
@@ -76,14 +83,32 @@ function describeFailure(err: unknown): string {
   for (let depth = 0; depth < MAX_CAUSE_DEPTH && current !== undefined && current !== null; depth++) {
     const prefix = depth === 0 ? '' : 'caused by: ';
     if (!(current instanceof Error)) {
-      lines.push(prefix + (typeof current === 'string' ? current : `a thrown ${typeof current}`));
+      lines.push(`${prefix}a thrown ${typeof current}`);
       break;
     }
+    const name = typeof current.name === 'string' && IDENTIFIER.test(current.name) ? current.name : 'Error';
     const code = (current as { code?: unknown }).code;
-    const codeText = typeof code === 'string' || typeof code === 'number' ? ` [code: ${code}]` : '';
-    const text = typeof current.stack === 'string' ? current.stack : `${current.name}: ${String(current.message)}`;
-    lines.push(prefix + text + codeText);
+    const codeText =
+      typeof code === 'number' || (typeof code === 'string' && IDENTIFIER.test(code)) ? ` [code: ${code}]` : '';
+    const frames = stackFrames(current);
+    lines.push(`${prefix}${name} (message withheld)${codeText}`, ...frames);
     current = current.cause;
   }
   return lines.join('\n');
+}
+
+/**
+ * The `at …` lines of an error's stack, read only from after its message
+ * (which the stack's head repeats, and which may itself hold lines that look
+ * like frames). A stack that does not start with its message, or none at
+ * all, gives no frames.
+ */
+function stackFrames(error: Error): string[] {
+  const stack = typeof error.stack === 'string' ? error.stack : '';
+  const head = error.message ? `${error.name}: ${error.message}` : error.name;
+  if (!stack.startsWith(head)) return [];
+  return stack
+    .slice(head.length)
+    .split('\n')
+    .filter((line) => /^\s+at \S/.test(line));
 }

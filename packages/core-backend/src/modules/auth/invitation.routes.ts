@@ -49,14 +49,15 @@ export interface InvitationSignIn {
  *   the password is never handed to the inviter, who would then sign in as
  *   an admin. It still goes to a listener that can deliver it; when none
  *   does, it is discarded and the account is left with no password (an admin
- *   sets one in User accounts). When whether the address holds Admin cannot
- *   be read, such an invite is a 503 and nothing is written.
+ *   sets one in User accounts). Asked only once the account is made, so an
+ *   address that already has one is answered `existing` whatever that lookup
+ *   would do; when it cannot be read, the address is taken to hold Admin.
  * - The admission port is asked with the reason `invite`; a refusal is 403
  *   with `kind: 'admission'` and the port's words.
  * - Each inviter has a budget of invitations per window, and past it the
- *   answer is 429. It is spent before any account is looked at, so nobody
- *   signed in can keep the server hashing passwords for addresses that
- *   already have accounts.
+ *   answer is 429. It is spent right after the request is read, before any
+ *   role, account or password work, so a refused request costs the server
+ *   nothing more.
  *
  * `POST /api/admin/accounts` stays the admins' account API beside this.
  */
@@ -94,6 +95,10 @@ export function createInvitationRoutes(
       res.status(400).json({ error: 'startingPassword must be a boolean' });
       return;
     }
+    if (!limiter.consume(req.userId!)) {
+      res.status(429).json({ error: 'Too many invitations. Try again later.' });
+      return;
+    }
     const inviterIsAdmin = await adminAccess.isAdmin(req.userEmail);
     if (role === 'admin' && !inviterIsAdmin) {
       res.status(403).json({ error: 'Only an admin can invite someone as Admin' });
@@ -105,25 +110,6 @@ export function createInvitationRoutes(
     }
     const sso = offeredProviders(signIn.providers).length > 0;
     const generate = signIn.passwordSignIn && (!sso || startingPassword === true);
-    // An address that already holds Admin (listed in `roles.yaml` before it
-    // has an account) never has its password handed to a non-admin inviter:
-    // whoever learned it would sign in as an admin. Asked only when one would
-    // be made, and a lookup that fails is never read as "not an admin".
-    let withholdFromInviter = false;
-    if (generate && !inviterIsAdmin) {
-      try {
-        withholdFromInviter = await adminAccess.holdsAdmin(canonicalEmail(email));
-      } catch (error) {
-        log.warn('an invite could not tell whether the address holds Admin:', { err: error });
-        res.status(503).json({ error: "Could not check this address's role. Try again later." });
-        return;
-      }
-    }
-
-    if (!limiter.consume(req.userId!)) {
-      res.status(429).json({ error: 'Too many invitations. Try again later.' });
-      return;
-    }
 
     let invited: Awaited<ReturnType<AuthService['createInvitedAccount']>>;
     try {
@@ -145,6 +131,22 @@ export function createInvitationRoutes(
     }
 
     const { user, startingPassword: password } = invited;
+    // An address that already holds Admin (listed in `roles.yaml` before it
+    // had an account) never has its password handed to a non-admin inviter:
+    // whoever learned it would sign in as an admin. Asked only when a
+    // password was made, and a lookup that fails is never read as "not an
+    // admin": the password is then withheld as if it were one.
+    let withholdFromInviter = false;
+    if (password !== undefined && !inviterIsAdmin) {
+      try {
+        withholdFromInviter = await adminAccess.holdsAdmin(canonicalEmail(user.email));
+      } catch (error) {
+        log.warn('an invite could not tell whether the address holds Admin; its password is withheld from the inviter:', {
+          err: error,
+        });
+        withholdFromInviter = true;
+      }
+    }
     const account = { id: user.id, email: user.email, name: user.name };
     const { notified, passwordDeliveredBy } = await accountHooks.deliverAccountInvited({
       account,

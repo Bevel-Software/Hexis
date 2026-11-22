@@ -523,6 +523,11 @@ export class AuthService implements IAccountSwitchGuard {
    *
    * The admission port is asked with the reason `invite` before the insert,
    * and only for an address with no account.
+   *
+   * An address that already has an account is answered before anything is
+   * asked or generated: no admission, no password, no hash, so inviting
+   * existing addresses costs one indexed read each. The insert still does
+   * nothing on conflict, for an account made between that read and it.
    */
   async createInvitedAccount(
     email: string,
@@ -532,6 +537,12 @@ export class AuthService implements IAccountSwitchGuard {
     if (!EMAIL_REGEX.test(normalizedEmail)) {
       throw new AccountChangeRefusedError('Invalid email');
     }
+    const [already] = await this.db
+      .select({ id: users.id })
+      .from(users)
+      .where(eq(users.emailBidx, normalizedEmail))
+      .limit(1);
+    if (already) return { created: false };
     await this.assertAdmitted(normalizedEmail, 'invite');
     const mayHoldHash = !SYSTEM_ACCOUNT_EMAILS.includes(normalizedEmail) && !this.isOwnerEmail(normalizedEmail);
     const startingPassword = options.startingPassword && mayHoldHash ? generateStartingPassword() : undefined;

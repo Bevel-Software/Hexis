@@ -47,7 +47,8 @@ export async function inviterOf(
     log.warn('the inviter could not be read; the invite names them by address:', { err });
     return null;
   });
-  return by ?? requester;
+  // The three fields the event promises, and nothing else the account row carries.
+  return by ? { id: by.id, email: by.email, name: by.name } : requester;
 }
 
 /**

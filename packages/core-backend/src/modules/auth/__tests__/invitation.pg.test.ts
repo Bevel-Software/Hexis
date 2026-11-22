@@ -8,6 +8,14 @@ import { AuthService } from '../auth.service.js';
 import { createInvitationRoutes } from '../invitation.routes.js';
 import { AccountHooks } from '../account-hooks.js';
 import { admitEveryone, type IAccountAdmission } from '../index.js';
+import { hashPassword } from '../password-hash.js';
+
+// The real hash, counted: an invite of an address that already has an
+// account must not pay for one.
+vi.mock('../password-hash.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../password-hash.js')>();
+  return { ...real, hashPassword: vi.fn(real.hashPassword) };
+});
 
 /**
  * An invitation makes a NEW account and writes nothing to one that is
@@ -253,6 +261,26 @@ describe.skipIf(!PG_ADMIN_URL)('invitations on a real Postgres', () => {
         expect(existing.status).toBe(200);
         expect(await existing.json()).toEqual({ status: 'existing' });
         expect(canProvision).not.toHaveBeenCalled();
+      } finally {
+        app.close();
+      }
+    },
+    PG_TEST_TIMEOUT,
+  );
+
+  it(
+    'hashes no password for an address that already has an account',
+    async () => {
+      const app = await startApp();
+      try {
+        await app.db.insert(users).values({ email: 'old@acme.test', emailBidx: 'old@acme.test', name: 'old' });
+        vi.mocked(hashPassword).mockClear();
+        const existing = await invite(app.base, { email: 'Old@Acme.test' });
+        expect(await existing.json()).toEqual({ status: 'existing' });
+        expect(hashPassword).not.toHaveBeenCalled();
+        // A new address on the same deployment does get one hashed.
+        expect((await invite(app.base, { email: 'new@acme.test' })).status).toBe(201);
+        expect(hashPassword).toHaveBeenCalledTimes(1);
       } finally {
         app.close();
       }

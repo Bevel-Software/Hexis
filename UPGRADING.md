@@ -33,11 +33,13 @@ earlier release added for it — the Skills & Tools sidebar shows that root as
 a file tree now); write a `plugin.json` into every plugin folder that predates
 the manifest. Each is idempotent, so a second start writes nothing.
 
-### Anyone signed in can invite people (0.35+)
+### Anyone signed in can invite people (0.41+)
 
-From 0.35 the toolbar's Invite button, the Invite people command and Manage
-access's Invite action open the Invite dialog for everyone signed in, not
-only admins. A member invites as Member; only an admin can invite as Admin.
+From 0.41 the toolbar's Invite button and the Invite people command open the
+Invite dialog for everyone signed in, not only admins; so does Manage
+access's Invite action on a row with no account, on a deployment with
+password sign-in and no single sign-on (the only one where it is offered).
+A member invites as Member; only an admin can invite as Admin.
 There is no setting to turn this off: a deployment that wants nobody to
 create password accounts turns password sign-in off (`LOGIN_PASSWORD=false`).
 On a cloud deployment each newly created account still takes a seat and is
@@ -56,11 +58,11 @@ addresses never get one. From a non-admin, the password of an address that
 already holds Admin in `roles.yaml` is never shown to the inviter: delivered
 if a listener can, discarded otherwise, leaving the account with no way in
 (its row says so, and an admin sets a password in User accounts). When
-`roles.yaml` cannot be read, such an invite from a non-admin is refused with
-503 and creates nothing. An invite never changes an account that already
-exists: it no longer gives a first password to an existing account without
-one. Admins set or reset a password from User
-accounts, as before.
+`roles.yaml` cannot be read, a non-admin's invite treats the address as
+holding Admin: the account is made and its password withheld the same way.
+An invite never changes an account that already exists: it no longer gives a
+first password to an existing account without one. Admins set or reset a
+password from User accounts, as before.
 
 Hosts that listen for invitations (`onAccountInvited`) receive the generated
 password as `startingPassword` on the event. A listener that puts it in what

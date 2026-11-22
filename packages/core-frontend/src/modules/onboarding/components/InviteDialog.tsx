@@ -26,8 +26,15 @@ function people(n: number): string {
   return `${n} ${n === 1 ? 'person' : 'people'}`;
 }
 
-/** "A", "A or B", "A, B or C": the single sign-on providers, by their labels. */
-function either(labels: string[]): string {
+/**
+ * "A", "A or B", "A, B or C": the single sign-on providers, by their labels.
+ * Empty exactly when there are none: a provider with a blank label is named
+ * "single sign-on", so every check that reads this as "is single sign-on
+ * offered" (the shut-out rows, the message, the summary) agrees with the
+ * provider list rather than with what it is called.
+ */
+function either(rawLabels: string[]): string {
+  const labels = rawLabels.map((label) => label.trim() || 'single sign-on');
   if (labels.length <= 1) return labels[0] ?? '';
   return `${labels.slice(0, -1).join(', ')} or ${labels[labels.length - 1]}`;
 }
@@ -95,9 +102,13 @@ interface InviteDialogProps {
  */
 export function InviteDialog({ open, onClose, onInvited, initialEmails }: InviteDialogProps) {
   const { user } = useAuth();
-  // Optional context: the dialog is mounted bare in tests, and a verdict not
-  // in yet reads as "not an admin" — a Member invite, which is always allowed.
-  const isAdmin = useContext(AdminContext)?.isAdmin ?? false;
+  // Optional context: the dialog is mounted bare in tests (no verdict to wait
+  // for: a Member invite). Under the provider nothing is sent until the
+  // verdict is in, or an admin who sends at once would invite as Member with
+  // the Role picker not yet shown.
+  const admin = useContext(AdminContext);
+  const isAdmin = admin?.isAdmin ?? false;
+  const adminSettled = admin?.isAdminLoading !== true;
   const signIn = useSignInMethods();
   const methods = signIn.status === 'ready' ? signIn.methods : null;
   const mode = formMode(methods);
@@ -133,7 +144,7 @@ export function InviteDialog({ open, onClose, onInvited, initialEmails }: Invite
   for (const email of splitEmails(draft)) if (!pending.includes(email)) pending.push(email);
   const valid = pending.filter(isValidEmail);
   const wantsPassword = mode === 'password' || (mode === 'sso' && alsoPassword);
-  const canSend = mode !== 'unknown' && mode !== 'none' && valid.length > 0 && !sending;
+  const canSend = mode !== 'unknown' && mode !== 'none' && adminSettled && valid.length > 0 && !sending;
 
   async function send() {
     if (!canSend) return;
@@ -598,9 +609,13 @@ function InvitedBody({
                 : allEmailed
               ? 'They have been emailed the link and how to sign in.'
               : passwordSet
-                ? `${who} can sign in now. Send them the link and their password.`
+                ? gotIt === created
+                  ? `${who} can sign in now. Send them the link and their password.`
+                  : `${who} can sign in now. Each row says how. Send them the link, and the password on the rows that show one.`
                 : sentIt > 0
-                  ? `${who} can sign in now with the password they were sent. Send them the link.`
+                  ? sentIt === created
+                    ? `${who} can sign in now with the password they were sent. Send them the link.`
+                    : `${who} can sign in now. Each row says how. Send them the link.`
                 : idp
                   ? `${who} can sign in now with ${idp}. Send them the link.`
                   : created === invited
