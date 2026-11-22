@@ -105,8 +105,13 @@ const tabAt = (result: Hook, path: string) => result.current.openTabs.find((t) =
 const settle = () => act(async () => { await new Promise((r) => setTimeout(r, 20)); });
 
 beforeEach(() => {
-  // Call history is per test: `not.toHaveBeenCalled` must see only its own.
-  vi.clearAllMocks();
+  // Every mock starts each test bare, and the defaults are installed again
+  // below. Call history is per test (`not.toHaveBeenCalled` must see only
+  // its own), and so are the held answers a test queues with
+  // `mockImplementationOnce`. `clearAllMocks` drops the calls but keeps that
+  // queue, so a hold a test queued and never used answered the next test's
+  // read or write.
+  vi.resetAllMocks();
   disk = new Map([
     ['KB/Keep.md', 'keep'],
     ['KB/Gone.md', 'gone'],
@@ -3221,5 +3226,22 @@ describe('a write already on its way when the file is deleted', () => {
     expect(disk.get('KB/Draft.md')).toBe('edited more');
     expect(apiMocks.writeFile).toHaveBeenLastCalledWith('ws-1', 'KB/Draft.md', 'edited more', { ifMatch: 'edited' });
     expect(tabAt(result, 'KB/Draft.md')?.isDirty).toBe(false);
+  });
+});
+
+// The two run in order: the first queues a held answer it never uses, and
+// the second must not get it. With `clearAllMocks` in the shared setup the
+// second test's write took the first test's refusal.
+describe('a held answer a test never used stays in that test', () => {
+  it('queues a write refusal and makes no write', () => {
+    apiMocks.writeFile.mockImplementationOnce(async () => {
+      throw new WorkspaceApiError(500, 'A hold left over from an earlier test.');
+    });
+    expect(apiMocks.writeFile).not.toHaveBeenCalled();
+  });
+
+  it('writes to the branch as the server would', async () => {
+    await apiMocks.writeFile('ws-1', 'KB/Keep.md', 'kept', { ifMatch: 'keep' });
+    expect(disk.get('KB/Keep.md')).toBe('kept');
   });
 });
