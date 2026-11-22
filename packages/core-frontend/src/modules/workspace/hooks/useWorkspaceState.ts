@@ -429,7 +429,8 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
    * became the open tab's saved content (`applyReadBytes`, the
    * `file-changed` handler, the reads of `addTab` and `hydrateTabs` that
    * opened it), or of a write that completed (`markWritten`: a save of ours,
-   * a reverted or an accepted agent change). A read issued before it answers
+   * a reverted or an accepted agent change; one that expected bytes counts
+   * from when it was sent, see `writeWindowRef`). A read issued before it answers
    * late with older bytes, and must not replace what that newer read or write
    * brought; nor does its 404 mark the tab deleted (`applyReadGone`). A read
    * that left the tab alone (unsaved edits, a pending preview) does not count:
@@ -462,7 +463,10 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       const key = existenceKey(readFrom, path);
       if ((landedAtSeqRef.current.get(key) ?? -1) > seq) return true;
       const w = writeWindowRef.current.get(key);
-      return w !== undefined && seq > w.after && seq < w.before && found === w.replaced;
+      if (w === undefined || seq <= w.after || seq >= w.before) return false;
+      // The server reads a missing file as empty at the write: a write that
+      // replaced empty bytes may have followed a 404 rather than a delete.
+      return found === w.replaced || (found === null && w.replaced === '');
     },
     [],
   );
@@ -819,9 +823,9 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
    * A tracked read (`seq`, from `trackExistenceCheck`) answered 404 for an
    * open tab: mark it deleted, under the one policy every such read shares,
    * the counterpart of `applyReadBytes` for the answer "gone". Nothing is
-   * marked when the workspace moved on, or when bytes or a write landed after
-   * this read was issued (the tab closed and opened again, restored,
-   * reloaded, saved; `isStaleLanding`): the file is there, and this 404 is
+   * marked when the workspace moved on, or when bytes landed after this read
+   * was issued, or a write sent after it completed (the tab closed and opened
+   * again, restored, reloaded, saved; `isStaleLanding`): the file is there, and this 404 is
    * about a file since re-created. A newer read that only FOUND the file,
    * leaving a dirty tab alone, does not outrank it: the server may have
    * answered that one before the delete and this one after.
