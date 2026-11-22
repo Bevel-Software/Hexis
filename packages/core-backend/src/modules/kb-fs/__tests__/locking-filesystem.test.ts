@@ -509,6 +509,37 @@ describe('LockingFilesystem — the caller judges under the lock', () => {
     expect(versionControl.commitChanges).not.toHaveBeenCalled();
   });
 
+  it('a folder move is judged as each file it holds, at the path it lands on, and a refusal moves nothing', async () => {
+    await fs.mkdir(path.join(root, 'knowledge-base/A/Sub'), { recursive: true });
+    await fs.writeFile(path.join(root, 'knowledge-base/A/one.md'), 'one\n');
+    await fs.writeFile(path.join(root, 'knowledge-base/A/Sub/two.md'), 'two\n');
+    const judged: string[] = [];
+    let refuse = false;
+    const validateWrite = Object.assign(
+      async (p: string, content: unknown) => {
+        judged.push(`${p}=${String(content).trim()}`);
+        if (refuse && String(content).startsWith('two')) throw new Error('two may not move');
+      },
+      { appliesTo: () => true },
+    );
+    const guarded = new LockingFilesystem(
+      { basePath: root, contained: true },
+      { versionControl: makeVersionControl(), workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB, validateWrite },
+    );
+    refuse = true;
+    await expect(guarded.moveFile('knowledge-base/A', 'knowledge-base/B')).rejects.toThrow('two may not move');
+    expect(judged).toContain('knowledge-base/B/Sub/two.md=two');
+    expect(await fs.readFile(path.join(root, 'knowledge-base/A/Sub/two.md'), 'utf-8')).toBe('two\n');
+    await expect(fs.access(path.join(root, 'knowledge-base/B'))).rejects.toThrow();
+
+    refuse = false;
+    judged.length = 0;
+    await guarded.moveFile('knowledge-base/A', 'knowledge-base/B');
+    // Each file twice: before the locks and again under them.
+    expect([...new Set(judged)].sort()).toEqual(['knowledge-base/B/Sub/two.md=two', 'knowledge-base/B/one.md=one']);
+    expect(await fs.readFile(path.join(root, 'knowledge-base/B/Sub/two.md'), 'utf-8')).toBe('two\n');
+  });
+
   it('rewriteFile refuses a path outside the repository before any lock', async () => {
     const versionControl = makeVersionControl();
     await expect(layer(versionControl).rewriteFile('elsewhere/Foo.md', () => 'x')).rejects.toThrow();

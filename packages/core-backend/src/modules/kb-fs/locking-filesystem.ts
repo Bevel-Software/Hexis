@@ -380,7 +380,7 @@ export class LockingFilesystem extends GitGuardedFilesystem {
     // Only the destination is gated: moving a stray INTO the repository is how
     // a file the old behaviour left beside the clone gets rescued.
     this.assertInsideRepo(dest);
-    await this.validateResultingWrite(dest, () => this.readFile(src));
+    await this.validateMovedBytes(src, dest);
     // A move mutates two paths: the source is deleted and the destination
     // is created. Only locking `dest` would let a concurrent writer hold
     // the source's lock and mutate it under us, and would also leave the
@@ -398,7 +398,7 @@ export class LockingFilesystem extends GitGuardedFilesystem {
     // lock's check): the source cannot change under its lock, so the bytes
     // judged there are the bytes the move lands.
     const check = async () => {
-      await this.validateResultingWrite(dest, () => this.readFile(src));
+      await this.validateMovedBytes(src, dest);
     };
     const move = () => this.moveNoReplace(src, dest, options);
     if (src === dest) {
@@ -489,7 +489,7 @@ export class LockingFilesystem extends GitGuardedFilesystem {
       await this.assertNotGitInternals(e.path);
       this.assertInsideRepo(e.path);
     }
-    await this.validateResultingWrite(dest, () => this.readFile(src));
+    await this.validateMovedBytes(src, dest);
     if (this.lockContext.validateWrite) {
       for (const e of edits) await this.lockContext.validateWrite(e.path, e.content);
     }
@@ -572,7 +572,7 @@ export class LockingFilesystem extends GitGuardedFilesystem {
       await this.assertNoLinkBelowBase(src);
       await this.assertNoLinkBelowBase(dest);
       for (const e of edits) await this.assertNoLinkBelowBase(e.path);
-      await this.validateResultingWrite(dest, () => this.readFile(src));
+      await this.validateMovedBytes(src, dest);
       if (this.lockContext.validateWrite) {
         for (const e of edits) await this.lockContext.validateWrite(e.path, e.content);
       }
@@ -1117,6 +1117,20 @@ export class LockingFilesystem extends GitGuardedFilesystem {
     const bytes = await candidate();
     await validate(dest, bytes);
     return bytes;
+  }
+
+  /**
+   * Validate a move at its destination: every file it moves, at the path it
+   * lands on, with the bytes it carries there. A file moves as itself; a
+   * folder moves as each file it holds, so a folder is never read as though
+   * it were a file. Nothing is read when no validator claims the paths.
+   */
+  private async validateMovedBytes(src: string, dest: string): Promise<void> {
+    if (!this.lockContext.validateWrite?.appliesTo) return;
+    for (const file of await this.filesBelow(src)) {
+      const landsAt = file === src ? dest : `${dest}${file.slice(src.length)}`;
+      await this.validateResultingWrite(landsAt, () => this.readFile(file));
+    }
   }
 
   /** The bytes at `inputPath`, or null when nothing is there. */
