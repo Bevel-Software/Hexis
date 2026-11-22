@@ -886,7 +886,9 @@ describe('SkillPage', () => {
       });
       let onMain: string | undefined = RAW_MAIN;
       let deliver!: () => void;
-      apiMock.writeFile.mockImplementation((_ws: string, path: string, content: string, options?: { ifMatch?: string }) =>
+      // Calls from earlier tests are not this one's; the held answer is for this write alone.
+      apiMock.writeFile.mockClear();
+      apiMock.writeFile.mockImplementationOnce((_ws: string, path: string, content: string, options?: { ifMatch?: string }) =>
         new Promise((resolve, reject) => {
           deliver = () => {
             if (options?.ifMatch !== undefined && (onMain ?? '') !== options.ifMatch) {
