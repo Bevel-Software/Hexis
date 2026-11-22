@@ -264,6 +264,15 @@ export class AccountErasureService implements IAccountErasureService {
         .update(pendingCommits)
         .set({ authorEmail: target.erasedEmail, authorEmailBidx: erasedBidx, authorName: target.erasedName })
         .where(eq(pendingCommits.authorEmailBidx, emailBidx));
+      // The person behind a bot's actions (`modules/bots`): named beside the
+      // bot on its queued saves, the requests it opened and the merges it
+      // made, and erased there as everywhere else.
+      for (const table of [pendingCommits, changeRequests, prMergeLog] as const) {
+        await tx
+          .update(table)
+          .set({ madeByEmail: target.erasedEmail, madeByEmailBidx: erasedBidx, madeByName: target.erasedName })
+          .where(eq(table.madeByEmailBidx, emailBidx));
+      }
 
       // Module-owned rows, before the users delete so FKs onto users are
       // still satisfiable — and so a participant that MISSES rows makes the

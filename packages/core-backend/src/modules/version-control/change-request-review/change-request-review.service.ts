@@ -25,6 +25,7 @@ import {
 } from '../../../shared/domain-errors.js';
 import type { WorkspaceService } from '../../workspace/index.js';
 import { canonicalEmail, hashEmail } from '../../../shared/email-identity.js';
+import { madeByColumns } from '../../../shared/made-by.js';
 import type {
   IChangeRequestReviewService,
   MergeGateInput,
@@ -582,6 +583,8 @@ export class ChangeRequestReviewService implements IChangeRequestReviewService {
         triggeredByEmail,
         triggeredByEmailBidx: triggeredByEmail,
         triggeredByName: user.name,
+        // A bot merging: the person behind the bot is in the merge's history too.
+        ...madeByColumns(user.madeBy),
         headShaAtMerge: headSha,
         mergeMethod: MERGE_METHOD,
         succeeded: false,
@@ -772,6 +775,8 @@ export class ChangeRequestReviewService implements IChangeRequestReviewService {
         triggeredByEmail,
         triggeredByEmailBidx: triggeredByEmail,
         triggeredByName: user.name,
+        // A bot merging: the person behind the bot is in the merge's history too.
+        ...madeByColumns(user.madeBy),
         headShaAtMerge: headSha,
         mergeMethod: MERGE_METHOD,
         succeeded: false,

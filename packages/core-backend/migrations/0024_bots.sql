@@ -1,7 +1,16 @@
 ALTER TABLE "agent_connections" ADD COLUMN "bot_user_id" uuid;--> statement-breakpoint
 ALTER TABLE "agent_events" ADD COLUMN "bot_user_id" uuid;--> statement-breakpoint
+ALTER TABLE "change_requests" ADD COLUMN "made_by_email" text;--> statement-breakpoint
+ALTER TABLE "change_requests" ADD COLUMN "made_by_email_bidx" text;--> statement-breakpoint
+ALTER TABLE "change_requests" ADD COLUMN "made_by_name" text;--> statement-breakpoint
 ALTER TABLE "api_tokens" ADD COLUMN "bot_user_id" uuid;--> statement-breakpoint
 ALTER TABLE "oauth_auth_codes" ADD COLUMN "bot_user_id" uuid;--> statement-breakpoint
+ALTER TABLE "pending_commits" ADD COLUMN "made_by_email" text;--> statement-breakpoint
+ALTER TABLE "pending_commits" ADD COLUMN "made_by_email_bidx" text;--> statement-breakpoint
+ALTER TABLE "pending_commits" ADD COLUMN "made_by_name" text;--> statement-breakpoint
+ALTER TABLE "pr_merge_log" ADD COLUMN "made_by_email" text;--> statement-breakpoint
+ALTER TABLE "pr_merge_log" ADD COLUMN "made_by_email_bidx" text;--> statement-breakpoint
+ALTER TABLE "pr_merge_log" ADD COLUMN "made_by_name" text;--> statement-breakpoint
 ALTER TABLE "users" ADD COLUMN "bot_id" text;--> statement-breakpoint
 ALTER TABLE "users" ADD COLUMN "bot_retired_at" timestamp;--> statement-breakpoint
 ALTER TABLE "agent_connections" ADD CONSTRAINT "agent_connections_bot_user_id_users_id_fk" FOREIGN KEY ("bot_user_id") REFERENCES "users"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint

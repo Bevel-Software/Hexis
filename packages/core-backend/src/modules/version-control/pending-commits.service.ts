@@ -40,6 +40,7 @@ import { logger } from '../../shared/logging.js';
 const log = logger('pending-commits');
 import type { Database } from '../database/index.js';
 import { canonicalEmail } from '../../shared/email-identity.js';
+import { madeByColumns } from '../../shared/made-by.js';
 import { pendingCommits } from '../database/index.js';
 import { canonicalWorkspaceId } from '../../shared/workspace-id.js';
 
@@ -92,6 +93,9 @@ export interface PendingCommit {
   path: string;
   authorEmail: string;
   authorName: string;
+  /** For a bot's change: the person behind the bot, named beside it on the commit. */
+  madeByEmail: string | null;
+  madeByName: string | null;
   queuedAt: Date;
   status: 'pending' | 'running' | 'needs_attention';
   attempts: number;
@@ -106,6 +110,8 @@ export interface EnqueueInput {
   path: string;
   authorEmail: string;
   authorName: string;
+  /** For a bot's change: the person who made the connection it acts through. */
+  madeBy?: { name: string; email: string };
 }
 
 export interface WorkspaceDescriptor {
@@ -123,6 +129,8 @@ function rowToPending(row: Row): PendingCommit {
     path: row.path,
     authorEmail: row.authorEmail,
     authorName: row.authorName,
+    madeByEmail: row.madeByEmail ?? null,
+    madeByName: row.madeByName ?? null,
     queuedAt: row.queuedAt,
     status: row.status as PendingCommit['status'],
     attempts: row.attempts,
@@ -178,6 +186,7 @@ export class PendingCommitsService {
         authorEmail: email,
         authorEmailBidx: email,
         authorName: input.authorName,
+        ...madeByColumns(input.madeBy),
         // Reset transient counters — this is effectively a fresh enqueue.
         attempts: 0,
         lastError: null,
@@ -200,6 +209,7 @@ export class PendingCommitsService {
       authorEmail: email,
       authorEmailBidx: email,
       authorName: input.authorName,
+      ...madeByColumns(input.madeBy),
     });
   }
 

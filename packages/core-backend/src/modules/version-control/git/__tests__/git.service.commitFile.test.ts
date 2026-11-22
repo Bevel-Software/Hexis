@@ -107,6 +107,24 @@ describe('GitService.commitFile — skipValidator', () => {
     expect(change?.subject).toBe('Revert agent change');
   });
 
+  it("a bot's commit is authored by the bot and names the person behind it in a Made-by trailer", async () => {
+    const { workspaceDir, repo } = await seedWorkspace(root, workspaceId);
+    const svc = new GitService(stubWorkspaceService(workspaceId, workspaceDir), makeValidator().hooks, testKbContext());
+    const bot = { id: 'u-bot', name: 'release-helper', email: 'release-helper@agent.hexis', madeBy: { name: 'Dana', email: 'Dana@Acme.com' } };
+
+    await fs.writeFile(path.join(repo, 'Bot.md'), 'written by a bot\n');
+    await svc.commitFile(workspaceId, bot, 'Bot.md', 'bot commit');
+    const { stdout } = await execFileAsync('git', ['log', '-1', '--format=%an <%ae>%n%B'], { cwd: repo });
+    expect(stdout).toContain('release-helper <release-helper@agent.hexis>');
+    expect(stdout).toContain('Made-by: Dana <dana@acme.com>');
+
+    // A person's own commit carries no trailer.
+    await fs.writeFile(path.join(repo, 'Mine.md'), 'mine\n');
+    await svc.commitFile(workspaceId, USER, 'Mine.md', 'my commit');
+    const mine = await execFileAsync('git', ['log', '-1', '--format=%B'], { cwd: repo });
+    expect(mine.stdout).not.toContain('Made-by');
+  });
+
   it('runs the KB validator when skipValidator is omitted', async () => {
     const { workspaceDir, repo } = await seedWorkspace(root, workspaceId);
     const { hooks, runValidation } = makeValidator();

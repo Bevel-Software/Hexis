@@ -143,6 +143,15 @@ export const prMergeLog = pgTable('pr_merge_log', {
   /** Blind index of `triggered_by_email` — GDPR-erasure lookup. */
   triggeredByEmailBidx: blindIndexText('triggered_by_email_bidx').notNull(),
   triggeredByName: encryptedText('triggered_by_name').notNull(),
+  /**
+   * The person who made the connection, when the author above is a BOT acting
+   * through it (`modules/bots`): every action of a bot names both. Null for a
+   * person's own action. Erased with the person's account, like the author.
+   */
+  madeByEmail: encryptedText('made_by_email'),
+  /** Blind index of `made_by_email` — GDPR-erasure lookup. */
+  madeByEmailBidx: blindIndexText('made_by_email_bidx'),
+  madeByName: encryptedText('made_by_name'),
   headShaAtMerge: text('head_sha_at_merge').notNull(),
   mergeMethod: text('merge_method').notNull(),
   succeeded: boolean('succeeded').notNull(),
@@ -201,6 +210,15 @@ export const changeRequests = pgTable('change_requests', {
   /** Blind index of `author_email` — GDPR-erasure lookup. */
   authorEmailBidx: blindIndexText('author_email_bidx').notNull(),
   authorName: encryptedText('author_name').notNull(),
+  /**
+   * The person who made the connection, when the author above is a BOT acting
+   * through it (`modules/bots`): every action of a bot names both. Null for a
+   * person's own action. Erased with the person's account, like the author.
+   */
+  madeByEmail: encryptedText('made_by_email'),
+  /** Blind index of `made_by_email` — GDPR-erasure lookup. */
+  madeByEmailBidx: blindIndexText('made_by_email_bidx'),
+  madeByName: encryptedText('made_by_name'),
   state: text('state').notNull().default('open'), // 'open' | 'merged' | 'closed'
   mergedSha: text('merged_sha'),
   // The last apply attempt that did not land (null when none, or once a gate
@@ -413,6 +431,15 @@ export const pendingCommits = pgTable('pending_commits', {
   /** Blind index of `author_email` — GDPR-erasure lookup. */
   authorEmailBidx: blindIndexText('author_email_bidx').notNull(),
   authorName: encryptedText('author_name').notNull(),
+  /**
+   * The person who made the connection, when the author above is a BOT acting
+   * through it (`modules/bots`): every action of a bot names both. Null for a
+   * person's own action. Erased with the person's account, like the author.
+   */
+  madeByEmail: encryptedText('made_by_email'),
+  /** Blind index of `made_by_email` — GDPR-erasure lookup. */
+  madeByEmailBidx: blindIndexText('made_by_email_bidx'),
+  madeByName: encryptedText('made_by_name'),
   queuedAt: timestamp('queued_at').defaultNow().notNull(),
   // `running` is set while the worker is mid-commit so a second worker
   // (e.g. after a restart with another instance still draining) doesn't

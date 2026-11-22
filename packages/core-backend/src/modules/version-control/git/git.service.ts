@@ -27,6 +27,7 @@ import type { VersionControlHooks, CommitValidationContext } from '../version-co
 import type { IAccessControl } from '../../access/index.js';
 import { AccessDeniedError, PushAccessRefusedError } from '../../access-model/index.js';
 import { canonicalEmail } from '../../../shared/email-identity.js';
+import { madeByTrailer } from '../../../shared/made-by.js';
 import { WorkspaceIdMutex, type WorkspaceMutex, assertInsideRepo, cloneTrackingConfigArgs, SAFE_IMPLICIT_FETCH_ARGS, readRefSha } from '../../kb-fs/index.js';
 import { isAbsence } from '../../../shared/fs.contract.js';
 import { utf8Text } from '../../../shared/utf8-text.js';
@@ -297,6 +298,16 @@ async function existsForCommitCheck(absolutePath: string): Promise<boolean> {
  * fails rejects, and the push fails with it: an unanswered question is never
  * read as "unknown author".
  */
+/**
+ * The trailer paragraph a BOT's commit carries (`Made-by: <person>`), so
+ * the change names the person behind the bot beside the bot as its author;
+ * nothing for a person's own commit.
+ */
+function madeByArgs(madeBy: { name: string; email: string } | undefined): string[] {
+  const trailer = madeByTrailer(madeBy);
+  return trailer ? ['-m', trailer] : [];
+}
+
 export interface CommitAuthorDirectory {
   /** The live accounts among `emails`, keyed by canonical address; switched-off and unknown addresses are left out. */
   findActiveAccountsByEmail(emails: readonly string[]): Promise<ReadonlyMap<string, unknown>>;
@@ -1180,6 +1191,7 @@ export class GitService implements IGitService {
       if (req.description && req.description.trim()) {
         args.push('-m', req.description.trim());
       }
+      args.push(...madeByArgs(user.madeBy));
       await this.git(cwd, args);
       // The commit exists from here on: reported now, before the attribution
       // read, which can fail without unmaking it — with the files the commit
@@ -1348,6 +1360,7 @@ export class GitService implements IGitService {
         'commit',
         `--author=${user.name} <${user.email}>`,
         '-m', subject,
+        ...madeByArgs(user.madeBy),
       ]);
       // The commit exists from here on: reported now, before the attribution
       // read, which can fail without unmaking it — with the files the commit
@@ -1477,12 +1490,12 @@ export class GitService implements IGitService {
         }
         await this.git(
           cwd,
-          ['commit', `--author=${user.name} <${user.email}>`, '-m', subject, ...pathspecArgs],
+          ['commit', `--author=${user.name} <${user.email}>`, '-m', subject, ...madeByArgs(user.madeBy), ...pathspecArgs],
           { input: pathspecInput },
         );
       } else {
         await this.git(cwd, ['add', '-A']);
-        await this.git(cwd, ['commit', `--author=${user.name} <${user.email}>`, '-m', subject]);
+        await this.git(cwd, ['commit', `--author=${user.name} <${user.email}>`, '-m', subject, ...madeByArgs(user.madeBy)]);
       }
 
       // CONTRACT: past this point the commit EXISTS, so this method must not
@@ -1920,7 +1933,7 @@ export class GitService implements IGitService {
     // NUL-delimited and with renames as a delete plus an add, so every path is
     // named verbatim, both ends of a rename included.
     const { stdout: merged } = await this.git(cwd, ['diff', '--cached', '--name-only', '--no-renames', '-z']);
-    await this.git(cwd, ['commit', `--author=${user.name} <${user.email}>`, '-m', opts.subject, '-m', opts.body]);
+    await this.git(cwd, ['commit', `--author=${user.name} <${user.email}>`, '-m', opts.subject, '-m', opts.body, ...madeByArgs(user.madeBy)]);
     this.accessControl?.invalidate(workspaceId);
     this.landed(workspaceId, branch, user, merged.split('\0').filter(Boolean));
     // The publish runs here, inside the reservation the merge was made in,
@@ -2252,6 +2265,7 @@ export class GitService implements IGitService {
           `--author=${user.name} <${user.email}>`,
           '-m', commit.subject,
           '-m', commit.body,
+          ...madeByArgs(user.madeBy),
         ]);
         const { stdout: sha } = await this.git(cwd, ['rev-parse', 'HEAD']);
 

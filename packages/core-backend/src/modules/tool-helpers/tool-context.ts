@@ -92,8 +92,12 @@ export type ResolveToolContext = (
  */
 export function createToolContextResolver(deps: ToolContextDeps): ResolveToolContext {
   return async function resolveToolContext(auth, abortSignal, sessionId) {
-    const user = await deps.authService.getUserById(auth.userId);
-    if (!user) throw new ToolError('Your account is no longer available.', 401);
+    const found = await deps.authService.getUserById(auth.userId);
+    if (!found) throw new ToolError('Your account is no longer available.', 401);
+    // A connection made as a bot acts as the bot's row; what it writes, opens
+    // and merges also names the person who made the connection.
+    const maker = auth.madeBy ? await deps.authService.getUserById(auth.madeBy.id) : null;
+    const user = maker ? { ...found, madeBy: { name: maker.name, email: maker.email } } : found;
 
     const { loadActiveGroups } = deps;
     const validatorCache = new Map<string, WriteValidator>();

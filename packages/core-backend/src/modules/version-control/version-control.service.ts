@@ -91,6 +91,7 @@ import {
 } from './change-request-hooks.js';
 import { WorkspaceMutex, assertValidBranchName } from '../kb-fs/index.js';
 import { canonicalEmail, hashEmail } from '../../shared/email-identity.js';
+import { madeByColumns } from '../../shared/made-by.js';
 import {
   BranchAuthorshipError,
   BranchDeleteBlockedError,
@@ -1750,6 +1751,7 @@ export class VersionControlService implements IVersionControlService {
       path: targetPath,
       authorEmail: user.email,
       authorName: user.name,
+      ...(user.madeBy ? { madeBy: user.madeBy } : {}),
     });
     await this.fileLocks.release(workspaceId, branch, targetPath, user);
     lockLog.info(
@@ -2455,6 +2457,8 @@ export class VersionControlService implements IVersionControlService {
           authorEmail: canonicalEmail(user.email),
           authorEmailBidx: user.email,
           authorName: user.name,
+          // A bot opening it: the person behind the bot is in its history too.
+          ...madeByColumns(user.madeBy),
           accessRequestLevel: input.accessRequest?.level ?? null,
           accessRequestNote: note ? note : null,
         })

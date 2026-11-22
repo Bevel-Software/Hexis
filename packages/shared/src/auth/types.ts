@@ -23,6 +23,13 @@ export interface AuthUser {
    * admin".
    */
   isEnvAdmin?: boolean;
+  /**
+   * Set only on the identity a BOT acts with (`modules/bots` in the core
+   * backend): the person who made the connection it acts through. What the
+   * bot writes, opens and merges names them beside the bot. Never sent by
+   * the server to a client.
+   */
+  madeBy?: { name: string; email: string };
 }
 
 export interface LoginRequest {
