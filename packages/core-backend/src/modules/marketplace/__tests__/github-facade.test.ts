@@ -55,14 +55,17 @@ function tree(files: Record<string, string>, sourceCommit: string): VirtualTree 
 
 /** Connection keys, in memory: what the service does minus the database. */
 function makeKeys() {
-  const byToken = new Map<string, { tokenId: string; user: AuthUser; label: string; kind: string }>();
+  const byToken = new Map<
+    string,
+    { tokenId: string; user: AuthUser; label: string; kind: string; botUserId?: string | null; agentPath?: string | null }
+  >();
   const kinds: Record<string, string> = { key: 'bevel_', [GITHUB_LINK_KEY_KIND]: GITHUB_LINK_KEY_PREFIX };
   return {
     byToken,
     looksLikeExternalApiKey: (t: string) => Object.values(kinds).some((p) => t.startsWith(p)),
     verifyAndLoadToken: async (t: string) => {
       const hit = byToken.get(t);
-      return hit ? { tokenId: hit.tokenId, user: hit.user, botUserId: null, agentPath: null } : null;
+      return hit ? { tokenId: hit.tokenId, user: hit.user, botUserId: hit.botUserId ?? null, agentPath: hit.agentPath ?? null } : null;
     },
     mint: async (userId: string, label: string, options: { kind?: string } = {}) => {
       const kind = options.kind ?? 'key';
@@ -281,6 +284,30 @@ describe('the GitHub facade', () => {
         expect(line).not.toContain('not-it');
         expect(line).not.toContain(code);
         expect(line).not.toContain('never-issued');
+      }
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('refuses a key made as a bot, or as a legacy agent, with a 403 and one log line naming the path, never the key', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const asBot = 'bevel_made_as_a_bot';
+      const asAgent = 'bevel_made_as_an_agent';
+      shared.keys.byToken.set(asBot, { tokenId: 'tok-bot', user: users.alice, label: 'k', kind: 'key', botUserId: 'u-ops' });
+      shared.keys.byToken.set(asAgent, { tokenId: 'tok-agent', user: users.alice, label: 'k', kind: 'key', agentPath: 'Agents/ops.md' });
+      for (const key of [asBot, asAgent]) {
+        const res = await api(a.base, key, '/repos/git/marketplace');
+        expect(res.status).toBe(403);
+        expect(((await res.json()) as { message: string }).message).toMatch(/made as a bot or as an agent/);
+      }
+      const lines = warn.mock.calls.map((c) => String(c[0]));
+      expect(lines).toHaveLength(2);
+      for (const line of lines) {
+        expect(line).toMatch(/GET "\/repos\/git\/marketplace" refused: connection key made as a bot or an agent — from /);
+        expect(line).not.toContain(asBot);
+        expect(line).not.toContain(asAgent);
       }
     } finally {
       warn.mockRestore();

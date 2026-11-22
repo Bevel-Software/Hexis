@@ -118,6 +118,7 @@ export function createGitHubFacadeRoutes(deps: GitHubFacadeRoutesDeps): express.
       return;
     }
     if (keyActsAsSomeoneElse(resolved)) {
+      log.warn(`${req.method} ${printable(req.path)} refused: connection key made as a bot or an agent — from ${userAgentOf(req)}`);
       res.status(403).json({ message: KEY_MADE_AS_BOT_REFUSAL });
       return;
     }

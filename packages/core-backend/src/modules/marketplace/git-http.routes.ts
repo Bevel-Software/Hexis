@@ -33,9 +33,9 @@ export function keyActsAsSomeoneElse(key: ResolvedMarketplaceKey): boolean {
   return key.botUserId !== null || key.agentPath !== null;
 }
 
-/** What a refused key made as a bot is told. */
+/** What a refused key made as a bot, or as a legacy agent, is told. */
 export const KEY_MADE_AS_BOT_REFUSAL =
-  'This connection key was made as a bot, and the marketplace serves a person their own skills: use a key made as Myself.';
+  'This connection key was made as a bot or as an agent, and the marketplace serves a person their own skills: use a key made as Myself.';
 
 /**
  * The per-user marketplace as a git remote:
