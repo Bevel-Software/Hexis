@@ -2299,6 +2299,33 @@ describe('a change pulled from the git host onto the open file', () => {
       expect(result.current.activeTab?.isDirty).toBe(false);
     });
 
+    it("newer bytes without Done's edit leave it merged onto them as unsaved edits, never clean and off the branch", async () => {
+      const result = await editedTab();
+      const write = holdWriteAnswer();
+      const saving = done(result, SAVED);
+      await waitFor(() => expect(disk.get('KB/Notes.md')).toBe(SAVED));
+
+      // A commit from the git host that replaced the write instead of building on it.
+      const pulled = upstream(BASE);
+      disk.set('KB/Notes.md', pulled);
+      act(() => bus.emit(fileChanged('KB/Notes.md', GIT_SYNC)));
+      await waitFor(() => expect(result.current.activeTab?.savedContent).toBe(pulled));
+
+      await act(async () => { write.answer(); await saving; });
+      await settle();
+
+      const merged = upstream(SAVED);
+      const tab = result.current.activeTab!;
+      expect(tab.content).toBe(merged);
+      expect(tab.savedContent).toBe(pulled);
+      expect(tab.isDirty).toBe(true);
+      expect(tab.changedOnBranch).toBe('merged');
+
+      await act(async () => { await result.current.saveFile('KB/Notes.md', merged); });
+      expect(apiMocks.writeFile).toHaveBeenLastCalledWith('ws-1', 'KB/Notes.md', merged, { ifMatch: pulled });
+      expect(disk.get('KB/Notes.md')).toBe(merged);
+    });
+
     it('a save queued behind it writes onto the newer bytes rather than being refused', async () => {
       const result = await editedTab();
       const write = holdWriteAnswer();
