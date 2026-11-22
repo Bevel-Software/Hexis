@@ -40,7 +40,7 @@ import { logger } from '../../shared/logging.js';
 const log = logger('pending-commits');
 import type { Database } from '../database/index.js';
 import { canonicalEmail } from '../../shared/email-identity.js';
-import { holdMaker, madeByColumns } from './made-by.js';
+import { inMakerTransaction, madeByColumns } from './made-by.js';
 import { pendingCommits } from '../database/index.js';
 import { canonicalWorkspaceId } from '../../shared/workspace-id.js';
 
@@ -183,22 +183,22 @@ export class PendingCommitsService {
   }
 
   /**
-   * Run `write` on `this.db`, or, for a bot's save, in a transaction that
-   * first makes sure the person behind the bot still has an account
+   * Run `write` on `this.db`, or, for a bot's save, in `inMakerTransaction`,
+   * which first makes sure the person behind the bot still has an account
    * (`holdMaker`): the row names them, and their erasure rewrites that
    * name, so a save queued after the erasure committed is refused rather
-   * than naming them in a commit's trailer for good. A pull-conflict
-   * recovery queued for a save whose row the erasure already rewrote names
-   * no account either and is refused the same way; that dispatch is
-   * best-effort and logs it (`queuePullConflictRecovery`).
+   * than naming them in a commit's trailer for good (and `releaseLock` puts
+   * the save's bytes back). A pull-conflict recovery dispatch
+   * (`enqueueIfAbsent`) reaches this only when no row exists for its path:
+   * one whose row is still there, rewritten by the erasure or not, inserts
+   * nothing and returns false without asking. Only an insert is refused
+   * the same way, and that dispatch is best-effort and logs the refusal
+   * (`queuePullConflictRecovery`).
    */
   private async namingMaker<T>(input: EnqueueInput, write: (q: Database) => Promise<T>): Promise<T> {
     const madeBy = input.madeBy;
     if (!madeBy) return write(this.db);
-    return this.db.transaction(async (tx) => {
-      await holdMaker(tx, madeBy);
-      return write(tx as unknown as Database);
-    });
+    return inMakerTransaction(this.db, madeBy, (tx) => write(tx as unknown as Database));
   }
 
   private async refreshOrInsert(q: Database, input: EnqueueInput, email: string, workspaceId: string): Promise<void> {

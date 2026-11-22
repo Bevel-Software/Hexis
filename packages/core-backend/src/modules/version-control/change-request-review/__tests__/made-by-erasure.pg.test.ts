@@ -153,4 +153,32 @@ describe.skipIf(!PG_ADMIN_URL)('a record naming the person behind a bot, against
     ).rejects.toMatchObject({ payload: { kind: 'connection-maker-erased' } });
     expect((await db.select().from(pendingCommits)).map((r) => [r.path, r.madeByEmail])).toEqual([['a.md', PERSON]]);
   });
+
+  it('answers a wait past the bound on an erasure as a retryable busy refusal, not a database error', async () => {
+    const locked = signal();
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    // An erasure that holds the lock and does not let go.
+    const erasure = db.transaction(async (tx) => {
+      await svc.holdRecordWriters(tx);
+      locked.open();
+      await held;
+    });
+    await locked.opened;
+    const queue = new PendingCommitsService(db);
+    const busy = { status: 503, payload: { kind: 'record-write-busy', retryable: true } };
+    try {
+      await Promise.all([
+        expect(openRequest('waiting')).rejects.toMatchObject(busy),
+        expect(
+          queue.enqueue({ workspaceId: 'main', branch: 'main', path: 'a.md', authorEmail: BOT, authorName: 'Coder', madeBy: botUser.madeBy }),
+        ).rejects.toMatchObject(busy),
+      ]);
+    } finally {
+      release();
+      await erasure;
+    }
+    expect(await madeByOf()).toEqual([]);
+    expect(await db.select().from(pendingCommits)).toEqual([]);
+  }, 20_000);
 });

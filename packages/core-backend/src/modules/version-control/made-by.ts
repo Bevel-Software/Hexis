@@ -3,7 +3,14 @@ import type { AuthUser } from '@bevel-software/platform-shared';
 import { users, type Database } from '../database/index.js';
 import { canonicalEmail } from '../../shared/email-identity.js';
 import { VersionControlDomainError } from '../../shared/domain-errors.js';
-import { takeRecordWriterLock } from './change-request-review/approval-lock.js';
+import { logger } from '../../shared/logging.js';
+import {
+  APPROVAL_LOCK_TIMEOUT_MS,
+  isApprovalLockTimeout,
+  takeRecordWriterLock,
+} from './change-request-review/approval-lock.js';
+
+const log = logger('made-by');
 
 /*
  * How version control records the person behind a BOT's change: in a
@@ -102,13 +109,68 @@ export async function holdMaker(tx: RecordTx, madeBy: { email: string } | undefi
 }
 
 /**
+ * A record naming the person behind a bot waited for the record writers'
+ * lock (`holdMaker`) longer than its bound: an account erasure held it.
+ * Nothing was written; retryable by the caller, as an approval write that
+ * waited too long is.
+ */
+export class RecordWriterBusyError extends VersionControlDomainError {
+  constructor() {
+    super('This could not be recorded right now. Try that again in a moment.', 503, {
+      kind: 'record-write-busy',
+      retryable: true,
+    });
+    this.name = 'RecordWriterBusyError';
+  }
+}
+
+/**
+ * Whether `err` refused a record that names the person behind a bot, so
+ * nothing of the call was recorded: the person has no account any more, or
+ * the writers' lock was not free in time. A caller that wrote bytes for that
+ * record (a save) puts them back (`releaseLock`).
+ */
+export function isMakerRecordRefusal(err: unknown): boolean {
+  return err instanceof ConnectionMakerGoneError || err instanceof RecordWriterBusyError;
+}
+
+/**
+ * Run `write` in the one kind of transaction a record naming the person
+ * behind a bot is written in: `holdMaker` first (unless the record keeps
+ * nothing of them, `namesMaker: false`), then `write`. A wait on the
+ * writers' lock past its bound is answered as `RecordWriterBusyError`, never
+ * as the raw database error. Every such record goes through here or, for an
+ * approval, through the approval lock, which answers its own busy refusal.
+ */
+export async function inMakerTransaction<T>(
+  db: Database,
+  madeBy: { email: string },
+  write: (tx: RecordTx) => Promise<T>,
+  { namesMaker = true }: { namesMaker?: boolean } = {},
+): Promise<T> {
+  try {
+    return await db.transaction(async (tx) => {
+      if (namesMaker) await holdMaker(tx, madeBy);
+      return write(tx);
+    });
+  } catch (err) {
+    if (isApprovalLockTimeout(err)) {
+      log.warn(`gave up waiting for the record writers' lock after ${APPROVAL_LOCK_TIMEOUT_MS}ms`);
+      throw new RecordWriterBusyError();
+    }
+    throw err;
+  }
+}
+
+/**
  * Write a record of `user`'s action that names them: `write` gets where to
  * write and the address to name. A person's write runs as it is, on `db`,
- * with the address they act under. A bot's runs in a transaction that first
- * makes sure the person behind it still has an account (`holdMaker`), then
- * reads the bot's address from its row (`recordedAddress`). A record that
- * keeps nothing of that person (`namesMaker: false`, e.g. who could not
- * apply a request, which names the bot alone) skips the first step.
+ * with the address they act under. A bot's runs in `inMakerTransaction`,
+ * which first makes sure the person behind it still has an account
+ * (`holdMaker`), then reads the bot's address from its row
+ * (`recordedAddress`). A record that keeps nothing of that person
+ * (`namesMaker: false`, e.g. who could not apply a request, which names the
+ * bot alone) skips the first step.
  */
 export async function writeNamingActor<T>(
   db: Database,
@@ -117,9 +179,10 @@ export async function writeNamingActor<T>(
   { namesMaker = true }: { namesMaker?: boolean } = {},
 ): Promise<T> {
   if (!user.madeBy) return write(db, canonicalEmail(user.email));
-  const madeBy = user.madeBy;
-  return db.transaction(async (tx) => {
-    if (namesMaker) await holdMaker(tx, madeBy);
-    return write(tx as unknown as Database, await recordedAddress(tx, user));
-  });
+  return inMakerTransaction(
+    db,
+    user.madeBy,
+    async (tx) => write(tx as unknown as Database, await recordedAddress(tx, user)),
+    { namesMaker },
+  );
 }

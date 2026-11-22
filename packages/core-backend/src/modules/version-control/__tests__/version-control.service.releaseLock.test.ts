@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, type MockInstance } from 'vitest';
+import { describe, it, expect, vi, beforeEach, type Mock, type MockInstance } from 'vitest';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import type { AuthUser, Change } from '@bevel-software/platform-shared';
 import type { GitService } from '../git/git.service.js';
@@ -10,6 +10,7 @@ import { FileLockService } from '../file-lock.service.js';
 import { PendingCommitsService } from '../pending-commits.service.js';
 import { VersionControlEventBus } from '../event-bus.js';
 import { VersionControlService, syncConflictMessage } from '../version-control.service.js';
+import { ConnectionMakerGoneError, RecordWriterBusyError } from '../made-by.js';
 import { openChangeGate } from '../../../__tests__/open-change-gate.js';
 import type { Database } from '../../database/index.js';
 import {
@@ -40,6 +41,14 @@ const USER: AuthUser = {
   id: 'user-1',
   email: 'alice@example.com',
   name: 'Alice',
+};
+
+/** A bot acting through a connection Dana made. */
+const BOT_USER: AuthUser = {
+  id: USER.id,
+  email: 'coder@agent.hexis',
+  name: 'Coder',
+  madeBy: { name: 'Dana', email: 'dana@example.com' },
 };
 
 const CHANGE: Change = {
@@ -299,6 +308,40 @@ describe('VersionControlService.releaseLock — new (enqueue, no synchronous com
     expect(err).toBeInstanceOf(VersionControlValidationError);
     expect((err as VersionControlValidationError).payload?.kind).toBe('coordination-hold');
     expect(pending.enqueue).not.toHaveBeenCalled();
+    expect(locks.release).not.toHaveBeenCalled();
+    expect(emitSpy).not.toHaveBeenCalled();
+  });
+
+  // A bot's save the queue refuses records nothing, so its bytes are nobody's
+  // who may be named: put back to HEAD and the lock dropped, as a failed
+  // write is, rather than left dirty under a held lock until a restart.
+  it.each([
+    ['its maker has no account', () => new ConnectionMakerGoneError()],
+    ['its record could not wait out an erasure', () => new RecordWriterBusyError()],
+  ])("a bot's save refused because %s is discarded, the lock dropped, the refusal surfaced", async (_why, refusal) => {
+    const git = makeGit();
+    const locks = makeFileLocks(USER.id);
+    const pending = makePending();
+    const err = refusal();
+    (pending.enqueue as Mock).mockRejectedValue(err);
+    const svc = makeFacade(git, locks, pending, events);
+
+    await expect(svc.releaseLock('ws-1', 'feat/x', 'foo.md', BOT_USER)).rejects.toBe(err);
+    expect(git.discardPath).toHaveBeenCalledWith('ws-1', 'foo.md');
+    expect(locks.release).toHaveBeenCalledTimes(1);
+    expect(git.commitFile).not.toHaveBeenCalled();
+    expect(emitSpy.mock.calls.map((c) => (c[0] as { kind: string }).kind)).toEqual(['lock-released', 'file-changed']);
+  });
+
+  it('a queue that fails for any other reason leaves the bytes and the lock for recovery, as before', async () => {
+    const git = makeGit();
+    const locks = makeFileLocks(USER.id);
+    const pending = makePending();
+    (pending.enqueue as Mock).mockRejectedValue(new Error('db connection lost'));
+    const svc = makeFacade(git, locks, pending, events);
+
+    await expect(svc.releaseLock('ws-1', 'feat/x', 'foo.md', BOT_USER)).rejects.toThrow(/db connection lost/);
+    expect(git.discardPath).not.toHaveBeenCalled();
     expect(locks.release).not.toHaveBeenCalled();
     expect(emitSpy).not.toHaveBeenCalled();
   });
