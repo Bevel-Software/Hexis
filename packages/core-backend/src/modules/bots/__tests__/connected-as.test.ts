@@ -52,15 +52,18 @@ describe('describeConnectionChoices', () => {
 
   it('still loads when the bots cannot be listed: each bot row is shown as not checked, and the failure is logged', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const out = await describeConnectionChoices(
-      { resolveConnections: async () => Promise.reject(new Error('repo down')) },
-      [
-        { maker: DANA, choice: MYSELF },
-        { maker: DANA, choice: AS_OPS },
-      ],
-    );
-    expect(out).toEqual([{ kind: 'myself' }, { kind: 'bot', name: 'a bot', stopped: 'could not be checked' }]);
-    expect(warn.mock.calls.map((c) => String(c[0])).some((l) => /listing the bots for a list of connections failed/.test(l))).toBe(true);
-    warn.mockRestore();
+    try {
+      const out = await describeConnectionChoices(
+        { resolveConnections: async () => Promise.reject(new Error('repo down')) },
+        [
+          { maker: DANA, choice: MYSELF },
+          { maker: DANA, choice: AS_OPS },
+        ],
+      );
+      expect(out).toEqual([{ kind: 'myself' }, { kind: 'bot', name: 'a bot', stopped: 'could not be checked' }]);
+      expect(warn.mock.calls.map((c) => String(c[0])).some((l) => /listing the bots for a list of connections failed/.test(l))).toBe(true);
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
