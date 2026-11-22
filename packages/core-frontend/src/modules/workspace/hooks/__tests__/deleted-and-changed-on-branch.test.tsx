@@ -2200,6 +2200,133 @@ describe('a change pulled from the git host onto the open file', () => {
     });
   });
 
+  describe("a save's answer that arrives after a newer pull already landed", () => {
+    /**
+     * The next write lands on disk at once, but its answer waits until
+     * `answer` is called: a commit pulled from the git host can land on top
+     * of it, and its `file-changed` read reach the tab, first.
+     */
+    function holdWriteAnswer() {
+      const write = apiMocks.writeFile.getMockImplementation()!;
+      let answer!: () => void;
+      const answered = new Promise<void>((r) => { answer = r; });
+      apiMocks.writeFile.mockImplementationOnce(async (...args: Parameters<typeof write>) => {
+        const wrote = await write(...args);
+        await answered;
+        return wrote;
+      });
+      return { answer: () => answer() };
+    }
+
+    /** Done: the editor closes, the tab is marked clean, the save is sent. */
+    function done(result: Hook, text: string): Promise<void> {
+      let saving!: Promise<void>;
+      act(() => {
+        result.current.setActiveTabContent(text);
+        saving = result.current.saveFile('KB/Notes.md', text);
+        result.current.setHasUnsavedFileChanges?.(false);
+      });
+      return saving;
+    }
+
+    const SAVED = BASE.replace('Second paragraph.', 'Second paragraph, saved.');
+    const upstream = (text: string) => text.replace('First paragraph.', 'First paragraph, rewritten upstream.');
+
+    it("keeps the newer bytes over Done's text the write put there, and the next save expects them", async () => {
+      const result = await editedTab();
+      const write = holdWriteAnswer();
+      const saving = done(result, SAVED);
+      await waitFor(() => expect(disk.get('KB/Notes.md')).toBe(SAVED));
+
+      // Pulled on top of the write, before its answer arrived.
+      const pulled = upstream(SAVED);
+      disk.set('KB/Notes.md', pulled);
+      act(() => bus.emit(fileChanged('KB/Notes.md', GIT_SYNC)));
+      await waitFor(() => expect(result.current.activeTab?.savedContent).toBe(pulled));
+      const landed = result.current.activeTab!;
+      expect(landed.content).toBe(pulled);
+
+      await act(async () => { write.answer(); await saving; });
+      await settle();
+
+      const tab = result.current.activeTab!;
+      expect(tab.content).toBe(pulled);
+      expect(tab.savedContent).toBe(pulled);
+      expect(tab.isDirty).toBe(false);
+      expect(tab.changedOnBranch ?? null).toBe(landed.changedOnBranch ?? null);
+      expect(tab.remoteRevision).toBe(landed.remoteRevision);
+
+      const again = `${pulled}\n\nAfter the pull.`;
+      await typeInto(result, again);
+      await act(async () => { await result.current.saveFile('KB/Notes.md', result.current.activeTab!.content!); });
+      expect(apiMocks.writeFile).toHaveBeenLastCalledWith('ws-1', 'KB/Notes.md', again, { ifMatch: pulled });
+      expect(disk.get('KB/Notes.md')).toBe(again);
+    });
+
+    it('keeps typing merged onto the newer bytes, with its banner, and the next save writes it over them', async () => {
+      const result = await editedTab();
+      await typeInto(result, SAVED);
+      const write = holdWriteAnswer();
+      // An autosave: the editor stays open, and the person types on.
+      let saving!: Promise<void>;
+      act(() => { saving = result.current.saveFile('KB/Notes.md', SAVED); });
+      await waitFor(() => expect(disk.get('KB/Notes.md')).toBe(SAVED));
+      const typed = `${SAVED}\n\nTyped while the save was out.`;
+      await typeInto(result, typed);
+
+      const pulled = upstream(SAVED);
+      disk.set('KB/Notes.md', pulled);
+      act(() => bus.emit(fileChanged('KB/Notes.md', GIT_SYNC)));
+      const merged = upstream(typed);
+      await waitFor(() => expect(result.current.activeTab?.changedOnBranch).toBe('merged'));
+      const landed = result.current.activeTab!;
+      expect(landed.content).toBe(merged);
+      expect(landed.savedContent).toBe(pulled);
+
+      await act(async () => { write.answer(); await saving; });
+      await settle();
+
+      const tab = result.current.activeTab!;
+      expect(tab.content).toBe(merged);
+      expect(tab.savedContent).toBe(pulled);
+      expect(tab.isDirty).toBe(true);
+      expect(tab.changedOnBranch).toBe('merged');
+      expect(tab.remoteRevision).toBe(landed.remoteRevision);
+
+      await act(async () => { await result.current.saveFile('KB/Notes.md', merged); });
+      expect(apiMocks.writeFile).toHaveBeenLastCalledWith('ws-1', 'KB/Notes.md', merged, { ifMatch: pulled });
+      expect(disk.get('KB/Notes.md')).toBe(merged);
+      expect(result.current.activeTab?.isDirty).toBe(false);
+    });
+
+    it('a save queued behind it writes onto the newer bytes rather than being refused', async () => {
+      const result = await editedTab();
+      const write = holdWriteAnswer();
+      const one = done(result, SAVED);
+      await waitFor(() => expect(disk.get('KB/Notes.md')).toBe(SAVED));
+      const second = `${SAVED}\n\nSECONDDONE`;
+      const two = done(result, second);
+
+      const pulled = upstream(SAVED);
+      disk.set('KB/Notes.md', pulled);
+      act(() => bus.emit(fileChanged('KB/Notes.md', GIT_SYNC)));
+      await waitFor(() => expect(result.current.activeTab?.savedContent).toBe(pulled));
+
+      await act(async () => { write.answer(); await one; await two; });
+      await settle();
+
+      // The queued save measured its text from the first one's onto the pull,
+      // and expected the pull on disk.
+      const written = upstream(second);
+      expect(apiMocks.writeFile).toHaveBeenLastCalledWith('ws-1', 'KB/Notes.md', written, { ifMatch: pulled });
+      expect(disk.get('KB/Notes.md')).toBe(written);
+      const tab = result.current.activeTab!;
+      expect(tab.content).toBe(written);
+      expect(tab.savedContent).toBe(written);
+      expect(tab.isDirty).toBe(false);
+    });
+  });
+
   it('an echo of our own save does not touch edits typed after it', async () => {
     const result = await editedTab();
     await typeInto(result, `${BASE}\n\nTyped after the save.`);

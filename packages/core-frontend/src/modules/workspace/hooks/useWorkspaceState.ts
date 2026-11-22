@@ -371,6 +371,15 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
    */
   const savesInFlightRef = useRef<Map<string, Promise<SaveLeft>>>(new Map());
   /**
+   * The bytes the newest tracked read found (`trackExistenceCheck`), with its
+   * number, by workspace and path, recorded only while a save of that path is
+   * on its way and dropped when the last one settles. A write's answer can
+   * arrive after a read sent later already landed newer bytes in the tab (a
+   * commit pulled from the git host on top of what the write put there); the
+   * write's landing reads this to keep them (`saveOnce`).
+   */
+  const foundWhileSavingRef = useRef<Map<string, { seq: number; bytes: string }>>(new Map());
+  /**
    * The place in `orderRef` of the latest save asked for, by workspace and
    * path, while it is on its way. A save that lands, or is refused, while a
    * later one is queued finds the tab's text is that later save's: Done
@@ -454,7 +463,12 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     const seq = ++existenceReadSeqRef.current;
     const key = existenceKey(readFrom, path);
     const thisAnswer = read.then(
-      (bytes): ExistenceAnswer => ({ goneAt: null, found: { seq, bytes } }),
+      (bytes): ExistenceAnswer => {
+        if (savesInFlightRef.current.has(key) && (foundWhileSavingRef.current.get(key)?.seq ?? -1) < seq) {
+          foundWhileSavingRef.current.set(key, { seq, bytes });
+        }
+        return { goneAt: null, found: { seq, bytes } };
+      },
       (err: unknown): ExistenceAnswer => {
         // A 404 older than bytes or a write that landed since is about a
         // file since re-created: it refuses no save (see `applyReadGone`).
@@ -2139,11 +2153,22 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       // A file deleted after the checks above reads there as empty, so this
       // write is refused rather than re-creating it. A tab with no saved bytes
       // has nothing to expect, and writes unconditionally as before.
+      const sentAfterRead = existenceReadSeqRef.current;
       await writeFile(workspaceId, relativePath, toWrite, expected !== null ? { ifMatch: expected } : undefined);
       markWritten(workspaceId, relativePath);
-      const wrote: SaveLeft = { onDisk: toWrite, editBase: content };
+      // A read sent after this write that found neither the bytes the write
+      // replaced (`expected`, which the server held when it wrote) nor the
+      // write's own read the disk after the write: a commit pulled from the
+      // git host on top of it. Those bytes are the disk's now, newer than the
+      // write's, whichever answer arrived first. A write with nothing to
+      // expect cannot tell an earlier read from a later one, and keeps its own.
+      const seen = foundWhileSavingRef.current.get(existenceKey(workspaceId, relativePath));
+      const newerOnDisk = expected !== null && seen && seen.seq > sentAfterRead
+        && seen.bytes !== expected && seen.bytes !== toWrite ? seen.bytes : null;
+      const wrote: SaveLeft = { onDisk: newerOnDisk ?? toWrite, editBase: content };
       if (!stillHere()) return wrote;
-      // Update the matching tab: its on-disk baseline is now what was written.
+      // Update the matching tab: its on-disk baseline is now what was written,
+      // unless it already took newer bytes a later read found (`afterWrite`).
       // A save that merged onto a pulled commit keeps the banner: the person
       // has not seen it yet. Its text is not the editor's, which an autosave
       // leaves open, so the editor reloads it; otherwise its next save writes
@@ -2182,6 +2207,16 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
         // wrote, as here. Replaced by this write's older text, it showed
         // until that save landed, and an Edit meanwhile typed on it.
         const queuedText = heldForLaterSave(t);
+        // The tab already took bytes newer than this write's (`newerOnDisk`):
+        // the `file-changed` read merged its text onto them, said so in the
+        // banner, and reloaded the editor. That landing stands; the write's
+        // older bytes never go back over it. Only Done's text, whose save
+        // this was, is unsaved again if the newer bytes lack it: nothing on
+        // its way writes it now, unless a later save queued behind this one.
+        if (newerOnDisk !== null && t.savedContent === newerOnDisk) {
+          const unsaved = t.isDirty || (!queuedText && t.content !== null && t.content !== t.savedContent);
+          return unsaved === t.isDirty ? t : { ...t, isDirty: unsaved };
+        }
         const readMovedTab = mergedOntoPull && expected !== null && t.savedContent === expected;
         const typedFrom = readMovedTab ? toWrite : content;
         const typedSince = (t.isDirty || queuedText) && t.content !== null && t.content !== typedFrom
@@ -2243,7 +2278,10 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     })();
     savesInFlightRef.current.set(key, run);
     const settle = () => {
-      if (savesInFlightRef.current.get(key) === run) savesInFlightRef.current.delete(key);
+      if (savesInFlightRef.current.get(key) === run) {
+        savesInFlightRef.current.delete(key);
+        foundWhileSavingRef.current.delete(key);
+      }
       if (lastSaveAskedRef.current.get(key) === askedAt) lastSaveAskedRef.current.delete(key);
     };
     run.then(settle, settle);
