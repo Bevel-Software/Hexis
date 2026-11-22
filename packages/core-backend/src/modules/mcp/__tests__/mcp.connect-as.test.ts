@@ -26,7 +26,7 @@ import type { ConnectionScopeWire } from '../../agent-scope/index.js';
  * loads `read_file` alone, `bevel_gone` one whose file was deleted.
  */
 
-const NARROW: ConnectionScopeWire = { agent: { path: 'Agents/narrow.agent', name: 'narrow' } };
+const NARROW: ConnectionScopeWire = { agent: { path: 'narrow@agent.hexis', name: 'narrow' } };
 const GONE: ConnectionScopeWire = {
   agent: { path: 'Agents/gone.agent', name: 'Agents/gone.agent' },
   unavailable: 'This connection was made as the agent file `Agents/gone.agent`, which no longer exists.',
@@ -132,15 +132,15 @@ describe('a narrowed connection', () => {
   it('lists what its agent loads, and refuses another tool by name and agent — not as unknown', async () => {
     const { mcp } = await harness();
     vi.spyOn(console, 'log').mockImplementation(() => {});
-    const client = await connect(mcp, { bearer: 'bevel_narrow', agentPath: 'Agents/narrow.agent' });
+    const client = await connect(mcp, { bearer: 'bevel_narrow', connectionChoice: { botUserId: 'bot-narrow', agentPath: null } });
     const names = (await client.listTools()).tools.map((t) => t.name);
     expect(names).toContain('read_file');
     expect(names).not.toContain('edit_file');
     const refused = await client.callTool({ name: 'edit_file', arguments: {} });
     expect(refused.isError).toBe(true);
     expect(textOf(refused)).toBe(
-      'The tool "edit_file" is not available to this connection: it is connected as the agent "narrow" ' +
-        '(`Agents/narrow.agent`), which does not load it.',
+      'The tool "edit_file" is not available to this connection: it acts as the bot "narrow" ' +
+        '(narrow@agent.hexis), which is not offered it.',
     );
   });
 
@@ -157,21 +157,21 @@ describe('a narrowed connection', () => {
   it('tells the agent at the handshake what it is connected as; Everything is told what it always was', async () => {
     const { mcp } = await harness();
     vi.spyOn(console, 'log').mockImplementation(() => {});
-    const narrowed = (await connect(mcp, { bearer: 'bevel_narrow', agentPath: 'Agents/narrow.agent' }, true)).getInstructions();
+    const narrowed = (await connect(mcp, { bearer: 'bevel_narrow', connectionChoice: { botUserId: 'bot-narrow', agentPath: null } }, true)).getInstructions();
     const everything = (await connect(mcp, {}, true)).getInstructions();
     expect(narrowed).toBe(
-      `${everything}\n\nThis connection is connected as the agent "narrow" (\`Agents/narrow.agent\`): it loads only the ` +
-        'platform tools, connectors, skills and plugins that file lists, and of those only what you may read.',
+      `${everything}\n\nThis connection acts as the bot "narrow" (narrow@agent.hexis), not as the person who made it: ` +
+        "every read, write, skill and tool is judged for the bot's own access, with the bot's secrets and tool sign-ins.",
     );
-    expect(everything).not.toContain('connected as the agent');
+    expect(everything).not.toContain('acts as the bot');
   });
 
   it('two connections of one person made as different agents never share a built surface', async () => {
     const { state, mcp } = await harness();
     vi.spyOn(console, 'log').mockImplementation(() => {});
-    await (await connect(mcp, { bearer: 'bevel_narrow', agentPath: 'Agents/narrow.agent' })).listTools();
-    await (await connect(mcp, { bearer: 'bevel_narrow', agentPath: 'Agents/other.agent' })).listTools();
-    await (await connect(mcp, { bearer: 'bevel_narrow', agentPath: 'Agents/narrow.agent' })).listTools();
+    await (await connect(mcp, { bearer: 'bevel_narrow', connectionChoice: { botUserId: 'bot-narrow', agentPath: null } })).listTools();
+    await (await connect(mcp, { bearer: 'bevel_narrow', connectionChoice: { botUserId: 'bot-other', agentPath: null } })).listTools();
+    await (await connect(mcp, { bearer: 'bevel_narrow', connectionChoice: { botUserId: 'bot-narrow', agentPath: null } })).listTools();
     expect(state.builds).toBe(2);
   });
 });
@@ -180,7 +180,7 @@ describe('a connection whose agent file is gone', () => {
   it('is served an empty listing carrying the reason, and every call — meta-tools too — answers it', async () => {
     const { mcp } = await harness();
     vi.spyOn(console, 'log').mockImplementation(() => {});
-    const client = await connect(mcp, { bearer: 'bevel_gone', agentPath: 'Agents/gone.agent' });
+    const client = await connect(mcp, { bearer: 'bevel_gone', connectionChoice: { botUserId: 'bot-gone', agentPath: null } });
     const listed = await client.listTools();
     expect(listed.tools).toEqual([]);
     expect(listed._meta).toEqual({ [CONNECTION_META_KEY]: GONE.unavailable });
@@ -189,7 +189,7 @@ describe('a connection whose agent file is gone', () => {
       expect(res.isError).toBe(true);
       expect(textOf(res)).toBe(GONE.unavailable);
     }
-    const instructions = (await connect(mcp, { bearer: 'bevel_gone', agentPath: 'Agents/gone.agent' }, true)).getInstructions();
+    const instructions = (await connect(mcp, { bearer: 'bevel_gone', connectionChoice: { botUserId: 'bot-gone', agentPath: null } }, true)).getInstructions();
     expect(instructions?.endsWith(GONE.unavailable!)).toBe(true);
   });
 });

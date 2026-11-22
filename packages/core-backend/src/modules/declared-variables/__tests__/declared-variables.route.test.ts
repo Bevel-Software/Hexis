@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createDeclaredVariableRoutes } from '../declared-variables.routes.js';
 import type { IToolManualService, ToolManualSummary } from '../../tool-manuals/tool-manuals.contract.js';
 import type { ISecretsVaultService } from '../../secrets-vault/secrets-vault.contract.js';
-import { ConnectionScope, type IAgentScopeResolver } from '../../agent-scope/index.js';
+import { ConnectionScope } from '../../agent-scope/index.js';
 
 /**
  * The one core route that releases secret VALUES. What is worth pinning here is
@@ -47,9 +47,8 @@ async function mount(opts: {
   source?: 'session' | 'external' | 'internal';
   manuals?: ToolManualSummary[];
   secrets?: Record<string, string>;
-  /** The `.agent` file the caller's connection was made as; absent is Everything. */
-  agentPath?: string;
-  agentScope?: Pick<IAgentScopeResolver, 'resolve'>;
+  /** What the caller's connection loads, as the verifier resolved it; absent is Myself. */
+  connection?: ConnectionScope;
 }): Promise<Harness> {
   const userId = opts.userId ?? 'user-1';
   const source = opts.source ?? 'external';
@@ -73,13 +72,12 @@ async function mount(opts: {
             userId,
             source,
             scope: 'write',
-            ...(opts.agentPath ? { agentPath: opts.agentPath } : {}),
+            ...(opts.connection ? { connection: opts.connection } : {}),
           } as typeof req.toolAuth;
         }
         next();
       },
       async () => 'runner@x.eu',
-      opts.agentScope,
     ),
   );
   httpServer = await new Promise<HttpServer>((r) => {
@@ -145,35 +143,25 @@ describe('POST /agent/local-tools/:slug/variables', () => {
     expect(resolve).not.toHaveBeenCalled();
   });
 
-  it("releases only the variables of a connector the connection's .agent file loads", async () => {
-    const agent = { path: 'Agents/ops.agent', name: 'Ops' };
-    const loading = (connectors: string[]) => ({
-      resolve: async () => ConnectionScope.narrowed(agent, { skills: [], connectors, platformTools: null }, 'fp'),
-    });
-    // A folder entry over the tool's plugin loads it.
-    const inScope = await mount({
+  it('releases a bot connection the bot\'s own variables, and a connection that loads nothing none', async () => {
+    // Made as a usable bot: the caller IS the bot (the verifier put its row on
+    // the request), so what it may read is what it is handed.
+    const asBot = await mount({
       manuals: [GIT_TOOL],
-      secrets: { git_GITHUB_TOKEN: 'ghp_secret' },
-      agentPath: agent.path,
-      agentScope: loading(['Plugins/Engineering']),
+      secrets: { git_GITHUB_TOKEN: 'ghp_bot_secret' },
+      connection: ConnectionScope.asBot({ path: 'ops@agent.hexis', name: 'ops' }, null, 'fp'),
     });
-    expect((await fetch(`${inScope.base}/agent/local-tools/git/variables`, { method: 'POST' })).status).toBe(200);
+    expect((await fetch(`${asBot.base}/agent/local-tools/git/variables`, { method: 'POST' })).status).toBe(200);
     await new Promise<void>((r) => httpServer!.close(() => r()));
 
-    // A readable tool the file does not load is as absent as an unreadable one.
-    const outOfScope = await mount({
+    // A bot that cannot be used loads nothing: as absent as an unreadable tool.
+    const gone = await mount({
       manuals: [GIT_TOOL],
-      secrets: { git_GITHUB_TOKEN: 'ghp_secret' },
-      agentPath: agent.path,
-      agentScope: loading(['Plugins/billing.tool']),
+      secrets: { git_GITHUB_TOKEN: 'ghp_person_secret' },
+      connection: ConnectionScope.unavailable({ path: 'ops', name: 'ops' }, 'It loads nothing.', 'fp'),
     });
-    expect((await fetch(`${outOfScope.base}/agent/local-tools/git/variables`, { method: 'POST' })).status).toBe(404);
-    expect(outOfScope.resolve).not.toHaveBeenCalled();
-    await new Promise<void>((r) => httpServer!.close(() => r()));
-
-    // A narrowed connection with no resolver wired loads nothing.
-    const unwired = await mount({ manuals: [GIT_TOOL], agentPath: agent.path });
-    expect((await fetch(`${unwired.base}/agent/local-tools/git/variables`, { method: 'POST' })).status).toBe(404);
+    expect((await fetch(`${gone.base}/agent/local-tools/git/variables`, { method: 'POST' })).status).toBe(404);
+    expect(gone.resolve).not.toHaveBeenCalled();
   });
 
   it('403s an unauthenticated caller', async () => {

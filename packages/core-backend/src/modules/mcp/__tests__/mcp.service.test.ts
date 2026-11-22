@@ -54,8 +54,8 @@ async function setup(deps?: {
   auditRecorder?: IAgentEventRecorder;
   /** The agent connection an OAuth caller arrived through (with `tokenId: null`). */
   connectionId?: string | null;
-  /** The agent the credential connects as; absent = Everything. */
-  agentPath?: string | null;
+  /** The bot the credential connects as; absent = Myself. */
+  botUserId?: string | null;
   /** Released skills listed beside `rfi` — listed only: `get_skill` answers not-found for them. */
   listedOnly?: { name: string; description: string; path: string }[];
 }) {
@@ -221,7 +221,7 @@ async function setup(deps?: {
   );
   lastService = mcp;
   const tokenId = deps?.tokenId === undefined ? 'tok-1' : deps.tokenId;
-  return connectClient(mcp, tokenId, deps?.connectionId ?? null, deps?.agentPath ?? null);
+  return connectClient(mcp, tokenId, deps?.connectionId ?? null, deps?.botUserId ?? null);
 }
 
 /** The service `setup` built last — for a test that needs a SECOND request against the same service. */
@@ -238,10 +238,16 @@ async function connectClient(
   mcp: McpService,
   tokenId: string | null,
   connectionId: string | null = null,
-  agentPath: string | null = null,
+  botUserId: string | null = null,
 ): Promise<Client> {
   const server = await mcp.createRequestServer(
-    { userId: 'user-A', tokenId, connectionId, agentPath, bearer: 'bevel_testkey' },
+    {
+      userId: 'user-A',
+      tokenId,
+      connectionId,
+      ...(botUserId ? { connectionChoice: { botUserId, agentPath: null } } : {}),
+      bearer: 'bevel_testkey',
+    },
     { jsonrpc: '2.0', id: 0, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test-client', version: '0.0.0' } } },
   );
 
@@ -970,8 +976,8 @@ describe('McpService — the Audit log records what an agent calls', () => {
     await expect(client.getPrompt({ name: 'onboard' })).rejects.toThrow(/Unknown skill "onboard"/);
   });
 
-  it('serves a connection narrowed to an agent its skills and nothing beside them', async () => {
-    const client = await setup({ agentPath: 'Agents/support.agent' });
+  it('serves a connection made as a bot its skills, and not the onboarding meant for the person', async () => {
+    const client = await setup({ botUserId: 'bot-support' });
     expect((await client.listPrompts()).prompts.map((p) => p.name)).toEqual(['rfi']);
     await expect(client.getPrompt({ name: 'onboard' })).rejects.toThrow(/Unknown skill "onboard"/);
   });

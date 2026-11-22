@@ -151,6 +151,7 @@ describe('ExternalApiKeyService', () => {
         revokedBy: null,
         deletedAt: null,
         agentPath: null,
+        botUserId: null,
       });
     });
 
@@ -372,6 +373,7 @@ describe('ExternalApiKeyService', () => {
         revokedBy: null,
         deletedAt: null,
         agentPath: null,
+        botUserId: null,
       });
       expect(summaries[1].revokedAt).toBe(rows[1].revokedAt!.getTime());
       // sanity-check that ordering was requested (we can't introspect the
@@ -404,6 +406,7 @@ describe('ExternalApiKeyService', () => {
           revokedBy: null,
           deletedAt: null,
           agentPath: null,
+          botUserId: null,
           user: { id: 'u-alice', email: 'alice@example.com', name: 'Alice' },
         },
         {
@@ -416,6 +419,7 @@ describe('ExternalApiKeyService', () => {
           revokedBy: null,
           deletedAt: null,
           agentPath: null,
+          botUserId: null,
           user: { id: 'u-bob', email: 'bob@example.com', name: 'Bob' },
         },
       ]);

@@ -1,9 +1,8 @@
 import type { Server as HttpServer } from 'node:http';
 import express from 'express';
-import { afterEach, describe, expect, it } from 'vitest';
-import { createSecretsVaultRoutes } from '../secrets-vault.routes.js';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { NO_SUCH_BOT, createSecretsVaultPublicRoutes, createSecretsVaultRoutes } from '../secrets-vault.routes.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
-import { ConnectionScope } from '../../agent-scope/index.js';
 
 /**
  * The aggregated `/connect/pending` surface: everything standing between the
@@ -337,26 +336,16 @@ describe('GET /api/connect/pending — readability', () => {
   });
 });
 
-describe('GET /api/connect/pending — narrowed to the agent the connection is made as', () => {
+describe('the Secrets and Connect tools routes opened for a bot (?bot=)', () => {
   /**
-   * The consent step's "Connect as" choice: a connection made as an `.agent`
-   * file loads only the connectors the file lists, so the page that asks for
-   * sign-ins and keys lists only those. Two readable tools, one of which the
-   * agent loads; the agent is answered by a stub resolver over the REAL
-   * `ConnectionScope`, the one answer every agent surface asks.
+   * A person who may act as a bot opens the pages by a link naming it: every
+   * route then reads and writes the BOT's secrets and sign-ins. One who may
+   * not is refused with the answer a bot that does not exist gets, and
+   * nothing of the bot's is read. The sign-in callback checks again.
    */
-  const AGENT = { path: 'Agents/ops.agent', name: 'ops' };
-  const resolver = {
-    resolve: async (_email: string | undefined, agentPath: string | null | undefined) => {
-      if (!agentPath) return ConnectionScope.everything();
-      if (agentPath === AGENT.path) {
-        return ConnectionScope.narrowed(AGENT, { skills: [], connectors: ['Tools/weather.tool'], platformTools: null }, 'fp');
-      }
-      return ConnectionScope.gone(agentPath);
-    },
-  };
-  const twoTools = {
-    listAccessible: async () => [
+  const OPS = { id: 'row-ops', email: 'ops@agent.hexis', botId: 'ops', name: 'ops' };
+  const oneTool = {
+    listAccessible: vi.fn(async (_email: string) => [
       {
         slug: 'weather',
         name: 'weather',
@@ -364,88 +353,110 @@ describe('GET /api/connect/pending — narrowed to the agent the connection is m
         type: 'http' as const,
         variables: [{ name: 'API_KEY', scope: 'user' as const, label: null }],
       },
-      {
-        slug: 'notion',
-        name: 'notion',
-        path: 'Tools/notion.tool',
-        type: 'mcp' as const,
-        variables: [
-          {
-            name: 'MCP_OAUTH',
-            scope: 'user' as const,
-            label: 'notion sign-in',
-            oauth: { authorizationUrl: 'https://a.example/auth', tokenUrl: 'https://a.example/token', clientId: 'cid' },
-          },
-        ],
-      },
-    ],
+    ]),
   } as unknown as Parameters<typeof createSecretsVaultRoutes>[0]['toolManualService'];
-  const vault = {
-    statusFor: async (_u: string, keys: string[]) =>
-      keys.map((key) => ({
-        key,
-        adminConfigured: key === 'notion_MCP_OAUTH',
-        adminKind: key === 'notion_MCP_OAUTH' ? ('oauth' as const) : null,
-        userConfigured: false,
-        userKind: null,
-      })),
-    // A sign-in registered directly on the Secrets page: nobody's connector.
-    list: async () => [
-      { id: 's-own', key: 'MY_TOKEN', kind: 'oauth' as const, label: 'Mine', authorized: false, createdAt: new Date(), updatedAt: new Date() },
-    ],
-  } as unknown as Parameters<typeof createSecretsVaultRoutes>[0]['secretsVault'];
 
-  async function pendingAs(agent: string | null, withResolver = true) {
+  function harness(mayActAs: { value: boolean }, withBots = true) {
+    const statusFor = vi.fn(async (_u: string, keys: string[]) =>
+      keys.map((key) => ({ key, adminConfigured: false, adminKind: null, userConfigured: false, userKind: null })),
+    );
+    const list = vi.fn(async (_u: string) => [] as never[]);
+    const getById = vi.fn(async (_u: string, id: string) => ({ id, kind: 'oauth' as const }));
+    const beginOAuth = vi.fn(async (_u: string, _id: string, _r: string, state: string) => `https://idp.example/auth?state=${encodeURIComponent(state)}`);
+    const completeOAuth = vi.fn(async () => undefined);
+    const bots = {
+      actAs: vi.fn(async (email: string, botId: string) => (mayActAs.value && email === 'a@x.com' && botId === 'ops' ? OPS : null)),
+    };
+    const deps = {
+      kb: testKbContext(),
+      secretsVault: { statusFor, list, getById, beginOAuth, completeOAuth } as unknown as Parameters<typeof createSecretsVaultRoutes>[0]['secretsVault'],
+      toolManualService: oneTool,
+      accessControl,
+      ...(withBots ? { bots, userOf: async (id: string) => (id === 'u1' ? { id: 'u1', email: 'a@x.com' } : id === OPS.id ? OPS : null) } : {}),
+      connectionProbe: { probe: async () => ({ status: 'unverifiable' as const, detail: null, checkedAt: new Date() }) },
+      stateSecret: 'test-secret',
+      publicBackendUrl: 'http://localhost:3000',
+      publicFrontendUrl: 'http://localhost:5173',
+    };
     const app = express();
     app.use(express.json());
+    app.use('/api', createSecretsVaultPublicRoutes(deps));
     app.use((req, _res, next) => {
       req.userId = 'u1';
       req.userEmail = 'a@x.com';
       next();
     });
-    app.use(
-      '/api',
-      createSecretsVaultRoutes({
-        kb: testKbContext(),
-        secretsVault: vault,
-        toolManualService: twoTools,
-        accessControl,
-        ...(withResolver ? { agents: resolver } : {}),
-        connectionProbe: {
-          probe: async () => ({ status: 'unverifiable' as const, detail: null, checkedAt: new Date() }),
-        },
-        stateSecret: 'test-secret',
-        publicBackendUrl: 'http://localhost:3000',
-        publicFrontendUrl: 'http://localhost:5173',
-      }),
-    );
+    app.use('/api', createSecretsVaultRoutes(deps));
+    return { app, statusFor, list, completeOAuth, bots };
+  }
+
+  async function listen(app: express.Express): Promise<string> {
     httpServer = await new Promise<HttpServer>((resolve) => {
       const s = app.listen(0, () => resolve(s));
     });
-    const port = (httpServer.address() as { port: number }).port;
-    const query = agent === null ? '' : `?agent=${encodeURIComponent(agent)}`;
-    const res = await fetch(`http://127.0.0.1:${port}/api/connect/pending${query}`);
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as PendingBody & { toolOAuth: { slug: string }[] };
-    return { tools: body.tools.map((t) => t.slug), signIns: body.toolOAuth.map((o) => o.slug), standalone: body.oauth.map((o) => o.id) };
+    return `http://127.0.0.1:${(httpServer.address() as { port: number }).port}`;
   }
 
-  it('lists everything without a choice, as before', async () => {
-    expect(await pendingAs(null)).toEqual({ tools: ['weather'], signIns: ['notion'], standalone: ['s-own'] });
+  it('without a bot named, the pages are the person\'s own, as today', async () => {
+    const h = harness({ value: true });
+    const base = await listen(h.app);
+    expect((await fetch(`${base}/api/connect/pending`)).status).toBe(200);
+    expect(h.statusFor.mock.calls[0]![0]).toBe('u1');
+    expect(h.list.mock.calls[0]![0]).toBe('u1');
+    expect(h.bots.actAs).not.toHaveBeenCalled();
   });
 
-  it('lists only the connectors the agent loads, and no standalone sign-in', async () => {
-    expect(await pendingAs(AGENT.path)).toEqual({ tools: ['weather'], signIns: [], standalone: [] });
+  it('opened for a bot the person may act as, it reads the bot\'s tools, secrets and sign-ins', async () => {
+    const h = harness({ value: true });
+    const base = await listen(h.app);
+    expect((await fetch(`${base}/api/connect/pending?bot=ops`)).status).toBe(200);
+    expect(h.statusFor.mock.calls[0]![0]).toBe(OPS.id);
+    expect(h.list.mock.calls[0]![0]).toBe(OPS.id);
+    expect(vi.mocked(oneTool.listAccessible)).toHaveBeenLastCalledWith(OPS.email);
+    expect((await fetch(`${base}/api/secrets?bot=ops`)).status).toBe(200);
+    expect(h.list.mock.calls.at(-1)![0]).toBe(OPS.id);
   });
 
-  it('lists nothing for an agent the person cannot use: a narrowing that cannot be read is never Everything', async () => {
-    expect(await pendingAs('Agents/gone.agent')).toEqual({ tools: [], signIns: [], standalone: [] });
-    // …and the same with no resolver wired at all.
-    expect(await pendingAs(AGENT.path, false)).toEqual({ tools: [], signIns: [], standalone: [] });
+  it('opened for a bot the person may not act as, it answers what a bot that does not exist gets, reading nothing', async () => {
+    const h = harness({ value: false });
+    const base = await listen(h.app);
+    const refused = await fetch(`${base}/api/connect/pending?bot=ops`);
+    const missing = await fetch(`${base}/api/connect/pending?bot=nobody`);
+    expect(refused.status).toBe(404);
+    expect(await refused.json()).toEqual({ error: NO_SUCH_BOT });
+    expect(await missing.json()).toEqual({ error: NO_SUCH_BOT });
+    expect(h.statusFor).not.toHaveBeenCalled();
+    expect(h.list).not.toHaveBeenCalled();
   });
 
-  it('reads an empty or blank choice as Everything', async () => {
-    expect(await pendingAs('  ')).toEqual({ tools: ['weather'], signIns: ['notion'], standalone: ['s-own'] });
+  it('with no bots wired, a page naming a bot is refused', async () => {
+    const h = harness({ value: true }, false);
+    const base = await listen(h.app);
+    expect((await fetch(`${base}/api/secrets?bot=ops`)).status).toBe(404);
+  });
+
+  it('a sign-in started for a bot lands on the bot, and is refused at the callback once the person may no longer act as it', async () => {
+    const mayActAs = { value: true };
+    const h = harness(mayActAs);
+    const base = await listen(h.app);
+    const startUrl = async () => {
+      const res = await fetch(`${base}/api/secrets/s-1/oauth/start?bot=ops`);
+      expect(res.status).toBe(200);
+      return new URL(((await res.json()) as { url: string }).url).searchParams.get('state')!;
+    };
+    const callback = (state: string) =>
+      fetch(`${base}/api/secrets/oauth/callback?code=c&state=${encodeURIComponent(state)}`, { redirect: 'manual' });
+
+    const ok = await callback(await startUrl());
+    expect(ok.headers.get('location')).toContain('#authorized=');
+    expect(h.completeOAuth).toHaveBeenCalledWith(OPS.id, 's-1', 'c', expect.any(String));
+
+    const state = await startUrl();
+    mayActAs.value = false;
+    h.completeOAuth.mockClear();
+    const refused = await callback(state);
+    expect(decodeURIComponent(refused.headers.get('location') ?? '')).toContain(NO_SUCH_BOT);
+    expect(h.completeOAuth).not.toHaveBeenCalled();
   });
 });
 
