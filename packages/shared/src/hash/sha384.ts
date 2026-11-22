@@ -9,6 +9,8 @@
  * so each word is held as a high and a low half.
  */
 
+import { paddedMessage, wordsToBase64 } from './message-block.js';
+
 /** The 80 round constants, each 64-bit word as its high and low halves. */
 const K = new Uint32Array([
   0x428a2f98, 0xd728ae22, 0x71374491, 0x23ef65cd, 0xb5c0fbcf, 0xec4d3b2f, 0xe9b5dba5, 0x8189dbbc,
@@ -33,16 +35,10 @@ const K = new Uint32Array([
   0x4cc5d4be, 0xcb3e42b6, 0x597f299c, 0xfc657e2a, 0x5fcb6fab, 0x3ad6faec, 0x6c44198c, 0x4a475817,
 ]);
 
-const utf8 = new TextEncoder();
-
 /** The digest of `text` exactly as given, in standard padded base64: the form a Content-Security-Policy hash source takes. */
 export function sha384Base64(text: string): string {
-  let binary = '';
   // SHA-384 is the first six of the eight 64-bit words: twelve halves.
-  for (const word of digest(text).subarray(0, 12)) {
-    binary += String.fromCharCode(word >>> 24, (word >>> 16) & 0xff, (word >>> 8) & 0xff, word & 0xff);
-  }
-  return btoa(binary);
+  return wordsToBase64(digest(text).subarray(0, 12));
 }
 
 /** The high half of the 64-bit sum whose low halves are `lo` (a plain, uncarried sum) and high halves `hi`. */
@@ -50,23 +46,14 @@ const carried = (hi: number, lo: number) => (hi + Math.floor(lo / 0x1_0000_0000)
 
 /** The SHA-512 compression run from SHA-384's initial values: eight 64-bit words as sixteen halves. */
 function digest(text: string): Uint32Array {
-  const bytes = utf8.encode(text);
-  const bitLength = bytes.length * 8;
-  // The message, a 1 bit, zeros, and the 128-bit length: a whole number of 128-byte blocks.
-  const padded = new Uint8Array((((bytes.length + 16) >> 7) + 1) << 7);
-  padded.set(bytes);
-  padded[bytes.length] = 0x80;
-  const view = new DataView(padded.buffer);
-  view.setUint32(padded.length - 8, Math.floor(bitLength / 0x1_0000_0000));
-  view.setUint32(padded.length - 4, bitLength >>> 0);
-
+  const view = paddedMessage(text, 128);
   const h = new Uint32Array([
     0xcbbb9d5d, 0xc1059ed8, 0x629a292a, 0x367cd507, 0x9159015a, 0x3070dd17, 0x152fecd8, 0xf70e5939,
     0x67332667, 0xffc00b31, 0x8eb44a87, 0x68581511, 0xdb0c2e0d, 0x64f98fa7, 0x47b5481d, 0xbefa4fa4,
   ]);
   // The schedule, word i at [2i] (high) and [2i + 1] (low).
   const w = new Uint32Array(160);
-  for (let offset = 0; offset < padded.length; offset += 128) {
+  for (let offset = 0; offset < view.byteLength; offset += 128) {
     for (let i = 0; i < 32; i++) w[i] = view.getUint32(offset + i * 4);
     for (let i = 32; i < 160; i += 2) {
       const xh = w[i - 30]!;

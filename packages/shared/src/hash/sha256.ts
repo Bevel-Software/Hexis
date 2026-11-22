@@ -7,6 +7,8 @@
  * HTTP would have no digest at all.
  */
 
+import { paddedMessage, wordsToBase64 } from './message-block.js';
+
 const K = new Uint32Array([
   0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
   0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
@@ -18,8 +20,6 @@ const K = new Uint32Array([
   0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
 ]);
 
-const utf8 = new TextEncoder();
-
 /** The digest of `text` exactly as given, nothing trimmed or normalised (a lone surrogate is U+FFFD, as `TextEncoder` writes it). */
 export function sha256Hex(text: string): string {
   return Array.from(digest(text), (x) => x.toString(16).padStart(8, '0')).join('');
@@ -27,29 +27,16 @@ export function sha256Hex(text: string): string {
 
 /** The same digest as {@link sha256Hex}, in standard padded base64: the form a Content-Security-Policy hash source takes. */
 export function sha256Base64(text: string): string {
-  let binary = '';
-  for (const word of digest(text)) {
-    binary += String.fromCharCode(word >>> 24, (word >>> 16) & 0xff, (word >>> 8) & 0xff, word & 0xff);
-  }
-  return btoa(binary);
+  return wordsToBase64(digest(text));
 }
 
 /** The digest's eight 32-bit words. */
 function digest(text: string): Uint32Array {
-  const bytes = utf8.encode(text);
-  const bitLength = bytes.length * 8;
-  // The message, a 1 bit, zeros, and the 64-bit length: a whole number of 64-byte blocks.
-  const padded = new Uint8Array((((bytes.length + 8) >> 6) + 1) << 6);
-  padded.set(bytes);
-  padded[bytes.length] = 0x80;
-  const view = new DataView(padded.buffer);
-  view.setUint32(padded.length - 8, Math.floor(bitLength / 0x1_0000_0000));
-  view.setUint32(padded.length - 4, bitLength >>> 0);
-
+  const view = paddedMessage(text, 64);
   const h = new Uint32Array([0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19]);
   const w = new Uint32Array(64);
   const rotr = (x: number, n: number) => (x >>> n) | (x << (32 - n));
-  for (let offset = 0; offset < padded.length; offset += 64) {
+  for (let offset = 0; offset < view.byteLength; offset += 64) {
     for (let i = 0; i < 16; i++) w[i] = view.getUint32(offset + i * 4);
     for (let i = 16; i < 64; i++) {
       const s0 = rotr(w[i - 15]!, 7) ^ rotr(w[i - 15]!, 18) ^ (w[i - 15]! >>> 3);
