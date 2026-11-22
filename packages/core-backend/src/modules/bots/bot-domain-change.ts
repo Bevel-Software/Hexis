@@ -15,6 +15,17 @@ export interface GrantRewriteWorkspace {
   writeFile(workspaceId: string, wsPath: string, content: string): Promise<void>;
 }
 
+/**
+ * What changing the bots' domain answers: the new domain, the change request
+ * rewriting the grants (null when no grant names a bot at the old domain),
+ * and, when that request could not be opened, the one sentence saying so.
+ */
+export interface DomainChange {
+  domain: string;
+  changeRequest: number | null;
+  changeRequestError?: string;
+}
+
 /** Opens the change request that rewrites the grants of a domain change; answers its number, or null when no grant names a bot. */
 export interface IGrantRewriter {
   open(by: AuthUser, from: string, to: string, botIds: readonly string[]): Promise<number | null>;

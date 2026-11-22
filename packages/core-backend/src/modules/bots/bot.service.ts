@@ -1,11 +1,12 @@
 import { and, eq, isNotNull, isNull } from 'drizzle-orm';
 import { logger } from '../../shared/logging.js';
 import { canonicalEmail } from '../../shared/email-identity.js';
+import { redactSecret } from '../../shared/redact-secret.js';
 import type { Database } from '../database/index.js';
 import { users } from '../database/index.js';
 import { BotAddressBook, botAddress } from './bot-address-book.js';
 import { botsDomainRefusal, normalizeBotsDomain } from './bot-domain.js';
-import type { IGrantRewriter } from './bot-domain-change.js';
+import type { DomainChange, IGrantRewriter } from './bot-domain-change.js';
 import type { AuthUser } from '@bevel-software/platform-shared';
 import {
   DEFAULT_BOTS_DOMAIN,
@@ -251,10 +252,12 @@ export class BotService implements IBots {
    * `by`, rewrites every grant written at the old domain; and until it is
    * merged, a grant at the old domain still counts for its bot. Refuses a
    * domain people's addresses use, or text that is not a domain. A request
-   * that cannot be opened is logged and answered as none: the addresses have
-   * changed, and the old spelling keeps counting until the next change.
+   * that cannot be opened is answered as `changeRequestError`, one sentence
+   * with any credential scrubbed, never as "nothing to rewrite": the
+   * addresses have changed, and the old spelling keeps counting until the
+   * next change, so the admin must learn that no request rewrites it.
    */
-  async changeDomain(by: AuthUser, input: unknown, rewriter?: IGrantRewriter): Promise<{ domain: string; changeRequest: number | null }> {
+  async changeDomain(by: AuthUser, input: unknown, rewriter?: IGrantRewriter): Promise<DomainChange> {
     const domain = normalizeBotsDomain(input);
     const current = this.domain();
     const people = await this.db.select({ email: users.email }).from(users).where(isNull(users.botId));
@@ -273,15 +276,20 @@ export class BotService implements IBots {
     await this.refreshAddresses();
 
     let changeRequest: number | null = null;
+    let changeRequestError: string | undefined;
     try {
       changeRequest = rewriter ? await rewriter.open(by, current, domain, [...this.rows.keys()]) : null;
     } catch (err) {
-      log.warn("opening the change request that rewrites the bots' grants failed; the previous domain keeps counting", { err });
+      // The message only, scrubbed: a git failure quotes its remote back.
+      const why = redactSecret(err instanceof Error ? err.message : String(err));
+      log.warn(`opening the change request that rewrites the bots' grants failed; the previous domain keeps counting: ${why}`);
+      changeRequestError =
+        `The change request rewriting the grants at ${current} could not be opened (${why}), so those grants still count until the domain is changed again.`;
     }
     if (changeRequest !== null) await this.settings.record({ botsDomainChangeRequest: String(changeRequest) }, by.id);
     await this.refreshAddresses();
     log.info(`bots' domain changed from ${current} to ${domain}`);
-    return { domain, changeRequest };
+    return changeRequestError ? { domain, changeRequest, changeRequestError } : { domain, changeRequest };
   }
 
   /**

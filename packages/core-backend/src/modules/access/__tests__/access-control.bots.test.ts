@@ -5,7 +5,7 @@ import path from 'node:path';
 import { NodeFs } from '../../kb-fs/node-fs.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import { AccessControlService } from '../access-control.service.js';
-import { BotAddressBook } from '../../bots/bot-address-book.js';
+import { BotAddressBook } from '../../bots/index.js';
 
 /**
  * A bot's access, through the public resolver over a real on-disk tree: it is

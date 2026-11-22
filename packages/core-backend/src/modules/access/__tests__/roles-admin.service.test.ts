@@ -10,7 +10,7 @@ import type { VersionControlEventBus } from '../../version-control/index.js';
 import type { FileTreeEntry, VersionControlEventPayload } from '@bevel-software/platform-shared';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { AccessControlService } from '../access-control.service.js';
-import { BotAddressBook } from '../../bots/bot-address-book.js';
+import { BotAddressBook } from '../../bots/index.js';
 import { RolesAdminService } from '../roles-admin.service.js';
 import { rewriteRoleTokensInText, findRoleRefsInText } from '../reference-scan.js';
 import { PushNeedsAgentResolutionError } from '../../../shared/domain-errors.js';

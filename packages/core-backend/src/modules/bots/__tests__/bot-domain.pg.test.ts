@@ -145,4 +145,28 @@ describe.skipIf(!PG_ADMIN_URL)('the bots\' domain on a real Postgres', () => {
     expect(book.isBot('release-helper@agent.hexis')).toBe(false);
     expect((await service.choicesFor('dana@acme.com'))[0]!.address).toBe('release-helper@bots.acme.com');
   });
+
+  it('says so, with no credential, when the rewrite cannot be opened, and keeps the old address counting', async () => {
+    merged.value = false;
+    const secret = 'ghp_s3cretTokenValueThatMustNotLeak';
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const prevToken = process.env.GIT_TOKEN;
+    process.env.GIT_TOKEN = secret;
+    try {
+      rewriter.open.mockRejectedValueOnce(new Error(`push to https://x:${secret}@github.com/acme/kb.git refused`));
+      const res = await put('robots.acme.com');
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { domain: string; changeRequest: number | null; changeRequestError?: string };
+      expect(body.domain).toBe('robots.acme.com');
+      expect(body.changeRequest).toBeNull();
+      expect(body.changeRequestError).toMatch(/^The change request rewriting the grants at bots\.acme\.com could not be opened \(.*\), so those grants still count until the domain is changed again\.$/);
+      expect(body.changeRequestError).not.toContain(secret);
+      expect(JSON.stringify(warn.mock.calls)).not.toContain(secret);
+      expect(book.addressesOf('release-helper@robots.acme.com')).toEqual(['release-helper@robots.acme.com', 'release-helper@bots.acme.com']);
+    } finally {
+      if (prevToken === undefined) delete process.env.GIT_TOKEN;
+      else process.env.GIT_TOKEN = prevToken;
+      warn.mockRestore();
+    }
+  });
 });

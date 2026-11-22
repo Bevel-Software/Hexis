@@ -1,7 +1,7 @@
 import express from 'express';
 import type { AuthUser } from '@bevel-software/platform-shared';
 import { logger } from '../../shared/logging.js';
-import type { IGrantRewriter } from './bot-domain-change.js';
+import type { DomainChange, IGrantRewriter } from './bot-domain-change.js';
 import '../auth/index.js'; // Express Request augmentation (req.userId / req.userEmail)
 
 const log = logger('bots');
@@ -9,7 +9,7 @@ const log = logger('bots');
 /** What the domain routes need of the bots mechanism. */
 export interface BotsDomainService {
   domain(): string;
-  changeDomain(by: AuthUser, input: unknown, rewriter?: IGrantRewriter): Promise<{ domain: string; changeRequest: number | null }>;
+  changeDomain(by: AuthUser, input: unknown, rewriter?: IGrantRewriter): Promise<DomainChange>;
 }
 
 /**

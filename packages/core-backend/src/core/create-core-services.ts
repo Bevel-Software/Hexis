@@ -113,9 +113,7 @@ import {
   MarketplaceCompilerService,
   KbPluginSource,
 } from '../modules/plugins/index.js';
-import { noBots } from '../modules/bots/index.js';
-import { BotService } from '../modules/bots/bot.service.js';
-import { BotAddressBook } from '../modules/bots/bot-address-book.js';
+import { BotAddressBook, BotService, noBots } from '../modules/bots/index.js';
 import { MarketplaceRepoService } from '../modules/marketplace/index.js';
 import {
   GitHubFacadeCredentialsService,

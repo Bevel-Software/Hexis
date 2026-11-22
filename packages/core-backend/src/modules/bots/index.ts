@@ -10,5 +10,9 @@ export {
   type Principal,
   type ResolvedConnection,
 } from './bots.contract.js';
-export { botAddress } from './bot-address-book.js';
+export { BotAddressBook, botAddress } from './bot-address-book.js';
 export { describeConnectionChoice, type ConnectedAs } from './connected-as.js';
+// The composition root's: the service, the address book and the routes it wires.
+export { BotService } from './bot.service.js';
+export { createBotsRoutes } from './bots.routes.js';
+export { GrantRewriteChangeRequests, type DomainChange, type IGrantRewriter } from './bot-domain-change.js';
