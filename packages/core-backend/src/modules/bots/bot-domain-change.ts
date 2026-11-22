@@ -2,6 +2,7 @@ import path from 'node:path';
 import type { AuthUser, IVersionControlService } from '@bevel-software/platform-shared';
 import { logger } from '../../shared/logging.js';
 import { redactSecret } from '../../shared/redact-secret.js';
+import { PushNeedsAgentResolutionError } from '../../shared/domain-errors.js';
 import type { ITreeWalker } from '../../shared/fs.contract.js';
 import { rewriteBotGrants } from './bot-domain.js';
 
@@ -51,8 +52,18 @@ export interface IGrantRewriter {
  * It reads them from the new branch's own checkout, the committed default
  * branch, never from the default branch's working copy: a file there that is
  * not committed is not the target's, and a request carrying it cannot merge.
- * A branch no request comes from (nothing to rewrite, or the rewrite failed
- * before the request) is removed again.
+ * A branch no request comes from is removed again: nothing to rewrite, or
+ * the rewrite failed before its commit landed. One failure keeps it: a commit
+ * that landed but whose push was handed to recovery
+ * (`PushNeedsAgentResolutionError`, which names the branch). That commit is
+ * the rewrite, recovery shares it, and an admin can open the request from it;
+ * no request is opened here.
+ *
+ * With no bot there is nothing a grant can name, so no branch is cut at all.
+ *
+ * A file the default branch holds uncommitted is not read. A grant at the old
+ * domain in such a file is not rewritten, and once the request is merged it
+ * no longer counts for its bot; the request's description says so.
  */
 export class GrantRewriteChangeRequests implements IGrantRewriter {
   constructor(
@@ -92,6 +103,8 @@ export class GrantRewriteChangeRequests implements IGrantRewriter {
 
   async open(by: AuthUser, from: string, to: string, botIds: readonly string[]): Promise<number | null> {
     const { versionControl, workspace, kb, isAccessFile } = this.deps;
+    // No bot, no grant that can name one: nothing to read, and no git at all.
+    if (botIds.length === 0) return null;
     const live = kb.defaultWorkspaceId();
     // The branch first, and the grants read from ITS checkout: a fresh clone
     // of the committed default branch, the very tree the request merges into.
@@ -116,9 +129,16 @@ export class GrantRewriteChangeRequests implements IGrantRewriter {
         await versionControl.commitChanges(ws.id, by, `Address bots at ${to} instead of ${from}`);
       }
     } catch (err) {
-      // No request will come from the branch: it goes, and the failure that
-      // stopped the rewrite is what the caller hears.
-      await this.dropBranch(live, branch, by);
+      // The commit landed and only its push was handed to recovery: the
+      // branch holds the rewrite, so it stays for recovery to share. Any
+      // other failure came before the commit landed: no request will come
+      // from the branch, so it goes. Either way the failure is what the
+      // caller hears.
+      if (err instanceof PushNeedsAgentResolutionError) {
+        log.warn(`bots' domain change: the rewrite is committed on ${branch} but not shared yet; the branch is kept and no change request was opened`);
+      } else {
+        await this.dropBranch(live, branch, by);
+      }
       throw err;
     }
     if (rewritten.length === 0) {
@@ -133,7 +153,9 @@ export class GrantRewriteChangeRequests implements IGrantRewriter {
       description:
         `The bots' domain changed from ${from} to ${to}, so every bot's address changed with it. ` +
         `This rewrites the ${rewritten.length} file(s) whose grants still name a bot at ${from}. ` +
-        `Until it is merged, a grant at ${from} still counts for its bot.`,
+        `Until it is merged, a grant at ${from} still counts for its bot. ` +
+        `It rewrites only what the default branch had committed when it was opened: a grant at ${from} in a file committed since ` +
+        `(or not committed yet) stops counting once this is merged, so search for @${from} after merging and fix what is left by hand.`,
     });
     log.info(`bots' domain change: change request #${detail.number} rewrites ${rewritten.length} file(s)`);
     return detail.number;

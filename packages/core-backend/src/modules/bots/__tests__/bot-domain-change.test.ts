@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import type { AuthUser } from '@bevel-software/platform-shared';
 import { realDisk } from '../../../__tests__/real-disk.js';
 import { WalkError, type ITreeWalker } from '../../../shared/fs.contract.js';
+import { PushNeedsAgentResolutionError } from '../../../shared/domain-errors.js';
 import { hasAccessFrontmatterExtension, isAccessFile } from '../../access-model/index.js';
 import { GrantRewriteChangeRequests } from '../bot-domain-change.js';
 
@@ -48,10 +49,11 @@ async function seed(files: Record<string, string>, name = 'branch'): Promise<str
 function rewriter(
   dir: string,
   walker: Pick<ITreeWalker, 'walkKb'> = realDisk(),
-  opts: { live?: string; failDelete?: boolean; failCommit?: boolean } = {},
+  opts: { live?: string; failDelete?: boolean; failCommit?: boolean | Error } = {},
 ) {
   const written: Record<string, string> = {};
   const calls: string[] = [];
+  const descriptions: string[] = [];
   const folder = (ws: string) => (ws === 'ws-main' ? (opts.live ?? path.join(root!, 'unused-live')) : dir);
   const r = new GrantRewriteChangeRequests({
     versionControl: {
@@ -64,10 +66,11 @@ function rewriter(
       },
       commitChanges: async (_ws: string, by: AuthUser, message: string) => {
         calls.push(`commit by ${by.email}: ${message}`);
-        if (opts.failCommit) throw new Error('commit failed');
+        if (opts.failCommit) throw opts.failCommit instanceof Error ? opts.failCommit : new Error('commit failed');
       },
-      openChangeRequest: async (_ws: string, by: AuthUser, req: { targetBranch: string }) => {
+      openChangeRequest: async (_ws: string, by: AuthUser, req: { targetBranch: string; description: string }) => {
         calls.push(`request by ${by.email} into ${req.targetBranch}`);
+        descriptions.push(req.description);
         return { number: 7 };
       },
     } as never,
@@ -85,7 +88,7 @@ function rewriter(
     isAccessFile,
     hasOwnAccessLines: hasAccessFrontmatterExtension,
   });
-  return { r, written, calls };
+  return { r, written, calls, descriptions };
 }
 
 describe('the grant-rewriting change request of a bots\' domain change', () => {
@@ -185,6 +188,40 @@ describe('the grant-rewriting change request of a bots\' domain change', () => {
     const { r, written } = rewriter(committed, realDisk(), { live });
     expect(await r.open(ADMIN, 'agent.hexis', 'bots.acme.com', ['ops'])).toBeNull();
     expect(written).toEqual({});
+  });
+
+  it('touches no git at all when there is no bot', async () => {
+    const dir = await seed({ 'access.md': '---\nread:\n  - ops@agent.hexis\n---\n' });
+    // A walker that fails if asked: with no bot the rewrite reads nothing.
+    const refusing: Pick<ITreeWalker, 'walkKb'> = {
+      walkKb: async () => {
+        throw new Error('read with no bot');
+      },
+    };
+    const { r, written, calls } = rewriter(dir, refusing);
+    expect(await r.open(ADMIN, 'agent.hexis', 'bots.acme.com', [])).toBeNull();
+    expect(written).toEqual({});
+    expect(calls).toEqual([]);
+  });
+
+  it('tells the admin, in the request, that grants it could not see stop counting once it is merged', async () => {
+    const dir = await seed({ 'access.md': '---\nread:\n  - ops@agent.hexis\n---\n' });
+    const { r, descriptions } = rewriter(dir);
+    expect(await r.open(ADMIN, 'agent.hexis', 'bots.acme.com', ['ops'])).toBe(7);
+    expect(descriptions).toHaveLength(1);
+    expect(descriptions[0]).toContain('stops counting once this is merged');
+    expect(descriptions[0]).toContain('search for @agent.hexis after merging');
+  });
+
+  it('keeps the branch, and answers the failure, when the rewrite is committed but its push is handed to recovery', async () => {
+    const dir = await seed({ 'access.md': '---\nread:\n  - ops@agent.hexis\n---\n' });
+    const handedOff = new PushNeedsAgentResolutionError('bots/domain-x', 'access.md', 'rejected', 'rejected', 'refused');
+    const { r, calls } = rewriter(dir, realDisk(), { failCommit: handedOff });
+    await expect(r.open(ADMIN, 'agent.hexis', 'bots.acme.com', ['ops'])).rejects.toBe(handedOff);
+    // The commit is the rewrite and recovery owns it: nothing deletes its branch, and no request is opened.
+    expect(calls.some((c) => c.startsWith('delete'))).toBe(false);
+    expect(calls.some((c) => c.startsWith('request'))).toBe(false);
+    expect(calls.at(-1)).toMatch(/^commit by admin@acme\.com/);
   });
 
   it('removes the branch and answers the failure when the rewrite cannot be committed', async () => {
