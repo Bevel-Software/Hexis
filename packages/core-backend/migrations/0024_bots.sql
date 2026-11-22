@@ -8,6 +8,9 @@ ALTER TABLE "oauth_auth_codes" ADD COLUMN "bot_user_id" uuid;--> statement-break
 ALTER TABLE "pending_commits" ADD COLUMN "made_by_email" text;--> statement-breakpoint
 ALTER TABLE "pending_commits" ADD COLUMN "made_by_email_bidx" text;--> statement-breakpoint
 ALTER TABLE "pending_commits" ADD COLUMN "made_by_name" text;--> statement-breakpoint
+ALTER TABLE "pr_file_approvals" ADD COLUMN "made_by_email" text;--> statement-breakpoint
+ALTER TABLE "pr_file_approvals" ADD COLUMN "made_by_email_bidx" text;--> statement-breakpoint
+ALTER TABLE "pr_file_approvals" ADD COLUMN "made_by_name" text;--> statement-breakpoint
 ALTER TABLE "pr_merge_log" ADD COLUMN "made_by_email" text;--> statement-breakpoint
 ALTER TABLE "pr_merge_log" ADD COLUMN "made_by_email_bidx" text;--> statement-breakpoint
 ALTER TABLE "pr_merge_log" ADD COLUMN "made_by_name" text;--> statement-breakpoint

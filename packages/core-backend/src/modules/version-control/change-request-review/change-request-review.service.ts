@@ -455,6 +455,8 @@ export class ChangeRequestReviewService implements IChangeRequestReviewService {
           approverEmail: callerEmail,
           approverEmailBidx: callerEmail,
           approverName: user.name,
+          // A bot approving: the person behind the bot is in the approval too.
+          ...madeByColumns(user.madeBy),
           headSha,
         })
         .onConflictDoNothing();
@@ -486,6 +488,11 @@ export class ChangeRequestReviewService implements IChangeRequestReviewService {
       .update(prFileApprovals)
       .set({ approverEmail: erased.email, approverEmailBidx: erased.email, approverName: erased.name })
       .where(eq(prFileApprovals.approverEmailBidx, email));
+    // The person behind a bot's approvals, erased the same way.
+    await tx
+      .update(prFileApprovals)
+      .set({ madeByEmail: erased.email, madeByEmailBidx: erased.email, madeByName: erased.name })
+      .where(eq(prFileApprovals.madeByEmailBidx, email));
   }
 
   /**

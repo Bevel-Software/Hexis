@@ -145,6 +145,17 @@ describe('DirectoryGroupsPage', () => {
     expect(screen.getByRole('combobox', { name: 'Add member to Product' })).toBeInTheDocument();
   });
 
+  it('marks a bot among the members "Bot", and a person not', async () => {
+    vi.mocked(getGroupsRoster).mockResolvedValue({
+      ...MANUAL_ROSTER,
+      groups: [{ ...MANUAL_ROSTER.groups[0]!, members: ['pat@example.com', 'release-helper@agent.hexis'], bots: ['release-helper@agent.hexis'] }],
+    });
+    renderPage();
+    const bot = (await screen.findByText('release-helper@agent.hexis')).parentElement!;
+    expect(bot).toHaveTextContent('Bot');
+    expect(screen.getByText('pat@example.com').parentElement!).not.toHaveTextContent('Bot');
+  });
+
   it('manual mode: creating a group calls the api and applies the returned roster', async () => {
     vi.mocked(createGroup).mockResolvedValue({
       mode: 'manual',

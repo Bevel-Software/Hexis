@@ -1,5 +1,5 @@
 {
-  "id": "a63c4870-6660-4fbd-b8af-e983bc3e5901",
+  "id": "7ca96b2e-d0ff-4b94-86a5-a219fe45c88a",
   "prevId": "35ec568e-5f44-49bf-a801-f674a7f057f4",
   "version": "7",
   "dialect": "postgresql",
@@ -2012,6 +2012,24 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true
+        },
+        "made_by_email": {
+          "name": "made_by_email",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "made_by_email_bidx": {
+          "name": "made_by_email_bidx",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "made_by_name": {
+          "name": "made_by_name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
         },
         "head_sha": {
           "name": "head_sha",

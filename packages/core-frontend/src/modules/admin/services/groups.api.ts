@@ -18,6 +18,8 @@ export interface GroupRosterEntry {
   canonical: string;
   displayName: string;
   members: string[];
+  /** The members that are bots: marked "Bot", never shown as people. Absent from older servers. */
+  bots?: string[];
   /**
    * Every access rule referencing this group in a file the viewer can read —
    * drives the delete warning.

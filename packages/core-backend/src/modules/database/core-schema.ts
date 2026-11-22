@@ -118,6 +118,15 @@ export const prFileApprovals = pgTable('pr_file_approvals', {
   /** Blind index of `approver_email` — the uniqueness key and eq() lookup. */
   approverEmailBidx: blindIndexText('approver_email_bidx').notNull(),
   approverName: encryptedText('approver_name').notNull(),
+  /**
+   * The person who made the connection, when the approver above is a BOT
+   * acting through it (`modules/bots`). Null for a person's own approval.
+   * Erased with the person's account, like the approver.
+   */
+  madeByEmail: encryptedText('made_by_email'),
+  /** Blind index of `made_by_email` — GDPR-erasure lookup. */
+  madeByEmailBidx: blindIndexText('made_by_email_bidx'),
+  madeByName: encryptedText('made_by_name'),
   headSha: text('head_sha').notNull(),
   approvedAt: timestamp('approved_at').defaultNow().notNull(),
 }, (t) => ({
