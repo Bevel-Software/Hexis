@@ -66,6 +66,13 @@ export interface ToolAuth {
    * then the bot's row): recorded beside the bot on what the call does.
    */
   madeBy?: Principal;
+  /**
+   * The bot a connection made as a bot names, on a call where it could not
+   * act as it (the bot cannot be used, or the person may no longer act as
+   * it): `userId` is then the person and the connection loads nothing. Kept
+   * so the audit of the refused call still names the bot.
+   */
+  stoppedBotUserId?: string;
   /** Always `'write'` now (the middleware sets it for both internal + external — neither credential carries scope). The read path is dormant until consumer agents are removed. */
   scope: 'read' | 'write';
 }
@@ -176,6 +183,7 @@ async function withConnection(
       userId: resolved.actor.id,
       connection: resolved.scope,
       ...(resolved.madeBy ? { madeBy: resolved.madeBy } : {}),
+      ...(!resolved.madeBy && choice.botUserId ? { stoppedBotUserId: choice.botUserId } : {}),
     },
   };
 }

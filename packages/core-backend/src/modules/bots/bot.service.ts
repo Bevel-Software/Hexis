@@ -51,6 +51,9 @@ export function goneSentence(label: string): string {
 /** The few words a list of connections shows for a connection whose bot is gone for its maker. */
 export const GONE_REASON = 'you may no longer edit this bot';
 
+/** A connection of a list whose bot could not be judged just now: the rest of the list still loads. */
+export const COULD_NOT_CHECK_REASON = 'could not be checked';
+
 /** The sentence for a bot its maker may act as but which cannot be used. */
 export function unusableSentence(label: string, problem: string): string {
   return `This connection was made as the bot "${label}", which cannot be used (${problem}), so it loads nothing until that is fixed.`;
@@ -208,7 +211,36 @@ export class BotService implements IBots {
 
   async resolveConnection(maker: Principal, choice: ConnectionChoice): Promise<ResolvedConnection> {
     if (!choice.botUserId && !choice.agentPath) return { kind: 'myself' };
-    const grouped = await this.sync();
+    return this.resolveAgainst(await this.sync(), maker, choice);
+  }
+
+  async resolveConnections(requests: readonly { maker: Principal; choice: ConnectionChoice }[]): Promise<ResolvedConnection[]> {
+    const asBot = requests.some((r) => r.choice.botUserId || r.choice.agentPath);
+    const grouped = asBot ? await this.sync() : new Map<string, BotDefinition[]>();
+    return Promise.all(
+      requests.map(async ({ maker, choice }): Promise<ResolvedConnection> => {
+        if (!choice.botUserId && !choice.agentPath) return { kind: 'myself' };
+        try {
+          return await this.resolveAgainst(grouped, maker, choice);
+        } catch (err) {
+          log.warn('judging one connection of a list failed; it is shown as not checked', { err });
+          return {
+            kind: 'unavailable',
+            bot: { id: choice.botUserId ?? choice.agentPath ?? 'unknown', name: choice.agentPath ?? 'a bot' },
+            sentence: 'Whom this connection acts as could not be checked just now.',
+            reason: COULD_NOT_CHECK_REASON,
+          };
+        }
+      }),
+    );
+  }
+
+  /** What `choice`, made by `maker`, acts as, judged against the definitions `grouped` (one sync). */
+  private async resolveAgainst(
+    grouped: Map<string, BotDefinition[]>,
+    maker: Principal,
+    choice: ConnectionChoice,
+  ): Promise<ResolvedConnection> {
     let row: BotRow | undefined;
     let label: string;
     if (choice.botUserId) {

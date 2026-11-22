@@ -60,9 +60,10 @@ export function createAgentRestAuditMiddleware(deps: AgentRestAuditDeps): Reques
         try {
           deps.recorder.record({
             // A bot's call names both: the person who made the connection,
-            // and the bot it acted as.
+            // and the bot it acted as — or, refused because the bot could not
+            // be used, the bot it was made as.
             userId: auth.madeBy?.id ?? auth.userId,
-            ...(auth.madeBy ? { botUserId: auth.userId } : {}),
+            ...(auth.madeBy ? { botUserId: auth.userId } : auth.stoppedBotUserId ? { botUserId: auth.stoppedBotUserId } : {}),
             principal: { kind: 'agent', id: auth.connectionId! },
             ...classifyToolCall(utcpName, args, ctx, skills),
             outcome,

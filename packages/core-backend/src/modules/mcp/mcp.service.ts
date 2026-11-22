@@ -600,8 +600,13 @@ export class McpService {
       this.auditRecorder && principal
         ? new RequestAudit(this.auditRecorder, caller.credentialUserId ?? userId, principal, {
             kbManualName: EXTERNAL_KB_MANUAL_NAME,
-            // A bot's request names both: the person (above) and the bot.
-            ...(caller.credentialUserId ? { botUserId: userId } : {}),
+            // A bot's request names both: the person (above) and the bot —
+            // the bot it was made as, too, when it could not act as it.
+            ...(caller.credentialUserId
+              ? { botUserId: userId }
+              : choice?.botUserId
+                ? { botUserId: choice.botUserId }
+                : {}),
             catalogNames: () => catalogNamesHolder.current,
             loadSkills: () =>
               this.fetchSkillList(loopbackBearer).then((skills) =>

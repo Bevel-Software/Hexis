@@ -192,8 +192,17 @@ export interface IChangeRequestReviewService {
      * recorded in the merge commit body for audit. Bypass requires admin
      * write access at `origin/<baseBranch>` (i.e. write on `roles.yaml`) —
      * non-admins get a 403 even when warnings would otherwise be skippable.
+     *
+     * `authorize` is a further check of the merge, run inside its reservation
+     * against the target and source commits it merges, in the clone it runs
+     * in (`workspaceId`). Throwing refuses the merge; the refusal reaches the
+     * caller as it was thrown. The merge itself also refuses when the source
+     * moved past `headSha`, the head its approvals were read at.
      */
-    opts?: { bypass?: boolean },
+    opts?: {
+      bypass?: boolean;
+      authorize?: (target: { sha: string; sourceSha: string; changedPaths: string[]; workspaceId: string }) => Promise<void>;
+    },
   ): Promise<MergePrResult>;
 
   /**

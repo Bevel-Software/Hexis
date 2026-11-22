@@ -97,6 +97,8 @@ export const users = pgTable('users', {
 }, (t) => ({
   emailBidxUnq: uniqueIndex('users_email_bidx_unq').on(t.emailBidx),
   botIdUnq: uniqueIndex('users_bot_id_unq').on(t.botId),
+  // Only a bot is ever retired: a person's row never carries the mark.
+  botRetiredCheck: check('users_bot_retired_only_bots', sql`${t.botRetiredAt} IS NULL OR ${t.botId} IS NOT NULL`),
 }));
 
 /**
@@ -350,9 +352,10 @@ export const externalApiKeys = pgTable('api_tokens', {
    * is judged for the bot's row, and checks again that the owner may still
    * act as it (see `modules/bots`).
    */
-  botUserId: uuid('bot_user_id').references(() => users.id, { onDelete: 'cascade' }),
+  botUserId: uuid('bot_user_id').references(() => users.id, { onDelete: 'restrict' }),
 }, (t) => ({
   byUser: index('api_tokens_by_user').on(t.userId),
+  byBot: index('api_tokens_by_bot').on(t.botUserId),
 }));
 
 /**
@@ -577,10 +580,11 @@ export const oauthAuthCodes = pgTable('oauth_auth_codes', {
    */
   agentPath: text('agent_path'),
   /** The bot chosen on the consent step, carried to the exchange; null for Myself. */
-  botUserId: uuid('bot_user_id').references(() => users.id, { onDelete: 'cascade' }),
+  botUserId: uuid('bot_user_id').references(() => users.id, { onDelete: 'restrict' }),
 }, (t) => ({
   // Sweep expired/spent rows without a full scan.
   byExpiry: index('oauth_auth_codes_by_expiry').on(t.expiresAt),
+  byBot: index('oauth_auth_codes_by_bot').on(t.botUserId),
 }));
 
 /**
@@ -631,9 +635,10 @@ export const agentConnections = pgTable('agent_connections', {
    * so re-authorising with another choice changes whom the agent acts as
    * from its next request.
    */
-  botUserId: uuid('bot_user_id').references(() => users.id, { onDelete: 'cascade' }),
+  botUserId: uuid('bot_user_id').references(() => users.id, { onDelete: 'restrict' }),
 }, (t) => ({
   byUser: index('agent_connections_by_user').on(t.userId),
+  byBot: index('agent_connections_by_bot').on(t.botUserId),
   liveUnq: uniqueIndex('agent_connections_live_unq')
     .on(t.userId, t.agentKey)
     .where(sql`${t.revokedAt} is null`),
@@ -729,7 +734,7 @@ export const agentEvents = pgTable('agent_events', {
    * when the person acted as themselves. `user_id` stays the person who made
    * the connection, so every event of a bot names both.
    */
-  botUserId: uuid('bot_user_id').references(() => users.id, { onDelete: 'cascade' }),
+  botUserId: uuid('bot_user_id').references(() => users.id, { onDelete: 'restrict' }),
   at: timestamp('at').defaultNow().notNull(),
 }, (t) => ({
   // The two read paths: one principal's events, newest first.
@@ -739,6 +744,7 @@ export const agentEvents = pgTable('agent_events', {
   // The retention prune, and per-user counts.
   byAt: index('agent_events_by_at').on(t.at),
   byUser: index('agent_events_by_user').on(t.userId),
+  byBot: index('agent_events_by_bot').on(t.botUserId),
   kindCheck: check('agent_events_kind', sql`${t.kind} IN ('capability', 'tool', 'skill')`),
   outcomeCheck: check('agent_events_outcome', sql`${t.outcome} IN ('ok', 'error', 'denied', 'refused')`),
   principalCheck: check(

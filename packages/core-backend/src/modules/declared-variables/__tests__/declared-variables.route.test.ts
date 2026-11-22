@@ -49,14 +49,21 @@ async function mount(opts: {
   secrets?: Record<string, string>;
   /** What the caller's connection loads, as the verifier resolved it; absent is Myself. */
   connection?: ConnectionScope;
-}): Promise<Harness> {
+  /** The person behind a connection made as a bot (`userId` is then the bot's row). */
+  madeBy?: { id: string; email: string };
+}): Promise<Harness & { listedFor: string[] }> {
   const userId = opts.userId ?? 'user-1';
   const source = opts.source ?? 'external';
   const secrets = opts.secrets ?? {};
-  const resolve = vi.fn(async (_u: string, key: string) => secrets[key] ?? null);
+  // A secret keyed `<user id>:<key>` is that identity's own; a bare key is anyone's.
+  const resolve = vi.fn(async (u: string, key: string) => secrets[`${u}:${key}`] ?? secrets[key] ?? null);
+  const listedFor: string[] = [];
 
   const toolManualService = {
-    listAccessible: async () => opts.manuals ?? [],
+    listAccessible: async (email: string) => {
+      listedFor.push(email);
+      return opts.manuals ?? [];
+    },
   } as unknown as IToolManualService;
   const secretsVault = { resolve } as unknown as ISecretsVaultService;
 
@@ -73,18 +80,19 @@ async function mount(opts: {
             source,
             scope: 'write',
             ...(opts.connection ? { connection: opts.connection } : {}),
+            ...(opts.madeBy ? { madeBy: opts.madeBy } : {}),
           } as typeof req.toolAuth;
         }
         next();
       },
-      async () => 'runner@x.eu',
+      async (id: string) => (id === 'u-bot' ? 'ops@agent.hexis' : 'runner@x.eu'),
     ),
   );
   httpServer = await new Promise<HttpServer>((r) => {
     const s = app.listen(0, () => r(s));
   });
   const port = (httpServer.address() as { port: number }).port;
-  return { base: `http://127.0.0.1:${port}`, resolve };
+  return { base: `http://127.0.0.1:${port}`, resolve, listedFor };
 }
 
 afterEach(async () => {
@@ -147,11 +155,19 @@ describe('POST /agent/local-tools/:slug/variables', () => {
     // Made as a usable bot: the caller IS the bot (the verifier put its row on
     // the request), so what it may read is what it is handed.
     const asBot = await mount({
+      userId: 'u-bot',
+      madeBy: { id: 'user-1', email: 'dana@acme.com' },
       manuals: [GIT_TOOL],
-      secrets: { git_GITHUB_TOKEN: 'ghp_bot_secret' },
+      secrets: { 'u-bot:git_GITHUB_TOKEN': 'ghp_bot_secret', 'user-1:git_GITHUB_TOKEN': 'ghp_person_secret' },
       connection: ConnectionScope.asBot({ path: 'ops@agent.hexis', name: 'ops' }, null, 'fp'),
     });
-    expect((await fetch(`${asBot.base}/agent/local-tools/git/variables`, { method: 'POST' })).status).toBe(200);
+    const res = await fetch(`${asBot.base}/agent/local-tools/git/variables`, { method: 'POST' });
+    expect(res.status).toBe(200);
+    // The bot's own secret, read from the bot's vault and judged for the bot's
+    // address — never the person's.
+    expect(((await res.json()) as { variables: Record<string, string> }).variables.GITHUB_TOKEN).toBe('ghp_bot_secret');
+    expect(asBot.resolve.mock.calls.every((c) => c[0] === 'u-bot')).toBe(true);
+    expect(asBot.listedFor).toEqual(['ops@agent.hexis']);
     await new Promise<void>((r) => httpServer!.close(() => r()));
 
     // A bot that cannot be used loads nothing: as absent as an unreadable tool.

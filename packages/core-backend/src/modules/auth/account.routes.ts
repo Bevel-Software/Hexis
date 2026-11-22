@@ -336,6 +336,10 @@ export function createAccountRoutes(
         return;
       }
     } catch (err) {
+      if (err instanceof AccountChangeRefusedError) {
+        res.status(400).json({ error: err.message });
+        return;
+      }
       log.error('user erasure failed:', { err });
       res.status(500).json({ error: 'Failed to erase user' });
       return;

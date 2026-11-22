@@ -17,7 +17,7 @@ import '../tool-auth/index.js'; // req.externalApiKeyId augmentation
 import './mcp-auth.middleware.js'; // req.mcpCallerKind augmentation
 import { isPagePath } from '../audit/index.js';
 import type { IBots } from '../bots/index.js';
-import { describeConnectionChoice } from '../bots/index.js';
+import { describeConnectionChoices } from '../bots/index.js';
 import { NOT_A_BOT_CHOICE } from './oauth/oauth-consent.routes.js';
 
 /** Pull the raw bearer token off an already-authenticated request. */
@@ -111,7 +111,7 @@ export function createMcpRoutes(
    * The "Connect as" choices a key may be minted as (`modules/bots`).
    * Absent: keys are minted as Myself only, and no choices are listed.
    */
-  bots?: Pick<IBots, 'choicesFor' | 'actAs' | 'resolveConnection'>,
+  bots?: Pick<IBots, 'choicesFor' | 'actAs' | 'resolveConnections'>,
 ): express.Router {
   const router = express.Router();
 
@@ -267,8 +267,9 @@ export function createMcpRoutes(
       // Whom each key connects as, judged now: "you", a bot, or a bot it
       // stopped acting as and why.
       const person = { id: req.userId!, email: req.userEmail ?? '' };
-      const connectedAs = await Promise.all(
-        tokens.map((t) => describeConnectionChoice(bots, person, { botUserId: t.botUserId, agentPath: t.agentPath })),
+      const connectedAs = await describeConnectionChoices(
+        bots,
+        tokens.map((t) => ({ maker: person, choice: { botUserId: t.botUserId, agentPath: t.agentPath } })),
       );
       res.json(
         tokens.map((t, i) => ({

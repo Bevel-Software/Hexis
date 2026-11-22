@@ -1224,6 +1224,7 @@ export class VersionControlService implements IVersionControlService {
         path: [...err.conflictedPaths].sort()[0],
         authorEmail: user?.email ?? RECOVERY_BOT_EMAIL,
         authorName: user?.name ?? RECOVERY_BOT_NAME,
+        madeBy: user?.madeBy,
       });
       if (queued) {
         log.warn(

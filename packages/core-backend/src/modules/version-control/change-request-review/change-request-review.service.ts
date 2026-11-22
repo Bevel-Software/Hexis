@@ -117,8 +117,8 @@ class ApprovalAuthError extends VersionControlDomainError {
  * made then are that new person's.
  */
 class ApprovalAccountGoneError extends VersionControlDomainError {
-  constructor() {
-    super('This account no longer exists — sign in again to approve.', 401, {
+  constructor(message = 'This account no longer exists — sign in again to approve.') {
+    super(message, 401, {
       kind: 'approval-account-erased',
     });
     this.name = 'ApprovalAccountGoneError';
@@ -447,6 +447,17 @@ export class ChangeRequestReviewService implements IChangeRequestReviewService {
         .where(eq(users.id, user.id))
         .limit(1);
       if (!account) throw new ApprovalAccountGoneError();
+      // A bot's approval names the person behind it too, and their erasure
+      // rewrites that name under this same lock: asked here as well, so an
+      // erasure that committed first is not undone by this insert. By
+      // address, which is all the approval records of them.
+      if (user.madeBy) {
+        const madeBy = canonicalEmail(user.madeBy.email);
+        const [maker] = await tx.select({ id: users.id }).from(users).where(eq(users.emailBidx, madeBy)).limit(1);
+        if (!maker) {
+          throw new ApprovalAccountGoneError('The person who made this connection no longer has an account, so the bot cannot approve in their name.');
+        }
+      }
       await tx
         .insert(prFileApprovals)
         .values({

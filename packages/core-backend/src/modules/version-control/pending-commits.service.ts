@@ -250,6 +250,7 @@ export class PendingCommitsService {
       authorEmail: email,
       authorEmailBidx: email,
       authorName: input.authorName,
+      ...madeByColumns(input.madeBy),
     });
     return true;
   }

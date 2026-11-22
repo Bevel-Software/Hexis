@@ -72,6 +72,13 @@ describe('PendingCommitsService.enqueueIfAbsent', () => {
     });
   });
 
+  it("records the person behind a bot beside the bot, as every queued save does", async () => {
+    const { db, inserted } = makeFakeDb(0);
+    const svc = new PendingCommitsService(db);
+    await svc.enqueueIfAbsent({ ...INPUT, authorEmail: 'ops@agent.hexis', authorName: 'Ops', madeBy: { name: 'Dana', email: 'Dana@Acme.com' } });
+    expect(inserted[0]).toMatchObject({ authorEmail: 'ops@agent.hexis', madeByEmail: 'dana@acme.com', madeByEmailBidx: 'dana@acme.com', madeByName: 'Dana' });
+  });
+
   it('is a no-op when ANY row exists for the tuple (pending, running, or needs_attention)', async () => {
     const { db, inserted } = makeFakeDb(1);
     const svc = new PendingCommitsService(db);

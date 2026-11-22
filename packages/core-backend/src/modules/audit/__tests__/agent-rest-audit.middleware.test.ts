@@ -83,6 +83,22 @@ describe('the REST recorder for the local server', () => {
     expect(typeof events[0]!.durationMs).toBe('number');
   });
 
+  it('names both the person and the bot for a bot call, and the bot it was made as for a call the bot could not make', async () => {
+    const asBot = makeApp({ ...EXCHANGED_GRANT, userId: 'u-bot', madeBy: { id: 'u-1', email: 'dana@acme.com' } });
+    let base = await listen(asBot.app);
+    await post(base, 'boom', {});
+    await settle();
+    expect(asBot.events[0]).toMatchObject({ userId: 'u-1', botUserId: 'u-bot' });
+    server.close();
+
+    // Stopped: the person is the identity, the connection loads nothing, and the bot is still named.
+    const stopped = makeApp({ ...EXCHANGED_GRANT, stoppedBotUserId: 'u-bot' });
+    base = await listen(stopped.app);
+    await post(base, 'boom', {});
+    await settle();
+    expect(stopped.events[0]).toMatchObject({ userId: 'u-1', botUserId: 'u-bot', outcome: 'error' });
+  });
+
   it('fetches the skill catalog only for a read that names a path, and classifies the read by it', async () => {
     const { app, events, skillFolders } = makeApp(EXCHANGED_GRANT, [{ name: 'rfi', path: 'Plugins/Sales/rfi' }]);
     const base = await listen(app);

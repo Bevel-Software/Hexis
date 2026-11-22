@@ -131,6 +131,8 @@ describe('createTokenVerifier — internal-token source resolution', () => {
     if (!result.ok) return;
     expect(result.auth.userId).toBe('user-A');
     expect(result.auth.connection?.loadsAnything()).toBe(false);
+    // The bot it was made as is kept for the audit of the refused call.
+    expect(result.auth.stoppedBotUserId).toBe('u-bot');
     expect(result.auth.connection?.describe()).toMatch(/has no bots, so it loads nothing/);
   });
 });

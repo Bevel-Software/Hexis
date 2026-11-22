@@ -161,6 +161,35 @@ describe.skipIf(!PG_ADMIN_URL)('bots on a real Postgres', () => {
     expect(await service.resolveConnection(PERSON, choice)).toMatchObject({ kind: 'unavailable', sentence: goneSentence('ops') });
   });
 
+  it('a list of connections is judged against one look at the bots, and one that cannot be judged does not sink the rest', async () => {
+    const { state, dir } = directory();
+    state.defs = [def('ops')];
+    state.writers.set('Agents/ops.agent', new Set([PERSON.email]));
+    const definitions = vi.spyOn(dir, 'definitions');
+    const failing: IBotDirectory = {
+      ...dir,
+      definitions: dir.definitions,
+      mayActAs: async (email, d) => {
+        if (email === 'broken@acme.com') throw new Error('access tree unreadable');
+        return dir.mayActAs(email, d);
+      },
+    };
+    const service = new BotService(db, settings(), failing);
+    await service.load();
+    const bot = (await service.actAs(PERSON.email, 'ops'))!;
+    definitions.mockClear();
+    const choice = { botUserId: bot.id, agentPath: null };
+    const out = await service.resolveConnections([
+      { maker: PERSON, choice },
+      { maker: { id: 'x', email: 'broken@acme.com' }, choice },
+      { maker: PERSON, choice: { botUserId: null, agentPath: null } },
+    ]);
+    expect(definitions).toHaveBeenCalledTimes(1);
+    expect(out[0]).toMatchObject({ kind: 'bot', actor: { id: bot.id } });
+    expect(out[1]).toMatchObject({ kind: 'unavailable', reason: 'could not be checked' });
+    expect(out[2]).toEqual({ kind: 'myself' });
+  });
+
   it('a removed definition retires the bot, keeping its row; the same id coming back brings the same row back', async () => {
     const { state, dir } = directory();
     state.defs = [def('phoenix')];

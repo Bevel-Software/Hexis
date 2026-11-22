@@ -1,5 +1,5 @@
 {
-  "id": "7ca96b2e-d0ff-4b94-86a5-a219fe45c88a",
+  "id": "d5802b45-423d-4fca-aff6-7e4825608039",
   "prevId": "35ec568e-5f44-49bf-a801-f674a7f057f4",
   "version": "7",
   "dialect": "postgresql",
@@ -93,6 +93,21 @@
           "method": "btree",
           "with": {}
         },
+        "agent_connections_by_bot": {
+          "name": "agent_connections_by_bot",
+          "columns": [
+            {
+              "expression": "bot_user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
         "agent_connections_live_unq": {
           "name": "agent_connections_live_unq",
           "columns": [
@@ -153,7 +168,7 @@
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
+          "onDelete": "restrict",
           "onUpdate": "no action"
         }
       },
@@ -341,6 +356,21 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
+        },
+        "agent_events_by_bot": {
+          "name": "agent_events_by_bot",
+          "columns": [
+            {
+              "expression": "bot_user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
@@ -393,7 +423,7 @@
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
+          "onDelete": "restrict",
           "onUpdate": "no action"
         }
       },
@@ -917,6 +947,21 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
+        },
+        "api_tokens_by_bot": {
+          "name": "api_tokens_by_bot",
+          "columns": [
+            {
+              "expression": "bot_user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
@@ -943,7 +988,7 @@
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
+          "onDelete": "restrict",
           "onUpdate": "no action"
         }
       },
@@ -1342,6 +1387,21 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
+        },
+        "oauth_auth_codes_by_bot": {
+          "name": "oauth_auth_codes_by_bot",
+          "columns": [
+            {
+              "expression": "bot_user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
@@ -1381,7 +1441,7 @@
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
+          "onDelete": "restrict",
           "onUpdate": "no action"
         }
       },
@@ -2535,7 +2595,12 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "users_bot_retired_only_bots": {
+          "name": "users_bot_retired_only_bots",
+          "value": "\"users\".\"bot_retired_at\" IS NULL OR \"users\".\"bot_id\" IS NOT NULL"
+        }
+      },
       "isRLSEnabled": false
     }
   },

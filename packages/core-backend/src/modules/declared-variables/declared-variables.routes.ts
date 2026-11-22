@@ -145,7 +145,9 @@ export function createDeclaredVariableRoutes(
       }));
       const { values, missing } = await resolveAll(who.userId, entries);
       log.info(
-        `local tool "${manual.path}" resolved for user=${who.userId}: ` +
+        `local tool "${manual.path}" resolved for user=${who.userId}` +
+          // A bot's release names the person who made the connection too.
+          `${req.toolAuth?.madeBy ? ` made-by=${req.toolAuth.madeBy.id}` : ''}: ` +
           `provided=[${Object.keys(values).join(',')}] missing=[${missing.join(',')}]`,
       );
       res.set('Cache-Control', 'no-store').json({ name: manual.name, variables: values, missing });

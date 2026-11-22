@@ -3,7 +3,7 @@ import { logger } from '../../shared/logging.js';
 import type { Database } from '../database/index.js';
 import { agentConnections, agentEvents, externalApiKeys, oauthTokens, users } from '../database/index.js';
 import type { IExternalApiKeyService } from '../tool-auth/index.js';
-import { describeConnectionChoice, type ConnectedAs, type IBots } from '../bots/index.js';
+import { describeConnectionChoices, type ConnectedAs, type IBots } from '../bots/index.js';
 import {
   AuditPrincipalNotFoundError,
   InvalidCursorError,
@@ -58,7 +58,7 @@ export class AgentAuditService implements IAgentAuditService, IAgentEventRecorde
      * same resolution their calls run). Absent: a choice of a bot reads as
      * stopped, since nothing could resolve it.
      */
-    private readonly bots?: Pick<IBots, 'resolveConnection'>,
+    private readonly bots?: Pick<IBots, 'resolveConnections'>,
   ) {}
 
   record(event: AgentEventInput): void {
@@ -147,13 +147,15 @@ export class AgentAuditService implements IAgentAuditService, IAgentEventRecorde
     }
 
     // Whom each key and agent connection is connected as, judged now, by the
-    // resolution its calls run.
-    const connectedAs = new Map<string, ConnectedAs>(
-      await Promise.all([
-        ...keyRows.map(async (k) => [k.id, await describeConnectionChoice(this.bots, k.user, { botUserId: k.botUserId ?? null, agentPath: k.agentPath ?? null })] as const),
-        ...connectionRows.map(async ({ connection: c, user }) => [c.id, await describeConnectionChoice(this.bots, user, { botUserId: c.botUserId ?? null, agentPath: c.agentPath ?? null })] as const),
-      ]),
-    );
+    // resolution its calls run — against one look at the bots for the whole
+    // list, and a row that cannot be judged is shown as not checked rather
+    // than failing the page (and the revoke controls on it).
+    const judged = [
+      ...keyRows.map((k) => ({ id: k.id, maker: k.user, choice: { botUserId: k.botUserId ?? null, agentPath: k.agentPath ?? null } })),
+      ...connectionRows.map(({ connection: c, user }) => ({ id: c.id, maker: user, choice: { botUserId: c.botUserId ?? null, agentPath: c.agentPath ?? null } })),
+    ];
+    const described = await describeConnectionChoices(this.bots, judged);
+    const connectedAs = new Map<string, ConnectedAs>(judged.map((j, i) => [j.id, described[i]!]));
     const principals: AuditPrincipal[] = [
       ...keyRows.map((k) => ({
         kind: 'key' as const,

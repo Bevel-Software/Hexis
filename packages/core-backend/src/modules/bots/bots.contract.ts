@@ -173,4 +173,12 @@ export interface IBots {
   actAs(actorEmail: string, botId: string): Promise<(Principal & { botId: string; name: string }) | null>;
   /** Resolve what a connection made by `maker` with `choice` acts as, now. */
   resolveConnection(maker: Principal, choice: ConnectionChoice): Promise<ResolvedConnection>;
+  /**
+   * The same for a LIST of connections, against one look at the bots: what
+   * a list of connections shows, so its cost does not grow with its length.
+   * A connection that cannot be judged is answered `unavailable` with that
+   * reason, and the others are answered as usual. Rejects only when the
+   * bots cannot be listed at all.
+   */
+  resolveConnections(requests: readonly { maker: Principal; choice: ConnectionChoice }[]): Promise<ResolvedConnection[]>;
 }
