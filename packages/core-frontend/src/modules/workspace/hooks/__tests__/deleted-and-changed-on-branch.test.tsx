@@ -2699,7 +2699,7 @@ describe('a write already on its way when the file is deleted', () => {
       expect(tab.changedOnBranch).toBe('merged');
       expect(disk.get('KB/Notes.md')).toBe(pulled);
 
-      await act(async () => { await result.current.saveFile('KB/Notes.md', tab.content); });
+      await act(async () => { await result.current.saveFile('KB/Notes.md', tab.content ?? ''); });
       expect(disk.get('KB/Notes.md')).toBe(`${pulled}\n\nMy new closing line.`);
     });
 
