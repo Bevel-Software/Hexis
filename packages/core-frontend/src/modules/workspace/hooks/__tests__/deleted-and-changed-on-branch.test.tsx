@@ -2607,7 +2607,8 @@ describe('a write already on its way when the file is deleted', () => {
     await act(async () => { await result.current.deleteEntry('KB/Draft.md'); });
     await act(async () => {
       held.deliver();
-      await expect(saving).rejects.toThrow();
+      // Refused at the write itself: the delete landed after the client's checks.
+      await expect(saving).rejects.toThrow('changed since you opened it');
     });
 
     expect(disk.has('KB/Draft.md')).toBe(false);
@@ -2632,7 +2633,7 @@ describe('a write already on its way when the file is deleted', () => {
     vi.spyOn(Date, 'now').mockReturnValue(now + 61_000);
     await act(async () => {
       held.deliver();
-      await expect(first).rejects.toThrow();
+      await expect(first).rejects.toThrow('changed since you opened it');
       await expect(second).rejects.toThrow('Draft.md was deleted from this branch');
     });
 
@@ -2659,6 +2660,60 @@ describe('a write already on its way when the file is deleted', () => {
 
     expect(disk.has('KB/Draft.md')).toBe(false);
     expect(tabAt(result, 'KB/Draft.md')?.pendingFileContent).toBe(AGENT);
+  });
+
+  describe('refused after a change pulled from the git host moved the tab under it', () => {
+    const BASE = 'First paragraph.\n\nSecond paragraph.\n\nThird paragraph.';
+
+    /** Done on `edited`, the write held at the server, then `pulled` arrives on the clean tab. */
+    async function doneThenPulled(edited: string, pulled: string) {
+      disk.set('KB/Notes.md', BASE);
+      const result = await mountReady();
+      await open(result, 'KB/Notes.md');
+      await typeInto(result, edited);
+      const held = holdWriteAtServer();
+      let saving!: Promise<void>;
+      act(() => {
+        saving = result.current.saveFile('KB/Notes.md', edited);
+        result.current.setHasUnsavedFileChanges?.(false);
+      });
+      await waitFor(() => expect(apiMocks.writeFile).toHaveBeenCalledOnce());
+      disk.set('KB/Notes.md', pulled);
+      act(() => bus.emit(fileChanged('KB/Notes.md', GIT_SYNC)));
+      await waitFor(() => expect(tabAt(result, 'KB/Notes.md')?.savedContent).toBe(pulled));
+      await act(async () => {
+        held.deliver();
+        await expect(saving).rejects.toThrow('changed since you opened it');
+      });
+      return result;
+    }
+
+    it('merges the edits onto the pulled bytes, so the next save does not write them over the pull', async () => {
+      const pulled = BASE.replace('First paragraph.', 'First paragraph, rewritten upstream.');
+      const result = await doneThenPulled(`${BASE}\n\nMy new closing line.`, pulled);
+
+      const tab = tabAt(result, 'KB/Notes.md')!;
+      expect(tab.savedContent).toBe(pulled);
+      expect(tab.content).toBe(`${pulled}\n\nMy new closing line.`);
+      expect(tab.isDirty).toBe(true);
+      expect(tab.changedOnBranch).toBe('merged');
+      expect(disk.get('KB/Notes.md')).toBe(pulled);
+
+      await act(async () => { await result.current.saveFile('KB/Notes.md', tab.content); });
+      expect(disk.get('KB/Notes.md')).toBe(`${pulled}\n\nMy new closing line.`);
+    });
+
+    it('keeps the pulled bytes and says the edits were discarded when they collide', async () => {
+      const pulled = BASE.replace('Second paragraph.', 'Second paragraph, their way.');
+      const result = await doneThenPulled(BASE.replace('Second paragraph.', 'Second paragraph, my way.'), pulled);
+
+      const tab = tabAt(result, 'KB/Notes.md')!;
+      expect(tab.content).toBe(pulled);
+      expect(tab.savedContent).toBe(pulled);
+      expect(tab.isDirty).toBe(false);
+      expect(tab.changedOnBranch).toBe('discarded');
+      expect(disk.get('KB/Notes.md')).toBe(pulled);
+    });
   });
 
   it('two saves of one file sent together both land, each over what the one before wrote', async () => {

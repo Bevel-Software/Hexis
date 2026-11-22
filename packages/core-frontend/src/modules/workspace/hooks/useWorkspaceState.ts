@@ -1969,11 +1969,39 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
           const idx = prev.findIndex((t) => t.path === relativePath);
           if (idx < 0 || prev[idx].isDirty) return prev;
           const next = prev.slice();
-          next[idx] = { ...prev[idx], content, isDirty: true };
+          next[idx] = withEditsBack(prev[idx]);
           return next;
         });
       }
       throw err;
+    }
+
+    /**
+     * The tab with the refused save's edits on it again, on the baseline the
+     * tab holds NOW. `content` was edited from `editedFrom`; a `file-changed`
+     * read that landed while the write was on its way may have moved the
+     * tab's saved bytes to a pulled commit (the tab was clean, Done had marked
+     * it so). Putting `content` back over those bytes as it was would make
+     * the edits look based on the pull, and the next save would write them
+     * over it. So the edits are merged onto the pulled bytes, as that read
+     * merges onto a tab that was dirty, with the same banner; when they
+     * collide, the tab keeps the pulled bytes and says the edits were
+     * discarded.
+     */
+    function withEditsBack(t: OpenTab): OpenTab {
+      const baseline = t.savedContent;
+      if (editedFrom === null || baseline === null || baseline === editedFrom) {
+        return { ...t, content, isDirty: true };
+      }
+      const merged = threeWayMerge(editedFrom, content, baseline);
+      if (merged === null) return takePulledOverEdits(t, baseline, 'discarded');
+      return {
+        ...t,
+        content: merged,
+        isDirty: merged !== baseline,
+        changedOnBranch: 'merged',
+        remoteRevision: (t.remoteRevision ?? 0) + 1,
+      };
     }
 
     async function writeOnce(): Promise<string | null> {
