@@ -2558,7 +2558,7 @@ describe('a write already on its way when the file is deleted', () => {
   /** The next write reaches the server and waits there until `deliver`. */
   function holdWriteAtServer() {
     const server = apiMocks.writeFile.getMockImplementation()!;
-    const held = { deliver: () => { throw new Error('No write was started'); } };
+    const held: { deliver: () => void } = { deliver: () => { throw new Error('No write was started'); } };
     apiMocks.writeFile.mockImplementationOnce((...args: unknown[]) => new Promise((resolve, reject) => {
       held.deliver = () => { Promise.resolve(server(...args)).then(resolve, reject); };
     }));
