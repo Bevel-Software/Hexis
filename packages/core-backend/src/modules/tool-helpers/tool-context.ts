@@ -17,7 +17,7 @@ import type { VersionControlEventBus } from '../version-control/index.js';
 import type { AuthService } from '../auth/index.js';
 import { ToolError, type ToolContext } from './tool.contract.js';
 import type { ToolAuth } from '../tool-auth/index.js';
-import { resolveConnectionScope, type IAgentScopeResolver } from '../agent-scope/index.js';
+import { connectionOf } from '../agent-scope/index.js';
 
 export interface ToolContextDeps {
   authService: AuthService;
@@ -41,12 +41,6 @@ export interface ToolContextDeps {
   loadActiveGroups?: (
     read: (filename: string) => Promise<string | null>,
   ) => Promise<{ groups: GroupsIndex; sourceFile: string; health: { ok: boolean } }>;
-  /**
-   * Resolves the scope of a connection made as an agent configuration. Every
-   * deployment passes it. Absent, a credential that names an agent loads
-   * nothing — a narrowing that cannot be read is never read as Everything.
-   */
-  agentScope?: Pick<IAgentScopeResolver, 'resolve'>;
 }
 
 /** A file's text, or null when it does not exist. Any other failure throws. */
@@ -156,7 +150,7 @@ export function createToolContextResolver(deps: ToolContextDeps): ResolveToolCon
       return fs;
     };
 
-    const connectionScope = await resolveConnectionScope(deps.agentScope, user.email, auth.agentPath);
+    const connectionScope = connectionOf(auth);
 
     return {
       user,

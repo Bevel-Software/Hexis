@@ -143,7 +143,14 @@ export type ResolvedConnection =
       bot: { id: string; name: string };
       platformTools: readonly string[] | null;
     }
-  | { kind: 'unavailable'; bot: { id: string; name: string }; sentence: string };
+  | {
+      kind: 'unavailable';
+      bot: { id: string; name: string };
+      /** The one sentence the connection answers with. */
+      sentence: string;
+      /** The same in a few words, for a list of connections ("you may no longer edit this bot"). */
+      reason: string;
+    };
 
 /**
  * The bots mechanism, as the rest of core asks it. Implemented by

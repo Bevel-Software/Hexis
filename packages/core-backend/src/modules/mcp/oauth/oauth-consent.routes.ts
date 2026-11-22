@@ -4,7 +4,7 @@ import { logger } from '../../../shared/logging.js';
 const log = logger('mcp-oauth');
 import type { BevelOAuthProvider } from './bevel-oauth-provider.js';
 import { verifyAuthRequest, type McpAuthRequestState } from './oauth-state.js';
-import type { IAgentScopeResolver } from '../../agent-scope/index.js';
+import type { IBots } from '../../bots/index.js';
 import '../../auth/index.js'; // Express Request augmentation (req.userId / req.userEmail)
 
 export interface OAuthConsentRoutesDeps {
@@ -23,15 +23,18 @@ export interface OAuthConsentRoutesDeps {
     completeConsent(userId: string, st: McpAuthRequestState): Promise<{ redirectTo: string }>;
   };
   /**
-   * The "Connect as" choices: the agent configurations the person may connect an
-   * MCP client as, offered below Everything. Absent, the consent offers
-   * Everything alone and Finish refuses any other choice.
+   * The "Connect as" choices: the bots the person may act as, offered below
+   * Myself. Absent, the consent offers Myself alone and Finish refuses any
+   * other choice.
    */
-  agents?: Pick<IAgentScopeResolver, 'listChoices' | 'choosable'>;
+  bots?: Pick<IBots, 'choicesFor' | 'actAs'>;
 }
 
-/** The refusal of a choice that is not one of the person's — one answer for missing and unreadable. */
-export const NOT_AN_AGENT_CHOICE = 'That agent is not one you can connect as. Choose Everything or one of the agents listed.';
+/**
+ * The refusal of a choice that is not one of the person's: one answer for a
+ * bot that does not exist, one that cannot be used and one they may not act as.
+ */
+export const NOT_A_BOT_CHOICE = 'That bot is not one you can connect as. Choose Myself or one of the bots listed.';
 
 /**
  * The authenticated tail of the MCP OAuth flow. `/authorize` (SDK-owned)
@@ -59,16 +62,16 @@ export function createOAuthConsentRoutes(deps: OAuthConsentRoutesDeps): express.
       return;
     }
     const client = await deps.provider.clientsStore.getClient(st.c);
-    // Everything is not in the list: it is the choice every consent has, and
-    // the one the page selects. A failure to read the agents costs the choice
-    // of an agent, never the consent itself — but it is SAID
-    // (`agentsUnavailable`), so the page does not pass an empty list off as
-    // "you have no agents" and approve Everything unasked.
-    let agentsUnavailable = false;
-    const agents = deps.agents && req.userEmail
-      ? await deps.agents.listChoices(req.userEmail).catch((err: unknown) => {
-          log.warn('listing the agents to connect as failed:', { detail: err instanceof Error ? err.message : String(err) });
-          agentsUnavailable = true;
+    // Myself is not in the list: it is the choice every consent has, and the
+    // one the page selects. A failure to read the bots costs the choice of a
+    // bot, never the consent itself — but it is SAID (`botsUnavailable`), so
+    // the page does not pass an empty list off as "you have no bots" and
+    // approve Myself unasked.
+    let botsUnavailable = false;
+    const bots = deps.bots && req.userEmail
+      ? await deps.bots.choicesFor(req.userEmail).catch((err: unknown) => {
+          log.warn('listing the bots to connect as failed:', { detail: err instanceof Error ? err.message : String(err) });
+          botsUnavailable = true;
           return [];
         })
       : [];
@@ -76,8 +79,8 @@ export function createOAuthConsentRoutes(deps: OAuthConsentRoutesDeps): express.
       clientName: client?.client_name ?? null,
       scope: st.sc ?? null,
       resource: st.rs ?? null,
-      agents,
-      ...(agentsUnavailable ? { agentsUnavailable: true } : {}),
+      bots,
+      ...(botsUnavailable ? { botsUnavailable: true } : {}),
     });
   });
 
@@ -90,25 +93,25 @@ export function createOAuthConsentRoutes(deps: OAuthConsentRoutesDeps): express.
     const st = raw ? verifyAuthRequest(deps.stateSecret, raw) : null;
     if (!st) return void res.status(400).json({ error: 'Invalid or expired authorization request. Restart the connection from your agent.' });
     if (st.gh && !deps.facade) return void res.status(400).json({ error: NO_FACADE });
-    // "Connect as": absent, null or empty is Everything. Anything else must be
-    // an agent the person may choose right now — checked here, at the only
-    // place a choice is made, so the token exchange records it as given.
-    const asked: unknown = (req.body ?? {}).agentPath;
+    // "Connect as": absent, null or empty is Myself. Anything else must be a
+    // bot the person may act as right now — checked here, at the only place a
+    // choice is made, and again on every call the connection makes.
+    const asked: unknown = (req.body ?? {}).bot;
     if (asked !== undefined && asked !== null && typeof asked !== 'string') {
-      return void res.status(400).json({ error: NOT_AN_AGENT_CHOICE });
+      return void res.status(400).json({ error: NOT_A_BOT_CHOICE });
     }
     const choosing = typeof asked === 'string' && asked.trim() !== '';
     // An account linked through the GitHub facade has no agent connection to
     // record a choice on.
-    if (choosing && (st.gh || !deps.agents || !req.userEmail)) {
-      return void res.status(400).json({ error: NOT_AN_AGENT_CHOICE });
+    if (choosing && (st.gh || !deps.bots || !req.userEmail)) {
+      return void res.status(400).json({ error: NOT_A_BOT_CHOICE });
     }
     try {
-      const agentPath = choosing && deps.agents && req.userEmail ? await deps.agents.choosable(req.userEmail, asked as string) : null;
-      if (choosing && agentPath === null) return void res.status(400).json({ error: NOT_AN_AGENT_CHOICE });
+      const bot = choosing && deps.bots && req.userEmail ? await deps.bots.actAs(req.userEmail, (asked as string).trim()) : null;
+      if (choosing && bot === null) return void res.status(400).json({ error: NOT_A_BOT_CHOICE });
       const { redirectTo } = st.gh && deps.facade
         ? await deps.facade.completeConsent(userId, st)
-        : await deps.provider.issueAuthCode(userId, st, agentPath);
+        : await deps.provider.issueAuthCode(userId, st, bot?.id ?? null);
       res.json({ redirectTo });
     } catch (err) {
       // Message only — the raw error object can carry sensitive context

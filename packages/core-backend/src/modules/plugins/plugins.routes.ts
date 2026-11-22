@@ -17,7 +17,7 @@ import { pluginFolderBelowRoot } from './plugins.service.js';
 import type { KbContext } from '../../shared/kb-context.js';
 import { PluginProvisionError, type PluginProvisionService } from './plugin-provision.service.js';
 import { argumentsRefusal } from '../tool-helpers/index.js';
-import { resolveConnectionScope, type IAgentScopeResolver } from '../agent-scope/index.js';
+import { connectionOf } from '../agent-scope/index.js';
 import '../tool-auth/index.js'; // Express Request.toolAuth augmentation
 import { PluginLinkError, type PluginLinksService } from './plugin-links.service.js';
 import { PluginRenameError, type PluginRenameService } from './plugin-rename.service.js';
@@ -87,21 +87,19 @@ function refuseMismatchedArguments(req: express.Request, res: express.Response):
 
 /**
  * Answer the connection-scope refusal when the caller's connection was made
- * as an agent configuration that does not list `toolName`; `true` when it answered.
+ * as a bot that is not offered `toolName`, or one that loads nothing; `true` when it answered.
  * These routes ARE the `create_plugin` and `my_plugin` tools but are not
  * hosted by `toolHandler`, so they ask the one policy it asks —
  * `ConnectionScope.platformToolRefusal` — and answer what it answers. A
- * session, or a key made as Everything, carries no `agentPath` and is never
+ * session, or a key made as Myself, carries no connection and is never
  * refused.
  */
 async function refuseOutsideConnectionScope(
   req: express.Request,
   res: express.Response,
-  user: AuthUser,
   toolName: string,
-  agentScope: Pick<IAgentScopeResolver, 'resolve'> | undefined,
 ): Promise<boolean> {
-  const scope = await resolveConnectionScope(agentScope, user.email, req.toolAuth?.agentPath);
+  const scope = connectionOf(req.toolAuth);
   const refusal = scope.platformToolRefusal(toolName);
   if (!refusal) return false;
   res.status(403).json(refusal);
@@ -131,8 +129,6 @@ async function refuseOutsideConnectionScope(
 export function createPluginCreationRoutes(
   provision: Pick<PluginProvisionService, 'createPlugin' | 'ensurePersonalPlugin'>,
   resolveUser: (req: express.Request) => Promise<AuthUser | null>,
-  /** Resolves a connection's agent choice to its scope; absent, a narrowed connection loads nothing. */
-  agentScope?: Pick<IAgentScopeResolver, 'resolve'>,
 ): express.Router {
   const router = express.Router();
 
@@ -147,7 +143,7 @@ export function createPluginCreationRoutes(
     // route-hosted tool's is in `toolHandler`: a call that does not match, or
     // a connection whose agent does not list the tool, is refused before
     // anything is provisioned.
-    if (await refuseOutsideConnectionScope(req, res, user, 'create_plugin', agentScope)) return;
+    if (await refuseOutsideConnectionScope(req, res, 'create_plugin')) return;
     if (refuseMismatchedArguments(req, res)) return;
     // `req.body` is undefined when no JSON body was sent at all — that is a
     // 400, not a destructuring crash.
@@ -187,7 +183,7 @@ export function createPluginCreationRoutes(
     // route-hosted tool's is in `toolHandler`: a call that does not match, or
     // a connection whose agent does not list the tool, is refused before
     // anything is provisioned.
-    if (await refuseOutsideConnectionScope(req, res, user, 'my_plugin', agentScope)) return;
+    if (await refuseOutsideConnectionScope(req, res, 'my_plugin')) return;
     if (refuseMismatchedArguments(req, res)) return;
     try {
       res.json(await provision.ensurePersonalPlugin(user));

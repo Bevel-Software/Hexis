@@ -43,6 +43,9 @@ export function goneSentence(label: string): string {
   );
 }
 
+/** The few words a list of connections shows for a connection whose bot is gone for its maker. */
+export const GONE_REASON = 'you may no longer edit this bot';
+
 /** The sentence for a bot its maker may act as but which cannot be used. */
 export function unusableSentence(label: string, problem: string): string {
   return `This connection was made as the bot "${label}", which cannot be used (${problem}), so it loads nothing until that is fixed.`;
@@ -64,13 +67,18 @@ interface BotRow {
  * definitions come from the distribution's {@link IBotDirectory}.
  */
 export class BotService implements IBots {
-  readonly addresses = new BotAddressBook();
   private rows = new Map<string, BotRow>();
 
   constructor(
     private readonly db: Database,
     private readonly settings: BotSettings,
     private readonly directory: IBotDirectory,
+    /**
+     * The address book this service keeps current. Injected so the access
+     * module, built before the distribution's directory can be, decides with
+     * the very book this service fills.
+     */
+    readonly addresses: BotAddressBook = new BotAddressBook(),
     /**
      * Whether change request `number` has been merged — what decides when a
      * grant at the previous bots' domain stops counting. Absent, a previous
@@ -201,13 +209,19 @@ export class BotService implements IBots {
       kind: 'unavailable',
       bot: { id: row?.botId ?? label, name: label },
       sentence: goneSentence(label),
+      reason: GONE_REASON,
     });
     if (!row || row.retiredAt) return gone();
     const defs = grouped.get(row.botId);
     if (!defs || !(await this.mayActAsAny(maker.email, defs))) return gone();
     const problem = this.problemOf(row.botId, defs);
     if (problem !== null) {
-      return { kind: 'unavailable', bot: { id: row.botId, name: label }, sentence: unusableSentence(label, problem) };
+      return {
+        kind: 'unavailable',
+        bot: { id: row.botId, name: label },
+        sentence: unusableSentence(label, problem),
+        reason: 'cannot be used: ' + problem,
+      };
     }
     return {
       kind: 'bot',

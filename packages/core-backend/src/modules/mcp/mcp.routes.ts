@@ -16,8 +16,9 @@ import type { BevelOAuthProvider } from './oauth/bevel-oauth-provider.js';
 import '../tool-auth/index.js'; // req.externalApiKeyId augmentation
 import './mcp-auth.middleware.js'; // req.mcpCallerKind augmentation
 import { isPagePath } from '../audit/index.js';
-import type { IAgentScopeResolver } from '../agent-scope/index.js';
-import { NOT_AN_AGENT_CHOICE } from './oauth/oauth-consent.routes.js';
+import type { IBots } from '../bots/index.js';
+import { describeConnectionChoice } from './connected-as.js';
+import { NOT_A_BOT_CHOICE } from './oauth/oauth-consent.routes.js';
 
 /** Pull the raw bearer token off an already-authenticated request. */
 function extractBearer(req: Request): string {
@@ -107,10 +108,10 @@ export function createMcpRoutes(
   // local-token exchange), same value McpAuthMiddleware advertises.
   resourceMetadataUrl: string,
   /**
-   * The "Connect as" choices a key may be minted as (`modules/agent-scope`).
-   * Absent: keys are minted as Everything only, and no choices are listed.
+   * The "Connect as" choices a key may be minted as (`modules/bots`).
+   * Absent: keys are minted as Myself only, and no choices are listed.
    */
-  agents?: Pick<IAgentScopeResolver, 'listChoices' | 'choosable'>,
+  bots?: Pick<IBots, 'choicesFor' | 'actAs' | 'resolveConnection'>,
 ): express.Router {
   const router = express.Router();
 
@@ -152,6 +153,8 @@ export function createMcpRoutes(
       const built = await mcpService.createRequestServer(
         {
           userId: req.userId!,
+          // The person behind a bot's connection (`userId` is the bot's).
+          ...(req.mcpCredentialUserId ? { credentialUserId: req.mcpCredentialUserId } : {}),
           // Connection-key id (set by mcpAuthMiddleware for `bevel_…` bearers;
           // undefined for OAuth/JWT) — resolved per request, so per-key metering
           // never depends on anything remembered from an earlier request.
@@ -160,10 +163,10 @@ export function createMcpRoutes(
           // exchanged grant; undefined for keys/JWTs) — the Audit log's other
           // principal, resolved per request like the key id.
           connectionId: req.agentConnectionId ?? null,
-          // The agent configuration the credential connects as (a key's, an agent
-          // connection's, or the one an exchanged grant carries); null is
-          // Everything. Resolved per request like the ids above.
-          ...(req.mcpAgentPath ? { agentPath: req.mcpAgentPath } : {}),
+          // Whom the credential connects as (a key's choice, an agent
+          // connection's, or the one an exchanged grant carries); absent is
+          // Myself. Resolved per request like the ids above.
+          ...(req.mcpConnectionChoice ? { connectionChoice: req.mcpConnectionChoice } : {}),
           // The proxy authenticates its loopback calls with the SAME bearer the
           // client used here, so it acts on the request exactly as the caller would.
           bearer: extractBearer(req),
@@ -244,14 +247,14 @@ export function createMcpRoutes(
 
   // ── Connection-key management (JWT-only) ───────────────────────────────
 
-  // The agents a key may be minted as — the same choices the OAuth consent
-  // step offers below Everything, for the key-mint dialog.
-  router.get('/mcp/agent-choices', jwtAuthMiddleware, async (req, res) => {
+  // The bots a key may be minted as — the same choices the OAuth consent
+  // step offers below Myself, for the key-mint dialog.
+  router.get('/mcp/bot-choices', jwtAuthMiddleware, async (req, res) => {
     try {
-      res.json({ agents: agents && req.userEmail ? await agents.listChoices(req.userEmail) : [] });
+      res.json({ bots: bots && req.userEmail ? await bots.choicesFor(req.userEmail) : [] });
     } catch (err) {
-      log.error('listing the agents to connect as failed:', { err });
-      res.status(500).json({ error: 'Failed to list the agents' });
+      log.error('listing the bots to connect as failed:', { err });
+      res.status(500).json({ error: 'Failed to list the bots' });
     }
   });
 
@@ -261,9 +264,16 @@ export function createMcpRoutes(
       // Enrich each key with its LLM-proxy usage today + the daily cap, so the
       // settings UI can show how much of the model budget the key has spent.
       const usage = await llmUsageService.usageForTokens(tokens.map((t) => t.id));
+      // Whom each key connects as, judged now: "you", a bot, or a bot it
+      // stopped acting as and why.
+      const person = { id: req.userId!, email: req.userEmail ?? '' };
+      const connectedAs = await Promise.all(
+        tokens.map((t) => describeConnectionChoice(bots, person, { botUserId: t.botUserId, agentPath: t.agentPath })),
+      );
       res.json(
-        tokens.map((t) => ({
+        tokens.map((t, i) => ({
           ...t,
+          connectedAs: connectedAs[i],
           llmUsage: {
             usedTodayTokens: usage[t.id] ?? 0,
             dailyTokenCap: llmUsageService.dailyCap,
@@ -286,23 +296,24 @@ export function createMcpRoutes(
         res.status(400).json({ error: 'JSON body required' });
         return;
       }
-      const { label, agentPath: asked } = req.body as { label?: string; agentPath?: unknown };
+      const { label, bot: asked } = req.body as { label?: string; bot?: unknown };
       if (!label) {
         res.status(400).json({ error: 'label is required' });
         return;
       }
       // "Connect as", exactly as on the consent step: absent, null or empty is
-      // Everything; anything else must be an agent the owner may choose now.
-      let agentPath: string | null = null;
+      // Myself; anything else must be a bot the owner may act as now.
+      let botUserId: string | null = null;
       if (asked !== undefined && asked !== null && asked !== '') {
-        agentPath =
-          typeof asked === 'string' && agents && req.userEmail ? await agents.choosable(req.userEmail, asked) : null;
-        if (agentPath === null) {
-          res.status(400).json({ error: NOT_AN_AGENT_CHOICE });
+        const bot =
+          typeof asked === 'string' && bots && req.userEmail ? await bots.actAs(req.userEmail, asked.trim()) : null;
+        if (bot === null) {
+          res.status(400).json({ error: NOT_A_BOT_CHOICE });
           return;
         }
+        botUserId = bot.id;
       }
-      const minted = await externalApiKeyService.mint(req.userId!, label, agentPath ? { agentPath } : {});
+      const minted = await externalApiKeyService.mint(req.userId!, label, botUserId ? { botUserId } : {});
       // The plaintext field is the *only* read path for the raw key. The
       // frontend must store it nowhere — it shows the dialog once and then
       // discards. Subsequent fetches return only `summary`-shaped rows.
@@ -461,11 +472,19 @@ export function createMcpRoutes(
       // The grant's agent connection rides along, so the local server's
       // calls with this token stay attributed to the agent in the Audit log.
       const connectionId = typeof info.extra?.connectionId === 'string' ? info.extra.connectionId : undefined;
-      // So does the agent the connection was made as: the local server's
-      // calls see the same narrowed surface as the hosted endpoint's.
+      // So does whom the connection was made as: the local server's calls act
+      // as the same bot as the hosted endpoint's. (A token that names its
+      // connection is resolved through the connection's current choice.)
+      const botUserId = typeof info.extra?.botUserId === 'string' && info.extra.botUserId ? info.extra.botUserId : undefined;
       const agentPath = typeof info.extra?.agentPath === 'string' && info.extra.agentPath ? info.extra.agentPath : undefined;
       const minted = internalTokens.mint(
-        { userId, externalProxy: true, ...(connectionId ? { connectionId } : {}), ...(agentPath ? { agentPath } : {}) },
+        {
+          userId,
+          externalProxy: true,
+          ...(connectionId ? { connectionId } : {}),
+          ...(botUserId ? { botUserId } : {}),
+          ...(agentPath ? { agentPath } : {}),
+        },
         ttlMs,
       );
       // The ACTUAL lifetime, not the constant — the caller schedules its

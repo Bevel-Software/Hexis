@@ -6,6 +6,8 @@ import type { IExternalApiKeyService } from './external-api-key.interface.js';
 import type { AuthService } from '../auth/index.js';
 import { ACCOUNT_DEACTIVATED_MESSAGE, AuthBackendError } from '../auth/index.js';
 import type { InternalTokenService } from './internal-token.service.js';
+import type { ConnectionChoice, IBots, Principal } from '../bots/index.js';
+import { resolveConnectionIdentity, type ConnectionScope } from '../agent-scope/index.js';
 import {
   INVALID_CONNECTION_KEY_CHALLENGE,
   INVALID_CONNECTION_KEY_MESSAGE,
@@ -27,6 +29,11 @@ import {
  */
 export interface ToolAuth {
   source: 'internal' | 'external' | 'session';
+  /**
+   * Whom the call acts as: the person who holds the credential, or — for a
+   * connection made as a bot — the bot's own users row, so every check
+   * downstream is judged for the bot (see `connection`, `madeBy`).
+   */
   userId: string;
   tokenId?: string;
   /** The agent run id carried by a per-run internal token (in-process agent). The external path supplies `sessionId` on the tool body instead. */
@@ -48,12 +55,17 @@ export interface ToolAuth {
    */
   connectionId?: string;
   /**
-   * The agent configuration an EXTERNAL caller's connection was made as — a
-   * connection key's `api_tokens.agent_path`, or the one an `externalProxy`
-   * token carries for an agent connection. Absent is Everything. Every agent
-   * surface resolves it to the connection's scope (`modules/agent-scope`).
+   * What the connection may load, resolved by the verifier on THIS call from
+   * whom it was made as (`modules/agent-scope`). Absent is Myself: an
+   * internal caller, a session, or a connection made as the person. Every
+   * agent surface asks it; none resolves a connection itself.
    */
-  agentPath?: string;
+  connection?: ConnectionScope;
+  /**
+   * The person who made the connection, when it acts as a bot (`userId` is
+   * then the bot's row): recorded beside the bot on what the call does.
+   */
+  madeBy?: Principal;
   /** Always `'write'` now (the middleware sets it for both internal + external — neither credential carries scope). The read path is dormant until consumer agents are removed. */
   scope: 'read' | 'write';
 }
@@ -126,7 +138,43 @@ export type VerifyResult =
  * gone or revoked — what `BevelOAuthProvider.liveConnectionChoice` answers.
  */
 export interface ConnectionChoices {
-  liveConnectionChoice(connectionId: string): Promise<{ agentPath: string | null } | null>;
+  liveConnectionChoice(connectionId: string): Promise<ConnectionChoice | null>;
+}
+
+/**
+ * What the verifier resolves a connection made as a bot through: the bots
+ * mechanism, and the person behind a credential that carries only their id.
+ */
+export interface ConnectionIdentities {
+  bots?: Pick<IBots, 'resolveConnection'>;
+  userOf(userId: string): Promise<Principal | null>;
+}
+
+/**
+ * The verified credential's identity, turned into whom its call acts as:
+ * unchanged for Myself; for a bot, the bot's row with the person kept as
+ * `madeBy` — or, when the bot cannot be used or the person may no longer act
+ * as it, the person with a connection that loads nothing. Asked on every call.
+ */
+async function withConnection(
+  auth: ToolAuth,
+  choice: ConnectionChoice,
+  identities: ConnectionIdentities | undefined,
+  knownEmail?: string,
+): Promise<VerifyResult> {
+  if (!choice.botUserId && !choice.agentPath) return { ok: true, auth };
+  const email = knownEmail ?? (await identities?.userOf(auth.userId))?.email;
+  if (!email) return { ok: false, status: 401, message: 'Your account is no longer available.' };
+  const resolved = await resolveConnectionIdentity(identities?.bots, { id: auth.userId, email }, choice);
+  return {
+    ok: true,
+    auth: {
+      ...auth,
+      userId: resolved.actor.id,
+      connection: resolved.scope,
+      ...(resolved.madeBy ? { madeBy: resolved.madeBy } : {}),
+    },
+  };
 }
 
 /**
@@ -158,6 +206,11 @@ export function createTokenVerifier(
    * the token's own choice stands.
    */
   connections?: ConnectionChoices,
+  /**
+   * How a connection made as a bot is resolved (see {@link withConnection}).
+   * Absent, a credential made as a bot loads nothing.
+   */
+  identities?: ConnectionIdentities,
 ): (token: string | undefined) => Promise<VerifyResult> {
   const missing = { ok: false as const, status: 401, message: 'A connection key or internal token is required' };
   return async (token) => {
@@ -175,41 +228,38 @@ export function createTokenVerifier(
       if (accounts && !(await accounts.isActive(claim.userId))) {
         return { ok: false, status: 401, message: ACCOUNT_DEACTIVATED_MESSAGE };
       }
-      let agentPath = claim.agentPath;
-      if (claim.externalProxy && claim.connectionId && connections) {
+      if (!claim.externalProxy) {
+        return { ok: true, auth: { source: 'internal', userId: claim.userId, sessionId: claim.sessionId, focusedBranch: claim.focusedBranch, scope: 'write' } };
+      }
+      let choice: ConnectionChoice = { botUserId: claim.botUserId ?? null, agentPath: claim.agentPath ?? null };
+      if (claim.connectionId && connections) {
         const live = await connections.liveConnectionChoice(claim.connectionId);
         // A revoked connection's token is dead here too, as it is at the MCP endpoint.
         if (!live) return { ok: false, status: 401, message: 'Access for this agent was revoked' };
-        agentPath = live.agentPath ?? undefined;
+        choice = live;
       }
-      return claim.externalProxy
-        ? {
-            ok: true,
-            auth: {
-              source: 'external',
-              userId: claim.userId,
-              ...(claim.connectionId ? { connectionId: claim.connectionId } : {}),
-              ...(agentPath ? { agentPath } : {}),
-              scope: 'write',
-            },
-          }
-        : { ok: true, auth: { source: 'internal', userId: claim.userId, sessionId: claim.sessionId, focusedBranch: claim.focusedBranch, scope: 'write' } };
+      return withConnection(
+        {
+          source: 'external',
+          userId: claim.userId,
+          ...(claim.connectionId ? { connectionId: claim.connectionId } : {}),
+          scope: 'write',
+        },
+        choice,
+        identities,
+      );
     }
 
     // External API key → external caller. (verifyAndLoadToken may throw → propagates → caller maps to 500.)
     if (externalApiKeyService.looksLikeExternalApiKey(token)) {
       const resolved = await externalApiKeyService.verifyAndLoadToken(token);
       if (resolved) {
-        return {
-          ok: true,
-          auth: {
-            source: 'external',
-            userId: resolved.user.id,
-            tokenId: resolved.tokenId,
-            ...(resolved.agentPath ? { agentPath: resolved.agentPath } : {}),
-            scope: 'write',
-          },
-        };
+        return withConnection(
+          { source: 'external', userId: resolved.user.id, tokenId: resolved.tokenId, scope: 'write' },
+          { botUserId: resolved.botUserId, agentPath: resolved.agentPath },
+          identities,
+          resolved.user.email,
+        );
       }
       // A live key of a switched-off account is told so, not sent to mint another.
       if (await externalApiKeyService.isKeyOfSwitchedOffAccount?.(token)) {
@@ -233,8 +283,9 @@ export function createToolAuthMiddleware(
   internalTokenService: InternalTokenService,
   accounts?: Pick<AuthService, 'isActive'>,
   connections?: ConnectionChoices,
+  identities?: ConnectionIdentities,
 ): RequestHandler {
-  const verify = createTokenVerifier(externalApiKeyService, internalTokenService, accounts, connections);
+  const verify = createTokenVerifier(externalApiKeyService, internalTokenService, accounts, connections, identities);
   return async (req: Request, res: Response, next: NextFunction) => {
     const header = req.headers.authorization;
     if (!header || !header.toLowerCase().startsWith('bearer ')) {
@@ -275,8 +326,9 @@ export function createManualAuthMiddleware(
   internalTokenService: InternalTokenService,
   authService: Pick<AuthService, 'isActive' | 'resolveSession'>,
   connections?: ConnectionChoices,
+  identities?: ConnectionIdentities,
 ): RequestHandler {
-  const verify = createTokenVerifier(externalApiKeyService, internalTokenService, authService, connections);
+  const verify = createTokenVerifier(externalApiKeyService, internalTokenService, authService, connections, identities);
   return async (req: Request, res: Response, next: NextFunction) => {
     const header = req.headers.authorization;
     if (!header || !header.toLowerCase().startsWith('bearer ')) {

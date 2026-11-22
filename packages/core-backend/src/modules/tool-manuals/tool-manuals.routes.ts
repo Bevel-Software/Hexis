@@ -19,7 +19,7 @@ import type { AuthUser } from '@bevel-software/platform-shared';
 import '../auth/index.js'; // Express Request augmentation (req.userId / req.userEmail)
 import '../tool-auth/index.js'; // Express Request augmentation (req.toolAuth)
 import { hasGitInternalsSegment } from '../../shared/git-internals.js';
-import { NOT_AVAILABLE_TO_CONNECTION, resolveConnectionScope, type IAgentScopeResolver } from '../agent-scope/index.js';
+import { NOT_AVAILABLE_TO_CONNECTION, connectionOf } from '../agent-scope/index.js';
 
 /** Resolve a connection-key/internal-token user id to its email (per-caller ACL). */
 export type ResolveUserEmail = (userId: string) => Promise<string | undefined>;
@@ -65,11 +65,6 @@ export function createToolManualsAgentRoutes(
      */
     pluginIndex?: Pick<IPluginIndexService, 'catalog'>;
   },
-  /**
-   * Resolves the scope of a connection made as an agent configuration, so
-   * `all-tools` lists only the connectors it loads (`modules/agent-scope`).
-   */
-  agentScope?: Pick<IAgentScopeResolver, 'resolve'>,
 ): express.Router {
   const router = express.Router();
 
@@ -93,7 +88,7 @@ export function createToolManualsAgentRoutes(
       // file loads, and says which agent it is — the MCP proxy words its
       // refusals and its handshake from that. Everything lists as it always
       // did, with no `connection` at all.
-      const scope = await resolveConnectionScope(agentScope, email, req.toolAuth?.agentPath);
+      const scope = connectionOf(req.toolAuth);
       const within = scope.connectorFilter();
       const userManuals = email
         ? await toolManualService.toManualCallTemplates(email, within ? { remoteOnly, within } : { remoteOnly })
@@ -196,7 +191,7 @@ export function createToolManualsAgentRoutes(
       // that defines a connector the file loads — the archive is how the
       // local MCP server runs one, and nothing else asks for it. Checked
       // before any file is opened.
-      const scope = await resolveConnectionScope(agentScope, email, req.toolAuth?.agentPath);
+      const scope = connectionOf(req.toolAuth);
       if (!scope.loadsConnectorIn(pluginRel)) {
         const why = scope.describe();
         return void res.status(403).json({
@@ -304,7 +299,7 @@ export function createToolManualsAgentRoutes(
       const slug = Array.isArray(req.params.slug) ? req.params.slug[0] : req.params.slug;
       // A connection made as an agent configuration reads only the manuals of the
       // connectors it loads; another is as absent as one the person cannot read.
-      const scope = await resolveConnectionScope(agentScope, email, req.toolAuth?.agentPath);
+      const scope = connectionOf(req.toolAuth);
       const within = scope.connectorFilter();
       const manual = await toolManualService.resolveInlineManual(email, String(slug), within ? { within } : undefined);
       if (!manual) return void res.status(404).json({ error: 'Not found' });

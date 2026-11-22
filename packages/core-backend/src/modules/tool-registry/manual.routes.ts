@@ -2,7 +2,7 @@ import express, { type Request, type RequestHandler } from 'express';
 import { UtcpManualSerializer } from '@utcp/sdk';
 import { declaresWrite, type IToolRegistry, type ToolManualContext, type UtcpTool } from './tool.contract.js';
 import { requireInternalSource } from '../tool-auth/index.js';
-import { resolveConnectionScope, type IAgentScopeResolver } from '../agent-scope/index.js';
+import { connectionOf } from '../agent-scope/index.js';
 import type { IToolReadOnlyHints } from './read-only-hints.contract.js';
 
 /** Resolve a connection-key/internal-token user id to its email (for per-caller provider defs). */
@@ -63,12 +63,6 @@ export function createManualRoutes(
    * Absent, the manual carries the tools' own tags only.
    */
   readOnlyHints?: Pick<IToolReadOnlyHints, 'apply'>,
-  /**
-   * Resolves the scope of a connection made as an agent configuration: the external
-   * manual then lists only the platform tools it loads, and the providers word
-   * their descriptions for it (`modules/agent-scope`).
-   */
-  agentScope?: Pick<IAgentScopeResolver, 'resolve'>,
 ): express.Router {
   const router = express.Router();
 
@@ -84,10 +78,9 @@ export function createManualRoutes(
     } catch {
       userEmail = undefined;
     }
-    // Everything adds nothing to the context, so its providers are asked
-    // exactly what they were asked before connections could be narrowed.
-    const agentPath = req.toolAuth?.agentPath;
-    const connectionScope = agentPath ? await resolveConnectionScope(agentScope, userEmail, agentPath) : undefined;
+    // Myself adds nothing to the context, so its providers are asked exactly
+    // what they were asked before connections could be made as bots.
+    const connectionScope = req.toolAuth?.connection;
     return {
       userId,
       ...(userEmail !== undefined ? { userEmail } : {}),
@@ -98,8 +91,8 @@ export function createManualRoutes(
   router.get('/agent/utcp', manualAuth, async (req, res) => {
     const ctx = await context(req);
     const tools = await registry.listExternal(ctx);
-    // A connection made as an agent configuration is offered only the platform
-    // tools that file loads; a call to another is refused at its route.
+    // A connection made as a bot is offered only the platform tools the
+    // distribution offers the bot; a call to another is refused at its route.
     const scope = ctx.connectionScope;
     const offered = scope ? tools.filter((t) => scope.allowsPlatformTool(t.name)) : tools;
     res.json(toManual(readOnlyHints ? readOnlyHints.apply(offered) : offered));

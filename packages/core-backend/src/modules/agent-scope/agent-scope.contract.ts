@@ -1,83 +1,73 @@
+import type { ConnectionChoice, IBots, Principal, ResolvedConnection } from '../bots/index.js';
 import { ConnectionScope } from './connection-scope.js';
 
-/** One agent configuration a person may connect as — a row of the "Connect as" choice. */
-export interface AgentChoice {
-  /** Repo-relative path of the configuration — what the connection records. */
-  path: string;
-  /** Its name, as the choice shows it. */
-  name: string;
-  /** Its description, one line; empty when it has none. */
-  description: string;
+/**
+ * Whom a call of a connection acts as: `actor` is the identity every check of
+ * the call is judged for (the bot's row for a connection made as a bot, the
+ * person otherwise), `madeBy` the person who made a bot's connection, and
+ * `scope` what the connection may load.
+ */
+export interface ConnectionIdentity {
+  actor: Principal;
+  madeBy: Principal | null;
+  scope: ConnectionScope;
+}
+
+/** The scope a resolved connection loads. */
+export function scopeOf(resolved: ResolvedConnection): ConnectionScope {
+  switch (resolved.kind) {
+    case 'myself':
+      return ConnectionScope.myself();
+    case 'bot':
+      return ConnectionScope.asBot(
+        { path: resolved.actor.email, name: resolved.bot.name },
+        resolved.platformTools,
+        `bot\u0000${resolved.actor.id}\u0000${resolved.platformTools?.join(',') ?? '*'}`,
+      );
+    case 'unavailable':
+      return ConnectionScope.unavailable(
+        { path: resolved.bot.id, name: resolved.bot.name },
+        resolved.sentence,
+        `bot\u0000${resolved.bot.id}\u0000unavailable\u0000${resolved.sentence}`,
+      );
+  }
 }
 
 /**
- * The connection-scope mechanism: which agent configurations a person may
- * connect as, and what a connection made as one may load right now.
- *
- * Core owns the MECHANISM and none of the configurations: what an agent
- * configuration is — the file kind, where it lives, what its definition
- * says — is the distribution's (`CorePorts.agentScope`), exactly as the
- * file kinds whose frontmatter carries access verbs are
- * (`registerAccessFrontmatterExtensions`). Core itself offers no agent to
- * connect as ({@link noAgentConfigurations}): every connection it makes is
- * Everything, and a connection recorded as some path by a distribution that
- * is no longer there loads nothing, never Everything.
- *
- * Every agent surface resolves its caller's scope here, with the agent path
- * its credential carries — a connection key's `api_tokens.agent_path`, an
- * agent connection's `agent_connections.agent_path` — and asks the scope;
- * none reads a configuration itself.
+ * THE way a credential becomes whom its call acts as — every credential
+ * verifier asks this, on every call, with the person the credential belongs
+ * to and the choice it records. No choice is Myself, without asking anything.
+ * A choice of a bot is resolved through the bots mechanism NOW, so a bot that
+ * stopped being usable, or a maker who may no longer act as it, stops the
+ * very next call: the connection then loads nothing (`scope` says why) and is
+ * never handed the person's access. A choice with no bots mechanism to read
+ * it (a construction that wired none) loads nothing too.
  */
-export interface IAgentScopeResolver {
-  /**
-   * The scope of a connection made as `agentPath` for the person `userEmail`.
-   * No path is Everything. The configuration is read, through the person's
-   * read gate, on EVERY call — the connection follows the configuration, not
-   * a copy of it — and one that is missing, unreadable to the person or not
-   * a valid definition yields a scope that loads nothing, never Everything.
-   */
-  resolve(userEmail: string | undefined, agentPath: string | null | undefined): Promise<ConnectionScope>;
-  /**
-   * The agent configurations `userEmail` may connect as, by name — what the
-   * consent step and the key-mint dialog offer below Everything. Rejects
-   * when they cannot be listed at all (the default branch cannot be opened):
-   * that is a failed listing, which the caller says, never an empty one.
-   */
-  listChoices(userEmail: string): Promise<AgentChoice[]>;
-  /**
-   * `agentPath` normalized when it is one of {@link listChoices}' paths, else
-   * null — one answer for a configuration that does not exist and one the
-   * person may not read, so a refused choice says nothing about either.
-   */
-  choosable(userEmail: string, agentPath: string): Promise<string | null>;
+export async function resolveConnectionIdentity(
+  bots: Pick<IBots, 'resolveConnection'> | undefined,
+  maker: Principal,
+  choice: ConnectionChoice,
+): Promise<ConnectionIdentity> {
+  if (!choice.botUserId && !choice.agentPath) return { actor: maker, madeBy: null, scope: ConnectionScope.myself() };
+  const resolved: ResolvedConnection = bots
+    ? await bots.resolveConnection(maker, choice)
+    : {
+        kind: 'unavailable',
+        bot: { id: choice.botUserId ?? choice.agentPath ?? '', name: choice.agentPath ?? 'unknown' },
+        sentence: 'This connection was made as a bot, and this deployment has no bots, so it loads nothing.',
+        reason: 'this deployment has no bots',
+      };
+  if (resolved.kind === 'bot') return { actor: resolved.actor, madeBy: resolved.madeBy, scope: scopeOf(resolved) };
+  // Myself (a mechanism that found no choice) or unavailable: the person stays
+  // the identity, and an unavailable scope refuses every surface before it reads.
+  return { actor: maker, madeBy: null, scope: scopeOf(resolved) };
 }
 
 /**
- * The resolver of a distribution that has no agent configurations — core's
- * own default. Nothing is offered, nothing is choosable, and a recorded path
- * resolves to a scope that loads nothing: a narrowing that cannot be read is
- * never read as Everything.
+ * The scope of the call `auth` was verified for: what the verifier resolved,
+ * or Myself for a caller with no connection to speak of (an internal caller,
+ * a session). The one way a surface reads it.
  */
-export function noAgentConfigurations(): IAgentScopeResolver {
-  return {
-    resolve: async (_userEmail, agentPath) => (agentPath ? ConnectionScope.gone(agentPath) : ConnectionScope.everything()),
-    listChoices: async () => [],
-    choosable: async () => null,
-  };
-}
-
-/**
- * The scope of a caller whose credential connects as `agentPath` — THE way
- * every agent surface turns a credential into a scope. No path is
- * Everything, without asking anything. A path with no resolver to read it
- * (a construction that wired none) loads nothing: a narrowing that cannot be
- * read is never read as Everything.
- */
-export async function resolveConnectionScope(
-  resolver: Pick<IAgentScopeResolver, 'resolve'> | undefined,
-  userEmail: string | undefined,
-  agentPath: string | null | undefined,
-): Promise<ConnectionScope> {
-  if (!agentPath) return ConnectionScope.everything();
-  return resolver ? resolver.resolve(userEmail, agentPath) : ConnectionScope.gone(agentPath);
+export function connectionOf(auth: { connection?: ConnectionScope } | undefined): ConnectionScope {
+  return auth?.connection ?? ConnectionScope.myself();
 }

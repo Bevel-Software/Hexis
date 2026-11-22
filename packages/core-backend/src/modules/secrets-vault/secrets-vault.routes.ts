@@ -20,19 +20,20 @@ import type { IConnectionProbeService } from '../connection-probe/index.js';
 import { utcpNamespacedKey } from '../../shared/utcp-namespace.js';
 import type { IAccessControl } from '../access/index.js';
 import type { KbContext } from '../../shared/kb-context.js';
-import { resolveConnectionScope, type IAgentScopeResolver } from '../agent-scope/index.js';
+import type { IBots, Principal } from '../bots/index.js';
 import '../auth/index.js'; // Express Request augmentation (req.userId / req.userEmail)
 
 export interface SecretsVaultRoutesDeps {
   secretsVault: ISecretsVaultService;
   /**
-   * Resolves what a connection made as an agent configuration loads, so the connect
-   * page can list only the tools the chosen agent would reach (`?agent=`).
-   * Optional: a construction without one answers such a request as a
-   * connection that loads nothing — a narrowing that cannot be read is never
-   * read as Everything.
+   * The bots a person may act as. The Secrets and Connect tools pages may be
+   * opened for one (`?bot=<id>`): every route below then reads and writes
+   * that bot's secrets and sign-ins, after checking the person may act as it.
+   * Absent, no bot can be named and a request naming one is refused.
    */
-  agents?: Pick<IAgentScopeResolver, 'resolve'>;
+  bots?: Pick<IBots, 'actAs'>;
+  /** The person (or bot) behind a user id: the sign-in callback re-checks who may act as a bot with it. */
+  userOf?: (userId: string) => Promise<Principal | null>;
   /** The released branch's clone — where the `.tool` files the access verdicts are read from live. */
   kb: Pick<KbContext, 'defaultWorkspaceId'>;
   /** Source of `.tool` manuals + their declared variable scopes (default-branch catalog). */
@@ -171,6 +172,31 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
   // in the manual namespace), so storage and resolution agree for snake_case ids.
   const varKey = (manualName: string, varName: string) => utcpNamespacedKey(manualName, varName);
 
+  // Opened for a bot: `?bot=<id>` names one, and every route below acts for
+  // it — `req.userId`/`req.userEmail` become the bot's, the person is kept
+  // for the sign-in round trip — once the person may act as it. A bot that
+  // does not exist, cannot be used, or that the person may not act as gets
+  // ONE answer, so the refusal discloses none of them, and nothing of the
+  // bot's is read. These two pages, and only they, take a bot: nothing else
+  // in the app changes whom it acts for.
+  router.use(async (req, res, next) => {
+    const named = req.query.bot;
+    if (named === undefined) return next();
+    const person = req.userId && req.userEmail ? { id: req.userId, email: req.userEmail } : null;
+    if (!person) return void res.status(401).json({ error: 'Not authenticated' });
+    try {
+      const bot = typeof named === 'string' && deps.bots ? await deps.bots.actAs(person.email, named) : null;
+      if (!bot) return void res.status(404).json({ error: NO_SUCH_BOT });
+      req.userId = bot.id;
+      req.userEmail = bot.email;
+      req.secretsMadeBy = person;
+      next();
+    } catch (err) {
+      log.error('resolving the bot a page was opened for failed:', { err });
+      res.status(500).json({ error: 'Internal error' });
+    }
+  });
+
   /** Find an accessible (readable) manual by slug + its DECLARED variable, or null. */
   async function findManualVar(
     email: string,
@@ -282,6 +308,7 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
         u: userId,
         i: req.params.id,
         n: randomBytes(8).toString('hex'),
+        ...(req.secretsMadeBy ? { b: req.secretsMadeBy.id } : {}),
       });
       const url = await secretsVault.beginOAuth(
         userId,
@@ -383,20 +410,14 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
   // not relaxed is readability: the listing is still built from `listAccessible`,
   // so a tool the caller may not read is named here in no state at all.
   //
-  // `?agent=<path>` — the consent step's "Connect as" choice — narrows the
-  // listing to what a connection made as that agent configuration would load, by the
-  // ONE answer every agent surface asks (`ConnectionScope.allowsConnector`,
-  // applied after the read gate exactly as the tool listing applies it). A
-  // sign-in the connection will never reach is not on a page about what the
-  // connection needs. Absent, the listing is Everything's, as it always was.
+  // Opened for a bot (`?bot=`), the listing is the bot's: what the bot may
+  // read, and the bot's own secrets and sign-ins (see the bot gate above).
   router.get('/connect/pending', async (req, res) => {
     const userId = req.userId;
     const email = req.userEmail;
     if (!userId || !email) return void res.status(401).json({ error: 'Not authenticated' });
     try {
-      const agentPath = typeof req.query.agent === 'string' && req.query.agent.trim() !== '' ? req.query.agent : null;
-      const scope = await resolveConnectionScope(deps.agents, email, agentPath);
-      const manuals = (await toolManualService.listAccessible(email)).filter((m) => scope.allowsConnector(m.path));
+      const manuals = await toolManualService.listAccessible(email);
       // BOTH tiers now — the workspace values are reported as well, so their
       // stored state has to be asked for.
       const allKeys = manuals.flatMap((m) => (m.variables ?? []).map((v) => varKey(m.name, v.name)));
@@ -515,11 +536,9 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
       // Secrets page. A TOOL sign-in provisions a per-user row in the same
       // table (keyed `<manual>_<VAR>`), so exclude every tool-var key here or
       // an authorized tool sign-in would render twice — once as a toolOAuth
-      // row and again as a "standalone" one. They belong to no connector, so
-      // a connection narrowed to an agent's connectors has nothing to do with
-      // them: listed for Everything only.
+      // row and again as a "standalone" one.
       const toolOAuthKeys = new Set(toolOAuth.map((o) => o.key));
-      const secrets = scope.isEverything() ? await secretsVault.list(userId) : [];
+      const secrets = await secretsVault.list(userId);
       const oauth = secrets
         .filter((s) => s.kind === 'oauth' && !toolOAuthKeys.has(s.key))
         .map((s) => ({ id: s.id, key: s.key, label: s.label, authorized: s.authorized ?? false }));
@@ -740,6 +759,7 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
         i: id,
         n: randomBytes(8).toString('hex'),
         r: isSafeReturnPath(returnTo) ? returnTo : 'connect',
+        ...(req.secretsMadeBy ? { b: req.secretsMadeBy.id } : {}),
       });
       const consentUrl = new URL(url);
       consentUrl.searchParams.set('state', state);
@@ -837,6 +857,13 @@ export function createSecretsVaultPublicRoutes(deps: SecretsVaultRoutesDeps): ex
     const dest = isSafeReturnPath(state.r) ? state.r : state.r === 'connect' ? '/connect' : '/secrets';
 
     try {
+      // A sign-in started for a bot is checked again here: the person who
+      // started it must still act as that very bot. The state is signed, so
+      // it cannot be pointed at another bot; this catches a person who lost
+      // the right in the minutes the provider took.
+      if (state.b !== undefined && !(await stillActsAs(deps, state.b, state.u))) {
+        return void back(`error=${encodeURIComponent(`Authorization failed. ${NO_SUCH_BOT}`)}`, dest);
+      }
       await secretsVault.completeOAuth(state.u, state.i, code, redirectUriFor(deps.publicBackendUrl));
       back(`authorized=${encodeURIComponent(state.i)}`, dest);
     } catch (err) {
@@ -863,6 +890,29 @@ export function createSecretsVaultPublicRoutes(deps: SecretsVaultRoutesDeps): ex
   return router;
 }
 
+/** What a page opened for a bot answers when the person may not act as it: the same for a bot that does not exist. */
+export const NO_SUCH_BOT = 'There is no bot of that name that you may act as.';
+
+declare global {
+  // eslint-disable-next-line @typescript-eslint/no-namespace
+  namespace Express {
+    interface Request {
+      /** On the Secrets and Connect tools routes opened for a bot: the person acting for it. */
+      secretsMadeBy?: Principal;
+    }
+  }
+}
+
+/** Whether the person `personId` may still act as the bot whose row is `botUserId`. */
+async function stillActsAs(deps: SecretsVaultRoutesDeps, personId: string, botUserId: string): Promise<boolean> {
+  if (!deps.bots || !deps.userOf) return false;
+  const [person, bot] = await Promise.all([deps.userOf(personId), deps.userOf(botUserId)]);
+  if (!person || !bot) return false;
+  const botId = bot.email.split('@')[0] ?? '';
+  const actsAs = await deps.bots.actAs(person.email, botId);
+  return actsAs?.id === botUserId;
+}
+
 function mapError(err: unknown, res: express.Response, op: string): void {
   if (err instanceof InvalidSecretError) return void res.status(422).json({ error: err.message });
   if (err instanceof SecretNotFoundError) return void res.status(404).json({ error: err.message });
@@ -874,10 +924,12 @@ function mapError(err: unknown, res: express.Response, op: string): void {
 // ---- signed-state helpers (CSRF + identity for the un-authed callback) -------
 
 interface OAuthState {
-  u: string; // user id
+  u: string; // user id: whose secret the sign-in lands on (a bot's, on a page opened for one)
   i: string; // secret id
   n: string; // nonce
   iat: number; // issued-at (epoch ms)
+  /** On a sign-in started on a page opened for a bot: the person who started it, re-checked at the callback. */
+  b?: string;
   /**
    * Return path hint: a same-origin path (`isSafeReturnPath`) → land there; the
    * legacy marker `'connect'` → /connect; anything else (incl. absent) →

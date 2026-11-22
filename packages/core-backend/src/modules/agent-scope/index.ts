@@ -1,8 +1,8 @@
 export {
-  noAgentConfigurations,
-  resolveConnectionScope,
-  type AgentChoice,
-  type IAgentScopeResolver,
+  connectionOf,
+  resolveConnectionIdentity,
+  scopeOf,
+  type ConnectionIdentity,
 } from './agent-scope.contract.js';
 export {
   ConnectionScope,
@@ -11,5 +11,4 @@ export {
   describeConnection,
   type ConnectionScopeWire,
   type ScopeAgent,
-  type ScopeRoots,
 } from './connection-scope.js';
