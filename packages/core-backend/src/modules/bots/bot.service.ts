@@ -4,6 +4,9 @@ import { canonicalEmail } from '../../shared/email-identity.js';
 import type { Database } from '../database/index.js';
 import { users } from '../database/index.js';
 import { BotAddressBook, botAddress } from './bot-address-book.js';
+import { botsDomainRefusal, normalizeBotsDomain } from './bot-domain.js';
+import type { IGrantRewriter } from './bot-domain-change.js';
+import type { AuthUser } from '@bevel-software/platform-shared';
 import {
   DEFAULT_BOTS_DOMAIN,
   type BotChoice,
@@ -49,6 +52,15 @@ export const GONE_REASON = 'you may no longer edit this bot';
 /** The sentence for a bot its maker may act as but which cannot be used. */
 export function unusableSentence(label: string, problem: string): string {
   return `This connection was made as the bot "${label}", which cannot be used (${problem}), so it loads nothing until that is fixed.`;
+}
+
+/** A domain an admin may not give the bots, refused with the reason. */
+export class BotsDomainRefusedError extends Error {
+  readonly status = 422;
+  constructor(message: string) {
+    super(message);
+    this.name = 'BotsDomainRefusedError';
+  }
 }
 
 interface BotRow {
@@ -230,6 +242,53 @@ export class BotService implements IBots {
       bot: { id: row.botId, name: row.name },
       platformTools: defs[0].platformTools,
     };
+  }
+
+  /**
+   * Change the bots' domain (the caller has checked `by` is an admin). Every
+   * bot is given its new address at once; one change request, opened as
+   * `by`, rewrites every grant written at the old domain; and until it is
+   * merged, a grant at the old domain still counts for its bot. Refuses a
+   * domain people's addresses use, or text that is not a domain. A request
+   * that cannot be opened is logged and answered as none: the addresses have
+   * changed, and the old spelling keeps counting until the next change.
+   */
+  async changeDomain(by: AuthUser, input: unknown, rewriter?: IGrantRewriter): Promise<{ domain: string; changeRequest: number | null }> {
+    const domain = normalizeBotsDomain(input);
+    const current = this.domain();
+    const people = await this.db.select({ email: users.email }).from(users).where(isNull(users.botId));
+    const refusal = botsDomainRefusal(domain, people.map((p) => p.email), current);
+    if (refusal) throw new BotsDomainRefusedError(refusal);
+
+    await this.settings.record({ botsDomain: domain, botsPreviousDomain: current, botsDomainChangeRequest: '0' }, by.email);
+    const now = new Date();
+    await this.db.transaction(async (tx) => {
+      for (const row of this.rows.values()) {
+        const address = botAddress(row.botId, domain);
+        await tx.update(users).set({ email: address, emailBidx: address, updatedAt: now }).where(eq(users.id, row.id));
+      }
+    });
+    for (const row of this.rows.values()) this.rows.set(row.botId, { ...row, email: botAddress(row.botId, domain) });
+    await this.refreshAddresses();
+
+    let changeRequest: number | null = null;
+    try {
+      changeRequest = rewriter ? await rewriter.open(by, current, domain, [...this.rows.keys()]) : null;
+    } catch (err) {
+      log.warn("opening the change request that rewrites the bots' grants failed; the previous domain keeps counting", { err });
+    }
+    if (changeRequest !== null) await this.settings.record({ botsDomainChangeRequest: String(changeRequest) }, by.email);
+    await this.refreshAddresses();
+    log.info(`bots' domain changed from ${current} to ${domain}`);
+    return { domain, changeRequest };
+  }
+
+  /**
+   * Re-read whether the previous domain still counts — call when a change
+   * request is merged, so a merged rewrite stops the old spelling at once.
+   */
+  async refresh(): Promise<void> {
+    await this.refreshAddresses();
   }
 
   /** Why the bot `id`, defined by `defs`, cannot be used; null when it can. */

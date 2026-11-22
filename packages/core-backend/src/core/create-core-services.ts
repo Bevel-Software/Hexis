@@ -8,7 +8,8 @@ import type { AuthUser } from '@bevel-software/platform-shared';
 // eslint-disable-next-line no-restricted-imports
 import { configureBranchModel, configureKbLayout } from '@bevel-software/platform-shared';
 import type { TenantConfig } from '../core-config.js';
-import { sql } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
+import { changeRequests } from '../modules/database/index.js';
 import { DEFAULT_DB_SCHEMA, assertSearchPath } from '../modules/database/connection.js';
 import { DEFAULT_SECRETS_SCOPE } from '../modules/secrets-vault/secrets-variable-loader.js';
 import { KbContext } from '../shared/kb-context.js';
@@ -903,7 +904,12 @@ export async function createCoreServices(
   // checks above decide with; its rows are read now, before anything is
   // decided. Core owns the mechanism and no bot (see `modules/bots`).
   const botDirectory = ports.bots?.({ workspaceService, accessControl, kb, disk, pluginLinkIndex }) ?? noBots();
-  const botService = new BotService(db, settings, botDirectory, botAddresses);
+  const botService = new BotService(db, settings, botDirectory, botAddresses, async (number) => {
+    // A grant at the previous bots' domain counts until the change request
+    // rewriting it is merged.
+    const [row] = await db.select({ state: changeRequests.state }).from(changeRequests).where(eq(changeRequests.number, number)).limit(1);
+    return row?.state === 'merged';
+  });
   await botService.load();
   const pluginIndexService = new PluginIndexService(
     workspaceService,
