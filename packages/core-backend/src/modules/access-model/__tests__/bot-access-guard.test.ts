@@ -67,4 +67,21 @@ describe('the bot\'s pre-disk write check', () => {
     expect(validate.appliesTo('knowledge-base/x.md')).toBe(true);
     expect(validate.appliesTo('tmp/x.md')).toBe(false);
   });
+
+  it('refuses deleting an access file, or a file whose definition carries access lines, as the merge refuses it', async () => {
+    await expect(validate.removal('knowledge-base/Team/access.md')).rejects.toThrow(/"Team\/access\.md" decides who may reach what/);
+    await expect(validate.removal('knowledge-base/roles.yaml')).rejects.toBeInstanceOf(BotChangesAccessError);
+    await expect(validate.removal('knowledge-base/Team/page.md')).rejects.toThrow(
+      /access lines \(read, write, download, owner\) of "Team\/page\.md"/,
+    );
+  });
+
+  it('lets a delete through when the file carries no access lines, is not there, or is outside the knowledge base', async () => {
+    const plain = makeBotAccessWriteValidator('knowledge-base', async (p) =>
+      p === 'knowledge-base/Team/notes.md' ? '---\nnodeType: x\n---\n# notes\n' : null,
+    );
+    await expect(plain.removal('knowledge-base/Team/notes.md')).resolves.toBeUndefined();
+    await expect(plain.removal('knowledge-base/Team/gone.md')).resolves.toBeUndefined();
+    await expect(plain.removal('elsewhere/access.md')).resolves.toBeUndefined();
+  });
 });

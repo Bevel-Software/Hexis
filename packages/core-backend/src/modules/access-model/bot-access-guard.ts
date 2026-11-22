@@ -80,13 +80,21 @@ export class BotChangesAccessError extends VersionControlDomainError {
  * The agent's pre-disk write check for a BOT: refuses a write to an access
  * file outright, and a write to any other file that changes its own access
  * lines, judged against what the file holds now (`readCurrent`, read under
- * the write's lock when the filesystem runs the check there). Paths are
- * workspace-relative; a path outside the knowledge base carries no rules.
+ * the write's lock when the filesystem runs the check there). `removal`
+ * judges a delete the same way: deleting an access file, or a file whose own
+ * definition carries access lines, is refused, as the merge refuses it.
+ * The agent's file tools ask this one validator: the filesystem's writes
+ * and deletes, each file `unzip` extracts, and the content an
+ * `update_branch` resolution brings. Paths are workspace-relative; a path
+ * outside the knowledge base carries no rules.
  */
 export function makeBotAccessWriteValidator(
   kbDirName: string,
   readCurrent: (wsPath: string) => Promise<string | null>,
-): ((path: string, content: FileContent) => Promise<void>) & { appliesTo: (path: string) => boolean } {
+): ((path: string, content: FileContent) => Promise<void>) & {
+  appliesTo: (path: string) => boolean;
+  removal: (path: string) => Promise<void>;
+} {
   const prefix = `${kbDirName}/`;
   const repoRelative = (wsPath: string): string | null => {
     const p = wsPath.replace(/^\/+/, '');
@@ -98,7 +106,13 @@ export function makeBotAccessWriteValidator(
     if (isAccessFile(rel)) throw new BotChangesAccessError(rel, 'file');
     if (changesOwnAccessLines(await readCurrent(wsPath), contentText(content))) throw new BotChangesAccessError(rel, 'lines');
   };
+  const removal = async (wsPath: string): Promise<void> => {
+    const rel = repoRelative(wsPath);
+    if (rel === null) return;
+    if (isAccessFile(rel)) throw new BotChangesAccessError(rel, 'file');
+    if (changesOwnAccessLines(await readCurrent(wsPath), null)) throw new BotChangesAccessError(rel, 'lines');
+  };
   // Every path inside the knowledge base: a copy or a move lands content at
   // a new path, and its access lines are new there.
-  return Object.assign(validate, { appliesTo: (wsPath: string) => repoRelative(wsPath) !== null });
+  return Object.assign(validate, { appliesTo: (wsPath: string) => repoRelative(wsPath) !== null, removal });
 }

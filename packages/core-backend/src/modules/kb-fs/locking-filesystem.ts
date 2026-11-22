@@ -126,10 +126,15 @@ export class MoveUndoError extends Error {
  * candidate content) of a write; throw (or reject) to refuse it. `appliesTo`
  * names the paths it guards — only a validator that declares it is also run
  * for the ops whose candidate has to be read first (append, copy, move), so an
- * unrelated copy never pays for reading its source.
+ * unrelated copy never pays for reading its source. `removal`, when given, is
+ * asked before a delete removes a path's file (`deleteFile`, and each of
+ * `writeFiles`' deletes), before the lock and again under it, and judges what
+ * the removal takes away; absent, deletes are not this validator's to judge.
+ * (A move is judged at its destination, where the moved bytes land.)
  */
 export type WriteValidator = ((path: string, content: FileContent) => void | Promise<void>) & {
   appliesTo?: (path: string) => boolean;
+  removal?: (path: string) => void | Promise<void>;
 };
 
 /**
@@ -295,7 +300,15 @@ export class LockingFilesystem extends GitGuardedFilesystem {
 
   override async deleteFile(inputPath: string, options?: RemoveOptions): Promise<void> {
     await this.assertNotGitInternals(inputPath);
-    return this.withLock(inputPath, () => super.deleteFile(inputPath, options));
+    // The validator's removal check, as a write's content check runs: once
+    // before the lock, and again under it on the file the delete takes away.
+    const removal = this.lockContext.validateWrite?.removal;
+    await removal?.(inputPath);
+    return this.withLock(
+      inputPath,
+      () => super.deleteFile(inputPath, options),
+      removal && (async () => removal(inputPath)),
+    );
   }
 
   override async copyFile(src: string, dest: string, options?: CopyOptions): Promise<void> {
@@ -733,6 +746,8 @@ export class LockingFilesystem extends GitGuardedFilesystem {
     // refusal must not leave a lock held or a partial batch on disk.
     if (this.lockContext.validateWrite) {
       for (const w of writes) await this.lockContext.validateWrite(w.path, w.content);
+      const removal = this.lockContext.validateWrite.removal;
+      if (removal) for (const d of deletes) await removal(d);
     }
     // Deterministic lock order (string sort) so two concurrent batch writes
     // can't deadlock by acquiring the same paths in opposite orders — the same
@@ -819,6 +834,8 @@ export class LockingFilesystem extends GitGuardedFilesystem {
     if (this.lockContext.validateWrite) {
       try {
         for (const w of writes) await this.lockContext.validateWrite(w.path, w.content);
+        const removal = this.lockContext.validateWrite.removal;
+        if (removal) for (const d of deletes) await removal(d);
       } catch (err) {
         await releaseAll(() => 'untouched');
         throw err;

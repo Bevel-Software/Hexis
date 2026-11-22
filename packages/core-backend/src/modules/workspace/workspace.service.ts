@@ -2265,11 +2265,13 @@ export class WorkspaceService implements IWorkspaceService {
     destDirWsPath?: string,
     /**
      * Per-extracted-path write guard. Called with each entry's
-     * workspace-relative target before it is written; if it throws, the entry
-     * is skipped (with the thrown message as the reason) rather than aborting
-     * the whole extraction. Omitted by non-agent / human callers.
+     * workspace-relative target before it is written, and for a file with
+     * the bytes it would write (undefined for a folder), so a guard that
+     * judges content judges what lands; if it throws, the entry is skipped
+     * (with the thrown message as the reason) rather than aborting the whole
+     * extraction. Omitted by non-agent / human callers.
      */
-    guardWrite?: (wsRelativePath: string) => Promise<void>,
+    guardWrite?: (wsRelativePath: string, content?: Buffer) => Promise<void>,
   ): Promise<UnzipResult> {
     const { workspaceDir, relativePath: zipRelativePath, absolutePath: zipAbsolute } =
       await this.resolveInsideRepo(workspaceId, zipWsPath);
@@ -2371,10 +2373,10 @@ export class WorkspaceService implements IWorkspaceService {
       // archive can't be a way around whatever the guard enforces. Runs before
       // any filesystem side effect — including directory creation — so a
       // refused entry leaves nothing behind on disk.
-      const allowEntry = async (): Promise<boolean> => {
+      const allowEntry = async (content?: Buffer): Promise<boolean> => {
         if (!guardWrite) return true;
         try {
-          await guardWrite(relForReport);
+          await guardWrite(relForReport, content);
           return true;
         } catch (err) {
           skipped.push({ path: rawName, reason: err instanceof Error ? err.message : 'Refused before it was written' });
@@ -2468,7 +2470,7 @@ export class WorkspaceService implements IWorkspaceService {
         });
         continue;
       }
-      if (!(await allowEntry())) continue;
+      if (!(await allowEntry(data))) continue;
       await fs.mkdir(path.dirname(targetAbsolute), { recursive: true });
       await fs.writeFile(targetAbsolute, data);
       totalUncompressed += data.byteLength;

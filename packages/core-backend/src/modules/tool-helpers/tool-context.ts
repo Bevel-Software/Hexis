@@ -60,6 +60,12 @@ function composeValidators(first: WriteValidator, second: WriteValidator): Write
     await second(p, content);
   };
   both.appliesTo = (p) => (first.appliesTo?.(p) ?? false) || (second.appliesTo?.(p) ?? false);
+  if (first.removal || second.removal) {
+    both.removal = async (p) => {
+      await first.removal?.(p);
+      await second.removal?.(p);
+    };
+  }
   return both;
 }
 

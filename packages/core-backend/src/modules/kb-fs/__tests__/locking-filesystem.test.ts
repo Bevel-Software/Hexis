@@ -458,6 +458,57 @@ describe('LockingFilesystem — the caller judges under the lock', () => {
     expect(versionControl.releaseLockUntouched).toHaveBeenCalled();
   });
 
+  it("a delete asks the validator's removal check before the lock and again under it; a refusal deletes nothing", async () => {
+    await fs.mkdir(path.join(root, 'knowledge-base'), { recursive: true });
+    await fs.writeFile(path.join(root, 'knowledge-base/Foo.md'), 'kept\n');
+    const versionControl = makeVersionControl();
+    const asked: { path: string; locked: boolean }[] = [];
+    const validateWrite = Object.assign(async () => {}, {
+      removal: async (p: string) => {
+        asked.push({ path: p, locked: (versionControl.acquireLock as ReturnType<typeof vi.fn>).mock.calls.length > 0 });
+        if (asked.length === 2) throw new Error('not yours to delete');
+      },
+    });
+    const guarded = new LockingFilesystem(
+      { basePath: root, contained: true },
+      { versionControl, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB, validateWrite },
+    );
+    await expect(guarded.deleteFile('knowledge-base/Foo.md')).rejects.toThrow('not yours to delete');
+    expect(asked).toEqual([
+      { path: 'knowledge-base/Foo.md', locked: false },
+      { path: 'knowledge-base/Foo.md', locked: true },
+    ]);
+    expect(await fs.readFile(path.join(root, 'knowledge-base/Foo.md'), 'utf-8')).toBe('kept\n');
+    expect(versionControl.releaseLockUntouched).toHaveBeenCalled();
+    expect(versionControl.releaseLock).not.toHaveBeenCalled();
+  });
+
+  it("writeFiles asks the removal check for each delete, before and under the locks; a refusal lands nothing", async () => {
+    await fs.mkdir(path.join(root, 'knowledge-base'), { recursive: true });
+    await fs.writeFile(path.join(root, 'knowledge-base/Gone.md'), 'kept\n');
+    const versionControl = makeVersionControl();
+    const asked: string[] = [];
+    let refuseUnderLock = false;
+    const validateWrite = Object.assign(async () => {}, {
+      removal: async (p: string) => {
+        asked.push(p);
+        if (refuseUnderLock && asked.length === 2) throw new Error('not yours to delete');
+      },
+    });
+    const guarded = new LockingFilesystem(
+      { basePath: root, contained: true },
+      { versionControl, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB, validateWrite },
+    );
+    refuseUnderLock = true;
+    await expect(
+      guarded.writeFiles([{ path: 'knowledge-base/New.md', content: 'new\n' }], 'batch', ['knowledge-base/Gone.md']),
+    ).rejects.toThrow('not yours to delete');
+    expect(asked).toEqual(['knowledge-base/Gone.md', 'knowledge-base/Gone.md']);
+    expect(await fs.readFile(path.join(root, 'knowledge-base/Gone.md'), 'utf-8')).toBe('kept\n');
+    await expect(fs.access(path.join(root, 'knowledge-base/New.md'))).rejects.toThrow();
+    expect(versionControl.commitChanges).not.toHaveBeenCalled();
+  });
+
   it('rewriteFile refuses a path outside the repository before any lock', async () => {
     const versionControl = makeVersionControl();
     await expect(layer(versionControl).rewriteFile('elsewhere/Foo.md', () => 'x')).rejects.toThrow();

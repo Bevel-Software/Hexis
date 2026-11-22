@@ -1,31 +1,32 @@
 import type { Server as HttpServer } from 'node:http';
 import express from 'express';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { ToolRegistry } from '../../tool-registry/tool-registry.js';
-import { InternalTokenService } from '../../tool-auth/internal-token.service.js';
-import { createToolAuthMiddleware } from '../../tool-auth/tool-auth.middleware.js';
+import { ToolRegistry, createManualRoutes } from '../../tool-registry/index.js';
 import { createToolContextResolver } from '../tool-context.js';
 import { createToolHandlerFactory } from '../tool-handler.js';
-import { createManualRoutes } from '../../tool-registry/manual.routes.js';
-import { registerWorkspaceTools } from '../../workspace/workspace.tools.js';
-import { RoutineWritePolicyService } from '../../workspace/routine-write-policy.js';
-import { VersionControlHooks } from '../../version-control/version-control-hooks.js';
-import { ToolDescriptionNotes } from '../../workspace/agent-access.gate.js';
-import { SpillStore } from '../../workspace/spill-store.js';
-import { DocExtractService, WorkerDocumentExtractor } from '../../workspace/index.js';
+import { DocExtractService, SpillStore, ToolDescriptionNotes, WorkerDocumentExtractor } from '../../workspace/index.js';
+import {
+  InternalTokenService,
+  RoutineWritePolicyService,
+  VersionControlHooks,
+  createToolAuthMiddleware,
+  registerWorkspaceTools,
+} from '../../../__tests__/tool-wiring.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 
 const WS = 'target-company-state';
 let recorded: unknown[][] = [];
 /** Workspace-relative targets the stub archive holds; each is offered to the tool's write guard. */
 let archiveEntries: string[] = [];
+/** The bytes an entry holds, offered to the guard with its target (a folder entry has none). */
+let archiveContents = new Map<string, string>();
 
 const externalApiKeyService = { verifyAndLoadToken: async () => null } as never;
 const authService = { getUserById: async (id: string) => ({ id, email: 'e@x', name: 'N' }) } as never;
 const workspaceService = {
   getOrCreateForUser: async () => ({ id: WS }),
   getWorkspacePath: async () => '/tmp/ws',
-  unzipFile: async (ws: string, p: string, d?: string, guardWrite?: (target: string) => Promise<void>) => {
+  unzipFile: async (ws: string, p: string, d?: string, guardWrite?: (target: string, content?: Buffer) => Promise<void>) => {
     recorded.push(['unzip', ws, p, d]);
     if (archiveEntries.length === 0) return { extracted: [p], skipped: [] };
     // Mirrors the real extraction: a guard refusal skips that entry with its message.
@@ -33,7 +34,8 @@ const workspaceService = {
     const skipped: { path: string; reason: string }[] = [];
     for (const target of archiveEntries) {
       try {
-        await guardWrite?.(target);
+        const bytes = archiveContents.get(target);
+        await guardWrite?.(target, bytes === undefined ? undefined : Buffer.from(bytes));
         extracted.push(target);
       } catch (err) {
         skipped.push({ path: target, reason: (err as Error).message });
@@ -55,10 +57,10 @@ const accessControl = {
 const internalToken = new InternalTokenService({ secret: 's' });
 let httpServer: HttpServer | undefined;
 
-async function start(): Promise<string> {
+async function start(opts: { isBot?: (email: string) => boolean } = {}): Promise<string> {
   const registry = new ToolRegistry();
   const toolAuth = createToolAuthMiddleware(externalApiKeyService, internalToken);
-  const resolve = createToolContextResolver({ authService, workspaceService, versionControlService, events, kbDirName: 'knowledge-base', creatorAccess: { planForCreate: async () => null, grantInExtractedFile: async () => null, noteAccessFileWritten: () => {} } });
+  const resolve = createToolContextResolver({ authService, workspaceService, versionControlService, events, kbDirName: 'knowledge-base', ...(opts.isBot ? { isBot: opts.isBot } : {}), creatorAccess: { planForCreate: async () => null, grantInExtractedFile: async () => null, noteAccessFileWritten: () => {} } });
   const th = createToolHandlerFactory(resolve);
   const router = express.Router();
   // NOTE (core split): this suite used to register the search, feedback and
@@ -89,6 +91,7 @@ const post = (url: string, body: unknown = {}) =>
 beforeEach(() => {
   recorded = [];
   archiveEntries = [];
+  archiveContents = new Map();
 });
 afterEach(async () => {
   if (httpServer) await new Promise<void>((r) => httpServer!.close(() => r()));
@@ -115,6 +118,38 @@ describe('Phase 4 tools (core subset)', () => {
     expect(body.skipped).toEqual([
       { path: 'knowledge-base/roles.yaml', reason: expect.stringContaining('roles.yaml is never extracted') },
     ]);
+  });
+
+  it("a bot's unzip extracts no access file and no file whose own access lines it would change: each entry takes the write tools' gate", async () => {
+    archiveEntries = [
+      'knowledge-base/KnowledgeBase/notes.md',
+      'knowledge-base/KnowledgeBase/page.md',
+      'knowledge-base/KnowledgeBase/access.md',
+    ];
+    archiveContents = new Map([
+      ['knowledge-base/KnowledgeBase/notes.md', '# notes\n'],
+      ['knowledge-base/KnowledgeBase/page.md', '---\nread:\n  - everyone\n---\n# page\n'],
+      ['knowledge-base/KnowledgeBase/access.md', 'read:\n  - everyone\n'],
+    ]);
+    const base = await start({ isBot: () => true });
+    const res = await post(`${base}/api/agent/tools/unzip`, { path: 'knowledge-base/a.zip', branch: WS });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { extracted: string[]; skipped: { path: string; reason: string }[] };
+    expect(body.extracted).toEqual(['knowledge-base/KnowledgeBase/notes.md']);
+    expect(body.skipped).toEqual([
+      { path: 'knowledge-base/KnowledgeBase/page.md', reason: expect.stringContaining('A bot cannot change access') },
+      { path: 'knowledge-base/KnowledgeBase/access.md', reason: expect.stringContaining('A bot cannot change access') },
+    ]);
+  });
+
+  it("a person's unzip extracts the same archive whole: the bot's guard is the bot's alone", async () => {
+    archiveEntries = ['knowledge-base/KnowledgeBase/page.md'];
+    archiveContents = new Map([['knowledge-base/KnowledgeBase/page.md', '---\nread:\n  - everyone\n---\n# page\n']]);
+    const base = await start({ isBot: () => false });
+    const body = (await (await post(`${base}/api/agent/tools/unzip`, { path: 'knowledge-base/a.zip', branch: WS })).json()) as {
+      extracted: string[];
+    };
+    expect(body.extracted).toEqual(['knowledge-base/KnowledgeBase/page.md']);
   });
 
   it('the registered core tool appears in the internal manual', async () => {

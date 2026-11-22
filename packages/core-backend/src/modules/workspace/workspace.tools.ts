@@ -4010,7 +4010,7 @@ export function registerWorkspaceTools(
             // hook refuses is skipped (not extracted), so an archive can't be
             // a way around it — the extension policy applies per entry too, so
             // a restricted run can't unzip a `.md` into the graph.
-            (wsRelPath) => {
+            async (wsRelPath, content) => {
               // An entry that would land beside the repository is skipped with the
               // corrected-path reason, like any other refused entry.
               assertInsideRepo(wsRelPath, kbDirName);
@@ -4023,7 +4023,12 @@ export function registerWorkspaceTools(
                 );
               }
               writePolicy.assertPathWritable(ctx.sessionId, wsRelPath);
-              return assertAgentWriteAllowed(agentAccessGate, ctx, a.branch as string, wsRelPath);
+              await assertAgentWriteAllowed(agentAccessGate, ctx, a.branch as string, wsRelPath);
+              // Each extracted file takes the same pre-disk gate the file
+              // tools' writes take (`getWriteValidator`), on the bytes it
+              // would write — for a bot, the guard that refuses an access file
+              // or a change to a file's own access lines.
+              if (content !== undefined) await (await ctx.getWriteValidator(a.branch as string))(wsRelPath, content);
             },
           ),
         'Nothing to extract',
