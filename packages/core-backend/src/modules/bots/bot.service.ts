@@ -94,11 +94,12 @@ export class BotService implements IBots {
      */
     readonly addresses: BotAddressBook = new BotAddressBook(),
     /**
-     * Whether change request `number` has been merged — what decides when a
-     * grant at the previous bots' domain stops counting. Absent, a previous
-     * domain counts until the next change.
+     * The state of change request `number` (null when there is none) — what
+     * decides when a grant at the previous bots' domain stops counting (it is
+     * merged) and whether the domain may change again (it is not open).
+     * Absent, a previous domain counts until the next change.
      */
-    private readonly changeRequestMerged?: (number: number) => Promise<boolean>,
+    private readonly changeRequestState?: (number: number) => Promise<'open' | 'merged' | 'closed' | null>,
   ) {}
 
   /** The bots' domain in effect. */
@@ -263,15 +264,38 @@ export class BotService implements IBots {
     const people = await this.db.select({ email: users.email }).from(users).where(isNull(users.botId));
     const refusal = botsDomainRefusal(domain, people.map((p) => p.email), current);
     if (refusal) throw new BotsDomainRefusedError(refusal);
+    // Only one previous domain is kept. While the last change's rewrite is
+    // still open, its grants count only through that previous domain, so a
+    // second change now would cut them off before anyone merged it.
+    const pending = await this.openRewrite();
+    if (pending !== null) {
+      throw new BotsDomainRefusedError(
+        `The change request rewriting the grants at ${this.settings.resolve('botsPreviousDomain')} (#${pending}) is still open. Merge or decline it, then change the domain again.`,
+      );
+    }
+    // Every bot the distribution names now, not only the rows made so far:
+    // a bot defined since the last look gets its row and is re-addressed and
+    // rewritten with the rest.
+    await this.sync();
 
-    await this.settings.record({ botsDomain: domain, botsPreviousDomain: current, botsDomainChangeRequest: '0' }, by.id);
+    // The rows first, in one transaction, and the settings only once they
+    // are written: a failed transaction leaves both as they were. Settings
+    // that cannot be recorded put the rows back, so the two never disagree.
     const now = new Date();
-    await this.db.transaction(async (tx) => {
-      for (const row of this.rows.values()) {
-        const address = botAddress(row.botId, domain);
-        await tx.update(users).set({ email: address, emailBidx: address, updatedAt: now }).where(eq(users.id, row.id));
-      }
-    });
+    const readdress = (to: string) =>
+      this.db.transaction(async (tx) => {
+        for (const row of this.rows.values()) {
+          const address = botAddress(row.botId, to);
+          await tx.update(users).set({ email: address, emailBidx: address, updatedAt: now }).where(eq(users.id, row.id));
+        }
+      });
+    await readdress(domain);
+    try {
+      await this.settings.record({ botsDomain: domain, botsPreviousDomain: current, botsDomainChangeRequest: '0' }, by.id);
+    } catch (err) {
+      await readdress(current);
+      throw err;
+    }
     for (const row of this.rows.values()) this.rows.set(row.botId, { ...row, email: botAddress(row.botId, domain) });
     await this.refreshAddresses();
 
@@ -328,14 +352,24 @@ export class BotService implements IBots {
     });
   }
 
+  /** The number of the last domain change's rewrite while it is open; null otherwise. */
+  private async openRewrite(): Promise<number | null> {
+    if (!this.settings.resolve('botsPreviousDomain')) return null;
+    const number = Number(this.settings.resolve('botsDomainChangeRequest'));
+    if (!this.changeRequestState || !Number.isInteger(number) || number <= 0) return null;
+    // Cannot tell: refused as if open, rather than cut its grants off.
+    const state = await this.changeRequestState(number).catch(() => 'open' as const);
+    return state === 'open' ? number : null;
+  }
+
   /** The previous bots' domain while grants at it still count: until its change request is merged. */
   private async previousDomainInEffect(): Promise<string | null> {
     const previous = this.settings.resolve('botsPreviousDomain');
     if (!previous) return null;
     const number = Number(this.settings.resolve('botsDomainChangeRequest'));
-    if (!this.changeRequestMerged || !Number.isInteger(number) || number <= 0) return previous;
+    if (!this.changeRequestState || !Number.isInteger(number) || number <= 0) return previous;
     try {
-      return (await this.changeRequestMerged(number)) ? null : previous;
+      return (await this.changeRequestState(number)) === 'merged' ? null : previous;
     } catch (err) {
       // Cannot tell: the old spelling keeps counting rather than cutting a bot off.
       log.warn('could not read the domain change request; the previous domain still counts', { err });

@@ -904,10 +904,17 @@ export async function createCoreServices(
   const botDirectory = ports.bots?.({ workspaceService, accessControl, kb, disk, pluginLinkIndex }) ?? noBots();
   const botService = new BotService(db, settings, botDirectory, botAddresses, async (number) => {
     // A grant at the previous bots' domain counts until the change request
-    // rewriting it is merged.
+    // rewriting it is merged, and the domain does not change again while it
+    // is open.
     const [row] = await db.select({ state: changeRequests.state }).from(changeRequests).where(eq(changeRequests.number, number)).limit(1);
-    return row?.state === 'merged';
+    const state = row?.state;
+    return state === 'open' || state === 'merged' || state === 'closed' ? state : null;
   });
+  // The rows made so far. A bot the distribution names since the last boot
+  // gets its row on the first look that needs it — a listing of choices, a
+  // connection, a domain change — each of which syncs first; until then its
+  // address is in no book, and nothing can act as it or sign in at it (the
+  // whole bots' domain is refused to people).
   await botService.load();
   const pluginIndexService = new PluginIndexService(
     workspaceService,
@@ -1026,6 +1033,15 @@ export async function createCoreServices(
   // browser sessions. Single instance per Node process — survives across
   // requests, doesn't survive restarts (clients reconnect + resync).
   const eventBus = new VersionControlEventBus();
+  // A merged change request may be the rewrite of the last bots' domain
+  // change: the address book re-reads whether the old spelling still counts,
+  // so a merged rewrite stops it at once.
+  eventBus.onEmit((event) => {
+    if (event.kind !== 'change-request-merged') return;
+    botService.refresh().catch((err: unknown) => {
+      logger('bots').warn("re-reading the bots' previous domain after a merge failed; the next look re-reads it", { err });
+    });
+  });
   // Office-document/PDF/email text extraction for `read_file`/`grep`, cached
   // by content hash beside the workspaces root (see `DocExtractionCache`),
   // failures included. A fresh failure is told to the people looking at the

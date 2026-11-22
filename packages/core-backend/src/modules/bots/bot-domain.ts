@@ -1,3 +1,4 @@
+import { isFrontmatterFence } from '@bevel-software/platform-shared';
 import { canonicalEmail } from '../../shared/email-identity.js';
 
 /**
@@ -47,9 +48,16 @@ export function rewriteBotGrants(
   if (isAccessFile(path)) {
     next = rewrite(text);
   } else {
-    const fm = /^(---\r?\n)([\s\S]*?)(\r?\n---\r?\n?)/.exec(text);
-    if (!fm) return null;
-    next = fm[1] + rewrite(fm[2]) + fm[3] + text.slice(fm[0].length);
+    // The fences by the platform's one rule (`isFrontmatterFence`, which the
+    // access model reads frontmatter with), so a grant the access model
+    // enforces is a grant this rewrites. Lines keep their own endings: only
+    // the lines between the fences change.
+    const lines = text.split(/(?<=\n)/);
+    const bare = (line: string) => line.replace(/\r?\n$/, '');
+    if (lines.length === 0 || !isFrontmatterFence(bare(lines[0]))) return null;
+    const close = lines.findIndex((line, i) => i > 0 && isFrontmatterFence(bare(line)));
+    if (close === -1) return null;
+    next = lines[0] + rewrite(lines.slice(1, close).join('')) + lines.slice(close).join('');
   }
   return next === text ? null : next;
 }

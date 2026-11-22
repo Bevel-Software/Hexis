@@ -32,6 +32,13 @@ describe('rewriting grants and refusing domains', () => {
     expect(rewriteBotGrants('Team/page.md', page, ['release-helper'], 'agent.hexis', 'bots.acme.com', isAccessFile)).toBe(
       '---\nread:\n  - R <release-helper@bots.acme.com>\n---\nMail release-helper@agent.hexis for help.\n',
     );
+    // A fence with surrounding whitespace is a fence to the access model, so its grants are rewritten too;
+    // CRLF line endings stay as they were.
+    const spaced = '---  \r\nread:\r\n  - R <release-helper@agent.hexis>\r\n --- \r\nbody\r\n';
+    expect(rewriteBotGrants('Team/page.md', spaced, ['release-helper'], 'agent.hexis', 'bots.acme.com', isAccessFile)).toBe(
+      '---  \r\nread:\r\n  - R <release-helper@bots.acme.com>\r\n --- \r\nbody\r\n',
+    );
+    expect(rewriteBotGrants('Team/page.md', '---\nread:\n  - R <release-helper@agent.hexis>\n', ['release-helper'], 'agent.hexis', 'x.io', isAccessFile)).toBeNull();
     expect(rewriteBotGrants('Team/page.md', '# nothing\n', ['release-helper'], 'agent.hexis', 'x.io', isAccessFile)).toBeNull();
     expect(rewriteBotGrants('roles.yaml', 'groups:\n  G:\n    - not-a-bot@agent.hexis\n', ['release-helper'], 'agent.hexis', 'x.io', isAccessFile)).toBeNull();
   });
@@ -56,7 +63,8 @@ describe.skipIf(!PG_ADMIN_URL)('the bots\' domain on a real Postgres', () => {
   let store: DeploymentSettingsService;
   const book = new BotAddressBook();
   let service: BotService;
-  const merged = { value: false };
+  /** The state of the rewrite's change request, as the database would answer it. */
+  const rewrite = { state: 'open' as 'open' | 'merged' | 'closed' };
   const rewriter = { open: vi.fn(async () => 42) };
   let admin: { id: string; email: string; name: string };
 
@@ -71,7 +79,7 @@ describe.skipIf(!PG_ADMIN_URL)('the bots\' domain on a real Postgres', () => {
     admin = { id: adminRow!.id, email: 'admin@acme.com', name: 'Admin' };
     store = new DeploymentSettingsService(db, '', undefined, { env: {} });
     await store.load();
-    service = new BotService(db, store, { definitions: async () => [def('release-helper')], mayActAs: async () => true }, book, async () => merged.value);
+    service = new BotService(db, store, { definitions: async () => [def('release-helper')], mayActAs: async () => true }, book, async () => rewrite.state);
     await service.load();
     await service.sync();
     const app = express();
@@ -138,8 +146,15 @@ describe.skipIf(!PG_ADMIN_URL)('the bots\' domain on a real Postgres', () => {
     expect(saved[0]).toMatchObject({ value: 'bots.acme.com', updatedBy: admin.id });
     expect(store.resolve('botsDomainChangeRequest')).toBe('42');
 
+    // While the rewrite is open a second change is refused: only one previous
+    // domain is kept, and its grants would stop counting before anyone merged it.
+    const again = await put('robots.acme.com');
+    expect(again.status).toBe(422);
+    expect(((await again.json()) as { error: string }).error).toMatch(/\(#42\) is still open/);
+    expect(book.isBot('release-helper@agent.hexis')).toBe(true);
+
     // The rewrite is merged: the next look drops the old spelling.
-    merged.value = true;
+    rewrite.state = 'merged';
     await service.sync();
     expect(book.addressesOf('release-helper@bots.acme.com')).toEqual(['release-helper@bots.acme.com']);
     expect(book.isBot('release-helper@agent.hexis')).toBe(false);
@@ -147,7 +162,6 @@ describe.skipIf(!PG_ADMIN_URL)('the bots\' domain on a real Postgres', () => {
   });
 
   it('says so, with no credential, when the rewrite cannot be opened, and keeps the old address counting', async () => {
-    merged.value = false;
     const secret = 'ghp_s3cretTokenValueThatMustNotLeak';
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const prevToken = process.env.GIT_TOKEN;
@@ -168,5 +182,61 @@ describe.skipIf(!PG_ADMIN_URL)('the bots\' domain on a real Postgres', () => {
       else process.env.GIT_TOKEN = prevToken;
       warn.mockRestore();
     }
+  });
+});
+
+describe.skipIf(!PG_ADMIN_URL)('a domain change on a real Postgres: every bot named now, and rows and settings together', () => {
+  let db: Database;
+  let closeDb: () => Promise<void>;
+  let store: DeploymentSettingsService;
+  let admin: { id: string; email: string; name: string };
+
+  beforeAll(async () => {
+    ({ db, close: closeDb } = await openMigratedScratchDb('hexis_bot_domain_rows'));
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const [adminRow] = await db
+      .insert(users)
+      .values({ email: 'admin@acme.com', emailBidx: 'admin@acme.com', name: 'Admin' })
+      .returning({ id: users.id });
+    admin = { id: adminRow!.id, email: 'admin@acme.com', name: 'Admin' };
+    store = new DeploymentSettingsService(db, '', undefined, { env: {} });
+    await store.load();
+  }, PG_TEST_TIMEOUT);
+
+  afterAll(async () => {
+    vi.restoreAllMocks();
+    await closeDb();
+    await dropScratchDatabases();
+  }, PG_TEST_TIMEOUT);
+
+  const emailOf = async (botId: string) => (await db.select().from(users).where(eq(users.botId, botId)))[0]?.email;
+
+  it('re-addresses and rewrites a bot defined since the last look, not only the rows made so far', async () => {
+    const defs = [def('first')];
+    const service = new BotService(db, store, { definitions: async () => defs, mayActAs: async () => true });
+    await service.load();
+    await service.sync();
+    defs.push(def('second'));
+    const rewriter = { open: vi.fn(async () => 7) };
+    await service.changeDomain(admin, 'bots-a.acme.com', rewriter);
+    expect(await emailOf('first')).toBe('first@bots-a.acme.com');
+    expect(await emailOf('second')).toBe('second@bots-a.acme.com');
+    expect(rewriter.open).toHaveBeenCalledWith(admin, 'agent.hexis', 'bots-a.acme.com', ['first', 'second']);
+  });
+
+  it('puts every row back when the settings cannot be recorded, so rows and settings never disagree', async () => {
+    const failing = {
+      resolve: (key: string) => store.resolve(key),
+      record: async () => {
+        throw new Error('settings store down');
+      },
+    };
+    const service = new BotService(db, failing as never, { definitions: async () => [def('first'), def('second')], mayActAs: async () => true });
+    await service.load();
+    const before = service.domain();
+    await expect(service.changeDomain(admin, 'bots-b.acme.com')).rejects.toThrow('settings store down');
+    expect(service.domain()).toBe(before);
+    expect(await emailOf('first')).toBe(`first@${before}`);
+    expect(await emailOf('second')).toBe(`second@${before}`);
   });
 });
