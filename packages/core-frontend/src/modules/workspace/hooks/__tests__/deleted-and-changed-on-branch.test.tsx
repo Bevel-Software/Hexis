@@ -2354,6 +2354,152 @@ describe('a change pulled from the git host onto the open file', () => {
     });
   });
 
+  describe("a read sent while a save was on its way that answers after the save's answer", () => {
+    const SAVED = BASE.replace('Second paragraph.', 'Second paragraph, saved.');
+    // Typed while the save is out (the tab is dirty when its answer arrives,
+    // so the refetch after it leaves the tab alone), and on after the answer.
+    const TYPED_DURING = `${SAVED}\n\nTyped while the save was out.`;
+    const TYPED = `${TYPED_DURING}\nAnd on after it landed.`;
+    const upstream = (text: string) => text.replace('First paragraph.', 'First paragraph, rewritten upstream.');
+
+    /**
+     * The next write reaches the disk when `land` is called (a read sent
+     * before that is served before it), and its answer arrives when
+     * `answer` is called.
+     */
+    function holdWrite() {
+      const write = apiMocks.writeFile.getMockImplementation()!;
+      let land!: () => void;
+      const landing = new Promise<void>((r) => { land = r; });
+      let answer!: () => void;
+      const answered = new Promise<void>((r) => { answer = r; });
+      let sent!: () => void;
+      const wasSent = new Promise<void>((r) => { sent = r; });
+      apiMocks.writeFile.mockImplementationOnce(async (...args: Parameters<typeof write>) => {
+        sent();
+        await landing;
+        const wrote = await write(...args);
+        await answered;
+        return wrote;
+      });
+      return { wasSent, land: () => land(), answer: () => answer() };
+    }
+
+    /**
+     * The next read is served at once, from the disk as it is when it is
+     * sent, but its answer waits for `answer`.
+     */
+    function holdRead() {
+      let answer!: () => void;
+      const answered = new Promise<void>((r) => { answer = r; });
+      apiMocks.readFile.mockImplementationOnce(async (_ws: string, path: string) => {
+        const bytes = disk.get(path);
+        await answered;
+        if (bytes === undefined) throw new WorkspaceApiError(404, 'Not found');
+        return bytes;
+      });
+      return { answer: () => answer() };
+    }
+
+    /** The person types while the save is out, its answer arrives, and they type on. */
+    async function answerThenType(result: Hook, write: ReturnType<typeof holdWrite>, saving: Promise<void>) {
+      await typeInto(result, TYPED_DURING);
+      await act(async () => { write.answer(); await saving; });
+      const landed = result.current.activeTab!;
+      expect(landed.savedContent).toBe(SAVED);
+      expect(landed.content).toBe(TYPED_DURING);
+      expect(landed.isDirty).toBe(true);
+      await typeInto(result, TYPED);
+    }
+
+    /** An autosave of SAVED: the editor stays open. Resolves once the write is sent. */
+    async function autosave(result: Hook) {
+      await typeInto(result, SAVED);
+      const write = holdWrite();
+      let saving!: Promise<void>;
+      act(() => { saving = result.current.saveFile('KB/Notes.md', SAVED); });
+      await act(async () => { await write.wasSent; });
+      return { write, saving };
+    }
+
+    it('a commit it found pulled on top of the write is merged onto the later typing, and the next save writes over it', async () => {
+      const result = await editedTab();
+      const { write, saving } = await autosave(result);
+      write.land();
+      await waitFor(() => expect(disk.get('KB/Notes.md')).toBe(SAVED));
+      // The answer is not back yet when a commit lands on top and its read is sent.
+      const pulled = upstream(SAVED);
+      disk.set('KB/Notes.md', pulled);
+      const read = holdRead();
+      act(() => bus.emit(fileChanged('KB/Notes.md', GIT_SYNC)));
+      await answerThenType(result, write, saving);
+
+      await act(async () => { read.answer(); });
+      await settle();
+
+      const merged = upstream(TYPED);
+      const tab = result.current.activeTab!;
+      expect(tab.content).toBe(merged);
+      expect(tab.savedContent).toBe(pulled);
+      expect(tab.isDirty).toBe(true);
+      expect(tab.changedOnBranch).toBe('merged');
+
+      await act(async () => { await result.current.saveFile('KB/Notes.md', merged); });
+      expect(apiMocks.writeFile).toHaveBeenLastCalledWith('ws-1', 'KB/Notes.md', merged, { ifMatch: pulled });
+      expect(disk.get('KB/Notes.md')).toBe(merged);
+    });
+
+    it('a 404 it found after the write marks the tab deleted, keeps the later typing, and the next save writes nothing', async () => {
+      const result = await editedTab();
+      const { write, saving } = await autosave(result);
+      write.land();
+      await waitFor(() => expect(disk.get('KB/Notes.md')).toBe(SAVED));
+      disk.delete('KB/Notes.md');
+      const read = holdRead();
+      act(() => bus.emit(fileChanged('KB/Notes.md')));
+      await answerThenType(result, write, saving);
+
+      await act(async () => { read.answer(); });
+      await waitFor(() => expect(result.current.activeTab?.deletedBy).toMatchObject({ name: 'Sam Rivera' }));
+
+      const tab = result.current.activeTab!;
+      expect(tab.content).toBe(TYPED);
+      expect(tab.isDirty).toBe(true);
+
+      apiMocks.writeFile.mockClear();
+      await act(async () => {
+        await expect(result.current.saveFile('KB/Notes.md', TYPED)).rejects.toThrow('Notes.md was deleted from this branch');
+      });
+      expect(apiMocks.writeFile).not.toHaveBeenCalled();
+      expect(disk.has('KB/Notes.md')).toBe(false);
+    });
+
+    it('the bytes the write replaced, which the server answered it with before the write, put nothing back', async () => {
+      const result = await editedTab();
+      const { write, saving } = await autosave(result);
+      // Sent after the write, served before it reached the disk: it finds BASE.
+      const read = holdRead();
+      act(() => bus.emit(fileChanged('KB/Notes.md', GIT_SYNC)));
+      write.land();
+      await waitFor(() => expect(disk.get('KB/Notes.md')).toBe(SAVED));
+      await answerThenType(result, write, saving);
+      expect(disk.get('KB/Notes.md')).toBe(SAVED);
+
+      await act(async () => { read.answer(); });
+      await settle();
+
+      const tab = result.current.activeTab!;
+      expect(tab.content).toBe(TYPED);
+      expect(tab.savedContent).toBe(SAVED);
+      expect(tab.isDirty).toBe(true);
+      expect(tab.changedOnBranch ?? null).toBeNull();
+
+      await act(async () => { await result.current.saveFile('KB/Notes.md', TYPED); });
+      expect(apiMocks.writeFile).toHaveBeenLastCalledWith('ws-1', 'KB/Notes.md', TYPED, { ifMatch: SAVED });
+      expect(disk.get('KB/Notes.md')).toBe(TYPED);
+    });
+  });
+
   it('an echo of our own save does not touch edits typed after it', async () => {
     const result = await editedTab();
     await typeInto(result, `${BASE}\n\nTyped after the save.`);
