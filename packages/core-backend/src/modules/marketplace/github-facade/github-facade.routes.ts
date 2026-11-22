@@ -2,7 +2,6 @@ import express from 'express';
 import { logger } from '../../../shared/logging.js';
 
 const log = logger('github-facade');
-import type { AuthUser } from '@bevel-software/platform-shared';
 import '../../auth/index.js'; // Express Request.userId / userEmail augmentation
 import '../../tool-auth/index.js'; // Express Request augmentation (req.externalApiKeyId)
 import type { MarketplaceRepoService } from '../marketplace-repo.service.js';

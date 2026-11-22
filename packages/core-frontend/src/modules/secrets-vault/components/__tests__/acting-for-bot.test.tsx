@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { useEffect } from 'react';
 import { act, render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter, useNavigate } from 'react-router-dom';
 import { SecretsPage } from '../SecretsPage';
@@ -76,9 +77,12 @@ afterEach(() => {
 const forBot = (url: string) => /[?&]bot=ops(?:&|$)/.test(url);
 
 /** Hands the test the router's own navigation, as a link on the page would use it. */
-let navigateTo: (to: string) => void = () => undefined;
+const nav: { to: (to: string) => void } = { to: () => undefined };
 function Navigator() {
-  navigateTo = useNavigate();
+  const navigate = useNavigate();
+  useEffect(() => {
+    nav.to = (to: string) => void navigate(to);
+  }, [navigate]);
   return null;
 }
 
@@ -93,7 +97,7 @@ describe('a page opened for a bot acts for it, and nothing else does', () => {
     );
     expect(await screen.findByTestId('secrets-of-bot')).toHaveTextContent('Secrets of ops');
     asked.length = 0;
-    act(() => navigateTo('/secrets'));
+    act(() => nav.to('/secrets'));
     await waitFor(() => expect(screen.queryByTestId('secrets-of-bot')).toBeNull());
     await waitFor(() => expect(asked.filter((a) => a.method === 'GET').length).toBeGreaterThan(0));
     expect(asked.some((a) => a.url.includes('bot='))).toBe(false);
