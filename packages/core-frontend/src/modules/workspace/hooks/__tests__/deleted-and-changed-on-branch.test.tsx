@@ -1656,7 +1656,7 @@ describe('a change pulled from the git host onto the open file', () => {
       expect(result.current.activeTab?.isDirty).toBe(false);
     });
 
-    it('later typing that collides with the pull is given up, and the tab says so', async () => {
+    it('later typing over the pulled lines the editor showed is an edit, kept unsaved', async () => {
       const result = await editedTab();
       const edited = `${BASE}\n\nMy new closing line.`;
       await typeInto(result, edited);
@@ -1664,17 +1664,55 @@ describe('a change pulled from the git host onto the open file', () => {
       disk.set('KB/Notes.md', pulled);
       const held = holdFileChangedRead(pulled);
 
+      // The change read merged the edits onto the pull and reloaded the
+      // editor with it: rewriting the pulled line is the person's choice.
       await typeDuringWrite(
         result, edited, (now) => now.replace('First paragraph, rewritten upstream.', 'First paragraph, my way.'), held,
       );
 
       const written = `${pulled}\n\nMy new closing line.`;
+      expect(disk.get('KB/Notes.md')).toBe(written);
       const tab = result.current.activeTab!;
-      expect(tab.content).toBe(written);
+      expect(tab.content).toBe(written.replace('First paragraph, rewritten upstream.', 'First paragraph, my way.'));
       expect(tab.savedContent).toBe(written);
-      expect(tab.isDirty).toBe(false);
-      expect(tab.changedOnBranch).toBe('discarded');
+      expect(tab.isDirty).toBe(true);
+      expect(tab.changedOnBranch).toBe('merged');
       expect(tab.remoteRevision).toBe(2);
+    });
+
+    it('typing during the change read, before it lands, is kept with the later typing', async () => {
+      const result = await editedTab();
+      const edited = `${BASE}\n\nMy new closing line.`;
+      await typeInto(result, edited);
+      const pulled = BASE.replace('First paragraph.', 'First paragraph, rewritten upstream.');
+      disk.set('KB/Notes.md', pulled);
+      const held = holdFileChangedRead(pulled);
+      const early = edited.replace('Second paragraph.', 'Second paragraph, typed early.');
+      const write = apiMocks.writeFile.getMockImplementation()!;
+      let land!: () => void;
+      const landed = new Promise<void>((r) => { land = r; });
+      apiMocks.writeFile.mockClear();
+      apiMocks.writeFile.mockImplementationOnce(async (...args: Parameters<typeof write>) => {
+        await landed;
+        return write(...args);
+      });
+
+      let saving!: Promise<void>;
+      act(() => { saving = result.current.saveFile('KB/Notes.md', edited); });
+      await typeInto(result, early);
+      await act(async () => { held.answer(); });
+      await waitFor(() => expect(apiMocks.writeFile).toHaveBeenCalledOnce());
+      await typeInto(result, `${result.current.activeTab!.content!}\n\nTyped while it saved.`);
+      await act(async () => { land(); await saving; });
+
+      const written = `${pulled}\n\nMy new closing line.`;
+      expect(disk.get('KB/Notes.md')).toBe(written);
+      const tab = result.current.activeTab!;
+      expect(tab.content).toBe(
+        `${written.replace('Second paragraph.', 'Second paragraph, typed early.')}\n\nTyped while it saved.`,
+      );
+      expect(tab.savedContent).toBe(written);
+      expect(tab.isDirty).toBe(true);
     });
 
     it('a write with no pull keeps the later typing unsaved, without reloading the editor', async () => {
@@ -1741,6 +1779,82 @@ describe('a change pulled from the git host onto the open file', () => {
     expect(tab.content).toBe(edited);
     expect(tab.savedContent).toBe(edited);
     expect(tab.changedOnBranch ?? null).toBeNull();
+  });
+
+  describe('Done during a change read the edits merge onto', () => {
+    /**
+     * Done on `edited` while the read of a pulled commit is held: the save
+     * starts and the closing editor reports the tab clean, then the read
+     * answers (onto the clean tab, so it takes the pulled bytes) and the save
+     * merges onto the pull. `whileWriting` runs once the PUT has started,
+     * before it lands.
+     */
+    async function doneDuringRead(result: Hook, edited: string, pulled: string, whileWriting?: () => Promise<void>) {
+      disk.set('KB/Notes.md', pulled);
+      const held = holdFileChangedRead(pulled);
+      const write = apiMocks.writeFile.getMockImplementation()!;
+      let land!: () => void;
+      const landed = new Promise<void>((r) => { land = r; });
+      apiMocks.writeFile.mockClear();
+      apiMocks.writeFile.mockImplementationOnce(async (...args: Parameters<typeof write>) => {
+        await landed;
+        return write(...args);
+      });
+      let saving!: Promise<void>;
+      act(() => {
+        saving = result.current.saveFile('KB/Notes.md', edited);
+        result.current.setHasUnsavedFileChanges?.(false);
+      });
+      await act(async () => { held.answer(); });
+      await waitFor(() => expect(apiMocks.writeFile).toHaveBeenCalledOnce());
+      if (whileWriting) await whileWriting();
+      await act(async () => { land(); await saving; });
+    }
+
+    it('the tab holds what was written, saved, with the merged banner, and a later save keeps the edit', async () => {
+      const result = await editedTab();
+      const edited = BASE.replace('First paragraph.', 'LOCALEDIT First paragraph.');
+      await typeInto(result, edited);
+      const pulled = `${BASE} HOSTAPPENDED`;
+
+      await doneDuringRead(result, edited, pulled);
+
+      const written = `${BASE.replace('First paragraph.', 'LOCALEDIT First paragraph.')} HOSTAPPENDED`;
+      expect(disk.get('KB/Notes.md')).toBe(written);
+      const tab = result.current.activeTab!;
+      expect(tab.content).toBe(written);
+      expect(tab.savedContent).toBe(written);
+      expect(tab.isDirty).toBe(false);
+      expect(tab.changedOnBranch).toBe('merged');
+
+      // Edit, then Done again with the editor's text: the edit stays on the branch.
+      await act(async () => { await result.current.saveFile('KB/Notes.md', tab.content!); });
+      expect(disk.get('KB/Notes.md')).toBe(written);
+    });
+
+    it('the read keeps the edits in the clean tab, and typing after it is kept with them', async () => {
+      const result = await editedTab();
+      const edited = BASE.replace('First paragraph.', 'LOCALEDIT First paragraph.');
+      await typeInto(result, edited);
+      const pulled = `${BASE} HOSTAPPENDED`;
+      const written = `${BASE.replace('First paragraph.', 'LOCALEDIT First paragraph.')} HOSTAPPENDED`;
+
+      // The read lands on the tab Done marked clean: it shows the edits on
+      // the pull, still clean, never the pulled bytes alone. Edit again, type.
+      await doneDuringRead(result, edited, pulled, async () => {
+        const now = result.current.activeTab!;
+        expect(now.content).toBe(written);
+        expect(now.isDirty).toBe(false);
+        await typeInto(result, `${written}\n\nTyped after Done.`);
+      });
+
+      expect(disk.get('KB/Notes.md')).toBe(written);
+      const tab = result.current.activeTab!;
+      expect(tab.content).toBe(`${written}\n\nTyped after Done.`);
+      expect(tab.savedContent).toBe(written);
+      expect(tab.isDirty).toBe(true);
+      expect(tab.changedOnBranch).toBe('merged');
+    });
   });
 
   it('an echo of our own save does not touch edits typed after it', async () => {

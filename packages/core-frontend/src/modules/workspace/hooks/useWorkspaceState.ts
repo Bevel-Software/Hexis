@@ -2089,13 +2089,13 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       // has not seen it yet. Its text is not the editor's, which an autosave
       // leaves open, so the editor reloads it; otherwise its next save writes
       // over the pull.
-      // The tab's text is the editor's newest: what the person typed while
-      // this write was on its way (an autosave leaves the editor open) was
-      // edited from `content`, never from what was written. It stays, unsaved:
-      // as it is when nothing was merged (the editor holds it already), merged
-      // onto the written bytes when the write merged onto a pull; when it
-      // collides with the pull it is given up, and the banner says so, as the
-      // `file-changed` read decides for edits that collide.
+      // A dirty tab's text is the editor's newest: what the person typed while
+      // this write was on its way (an autosave leaves the editor open). It
+      // stays, unsaved: as it is when nothing was merged (the editor holds it
+      // already) or when the `file-changed` read already merged it onto this
+      // pull (`afterWrite`); otherwise merged onto the written bytes, and when
+      // it collides with the pull it is given up, and the banner says so, as
+      // that read decides for edits that collide.
       setOpenTabs((prev) => {
         const idx = prev.findIndex((t) => t.path === relativePath);
         if (idx < 0) return prev;
@@ -2107,7 +2107,18 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       return wrote;
 
       function afterWrite(t: OpenTab): OpenTab {
-        const typedSince = t.content !== null && t.content !== content ? t.content : null;
+        // Only a dirty tab holds typing: a clean one's text is the save's, or
+        // what a `file-changed` read put there. Typing is measured from the
+        // text it grew from. When that read moved the tab onto the pull this
+        // write merged onto, it merged the edits onto the pull already (onto
+        // a tab Done marked clean too), and the editor reloaded with them:
+        // what was typed since grew from that, which this write holds, so the
+        // tab's text is kept as it is. Measured from the save's own text
+        // instead, the pulled bytes a read put in a tab Done had marked clean
+        // read as typing that removed the edit, and the next save erased it.
+        const readMovedTab = mergedOntoPull && expected !== null && t.savedContent === expected;
+        const typedFrom = readMovedTab ? toWrite : content;
+        const typedSince = t.isDirty && t.content !== null && t.content !== typedFrom ? t.content : null;
         if (typedSince === null) {
           return {
             ...t,
@@ -2121,7 +2132,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
         if (!mergedOntoPull) {
           return { ...t, savedContent: toWrite, isDirty: typedSince !== toWrite, changedOnBranch: null };
         }
-        const kept = threeWayMerge(content, typedSince, toWrite);
+        const kept = threeWayMerge(typedFrom, typedSince, toWrite);
         if (kept === null) return takePulledOverEdits(t, toWrite, 'discarded');
         return {
           ...t,
@@ -2532,7 +2543,15 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
               // person has typed on past the save: those bytes are newer than
               // the disk's, not overwritten by it.
               if (content === t.savedContent) return base;
-              if (t.isDirty && t.content !== null && t.savedContent !== null) {
+              // Done marks the tab clean as the editor closes, while the save
+              // of its edits is still on its way: the edits are the tab's
+              // text, not yet its saved bytes. Taken as a clean tab's, they
+              // were replaced by the pulled bytes, and the editor reopened
+              // without them. They are merged onto the pull as unsaved
+              // edits are; the tab stays clean, since the save writes them.
+              const savingDone = !t.isDirty && t.content !== t.savedContent
+                && savesInFlightRef.current.has(existenceKey(subscribedWorkspaceId, event.path));
+              if ((t.isDirty || savingDone) && t.content !== null && t.savedContent !== null) {
                 // Content changed underneath unsaved edits. Inside this
                 // deployment the file lock stops every other writer while a
                 // tab is dirty, so this is a commit pulled from the git host.
@@ -2545,7 +2564,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
                   ...base,
                   content: merged,
                   savedContent: content,
-                  isDirty: merged !== content,
+                  isDirty: !savingDone && merged !== content,
                   // Edits the pulled commit already holds leave nothing to save.
                   changedOnBranch: merged !== content ? 'merged' : null,
                   remoteRevision,
