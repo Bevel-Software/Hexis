@@ -2376,9 +2376,9 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     // it has: there is nothing left to refetch. So does a pending agent preview:
     // its bytes are the baseline Reject writes back, and no read may replace
     // them (`applyReadBytes`), so nulled they would stay on "Opening" for good.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     // Nor does Done's text whose save is on its way (`isSavingDone`): nulled,
     // the tab would reopen on the disk's bytes before the save wrote it.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setOpenTabs((prev) => prev.map((t) => {
       if (t.isDirty || t.deletedBy || t.pendingFileContent !== null || t.path === activePath) return t;
       if (workspaceId && isSavingDone(workspaceId, t)) return t;
