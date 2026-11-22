@@ -71,6 +71,17 @@ export function SecretsPage() {
   // person's own, reads and writes for whom the URL now names.
   const location = useLocation();
   const bot = useMemo(() => botFromLocation(location.search), [location.search]);
+  /**
+   * Whom the lists ON SCREEN were loaded for — set with the lists, in the
+   * same load. Every action a row offers (Sign in, Remove, a panel's save)
+   * acts for THIS identity, never for the one the URL names now: between a
+   * change of `?bot=` and the new lists' arrival — or after that load
+   * failed — the rows still on screen are the previous identity's, and a
+   * click on one must not act in, or delete from, the newly named one's
+   * vault. Undefined until the first lists have arrived.
+   */
+  const [listedFor, setListedFor] = useState<string | null | undefined>(undefined);
+  const shownFor = listedFor === undefined ? bot : listedFor;
 
   const refresh = useCallback(async (quiet = false) => {
     const mine = ++loadSeq.current;
@@ -81,6 +92,7 @@ export function SecretsPage() {
       if (loadSeq.current !== mine) return;
       setTools(t);
       setSecrets(s);
+      setListedFor(bot);
       setError(null);
     } catch (err) {
       // Inside the guard too: an older load failing after a newer one
@@ -115,7 +127,7 @@ export function SecretsPage() {
 
   const onDelete = async (id: string) => {
     try {
-      await deleteSecret(id, bot);
+      await deleteSecret(id, shownFor);
       await refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -124,7 +136,7 @@ export function SecretsPage() {
 
   const onAuthorize = async (id: string) => {
     try {
-      const url = await startOAuth(id, bot);
+      const url = await startOAuth(id, shownFor);
       window.location.href = url;
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -132,7 +144,7 @@ export function SecretsPage() {
   };
 
   return (
-    <ActingForBot.Provider value={bot}>
+    <ActingForBot.Provider value={shownFor}>
     <PageShell
       title="Secrets"
       // The header's Refresh is QUIET, like the refetch a save triggers: a loud
@@ -162,9 +174,9 @@ export function SecretsPage() {
         </Banner>
       )}
 
-      {bot && (
+      {shownFor && (
         <p className="mb-2 text-ui font-medium text-ink" data-testid="secrets-of-bot">
-          Secrets of {bot}
+          Secrets of {shownFor}
         </p>
       )}
       <p className="mb-5 text-ui text-ink-muted">

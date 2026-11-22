@@ -22,6 +22,8 @@ import { listSecrets } from '../../services/secrets.api';
  */
 
 const asked: { url: string; method: string }[] = [];
+/** A test's own answers, asked before the defaults; a status other than 200 fails the request. */
+let override: (url: string) => { status: number; body: unknown } | undefined = () => undefined;
 
 function respond(url: string): unknown {
   if (url.startsWith('/api/secrets/tools/') && url.includes('/check')) {
@@ -65,11 +67,16 @@ beforeEach(() => {
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       asked.push({ url, method: init?.method ?? 'GET' });
-      return new Response(JSON.stringify(respond(url)), { status: 200, headers: { 'content-type': 'application/json' } });
+      const own = override(url);
+      return new Response(JSON.stringify(own ? own.body : respond(url)), {
+        status: own ? own.status : 200,
+        headers: { 'content-type': 'application/json' },
+      });
     }),
   );
 });
 afterEach(() => {
+  override = () => undefined;
   vi.unstubAllGlobals();
   window.history.replaceState(null, '', '/');
 });
@@ -101,6 +108,35 @@ describe('a page opened for a bot acts for it, and nothing else does', () => {
     await waitFor(() => expect(screen.queryByTestId('secrets-of-bot')).toBeNull());
     await waitFor(() => expect(asked.filter((a) => a.method === 'GET').length).toBeGreaterThan(0));
     expect(asked.some((a) => a.url.includes('bot='))).toBe(false);
+  });
+
+  it("acts for whom its rows were listed for: a link to another bot whose lists fail to load leaves the rows, and their controls, the first bot's", async () => {
+    override = (url) => {
+      if (url === '/api/secrets?bot=ops') {
+        return { status: 200, body: { secrets: [{ id: 's-ops', key: 'Gmail_TOKEN', kind: 'oauth', authorized: true }] } };
+      }
+      if (url.includes('bot=ci') && !url.includes('/s-ops')) return { status: 500, body: { message: 'down' } };
+      return undefined;
+    };
+    window.history.replaceState(null, '', '/secrets?bot=ops');
+    render(
+      <MemoryRouter initialEntries={['/secrets?bot=ops']}>
+        <Navigator />
+        <SecretsPage />
+      </MemoryRouter>,
+    );
+    expect(await screen.findByTestId('secrets-of-bot')).toHaveTextContent('Secrets of ops');
+    act(() => nav.to('/secrets?bot=ci'));
+    await waitFor(() => expect(asked.some((a) => a.url === '/api/secrets?bot=ci')).toBe(true));
+    expect(await screen.findByRole('alert')).toBeInTheDocument();
+    // The rows on screen are still ops's, and the page says so.
+    expect(screen.getByTestId('secrets-of-bot')).toHaveTextContent('Secrets of ops');
+    asked.length = 0;
+    fireEvent.click(screen.getByRole('button', { name: /Remove Gmail_TOKEN/, hidden: true }));
+    await waitFor(() => expect(asked.some((a) => a.method === 'DELETE')).toBe(true));
+    const del = asked.find((a) => a.method === 'DELETE')!;
+    expect(forBot(del.url)).toBe(true);
+    expect(del.url).not.toContain('bot=ci');
   });
 
   it("names the bot on the page's own reads and writes, never on a request made elsewhere, during or after", async () => {
