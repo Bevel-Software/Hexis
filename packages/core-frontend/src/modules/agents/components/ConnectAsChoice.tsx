@@ -1,4 +1,5 @@
-import { useId } from 'react';
+import { useContext, useId } from 'react';
+import { AuthContext } from '../../auth';
 import { cn } from '../../../lib/utils';
 import type { BotChoice } from '../services/agent-choices.api';
 import type { UnavailableChoice } from '../connect-as';
@@ -6,7 +7,7 @@ import type { UnavailableChoice } from '../connect-as';
 export interface ConnectAsChoiceProps {
   /** The bots the person may act as, the ones that cannot be used included; Myself is always offered first. */
   bots: readonly BotChoice[];
-  /** The signed-in person's address, shown under Myself. */
+  /** The address shown under Myself; the signed-in person's when not given. */
   myselfEmail?: string;
   /** The chosen bot's id, or null for Myself. */
   value: string | null;
@@ -36,12 +37,14 @@ export interface ConnectAsChoiceProps {
  */
 export function ConnectAsChoice({ bots, myselfEmail, value, onChange, disabled, hint, unavailable }: ConnectAsChoiceProps) {
   const name = useId();
+  const signedIn = useContext(AuthContext)?.user?.email;
+  const email = myselfEmail ?? signedIn;
   if (bots.length === 0 && !unavailable) return null;
   const options: { id: string | null; title: string; detail: string; disabled: boolean }[] = [
     {
       id: null,
       title: 'Myself',
-      detail: myselfEmail ? `${myselfEmail} · everything you may read and write` : 'Everything you may read and write',
+      detail: email ? `${email} · everything you may read and write` : 'everything you may read and write',
       disabled: false,
     },
     ...bots.map((b) => ({

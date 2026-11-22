@@ -67,11 +67,10 @@ export function catalogRevision(
    */
   views: readonly { uri: string; text: string }[] = [],
   /**
-   * The connection's agent configuration — its path and the digest of its bytes, or
-   * why it cannot be used (`ConnectionScope.fingerprint`) — so an edit of
-   * the file is a new revision even when it changes nothing listed (a new
-   * skill entry that names nothing yet still moves it). Absent for
-   * Everything, whose revision is exactly what it was before agents existed.
+   * Whom the connection acts as — the bot and the tools it is offered, or why
+   * it cannot be used (`ConnectionScope.fingerprint`) — so a change of
+   * either is a new revision. Absent for Myself, whose revision is exactly
+   * what it was before bots existed.
    */
   agent: string | null = null,
 ): string {

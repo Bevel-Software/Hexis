@@ -4,6 +4,7 @@ import { MemoryRouter } from 'react-router-dom';
 import type { ConnectPending } from '../../services/connect.api';
 import { ConnectToolsPage } from '../ConnectToolsPage';
 import { TOOL_CREDENTIALS_STALE_EVENT } from '../../../../core/events';
+import { actingForBot } from '../../services/acting-for';
 
 /**
  * What this page owes the Library.
@@ -528,7 +529,7 @@ describe('ConnectToolsPage: inside Skills & Tools', () => {
   });
 
   describe('"Connect as"', () => {
-    const OPS = { path: 'Agents/ops.agent', name: 'ops', description: 'Watches the dashboards.' };
+    const OPS = { id: 'ops', name: 'ops', description: 'Watches the dashboards.', address: 'ops@agent.hexis', unavailable: null };
 
     /** Click Finish with the address held, as above; resolves once the browser would have left. */
     async function finish() {
@@ -542,107 +543,114 @@ describe('ConnectToolsPage: inside Skills & Tools', () => {
       }
     }
 
+    /** Whom each list load was for: the bot the page acted for when it asked, or null for the person. */
+    let loadedFor: (string | null)[] = [];
+
     beforeEach(() => {
       window.history.replaceState(null, '', '/skills-and-tools/connect?oauth=signed-state');
-      connectMock.getMcpOAuthRequest.mockResolvedValue({ clientName: 'Claude', scope: null, resource: null, agents: [OPS] });
+      connectMock.getMcpOAuthRequest.mockResolvedValue({ clientName: 'Claude', scope: null, resource: null, bots: [OPS] });
       connectMock.completeMcpOAuth.mockResolvedValue('/agent-callback?code=abc');
+      loadedFor = [];
+      const answer = connectMock.getConnectPending.getMockImplementation();
+      connectMock.getConnectPending.mockImplementation(async (...args: unknown[]) => {
+        loadedFor.push(actingForBot());
+        return answer ? answer(...(args as [])) : pending(false);
+      });
     });
 
-    it('offers Everything, selected, before the person approves, and each agent by name with its description', async () => {
+    it('offers Myself, selected, before the person approves, and each bot by name with its description', async () => {
       renderPage();
       const group = await screen.findByRole('group', { name: 'Connect as' });
-      expect(within(group).getByRole('radio', { name: /Everything/ })).toBeChecked();
-      expect(await within(group).findByRole('radio', { name: /ops.*Watches the dashboards\./ })).not.toBeChecked();
+      expect(within(group).getByRole('radio', { name: /Myself/ })).toBeChecked();
+      expect(await within(group).findByRole('radio', { name: /ops.*Bot · Watches the dashboards\./ })).not.toBeChecked();
     });
 
-    it('asks nothing when there is no agent to connect as: the connection is Everything’s, as it always was', async () => {
-      connectMock.getMcpOAuthRequest.mockResolvedValue({ clientName: 'Claude', scope: null, resource: null, agents: [] });
+    it('asks nothing when there is no bot to connect as: the connection is the person\'s, as it always was', async () => {
+      connectMock.getMcpOAuthRequest.mockResolvedValue({ clientName: 'Claude', scope: null, resource: null, bots: [] });
       renderPage();
-      // Finish waits for the agents to answer, so once it went through, the choice had its chance to appear.
       await finish();
       expect(screen.queryByRole('group', { name: 'Connect as' })).toBeNull();
-      expect(screen.queryByText(/Connect as/)).toBeNull();
       expect(connectMock.completeMcpOAuth).toHaveBeenCalledWith('signed-state', null);
     });
 
-    it('says when the agents could not be loaded, and approves Everything only once that is confirmed', async () => {
-      connectMock.getMcpOAuthRequest.mockResolvedValue({
-        clientName: 'Claude',
-        scope: null,
-        resource: null,
-        agents: [],
-        agentsUnavailable: true,
-      });
+    it('says when the bots could not be loaded, and approves Myself only once that is confirmed', async () => {
+      connectMock.getMcpOAuthRequest.mockResolvedValue({ clientName: 'Claude', scope: null, resource: null, bots: [], botsUnavailable: true });
       renderPage();
-      expect(await screen.findByRole('alert')).toHaveTextContent(/agents couldn't be loaded/);
+      expect(await screen.findByRole('alert')).toHaveTextContent(/bots couldn't be loaded/);
       expect(screen.getByRole('button', { name: 'Finish & return to your agent' })).toBeDisabled();
-      fireEvent.click(screen.getByRole('checkbox', { name: 'Connect as Everything anyway' }));
+      fireEvent.click(screen.getByRole('checkbox', { name: 'Connect as Myself anyway' }));
       await finish();
       expect(connectMock.completeMcpOAuth).toHaveBeenCalledWith('signed-state', null);
     });
 
-    it('keeps Finish disabled until the agents on offer have answered', async () => {
+    it('keeps Finish disabled until the bots on offer have answered', async () => {
       let answer!: (r: unknown) => void;
       connectMock.getMcpOAuthRequest.mockReturnValue(new Promise((resolve) => (answer = resolve)));
       renderPage();
       const finishButton = await screen.findByRole('button', { name: 'Finish & return to your agent' });
       expect(finishButton).toBeDisabled();
-      await act(async () => answer({ clientName: 'Claude', scope: null, resource: null, agents: [OPS] }));
+      await act(async () => answer({ clientName: 'Claude', scope: null, resource: null, bots: [OPS] }));
       expect(finishButton).toBeEnabled();
     });
 
-    it('approving with an agent picked connects as that agent', async () => {
+    it('approving with a bot picked connects as that bot', async () => {
       renderPage();
       fireEvent.click(await screen.findByRole('radio', { name: /ops/ }));
       await finish();
-      expect(connectMock.completeMcpOAuth).toHaveBeenCalledWith('signed-state', 'Agents/ops.agent');
+      expect(connectMock.completeMcpOAuth).toHaveBeenCalledWith('signed-state', 'ops');
     });
 
-    it('lists the tools for the chosen agent: the list is fetched again for it, quietly, and once more for Everything', async () => {
+    it('lists the bot\'s tools and sign-ins for the chosen bot, quietly, and the person\'s again for Myself', async () => {
       renderPage();
-      // The first load, before any choice, is Everything's.
       await screen.findByLabelText('API_KEY value');
-      expect(connectMock.getConnectPending).toHaveBeenLastCalledWith(null);
-      // The agent loads no tool that needs anything: the page says so, for that agent.
-      connectMock.getConnectPending.mockResolvedValue({ tools: [], oauth: [], toolOAuth: [] });
+      expect(loadedFor.at(-1)).toBeNull();
+      connectMock.getConnectPending.mockImplementation(async () => {
+        loadedFor.push(actingForBot());
+        return { tools: [], oauth: [], toolOAuth: [] };
+      });
       fireEvent.click(await screen.findByRole('radio', { name: /ops/ }));
-      await waitFor(() => expect(connectMock.getConnectPending).toHaveBeenLastCalledWith('Agents/ops.agent'));
-      expect(await screen.findByRole('status')).toHaveTextContent(/none of the tools the chosen agent loads/);
-      // Quietly: the page never dropped to "Loading…" over the list it had.
+      await waitFor(() => expect(loadedFor.at(-1)).toBe('ops'));
+      expect(await screen.findByRole('status')).toHaveTextContent(/none of the tools the bot ops may reach/);
       expect(screen.queryByText('Loading…')).not.toBeInTheDocument();
-      // Back to Everything: fetched again, as Everything.
-      connectMock.getConnectPending.mockResolvedValue(pending(false));
-      fireEvent.click(screen.getByRole('radio', { name: /Everything/ }));
-      await waitFor(() => expect(connectMock.getConnectPending).toHaveBeenLastCalledWith(null));
+      connectMock.getConnectPending.mockImplementation(async () => {
+        loadedFor.push(actingForBot());
+        return pending(false);
+      });
+      fireEvent.click(screen.getByRole('radio', { name: /Myself/ }));
+      await waitFor(() => expect(loadedFor.at(-1)).toBeNull());
       await screen.findByLabelText('API_KEY value');
     });
 
-    it('fetches the remembered agent’s list straight away when the page comes back from a sign-in', async () => {
-      const first = renderPage();
-      fireEvent.click(await screen.findByRole('radio', { name: /ops/ }));
-      await waitFor(() => expect(connectMock.getConnectPending).toHaveBeenLastCalledWith('Agents/ops.agent'));
-      first.unmount();
-      connectMock.getConnectPending.mockClear();
-      window.history.replaceState(null, '', '/skills-and-tools/connect');
-      renderPage();
-      await screen.findByRole('radio', { name: /ops/ });
-      await waitFor(() => expect(connectMock.getConnectPending).toHaveBeenLastCalledWith('Agents/ops.agent'));
-    });
-
-    it('keeps the choice across a tool sign-in’s round-trip, and a new authorization starts at Everything', async () => {
+    it('keeps the choice across a tool sign-in\'s round-trip, and a new authorization starts at Myself', async () => {
       const first = renderPage();
       fireEvent.click(await screen.findByRole('radio', { name: /ops/ }));
       first.unmount();
-      // Back from a provider: the query is gone, the session copy remains.
       window.history.replaceState(null, '', '/skills-and-tools/connect');
       const back = renderPage();
       expect(await screen.findByRole('radio', { name: /ops/ })).toBeChecked();
+      await waitFor(() => expect(loadedFor.at(-1)).toBe('ops'));
       back.unmount();
-      // Another agent's authorization arrives: its choice is its own.
       window.history.replaceState(null, '', '/skills-and-tools/connect?oauth=another-state');
       renderPage();
       await screen.findByRole('radio', { name: /ops/ });
-      expect(screen.getByRole('radio', { name: /Everything/ })).toBeChecked();
+      expect(screen.getByRole('radio', { name: /Myself/ })).toBeChecked();
+    });
+  });
+
+  describe('opened for a bot by a link naming it', () => {
+    it('acts for that bot while it is open, and for the person again once it leaves', async () => {
+      window.history.replaceState(null, '', '/skills-and-tools/connect?bot=ops');
+      const seen: (string | null)[] = [];
+      connectMock.getConnectPending.mockImplementation(async () => {
+        seen.push(actingForBot());
+        return pending(false);
+      });
+      const page = renderPage();
+      await screen.findByLabelText('API_KEY value');
+      expect(seen[0]).toBe('ops');
+      expect(screen.getByText(/the bot ops may reach/)).toBeInTheDocument();
+      page.unmount();
+      expect(actingForBot()).toBeNull();
     });
   });
 });

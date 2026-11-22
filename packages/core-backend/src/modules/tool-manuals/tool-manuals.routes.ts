@@ -84,10 +84,11 @@ export function createToolManualsAgentRoutes(
       // Default remote-safe: exclude local-only manuals unless the caller (a locally
       // installed MCP server) explicitly opts in with `?remote=false`.
       const remoteOnly = req.query.remote !== 'false';
-      // A connection made as an agent configuration lists only the connectors that
-      // file loads, and says which agent it is — the MCP proxy words its
-      // refusals and its handshake from that. Everything lists as it always
-      // did, with no `connection` at all.
+      // The caller is whom the connection acts as (a bot's row for a bot's
+      // connection), so the list is already theirs; the answer says which bot
+      // it is — the MCP proxy words its refusals and its handshake from that —
+      // and a connection that loads nothing lists nothing. Myself lists as it
+      // always did, with no `connection` at all.
       const scope = connectionOf(req.toolAuth);
       const within = scope.connectorFilter();
       const userManuals = email
@@ -187,10 +188,9 @@ export function createToolManualsAgentRoutes(
       if (![...verdicts.values()].some((v) => v === true)) {
         return void res.status(404).json({ error: 'Not found' });
       }
-      // A connection made as an agent configuration materializes only a plugin
-      // that defines a connector the file loads — the archive is how the
-      // local MCP server runs one, and nothing else asks for it. Checked
-      // before any file is opened.
+      // A connection that loads nothing materializes no plugin — the archive
+      // is how the local MCP server runs one, and nothing else asks for it.
+      // Checked before any file is opened.
       const scope = connectionOf(req.toolAuth);
       if (!scope.loadsConnectorIn(pluginRel)) {
         const why = scope.describe();

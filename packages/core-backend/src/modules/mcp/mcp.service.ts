@@ -273,11 +273,10 @@ interface RequestSurface {
    */
   degraded: boolean;
   /**
-   * The agent the catalog was narrowed to, as `all-tools` reported it —
-   * absent for Everything. A call to a tool not on a narrowed surface is
-   * refused by name and agent rather than as unknown, and a connection whose
-   * agent configuration cannot be used is served nothing, with the sentence that says
-   * why.
+   * The bot the connection acts as, as `all-tools` reported it — absent
+   * for Myself. A call to a platform tool the bot is not offered is refused
+   * by name and bot rather than as unknown, and a connection whose bot cannot
+   * be used is served nothing, with the sentence that says why.
    */
   connection?: ConnectionScopeWire;
 }
@@ -285,7 +284,7 @@ interface RequestSurface {
 /**
  * The `connection` a loopback answer (`all-tools`, `catalog-revision`)
  * carries, as a field to spread: validated at the boundary by the MCP
- * core's reader (HTTP loses the type), and absent for Everything.
+ * core's reader (HTTP loses the type), and absent for Myself.
  */
 function connectionOf(body: unknown): { connection?: ConnectionScopeWire } {
   const connection = connectionWireOf(body);
@@ -578,10 +577,10 @@ export class McpService {
 
     let instructions: Promise<ComposedAgentInstructions> | undefined;
     const agentInstructions = () => (instructions ??= this.composeAgentInstructions());
-    // What a narrowed connection is told about itself at the handshake: the
-    // agent it is connected as, or why it loads nothing. Read off the catalog
-    // revision (cheap), not the surface (a full discovery). Everything is
-    // told nothing new, so its handshake is exactly what it was.
+    // What a connection made as a bot is told about itself at the handshake:
+    // the bot it acts as, or why it loads nothing. Read off the catalog
+    // revision (cheap), not the surface (a full discovery). Myself is told
+    // nothing new, so its handshake is exactly what it was.
     const connectionLine = async (): Promise<string | null> =>
       madeAsBot ? describeConnection((await this.fetchCatalogRevision(loopbackBearer)).connection) : null;
     // The Audit log's view of this request — only when the request can be
@@ -661,9 +660,9 @@ export class McpService {
           return undefined;
         }),
       ]);
-      // A connection whose agent configuration cannot be used is served NOTHING — not
-      // Everything — and the one sentence saying why rides the listing's
-      // `_meta` (the handshake carries it too).
+      // A connection whose bot cannot be used is served NOTHING — never the
+      // person's surface — and the one sentence saying why rides the
+      // listing's `_meta` (the handshake carries it too).
       if (connection?.unavailable) {
         return { tools: [], _meta: { [CONNECTION_META_KEY]: connection.unavailable } };
       }
@@ -1034,7 +1033,7 @@ export class McpService {
   /**
    * The caller's catalog revision (`GET /api/agent/catalog-revision`, the one
    * `hexis-mcp` polls), read with their bearer; null when it cannot be read.
-   * With it, the agent the caller's connection is narrowed to, when it is.
+   * With it, the bot the caller's connection acts as, when it is one.
    * A deployment or a test that does not serve the route answers 404, which
    * is not worth a line in the log; anything else is.
    */

@@ -24,7 +24,6 @@ import { CONNECT_TOOLS_PATH } from '../../library';
 import { CoworkSetupSteps } from './CoworkSetupSteps';
 import { useAdmin } from '../../admin';
 import { connectedAsLabel, listBotChoices, useConnectAsChoice } from '../../agents';
-import { useAuth } from '../../auth';
 import { ConnectAsChoice } from '../../agents/components/ConnectAsChoice';
 import {
   type ExternalApiKeySummary,
@@ -94,7 +93,6 @@ export function ExternalAgentAccessPage() {
   // Only the wording of the "not set up yet" notice depends on this; the
   // tutorial itself is the same for everyone.
   const { isAdmin } = useAdmin();
-  const { user } = useAuth();
   const [keys, setKeys] = useState<ExternalApiKeySummary[]>([]);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -564,7 +562,6 @@ export function ExternalAgentAccessPage() {
               </div>
               <ConnectAsChoice
                 bots={connectAs.bots}
-                myselfEmail={user?.email}
                 value={connectAs.value}
                 disabled={creating}
                 onChange={connectAs.setValue}

@@ -6,7 +6,7 @@ import { ToolError, type ToolContext } from './tool.contract.js';
 export interface ToolValidatorDeps extends ToolContextDeps {
   externalApiKeyService: IExternalApiKeyService;
   internalTokenService: InternalTokenService;
-  /** Where an agent connection's current "Connect as" choice is read (see `createTokenVerifier`). */
+  /** Where an agent connection's current "Connect as" choice (Myself or a bot) is read (see `createTokenVerifier`). */
   connections?: ConnectionChoices;
 }
 

@@ -13,7 +13,6 @@ import { useAppRegistry } from '../../../core/registry';
 import { SlotBoundary } from '../../../shared/components/SlotBoundary';
 import { useConnectAsChoice } from '../../agents';
 import { ConnectAsChoice } from '../../agents/components/ConnectAsChoice';
-import { useAuth } from '../../auth';
 import { actForBot, botFromLocation } from '../services/acting-for';
 import {
   getConnectPending,
@@ -129,7 +128,6 @@ export function ConnectToolsPage() {
   // have answered (before that it would approve Everything unseen), and for
   // Everything to be confirmed when they could not be loaded.
   const connectAs = useConnectAsChoice({ initial: rememberedConnectAs, expect: agentState });
-  const { user } = useAuth();
   const [finishing, setFinishing] = useState(false);
   // Entries the user took OUT. Everything the server sent is in by default —
   // it used to be the other way round, and an unconfigured tool the reader had
@@ -445,7 +443,6 @@ export function ConnectToolsPage() {
               <div className="mt-4">
                 <ConnectAsChoice
                   bots={connectAs.bots}
-                  myselfEmail={user?.email}
                   value={connectAs.value}
                   disabled={finishing}
                   onChange={(botId) => {

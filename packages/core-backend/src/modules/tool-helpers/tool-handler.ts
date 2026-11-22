@@ -50,9 +50,8 @@ export interface ToolHandlerOptions {
    * connectors it must materialize. A connection's `platformTools` decides
    * which tools its agent is OFFERED — the MCP listing and `tools/call`
    * refuse the rest by name — not what its surface holds, so such a route is
-   * not refused for want of a `platformTools` entry. Its answer is still
-   * narrowed to the connection's skills or connectors by the handler, and a
-   * connection that loads nothing is refused it like any other route.
+   * not refused for want of a `platformTools` entry. A connection that loads
+   * nothing is refused it like any other route.
    */
   discovery?: boolean;
 }

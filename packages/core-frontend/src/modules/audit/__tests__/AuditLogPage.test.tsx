@@ -181,14 +181,14 @@ describe('AuditLogPage', () => {
     vi.mocked(listPrincipals).mockResolvedValue([
       { ...ALICE_CLAUDE, connectedAs: { kind: 'bot', name: 'delivery-coder', stopped: null } },
       { ...ALICE_CI, connectedAs: { kind: 'myself' } },
-      { ...BOB_LINK, connectedAs: { kind: 'bot', name: 'release-helper', stopped: 'you may no longer edit this bot' } },
+      { ...ALICE_CI, id: 'k-old-release', label: 'Old release script', connectedAs: { kind: 'bot', name: 'release-helper', stopped: 'you may no longer edit this bot' } },
     ]);
     renderPage({ isAdmin: true });
     await waitFor(() => expect(screen.getByText('CI pipeline')).toBeInTheDocument());
-    const rowOf = (label: string) => screen.getByText(label).closest('li') as HTMLElement;
+    const rowOf = (label: string) => screen.getAllByText(label)[0]!.closest('li') as HTMLElement;
     expect(rowOf('Claude')).toHaveTextContent('Connected as delivery-coder');
     expect(rowOf('CI pipeline')).toHaveTextContent('Connected as you');
-    expect(rowOf('Claude link')).toHaveTextContent('Connected as release-helper · stopped: you may no longer edit this bot');
+    expect(rowOf('Old release script')).toHaveTextContent('Connected as release-helper · stopped: you may no longer edit this bot');
   });
 
   it('shows an admin a key its owner deleted for good, marked as such, with its history intact', async () => {
