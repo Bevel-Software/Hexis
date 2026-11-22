@@ -866,6 +866,57 @@ describe('SkillPage', () => {
     expect(apiMock.proposeChange).not.toHaveBeenCalled();
   });
 
+  // The server as it answers a conditional write: it compares `ifMatch` with
+  // what the file holds when the write reaches it, a missing file reading as
+  // empty, and refuses (409) otherwise. The write is held at the server while
+  // the skill is deleted or replaced on the default branch, then answered.
+  it.each([
+    ['deleted', undefined],
+    ['replaced', '---\nname: newsletter\n---\nSomeone else rewrote this.'],
+  ] as const)(
+    'a direct save held while the skill is %s is refused: the editor keeps the edits and says why, and nothing says Saved',
+    async (_what, nowOnMain) => {
+      accessMock.result = {
+        canWrite: true,
+        eligible: { roles: [], users: [] },
+        owners: { roles: [], users: [] },
+      };
+      apiMock.getOrCreateWorkspace.mockResolvedValue({
+        workspace: { id: 'target-company-state', kbDirName: 'knowledge-base' },
+      });
+      let onMain: string | undefined = RAW_MAIN;
+      let deliver!: () => void;
+      apiMock.writeFile.mockImplementation((_ws: string, path: string, content: string, options?: { ifMatch?: string }) =>
+        new Promise((resolve, reject) => {
+          deliver = () => {
+            if (options?.ifMatch !== undefined && (onMain ?? '') !== options.ifMatch) {
+              reject(new Error(`"${path}" changed since you opened it.`));
+              return;
+            }
+            onMain = content;
+            resolve(undefined);
+          };
+        }));
+      renderPage(true);
+
+      fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+      const box = await screen.findByRole('textbox', { name: 'Edit SKILL.md' });
+      fireEvent.change(box, { target: { value: 'rewritten body' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+      await waitFor(() => expect(apiMock.writeFile).toHaveBeenCalledOnce());
+
+      onMain = nowOnMain;
+      await act(async () => { deliver(); });
+
+      const alert = await screen.findByRole('alert');
+      expect(alert).toHaveTextContent('changed since you opened it');
+      // The skill is not re-created, nor the other change overwritten.
+      expect(onMain).toBe(nowOnMain);
+      expect(screen.getByRole('textbox', { name: 'Edit SKILL.md' })).toHaveValue('rewritten body');
+      expect(screen.queryByText(/Saved: the skill now reads with your change/)).toBeNull();
+    },
+  );
+
   it('a save whose allowed-tools name unknown platform tools lands, and says so in the status area', async () => {
     accessMock.result = {
       canWrite: true,
