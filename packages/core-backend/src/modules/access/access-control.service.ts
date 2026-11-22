@@ -1460,7 +1460,10 @@ function holderChangesFor(verb: 'read' | 'write', here: MoveSide, there: MoveSid
         principalKeysOfToken(side.model, token),
       );
     }
-    for (const email of byEmail.keys()) people.add(email);
+    // Raw grant keys: a bot granted at the previous domain is put under its
+    // current address, the spelling the holder lists above already use, so
+    // it is one candidate and not two.
+    for (const email of byEmail.keys()) people.add(currentAddressOf(side.model, email));
   }
   const lose: HolderChange[] = [];
   const gain: HolderChange[] = [];

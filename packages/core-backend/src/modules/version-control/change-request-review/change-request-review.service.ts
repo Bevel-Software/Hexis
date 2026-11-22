@@ -508,6 +508,39 @@ export class ChangeRequestReviewService implements IChangeRequestReviewService {
   }
 
   /**
+   * See the interface. Same lock, same order and same matching as
+   * `eraseApprover`: the every-request approval lock first, so a copy of
+   * approvals onto a new head that read a row a moment earlier cannot put the
+   * old address back after this; rows found by the blind index of the old
+   * address, and the index rewritten with the address.
+   */
+  async readdressIdentity(tx: ApprovalTx, from: string, to: string): Promise<void> {
+    const old = canonicalEmail(from);
+    const now = canonicalEmail(to);
+    if (old === now) return;
+    await takeEveryApprovalLock(tx);
+    await tx
+      .update(prFileApprovals)
+      .set({ approverEmail: now, approverEmailBidx: now })
+      .where(eq(prFileApprovals.approverEmailBidx, old));
+    await tx
+      .update(prFileApprovals)
+      .set({ madeByEmail: now, madeByEmailBidx: now })
+      .where(eq(prFileApprovals.madeByEmailBidx, old));
+    // Authorship: every check of "is this the author" (edit, cancel, the
+    // author filter, `mine`, self-approval) hashes the stored address, so the
+    // stored address is what moves.
+    await tx
+      .update(changeRequests)
+      .set({ authorEmail: now, authorEmailBidx: now })
+      .where(eq(changeRequests.authorEmailBidx, old));
+    await tx
+      .update(changeRequests)
+      .set({ madeByEmail: now, madeByEmailBidx: now })
+      .where(eq(changeRequests.madeByEmailBidx, old));
+  }
+
+  /**
    * Pure in `this`: the whole verdict comes out of `evaluateGateParts`, a
    * module-level function. Call-sites borrow this off the prototype against a
    * bare object to get the real gate without a service, so keep it that way —

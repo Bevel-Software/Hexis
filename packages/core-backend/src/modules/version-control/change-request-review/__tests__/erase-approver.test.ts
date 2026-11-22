@@ -113,3 +113,52 @@ describe('ChangeRequestReviewService.eraseApprover', () => {
     expect(JSON.stringify(h.wheres[0]!.params)).toContain('bob@bevel.software');
   });
 });
+
+/**
+ * `readdressIdentity` is the same shape for a bots' domain change: the bot's
+ * approvals and the change requests it authored move from its old address to
+ * its new one, in the caller's transaction, under the same lock.
+ */
+describe('ChangeRequestReviewService.readdressIdentity', () => {
+  it('takes the every-request lock exclusively first, then moves approvals and authorship by the old address\'s blind index', async () => {
+    const h = harness();
+    await h.svc.readdressIdentity(h.tx, 'Coder@Agent.Hexis', 'coder@bots.acme.com');
+
+    expect(h.order).toEqual([
+      'timeout',
+      'gate:exclusive',
+      'update:pr_file_approvals',
+      'update:pr_file_approvals',
+      'update:change_requests',
+      'update:change_requests',
+    ]);
+    expect(h.locked).toEqual([[4207, 0]]);
+    expect(h.lockSql[0]).toContain('pg_advisory_xact_lock');
+    // The new address, canonical, in the address and its index; nothing else
+    // (the bot's name is unchanged by a domain change).
+    expect(h.sets).toEqual([
+      { approverEmail: 'coder@bots.acme.com', approverEmailBidx: 'coder@bots.acme.com' },
+      { madeByEmail: 'coder@bots.acme.com', madeByEmailBidx: 'coder@bots.acme.com' },
+      { authorEmail: 'coder@bots.acme.com', authorEmailBidx: 'coder@bots.acme.com' },
+      { madeByEmail: 'coder@bots.acme.com', madeByEmailBidx: 'coder@bots.acme.com' },
+    ]);
+    // Matched by the blind index of the old address, canonical: the address
+    // columns hold randomized ciphertext and would match nothing.
+    expect(h.wheres.map((w) => w.sql.replace(/^.*?("[a-z_]+") = \$1$/, '$1'))).toEqual([
+      '"approver_email_bidx"',
+      '"made_by_email_bidx"',
+      '"author_email_bidx"',
+      '"made_by_email_bidx"',
+    ]);
+    for (const where of h.wheres) {
+      expect(JSON.stringify(where.params)).toContain('coder@agent.hexis');
+      expect(JSON.stringify(where.params)).not.toContain('Coder@Agent.Hexis');
+    }
+  });
+
+  it('touches nothing and takes no lock when the address does not change', async () => {
+    const h = harness();
+    await h.svc.readdressIdentity(h.tx, 'coder@agent.hexis', 'Coder@agent.hexis');
+    expect(h.order).toEqual([]);
+  });
+});

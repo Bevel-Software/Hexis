@@ -240,4 +240,51 @@ describe.skipIf(!PG_ADMIN_URL)('a domain change on a real Postgres: every bot na
     expect(await emailOf('first')).toBe(`first@${before}`);
     expect(await emailOf('second')).toBe(`second@${before}`);
   });
+  it('moves what names each bot with its row, from its stored address to its new one, and back when the settings cannot be recorded', async () => {
+    const calls: string[] = [];
+    const recorded = {
+      readdressIdentity: vi.fn(async (_tx: unknown, from: string, to: string) => {
+        calls.push(`${from} -> ${to}`);
+      }),
+    };
+    const ok = new BotService(db, store, { definitions: async () => [def('first'), def('second')], mayActAs: async () => true }, undefined, undefined, recorded);
+    await ok.load();
+    const before = ok.domain();
+    await ok.changeDomain(admin, 'bots-c.acme.com');
+    expect(calls.sort()).toEqual([`first@${before} -> first@bots-c.acme.com`, `second@${before} -> second@bots-c.acme.com`]);
+
+    calls.length = 0;
+    const failing = {
+      resolve: (key: string) => store.resolve(key),
+      record: async () => {
+        throw new Error('settings store down');
+      },
+    };
+    const down = new BotService(db, failing as never, { definitions: async () => [def('first')], mayActAs: async () => true }, undefined, undefined, recorded);
+    await down.load();
+    await expect(down.changeDomain(admin, 'bots-d.acme.com')).rejects.toThrow('settings store down');
+    // There and back, in that order: the second transaction puts back what the first moved.
+    expect(calls.filter((c) => c.startsWith('first@'))).toEqual([
+      'first@bots-c.acme.com -> first@bots-d.acme.com',
+      'first@bots-d.acme.com -> first@bots-c.acme.com',
+    ]);
+    expect(await emailOf('first')).toBe('first@bots-c.acme.com');
+  });
+
+  it('leaves every row where it was when moving what names a bot fails, and changes no setting', async () => {
+    const recorded = {
+      readdressIdentity: vi.fn(async (_tx: unknown, from: string) => {
+        if (from.startsWith('second@')) throw new Error('approval lock timed out');
+      }),
+    };
+    const service = new BotService(db, store, { definitions: async () => [def('first'), def('second')], mayActAs: async () => true }, undefined, undefined, recorded);
+    await service.load();
+    const before = service.domain();
+    await expect(service.changeDomain(admin, 'bots-e.acme.com')).rejects.toThrow('approval lock timed out');
+    // One transaction: the first bot's row, updated before the failure, is rolled back with it.
+    expect(await emailOf('first')).toBe(`first@${before}`);
+    expect(await emailOf('second')).toBe(`second@${before}`);
+    expect(service.domain()).toBe(before);
+    expect(store.resolve('botsDomain') || 'agent.hexis').toBe(before);
+  });
 });

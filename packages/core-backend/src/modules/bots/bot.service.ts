@@ -15,6 +15,7 @@ import {
   type ConnectionChoice,
   type IBotDirectory,
   type IBots,
+  type IRecordedIdentity,
   type Principal,
   type ResolvedConnection,
 } from './bots.contract.js';
@@ -103,6 +104,13 @@ export class BotService implements IBots {
      * Absent, a previous domain counts until the next change.
      */
     private readonly changeRequestState?: (number: number) => Promise<'open' | 'merged' | 'closed' | null>,
+    /**
+     * What else names a bot by its address — its approvals and the change
+     * requests it authored — moved with its row on a domain change, in the
+     * same transaction. Absent, only the rows move (a deployment without
+     * change requests, and tests of the rows alone).
+     */
+    private readonly recorded?: IRecordedIdentity,
   ) {}
 
   /** The bots' domain in effect. */
@@ -313,19 +321,23 @@ export class BotService implements IBots {
     // The rows first, in one transaction, and the settings only once they
     // are written: a failed transaction leaves both as they were. Settings
     // that cannot be recorded put the rows back, so the two never disagree.
+    // What names a bot by its address (its approvals, the requests it
+    // authored) moves in the same transaction as its row, and back with it.
     const now = new Date();
-    const readdress = (to: string) =>
+    const moves = [...this.rows.values()].map((row) => ({ id: row.id, from: row.email, to: botAddress(row.botId, domain) }));
+    const readdress = (back: boolean) =>
       this.db.transaction(async (tx) => {
-        for (const row of this.rows.values()) {
-          const address = botAddress(row.botId, to);
-          await tx.update(users).set({ email: address, emailBidx: address, updatedAt: now }).where(eq(users.id, row.id));
+        for (const move of moves) {
+          const [from, to] = back ? [move.to, move.from] : [move.from, move.to];
+          await tx.update(users).set({ email: to, emailBidx: to, updatedAt: now }).where(eq(users.id, move.id));
+          await this.recorded?.readdressIdentity(tx, from, to);
         }
       });
-    await readdress(domain);
+    await readdress(false);
     try {
       await this.settings.record({ botsDomain: domain, botsPreviousDomain: current, botsDomainChangeRequest: '0' }, by.id);
     } catch (err) {
-      await readdress(current);
+      await readdress(true);
       throw err;
     }
     for (const row of this.rows.values()) this.rows.set(row.botId, { ...row, email: botAddress(row.botId, domain) });

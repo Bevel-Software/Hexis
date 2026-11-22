@@ -909,6 +909,12 @@ export async function createCoreServices(
     const [row] = await db.select({ state: changeRequests.state }).from(changeRequests).where(eq(changeRequests.number, number)).limit(1);
     const state = row?.state;
     return state === 'open' || state === 'merged' || state === 'closed' ? state : null;
+  }, {
+    // A bot's approvals and the requests it authored move with its row on a
+    // domain change. The review service is built further down (it needs the
+    // git service); this is called only by a domain change, long after this
+    // function has returned, so it is always there by then.
+    readdressIdentity: (tx, from, to) => changeRequestReviewService.readdressIdentity(tx, from, to),
   });
   // The rows made so far. A bot the distribution names since the last boot
   // gets its row on the first look that needs it — a listing of choices, a

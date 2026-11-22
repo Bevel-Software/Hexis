@@ -163,6 +163,18 @@ export interface IChangeRequestReviewService {
   eraseApprover(tx: ApprovalTx, email: string, erased: { email: string; name: string }): Promise<void>;
 
   /**
+   * Move everything a change request records under the address `from` to the
+   * address `to`, inside the caller's transaction (`tx`): the approvals made
+   * under it, as approver and as the person behind a bot's approval, and the
+   * requests it authored or made. A bots' domain change calls this for each
+   * bot in the transaction that re-addresses the bot's row, so the bot stays
+   * the author of its requests and its approvals keep counting at its new
+   * address. Takes the every-request approval lock first, as `eraseApprover`
+   * does, and for the same reason. A no-op when the addresses are the same.
+   */
+  readdressIdentity(tx: ApprovalTx, from: string, to: string): Promise<void>;
+
+  /**
    * Execute the merge via a local `git merge --no-ff` on the base branch's
    * workspace, pushed to origin (provider-agnostic — no PR API). Re-validates
    * the gate server-side first (don't trust the caller's cached

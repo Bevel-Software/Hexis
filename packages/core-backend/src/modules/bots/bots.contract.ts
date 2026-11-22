@@ -18,6 +18,8 @@
  * existed.
  */
 
+import type { Database } from '../database/index.js';
+
 /** The bots' domain when no admin changed it. Not a domain anyone can own, so nothing can be mailed to a bot. */
 export const DEFAULT_BOTS_DOMAIN = 'agent.hexis';
 
@@ -94,6 +96,20 @@ export interface IBotAddresses {
   addressesOf(email: string): readonly string[];
   /** The bots' domain now in effect. */
   domain(): string;
+}
+
+/** The transaction a bots' domain change re-addresses the bots' rows in. */
+export type BotsTx = Parameters<Parameters<Database['transaction']>[0]>[0];
+
+/**
+ * What else records a bot by its address, moved with its row when the bots'
+ * domain changes (the change-request module answers it): the approvals the
+ * bot made and the change requests it authored or made. Called in the
+ * transaction that re-addresses the row, so the row and what names it never
+ * disagree, and a failure leaves both at the old address.
+ */
+export interface IRecordedIdentity {
+  readdressIdentity(tx: BotsTx, from: string, to: string): Promise<void>;
 }
 
 /** A bot as the "Connect as" choice offers it. */
