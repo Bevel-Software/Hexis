@@ -109,8 +109,9 @@ beforeEach(() => {
   // below. Call history is per test (`not.toHaveBeenCalled` must see only
   // its own), and so are the held answers a test queues with
   // `mockImplementationOnce`. `clearAllMocks` drops the calls but keeps that
-  // queue, so a hold a test queued and never used answered the next test's
-  // read or write.
+  // queue; the reset drops both here, so a hold a test queued and never used
+  // cannot answer a later test, whatever `restoreAllMocks` in `afterEach`
+  // does to a `vi.fn`.
   vi.resetAllMocks();
   disk = new Map([
     ['KB/Keep.md', 'keep'],
@@ -3230,8 +3231,7 @@ describe('a write already on its way when the file is deleted', () => {
 });
 
 // The two run in order: the first queues a held answer it never uses, and
-// the second must not get it. With `clearAllMocks` in the shared setup the
-// second test's write took the first test's refusal.
+// the second must not get it.
 describe('a held answer a test never used stays in that test', () => {
   it('queues a write refusal and makes no write', () => {
     apiMocks.writeFile.mockImplementationOnce(async () => {
