@@ -264,6 +264,13 @@ export function createWorkspaceRoutes(
        * either. See the `IVersionControlService.acquireLock` contract.
        */
       platformRestore?: { source: string };
+      /**
+       * `op` takes `targetPath` away (a delete, a folder sweep's per-file
+       * delete, the source side of a move). A removal ENDS any edit of the
+       * path, the caller's own included, so it is committed here even when
+       * the caller already holds the lock: see the held-lock branch below.
+       */
+      removesPath?: boolean;
     },
   ): Promise<T> {
     const branch = branchForWorkspaceId(workspaceId);
@@ -280,6 +287,20 @@ export function createWorkspaceRoutes(
     const existing = await versionControlService.getLock(workspaceId, branch, targetPath);
     if (existing && existing.holderUserId === user.id) {
       const result = await op();
+      // A REMOVAL under the caller's own hold is not left to their release.
+      // The file is gone, so the edit the hold was for is over: the editor's
+      // tab closes, its heartbeat stops, and the release it would have sent
+      // may never come (the hold expires first, or the save that held it is
+      // refused). A deletion waiting on that release stayed on disk with no
+      // commit queued for it, so the repository kept the file the server no
+      // longer had. Commit it now, exactly as an unheld removal is.
+      if (options?.removesPath) {
+        await commitRemovalUnderHeldLock(workspaceId, branch, targetPath, user);
+        if (!options.skipFsTreeEvent) {
+          eventBus.emit({ kind: 'fs-tree-changed', workspaceId, branch });
+        }
+        return result;
+      }
       // Disk write landed but no commit yet (caller will release later,
       // at which point releaseLock fires its own `file-changed` with a
       // real `newSha`). Emit a null-sha file-changed now so any other
@@ -375,6 +396,40 @@ export function createWorkspaceRoutes(
       eventBus.emit({ kind: 'fs-tree-changed', workspaceId, branch });
     }
     return result;
+  }
+
+  /**
+   * Release the caller's own hold on a path the request just removed, which
+   * queues the removal's commit (see `withLock`). The hold was checked before
+   * the removal, so it can have ended since (expired, or released by the
+   * caller's own client): then a fresh hold is taken for the commit, as an
+   * unheld removal takes one. If somebody else took the path in between, the
+   * removal is on disk but not committed by this request, and the request
+   * says so with a 409 rather than answering success.
+   */
+  async function commitRemovalUnderHeldLock(
+    workspaceId: string,
+    branch: string,
+    targetPath: string,
+    user: AuthUser,
+  ): Promise<void> {
+    try {
+      await versionControlService.releaseLock(workspaceId, branch, targetPath, user);
+      return;
+    } catch (err) {
+      const holdEnded = err instanceof VersionControlDomainError && err.payload?.kind === 'lock-not-held';
+      if (!holdEnded) throw err;
+    }
+    const acquired = await versionControlService.acquireLock(workspaceId, branch, targetPath, user);
+    if (!acquired.acquired) {
+      const holder = acquired.lock.holderName || 'another user';
+      const err: Error & { status?: number } = new Error(
+        `"${targetPath}" was deleted here, but ${holder} started editing it before the deletion was shared. Try again in a moment.`,
+      );
+      err.status = 409;
+      throw err;
+    }
+    await versionControlService.releaseLock(workspaceId, branch, targetPath, user);
   }
 
   /**
@@ -1124,7 +1179,7 @@ export function createWorkspaceRoutes(
                 async () => {
                   await workspaceService.deleteFile(id, relFile);
                 },
-                { skipFsTreeEvent: true },
+                { skipFsTreeEvent: true, removesPath: true },
               );
             }
             // No explicit push here — each per-file release enqueues a
@@ -1184,7 +1239,7 @@ export function createWorkspaceRoutes(
         res.status(409).json({ error: repositoryOwnFileDeleteRefusal(rel) });
         return;
       }
-      await withLock(id, user, filePath, () => workspaceService.deleteFile(id, filePath));
+      await withLock(id, user, filePath, () => workspaceService.deleteFile(id, filePath), { removesPath: true });
       // Deleting content is not deleting structure: an emptied folder stays.
       await keepFolderOf(id, user, filePath);
       res.json({ status: 'deleted' });
@@ -1285,6 +1340,9 @@ export function createWorkspaceRoutes(
       // one out of a folder that denies them.
       const restoreAt = (p: string) => ({
         platformRestore: platformRestore && p === newPath ? { source: oldPath } : undefined,
+        // The move takes the source away: committed even under the caller's
+        // own hold (see `withLock`).
+        removesPath: p === oldPath,
       });
       // The restore was authorised against a destination that was missing when
       // the access module looked. Both locks are in hand by the time this runs,

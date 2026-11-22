@@ -1,5 +1,6 @@
 ---
 '@bevel-software/platform-core-frontend': patch
+'@bevel-software/platform-core-backend': patch
 ---
 
 Deleting the open file lands on the tab that is left, and a file deleted by someone else says so.
@@ -11,6 +12,8 @@ When someone else deletes the file you are viewing (a teammate, an agent, a merg
 The same holds on a skill's page and a tool's page in Skills & Tools: when someone else deletes the skill or the tool on screen, the page shows the same notice (one `DeletedFileNotice` component for both apps), with the skill editor's unsaved text and Copy edits when there is any, and Close lands on Skills & Tools. Before, the page kept the old content until a reload. Deleting the skill or tool on screen yourself, from the sidebar, lands on Skills & Tools without the notice.
 
 A save, or a rejected agent change, already on its way when the file is deleted no longer re-creates it: the write carries the bytes the file should still hold (`ifMatch`), the server refuses it when they differ (a deleted file reads as empty), and the edits or the agent's version stay on the tab. A file that was empty when opened is the one case this cannot tell apart from a deleted one. Saves of one file now run one after another, each expecting what the one before wrote. Saving a skill directly from its page in Skills & Tools carries the same check, so a skill deleted or changed on the default branch since the editor opened is refused with that message instead of being overwritten; the editor keeps the text.
+
+A delete made while your own save of the same file still holds its editor lock is now committed by the delete itself. Before, it waited for that save's release, which never came once the tab closed and the hold expired, so the server no longer had the file but the repository kept it. The same holds for a folder delete that contains a file you hold, and for the source side of a move. If someone else takes the file between the delete and its commit, the delete answers 409 naming them instead of success.
 
 A commit pulled from the git host onto a file with unsaved edits — the one write the file lock cannot stop — now merges the edits onto the new content (a line-based three-way merge, `node-diff3`) and keeps the result unsaved, with a banner saying so. When the two collide the edits are discarded, as before, and the banner says that instead.
 
