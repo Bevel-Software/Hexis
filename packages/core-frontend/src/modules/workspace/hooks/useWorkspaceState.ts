@@ -96,9 +96,10 @@ interface ExistenceAnswer {
 /**
  * A tab whose edits a commit pulled from the git host replaced: it shows the
  * pulled bytes, clean, and says whether the edits were discarded (or held by
- * the pull already, `null`). The editor reloads its buffer.
+ * the pull already: no banner, or the one already showing). The editor
+ * reloads its buffer.
  */
-function takePulledOverEdits(tab: OpenTab, pulled: string, changedOnBranch: 'discarded' | null): OpenTab {
+function takePulledOverEdits(tab: OpenTab, pulled: string, changedOnBranch: OpenTab['changedOnBranch']): OpenTab {
   return {
     ...tab,
     content: pulled,
@@ -107,6 +108,21 @@ function takePulledOverEdits(tab: OpenTab, pulled: string, changedOnBranch: 'dis
     changedOnBranch,
     remoteRevision: (tab.remoteRevision ?? 0) + 1,
   };
+}
+
+/**
+ * What a save that landed (or gave its edits up to a pull) left for the save
+ * queued behind it. Two values, never one: `onDisk` is what the disk holds
+ * now, which the next write expects (`ifMatch`); `editBase` is what the
+ * next save's text was edited from, which its edits are measured against.
+ * They differ once a save merged onto a pulled commit: the disk holds the
+ * merge, but the editor's next text grew from the text that save was given,
+ * without the pull. Taking the disk bytes as the edit base made those edits
+ * look based on the pull, and the next save wrote them over it.
+ */
+interface SaveLeft {
+  onDisk: string;
+  editBase: string;
 }
 
 /** The newer of two optional answers, by read number. */
@@ -348,12 +364,12 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
   const orderRef = useRef(0);
   /**
    * Saves of one file still on their way, by workspace and path
-   * (`existenceKey`), each settling to the bytes the disk holds once it is
-   * done. A save runs after the one before it and expects on disk what that
-   * one left there (`saveFile`): two saves sent together would each expect
-   * the bytes from before both, and the second would be refused.
+   * (`existenceKey`), each settling to what it left (`SaveLeft`). A save runs
+   * after the one before it and expects on disk what that one left there
+   * (`saveFile`): two saves sent together would each expect the bytes from
+   * before both, and the second would be refused.
    */
-  const savesInFlightRef = useRef<Map<string, Promise<string | null>>>(new Map());
+  const savesInFlightRef = useRef<Map<string, Promise<SaveLeft>>>(new Map());
   /**
    * Open tabs whose file someone else deleted (`OpenTab.deletedBy`), as a
    * ref so `saveFile` can refuse a write-back synchronously — the state that
@@ -1947,19 +1963,21 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
   }, [isCheckGone, isOwnDelete, isOvertakenByOwnDelete]);
 
   /**
-   * One save of `content` to `relativePath` in `workspaceId`, expecting
-   * `editedFrom` on disk (the bytes the edits were made from). Answers the
-   * bytes the disk holds once it is done. Refused or failed, it throws, and
-   * the tab is unsaved again with `content`: a save that does not land never
-   * takes the edits with it (Done marks the tab clean as the editor closes).
+   * One save of `content` to `relativePath` in `workspaceId`. `editedFrom` is
+   * the text `content` was edited from; `onDisk` is what the disk should hold
+   * (`SaveLeft`), the same bytes unless a save before this one merged onto a
+   * pull. Answers what it left. Refused or failed, it throws, and the tab is
+   * unsaved again with `content`: a save that does not land never takes the
+   * edits with it (Done marks the tab clean as the editor closes).
    */
   const saveOnce = useCallback(async (
     workspaceId: string,
     relativePath: string,
     content: string,
     editedFrom: string | null,
+    onDisk: string | null,
     askedAt: number,
-  ): Promise<string | null> => {
+  ): Promise<SaveLeft> => {
     const stillHere = () => workspaceIdRef.current === workspaceId;
     try {
       return await writeOnce();
@@ -2006,22 +2024,31 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       };
     }
 
-    async function writeOnce(): Promise<string | null> {
+    async function writeOnce(): Promise<SaveLeft> {
       const found = await awaitStillOnBranch(workspaceId, relativePath, askedAt);
-      // A read waited on found other bytes on disk than `content` was edited
-      // from: a commit pulled from the git host, which the `file-changed` read
-      // merges the tab's edits onto. Writing `content` as it was would overwrite
-      // that commit, so the edits are merged onto it here too; when they collide
-      // the tab has given them up, and nothing is written. Bytes from a read
-      // older than a write or bytes landed since are not what the disk holds.
+      // What the disk holds: what the save before this one left, or newer
+      // bytes a read waited on found there. Bytes from a read older than a
+      // write or bytes landed since are not what the disk holds.
+      const onDiskNow = found && found.bytes !== onDisk
+        && !isStaleLanding(workspaceId, relativePath, found.seq) ? found.bytes : onDisk;
+      // The disk holds other bytes than `content` was edited from: a commit
+      // pulled from the git host (the `file-changed` read merges the tab's
+      // edits onto it), or the merge a save before this one wrote onto one.
+      // Writing `content` as it was would overwrite that commit, so the edits
+      // are merged onto it here too, measured from the text they were made
+      // from; when they collide the tab has given them up, and nothing is
+      // written.
       let toWrite = content;
       let mergedOntoPull = false;
-      // What the disk must still hold for the write to land (`ifMatch`).
-      let expected = editedFrom;
-      if (found && editedFrom !== null && found.bytes !== editedFrom
-        && !isStaleLanding(workspaceId, relativePath, found.seq)) {
-        const merged = threeWayMerge(editedFrom, content, found.bytes);
-        const pulled = found.bytes;
+      // What the disk must still hold for the write to land (`ifMatch`). A tab
+      // with no saved bytes expects nothing, and writes unconditionally.
+      let expected = editedFrom === null ? onDisk : onDiskNow;
+      if (editedFrom !== null && onDiskNow !== null && onDiskNow !== editedFrom) {
+        const merged = threeWayMerge(editedFrom, content, onDiskNow);
+        const pulled = onDiskNow;
+        // The edits still in the next save's text: the pull holds them, or
+        // they were given up and are still measured from where they began.
+        const left: SaveLeft = { onDisk: pulled, editBase: merged === null ? editedFrom : content };
         if (merged === null || merged === pulled) {
           // The tab shows the pulled bytes and says what became of the edits.
           // The `file-changed` read cannot always say it: Done marks the tab
@@ -2029,7 +2056,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
           // clean tab, silently.
           // The tabs are another branch's once the person switched while this
           // waited: one at the same path holds that branch's file, not this one.
-          if (!stillHere()) return pulled;
+          if (!stillHere()) return left;
           setOpenTabs((prev) => {
             const idx = prev.findIndex((t) => t.path === relativePath);
             if (idx < 0) return prev;
@@ -2037,10 +2064,12 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
             // Edits made since (Edit again, typing) are the person's newest.
             if (t.isDirty || (t.savedContent !== editedFrom && t.savedContent !== pulled)) return prev;
             const next = prev.slice();
-            next[idx] = takePulledOverEdits(t, pulled, merged === null ? 'discarded' : null);
+            // Edits the pull holds already add no banner, and take none away:
+            // a save before this one may have merged, and said so.
+            next[idx] = takePulledOverEdits(t, pulled, merged === null ? 'discarded' : t.changedOnBranch ?? null);
             return next;
           });
-          return pulled;
+          return left;
         }
         toWrite = merged;
         mergedOntoPull = true;
@@ -2053,7 +2082,8 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       // has nothing to expect, and writes unconditionally as before.
       await writeFile(workspaceId, relativePath, toWrite, expected !== null ? { ifMatch: expected } : undefined);
       markWritten(workspaceId, relativePath);
-      if (!stillHere()) return toWrite;
+      const wrote: SaveLeft = { onDisk: toWrite, editBase: content };
+      if (!stillHere()) return wrote;
       // Update the matching tab — both the cached current value and the on-disk
       // baseline now equal what was written; clear dirty. A save that merged
       // onto a pulled commit keeps the banner: the person has not seen it yet.
@@ -2075,18 +2105,21 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
         return next;
       });
       bumpFs();
-      return toWrite;
+      return wrote;
     }
   }, [bumpFs, markWritten, awaitStillOnBranch, isStaleLanding]);
 
   /**
    * Save `content` to the open file at `relativePath`. Saves of one file run
    * one after another (`savesInFlightRef`): each expects on disk what the
-   * one before it left there, or, first in line, the tab's saved bytes as
-   * they were when it was asked for — read then, because by the time it runs
-   * the tab may have closed (our own delete), and a save that expected
-   * nothing would write unconditionally. Its place in `orderRef` is taken
-   * then too, so a delete of ours confirmed while it queued refuses it.
+   * one before it left there, and measures its edits from the text that one
+   * was given (`SaveLeft`) — not from what it wrote, which holds a pull the
+   * text never saw. First in line, or behind one that was refused, both are
+   * the tab's saved bytes as they were when it was asked for — read then,
+   * because by the time it runs the tab may have closed (our own delete), and
+   * a save that expected nothing would write unconditionally. Its place in
+   * `orderRef` is taken then too, so a delete of ours confirmed while it
+   * queued refuses it.
    */
   const saveFile = useCallback(async (relativePath: string, content: string) => {
     if (!workspaceId) return;
@@ -2095,8 +2128,13 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     const key = existenceKey(workspaceId, relativePath);
     const before = savesInFlightRef.current.get(key);
     const run = (async () => {
-      const leftBefore = before ? await before.catch(() => null) : null;
-      return saveOnce(workspaceId, relativePath, content, leftBefore ?? savedWhenAsked, askedAt);
+      const left = before ? await before.catch(() => null) : null;
+      return saveOnce(
+        workspaceId, relativePath, content,
+        left ? left.editBase : savedWhenAsked,
+        left ? left.onDisk : savedWhenAsked,
+        askedAt,
+      );
     })();
     savesInFlightRef.current.set(key, run);
     const settle = () => {
