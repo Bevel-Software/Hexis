@@ -328,8 +328,8 @@ describe('CoreAppShell: a claiming app with screens of its own', () => {
     expect(nav.compareDocumentPosition(heading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(heading.compareDocumentPosition(folders) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     // The heading stands in place of the rule a tree without app rows draws
-    // over its folders (this tree has no loose files, which draw one too).
-    expect(screen.getByTestId('file-explorer-root').querySelector('.border-t.border-line')).toBeNull();
+    // over its folders (the cases passing `null` and `false` below see it drawn).
+    expect(explorer().queryByTestId('file-explorer-folders-rule')).not.toBeInTheDocument();
     // And no second heading over nothing: nothing is pinned.
     expect(explorer().queryByText('Company Context')).not.toBeInTheDocument();
   }
@@ -427,6 +427,7 @@ describe('CoreAppShell: a claiming app passing nothing as nav or page', () => {
     // The headings of a tree with no app rows above it: "Company Context"
     // over the pins, the rule over the folders, and no "Files" heading.
     expect(explorer().getByText('Company Context')).toBeInTheDocument();
+    expect(explorer().getByTestId('file-explorer-folders-rule')).toBeInTheDocument();
     expect(explorer().queryByText('Files')).not.toBeInTheDocument();
     expect(screen.getByTestId('file-explorer-root').innerHTML).toBe(without);
   });
@@ -440,6 +441,7 @@ describe('CoreAppShell: a claiming app passing nothing as nav or page', () => {
     await screen.findByTestId('agent-renderer');
 
     expect(explorer().getByText('Company Context')).toBeInTheDocument();
+    expect(explorer().getByTestId('file-explorer-folders-rule')).toBeInTheDocument();
     expect(explorer().queryByText('Files')).not.toBeInTheDocument();
   });
 

@@ -2676,7 +2676,7 @@ export function FileExplorer({
             own in place of the rule: the rows above are screens, these are
             files, and the heading says which is which. */}
         {lead === undefined ? (
-          <div className="mx-3 my-2 border-t border-line" />
+          <div className="mx-3 my-2 border-t border-line" data-testid="file-explorer-folders-rule" />
         ) : (
           <div className="px-2.5 pb-1.5 pt-3 text-label uppercase text-ink-faint">Files</div>
         )}
