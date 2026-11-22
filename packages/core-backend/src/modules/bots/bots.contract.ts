@@ -149,7 +149,10 @@ export type ResolvedConnection =
        * The bot the connection was made as, as far as it is known: its id and
        * name; when no bot answers to the connection any more, `id` is the
        * label it was made with (a legacy agent path, or `unknown`) and
-       * `name` that label too.
+       * `name` that label too. When one connection of a list could not be
+       * judged (`resolveConnections`), `id` is what the connection names
+       * (the bot's users row id, or a legacy agent path) and `name` the
+       * legacy path, or "a bot".
        */
       bot: { id: string; name: string };
       /** The one sentence the connection answers with. */
@@ -181,7 +184,8 @@ export interface IBots {
   resolveConnection(maker: Principal, choice: ConnectionChoice): Promise<ResolvedConnection>;
   /**
    * The same for a LIST of connections, against one look at the bots: what
-   * a list of connections shows, so its cost does not grow with its length.
+   * a list of connections shows, so the bots are listed once, not once per
+   * connection.
    * A connection that cannot be judged is answered `unavailable` with that
    * reason, and the others are answered as usual. Rejects only when the
    * bots cannot be listed at all.

@@ -31,8 +31,10 @@ beforeAll(async () => {
       stateSecret: SECRET,
       bots: {
         choicesFor: async () => [],
-        actAs: async (_e: string, id: string) =>
-          id === 'ops' ? { id: 'u-ops', email: 'ops@agent.hexis', botId: 'ops', name: 'Ops' } : null,
+        // Only for the person who signed in: a Finish that asked for anyone
+        // else would get no bot.
+        actAs: async (email: string, id: string) =>
+          email === 'dana@acme.com' && id === 'ops' ? { id: 'u-ops', email: 'ops@agent.hexis', botId: 'ops', name: 'Ops' } : null,
       },
     }),
   );

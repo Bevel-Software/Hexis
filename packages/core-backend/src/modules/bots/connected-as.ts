@@ -1,4 +1,7 @@
+import { logger } from '../../shared/logging.js';
 import type { ConnectionChoice, IBots, Principal } from './bots.contract.js';
+
+const log = logger('bots');
 
 /**
  * Whom a connection the person made is connected as, as their connections
@@ -15,7 +18,7 @@ const NOT_CHECKED = 'could not be checked';
 
 /**
  * Describe each connection of a list — `choice`, made by `maker` — against
- * one look at the bots, so the list's cost does not grow with its length.
+ * one look at the bots, so the bots are listed once, not once per connection.
  * Without a bots mechanism a choice of a bot is stopped; when the bots
  * cannot be listed, or one connection cannot be judged, that connection is
  * shown as not checked and the rest of the list still loads.
@@ -31,7 +34,10 @@ export async function describeConnectionChoices(
       asBot(i.choice) ? { kind: 'bot', name: i.choice.agentPath ?? 'a bot', stopped: 'this deployment has no bots' } : { kind: 'myself' },
     );
   }
-  const resolved = await bots.resolveConnections(items).catch(() => null);
+  const resolved = await bots.resolveConnections(items).catch((err: unknown) => {
+    log.warn('listing the bots for a list of connections failed; each connection made as a bot is shown as not checked', { err });
+    return null;
+  });
   return items.map((item, n): ConnectedAs => {
     if (!asBot(item.choice)) return { kind: 'myself' };
     const r = resolved?.[n];

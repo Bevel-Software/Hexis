@@ -94,7 +94,12 @@ const connection = (over: object) => ({
   ...over,
 });
 
-function makeService(queue: unknown[], keys: Partial<IExternalApiKeyService> = {}, retention: number | null = 90) {
+function makeService(
+  queue: unknown[],
+  keys: Partial<IExternalApiKeyService> = {},
+  retention: number | null = 90,
+  bots?: ConstructorParameters<typeof AgentAuditService>[4],
+) {
   const fake = makeFakeDb(queue);
   const keyService = {
     listForUser: vi.fn(async () => []),
@@ -102,7 +107,7 @@ function makeService(queue: unknown[], keys: Partial<IExternalApiKeyService> = {
     ownerOf: vi.fn(async () => null),
     ...keys,
   } as unknown as IExternalApiKeyService;
-  const service = new AgentAuditService(fake.db, keyService, () => retention, () => NOW);
+  const service = new AgentAuditService(fake.db, keyService, () => retention, () => NOW, bots);
   return { service, ...fake, keyService };
 }
 
@@ -247,6 +252,43 @@ describe('AgentAuditService.listPrincipals', () => {
     expect(rows.map((r) => r.user.email)).toEqual(['alice@example.com', 'bob@example.com']);
     expect((keyService.listForDeployment as any)).toHaveBeenCalled();
     expect((keyService.listForUser as any)).not.toHaveBeenCalled();
+  });
+
+  it('gives each key and agent the connectedAs of its own choice, judged in one look at the bots, in a mixed list', async () => {
+    const resolveConnections = vi.fn(async (items: readonly { choice: { botUserId: string | null; agentPath: string | null } }[]) =>
+      items.map(({ choice }) =>
+        choice.botUserId === 'u-ops'
+          ? ({ kind: 'bot', actor: { id: 'u-ops', email: 'ops@agent.hexis' }, madeBy: ALICE, bot: { id: 'ops', name: 'Ops' }, platformTools: null } as const)
+          : choice.agentPath
+            ? ({ kind: 'unavailable', bot: { id: choice.agentPath, name: choice.agentPath }, sentence: 's', reason: 'you may no longer edit this bot' } as const)
+            : ({ kind: 'myself' } as const),
+      ),
+    );
+    const { service } = makeService(
+      [
+        [ALICE],
+        [
+          { connection: connection({ id: 'c-1' }), user: ALICE },
+          { connection: connection({ id: 'c-legacy', agentPath: 'Agents/ops.md', lastUsedAt: new Date(NOW - 120_000) }), user: ALICE },
+        ],
+        [],
+        [],
+      ],
+      { listForUser: vi.fn(async () => [key({ id: 'k-bot', botUserId: 'u-ops' }), key({ id: 'k-me', lastUsedAt: NOW - 3 * DAY })]) },
+      90,
+      { resolveConnections },
+    );
+
+    const rows = await service.listPrincipals({ userId: ALICE.id });
+
+    expect(resolveConnections).toHaveBeenCalledTimes(1);
+    const byId = new Map(rows.map((r) => [r.id, r]));
+    expect(byId.get('k-bot')).toMatchObject({ connectedAs: { kind: 'bot', name: 'Ops', stopped: null } });
+    expect(byId.get('k-me')).toMatchObject({ connectedAs: { kind: 'myself' } });
+    expect(byId.get('c-1')).toMatchObject({ connectedAs: { kind: 'myself' } });
+    expect(byId.get('c-legacy')).toMatchObject({
+      connectedAs: { kind: 'bot', name: 'Agents/ops.md', stopped: 'you may no longer edit this bot' },
+    });
   });
 });
 

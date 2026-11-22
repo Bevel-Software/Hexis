@@ -110,7 +110,8 @@ export interface IAccountErasureService {
    * Erase `userId`. Returns false when no such user exists. `erasureId` fixes
    * the anonymised identity (`deleted-<erasureId>@erased.invalid`) so a caller
    * can name the erased account elsewhere — e.g. a commit message — without
-   * the email; random when omitted.
+   * the email; random when omitted. Throws `AccountChangeRefusedError` for a
+   * bot's row, before anything is touched: a bot is retired, never erased.
    */
   eraseUser(userId: string, opts?: { erasureId?: string }): Promise<boolean>;
 }

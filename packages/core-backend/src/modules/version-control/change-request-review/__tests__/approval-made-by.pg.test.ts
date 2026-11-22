@@ -35,9 +35,10 @@ describe.skipIf(!PG_ADMIN_URL)("a bot's approval and the person behind it", () =
       db,
       {
         canWriteAtRef: async () => true,
-        eligibleWritersForPathsAtRef: async () => {
-          throw new Error('not needed here');
-        },
+        // The states the approval answers with are not what this suite
+        // checks: no access tree to resolve them against, so none is read.
+        eligibleWritersForPathsAtRef: async () => null,
+        canWriteBatchAtRef: async () => null,
       } as unknown as IAccessControl,
       { ensureRemotesFetched: async () => undefined } as unknown as WorkspaceService,
       {} as GitService,
@@ -54,7 +55,7 @@ describe.skipIf(!PG_ADMIN_URL)("a bot's approval and the person behind it", () =
     svc.approveFile(7, FILE.path, { id: botId, email: 'ops@agent.hexis', name: 'Ops', madeBy: { name: 'X', email: madeBy } }, [FILE], head, 'main', null, 'ws');
 
   it('records the person behind the bot when they have an account', async () => {
-    await approveAs('Dana@Acme.com', 'head-1').catch(() => undefined);
+    await expect(approveAs('Dana@Acme.com', 'head-1')).resolves.toHaveLength(1);
     const rows = await db.select().from(prFileApprovals).where(eq(prFileApprovals.headSha, 'head-1'));
     expect(rows).toHaveLength(1);
     expect(rows[0]!.madeByEmail).toBe('dana@acme.com');

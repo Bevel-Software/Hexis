@@ -10,7 +10,9 @@ import { unlistedToolAnswer } from '../index.js';
 describe('unlistedToolAnswer', () => {
   it('refuses a bot-only tool on a Myself connection by why, pointing at the person', () => {
     for (const name of ['approve_change_request', 'apply_change_request']) {
-      expect(unlistedToolAnswer(name, undefined)).toMatch(/offered only to a connection made as a bot/);
+      expect(unlistedToolAnswer(name, undefined)).toBe(
+        `The tool "${name}" is offered only to a connection made as a bot. A change request you propose is reviewed and applied by a person in the app: ask the user to do it there.`,
+      );
     }
   });
 

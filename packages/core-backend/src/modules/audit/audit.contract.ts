@@ -90,7 +90,11 @@ export function isPagePath(path: string): boolean {
 export interface AgentEventInput {
   /** The person: who made the connection (the bot's maker, for a bot's connection). */
   userId: string;
-  /** The bot the call was made as, when its connection acts as one; absent or null for the person themselves. */
+  /**
+   * The bot the call was made as: the bot its connection acts as, or, for a
+   * call refused because that bot could not be used, the bot the connection
+   * was made as. Absent or null for the person themselves.
+   */
   botUserId?: string | null;
   principal: RecordedPrincipal;
   kind: AgentEventKind;
