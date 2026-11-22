@@ -85,15 +85,35 @@ function existenceKey(workspaceId: string, path: string): string {
 }
 
 /**
- * The answer `found` (bytes, or `null` for a 404) of a read sent while a
- * write that replaced `replaced` was on its way cannot say on which side
- * of the write the server answered it: before it (the bytes the write
- * replaced, or a 404 over empty bytes, which the server reads a missing
- * file as) or after a commit that put them back, or a delete. Anything
- * else was answered after the write.
+ * A short stand-in for a file's bytes: its length and an FNV-1a hash of its
+ * UTF-16 code units. A remembered write keeps this instead of the bytes it
+ * replaced (`writeWindowRef`), so the hook holds no file's contents past the
+ * write. Different fingerprints mean different bytes; equal fingerprints of
+ * different bytes are rare and only make `isAmbiguousAnswer` say yes, which
+ * costs one more read of the file. Only empty bytes have length 0.
  */
-function isAmbiguousAnswer(found: string | null, replaced: string): boolean {
-  return found === replaced || (found === null && replaced === '');
+type Fingerprint = string;
+function fingerprint(bytes: string): Fingerprint {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < bytes.length; i++) {
+    h ^= bytes.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return `${bytes.length}:${(h >>> 0).toString(16)}`;
+}
+const EMPTY_FINGERPRINT = fingerprint('');
+
+/**
+ * The answer `found` (bytes, or `null` for a 404) of a read sent while a
+ * write that replaced the bytes fingerprinted `replaced` was on its way
+ * cannot say on which side of the write the server answered it: before it
+ * (the bytes the write replaced, or a 404 over empty bytes, which the server
+ * reads a missing file as) or after a commit that put them back, or a
+ * delete. Anything else was answered after the write. A fingerprint match
+ * of other bytes reads as ambiguous too: the file is only read once more.
+ */
+function isAmbiguousAnswer(found: string | null, replaced: Fingerprint): boolean {
+  return found === null ? replaced === EMPTY_FINGERPRINT : fingerprint(found) === replaced;
 }
 
 /**
@@ -388,9 +408,18 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
    * A write's answer can arrive after a read sent while it was on its way
    * already answered; `markWritten` judges that answer against the write as
    * `isStaleLanding` judges one that arrives after it, and a save's landing
-   * keeps the newer bytes it found (`saveOnce`).
+   * keeps the newer bytes it found (`saveOnce`). Only those two read it, for
+   * a read that answered while the write was on its way, so an answer is
+   * kept only while a write of that path is (`writesInFlightRef`), and the
+   * entry goes when the last one settles.
    */
   const newestAnswerRef = useRef<Map<string, { seq: number; bytes: string | null }>>(new Map());
+  /**
+   * Writes of ours on their way, by workspace and path (`existenceKey`): a
+   * save's or a Reject's, from `beginWrite` to `endWrite`. While a path has
+   * one, `recordAnswer` keeps its reads' answers in `newestAnswerRef`.
+   */
+  const writesInFlightRef = useRef<Map<string, number>>(new Map());
   /**
    * The place in `orderRef` of the latest save asked for, by workspace and
    * path, while it is on its way. A save that lands, or is refused, while a
@@ -453,14 +482,15 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
   /**
    * By workspace and path, the latest write of ours that expected bytes on
    * disk (`ifMatch`) and completed: the read numbers taken just before it was
-   * sent (`after`) and when its answer arrived (`before`), and the bytes it
-   * replaced. A read numbered between the two was sent while the write was
+   * sent (`after`) and when its answer arrived (`before`), and the
+   * fingerprint of the bytes it replaced (never the bytes: this outlives the
+   * write, for reads still on their way). A read numbered between the two was sent while the write was
    * on its way: one that found anything but the bytes the write replaced
    * (the write's own bytes, a commit pulled on top, a 404 for a delete
    * since) was answered after the write; one that found them may have been
    * answered before it, and is read again. See `isStaleLanding`.
    */
-  const writeWindowRef = useRef<Map<string, { after: number; before: number; replaced: string }>>(new Map());
+  const writeWindowRef = useRef<Map<string, { after: number; before: number; replaced: Fingerprint }>>(new Map());
   /**
    * Reads the open tab's file again as a `file-changed` event for it does
    * (merging onto unsaved edits, or the deleted notice), naming nobody. Set
@@ -504,19 +534,44 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     },
     [rereadAfterAmbiguous],
   );
-  /** Keep `newestAnswerRef`: the answer of read `seq` when no read issued after it answered first. */
+  /**
+   * Keep `newestAnswerRef`: the answer of read `seq` when no read issued
+   * after it answered first, and only while a write of the path is on its
+   * way. No write reads an answer that came before it was sent.
+   */
   const recordAnswer = useCallback((key: string, seq: number, bytes: string | null) => {
+    if (!writesInFlightRef.current.has(key)) return;
     if ((newestAnswerRef.current.get(key)?.seq ?? -1) < seq) newestAnswerRef.current.set(key, { seq, bytes });
   }, []);
   const markLanded = useCallback((readFrom: string, path: string, seq: number) => {
     const key = existenceKey(readFrom, path);
     if ((landedAtSeqRef.current.get(key) ?? -1) < seq) landedAtSeqRef.current.set(key, seq);
   }, []);
-  /** A number no read takes, read before a write is sent: what `markWritten` orders that write by. */
-  const takeWriteSentSeq = useCallback(() => ++existenceReadSeqRef.current, []);
+  /**
+   * A write of ours is about to be sent: answers to the path's reads are kept
+   * from now (`recordAnswer`). Returns a number no read takes, what
+   * `markWritten` orders the write by. Pair every call with `endWrite`,
+   * whether the write lands or is refused.
+   */
+  const beginWrite = useCallback((readFrom: string, path: string) => {
+    const key = existenceKey(readFrom, path);
+    writesInFlightRef.current.set(key, (writesInFlightRef.current.get(key) ?? 0) + 1);
+    return ++existenceReadSeqRef.current;
+  }, []);
+  /** The write `beginWrite` started settled; the last one of the path drops its kept answer. */
+  const endWrite = useCallback((readFrom: string, path: string) => {
+    const key = existenceKey(readFrom, path);
+    const left = (writesInFlightRef.current.get(key) ?? 1) - 1;
+    if (left > 0) {
+      writesInFlightRef.current.set(key, left);
+      return;
+    }
+    writesInFlightRef.current.delete(key);
+    newestAnswerRef.current.delete(key);
+  }, []);
   /**
    * A write of this tab's completed: its bytes are now the saved content, and
-   * every read issued before it was sent (`sent`, from `takeWriteSentSeq`)
+   * every read issued before it was sent (`sent`, from `beginWrite`)
    * may hold what the disk had before the write, so it lands on nothing.
    * A read sent while the write was on its way is dropped only when it found
    * the bytes the write replaced (`replaced`, its `ifMatch`), and the file is
@@ -542,9 +597,10 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     }
     markLanded(readFrom, path, write.sent);
     const key = existenceKey(readFrom, path);
-    writeWindowRef.current.set(key, { after: write.sent, before: answeredAt, replaced: write.replaced });
+    const replaced = fingerprint(write.replaced);
+    writeWindowRef.current.set(key, { after: write.sent, before: answeredAt, replaced });
     const answered = newestAnswerRef.current.get(key);
-    if (answered && answered.seq > write.sent && isAmbiguousAnswer(answered.bytes, write.replaced)) {
+    if (answered && answered.seq > write.sent && isAmbiguousAnswer(answered.bytes, replaced)) {
       rereadAfterAmbiguous(readFrom, path, answered.seq);
     }
   }, [markLanded, rereadAfterAmbiguous]);
@@ -2246,16 +2302,21 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       // A file deleted after the checks above reads there as empty, so this
       // write is refused rather than re-creating it. A tab with no saved bytes
       // has nothing to expect, and writes unconditionally as before.
-      const sent = takeWriteSentSeq();
-      await writeFile(workspaceId, relativePath, toWrite, expected !== null ? { ifMatch: expected } : undefined);
-      markWritten(workspaceId, relativePath, { sent, replaced: expected });
-      // A read sent after this write that found neither the bytes the write
-      // replaced (`expected`, which the server held when it wrote) nor the
-      // write's own read the disk after the write: a commit pulled from the
-      // git host on top of it. Those bytes are the disk's now, newer than the
-      // write's, whichever answer arrived first. A write with nothing to
-      // expect cannot tell an earlier read from a later one, and keeps its own.
-      const seen = newestAnswerRef.current.get(existenceKey(workspaceId, relativePath));
+      const sent = beginWrite(workspaceId, relativePath);
+      let seen: { seq: number; bytes: string | null } | undefined;
+      try {
+        await writeFile(workspaceId, relativePath, toWrite, expected !== null ? { ifMatch: expected } : undefined);
+        markWritten(workspaceId, relativePath, { sent, replaced: expected });
+        // A read sent after this write that found neither the bytes the write
+        // replaced (`expected`, which the server held when it wrote) nor the
+        // write's own read the disk after the write: a commit pulled from the
+        // git host on top of it. Those bytes are the disk's now, newer than the
+        // write's, whichever answer arrived first. A write with nothing to
+        // expect cannot tell an earlier read from a later one, and keeps its own.
+        seen = newestAnswerRef.current.get(existenceKey(workspaceId, relativePath));
+      } finally {
+        endWrite(workspaceId, relativePath);
+      }
       const newerOnDisk = expected !== null && seen && seen.seq > sent && seen.bytes !== null
         && seen.bytes !== expected && seen.bytes !== toWrite ? seen.bytes : null;
       const wrote: SaveLeft = { onDisk: newerOnDisk ?? toWrite, editBase: content };
@@ -2346,7 +2407,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
         };
       }
     }
-  }, [bumpFs, markWritten, takeWriteSentSeq, awaitStillOnBranch, isStaleLanding]);
+  }, [bumpFs, markWritten, beginWrite, endWrite, awaitStillOnBranch, isStaleLanding]);
 
   /**
    * Save `content` to the open file at `relativePath`. Saves of one file run
@@ -2469,9 +2530,13 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     // refuses (409) instead of re-creating it with the baseline; the agent's
     // version stays on the tab.
     const agentVersion = active.pendingFileContent;
-    const sent = takeWriteSentSeq();
-    await writeFile(workspaceId, path, baseline, agentVersion !== null ? { ifMatch: agentVersion } : undefined);
-    markWritten(workspaceId, path, { sent, replaced: agentVersion });
+    const sent = beginWrite(workspaceId, path);
+    try {
+      await writeFile(workspaceId, path, baseline, agentVersion !== null ? { ifMatch: agentVersion } : undefined);
+      markWritten(workspaceId, path, { sent, replaced: agentVersion });
+    } finally {
+      endWrite(workspaceId, path);
+    }
     // Switched branch meanwhile: a tab at `path` now is the other branch's.
     if (workspaceIdRef.current !== workspaceId) return;
     setOpenTabs((prev) => prev.map((t) => {
@@ -2484,7 +2549,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       return { ...t, content: baseline, savedContent: baseline, pendingFileContent: null, isDirty: false };
     }));
     bumpFs();
-  }, [workspaceId, bumpFs, markWritten, takeWriteSentSeq, awaitStillOnBranch]);
+  }, [workspaceId, bumpFs, markWritten, beginWrite, endWrite, awaitStillOnBranch]);
 
   // ── fsRevision invalidation ───────────────────────────────────────────────
 
