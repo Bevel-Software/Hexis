@@ -1827,9 +1827,14 @@ describe('a change pulled from the git host onto the open file', () => {
       expect(tab.isDirty).toBe(false);
       expect(tab.changedOnBranch).toBe('merged');
 
-      // Edit, then Done again with the editor's text: the edit stays on the branch.
-      await act(async () => { await result.current.saveFile('KB/Notes.md', tab.content!); });
-      expect(disk.get('KB/Notes.md')).toBe(written);
+      // Edit, type a line, then Done again with the editor's text: the branch
+      // holds the first edit, the pulled line and the new one.
+      const again = `${written}\n\nEdited after Done.`;
+      await typeInto(result, again);
+      await act(async () => { await result.current.saveFile('KB/Notes.md', result.current.activeTab!.content!); });
+      expect(disk.get('KB/Notes.md')).toBe(again);
+      expect(apiMocks.writeFile).toHaveBeenLastCalledWith('ws-1', 'KB/Notes.md', again, { ifMatch: written });
+      expect(result.current.activeTab?.isDirty).toBe(false);
     });
 
     it('the read keeps the edits in the clean tab, and typing after it is kept with them', async () => {
@@ -1854,6 +1859,162 @@ describe('a change pulled from the git host onto the open file', () => {
       expect(tab.savedContent).toBe(written);
       expect(tab.isDirty).toBe(true);
       expect(tab.changedOnBranch).toBe('merged');
+    });
+  });
+
+  describe('Done again while the save of the first Done is on its way', () => {
+    /**
+     * The next two writes are held, each until its `land` is called; `fail`
+     * makes the first one fail instead of writing.
+     */
+    function holdTwoWrites(fail?: boolean) {
+      const write = apiMocks.writeFile.getMockImplementation()!;
+      const gates: Array<() => void> = [];
+      const landed = [0, 1].map(() => new Promise<void>((r) => { gates.push(r); }));
+      apiMocks.writeFile.mockClear();
+      apiMocks.writeFile.mockImplementationOnce(async (...args: Parameters<typeof write>) => {
+        await landed[0];
+        if (fail) throw new WorkspaceApiError(500, 'The write failed.');
+        return write(...args);
+      });
+      apiMocks.writeFile.mockImplementationOnce(async (...args: Parameters<typeof write>) => {
+        await landed[1];
+        return write(...args);
+      });
+      return { landFirst: gates[0], landSecond: gates[1] };
+    }
+
+    /** Edit to `text`, then Done: the save starts and the closing editor reports the tab clean. */
+    function done(result: Hook, text: string): Promise<void> {
+      let saving!: Promise<void>;
+      act(() => {
+        result.current.setActiveTabContent(text);
+        saving = result.current.saveFile('KB/Notes.md', text);
+        result.current.setHasUnsavedFileChanges?.(false);
+      });
+      return saving;
+    }
+
+    it('the first landing keeps the second Done\'s text, and an Edit before the second lands keeps it too', async () => {
+      const result = await editedTab();
+      const first = `${BASE}\n\nFIRSTDONE`;
+      const second = `${first}\n\nSECONDDONE`;
+      const writes = holdTwoWrites();
+      const one = done(result, first);
+      await waitFor(() => expect(apiMocks.writeFile).toHaveBeenCalledOnce());
+      const two = done(result, second);
+
+      await act(async () => { writes.landFirst(); await one; });
+      await waitFor(() => expect(apiMocks.writeFile).toHaveBeenCalledTimes(2));
+
+      expect(disk.get('KB/Notes.md')).toBe(first);
+      let tab = result.current.activeTab!;
+      // The second Done's text, not the first one's: its save writes it.
+      expect(tab.content).toBe(second);
+      expect(tab.savedContent).toBe(first);
+      expect(tab.isDirty).toBe(false);
+
+      // Edit again and type before the second save lands.
+      const typed = `${second}\n\nTYPED`;
+      await typeInto(result, typed);
+      await act(async () => { writes.landSecond(); await two; });
+
+      expect(disk.get('KB/Notes.md')).toBe(second);
+      tab = result.current.activeTab!;
+      expect(tab.content).toBe(typed);
+      expect(tab.isDirty).toBe(true);
+      await act(async () => { await result.current.saveFile('KB/Notes.md', tab.content!); });
+      expect(disk.get('KB/Notes.md')).toBe(typed);
+    });
+
+    it('a first save that merged onto a pull shows the second Done\'s text merged onto it, and an Edit keeps all three', async () => {
+      const result = await editedTab();
+      const first = BASE.replace('First paragraph.', 'FIRSTDONE First paragraph.');
+      const second = first.replace('Second paragraph.', 'SECONDDONE Second paragraph.');
+      const pulled = `${BASE} HOSTAPPENDED`;
+      disk.set('KB/Notes.md', pulled);
+      const held = holdFileChangedRead(pulled);
+      const writes = holdTwoWrites();
+      const one = done(result, first);
+      const two = done(result, second);
+      await act(async () => { held.answer(); });
+      await waitFor(() => expect(apiMocks.writeFile).toHaveBeenCalledOnce());
+
+      await act(async () => { writes.landFirst(); await one; });
+      await waitFor(() => expect(apiMocks.writeFile).toHaveBeenCalledTimes(2));
+
+      const wroteFirst = `${first} HOSTAPPENDED`;
+      const both = `${second} HOSTAPPENDED`;
+      expect(disk.get('KB/Notes.md')).toBe(wroteFirst);
+      let tab = result.current.activeTab!;
+      expect(tab.content).toBe(both);
+      expect(tab.savedContent).toBe(wroteFirst);
+      expect(tab.isDirty).toBe(false);
+      expect(tab.changedOnBranch).toBe('merged');
+
+      const typed = `TYPED\n\n${both}`;
+      await typeInto(result, typed);
+      await act(async () => { writes.landSecond(); await two; });
+
+      expect(disk.get('KB/Notes.md')).toBe(both);
+      tab = result.current.activeTab!;
+      expect(tab.content).toBe(typed);
+      expect(tab.isDirty).toBe(true);
+      await act(async () => { await result.current.saveFile('KB/Notes.md', tab.content!); });
+      expect(disk.get('KB/Notes.md')).toBe(typed);
+    });
+
+    it('a first save that fails leaves the second Done\'s text, which its own save writes', async () => {
+      const result = await editedTab();
+      const first = `${BASE}\n\nFIRSTDONE`;
+      const second = `${first}\n\nSECONDDONE`;
+      const writes = holdTwoWrites(true);
+      const one = done(result, first);
+      await waitFor(() => expect(apiMocks.writeFile).toHaveBeenCalledOnce());
+      const two = done(result, second);
+
+      await act(async () => { writes.landFirst(); await one.catch(() => {}); });
+      await waitFor(() => expect(apiMocks.writeFile).toHaveBeenCalledTimes(2));
+
+      let tab = result.current.activeTab!;
+      // Not the failed save's older text put back as unsaved edits.
+      expect(tab.content).toBe(second);
+      expect(tab.isDirty).toBe(false);
+
+      await act(async () => { writes.landSecond(); await two; });
+
+      expect(disk.get('KB/Notes.md')).toBe(second);
+      tab = result.current.activeTab!;
+      expect(tab.content).toBe(second);
+      expect(tab.savedContent).toBe(second);
+      expect(tab.isDirty).toBe(false);
+    });
+
+    it('a first save the pull already holds leaves the second Done\'s text on the pull', async () => {
+      const result = await editedTab();
+      const pulled = BASE.replace('First paragraph.', 'First paragraph, rewritten upstream.');
+      const second = `${pulled}\n\nSECONDDONE`;
+      disk.set('KB/Notes.md', pulled);
+      const held = holdFileChangedRead(pulled);
+      const writes = holdTwoWrites();
+      const one = done(result, pulled);
+      const two = done(result, second);
+
+      await act(async () => { held.answer(); await one; });
+      await waitFor(() => expect(apiMocks.writeFile).toHaveBeenCalledOnce());
+
+      // The first save wrote nothing: the pull holds its text.
+      let tab = result.current.activeTab!;
+      expect(tab.content).toBe(second);
+      expect(tab.savedContent).toBe(pulled);
+      expect(tab.isDirty).toBe(false);
+
+      await act(async () => { writes.landFirst(); await two; });
+
+      expect(disk.get('KB/Notes.md')).toBe(second);
+      tab = result.current.activeTab!;
+      expect(tab.content).toBe(second);
+      expect(tab.isDirty).toBe(false);
     });
   });
 

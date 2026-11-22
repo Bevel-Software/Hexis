@@ -371,6 +371,16 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
    */
   const savesInFlightRef = useRef<Map<string, Promise<SaveLeft>>>(new Map());
   /**
+   * The place in `orderRef` of the latest save asked for, by workspace and
+   * path, while it is on its way. A save that lands, or is refused, while a
+   * later one is queued finds the tab's text is that later save's: Done
+   * marked the tab clean with it, and the queued save writes it. Replacing
+   * it with what this save wrote showed older text, and an Edit then typed on
+   * that text, which the queued save's landing took for edits removing its
+   * own.
+   */
+  const lastSaveAskedRef = useRef<Map<string, number>>(new Map());
+  /**
    * Open tabs whose file someone else deleted (`OpenTab.deletedBy`), as a
    * ref so `saveFile` can refuse a write-back synchronously — the state that
    * marks the tab lands a render after the editor's unmount cleanup reads it.
@@ -490,13 +500,25 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
    */
   const workspaceIdRef = useRef<string | null>(workspaceId);
   /**
+   * The tab holds Done's text, not yet its saved bytes: Done marks the tab
+   * clean as the editor closes, while the save of that text (or of a later
+   * Done's, queued behind another) is still on its way. No read replaces
+   * it as it would a clean tab's bytes: the save writes it, merging onto
+   * any newer bytes it finds on disk, and its landing updates the tab.
+   */
+  const isSavingDone = useCallback((readFrom: string, t: OpenTab) => (
+    !t.isDirty && t.content !== null && t.content !== t.savedContent
+      && savesInFlightRef.current.has(existenceKey(readFrom, t.path))
+  ), []);
+  /**
    * Put the bytes of a refresh read (`activateTab`, `reloadTabFromDisk`, the
    * eager refetch, `lock-released`) into the open tab, under the one policy
    * they share. Nothing lands when the workspace moved on, when a read issued
    * after this one (`seq`, from `trackExistenceCheck`) found the file gone
    * or already landed its bytes (they are newer than these), or when the tab,
    * as it is NOW, was marked deleted, holds unsaved edits or a pending agent
-   * preview: newer state always wins over a late answer.
+   * preview, or Done's text whose save is on its way (`isSavingDone`):
+   * newer state always wins over a late answer.
    * `stillApplies` adds a caller's own check on the tab as it is now.
    */
   const applyReadBytes = useCallback((
@@ -512,6 +534,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       if (t.path !== path) return t;
       if (isStaleLanding(readFrom, path, seq)) return t;
       if (t.deletedBy || t.isDirty || t.pendingFileContent !== null) return t;
+      if (isSavingDone(readFrom, t)) return t;
       if (stillApplies && !stillApplies(t)) return t;
       markLanded(readFrom, path, seq);
       // Same bytes: skip a re-render that would briefly unmount the renderer.
@@ -522,7 +545,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
         remoteRevision: (t.remoteRevision ?? 0) + 1,
       };
     }));
-  }, [isStaleFind, isStaleLanding, markLanded]);
+  }, [isStaleFind, isStaleLanding, markLanded, isSavingDone]);
   // Unsaved-work questions are asked in the app's own dialog and awaited.
   const confirm = useConfirm();
   // Paths whose close is waiting on that question: a second close of the same
@@ -1979,13 +2002,23 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     askedAt: number,
   ): Promise<SaveLeft> => {
     const stillHere = () => workspaceIdRef.current === workspaceId;
+    /**
+     * The tab's text is a later save's, still queued behind this one: Done
+     * marked the tab clean with text other than its saved bytes, and a save
+     * of this path was asked for after this one (`lastSaveAskedRef`). That
+     * save writes it; this one's landing never puts older text over it.
+     */
+    const heldForLaterSave = (t: OpenTab) => !t.isDirty && t.content !== null && t.content !== t.savedContent
+      && (lastSaveAskedRef.current.get(existenceKey(workspaceId, relativePath)) ?? askedAt) > askedAt;
     try {
       return await writeOnce();
     } catch (err) {
       if (stillHere()) {
         setOpenTabs((prev) => {
           const idx = prev.findIndex((t) => t.path === relativePath);
-          if (idx < 0 || prev[idx].isDirty) return prev;
+          // Edits made since are newer than the refused ones: typing, or a
+          // later Done's text, which its own save puts back if refused too.
+          if (idx < 0 || prev[idx].isDirty || heldForLaterSave(prev[idx])) return prev;
           const next = prev.slice();
           next[idx] = withEditsBack(prev[idx]);
           return next;
@@ -2064,6 +2097,27 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
             // Edits made since (Edit again, typing) are the person's newest.
             if (t.isDirty || (t.savedContent !== editedFrom && t.savedContent !== pulled)) return prev;
             const next = prev.slice();
+            if (heldForLaterSave(t)) {
+              // A later Done's text, which the save queued behind this one
+              // merges onto the pull from `left.editBase` at its write. The
+              // tab shows that merge now, as the save will write it, so an
+              // Edit before it lands types on the pull, never on text without
+              // it; when they collide, that save will give them up too. A
+              // `file-changed` read that already moved the tab onto the pull
+              // merged that text onto it: it stays as it is.
+              if (t.savedContent === pulled) return prev;
+              const carried = threeWayMerge(left.editBase, t.content!, pulled);
+              next[idx] = carried === null
+                ? takePulledOverEdits(t, pulled, 'discarded')
+                : {
+                  ...t,
+                  content: carried,
+                  savedContent: pulled,
+                  changedOnBranch: carried !== pulled ? 'merged' : t.changedOnBranch ?? null,
+                  remoteRevision: (t.remoteRevision ?? 0) + 1,
+                };
+              return next;
+            }
             // Edits the pull holds already add no banner, and take none away:
             // a save before this one may have merged, and said so.
             next[idx] = takePulledOverEdits(t, pulled, merged === null ? 'discarded' : t.changedOnBranch ?? null);
@@ -2107,8 +2161,9 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       return wrote;
 
       function afterWrite(t: OpenTab): OpenTab {
-        // Only a dirty tab holds typing: a clean one's text is the save's, or
-        // what a `file-changed` read put there. Typing is measured from the
+        // Only a dirty tab holds typing: a clean one's text is the save's,
+        // what a `file-changed` read put there, or a later Done's (below).
+        // Typing is measured from the
         // text it grew from. When that read moved the tab onto the pull this
         // write merged onto, it merged the edits onto the pull already (onto
         // a tab Done marked clean too), and the editor reloaded with them:
@@ -2116,9 +2171,16 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
         // tab's text is kept as it is. Measured from the save's own text
         // instead, the pulled bytes a read put in a tab Done had marked clean
         // read as typing that removed the edit, and the next save erased it.
+        // A clean tab holding a later Done's text, whose save is queued
+        // behind this one, is kept like typing, and stays clean: that save
+        // writes it, measuring it from this save's text onto what this one
+        // wrote, as here. Replaced by this write's older text, it showed
+        // until that save landed, and an Edit meanwhile typed on it.
+        const queuedText = heldForLaterSave(t);
         const readMovedTab = mergedOntoPull && expected !== null && t.savedContent === expected;
         const typedFrom = readMovedTab ? toWrite : content;
-        const typedSince = t.isDirty && t.content !== null && t.content !== typedFrom ? t.content : null;
+        const typedSince = (t.isDirty || queuedText) && t.content !== null && t.content !== typedFrom
+          ? t.content : null;
         if (typedSince === null) {
           return {
             ...t,
@@ -2130,7 +2192,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
           };
         }
         if (!mergedOntoPull) {
-          return { ...t, savedContent: toWrite, isDirty: typedSince !== toWrite, changedOnBranch: null };
+          return { ...t, savedContent: toWrite, isDirty: t.isDirty && typedSince !== toWrite, changedOnBranch: null };
         }
         const kept = threeWayMerge(typedFrom, typedSince, toWrite);
         if (kept === null) return takePulledOverEdits(t, toWrite, 'discarded');
@@ -2138,7 +2200,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
           ...t,
           content: kept,
           savedContent: toWrite,
-          isDirty: kept !== toWrite,
+          isDirty: t.isDirty && kept !== toWrite,
           changedOnBranch: 'merged',
           remoteRevision: (t.remoteRevision ?? 0) + 1,
         };
@@ -2164,6 +2226,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     const savedWhenAsked = openTabsRef.current.find((t) => t.path === relativePath)?.savedContent ?? null;
     const key = existenceKey(workspaceId, relativePath);
     const before = savesInFlightRef.current.get(key);
+    lastSaveAskedRef.current.set(key, askedAt);
     const run = (async () => {
       const left = before ? await before.catch(() => null) : null;
       return saveOnce(
@@ -2176,6 +2239,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     savesInFlightRef.current.set(key, run);
     const settle = () => {
       if (savesInFlightRef.current.get(key) === run) savesInFlightRef.current.delete(key);
+      if (lastSaveAskedRef.current.get(key) === askedAt) lastSaveAskedRef.current.delete(key);
     };
     run.then(settle, settle);
     await run;
@@ -2308,8 +2372,11 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     // its bytes are the baseline Reject writes back, and no read may replace
     // them (`applyReadBytes`), so nulled they would stay on "Opening" for good.
     // eslint-disable-next-line react-hooks/set-state-in-effect
+    // Nor does Done's text whose save is on its way (`isSavingDone`): nulled,
+    // the tab would reopen on the disk's bytes before the save wrote it.
     setOpenTabs((prev) => prev.map((t) => {
       if (t.isDirty || t.deletedBy || t.pendingFileContent !== null || t.path === activePath) return t;
+      if (workspaceId && isSavingDone(workspaceId, t)) return t;
       return { ...t, content: null, savedContent: null };
     }));
 
@@ -2348,7 +2415,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
         }
       });
     }
-  }, [fsRevision, workspaceId, applyReadGone, trackExistenceCheck, applyReadBytes]);
+  }, [fsRevision, workspaceId, applyReadGone, trackExistenceCheck, applyReadBytes, isSavingDone]);
 
   // ── Reset hydratedKey when persistenceBranch changes ──────────────────────
 
@@ -2549,8 +2616,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
               // were replaced by the pulled bytes, and the editor reopened
               // without them. They are merged onto the pull as unsaved
               // edits are; the tab stays clean, since the save writes them.
-              const savingDone = !t.isDirty && t.content !== t.savedContent
-                && savesInFlightRef.current.has(existenceKey(subscribedWorkspaceId, event.path));
+              const savingDone = isSavingDone(subscribedWorkspaceId, t);
               if ((t.isDirty || savingDone) && t.content !== null && t.savedContent !== null) {
                 // Content changed underneath unsaved edits. Inside this
                 // deployment the file lock stops every other writer while a
@@ -2657,7 +2723,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       offFsTreeChanged();
       offLockReleased();
     };
-  }, [bus, workspaceId, refreshFileTree, dropTabByPath, applyReadGone, trackExistenceCheck, isStaleFind, isStaleLanding, markLanded, forgetOwnDelete, applyReadBytes]);
+  }, [bus, workspaceId, refreshFileTree, dropTabByPath, applyReadGone, trackExistenceCheck, isStaleFind, isStaleLanding, markLanded, forgetOwnDelete, applyReadBytes, isSavingDone]);
 
   // ── Derived values ────────────────────────────────────────────────────────
 
