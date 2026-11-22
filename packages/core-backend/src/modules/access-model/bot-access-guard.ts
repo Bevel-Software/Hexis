@@ -1,6 +1,6 @@
 import type { FileContent } from '@mastra/core/workspace';
 import { VersionControlDomainError } from '../../shared/domain-errors.js';
-import { isAccessMdPath, parseOwnAccessEntries } from './access-grammar.js';
+import { isAccessMdPath, parseOwnAccessEntries, type ParsedEntry } from './access-grammar.js';
 import { GROUPS_YAML, SYNCED_GROUPS_YAML } from './group-files.js';
 import { ROLES_YAML_BASENAME } from './roles-yaml-guard.js';
 
@@ -30,9 +30,35 @@ export function isAccessFile(repoRelativePath: string): boolean {
  * any changes them; reformatting that leaves the parsed lines equal does not.
  */
 export function changesOwnAccessLines(before: string | null, after: string | null): boolean {
-  const was = before === null ? null : parseOwnAccessEntries(before);
-  const is = after === null ? null : parseOwnAccessEntries(after);
-  return JSON.stringify(was) !== JSON.stringify(is);
+  return canonicalOwnAccess(before) !== canonicalOwnAccess(after);
+}
+
+/**
+ * The access lines of a file's own definition as what they grant: per verb,
+ * each entry's canonical principal and whether it denies. The display parts
+ * of an entry (a person's name, a role's spelling) grant nothing, so a change
+ * to them alone is not a change to access.
+ */
+function canonicalOwnAccess(text: string | null): string {
+  const entries = text === null ? null : parseOwnAccessEntries(text);
+  if (entries === null) return 'null';
+  const canonical: Record<string, string[]> = {};
+  for (const [verb, list] of Object.entries(entries).sort(([a], [b]) => a.localeCompare(b))) {
+    canonical[verb] = (list as ParsedEntry[]).map(
+      (e) => `${e.deny ? '!' : ''}${e.kind === 'role' ? `role:${e.role}` : `user:${e.email}`}`,
+    );
+  }
+  return JSON.stringify(canonical);
+}
+
+/**
+ * File content as the text its access lines are read from. Every kind of
+ * content is decoded: a write that arrives as bytes changes the file's lines
+ * exactly as one that arrives as text does.
+ */
+function contentText(content: FileContent): string {
+  if (typeof content === 'string') return content;
+  return Buffer.from(content as Uint8Array).toString('utf8');
 }
 
 /** A bot's write or merge that would change access, refused. 403: the bot is known; the change is not its to make. */
@@ -70,9 +96,7 @@ export function makeBotAccessWriteValidator(
     const rel = repoRelative(wsPath);
     if (rel === null) return;
     if (isAccessFile(rel)) throw new BotChangesAccessError(rel, 'file');
-    const after = typeof content === 'string' ? content : Buffer.isBuffer(content) ? content.toString('utf8') : null;
-    if (after === null) return;
-    if (changesOwnAccessLines(await readCurrent(wsPath), after)) throw new BotChangesAccessError(rel, 'lines');
+    if (changesOwnAccessLines(await readCurrent(wsPath), contentText(content))) throw new BotChangesAccessError(rel, 'lines');
   };
   // Every path inside the knowledge base: a copy or a move lands content at
   // a new path, and its access lines are new there.

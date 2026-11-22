@@ -518,7 +518,18 @@ export class ChangeRequestReviewService implements IChangeRequestReviewService {
     prTitle: string,
     baseBranch: string,
     workspaceId: string,
-    opts: { bypass?: boolean } = {},
+    opts: {
+      bypass?: boolean;
+      /**
+       * A further check of the merge, run where the git layer runs its own:
+       * inside the merge's reservation, against the target and source commits
+       * this attempt actually merges (see `GitService.mergeChangeRequest`), in
+       * the clone the merge runs in (`workspaceId`), which holds both commits.
+       * Throwing refuses the merge, and the refusal reaches the caller as it
+       * was thrown.
+       */
+      authorize?: (target: { sha: string; sourceSha: string; changedPaths: string[]; workspaceId: string }) => Promise<void>;
+    } = {},
   ): Promise<MergePrResult> {
     assertValidPrNumber(prNumber);
     if (!headSha) throw new VersionControlValidationError('head sha is required');
@@ -616,6 +627,9 @@ export class ChangeRequestReviewService implements IChangeRequestReviewService {
     // caller-resolvable precondition (ChangeRequestConflictsError, 409).
     const baseWorkspace = await this.workspaceService.getOrCreateForBranch(cr.targetBranch);
     let mergeResult: Awaited<ReturnType<GitService['mergeChangeRequest']>>;
+    // A refusal from the check below is the caller's answer, not a failed
+    // merge: kept apart so it is not rewrapped as one.
+    let refusal: unknown = null;
     try {
       mergeResult = await this.git.mergeChangeRequest(
         baseWorkspace.id,
@@ -626,9 +640,36 @@ export class ChangeRequestReviewService implements IChangeRequestReviewService {
         // Named so a merge that finds nothing to merge can tell an empty request
         // apart from one a previous attempt already merged and failed to record
         // (see `ownMergeCommitOn`).
-        { appliedChangeNumber: prNumber, appliedChangeTitle: cr.title },
+        {
+          appliedChangeNumber: prNumber,
+          appliedChangeTitle: cr.title,
+          // The gate above judged the approvals at `headSha`. The merge lands
+          // whatever the source holds when it runs, so a push in between
+          // would land a head nobody approved: asked again here, at the
+          // commit this attempt merges, inside the merge's reservation.
+          authorize: async (target) => {
+            try {
+              if (target.sourceSha !== headSha) {
+                throw new MergeBlockedError([
+                  'The draft changed after its approvals were read. Read the change request again; approvals of an earlier version do not apply.',
+                ]);
+              }
+              await opts.authorize?.({ ...target, workspaceId: baseWorkspace.id });
+            } catch (err) {
+              refusal = err;
+              throw err;
+            }
+          },
+        },
       );
     } catch (err) {
+      if (err === refusal) {
+        await this.db
+          .update(prMergeLog)
+          .set({ succeeded: false, completedAt: new Date(), error: err instanceof Error ? err.message : String(err) })
+          .where(eq(prMergeLog.id, logRow.id));
+        throw err;
+      }
       const redacted = redactTokens(err instanceof Error ? err.message : String(err), this.git.credentials?.token());
       await this.db
         .update(prMergeLog)

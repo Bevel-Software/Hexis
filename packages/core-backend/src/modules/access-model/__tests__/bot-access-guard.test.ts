@@ -30,6 +30,12 @@ describe('changesOwnAccessLines', () => {
     expect(changesOwnAccessLines(page('nodeType: x\nread:\n  - everyone\n'), page('nodeType: y\nread:\n  - everyone\n', '# changed\n'))).toBe(false);
     expect(changesOwnAccessLines(null, '# a new page with no access lines\n')).toBe(false);
   });
+  it('reads an entry as what it grants: a renamed person, a respelled role or a reflowed list is no change', () => {
+    const before = page('read:\n  - Ada <ada@x.io>\n  - Engineer\n');
+    expect(changesOwnAccessLines(before, page('read: ["Ada Lovelace <ADA@x.io>", "engineer"]\n'))).toBe(false);
+    expect(changesOwnAccessLines(before, page('read:\n  - Ada <ada@x.io>\n  - "!Engineer"\n'))).toBe(true);
+    expect(changesOwnAccessLines(before, page('read:\n  - Ada <bob@x.io>\n  - Engineer\n'))).toBe(true);
+  });
 });
 
 describe('the bot\'s pre-disk write check', () => {
@@ -46,6 +52,14 @@ describe('the bot\'s pre-disk write check', () => {
       /access lines \(read, write, download, owner\) of "Team\/page\.md"/,
     );
     await expect(validate('knowledge-base/Team/page.md', '---\nread:\n  - Engineer\n---\n# page, edited\n')).resolves.toBeUndefined();
+  });
+
+  it('judges content that arrives as bytes exactly as text', async () => {
+    const changed = new TextEncoder().encode('---\nread:\n  - everyone\n---\n# page\n');
+    await expect(validate('knowledge-base/Team/page.md', changed)).rejects.toBeInstanceOf(BotChangesAccessError);
+    await expect(validate('knowledge-base/Team/page.md', Buffer.from(changed))).rejects.toBeInstanceOf(BotChangesAccessError);
+    const same = new TextEncoder().encode('---\nread:\n  - Engineer\n---\n# page, edited\n');
+    await expect(validate('knowledge-base/Team/page.md', same)).resolves.toBeUndefined();
   });
 
   it('leaves a path outside the knowledge base alone, and claims every path inside it', async () => {

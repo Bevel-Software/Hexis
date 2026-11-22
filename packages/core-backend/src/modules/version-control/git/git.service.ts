@@ -2116,7 +2116,8 @@ export class GitService implements IGitService {
       requireCleanTarget?: boolean;
       /**
        * Decide whether `user` may land this merge, given the target commit it
-       * is actually built on and every path it writes. Throwing refuses, and
+       * is actually built on (`sha`), the source commit it merges
+       * (`sourceSha`) and every path it writes. Throwing refuses, and
        * refuses before anything is committed or pushed.
        *
        * Also here rather than in the caller, and for the same reason: the
@@ -2126,7 +2127,7 @@ export class GitService implements IGitService {
        * below is what makes the ref current, and a fetch that fails throws
        * instead of falling back to the stale one.
        */
-      authorize?: (target: { sha: string; changedPaths: string[] }) => Promise<void>;
+      authorize?: (target: { sha: string; sourceSha: string; changedPaths: string[] }) => Promise<void>;
       /**
        * The change request this merge applies, when it is one (the agent
        * `merge_branch` path merges no request and leaves it unset).
@@ -2206,13 +2207,16 @@ export class GitService implements IGitService {
           // that tip. Re-read every attempt: a retry happens BECAUSE the
           // target moved, which can move its roles and its file set too.
           const { stdout: targetSha } = await this.git(cwd, ['rev-parse', `origin/${targetBranch}`]);
+          // And the source commit this attempt merges, so a caller that read
+          // the request at one head can refuse when the source moved since.
+          const { stdout: sourceSha } = await this.git(cwd, ['rev-parse', `origin/${sourceBranch}`]);
           const changedPaths = await this.prChangedPathsAt(
             cwd,
             `origin/${targetBranch}`,
             `origin/${sourceBranch}`,
             { forAccessCheck: true },
           );
-          await opts.authorize({ sha: targetSha.trim(), changedPaths });
+          await opts.authorize({ sha: targetSha.trim(), sourceSha: sourceSha.trim(), changedPaths });
         }
 
         // `--no-commit --no-ff` so we author the merge commit as the human and

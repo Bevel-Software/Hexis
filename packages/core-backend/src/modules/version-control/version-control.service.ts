@@ -4313,10 +4313,12 @@ export class VersionControlService implements IVersionControlService {
     // neutralise must abort the merge, never fall through.
     //
     // A bot may merge where it is granted, but never a change to access: the
-    // request is refused whole when it touches an access file or a file's own
-    // access lines (`modules/bots`). Asked before anything is rewritten.
-    if (this.isBot(user.email)) await this.assertBotMergeLeavesAccess(number, baseBranch);
-    const preserved = await this.preserveBaseRolesYaml(number, user, baseBranch);
+    // request is refused whole when it touches an access file — roles.yaml
+    // included — or a file's own access lines (`modules/bots`). That is asked
+    // inside the merge (`assertBotMergeLeavesAccess`), so nothing is rewritten for a
+    // bot: its roles.yaml change is refused there, not neutralised here.
+    const bot = this.isBot(user.email);
+    const preserved = bot ? false : await this.preserveBaseRolesYaml(number, user, baseBranch);
 
     // When preservation pushed a restore commit, the source-branch head advanced,
     // so the caller's `headSha`/`approvals` (resolved against the pre-preservation
@@ -4353,7 +4355,7 @@ export class VersionControlService implements IVersionControlService {
         title,
         baseBranch,
         workspaceId,
-        opts,
+        { ...opts, authorize: bot ? (target) => this.assertBotMergeLeavesAccess(target) : undefined },
       );
     } catch (err) {
       // The local merge hit conflicts — hand the caller (agent/UI) the actual
@@ -4575,8 +4577,12 @@ export class VersionControlService implements IVersionControlService {
           // is what the hook refuses on) and both sides of a rename, since the
           // old name is a file this merge deletes.
           authorize: this.kb.isProtectedBranch(targetBranch)
-            ? async ({ sha, changedPaths }) => {
+            ? async (target) => {
+                const { sha, changedPaths } = target;
                 if (changedPaths.length === 0) return;
+                // A bot never changes access, on this path as on a change
+                // request's: the same check, against the same commits.
+                if (this.isBot(user.email)) await this.assertBotMergeLeavesAccess({ ...target, workspaceId: targetWorkspaceId });
                 // roles.yaml never changes through a merge. A change request's
                 // merge restores the target's copy on the source first
                 // (`preserveBaseRolesYaml`): a draft is a free-for-all, and the
@@ -4823,6 +4829,34 @@ export class VersionControlService implements IVersionControlService {
   }
 
   /**
+   * The check a BOT's merge passes — a change request's and a branch's alike
+   * — run inside the merge against the target commit it is built on (`sha`)
+   * and the source commit it lands (`sourceSha`): refused when any path it
+   * writes is an access file (roles.yaml and both sides of a rename
+   * included), or when a file's own access lines differ between those two
+   * commits. Read in the clone the merge runs in, which has just fetched both.
+   */
+  private async assertBotMergeLeavesAccess(target: {
+    sha: string;
+    sourceSha: string;
+    changedPaths: string[];
+    workspaceId: string;
+  }): Promise<void> {
+    const { sha, sourceSha, changedPaths, workspaceId } = target;
+    for (const p of changedPaths) {
+      if (isAccessFile(p)) throw new BotChangesAccessError(p, 'file');
+    }
+    for (const p of changedPaths) {
+      if (!p.endsWith('.md') && !hasAccessFrontmatterExtension(p)) continue;
+      const [before, after] = await Promise.all([
+        this.git.readFileAtRef(workspaceId, sha, p),
+        this.git.readFileAtRef(workspaceId, sourceSha, p),
+      ]);
+      if (changesOwnAccessLines(before, after)) throw new BotChangesAccessError(p, 'lines');
+    }
+  }
+
+  /**
    * Guarantee a CR carries NO `roles.yaml` change across its merge: if the CR's
    * `roles.yaml` differs from the base branch's, restore the base version on the
    * SOURCE branch (commit + push) so the merged diff has no roles.yaml change.
@@ -4834,34 +4868,6 @@ export class VersionControlService implements IVersionControlService {
    * {@link RolesYamlPreservationError}, aborting the merge. We must never let a
    * roles.yaml change slip through because the neutralisation step failed.
    */
-  /**
-   * Refuse a BOT's merge of change request `number` when it changes access:
-   * an access file among its changed paths, or a changed file whose own
-   * access lines differ between the base and the request's head. Read from
-   * the published refs, fetched first; a request that cannot be read is
-   * refused rather than merged unchecked.
-   */
-  private async assertBotMergeLeavesAccess(number: number, baseBranch: string): Promise<void> {
-    const summary = await this.prs.getPr(number);
-    if (!summary || summary.base !== baseBranch) {
-      throw new VersionControlDomainError(`Change request #${number} could not be read, so a bot may not merge it.`, 409);
-    }
-    const ws = await this.workspaceService.getOrCreateForBranch(summary.branch);
-    await this.git.fetch(ws.id);
-    const paths = await this.git.changedPathsForPr(ws.id, summary.base, summary.branch);
-    for (const p of paths) {
-      if (isAccessFile(p)) throw new BotChangesAccessError(p, 'file');
-    }
-    for (const p of paths) {
-      if (!p.endsWith('.md') && !hasAccessFrontmatterExtension(p)) continue;
-      const [before, after] = await Promise.all([
-        this.git.readFileAtRef(ws.id, `origin/${summary.base}`, p),
-        this.git.readFileAtRef(ws.id, `origin/${summary.branch}`, p),
-      ]);
-      if (changesOwnAccessLines(before, after)) throw new BotChangesAccessError(p, 'lines');
-    }
-  }
-
   private async preserveBaseRolesYaml(
     number: number,
     user: AuthUser,

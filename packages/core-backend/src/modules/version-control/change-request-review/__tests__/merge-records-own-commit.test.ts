@@ -405,3 +405,64 @@ describe('mergePr — a request whose merge commit was pushed but never recorded
     );
   });
 });
+
+/**
+ * The gate judges the approvals at the head the caller read; the merge lands
+ * whatever the source holds when it runs. `mergePr` asks again inside the
+ * merge, at the source commit that attempt merges, so a push in between is
+ * refused instead of landing a head nobody approved.
+ */
+describe('mergePr — the head the approvals were read at', () => {
+  type Hook = (t: { sha: string; sourceSha: string; changedPaths: string[] }) => Promise<void>;
+  function makeMergingAt(sourceSha: string, extra?: (t: { workspaceId: string }) => Promise<void>) {
+    const captured: Captured[] = [];
+    const landed = { count: 0 };
+    const mergeChangeRequest = vi.fn(async (...args: unknown[]) => {
+      const opts = args[5] as { authorize?: Hook };
+      await opts.authorize?.({ sha: 'target-tip', sourceSha, changedPaths: [APPROVED.path] });
+      landed.count += 1;
+      return { kind: 'merged', sha: 'merge-1', mergeCommit: 'merge-1' } as AppliedMergeResult;
+    });
+    const svc = new ChangeRequestReviewService(
+      makeDb(captured),
+      {} as unknown as IAccessControl,
+      { getOrCreateForBranch: vi.fn(async () => ({ id: 'ws-base' })) } as unknown as WorkspaceService,
+      { mergeChangeRequest } as unknown as GitService,
+    );
+    const merge = () =>
+      svc.mergePr(CR_ROW.number, USER, HEAD_SHA, [APPROVED], 'open', CR_ROW.title, BASE, 'ws-1', {
+        ...(extra ? { authorize: extra } : {}),
+      });
+    return { merge, landed, captured };
+  }
+
+  it('refuses, as a gate refusal, when the source moved past the approved head, and lands nothing', async () => {
+    const { merge, landed, captured } = makeMergingAt('a-later-push');
+    await expect(merge()).rejects.toMatchObject({
+      status: 422,
+      payload: { mergeBlockedReasons: [expect.stringMatching(/changed after its approvals were read/)] },
+    });
+    expect(landed.count).toBe(0);
+    const log = captured.find((c) => c.kind === 'update' && c.table === prMergeLog);
+    expect(log?.values).toMatchObject({ succeeded: false });
+  });
+
+  it("merges at the approved head, and runs the caller's own check in the merge's clone", async () => {
+    const seen: string[] = [];
+    const { merge, landed } = makeMergingAt(HEAD_SHA, async (t) => {
+      seen.push(t.workspaceId);
+    });
+    await merge();
+    expect(landed.count).toBe(1);
+    expect(seen).toEqual(['ws-base']);
+  });
+
+  it("passes the caller's refusal through as it was thrown, not as a failed merge", async () => {
+    const refusal = Object.assign(new Error('a bot cannot change access'), { status: 403 });
+    const { merge, landed } = makeMergingAt(HEAD_SHA, async () => {
+      throw refusal;
+    });
+    await expect(merge()).rejects.toBe(refusal);
+    expect(landed.count).toBe(0);
+  });
+});
