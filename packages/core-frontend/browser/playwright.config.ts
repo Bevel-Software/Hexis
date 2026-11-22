@@ -11,10 +11,8 @@ import { defineConfig } from '@playwright/test';
  * CI installs the browser and runs it beside the unit suites. No server:
  * every page here is set from a string.
  *
- * A suite lives where its imports allow: here when it reaches the app only
- * through module entries, and in a module's own `__tests__/browser/` when it
- * drives that module's files (a module's suites may import its files; no
- * other suite may). The runner collects both.
+ * The runner collects suites from two places: this folder, and any module's
+ * own `__tests__/browser/` (see `testMatch`).
  */
 export default defineConfig({
   testDir: '..',
