@@ -304,6 +304,24 @@ describe('GitService.changedFilesForPr / resolvePrShas', () => {
     expect(paths.sort()).toEqual(['Reports/.gitkeep', 'Reports/empty.md']);
   });
 
+  it('writtenPathsBetweenCommits reads full object names only, roles.yaml included', async () => {
+    const { repo } = await seedWorkspace(root, workspaceId);
+    const base = (await execFileAsync('git', ['-C', repo, 'rev-parse', 'HEAD'])).stdout.trim();
+    await fs.writeFile(path.join(repo, 'roles.yaml'), 'admins: []\n');
+    await fs.writeFile(path.join(repo, 'added.md'), 'x\n');
+    await runGit(repo, ['add', '-A']);
+    await runGit(repo, ['commit', '-m', 'work']);
+    const head = (await execFileAsync('git', ['-C', repo, 'rev-parse', 'HEAD'])).stdout.trim();
+    const git = new GitService(stubWorkspaceService(workspaceId, repo), new VersionControlHooks(), testKbContext());
+
+    expect((await git.writtenPathsBetweenCommits(workspaceId, base, head)).sort()).toEqual(['added.md', 'roles.yaml']);
+    // Anything but exactly 40 (or 64) hex characters is refused before git
+    // runs: an abbreviation, and a name longer than SHA-1's but short of SHA-256's.
+    for (const bad of [head.slice(0, 12), `${head}a`, `${head}${'a'.repeat(23)}`, head.toUpperCase()]) {
+      await expect(git.writtenPathsBetweenCommits(workspaceId, base, bad)).rejects.toThrow(/invalid commit sha/);
+    }
+  });
+
   it('pathExistsAtRef answers for files and folders at a ref, and false for what is not there', async () => {
     const { repo } = await seedWorkspace(root, workspaceId);
     const git = new GitService(stubWorkspaceService(workspaceId, repo), new VersionControlHooks(), testKbContext());
