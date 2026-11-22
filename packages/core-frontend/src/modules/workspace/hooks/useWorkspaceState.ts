@@ -1999,7 +1999,9 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
         ...t,
         content: merged,
         isDirty: merged !== baseline,
-        changedOnBranch: 'merged',
+        // Edits the pulled commit already holds leave nothing to save, and
+        // nothing was merged: no banner, as the `file-changed` merge decides.
+        changedOnBranch: merged !== baseline ? 'merged' : null,
         remoteRevision: (t.remoteRevision ?? 0) + 1,
       };
     }

@@ -2714,6 +2714,18 @@ describe('a write already on its way when the file is deleted', () => {
       expect(tab.changedOnBranch).toBe('discarded');
       expect(disk.get('KB/Notes.md')).toBe(pulled);
     });
+
+    it('shows no banner and leaves the tab clean when the pulled bytes already hold the edits', async () => {
+      const pulled = BASE.replace('First paragraph.', 'First paragraph, rewritten upstream.');
+      const result = await doneThenPulled(pulled, pulled);
+
+      const tab = tabAt(result, 'KB/Notes.md')!;
+      expect(tab.content).toBe(pulled);
+      expect(tab.savedContent).toBe(pulled);
+      expect(tab.isDirty).toBe(false);
+      expect(tab.changedOnBranch).toBeNull();
+      expect(disk.get('KB/Notes.md')).toBe(pulled);
+    });
   });
 
   it('two saves of one file sent together both land, each over what the one before wrote', async () => {
