@@ -17,6 +17,27 @@ const USER: AuthUser = {
   name: 'Alice',
 };
 
+/**
+ * The paths whose lock `versionControl` holds right now, as its acquires and
+ * releases move: what a check records to prove it ran under a lock.
+ */
+function trackHeldLocks(versionControl: IVersionControlService): Set<string> {
+  const held = new Set<string>();
+  const vc = versionControl as unknown as Record<string, ReturnType<typeof vi.fn>>;
+  vc.acquireLock!.mockImplementation(async (_w: string, _b: string, p: string) => {
+    held.add(p);
+    return { acquired: true, lock: { holderName: 'Alice' } };
+  });
+  for (const release of ['releaseLock', 'releaseLockNoCommit', 'releaseLockUntouched']) {
+    const answer = release === 'releaseLock' ? null : undefined;
+    vc[release]!.mockImplementation(async (_w: string, _b: string, p: string) => {
+      held.delete(p);
+      return answer;
+    });
+  }
+  return held;
+}
+
 function makeVersionControl(): IVersionControlService {
   return {
     acquireLock: vi.fn().mockResolvedValue({
@@ -487,23 +508,27 @@ describe('LockingFilesystem — the caller judges under the lock', () => {
     await fs.mkdir(path.join(root, 'knowledge-base'), { recursive: true });
     await fs.writeFile(path.join(root, 'knowledge-base/Gone.md'), 'kept\n');
     const versionControl = makeVersionControl();
-    const asked: string[] = [];
-    let refuseUnderLock = false;
+    const held = trackHeldLocks(versionControl);
+    const asked: { path: string; locked: boolean }[] = [];
     const validateWrite = Object.assign(async () => {}, {
+      // Refused only where its lock is held: a removal check missing under
+      // the locks would let the batch land.
       removal: async (p: string) => {
-        asked.push(p);
-        if (refuseUnderLock && asked.length === 2) throw new Error('not yours to delete');
+        asked.push({ path: p, locked: held.has(p) });
+        if (held.has(p)) throw new Error('not yours to delete');
       },
     });
     const guarded = new LockingFilesystem(
       { basePath: root, contained: true },
       { versionControl, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB, validateWrite },
     );
-    refuseUnderLock = true;
     await expect(
       guarded.writeFiles([{ path: 'knowledge-base/New.md', content: 'new\n' }], 'batch', ['knowledge-base/Gone.md']),
     ).rejects.toThrow('not yours to delete');
-    expect(asked).toEqual(['knowledge-base/Gone.md', 'knowledge-base/Gone.md']);
+    expect(asked).toEqual([
+      { path: 'knowledge-base/Gone.md', locked: false },
+      { path: 'knowledge-base/Gone.md', locked: true },
+    ]);
     expect(await fs.readFile(path.join(root, 'knowledge-base/Gone.md'), 'utf-8')).toBe('kept\n');
     await expect(fs.access(path.join(root, 'knowledge-base/New.md'))).rejects.toThrow();
     expect(versionControl.commitChanges).not.toHaveBeenCalled();
@@ -515,16 +540,21 @@ describe('LockingFilesystem — the caller judges under the lock', () => {
     await fs.writeFile(path.join(root, 'knowledge-base/A/Sub/two.md'), 'two\n');
     const judged: string[] = [];
     let refuse = false;
+    const versionControl = makeVersionControl();
+    const held = trackHeldLocks(versionControl);
+    /** Each judgement of a landing, with whether both of the file's ends were locked then. */
+    const observed: { landsAt: string; locked: boolean }[] = [];
     const validateWrite = Object.assign(
       async (p: string, content: unknown) => {
         judged.push(`${p}=${String(content).trim()}`);
+        observed.push({ landsAt: p, locked: held.has(p) && held.has(p.replace('knowledge-base/B', 'knowledge-base/A')) });
         if (refuse && String(content).startsWith('two')) throw new Error('two may not move');
       },
       { appliesTo: () => true },
     );
     const guarded = new LockingFilesystem(
       { basePath: root, contained: true },
-      { versionControl: makeVersionControl(), workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB, validateWrite },
+      { versionControl, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB, validateWrite },
     );
     refuse = true;
     await expect(guarded.moveFile('knowledge-base/A', 'knowledge-base/B')).rejects.toThrow('two may not move');
@@ -534,10 +564,95 @@ describe('LockingFilesystem — the caller judges under the lock', () => {
 
     refuse = false;
     judged.length = 0;
+    observed.length = 0;
     await guarded.moveFile('knowledge-base/A', 'knowledge-base/B');
-    // Each file twice: before the locks and again under them.
-    expect([...new Set(judged)].sort()).toEqual(['knowledge-base/B/Sub/two.md=two', 'knowledge-base/B/one.md=one']);
+    // Each file twice: before the locks, and again with the file's lock held
+    // at both ends — every file a folder carries is locked, not the folder alone.
+    expect(observed.sort((x, y) => (x.landsAt < y.landsAt ? -1 : x.landsAt > y.landsAt ? 1 : Number(x.locked) - Number(y.locked)))).toEqual([
+      { landsAt: 'knowledge-base/B/Sub/two.md', locked: false },
+      { landsAt: 'knowledge-base/B/Sub/two.md', locked: true },
+      { landsAt: 'knowledge-base/B/one.md', locked: false },
+      { landsAt: 'knowledge-base/B/one.md', locked: true },
+    ]);
     expect(await fs.readFile(path.join(root, 'knowledge-base/B/Sub/two.md'), 'utf-8')).toBe('two\n');
+    // One change naming both ends of every file.
+    expect(versionControl.commitChanges).toHaveBeenCalledWith('ws-feat', USER, 'Move knowledge-base/A to knowledge-base/B', [
+      'knowledge-base/A/Sub/two.md',
+      'knowledge-base/A/one.md',
+      'knowledge-base/B/Sub/two.md',
+      'knowledge-base/B/one.md',
+    ]);
+  });
+
+  it("a move asks the removal check for every file it takes away, before the locks and under them; a refusal moves nothing", async () => {
+    await fs.mkdir(path.join(root, 'knowledge-base/Team'), { recursive: true });
+    await fs.writeFile(path.join(root, 'knowledge-base/Team/access.md'), 'read:\n  - Eng\n');
+    await fs.writeFile(path.join(root, 'knowledge-base/Team/page.md'), '# page\n');
+    const versionControl = makeVersionControl();
+    const held = trackHeldLocks(versionControl);
+    const asked: { path: string; locked: boolean }[] = [];
+    const validateWrite = Object.assign(async () => {}, {
+      appliesTo: () => false,
+      removal: async (p: string) => {
+        asked.push({ path: p, locked: held.has(p) });
+        if (p.endsWith('/access.md')) throw new Error('not yours to take away');
+      },
+    });
+    const guarded = new LockingFilesystem(
+      { basePath: root, contained: true },
+      { versionControl, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB, validateWrite },
+    );
+    // A file renamed away from its access-deciding name.
+    await expect(guarded.moveFile('knowledge-base/Team/access.md', 'knowledge-base/Team/notes.md')).rejects.toThrow(
+      'not yours to take away',
+    );
+    expect(asked).toEqual([{ path: 'knowledge-base/Team/access.md', locked: false }]);
+    // A folder carrying one.
+    await expect(guarded.moveFile('knowledge-base/Team', 'knowledge-base/Elsewhere')).rejects.toThrow('not yours to take away');
+    expect(await fs.readFile(path.join(root, 'knowledge-base/Team/access.md'), 'utf-8')).toBe('read:\n  - Eng\n');
+    await expect(fs.access(path.join(root, 'knowledge-base/Elsewhere'))).rejects.toThrow();
+    // A page moves: asked once before its locks and once under them.
+    asked.length = 0;
+    await guarded.moveFile('knowledge-base/Team/page.md', 'knowledge-base/Team/moved.md');
+    expect(asked).toEqual([
+      { path: 'knowledge-base/Team/page.md', locked: false },
+      { path: 'knowledge-base/Team/page.md', locked: true },
+    ]);
+  });
+
+  it('landUnderLock judges the bytes before the lock and again under it, lands under the lock and releases untouched', async () => {
+    await fs.mkdir(path.join(root, 'knowledge-base'), { recursive: true });
+    const versionControl = makeVersionControl();
+    const held = trackHeldLocks(versionControl);
+    const judged: boolean[] = [];
+    let refuseUnderLock = false;
+    const validateWrite = async (p: string) => {
+      judged.push(held.has(p));
+      if (refuseUnderLock && held.has(p)) throw new Error('changed meanwhile');
+    };
+    const guarded = new LockingFilesystem(
+      { basePath: root, contained: true },
+      { versionControl, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB, validateWrite },
+    );
+    const target = 'knowledge-base/x.md';
+    let landedLocked: boolean | null = null;
+    const land = async () => {
+      landedLocked = held.has(target);
+      await fs.writeFile(path.join(root, target), 'x\n');
+    };
+    await guarded.landUnderLock(target, Buffer.from('x\n'), land);
+    expect(judged).toEqual([false, true]);
+    expect(landedLocked).toBe(true);
+    expect(versionControl.releaseLockUntouched).toHaveBeenCalledWith('ws-feat', 'feat', target, USER);
+    expect(versionControl.releaseLock).not.toHaveBeenCalled();
+
+    await fs.rm(path.join(root, target));
+    refuseUnderLock = true;
+    landedLocked = null;
+    await expect(guarded.landUnderLock(target, Buffer.from('x\n'), land)).rejects.toThrow('changed meanwhile');
+    expect(landedLocked).toBeNull();
+    await expect(fs.access(path.join(root, target))).rejects.toThrow();
+    expect(held.size).toBe(0);
   });
 
   it('rewriteFile refuses a path outside the repository before any lock', async () => {
