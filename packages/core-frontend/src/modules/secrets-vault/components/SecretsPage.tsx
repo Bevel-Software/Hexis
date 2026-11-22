@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Link, useLocation } from 'react-router-dom';
 import { Badge, Banner, Button, Surface, TextField } from '../../../shared/components';
 import { PageShell } from '../../../shared/components/PageShell';
 import { pathForTool, readOAuthFragment, ToolLogo } from '../../library';
@@ -66,8 +66,11 @@ export function SecretsPage() {
   // page and what it renders makes reads and writes that bot's secrets — the
   // page passes the bot to its own calls and provides it to its panels
   // (`ActingForBot`). Nothing outside the page sees it, so nothing is "as
-  // the bot" once the page is left.
-  const [bot] = useState(() => botFromLocation());
+  // the bot" once the page is left. Read from the router's location, so the
+  // page follows its URL: a link to another bot's page, or back to the
+  // person's own, reads and writes for whom the URL now names.
+  const location = useLocation();
+  const bot = useMemo(() => botFromLocation(location.search), [location.search]);
 
   const refresh = useCallback(async (quiet = false) => {
     const mine = ++loadSeq.current;

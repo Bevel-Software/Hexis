@@ -70,9 +70,10 @@ function pendingPair(): ConnectPending {
 
 const heard = vi.fn();
 
+/** The router starts where each test put the window, as the browser's would. */
 function renderPage() {
   return render(
-    <MemoryRouter>
+    <MemoryRouter initialEntries={[window.location.pathname + window.location.search + window.location.hash]}>
       <ConnectToolsPage />
     </MemoryRouter>,
   );
@@ -634,10 +635,29 @@ describe('ConnectToolsPage: inside Skills & Tools', () => {
       await screen.findByRole('radio', { name: /ops/ });
       expect(screen.getByRole('radio', { name: /Myself/ })).toBeChecked();
     });
+    it('while a newly chosen identity\'s list is on its way, the rows on screen still act for whom they were listed for', async () => {
+      varsMock.setUserVar.mockReset().mockResolvedValue(undefined);
+      connectMock.getConnectPending.mockImplementation(async (bot?: string | null) => {
+        loadedFor.push(bot ?? null);
+        // The bot's list never arrives in this test.
+        if (bot) return new Promise(() => {});
+        return pending(false);
+      });
+      renderPage();
+      await screen.findByLabelText('API_KEY value');
+      fireEvent.click(await screen.findByRole('radio', { name: /ops/ }));
+      await waitFor(() => expect(loadedFor.at(-1)).toBe('ops'));
+      // The person's rows are still on screen: a save there is the person's.
+      fireEvent.change(screen.getByLabelText('API_KEY value'), { target: { value: 'k' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+      await waitFor(() => expect(varsMock.setUserVar).toHaveBeenCalledWith('heyreach', 'API_KEY', 'k', null, null));
+    });
   });
 
   describe('opened for a bot by a link naming it', () => {
     it('acts for that bot while it is open, and for the person again once it leaves', async () => {
+      varsMock.setUserVar.mockReset().mockResolvedValue(undefined);
+      varsMock.checkToolConnection.mockReset().mockResolvedValue({ status: 'ok', checkedAt: '2026-11-22T00:00:00Z' });
       window.history.replaceState(null, '', '/skills-and-tools/connect?bot=ops');
       const seen: (string | null)[] = [];
       connectMock.getConnectPending.mockImplementation(async (bot?: string | null) => {
@@ -648,7 +668,45 @@ describe('ConnectToolsPage: inside Skills & Tools', () => {
       await screen.findByLabelText('API_KEY value');
       expect(seen[0]).toBe('ops');
       expect(screen.getByText(/the bot ops may reach/)).toBeInTheDocument();
+      // A key saved here is the bot's, and so is the probe that follows it.
+      fireEvent.change(screen.getByLabelText('API_KEY value'), { target: { value: 'k' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+      await waitFor(() => expect(varsMock.setUserVar).toHaveBeenCalledWith('heyreach', 'API_KEY', 'k', null, 'ops'));
+      await waitFor(() => expect(varsMock.checkToolConnection).toHaveBeenCalledWith('heyreach', 'ops'));
       page.unmount();
+
+      // Opened again without the bot, the page is the person's: every list
+      // load and every credential call after it acts for the person.
+      window.history.replaceState(null, '', '/skills-and-tools/connect');
+      seen.length = 0;
+      varsMock.setUserVar.mockClear();
+      varsMock.checkToolConnection.mockClear();
+      renderPage();
+      await screen.findByLabelText('API_KEY value');
+      expect(seen).toEqual([null]);
+      expect(screen.queryByText(/the bot ops/)).not.toBeInTheDocument();
+      fireEvent.change(screen.getByLabelText('API_KEY value'), { target: { value: 'k2' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+      await waitFor(() => expect(varsMock.setUserVar).toHaveBeenCalledWith('heyreach', 'API_KEY', 'k2', null, null));
+      await waitFor(() => expect(varsMock.checkToolConnection).toHaveBeenCalledWith('heyreach', null));
     });
+
+    it('a tool sign-in started for the bot comes back to the bot\'s page', async () => {
+      window.history.replaceState(null, '', '/skills-and-tools/connect?bot=ops');
+      connectMock.getConnectPending.mockResolvedValue({
+        tools: [],
+        oauth: [],
+        toolOAuth: [
+          { slug: 'weather', varName: 'TOKEN', toolName: 'weather', key: 'weather_TOKEN', label: 'Weather', authorized: false, needsReauth: false, ownerConfigured: true, ownerOnly: false },
+        ],
+      });
+      connectMock.startToolOAuth.mockResolvedValue('about:blank');
+      renderPage();
+      fireEvent.click(await screen.findByRole('button', { name: /Authorize/ }));
+      await waitFor(() =>
+        expect(connectMock.startToolOAuth).toHaveBeenCalledWith('weather', 'TOKEN', { returnTo: '/skills-and-tools/connect?bot=ops' }, 'ops'),
+      );
+    });
+
   });
 });

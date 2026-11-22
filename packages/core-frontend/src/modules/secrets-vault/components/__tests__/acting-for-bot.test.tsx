@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { act, render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { MemoryRouter, useNavigate } from 'react-router-dom';
 import { SecretsPage } from '../SecretsPage';
 import { listToolSecrets } from '../../services/tool-secrets.api';
 import { getConnectPending } from '../../services/connect.api';
@@ -75,11 +75,34 @@ afterEach(() => {
 
 const forBot = (url: string) => /[?&]bot=ops(?:&|$)/.test(url);
 
+/** Hands the test the router's own navigation, as a link on the page would use it. */
+let navigateTo: (to: string) => void = () => undefined;
+function Navigator() {
+  navigateTo = useNavigate();
+  return null;
+}
+
 describe('a page opened for a bot acts for it, and nothing else does', () => {
+  it('follows its URL while it stays mounted: another link names whom it acts for from then on', async () => {
+    window.history.replaceState(null, '', '/secrets?bot=ops');
+    render(
+      <MemoryRouter initialEntries={['/secrets?bot=ops']}>
+        <Navigator />
+        <SecretsPage />
+      </MemoryRouter>,
+    );
+    expect(await screen.findByTestId('secrets-of-bot')).toHaveTextContent('Secrets of ops');
+    asked.length = 0;
+    act(() => navigateTo('/secrets'));
+    await waitFor(() => expect(screen.queryByTestId('secrets-of-bot')).toBeNull());
+    await waitFor(() => expect(asked.filter((a) => a.method === 'GET').length).toBeGreaterThan(0));
+    expect(asked.some((a) => a.url.includes('bot='))).toBe(false);
+  });
+
   it("names the bot on the page's own reads and writes, never on a request made elsewhere, during or after", async () => {
     window.history.replaceState(null, '', '/secrets?bot=ops');
     const page = render(
-      <MemoryRouter>
+      <MemoryRouter initialEntries={['/secrets?bot=ops']}>
         <SecretsPage />
       </MemoryRouter>,
     );
@@ -116,7 +139,7 @@ describe('a page opened for a bot acts for it, and nothing else does', () => {
   it('is the person\'s own page, and asks as the person, when the link names no bot', async () => {
     window.history.replaceState(null, '', '/secrets');
     render(
-      <MemoryRouter>
+      <MemoryRouter initialEntries={['/secrets']}>
         <SecretsPage />
       </MemoryRouter>,
     );

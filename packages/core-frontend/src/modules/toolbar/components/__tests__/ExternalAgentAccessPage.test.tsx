@@ -854,18 +854,29 @@ describe('minting a key as a bot ("Connect as")', () => {
     expect(createMock).toHaveBeenLastCalledWith('CI', null);
   });
 
-  it('mints as Myself unless a bot is picked, and as the bot when one is', async () => {
+  // Two mints, two pages: the key a mint reveals opens a modal over the form,
+  // so a second mint on the same page would be driving a form the real
+  // overlay blocks.
+  it('mints as Myself unless a bot is picked', async () => {
     agentChoicesMock.mockResolvedValue([OPS]);
     const user = userEvent.setup();
     mount(PUBLIC_URL);
     await user.click(screen.getByRole('tab', { name: 'Autonomous agents' }));
+    await screen.findByRole('radio', { name: /ops/ });
     await user.type(screen.getByRole('textbox', { name: /Create an external API key/ }), 'CI');
     await user.click(screen.getByRole('button', { name: 'Create key' }));
     expect(createMock).toHaveBeenLastCalledWith('CI', null);
+  });
+
+  it('mints as the bot when one is picked, with the label as typed', async () => {
+    agentChoicesMock.mockResolvedValue([OPS]);
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    await user.click(screen.getByRole('tab', { name: 'Autonomous agents' }));
     await user.click(await screen.findByRole('radio', { name: /ops/ }));
     await user.type(screen.getByRole('textbox', { name: /Create an external API key/ }), 'Pipeline');
     await user.click(screen.getByRole('button', { name: 'Create key' }));
-    expect(createMock).toHaveBeenLastCalledWith(expect.stringContaining('Pipeline'), 'ops');
+    expect(createMock).toHaveBeenLastCalledWith('Pipeline', 'ops');
   });
 
   it('says when the bots could not be loaded, and mints as Myself only once that is confirmed', async () => {
