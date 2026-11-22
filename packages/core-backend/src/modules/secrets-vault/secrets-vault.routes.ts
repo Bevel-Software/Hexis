@@ -190,6 +190,7 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
       req.userId = bot.id;
       req.userEmail = bot.email;
       req.secretsMadeBy = person;
+      req.secretsBot = bot.botId;
       next();
     } catch (err) {
       log.error('resolving the bot a page was opened for failed:', { err });
@@ -308,7 +309,9 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
         u: userId,
         i: req.params.id,
         n: randomBytes(8).toString('hex'),
+        // Opened for a bot, the sign-in comes back to that bot's page.
         ...(req.secretsMadeBy ? { b: req.secretsMadeBy.id } : {}),
+        ...(req.secretsBot ? { r: `/secrets?bot=${encodeURIComponent(req.secretsBot)}` } : {}),
       });
       const url = await secretsVault.beginOAuth(
         userId,
@@ -707,6 +710,16 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
           });
         }
         if (st?.adminBringsOwnApp !== true) {
+          // On a bot's page the sign-in is bound to the person who starts it
+          // and re-checked when it completes (the signed state's `b`). A
+          // managed sign-in completes through the distribution's broker,
+          // which carries no such binding, so it is refused there rather than
+          // completed unchecked.
+          if (req.secretsMadeBy) {
+            return void res.status(409).json({
+              error: "A managed connector cannot be connected for a bot yet. Connect it on the person's own page, or ask your admin to set up the tool's own sign-in.",
+            });
+          }
           const port = deps.managedSignIns?.() ?? null;
           if (!port || !port.available()) {
             return void res.status(409).json({
@@ -758,7 +771,13 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
         u: userId,
         i: id,
         n: randomBytes(8).toString('hex'),
-        r: isSafeReturnPath(returnTo) ? returnTo : 'connect',
+        // A bot's page with no return path of its own comes back to that
+        // bot's Connect page, never the person's.
+        r: isSafeReturnPath(returnTo)
+          ? returnTo
+          : req.secretsBot
+            ? `/connect?bot=${encodeURIComponent(req.secretsBot)}`
+            : 'connect',
         ...(req.secretsMadeBy ? { b: req.secretsMadeBy.id } : {}),
       });
       const consentUrl = new URL(url);
@@ -899,6 +918,8 @@ declare global {
     interface Request {
       /** On the Secrets and Connect tools routes opened for a bot: the person acting for it. */
       secretsMadeBy?: Principal;
+      /** The id of the bot a `?bot=` page was opened for, beside `secretsMadeBy`. */
+      secretsBot?: string;
     }
   }
 }

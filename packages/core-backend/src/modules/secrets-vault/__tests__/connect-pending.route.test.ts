@@ -351,16 +351,43 @@ describe('the Secrets and Connect tools routes opened for a bot (?bot=)', () => 
         name: 'weather',
         path: 'Tools/weather.tool',
         type: 'http' as const,
-        variables: [{ name: 'API_KEY', scope: 'user' as const, label: null }],
+        variables: [
+          { name: 'API_KEY', scope: 'user' as const, label: null },
+          {
+            name: 'TOKEN',
+            scope: 'user' as const,
+            label: 'Weather sign-in',
+            oauth: { authorizationUrl: 'https://idp.example/auth', tokenUrl: 'https://idp.example/token', clientId: 'cid' },
+          },
+        ],
       },
     ]),
   } as unknown as Parameters<typeof createSecretsVaultRoutes>[0]['toolManualService'];
 
+  /**
+   * Each identity's own state, told apart: the BOT is signed in to the tool
+   * and has a standalone sign-in of its own; the PERSON is signed in to
+   * neither and has a different standalone sign-in. A page that read the
+   * wrong identity's vault shows the other's.
+   */
+  const signedIn = (u: string) => u === OPS.id;
+  const standalone = (u: string) =>
+    u === OPS.id
+      ? [{ id: 's-bot', key: 'ops_calendar', label: 'Ops calendar', kind: 'oauth', authorized: true }]
+      : [{ id: 's-person', key: 'dana_mail', label: 'Dana mail', kind: 'oauth', authorized: false }];
+
   function harness(mayActAs: { value: boolean }, withBots = true) {
-    const statusFor = vi.fn(async (_u: string, keys: string[]) =>
-      keys.map((key) => ({ key, adminConfigured: false, adminKind: null, userConfigured: false, userKind: null })),
+    const statusFor = vi.fn(async (u: string, keys: string[]) =>
+      keys.map((key) => ({
+        key,
+        adminConfigured: key === 'weather_TOKEN',
+        adminKind: key === 'weather_TOKEN' ? ('oauth' as const) : null,
+        userConfigured: signedIn(u) && key === 'weather_TOKEN',
+        userKind: signedIn(u) && key === 'weather_TOKEN' ? ('oauth' as const) : null,
+        userAuthorized: signedIn(u) && key === 'weather_TOKEN',
+      })),
     );
-    const list = vi.fn<(userId: string) => Promise<never[]>>(async () => []);
+    const list = vi.fn(async (u: string) => standalone(u));
     const getById = vi.fn(async (_u: string, id: string) => ({ id, kind: 'oauth' as const }));
     const beginOAuth = vi.fn(async (_u: string, _id: string, _r: string, state: string) => `https://idp.example/auth?state=${encodeURIComponent(state)}`);
     const completeOAuth = vi.fn(async () => undefined);
@@ -400,7 +427,11 @@ describe('the Secrets and Connect tools routes opened for a bot (?bot=)', () => 
   it('without a bot named, the pages are the person\'s own, as today', async () => {
     const h = harness({ value: true });
     const base = await listen(h.app);
-    expect((await fetch(`${base}/api/connect/pending`)).status).toBe(200);
+    const res = await fetch(`${base}/api/connect/pending`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { toolOAuth: { authorized: boolean }[]; oauth: { id: string }[] };
+    expect(body.toolOAuth).toEqual([expect.objectContaining({ authorized: false })]);
+    expect(body.oauth.map((o) => o.id)).toEqual(['s-person']);
     expect(h.statusFor.mock.calls[0]![0]).toBe('u1');
     expect(h.list.mock.calls[0]![0]).toBe('u1');
     expect(h.bots.actAs).not.toHaveBeenCalled();
@@ -409,7 +440,15 @@ describe('the Secrets and Connect tools routes opened for a bot (?bot=)', () => 
   it('opened for a bot the person may act as, it reads the bot\'s tools, secrets and sign-ins', async () => {
     const h = harness({ value: true });
     const base = await listen(h.app);
-    expect((await fetch(`${base}/api/connect/pending?bot=ops`)).status).toBe(200);
+    const res = await fetch(`${base}/api/connect/pending?bot=ops`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      toolOAuth: { key: string; authorized: boolean }[];
+      oauth: { id: string; key: string; authorized: boolean }[];
+    };
+    // The bot's tool sign-in (authorized) and the bot's own standalone sign-in — none of the person's.
+    expect(body.toolOAuth).toEqual([expect.objectContaining({ key: 'weather_TOKEN', authorized: true })]);
+    expect(body.oauth).toEqual([{ id: 's-bot', key: 'ops_calendar', label: 'Ops calendar', authorized: true }]);
     expect(h.statusFor.mock.calls[0]![0]).toBe(OPS.id);
     expect(h.list.mock.calls[0]![0]).toBe(OPS.id);
     expect(vi.mocked(oneTool.listAccessible)).toHaveBeenLastCalledWith(OPS.email);
@@ -449,6 +488,8 @@ describe('the Secrets and Connect tools routes opened for a bot (?bot=)', () => 
 
     const ok = await callback(await startUrl());
     expect(ok.headers.get('location')).toContain('#authorized=');
+    // Back on the bot's own page, never the person's.
+    expect(ok.headers.get('location')).toContain('/secrets?bot=ops#authorized=');
     expect(h.completeOAuth).toHaveBeenCalledWith(OPS.id, 's-1', 'c', expect.any(String));
 
     const state = await startUrl();
