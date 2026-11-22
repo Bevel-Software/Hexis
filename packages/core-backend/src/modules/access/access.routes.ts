@@ -616,6 +616,9 @@ export function createAccessRoutes(
         // dialog labels the chip it makes of them.
         const accountEmails = new Set(userRows.map((u) => u.email.trim().toLowerCase()));
         people = [...byEmail.values()]
+          // A bot is not a person: it is left out of the people suggested, and
+          // is granted by typing its address, with the control that exists.
+          .filter((p) => !(accessControl.isBot?.(p.email) ?? false))
           .filter((p) => p.email.toLowerCase().includes(q) || p.name.toLowerCase().includes(q))
           // The address actually TYPED is never hidden by the cap. A chip made
           // from a free-typed email labels itself by ABSENCE from this list, so

@@ -44,6 +44,8 @@ async function makeHarness(opts: {
   denied?: { name: string; email: string }[];
   /** Override the users database — to stand in a lookup that is DOWN. */
   db?: Database;
+  /** Addresses that are bots'. */
+  bots?: string[];
 }): Promise<{ server: Server; baseUrl: string; files: Map<string, string> }> {
   const files = new Map<string, string>();
   const granted = opts.granted ?? [];
@@ -63,6 +65,7 @@ async function makeHarness(opts: {
     eligibleOwners: vi.fn(async () => ({ roles: [], users: [] })),
     eligibleDownloaders: vi.fn(async () => ({ roles: [], users: [] })),
     locallyDeniedPrincipals: vi.fn(async () => ({ principals: [], users: opts.denied ?? [] })),
+    isBot: (email: string) => (opts.bots ?? []).includes(email.toLowerCase()),
   } as unknown as IAccessControl;
 
   const workspaceService = {
@@ -294,6 +297,16 @@ describe('a grant to an email with no account', () => {
       readers: { users: { email: string; hasAccount: boolean }[] };
     };
     expect(body.readers.users[0].hasAccount).toBe(true);
+  });
+
+  it('suggest leaves a bot out of the people: it is not a person, and is granted by typing its address', async () => {
+    const BOT = { name: 'release-helper', email: 'release-helper@agent.hexis' };
+    h = await makeHarness({ kbPeople: [KNOWN, BOT], accounts: [KNOWN.email, BOT.email], bots: [BOT.email] });
+    const body = (await (
+      await fetch(`${h.baseUrl}/api/workspace/${encodeURIComponent(WS)}/access/suggest?q=${encodeURIComponent('re')}`)
+    ).json()) as { people: { email: string }[] };
+    expect(body.people.map((p) => p.email)).toContain(KNOWN.email);
+    expect(body.people.map((p) => p.email)).not.toContain(BOT.email);
   });
 
   it('suggest puts the exact address asked for first, so the cap can never hide it', async () => {

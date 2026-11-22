@@ -10,6 +10,7 @@ import type { VersionControlEventBus } from '../../version-control/index.js';
 import type { FileTreeEntry, VersionControlEventPayload } from '@bevel-software/platform-shared';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { AccessControlService } from '../access-control.service.js';
+import { BotAddressBook } from '../../bots/bot-address-book.js';
 import { RolesAdminService } from '../roles-admin.service.js';
 import { rewriteRoleTokensInText, findRoleRefsInText } from '../reference-scan.js';
 import { PushNeedsAgentResolutionError } from '../../../shared/domain-errors.js';
@@ -293,6 +294,22 @@ describe('RolesAdminService', () => {
     expect(asAdmin).not.toHaveProperty('referencesHidden');
     const asMember = (await svc.getRoster(SALES_VIEWER)).find((r) => r.canonical === 'sales')!;
     expect(asMember.referencedBy).toHaveLength(2);
+  });
+
+  it('refuses to give a bot a role, Admin least of all, and writes nothing', async () => {
+    const book = new BotAddressBook();
+    book.replace({ domain: 'agent.hexis', botIds: ['release-helper'], previousDomain: null });
+    const withBots = new AccessControlService(ws, KB, realDisk(), [], undefined, undefined, {}, book);
+    const guarded = new RolesAdminService(ws, versionControl.svc, withBots, realDisk(), KB, () => DEFAULT_BRANCH, bus.bus);
+    const before = await readRoles();
+    for (const role of ['sales', 'admin']) {
+      await expect(guarded.addMember(ADMIN, role, 'release-helper@agent.hexis')).rejects.toMatchObject({
+        status: 422,
+        payload: { kind: 'bot-cannot-hold-role' },
+      });
+    }
+    expect(await readRoles()).toBe(before);
+    expect(versionControl.commits).toHaveLength(0);
   });
 
   it('addMember persists + is idempotent', async () => {
