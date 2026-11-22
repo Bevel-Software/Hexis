@@ -2272,6 +2272,14 @@ export class WorkspaceService implements IWorkspaceService {
      * extraction. Omitted by non-agent / human callers.
      */
     guardWrite?: (wsRelativePath: string, content?: Buffer) => Promise<void>,
+    /**
+     * How a file entry that passed the guard is put on disk: called with its
+     * target, its bytes and the write itself, and expected to run `write`
+     * (under the caller's lock, judged again there) or throw to skip the
+     * entry with the thrown message as the reason. Absent, the write runs
+     * directly, as it always has for non-agent callers.
+     */
+    landEntry?: (wsRelativePath: string, content: Buffer, write: () => Promise<void>) => Promise<void>,
   ): Promise<UnzipResult> {
     const { workspaceDir, relativePath: zipRelativePath, absolutePath: zipAbsolute } =
       await this.resolveInsideRepo(workspaceId, zipWsPath);
@@ -2471,8 +2479,20 @@ export class WorkspaceService implements IWorkspaceService {
         continue;
       }
       if (!(await allowEntry(data))) continue;
-      await fs.mkdir(path.dirname(targetAbsolute), { recursive: true });
-      await fs.writeFile(targetAbsolute, data);
+      const write = async (): Promise<void> => {
+        await fs.mkdir(path.dirname(targetAbsolute), { recursive: true });
+        await fs.writeFile(targetAbsolute, data);
+      };
+      if (landEntry) {
+        try {
+          await landEntry(relForReport, data, write);
+        } catch (err) {
+          skipped.push({ path: rawName, reason: err instanceof Error ? err.message : 'Refused before it was written' });
+          continue;
+        }
+      } else {
+        await write();
+      }
       totalUncompressed += data.byteLength;
       extracted.push(relForReport);
       await this.diffService?.syncFromDisk(workspaceId, relForReport);

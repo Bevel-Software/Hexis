@@ -144,6 +144,21 @@ interface ReadGate {
 }
 
 /** Throw a 403 ToolError if the gate denies reading `wsPath` (a KB node). */
+/**
+ * `unzip`'s landing for each extracted file: under the file's lock, with the
+ * agent's write gate asked again there (`LockingFilesystem.landUnderLock`).
+ * The agent's write filesystem is always a locking one (`write: true`); one
+ * that is not lands directly, as the service would.
+ */
+async function landingUnderLock(
+  ctx: ToolContext,
+  branch: string,
+): Promise<((wsRelPath: string, content: Buffer, write: () => Promise<void>) => Promise<void>) | undefined> {
+  const fs = (await ctx.getFilesystem(branch)) as LocalFilesystem & { landUnderLock?: LockingFilesystem['landUnderLock'] };
+  if (typeof fs.landUnderLock !== 'function') return undefined;
+  return (wsRelPath, content, write) => fs.landUnderLock!(wsRelPath, content, write);
+}
+
 async function assertCanRead(gate: ReadGate, wsPath: string): Promise<void> {
   const rel = toKbRelative(wsPath, gate.kbDirName);
   if (rel === null) return; // not a KB node — not governed by read rules
@@ -3801,7 +3816,14 @@ export function registerWorkspaceTools(
       // the two — by another agent, or by the sidebar, which moves without
       // taking this lock — comes back here as a refusal, not an overwrite.
       if (linkPlan === undefined) {
-        await asEntryExists(() => fs.moveFile(src, dest));
+        // A folder moves through the filesystem's all-files-locked move, which
+        // answers a held file or one that arrived meanwhile as those errors.
+        try {
+          await asEntryExists(() => fs.moveFile(src, dest));
+        } catch (err) {
+          if (err instanceof MoveLockedError || err instanceof MoveRacedError) throw new ToolError(err.message, 409);
+          throw err;
+        }
       } else {
         // The move and every link edit, one commit. Under the locks, each page
         // is checked to still hold the bytes its edit was computed from.
@@ -4000,6 +4022,7 @@ export function registerWorkspaceTools(
       // into the same 404 every other file tool answers. Only that declared
       // answer maps — a failure part-way through an extraction is not the
       // archive going missing.
+      const landEntry = await landingUnderLock(ctx, a.branch as string);
       return orDeclaredNotFound(
         () =>
           ctx.workspaceService.unzipFile(
@@ -4030,6 +4053,12 @@ export function registerWorkspaceTools(
               // or a change to a file's own access lines.
               if (content !== undefined) await (await ctx.getWriteValidator(a.branch as string))(wsRelPath, content);
             },
+            // ...and lands, as those writes do, under the file's lock with the
+            // gate asked again there: extraction writes past the filesystem,
+            // so without the lock a save between the gate and the write could
+            // change what the gate judged (a page gaining access lines a bot's
+            // bytes would then remove). The bytes stay uncommitted.
+            landEntry,
           ),
         'Nothing to extract',
       );
