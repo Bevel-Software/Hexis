@@ -39,6 +39,7 @@ import {
 } from '../modules/tool-manuals/index.js';
 import { registerVersionControlTools } from '../modules/version-control/agent-tools/version-control.tools.js';
 import { changeRequestScope, registerChangeRequestReadTools } from '../modules/version-control/agent-tools/change-request-read.tools.js';
+import { registerChangeRequestApplyTools } from '../modules/version-control/agent-tools/change-request-apply.tools.js';
 import { createOnboardingRoutes } from '../modules/onboarding/onboarding.routes.js';
 import { registerWorkspaceTools } from '../modules/workspace/workspace.tools.js';
 import { registerAgentGuideTool } from '../modules/agent-guide/index.js';
@@ -508,6 +509,8 @@ export async function createCoreServer(
   // because they are the only ones that gate their whole payload on the
   // caller's read access, so they take the access service and nothing else.
   registerChangeRequestReadTools(core.toolRegistry, toolsRouter, ta, th, core.accessControl, core.kb);
+  // Approving and applying a change request: offered only to a connection made as a bot.
+  registerChangeRequestApplyTools(core.toolRegistry, toolsRouter, ta, th, core.accessControl, core.kb);
   const workspaceTools = registerWorkspaceTools(core.toolRegistry, toolsRouter, ta, th, core.spillStore, core.docExtractService, core.accessControl, core.kb, agentAccessGate, core.routineWritePolicy, core.sessionSink, allowedToolsChecker, core.changeGate, core.agentUploadStore, core.agentGuideStart, core.agentDownloadStore, core.starterPackService, core.disk, core.patternMatcher);
   // `open_page` — the knowledge-base page shown inside a chat. Registered
   // here, on the same router as the file tools, because it answers with

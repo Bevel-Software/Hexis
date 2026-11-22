@@ -28,7 +28,7 @@ const BOT: AuthUser = { id: 'u-bot', email: 'release-helper@agent.hexis', name: 
 const PERSON: AuthUser = { id: 'u-dana', email: 'dana@acme.com', name: 'Dana' };
 const isBot = (email: string) => email === BOT.email;
 
-function makeService(changed: Record<string, { base: string | null; head: string | null }> = {}) {
+function makeService(changed: Record<string, { base: string | null; head: string | null }> = {}, db: unknown = {}) {
   const acquire = vi.fn(async () => ({ acquired: true, lock: {} as never }));
   const gate: IChangeReadGate = { judge: vi.fn(), assertMayChange: vi.fn(async () => undefined) };
   const git = {
@@ -41,7 +41,7 @@ function makeService(changed: Record<string, { base: string | null; head: string
   const prs = { getPr: vi.fn(async () => ({ base: 'main', branch: DRAFT })) } as unknown as PullRequestService;
   const mergePr = vi.fn(async () => ({ merged: true }));
   const svc = new VersionControlService(
-    {} as unknown as Database,
+    db as Database,
     git,
     prs,
     { mergePr } as unknown as IChangeRequestReviewService,
@@ -94,5 +94,20 @@ describe('a bot merging a change request', () => {
     });
     await expect(merge(svc, BOT)).rejects.toThrow(/access lines/);
     expect(mergePr).not.toHaveBeenCalled();
+  });
+});
+
+describe('a bot merging a branch that an open change request proposes', () => {
+  /** A database whose one answer is the open request #12 from the source into the target. */
+  const openRequest = { select: () => ({ from: () => ({ where: () => ({ limit: async () => [{ number: 12 }] }) }) }) };
+
+  it('is pointed at apply_change_request, where the request\'s own gate decides; a person is pointed at the app', async () => {
+    const { svc } = makeService({}, openRequest);
+    const forBot = await svc.mergeBranch(BOT, DRAFT, 'main').catch((e: unknown) => e as Error);
+    expect(forBot.message).toMatch(/Change request #12 proposes merging "bots\/proposal" into "main" and is still open\./);
+    expect(forBot.message).toMatch(/use `apply_change_request` with number 12/);
+    expect(forBot.message).not.toMatch(/ask the user/);
+    const forPerson = await svc.mergeBranch(PERSON, DRAFT, 'main').catch((e: unknown) => e as Error);
+    expect(forPerson.message).toMatch(/A change request is merged by a person: ask the user to review #12 in the app\./);
   });
 });

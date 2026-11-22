@@ -1,4 +1,5 @@
 import {
+  BOT_ONLY_TOOLS,
   NOT_AVAILABLE_TO_CONNECTION,
   connectionRefusal,
   describeConnection,
@@ -82,10 +83,16 @@ export class ConnectionScope {
     return this.loadsAnything();
   }
 
-  /** Whether the platform's own tool `name` is loaded. */
+  /**
+   * Whether the platform's own tool `name` is loaded. Myself loads every
+   * platform tool but the bot-only ones (`BOT_ONLY_TOOLS`: approving and
+   * applying a change request), which only a connection made as a bot is
+   * offered — the one place that decides it, for every listing and every
+   * call.
+   */
   allowsPlatformTool(name: string): boolean {
     const s = this.state;
-    if (s.kind === 'myself') return true;
+    if (s.kind === 'myself') return !BOT_ONLY_TOOLS.has(name);
     if (s.kind === 'unavailable') return false;
     return s.platformTools === null || s.platformTools.includes(name);
   }

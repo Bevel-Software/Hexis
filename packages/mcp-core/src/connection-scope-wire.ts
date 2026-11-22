@@ -20,6 +20,16 @@ export const NOT_AVAILABLE_TO_CONNECTION = 'not_available_to_connection';
  */
 export const CONNECTION_META_KEY = 'software.bevel.hexis/connection';
 
+/**
+ * The platform tools offered ONLY to a connection made as a bot: approving
+ * and applying a change request. A bot is an identity of its own, granted
+ * like a person, and may approve and apply where its grants allow; an agent
+ * acting as a person proposes, and the person reviews and applies in the
+ * app. A connection made as Myself is never offered these, and a call is
+ * refused with {@link connectionRefusal}'s sentence for them.
+ */
+export const BOT_ONLY_TOOLS: ReadonlySet<string> = new Set(['approve_change_request', 'apply_change_request']);
+
 /** The bot a connection was made as. */
 export interface ScopeAgent {
   /**
@@ -63,7 +73,11 @@ export function connectionWireOf(body: unknown): ConnectionScopeWire | undefined
  * The ONE wording — the tool route and both MCP servers answer with it.
  */
 export function connectionRefusal(toolName: string, wire: ConnectionScopeWire | undefined): string {
-  if (!wire) return `The tool "${toolName}" is not available to this connection.`;
+  if (!wire) {
+    return BOT_ONLY_TOOLS.has(toolName)
+      ? `The tool "${toolName}" is offered only to a connection made as a bot. A change request you propose is reviewed and applied by a person in the app: ask the user to do it there.`
+      : `The tool "${toolName}" is not available to this connection.`;
+  }
   if (wire.unavailable) return wire.unavailable;
   return (
     `The tool "${toolName}" is not available to this connection: it acts as the bot ` +

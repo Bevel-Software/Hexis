@@ -4501,7 +4501,7 @@ export class VersionControlService implements IVersionControlService {
     // at once rather than after the source's commits have landed. Not the
     // answer that counts — that one is asked again under the locks below.
     const openBefore = await this.openRequestBlockingMerge(sourceBranch, targetBranch);
-    if (openBefore !== null) throw new OpenChangeRequestBlocksMergeError(sourceBranch, targetBranch, openBefore);
+    if (openBefore !== null) throw new OpenChangeRequestBlocksMergeError(sourceBranch, targetBranch, openBefore, this.isBot(user.email));
 
     // Writes are committed asynchronously: a write tool answers once the bytes
     // are on disk and the pending-commits worker commits and pushes them a few
@@ -4540,7 +4540,7 @@ export class VersionControlService implements IVersionControlService {
       // blocked: the target merged into the source is how a draft under review
       // stays current, and that must keep working while the request is open.
       const open = await this.openRequestBlockingMerge(sourceBranch, targetBranch);
-      if (open !== null) throw new OpenChangeRequestBlocksMergeError(sourceBranch, targetBranch, open);
+      if (open !== null) throw new OpenChangeRequestBlocksMergeError(sourceBranch, targetBranch, open, this.isBot(user.email));
 
       // The merge runs in the target's own workspace, like a change request's.
       const targetWorkspaceId = (await this.workspaceService.getOrCreateForBranch(targetBranch)).id;
@@ -5084,7 +5084,7 @@ export class VersionControlService implements IVersionControlService {
     // how a draft under review stays current, and is never blocked.)
     if (from !== branch) {
       const openBefore = await this.openRequestBlockingMerge(from, branch);
-      if (openBefore !== null) throw new OpenChangeRequestBlocksMergeError(from, branch, openBefore);
+      if (openBefore !== null) throw new OpenChangeRequestBlocksMergeError(from, branch, openBefore, this.isBot(user.email));
     }
     // The merge takes what the REMOTE holds of `from`, and the push publishes
     // the branch: writes still being committed on either would be missed by
@@ -5115,7 +5115,7 @@ export class VersionControlService implements IVersionControlService {
     return this.runOnBranchPair(from, branch, async () => {
       if (from !== branch) {
         const open = await this.openRequestBlockingMerge(from, branch);
-        if (open !== null) throw new OpenChangeRequestBlocksMergeError(from, branch, open);
+        if (open !== null) throw new OpenChangeRequestBlocksMergeError(from, branch, open, this.isBot(user.email));
       }
       if (!(await this.git.remoteBranchExists(workspaceId, from))) {
         throw new VersionControlValidationError(`No branch named "${from}" on the shared repository.`);

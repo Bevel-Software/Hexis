@@ -33,6 +33,22 @@ describe('ConnectionScope', () => {
     expect(scope.describe()).toMatch(/acts as the bot "ops" \(ops@agent\.hexis\), not as the person who made it/);
   });
 
+  it('offers approving and applying a change request to a bot alone: Myself is refused them, saying who applies', () => {
+    const myself = ConnectionScope.myself();
+    for (const tool of ['approve_change_request', 'apply_change_request']) {
+      expect(myself.allowsPlatformTool(tool)).toBe(false);
+      expect(myself.platformToolRefusal(tool)).toEqual({
+        error:
+          `The tool "${tool}" is offered only to a connection made as a bot. A change request you propose is reviewed and applied by a person in the app: ask the user to do it there.`,
+        code: NOT_AVAILABLE_TO_CONNECTION,
+      });
+      expect(ConnectionScope.asBot(BOT, null, 'fp').allowsPlatformTool(tool)).toBe(true);
+    }
+    // The distribution's limit on a bot's platform tools still applies to them.
+    expect(ConnectionScope.asBot(BOT, ['read_file'], 'fp').allowsPlatformTool('apply_change_request')).toBe(false);
+    expect(ConnectionScope.asBot(BOT, ['apply_change_request'], 'fp').allowsPlatformTool('apply_change_request')).toBe(true);
+  });
+
   it('a bot offered every tool is refused none', () => {
     expect(ConnectionScope.asBot(BOT, null, 'fp').platformToolRefusal('create_plugin')).toBeNull();
   });

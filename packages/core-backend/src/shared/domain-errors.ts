@@ -675,6 +675,8 @@ export class ChangeRequestConflictsError extends VersionControlDomainError {
  * A direct branch merge was asked to do what an open change request is
  * waiting for a person to do: merge `sourceBranch` into `targetBranch`.
  * Carries the request's number so the caller can point the person at it.
+ * `byBot`: the caller is a bot, which applies a request itself, through its
+ * gate (`apply_change_request`), rather than asking a person to.
  */
 export class OpenChangeRequestBlocksMergeError extends VersionControlDomainError {
   readonly kind = 'open-change-request-blocks-merge' as const;
@@ -682,10 +684,13 @@ export class OpenChangeRequestBlocksMergeError extends VersionControlDomainError
     readonly sourceBranch: string,
     readonly targetBranch: string,
     readonly number: number,
+    byBot = false,
   ) {
     super(
       `Change request #${number} proposes merging "${sourceBranch}" into "${targetBranch}" and is still open. ` +
-        `A change request is merged by a person: ask the user to review #${number} in the app.`,
+        (byBot
+          ? `It is applied through its own gate: use \`apply_change_request\` with number ${number}.`
+          : `A change request is merged by a person: ask the user to review #${number} in the app.`),
       409,
       { kind: 'open-change-request-blocks-merge', sourceBranch, targetBranch, number },
     );

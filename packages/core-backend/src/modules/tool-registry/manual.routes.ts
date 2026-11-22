@@ -3,6 +3,7 @@ import { UtcpManualSerializer } from '@utcp/sdk';
 import { declaresWrite, type IToolRegistry, type ToolManualContext, type UtcpTool } from './tool.contract.js';
 import { requireInternalSource } from '../tool-auth/index.js';
 import type { IToolReadOnlyHints } from './read-only-hints.contract.js';
+import { ConnectionScope } from '../agent-scope/index.js';
 
 /** Resolve a connection-key/internal-token user id to its email (for per-caller provider defs). */
 export type ResolveUserEmail = (userId: string) => Promise<string | undefined>;
@@ -91,13 +92,19 @@ export function createManualRoutes(
     const ctx = await context(req);
     const tools = await registry.listExternal(ctx);
     // A connection made as a bot is offered only the platform tools the
-    // distribution offers the bot; a call to another is refused at its route.
-    const scope = ctx.connectionScope;
-    const offered = scope ? tools.filter((t) => scope.allowsPlatformTool(t.name)) : tools;
+    // distribution offers the bot, and Myself none of the bot-only ones; a
+    // call to another is refused at its route. No scope on the context is
+    // Myself.
+    const scope = ctx.connectionScope ?? ConnectionScope.myself();
+    const offered = tools.filter((t) => scope.allowsPlatformTool(t.name));
     res.json(toManual(readOnlyHints ? readOnlyHints.apply(offered) : offered));
   });
   router.get('/agent/internal/utcp', manualAuth, requireInternalSource, async (req, res) => {
-    const internal = await registry.listInternal(await context(req));
+    const ctx = await context(req);
+    // The same offer as the external manual: the in-app agent acts as a
+    // person (Myself), and a bot's internal token as that bot.
+    const scope = ctx.connectionScope ?? ConnectionScope.myself();
+    const internal = (await registry.listInternal(ctx)).filter((t) => scope.allowsPlatformTool(t.name));
     const tools = req.toolAuth?.scope === 'read' ? internal.filter((t) => !declaresWrite(t)) : internal;
     res.json(toManual(tools));
   });

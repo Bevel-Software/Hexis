@@ -95,6 +95,18 @@ import {
  * does not resolve — an access tree that will not load at `origin/<base>`, or a
  * clone that does not have the merge commit yet.
  */
+/** A change-request number as the change-request tools accept it. */
+export function changeRequestNumberArg(args: Record<string, unknown>): number {
+  const n = args.number;
+  // A SAFE integer: JSON carries numbers a double cannot hold exactly, and
+  // one of those would reach the database rounded, or as an error the
+  // caller could not have predicted — not as the 400 a wrong number earns.
+  if (typeof n !== 'number' || !Number.isSafeInteger(n) || n <= 0) {
+    throw new ToolError('`number` is required and must be a positive integer.', 400);
+  }
+  return n;
+}
+
 export function registerChangeRequestReadTools(
   registry: IToolRegistry,
   router: Router,
@@ -130,17 +142,7 @@ export function registerChangeRequestReadTools(
     router.post(path.slice('/api'.length), toolAuth, toolHandler(spec.handler, { write: false }));
   };
 
-  /** A change-request number as the tools accept it. */
-  const numberArg = (args: Record<string, unknown>): number => {
-    const n = args.number;
-    // A SAFE integer: JSON carries numbers a double cannot hold exactly, and
-    // one of those would reach the database rounded, or as an error the
-    // caller could not have predicted — not as the 400 a wrong number earns.
-    if (typeof n !== 'number' || !Number.isSafeInteger(n) || n <= 0) {
-      throw new ToolError('`number` is required and must be a positive integer.', 400);
-    }
-    return n;
-  };
+  const numberArg = changeRequestNumberArg;
 
   const { repoGlobalWorkspaceId, readablePaths, scopedDetail } = changeRequestScope(accessControl, kb);
 
@@ -609,13 +611,19 @@ export function changeRequestScope(
   const scopedDetail = async (
     ctx: ToolContext,
     number: number,
-    opts: { patches: boolean },
+    /**
+     * `fresh`: read past the detail cache — what a tool that ACTS on the
+     * request needs, so an approval or an apply pins to the head as it is now
+     * and not to a head the caller never saw.
+     */
+    opts: { patches: boolean; fresh?: boolean },
   ): Promise<ScopedDetail> => {
     const workspaceId = await repoGlobalWorkspaceId(ctx);
     const detail = await ctx.versionControlService.getChangeRequestDetail(number, {
       workspaceId,
       viewerEmail: ctx.user.email,
       patches: opts.patches,
+      ...(opts.fresh ? { fresh: true } : {}),
     });
     if (!detail) throw notFound(number);
     const viewerIsAuthor = isAuthor(detail, ctx.user.email);
