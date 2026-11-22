@@ -71,7 +71,12 @@ describe('a connection made as a bot, at the credential verifier', () => {
         : { kind: 'unavailable', bot: { id: 'ops', name: 'ops' }, sentence: 'You may no longer act as ops.', reason: 'gone' },
     );
     const verify = createTokenVerifier(keys, internal, undefined, undefined, { bots, userOf: async () => DANA });
-    expect((await verify('bevel_bot')).ok && (await verify('bevel_bot'))).toBeTruthy();
+    // Both earlier calls act as the bot: the connection is usable before `usable` is switched off.
+    for (let i = 0; i < 2; i++) {
+      const call = await verify('bevel_bot');
+      expect(call.ok).toBe(true);
+      if (call.ok) expect(call.auth.userId).toBe(OPS.id);
+    }
     usable = false;
     const stopped = await verify('bevel_bot');
     if (!stopped.ok) throw new Error('refused');

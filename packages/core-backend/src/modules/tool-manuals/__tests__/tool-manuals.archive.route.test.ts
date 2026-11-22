@@ -175,9 +175,11 @@ describe('GET /tools/:slug/manual', () => {
     await new Promise<void>((r) => httpServer!.close(() => r()));
 
     base = await baseUrl(undefined, { scope: UNAVAILABLE }, service);
-    await fetch(`${base}/api/tools/weather/manual`);
-    const last = resolveInlineManual.mock.calls.at(-1) as unknown[] | undefined;
-    const within = last?.[2] as { within?: (p: string) => boolean } | undefined;
-    if (within?.within) expect(within.within('Plugins/GTM/weather.tool')).toBe(false);
+    // The stub answers a manual whatever it is asked, so the status says the
+    // route asked; the filter it was handed is what narrows a real service.
+    expect((await fetch(`${base}/api/tools/weather/manual`)).status).toBe(200);
+    expect(resolveInlineManual).toHaveBeenLastCalledWith('ali@example.com', 'weather', { within: expect.any(Function) });
+    const last = resolveInlineManual.mock.calls.at(-1) as unknown as [string, string, { within: (p: string) => boolean }];
+    expect(last[2].within('Plugins/GTM/weather.tool')).toBe(false);
   });
 });

@@ -1,7 +1,7 @@
 import type { Server as HttpServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import express from 'express';
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { ToolRegistry } from '../tool-registry.js';
 import { createManualRoutes } from '../manual.routes.js';
 import { ConnectionScope } from '../../agent-scope/index.js';
@@ -21,12 +21,7 @@ const pass: express.RequestHandler = (_req, _res, next) => next();
 const handler = (() => pass) as never;
 const accessControl = { canReadBatchAtRef: async () => new Map<string, boolean>() };
 const BOT_ONLY = ['approve_change_request', 'apply_change_request'];
-
-let server: HttpServer | undefined;
-afterEach(async () => {
-  await new Promise<void>((r) => (server ? server.close(() => r()) : r()));
-  server = undefined;
-});
+const READ_TOOLS = ['list_change_requests', 'get_change_request', 'list_change_request_files', 'list_change_request_reviews'];
 
 async function manualOf(connection: ConnectionScope | undefined, route: '/agent/utcp' | '/agent/internal/utcp'): Promise<string[]> {
   const registry = new ToolRegistry();
@@ -44,11 +39,17 @@ async function manualOf(connection: ConnectionScope | undefined, route: '/agent/
   };
   const app = express();
   app.use('/api', createManualRoutes(registry, auth));
-  server = await new Promise<HttpServer>((r) => {
+  // Each listing its own server, closed before the next one starts: a check
+  // that asks several times leaves nothing listening behind it.
+  const server = await new Promise<HttpServer>((r) => {
     const s = app.listen(0, '127.0.0.1', () => r(s));
   });
-  const res = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/api${route}`);
-  return ((await res.json()) as { tools: Array<{ name: string }> }).tools.map((t) => t.name);
+  try {
+    const res = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/api${route}`);
+    return ((await res.json()) as { tools: Array<{ name: string }> }).tools.map((t) => t.name);
+  } finally {
+    await new Promise<void>((r) => server.close(() => r()));
+  }
 }
 
 describe('the bot-only tools in the manuals', () => {
@@ -56,7 +57,7 @@ describe('the bot-only tools in the manuals', () => {
     for (const connection of [undefined, ConnectionScope.myself()]) {
       const names = await manualOf(connection, route);
       for (const tool of BOT_ONLY) expect(names).not.toContain(tool);
-      expect(names).toContain('get_change_request');
+      for (const tool of READ_TOOLS) expect(names).toContain(tool);
     }
   });
 

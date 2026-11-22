@@ -338,11 +338,15 @@ describe('apply_change_request, as a bot', () => {
   it('answers the reason when recording it for others fails, never that failure instead', async () => {
     mergeChangeRequest.mockRejectedValue(new VersionControlDomainError('Merge gate rejected: x', 422, { mergeBlockedReasons: ['x'] }));
     recordApplyFailure.mockRejectedValue(new Error('db down'));
-    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    const base = await start();
-    const res = await call(base, 'apply_change_request', { number: 7 });
-    expect(res.status).toBe(422);
-    expect(res.json.error).toBe('Merge gate rejected: x');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const base = await start();
+      const res = await call(base, 'apply_change_request', { number: 7 });
+      expect(res.status).toBe(422);
+      expect(res.json.error).toBe('Merge gate rejected: x');
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('names only the conflicting files it may read', async () => {

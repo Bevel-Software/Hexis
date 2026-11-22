@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { AuthUser } from '@bevel-software/platform-shared';
-import { NodeFs } from '../../kb-fs/node-fs.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
 import { WalkError, type ITreeWalker } from '../../../shared/fs.contract.js';
 import { hasAccessFrontmatterExtension, isAccessFile } from '../../access-model/index.js';
 import { GrantRewriteChangeRequests } from '../bot-domain-change.js';
@@ -38,7 +38,7 @@ async function seed(files: Record<string, string>): Promise<string> {
   return root;
 }
 
-function rewriter(dir: string, walker: Pick<ITreeWalker, 'walkKb'> = new NodeFs()) {
+function rewriter(dir: string, walker: Pick<ITreeWalker, 'walkKb'> = realDisk()) {
   const written: Record<string, string> = {};
   const calls: string[] = [];
   const r = new GrantRewriteChangeRequests({
@@ -114,7 +114,7 @@ describe('the grant-rewriting change request of a bots\' domain change', () => {
 
   it('refuses the whole rewrite, opening nothing, when a folder cannot be listed', async () => {
     const dir = await seed({ 'access.md': '---\nread:\n  - ops@agent.hexis\n---\n' });
-    const real = new NodeFs();
+    const real = realDisk();
     // A walker that finds a hole: reported and walked around unless the
     // caller asks for the walk to throw — which the rewrite must.
     const holed: Pick<ITreeWalker, 'walkKb'> = {

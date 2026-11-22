@@ -245,7 +245,7 @@ describe('GET /agent/catalog-revision, for a connection made as an .agent file',
   const paths = ['Plugins/Ops/ops.tool', 'Plugins/Sales/crm.tool'];
   const skills = [skill({ name: 'notes', path: 'Skills/Release/notes' }), skill({ name: 'pitch', path: 'Skills/Sales/pitch' })];
 
-  async function mount(connection: ConnectionScope | undefined) {
+  async function mount(connection: ConnectionScope | undefined, userId = 'u1') {
     // The two services judge by the caller they are handed, AFTER their own
     // read gate — stood in for here by the lists above, all readable.
     const catalogFingerprints = vi.fn(async (_email: string, within?: (p: string) => boolean) =>
@@ -260,10 +260,12 @@ describe('GET /agent/catalog-revision, for a connection made as an .agent file',
         toolManuals: { catalogFingerprints } as never,
         skills: { listSkills } as never,
         manualAuth: (req, _res, next) => {
-          req.toolAuth = { userId: 'u1', ...(connection ? { connection } : {}) } as never;
+          req.toolAuth = { userId, ...(connection ? { connection } : {}) } as never;
           next();
         },
-        resolveUserEmail: async () => 'ada@example.com',
+        // The bot's row has an address of its own: a read judged for the
+        // person instead would show up as `ada@example.com` below.
+        resolveUserEmail: async (id: string) => (id === 'u-ops' ? 'ops@agent.hexis' : 'ada@example.com'),
       }),
     );
     http = app.listen(0);
@@ -283,9 +285,14 @@ describe('GET /agent/catalog-revision, for a connection made as an .agent file',
 
   it('a bot is fingerprinted over what it may read (the caller is the bot), names the bot, and moves with whom it acts as', async () => {
     const asBot = ConnectionScope.asBot({ path: 'ops@agent.hexis', name: 'ops' }, null, 'bot-ops');
-    const { read } = await mount(asBot);
+    // The verifier puts the bot's row on the call.
+    const { read, catalogFingerprints, listSkills } = await mount(asBot, 'u-ops');
     const body = await read();
     expect(body.tools).toBe(2);
+    expect(catalogFingerprints.mock.calls.every((c) => c[0] === 'ops@agent.hexis')).toBe(true);
+    expect(listSkills.mock.calls.every((c) => c[0] === 'ops@agent.hexis')).toBe(true);
+    expect(catalogFingerprints).toHaveBeenCalled();
+    expect(listSkills).toHaveBeenCalled();
     expect(body.connection).toEqual({ agent: { path: 'ops@agent.hexis', name: 'ops' } });
     expect(body.revision).not.toBe(catalogRevision(lines, skills));
   });
