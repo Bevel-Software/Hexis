@@ -41,7 +41,7 @@ import {
   toListedResource,
   toReadResourceResult,
   CONNECTION_META_KEY,
-  connectionRefusal,
+  unlistedToolAnswer,
   describeConnection,
   type ConnectionScopeWire,
   type McpAppManifest,
@@ -1312,7 +1312,7 @@ export async function createHexisMcpServer(
         // On a narrowed connection, a tool off the surface is one its agent
         // does not load: refused by name and agent, never "unknown" — the tool
         // may well exist, for this person, on another connection.
-        if (!tool) return toolError(connection ? connectionRefusal(name, connection) : `Unknown tool "${name}".`);
+        if (!tool) return toolError(unlistedToolAnswer(name, connection));
         const progressToken = request.params._meta?.progressToken;
         return await dispatchToolCall(
           live,

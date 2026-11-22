@@ -650,7 +650,12 @@ export function createAccessRoutes(
         // older server (no such field) and a failed lookup (no response) are
         // the other two ways to say nothing — all three leave the address
         // unjudged rather than labelled on a guess.
-        accountsKnown: !peopleWithheld,
+        //
+        // And false for a bot's address typed in full: a bot has a row but is
+        // left out of `people`, so its absence there is no evidence of a
+        // missing account, and the chip made of it must not be labelled
+        // "hasn't signed in yet" with invite advice the server would refuse.
+        accountsKnown: !peopleWithheld && !(accessControl.isBot?.(q) ?? false),
         // DEPRECATED alias of `roles` — the shipped share dialog still reads
         // `plugins`. Kept populated for ONE release; remove in 0.2.0 together
         // with the dialog's rename to `roles`.

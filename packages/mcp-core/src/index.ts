@@ -182,6 +182,7 @@ export {
   NOT_AVAILABLE_TO_CONNECTION,
   connectionRefusal,
   connectionWireOf,
+  unlistedToolAnswer,
   describeConnection,
   type ConnectionScopeWire,
   type ScopeAgent,

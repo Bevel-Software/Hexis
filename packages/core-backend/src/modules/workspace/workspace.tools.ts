@@ -2056,10 +2056,12 @@ export function registerWorkspaceTools(
         connectedAs: {
           type: ['object', 'null'],
           description:
-            'The bot this connection acts as: its address as `path`, and its `name`. Null when the connection was made as Myself.',
+            'The bot this connection was made as, `{ path, name }`. Null when it was made as Myself.',
           properties: {
-            path: str("The bot's address (`<id>@<bots' domain>`)."),
-            name: str("The bot's name."),
+            path: str(
+              "The bot's address (`<id>@<bots' domain>`). For a bot that cannot be used, the id or legacy path it was made with.",
+            ),
+            name: str("The bot's name; `unknown` when no bot answers to the connection any more."),
           },
           required: ['path', 'name'],
         },

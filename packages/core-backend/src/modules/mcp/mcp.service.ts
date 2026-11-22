@@ -81,7 +81,7 @@ import {
 import { guideFirstDescription } from '../tool-registry/index.js';
 import {
   CONNECTION_META_KEY,
-  connectionRefusal,
+  unlistedToolAnswer,
   connectionWireOf,
   describeConnection,
   type ConnectionScopeWire,
@@ -882,7 +882,7 @@ export class McpService {
           answer ??
           toolError(
             retiredToolMessage(toolName) ??
-              (connection ? connectionRefusal(toolName, connection) : `Unknown tool "${toolName}".`),
+              unlistedToolAnswer(toolName, connection),
           )
         );
       }

@@ -285,6 +285,16 @@ async function existsForCommitCheck(absolutePath: string): Promise<boolean> {
 }
 
 /**
+ * The trailer paragraph a BOT's commit carries (`Made-by: <person>`), so
+ * the change names the person behind the bot beside the bot as its author;
+ * nothing for a person's own commit.
+ */
+function madeByArgs(madeBy: { name: string; email: string } | undefined): string[] {
+  const trailer = madeByTrailer(madeBy);
+  return trailer ? ['-m', trailer] : [];
+}
+
+/**
  * The deployment's live accounts, as the protected-branch push gate asks for
  * them. The gate asks first whether the user who authored an unpushed commit
  * may write what it changed; an author who is not a live account — an address
@@ -298,16 +308,6 @@ async function existsForCommitCheck(absolutePath: string): Promise<boolean> {
  * fails rejects, and the push fails with it: an unanswered question is never
  * read as "unknown author".
  */
-/**
- * The trailer paragraph a BOT's commit carries (`Made-by: <person>`), so
- * the change names the person behind the bot beside the bot as its author;
- * nothing for a person's own commit.
- */
-function madeByArgs(madeBy: { name: string; email: string } | undefined): string[] {
-  const trailer = madeByTrailer(madeBy);
-  return trailer ? ['-m', trailer] : [];
-}
-
 export interface CommitAuthorDirectory {
   /** The live accounts among `emails`, keyed by canonical address; switched-off and unknown addresses are left out. */
   findActiveAccountsByEmail(emails: readonly string[]): Promise<ReadonlyMap<string, unknown>>;

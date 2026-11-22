@@ -309,6 +309,20 @@ describe('a grant to an email with no account', () => {
     expect(body.people.map((p) => p.email)).not.toContain(BOT.email);
   });
 
+  it("suggest does not rule on accounts for a bot's address typed in full, so its chip is not labelled as a missing account", async () => {
+    const BOT = { name: 'release-helper', email: 'release-helper@agent.hexis' };
+    h = await makeHarness({ kbPeople: [KNOWN, BOT], accounts: [KNOWN.email, BOT.email], bots: [BOT.email] });
+    const ask = async (q: string) =>
+      (await (
+        await fetch(`${h.baseUrl}/api/workspace/${encodeURIComponent(WS)}/access/suggest?q=${encodeURIComponent(q)}`)
+      ).json()) as { people: { email: string }[]; accountsKnown: boolean };
+    const typed = await ask(BOT.email);
+    expect(typed.people.map((p) => p.email)).not.toContain(BOT.email);
+    expect(typed.accountsKnown).toBe(false);
+    // A person's address still rules on accounts as before.
+    expect((await ask(KNOWN.email)).accountsKnown).toBe(true);
+  });
+
   it('suggest puts the exact address asked for first, so the cap can never hide it', async () => {
     // Twenty-one people all match the query (each filler email CONTAINS the
     // exact one), with the exact match last in union order. The cap is 15, so

@@ -86,6 +86,17 @@ export function connectionRefusal(toolName: string, wire: ConnectionScopeWire | 
 }
 
 /**
+ * The answer to a call of a tool the surface does not list: on a connection
+ * made as a bot, or for a tool offered only to one (a Myself connection
+ * calling `approve_change_request`), the connection's refusal, naming why;
+ * otherwise an unknown tool. The ONE place both MCP servers decide it, so
+ * neither answers "unknown" for a tool the connection merely does not load.
+ */
+export function unlistedToolAnswer(toolName: string, wire: ConnectionScopeWire | undefined): string {
+  return wire || BOT_ONLY_TOOLS.has(toolName) ? connectionRefusal(toolName, wire) : `Unknown tool "${toolName}".`;
+}
+
+/**
  * The one line an agent is told about its connection (the MCP handshake, the
  * agent guide); null for Myself, which is told nothing new.
  */

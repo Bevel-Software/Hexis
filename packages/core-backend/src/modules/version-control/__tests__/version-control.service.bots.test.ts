@@ -175,7 +175,7 @@ describe('a bot merging a branch that an open change request proposes', () => {
     const { svc } = makeService({}, openRequest);
     const forBot = await svc.mergeBranch(BOT, DRAFT, 'main').catch((e: unknown) => e as Error);
     expect(forBot.message).toMatch(/Change request #12 proposes merging "bots\/proposal" into "main" and is still open\./);
-    expect(forBot.message).toMatch(/use `apply_change_request` with number 12/);
+    expect(forBot.message).toMatch(/use `apply_change_request` with number 12 if this connection is offered it; otherwise a person applies #12 in the app\./);
     expect(forBot.message).not.toMatch(/ask the user/);
     const forPerson = await svc.mergeBranch(PERSON, DRAFT, 'main').catch((e: unknown) => e as Error);
     expect(forPerson.message).toMatch(/A change request is merged by a person: ask the user to review #12 in the app\./);

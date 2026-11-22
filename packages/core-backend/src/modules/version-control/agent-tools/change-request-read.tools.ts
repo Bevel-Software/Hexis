@@ -30,6 +30,18 @@ import {
   visibleBlockers,
 } from './change-request-read-shape.js';
 
+/** A change-request number as the change-request tools accept it. */
+export function changeRequestNumberArg(args: Record<string, unknown>): number {
+  const n = args.number;
+  // A SAFE integer: JSON carries numbers a double cannot hold exactly, and
+  // one of those would reach the database rounded, or as an error the
+  // caller could not have predicted — not as the 400 a wrong number earns.
+  if (typeof n !== 'number' || !Number.isSafeInteger(n) || n <= 0) {
+    throw new ToolError('`number` is required and must be a positive integer.', 400);
+  }
+  return n;
+}
+
 /**
  * The four read tools over change requests, named and shaped after GitHub's
  * pull-request API: `list_change_requests`, `get_change_request`,
@@ -95,17 +107,6 @@ import {
  * does not resolve — an access tree that will not load at `origin/<base>`, or a
  * clone that does not have the merge commit yet.
  */
-/** A change-request number as the change-request tools accept it. */
-export function changeRequestNumberArg(args: Record<string, unknown>): number {
-  const n = args.number;
-  // A SAFE integer: JSON carries numbers a double cannot hold exactly, and
-  // one of those would reach the database rounded, or as an error the
-  // caller could not have predicted — not as the 400 a wrong number earns.
-  if (typeof n !== 'number' || !Number.isSafeInteger(n) || n <= 0) {
-    throw new ToolError('`number` is required and must be a positive integer.', 400);
-  }
-  return n;
-}
 
 export function registerChangeRequestReadTools(
   registry: IToolRegistry,

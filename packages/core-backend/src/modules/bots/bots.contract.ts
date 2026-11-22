@@ -145,6 +145,12 @@ export type ResolvedConnection =
     }
   | {
       kind: 'unavailable';
+      /**
+       * The bot the connection was made as, as far as it is known: its id and
+       * name; when no bot answers to the connection any more, `id` is the
+       * label it was made with (a legacy agent path, or `unknown`) and
+       * `name` that label too.
+       */
       bot: { id: string; name: string };
       /** The one sentence the connection answers with. */
       sentence: string;
