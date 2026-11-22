@@ -390,7 +390,10 @@ export class BotService implements IBots {
     const number = Number(this.settings.resolve('botsDomainChangeRequest'));
     if (!this.changeRequestState || !Number.isInteger(number) || number <= 0) return null;
     // Cannot tell: refused as if open, rather than cut its grants off.
-    const state = await this.changeRequestState(number).catch(() => 'open' as const);
+    const state = await this.changeRequestState(number).catch((err: unknown) => {
+      log.warn(`reading the state of the bots' domain rewrite #${number} failed; it is taken as still open`, { err });
+      return 'open' as const;
+    });
     return state === 'open' ? number : null;
   }
 

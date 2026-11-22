@@ -4313,7 +4313,8 @@ export class VersionControlService implements IVersionControlService {
     // normally. Best-effort by design is NOT acceptable here — a failure to
     // neutralise must abort the merge, never fall through.
     //
-    // A bot may merge where it is granted, but never a change to access: the
+    // A bot may merge where it is granted — every file the merge changes must
+    // be one it may write (`assertBotMayWriteMerged`) — but never a change to access: the
     // request is refused whole when it touches an access file — roles.yaml
     // included — or a file's own access lines (`modules/bots`). That is asked
     // inside the merge (`assertBotMergeLeavesAccess`), so nothing is rewritten for a
