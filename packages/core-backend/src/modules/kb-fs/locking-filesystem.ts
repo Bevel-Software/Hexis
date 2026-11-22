@@ -142,6 +142,21 @@ export type WriteValidator = ((path: string, content: FileContent) => void | Pro
 };
 
 /**
+ * Whether what a {@link WriteValidator} threw is its REFUSAL — an Error that
+ * carries a 4xx `status`, as every validator's refusal does (the roles.yaml
+ * guards, the bot's access guard, a tool's own `ToolError`) and as every
+ * route answers it — rather than a failure of the validator itself (a read
+ * of the current file that failed, a bug), which carries none or a 5xx.
+ * Only a caller that answers a refusal instead of throwing it needs to ask
+ * ({@link LockingFilesystem.landUnderLock}); every other write throws both.
+ */
+export function isWriteRefusal(err: unknown): err is Error & { status: number } {
+  if (!(err instanceof Error)) return false;
+  const status = (err as { status?: unknown }).status;
+  return typeof status === 'number' && Number.isInteger(status) && status >= 400 && status < 500;
+}
+
+/**
  * Dependencies the wrapper needs to talk to the version-control lock service.
  * Captured at construction time so every per-method call resolves to the
  * same `(workspace, branch, user)` triple — the agent can't accidentally
@@ -331,12 +346,16 @@ export class LockingFilesystem extends GitGuardedFilesystem {
    *
    * A REFUSAL is answered, not thrown: the validator saying no (before the
    * lock or under it) or the lock staying held by somebody else resolves
-   * with that sentence, and the caller skips the file. Anything else throws
-   * as it came — the lock store failing, or `land` itself failing (a full
-   * disk, a permission error) — so a caller never reports a failure as a
-   * file it chose to skip. `land` is the caller's to make safe at the moment
-   * it runs (under the lock): it is where a check of the target's placement
-   * belongs, since only the caller knows how it writes.
+   * with that sentence, and the caller skips the file. The validator says no
+   * by throwing an error that carries a 4xx `status` (the refusal every
+   * route answers with, {@link isWriteRefusal}); anything else it throws —
+   * a read of the current file failing, say — is a failure. Failures throw
+   * as they came — the validator failing, the lock store failing, or `land`
+   * itself failing (a full disk, a permission error) — so a caller never
+   * reports a failure as a file it chose to skip. `land` is the caller's to
+   * make safe at the moment it runs (under the lock): it is where a check of
+   * the target's placement belongs, since only the caller knows how it
+   * writes.
    */
   async landUnderLock(inputPath: string, content: Buffer, land: () => Promise<void>): Promise<string | undefined> {
     // The path's own rules throw, as for every write here: a caller hands over
@@ -349,7 +368,8 @@ export class LockingFilesystem extends GitGuardedFilesystem {
         await validate?.(inputPath, content);
         return undefined;
       } catch (err) {
-        return err instanceof Error ? err.message : String(err);
+        if (isWriteRefusal(err)) return err.message;
+        throw err;
       }
     };
     const before = await refusal();

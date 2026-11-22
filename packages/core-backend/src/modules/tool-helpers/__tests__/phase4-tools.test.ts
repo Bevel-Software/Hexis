@@ -47,32 +47,34 @@ const workspaceService = {
   ) => {
     recorded.push(['unzip', ws, p, d]);
     if (archiveEntries.length === 0) return { extracted: [p], skipped: [] };
-    // Mirrors the real extraction: a guard refusal skips that entry with its
-    // message, and a file that passed lands through `landEntry` (a refusal
-    // it answers skips it too; a throw would fail the extraction).
+    // Mirrors the real extraction (`WorkspaceService.unzipFile`): a guard
+    // that throws skips that entry with its message; a file that passed
+    // lands through `landEntry`, whose answered refusal skips it too, and
+    // whose THROW fails the whole extraction, as the service lets it.
     const extracted: string[] = [];
     const skipped: { path: string; reason: string }[] = [];
     for (const target of archiveEntries) {
+      const text = archiveContents.get(target);
+      const bytes = text === undefined ? undefined : Buffer.from(text);
       try {
-        const text = archiveContents.get(target);
-        const bytes = text === undefined ? undefined : Buffer.from(text);
         await guardWrite?.(target, bytes);
-        if (bytes !== undefined) {
-          const write = async () => {
-            landings.push({ path: target, locked: heldLocks.has(target) });
-            await mkdir(path.dirname(path.join(workspaceDir, target)), { recursive: true });
-            await writeFile(path.join(workspaceDir, target), bytes);
-          };
-          const refused = landEntry ? await landEntry(target, bytes, write) : (await write(), undefined);
-          if (refused !== undefined) {
-            skipped.push({ path: target, reason: refused });
-            continue;
-          }
-        }
-        extracted.push(target);
       } catch (err) {
         skipped.push({ path: target, reason: (err as Error).message });
+        continue;
       }
+      if (bytes !== undefined) {
+        const write = async () => {
+          landings.push({ path: target, locked: heldLocks.has(target) });
+          await mkdir(path.dirname(path.join(workspaceDir, target)), { recursive: true });
+          await writeFile(path.join(workspaceDir, target), bytes);
+        };
+        const refused = landEntry ? await landEntry(target, bytes, write) : (await write(), undefined);
+        if (refused !== undefined) {
+          skipped.push({ path: target, reason: refused });
+          continue;
+        }
+      }
+      extracted.push(target);
     }
     return { extracted, skipped };
   },
@@ -216,6 +218,25 @@ describe('Phase 4 tools (core subset)', () => {
       { path: 'knowledge-base/KnowledgeBase/page.md', reason: expect.stringContaining('A bot cannot change access') },
     ]);
     expect(await readFile(path.join(workspaceDir, 'knowledge-base/KnowledgeBase/page.md'), 'utf-8')).toContain('- Eng');
+  });
+
+  it("a bot's unzip fails, rather than skipping the file, when the gate cannot read the page it judges against", async () => {
+    // The page's name is a folder on disk: reading what it holds now fails
+    // (EISDIR), which is the gate failing, not the gate saying no.
+    await mkdir(path.join(workspaceDir, 'knowledge-base/KnowledgeBase/page.md'), { recursive: true });
+    archiveEntries = ['knowledge-base/KnowledgeBase/notes.md', 'knowledge-base/KnowledgeBase/page.md'];
+    archiveContents = new Map([
+      ['knowledge-base/KnowledgeBase/notes.md', '# notes\n'],
+      ['knowledge-base/KnowledgeBase/page.md', '# page\n'],
+    ]);
+    const base = await start({ isBot: () => true });
+    const res = await post(`${base}/api/agent/tools/unzip`, { path: 'knowledge-base/a.zip', branch: WS });
+    expect(res.status).toBeGreaterThanOrEqual(500);
+    const body = (await res.json()) as { skipped?: unknown };
+    expect(body.skipped).toBeUndefined();
+    // Nothing was put at the page's name, and no lock is left behind.
+    expect(landings.map((l) => l.path)).toEqual(['knowledge-base/KnowledgeBase/notes.md']);
+    expect(heldLocks.size).toBe(0);
   });
 
   it("a bot's delete of an access file or of a page with its own access lines is refused through the resolved context; a person's is not judged by it", async () => {

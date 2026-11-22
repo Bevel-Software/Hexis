@@ -630,7 +630,7 @@ describe('LockingFilesystem — the caller judges under the lock', () => {
     const validateWrite = async (p: string, content: string | Uint8Array) => {
       judged.push(held.has(p));
       judgedBytes.push(typeof content === 'string' ? content : Buffer.from(content).toString('utf-8'));
-      if (refuseUnderLock && held.has(p)) throw new Error('changed meanwhile');
+      if (refuseUnderLock && held.has(p)) throw new VersionControlValidationError('changed meanwhile');
     };
     const guarded = new LockingFilesystem(
       { basePath: root, contained: true },
@@ -697,6 +697,55 @@ describe('LockingFilesystem — the caller judges under the lock', () => {
     expect(land).not.toHaveBeenCalled();
     expect(taken.releaseLockUntouched).not.toHaveBeenCalled();
   }, 10_000);
+
+  it('landUnderLock answers only a refusal the validator declares (a 4xx status); a validator that fails throws, before the lock or under it', async () => {
+    await fs.mkdir(path.join(root, 'knowledge-base'), { recursive: true });
+    const target = 'knowledge-base/x.md';
+    const versionControl = makeVersionControl();
+    const held = trackHeldLocks(versionControl);
+    // What the validator does, per look: before the lock, and under it.
+    let failBefore: unknown = null;
+    let failUnder: unknown = null;
+    const validateWrite = async (p: string) => {
+      const reason = held.has(p) ? failUnder : failBefore;
+      if (reason !== null) throw reason;
+    };
+    const guarded = new LockingFilesystem(
+      { basePath: root, contained: true },
+      { versionControl, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB, validateWrite },
+    );
+    const land = vi.fn(async () => {});
+
+    // A read inside the validator failing is a failure, not a skip — before
+    // the lock it takes none ...
+    const unreadable = Object.assign(new Error('EIO: i/o error, read'), { code: 'EIO' });
+    failBefore = unreadable;
+    await expect(guarded.landUnderLock(target, Buffer.from('x\n'), land)).rejects.toBe(unreadable);
+    expect(versionControl.acquireLock).not.toHaveBeenCalled();
+
+    // ... and under the lock it releases it untouched.
+    failBefore = null;
+    failUnder = unreadable;
+    await expect(guarded.landUnderLock(target, Buffer.from('x\n'), land)).rejects.toBe(unreadable);
+    expect(held.size).toBe(0);
+    expect(versionControl.releaseLockUntouched).toHaveBeenCalledWith('ws-feat', 'feat', target, USER);
+
+    // A thrown error that says 5xx, or a value that is not an Error, is no refusal either.
+    failUnder = Object.assign(new Error('the guard broke'), { status: 500 });
+    await expect(guarded.landUnderLock(target, Buffer.from('x\n'), land)).rejects.toThrow('the guard broke');
+    failUnder = 'not an error';
+    await expect(guarded.landUnderLock(target, Buffer.from('x\n'), land)).rejects.toBe('not an error');
+
+    // A declared refusal, before or under the lock, is answered with its sentence.
+    failUnder = null;
+    failBefore = new VersionControlValidationError('no, before');
+    expect(await guarded.landUnderLock(target, Buffer.from('x\n'), land)).toBe('no, before');
+    failBefore = null;
+    failUnder = Object.assign(new Error('no, under'), { status: 403 });
+    expect(await guarded.landUnderLock(target, Buffer.from('x\n'), land)).toBe('no, under');
+    expect(land).not.toHaveBeenCalled();
+    expect(held.size).toBe(0);
+  });
 
   it('rewriteFile refuses a path outside the repository before any lock', async () => {
     const versionControl = makeVersionControl();
