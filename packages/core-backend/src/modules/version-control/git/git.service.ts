@@ -3857,13 +3857,18 @@ export class GitService implements IGitService {
    * Every path a change request's merge WRITES, between the two commits a
    * caller already holds (a detail's `baseSha` and `headSha`): the
    * authorizing set (`forAccessCheck`) — `roles.yaml` kept, both sides of
-   * every rename — off the same memoized diff the review surface is shaped
-   * from, so a reader judging "may this be applied" asks about exactly the
-   * paths the merge's own check will, at no second `git diff`.
+   * every rename — so a reader judging "may this be applied" asks about
+   * exactly the paths the merge's own check will. Read through
+   * `prChangedEntriesBetweenCommits`, which memoizes per pair of commits: a
+   * second reading of the same pair runs no second `git diff`, while the
+   * detail's displayed file list (`changedFilesForPr`) runs a diff of its own.
+   * Both ends must be FULL object names (40 hex characters, or 64 in a
+   * SHA-256 repository): they are the memo's key, and an abbreviation would
+   * key one pair of commits two ways.
    */
   async writtenPathsBetweenCommits(workspaceId: string, baseSha: string, headSha: string): Promise<string[]> {
     for (const sha of [baseSha, headSha]) {
-      if (!/^[0-9a-f]{40,64}$/.test(sha)) {
+      if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(sha)) {
         throw new VersionControlValidationError(`invalid commit sha: ${sha}`);
       }
     }
