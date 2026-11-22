@@ -54,6 +54,8 @@ interface Harness {
   getLockMock: ReturnType<typeof vi.fn>;
   /** Exposed so a test can see which releases queued a commit. */
   releaseLockMock: ReturnType<typeof vi.fn>;
+  /** Exposed so a test can say the caller's hold lapsed before it was renewed. */
+  heartbeatLockMock: ReturnType<typeof vi.fn>;
   eventBusEmit: ReturnType<typeof vi.fn>;
 }
 
@@ -94,6 +96,7 @@ async function makeHarness(): Promise<Harness> {
     acquireLock: vi.fn(async () => ({ acquired: true, lock: {} as never })),
     releaseLock: vi.fn(async () => undefined as never),
     releaseLockNoCommit: vi.fn(async () => undefined as never),
+    heartbeatLock: vi.fn(async () => ({}) as never),
   };
   const versionControlService = versionControlServiceMock as unknown as IVersionControlService;
 
@@ -140,6 +143,7 @@ async function makeHarness(): Promise<Harness> {
     acquireLockMock: versionControlServiceMock.acquireLock as unknown as ReturnType<typeof vi.fn>,
     getLockMock: versionControlServiceMock.getLock as unknown as ReturnType<typeof vi.fn>,
     releaseLockMock: versionControlServiceMock.releaseLock as unknown as ReturnType<typeof vi.fn>,
+    heartbeatLockMock: versionControlServiceMock.heartbeatLock as unknown as ReturnType<typeof vi.fn>,
     eventBusEmit: (eventBus as unknown as { emit: ReturnType<typeof vi.fn> }).emit,
   };
 }
@@ -475,5 +479,104 @@ describe('DELETE and move under the caller\'s own hold — the removal is commit
 
     expect(res.status).toBe(200);
     expect(releasedPaths()).toEqual([`${KB}/Team/Draft.md`]);
+  });
+});
+
+/**
+ * The caller's hold is read once, and can lapse before the removal runs: a
+ * hold that ended may already be someone else's. Everything that can refuse
+ * the removal is decided BEFORE the file is touched, so another editor never
+ * loses a file to a request that then answers 409.
+ */
+describe('DELETE under the caller\'s own hold — refused before anything is removed', () => {
+  let h: Harness | null = null;
+  afterEach(async () => {
+    if (h) {
+      await closeServer(h.server);
+      await fs.rm(h.workspaceDir, { recursive: true, force: true });
+    }
+    h = null;
+  });
+
+  const del = (base: string, p: string) =>
+    fetch(`${base}/api/workspace/${WORKSPACE_ID}/file?path=${encodeURIComponent(p)}`, { method: 'DELETE' });
+  const lockNotHeld = () =>
+    new VersionControlValidationError('Cannot heartbeat lock: not held by you (or no longer exists).', {
+      kind: 'lock-not-held',
+    });
+  const seed = async (hh: Harness) => {
+    await fs.mkdir(path.join(hh.repoDir, 'Team'), { recursive: true });
+    await fs.writeFile(path.join(hh.repoDir, 'Team/Draft.md'), 'draft', 'utf-8');
+    await fs.writeFile(path.join(hh.repoDir, 'Team/Keep.md'), 'keep', 'utf-8');
+  };
+  const DRAFT = `${KB}/Team/Draft.md`;
+
+  it('renews the caller\'s hold before the removal runs', async () => {
+    h = await makeHarness();
+    await seed(h);
+    h.getLockMock.mockImplementation(async (_w: string, _b: string, p: string) =>
+      p === DRAFT ? { holderUserId: USER_ID, holderName: 'Alice', mode: 'edit' } : null,
+    );
+
+    const res = await del(h.baseUrl, 'Team/Draft.md');
+
+    expect(res.status).toBe(200);
+    expect(h.heartbeatLockMock).toHaveBeenCalledWith(WORKSPACE_ID, WORKSPACE_ID, DRAFT, USER);
+    const renewedAt = h.heartbeatLockMock.mock.invocationCallOrder[0];
+    const removedAt = h.deleteFileMock.mock.invocationCallOrder[0];
+    expect(renewedAt).toBeLessThan(removedAt);
+  });
+
+  it('answers 409 naming the new holder and leaves the file when the hold lapsed to someone else', async () => {
+    h = await makeHarness();
+    await seed(h);
+    h.getLockMock.mockImplementation(async (_w: string, _b: string, p: string) =>
+      p === DRAFT ? { holderUserId: USER_ID, holderName: 'Alice', mode: 'edit' } : null,
+    );
+    h.heartbeatLockMock.mockRejectedValueOnce(lockNotHeld());
+    h.acquireLockMock.mockResolvedValueOnce({ acquired: false, lock: { holderUserId: 'user-2', holderName: 'Bob' } });
+
+    const res = await del(h.baseUrl, 'Team/Draft.md');
+
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain('being edited by Bob');
+    expect(await exists(path.join(h.repoDir, 'Team/Draft.md'))).toBe(true);
+    expect(h.deleteFileMock).not.toHaveBeenCalled();
+    expect(h.releaseLockMock).not.toHaveBeenCalled();
+  });
+
+  it('takes the path as an unheld removal does when the hold lapsed and nobody took it', async () => {
+    h = await makeHarness();
+    await seed(h);
+    h.getLockMock.mockImplementation(async (_w: string, _b: string, p: string) =>
+      p === DRAFT ? { holderUserId: USER_ID, holderName: 'Alice', mode: 'edit' } : null,
+    );
+    h.heartbeatLockMock.mockRejectedValueOnce(lockNotHeld());
+
+    const res = await del(h.baseUrl, 'Team/Draft.md');
+
+    expect(res.status).toBe(200);
+    expect(await exists(path.join(h.repoDir, 'Team/Draft.md'))).toBe(false);
+    expect(h.acquireLockMock.mock.invocationCallOrder[0]).toBeLessThan(h.deleteFileMock.mock.invocationCallOrder[0]);
+    expect(h.releaseLockMock.mock.calls.map((c) => c[2])).toEqual([DRAFT]);
+  });
+
+  it('refuses with 409 and leaves the file under the caller\'s own coordination hold', async () => {
+    h = await makeHarness();
+    await seed(h);
+    h.getLockMock.mockImplementation(async (_w: string, _b: string, p: string) =>
+      p === DRAFT ? { holderUserId: USER_ID, holderName: 'Alice', mode: 'coordination' } : null,
+    );
+
+    const res = await del(h.baseUrl, 'Team/Draft.md');
+
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain('held for coordination');
+    expect(await exists(path.join(h.repoDir, 'Team/Draft.md'))).toBe(true);
+    expect(h.deleteFileMock).not.toHaveBeenCalled();
+    expect(h.releaseLockMock).not.toHaveBeenCalled();
+    expect(h.heartbeatLockMock).not.toHaveBeenCalled();
   });
 });
