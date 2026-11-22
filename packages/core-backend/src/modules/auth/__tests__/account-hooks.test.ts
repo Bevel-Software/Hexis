@@ -111,3 +111,68 @@ describe('AccountHooks: an account was invited', () => {
     expect(await hooks.runAccountInvited(EVENT)).toEqual(['email']);
   });
 });
+
+describe('AccountHooks: who delivered the starting password', () => {
+  const PASSWORD = 'Kq7mZt3xWp9rHs4v';
+
+  it('collects the channels that say they carried the password, beside every channel that notified', async () => {
+    const hooks = new AccountHooks();
+    hooks.onAccountInvited(async () => 'chat');
+    hooks.onAccountInvited(async () => ({ channel: 'email', deliveredStartingPassword: true }));
+    hooks.onAccountInvited(async () => ({ channel: 'companion', deliveredStartingPassword: true }));
+    expect(await hooks.deliverAccountInvited({ ...EVENT, startingPassword: PASSWORD })).toEqual({
+      notified: ['chat', 'email', 'companion'],
+      passwordDeliveredBy: ['email', 'companion'],
+    });
+  });
+
+  it('a plain channel, or deliveredStartingPassword other than true, never claims the password', async () => {
+    const hooks = new AccountHooks();
+    hooks.onAccountInvited(async () => 'email');
+    hooks.onAccountInvited(async () => ({ channel: 'sms', deliveredStartingPassword: false }));
+    // A listener written in plain JavaScript can answer anything.
+    hooks.onAccountInvited(async () => ({ channel: 'fax', deliveredStartingPassword: 'yes' }) as never);
+    expect(await hooks.deliverAccountInvited({ ...EVENT, startingPassword: PASSWORD })).toEqual({
+      notified: ['email', 'sms', 'fax'],
+      passwordDeliveredBy: [],
+    });
+  });
+
+  it('claims nothing for an event that carried no password, and an empty channel is no channel', async () => {
+    const hooks = new AccountHooks();
+    hooks.onAccountInvited(async () => ({ channel: 'email', deliveredStartingPassword: true }));
+    hooks.onAccountInvited(async () => ({ channel: '', deliveredStartingPassword: true }));
+    expect(await hooks.deliverAccountInvited(EVENT)).toEqual({ notified: ['email'], passwordDeliveredBy: [] });
+    expect(await hooks.runAccountInvited(EVENT)).toEqual(['email']);
+  });
+
+  it('a listener that throws delivered nothing', async () => {
+    const hooks = new AccountHooks();
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      hooks.onAccountInvited(async () => {
+        throw new Error('smtp down');
+      });
+      expect(await hooks.deliverAccountInvited({ ...EVENT, startingPassword: PASSWORD })).toEqual({
+        notified: [],
+        passwordDeliveredBy: [],
+      });
+    } finally {
+      error.mockRestore();
+    }
+  });
+
+  it('keeps each run to its own deliveries when invites overlap', async () => {
+    const hooks = new AccountHooks();
+    hooks.onAccountInvited(async (event) => {
+      await new Promise((r) => setTimeout(r, event.account.id === 'slow' ? 20 : 0));
+      return event.account.id === 'slow' ? { channel: 'email', deliveredStartingPassword: true } : 'chat';
+    });
+    const [slow, fast] = await Promise.all([
+      hooks.deliverAccountInvited({ ...EVENT, account: { ...EVENT.account, id: 'slow' }, startingPassword: PASSWORD }),
+      hooks.deliverAccountInvited({ ...EVENT, account: { ...EVENT.account, id: 'fast' }, startingPassword: PASSWORD }),
+    ]);
+    expect(slow.passwordDeliveredBy).toEqual(['email']);
+    expect(fast).toEqual({ notified: ['chat'], passwordDeliveredBy: [] });
+  });
+});

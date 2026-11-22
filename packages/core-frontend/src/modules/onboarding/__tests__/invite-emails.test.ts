@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { InvitationRequest, InvitationResult } from '@bevel-software/platform-shared';
-import { gotPassword, isInvited, sendInvites, wasEmailed } from '../invite-emails';
+import { gotPassword, isInvited, passwordDelivered, sendInvites, wasEmailed } from '../invite-emails';
 
 /** Every invite promotion is sent `ifActive`: the server refuses a switched-off account at the write. */
 const ACTIVE = { ifActive: true };
@@ -141,6 +141,26 @@ describe('sendInvites carries how the deployment told the person', () => {
       { email: 'quiet@acme.com', status: 'created', role: 'member', startingPassword: PW },
     ]);
     expect(outcomes.map(wasEmailed)).toEqual([true, false]);
+  });
+
+  it('a password the deployment delivered to the person rides as `passwordDeliveredBy`, with none to show', async () => {
+    api.sendInvitation.mockResolvedValueOnce({
+      status: 'created',
+      account: { id: '1', email: 'sent@acme.com', name: 'sent' },
+      passwordDeliveredBy: ['companion'],
+      notified: ['companion'],
+      singleSignOn: false,
+    });
+    const outcomes = await sendInvites(['sent@acme.com', 'shown@acme.com'], 'member', api, { startingPassword: true });
+    expect(outcomes[0]).toEqual({
+      email: 'sent@acme.com',
+      status: 'created',
+      role: 'member',
+      passwordDeliveredBy: ['companion'],
+      notified: ['companion'],
+    });
+    expect(outcomes.map(passwordDelivered)).toEqual([true, false]);
+    expect(outcomes.map(gotPassword)).toEqual([false, true]);
   });
 });
 

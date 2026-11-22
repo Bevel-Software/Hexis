@@ -552,6 +552,26 @@ export class AuthService implements IAccountSwitchGuard {
   }
 
   /**
+   * Take back an invited account's generated starting password that nobody
+   * was given (see `POST /api/invitations`), leaving the account with none.
+   * Only while the row still holds exactly that password: the hash read is
+   * the hash the update matches, so a password somebody set in the meantime
+   * (an admin in User accounts) is never cleared. Answers whether it cleared
+   * it; a database failure throws.
+   */
+  async discardStartingPassword(userId: string, startingPassword: string): Promise<boolean> {
+    const [row] = await this.db.select().from(users).where(eq(users.id, userId)).limit(1);
+    if (!row?.passwordHash || !(await verifyPassword(startingPassword, row.passwordHash))) return false;
+    const [cleared] = await this.db
+      .update(users)
+      .set({ passwordHash: null, sessionVersion: sql`${users.sessionVersion} + 1`, updatedAt: new Date() })
+      .where(and(eq(users.id, userId), eq(users.passwordHash, row.passwordHash)))
+      .returning({ id: users.id });
+    if (cleared) this.activeCache.delete(userId);
+    return Boolean(cleared);
+  }
+
+  /**
    * Is `email` the deployment admin — the account whose password is set in
    * the deployment environment (`ADMIN_EMAIL` while `ADMIN_PASSWORD` is set)
    * rather than stored on its row? The single definition behind

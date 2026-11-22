@@ -46,20 +46,29 @@ no seat and answers `existing`.
 
 Nobody types a starting password any more. Where one is needed (password
 sign-in and no single sign-on, or "Also give them a password" ticked), the
-platform generates it, shows it once on the invited person's row to copy,
-and passes it to the deployment's invitation mail. The owner's address
+platform generates it and passes it to the deployment's listeners. When one
+of them delivers it to the invited person (their email, the companion), the
+inviter is not shown it and the row says how it was sent; otherwise it is
+shown once on the person's row, to copy and pass on. An address that grants
+or groups already name gets a password like any other. The owner's address
 (`ADMIN_EMAIL`, with or without `ADMIN_PASSWORD`) and the system accounts'
-addresses never get one, and a non-admin's invite makes none for an address
-that already holds Admin in `roles.yaml`. Such an account is created with no
-way in, and its row says so. When `roles.yaml` cannot be read, such an
-invite from a non-admin is refused with 503 and creates nothing. An invite never changes an account that already
-exists: it no longer gives a first password to an
-existing account without one. Admins set or reset a password from User
+addresses never get one. From a non-admin, the password of an address that
+already holds Admin in `roles.yaml` is never shown to the inviter: delivered
+if a listener can, discarded otherwise, leaving the account with no way in
+(its row says so, and an admin sets a password in User accounts). When
+`roles.yaml` cannot be read, such an invite from a non-admin is refused with
+503 and creates nothing. An invite never changes an account that already
+exists: it no longer gives a first password to an existing account without
+one. Admins set or reset a password from User
 accounts, as before.
 
 Hosts that listen for invitations (`onAccountInvited`) receive the generated
-password as `startingPassword` on the event, and the admission port is asked
-with the new reason `invite`.
+password as `startingPassword` on the event. A listener that puts it in what
+it sends the person answers `{ channel: 'email', deliveredStartingPassword: true }`
+(or its own channel name) instead of `'email'`; a plain channel name still
+means "told them of the invite" and leaves the password with the inviter, so
+a mail that does not carry the password yet keeps working as before. The
+admission port is asked with the new reason `invite`.
 
 ### A change request's body is its description (0.32+)
 

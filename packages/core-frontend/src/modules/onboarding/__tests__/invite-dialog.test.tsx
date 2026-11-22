@@ -57,6 +57,8 @@ let invitationAnswers: Map<string, () => Response>;
 let admins: string[];
 /** Channels the deployment's listeners answer for a new account. */
 let notified: string[];
+/** Channels that delivered the generated password to the person; when any, the server hands it back to nobody. */
+let deliveredBy: string[];
 /** Every invitation request the dialog sent, in order. */
 let invitations: InvitationRequest[];
 /** Every Admin promotion the dialog sent, in order. */
@@ -74,6 +76,7 @@ beforeEach(() => {
   invitationAnswers = new Map();
   admins = ['juan@bevel.software'];
   notified = [];
+  deliveredBy = [];
   invitations = [];
   promotions = [];
   copyMock.mockReset().mockResolvedValue(true);
@@ -94,7 +97,8 @@ beforeEach(() => {
       return json(201, {
         status: 'created',
         account: { id: `id-${request.email}`, email: request.email, name: request.email.split('@')[0] },
-        ...(request.startingPassword ? { startingPassword: GENERATED } : {}),
+        ...(request.startingPassword && deliveredBy.length === 0 ? { startingPassword: GENERATED } : {}),
+        ...(request.startingPassword && deliveredBy.length > 0 ? { passwordDeliveredBy: deliveredBy } : {}),
         notified,
         singleSignOn: ssoOffered && !ssoRefused.has(request.email),
       });
@@ -579,7 +583,7 @@ describe('InviteDialog: the generated password, shown once', () => {
   });
 
   // The server makes no password for the owner's or a system account's
-  // address, nor for an Admin's from a non-admin: without single sign-on
+  // address, and hands a non-admin none for an Admin's it could not deliver: without single sign-on
   // nothing lets that account in, and the view says so.
   it('says a new account with no password can’t sign in yet, where single sign-on is off', async () => {
     invitationAnswers.set('owner@acme.com', () =>
@@ -667,6 +671,33 @@ describe('InviteDialog: the generated password, shown once', () => {
     // The mail was the message: the link stays, the message to forward goes.
     expect(screen.getByRole('button', { name: 'Copy link' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Copy message' })).not.toBeInTheDocument();
+    // The email announced the invite without the password: the inviter passes it on.
+    expect(screen.getByText(/Their email didn’t carry it: send it to them separately/)).toBeInTheDocument();
+  });
+
+  it('shows no password on a row whose password the deployment emailed to the person, and says so', async () => {
+    notified = ['email'];
+    deliveredBy = ['email'];
+    await sendPasswordOnly(['ana@acme.com']);
+    const row = rowOf('ana@acme.com');
+    expect(within(row).getByText('Emailed · Member · signs in with the password sent to them by email')).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain(GENERATED);
+    expect(screen.queryByRole('button', { name: 'Copy' })).not.toBeInTheDocument();
+    expect(screen.queryByText(/Copy the password on its row now/)).not.toBeInTheDocument();
+    expect(screen.getByText('They have been emailed the link and how to sign in.')).toBeInTheDocument();
+  });
+
+  it('shows no password on a row the companion delivered it on; the message says they have been sent one', async () => {
+    notified = ['companion'];
+    deliveredBy = ['companion'];
+    await sendPasswordOnly(['ana@acme.com']);
+    const row = rowOf('ana@acme.com');
+    expect(within(row).getByText('Member · signs in with the password sent to them through the companion')).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain(GENERATED);
+    expect(screen.getByText('They can sign in now with the password they were sent. Send them the link.')).toBeInTheDocument();
+    const message = screen.getByText(/^I’ve added you to/);
+    expect(message).toHaveTextContent('the password you’ve been sent');
+    expect(message).not.toHaveTextContent('send you separately');
   });
 });
 

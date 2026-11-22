@@ -21,8 +21,11 @@ export interface AccountInvitedEvent {
   /**
    * The starting password the platform generated for the account, absent
    * when none was. It travels here so a listener that writes to the person
-   * can put it in the invitation, with the request to sign in and change
-   * it; a listener must not log it or keep it.
+   * (their email, the companion in their chat app) can put it in the
+   * invitation, with the request to sign in and change it; a listener must
+   * not log it or keep it. A listener that did put it in front of the
+   * person says so in its answer ({@link AccountInvitedAnswer}): the inviter
+   * is then not shown it.
    */
   startingPassword?: string;
 }
@@ -48,11 +51,40 @@ export async function inviterOf(
 }
 
 /**
- * A listener answers how it reached the person — a non-empty channel name,
- * `'email'` say — or null when it did not; the rule is {@link NotifyingListener}'s:
- * awaited, a throw logged and counted as null, never failing the invite.
+ * How a listener reached the invited person: a non-empty channel name
+ * (`'email'`, `'companion'`) when it told them of the invite, or null
+ * when it did not. `{ channel, deliveredStartingPassword: true }` says more:
+ * what it sent them carried the event's `startingPassword`, so they have it
+ * without the inviter (the credential delivery policy: a password the
+ * person was sent directly is not also handed to whoever invited them). A
+ * plain channel name never claims that, so a mail that only announces the
+ * invite leaves the password with the inviter, as before.
  */
-export type AccountInvitedHook = NotifyingListener<AccountInvitedEvent>;
+export type AccountInvitedAnswer = string | null | { channel: string; deliveredStartingPassword: boolean };
+
+/**
+ * A listener answers {@link AccountInvitedAnswer}; otherwise the rule is
+ * {@link NotifyingListener}'s: awaited, a throw logged and counted as null,
+ * never failing the invite.
+ */
+export type AccountInvitedHook = (event: AccountInvitedEvent) => Promise<AccountInvitedAnswer>;
+
+/**
+ * What the listeners did with an invite. `notified`: the channels that
+ * reached the person, in registration order. `passwordDeliveredBy`: of
+ * those, the ones that carried the starting password to them; always empty
+ * for an event with no `startingPassword`.
+ */
+export interface AccountInvitedNotice {
+  notified: string[];
+  passwordDeliveredBy: string[];
+}
+
+/** One run of the invited listeners: the event, and where the delivered password went. */
+interface InvitedRun {
+  event: AccountInvitedEvent;
+  passwordDeliveredBy: string[];
+}
 
 /**
  * Core's seam for "an account was invited": a deployment (the cloud with its
@@ -65,6 +97,12 @@ export interface IAccountHooks {
   onAccountInvited(hook: AccountInvitedHook): void;
   /** Run every listener in registration order; the channels that reached the person, in that order. */
   runAccountInvited(event: AccountInvitedEvent): Promise<string[]>;
+  /**
+   * The same run, answering also which channels carried the starting
+   * password to the person: what the invitation route reads to decide
+   * whether the inviter is shown it.
+   */
+  deliverAccountInvited(event: AccountInvitedEvent): Promise<AccountInvitedNotice>;
   onAccountDeactivated(hook: AccountDeactivatedHook): void;
   /** Run every listener in registration order; what each cleaned up, in that order. */
   runAccountDeactivated(event: AccountDeactivatedEvent): Promise<string[]>;
@@ -89,11 +127,11 @@ export type AccountDeactivatedHook = NotifyingListener<AccountDeactivatedEvent>;
 export class AccountHooks implements IAccountHooks {
   // The account exists whether or not the person was told: the admin's
   // answer says they were not, and the admin sends the link themselves.
-  private readonly invited = new ListenerSeam<AccountInvitedEvent>(
+  private readonly invited = new ListenerSeam<InvitedRun>(
     log,
     'an account-invited listener failed; the person was not notified by it:',
     // A mailer's error can quote the message it was sending, password and all.
-    (event) => [event.startingPassword],
+    (run) => [run.event.startingPassword],
   );
   // The account is off whether or not a listener cleaned up after it: a
   // failure here is logged, and the sign-ins it left are refused on use
@@ -104,11 +142,27 @@ export class AccountHooks implements IAccountHooks {
   );
 
   onAccountInvited(hook: AccountInvitedHook): void {
-    this.invited.add(hook);
+    this.invited.add(async (run) => {
+      const answer = await hook(run.event);
+      if (answer === null || typeof answer === 'string') return answer;
+      if (typeof answer !== 'object' || typeof answer.channel !== 'string' || answer.channel === '') return null;
+      // Only a password the event carried can have been delivered, and only
+      // `true` claims it: anything else leaves it with the inviter.
+      if (answer.deliveredStartingPassword === true && run.event.startingPassword) {
+        run.passwordDeliveredBy.push(answer.channel);
+      }
+      return answer.channel;
+    });
   }
 
-  runAccountInvited(event: AccountInvitedEvent): Promise<string[]> {
-    return this.invited.run(event);
+  async runAccountInvited(event: AccountInvitedEvent): Promise<string[]> {
+    return (await this.deliverAccountInvited(event)).notified;
+  }
+
+  async deliverAccountInvited(event: AccountInvitedEvent): Promise<AccountInvitedNotice> {
+    const run: InvitedRun = { event, passwordDeliveredBy: [] };
+    const notified = await this.invited.run(run);
+    return { notified, passwordDeliveredBy: run.passwordDeliveredBy };
   }
 
   onAccountDeactivated(hook: AccountDeactivatedHook): void {

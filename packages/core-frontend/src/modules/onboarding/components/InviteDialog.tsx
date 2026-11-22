@@ -11,6 +11,7 @@ import { initials } from '../../../lib/email';
 import { EmailChipsInput } from './EmailChipsInput';
 import {
   gotPassword,
+  passwordDelivered,
   isInvited,
   isValidEmail,
   sendInvites,
@@ -35,8 +36,7 @@ function either(labels: string[]): string {
  * What the form offers, from how the deployment signs people in:
  * - `password`: password sign-in and no single sign-on — every new account
  *   gets a generated starting password, or nobody invited could sign in (the
- *   owner's and the system accounts' addresses, and from a non-admin one
- *   that already holds Admin, excepted: the answer says);
+ *   owner's and the system accounts' addresses excepted: the answer says);
  * - `sso`: single sign-on and password sign-in — a generated password is an
  *   option;
  * - `sso-only`: password sign-in is off — no password at all;
@@ -72,10 +72,8 @@ interface InviteDialogProps {
  * How the invited people get in depends on the deployment, so the dialog
  * asks it first (`GET /api/auth/providers`) and lets nothing be sent until it
  * knows. Nobody types a password: without single sign-on the server
- * generates one for every new account but an owner's or a system account's
- * (or, from a non-admin, one that already holds Admin);
- * with single sign-on that is an
- * option. An account that is already there is left exactly as it was.
+ * generates one for every new account but an owner's or a system account's;
+ * with single sign-on that is an option. An account that is already there is left exactly as it was.
  *
  * Two views in one dialog. The form; then, after sending, who is invited,
  * how each of them signs in, and how to tell them. The second view exists
@@ -86,6 +84,11 @@ interface InviteDialogProps {
  * A generated password is shown on its row in the result view, with a Copy
  * button, and nowhere else: never in the message, never again after Done or
  * "Invite more people" (both drop the outcomes), and gone with the dialog.
+ * One the deployment delivered to the person directly (their email, the
+ * companion) is not shown at all: the server does not hand it back, and the
+ * row says how it was sent (the credential delivery policy). Neither is an
+ * Admin's address's from a non-admin's invite, which the server never hands
+ * to the inviter.
  *
  * Feedback stays INSIDE the dialog: the Library's toasts only exist under its
  * own routes, and this opens from Knowledge too.
@@ -411,6 +414,13 @@ function outcomeBadge(outcome: InviteOutcome): { tone: BadgeTone; label: string 
   return OUTCOME_BADGE[outcome.status];
 }
 
+/** How the deployment delivered a password to the person, in words: "by email", "through the companion". */
+function deliveredHow(channels: string[]): string {
+  return channels
+    .map((c) => (c === 'email' ? 'by email' : c === 'companion' ? 'through the companion' : `by ${c}`))
+    .join(' and ');
+}
+
 /** How the person on one row signs in — or why they can't. */
 function outcomeDetail(outcome: InviteOutcome, idp: string): string {
   switch (outcome.status) {
@@ -423,10 +433,17 @@ function outcomeDetail(outcome: InviteOutcome, idp: string): string {
       // Single sign-on is named only where the server said it lets this
       // address in: it refuses one outside the deployment's allowed domains.
       const viaIdp = idp && outcome.singleSignOn ? idp : '';
+      // A password the deployment delivered to the person is not shown here
+      // (the credential delivery policy): the row says how it went instead.
+      const sent = passwordDelivered(outcome) ? `the password sent to them ${deliveredHow(outcome.passwordDeliveredBy ?? [])}` : '';
       const how = outcome.startingPassword
         ? viaIdp
           ? `signs in with ${viaIdp} or the password below`
           : 'signs in with the password below'
+        : sent
+          ? viaIdp
+            ? `signs in with ${viaIdp} or ${sent}`
+            : `signs in with ${sent}`
         : viaIdp
           ? `signs in with ${viaIdp}`
           : idp
@@ -460,11 +477,22 @@ const INTRO = 'I’ve added you to our workspace, where we keep what our AI agen
 /**
  * The message to forward, saying how to sign in. `idp`: the single sign-on
  * that lets the reader in ('' when none does). `password`: 'separately' when
- * one was generated for them, never the password itself; 'own' when they
- * sign in with a password of their own; 'none' when no password lets them in.
+ * one was generated for them and the inviter passes it on, never the password
+ * itself; 'sent' when the deployment delivered it to them directly; 'own'
+ * when they sign in with a password of their own; 'none' when no password
+ * lets them in.
  */
-function inviteMessage(origin: string, how: { idp: string; password: 'separately' | 'own' | 'none' }): string {
+function inviteMessage(
+  origin: string,
+  how: { idp: string; password: 'separately' | 'sent' | 'own' | 'none' },
+): string {
   const { idp, password } = how;
+  if (password === 'sent' && idp) {
+    return `${INTRO} Sign in at ${origin} with ${idp}, or with your work email and the password you’ve been sent (change it on your Account page). Then connect your agent from the welcome page.`;
+  }
+  if (password === 'sent') {
+    return `${INTRO} Sign in at ${origin} with your work email and the password you’ve been sent. Then change it on your Account page and connect your agent from the welcome page.`;
+  }
   if (password === 'separately' && idp) {
     return `${INTRO} Sign in at ${origin} with ${idp}, or with your work email and the password I’ll send you separately (change it on your Account page). Then connect your agent from the welcome page.`;
   }
@@ -491,7 +519,7 @@ function messageFor(outcome: InviteOutcome, origin: string, idp: string, passwor
   if (outcome.status === 'created') {
     return inviteMessage(origin, {
       idp: outcome.singleSignOn ? idp : '',
-      password: gotPassword(outcome) ? 'separately' : 'none',
+      password: gotPassword(outcome) ? 'separately' : passwordDelivered(outcome) ? 'sent' : 'none',
     });
   }
   return inviteMessage(origin, { idp, password: passwordSignIn ? 'own' : 'none' });
@@ -516,6 +544,8 @@ function InvitedBody({
   // it was not everyone invited, since an existing account got none.
   const gotIt = outcomes.filter(gotPassword).length;
   const passwordSet = gotIt > 0;
+  // Who the deployment sent their password to directly: shown no password.
+  const sentIt = outcomes.filter(passwordDelivered).length;
   // The deployment emailed EVERY invited person the invite itself (the
   // cloud's mail, say): the inviter has nothing to send. One person it did
   // not reach — an account that was already there, a deployment with no
@@ -528,10 +558,10 @@ function InvitedBody({
   // New accounts nothing lets in yet: no password was made for them, and
   // single sign-on is off or refuses the address (one outside the allowed
   // domains). Without single sign-on that is an address the server makes no
-  // password for: the owner's, a system account's, or an Admin's from a
-  // non-admin.
+  // password for (the owner's, a system account's), or an Admin's from a
+  // non-admin that nobody could deliver to.
   const shutOutEmails = outcomes
-    .filter((o) => o.status === 'created' && !o.startingPassword && !(idp && o.singleSignOn))
+    .filter((o) => o.status === 'created' && !o.startingPassword && !passwordDelivered(o) && !(idp && o.singleSignOn))
     .map((o) => o.email);
   const shutOut = shutOutEmails.length;
   const shutOutWhy = idp ? `${idp} doesn’t accept` : 'no password was made for';
@@ -569,6 +599,8 @@ function InvitedBody({
               ? 'They have been emailed the link and how to sign in.'
               : passwordSet
                 ? `${who} can sign in now. Send them the link and their password.`
+                : sentIt > 0
+                  ? `${who} can sign in now with the password they were sent. Send them the link.`
                 : idp
                   ? `${who} can sign in now with ${idp}. Send them the link.`
                   : created === invited
@@ -616,7 +648,7 @@ function InvitedBody({
                   : 'Copy each password on its row now: they aren’t shown again.'}
               </span>{' '}
               {allEmailed
-                ? 'Send it to them separately if their email didn’t carry it, and ask them to change it on their Account page.'
+                ? 'Their email didn’t carry it: send it to them separately, and ask them to change it on their Account page.'
                 : 'Send it to them separately. It isn’t in the message below, so the message is safe to post in a shared channel.'}
             </Banner>
           )}

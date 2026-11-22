@@ -6,6 +6,7 @@ import { users, type Database } from '../../database/index.js';
 import { PG_ADMIN_URL, PG_TEST_TIMEOUT, dropScratchDatabases, openMigratedScratchDb } from '../../../__tests__/pg-scratch.js';
 import { AuthService } from '../auth.service.js';
 import { createInvitationRoutes } from '../invitation.routes.js';
+import { AccountHooks } from '../account-hooks.js';
 import { admitEveryone, type IAccountAdmission } from '../index.js';
 
 /**
@@ -17,7 +18,15 @@ import { admitEveryone, type IAccountAdmission } from '../index.js';
 const closers: (() => Promise<void>)[] = [];
 
 async function startApp(
-  opts: { admission?: IAccountAdmission; adminEmail?: string; adminPassword?: string } = {},
+  opts: {
+    admission?: IAccountAdmission;
+    adminEmail?: string;
+    adminPassword?: string;
+    /** The deployment's listeners (its mail, its companion); none by default. */
+    hooks?: AccountHooks;
+    /** Addresses `roles.yaml` lists under Admin before they have accounts. */
+    admins?: string[];
+  } = {},
 ): Promise<{ base: string; auth: AuthService; db: Database; close(): void }> {
   const { db, close } = await openMigratedScratchDb('hexis_invite');
   closers.push(close);
@@ -41,7 +50,12 @@ async function startApp(
   });
   app.use(
     '/api',
-    createInvitationRoutes(auth, { isAdmin: async () => false, holdsAdmin: async () => false }, { runAccountInvited: async () => [] }, { passwordSignIn: true, providers: [] }),
+    createInvitationRoutes(
+      auth,
+      { isAdmin: async () => false, holdsAdmin: async (email) => (opts.admins ?? []).includes(email) },
+      opts.hooks ?? new AccountHooks(),
+      { passwordSignIn: true, providers: [] },
+    ),
   );
   const server: Server = await new Promise((resolve) => {
     const s = app.listen(0, () => resolve(s));
@@ -138,6 +152,79 @@ describe.skipIf(!PG_ADMIN_URL)('invitations on a real Postgres', () => {
         expect(res.status).toBe(201);
         expect(await res.json()).not.toHaveProperty('startingPassword');
         const [row] = await app.db.select().from(users).where(eq(users.emailBidx, 'owner@acme.test'));
+        expect(row!.passwordHash).toBeNull();
+      } finally {
+        app.close();
+      }
+    },
+    PG_TEST_TIMEOUT,
+  );
+
+  it(
+    'a password a listener delivered signs the person in, and the member is not handed it',
+    async () => {
+      const hooks = new AccountHooks();
+      let mailed = '';
+      hooks.onAccountInvited(async (event) => {
+        mailed = event.startingPassword ?? '';
+        return { channel: 'email', deliveredStartingPassword: true };
+      });
+      const app = await startApp({ hooks });
+      try {
+        const res = await invite(app.base, { email: 'mailed@acme.test' });
+        expect(res.status).toBe(201);
+        const body = (await res.json()) as Record<string, unknown>;
+        expect(body).not.toHaveProperty('startingPassword');
+        expect(body.passwordDeliveredBy).toEqual(['email']);
+        expect(mailed).toHaveLength(16);
+        expect((await app.auth.loginWithPassword('mailed@acme.test', mailed)).user.email).toBe('mailed@acme.test');
+      } finally {
+        app.close();
+      }
+    },
+    PG_TEST_TIMEOUT,
+  );
+
+  it(
+    "an Admin's address invited by a member, with nobody to deliver its password: the account is left with none",
+    async () => {
+      const hooks = new AccountHooks();
+      let offered = '';
+      hooks.onAccountInvited(async (event) => {
+        offered = event.startingPassword ?? '';
+        return 'email'; // announced the invite, without the password
+      });
+      const app = await startApp({ hooks, admins: ['boss@acme.test'] });
+      try {
+        const res = await invite(app.base, { email: 'Boss@Acme.test' });
+        expect(res.status).toBe(201);
+        expect(await res.json()).not.toHaveProperty('startingPassword');
+        const [row] = await app.db.select().from(users).where(eq(users.emailBidx, 'boss@acme.test'));
+        expect(row!.passwordHash).toBeNull();
+        await expect(app.auth.loginWithPassword('boss@acme.test', offered)).rejects.toThrow();
+      } finally {
+        app.close();
+      }
+    },
+    PG_TEST_TIMEOUT,
+  );
+
+  it(
+    'discarding a starting password leaves alone a password set on the account meanwhile',
+    async () => {
+      const app = await startApp();
+      try {
+        const made = await app.auth.createInvitedAccount('race@acme.test', { startingPassword: true });
+        if (!made.created || !made.startingPassword) throw new Error('expected a new account with a password');
+        // An admin sets a password in User accounts before the discard runs.
+        await app.auth.createAccount('race@acme.test', 'Race', 'set-by-an-admin-123');
+        expect(await app.auth.discardStartingPassword(made.user.id, made.startingPassword)).toBe(false);
+        expect((await app.auth.loginWithPassword('race@acme.test', 'set-by-an-admin-123')).user.email).toBe('race@acme.test');
+        // Untouched, it is taken back.
+        const other = await app.auth.createInvitedAccount('other@acme.test', { startingPassword: true });
+        if (!other.created || !other.startingPassword) throw new Error('expected a new account with a password');
+        expect(await app.auth.discardStartingPassword(other.user.id, other.startingPassword)).toBe(true);
+        const [row] = await app.db.select().from(users).where(eq(users.emailBidx, 'other@acme.test'));
         expect(row!.passwordHash).toBeNull();
       } finally {
         app.close();

@@ -152,7 +152,8 @@ export async function createAccount(
  * Invite one address (`POST /api/invitations`), for anyone signed in: a NEW
  * account, or `{ status: 'existing' }` for an address that has one, which
  * the server leaves exactly as it was. `startingPassword` asks the server to
- * generate a password for the new account; the answer carries it this once.
+ * generate a password for the new account; the answer carries it this once,
+ * unless the deployment delivered it to the person (`passwordDeliveredBy`).
  *
  * A refusal throws {@link AccountRequestError}; `kind: 'admission'` means
  * the deployment's admission rules had no place for the account.
@@ -168,15 +169,18 @@ export async function sendInvitation(request: InvitationRequest): Promise<Invita
     status?: unknown;
     account?: Extract<InvitationResult, { status: 'created' }>['account'];
     startingPassword?: unknown;
+    passwordDeliveredBy?: unknown;
     notified?: unknown;
     singleSignOn?: unknown;
   };
   if (body.status === 'existing') return { status: 'existing' };
   if (body.status !== 'created' || !body.account) throw new AccountRequestError('Could not invite them', res.status);
+  const deliveredBy = notifiedChannels(body.passwordDeliveredBy);
   return {
     status: 'created',
     account: body.account,
     ...(typeof body.startingPassword === 'string' && body.startingPassword ? { startingPassword: body.startingPassword } : {}),
+    ...(deliveredBy.length > 0 ? { passwordDeliveredBy: deliveredBy } : {}),
     notified: notifiedChannels(body.notified),
     // Never assumed: only a server that says so has single sign-on letting them in.
     singleSignOn: body.singleSignOn === true,

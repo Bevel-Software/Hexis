@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import express from 'express';
 import type { Server } from 'node:http';
 import { createInvitationRoutes, type InvitationSignIn } from '../invitation.routes.js';
-import type { AccountInvitedEvent } from '../account-hooks.js';
+import type { AccountInvitedEvent, AccountInvitedNotice } from '../account-hooks.js';
 import type { AuthProviderPlugin } from '../auth.routes.js';
 import type { AuthService } from '../auth.service.js';
 import { FixedWindowRateLimiter } from '../rate-limit.js';
@@ -25,7 +25,11 @@ const createInvitedAccount = vi.fn<AuthService['createInvitedAccount']>();
 const getUserById = vi.fn<AuthService['getUserById']>(async (id) => ({ id, email: `${id}@acme.test`, name: 'Inviter' }));
 // The deployment's ALLOWED_EMAIL_DOMAINS, as single sign-on reads it: acme.test only.
 const isEmailDomainAllowed = vi.fn<AuthService['isEmailDomainAllowed']>((email) => email.endsWith('@acme.test'));
-const runAccountInvited = vi.fn<(event: AccountInvitedEvent) => Promise<string[]>>(async () => []);
+const deliverAccountInvited = vi.fn<(event: AccountInvitedEvent) => Promise<AccountInvitedNotice>>(async () => ({
+  notified: [],
+  passwordDeliveredBy: [],
+}));
+const discardStartingPassword = vi.fn<AuthService['discardStartingPassword']>(async () => true);
 
 /** Every line logged while a test runs, message and fields. */
 let lines: { level: string; message: string; fields?: LogFields }[] = [];
@@ -61,7 +65,9 @@ beforeEach(() => {
     user: { id: 'new-1', email, name: email.split('@')[0] },
     ...(startingPassword ? { startingPassword: GENERATED } : {}),
   }));
-  runAccountInvited.mockClear();
+  deliverAccountInvited.mockClear();
+  discardStartingPassword.mockReset();
+  discardStartingPassword.mockResolvedValue(true);
 });
 afterEach(() => {
   setLogger(previousLogger);
@@ -98,9 +104,9 @@ async function start(opts: {
   app.use(
     '/api',
     createInvitationRoutes(
-      { createInvitedAccount, getUserById, isEmailDomainAllowed },
+      { createInvitedAccount, discardStartingPassword, getUserById, isEmailDomainAllowed },
       adminAccess,
-      { runAccountInvited },
+      { deliverAccountInvited },
       { passwordSignIn: true, providers: [], ...opts.signIn },
       opts.limiter,
     ),
@@ -141,7 +147,7 @@ describe('POST /api/invitations — who may invite as what', () => {
     const res = await invite(base, { email: 'new@acme.test', role: 'admin' });
     expect(res.status).toBe(403);
     expect(createInvitedAccount).not.toHaveBeenCalled();
-    expect(runAccountInvited).not.toHaveBeenCalled();
+    expect(deliverAccountInvited).not.toHaveBeenCalled();
   });
 
   it("takes an admin's role: admin (the promotion itself is the roles route's)", async () => {
@@ -151,12 +157,41 @@ describe('POST /api/invitations — who may invite as what', () => {
     expect(createInvitedAccount).toHaveBeenCalledTimes(1);
   });
 
-  it('makes no password when a member invites an address that already holds Admin', async () => {
+  it("never hands a member the password of an address that already holds Admin: undelivered, it is discarded", async () => {
     const base = await start({ admin: false, admins: ['boss@acme.test'] });
     const res = await invite(base, { email: 'Boss@Acme.test', startingPassword: true });
     expect(res.status).toBe(201);
-    expect((await res.json()).startingPassword).toBeUndefined();
-    expect(createInvitedAccount).toHaveBeenCalledWith('Boss@Acme.test', { startingPassword: false });
+    const body = await res.json();
+    expect(body).not.toHaveProperty('startingPassword');
+    expect(body).not.toHaveProperty('passwordDeliveredBy');
+    // Made, offered to the listeners, and taken back when none delivered it.
+    expect(createInvitedAccount).toHaveBeenCalledWith('Boss@Acme.test', { startingPassword: true });
+    expect(deliverAccountInvited.mock.calls[0]![0].startingPassword).toBe(GENERATED);
+    expect(discardStartingPassword).toHaveBeenCalledWith('new-1', GENERATED);
+    expect(lines.find((l) => l.message === 'account audit:')?.fields).toMatchObject({
+      passwordGenerated: true,
+      passwordReturned: false,
+      passwordDiscarded: true,
+    });
+  });
+
+  it('delivers the password of an address that already holds Admin when a listener can, and keeps it', async () => {
+    deliverAccountInvited.mockResolvedValueOnce({ notified: ['email'], passwordDeliveredBy: ['email'] });
+    const base = await start({ admin: false, admins: ['boss@acme.test'] });
+    const body = await (await invite(base, { email: 'boss@acme.test' })).json();
+    expect(body).not.toHaveProperty('startingPassword');
+    expect(body.passwordDeliveredBy).toEqual(['email']);
+    expect(discardStartingPassword).not.toHaveBeenCalled();
+  });
+
+  it('answers 201 with no password when discarding the undelivered Admin password fails, and logs it', async () => {
+    discardStartingPassword.mockRejectedValueOnce(new Error('db down'));
+    const base = await start({ admin: false, admins: ['boss@acme.test'] });
+    const res = await invite(base, { email: 'boss@acme.test' });
+    expect(res.status).toBe(201);
+    expect(await res.json()).not.toHaveProperty('startingPassword');
+    expect(lines.some((l) => l.level === 'error' && l.message.includes('could not be discarded'))).toBe(true);
+    expect(JSON.stringify(lines)).not.toContain(GENERATED);
   });
 
   it('still makes one when an admin invites an address that already holds Admin', async () => {
@@ -171,7 +206,7 @@ describe('POST /api/invitations — who may invite as what', () => {
     const res = await invite(base, { email: 'boss@acme.test' });
     expect(res.status).toBe(503);
     expect(createInvitedAccount).not.toHaveBeenCalled();
-    expect(runAccountInvited).not.toHaveBeenCalled();
+    expect(deliverAccountInvited).not.toHaveBeenCalled();
   });
 
   it("does not ask when an admin invites, so a failed lookup does not stop the admin's invite", async () => {
@@ -194,7 +229,7 @@ describe('POST /api/invitations — who may invite as what', () => {
     const res = await invite(base, { email: 'old@acme.test' });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ status: 'existing' });
-    expect(runAccountInvited).not.toHaveBeenCalled();
+    expect(deliverAccountInvited).not.toHaveBeenCalled();
     expect(lines.filter((l) => l.message === 'account audit:')).toEqual([]);
   });
 });
@@ -246,13 +281,71 @@ describe('POST /api/invitations — the starting password follows how people sig
   });
 });
 
+describe('POST /api/invitations — who gets the password (the credential delivery policy)', () => {
+  it('a password a listener delivered to the person is not returned to the inviter; the answer says by which channel', async () => {
+    deliverAccountInvited.mockResolvedValueOnce({ notified: ['email'], passwordDeliveredBy: ['email'] });
+    const base = await start({ admin: false });
+    const res = await invite(base, { email: 'new@acme.test' });
+    expect(res.status).toBe(201);
+    expect(await res.json()).toEqual({
+      status: 'created',
+      account: { id: 'new-1', email: 'new@acme.test', name: 'new' },
+      passwordDeliveredBy: ['email'],
+      notified: ['email'],
+      singleSignOn: false,
+    });
+    expect(discardStartingPassword).not.toHaveBeenCalled();
+    expect(lines.find((l) => l.message === 'account audit:')?.fields).toEqual({
+      action: 'invite',
+      actorUserId: 'inviter-1',
+      targetUserId: 'new-1',
+      passwordGenerated: true,
+      passwordDeliveredBy: ['email'],
+      passwordReturned: false,
+    });
+  });
+
+  it('the companion delivering it counts the same, for an admin too', async () => {
+    deliverAccountInvited.mockResolvedValueOnce({ notified: ['companion'], passwordDeliveredBy: ['companion'] });
+    const base = await start({ admin: true });
+    const body = await (await invite(base, { email: 'new@acme.test' })).json();
+    expect(body).not.toHaveProperty('startingPassword');
+    expect(body.passwordDeliveredBy).toEqual(['companion']);
+  });
+
+  it('a listener that only announced the invite leaves the password with the inviter, once', async () => {
+    deliverAccountInvited.mockResolvedValueOnce({ notified: ['email'], passwordDeliveredBy: [] });
+    const base = await start({ admin: false });
+    const body = await (await invite(base, { email: 'new@acme.test' })).json();
+    expect(body.startingPassword).toBe(GENERATED);
+    expect(body).not.toHaveProperty('passwordDeliveredBy');
+    expect(body.notified).toEqual(['email']);
+  });
+
+  it('nobody to deliver it: the inviter gets it, for an address any grant may already name', async () => {
+    // Only Admin is asked about; grants and groups never hold a password back.
+    const base = await start({ admin: false, admins: [] });
+    const body = await (await invite(base, { email: 'granted@acme.test' })).json();
+    expect(body.startingPassword).toBe(GENERATED);
+    expect(discardStartingPassword).not.toHaveBeenCalled();
+  });
+
+  it('a delivery claimed for an invite that made no password changes nothing', async () => {
+    deliverAccountInvited.mockResolvedValueOnce({ notified: ['email'], passwordDeliveredBy: ['email'] });
+    const base = await start({ admin: false, signIn: { providers: [sso] } });
+    const body = await (await invite(base, { email: 'new@acme.test' })).json();
+    expect(body).not.toHaveProperty('startingPassword');
+    expect(body).not.toHaveProperty('passwordDeliveredBy');
+  });
+});
+
 describe('POST /api/invitations — the event, the audit line and the refusals', () => {
   it('carries the generated password on the invited event, and the channels back in the answer', async () => {
-    runAccountInvited.mockResolvedValueOnce(['email']);
+    deliverAccountInvited.mockResolvedValueOnce({ notified: ['email'], passwordDeliveredBy: [] });
     const base = await start({ admin: false });
     const res = await invite(base, { email: 'new@acme.test' });
     expect((await res.json()).notified).toEqual(['email']);
-    expect(runAccountInvited).toHaveBeenCalledWith({
+    expect(deliverAccountInvited).toHaveBeenCalledWith({
       account: { id: 'new-1', email: 'new@acme.test', name: 'new' },
       invitedBy: { id: 'inviter-1', email: 'inviter-1@acme.test', name: 'Inviter' },
       passwordSet: true,
@@ -263,7 +356,7 @@ describe('POST /api/invitations — the event, the audit line and the refusals',
   it('leaves startingPassword off the event when none was generated', async () => {
     const base = await start({ admin: false, signIn: { providers: [sso] } });
     await invite(base, { email: 'new@acme.test' });
-    const event = runAccountInvited.mock.calls[0]![0];
+    const event = deliverAccountInvited.mock.calls[0]![0];
     expect(event.passwordSet).toBe(false);
     expect(event).not.toHaveProperty('startingPassword');
   });
@@ -276,7 +369,14 @@ describe('POST /api/invitations — the event, the audit line and the refusals',
       {
         level: 'info',
         message: 'account audit:',
-        fields: { action: 'invite', actorUserId: 'inviter-1', targetUserId: 'new-1', passwordGenerated: true },
+        fields: {
+          action: 'invite',
+          actorUserId: 'inviter-1',
+          targetUserId: 'new-1',
+          passwordGenerated: true,
+          passwordDeliveredBy: [],
+          passwordReturned: true,
+        },
       },
     ]);
     expect(JSON.stringify(lines)).not.toContain(GENERATED);
@@ -288,7 +388,7 @@ describe('POST /api/invitations — the event, the audit line and the refusals',
     const res = await invite(base, { email: 'new@acme.test' });
     expect(res.status).toBe(403);
     expect(await res.json()).toEqual({ error: 'Your plan has no seat left', kind: 'admission' });
-    expect(runAccountInvited).not.toHaveBeenCalled();
+    expect(deliverAccountInvited).not.toHaveBeenCalled();
   });
 
   it('answers an invalid address with 400, and anything unexpected with 500 and no internals', async () => {
@@ -320,6 +420,6 @@ describe('POST /api/invitations — the per-inviter budget', () => {
     const res = await invite(base, { email: 'b@acme.test' });
     expect(res.status).toBe(429);
     expect(createInvitedAccount).toHaveBeenCalledTimes(2);
-    expect(runAccountInvited).toHaveBeenCalledTimes(1);
+    expect(deliverAccountInvited).toHaveBeenCalledTimes(1);
   });
 });

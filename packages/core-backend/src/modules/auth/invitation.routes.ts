@@ -34,14 +34,23 @@ export interface InvitationSignIn {
  *   sign-in and no single sign-on every new account gets one, whatever
  *   `startingPassword` says, or nobody invited could sign in (the deployment
  *   owner's and the system accounts' addresses excepted: an inviter never
- *   learns an owner's password, and the system accounts hold none; nor,
- *   from a non-admin, an address that already holds Admin). With
- *   both, only when `startingPassword` is true.
- *   With password sign-in off none is made, and asking for one is a 400.
- *   When whether the address holds Admin cannot be read, a non-admin's
- *   invite that would make a password is a 503 and nothing is written.
- *   It is returned once in the answer and carried on the invited event for
- *   a deployment's mail; never logged.
+ *   learns an owner's password, and the system accounts hold none). With
+ *   both, only when `startingPassword` is true. With password sign-in off
+ *   none is made, and asking for one is a 400. An address the access model
+ *   already names (a grant, a group) gets one like any other.
+ * - Who gets it (the credential delivery policy): it is carried on the
+ *   invited event, and when a listener answers that what it sent the person
+ *   carried it (`deliveredStartingPassword`: their email, the companion),
+ *   the answer leaves it out and says by which channel instead
+ *   (`passwordDeliveredBy`). Otherwise it is returned once in the answer,
+ *   for the inviter to copy and pass on. Never logged.
+ * - One exception to that fallback: from a non-admin, for an address that
+ *   already holds Admin (listed in `roles.yaml` before it has an account),
+ *   the password is never handed to the inviter, who would then sign in as
+ *   an admin. It still goes to a listener that can deliver it; when none
+ *   does, it is discarded and the account is left with no password (an admin
+ *   sets one in User accounts). When whether the address holds Admin cannot
+ *   be read, such an invite is a 503 and nothing is written.
  * - The admission port is asked with the reason `invite`; a refusal is 403
  *   with `kind: 'admission'` and the port's words.
  * - Each inviter has a budget of invitations per window, and past it the
@@ -52,9 +61,9 @@ export interface InvitationSignIn {
  * `POST /api/admin/accounts` stays the admins' account API beside this.
  */
 export function createInvitationRoutes(
-  authService: Pick<AuthService, 'createInvitedAccount' | 'getUserById' | 'isEmailDomainAllowed'>,
+  authService: Pick<AuthService, 'createInvitedAccount' | 'discardStartingPassword' | 'getUserById' | 'isEmailDomainAllowed'>,
   adminAccess: IAdminAccessService & IAdminRoleLookup,
-  accountHooks: Pick<IAccountHooks, 'runAccountInvited'>,
+  accountHooks: Pick<IAccountHooks, 'deliverAccountInvited'>,
   signIn: InvitationSignIn,
   /**
    * Invitations per inviter per window. Generous: one dialog sends a whole
@@ -95,14 +104,15 @@ export function createInvitationRoutes(
       return;
     }
     const sso = offeredProviders(signIn.providers).length > 0;
-    let generate = signIn.passwordSignIn && (!sso || startingPassword === true);
+    const generate = signIn.passwordSignIn && (!sso || startingPassword === true);
     // An address that already holds Admin (listed in `roles.yaml` before it
-    // has an account) gets no password from a non-admin's invite: whoever
-    // learned it would sign in as an admin. Asked only when one would be made,
-    // and a lookup that fails is never read as "not an admin".
+    // has an account) never has its password handed to a non-admin inviter:
+    // whoever learned it would sign in as an admin. Asked only when one would
+    // be made, and a lookup that fails is never read as "not an admin".
+    let withholdFromInviter = false;
     if (generate && !inviterIsAdmin) {
       try {
-        generate = !(await adminAccess.holdsAdmin(canonicalEmail(email)));
+        withholdFromInviter = await adminAccess.holdsAdmin(canonicalEmail(email));
       } catch (error) {
         log.warn('an invite could not tell whether the address holds Admin:', { err: error });
         res.status(503).json({ error: "Could not check this address's role. Try again later." });
@@ -135,24 +145,43 @@ export function createInvitationRoutes(
     }
 
     const { user, startingPassword: password } = invited;
-    // Never the password: whether one was made is all the line says.
-    log.info('account audit:', {
-      action: 'invite',
-      actorUserId: req.userId,
-      targetUserId: user.id,
-      passwordGenerated: password !== undefined,
-    });
     const account = { id: user.id, email: user.email, name: user.name };
-    const notified = await accountHooks.runAccountInvited({
+    const { notified, passwordDeliveredBy } = await accountHooks.deliverAccountInvited({
       account,
       invitedBy: await inviterOf(req, (id) => authService.getUserById(id)),
       passwordSet: password !== undefined,
       ...(password !== undefined ? { startingPassword: password } : {}),
     });
+    const delivered = password !== undefined && passwordDeliveredBy.length > 0;
+    // The inviter is handed the password only when nobody delivered it to
+    // the person, and never an Admin's from a non-admin.
+    const returned = password !== undefined && !delivered && !withholdFromInviter;
+    let discarded = false;
+    if (password !== undefined && !delivered && withholdFromInviter) {
+      // Nobody holds it now: drop it, so the account honestly has no
+      // password and User accounts offers to set one. A failure leaves a
+      // password nobody was given, which lets nobody in: logged, not fatal.
+      try {
+        discarded = await authService.discardStartingPassword(user.id, password);
+      } catch (error) {
+        log.error('an undelivered starting password could not be discarded; nobody was given it:', { err: error });
+      }
+    }
+    // Never the password: whether one was made, and where it went, is all the line says.
+    log.info('account audit:', {
+      action: 'invite',
+      actorUserId: req.userId,
+      targetUserId: user.id,
+      passwordGenerated: password !== undefined,
+      passwordDeliveredBy: delivered ? passwordDeliveredBy : [],
+      passwordReturned: returned,
+      ...(discarded ? { passwordDiscarded: true } : {}),
+    });
     const answer: InvitationResult = {
       status: 'created',
       account,
-      ...(password !== undefined ? { startingPassword: password } : {}),
+      ...(returned ? { startingPassword: password } : {}),
+      ...(delivered ? { passwordDeliveredBy } : {}),
       notified,
       // Single sign-on refuses an address outside the allowed domains, so the
       // dialog may say "signs in with SSO" only where this is true.

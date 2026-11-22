@@ -50,7 +50,10 @@ const ADMIN_ROLE = 'admin';
 export type InviteOutcome =
   /**
    * A new account. `startingPassword`: the password the platform generated
-   * for it, held only for the result view to show once.
+   * for it, held only for the result view to show once; absent when the
+   * deployment delivered it to the person instead. `passwordDeliveredBy`:
+   * the channels that carried the generated password to the person
+   * (`'email'`, `'companion'`), so the inviter is not shown it.
    * `notified`: how the deployment told the person of the invite (`'email'`
    * from the cloud's mail, say), as the server's listeners answered; absent
    * when nobody did and the inviter hands over the link themselves.
@@ -63,6 +66,7 @@ export type InviteOutcome =
       role: InviteRole;
       roleError?: string;
       startingPassword?: string;
+      passwordDeliveredBy?: string[];
       notified?: string[];
       singleSignOn?: boolean;
     }
@@ -93,9 +97,14 @@ export function isInvited(outcome: InviteOutcome): boolean {
   return outcome.status === 'created' || (outcome.status === 'existing' && !outcome.deactivated);
 }
 
-/** The account was created with a generated starting password. */
+/** The account was created with a generated starting password the inviter is shown, to pass on. */
 export function gotPassword(outcome: InviteOutcome): boolean {
   return outcome.status === 'created' && Boolean(outcome.startingPassword);
+}
+
+/** The account was created with a generated starting password the deployment delivered to the person. */
+export function passwordDelivered(outcome: InviteOutcome): boolean {
+  return outcome.status === 'created' && (outcome.passwordDeliveredBy?.length ?? 0) > 0;
 }
 
 /** The deployment emailed this person the invite itself, so the inviter need not send them the link. */
@@ -112,8 +121,8 @@ function isSwitchedOff(err: unknown): boolean {
  * Invite each address (`POST /api/invitations`). The server makes a NEW
  * account, with a generated starting password when `startingPassword` asks
  * for one (and unasked where password sign-in is the only way in; never for
- * the owner's or a system account's address, nor from a non-admin for one
- * that already holds Admin), or says
+ * the owner's or a system account's address), handed back to show once
+ * unless the deployment delivered it to the person, or says
  * the address already has one, which it leaves exactly as it was.
  *
  * One at a time, not in parallel. Each create asks the deployment's admission
@@ -174,6 +183,7 @@ export async function sendInvites(
       result.status === 'created'
         ? {
             ...(result.startingPassword ? { startingPassword: result.startingPassword } : {}),
+            ...(result.passwordDeliveredBy?.length ? { passwordDeliveredBy: result.passwordDeliveredBy } : {}),
             ...(result.notified.length > 0 ? { notified: result.notified } : {}),
             ...(result.singleSignOn ? { singleSignOn: true } : {}),
           }
