@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import { buildSandboxedHtmlIn } from './fixtures/sandboxed-document';
-import { isFrameEscape } from '../src/modules/workspace/utils/frameEscape';
+import { isFrameEscape } from '../../utils/frameEscape';
 
 /**
  * Escape pressed with focus inside an HTML page's frame, in a real browser,

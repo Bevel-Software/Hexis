@@ -2,7 +2,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Page } from '@playwright/test';
 import { build, type Rollup } from 'vite';
-import type { buildSandboxedHtml, sanitizeAgentHtml } from '../../src/modules/workspace/components/renderers/htmlSandbox';
+import type { buildSandboxedHtml, sanitizeAgentHtml } from '../../../components/renderers/htmlSandbox';
 
 /**
  * Build a page's frame document IN the browser under test, with the real

@@ -690,7 +690,8 @@ describe('buildSandboxedHtml', () => {
  * The frame's `script-src`: built from the document `buildSandboxedHtml`
  * returns, it lists exactly the inline scripts and handlers that document
  * holds, once by SHA-256 and once, in a second policy, by SHA-384. The
- * browser enforcing them is `browser/html-page-own-scripts.browser.ts`.
+ * browser enforcing them is
+ * `src/modules/workspace/__tests__/browser/html-page-own-scripts.browser.ts`.
  */
 describe('buildSandboxedHtml: the scripts a page may run', () => {
   const policiesOf = (doc: string) =>

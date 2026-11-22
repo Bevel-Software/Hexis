@@ -10,7 +10,7 @@ import {
   PageToolsClient,
   answerToolCall,
   asToolCall,
-} from '../../src/modules/workspace/components/renderers/htmlToolBridge';
+} from '../../../components/renderers/htmlToolBridge';
 
 declare global {
   interface Window {

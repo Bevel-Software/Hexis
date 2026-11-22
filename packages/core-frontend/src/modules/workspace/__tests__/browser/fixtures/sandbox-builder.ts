@@ -5,7 +5,7 @@
  * run, so a document built anywhere else would be read by a different parser
  * than the frame's.
  */
-import { buildSandboxedHtml, sanitizeAgentHtml } from '../../src/modules/workspace/components/renderers/htmlSandbox';
+import { buildSandboxedHtml, sanitizeAgentHtml } from '../../../components/renderers/htmlSandbox';
 
 declare global {
   interface Window {

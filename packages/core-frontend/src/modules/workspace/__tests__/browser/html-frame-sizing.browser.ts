@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import { buildSandboxedHtmlIn } from './fixtures/sandboxed-document';
-import { attachFrameResizeHandle } from '../src/modules/workspace/components/renderers/frameResizeHandle';
+import { attachFrameResizeHandle } from '../../components/renderers/frameResizeHandle';
 
 /**
  * The handle under an HTML page's frame, driven by a real pointer in a real

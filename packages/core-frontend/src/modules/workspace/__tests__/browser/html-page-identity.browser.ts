@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { expect, test, type Page } from '@playwright/test';
 import { build, type Rollup } from 'vite';
 import { buildSandboxedHtmlIn } from './fixtures/sandboxed-document';
-import type { PageConsent, PageToolsClient, answerToolCall, asToolCall } from '../src/modules/workspace/components/renderers/htmlToolBridge';
+import type { PageConsent, PageToolsClient, answerToolCall, asToolCall } from '../../components/renderers/htmlToolBridge';
 
 /** What the bundled fixture leaves on the host page: the renderer's tool bridge. */
 type HostWindow = Window & {
