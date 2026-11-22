@@ -1,4 +1,5 @@
 import { authFetch } from '../../../lib/api';
+import { secretsPath } from './acting-for';
 
 export type SecretKind = 'static' | 'oauth';
 
@@ -38,7 +39,7 @@ async function unwrap(res: Response, fallback: string): Promise<never> {
 }
 
 export async function listSecrets(): Promise<SecretSummary[]> {
-  const res = await authFetch('/api/secrets');
+  const res = await authFetch(secretsPath('/api/secrets'));
   if (!res.ok) await unwrap(res, "Couldn't load your secrets.");
   return ((await res.json()) as { secrets: SecretSummary[] }).secrets;
 }
@@ -48,7 +49,7 @@ export async function putStaticSecret(input: {
   value: string;
   label?: string | null;
 }): Promise<SecretSummary> {
-  const res = await authFetch('/api/secrets/static', {
+  const res = await authFetch(secretsPath('/api/secrets/static'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
@@ -62,7 +63,7 @@ export async function createOAuthSecret(input: {
   label?: string | null;
   provider: OAuthProviderConfig;
 }): Promise<SecretSummary> {
-  const res = await authFetch('/api/secrets/oauth', {
+  const res = await authFetch(secretsPath('/api/secrets/oauth'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
@@ -72,13 +73,13 @@ export async function createOAuthSecret(input: {
 }
 
 export async function deleteSecret(id: string): Promise<void> {
-  const res = await authFetch(`/api/secrets/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  const res = await authFetch(secretsPath(`/api/secrets/${encodeURIComponent(id)}`), { method: 'DELETE' });
   if (!res.ok && res.status !== 204) await unwrap(res, "Couldn't remove this secret.");
 }
 
 /** Fetch the provider consent URL for an oauth secret; the caller navigates to it. */
 export async function startOAuth(id: string): Promise<string> {
-  const res = await authFetch(`/api/secrets/${encodeURIComponent(id)}/oauth/start`);
+  const res = await authFetch(secretsPath(`/api/secrets/${encodeURIComponent(id)}/oauth/start`));
   if (!res.ok) await unwrap(res, "Couldn't start authorization.");
   return ((await res.json()) as { url: string }).url;
 }

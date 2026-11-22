@@ -599,8 +599,10 @@ export class McpService {
             : null;
     const audit =
       this.auditRecorder && principal
-        ? new RequestAudit(this.auditRecorder, userId, principal, {
+        ? new RequestAudit(this.auditRecorder, caller.credentialUserId ?? userId, principal, {
             kbManualName: EXTERNAL_KB_MANUAL_NAME,
+            // A bot's request names both: the person (above) and the bot.
+            ...(caller.credentialUserId ? { botUserId: userId } : {}),
             catalogNames: () => catalogNamesHolder.current,
             loadSkills: () =>
               this.fetchSkillList(loopbackBearer).then((skills) =>

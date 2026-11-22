@@ -1064,6 +1064,8 @@ export async function createCoreServices(
     // The opened event names the approvers as accounts; auth answers which
     // of the addresses the access model names have one.
     authService,
+    // A bot never changes access: the access module says who is one.
+    (email) => accessControl.isBot(email),
   );
   // The leftover-branch cleanup asks the Deployment page at every round, so
   // switching it off there applies without a restart.
@@ -1419,8 +1421,12 @@ export async function createCoreServices(
   // agent makes), reads keys through the key service so their shape is
   // defined once, and prunes past the retention setting — read per sweep, so
   // a change on the Deployment page applies without a restart.
-  const agentAuditService = new AgentAuditService(db, externalApiKeyService, () =>
-    retentionDaysFrom(settings.resolve('auditRetentionDays')),
+  const agentAuditService = new AgentAuditService(
+    db,
+    externalApiKeyService,
+    () => retentionDaysFrom(settings.resolve('auditRetentionDays')),
+    Date.now,
+    botService,
   );
   // The embed surface. It reads files through the workspace service and
   // judges them with the same access resolver the app file page uses, so what

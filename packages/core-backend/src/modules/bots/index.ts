@@ -11,3 +11,4 @@ export {
   type ResolvedConnection,
 } from './bots.contract.js';
 export { botAddress } from './bot-address-book.js';
+export { describeConnectionChoice, type ConnectedAs } from './connected-as.js';

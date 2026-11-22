@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Badge, Banner, Button, Surface, TextField } from '../../../shared/components';
 import { cn } from '../../../lib/utils';
@@ -13,6 +13,8 @@ import { useAppRegistry } from '../../../core/registry';
 import { SlotBoundary } from '../../../shared/components/SlotBoundary';
 import { useConnectAsChoice } from '../../agents';
 import { ConnectAsChoice } from '../../agents/components/ConnectAsChoice';
+import { useAuth } from '../../auth';
+import { actForBot, botFromLocation } from '../services/acting-for';
 import {
   getConnectPending,
   startToolOAuth,
@@ -127,6 +129,7 @@ export function ConnectToolsPage() {
   // have answered (before that it would approve Everything unseen), and for
   // Everything to be confirmed when they could not be loaded.
   const connectAs = useConnectAsChoice({ initial: rememberedConnectAs, expect: agentState });
+  const { user } = useAuth();
   const [finishing, setFinishing] = useState(false);
   // Entries the user took OUT. Everything the server sent is in by default —
   // it used to be the other way round, and an unconfigured tool the reader had
@@ -149,13 +152,15 @@ export function ConnectToolsPage() {
    */
   const loadSeq = useRef(0);
 
-  // The agent the list is for: the "Connect as" choice, in agent-connect mode
-  // only. A connection made as an agent loads only the connectors its file
-  // lists, so the page asks for the sign-ins and keys of those and no other —
-  // asking for hubspot's sign-in on the way to an agent that never loads
-  // hubspot sends the person off to sign in for nothing. Everything (null)
-  // lists what it always listed.
-  const chosenAgent = agentState != null ? connectAs.value : null;
+  // Whose tools, keys and sign-ins the page shows: the bot chosen to connect
+  // as, in agent-connect mode; else the bot the page was opened for by its
+  // link (`?bot=<id>`); else the person's own. A connection made as a bot
+  // uses the bot's sign-ins, so those are the ones it needs. Set for the
+  // requests before the list loads (a layout effect runs first), and
+  // released when the page leaves: no other page acts for the bot.
+  const [linkedBot] = useState(() => botFromLocation());
+  const chosenAgent = agentState != null ? connectAs.value : linkedBot;
+  useLayoutEffect(() => actForBot(chosenAgent), [chosenAgent]);
 
   /**
    * @param quiet keep the list on screen while it refetches.
@@ -171,7 +176,7 @@ export function ConnectToolsPage() {
     if (!quiet) setLoading(true);
     setRefreshing(true);
     try {
-      const pending = await getConnectPending(chosenAgent);
+      const pending = await getConnectPending();
       if (loadSeq.current !== mine) return;
       setTools(pending.tools);
       setOauth(pending.oauth);
@@ -226,7 +231,7 @@ export function ConnectToolsPage() {
       .then((r) => {
         if (cancelled) return;
         setAgentName(r.clientName);
-        settleConnectAs({ agents: r.agents ?? [], failed: r.agentsUnavailable === true }, agentState);
+        settleConnectAs({ bots: r.bots ?? [], failed: r.botsUnavailable === true }, agentState);
       })
       .catch(() => {
         if (cancelled) return;
@@ -439,13 +444,13 @@ export function ConnectToolsPage() {
               </div>
               <div className="mt-4">
                 <ConnectAsChoice
-                  agents={connectAs.agents}
+                  bots={connectAs.bots}
+                  myselfEmail={user?.email}
                   value={connectAs.value}
                   disabled={finishing}
-                  hint="What this connection loads. An agent narrows it to the tools, skills and plugins its configuration lists, and only those you may read."
-                  onChange={(path) => {
-                    connectAs.setValue(path);
-                    if (path) sessionStorage.setItem(MCP_OAUTH_AGENT_KEY, path);
+                  onChange={(botId) => {
+                    connectAs.setValue(botId);
+                    if (botId) sessionStorage.setItem(MCP_OAUTH_AGENT_KEY, botId);
                     else sessionStorage.removeItem(MCP_OAUTH_AGENT_KEY);
                   }}
                   unavailable={connectAs.unavailable}
@@ -476,7 +481,7 @@ export function ConnectToolsPage() {
           {!nothingToDo && (
             <p className="mb-5 text-ui text-ink-muted">
               {chosenAgent
-                ? 'These are the tools the chosen agent loads that need a sign-in or a key before they will work in your agent. '
+                ? `These are the tools the bot ${chosenAgent} may reach that need a sign-in or a key before they will work for it. `
                 : 'These tools need a sign-in or a key before they will work in your agent. '}
               Authorize each connection and enter any keys below, then head back to your agent and
               run the tool again. Anything greyed out is not yours to do — it is waiting on the
@@ -494,7 +499,7 @@ export function ConnectToolsPage() {
               // user's only job is to finish.
               <Banner role="status" tone="ok">
                 {chosenAgent
-                  ? 'You’re all set: none of the tools the chosen agent loads need a personal sign-in or key. Click '
+                  ? `You’re all set: none of the tools the bot ${chosenAgent} may reach need a sign-in or key. Click `
                   : 'You’re all set: none of your tools need a personal sign-in or key. Click '}
                 “Finish &amp; return to your agent” above to complete the connection.
               </Banner>

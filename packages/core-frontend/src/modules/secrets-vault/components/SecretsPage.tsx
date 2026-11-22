@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Badge, Banner, Button, Surface, TextField } from '../../../shared/components';
 import { PageShell } from '../../../shared/components/PageShell';
@@ -12,6 +12,7 @@ import {
 } from '../services/secrets.api';
 import { listToolSecrets, type ToolSecrets } from '../services/tool-secrets.api';
 import { ToolSecretsPanel } from './ToolSecretsPanel';
+import { actForBot, botFromLocation } from '../services/acting-for';
 
 /**
  * The Secrets page, routed standalone at `/secrets` (below the persistent
@@ -61,6 +62,12 @@ export function SecretsPage() {
    * away the only copy of the answer the save was waiting for. Same fix
    * `useToolPage` made for the tool page, for the same reason.
    */
+  // Opened for a bot by a link naming it (`?bot=<id>`): every request this
+  // page makes reads and writes that bot's secrets, set before the first
+  // load (a layout effect runs first) and released when the page leaves.
+  const [bot] = useState(() => botFromLocation());
+  useLayoutEffect(() => actForBot(bot), [bot]);
+
   const refresh = useCallback(async (quiet = false) => {
     const mine = ++loadSeq.current;
     if (!quiet) setLoading(true);
@@ -149,6 +156,11 @@ export function SecretsPage() {
         </Banner>
       )}
 
+      {bot && (
+        <p className="mb-2 text-ui font-medium text-ink" data-testid="secrets-of-bot">
+          Secrets of {bot}
+        </p>
+      )}
       <p className="mb-5 text-ui text-ink-muted">
         Secrets back the{' '}
         <code className="rounded-sm bg-sunken px-1 py-0.5 font-mono text-meta text-ink">

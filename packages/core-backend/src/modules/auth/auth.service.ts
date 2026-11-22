@@ -351,7 +351,7 @@ export class AuthService implements IAccountSwitchGuard {
     const matches = await verifyPassword(provided, stored);
     // A bot's row never signs in, whatever it carries: the same answer as a
     // wrong password, so the address's being a bot's is not disclosed either.
-    if (!user?.passwordHash || !matches || user.botId !== null) {
+    if (!user?.passwordHash || !matches || user.botId != null) {
       throw new Error('Invalid credentials');
     }
     // Only now, with the password proven: telling a stranger that an address
@@ -697,7 +697,7 @@ export class AuthService implements IAccountSwitchGuard {
     // Before the policy check, so the deployment admin is told the real reason
     // rather than being sent to fix a password that would be refused anyway.
     this.assertNotSystemAccount(user.email);
-    if (user.botId !== null) throw new PasswordRefusedError(BOT_ADDRESS_REFUSAL);
+    if (user.botId != null) throw new PasswordRefusedError(BOT_ADDRESS_REFUSAL);
     if (this.isEnvAdminEmail(user.email)) {
       throw new PasswordRefusedError(ENV_ADMIN_PASSWORD_REFUSAL);
     }
@@ -749,7 +749,7 @@ export class AuthService implements IAccountSwitchGuard {
     // would sort by IV noise. The table is one row per team member.
     // People only: a bot's row is an identity of its own, never a person and
     // never a seat (`modules/bots`), so it is not an account here.
-    const rows = (await this.db.select().from(users)).filter((row) => row.botId === null);
+    const rows = (await this.db.select().from(users)).filter((row) => row.botId == null);
     return rows
       .map((row) => {
         const isEnvAdmin = this.reportsAsEnvAdmin(row.email);

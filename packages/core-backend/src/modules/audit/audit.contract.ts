@@ -1,3 +1,4 @@
+import type { ConnectedAs } from '../bots/index.js';
 /**
  * The Audit log's contracts: what an external agent's activity is recorded
  * as, who a recorded call is attributed to, and the two services around
@@ -87,7 +88,10 @@ export function isPagePath(path: string): boolean {
 
 /** One recorded call, as the recorder takes it. */
 export interface AgentEventInput {
+  /** The person: who made the connection (the bot's maker, for a bot's connection). */
   userId: string;
+  /** The bot the call was made as, when its connection acts as one; absent or null for the person themselves. */
+  botUserId?: string | null;
   principal: RecordedPrincipal;
   kind: AgentEventKind;
   /** The MCP server / `.tool` manual for a tool, the skill folder for a skill; null for a capability. */
@@ -129,11 +133,11 @@ export interface AuditPrincipal {
   eventCount: number;
   user: { id: string; email: string; name: string };
   /**
-   * For a key or an agent connection: the agent configuration it connects as (a
-   * repo-relative knowledge-base path), or null for Everything. Absent for a
-   * page, which acts as its viewer.
+   * For a key or an agent connection: whom it connects as, judged now — its
+   * owner ("you"), a bot by name, or a bot it stopped acting as and why.
+   * Absent for a page, which acts as its viewer.
    */
-  agentPath?: string | null;
+  connectedAs?: ConnectedAs;
 }
 
 /** One event as the page reads it. */

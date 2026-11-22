@@ -349,6 +349,14 @@ export class VersionControlService implements IVersionControlService {
      * approver counts as unresolved.
      */
     private readonly accounts?: ApproverAccounts,
+    /**
+     * Whether an address is a bot's (`modules/bots`): a bot never changes
+     * access, so its writes to access files and its merge of a request that
+     * changes access are refused. Defaulted for the harnesses that construct
+     * this service without bots; every deployment passes the access
+     * module's answer.
+     */
+    private readonly isBot: (email: string) => boolean = () => false,
   ) {
     // The type already requires it; this holds for a caller the compiler did
     // not see (plain JavaScript, a positional slip in a harness).
@@ -1483,7 +1491,7 @@ export class VersionControlService implements IVersionControlService {
       // lock first, so a bot is refused an access file here whatever surface
       // it writes through. (A file's own access lines are content, judged by
       // the agent's pre-disk check and by the merge.)
-      if (this.accessControl.isBot(user.email)) {
+      if (this.isBot(user.email)) {
         const rel = targetPath.startsWith(`${this.kbDirName}/`) ? targetPath.slice(this.kbDirName.length + 1) : targetPath;
         if (isAccessFile(rel)) throw new BotChangesAccessError(rel, 'file');
       }
@@ -4303,7 +4311,7 @@ export class VersionControlService implements IVersionControlService {
     // A bot may merge where it is granted, but never a change to access: the
     // request is refused whole when it touches an access file or a file's own
     // access lines (`modules/bots`). Asked before anything is rewritten.
-    if (this.accessControl.isBot(user.email)) await this.assertBotMergeLeavesAccess(number, baseBranch);
+    if (this.isBot(user.email)) await this.assertBotMergeLeavesAccess(number, baseBranch);
     const preserved = await this.preserveBaseRolesYaml(number, user, baseBranch);
 
     // When preservation pushed a restore commit, the source-branch head advanced,

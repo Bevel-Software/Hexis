@@ -59,7 +59,10 @@ export function createAgentRestAuditMiddleware(deps: AgentRestAuditDeps): Reques
       const record = (skills: readonly SkillFolder[] | null) => {
         try {
           deps.recorder.record({
-            userId: auth.userId,
+            // A bot's call names both: the person who made the connection,
+            // and the bot it acted as.
+            userId: auth.madeBy?.id ?? auth.userId,
+            ...(auth.madeBy ? { botUserId: auth.userId } : {}),
             principal: { kind: 'agent', id: auth.connectionId! },
             ...classifyToolCall(utcpName, args, ctx, skills),
             outcome,

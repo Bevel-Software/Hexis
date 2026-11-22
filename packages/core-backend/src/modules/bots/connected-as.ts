@@ -1,4 +1,4 @@
-import type { ConnectionChoice, IBots, Principal } from '../bots/index.js';
+import type { ConnectionChoice, IBots, Principal } from './bots.contract.js';
 
 /**
  * Whom a connection the person made is connected as, as their connections

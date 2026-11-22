@@ -3,6 +3,7 @@ import { logger } from '../../shared/logging.js';
 import type { Database } from '../database/index.js';
 import { agentConnections, agentEvents, externalApiKeys, oauthTokens, users } from '../database/index.js';
 import type { IExternalApiKeyService } from '../tool-auth/index.js';
+import { describeConnectionChoice, type ConnectedAs, type IBots } from '../bots/index.js';
 import {
   AuditPrincipalNotFoundError,
   InvalidCursorError,
@@ -52,6 +53,12 @@ export class AgentAuditService implements IAgentAuditService, IAgentEventRecorde
     /** Read per sweep, so a changed setting applies without a restart; null = keep forever. */
     private readonly retentionDays: () => number | null,
     private readonly now: () => number = Date.now,
+    /**
+     * Whom each key and agent connection is connected as, judged now (the
+     * same resolution their calls run). Absent: a choice of a bot reads as
+     * stopped, since nothing could resolve it.
+     */
+    private readonly bots?: Pick<IBots, 'resolveConnection'>,
   ) {}
 
   record(event: AgentEventInput): void {
@@ -67,6 +74,7 @@ export class AgentAuditService implements IAgentAuditService, IAgentEventRecorde
         name: event.name,
         outcome: event.outcome,
         durationMs: event.durationMs,
+        botUserId: event.botUserId ?? null,
         at: new Date(this.now()),
       })
       .then(
@@ -138,6 +146,14 @@ export class AgentAuditService implements IAgentAuditService, IAgentEventRecorde
       if (id) counts.set(id, Number(row.n));
     }
 
+    // Whom each key and agent connection is connected as, judged now, by the
+    // resolution its calls run.
+    const connectedAs = new Map<string, ConnectedAs>(
+      await Promise.all([
+        ...keyRows.map(async (k) => [k.id, await describeConnectionChoice(this.bots, k.user, { botUserId: k.botUserId ?? null, agentPath: k.agentPath ?? null })] as const),
+        ...connectionRows.map(async ({ connection: c, user }) => [c.id, await describeConnectionChoice(this.bots, user, { botUserId: c.botUserId ?? null, agentPath: c.agentPath ?? null })] as const),
+      ]),
+    );
     const principals: AuditPrincipal[] = [
       ...keyRows.map((k) => ({
         kind: 'key' as const,
@@ -151,7 +167,7 @@ export class AgentAuditService implements IAgentAuditService, IAgentEventRecorde
         deletedAt: k.deletedAt,
         eventCount: counts.get(k.id) ?? 0,
         user: k.user,
-        agentPath: k.agentPath ?? null,
+        connectedAs: connectedAs.get(k.id),
       })),
       ...connectionRows.map(({ connection: c, user }) => ({
         kind: 'agent' as const,
@@ -163,7 +179,7 @@ export class AgentAuditService implements IAgentAuditService, IAgentEventRecorde
         revokedBy: (c.revokedBy as 'owner' | 'admin' | null) ?? null,
         eventCount: counts.get(c.id) ?? 0,
         user,
-        agentPath: c.agentPath ?? null,
+        connectedAs: connectedAs.get(c.id),
       })),
       ...pageRows.flatMap((r) =>
         r.pagePath

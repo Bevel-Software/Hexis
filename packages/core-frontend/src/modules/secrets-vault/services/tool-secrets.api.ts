@@ -1,4 +1,5 @@
 import { authFetch } from '../../../lib/api';
+import { secretsPath } from './acting-for';
 import type { ManagedSignIn } from './connect.api';
 
 /**
@@ -102,7 +103,7 @@ async function unwrap(res: Response, fallback: string): Promise<never> {
 /** All accessible tools with their variables + config status; `path` narrows to one tool. */
 export async function listToolSecrets(path?: string): Promise<ToolSecrets[]> {
   const q = path ? `?path=${encodeURIComponent(path)}` : '';
-  const res = await authFetch(`/api/secrets/tools${q}`);
+  const res = await authFetch(secretsPath(`/api/secrets/tools${q}`));
   if (!res.ok) await unwrap(res, "Couldn't load tool secrets.");
   return ((await res.json()) as { tools: ToolSecrets[] }).tools;
 }
@@ -111,7 +112,7 @@ const varPath = (slug: string, varName: string, tier: ToolVarScope) =>
   `/api/secrets/tools/${encodeURIComponent(slug)}/vars/${encodeURIComponent(varName)}/${tier}`;
 
 async function putVar(slug: string, varName: string, tier: ToolVarScope, value: string, label?: string | null): Promise<void> {
-  const res = await authFetch(varPath(slug, varName, tier), {
+  const res = await authFetch(secretsPath(varPath(slug, varName, tier)), {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ value, label: label ?? null }),
@@ -120,7 +121,7 @@ async function putVar(slug: string, varName: string, tier: ToolVarScope, value: 
 }
 
 async function deleteVar(slug: string, varName: string, tier: ToolVarScope): Promise<void> {
-  const res = await authFetch(varPath(slug, varName, tier), { method: 'DELETE' });
+  const res = await authFetch(secretsPath(varPath(slug, varName, tier)), { method: 'DELETE' });
   if (!res.ok && res.status !== 204) await unwrap(res, "Couldn't remove this secret.");
 }
 
@@ -140,7 +141,7 @@ export async function setOAuthClientSecret(
   clientId?: string,
 ): Promise<void> {
   const res = await authFetch(
-    `/api/secrets/tools/${encodeURIComponent(slug)}/vars/${encodeURIComponent(varName)}/oauth/admin`,
+    secretsPath(`/api/secrets/tools/${encodeURIComponent(slug)}/vars/${encodeURIComponent(varName)}/oauth/admin`),
     {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
@@ -160,7 +161,7 @@ export async function setOAuthClientSecret(
  * rejects.
  */
 export async function checkToolConnection(slug: string): Promise<ProbeVerdict> {
-  const res = await authFetch(`/api/secrets/tools/${encodeURIComponent(slug)}/check`, { method: 'POST' });
+  const res = await authFetch(secretsPath(`/api/secrets/tools/${encodeURIComponent(slug)}/check`), { method: 'POST' });
   if (!res.ok) await unwrap(res, "Couldn't test this connection.");
   return ((await res.json()) as { verdict: ProbeVerdict }).verdict;
 }

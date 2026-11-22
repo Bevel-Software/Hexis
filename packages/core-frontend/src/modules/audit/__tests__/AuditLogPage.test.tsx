@@ -177,18 +177,18 @@ describe('AuditLogPage', () => {
     expect(screen.queryByRole('button', { name: /Revoke key for Old script/ })).not.toBeInTheDocument();
   });
 
-  it('shows what each connection and key connects as: Everything, or the agent file it was made as', async () => {
+  it('shows as whom each connection and key is connected: you, a bot, or a bot it stopped acting as', async () => {
     vi.mocked(listPrincipals).mockResolvedValue([
-      { ...ALICE_CLAUDE, agentPath: 'Agents/delivery-mechanic.agent' },
-      { ...ALICE_CI, agentPath: null },
+      { ...ALICE_CLAUDE, connectedAs: { kind: 'bot', name: 'delivery-coder', stopped: null } },
+      { ...ALICE_CI, connectedAs: { kind: 'myself' } },
+      { ...BOB_LINK, connectedAs: { kind: 'bot', name: 'release-helper', stopped: 'you may no longer edit this bot' } },
     ]);
     renderPage({ isAdmin: true });
     await waitFor(() => expect(screen.getByText('CI pipeline')).toBeInTheDocument());
     const rowOf = (label: string) => screen.getByText(label).closest('li') as HTMLElement;
-    expect(rowOf('Claude')).toHaveTextContent('As delivery-mechanic');
-    expect(within(rowOf('Claude')).getByTitle('Agents/delivery-mechanic.agent')).toBeInTheDocument();
-    // Everything is what a connection is unless it says otherwise: no tag.
-    expect(rowOf('CI pipeline')).not.toHaveTextContent('As ');
+    expect(rowOf('Claude')).toHaveTextContent('Connected as delivery-coder');
+    expect(rowOf('CI pipeline')).toHaveTextContent('Connected as you');
+    expect(rowOf('Claude link')).toHaveTextContent('Connected as release-helper · stopped: you may no longer edit this bot');
   });
 
   it('shows an admin a key its owner deleted for good, marked as such, with its history intact', async () => {

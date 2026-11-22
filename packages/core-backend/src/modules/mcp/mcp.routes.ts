@@ -17,7 +17,7 @@ import '../tool-auth/index.js'; // req.externalApiKeyId augmentation
 import './mcp-auth.middleware.js'; // req.mcpCallerKind augmentation
 import { isPagePath } from '../audit/index.js';
 import type { IBots } from '../bots/index.js';
-import { describeConnectionChoice } from './connected-as.js';
+import { describeConnectionChoice } from '../bots/index.js';
 import { NOT_A_BOT_CHOICE } from './oauth/oauth-consent.routes.js';
 
 /** Pull the raw bearer token off an already-authenticated request. */

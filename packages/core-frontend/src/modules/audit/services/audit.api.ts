@@ -1,3 +1,4 @@
+import type { ConnectedAs } from '../../agents';
 import { authFetch } from '../../../lib/api';
 
 /**
@@ -29,11 +30,8 @@ export interface AuditPrincipal {
   /** Events on record for it. */
   eventCount: number;
   user: { id: string; email: string; name: string };
-  /**
-   * For a key or an agent: the agent configuration it connects as (a knowledge-base
-   * path), or null for Everything. Absent for a page.
-   */
-  agentPath?: string | null;
+  /** For a key or an agent: whom it connects as — you, a bot, or a bot it stopped acting as and why. Absent for a page. */
+  connectedAs?: ConnectedAs;
 }
 
 export type AgentEventKind = 'capability' | 'tool' | 'skill';
