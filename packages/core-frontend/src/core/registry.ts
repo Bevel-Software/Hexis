@@ -392,6 +392,8 @@ export interface AppDef {
    * link to such a file lands here. `element` is then rendered under the
    * `/workspace/*` route, so it must show its folder surface
    * (`KnowledgeSurface` with `roots`) for a location it does not route itself.
+   * Its own screens go in that same surface (`nav` and `page`), so the app
+   * has one sidebar on every screen: its navigation above its folders.
    *
    * Two apps claiming one root is a composition error: the shell throws when
    * it is mounted, naming the root and both apps. So is claiming a root core
