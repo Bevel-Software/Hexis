@@ -2024,6 +2024,182 @@ describe('a change pulled from the git host onto the open file', () => {
     });
   });
 
+  describe('a save merged onto a pull the tab never took, and later text that collides with it', () => {
+    /**
+     * A refresh read of the open file (`reloadTabFromDisk`), held until
+     * `answer`. It answers `bytes`; the save waits on it and finds them on
+     * disk, but the read lands nothing in a tab holding edits or Done's text
+     * whose save is on its way, so the tab's saved bytes stay the ones the
+     * edits began from. The write then merges onto bytes the tab never held,
+     * and the text that came after it is measured from the save's own text.
+     */
+    function holdReloadRead(result: Hook, bytes: string) {
+      let answer!: () => void;
+      apiMocks.readFile.mockImplementationOnce(() => new Promise((resolve) => {
+        answer = () => resolve(bytes);
+      }));
+      let reloading!: Promise<void>;
+      act(() => { reloading = result.current.reloadTabFromDisk('KB/Notes.md'); });
+      return { answer: async () => { await act(async () => { answer(); await reloading; }); } };
+    }
+
+    /** The next write waits until `land` is called. */
+    function holdWrite() {
+      const write = apiMocks.writeFile.getMockImplementation()!;
+      let land!: () => void;
+      const landed = new Promise<void>((r) => { land = r; });
+      apiMocks.writeFile.mockClear();
+      apiMocks.writeFile.mockImplementationOnce(async (...args: Parameters<typeof write>) => {
+        await landed;
+        return write(...args);
+      });
+      return { land: () => land() };
+    }
+
+    const pulled = BASE.replace('First paragraph.', 'First paragraph, rewritten upstream.');
+
+    it('typing during the write that collides with the pull is discarded: the tab holds what was written, and the next save keeps it', async () => {
+      const result = await editedTab();
+      const edited = `${BASE}\n\nMy new closing line.`;
+      await typeInto(result, edited);
+      disk.set('KB/Notes.md', pulled);
+      const read = holdReloadRead(result, pulled);
+      const write = holdWrite();
+
+      let saving!: Promise<void>;
+      act(() => { saving = result.current.saveFile('KB/Notes.md', edited); });
+      await read.answer();
+      await waitFor(() => expect(apiMocks.writeFile).toHaveBeenCalledOnce());
+      const written = `${pulled}\n\nMy new closing line.`;
+      // The write merged onto the pull, expecting it on disk; the read left
+      // the tab holding edits alone, on the bytes they began from.
+      expect(apiMocks.writeFile).toHaveBeenCalledWith('ws-1', 'KB/Notes.md', written, { ifMatch: pulled });
+      expect(result.current.activeTab?.savedContent).toBe(BASE);
+      const revisionBefore = result.current.activeTab?.remoteRevision ?? 0;
+
+      // Typed while the write was out, on the line the pull rewrote.
+      await typeInto(result, edited.replace('First paragraph.', 'First paragraph, my way.'));
+      await act(async () => { write.land(); await saving; });
+
+      expect(disk.get('KB/Notes.md')).toBe(written);
+      let tab = result.current.activeTab!;
+      // The typing collides with the pull: given up, and the banner says so.
+      // The tab holds the written bytes as its baseline, and the editor
+      // reloads them (remoteRevision), so nothing of the typing is left in it.
+      expect(tab.content).toBe(written);
+      expect(tab.savedContent).toBe(written);
+      expect(tab.isDirty).toBe(false);
+      expect(tab.changedOnBranch).toBe('discarded');
+      expect(tab.remoteRevision).toBe(revisionBefore + 1);
+
+      // The next save is measured from the written bytes, and expects them.
+      const again = `${written}\n\nAfter the discard.`;
+      await typeInto(result, again);
+      await act(async () => { await result.current.saveFile('KB/Notes.md', result.current.activeTab!.content!); });
+      expect(apiMocks.writeFile).toHaveBeenLastCalledWith('ws-1', 'KB/Notes.md', again, { ifMatch: written });
+      expect(disk.get('KB/Notes.md')).toBe(again);
+      tab = result.current.activeTab!;
+      expect(tab.content).toBe(again);
+      expect(tab.savedContent).toBe(again);
+      expect(tab.isDirty).toBe(false);
+    });
+
+    it('a later Done whose text collides with the pull is discarded at the first landing, and its own save writes nothing over the pull', async () => {
+      const result = await editedTab();
+      const first = BASE.replace('Second paragraph.', 'FIRSTDONE Second paragraph.');
+      // The second Done rewrites the line the pull rewrote.
+      const second = first.replace('First paragraph.', 'First paragraph, my way.');
+      disk.set('KB/Notes.md', pulled);
+      const read = holdReloadRead(result, pulled);
+      const write = holdWrite();
+      const done = (text: string) => {
+        let saving!: Promise<void>;
+        act(() => {
+          result.current.setActiveTabContent(text);
+          saving = result.current.saveFile('KB/Notes.md', text);
+          result.current.setHasUnsavedFileChanges?.(false);
+        });
+        return saving;
+      };
+
+      const one = done(first);
+      const two = done(second);
+      await read.answer();
+      await waitFor(() => expect(apiMocks.writeFile).toHaveBeenCalledOnce());
+      const written = pulled.replace('Second paragraph.', 'FIRSTDONE Second paragraph.');
+      expect(apiMocks.writeFile).toHaveBeenCalledWith('ws-1', 'KB/Notes.md', written, { ifMatch: pulled });
+      // The read landed nothing in the tab holding the second Done's text.
+      let tab = result.current.activeTab!;
+      expect(tab.content).toBe(second);
+      expect(tab.savedContent).toBe(BASE);
+
+      await act(async () => { write.land(); await one; });
+      tab = result.current.activeTab!;
+      expect(tab.content).toBe(written);
+      expect(tab.savedContent).toBe(written);
+      expect(tab.isDirty).toBe(false);
+      expect(tab.changedOnBranch).toBe('discarded');
+
+      // The queued save measures the same text from the same base onto the
+      // same bytes, so it collides too and writes nothing.
+      await act(async () => { await two; });
+      expect(apiMocks.writeFile).toHaveBeenCalledOnce();
+      expect(disk.get('KB/Notes.md')).toBe(written);
+      tab = result.current.activeTab!;
+      expect(tab.content).toBe(written);
+      expect(tab.savedContent).toBe(written);
+      expect(tab.changedOnBranch).toBe('discarded');
+
+      const again = `${written}\n\nAfter the discard.`;
+      await typeInto(result, again);
+      await act(async () => { await result.current.saveFile('KB/Notes.md', result.current.activeTab!.content!); });
+      expect(apiMocks.writeFile).toHaveBeenLastCalledWith('ws-1', 'KB/Notes.md', again, { ifMatch: written });
+      expect(disk.get('KB/Notes.md')).toBe(again);
+    });
+
+    it('a first save that collides writes nothing, and a later Done that collides too is discarded with it, never shown without the pull', async () => {
+      const result = await editedTab();
+      // Both Dones rewrite the line the pull rewrote.
+      const first = BASE.replace('First paragraph.', 'First paragraph, my way.');
+      const second = `${first}\n\nSECONDDONE`;
+      disk.set('KB/Notes.md', pulled);
+      const read = holdReloadRead(result, pulled);
+      apiMocks.writeFile.mockClear();
+      const done = (text: string) => {
+        let saving!: Promise<void>;
+        act(() => {
+          result.current.setActiveTabContent(text);
+          saving = result.current.saveFile('KB/Notes.md', text);
+          result.current.setHasUnsavedFileChanges?.(false);
+        });
+        return saving;
+      };
+
+      const one = done(first);
+      const two = done(second);
+      await read.answer();
+      await act(async () => { await one; await two; });
+
+      // The first save gave its edits up to the pull and wrote nothing. The
+      // second Done's text is merged onto the pull from the first one's base
+      // by the queued save: it collides as well, so nothing is written over
+      // the pull, and the tab holds the pull with the discarded banner.
+      expect(apiMocks.writeFile).not.toHaveBeenCalled();
+      expect(disk.get('KB/Notes.md')).toBe(pulled);
+      const tab = result.current.activeTab!;
+      expect(tab.content).toBe(pulled);
+      expect(tab.savedContent).toBe(pulled);
+      expect(tab.isDirty).toBe(false);
+      expect(tab.changedOnBranch).toBe('discarded');
+
+      const again = `${pulled}\n\nAfter the discard.`;
+      await typeInto(result, again);
+      await act(async () => { await result.current.saveFile('KB/Notes.md', result.current.activeTab!.content!); });
+      expect(apiMocks.writeFile).toHaveBeenLastCalledWith('ws-1', 'KB/Notes.md', again, { ifMatch: pulled });
+      expect(disk.get('KB/Notes.md')).toBe(again);
+    });
+  });
+
   it('an echo of our own save does not touch edits typed after it', async () => {
     const result = await editedTab();
     await typeInto(result, `${BASE}\n\nTyped after the save.`);
