@@ -3,12 +3,12 @@ import { describe, it, expect, vi } from 'vitest';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import type { SQL } from 'drizzle-orm';
 import { ChangeRequestReviewService } from '../change-request-review.service.js';
-import { changeRequests, prMergeLog } from '../../../database/schema.js';
-import type { Database } from '../../../database/connection.js';
-import type { WorkspaceService } from '../../../workspace/workspace.service.js';
+import { changeRequests, prMergeLog } from '../../../database/index.js';
+import type { Database } from '../../../database/index.js';
+import type { WorkspaceService } from '../../../workspace/index.js';
 import type { GitService } from '../../git/git.service.js';
 import type { AppliedMergeResult, AuthUser, FileApprovalState } from '@bevel-software/platform-shared';
-import type { IAccessControl } from '../../../access/access-control.interface.js';
+import type { IAccessControl } from '../../../access/index.js';
 import { VersionControlDomainError } from '../../../../shared/domain-errors.js';
 
 /**

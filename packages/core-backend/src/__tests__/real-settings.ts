@@ -119,3 +119,12 @@ function settingsTable(): Database {
     }),
   } as unknown as Database;
 }
+
+/**
+ * Deployment settings over a REAL database, as the root builds them: for a
+ * Postgres suite whose settings must live in the migrated schema beside the
+ * rows that reference them (`users.id` for who recorded a change).
+ */
+export function deploymentSettingsOver(db: Database, env: NodeJS.ProcessEnv = {}): Settings {
+  return new DeploymentSettingsService(db, '', undefined, { env });
+}

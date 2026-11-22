@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { PendingCommitsService } from '../pending-commits.service.js';
-import type { Database } from '../../database/connection.js';
+import type { Database } from '../../database/index.js';
 
 /**
  * `enqueueIfAbsent` backs the pull-conflict recovery dispatch: it must

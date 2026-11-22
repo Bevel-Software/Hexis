@@ -5,8 +5,8 @@ import { describe, expect, it } from 'vitest';
 import { ToolRegistry } from '../tool-registry.js';
 import { createManualRoutes } from '../manual.routes.js';
 import { ConnectionScope } from '../../agent-scope/index.js';
-import { registerChangeRequestApplyTools } from '../../version-control/agent-tools/change-request-apply.tools.js';
-import { registerChangeRequestReadTools } from '../../version-control/agent-tools/change-request-read.tools.js';
+import { registerChangeRequestApplyTools } from '../../../__tests__/tool-wiring.js';
+import { registerChangeRequestReadTools } from '../../../__tests__/tool-wiring.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 
 /**

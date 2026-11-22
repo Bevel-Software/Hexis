@@ -9,7 +9,7 @@ import express from 'express';
 import type { AuthUser } from '@bevel-software/platform-shared';
 
 import { MarketplaceRepoService, type MarketplaceCompiler } from '../marketplace-repo.service.js';
-import { NodeGitRunner } from '../../version-control/git/node-git-runner.js';
+import { NodeGitRunner } from '../../version-control/index.js';
 import {
   GitHubFacadeCredentialsService,
   GitHubFacade,
@@ -21,9 +21,9 @@ import {
   createGitHubFacadeAdminRoutes,
   createGitHubFacadeRoutes,
 } from '../github-facade/index.js';
-import { createOAuthConsentRoutes } from '../../mcp/oauth/oauth-consent.routes.js';
-import type { BevelOAuthProvider } from '../../mcp/oauth/bevel-oauth-provider.js';
-import type { VirtualTree } from '../../plugins/compile/compile-marketplace.js';
+import { createOAuthConsentRoutes } from '../../../__tests__/tool-wiring.js';
+import type { BevelOAuthProvider } from '../../../__tests__/tool-wiring.js';
+import type { VirtualTree } from '../../plugins/index.js';
 
 /**
  * The GitHub-shaped surface, driven exactly as claude.ai drove the facade

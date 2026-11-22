@@ -8,8 +8,8 @@ import {
   TokenNotFoundError,
   TokenStillActiveError,
 } from '../external-api-key.errors.js';
-import type { Database } from '../../database/connection.js';
-import { externalApiKeys } from '../../database/schema.js';
+import type { Database } from '../../database/index.js';
+import { externalApiKeys } from '../../database/index.js';
 
 /**
  * Builds a fake drizzle chain. Every chainable method returns the same

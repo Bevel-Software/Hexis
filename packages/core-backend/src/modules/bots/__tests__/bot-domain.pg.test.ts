@@ -7,7 +7,8 @@ import { PG_ADMIN_URL, PG_TEST_TIMEOUT, dropScratchDatabases, openMigratedScratc
 import { BotService } from '../bot.service.js';
 import { BotAddressBook } from '../bot-address-book.js';
 import { botsDomainRefusal, rewriteBotGrants } from '../bot-domain.js';
-import { DeploymentSettingsService } from '../../settings/deployment-settings.service.js';
+import type { DeploymentSettingsService } from '../../settings/index.js';
+import { deploymentSettingsOver } from '../../../__tests__/real-settings.js';
 import { deploymentSettings } from '../../database/index.js';
 import { createBotsRoutes } from '../bots.routes.js';
 import { isAccessFile } from '../../access-model/index.js';
@@ -77,7 +78,7 @@ describe.skipIf(!PG_ADMIN_URL)('the bots\' domain on a real Postgres', () => {
       .values({ email: 'admin@acme.com', emailBidx: 'admin@acme.com', name: 'Admin' })
       .returning({ id: users.id });
     admin = { id: adminRow!.id, email: 'admin@acme.com', name: 'Admin' };
-    store = new DeploymentSettingsService(db, '', undefined, { env: {} });
+    store = deploymentSettingsOver(db);
     await store.load();
     service = new BotService(db, store, { definitions: async () => [def('release-helper')], mayActAs: async () => true }, book, async () => rewrite.state);
     await service.load();
@@ -199,7 +200,7 @@ describe.skipIf(!PG_ADMIN_URL)('a domain change on a real Postgres: every bot na
       .values({ email: 'admin@acme.com', emailBidx: 'admin@acme.com', name: 'Admin' })
       .returning({ id: users.id });
     admin = { id: adminRow!.id, email: 'admin@acme.com', name: 'Admin' };
-    store = new DeploymentSettingsService(db, '', undefined, { env: {} });
+    store = deploymentSettingsOver(db);
     await store.load();
   }, PG_TEST_TIMEOUT);
 

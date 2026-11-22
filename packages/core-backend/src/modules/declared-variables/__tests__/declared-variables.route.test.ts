@@ -2,8 +2,8 @@ import type { Server as HttpServer } from 'node:http';
 import express from 'express';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createDeclaredVariableRoutes } from '../declared-variables.routes.js';
-import type { IToolManualService, ToolManualSummary } from '../../tool-manuals/tool-manuals.contract.js';
-import type { ISecretsVaultService } from '../../secrets-vault/secrets-vault.contract.js';
+import type { IToolManualService, ToolManualSummary } from '../../tool-manuals/index.js';
+import type { ISecretsVaultService } from '../../secrets-vault/index.js';
 import { ConnectionScope } from '../../agent-scope/index.js';
 
 /**

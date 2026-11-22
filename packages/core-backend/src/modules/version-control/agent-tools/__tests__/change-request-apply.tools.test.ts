@@ -5,11 +5,11 @@ import type { ChangeRequestDetail, ChangedFile, FileApproval } from '@bevel-soft
 import { testKbContext } from '../../../../__tests__/kb-context.js';
 import { hashEmail } from '../../../../shared/email-identity.js';
 import { VersionControlDomainError } from '../../../../shared/domain-errors.js';
-import { ToolRegistry } from '../../../tool-registry/tool-registry.js';
-import { InternalTokenService } from '../../../tool-auth/internal-token.service.js';
-import { createToolAuthMiddleware } from '../../../tool-auth/tool-auth.middleware.js';
-import { createToolContextResolver } from '../../../tool-helpers/tool-context.js';
-import { createToolHandlerFactory } from '../../../tool-helpers/tool-handler.js';
+import { ToolRegistry } from '../../../tool-registry/index.js';
+import { InternalTokenService } from '../../../../__tests__/tool-wiring.js';
+import { createToolAuthMiddleware } from '../../../../__tests__/tool-wiring.js';
+import { createToolContextResolver } from '../../../../__tests__/tool-wiring.js';
+import { createToolHandlerFactory } from '../../../../__tests__/tool-wiring.js';
 import { registerChangeRequestApplyTools } from '../change-request-apply.tools.js';
 import { APPLY_FAILURE_REASON_WITHHELD } from '../change-request-read-shape.js';
 

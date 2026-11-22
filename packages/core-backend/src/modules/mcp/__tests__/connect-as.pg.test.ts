@@ -1,14 +1,12 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { randomBytes } from 'node:crypto';
 import { eq } from 'drizzle-orm';
-import { migrate } from 'drizzle-orm/node-postgres/migrator';
 import type { OAuthClientInformationFull } from '@modelcontextprotocol/sdk/shared/auth.js';
 import { BevelOAuthProvider } from '../oauth/bevel-oauth-provider.js';
-import { ExternalApiKeyService } from '../../tool-auth/external-api-key.service.js';
-import { closeDb, createDb, type Database } from '../../database/connection.js';
-import { agentConnections, oauthClients, users } from '../../database/core-schema.js';
-import { coreMigrationsDir } from '../../../assets.js';
-import { PG_ADMIN_URL, PG_TEST_TIMEOUT, dropScratchDatabases, scratchDatabaseUrl } from '../../../__tests__/pg-scratch.js';
+import { ExternalApiKeyService } from '../../../__tests__/tool-wiring.js';
+import type { Database } from '../../database/index.js';
+import { agentConnections, oauthClients, users } from '../../database/index.js';
+import { PG_ADMIN_URL, PG_TEST_TIMEOUT, dropScratchDatabases, openMigratedScratchDb } from '../../../__tests__/pg-scratch.js';
 
 /**
  * The "Connect as" choice — a bot's users row — through the real intermediary it is stored in: a
@@ -25,11 +23,11 @@ const REDIRECT = 'https://agent.example.com/callback';
 
 describe.skipIf(!PG_ADMIN_URL)('connecting as a bot, on a real Postgres', () => {
   let db: Database;
+  let close: () => Promise<void>;
   let provider: BevelOAuthProvider;
 
   beforeAll(async () => {
-    db = createDb(await scratchDatabaseUrl('hexis_connect_as'), { piiKey: randomBytes(32).toString('base64') });
-    await migrate(db, { migrationsFolder: coreMigrationsDir() });
+    ({ db, close } = await openMigratedScratchDb('hexis_connect_as'));
     provider = new BevelOAuthProvider({
       db,
       crypto: null,
@@ -42,7 +40,7 @@ describe.skipIf(!PG_ADMIN_URL)('connecting as a bot, on a real Postgres', () => 
 
   afterAll(async () => {
     vi.restoreAllMocks();
-    await closeDb(db);
+    await close();
     await dropScratchDatabases();
   }, PG_TEST_TIMEOUT);
 

@@ -2,7 +2,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { InternalTokenService } from '../../tool-auth/internal-token.service.js';
+import { InternalTokenService } from '../../../__tests__/tool-wiring.js';
 import { createToolValidator } from '../validate-token.js';
 import { hasHttpStatus } from '../tool.contract.js';
 

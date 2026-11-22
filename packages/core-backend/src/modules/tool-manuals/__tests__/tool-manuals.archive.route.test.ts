@@ -4,12 +4,12 @@ import os from 'node:os';
 import path from 'node:path';
 import express from 'express';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { NodeFs } from '../../kb-fs/node-fs.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { createToolManualsAgentRoutes } from '../tool-manuals.routes.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import type { IAccessControl } from '../../access/access-control.interface.js';
+import type { WorkspaceService } from '../../workspace/index.js';
+import type { IAccessControl } from '../../access/index.js';
 import type { IToolManualService } from '../tool-manuals.contract.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import { ConnectionScope } from '../../agent-scope/index.js';
@@ -58,7 +58,7 @@ async function baseUrl(
       toolManualService,
       manualAuth,
       async () => 'ali@example.com',
-      { workspaceService, accessControl, kb: testKbContext({ kbDirName: KB }), disk: new NodeFs(), pluginIndex: pluginIndex as never },
+      { workspaceService, accessControl, kb: testKbContext({ kbDirName: KB }), disk: realDisk(), pluginIndex: pluginIndex as never },
       connection?.agentScope,
     ),
   );

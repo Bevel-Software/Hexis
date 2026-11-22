@@ -3,7 +3,7 @@ import express from 'express';
 import type { Server } from 'node:http';
 import { createAgentRestAuditMiddleware } from '../agent-rest-audit.middleware.js';
 import type { AgentEventInput } from '../audit.contract.js';
-import type { ToolAuth } from '../../tool-auth/tool-auth.middleware.js';
+import type { ToolAuth } from '../../tool-auth/index.js';
 
 const KB = 'KNOWLEDGE_BASE';
 

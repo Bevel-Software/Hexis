@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createTokenVerifier } from '../../tool-auth/tool-auth.middleware.js';
-import { InternalTokenService } from '../../tool-auth/internal-token.service.js';
-import type { IExternalApiKeyService } from '../../tool-auth/external-api-key.interface.js';
+import { createTokenVerifier } from '../../tool-auth/index.js';
+import { InternalTokenService } from '../../../__tests__/tool-wiring.js';
+import type { IExternalApiKeyService } from '../../tool-auth/index.js';
 import type { ConnectionChoice, Principal, ResolvedConnection } from '../index.js';
 
 /**

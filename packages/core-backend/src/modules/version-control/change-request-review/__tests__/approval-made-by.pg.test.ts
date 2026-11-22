@@ -3,8 +3,8 @@ import { eq } from 'drizzle-orm';
 import { prFileApprovals, users, type Database } from '../../../database/index.js';
 import { PG_ADMIN_URL, PG_TEST_TIMEOUT, dropScratchDatabases, openMigratedScratchDb } from '../../../../__tests__/pg-scratch.js';
 import { ChangeRequestReviewService } from '../change-request-review.service.js';
-import type { IAccessControl } from '../../../access/access-control.interface.js';
-import type { WorkspaceService } from '../../../workspace/workspace.service.js';
+import type { IAccessControl } from '../../../access/index.js';
+import type { WorkspaceService } from '../../../workspace/index.js';
 import type { GitService } from '../../git/git.service.js';
 
 /**

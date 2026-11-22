@@ -3,8 +3,8 @@ import type { SQL } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import { AccountErasureService, type IErasureParticipant } from '../account-erasure.service.js';
-import type { Database } from '../../database/connection.js';
-import { ChangeRequestReviewService } from '../../version-control/change-request-review/change-request-review.service.js';
+import type { Database } from '../../database/index.js';
+import { ChangeRequestReviewService } from '../../../__tests__/tool-wiring.js';
 
 /**
  * Erasing an account rewrites the person's name and address out of every

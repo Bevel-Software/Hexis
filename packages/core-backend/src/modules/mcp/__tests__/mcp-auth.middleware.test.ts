@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import { InvalidTokenError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
 import { createMcpAuthMiddleware } from '../mcp-auth.middleware.js';
-import type { AuthService } from '../../auth/auth.service.js';
-import type { IExternalApiKeyService } from '../../tool-auth/external-api-key.interface.js';
+import type { AuthService } from '../../auth/index.js';
+import type { IExternalApiKeyService } from '../../tool-auth/index.js';
 import type { BevelOAuthProvider } from '../oauth/bevel-oauth-provider.js';
-import { InternalTokenService } from '../../tool-auth/internal-token.service.js';
-import { AccountDeactivatedError, AuthBackendError } from '../../auth/account-admission.js';
+import { InternalTokenService } from '../../../__tests__/tool-wiring.js';
+import { AccountDeactivatedError, AuthBackendError } from '../../auth/index.js';
 
 const RESOURCE_METADATA_URL = 'https://bevel.example/.well-known/oauth-protected-resource/api/mcp';
 

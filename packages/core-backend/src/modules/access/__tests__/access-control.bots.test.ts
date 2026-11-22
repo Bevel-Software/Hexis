@@ -2,8 +2,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { NodeFs } from '../../kb-fs/node-fs.js';
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
+import type { WorkspaceService } from '../../workspace/index.js';
 import { AccessControlService } from '../access-control.service.js';
 import { BotAddressBook } from '../../bots/index.js';
 
@@ -82,7 +82,7 @@ describe('a bot in the access model', () => {
     } as unknown as WorkspaceService;
     book = new BotAddressBook();
     book.replace({ domain: 'agent.hexis', botIds: ['release-helper'], previousDomain: null });
-    access = new AccessControlService(workspaceService, KB_DIR, new NodeFs(), [BOT], undefined, undefined, {}, book);
+    access = new AccessControlService(workspaceService, KB_DIR, realDisk(), [BOT], undefined, undefined, {}, book);
   });
   afterEach(async () => {
     await fs.rm(root, { recursive: true, force: true });
