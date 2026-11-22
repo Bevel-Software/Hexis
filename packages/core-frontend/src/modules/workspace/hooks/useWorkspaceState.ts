@@ -1052,13 +1052,18 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     // awaiting review, is the only copy of what it holds — the deleted notice,
     // Copy edits and Copy agent's version read it until Close —
     // so it stays as it is, whatever its read answered, unless the read is a
-    // 403: a file this person may no longer read closes like any other.
+    // 403: a file this person may no longer read closes like any other. So
+    // does Done's text whose save is on its way (`isSavingDone`): the read
+    // answers with the bytes from before it, and the save's landing updates
+    // the tab.
     const openTabsNow = () =>
       hydratedKey !== null && hydratedKeyRef.current === hydratedKey
         ? new Map(openTabsRef.current.map((t) => [t.path, t]))
         : new Map<string, OpenTab>();
     const liveTabsNow = () =>
-      new Map([...openTabsNow()].filter(([, t]) => t.deletedBy || t.isDirty || t.pendingFileContent !== null));
+      new Map([...openTabsNow()].filter(([, t]) => (
+        t.deletedBy || t.isDirty || t.pendingFileContent !== null || isSavingDone(workspaceId, t)
+      )));
     // Read them too, even when the persisted list has not caught up with them
     // (or is empty), so the 403 rule below holds for every tab kept.
     const readPaths = [...uniqPaths, ...[...liveTabsNow().keys()].filter((p) => !uniqPaths.includes(p))];
@@ -1225,7 +1230,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     } finally {
       releaseChecks();
     }
-  }, [workspaceId, workspaceBranch, markLanded, forgetOwnDelete, isOvertakenByOwnDelete, trackExistenceCheck, applyReadGone, isStaleLanding, isStaleFind]);
+  }, [workspaceId, workspaceBranch, markLanded, forgetOwnDelete, isOvertakenByOwnDelete, trackExistenceCheck, applyReadGone, isStaleLanding, isStaleFind, isSavingDone]);
 
   // ── Renderer value bridge → active tab.content ────────────────────────────
 

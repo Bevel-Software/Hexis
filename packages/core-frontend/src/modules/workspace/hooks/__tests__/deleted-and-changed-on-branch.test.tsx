@@ -2564,6 +2564,39 @@ describe('the Knowledge page mounted again while a deleted tab is open', () => {
     expect(tabAt(result, 'KB/Keep.md')?.isDirty).toBe(true);
   });
 
+  it("keeps Done's text whose save is still on its way, and the save's landing leaves it saved", async () => {
+    const result = await mountReady();
+    await remount(result, ['KB/Keep.md'], 'KB/Keep.md');
+    const before = disk.get('KB/Keep.md');
+    const write = apiMocks.writeFile.getMockImplementation()!;
+    let land!: () => void;
+    const landed = new Promise<void>((r) => { land = r; });
+    apiMocks.writeFile.mockClear();
+    apiMocks.writeFile.mockImplementationOnce(async (...args: Parameters<typeof write>) => {
+      await landed;
+      return write(...args);
+    });
+    // Done: the save starts and the closing editor reports the tab clean.
+    let saving!: Promise<void>;
+    act(() => {
+      result.current.setActiveTabContent('keep, done');
+      saving = result.current.saveFile('KB/Keep.md', 'keep, done');
+      result.current.setHasUnsavedFileChanges?.(false);
+    });
+    await waitFor(() => expect(apiMocks.writeFile).toHaveBeenCalledOnce());
+
+    // The remount reads the bytes from before the save.
+    await remount(result, ['KB/Keep.md'], 'KB/Keep.md');
+    expect(disk.get('KB/Keep.md')).toBe(before);
+    expect(tabAt(result, 'KB/Keep.md')?.content).toBe('keep, done');
+
+    await act(async () => { land(); await saving; });
+    expect(disk.get('KB/Keep.md')).toBe('keep, done');
+    expect(tabAt(result, 'KB/Keep.md')?.content).toBe('keep, done');
+    expect(tabAt(result, 'KB/Keep.md')?.savedContent).toBe('keep, done');
+    expect(tabAt(result, 'KB/Keep.md')?.isDirty).toBe(false);
+  });
+
   it('keeps a deleted, edited tab when the saved tab list is empty', async () => {
     const result = await mountReady();
     await remount(result, ['KB/Draft.md'], 'KB/Draft.md');
