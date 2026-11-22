@@ -2482,8 +2482,10 @@ export class WorkspaceService implements IWorkspaceService {
       if (!(await allowEntry(data))) continue;
       // The placement rules asked above (git internals, no link on the way)
       // are asked again HERE, at the moment of writing — under the caller's
-      // lock when there is one — so a link put on the path since the first
-      // look cannot redirect the bytes. Their refusal skips the entry, as
+      // lock when there is one — so a link put on the path between the first
+      // look and the landing gets nothing. (The lock is the file's, not its
+      // folders': what remains is the instant between this look and the open,
+      // and the open refuses a link at the file's own name.) Their refusal skips the entry, as
       // above; any other failure of the write (a full disk, a permission
       // error) fails the extraction rather than reading as a skipped entry.
       let placementRefusal: string | null = null;
