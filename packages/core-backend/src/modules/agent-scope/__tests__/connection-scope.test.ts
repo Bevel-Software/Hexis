@@ -28,7 +28,7 @@ describe('ConnectionScope', () => {
     // A discovery read is answered whatever tools the bot is offered.
     expect(scope.platformToolRefusal('list_skills', { discovery: true })).toBeNull();
     // Skills and connectors are not narrowed: the bot's own access already decided them.
-    expect(scope.allowsSkill('Skills/Anything')).toBe(true);
+    expect(scope.loadsAnything()).toBe(true);
     expect(scope.connectorFilter()).toBeUndefined();
     expect(scope.describe()).toMatch(/acts as the bot "ops" \(ops@agent\.hexis\), not as the person who made it/);
   });
@@ -41,7 +41,7 @@ describe('ConnectionScope', () => {
     const scope = ConnectionScope.unavailable(BOT, 'It loads nothing.', 'fp');
     expect(scope.platformToolRefusal('read_file')).toEqual({ error: 'It loads nothing.', code: NOT_AVAILABLE_TO_CONNECTION });
     expect(scope.platformToolRefusal('list_skills', { discovery: true })).not.toBeNull();
-    expect(scope.allowsSkill('Skills/x')).toBe(false);
+    expect(scope.loadsAnything()).toBe(false);
     expect(scope.skillFilter()?.('Skills/x')).toBe(false);
     expect(scope.describe()).toBe('It loads nothing.');
   });

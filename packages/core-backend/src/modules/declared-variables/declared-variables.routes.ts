@@ -130,7 +130,7 @@ export function createDeclaredVariableRoutes(
       // A connection that loads nothing is handed no variables; another is
       // judged for whom it acts as, which `listAccessible` already did.
       const scope = found ? connectionOf(req.toolAuth) : null;
-      const manual = found && scope?.allowsConnector(found.path) ? found : undefined;
+      const manual = found && scope?.loadsAnything() ? found : undefined;
       if (!manual) return void res.status(404).json({ error: 'Not found' });
       if (manual.remote !== false) {
         return void res.status(409).json({

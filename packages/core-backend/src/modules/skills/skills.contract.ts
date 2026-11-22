@@ -127,7 +127,7 @@ export interface ListSkillsOptions {
  * A connection's narrowing of the skills: whether the skill in `skillFolder`
  * (repo-relative) is one the connection loads. Applied AFTER the caller's read
  * gate, so it can only take skills away. The agent surfaces pass the
- * connection scope's `allowsSkill` (`modules/agent-scope`); absent is every
+ * connection scope's `skillFilter` (`modules/agent-scope`); absent is every
  * skill the caller may read.
  */
 export type SkillScope = (skillFolder: string) => boolean;

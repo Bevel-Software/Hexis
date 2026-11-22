@@ -14,7 +14,7 @@ import { domainErrorBody } from '../../shared/http-errors.js';
 import type { ResolveToolContext } from './tool-context.js';
 import { argumentsRefusal } from './route-argument-check.js';
 import { routeToolName, routeToolSchemasForRequest } from './route-tool-schemas.js';
-import { ConnectionScope, NOT_AVAILABLE_TO_CONNECTION, connectionOf } from '../agent-scope/index.js';
+import { NOT_AVAILABLE_TO_CONNECTION, connectionOf } from '../agent-scope/index.js';
 import { alwaysWritable, READ_ONLY_CODE, refuseWriteTool, type IWriteAccess } from '../write-access/index.js';
 import '../tool-auth/index.js'; // Express Request.toolAuth augmentation
 

@@ -190,6 +190,9 @@ export function ConnectToolsPage() {
         setRefreshing(false);
       }
     }
+    // Remade when the choice changes: the list is whom the page acts for, which
+    // the requests carry (set by the layout effect above), not an argument.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chosenAgent]);
 
   // The first load, loud; and again, quietly, whenever the choice changes —

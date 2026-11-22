@@ -192,7 +192,7 @@ export function createToolManualsAgentRoutes(
       // is how the local MCP server runs one, and nothing else asks for it.
       // Checked before any file is opened.
       const scope = connectionOf(req.toolAuth);
-      if (!scope.loadsConnectorIn(pluginRel)) {
+      if (!scope.loadsAnything()) {
         const why = scope.describe();
         return void res.status(403).json({
           error: `The plugin "${folder}" is not available to this connection.${why ? ` ${why}` : ''}`,

@@ -29,7 +29,7 @@ const keys = {
 } as unknown as IExternalApiKeyService;
 
 function botsAnswering(answer: () => ResolvedConnection) {
-  return { resolveConnection: vi.fn(async (_maker: Principal, _choice: ConnectionChoice) => answer()) };
+  return { resolveConnection: vi.fn<(maker: Principal, choice: ConnectionChoice) => Promise<ResolvedConnection>>(async () => answer()) };
 }
 
 const asOps = (maker: Principal): ResolvedConnection => ({

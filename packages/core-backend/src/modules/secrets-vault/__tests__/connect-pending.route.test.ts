@@ -345,7 +345,7 @@ describe('the Secrets and Connect tools routes opened for a bot (?bot=)', () => 
    */
   const OPS = { id: 'row-ops', email: 'ops@agent.hexis', botId: 'ops', name: 'ops' };
   const oneTool = {
-    listAccessible: vi.fn(async (_email: string) => [
+    listAccessible: vi.fn<(email: string) => Promise<unknown[]>>(async () => [
       {
         slug: 'weather',
         name: 'weather',
@@ -360,7 +360,7 @@ describe('the Secrets and Connect tools routes opened for a bot (?bot=)', () => 
     const statusFor = vi.fn(async (_u: string, keys: string[]) =>
       keys.map((key) => ({ key, adminConfigured: false, adminKind: null, userConfigured: false, userKind: null })),
     );
-    const list = vi.fn(async (_u: string) => [] as never[]);
+    const list = vi.fn<(userId: string) => Promise<never[]>>(async () => []);
     const getById = vi.fn(async (_u: string, id: string) => ({ id, kind: 'oauth' as const }));
     const beginOAuth = vi.fn(async (_u: string, _id: string, _r: string, state: string) => `https://idp.example/auth?state=${encodeURIComponent(state)}`);
     const completeOAuth = vi.fn(async () => undefined);

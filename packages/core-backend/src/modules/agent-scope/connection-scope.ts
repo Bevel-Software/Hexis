@@ -54,34 +54,23 @@ export class ConnectionScope {
     return this.state.kind === 'myself';
   }
 
-  /** True while the connection loads anything at all. */
-  private loads(): boolean {
+  /**
+   * True while the connection loads anything at all: every skill, connector
+   * and plugin its actor may read (a bot's connection is already judged for
+   * the bot), or — for a bot that cannot be used — nothing.
+   */
+  loadsAnything(): boolean {
     return this.state.kind !== 'unavailable';
   }
 
-  /** Whether the skill in `skillFolder` (repo-relative) is loaded: every skill the actor may read, unless nothing is. */
-  allowsSkill(_skillFolder: string): boolean {
-    return this.loads();
-  }
-
-  /** Whether the connector defined at `definitionPath` is loaded: every one the actor may read, unless nothing is. */
-  allowsConnector(_definitionPath: string): boolean {
-    return this.loads();
-  }
-
-  /** Whether any connector this connection loads may be defined in `folder` — what a plugin's archive asks. */
-  loadsConnectorIn(_folder: string): boolean {
-    return this.loads();
-  }
-
-  /** {@link allowsSkill} as the narrowing a skill listing takes, or undefined when it narrows nothing. */
+  /** The narrowing a skill listing takes: undefined when it narrows nothing, else one that admits nothing. */
   skillFilter(): ((skillFolder: string) => boolean) | undefined {
-    return this.loads() ? undefined : () => false;
+    return this.loadsAnything() ? undefined : () => false;
   }
 
-  /** {@link allowsConnector} as the narrowing a catalog read takes, or undefined when it narrows nothing. */
+  /** The narrowing a catalog read takes: undefined when it narrows nothing, else one that admits nothing. */
   connectorFilter(): ((definitionPath: string) => boolean) | undefined {
-    return this.loads() ? undefined : () => false;
+    return this.loadsAnything() ? undefined : () => false;
   }
 
   /**
@@ -90,7 +79,7 @@ export class ConnectionScope {
    * False only for a connection that loads nothing.
    */
   allowsDiscovery(): boolean {
-    return this.loads();
+    return this.loadsAnything();
   }
 
   /** Whether the platform's own tool `name` is loaded. */
