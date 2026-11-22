@@ -468,6 +468,34 @@ export const CORE_SETTINGS: SettingDef[] = [
     internal: true,
     validate: (v) => (/^\S+ \d+$/.test(v) ? null : 'A claim is a user id and a time.'),
   },
+  {
+    /**
+     * The domain of every bot's address (`<id>@<domain>`); unset is
+     * `agent.hexis`. Internal: written only by the bots' own domain change
+     * (`modules/bots`), which refuses a domain people's addresses use and
+     * re-addresses every bot in the same step, never by a setup-screen save.
+     */
+    key: 'botsDomain',
+    section: 'sign-in',
+    internal: true,
+  },
+  {
+    /**
+     * The bots' domain before the last change, while a grant written at it
+     * still counts for its bot: until the change request that rewrites those
+     * grants (`botsDomainChangeRequest`) is merged. Internal, like the domain.
+     */
+    key: 'botsPreviousDomain',
+    section: 'sign-in',
+    internal: true,
+  },
+  {
+    /** The number of the change request rewriting the grants of the last domain change. Internal. */
+    key: 'botsDomainChangeRequest',
+    section: 'sign-in',
+    internal: true,
+    validate: (v) => (/^\d+$/.test(v) ? null : 'A change request number is a number.'),
+  },
 ];
 
 /**

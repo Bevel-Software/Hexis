@@ -77,10 +77,26 @@ export const users = pgTable('users', {
    * what they did.
    */
   deactivatedAt: timestamp('deactivated_at'),
+  /**
+   * The id the distribution gives this row's bot, when the row is a BOT: an
+   * identity of its own that people connect as, granted by its address
+   * (`<bot_id>@<bots' domain>`, kept in `email` like a person's), never
+   * signed in to, never part of "everyone", never holding a role (see
+   * `modules/bots`). Null for a person. Unique, so one id is one row: a
+   * definition that comes back after it was removed brings the same row back.
+   */
+  botId: text('bot_id'),
+  /**
+   * When the distribution stopped naming this bot; null while it does, and
+   * always null for a person. A retired bot's row stays, so the history that
+   * names it stays readable, and nothing can act as it.
+   */
+  botRetiredAt: timestamp('bot_retired_at'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 }, (t) => ({
   emailBidxUnq: uniqueIndex('users_email_bidx_unq').on(t.emailBidx),
+  botIdUnq: uniqueIndex('users_bot_id_unq').on(t.botId),
 }));
 
 /**
@@ -294,8 +310,20 @@ export const externalApiKeys = pgTable('api_tokens', {
    * column existed. The path is the whole record: the file is re-read on
    * every surface build, so editing it changes what the key sees without a
    * new key (see `modules/agent-scope`).
+   *
+   * Since bots: only ever a LEGACY record, from before a connection could be
+   * made as a bot. A key that still carries one is made as the bot the
+   * distribution maps the path to, when there is one, and otherwise loads
+   * nothing (see `modules/bots`). New keys never write it.
    */
   agentPath: text('agent_path'),
+  /**
+   * The bot this key connects as — the bot's own `users` row — or null for
+   * Myself: the key acts as its owner. Every call through a key made as a bot
+   * is judged for the bot's row, and checks again that the owner may still
+   * act as it (see `modules/bots`).
+   */
+  botUserId: uuid('bot_user_id').references(() => users.id, { onDelete: 'cascade' }),
 }, (t) => ({
   byUser: index('api_tokens_by_user').on(t.userId),
 }));
@@ -509,8 +537,11 @@ export const oauthAuthCodes = pgTable('oauth_auth_codes', {
    * The "Connect as" choice made on the consent step, carried from Finish to
    * the token exchange that makes (or finds) the agent connection — the code
    * is the only thing that travels between the two. Null is Everything.
+   * Legacy since bots: a code minted now carries `bot_user_id` instead.
    */
   agentPath: text('agent_path'),
+  /** The bot chosen on the consent step, carried to the exchange; null for Myself. */
+  botUserId: uuid('bot_user_id').references(() => users.id, { onDelete: 'cascade' }),
 }, (t) => ({
   // Sweep expired/spent rows without a full scan.
   byExpiry: index('oauth_auth_codes_by_expiry').on(t.expiresAt),
@@ -555,9 +586,16 @@ export const agentConnections = pgTable('agent_connections', {
    * repo-relative knowledge-base path — or null for Everything. Set by every
    * consent that lands on the row, so re-authorising with another choice
    * changes what the agent sees from its next request. Same meaning as
-   * `api_tokens.agent_path`.
+   * `api_tokens.agent_path`, and legacy since bots in the same way.
    */
   agentPath: text('agent_path'),
+  /**
+   * The bot the person chose to connect as on the consent step, or null for
+   * Myself. Set by every consent that lands on the row, as `agent_path` was,
+   * so re-authorising with another choice changes whom the agent acts as
+   * from its next request.
+   */
+  botUserId: uuid('bot_user_id').references(() => users.id, { onDelete: 'cascade' }),
 }, (t) => ({
   byUser: index('agent_connections_by_user').on(t.userId),
   liveUnq: uniqueIndex('agent_connections_live_unq')
@@ -650,6 +688,12 @@ export const agentEvents = pgTable('agent_events', {
    */
   outcome: text('outcome').notNull(),
   durationMs: integer('duration_ms'),
+  /**
+   * The bot the call was made as, when its connection was made as one; null
+   * when the person acted as themselves. `user_id` stays the person who made
+   * the connection, so every event of a bot names both.
+   */
+  botUserId: uuid('bot_user_id').references(() => users.id, { onDelete: 'cascade' }),
   at: timestamp('at').defaultNow().notNull(),
 }, (t) => ({
   // The two read paths: one principal's events, newest first.
