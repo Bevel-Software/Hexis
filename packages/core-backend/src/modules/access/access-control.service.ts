@@ -1406,9 +1406,14 @@ function eligibleHoldersResolved(
   const roles = [...new Set(principals.map((p) => p.name))];
 
   const users: { name: string; email: string }[] = [];
-  for (const [email, state] of byEmail) {
+  const listed = new Set<string>();
+  for (const [named, state] of byEmail) {
     if (state !== 'grant') continue;
+    // A bot granted at the previous domain is listed under its current address, once.
+    const email = currentAddressOf(model, named);
+    if (listed.has(email)) continue;
     if (!hasPermissionResolved(model, verb, email, relativePath, fileOwn)) continue;
+    listed.add(email);
     users.push({ name: '', email });
   }
   users.sort((a, b) => a.email.localeCompare(b.email));
@@ -1486,10 +1491,23 @@ function holderChangesFor(verb: 'read' | 'write', here: MoveSide, there: MoveSid
  * names Admin even when `roles.yaml` does not list them).
  */
 function namedCandidateEmails(model: AccessModel, byEmail: CollapsedScope['byEmail']): Set<string> {
-  const candidates = new Set<string>(model.deploymentOwners);
-  for (const email of model.roles.byEmail.keys()) candidates.add(email);
-  for (const email of byEmail.keys()) candidates.add(email);
+  const candidates = new Set<string>();
+  for (const email of model.deploymentOwners) candidates.add(currentAddressOf(model, email));
+  for (const email of model.roles.byEmail.keys()) candidates.add(currentAddressOf(model, email));
+  for (const email of byEmail.keys()) candidates.add(currentAddressOf(model, email));
   return candidates;
+}
+
+/**
+ * The address a named address acts under now: a bot's address at the
+ * previous bots' domain, while grants there still count, is the bot's
+ * current address; any other address is itself. Every list of holders (the
+ * approval gate's eligible and excluded sets, the eligible-users display)
+ * names a bot by the address it approves and commits with, so a grant still
+ * written at the old domain counts there exactly as it counts for reads.
+ */
+function currentAddressOf(model: AccessModel, email: string): string {
+  return model.bots.addressesOf(email)[0] ?? email;
 }
 
 /**

@@ -88,7 +88,8 @@ export interface IBotAddresses {
   /**
    * Every address `email`'s bot is granted by: its current address, and its
    * address at the previous domain while that still counts (until the change
-   * request rewriting the grants is merged). Just `[email]` for anyone else.
+   * request rewriting the grants is merged). The current address is always
+   * first, asked by either spelling. Just `[email]` for anyone else.
    */
   addressesOf(email: string): readonly string[];
   /** The bots' domain now in effect. */

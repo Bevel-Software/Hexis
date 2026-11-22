@@ -365,9 +365,10 @@ export class ChangeRequestReviewService implements IChangeRequestReviewService {
           (r) => {
             const approverEmail = r.approverEmail.toLowerCase();
             if (r.headSha !== headSha) return false;
-            return everyoneCanApprove
-              ? !excludedEmails.has(approverEmail)
-              : eligible.emails.has(approverEmail);
+            if (eligible.emails.has(approverEmail)) return true;
+            // A bot is not part of everyone: only its own grants and its
+            // groups' (which put it in `emails`) make its approval count.
+            return everyoneCanApprove && !excludedEmails.has(approverEmail) && !this.accessControl.isBot(approverEmail);
           },
         );
 

@@ -120,6 +120,7 @@ type EligibilityByPath = Record<
 
 function makeAccessControl(byPath: EligibilityByPath): IAccessControl {
   return {
+    isBot: () => false,
     canWrite: async () => false,
     canWriteBatch: async () => new Map(),
     canRead: async () => true,
