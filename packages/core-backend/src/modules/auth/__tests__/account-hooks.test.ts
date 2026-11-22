@@ -170,6 +170,34 @@ describe('AccountHooks: who delivered the starting password', () => {
     expect(await hooks.runAccountInvited(EVENT)).toEqual(['email']);
   });
 
+  it('a channel name carrying the password is no channel: not notified, not a delivery, never logged', async () => {
+    const hooks = new AccountHooks();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      // A listener that names its channel after what it sent: the password
+      // whole, inside a longer name, or its elided head as a mailer echoes it.
+      hooks.onAccountInvited(async (event) => ({ channel: event.startingPassword!, deliveredStartingPassword: true }));
+      hooks.onAccountInvited(async (event) => `email:${event.startingPassword}`);
+      hooks.onAccountInvited(async (event) => ({ channel: `sms ${event.startingPassword!.slice(0, 10)}…`, deliveredStartingPassword: true }));
+      hooks.onAccountInvited(async () => ({ channel: 'email', deliveredStartingPassword: true }));
+      const notice = await hooks.deliverAccountInvited({ ...EVENT, startingPassword: PASSWORD });
+      // What the route answers the inviter and writes to its audit line comes from here.
+      expect(notice).toEqual({ notified: ['email'], passwordDeliveredBy: ['email'] });
+      expect(warn).toHaveBeenCalledTimes(3);
+      const logged = warn.mock.calls.map((call) => call.map((arg) => inspect(arg, { depth: 6 })).join(' ')).join('\n');
+      expect(logged).toContain('carries a secret');
+      expect(logged).not.toContain(PASSWORD.slice(0, 8));
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('the same name is a channel on an event that carried no password', async () => {
+    const hooks = new AccountHooks();
+    hooks.onAccountInvited(async () => PASSWORD);
+    expect(await hooks.runAccountInvited(EVENT)).toEqual([PASSWORD]);
+  });
+
   it('a listener that throws delivered nothing', async () => {
     const hooks = new AccountHooks();
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});

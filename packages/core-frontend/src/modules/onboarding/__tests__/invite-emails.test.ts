@@ -20,7 +20,8 @@ const EXISTING = new Set(['old@acme.com', 'boss@acme.com', 'off@acme.com']);
  * How the stand-in deployment signs people in, which decides — as the server
  * does — whether a new account gets a password: always with password sign-in
  * and no single sign-on, on request with both, never with password sign-in
- * off. Single sign-on and password sign-in both, unless a test says.
+ * off, where a request for one is refused (400) before the address is looked
+ * at. Single sign-on and password sign-in both, unless a test says.
  */
 type SignInShape = 'password-only' | 'sso-and-password' | 'sso-only';
 
@@ -28,8 +29,12 @@ function makeApi(shape: SignInShape = 'sso-and-password') {
   const generates = (request: InvitationRequest) =>
     shape === 'password-only' || (shape === 'sso-and-password' && request.startingPassword === true);
   return {
-    sendInvitation: vi.fn<(request: InvitationRequest) => Promise<InvitationResult>>(async (request) =>
-      EXISTING.has(request.email)
+    sendInvitation: vi.fn<(request: InvitationRequest) => Promise<InvitationResult>>(async (request) => {
+      if (shape === 'sso-only' && request.startingPassword === true) {
+        // What the client throws for that 400: the server's words, no admission kind.
+        throw new Error('Password sign-in is off here, so an invite carries no password');
+      }
+      return EXISTING.has(request.email)
         ? { status: 'existing' }
         : {
             status: 'created',
@@ -37,8 +42,8 @@ function makeApi(shape: SignInShape = 'sso-and-password') {
             ...(generates(request) ? { startingPassword: PW } : {}),
             notified: [],
             singleSignOn: false,
-          },
-    ),
+          };
+    }),
     addMember: vi.fn<(canonical: string, email: string, options?: { ifActive?: boolean }) => Promise<unknown>>(
       async () => [],
     ),
@@ -83,6 +88,24 @@ describe('sendInvites', () => {
     expect(api.sendInvitation).toHaveBeenCalledWith({ email: 'new@acme.com', role: 'member' });
     expect(outcomes).toEqual([{ email: 'new@acme.com', status: 'created', role: 'member', startingPassword: PW }]);
     expect(outcomes.map(gotPassword)).toEqual([true]);
+  });
+
+  it('with password sign-in off, asking for a password is an error on every row, new or existing', async () => {
+    api = makeApi('sso-only');
+    const outcomes = await sendInvites(['new@acme.com', 'old@acme.com'], 'member', api, { startingPassword: true });
+    const message = 'Password sign-in is off here, so an invite carries no password';
+    expect(outcomes).toEqual([
+      { email: 'new@acme.com', status: 'error', message },
+      { email: 'old@acme.com', status: 'error', message },
+    ]);
+    expect(outcomes.map(isInvited)).toEqual([false, false]);
+    expect(outcomes.map(gotPassword)).toEqual([false, false]);
+  });
+
+  it('with password sign-in off and no password asked, a new account gets none', async () => {
+    api = makeApi('sso-only');
+    const outcomes = await sendInvites(['new@acme.com'], 'member', api);
+    expect(outcomes).toEqual([{ email: 'new@acme.com', status: 'created', role: 'member' }]);
   });
 
   it("an admin's Admin invite promotes new and existing accounts through the roles route, ifActive", async () => {

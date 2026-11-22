@@ -19,6 +19,13 @@ export type NotifyingListener<E> = (event: E) => Promise<string | null>;
  * event's own effect — the account made, the request opened — stands
  * whatever the listeners do. A seam wraps one of these per event and keeps
  * its own typed registration method, so the rule above is written once.
+ *
+ * A channel name is the listener's own text, and it reaches the caller's
+ * answer and its log lines. One that carries a secret — the event's own
+ * (`secretsOf`), or the token in effect, as {@link redactSecret} finds them —
+ * is not a channel: it is counted as null and logged without its text, so
+ * whatever the caller derives from the channels (an answer, an audit line)
+ * cannot carry the secret either.
  */
 export class ListenerSeam<E> {
   private readonly listeners: NotifyingListener<E>[] = [];
@@ -50,14 +57,26 @@ export class ListenerSeam<E> {
     for (const listener of this.listeners) {
       try {
         const channel = await listener(event);
-        if (channel !== null && channel !== '') notified.push(channel);
+        if (channel === null || channel === '') continue;
+        if (redactSecret(channel, this.secrets(event)) !== channel) {
+          this.log.warn(
+            'a listener answered a channel name that carries a secret; it counts as not having reached anyone, and its answer is withheld:',
+            { seam: this.failed },
+          );
+          continue;
+        }
+        notified.push(channel);
       } catch (err) {
-        const secrets = this.secretsOf(event).filter((v): v is string => !!v);
+        const secrets = this.secrets(event);
         if (secrets.length === 0) this.log.error(this.failed, { err });
         else this.log.error(this.failed, { failure: redactSecret(describeFailure(err), secrets) });
       }
     }
     return notified;
+  }
+
+  private secrets(event: E): string[] {
+    return this.secretsOf(event).filter((v): v is string => !!v);
   }
 }
 

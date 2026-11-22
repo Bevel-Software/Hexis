@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import express from 'express';
 import type { Server } from 'node:http';
 import { createInvitationRoutes, type InvitationSignIn } from '../invitation.routes.js';
-import type { AccountInvitedEvent, AccountInvitedNotice } from '../account-hooks.js';
+import { AccountHooks, type AccountInvitedEvent, type AccountInvitedNotice } from '../account-hooks.js';
 import type { AuthProviderPlugin } from '../auth.routes.js';
 import type { AuthService } from '../auth.service.js';
 import { FixedWindowRateLimiter } from '../rate-limit.js';
@@ -326,6 +326,33 @@ describe('POST /api/invitations — who gets the password (the credential delive
       passwordDeliveredBy: ['email'],
       passwordReturned: false,
     });
+  });
+
+  it('a listener naming its channel with the password reaches neither the channels in the answer nor the audit line', async () => {
+    // The real runner, so the seam that judges a listener's answer is the one under test.
+    const hooks = new AccountHooks();
+    hooks.onAccountInvited(async (event) => ({ channel: `email to ${event.startingPassword}`, deliveredStartingPassword: true }));
+    deliverAccountInvited.mockImplementationOnce((event) => hooks.deliverAccountInvited(event));
+    const base = await start({ admin: false });
+    const res = await invite(base, { email: 'new@acme.test' });
+    expect(res.status).toBe(201);
+    // Not a delivery, so the fallback holds: the inviter is handed it, once, in its own field.
+    expect(await res.json()).toEqual({
+      status: 'created',
+      account: { id: 'new-1', email: 'new@acme.test', name: 'new' },
+      startingPassword: GENERATED,
+      notified: [],
+      singleSignOn: false,
+    });
+    expect(lines.find((l) => l.message === 'account audit:')?.fields).toEqual({
+      action: 'invite',
+      actorUserId: 'inviter-1',
+      targetUserId: 'new-1',
+      passwordGenerated: true,
+      passwordDeliveredBy: [],
+      passwordReturned: true,
+    });
+    expect(JSON.stringify(lines)).not.toContain(GENERATED.slice(0, 8));
   });
 
   it('the companion delivering it counts the same, for an admin too', async () => {

@@ -43,13 +43,16 @@ export interface InvitationSignIn {
  *   carried it (`deliveredStartingPassword`: their email, the companion),
  *   the answer leaves it out and says by which channel instead
  *   (`passwordDeliveredBy`). Otherwise it is returned once in the answer,
- *   for the inviter to copy and pass on. Never logged.
+ *   for the inviter to copy and pass on. Never logged; a listener's channel
+ *   name that carries it is refused at the listener seam, so neither
+ *   `notified` nor `passwordDeliveredBy` can.
  * - One exception to that fallback: from a non-admin, for an address that
  *   already holds Admin (listed in `roles.yaml` before it has an account),
  *   the password is never handed to the inviter, who would then sign in as
  *   an admin. It still goes to a listener that can deliver it; when none
  *   does, it is discarded and the account is left with no password (an admin
- *   sets one in User accounts). Asked only once the account is made, so an
+ *   sets one in User accounts); a discard that fails is logged and leaves a
+ *   hash of a password nobody was given. Asked only once the account is made, so an
  *   address that already has one is answered `existing` whatever that lookup
  *   would do; when it cannot be read, the address is taken to hold Admin.
  * - The admission port is asked with the reason `invite`; a refusal is 403

@@ -57,7 +57,10 @@ or groups already name gets a password like any other. The owner's address
 addresses never get one. From a non-admin, the password of an address that
 already holds Admin in `roles.yaml` is never shown to the inviter: delivered
 if a listener can, discarded otherwise, leaving the account with no way in
-(its row says so, and an admin sets a password in User accounts). When
+(its row says so, and an admin sets a password in User accounts; should the
+discard fail, the server logs it, and the password it stored is one nobody
+was given). A listener whose channel name carries the password as written is counted as
+not having reached the person, and the name is neither shown nor logged. When
 `roles.yaml` cannot be read, a non-admin's invite treats the address as
 holding Admin: the account is made and its password withheld the same way.
 An invite never changes an account that already exists: it no longer gives a

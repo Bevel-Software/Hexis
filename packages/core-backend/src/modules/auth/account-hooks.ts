@@ -81,10 +81,15 @@ export interface AccountInvitedNotice {
   passwordDeliveredBy: string[];
 }
 
-/** One run of the invited listeners: the event, and where the delivered password went. */
+/**
+ * One run of the invited listeners: the event, and the channels that CLAIMED
+ * to carry its password. A claim counts only for a channel the seam accepted
+ * into `notified` (one whose name carries a secret is not one), so the
+ * seam stays the one place a listener's text is judged.
+ */
 interface InvitedRun {
   event: AccountInvitedEvent;
-  passwordDeliveredBy: string[];
+  passwordClaims: string[];
 }
 
 /**
@@ -150,7 +155,7 @@ export class AccountHooks implements IAccountHooks {
       // Only a password the event carried can have been delivered, and only
       // `true` claims it: anything else leaves it with the inviter.
       if (answer.deliveredStartingPassword === true && run.event.startingPassword) {
-        run.passwordDeliveredBy.push(answer.channel);
+        run.passwordClaims.push(answer.channel);
       }
       return answer.channel;
     });
@@ -161,9 +166,11 @@ export class AccountHooks implements IAccountHooks {
   }
 
   async deliverAccountInvited(event: AccountInvitedEvent): Promise<AccountInvitedNotice> {
-    const run: InvitedRun = { event, passwordDeliveredBy: [] };
+    const run: InvitedRun = { event, passwordClaims: [] };
     const notified = await this.invited.run(run);
-    return { notified, passwordDeliveredBy: run.passwordDeliveredBy };
+    // The seam judges a name by its text alone, so a claimed name it left out
+    // of `notified` was refused every time it was answered.
+    return { notified, passwordDeliveredBy: run.passwordClaims.filter((channel) => notified.includes(channel)) };
   }
 
   onAccountDeactivated(hook: AccountDeactivatedHook): void {

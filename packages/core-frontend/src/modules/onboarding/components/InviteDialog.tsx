@@ -88,9 +88,10 @@ interface InviteDialogProps {
  * the inviter leaves with the sign-in address and a message to forward, not
  * with an assumption that people were notified.
  *
- * A generated password is shown on its row in the result view, with a Copy
- * button, and nowhere else: never in the message, never again after Done or
- * "Invite more people" (both drop the outcomes), and gone with the dialog.
+ * A generated password the server returned to the inviter is shown on its
+ * row in the result view, with a Copy button, and nowhere else: never in the
+ * message, never again after Done or "Invite more people" (both drop the
+ * outcomes), and gone with the dialog.
  * One the deployment delivered to the person directly (their email, the
  * companion) is not shown at all: the server does not hand it back, and the
  * row says how it was sent (the credential delivery policy). Neither is an
