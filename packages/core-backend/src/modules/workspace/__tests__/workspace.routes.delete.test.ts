@@ -109,7 +109,7 @@ async function makeHarness(): Promise<Harness> {
   const app = express();
   app.use(express.json());
   app.use('/api', (req, _res, next) => {
-    (req as any).userId = USER_ID;
+    (req as unknown as { userId: string }).userId = USER_ID;
     next();
   });
   app.use('/api', createWorkspaceRoutes(
