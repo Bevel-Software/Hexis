@@ -5,6 +5,7 @@ import { inputSchemaDefect } from '@bevel-software/platform-mcp-core';
 import { ToolRegistry } from '../tool-registry.js';
 import { registerVersionControlTools } from '../../version-control/agent-tools/version-control.tools.js';
 import { registerChangeRequestReadTools } from '../../version-control/agent-tools/change-request-read.tools.js';
+import { registerChangeRequestApplyTools } from '../../version-control/agent-tools/change-request-apply.tools.js';
 import { registerWorkspaceTools } from '../../workspace/workspace.tools.js';
 import { registerSkillsTools } from '../../skills/skills.tools.js';
 import { registerPluginsTools } from '../../plugins/plugins.tools.js';
@@ -65,6 +66,11 @@ const MODULES: ReadonlyArray<{ name: string; register: (registry: ToolRegistry) 
     name: 'registerChangeRequestReadTools',
     register: (registry) =>
       registerChangeRequestReadTools(registry, express.Router(), pass, handler, nothing, testKbContext()),
+  },
+  {
+    name: 'registerChangeRequestApplyTools',
+    register: (registry) =>
+      registerChangeRequestApplyTools(registry, express.Router(), pass, handler, nothing, testKbContext()),
   },
   {
     name: 'registerWorkspaceTools',
