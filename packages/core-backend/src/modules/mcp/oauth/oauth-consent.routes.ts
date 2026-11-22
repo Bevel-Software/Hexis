@@ -37,6 +37,24 @@ export interface OAuthConsentRoutesDeps {
 export const NOT_A_BOT_CHOICE = 'That bot is not one you can connect as. Choose Myself or one of the bots listed.';
 
 /**
+ * "Connect as" as a request body states it, read the one way by both places
+ * a choice is made: this consent step and the key-mint dialog
+ * (`mcp.routes.ts`). Absent, null or blank `bot` is Myself (`bot: null`); a
+ * string is the bot asked for, trimmed. Anything else is refused, and so is
+ * a choice sent as `agentPath` by a page made before bots: read as absent it
+ * would connect as Myself, with the person's whole access, while the person
+ * chose an agent, so the stale page fails instead.
+ */
+export function connectAsAsked(body: unknown): { ok: true; bot: string | null } | { ok: false } {
+  const b = (body ?? {}) as { bot?: unknown; agentPath?: unknown };
+  if (b.agentPath !== undefined && b.agentPath !== null) return { ok: false };
+  if (b.bot === undefined || b.bot === null) return { ok: true, bot: null };
+  if (typeof b.bot !== 'string') return { ok: false };
+  const bot = b.bot.trim();
+  return { ok: true, bot: bot === '' ? null : bot };
+}
+
+/**
  * The authenticated tail of the MCP OAuth flow. `/authorize` (SDK-owned)
  * validated the client's request, packed it into a signed state, and sent the
  * browser to the SPA's `/connect?oauth=<state>` page; these routes are what
@@ -96,24 +114,16 @@ export function createOAuthConsentRoutes(deps: OAuthConsentRoutesDeps): express.
     // "Connect as": absent, null or empty is Myself. Anything else must be a
     // bot the person may act as right now — checked here, at the only place a
     // choice is made, and again on every call the connection makes.
-    const asked: unknown = (req.body ?? {}).bot;
-    // A page from before bots sends the choice as `agentPath`. Read as absent
-    // it would connect as Myself, with the person's whole access, while the
-    // person chose an agent: refused, so the stale page fails instead.
-    if ((req.body ?? {}).agentPath !== undefined && (req.body ?? {}).agentPath !== null) {
-      return void res.status(400).json({ error: NOT_A_BOT_CHOICE });
-    }
-    if (asked !== undefined && asked !== null && typeof asked !== 'string') {
-      return void res.status(400).json({ error: NOT_A_BOT_CHOICE });
-    }
-    const choosing = typeof asked === 'string' && asked.trim() !== '';
+    const asked = connectAsAsked(req.body);
+    if (!asked.ok) return void res.status(400).json({ error: NOT_A_BOT_CHOICE });
+    const choosing = asked.bot !== null;
     // An account linked through the GitHub facade has no agent connection to
     // record a choice on.
     if (choosing && (st.gh || !deps.bots || !req.userEmail)) {
       return void res.status(400).json({ error: NOT_A_BOT_CHOICE });
     }
     try {
-      const bot = choosing && deps.bots && req.userEmail ? await deps.bots.actAs(req.userEmail, (asked as string).trim()) : null;
+      const bot = choosing && deps.bots && req.userEmail ? await deps.bots.actAs(req.userEmail, asked.bot as string) : null;
       if (choosing && bot === null) return void res.status(400).json({ error: NOT_A_BOT_CHOICE });
       const { redirectTo } = st.gh && deps.facade
         ? await deps.facade.completeConsent(userId, st)

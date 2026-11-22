@@ -18,7 +18,7 @@ import './mcp-auth.middleware.js'; // req.mcpCallerKind augmentation
 import { isPagePath } from '../audit/index.js';
 import type { IBots } from '../bots/index.js';
 import { describeConnectionChoices } from '../bots/index.js';
-import { NOT_A_BOT_CHOICE } from './oauth/oauth-consent.routes.js';
+import { NOT_A_BOT_CHOICE, connectAsAsked } from './oauth/oauth-consent.routes.js';
 
 /** Pull the raw bearer token off an already-authenticated request. */
 function extractBearer(req: Request): string {
@@ -297,17 +297,23 @@ export function createMcpRoutes(
         res.status(400).json({ error: 'JSON body required' });
         return;
       }
-      const { label, bot: asked } = req.body as { label?: string; bot?: unknown };
+      const { label } = req.body as { label?: string };
       if (!label) {
         res.status(400).json({ error: 'label is required' });
         return;
       }
-      // "Connect as", exactly as on the consent step: absent, null or empty is
+      // "Connect as", read exactly as the consent step reads it
+      // (`connectAsAsked`): absent, null or blank is Myself; a choice sent as
+      // `agentPath` by a dialog from before bots is refused, never minted as
       // Myself; anything else must be a bot the owner may act as now.
+      const asked = connectAsAsked(req.body);
+      if (!asked.ok) {
+        res.status(400).json({ error: NOT_A_BOT_CHOICE });
+        return;
+      }
       let botUserId: string | null = null;
-      if (asked !== undefined && asked !== null && asked !== '') {
-        const bot =
-          typeof asked === 'string' && bots && req.userEmail ? await bots.actAs(req.userEmail, asked.trim()) : null;
+      if (asked.bot !== null) {
+        const bot = bots && req.userEmail ? await bots.actAs(req.userEmail, asked.bot) : null;
         if (bot === null) {
           res.status(400).json({ error: NOT_A_BOT_CHOICE });
           return;
