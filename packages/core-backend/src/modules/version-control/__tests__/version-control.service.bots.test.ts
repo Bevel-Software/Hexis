@@ -28,6 +28,9 @@ const PROTECTED = 'current-company-state';
 const BOT: AuthUser = { id: 'u-bot', email: 'release-helper@agent.hexis', name: 'release-helper' };
 const PERSON: AuthUser = { id: 'u-dana', email: 'dana@acme.com', name: 'Dana' };
 const isBot = (email: string) => email === BOT.email;
+/** The target and source commits every merge and detail here is read at. */
+const TARGET_TIP = 'a'.repeat(40);
+const SOURCE_TIP = 'b'.repeat(40);
 
 type MergeHook = (t: { sha: string; sourceSha: string; changedPaths: string[]; workspaceId: string }) => Promise<void>;
 
@@ -47,12 +50,17 @@ function makeService(
   const acquire = vi.fn(async () => ({ acquired: true, lock: {} as never }));
   const gate: IChangeReadGate = { judge: vi.fn(), assertMayChange: vi.fn(async () => undefined) };
   const landed = { count: 0 };
-  const target = (workspaceId: string) => ({ sha: 'target-tip', sourceSha: 'source-tip', changedPaths: Object.keys(changed), workspaceId });
+  const target = (workspaceId: string) => ({ sha: TARGET_TIP, sourceSha: SOURCE_TIP, changedPaths: Object.keys(changed), workspaceId });
   const git = {
     fetch: vi.fn(async () => undefined),
     remoteBranchExists: vi.fn(async () => true),
     readFileAtRef: vi.fn(async (_ws: string, ref: string, p: string) =>
-      ref === 'target-tip' ? (changed[p]?.base ?? null) : ref === 'source-tip' ? (changed[p]?.head ?? null) : null,
+      ref === TARGET_TIP ? (changed[p]?.base ?? null) : ref === SOURCE_TIP ? (changed[p]?.head ?? null) : null,
+    ),
+    // The authorizing set between the two commits, as the git layer reports
+    // it: every path the merge writes, roles.yaml included.
+    writtenPathsBetweenCommits: vi.fn(async (_ws: string, base: string, head: string) =>
+      base === TARGET_TIP && head === SOURCE_TIP ? Object.keys(changed) : [],
     ),
     mergeChangeRequest: vi.fn(async (ws: string, _s: string, _t: string, _c: unknown, _u: unknown, opts: { authorize?: MergeHook }) => {
       await opts.authorize?.(target(ws));
@@ -64,12 +72,13 @@ function makeService(
     getPr: vi.fn(async () => ({ base: 'main', branch: DRAFT })),
     invalidateDetailCache: vi.fn(),
     // The detail as the gate reads it: open and mergeable, at the two tips the
-    // merge would use, changing every path of `changed` (a rename named by both ends).
+    // merge would use, listing the files the review surface lists — every
+    // path of `changed` but roles.yaml, which that list leaves out.
     getPrDetail: vi.fn(async () => ({
       state: 'open',
-      baseSha: 'target-tip',
-      headSha: 'source-tip',
-      files: Object.keys(changed).map((path) => ({ path })),
+      baseSha: TARGET_TIP,
+      headSha: SOURCE_TIP,
+      files: Object.keys(changed).filter((path) => path !== 'roles.yaml').map((path) => ({ path })),
       mergeableInBevel: true,
       mergeBlockedReasons: [],
       mergeWarnings: [],
@@ -82,7 +91,7 @@ function makeService(
     return { merged: true };
   });
   const canWriteBatchAtRef = vi.fn(async (_ws: string, sha: string, email: string, paths: string[]) =>
-    sha === 'target-tip' ? new Map(paths.map((p) => [p, mayWrite(email, p)])) : null,
+    sha === TARGET_TIP ? new Map(paths.map((p) => [p, mayWrite(email, p)])) : null,
   );
   const svc = new VersionControlService(
     db as Database,
@@ -182,7 +191,7 @@ describe('a bot merging a change request', () => {
     });
     expect(landed.count).toBe(0);
     // Judged for the bot, at the target commit the merge is built on.
-    expect(canWriteBatchAtRef).toHaveBeenCalledWith('ws-main', 'target-tip', BOT.email, Object.keys(changed));
+    expect(canWriteBatchAtRef).toHaveBeenCalledWith('ws-main', TARGET_TIP, BOT.email, Object.keys(changed));
 
     const person = makeService(changed, {}, () => false);
     await merge(person.svc, PERSON);
@@ -247,9 +256,33 @@ describe("a change request as a bot reads it: its own refusals are among the blo
     const lines = makeService({ 'Team/page.md': { base: '---\nread:\n  - Eng\n---\n', head: '---\nread:\n  - everyone\n---\n' } });
     expect((await detail(lines.svc, BOT))?.mergeBlockedReasons).toEqual([expect.stringMatching(/access lines/)]);
     const outside = makeService({ 'Ops/runbook.md': { base: '# a\n', head: '# b\n' } }, {}, (email) => email !== BOT.email);
-    expect((await detail(outside.svc, BOT))?.mergeBlockedReasons).toEqual([
-      expect.stringMatching(/outside its write access \(Ops\/runbook\.md\)/),
-    ]);
+    const d = await detail(outside.svc, BOT);
+    expect(d?.mergeBlockedReasons).toEqual([expect.stringMatching(/outside its write access \(Ops\/runbook\.md\)/)]);
+    expect(d?.mergeableInBevel).toBe(false);
+  });
+
+  it('names a roles.yaml change, which the displayed file list leaves out but the merge refuses', async () => {
+    const { svc } = makeService({ 'roles.yaml': { base: 'roles: {}\n', head: 'roles:\n  admin: [x]\n' } });
+    const d = await detail(svc, BOT);
+    expect(d?.files).toEqual([]);
+    expect(d?.mergeableInBevel).toBe(false);
+    expect(d?.mergeBlockedReasons).toEqual([expect.stringMatching(/A bot cannot change access: "roles\.yaml"/)]);
+  });
+
+  it('judges a pair of commits once while its verdict is kept, and judges again once it is not', async () => {
+    vi.useFakeTimers();
+    try {
+      const { svc, git, canWriteBatchAtRef } = makeService({ 'Team/page.md': { base: '# a\n', head: '# b\n' } });
+      await detail(svc, BOT);
+      await detail(svc, BOT);
+      expect(git.writtenPathsBetweenCommits).toHaveBeenCalledTimes(1);
+      expect(canWriteBatchAtRef).toHaveBeenCalledTimes(1);
+      vi.advanceTimersByTime(30_001);
+      await detail(svc, BOT);
+      expect(git.writtenPathsBetweenCommits).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('says the check could not be made when a commit cannot be read, rather than leaving the bot cleared', async () => {
@@ -258,6 +291,9 @@ describe("a change request as a bot reads it: its own refusals are among the blo
     const d = await detail(svc, BOT);
     expect(d?.mergeableInBevel).toBe(false);
     expect(d?.mergeBlockedReasons).toEqual(['Whether this bot may apply the request could not be checked right now.']);
+    // Not kept: once the commit reads again, the next look clears the bot.
+    (git.readFileAtRef as ReturnType<typeof vi.fn>).mockImplementation(async () => '# a\n');
+    expect((await detail(svc, BOT))?.mergeBlockedReasons).toEqual([]);
   });
 
   it('adds nothing for a request the bot may apply, nor for a person reading one it would refuse', async () => {

@@ -2308,9 +2308,12 @@ export class VersionControlService implements IVersionControlService {
    * outside its write access — are among its `mergeBlockedReasons`, judged by
    * the checks its merge runs (`assertBotMergeLeavesAccess`,
    * `assertBotMayWriteMerged`) at the head and target the detail was read
-   * at. So whatever a reader derives from the blockers ("may I apply this?")
-   * says what the merge would answer for the bot; the merge itself still asks
-   * again, inside its reservation.
+   * at, over the paths the merge writes (`writtenPathsBetweenCommits`:
+   * roles.yaml included, which the displayed file list leaves out). So
+   * whatever a reader derives from the blockers ("may I apply this?") says
+   * what the merge would answer for the bot; the merge itself still asks
+   * again, inside its reservation. A verdict is kept briefly per pair of
+   * commits and bot (see {@link botApplyVerdicts}).
    */
   async getChangeRequestDetail(
     number: number,
@@ -2323,7 +2326,6 @@ export class VersionControlService implements IVersionControlService {
     const refusal = await this.botApplyRefusal(opts.viewerEmail, {
       sha: detail.baseSha,
       sourceSha: detail.headSha,
-      changedPaths: [...new Set(detail.files.flatMap((f) => (f.previousPath ? [f.path, f.previousPath] : [f.path])))],
       workspaceId: opts.workspaceId,
     });
     return refusal === null
@@ -2339,18 +2341,48 @@ export class VersionControlService implements IVersionControlService {
    */
   private async botApplyRefusal(
     email: string,
-    target: { sha: string; sourceSha: string; changedPaths: string[]; workspaceId: string },
+    at: { sha: string; sourceSha: string; workspaceId: string },
   ): Promise<string | null> {
+    const key = [at.workspaceId, at.sha, at.sourceSha, email.toLowerCase()].join('\0');
+    const kept = this.botApplyVerdicts.get(key);
+    if (kept && Date.now() - kept.at < VersionControlService.BOT_APPLY_VERDICT_TTL_MS) return kept.refusal;
+    let refusal: string | null;
     try {
+      const changedPaths = await this.git.writtenPathsBetweenCommits(at.workspaceId, at.sha, at.sourceSha);
+      const target = { ...at, changedPaths };
       await this.assertBotMergeLeavesAccess(target);
       await this.assertBotMayWriteMerged(email, target);
-      return null;
+      refusal = null;
     } catch (err) {
-      if (err instanceof VersionControlDomainError) return err.message;
-      mergeLog.warn('could not judge whether a bot may apply a change request:', { err: sanitizeError(err) });
-      return 'Whether this bot may apply the request could not be checked right now.';
+      if (!(err instanceof VersionControlDomainError)) {
+        // Not kept: the next read asks again.
+        mergeLog.warn('could not judge whether a bot may apply a change request:', { err: sanitizeError(err) });
+        return 'Whether this bot may apply the request could not be checked right now.';
+      }
+      refusal = err.message;
     }
+    this.botApplyVerdicts.delete(key);
+    if (this.botApplyVerdicts.size >= VersionControlService.BOT_APPLY_VERDICTS_MAX) {
+      const oldest = this.botApplyVerdicts.keys().next().value;
+      if (oldest !== undefined) this.botApplyVerdicts.delete(oldest);
+    }
+    this.botApplyVerdicts.set(key, { at: Date.now(), refusal });
+    return refusal;
   }
+
+  /**
+   * A bot's apply verdict per (workspace, target commit, source commit, bot):
+   * the two commits fix what is changed and the access files it is judged
+   * by, so a detail read again — every poll of the page, every agent call —
+   * reads no file a second time. Kept for a short while only, because not
+   * everything the answer depends on lives in the commits (the bots' domain,
+   * which says whose grant a line is, is a setting); the merge never reads
+   * this and judges for itself. A verdict that could not be reached is not
+   * kept. Bounded, oldest first.
+   */
+  private readonly botApplyVerdicts = new Map<string, { at: number; refusal: string | null }>();
+  private static readonly BOT_APPLY_VERDICT_TTL_MS = 30_000;
+  private static readonly BOT_APPLY_VERDICTS_MAX = 500;
 
   /**
    * Open a new change request. A change request is a plain `change_requests`

@@ -3854,6 +3854,26 @@ export class GitService implements IGitService {
   }
 
   /**
+   * Every path a change request's merge WRITES, between the two commits a
+   * caller already holds (a detail's `baseSha` and `headSha`): the
+   * authorizing set (`forAccessCheck`) — `roles.yaml` kept, both sides of
+   * every rename — off the same memoized diff the review surface is shaped
+   * from, so a reader judging "may this be applied" asks about exactly the
+   * paths the merge's own check will, at no second `git diff`.
+   */
+  async writtenPathsBetweenCommits(workspaceId: string, baseSha: string, headSha: string): Promise<string[]> {
+    for (const sha of [baseSha, headSha]) {
+      if (!/^[0-9a-f]{40,64}$/.test(sha)) {
+        throw new VersionControlValidationError(`invalid commit sha: ${sha}`);
+      }
+    }
+    const cwd = await this.repoDir(workspaceId);
+    return this.mutex.run(workspaceId, async () =>
+      flattenChangedPaths(await this.prChangedEntriesBetweenCommits(cwd, baseSha, headSha), { forAccessCheck: true }),
+    );
+  }
+
+  /**
    * The shaping behind `changedPathsForPr`, without its workspace
    * reservation: the caller must already hold one. `mergeChangeRequest` reads
    * the same set inside its OWN reservation, where re-entering this one would
