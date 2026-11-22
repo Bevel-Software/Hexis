@@ -6,7 +6,7 @@ import type { AuthUser } from '@bevel-software/platform-shared';
 import '../../auth/index.js'; // Express Request.userId / userEmail augmentation
 import '../../tool-auth/index.js'; // Express Request augmentation (req.externalApiKeyId)
 import type { MarketplaceRepoService } from '../marketplace-repo.service.js';
-import type { MarketplaceKeyResolver } from '../git-http.routes.js';
+import { KEY_MADE_AS_BOT_REFUSAL, keyActsAsSomeoneElse, type MarketplaceKeyResolver, type ResolvedMarketplaceKey } from '../git-http.routes.js';
 import { GitHubFacadeRequestError, type GitHubFacade } from './github-facade.service.js';
 import { printable } from '../../../shared/printable.js';
 
@@ -106,7 +106,7 @@ export function createGitHubFacadeRoutes(deps: GitHubFacadeRoutesDeps): express.
       unauthorized(req, res, token ? 'bearer is not a connection key' : 'no bearer');
       return;
     }
-    let resolved: { tokenId: string; user: AuthUser } | null;
+    let resolved: ResolvedMarketplaceKey | null;
     try {
       resolved = await keys.verifyAndLoadToken(token);
     } catch (err) {
@@ -116,6 +116,10 @@ export function createGitHubFacadeRoutes(deps: GitHubFacadeRoutesDeps): express.
     }
     if (!resolved) {
       unauthorized(req, res, 'connection key unknown or revoked');
+      return;
+    }
+    if (keyActsAsSomeoneElse(resolved)) {
+      res.status(403).json({ message: KEY_MADE_AS_BOT_REFUSAL });
       return;
     }
     req.userId = resolved.user.id;

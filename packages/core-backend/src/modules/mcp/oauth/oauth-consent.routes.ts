@@ -97,6 +97,12 @@ export function createOAuthConsentRoutes(deps: OAuthConsentRoutesDeps): express.
     // bot the person may act as right now — checked here, at the only place a
     // choice is made, and again on every call the connection makes.
     const asked: unknown = (req.body ?? {}).bot;
+    // A page from before bots sends the choice as `agentPath`. Read as absent
+    // it would connect as Myself, with the person's whole access, while the
+    // person chose an agent: refused, so the stale page fails instead.
+    if ((req.body ?? {}).agentPath !== undefined && (req.body ?? {}).agentPath !== null) {
+      return void res.status(400).json({ error: NOT_A_BOT_CHOICE });
+    }
     if (asked !== undefined && asked !== null && typeof asked !== 'string') {
       return void res.status(400).json({ error: NOT_A_BOT_CHOICE });
     }

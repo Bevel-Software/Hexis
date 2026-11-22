@@ -16,11 +16,17 @@ const internalToken = new InternalTokenService({ secret: 'test-secret' });
 const externalApiKeyService = {
   looksLikeExternalApiKey: (t: string) => typeof t === 'string' && t.startsWith('bevel_'),
   verifyAndLoadToken: async (t: string) =>
-    t === 'bevel_ok' ? { user: { id: 'u-ext', email: 'e@x', name: 'Ext' }, tokenId: 'tk-1' } : null,
+    t === 'bevel_ok'
+      ? { user: { id: 'u-ext', email: 'e@x', name: 'Ext' }, tokenId: 'tk-1', botUserId: null, agentPath: null }
+      : t === 'bevel_bot'
+        ? { user: { id: 'u-ext', email: 'e@x', name: 'Ext' }, tokenId: 'tk-2', botUserId: 'u-bot', agentPath: null }
+        : t === 'bevel_bot_of_gone'
+          ? { user: { id: 'u-gone', email: 'g@x', name: 'Gone' }, tokenId: 'tk-3', botUserId: 'u-bot', agentPath: null }
+          : null,
 } as never;
 // Every account is on except `u-off`, which an admin switched off.
 const authService = {
-  getUserById: async (id: string) => ({ id, email: 'e@x', name: 'N' }),
+  getUserById: async (id: string) => (id === 'u-gone' ? null : { id, email: id === 'u-bot' ? 'ops@agent.hexis' : 'e@x', name: 'N' }),
   isActive: async (id: string) => id !== 'u-off',
 } as never;
 
@@ -39,6 +45,16 @@ const validateToken = createToolValidator({
   events: {} as never,
   kbDirName: 'knowledge-base',
   creatorAccess: { planForCreate: async () => null, grantInExtractedFile: async () => null, noteAccessFileWritten: () => {} },
+  // A connection made as the bot `u-bot` resolves to the bot's row, the maker kept.
+  identities: {
+    userOf: async (id: string) => ({ id, email: 'e@x' }),
+    bots: {
+      resolveConnection: async (maker, choice) =>
+        choice.botUserId === 'u-bot'
+          ? { kind: 'bot', actor: { id: 'u-bot', email: 'ops@agent.hexis' }, madeBy: maker, bot: { id: 'ops', name: 'Ops' }, platformTools: null }
+          : { kind: 'myself' },
+    },
+  },
 });
 
 beforeEach(async () => {
@@ -62,6 +78,18 @@ describe('validateToken (tool-author SDK entry)', () => {
     const ctx = await validateToken('bevel_ok');
     expect(ctx).toMatchObject({ source: 'external', scope: 'write' });
     expect(ctx.user.id).toBe('u-ext');
+  });
+
+  it('resolves a connection key made as a bot to the bot, as the hosted middleware does', async () => {
+    const ctx = await validateToken('bevel_bot');
+    expect(ctx.user.id).toBe('u-bot');
+    expect(ctx.user.email).toBe('ops@agent.hexis');
+  });
+
+  it('refuses a call made as a bot whose maker cannot be loaded, rather than run it with nobody behind it', async () => {
+    const err = await validateToken('bevel_bot_of_gone').catch((e) => e);
+    expect(hasHttpStatus(err) && err.status).toBe(401);
+    expect((err as Error).message).toMatch(/person who made this connection/);
   });
 
   it('getFilesystem(branch) builds the filesystem for that branch\'s workspace', async () => {

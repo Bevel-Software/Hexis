@@ -1,4 +1,4 @@
-import type { IExternalApiKeyService, InternalTokenService, ConnectionChoices } from '../tool-auth/index.js';
+import type { IExternalApiKeyService, InternalTokenService, ConnectionChoices, ConnectionIdentities } from '../tool-auth/index.js';
 import { createTokenVerifier } from '../tool-auth/index.js';
 import { createToolContextResolver, type ToolContextDeps } from './tool-context.js';
 import { ToolError, type ToolContext } from './tool.contract.js';
@@ -8,6 +8,14 @@ export interface ToolValidatorDeps extends ToolContextDeps {
   internalTokenService: InternalTokenService;
   /** Where an agent connection's current "Connect as" choice (Myself or a bot) is read (see `createTokenVerifier`). */
   connections?: ConnectionChoices;
+  /**
+   * How a connection made as a bot is resolved: the same provider the
+   * composition root hands the Express `toolAuth` middleware. Required, so a
+   * plugin-hosted endpoint judges a bot's call as the bot exactly as a hosted
+   * one does; a host with no bots passes `{ userOf }` without `bots`, and a
+   * connection made as a bot then loads nothing.
+   */
+  identities: ConnectionIdentities;
 }
 
 /**
@@ -36,7 +44,7 @@ export type ValidateToken = (
 ) => Promise<ToolContext>;
 
 export function createToolValidator(deps: ToolValidatorDeps): ValidateToken {
-  const verify = createTokenVerifier(deps.externalApiKeyService, deps.internalTokenService, deps.authService, deps.connections);
+  const verify = createTokenVerifier(deps.externalApiKeyService, deps.internalTokenService, deps.authService, deps.connections, deps.identities);
   const resolve = createToolContextResolver(deps);
   return async (token, signal) => {
     let result;

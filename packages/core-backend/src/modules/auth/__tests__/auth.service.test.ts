@@ -88,6 +88,19 @@ const CHANGED = [{ ...ROW, sessionVersion: 1 }];
 describe('AuthService.loginWithPassword — env bootstrap admin', () => {
   const config = makeConfig({ adminEmail: 'root@example.com', adminPassword: 'sup3r-secret' });
 
+  // The environment's admin address set to a bot's, or to any address at the
+  // bots' domain, signs nobody in and makes no row: the bot check comes first.
+  it.each(['release-helper@agent.hexis', 'someone@agent.hexis'])(
+    'refuses %s with the right environment password, and makes no row',
+    async (email) => {
+      const bots = { isBot: (e: string) => e === 'release-helper@agent.hexis', domain: () => 'agent.hexis' };
+      const { db } = makeFakeDb([[], [{ ...ROW, email }]]);
+      const svc = new AuthService(db, makeConfig({ adminEmail: email, adminPassword: 'sup3r-secret' }), undefined, bots);
+      await expect(svc.loginWithPassword(email, 'sup3r-secret')).rejects.toThrow('Invalid credentials');
+      expect(vi.mocked(db.insert)).not.toHaveBeenCalled();
+    },
+  );
+
   it('signs in the env admin and upserts their user row', async () => {
     // Two queued results: the lookup every login now performs, then the upsert.
     const { db } = makeFakeDb([[], [{ ...ROW, email: 'root@example.com', name: 'root' }]]);

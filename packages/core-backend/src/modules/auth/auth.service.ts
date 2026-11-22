@@ -309,6 +309,15 @@ export class AuthService implements IAccountSwitchGuard {
       .where(eq(users.emailBidx, normalizedEmail))
       .limit(1);
 
+    // A bot's address never signs in — the environment's admin address
+    // included, should it be set to one, so that path neither signs a bot in
+    // nor makes a person at the bots' domain. Asked before either path, with
+    // the answer and the cost of a wrong password.
+    if (this.isBotAddress(normalizedEmail)) {
+      await verifyPassword(provided, await decoyHash());
+      throw new Error('Invalid credentials');
+    }
+
     if (this.isEnvAdminEmail(normalizedEmail)) {
       // While `ADMIN_PASSWORD` is set, the environment's password is this
       // account's ONLY credential — the row was read above, but its hash is

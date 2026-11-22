@@ -96,7 +96,12 @@ export function createToolContextResolver(deps: ToolContextDeps): ResolveToolCon
     if (!found) throw new ToolError('Your account is no longer available.', 401);
     // A connection made as a bot acts as the bot's row; what it writes, opens
     // and merges also names the person who made the connection.
+    // A maker that cannot be loaded refuses the call: it would otherwise run
+    // as the bot with nobody named behind it, in the audit and the history.
     const maker = auth.madeBy ? await deps.authService.getUserById(auth.madeBy.id) : null;
+    if (auth.madeBy && !maker) {
+      throw new ToolError('The person who made this connection is no longer available, so it loads nothing.', 401);
+    }
     const user = maker ? { ...found, madeBy: { name: maker.name, email: maker.email } } : found;
 
     const { loadActiveGroups } = deps;

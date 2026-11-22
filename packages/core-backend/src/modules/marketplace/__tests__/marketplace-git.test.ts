@@ -34,6 +34,8 @@ const git = (args: string[], opts: { cwd?: string; env?: NodeJS.ProcessEnv } = {
 const users: Record<string, AuthUser> = {
   'bevel_alice': { id: 'user-alice', email: 'alice@x.io', name: 'Alice' } as AuthUser,
   'bevel_bob': { id: 'user-bob', email: 'bob@x.io', name: 'Bob' } as AuthUser,
+  // A key Alice made as a bot: it acts as the bot, never as Alice.
+  'bevel_alice_as_bot': { id: 'user-alice', email: 'alice@x.io', name: 'Alice' } as AuthUser,
 };
 
 function tree(files: Record<string, string>, sourceCommit: string): VirtualTree & { sourceCommit: string } {
@@ -73,7 +75,10 @@ describe('marketplace git endpoint', () => {
         repo,
         keys: {
           looksLikeExternalApiKey: (t) => t.startsWith('bevel_'),
-          verifyAndLoadToken: async (t) => (users[t] ? { tokenId: `tok-${t}`, user: users[t] } : null),
+          verifyAndLoadToken: async (t) =>
+            users[t]
+              ? { tokenId: `tok-${t}`, user: users[t], botUserId: t === 'bevel_alice_as_bot' ? 'user-ops-bot' : null, agentPath: null }
+              : null,
         },
         mountPath: '/git',
       }),
@@ -176,5 +181,13 @@ describe('marketplace git endpoint', () => {
       headers: { authorization: `Basic ${Buffer.from('key:bevel_alice').toString('base64')}` },
     });
     expect(push.status).toBe(403);
+  });
+
+  it('refuses a key made as a bot rather than serve it the tree of the person who made it', async () => {
+    const res = await fetch(`${base}/info/refs?service=git-upload-pack`, {
+      headers: { authorization: `Basic ${Buffer.from('key:bevel_alice_as_bot').toString('base64')}` },
+    });
+    expect(res.status).toBe(403);
+    expect(await res.text()).toMatch(/made as a bot/);
   });
 });

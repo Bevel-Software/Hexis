@@ -7,11 +7,35 @@ import type { AuthUser } from '@bevel-software/platform-shared';
 import type { MarketplaceRepoService } from './marketplace-repo.service.js';
 import '../tool-auth/index.js'; // Express Request augmentation (req.externalApiKeyId)
 
-/** How a bearer string resolves to a user — the connection-key service's shape. */
+/** A connection key as the marketplace surfaces read it: who made it, and what it connects as. */
+export interface ResolvedMarketplaceKey {
+  tokenId: string;
+  /** The person who made the key. Whom it acts as only when it was made as Myself. */
+  user: AuthUser;
+  /** The bot the key connects as, or null. */
+  botUserId: string | null;
+  /** A legacy "as an agent" path the key was minted with, or null. */
+  agentPath: string | null;
+}
+
+/** How a bearer string resolves to a key — the connection-key service's shape. */
 export interface MarketplaceKeyResolver {
   looksLikeExternalApiKey(token: string): boolean;
-  verifyAndLoadToken(plaintext: string): Promise<{ tokenId: string; user: AuthUser } | null>;
+  verifyAndLoadToken(plaintext: string): Promise<ResolvedMarketplaceKey | null>;
 }
+
+/**
+ * The marketplace serves the tree of the person who made the key. A key made
+ * as a bot (or as a legacy agent) acts as the bot and never as that person,
+ * so these surfaces refuse it rather than serve the person's tree to it.
+ */
+export function keyActsAsSomeoneElse(key: ResolvedMarketplaceKey): boolean {
+  return key.botUserId !== null || key.agentPath !== null;
+}
+
+/** What a refused key made as a bot is told. */
+export const KEY_MADE_AS_BOT_REFUSAL =
+  'This connection key was made as a bot, and the marketplace serves a person their own skills: use a key made as Myself.';
 
 /**
  * The per-user marketplace as a git remote:
@@ -91,7 +115,7 @@ export function createMarketplaceGitRoutes(deps: {
       challenge(res, 'A connection key is required: https://key:<connection-key>@<host>/git/marketplace.git');
       return;
     }
-    let resolved: { tokenId: string; user: AuthUser } | null;
+    let resolved: ResolvedMarketplaceKey | null;
     try {
       resolved = await keys.verifyAndLoadToken(key);
     } catch (err) {
@@ -101,6 +125,10 @@ export function createMarketplaceGitRoutes(deps: {
     }
     if (!resolved) {
       challenge(res, 'Invalid or revoked connection key');
+      return;
+    }
+    if (keyActsAsSomeoneElse(resolved)) {
+      res.status(403).type('text/plain').send(KEY_MADE_AS_BOT_REFUSAL);
       return;
     }
     req.userId = resolved.user.id;

@@ -163,8 +163,11 @@ async function withConnection(
   knownEmail?: string,
 ): Promise<VerifyResult> {
   if (!choice.botUserId && !choice.agentPath) return { ok: true, auth };
-  const email = knownEmail ?? (await identities?.userOf(auth.userId))?.email;
-  if (!email) return { ok: false, status: 401, message: 'Your account is no longer available.' };
+  // Without the bots mechanism the connection loads nothing whoever made it,
+  // so the person is not looked up: their account being gone is not what
+  // this call is told.
+  const email = identities ? (knownEmail ?? (await identities.userOf(auth.userId))?.email) : (knownEmail ?? '');
+  if (email === undefined) return { ok: false, status: 401, message: 'Your account is no longer available.' };
   const resolved = await resolveConnectionIdentity(identities?.bots, { id: auth.userId, email }, choice);
   return {
     ok: true,

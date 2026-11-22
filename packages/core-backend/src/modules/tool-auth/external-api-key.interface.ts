@@ -48,7 +48,11 @@ export interface ExternalApiKeySummary {
    * every key minted since (see `botUserId`).
    */
   agentPath: string | null;
-  /** The bot the key connects as (its users row), or null for Myself — chosen when the key was minted. */
+  /**
+   * The bot the key connects as (its users row), chosen when the key was
+   * minted. Null means Myself only when `agentPath` is null too: a legacy key
+   * keeps its `agentPath` with this null, and is not Myself.
+   */
   botUserId: string | null;
 }
 

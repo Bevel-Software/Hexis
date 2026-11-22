@@ -62,7 +62,7 @@ function makeKeys() {
     looksLikeExternalApiKey: (t: string) => Object.values(kinds).some((p) => t.startsWith(p)),
     verifyAndLoadToken: async (t: string) => {
       const hit = byToken.get(t);
-      return hit ? { tokenId: hit.tokenId, user: hit.user } : null;
+      return hit ? { tokenId: hit.tokenId, user: hit.user, botUserId: null, agentPath: null } : null;
     },
     mint: async (userId: string, label: string, options: { kind?: string } = {}) => {
       const kind = options.kind ?? 'key';
