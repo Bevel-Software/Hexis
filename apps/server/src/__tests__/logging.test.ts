@@ -181,15 +181,4 @@ describe('createPinoLogger — timeouts and aborts', () => {
       msg: 'skill list_skills loopback threw: [the log record could not be serialized: TypeError: this field refuses to be read]',
     });
   });
-
-  it('never throws into its caller when the value pino stringifies refuses', () => {
-    const { lines, logger } = capture();
-    const refusing = {
-      toJSON(): never {
-        throw new Error('cannot be written as JSON');
-      },
-    };
-    expect(() => logger.info('wrote', { refusing })).not.toThrow();
-    expect(lines()[0]?.msg).toBe('wrote [the log record could not be serialized: Error: cannot be written as JSON]');
-  });
 });

@@ -57,9 +57,11 @@ type Level = 'debug' | 'info' | 'warn' | 'error';
  * returns. The reason names the failure's type and message, never its
  * `cause` or anything a field carried.
  *
- * Every sink factory returns its logger through this, and so does the
- * module handle `logger()` for whatever sink is installed: one guard, the
- * same wherever a line is written.
+ * The module handle `logger()` resolves whatever sink is installed through
+ * this, so every module's call is guarded whoever wrote the sink. The two
+ * sinks this repository ships (the console sink here, the server shell's
+ * pino sink) return their loggers through it too, for code that holds a
+ * sink directly. One guard, the same wherever a line is written.
  */
 export function neverThrowing(impl: ILogger): ILogger {
   const call =
