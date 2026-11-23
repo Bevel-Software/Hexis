@@ -9,7 +9,8 @@ import { fileURLToPath } from 'node:url';
  * version control (a bot's writes to access files and its merge of a request
  * that changes access are refused) and auth (nobody signs in, is invited or is
  * made at a bot's address). A service that is not handed the check treats
- * every bot as a person, so each construction must pass the real one.
+ * every bot as a person, so each construction must pass the real one, and the
+ * real one is the address book the bot service fills.
  *
  * Auth takes its check with no default, so the compiler holds it. Access and
  * version control take theirs last, behind defaulted parameters that a great
@@ -39,7 +40,7 @@ function lastArgument(construction: string): string {
 }
 
 describe('the bot check the composition root wires', () => {
-  it('hands the bot address book to access, version control and auth, as each one’s last argument', async () => {
+  it('hands the bot service’s address book to access, version control and auth, as each one’s last argument', async () => {
     const source = await fs.readFile(compositionRoot, 'utf8');
 
     expect(lastArgument(constructionOf(source, 'AccessControlService'))).toBe('botAddresses');
@@ -47,7 +48,11 @@ describe('the bot check the composition root wires', () => {
     // Version control asks the access module, which holds the same book.
     expect(lastArgument(constructionOf(source, 'VersionControlService'))).toBe('(email) => accessControl.isBot(email)');
 
-    // The book is the bot service's own address book, made once.
+    // The book is made once, and it is the very book the bot service keeps
+    // current: a bot service given a book of its own (its parameter has a
+    // default) would fill that one, and access and auth would never see a bot.
     expect(source.match(/const botAddresses\b/g) ?? []).toHaveLength(1);
+    expect(source.match(/new BotService\(/g) ?? [], 'BotService is constructed once in the root').toHaveLength(1);
+    expect(source).toMatch(/new BotService\(\s*db,\s*settings,\s*botDirectory,\s*botAddresses,/);
   });
 });

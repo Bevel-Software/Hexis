@@ -94,7 +94,9 @@ export class BotService implements IBots {
     /**
      * The address book this service keeps current. Injected so the access
      * module, built before the distribution's directory can be, decides with
-     * the very book this service fills.
+     * the very book this service fills. Defaulted for the suites of this
+     * service alone; the composition root must pass the book it gives access
+     * and auth, and `core/__tests__/bot-check-wired.test.ts` checks that it does.
      */
     readonly addresses: BotAddressBook = new BotAddressBook(),
     /**
