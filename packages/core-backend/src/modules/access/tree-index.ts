@@ -6,8 +6,8 @@
  * the commit (a fact, remembered) or a blob the batch could not read (never
  * remembered)? Most paths are the same from one commit to the next, so an
  * index is a BASE set shared with the commits around it, plus what this
- * commit adds to it and takes from it. A path held by many cached commits is
- * then held once, and a commit costs what it changed.
+ * commit adds to it and takes from it. A path held by the cached commits that
+ * share a base is then held once, and such a commit costs what it changed.
  *
  * The strings come from {@link parseNulListing}, which decodes each path from
  * the bytes git printed: a path is a string of its own, never a view onto the
@@ -42,7 +42,7 @@ export class CommitTreeIndex {
     return this.added.has(p) || (this.base.has(p) && !this.removed.has(p));
   }
 
-  /** The paths this index holds that its base does not hold for it. */
+  /** The paths this index adds to its base or removes from it. */
   get ownPaths(): number {
     return this.added.size + this.removed.size;
   }
@@ -53,39 +53,60 @@ export class CommitTreeIndex {
  * once, however many indexes share it, plus every index's own paths. A base
  * is kept only while a held index uses it; when the last one is released,
  * nothing here points at it.
+ *
+ * A new index is built against the CLOSEST of the most recently held bases,
+ * not only the newest one. The service caches the commits of every workspace
+ * in one place, and two workspaces whose branches differ by more than the
+ * delta share (a draft that added a folder, say) build in turn: against the
+ * newest base alone, each would start a full base of its own whenever the
+ * other had built last; against the closest recent one, each finds its own.
  */
 export class TreeIndexer {
-  /** The base new indexes are built against: the newest held one. */
-  private latestBase: ReadonlySet<string> | null = null;
+  /** Held bases, most recently held first: the candidates a new index is built against. */
+  private readonly recentBases: ReadonlySet<string>[] = [];
   private readonly baseHolders = new Map<ReadonlySet<string>, number>();
   private held = 0;
 
   /**
-   * A new base is started when a commit differs from the current one by more
-   * than this share of its paths, so an index never costs more than that
-   * share of a full tree.
+   * A new base is started when a commit differs from every candidate by more
+   * than this share of the candidate's paths, so an index never costs more
+   * than that share of a full tree.
    */
   private static readonly MAX_DELTA_SHARE = 1 / 16;
+  /**
+   * Candidates compared per build, at most. A comparison is up to one set
+   * lookup per path, so this caps a build's work; more lines of history than
+   * this, built in turn, each start a base of their own.
+   */
+  private static readonly MAX_CANDIDATES = 8;
 
   /** The index of a commit whose listing is `paths` (unique, as git lists them). */
   index(paths: readonly string[]): CommitTreeIndex {
     const current = new Set(paths);
-    const base = this.latestBase;
-    if (base) {
+    let best: { base: ReadonlySet<string>; added: string[]; delta: number } | null = null;
+    for (const base of this.recentBases) {
+      // A candidate wins only with a smaller delta than the best so far and
+      // within the share; counting stops as soon as it cannot.
+      const limit = Math.min(base.size * TreeIndexer.MAX_DELTA_SHARE, best ? best.delta - 1 : Infinity);
       const added: string[] = [];
-      for (const p of current) if (!base.has(p)) added.push(p);
-      const removedCount = base.size - (current.size - added.length);
-      if (added.length + removedCount <= base.size * TreeIndexer.MAX_DELTA_SHARE) {
-        const removed: string[] = [];
-        if (removedCount > 0) for (const p of base) if (!current.has(p)) removed.push(p);
-        return new CommitTreeIndex(
-          base,
-          added.length ? new Set(added) : EMPTY,
-          removed.length ? new Set(removed) : EMPTY,
-        );
+      for (const p of current) {
+        if (base.has(p)) continue;
+        added.push(p);
+        if (added.length > limit) break;
       }
+      if (added.length > limit) continue;
+      const delta = added.length + base.size - (current.size - added.length);
+      if (delta > limit) continue;
+      best = { base, added, delta };
     }
-    return new CommitTreeIndex(current, EMPTY, EMPTY);
+    if (!best) return new CommitTreeIndex(current, EMPTY, EMPTY);
+    const removed: string[] = [];
+    if (best.delta > best.added.length) for (const p of best.base) if (!current.has(p)) removed.push(p);
+    return new CommitTreeIndex(
+      best.base,
+      best.added.length ? new Set(best.added) : EMPTY,
+      removed.length ? new Set(removed) : EMPTY,
+    );
   }
 
   /** Count `index` as held by a cached model. */
@@ -94,7 +115,11 @@ export class TreeIndexer {
     if (holders === 0) this.held += index.base.size;
     this.baseHolders.set(index.base, holders + 1);
     this.held += index.ownPaths;
-    this.latestBase = index.base;
+    this.forget(index.base);
+    this.recentBases.unshift(index.base);
+    if (this.recentBases.length > TreeIndexer.MAX_CANDIDATES) {
+      this.recentBases.length = TreeIndexer.MAX_CANDIDATES;
+    }
   }
 
   /** The model holding `index` let it go. */
@@ -104,7 +129,7 @@ export class TreeIndexer {
     if (holders <= 1) {
       this.baseHolders.delete(index.base);
       if (holders === 1) this.held -= index.base.size;
-      if (this.latestBase === index.base) this.latestBase = null;
+      this.forget(index.base);
     } else {
       this.baseHolders.set(index.base, holders - 1);
     }
@@ -113,5 +138,10 @@ export class TreeIndexer {
   /** Paths held across every held index, each shared base counted once. */
   get heldPaths(): number {
     return this.held;
+  }
+
+  private forget(base: ReadonlySet<string>): void {
+    const at = this.recentBases.indexOf(base);
+    if (at >= 0) this.recentBases.splice(at, 1);
   }
 }

@@ -5,9 +5,9 @@ import path from 'node:path';
 import v8 from 'node:v8';
 import vm from 'node:vm';
 
-// The real tree walker, as the composition root wires it: kb-fs exports none
-// from its entry, and the memo's model load walks the working tree with it.
-import { NodeFs } from '../../kb-fs/node-fs.js';
+// The real disk, from the fixture that stands in for the composition root:
+// the memo's model load walks the working tree with it.
+import { realDisk } from '../../../__tests__/real-disk.js';
 import type { WorkspaceService } from '../../workspace/index.js';
 import { NO_GIT_CREDENTIALS, type IGitRunner } from '../../../shared/git.contract.js';
 import { AccessControlService } from '../access-control.service.js';
@@ -122,7 +122,7 @@ describe('AccessControlService — what a cached at-ref model holds', () => {
       getWorkspacePath: async () => path.join(root, workspaceId),
       ensureRemotesFetched: async () => undefined,
     } as unknown as WorkspaceService;
-    return new AccessControlService(stub, KB, new NodeFs(), [], fakeRepository(commits), undefined, limits);
+    return new AccessControlService(stub, KB, realDisk(), [], fakeRepository(commits), undefined, limits);
   }
 
   /** Bytes git prints for one commit's listing. */
@@ -159,6 +159,41 @@ describe('AccessControlService — what a cached at-ref model holds', () => {
     const listing = listingBytes(commits.get(shas[0]!)!());
     const perCommit = await heapPerCommit(service(commits), shas);
     console.info(`[cache-memory] shared tree of ${TREE} paths: listing ${listing} bytes, heap per cached commit ${Math.round(perCommit)} bytes`);
+    expect(perCommit).toBeLessThan(listing / 20);
+  }, 120_000);
+
+  it('holds a small fraction of the listing per commit when two workspaces on diverging branches build in turn', async () => {
+    // Two workspaces, each on its own line of history: the lines share most
+    // of the tree but differ by more than a commit's delta may be, and their
+    // builds alternate, as the service caches every workspace's commits in
+    // one place. Each commit must still find its own line's base.
+    const OWN = 1_500;
+    const shared = Array.from({ length: TREE - 3 - OWN }, (_, i) => pagePath('Shared', i));
+    const ownA = Array.from({ length: OWN }, (_, i) => pagePath('Line-A', i));
+    const ownB = Array.from({ length: OWN }, (_, i) => pagePath('Line-B', i));
+    const commits = new Map<string, () => string[]>();
+    const builds: Array<[workspace: string, commit: string]> = [];
+    for (let c = 0; c <= COMMITS; c++) {
+      const a = sha(2 * c);
+      const b = sha(2 * c + 1);
+      commits.set(a, () => ['roles.yaml', 'access.md', ...shared, ...ownA, pagePath('Changed', c)]);
+      commits.set(b, () => ['roles.yaml', 'access.md', ...shared, ...ownB, pagePath('Changed', c)]);
+      builds.push(['ws-line-a', a], ['ws-line-b', b]);
+    }
+    const svc = service(commits);
+    const listing = listingBytes(commits.get(sha(0))!());
+    // One commit of each line before the baseline: the two bases.
+    for (const [ws, commit] of builds.slice(0, 2)) {
+      expect(await svc.canWriteAtRef(ws, commit, ADMIN, 'Team/New.md')).toBe(true);
+    }
+    const before = heapAfterGc();
+    for (const [ws, commit] of builds.slice(2)) {
+      expect(await svc.canWriteAtRef(ws, commit, ADMIN, 'Team/New.md')).toBe(true);
+    }
+    const perCommit = (heapAfterGc() - before) / (builds.length - 2);
+    // A path on the other line is absent here, and is not read as a lost blob.
+    expect(await svc.canWriteAtRef('ws-line-a', sha(2), ADMIN, pagePath('Line-B', 3))).toBe(true);
+    console.info(`[cache-memory] two diverging lines of ${TREE} paths, built in turn: listing ${listing} bytes, heap per cached commit ${Math.round(perCommit)} bytes`);
     expect(perCommit).toBeLessThan(listing / 20);
   }, 120_000);
 
@@ -251,7 +286,7 @@ describe('AccessControlService — what the own-entries memo holds', () => {
   /** Every workspace id is a clone of the same tree here. */
   function service(limits: { ownEntriesMaxWorkspaces?: number; ownEntriesMaxEntries?: number } = {}) {
     const stub = { getWorkspacePath: async () => workspaceDir } as unknown as WorkspaceService;
-    return new AccessControlService(stub, KB, new NodeFs(), [], undefined, undefined, { ...limits, now: () => clock });
+    return new AccessControlService(stub, KB, realDisk(), [], undefined, undefined, { ...limits, now: () => clock });
   }
 
   const DENIED = '---\nread:\n  - deny everyone\n---\n# denied\n';
