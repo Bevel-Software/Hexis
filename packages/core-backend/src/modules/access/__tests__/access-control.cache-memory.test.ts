@@ -11,7 +11,13 @@ import { realDisk } from '../../../__tests__/real-disk.js';
 import type { WorkspaceService } from '../../workspace/index.js';
 import { NO_GIT_CREDENTIALS, type IGitRunner } from '../../../shared/git.contract.js';
 import { AccessControlService } from '../access-control.service.js';
-import { OwnEntriesMemo, OWN_ENTRIES_LIMITS, type OwnEntriesLimits } from '../own-entries-memo.js';
+import {
+  OwnEntriesMemo,
+  OWN_ENTRIES_LIMITS,
+  type IOwnEntriesMemo,
+  type OwnEntriesLimits,
+} from '../own-entries-memo.js';
+import { TreeIndexer, type CommitPaths, type ITreeIndexer } from '../tree-index.js';
 
 /**
  * What the access caches HOLD, measured on the heap. Each case drives the
@@ -412,5 +418,101 @@ describe('AccessControlService — what the own-entries memo holds', () => {
     vi.restoreAllMocks();
     await writeFile(PAGE, PLAIN);
     expect(await readable(svc, 'ws-1', PAGE)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The two caches are contracts: the service holds them through interfaces
+// ---------------------------------------------------------------------------
+
+describe('AccessControlService — its cache collaborators are substitutable behind their contracts', () => {
+  let root: string;
+  beforeEach(async () => {
+    root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-cache-contracts-'));
+  });
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it('builds, holds and releases at-ref trees through any ITreeIndexer', async () => {
+    const commits = new Map<string, () => string[]>();
+    for (let c = 0; c < 3; c++) commits.set(sha(c), () => ['roles.yaml', 'access.md', pagePath('Team', c)]);
+    const built: CommitPaths[] = [];
+    const sizes = new Map<CommitPaths, number>();
+    const held = new Set<CommitPaths>();
+    // A structural substitute: a plain Set is a commit's paths.
+    const indexer: ITreeIndexer = {
+      index: (paths) => {
+        const tree = new Set(paths);
+        built.push(tree);
+        sizes.set(tree, tree.size);
+        return tree;
+      },
+      hold: (tree) => void held.add(tree),
+      release: (tree) => void held.delete(tree),
+      get heldPaths() {
+        return [...held].reduce((n, tree) => n + sizes.get(tree)!, 0);
+      },
+    };
+    const stub = {
+      getWorkspacePath: async () => path.join(root, 'ws'),
+      ensureRemotesFetched: async () => undefined,
+    } as unknown as WorkspaceService;
+    const svc = new AccessControlService(
+      stub,
+      KB,
+      realDisk(),
+      [],
+      fakeRepository(commits),
+      undefined,
+      // Three paths per commit: room for one held tree.
+      { treeIndexBudget: 3 },
+      indexer,
+    );
+    expect(await svc.canWriteAtRef('ws', sha(0), ADMIN, 'Team/New.md')).toBe(true);
+    expect(await svc.canWriteAtRef('ws', sha(1), ADMIN, 'Team/New.md')).toBe(true);
+    expect(await svc.canWriteAtRef('ws', sha(2), ADMIN, 'Team/New.md')).toBe(true);
+    expect(built).toHaveLength(3);
+    // Past the budget of one held tree, the older trees were released.
+    expect(held.size).toBe(1);
+    expect(held.has(built[2]!)).toBe(true);
+  });
+
+  it('opens and drops the own-entries memo through any IOwnEntriesMemo, and answers as before', async () => {
+    const repo = path.join(root, 'ws', KB);
+    await fs.mkdir(path.join(repo, 'Knowledge/Open'), { recursive: true });
+    await fs.writeFile(path.join(repo, 'roles.yaml'), ROLES_YAML);
+    await fs.writeFile(path.join(repo, 'access.md'), '---\nwrite:\n  - Admin\n---\n');
+    await fs.writeFile(path.join(repo, 'Knowledge/Open/access.md'), '---\nread:\n  - everyone\n---\n');
+    await fs.writeFile(path.join(repo, 'Knowledge/Open/Denied.md'), '---\nread:\n  - deny everyone\n---\n');
+    const calls: string[] = [];
+    // A structural substitute that remembers nothing.
+    const memo: IOwnEntriesMemo = {
+      open: (ws) => {
+        calls.push(`open ${ws}`);
+        return { get: () => undefined, set: () => undefined };
+      },
+      drop: (ws) => void calls.push(`drop ${ws}`),
+    };
+    const stub = { getWorkspacePath: async () => path.join(root, 'ws') } as unknown as WorkspaceService;
+    const svc = new AccessControlService(stub, KB, realDisk(), [], undefined, undefined, {}, undefined, memo);
+    const paths = ['Knowledge/Open/Denied.md', 'Knowledge/Open/access.md'];
+    const answers = await svc.canReadBatch('ws-1', 'ali@bevel.software', paths);
+    expect(answers.get(paths[0]!)).toBe(false);
+    expect(answers.get(paths[1]!)).toBe(true);
+    svc.invalidate('ws-1');
+    expect(calls).toEqual(['open ws-1', 'drop ws-1']);
+  });
+
+  it('refuses to hold or release a tree another TreeIndexer built', () => {
+    const one = new TreeIndexer();
+    const other = new TreeIndexer();
+    const tree = one.index(['a.md', 'b.md']);
+    expect(() => other.hold(tree)).toThrow(TypeError);
+    expect(() => other.release(new Set(['a.md']))).toThrow(TypeError);
+    one.hold(tree);
+    expect(one.heldPaths).toBe(2);
+    one.release(tree);
+    expect(one.heldPaths).toBe(0);
   });
 });

@@ -24,6 +24,18 @@ export const OWN_ENTRIES_LIMITS: OwnEntriesLimits = {
 };
 
 /**
+ * The contract the access service keeps its per-workspace memo of what files
+ * declare for themselves through. {@link OwnEntriesMemo} is the implementation
+ * the composition root wires.
+ */
+export interface IOwnEntriesMemo {
+  /** The memo for `workspaceId`, to read and fill for one batch. */
+  open(workspaceId: string): WorkspaceOwnEntries;
+  /** Drop `workspaceId`'s memo now (its working tree changed). */
+  drop(workspaceId: string): void;
+}
+
+/**
  * The per-workspace memo of what files declare for themselves, for the batch
  * checks (see `AccessControlService.cachedOwnEntriesBatch`), with its size
  * bounded by what it holds rather than by how long the process has run:
@@ -49,7 +61,7 @@ export const OWN_ENTRIES_LIMITS: OwnEntriesLimits = {
  * The composition root makes one memo per service graph and hands it to
  * that graph's `AccessControlService`, with the clock the service reads.
  */
-export class OwnEntriesMemo {
+export class OwnEntriesMemo implements IOwnEntriesMemo {
   /** In the order the memos were started, which is the order they expire in. */
   private readonly workspaces = new Map<string, WorkspaceMemo>();
   private entries = 0;

@@ -27,11 +27,36 @@ export function parseNulListing(bytes: Buffer): string[] {
   return out;
 }
 
+/** What a cached at-ref model asks of its commit's paths. */
+export interface CommitPaths {
+  /** Whether the commit carries `p`. */
+  has(p: string): boolean;
+}
+
+/**
+ * The contract the access service holds its commits' trees through: builds a
+ * commit's {@link CommitPaths}, and counts what the ones a cached model holds
+ * cost together. {@link TreeIndexer} is the implementation the composition
+ * root wires.
+ */
+export interface ITreeIndexer {
+  /** The paths of a commit whose listing is `paths` (unique, as git lists them). */
+  index(paths: readonly string[]): CommitPaths;
+  /** Count `tree`, which this indexer built, as held by a cached model. */
+  hold(tree: CommitPaths): void;
+  /** The model holding `tree`, which this indexer built, let it go. */
+  release(tree: CommitPaths): void;
+  /** Paths held across every held tree, as the implementation counts what they share. */
+  readonly heldPaths: number;
+}
+
 const EMPTY: ReadonlySet<string> = new Set();
 
 /** The paths of one commit: a shared base, plus what this commit adds and takes away. */
-export class CommitTreeIndex {
+class CommitTreeIndex implements CommitPaths {
   constructor(
+    /** The indexer that built this index, the only one that may hold or release it. */
+    readonly indexer: TreeIndexer,
     /** Shared with the other indexes built against it; read by {@link TreeIndexer} only. */
     readonly base: ReadonlySet<string>,
     private readonly added: ReadonlySet<string>,
@@ -61,7 +86,7 @@ export class CommitTreeIndex {
  * newest base alone, each would start a full base of its own whenever the
  * other had built last; against the closest recent one, each finds its own.
  */
-export class TreeIndexer {
+export class TreeIndexer implements ITreeIndexer {
   /** Held bases, most recently held first: the candidates a new index is built against. */
   private readonly recentBases: ReadonlySet<string>[] = [];
   private readonly baseHolders = new Map<ReadonlySet<string>, number>();
@@ -81,7 +106,7 @@ export class TreeIndexer {
   private static readonly MAX_CANDIDATES = 8;
 
   /** The index of a commit whose listing is `paths` (unique, as git lists them). */
-  index(paths: readonly string[]): CommitTreeIndex {
+  index(paths: readonly string[]): CommitPaths {
     const current = new Set(paths);
     let best: { base: ReadonlySet<string>; added: string[]; delta: number } | null = null;
     for (const base of this.recentBases) {
@@ -99,18 +124,20 @@ export class TreeIndexer {
       if (delta > limit) continue;
       best = { base, added, delta };
     }
-    if (!best) return new CommitTreeIndex(current, EMPTY, EMPTY);
+    if (!best) return new CommitTreeIndex(this, current, EMPTY, EMPTY);
     const removed: string[] = [];
     if (best.delta > best.added.length) for (const p of best.base) if (!current.has(p)) removed.push(p);
     return new CommitTreeIndex(
+      this,
       best.base,
       best.added.length ? new Set(best.added) : EMPTY,
       removed.length ? new Set(removed) : EMPTY,
     );
   }
 
-  /** Count `index` as held by a cached model. */
-  hold(index: CommitTreeIndex): void {
+  /** Count `tree` as held by a cached model. */
+  hold(tree: CommitPaths): void {
+    const index = this.built(tree);
     const holders = this.baseHolders.get(index.base) ?? 0;
     if (holders === 0) this.held += index.base.size;
     this.baseHolders.set(index.base, holders + 1);
@@ -122,8 +149,9 @@ export class TreeIndexer {
     }
   }
 
-  /** The model holding `index` let it go. */
-  release(index: CommitTreeIndex): void {
+  /** The model holding `tree` let it go. */
+  release(tree: CommitPaths): void {
+    const index = this.built(tree);
     const holders = this.baseHolders.get(index.base) ?? 0;
     this.held -= index.ownPaths;
     if (holders <= 1) {
@@ -138,6 +166,15 @@ export class TreeIndexer {
   /** Paths held across every held index, each shared base counted once. */
   get heldPaths(): number {
     return this.held;
+  }
+
+  /**
+   * `tree` as this indexer built it. Holding or releasing a tree another
+   * indexer built would corrupt both counts, so it is refused.
+   */
+  private built(tree: CommitPaths): CommitTreeIndex {
+    if (tree instanceof CommitTreeIndex && tree.indexer === this) return tree;
+    throw new TypeError('TreeIndexer: a tree this indexer did not build');
   }
 
   private forget(base: ReadonlySet<string>): void {

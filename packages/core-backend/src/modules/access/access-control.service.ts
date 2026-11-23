@@ -72,8 +72,8 @@ import {
   DIRECTORY_SYNC_BOT_EMAIL,
   DIRECTORY_SYNC_BOT_NAME,
 } from './directory-sync-bot.js';
-import { OwnEntriesMemo, type WorkspaceOwnEntries } from './own-entries-memo.js';
-import { CommitTreeIndex, TreeIndexer, parseNulListing } from './tree-index.js';
+import { OwnEntriesMemo, type IOwnEntriesMemo, type WorkspaceOwnEntries } from './own-entries-memo.js';
+import { TreeIndexer, parseNulListing, type CommitPaths, type ITreeIndexer } from './tree-index.js';
 
 /**
  * What one spec of a batched read came back as: a blob's text, nothing at
@@ -1514,7 +1514,7 @@ function ineligibleNamedEmailsResolved(
  * own-entries reads need to tell a path that is absent at the commit (a
  * fact, remembered) from a blob the batch could not read (never remembered).
  */
-type AtRefModel = { model: AccessModel; resolvedRef: string; tree: CommitTreeIndex | null };
+type AtRefModel = { model: AccessModel; resolvedRef: string; tree: CommitPaths | null };
 /**
  * One build's outcome: a model, no roles.yaml at the commit, or one that
  * doesn't parse. A git read failure is none of these: it throws
@@ -1633,10 +1633,11 @@ export class AccessControlService implements IAccessControl {
     } = {},
     /**
      * Builds the cached at-ref models' trees and counts what they hold
-     * together; see `TreeIndexer`. The composition root passes the one
-     * indexer; defaulted for the same reason as `gitRunner`.
+     * together, through its contract (`ITreeIndexer`). The composition root
+     * passes the one `TreeIndexer`; defaulted for the same reason as
+     * `gitRunner`.
      */
-    private readonly treeIndexer: TreeIndexer = new TreeIndexer(),
+    private readonly treeIndexer: ITreeIndexer = new TreeIndexer(),
     /**
      * Per-workspace memo of what files declare for themselves (keyed by
      * repo-relative path), for the BATCH checks: the explorer tree resolves
@@ -1649,12 +1650,13 @@ export class AccessControlService implements IAccessControl {
      *
      * The memo keeps entries only for paths in the access-frontmatter
      * extension set; a batch reads any other path as before, without keeping
-     * it. Bounded in age, workspaces and entries: see `OwnEntriesMemo`. The
-     * composition root passes the one memo, on the deployment's limits and
+     * it. Held through its contract (`IOwnEntriesMemo`); bounded in age,
+     * workspaces and entries: see `OwnEntriesMemo`. The composition root
+     * passes the one `OwnEntriesMemo`, on the deployment's limits and
      * the service's clock; the default reads `limits.now`, for the same
      * reason as `gitRunner`.
      */
-    private readonly ownEntriesMemo: OwnEntriesMemo = new OwnEntriesMemo(limits.now),
+    private readonly ownEntriesMemo: IOwnEntriesMemo = new OwnEntriesMemo(limits.now),
   ) {
     this.deploymentOwners = new Set(
       deploymentOwners.filter(Boolean).map((e) => canonicalEmail(e)),
@@ -2811,7 +2813,7 @@ export class AccessControlService implements IAccessControl {
     repoDir: string,
     ref: string,
     relativePath: string,
-    tree: CommitTreeIndex | null = null,
+    tree: CommitPaths | null = null,
   ): Promise<OwnEntries | null> {
     if (relativePath === 'roles.yaml') return null;
     // At a commit (what every gate passes: `resolvedRef`), the batched read
@@ -2837,7 +2839,7 @@ export class AccessControlService implements IAccessControl {
     repoDir: string,
     ref: string,
     relativePaths: string[],
-    tree: CommitTreeIndex | null = null,
+    tree: CommitPaths | null = null,
   ): Promise<Map<string, OwnEntries | null>> {
     const result = new Map<string, OwnEntries | null>();
     const wanted: string[] = [];
