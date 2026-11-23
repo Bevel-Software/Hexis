@@ -5,10 +5,10 @@ import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import type { WorkspaceService } from '../../../workspace/workspace.service.js';
+import type { WorkspaceService } from '../../../workspace/index.js';
 import { VersionControlHooks } from '../../version-control-hooks.js';
 import { GitService, parseNameStatusZ, parseNumstatZ, withoutPlaceholderRename } from '../git.service.js';
-import { WorkspaceMutex } from '../../../kb-fs/mutex.js';
+import { WorkspaceMutex } from '../../../kb-fs/index.js';
 
 const execFileAsync = promisify(execFile);
 

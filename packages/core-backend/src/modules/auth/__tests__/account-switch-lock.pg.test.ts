@@ -1,10 +1,8 @@
 import { afterAll, describe, expect, it } from 'vitest';
 import { randomBytes } from 'node:crypto';
 import pg from 'pg';
-import { closeDb, createDb, type Database } from '../../database/connection.js';
-import { runCoreMigrations } from '../../database/migrate.js';
-import { coreMigrationsDir } from '../../../assets.js';
-import { PG_ADMIN_URL, PG_TEST_TIMEOUT, dropScratchDatabases, scratchDatabaseUrl } from '../../../__tests__/pg-scratch.js';
+import type { Database } from '../../database/index.js';
+import { PG_ADMIN_URL, PG_TEST_TIMEOUT, dropScratchDatabases, openMigratedScratchDb } from '../../../__tests__/pg-scratch.js';
 import { VersionControlDomainError } from '../../../shared/domain-errors.js';
 import { AuthService } from '../auth.service.js';
 import { ACCOUNT_BUSY_MESSAGE, takeAccountSwitchLock } from '../account-switch-lock.js';
@@ -18,14 +16,12 @@ import { noBotAddresses } from '../../../__tests__/real-auth.js';
  * another connection holds the address's lock while the lock is asked for.
  */
 const KEY = randomBytes(32).toString('base64');
-const open: Database[] = [];
+const open: (() => Promise<void>)[] = [];
 const holders: pg.Client[] = [];
 
 async function migratedDatabase(): Promise<{ db: Database; url: string }> {
-  const url = await scratchDatabaseUrl('hexis_switch');
-  const db = createDb(url, { piiKey: KEY });
-  open.push(db);
-  await runCoreMigrations(db, coreMigrationsDir());
+  const { db, url, close } = await openMigratedScratchDb('hexis_switch', { piiKey: KEY });
+  open.push(close);
   return { db, url };
 }
 
@@ -42,7 +38,7 @@ async function holdLock(url: string, email: string): Promise<pg.Client> {
 describe.skipIf(!PG_ADMIN_URL)('the account switch lock under contention, on a real Postgres', () => {
   afterAll(async () => {
     for (const holder of holders) await holder.end().catch(() => undefined);
-    for (const db of open) await closeDb(db);
+    for (const close of open) await close();
     await dropScratchDatabases();
   }, PG_TEST_TIMEOUT);
 

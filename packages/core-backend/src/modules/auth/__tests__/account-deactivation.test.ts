@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import type { SQL } from 'drizzle-orm';
-import type { Database } from '../../database/connection.js';
+import type { Database } from '../../database/index.js';
 import type { CoreConfig } from '../../../core-config.js';
 import { AuthService } from '../auth.service.js';
 import {
@@ -13,7 +13,7 @@ import {
   type IAccountAdmission,
 } from '../account-admission.js';
 import { hashPassword } from '../password-hash.js';
-import { RECOVERY_BOT_EMAIL } from '../../version-control/recovery-bot.js';
+import { RECOVERY_BOT_EMAIL } from '../../version-control/index.js';
 import { noBotAddresses } from '../../../__tests__/real-auth.js';
 
 /**

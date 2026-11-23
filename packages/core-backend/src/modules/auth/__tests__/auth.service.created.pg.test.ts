@@ -1,9 +1,7 @@
 import { afterAll, describe, expect, it } from 'vitest';
 import { randomBytes } from 'node:crypto';
-import { closeDb, createDb, type Database } from '../../database/connection.js';
-import { runCoreMigrations } from '../../database/migrate.js';
-import { coreMigrationsDir } from '../../../assets.js';
-import { PG_ADMIN_URL, PG_TEST_TIMEOUT, dropScratchDatabases, scratchDatabaseUrl } from '../../../__tests__/pg-scratch.js';
+import type { Database } from '../../database/index.js';
+import { PG_ADMIN_URL, PG_TEST_TIMEOUT, dropScratchDatabases, openMigratedScratchDb } from '../../../__tests__/pg-scratch.js';
 import { AuthService } from '../auth.service.js';
 import { noBotAddresses } from '../../../__tests__/real-auth.js';
 
@@ -16,18 +14,17 @@ import { noBotAddresses } from '../../../__tests__/real-auth.js';
  * a wrong one would either tell nobody or tell the same person twice.
  */
 const KEY = randomBytes(32).toString('base64');
-const open: Database[] = [];
+const open: (() => Promise<void>)[] = [];
 
 async function migratedDatabase(): Promise<Database> {
-  const db = createDb(await scratchDatabaseUrl('hexis_created'), { piiKey: KEY });
-  open.push(db);
-  await runCoreMigrations(db, coreMigrationsDir());
+  const { db, close } = await openMigratedScratchDb('hexis_created', { piiKey: KEY });
+  open.push(close);
   return db;
 }
 
 describe.skipIf(!PG_ADMIN_URL)('whether an account is new, on a real Postgres', () => {
   afterAll(async () => {
-    for (const db of open) await closeDb(db);
+    for (const close of open) await close();
     await dropScratchDatabases();
   }, PG_TEST_TIMEOUT);
 

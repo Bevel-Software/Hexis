@@ -15,11 +15,12 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { PullRequestFile } from '@bevel-software/platform-shared';
 
-import { NodeFs } from '../../../kb-fs/node-fs.js';
 import type { WorkspaceService } from '../../../workspace/index.js';
-import { AccessControlService } from '../../../access/access-control.service.js';
+import type { IAccessControl } from '../../../access/index.js';
+import { realAccessControl } from '../../../../__tests__/real-access.js';
+import { realDisk } from '../../../../__tests__/real-disk.js';
 import { BotAddressBook } from '../../../bots/index.js';
-import type { Database } from '../../../database/connection.js';
+import type { Database } from '../../../database/index.js';
 import type { GitService } from '../../git/git.service.js';
 import { ChangeRequestReviewService } from '../change-request-review.service.js';
 
@@ -67,7 +68,7 @@ function db(paths: string[]): Database {
 describe('a bot\'s approvals while the bots\' domain change request is open', () => {
   let root: string;
   let book: BotAddressBook;
-  let access: AccessControlService;
+  let access: IAccessControl;
   const PATHS = ['Direct/page.md', 'Group/page.md', 'Denied/page.md'];
 
   beforeEach(async () => {
@@ -93,7 +94,7 @@ describe('a bot\'s approvals while the bots\' domain change request is open', ()
     } as unknown as WorkspaceService;
     book = new BotAddressBook();
     book.replace({ domain: 'agent.hexis', botIds: ['release-helper'], previousDomain: 'old.example' });
-    access = new AccessControlService(workspaceService, KB_DIR, new NodeFs(), [], undefined, undefined, {}, undefined, undefined, book);
+    access = realAccessControl(workspaceService, KB_DIR, realDisk(), book);
   });
 
   afterEach(async () => {
