@@ -105,7 +105,7 @@ export async function takeApprovalLock(tx: ApprovalTx, prNumber: number): Promis
  * Join the per-request writers, for the rest of `tx`, without claiming any
  * one request: shared on the every-request key only. For a write that names
  * a BOT's connection maker outside `pr_file_approvals` (a change request it
- * opens, a merge it starts, a save it queues; see `holdMaker` in
+ * opens, a merge it starts; see `holdMaker` in
  * `made-by.ts`): account erasure rewrites the maker out of those rows after
  * taking the every-request key exclusively (`takeEveryApprovalLock`), so a
  * writer holding it shared either commits before that rewrite starts — and

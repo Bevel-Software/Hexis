@@ -350,12 +350,14 @@ export class AccountErasureService implements IAccountErasureService {
       );
 
     // And the person behind a bot, on the four records that name them beside
-    // it. Each of those writers joins the lock above and asks for the
-    // person's account before it writes (`holdMaker` in version control),
-    // so one in flight either landed before the rewrite or is refused. This
-    // is the belt to that, as for the approvals above: the guarantee does not
-    // rest on a future writer remembering the check. Same statement, same
-    // guard, same reason.
+    // it. The writers of a request, an approval and a merge join the lock
+    // above and ask for the person's account before they write (`holdMaker`
+    // in version control), so one in flight either landed before the
+    // rewrite or is refused; for those this is the belt, as for the
+    // approvals above. A queued save does neither: its bytes are already on
+    // disk, so it is never refused (`PendingCommitsService.enqueue`), and
+    // this pass is what takes a row queued while the erasure ran. Same
+    // statement, same guard, same reason.
     for (const table of [changeRequests, prFileApprovals, pendingCommits, prMergeLog] as const) {
       await this.db
         .update(table)

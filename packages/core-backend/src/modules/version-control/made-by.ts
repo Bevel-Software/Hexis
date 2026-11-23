@@ -110,9 +110,9 @@ export async function holdMaker(tx: RecordTx, madeBy: { email: string } | undefi
 
 /**
  * A record naming the person behind a bot waited for the record writers'
- * lock (`holdMaker`) longer than its bound: an account erasure held it.
- * Nothing was written; retryable by the caller, as an approval write that
- * waited too long is.
+ * lock (`holdMaker`) longer than its bound: an account erasure or a bots' domain
+ * change (`holdRecordWriters`) held it. Nothing was written; retryable by
+ * the caller, as an approval write that waited too long is.
  */
 export class RecordWriterBusyError extends VersionControlDomainError {
   constructor() {
@@ -125,22 +125,14 @@ export class RecordWriterBusyError extends VersionControlDomainError {
 }
 
 /**
- * Whether `err` refused a record that names the person behind a bot, so
- * nothing of the call was recorded: the person has no account any more, or
- * the writers' lock was not free in time. A caller that wrote bytes for that
- * record (a save) puts them back (`releaseLock`).
- */
-export function isMakerRecordRefusal(err: unknown): boolean {
-  return err instanceof ConnectionMakerGoneError || err instanceof RecordWriterBusyError;
-}
-
-/**
  * Run `write` in the one kind of transaction a record naming the person
  * behind a bot is written in: `holdMaker` first (unless the record keeps
  * nothing of them, `namesMaker: false`), then `write`. A wait on the
  * writers' lock past its bound is answered as `RecordWriterBusyError`, never
  * as the raw database error. Every such record goes through here or, for an
- * approval, through the approval lock, which answers its own busy refusal.
+ * approval, through the approval lock, which answers its own busy refusal;
+ * the one exception is a queued save, which is never refused, because its
+ * bytes are already on disk (`PendingCommitsService.enqueue`).
  */
 export async function inMakerTransaction<T>(
   db: Database,

@@ -10,7 +10,6 @@ import { FileLockService } from '../file-lock.service.js';
 import { PendingCommitsService } from '../pending-commits.service.js';
 import { VersionControlEventBus } from '../event-bus.js';
 import { VersionControlService, syncConflictMessage } from '../version-control.service.js';
-import { ConnectionMakerGoneError, RecordWriterBusyError } from '../made-by.js';
 import { openChangeGate } from '../../../__tests__/open-change-gate.js';
 import type { Database } from '../../database/index.js';
 import {
@@ -312,28 +311,22 @@ describe('VersionControlService.releaseLock — new (enqueue, no synchronous com
     expect(emitSpy).not.toHaveBeenCalled();
   });
 
-  // A bot's save the queue refuses records nothing, so its bytes are nobody's
-  // who may be named: put back to HEAD and the lock dropped, as a failed
-  // write is, rather than left dirty under a held lock until a restart.
-  it.each([
-    ['its maker has no account', () => new ConnectionMakerGoneError()],
-    ['its record could not wait out an erasure', () => new RecordWriterBusyError()],
-  ])("a bot's save refused because %s is discarded, the lock dropped, the refusal surfaced", async (_why, refusal) => {
+  // A bot's save is queued like anyone's, beside the person behind it, and
+  // released the crash-safe way: nothing here puts its bytes back, since
+  // they may sit on top of another save of the path still queued.
+  it("a bot's save is queued beside the person behind it, then the lock is dropped", async () => {
     const git = makeGit();
     const locks = makeFileLocks(USER.id);
     const pending = makePending();
-    const err = refusal();
-    (pending.enqueue as Mock).mockRejectedValue(err);
     const svc = makeFacade(git, locks, pending, events);
 
-    await expect(svc.releaseLock('ws-1', 'feat/x', 'foo.md', BOT_USER)).rejects.toBe(err);
-    expect(git.discardPath).toHaveBeenCalledWith('ws-1', 'foo.md');
+    await svc.releaseLock('ws-1', 'feat/x', 'foo.md', BOT_USER);
+    expect(pending.enqueue).toHaveBeenCalledWith(expect.objectContaining({ path: 'foo.md', madeBy: BOT_USER.madeBy }));
+    expect(git.discardPath).not.toHaveBeenCalled();
     expect(locks.release).toHaveBeenCalledTimes(1);
-    expect(git.commitFile).not.toHaveBeenCalled();
-    expect(emitSpy.mock.calls.map((c) => (c[0] as { kind: string }).kind)).toEqual(['lock-released', 'file-changed']);
   });
 
-  it('a queue that fails for any other reason leaves the bytes and the lock for recovery, as before', async () => {
+  it("a queue that fails leaves the bytes and the lock for recovery, a bot's save as anyone's", async () => {
     const git = makeGit();
     const locks = makeFileLocks(USER.id);
     const pending = makePending();

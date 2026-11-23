@@ -91,7 +91,7 @@ import {
 } from './change-request-hooks.js';
 import { WorkspaceMutex, assertValidBranchName } from '../kb-fs/index.js';
 import { canonicalEmail, hashEmail } from '../../shared/email-identity.js';
-import { isMakerRecordRefusal, madeByColumns, writeNamingActor } from './made-by.js';
+import { madeByColumns, writeNamingActor } from './made-by.js';
 import {
   BranchAuthorshipError,
   BranchDeleteBlockedError,
@@ -1747,36 +1747,18 @@ export class VersionControlService implements IVersionControlService {
     // would re-introduce the orphan-files class of bug this refactor
     // exists to fix). Worst case: brief over-lock that resolves on TTL.
     //
-    // A REFUSAL is not a crash: a bot's save whose maker was erased, or
-    // whose record could not wait out an erasure (`isMakerRecordRefusal`),
-    // is refused and records nothing. Its bytes are then not the work of
-    // anyone who may be named, so the release goes the no-commit way —
-    // discard to HEAD and drop the lock, as a failed write does — instead
-    // of leaving them on disk under a held lock for a restart to find.
-    try {
-      await this.pendingCommits.enqueue({
-        workspaceId,
-        branch,
-        path: targetPath,
-        authorEmail: user.email,
-        authorName: user.name,
-        ...(user.madeBy ? { madeBy: user.madeBy } : {}),
-      });
-    } catch (err) {
-      if (isMakerRecordRefusal(err)) {
-        lockLog.warn(
-          `RELEASE refused ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id} → the save could not be recorded; releasing without a commit`,
-        );
-        // The refusal is the answer; a failure to release is logged, and the
-        // lock's TTL is the fallback it always was.
-        await this.releaseLockNoCommit(workspaceId, branch, targetPath, user).catch((releaseErr: unknown) =>
-          lockLog.warn(`RELEASE-NO-COMMIT after a refused save failed ws=${workspaceId} path=${targetPath}:`, {
-            err: releaseErr,
-          }),
-        );
-      }
-      throw err;
-    }
+    // A bot's save takes the same path: the queue never refuses a save for
+    // the person behind the bot (see `PendingCommitsService.enqueue`), so
+    // no refusal here leaves its bytes nobody's to commit, and nothing is
+    // put back that another queued save of the path still needs.
+    await this.pendingCommits.enqueue({
+      workspaceId,
+      branch,
+      path: targetPath,
+      authorEmail: user.email,
+      authorName: user.name,
+      ...(user.madeBy ? { madeBy: user.madeBy } : {}),
+    });
     await this.fileLocks.release(workspaceId, branch, targetPath, user);
     lockLog.info(
       `RELEASE done ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id} (commit queued for background worker)`,

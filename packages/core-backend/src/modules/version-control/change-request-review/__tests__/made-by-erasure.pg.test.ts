@@ -141,17 +141,22 @@ describe.skipIf(!PG_ADMIN_URL)('a record naming the person behind a bot, against
     expect(await madeByOf()).toEqual([ERASED.email]);
   });
 
-  it("refuses to queue a bot's save once the person behind it has no account", async () => {
+  // A queued save's bytes are already on disk, possibly on top of another
+  // save of the same path still queued, so the queue never refuses it for the
+  // person behind the bot: there would be nothing safe to put back. Erasure's
+  // passes rewrite the row instead (`account-erasure.approval-gate.test.ts`).
+  it("queues a bot's save even once the person behind it has no account, naming the address it was made with", async () => {
     const queue = new PendingCommitsService(db);
     const save = (path: string) =>
       queue.enqueue({ workspaceId: 'main', branch: 'main', path, authorEmail: BOT, authorName: 'Coder', madeBy: botUser.madeBy });
     await save('a.md');
     await db.delete(users).where(eq(users.emailBidx, PERSON));
-    await expect(save('b.md')).rejects.toMatchObject({ payload: { kind: 'connection-maker-erased' } });
+    await save('b.md');
     await expect(
       queue.enqueueIfAbsent({ workspaceId: 'main', branch: 'main', path: 'c.md', authorEmail: BOT, authorName: 'Coder', madeBy: botUser.madeBy }),
-    ).rejects.toMatchObject({ payload: { kind: 'connection-maker-erased' } });
-    expect((await db.select().from(pendingCommits)).map((r) => [r.path, r.madeByEmail])).toEqual([['a.md', PERSON]]);
+    ).resolves.toBe(true);
+    const rows = (await db.select().from(pendingCommits)).map((r) => [r.path, r.madeByEmail]);
+    expect(rows.sort()).toEqual([['a.md', PERSON], ['b.md', PERSON], ['c.md', PERSON]]);
   });
 
   it('answers a wait past the bound on an erasure as a retryable busy refusal, not a database error', async () => {
@@ -168,17 +173,15 @@ describe.skipIf(!PG_ADMIN_URL)('a record naming the person behind a bot, against
     const queue = new PendingCommitsService(db);
     const busy = { status: 503, payload: { kind: 'record-write-busy', retryable: true } };
     try {
-      await Promise.all([
-        expect(openRequest('waiting')).rejects.toMatchObject(busy),
-        expect(
-          queue.enqueue({ workspaceId: 'main', branch: 'main', path: 'a.md', authorEmail: BOT, authorName: 'Coder', madeBy: botUser.madeBy }),
-        ).rejects.toMatchObject(busy),
-      ]);
+      // A queued save does not wait on that lock at all: it lands at once,
+      // while the request gives up after the bound.
+      await queue.enqueue({ workspaceId: 'main', branch: 'main', path: 'a.md', authorEmail: BOT, authorName: 'Coder', madeBy: botUser.madeBy });
+      await expect(openRequest('waiting')).rejects.toMatchObject(busy);
     } finally {
       release();
       await erasure;
     }
     expect(await madeByOf()).toEqual([]);
-    expect(await db.select().from(pendingCommits)).toEqual([]);
+    expect((await db.select().from(pendingCommits)).map((r) => r.path)).toEqual(['a.md']);
   }, 20_000);
 });
