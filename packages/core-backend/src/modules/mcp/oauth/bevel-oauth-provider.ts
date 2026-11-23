@@ -814,7 +814,14 @@ export class BevelOAuthProvider implements OAuthServerProvider {
     if (existing) return choose(existing.id);
     const [inserted] = await this.deps.db
       .insert(agentConnections)
-      .values({ userId, clientId, clientName, agentKey, botUserId: choice?.botUserId ?? null, agentPath: choice?.agentPath ?? null })
+      .values({
+        userId,
+        clientId,
+        clientName,
+        agentKey,
+        ...(choice?.botUserId ? { botUserId: choice.botUserId } : {}),
+        ...(choice?.agentPath ? { agentPath: choice.agentPath } : {}),
+      })
       .onConflictDoNothing({
         target: [agentConnections.userId, agentConnections.agentKey],
         where: sql`${agentConnections.revokedAt} is null`,
