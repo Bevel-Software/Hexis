@@ -2200,11 +2200,12 @@ describe('a change pulled from the git host onto the open file', () => {
     });
   });
 
-  describe("a save's answer that arrives after a newer pull already landed", () => {
+  describe("a pull that lands on disk while a save's answer is still out", () => {
     /**
      * The next write lands on disk at once, but its answer waits until
      * `answer` is called: a commit pulled from the git host can land on top
-     * of it, and its `file-changed` read reach the tab, first.
+     * of it, and its `file-changed` read answer, first. That read lands on
+     * nothing; the file is read again once the write settles.
      */
     function holdWriteAnswer() {
       const write = apiMocks.writeFile.getMockImplementation()!;
@@ -2232,7 +2233,7 @@ describe('a change pulled from the git host onto the open file', () => {
     const SAVED = BASE.replace('Second paragraph.', 'Second paragraph, saved.');
     const upstream = (text: string) => text.replace('First paragraph.', 'First paragraph, rewritten upstream.');
 
-    it("keeps the newer bytes over Done's text the write put there, and the next save expects them", async () => {
+    it("takes the newer bytes over Done's text once the write settles, and the next save expects them", async () => {
       const result = await editedTab();
       const write = holdWriteAnswer();
       const saving = done(result, SAVED);
@@ -2241,20 +2242,24 @@ describe('a change pulled from the git host onto the open file', () => {
       // Pulled on top of the write, before its answer arrived.
       const pulled = upstream(SAVED);
       disk.set('KB/Notes.md', pulled);
+      const readsBefore = apiMocks.readFile.mock.calls.length;
       act(() => bus.emit(fileChanged('KB/Notes.md', GIT_SYNC)));
-      await waitFor(() => expect(result.current.activeTab?.savedContent).toBe(pulled));
-      const landed = result.current.activeTab!;
-      expect(landed.content).toBe(pulled);
+      await waitFor(() => expect(apiMocks.readFile.mock.calls.length).toBe(readsBefore + 1));
+      await settle();
+      // No read lands while the write is on its way.
+      expect(result.current.activeTab?.savedContent).toBe(BASE);
+      expect(result.current.activeTab?.content).toBe(SAVED);
 
       await act(async () => { write.answer(); await saving; });
+      // Read again after the write, the pull reaches the tab.
+      await waitFor(() => expect(result.current.activeTab?.savedContent).toBe(pulled));
       await settle();
 
       const tab = result.current.activeTab!;
       expect(tab.content).toBe(pulled);
-      expect(tab.savedContent).toBe(pulled);
       expect(tab.isDirty).toBe(false);
-      expect(tab.changedOnBranch ?? null).toBe(landed.changedOnBranch ?? null);
-      expect(tab.remoteRevision).toBe(landed.remoteRevision);
+      // A clean tab takes a pull silently.
+      expect(tab.changedOnBranch ?? null).toBe(null);
 
       const again = `${pulled}\n\nAfter the pull.`;
       await typeInto(result, again);
@@ -2276,22 +2281,23 @@ describe('a change pulled from the git host onto the open file', () => {
 
       const pulled = upstream(SAVED);
       disk.set('KB/Notes.md', pulled);
+      const readsBefore = apiMocks.readFile.mock.calls.length;
       act(() => bus.emit(fileChanged('KB/Notes.md', GIT_SYNC)));
-      const merged = upstream(typed);
-      await waitFor(() => expect(result.current.activeTab?.changedOnBranch).toBe('merged'));
-      const landed = result.current.activeTab!;
-      expect(landed.content).toBe(merged);
-      expect(landed.savedContent).toBe(pulled);
+      await waitFor(() => expect(apiMocks.readFile.mock.calls.length).toBe(readsBefore + 1));
+      await settle();
+      // No read lands while the write is on its way.
+      expect(result.current.activeTab?.content).toBe(typed);
+      expect(result.current.activeTab?.changedOnBranch ?? null).toBe(null);
 
       await act(async () => { write.answer(); await saving; });
+      const merged = upstream(typed);
+      await waitFor(() => expect(result.current.activeTab?.changedOnBranch).toBe('merged'));
       await settle();
 
       const tab = result.current.activeTab!;
       expect(tab.content).toBe(merged);
       expect(tab.savedContent).toBe(pulled);
       expect(tab.isDirty).toBe(true);
-      expect(tab.changedOnBranch).toBe('merged');
-      expect(tab.remoteRevision).toBe(landed.remoteRevision);
 
       await act(async () => { await result.current.saveFile('KB/Notes.md', merged); });
       expect(apiMocks.writeFile).toHaveBeenLastCalledWith('ws-1', 'KB/Notes.md', merged, { ifMatch: pulled });
@@ -2299,7 +2305,13 @@ describe('a change pulled from the git host onto the open file', () => {
       expect(result.current.activeTab?.isDirty).toBe(false);
     });
 
-    it("newer bytes without Done's edit leave it merged onto them as unsaved edits, never clean and off the branch", async () => {
+    // The save landed (the disk held the bytes it expected) and the tab is
+    // clean with them; a commit that replaced it afterwards reaches the tab
+    // as any pull reaches a clean tab, silently. Before, a read that answered
+    // while the write was out was taken as newer, which a pull reverted
+    // before the write could not tell apart (the architecture review on
+    // 9fb160cf).
+    it('newer bytes that replaced the landed write reach the clean tab once the write settles, as any pull does', async () => {
       const result = await editedTab();
       const write = holdWriteAnswer();
       const saving = done(result, SAVED);
@@ -2309,21 +2321,23 @@ describe('a change pulled from the git host onto the open file', () => {
       const pulled = upstream(BASE);
       disk.set('KB/Notes.md', pulled);
       act(() => bus.emit(fileChanged('KB/Notes.md', GIT_SYNC)));
-      await waitFor(() => expect(result.current.activeTab?.savedContent).toBe(pulled));
+      await settle();
+      expect(result.current.activeTab?.savedContent).toBe(BASE);
 
       await act(async () => { write.answer(); await saving; });
+      await waitFor(() => expect(result.current.activeTab?.savedContent).toBe(pulled));
       await settle();
 
-      const merged = upstream(SAVED);
       const tab = result.current.activeTab!;
-      expect(tab.content).toBe(merged);
-      expect(tab.savedContent).toBe(pulled);
-      expect(tab.isDirty).toBe(true);
-      expect(tab.changedOnBranch).toBe('merged');
+      expect(tab.content).toBe(pulled);
+      expect(tab.isDirty).toBe(false);
+      expect(tab.changedOnBranch ?? null).toBe(null);
 
-      await act(async () => { await result.current.saveFile('KB/Notes.md', merged); });
-      expect(apiMocks.writeFile).toHaveBeenLastCalledWith('ws-1', 'KB/Notes.md', merged, { ifMatch: pulled });
-      expect(disk.get('KB/Notes.md')).toBe(merged);
+      const again = upstream(SAVED);
+      await typeInto(result, again);
+      await act(async () => { await result.current.saveFile('KB/Notes.md', again); });
+      expect(apiMocks.writeFile).toHaveBeenLastCalledWith('ws-1', 'KB/Notes.md', again, { ifMatch: pulled });
+      expect(disk.get('KB/Notes.md')).toBe(again);
     });
 
     it('a save queued behind it writes onto the newer bytes rather than being refused', async () => {
@@ -2337,7 +2351,8 @@ describe('a change pulled from the git host onto the open file', () => {
       const pulled = upstream(SAVED);
       disk.set('KB/Notes.md', pulled);
       act(() => bus.emit(fileChanged('KB/Notes.md', GIT_SYNC)));
-      await waitFor(() => expect(result.current.activeTab?.savedContent).toBe(pulled));
+      await settle();
+      expect(result.current.activeTab?.savedContent).toBe(BASE);
 
       await act(async () => { write.answer(); await one; await two; });
       await settle();
@@ -2515,7 +2530,7 @@ describe('a change pulled from the git host onto the open file', () => {
       await act(async () => { read.answer(); });
       await settle();
 
-      // The ambiguous answer was dropped and the file read once more.
+      // The answer, sent while the write was on its way, was dropped and the file read once more.
       expect(apiMocks.readFile.mock.calls.length).toBe(readsBefore + 1);
       const merged = TYPED.replace('Second paragraph, saved.', 'Second paragraph.');
       const tab = result.current.activeTab!;
@@ -2543,8 +2558,8 @@ describe('a change pulled from the git host onto the open file', () => {
       await answerThenType(result, write, saving);
 
       await act(async () => { read.answer(); });
-      // The read that found the file gone again names nobody.
-      await waitFor(() => expect(result.current.activeTab?.deletedBy).toMatchObject({ name: null }));
+      // The read that found the file gone again names whom the held event named.
+      await waitFor(() => expect(result.current.activeTab?.deletedBy).toMatchObject({ name: 'Sam Rivera' }));
 
       const tab = result.current.activeTab!;
       expect(tab.content).toBe(TYPED);
@@ -2580,7 +2595,7 @@ describe('a change pulled from the git host onto the open file', () => {
 
         await typeThenAnswer(result, write, saving);
 
-        // The write's answer found that answer ambiguous and read once more.
+        // That answer came while the write was on its way: the file is read once more after it.
         expect(apiMocks.readFile.mock.calls.length).toBe(readsBefore + 1);
         const merged = TYPED_DURING.replace('Second paragraph, saved.', 'Second paragraph.');
         const tab = result.current.activeTab!;
@@ -2614,23 +2629,28 @@ describe('a change pulled from the git host onto the open file', () => {
         expect(tab.changedOnBranch ?? null).toBeNull();
       });
 
-      it('a delete after the write keeps the deleted notice and the unsaved edits, and the next save writes nothing', async () => {
+      it('a delete after the write shows the notice over the saved text once the write settles, and the next save writes nothing', async () => {
         const result = await editedTab();
         const { write, saving } = await autosave(result);
         write.land();
         await waitFor(() => expect(disk.get('KB/Notes.md')).toBe(SAVED));
-        // Nothing typed since: the tab's unsaved text is the save's own.
+        // Nothing typed since: the save lands, so the tab holds nothing unsaved.
         disk.delete('KB/Notes.md');
         act(() => bus.emit(fileChanged('KB/Notes.md')));
-        await waitFor(() => expect(result.current.activeTab?.deletedBy).toMatchObject({ name: 'Sam Rivera' }));
+        await settle();
+        // No read lands while the write is on its way.
+        expect(result.current.activeTab?.deletedBy ?? null).toBeNull();
 
         await act(async () => { write.answer(); await saving; });
+        // Read again after the write: the notice names whom the event named.
+        await waitFor(() => expect(result.current.activeTab?.deletedBy).toMatchObject({ name: 'Sam Rivera' }));
         await settle();
 
         const tab = result.current.activeTab!;
         expect(tab.deletedBy).toMatchObject({ name: 'Sam Rivera' });
         expect(tab.content).toBe(SAVED);
-        expect(tab.isDirty).toBe(true);
+        expect(tab.savedContent).toBe(SAVED);
+        expect(tab.isDirty).toBe(false);
 
         apiMocks.writeFile.mockClear();
         await act(async () => {
@@ -2649,7 +2669,9 @@ describe('a change pulled from the git host onto the open file', () => {
         // empty bytes (the server reads a missing file as empty) puts it back.
         disk.delete('KB/Notes.md');
         act(() => bus.emit(fileChanged('KB/Notes.md')));
-        await waitFor(() => expect(result.current.activeTab?.deletedBy).toBeTruthy());
+        await settle();
+        // The 404 answered while the write was on its way: no notice.
+        expect(result.current.activeTab?.deletedBy ?? null).toBeNull();
         write.land();
         await waitFor(() => expect(disk.get('KB/Notes.md')).toBe(SAVED));
 
@@ -3711,11 +3733,14 @@ describe('a write already on its way when the file is deleted', () => {
     await waitFor(() => expect(apiMocks.writeFile).toHaveBeenCalledOnce());
 
     await someoneElseDeletes('KB/Draft.md');
-    expect(tabAt(result, 'KB/Draft.md')?.deletedBy).toBeTruthy();
+    // No read lands while the write is on its way.
+    expect(tabAt(result, 'KB/Draft.md')?.deletedBy ?? null).toBeNull();
     await act(async () => {
       held.deliver();
       await expect(saving).rejects.toThrow('changed since you opened it');
     });
+    // Read again once the write settled: the notice, naming whom the event named.
+    await waitFor(() => expect(tabAt(result, 'KB/Draft.md')?.deletedBy).toMatchObject({ name: 'Sam Rivera' }));
 
     expect(disk.has('KB/Draft.md')).toBe(false);
     const tab = tabAt(result, 'KB/Draft.md')!;
@@ -3789,7 +3814,7 @@ describe('a write already on its way when the file is deleted', () => {
     expect(tabAt(result, 'KB/Draft.md')?.pendingFileContent).toBe(AGENT);
   });
 
-  it("a Reject that landed before someone else deleted the file, answering after the 404, keeps the agent's version and the notice", async () => {
+  it('a Reject that landed before someone else deleted the file, answering after the 404, lands, and the read after it shows the notice', async () => {
     const AGENT = '# Draft\n\nThe agent rewrote this.';
     const BASELINE = '# Draft\n\nA page to delete.';
     const result = await mountReady();
@@ -3810,24 +3835,30 @@ describe('a write already on its way when the file is deleted', () => {
     await waitFor(() => expect(disk.get('KB/Draft.md')).toBe(BASELINE));
 
     await someoneElseDeletes('KB/Draft.md');
-    expect(tabAt(result, 'KB/Draft.md')?.deletedBy).toBeTruthy();
+    // No read lands while the write is on its way.
+    expect(tabAt(result, 'KB/Draft.md')?.deletedBy ?? null).toBeNull();
     await act(async () => { answer(); await rejecting; });
+    // The change event read nothing under the agent's preview; the tree
+    // refresh's check found the file gone, and names nobody.
+    await waitFor(() => expect(tabAt(result, 'KB/Draft.md')?.deletedBy).toBeTruthy());
     await settle();
 
+    // The Reject landed: the agent's version went with it, and the tab
+    // holds the baseline it wrote, under the notice.
     const tab = tabAt(result, 'KB/Draft.md')!;
-    expect(tab.deletedBy).toBeTruthy();
-    expect(tab.pendingFileContent).toBe(AGENT);
+    expect(tab.pendingFileContent).toBeNull();
+    expect(tab.content).toBe(BASELINE);
     expect(disk.has('KB/Draft.md')).toBe(false);
 
     apiMocks.writeFile.mockClear();
     await act(async () => {
-      await expect(result.current.rejectPendingContent()).rejects.toThrow('Draft.md was deleted from this branch');
+      await expect(result.current.saveFile('KB/Draft.md', 'edited')).rejects.toThrow('Draft.md was deleted from this branch');
     });
     expect(apiMocks.writeFile).not.toHaveBeenCalled();
     expect(disk.has('KB/Draft.md')).toBe(false);
   });
 
-  it("a Reject over an empty agent version, whose 404 answered before the write put the file back, clears the notice once the file is read again", async () => {
+  it("a Reject over an empty agent version, whose 404 answered before the write put the file back, never shows the notice, and the file is read again", async () => {
     const BASELINE = '# Draft\n\nA page to delete.';
     const result = await mountReady();
     await open(result, 'KB/Draft.md');
@@ -3841,13 +3872,15 @@ describe('a write already on its way when the file is deleted', () => {
     // Served before the write: the file is missing, and the write over empty
     // bytes (the server reads a missing file as empty) puts the baseline back.
     await someoneElseDeletes('KB/Draft.md');
-    expect(tabAt(result, 'KB/Draft.md')?.deletedBy).toBeTruthy();
+    // The 404 answered while the write was on its way: it lands on nothing.
+    expect(tabAt(result, 'KB/Draft.md')?.deletedBy ?? null).toBeNull();
     const readsBefore = apiMocks.readFile.mock.calls.length;
     await act(async () => { held.deliver(); await rejecting; });
     expect(disk.get('KB/Draft.md')).toBe(BASELINE);
 
-    await waitFor(() => expect(tabAt(result, 'KB/Draft.md')?.deletedBy ?? null).toBeNull());
-    expect(apiMocks.readFile.mock.calls.length).toBeGreaterThan(readsBefore);
+    await waitFor(() => expect(apiMocks.readFile.mock.calls.length).toBeGreaterThan(readsBefore));
+    await settle();
+    expect(tabAt(result, 'KB/Draft.md')?.deletedBy ?? null).toBeNull();
     const tab = tabAt(result, 'KB/Draft.md')!;
     expect(tab.content).toBe(BASELINE);
     expect(tab.savedContent).toBe(BASELINE);
@@ -3867,7 +3900,7 @@ describe('a write already on its way when the file is deleted', () => {
     expect(tabAt(result, 'KB/Draft.md')?.deletedBy ?? null).toBeNull();
   });
 
-  it("a Reject over an empty agent version whose re-read finds the file gone keeps the notice and the agent's version", async () => {
+  it('a Reject over an empty agent version whose re-read finds the file gone lands, and shows the notice over the baseline', async () => {
     const result = await mountReady();
     await open(result, 'KB/Draft.md');
     disk.set('KB/Draft.md', '');
@@ -3886,20 +3919,22 @@ describe('a write already on its way when the file is deleted', () => {
     act(() => { rejecting = result.current.rejectPendingContent(); });
     await waitFor(() => expect(apiMocks.writeFile).toHaveBeenCalledOnce());
     await someoneElseDeletes('KB/Draft.md');
-    expect(tabAt(result, 'KB/Draft.md')?.deletedBy).toBeTruthy();
+    expect(tabAt(result, 'KB/Draft.md')?.deletedBy ?? null).toBeNull();
     const readsBefore = apiMocks.readFile.mock.calls.length;
     await act(async () => { deliver(); await rejecting; });
+    await waitFor(() => expect(tabAt(result, 'KB/Draft.md')?.deletedBy).toBeTruthy());
     await settle();
 
     expect(apiMocks.readFile.mock.calls.length).toBeGreaterThan(readsBefore);
 
+    // The Reject landed, so the agent's version went with it.
     const tab = tabAt(result, 'KB/Draft.md')!;
-    expect(tab.deletedBy).toBeTruthy();
-    expect(tab.pendingFileContent).toBe('');
+    expect(tab.pendingFileContent).toBeNull();
+    expect(tab.content).toBe('# Draft\n\nA page to delete.');
     expect(disk.has('KB/Draft.md')).toBe(false);
   });
 
-  it("a save under the agent's preview, whose 404 over an empty file answered before the write, clears the notice and keeps the preview", async () => {
+  it("a save under the agent's preview, whose 404 over an empty file answered before the write, shows no notice and keeps the preview", async () => {
     disk.set('KB/Draft.md', '');
     const result = await mountReady();
     await open(result, 'KB/Draft.md');
@@ -3910,20 +3945,127 @@ describe('a write already on its way when the file is deleted', () => {
     act(() => { saving = result.current.saveFile('KB/Draft.md', 'edited'); });
     await waitFor(() => expect(apiMocks.writeFile).toHaveBeenCalledOnce());
     await someoneElseDeletes('KB/Draft.md');
-    expect(tabAt(result, 'KB/Draft.md')?.deletedBy).toBeTruthy();
+    expect(tabAt(result, 'KB/Draft.md')?.deletedBy ?? null).toBeNull();
+    const readsBefore = apiMocks.readFile.mock.calls.length;
     await act(async () => { held.deliver(); await saving; });
     expect(disk.get('KB/Draft.md')).toBe('edited');
 
-    await waitFor(() => expect(tabAt(result, 'KB/Draft.md')?.deletedBy ?? null).toBeNull());
+    await waitFor(() => expect(apiMocks.readFile.mock.calls.length).toBeGreaterThan(readsBefore));
+    await settle();
+    expect(tabAt(result, 'KB/Draft.md')?.deletedBy ?? null).toBeNull();
     const tab = tabAt(result, 'KB/Draft.md')!;
     expect(tab.pendingFileContent).toBe('the agent');
     expect(tab.content).toBe('edited');
   });
 
-  describe('refused after a change pulled from the git host moved the tab under it', () => {
+  /**
+   * The disk holds something else for a moment while a write is on its way
+   * (other bytes, or no file), a read sees that, and the disk holds the bytes
+   * the write expects again by the time the server takes it, so it lands.
+   * What the read saw says nothing about which side of the write the server
+   * answered it on: it lands on nothing, and the read after the write
+   * decides (the architecture review on 9fb160cf).
+   */
+  describe('a read that saw a moment the write never saw', () => {
+    const BASE = 'First paragraph.\n\nSecond paragraph.\n\nThird paragraph.';
+    const EDITED = `${BASE}\n\nMy closing line.`;
+    const TYPED = `${EDITED}\nTyped while the save was out.`;
+
+    /** An autosave of EDITED held at the server; `moment` changes the disk, and BASE is put back. */
+    async function autosaveThrough(moment: () => void) {
+      disk.set('KB/Notes.md', BASE);
+      const result = await mountReady();
+      await open(result, 'KB/Notes.md');
+      await typeInto(result, EDITED);
+      const held = holdWriteAtServer();
+      let saving!: Promise<void>;
+      act(() => { saving = result.current.saveFile('KB/Notes.md', EDITED); });
+      await waitFor(() => expect(apiMocks.writeFile).toHaveBeenCalledOnce());
+      const readsBefore = apiMocks.readFile.mock.calls.length;
+      moment();
+      act(() => bus.emit(fileChanged('KB/Notes.md', GIT_SYNC)));
+      await waitFor(() => expect(apiMocks.readFile.mock.calls.length).toBeGreaterThan(readsBefore));
+      await settle();
+      disk.set('KB/Notes.md', BASE);
+      await typeInto(result, TYPED);
+      await act(async () => { held.deliver(); await saving; });
+      await settle();
+      return result;
+    }
+
+    /** The save landed: the written bytes are the baseline, the typing stays unsaved, and the next save lands on them. */
+    async function expectLandedAndNextSaveLands(result: Hook) {
+      expect(disk.get('KB/Notes.md')).toBe(EDITED);
+      const tab = tabAt(result, 'KB/Notes.md')!;
+      expect(tab.deletedBy ?? null).toBeNull();
+      expect(tab.savedContent).toBe(EDITED);
+      expect(tab.content).toBe(TYPED);
+      expect(tab.isDirty).toBe(true);
+      expect(tab.changedOnBranch ?? null).toBeNull();
+      await act(async () => { await result.current.saveFile('KB/Notes.md', TYPED); });
+      expect(apiMocks.writeFile).toHaveBeenLastCalledWith('ws-1', 'KB/Notes.md', TYPED, { ifMatch: EDITED });
+      expect(disk.get('KB/Notes.md')).toBe(TYPED);
+      expect(tabAt(result, 'KB/Notes.md')?.isDirty).toBe(false);
+    }
+
+    it('other bytes seen while a save was on its way, put back before it landed, leave the written bytes as the baseline', async () => {
+      const result = await autosaveThrough(() => { disk.set('KB/Notes.md', 'For a moment, other bytes.'); });
+      await expectLandedAndNextSaveLands(result);
+    });
+
+    it('a 404 seen while a save was on its way, the file put back before it landed, shows no notice', async () => {
+      const result = await autosaveThrough(() => { disk.delete('KB/Notes.md'); });
+      await expectLandedAndNextSaveLands(result);
+    });
+
+    it('a 404 seen while a Reject was on its way, the file put back before it landed, shows no notice, and the next Save and Reject land', async () => {
+      const AGENT = '# Draft\n\nThe agent rewrote this.';
+      const BASELINE = '# Draft\n\nA page to delete.';
+      const result = await mountReady();
+      await open(result, 'KB/Draft.md');
+      disk.set('KB/Draft.md', AGENT);
+      await act(async () => { result.current.setPendingContent(AGENT); });
+      const held = holdWriteAtServer();
+      let rejecting!: Promise<void>;
+      act(() => { rejecting = result.current.rejectPendingContent(); });
+      await waitFor(() => expect(apiMocks.writeFile).toHaveBeenCalledOnce());
+      const readsBefore = apiMocks.readFile.mock.calls.length;
+      // The file is gone for a moment; the tree refresh's check reads it.
+      disk.delete('KB/Draft.md');
+      act(() => bus.emit(fileChanged('KB/Draft.md')));
+      await waitFor(() => expect(apiMocks.readFile.mock.calls.length).toBeGreaterThan(readsBefore));
+      await settle();
+      disk.set('KB/Draft.md', AGENT);
+      await act(async () => { held.deliver(); await rejecting; });
+      await settle();
+
+      expect(disk.get('KB/Draft.md')).toBe(BASELINE);
+      const tab = tabAt(result, 'KB/Draft.md')!;
+      expect(tab.deletedBy ?? null).toBeNull();
+      expect(tab.pendingFileContent).toBeNull();
+      expect(tab.content).toBe(BASELINE);
+      expect(tab.savedContent).toBe(BASELINE);
+      expect(tab.isDirty).toBe(false);
+
+      await act(async () => { await result.current.saveFile('KB/Draft.md', 'edited'); });
+      expect(apiMocks.writeFile).toHaveBeenLastCalledWith('ws-1', 'KB/Draft.md', 'edited', { ifMatch: BASELINE });
+      disk.set('KB/Draft.md', 'the agent again');
+      await act(async () => { result.current.setPendingContent('the agent again'); });
+      await act(async () => { await result.current.rejectPendingContent(); });
+      expect(apiMocks.writeFile).toHaveBeenLastCalledWith('ws-1', 'KB/Draft.md', 'edited', { ifMatch: 'the agent again' });
+      expect(disk.get('KB/Draft.md')).toBe('edited');
+      expect(tabAt(result, 'KB/Draft.md')?.deletedBy ?? null).toBeNull();
+    });
+  });
+
+  describe('refused after a change pulled from the git host while it was on its way', () => {
     const BASE = 'First paragraph.\n\nSecond paragraph.\n\nThird paragraph.';
 
-    /** Done on `edited`, the write held at the server, then `pulled` arrives on the clean tab. */
+    /**
+     * Done on `edited`, the write held at the server, then `pulled` arrives
+     * on the clean tab: its read lands on nothing until the write is refused,
+     * and the file is read again.
+     */
     async function doneThenPulled(edited: string, pulled: string) {
       disk.set('KB/Notes.md', BASE);
       const result = await mountReady();
@@ -3938,11 +4080,14 @@ describe('a write already on its way when the file is deleted', () => {
       await waitFor(() => expect(apiMocks.writeFile).toHaveBeenCalledOnce());
       disk.set('KB/Notes.md', pulled);
       act(() => bus.emit(fileChanged('KB/Notes.md', GIT_SYNC)));
-      await waitFor(() => expect(tabAt(result, 'KB/Notes.md')?.savedContent).toBe(pulled));
+      await settle();
+      expect(tabAt(result, 'KB/Notes.md')?.savedContent).toBe(BASE);
       await act(async () => {
         held.deliver();
         await expect(saving).rejects.toThrow('changed since you opened it');
       });
+      await waitFor(() => expect(tabAt(result, 'KB/Notes.md')?.savedContent).toBe(pulled));
+      await settle();
       return result;
     }
 
