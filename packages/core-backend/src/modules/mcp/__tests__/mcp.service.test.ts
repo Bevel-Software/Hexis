@@ -14,6 +14,8 @@ import type { AgentEventInput, IAgentEventRecorder } from '../../audit/index.js'
 import { DEFAULT_KB_LAYOUT } from '@bevel-software/platform-shared';
 import { TOOL_PREFIX_LINE, platformInstructions } from '../../agent-instructions/index.js';
 import { splitCallLine } from '@bevel-software/platform-mcp-core';
+import { setLogger } from '../../../shared/logging.js';
+import { oneLineError, type ILogger, type LogFields } from '../../../shared/logger.contract.js';
 
 /** The platform-owned part of the handshake text: the header plus the shared file rules. */
 const PLATFORM = platformInstructions(DEFAULT_KB_LAYOUT, '');
@@ -58,6 +60,8 @@ async function setup(deps?: {
   agentPath?: string | null;
   /** Released skills listed beside `rfi` — listed only: `get_skill` answers not-found for them. */
   listedOnly?: { name: string; description: string; path: string }[];
+  /** `list_skills` accepts the request and never answers: a hung loopback. */
+  skillsHang?: boolean;
 }) {
   skillRequests = [];
   const registry = new ToolRegistry();
@@ -119,6 +123,11 @@ async function setup(deps?: {
   app.post('/api/agent/tools/list_skills', (req, res) => {
     const b = (req.body ?? {}) as Record<string, unknown>;
     skillRequests.push({ tool: 'list_skills', body: b });
+    if (deps?.skillsHang) {
+      // Never answered; the socket is let go after the test, whatever the caller did.
+      cleanups.push(async () => void req.socket.destroy());
+      return;
+    }
     const released = [{ name: 'rfi', description: 'RFI answers', path: 'Plugins/Sales/rfi' }, ...(deps?.listedOnly ?? [])];
     res.json({
       skills:
@@ -934,6 +943,44 @@ describe('McpService — the Audit log records what an agent calls', () => {
    * organisation released: the two prompt handlers name no branch, so a draft's
    * skills never reach a client's slash-command menu.
    */
+  /**
+   * The loopback's real 15-second deadline fires (`AbortSignal.timeout`), and
+   * the `DOMException` it rejects with is logged by the `catch` that degrades.
+   * The installed sink reads the record the way pino's error serializer does:
+   * the escaped copy every sink logs, every key listed and read. On 2026-11-23
+   * that read threw out of the `catch`, and the call answered
+   * `Value of "this" must be of DOMException` instead of its degraded result.
+   */
+  it('a loopback that times out degrades the call as written, and the log holds the timeout with its label', async () => {
+    const lines: Array<{ message: string; record?: Record<string, unknown> }> = [];
+    const serializing = (): ILogger => {
+      const write = (message: string, fields?: LogFields) => {
+        const err = fields?.err;
+        if (!(err instanceof Error)) return void lines.push({ message });
+        const copy = oneLineError(err) as unknown as Record<string, unknown>;
+        const record: Record<string, unknown> = { type: copy.constructor && (copy.constructor as { name: string }).name };
+        for (const key in copy) record[key] = copy[key];
+        record.message = copy.message;
+        record.stack = copy.stack;
+        lines.push({ message, record });
+      };
+      return { debug: write, info: write, warn: write, error: write, child: () => serializing() };
+    };
+    const restore = setLogger(serializing());
+    try {
+      const client = await setup({ skillsHang: true });
+      const { prompts } = await client.listPrompts();
+      // `fetchSkillList` degrades to no skills: the platform prompt alone.
+      expect(prompts.map((p) => p.name)).toEqual(['onboard']);
+      const logged = lines.find((l) => l.message === 'skill list_skills loopback threw:');
+      expect(logged?.record).toMatchObject({ type: 'DOMException', name: 'TimeoutError', code: 23 });
+      expect(String(logged?.record?.stack)).toContain('TimeoutError');
+      expect(lines.some((l) => l.message.includes('Value of "this"'))).toBe(false);
+    } finally {
+      setLogger(restore);
+    }
+  }, 30_000);
+
   it('serves prompts from the default branch only, never a draft', async () => {
     const client = await setup();
     const { prompts } = await client.listPrompts();
