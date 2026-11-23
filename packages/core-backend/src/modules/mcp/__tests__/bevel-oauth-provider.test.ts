@@ -238,7 +238,7 @@ describe('BevelOAuthProvider', () => {
     expect(tokens.scope).toBe('mcp');
     // A first mint for (user, agent) makes the durable agent connection,
     // keyed by the client's folded name and snapshotting the name shown…
-    expect(captured.values[0]).toEqual({ userId: 'user-1', clientId: 'client-1', clientName: 'Claude', agentKey: 'claude' });
+    expect(captured.values[0]).toEqual({ userId: 'user-1', clientId: 'client-1', clientName: 'Claude', agentKey: 'claude', botUserId: null, agentPath: null });
     // …looked up by that key, so a later registration of "Claude" by this
     // person lands on the same row instead of making a sixth one.
     // (where[0] consumed the code, [1]/[2] are the prunes, [3] read the client.)
@@ -529,7 +529,7 @@ describe('BevelOAuthProvider', () => {
       undefined /* token insert */,
     ]);
     await provider.exchangeRefreshToken(CLIENT, 'bevel-mcp_r_old');
-    expect(captured.values[0]).toEqual({ userId: 'user-1', clientId: 'client-1', clientName: 'Claude', agentKey: 'claude' });
+    expect(captured.values[0]).toEqual({ userId: 'user-1', clientId: 'client-1', clientName: 'Claude', agentKey: 'claude', botUserId: null, agentPath: null });
     expect(captured.values[1]).toMatchObject({ connectionId: 'conn-new' });
   });
 
