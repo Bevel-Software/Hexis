@@ -282,6 +282,21 @@ describe('AccessControlService: reads answered from the map of the head commit',
     expect(await read()).toBe(false);
   });
 
+  it('reads nothing for the paths of a group the model does not know', async () => {
+    const paths = Object.keys(FILES);
+    const sources = /(^|[\\/])(access\.md|roles\.yaml|groups\.yaml|synced-groups\.yaml|plugin\.json)$/;
+    // Answered from the checkout (the workspace is reported changed), where
+    // reading for a path means opening it.
+    const svc = service();
+    svc.invalidate('ws');
+    expect(await svc.canReadAsGroupBatch('ws', 'No Such Group', paths)).toBeNull();
+    expect(opened.filter((p) => !sources.test(p))).toEqual([]);
+    // A group it knows is answered for every path.
+    const known = await svc.canReadAsGroupBatch('ws', 'Platform', paths);
+    expect(known?.get('Team/Doc.md')).toBe(true);
+    expect(known?.get('Team/Own.md')).toBe(false);
+  });
+
   it('stops answering a reported change from the checkout after ten seconds when no commit follows', async () => {
     let clock = 1_000_000;
     const svc = service({}, undefined, { now: () => clock });

@@ -1735,10 +1735,17 @@ export class AccessControlService implements IAccessControl {
   private async batchRules(
     workspaceId: string,
     relativePaths: readonly string[],
+    /**
+     * Asked of the model before anything is read for the paths: a check that
+     * the model already settles (a group it does not know) answers false, and
+     * `owns` is then empty.
+     */
+    needsPaths: (model: AccessModel) => boolean = () => true,
   ): Promise<{ model: AccessModel; owns: (OwnEntries | null)[] }> {
     const repoDir = await this.repoDir(workspaceId);
     const head = await this.headMapOf(workspaceId, repoDir);
     const model = head ? head.model : await this.loadCheckoutModel(workspaceId, repoDir);
+    if (!needsPaths(model)) return { model, owns: [] };
     const memo = this.ownEntriesMemo.open(workspaceId);
     const owns = await Promise.all(
       relativePaths.map((p) => {
@@ -1824,8 +1831,13 @@ export class AccessControlService implements IAccessControl {
   ): Promise<Map<string, boolean> | null> {
     // The same per-path own-entries `canReadBatch` folds in: a file's own
     // frontmatter rules are part of the walk for a group as for a person.
-    const { model, owns } = await this.batchRules(workspaceId, relativePaths);
-    const keys = principalKeysOfGroup(model, group);
+    // An unknown group is settled by the model alone: nothing is read for the paths.
+    const found: { keys: Set<string> | null } = { keys: null };
+    const { model, owns } = await this.batchRules(workspaceId, relativePaths, (m) => {
+      found.keys = principalKeysOfGroup(m, group);
+      return found.keys !== null;
+    });
+    const keys = found.keys;
     if (keys === null) return null;
     const result = new Map<string, boolean>();
     relativePaths.forEach((p, i) => {
