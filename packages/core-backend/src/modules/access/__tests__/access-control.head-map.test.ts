@@ -331,13 +331,20 @@ describe('AccessControlService: reads answered from the map of the head commit',
     await git('commit', '-qm', 'roles no longer tracked');
     await copyToPlain();
     const paths = Object.keys(FILES);
+    // A first batch on a fresh service: the commit is listed and asked for
+    // its access files, which shows it has no roles file. No file version is
+    // read from git, and the checkout is what answers.
     const svc = service();
-    expect(await answers(svc, 'ws', paths)).toEqual(await answers(service(), 'plain', paths));
-    // No map was made: the batch gates read the checkout, and no file version was read from git.
     reset();
     await svc.canReadBatch('ws', 'mem@x.io', paths);
+    expect(gitLog).toEqual(['ls-tree', 'cat-file']);
     expect(opened.length).toBeGreaterThan(0);
-    expect(gitLog).not.toContain('cat-file');
+    // The next batch does not try the commit again.
+    reset();
+    await svc.canReadBatch('ws', 'mem@x.io', paths);
+    expect(gitLog).toEqual([]);
+    expect(opened.length).toBeGreaterThan(0);
+    expect(await answers(svc, 'ws', paths)).toEqual(await answers(service(), 'plain', paths));
   }, 120_000);
 
   it('answers from the checkout while a first map is still being read, and from the map once it is', async () => {

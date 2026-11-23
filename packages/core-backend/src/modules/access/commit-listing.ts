@@ -23,6 +23,12 @@ export interface ListedFile {
    * commit.
    */
   readonly regular: boolean;
+  /**
+   * True for a folder's own record, which a listing made with `-t` carries
+   * beside the files (an empty folder object included, which has no file to
+   * show it by).
+   */
+  readonly folder: boolean;
   /** The object's size in bytes; 0 for an entry that is not a regular file, and in a listing without sizes. */
   readonly size: number;
   /** The object id, decoded only when asked: a listing names tens of thousands of files and a caller wants the id of a few. */
@@ -58,12 +64,14 @@ export function visitTreeListing(bytes: Buffer, visit: (path: string, file: List
       if (idEnd === typeEnd + 1) throw new Error('unexpected git ls-tree record');
       const mode = bytes.toString('latin1', off, modeEnd);
       const regular = mode === '100644' || mode === '100755';
+      const folder = mode === '040000';
       const sizeText = idEnd < tab ? bytes.toString('latin1', idEnd + 1, tab).trim() : '';
       const size = regular && sizeText !== '' ? Number(sizeText) : 0;
       if (!Number.isInteger(size) || size < 0) throw new Error('unexpected git ls-tree record');
       const idStart = typeEnd + 1;
       visit(bytes.toString('utf8', tab + 1, end), {
         regular,
+        folder,
         size,
         objectId: () => bytes.toString('latin1', idStart, idEnd),
       });

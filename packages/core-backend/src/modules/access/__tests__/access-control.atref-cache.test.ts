@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 // The real disk, from the fixture that stands in for the composition root.
 import { realDisk } from '../../../__tests__/real-disk.js';
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -327,6 +327,24 @@ describe('AccessControlService — at-ref model cache', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     await expect(svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).rejects.toBeInstanceOf(AccessUnreadableError);
     expect(warn).toHaveBeenCalledWith(expect.stringMatching(/groups\.yaml is a tree, not a file/));
+  });
+
+  it('does not take that model for a commit whose groups file is an empty folder object either', async () => {
+    expect(await svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).toBe(true);
+
+    // A folder with nothing in it has no file to show it by: only git's
+    // plumbing makes one, as an entry for the empty tree. The commit's files
+    // are those of the commit before it, every one of them.
+    const plumb = (args: string[], input: string) =>
+      execFileSync('git', ['-C', other, ...args], { input, encoding: 'utf-8' }).trim();
+    const emptyTree = plumb(['mktree'], '');
+    const entries = await git(other, 'ls-tree', 'HEAD');
+    const tree = plumb(['mktree'], `${entries}\n040000 tree ${emptyTree}\tgroups.yaml\n`);
+    const commit = await git(other, 'commit-tree', tree, '-p', 'HEAD', '-m', 'groups.yaml is an empty folder');
+    await git(other, 'push', '-q', 'origin', `${commit}:refs/heads/main`);
+
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    await expect(svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).rejects.toBeInstanceOf(AccessUnreadableError);
   });
 
   it('refuses to decide from a listing it cannot read whole, and decides once git answers again', async () => {

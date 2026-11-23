@@ -198,6 +198,8 @@ export class HeadMaps<M> implements IHeadMaps<M> {
     const nothing: string[] = [];
     const toRead = new Map<string, Unseen>();
     visitTreeListing(stdout, (path, file) => {
+      // Only ordinary files have a version to remember; this listing is made
+      // without folders' own records, and a link or a submodule is skipped.
       if (!file.regular || path === 'roles.yaml') return;
       const objectId = file.objectId();
       const key = blobKey(objectId, path);

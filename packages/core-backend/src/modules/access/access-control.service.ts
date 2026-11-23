@@ -3006,7 +3006,7 @@ export class AccessControlService implements IAccessControl {
       // Sizes only for a head map, which reads file versions by them. Asking
       // for them makes git open every object, so one lost object anywhere
       // would fail the listing; a gate at a ref must not depend on that.
-      const args = opts.checkout ? ['ls-tree', '-r', '-z', '-l', ref] : ['ls-tree', '-r', '-z', ref];
+      const args = opts.checkout ? ['ls-tree', '-r', '-t', '-z', '-l', ref] : ['ls-tree', '-r', '-t', '-z', ref];
       const { stdout } = await this.gitRunner.run(repoDir, args, { encoding: 'buffer' });
       const walked = (p: string) => !opts.checkout || !p.split('/').some(isSkippedEntry);
       const out: string[] = [];
@@ -3027,15 +3027,15 @@ export class AccessControlService implements IAccessControl {
       // part of what the model is derived from. Without it in the key, a
       // commit that turned `groups.yaml` into a folder would have the key of
       // one with no groups file and take that commit's model unrefused.
-      const sourceFolders = new Set<string>();
+      // The listing carries each folder's own record (`-t`), so a folder is
+      // seen by its name even when it is an empty folder object with no
+      // file beneath it.
       visitTreeListing(stdout, (p, file) => {
-        opts.visit?.(p, file);
-        for (const name of FIXED_NAME_SOURCES) {
-          if (p.startsWith(`${name}/`) && !sourceFolders.has(name)) {
-            sourceFolders.add(name);
-            sources.update(`${name}/\0folder\n`);
-          }
+        if (file.folder) {
+          if ((FIXED_NAME_SOURCES as readonly string[]).includes(p)) sources.update(`${p}/\0folder\n`);
+          return;
         }
+        opts.visit?.(p, file);
         // One past the cap is enough to know the tree is not kept.
         if (all.length <= this.treeIndexMaxPaths) all.push(p);
         if (p === 'access.md' || p.endsWith('/access.md')) {
