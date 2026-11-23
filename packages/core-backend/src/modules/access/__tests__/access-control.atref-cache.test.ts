@@ -1,14 +1,15 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { NodeFs } from '../../kb-fs/node-fs.js';
+// The real disk, from the fixture that stands in for the composition root.
+import { realDisk } from '../../../__tests__/real-disk.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
+import type { WorkspaceService } from '../../workspace/index.js';
 import { AccessControlService } from '../access-control.service.js';
-import { AccessUnreadableError } from '../../access-model/access-errors.js';
+import { AccessUnreadableError } from '../../access-model/index.js';
 
 /**
  * Every git subprocess the service spawns through the git port (`spawn`) and
@@ -256,7 +257,7 @@ describe('AccessControlService — at-ref model cache', () => {
         await git(repo, 'fetch', '-q', 'origin');
       },
     } as unknown as WorkspaceService;
-    svc = new AccessControlService(stub, PROCESS_MAP_DIR, new NodeFs());
+    svc = new AccessControlService(stub, PROCESS_MAP_DIR, realDisk());
     spawnLog.length = 0;
     injected.failNext = null;
     injected.rewriteNext = null;
@@ -670,7 +671,7 @@ describe('AccessControlService — at-ref model cache', () => {
     // six does not keep it, so the same path is read on every call.
     const NEW = 'Team/New.md';
     const limited = (treeIndexMaxPaths: number) =>
-      new AccessControlService(stub, PROCESS_MAP_DIR, new NodeFs(), [], undefined, undefined, { treeIndexMaxPaths });
+      new AccessControlService(stub, PROCESS_MAP_DIR, realDisk(), [], undefined, undefined, { treeIndexMaxPaths });
     const keeps = limited(7);
     expect(await keeps.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).toBe(true);
     spawnLog.length = 0;
@@ -691,7 +692,7 @@ describe('AccessControlService — at-ref model cache', () => {
     // model keeps answering gates without a rebuild; only an absent path at
     // it is read again, while at the second it costs nothing.
     const NEW = 'Team/New.md';
-    const budgeted = new AccessControlService(stub, PROCESS_MAP_DIR, new NodeFs(), [], undefined, undefined, {
+    const budgeted = new AccessControlService(stub, PROCESS_MAP_DIR, realDisk(), [], undefined, undefined, {
       treeIndexBudget: 10,
     });
     const first = await git(repo, 'rev-parse', 'origin/main');

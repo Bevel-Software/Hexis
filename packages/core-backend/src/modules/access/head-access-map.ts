@@ -99,6 +99,21 @@ export interface HeadModelSource<M> {
   ): Promise<{ model: M; release(): void } | null>;
 }
 
+/**
+ * The contract the access service holds the head maps through. {@link HeadMaps}
+ * is the implementation the composition root wires.
+ */
+export interface IHeadMaps<M> {
+  /** The commit the checkout at `repoDir` stands on, read from the ref files; null when they do not say. */
+  headOf(repoDir: string): Promise<string | null>;
+  /**
+   * The map of `commit`, which the checkout at `repoDir` stands on, its
+   * model read through `source` when it is not held. Null when there is none
+   * to answer from right now: the caller answers from the checkout.
+   */
+  at(repoDir: string, commit: string, source: HeadModelSource<M>): Promise<HeadMap<M> | null>;
+}
+
 interface Held<M> {
   readonly map: HeadMap<M>;
   readonly tree: CommitPaths;
@@ -129,7 +144,7 @@ interface Unseen {
  * checkout holds there is not what the commit holds, and the old way reads
  * the checkout.
  */
-export class HeadMaps<M> {
+export class HeadMaps<M> implements IHeadMaps<M> {
   /** In the order they were last asked for. */
   private readonly heads = new Map<string, Held<M>>();
   private readonly building = new Map<string, Promise<HeadMap<M> | null>>();
@@ -149,7 +164,6 @@ export class HeadMaps<M> {
 
   constructor(
     private readonly git: IGitRunner,
-    private readonly source: HeadModelSource<M>,
     private readonly trees: ITreeIndexer,
     private readonly limits: HeadMapLimits = HEAD_MAP_LIMITS,
     /** Where the seed is kept between starts; without one every start reads the files again. */
@@ -194,18 +208,12 @@ export class HeadMaps<M> {
     for (const key of nothing) if (!this.blobs.has(key)) this.rememberBlob(key, null);
   }
 
-  /** The commit the checkout at `repoDir` stands on, read from the ref files; null when they do not say. */
   async headOf(repoDir: string): Promise<string | null> {
     const head = await readRevSha(repoDir, 'HEAD');
     return typeof head === 'string' ? null : head.sha;
   }
 
-  /**
-   * The map of `commit`, which the checkout at `repoDir` stands on. Null
-   * when there is none to answer from right now: the caller answers the old
-   * way, from the checkout.
-   */
-  async at(repoDir: string, commit: string): Promise<HeadMap<M> | null> {
+  async at(repoDir: string, commit: string, source: HeadModelSource<M>): Promise<HeadMap<M> | null> {
     const held = this.heads.get(commit);
     if (held) {
       this.heads.delete(commit);
@@ -220,7 +228,7 @@ export class HeadMaps<M> {
     if (this.warming.has(commit)) return null;
     let pending = this.building.get(commit);
     if (!pending) {
-      pending = this.build(repoDir, commit).finally(() => {
+      pending = this.build(repoDir, commit, source).finally(() => {
         if (this.building.get(commit) === pending) this.building.delete(commit);
       });
       this.building.set(commit, pending);
@@ -228,7 +236,7 @@ export class HeadMaps<M> {
     return pending;
   }
 
-  private async build(repoDir: string, commit: string): Promise<HeadMap<M> | null> {
+  private async build(repoDir: string, commit: string, source: HeadModelSource<M>): Promise<HeadMap<M> | null> {
     const paths: string[] = [];
     const own = new Map<string, OwnEntries>();
     const unseen = new Map<string, Unseen>();
@@ -236,7 +244,7 @@ export class HeadMaps<M> {
     let irregular = false;
     let wait = 0;
     await this.seed(repoDir);
-    const built = await this.source.modelAt(repoDir, commit, (path, file) => {
+    const built = await source.modelAt(repoDir, commit, (path, file) => {
       if (!file.regular) {
         irregular = true;
         return;

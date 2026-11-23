@@ -76,7 +76,7 @@ import { OwnEntriesMemo, type IOwnEntriesMemo, type WorkspaceOwnEntries } from '
 import { TreeIndexer, type CommitPaths, type ITreeIndexer } from './tree-index.js';
 import { visitTreeListing, type ListedFile } from './commit-listing.js';
 import { frontmatterHead } from './frontmatter-head.js';
-import { HeadMaps, type HeadMap, type HeadMapLimits, type IHeadSeedStore } from './head-access-map.js';
+import { HEAD_MAP_LIMITS, HeadMaps, type HeadMap, type HeadModelSource, type IHeadMaps } from './head-access-map.js';
 
 /**
  * What one spec of a batched read came back as: a blob's text, nothing at
@@ -123,7 +123,8 @@ async function catFileBatch(
 }
 
 
-interface AccessModel {
+/** The rules of one tree: what a head map holds as its model, opaque to everything but this file. */
+export interface AccessModel {
   roles: RolesIndex;
   accessFilesByDir: Map<string, AccessFile>;
   /**
@@ -1577,12 +1578,21 @@ export class AccessControlService implements IAccessControl {
      */
     private readonly ownEntriesMemo: IOwnEntriesMemo = new OwnEntriesMemo(limits.now),
     /**
-     * The maps a branch's reads are answered from (see `headMapOf`): the
-     * indexer that holds their commits' paths, apart from the at-ref models'
-     * because a map keeps its whole tree, and how much they may hold.
-     * Defaulted for the same reason as `gitRunner`.
+     * The maps the checkouts' commits are read into, by commit, through
+     * their contract (`IHeadMaps`). A branch's reads are answered from the
+     * map of the commit its checkout stands on: the rules of that commit,
+     * and the few files that declare access of their own (see `headMapOf`).
+     * The composition root passes the one `HeadMaps`, with the store a
+     * restart begins from; the default has no store and runs on the same
+     * git runner and clock, for the same reason as `gitRunner`.
      */
-    heads: { trees?: ITreeIndexer; limits?: HeadMapLimits; store?: IHeadSeedStore } = {},
+    private readonly headMaps: IHeadMaps<AccessModel> = new HeadMaps<AccessModel>(
+      gitRunner,
+      new TreeIndexer(),
+      HEAD_MAP_LIMITS,
+      undefined,
+      limits.now,
+    ),
   ) {
     this.deploymentOwners = new Set(
       deploymentOwners.filter(Boolean).map((e) => canonicalEmail(e)),
@@ -1590,25 +1600,12 @@ export class AccessControlService implements IAccessControl {
     this.treeIndexMaxPaths = limits.treeIndexMaxPaths ?? AccessControlService.TREE_INDEX_MAX_PATHS;
     this.treeIndexBudget = limits.treeIndexBudget ?? AccessControlService.TREE_INDEX_BUDGET;
     this.now = limits.now ?? Date.now;
-    this.headMaps = new HeadMaps<AccessModel>(
-      this.gitRunner,
-      { modelAt: (repoDir, commit, visit) => this.checkoutModelAt(repoDir, commit, visit) },
-      heads.trees ?? new TreeIndexer(),
-      heads.limits,
-      heads.store,
-      this.now,
-    );
   }
 
-  /**
-   * The maps the checkouts' commits are read into, by commit. A branch's
-   * reads are answered from the map of the commit its checkout stands on:
-   * the rules of that commit, and the few files that declare access of
-   * their own. Building one costs a listing and a read of the file versions
-   * no earlier commit held, so a head that moves by one saved file reads one
-   * file, where the checkout itself used to be walked again.
-   */
-  private readonly headMaps: HeadMaps<AccessModel>;
+  /** How a head map reads its commit's model: through this service's own build. */
+  private readonly headModels: HeadModelSource<AccessModel> = {
+    modelAt: (repoDir, commit, visit) => this.checkoutModelAt(repoDir, commit, visit),
+  };
 
   /**
    * Workspaces whose checkout was just reported changed (`invalidate`), with
@@ -1638,7 +1635,7 @@ export class AccessControlService implements IAccessControl {
       if (commit === suspect.commit && this.now() - suspect.at <= AccessControlService.SUSPECT_MS) return null;
       this.suspects.delete(workspaceId);
     }
-    const map = await this.headMaps.at(repoDir, commit);
+    const map = await this.headMaps.at(repoDir, commit, this.headModels);
     if (map) {
       this.lastHead.delete(workspaceId);
       this.lastHead.set(workspaceId, commit);

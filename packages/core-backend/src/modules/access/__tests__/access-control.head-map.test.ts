@@ -9,8 +9,9 @@ import { realDisk } from '../../../__tests__/real-disk.js';
 import type { IGitRunner } from '../../../shared/git.contract.js';
 import { NodeGitRunner } from '../../version-control/index.js';
 import type { WorkspaceService } from '../../workspace/index.js';
-import { AccessControlService } from '../access-control.service.js';
-import { HEAD_MAP_LIMITS, type HeadMapLimits, type HeadSeed, type IHeadSeedStore } from '../head-access-map.js';
+import { AccessControlService, type AccessModel } from '../access-control.service.js';
+import { HEAD_MAP_LIMITS, HeadMaps, type HeadMapLimits, type HeadSeed, type IHeadSeedStore } from '../head-access-map.js';
+import { TreeIndexer } from '../tree-index.js';
 
 const execFileAsync = promisify(execFile);
 const KB = 'knowledge-base';
@@ -107,10 +108,9 @@ describe('AccessControlService: reads answered from the map of the head commit',
       getWorkspacePath: async (id: string) => path.join(root, id),
       ensureRemotesFetched: async () => undefined,
     } as unknown as WorkspaceService;
-    return new AccessControlService(stub, KB, realDisk(), [], counted, undefined, { now: opts.now }, undefined, undefined, {
-      limits: { ...HEAD_MAP_LIMITS, ...limits },
-      store,
-    });
+    // The head maps, made as the composition root makes them.
+    const headMaps = new HeadMaps<AccessModel>(counted, new TreeIndexer(), { ...HEAD_MAP_LIMITS, ...limits }, store, opts.now);
+    return new AccessControlService(stub, KB, realDisk(), [], counted, undefined, { now: opts.now }, undefined, undefined, headMaps);
   }
 
   /** Every gate's answer for every person and path, as one comparable value. */
@@ -250,6 +250,44 @@ describe('AccessControlService: reads answered from the map of the head commit',
     expect(await read()).toBe(false);
     expect(opened).toEqual([]);
   });
+
+  it('stops answering a reported change from the checkout after ten seconds when no commit follows', async () => {
+    let clock = 1_000_000;
+    const svc = service({}, undefined, { now: () => clock });
+    const read = async () => (await svc.canReadBatch('ws', 'nobody@x.io', ['Top.md'])).get('Top.md');
+    expect(await read()).toBe(true);
+    await write(repo, { 'Top.md': DENY_ALL });
+    svc.invalidate('ws');
+    expect(await read()).toBe(false);
+    clock += 9_000;
+    expect(await read()).toBe(false);
+    // Still on disk and in no commit: past the wait, the commit answers again.
+    clock += 2_000;
+    expect(await read()).toBe(true);
+  });
+
+  it('takes no rule from an access file git does not track, where the checkout alone would', async () => {
+    const loose = { 'Team/Loose/access.md': '---\nread:\n  - deny everyone\n---\n', 'Team/Loose/A.md': '# a\n' };
+    const svc = service();
+    await svc.canReadBatch('ws', 'mem@x.io', Object.keys(FILES));
+    // Written and never committed, and nothing reports it.
+    await write(repo, loose);
+    await copyToPlain();
+    const asked = ['Team/Loose/A.md', 'Team/Doc.md'];
+    expect(Object.fromEntries(await svc.canReadBatch('ws', 'mem@x.io', asked))).toEqual({
+      'Team/Loose/A.md': true,
+      'Team/Doc.md': true,
+    });
+    // The same files read as a checkout only: the loose rule counts there.
+    expect(Object.fromEntries(await service().canReadBatch('plain', 'mem@x.io', asked))).toEqual({
+      'Team/Loose/A.md': false,
+      'Team/Doc.md': true,
+    });
+    // Committed, it is a rule for the map too.
+    await git('add', '-A', '-f');
+    await git('commit', '-qm', 'loose rule committed');
+    expect((await svc.canReadBatch('ws', 'mem@x.io', asked)).get('Team/Loose/A.md')).toBe(false);
+  }, 120_000);
 
   it('answers from the checkout while a first map is still being read, and from the map once it is', async () => {
     const paths = Object.keys(FILES);
