@@ -81,10 +81,10 @@ function fakeRepository(commits: Map<string, () => string[]>): IGitRunner {
       return answer(Buffer.from(`${sha}\n`));
     }
     if (args[0] === 'ls-tree') {
-      // One record per file, as `git ls-tree -r -z` prints it. A path holds
+      // One record per file, as `git ls-tree -r -z -l` prints it. A path holds
       // the same bytes at every commit here, so its object id is the path's.
       const paths = commits.get(args[args.length - 1]!)!();
-      const record = (p: string) => `100644 blob ${createHash('sha1').update(p).digest('hex')}\t${p}\u0000`;
+      const record = (p: string) => `100644 blob ${createHash('sha1').update(p).digest('hex')}       7\t${p}\u0000`;
       return answer(Buffer.from(paths.map(record).join(''), 'utf8'));
     }
     if (args[0] === 'cat-file') {

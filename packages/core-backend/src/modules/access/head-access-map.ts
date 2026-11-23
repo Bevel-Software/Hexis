@@ -1,0 +1,310 @@
+import { logger } from '../../shared/logging.js';
+import type { IGitRunner } from '../../shared/git.contract.js';
+import { readRevSha } from '../kb-fs/index.js';
+import { accessMdSelfEntries, isAccessMdPath, parseOwnAccessEntries, type OwnEntries } from '../access-model/index.js';
+import { catFileBatchBytes } from './cat-file-batch.js';
+import type { ListedFile } from './commit-listing.js';
+import { frontmatterHeadOfBytes } from './frontmatter-head.js';
+import { detachEntries } from './own-entries-memo.js';
+import type { CommitPaths, ITreeIndexer } from './tree-index.js';
+
+const log = logger('access');
+
+/**
+ * What a branch's reads are answered from: the access rules of the commit
+ * its checkout stands on, and what each file of that commit declares for
+ * itself.
+ *
+ * A map holds the rules, not an answer per file: `model` is the access model
+ * of the commit (shared with every commit that has the same access files),
+ * and `ownEntries` knows the few files that declare access of their own. A
+ * file that declares nothing is in no list here and is never opened to
+ * answer a question about it.
+ */
+export interface HeadMap<M> {
+  /** The commit the map was made from. */
+  readonly commit: string;
+  readonly model: M;
+  /**
+   * What the file at `p` declares for itself at the commit: its entries, or
+   * null for nothing (a folder of the commit declares nothing). `undefined`
+   * when the commit does not hold `p`: a file written and not committed
+   * yet, or one git does not track. The checkout is then the only place
+   * that can say.
+   */
+  ownEntries(p: string): OwnEntries | null | undefined;
+}
+
+/** How much the maps may hold, and how much a caller waits for. */
+export interface HeadMapLimits {
+  /** Maps held at most, least recently asked dropped first. */
+  readonly maxHeads: number;
+  /** Paths held at most across the held maps' trees, each shared base once. */
+  readonly maxTreePaths: number;
+  /** File versions remembered at most (what each declares, mostly nothing), oldest dropped first. */
+  readonly maxBlobs: number;
+  /**
+   * Bytes of file versions never seen before that a caller waits for. A
+   * commit that needs more (the first one after a start) is read in the
+   * background, and its callers are answered the old way until it is ready.
+   */
+  readonly waitBytes: number;
+  /** Bytes read from git in one process, at most (one file larger than this is read alone). */
+  readonly chunkBytes: number;
+}
+
+export const HEAD_MAP_LIMITS: HeadMapLimits = {
+  maxHeads: 64,
+  maxTreePaths: 2_000_000,
+  maxBlobs: 1_000_000,
+  waitBytes: 8 * 1024 * 1024,
+  chunkBytes: 16 * 1024 * 1024,
+};
+
+/**
+ * What {@link HeadMaps} asks of the access service: the access model of a
+ * commit, as the checkout standing on it reads it.
+ */
+export interface HeadModelSource<M> {
+  /**
+   * The model at `commit`, with `visit` called for every file the commit
+   * lists. `release` is called once, when the map made from it is dropped.
+   * Null when no model can be read from the commit (no roles file, one that
+   * does not parse, a git read that failed): the caller answers the old way.
+   */
+  modelAt(
+    repoDir: string,
+    commit: string,
+    visit: (path: string, file: ListedFile) => void,
+  ): Promise<{ model: M; release(): void } | null>;
+}
+
+interface Held<M> {
+  readonly map: HeadMap<M>;
+  readonly tree: CommitPaths;
+  release(): void;
+}
+
+/** A file version not seen before: its object, and the paths that hold it. */
+interface Unseen {
+  readonly objectId: string;
+  readonly key: string;
+  readonly size: number;
+  readonly paths: string[];
+}
+
+/**
+ * The maps of the commits that checkouts stand on, by commit.
+ *
+ * A new commit costs one listing (inside `modelAt`) and one read of the file
+ * versions it holds that no earlier commit held: a save changes one file, so
+ * a head that moves reads one file. What a file version declares is
+ * remembered by its object id, so a version is read once for every branch
+ * and commit that holds it. Everything is read through git, never from the
+ * checkout: a checkout may already hold a newer version of a file than the
+ * commit, and what that version says must not be remembered as the older
+ * one's.
+ *
+ * A commit that lists a symbolic link or a submodule gets no map: what the
+ * checkout holds there is not what the commit holds, and the old way reads
+ * the checkout.
+ */
+export class HeadMaps<M> {
+  /** In the order they were last asked for. */
+  private readonly heads = new Map<string, Held<M>>();
+  private readonly building = new Map<string, Promise<HeadMap<M> | null>>();
+  /** Commits being read in the background (see `HeadMapLimits.waitBytes`). */
+  private readonly warming = new Set<string>();
+  /** Commits no map can be made from, so they are not tried on every call. */
+  private readonly without = new Set<string>();
+  private static readonly WITHOUT_MAX = 256;
+  /** What each file version seen declares for itself, by `blobKey`. */
+  private readonly blobs = new Map<string, OwnEntries | null>();
+
+  constructor(
+    private readonly git: IGitRunner,
+    private readonly source: HeadModelSource<M>,
+    private readonly trees: ITreeIndexer,
+    private readonly limits: HeadMapLimits = HEAD_MAP_LIMITS,
+  ) {}
+
+  /** The commit the checkout at `repoDir` stands on, read from the ref files; null when they do not say. */
+  async headOf(repoDir: string): Promise<string | null> {
+    const head = await readRevSha(repoDir, 'HEAD');
+    return typeof head === 'string' ? null : head.sha;
+  }
+
+  /**
+   * The map of `commit`, which the checkout at `repoDir` stands on. Null
+   * when there is none to answer from right now: the caller answers the old
+   * way, from the checkout.
+   */
+  async at(repoDir: string, commit: string): Promise<HeadMap<M> | null> {
+    const held = this.heads.get(commit);
+    if (held) {
+      this.heads.delete(commit);
+      this.heads.set(commit, held);
+      return held.map;
+    }
+    if (this.without.has(commit) || this.warming.has(commit)) return null;
+    let pending = this.building.get(commit);
+    if (!pending) {
+      pending = this.build(repoDir, commit).finally(() => {
+        if (this.building.get(commit) === pending) this.building.delete(commit);
+      });
+      this.building.set(commit, pending);
+    }
+    return pending;
+  }
+
+  private async build(repoDir: string, commit: string): Promise<HeadMap<M> | null> {
+    const paths: string[] = [];
+    const own = new Map<string, OwnEntries>();
+    const unseen = new Map<string, Unseen>();
+    let irregular = false;
+    let wait = 0;
+    const built = await this.source.modelAt(repoDir, commit, (path, file) => {
+      if (!file.regular) {
+        irregular = true;
+        return;
+      }
+      paths.push(path);
+      // Never a node, wherever the rules are read from (`readOwnEntries`).
+      if (path === 'roles.yaml') return;
+      const objectId = file.objectId();
+      const key = blobKey(objectId, path);
+      const known = this.blobs.get(key);
+      if (known !== undefined) {
+        if (known !== null) own.set(path, known);
+        return;
+      }
+      const waiting = unseen.get(key);
+      if (waiting) {
+        waiting.paths.push(path);
+        return;
+      }
+      unseen.set(key, { objectId, key, size: file.size, paths: [path] });
+      wait += file.size;
+    });
+    if (!built || irregular) {
+      built?.release();
+      this.rememberWithout(commit);
+      return null;
+    }
+    const finish = async (): Promise<HeadMap<M> | null> => {
+      try {
+        await this.read(repoDir, [...unseen.values()], own);
+      } catch (err) {
+        built.release();
+        this.rememberWithout(commit);
+        log.warn(
+          `reading what the files of ${commit.slice(0, 7)} declare failed; answering from the checkout: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        return null;
+      }
+      return this.hold(commit, built, paths, own);
+    };
+    if (wait <= this.limits.waitBytes) return finish();
+    this.warming.add(commit);
+    void finish().finally(() => this.warming.delete(commit));
+    return null;
+  }
+
+  /** Read the versions in `unseen` from git, remember what each declares, and note the ones that declare something in `own`. */
+  private async read(repoDir: string, unseen: Unseen[], own: Map<string, OwnEntries>): Promise<void> {
+    for (let from = 0; from < unseen.length; ) {
+      let to = from;
+      let bytes = 0;
+      do {
+        bytes += unseen[to]!.size;
+        to++;
+      } while (to < unseen.length && bytes + unseen[to]!.size <= this.limits.chunkBytes);
+      const chunk = unseen.slice(from, to);
+      const outcomes = await catFileBatchBytes(
+        this.git,
+        repoDir,
+        chunk.map((u) => u.objectId),
+      );
+      chunk.forEach((u, i) => {
+        const outcome = outcomes[i];
+        // The listing named this object as a file: anything else is an
+        // object git could not read, and nothing is decided without it.
+        if (outcome?.kind !== 'blob') throw new Error(`object ${u.objectId} could not be read`);
+        const first = u.paths[0]!;
+        const declared = detachEntries(
+          isAccessMdPath(first)
+            ? accessMdSelfEntries(outcome.bytes.toString('utf-8'))
+            : parseOwnAccessEntries(frontmatterHeadOfBytes(outcome.bytes)),
+        );
+        this.rememberBlob(u.key, declared);
+        if (declared !== null) for (const p of u.paths) own.set(p, declared);
+      });
+      from = to;
+    }
+  }
+
+  private hold(
+    commit: string,
+    built: { model: M; release(): void },
+    paths: readonly string[],
+    own: ReadonlyMap<string, OwnEntries>,
+  ): HeadMap<M> {
+    const tree = this.trees.index(paths);
+    // The folders of the commit: a folder declares nothing for itself (its
+    // rules are its `access.md`, which the model holds), and git lists files
+    // only, so they are derived from the files' paths.
+    const folders = new Set<string>();
+    for (const p of paths) {
+      for (let cut = p.lastIndexOf('/'); cut > 0; cut = p.lastIndexOf('/', cut - 1)) {
+        const folder = p.slice(0, cut);
+        if (folders.has(folder)) break;
+        folders.add(folder);
+      }
+    }
+    const map: HeadMap<M> = {
+      commit,
+      model: built.model,
+      ownEntries: (p) => own.get(p) ?? (tree.has(p) || folders.has(p) ? null : undefined),
+    };
+    this.trees.hold(tree);
+    this.heads.set(commit, { map, tree, release: () => built.release() });
+    // The map just made is the one being asked for: it is never the one dropped.
+    while (
+      this.heads.size > 1 &&
+      (this.heads.size > this.limits.maxHeads || this.trees.heldPaths > this.limits.maxTreePaths)
+    ) {
+      const oldest = this.heads.entries().next().value;
+      if (!oldest) break;
+      this.heads.delete(oldest[0]);
+      this.trees.release(oldest[1].tree);
+      oldest[1].release();
+    }
+    return map;
+  }
+
+  private rememberBlob(key: string, declared: OwnEntries | null): void {
+    this.blobs.set(key, declared);
+    if (this.blobs.size > this.limits.maxBlobs) {
+      const oldest = this.blobs.keys().next().value;
+      if (oldest !== undefined) this.blobs.delete(oldest);
+    }
+  }
+
+  private rememberWithout(commit: string): void {
+    this.without.add(commit);
+    if (this.without.size > HeadMaps.WITHOUT_MAX) {
+      const oldest = this.without.values().next().value;
+      if (oldest !== undefined) this.without.delete(oldest);
+    }
+  }
+}
+
+/**
+ * The same bytes say two things by name: in an `access.md` the frontmatter
+ * is the folder's rules and only the body format governs the file itself;
+ * anywhere else the frontmatter is the file's own. So a version is
+ * remembered per reading.
+ */
+function blobKey(objectId: string, path: string): string {
+  return `${isAccessMdPath(path) ? 'a' : 'f'}${objectId}`;
+}

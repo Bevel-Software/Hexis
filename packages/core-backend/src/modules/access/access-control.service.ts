@@ -1,13 +1,13 @@
 import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { StringDecoder } from 'node:string_decoder';
 import { logger } from '../../shared/logging.js';
 
 const log = logger('access');
 
-import { isAbsence, type ITreeWalker, type WalkListener } from '../../shared/fs.contract.js';
-import { assertOneSpecPerLine, isCommitSha, isGitTimeout, type IGitRunner } from '../../shared/git.contract.js';
+import { isAbsence, isSkippedEntry, type ITreeWalker, type WalkListener } from '../../shared/fs.contract.js';
+import { isCommitSha, isGitTimeout, type IGitRunner } from '../../shared/git.contract.js';
+import { catFileBatchBytes } from './cat-file-batch.js';
 import { hashEmail } from '../../shared/email-identity.js';
 import { NodeGitRunner } from '../version-control/index.js';
 import { readRevSha } from '../kb-fs/index.js';
@@ -31,7 +31,6 @@ import type {
 import {
   DEFAULT_KB_LAYOUT,
   PLUGIN_MANIFEST_FILE,
-  isFrontmatterFence,
   isPersonalPluginDir,
   pluginIdentityOf,
   platformRestoreDestination,
@@ -75,7 +74,9 @@ import {
 } from './directory-sync-bot.js';
 import { OwnEntriesMemo, type IOwnEntriesMemo, type WorkspaceOwnEntries } from './own-entries-memo.js';
 import { TreeIndexer, type CommitPaths, type ITreeIndexer } from './tree-index.js';
-import { visitTreeListing } from './commit-listing.js';
+import { visitTreeListing, type ListedFile } from './commit-listing.js';
+import { frontmatterHead } from './frontmatter-head.js';
+import { HeadMaps, type HeadMap, type HeadMapLimits } from './head-access-map.js';
 
 /**
  * What one spec of a batched read came back as: a blob's text, nothing at
@@ -101,44 +102,9 @@ async function catFileBatchOutcomes(
   repoDir: string,
   specs: string[],
 ): Promise<CatFileOutcome[]> {
-  // Bytes, not text: every `<size>` in the header counts bytes, and the walk
-  // below has to step by that count through content that is not all ASCII.
-  // One spec per LINE is the protocol, and this walk depends on getting back
-  // exactly as many answers as it sent: a spec carrying a line break would
-  // insert an extra answer and shift every result after it, so each directory
-  // would be handed the NEXT one's `access.md`. Paths are refused a control
-  // character at the normaliser; this is the fence at the protocol.
-  assertOneSpecPerLine(specs);
-  const { stdout: out } = await runner.run(repoDir, ['cat-file', '--batch'], {
-    input: `${specs.join('\n')}\n`,
-    encoding: 'buffer',
-  });
-  const results: CatFileOutcome[] = [];
-  let off = 0;
-  for (let i = 0; i < specs.length; i++) {
-    const nl = out.indexOf(0x0a, off);
-    if (nl < 0) throw new Error('unexpected end of git cat-file output');
-    const header = out.subarray(off, nl).toString('utf-8');
-    off = nl + 1;
-    if (header.endsWith(' missing') || header.endsWith(' ambiguous')) {
-      results.push({ kind: 'missing' });
-      continue;
-    }
-    const parts = header.split(' ');
-    const size = Number(parts[2]);
-    if (parts.length !== 3 || !Number.isInteger(size) || size < 0) {
-      throw new Error(`unexpected git cat-file header: ${header}`);
-    }
-    // A non-blob (a directory path resolves to a tree) is reported as such,
-    // and its payload still has to be skipped to stay aligned.
-    results.push(
-      parts[1] === 'blob'
-        ? { kind: 'blob', text: out.subarray(off, off + size).toString('utf-8') }
-        : { kind: 'non-blob', type: parts[1]! },
-    );
-    off += size + 1; // payload + trailing LF
-  }
-  return results;
+  // One reader of the protocol (`catFileBatchBytes`); here each blob is text.
+  const outcomes = await catFileBatchBytes(runner, repoDir, specs);
+  return outcomes.map((o) => (o.kind === 'blob' ? { kind: 'blob', text: o.bytes.toString('utf-8') } : o));
 }
 
 /**
@@ -1096,71 +1062,6 @@ function parentDirOf(relativePath: string): string {
   return cut === -1 ? '' : relativePath.slice(0, cut);
 }
 
-/** The first read of {@link frontmatterHead}; each later one doubles, up to the last. */
-const HEAD_FIRST_READ = 1_024;
-const HEAD_LAST_READ = 64 * 1_024;
-
-/**
- * The start of `file` that holds everything its frontmatter can say: its
- * first line when that is no fence (no frontmatter at all), the text through
- * the closing fence when there is one, and the whole file when an opening
- * fence is never closed. Scanned for its frontmatter (`scanFrontmatter`), it
- * answers exactly as the whole file does, by the same fence rule
- * (`isFrontmatterFence`) — and a file with no frontmatter costs one small
- * read however long it is.
- */
-async function frontmatterHead(file: string): Promise<string> {
-  const handle = await fs.open(file, 'r');
-  try {
-    const decoder = new StringDecoder('utf8');
-    // What was read, kept as it was decoded and joined once, when answered:
-    // each character is scanned once, however long a line runs.
-    const pieces: string[] = [];
-    let before = 0;
-    // The line being read so far, folded (see `foldLine`), or null once it
-    // can no longer be a fence.
-    let line: string | null = '';
-    let first = true;
-    let position = 0;
-    for (let size = HEAD_FIRST_READ; ; size = Math.min(size * 2, HEAD_LAST_READ)) {
-      const chunk = Buffer.allocUnsafe(size);
-      const { bytesRead } = await handle.read(chunk, 0, size, position);
-      if (bytesRead === 0) return pieces.join('') + decoder.end();
-      position += bytesRead;
-      const piece = decoder.write(chunk.subarray(0, bytesRead));
-      pieces.push(piece);
-      let from = 0;
-      for (let nl = piece.indexOf('\n'); nl !== -1; nl = piece.indexOf('\n', from)) {
-        const fence = line !== null && isFrontmatterFence(foldLine(line, piece.slice(from, nl)));
-        // The first line opens a block or there is none; after it, the first
-        // fence closes the block.
-        if (first ? !fence : fence) return pieces.join('').slice(0, before + nl);
-        first = false;
-        line = '';
-        from = nl + 1;
-      }
-      if (line !== null) {
-        line = foldLine(line, piece.slice(from));
-        if (!'---'.startsWith(line.trim())) line = null;
-      }
-      // A first line still unfinished that already cannot be a fence.
-      if (first && line === null) return pieces.join('');
-      before += piece.length;
-    }
-  } finally {
-    await handle.close();
-  }
-}
-
-/**
- * `line` continued by `more`, every run of whitespace folded to one space.
- * Trimmed, it is `---` exactly when the unfolded line is, so it judges a fence
- * as `isFrontmatterFence` does while staying a few characters long.
- */
-function foldLine(line: string, more: string): string {
-  return `${line}${more}`.replace(/\s+/g, ' ');
-}
-
 /**
  * One file's own-entries, parsed as the path `asName` would be read.
  *
@@ -1675,6 +1576,13 @@ export class AccessControlService implements IAccessControl {
      * reason as `gitRunner`.
      */
     private readonly ownEntriesMemo: IOwnEntriesMemo = new OwnEntriesMemo(limits.now),
+    /**
+     * The maps a branch's reads are answered from (see `headMapOf`): the
+     * indexer that holds their commits' paths, apart from the at-ref models'
+     * because a map keeps its whole tree, and how much they may hold.
+     * Defaulted for the same reason as `gitRunner`.
+     */
+    heads: { trees?: ITreeIndexer; limits?: HeadMapLimits } = {},
   ) {
     this.deploymentOwners = new Set(
       deploymentOwners.filter(Boolean).map((e) => canonicalEmail(e)),
@@ -1682,6 +1590,87 @@ export class AccessControlService implements IAccessControl {
     this.treeIndexMaxPaths = limits.treeIndexMaxPaths ?? AccessControlService.TREE_INDEX_MAX_PATHS;
     this.treeIndexBudget = limits.treeIndexBudget ?? AccessControlService.TREE_INDEX_BUDGET;
     this.now = limits.now ?? Date.now;
+    this.headMaps = new HeadMaps<AccessModel>(
+      this.gitRunner,
+      { modelAt: (repoDir, commit, visit) => this.checkoutModelAt(repoDir, commit, visit) },
+      heads.trees ?? new TreeIndexer(),
+      heads.limits,
+    );
+  }
+
+  /**
+   * The maps the checkouts' commits are read into, by commit. A branch's
+   * reads are answered from the map of the commit its checkout stands on:
+   * the rules of that commit, and the few files that declare access of
+   * their own. Building one costs a listing and a read of the file versions
+   * no earlier commit held, so a head that moves by one saved file reads one
+   * file, where the checkout itself used to be walked again.
+   */
+  private readonly headMaps: HeadMaps<AccessModel>;
+
+  /**
+   * Workspaces whose checkout was just reported changed (`invalidate`), with
+   * the commit it stood on then. Until its head moves off that commit, the
+   * change may be on disk and in no commit yet, so the workspace is answered
+   * from the checkout, as before the maps. `SUSPECT_MS` ends the wait for a
+   * change that never became a commit.
+   */
+  private readonly suspects = new Map<string, { at: number; commit: string | undefined }>();
+  private static readonly SUSPECT_MS = 10_000;
+  /** The commit each workspace was last answered at, for `suspects`. */
+  private readonly lastHead = new Map<string, string>();
+  private static readonly LAST_HEAD_MAX = 1_024;
+
+  /**
+   * The map `workspaceId`'s reads are answered from, or null when they are
+   * answered from the checkout: no commit to read (not a repository, an
+   * unborn branch), a commit no map can be made from (see `HeadMaps`), a
+   * first map still being read, or a checkout just reported changed.
+   */
+  private async headMapOf(workspaceId: string, repoDir: string): Promise<HeadMap<AccessModel> | null> {
+    const commit = await this.headMaps.headOf(repoDir);
+    if (commit === null) return null;
+    const suspect = this.suspects.get(workspaceId);
+    if (suspect) {
+      suspect.commit ??= this.lastHead.get(workspaceId) ?? commit;
+      if (commit === suspect.commit && this.now() - suspect.at <= AccessControlService.SUSPECT_MS) return null;
+      this.suspects.delete(workspaceId);
+    }
+    const map = await this.headMaps.at(repoDir, commit);
+    if (map) {
+      this.lastHead.delete(workspaceId);
+      this.lastHead.set(workspaceId, commit);
+      if (this.lastHead.size > AccessControlService.LAST_HEAD_MAX) {
+        const oldest = this.lastHead.keys().next().value;
+        if (oldest !== undefined) this.lastHead.delete(oldest);
+      }
+    }
+    return map;
+  }
+
+  /**
+   * The access model at `commit` as the checkout standing on it reads it,
+   * for a head map: built like an at-ref model, held like one (`holders`),
+   * and released when its map is dropped.
+   */
+  private async checkoutModelAt(
+    repoDir: string,
+    commit: string,
+    visit: (path: string, file: ListedFile) => void,
+  ): Promise<{ model: AccessModel; release(): void } | null> {
+    let built: AtRefBuild;
+    try {
+      built = await this.buildModelAtCommit(repoDir, commit, 'HEAD', { checkout: true, visit });
+    } catch (err) {
+      if (err instanceof AccessUnreadableError) return null;
+      throw err;
+    }
+    if (typeof built === 'string') return null;
+    const key = built.sourcesKey;
+    const shared = this.modelsBySources.get(key);
+    if (shared) shared.holders++;
+    else this.modelsBySources.set(key, { model: built.model, holders: 1 });
+    return { model: (shared ?? built).model, release: () => this.releaseModel(key) };
   }
 
   /**
@@ -1694,6 +1683,13 @@ export class AccessControlService implements IAccessControl {
     this.cache.delete(workspaceId);
     this.ownEntriesMemo.drop(workspaceId);
     this.generation++;
+    // The change may not be in a commit yet: see `suspects`.
+    this.suspects.delete(workspaceId);
+    this.suspects.set(workspaceId, { at: this.now(), commit: undefined });
+    if (this.suspects.size > AccessControlService.LAST_HEAD_MAX) {
+      const oldest = this.suspects.keys().next().value;
+      if (oldest !== undefined) this.suspects.delete(oldest);
+    }
   }
 
   /**
@@ -1729,7 +1725,16 @@ export class AccessControlService implements IAccessControl {
     relativePaths: readonly string[],
   ): Promise<(OwnEntries | null)[]> {
     const memo = this.ownEntriesMemo.open(workspaceId);
-    return Promise.all(relativePaths.map((p) => this.cachedOwnEntries(memo, repoDir, p)));
+    // From the map of the commit the checkout stands on, where there is one:
+    // it knows the few files that declare something, so the rest are not
+    // opened. A path the commit does not hold is read from the checkout.
+    const head = await this.headMapOf(workspaceId, repoDir);
+    return Promise.all(
+      relativePaths.map((p) => {
+        const own = head?.ownEntries(p);
+        return own !== undefined ? own : this.cachedOwnEntries(memo, repoDir, p);
+      }),
+    );
   }
 
   private async cachedOwnEntries(
@@ -2625,6 +2630,12 @@ export class AccessControlService implements IAccessControl {
 
     const repoDir = await this.repoDir(workspaceId);
 
+    // The rules of the commit the checkout stands on, where a map of it can
+    // answer (`headMapOf`); the checkout itself is read below only when none
+    // can.
+    const head = await this.headMapOf(workspaceId, repoDir);
+    if (head) return head.model;
+
     let rolesYaml: string;
     try {
       rolesYaml = await fs.readFile(path.join(repoDir, 'roles.yaml'), 'utf-8');
@@ -2973,6 +2984,13 @@ export class AccessControlService implements IAccessControl {
   private async listAccessFilesAtRef(
     repoDir: string,
     ref: string,
+    /**
+     * `checkout`: list what a walk of the checkout would find, which skips
+     * dot-entries and vendored dependencies (`isSkippedEntry`), so an
+     * `access.md` or a plugin manifest under one is no source. `visit` sees
+     * every file of the listing.
+     */
+    opts: { checkout?: boolean; visit?: (path: string, file: ListedFile) => void } = {},
   ): Promise<
     | { accessFiles: string[]; pluginDirs: string[]; named: Set<string>; all: string[]; sourcesKey: string }
     | 'error'
@@ -2982,9 +3000,12 @@ export class AccessControlService implements IAccessControl {
       // below is a string of its own. Cut from one decoded listing, each
       // would be a view onto it, and a cached model keeping any of them
       // would keep the commit's whole listing alive.
-      const { stdout } = await this.gitRunner.run(repoDir, ['ls-tree', '-r', '-z', ref], {
-        encoding: 'buffer',
-      });
+      // Sizes only for a head map, which reads file versions by them. Asking
+      // for them makes git open every object, so one lost object anywhere
+      // would fail the listing; a gate at a ref must not depend on that.
+      const args = opts.checkout ? ['ls-tree', '-r', '-z', '-l', ref] : ['ls-tree', '-r', '-z', ref];
+      const { stdout } = await this.gitRunner.run(repoDir, args, { encoding: 'buffer' });
+      const walked = (p: string) => !opts.checkout || !p.split('/').some(isSkippedEntry);
       const out: string[] = [];
       const pluginDirs: string[] = [];
       const all: string[] = [];
@@ -2997,16 +3018,20 @@ export class AccessControlService implements IAccessControl {
       // reads, by path and object id, in the order git lists them, and the
       // plugins root that decides which manifests count. Two commits with
       // the same key hold the same rules (see `modelsBySources`).
-      const sources = createHash('sha256').update(`${pluginsDir}\0`);
-      visitTreeListing(stdout, (p, objectId) => {
+      const sources = createHash('sha256').update(`${pluginsDir}\0${opts.checkout ? 'checkout' : 'commit'}\0`);
+      visitTreeListing(stdout, (p, file) => {
+        opts.visit?.(p, file);
         // One past the cap is enough to know the tree is not kept.
         if (all.length <= this.treeIndexMaxPaths) all.push(p);
-        if (p === 'access.md' || p.endsWith('/access.md')) out.push(p);
-        else if (p === 'roles.yaml' || p === SYNCED_GROUPS_YAML || p === GROUPS_YAML) named.add(p);
+        if (p === 'access.md' || p.endsWith('/access.md')) {
+          if (!walked(p)) return;
+          out.push(p);
+        } else if (p === 'roles.yaml' || p === SYNCED_GROUPS_YAML || p === GROUPS_YAML) named.add(p);
         else if (p.startsWith(`${pluginsDir}/`) && p.endsWith(`/${PLUGIN_MANIFEST_FILE}`)) {
+          if (!walked(p)) return;
           pluginDirs.push(p.slice(0, -(PLUGIN_MANIFEST_FILE.length + 1)));
         } else return;
-        sources.update(`${p}\0${objectId()}\n`);
+        sources.update(`${p}\0${file.objectId()}\n`);
       });
       return { accessFiles: out, pluginDirs, named, all, sourcesKey: sources.digest('hex') };
     } catch {
@@ -3181,6 +3206,12 @@ export class AccessControlService implements IAccessControl {
     repoDir: string,
     commit: string,
     label: string,
+    /**
+     * For a head map (`checkoutModelAt`): the model as the checkout reads
+     * it, every listed file shown to `visit`, and no tree kept here (the map
+     * keeps its own).
+     */
+    opts: { checkout?: boolean; visit?: (path: string, file: ListedFile) => void } = {},
   ): Promise<AtRefBuild> {
     // Every read below tells "absent" apart from "git failed". A failure
     // refuses the whole build: a model missing one access.md could grant what
@@ -3189,12 +3220,13 @@ export class AccessControlService implements IAccessControl {
     // retry reads the tree in full.
     const tag = `${label}@${commit.slice(0, 7)}`;
 
-    const listed = await this.listAccessFilesAtRef(repoDir, commit);
+    const listed = await this.listAccessFilesAtRef(repoDir, commit, opts);
     if (listed === 'error') {
       logger(`access@${tag}`).warn('listing access.md files failed; refusing to decide from a partial tree');
       throw new AccessUnreadableError(label, 'access.md (ls-tree)');
     }
-    const treeOf = () => (listed.all.length <= this.treeIndexMaxPaths ? this.treeIndexer.index(listed.all) : null);
+    const treeOf = () =>
+      !opts.checkout && listed.all.length <= this.treeIndexMaxPaths ? this.treeIndexer.index(listed.all) : null;
     // The same sources as a commit already cached: the same rules, so the
     // model that commit holds is this one's too, and nothing more is read.
     const shared = this.modelsBySources.get(listed.sourcesKey);

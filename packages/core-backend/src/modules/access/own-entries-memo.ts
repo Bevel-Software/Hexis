@@ -149,7 +149,8 @@ function detach(s: string): string {
   return Buffer.from(s, 'utf16le').toString('utf16le');
 }
 
-function detachEntries(own: OwnEntries | null): OwnEntries | null {
+/** A copy of `own` whose strings share no memory with the text they were parsed from. */
+export function detachEntries(own: OwnEntries | null): OwnEntries | null {
   if (own === null) return null;
   const out = {} as OwnEntries;
   for (const verb of Object.keys(own) as (keyof OwnEntries)[]) {
