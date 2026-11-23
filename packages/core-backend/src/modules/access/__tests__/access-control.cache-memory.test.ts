@@ -11,6 +11,7 @@ import { realDisk } from '../../../__tests__/real-disk.js';
 import type { WorkspaceService } from '../../workspace/index.js';
 import { NO_GIT_CREDENTIALS, type IGitRunner } from '../../../shared/git.contract.js';
 import { AccessControlService } from '../access-control.service.js';
+import { OwnEntriesMemo, OWN_ENTRIES_LIMITS, type OwnEntriesLimits } from '../own-entries-memo.js';
 
 /**
  * What the access caches HOLD, measured on the heap. Each case drives the
@@ -253,7 +254,7 @@ describe('AccessControlService — what a cached at-ref model holds', () => {
 // Own-entries memo
 // ---------------------------------------------------------------------------
 
-const TTL_MS = 5 * 60_000;
+const TTL_MS = OWN_ENTRIES_LIMITS.ttlMs;
 const ROLES_YAML = 'roles:\n  Admin:\n    - razvan@bevel.software\n  Product Manager:\n    - felix@example.com\n';
 
 describe('AccessControlService — what the own-entries memo holds', () => {
@@ -283,10 +284,16 @@ describe('AccessControlService — what the own-entries memo holds', () => {
     await fs.rm(root, { recursive: true, force: true });
   });
 
-  /** Every workspace id is a clone of the same tree here. */
-  function service(limits: { ownEntriesMaxWorkspaces?: number; ownEntriesMaxEntries?: number } = {}) {
+  /**
+   * Every workspace id is a clone of the same tree here. The memo is injected
+   * as the composition root injects it, on the deployment's limits unless a
+   * case lowers one, and on the same moved clock as the service.
+   */
+  function service(limits: Partial<OwnEntriesLimits> = {}) {
     const stub = { getWorkspacePath: async () => workspaceDir } as unknown as WorkspaceService;
-    return new AccessControlService(stub, KB, realDisk(), [], undefined, undefined, { ...limits, now: () => clock });
+    const now = () => clock;
+    const memo = new OwnEntriesMemo(now, { ...OWN_ENTRIES_LIMITS, ...limits });
+    return new AccessControlService(stub, KB, realDisk(), [], undefined, undefined, { now }, undefined, memo);
   }
 
   const DENIED = '---\nread:\n  - deny everyone\n---\n# denied\n';
@@ -324,7 +331,7 @@ describe('AccessControlService — what the own-entries memo holds', () => {
     expect(left).toBeLessThan(held / 10);
   }, 120_000);
 
-  it('holds no entry for a path that cannot carry access entries, and answers it as before', async () => {
+  it('holds no entry for a path outside the access-frontmatter extension set, and answers it as before', async () => {
     const NOTE = 'Knowledge/Open/notes.txt';
     const PAGE = 'Knowledge/Open/Page.md';
     await writeFile(NOTE, DENIED);
@@ -343,7 +350,7 @@ describe('AccessControlService — what the own-entries memo holds', () => {
   it('drops the oldest workspace first past the workspace bound', async () => {
     const PAGE = 'Knowledge/Open/Page.md';
     await writeFile(PAGE, DENIED);
-    const svc = service({ ownEntriesMaxWorkspaces: 2 });
+    const svc = service({ maxWorkspaces: 2 });
     expect(await readable(svc, 'ws-a', PAGE)).toBe(false);
     expect(await readable(svc, 'ws-b', PAGE)).toBe(false);
     expect(await readable(svc, 'ws-c', PAGE)).toBe(false);
@@ -360,7 +367,7 @@ describe('AccessControlService — what the own-entries memo holds', () => {
     const TWO = 'Knowledge/Open/Two.md';
     await writeFile(ONE, DENIED);
     await writeFile(TWO, DENIED);
-    const svc = service({ ownEntriesMaxEntries: 1 });
+    const svc = service({ maxEntries: 1 });
     // ws-a holds ONE; ws-b's entry needs the room, so ws-a goes.
     expect(await readable(svc, 'ws-a', ONE)).toBe(false);
     expect(await readable(svc, 'ws-b', ONE)).toBe(false);

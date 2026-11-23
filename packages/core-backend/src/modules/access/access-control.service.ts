@@ -1533,31 +1533,6 @@ export class AccessControlService implements IAccessControl {
   private static readonly CACHE_TTL_MS = 5_000;
 
   /**
-   * Per-workspace memo of node frontmatter access entries (keyed by
-   * repo-relative path), for the BATCH checks — the explorer tree resolves
-   * every KB file on each load, which would otherwise cost one `fs.readFile`
-   * per node per tree build. Dropped by `invalidate()` — which fires on every
-   * commit / pull / branch switch, i.e. on every path a frontmatter edit can
-   * land through — so that is the PRIMARY freshness mechanism; the TTL is
-   * only a long backstop against a missed invalidation. It is deliberately
-   * NOT the model cache's 5s TTL: at 5s every tree build was effectively
-   * cold (~one full-KB read sweep per build). Single-file gates (`canRead` /
-   * `canWrite`) stay uncached — the write gate reads disk-fresh on purpose.
-   *
-   * Only paths that can carry access entries are held (the access-frontmatter
-   * extension set); a batch reads any other path as before, without keeping
-   * it. Bounded in age, workspaces and entries, so what it holds does not
-   * grow with uptime or with how many branches were ever opened: see
-   * `OwnEntriesMemo`.
-   */
-  private readonly ownEntriesMemo: OwnEntriesMemo;
-  private static readonly OWN_ENTRIES_TTL_MS = 5 * 60_000;
-  /** Workspaces whose memo is held at once, at most; past it the oldest is dropped. */
-  private static readonly OWN_ENTRIES_MAX_WORKSPACES = 32;
-  /** Entries held across every workspace's memo, at most; past it the oldest workspace is dropped. */
-  private static readonly OWN_ENTRIES_MAX_ENTRIES = 200_000;
-
-  /**
    * At-ref models keyed by workspace + the COMMIT the ref resolved to. The
    * tree at a commit is immutable, so an entry can never go stale: a push
    * that moves `origin/<base>` resolves to a new commit and simply misses.
@@ -1608,9 +1583,7 @@ export class AccessControlService implements IAccessControl {
   private static readonly TREE_INDEX_BUDGET = 500_000;
   private readonly treeIndexMaxPaths: number;
   private readonly treeIndexBudget: number;
-  /** Builds the cached models' trees and counts what they hold together; see `TreeIndexer`. */
-  private readonly treeIndexer = new TreeIndexer();
-  /** The service's clock, for every TTL it keeps. */
+  /** The service's clock, for the model cache's TTL. */
   private readonly now: () => number;
 
   /**
@@ -1648,19 +1621,40 @@ export class AccessControlService implements IAccessControl {
     private readonly kb: Pick<KbContext, 'layout'> = { layout: DEFAULT_KB_LAYOUT },
     /**
      * How much of the commits' trees the at-ref models may hold (see
-     * `TREE_INDEX_MAX_PATHS`, `TREE_INDEX_BUDGET`), and how much the
-     * own-entries memo may (`OWN_ENTRIES_MAX_WORKSPACES`,
-     * `OWN_ENTRIES_MAX_ENTRIES`). The defaults are the deployment's; a suite
-     * lowers them to reach the bounds with a small repository. `now` is the
-     * clock every TTL here reads, `Date.now` unless a suite moves time itself.
+     * `TREE_INDEX_MAX_PATHS`, `TREE_INDEX_BUDGET`). The defaults are the
+     * deployment's; a suite lowers them to reach the bounds with a small
+     * repository. `now` is the clock the model cache's TTL reads, `Date.now`
+     * unless a suite moves time itself.
      */
     limits: {
       treeIndexMaxPaths?: number;
       treeIndexBudget?: number;
-      ownEntriesMaxWorkspaces?: number;
-      ownEntriesMaxEntries?: number;
       now?: () => number;
     } = {},
+    /**
+     * Builds the cached at-ref models' trees and counts what they hold
+     * together; see `TreeIndexer`. The composition root passes the one
+     * indexer; defaulted for the same reason as `gitRunner`.
+     */
+    private readonly treeIndexer: TreeIndexer = new TreeIndexer(),
+    /**
+     * Per-workspace memo of what files declare for themselves (keyed by
+     * repo-relative path), for the BATCH checks: the explorer tree resolves
+     * every KB file on each load, which would otherwise cost one
+     * `fs.readFile` per node per tree build. Dropped by `invalidate()`, which
+     * fires on every commit / pull / branch switch, so that is the PRIMARY
+     * freshness mechanism; its age limit is only a backstop. Single-file
+     * gates (`canRead` / `canWrite`) stay uncached: the write gate reads
+     * disk-fresh on purpose.
+     *
+     * The memo keeps entries only for paths in the access-frontmatter
+     * extension set; a batch reads any other path as before, without keeping
+     * it. Bounded in age, workspaces and entries: see `OwnEntriesMemo`. The
+     * composition root passes the one memo, on the deployment's limits and
+     * the service's clock; the default reads `limits.now`, for the same
+     * reason as `gitRunner`.
+     */
+    private readonly ownEntriesMemo: OwnEntriesMemo = new OwnEntriesMemo(limits.now),
   ) {
     this.deploymentOwners = new Set(
       deploymentOwners.filter(Boolean).map((e) => canonicalEmail(e)),
@@ -1668,11 +1662,6 @@ export class AccessControlService implements IAccessControl {
     this.treeIndexMaxPaths = limits.treeIndexMaxPaths ?? AccessControlService.TREE_INDEX_MAX_PATHS;
     this.treeIndexBudget = limits.treeIndexBudget ?? AccessControlService.TREE_INDEX_BUDGET;
     this.now = limits.now ?? Date.now;
-    this.ownEntriesMemo = new OwnEntriesMemo(this.now, {
-      ttlMs: AccessControlService.OWN_ENTRIES_TTL_MS,
-      maxWorkspaces: limits.ownEntriesMaxWorkspaces ?? AccessControlService.OWN_ENTRIES_MAX_WORKSPACES,
-      maxEntries: limits.ownEntriesMaxEntries ?? AccessControlService.OWN_ENTRIES_MAX_ENTRIES,
-    });
   }
 
   /**
@@ -1728,9 +1717,11 @@ export class AccessControlService implements IAccessControl {
     repoDir: string,
     relativePath: string,
   ): Promise<OwnEntries | null> {
-    // A path no access entries can be declared in is read as it always was,
-    // and not kept: the file tree asks about every file, screenshots and
-    // transcripts included, and the memo would hold one entry for each.
+    // A path outside the access-frontmatter extension set is read on every
+    // batch and not kept. What it declares is still read and enforced, exactly
+    // as before; only the memo leaves it out, because the file tree asks about
+    // every file, screenshots and transcripts included, and the memo would
+    // hold one entry for each.
     if (!hasAccessFrontmatterExtension(relativePath)) return this.readOwnEntries(repoDir, relativePath);
     const hit = memo.get(relativePath);
     if (hit !== undefined) return hit;
@@ -1783,8 +1774,8 @@ export class AccessControlService implements IAccessControl {
     const repoDir = await this.repoDir(workspaceId);
     // Read each path's own-entries in parallel rather than serially (the batch
     // path otherwise bottlenecks on per-file disk latency), memoized per
-    // workspace for the files that can carry access entries, so a repeat
-    // tree build reads only the others (see `cachedOwnEntries`).
+    // workspace for the files in the access-frontmatter extension set, so a
+    // repeat tree build reads only the others (see `cachedOwnEntries`).
     const owns = await this.cachedOwnEntriesBatch(workspaceId, repoDir, relativePaths);
     const result = new Map<string, boolean>();
     relativePaths.forEach((p, i) => {

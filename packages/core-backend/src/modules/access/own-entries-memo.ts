@@ -1,5 +1,23 @@
 import type { OwnEntries, ParsedEntry } from '../access-model/index.js';
 
+/** What the memo may hold: how old a workspace's memo may grow, and how much it may keep. */
+export interface OwnEntriesLimits {
+  readonly ttlMs: number;
+  readonly maxWorkspaces: number;
+  readonly maxEntries: number;
+}
+
+/**
+ * The deployment's limits. The age is only a backstop: `invalidate()`, called
+ * on commit, push, pull and branch switch, is what keeps a memo fresh. It is
+ * not the model cache's 5 s, at which every tree build was effectively cold.
+ */
+export const OWN_ENTRIES_LIMITS: OwnEntriesLimits = {
+  ttlMs: 5 * 60_000,
+  maxWorkspaces: 32,
+  maxEntries: 200_000,
+};
+
 /**
  * The per-workspace memo of what files declare for themselves, for the batch
  * checks (see `AccessControlService.cachedOwnEntriesBatch`), with its size
@@ -22,6 +40,9 @@ import type { OwnEntries, ParsedEntry } from '../access-model/index.js';
  * Keys and values are copied into strings of their own before they are kept:
  * a path cut from an absolute path, or a role name cut from a file's text,
  * would otherwise keep the whole of that longer string alive.
+ *
+ * The composition root makes the one memo and hands it to
+ * `AccessControlService`, with the clock the service reads.
  */
 export class OwnEntriesMemo {
   /** In the order the memos were started, which is the order they expire in. */
@@ -29,8 +50,9 @@ export class OwnEntriesMemo {
   private entries = 0;
 
   constructor(
-    private readonly now: () => number,
-    private readonly limits: { ttlMs: number; maxWorkspaces: number; maxEntries: number },
+    /** The clock the age limit reads. */
+    private readonly now: () => number = Date.now,
+    private readonly limits: OwnEntriesLimits = OWN_ENTRIES_LIMITS,
   ) {}
 
   /** The memo for `workspaceId`: the one held, or a fresh one when none is held or it expired. */
