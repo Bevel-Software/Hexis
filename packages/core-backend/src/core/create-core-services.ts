@@ -84,6 +84,8 @@ import { AccountErasureService } from '../modules/auth/account-erasure.service.j
 import { OidcAuthProvider, oidcSettingsFrom } from '../modules/auth/oidc-auth-provider.js';
 import { authCookieSecure, createAuthMiddleware, readAuthCookie } from '../modules/auth/auth.middleware.js';
 import { AccessControlService, loadActiveGroups } from '../modules/access/access-control.service.js';
+import { OwnEntriesMemo, OWN_ENTRIES_LIMITS } from '../modules/access/own-entries-memo.js';
+import { TreeIndexer } from '../modules/access/tree-index.js';
 import { AccessMutationService } from '../modules/access/access-mutation.service.js';
 import { CreatorAccessService } from '../modules/access/creator-access.js';
 import { ChangeReadGate } from '../modules/access/change-read-gate.js';
@@ -856,6 +858,14 @@ export async function createCoreServices(
     [config.adminEmail],
     gitRunner,
     kb,
+    {},
+    // What the at-ref models keep of their commits' trees, shared across them,
+    // and the per-workspace memo of what files declare for themselves, on the
+    // deployment's bounds and the same clock as the service (`Date.now`).
+    // One of each per graph: a host that runs a graph per tenant holds them
+    // per active tenant, each within the bounds, and drops them with the graph.
+    new TreeIndexer(),
+    new OwnEntriesMemo(Date.now, OWN_ENTRIES_LIMITS),
   );
   // Creator read-grant on creation: read is default-deny and the roots grant
   // it to nobody, so every surface that starts a new folder at a root (human
