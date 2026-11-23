@@ -6,7 +6,6 @@ import os from 'node:os';
 import { realDisk } from '../../../__tests__/real-disk.js';
 import type { WorkspaceService } from '../../workspace/index.js';
 import { AccessControlService } from '../access-control.service.js';
-import { botAddressBook } from '../../../__tests__/bot-address-book.js';
 
 /**
  * `prospectiveHolderChanges`: who loses and who gains opening or editing a
@@ -124,40 +123,5 @@ describe('AccessControlService.prospectiveHolderChanges', () => {
       'Sales/deal.md': '# Deal\n',
     });
     expect(await service().prospectiveHolderChanges(workspaceId, 'Sales', 'Revenue')).toEqual({ lose: [], gain: [] });
-  });
-
-  it('a bot granted at the previous domain loses each verb once, under its current address', async () => {
-    // While the domain change's rewrite is open the old spelling still
-    // counts; the holder lists name the bot at its current address, and the
-    // raw grant keys must too, or the bot is listed twice.
-    const book = botAddressBook();
-    book.replace({ domain: 'agent.hexis', botIds: ['release-helper'], previousDomain: 'old.example' });
-    const withBots = new AccessControlService(
-      {
-        getWorkspacePath: async () => path.join(root, workspaceId),
-        ensureRemotesFetched: async () => undefined,
-      } as unknown as WorkspaceService,
-      KB_DIR,
-      realDisk(),
-      [],
-      undefined,
-      undefined,
-      {},
-      undefined,
-      undefined,
-      book,
-    );
-    await write({
-      ...BASE,
-      'Bots/access.md': rules('read:\n  - Release helper <release-helper@old.example>\nwrite:\n  - Release helper <release-helper@old.example>\n'),
-      'Bots/plan.md': '# Plan\n',
-      'Closed/access.md': rules('read:\n  - Support\n'),
-    });
-    const changes = await withBots.prospectiveHolderChanges(workspaceId, 'Bots/plan.md', 'Closed/plan.md');
-    const bot = changes.lose.filter((c) => c.name.startsWith('release-helper@'));
-    expect(bot).toEqual([
-      { kind: 'person', name: 'release-helper@agent.hexis', email: 'release-helper@agent.hexis', verb: 'read' },
-      { kind: 'person', name: 'release-helper@agent.hexis', email: 'release-helper@agent.hexis', verb: 'write' },
-    ]);
   });
 });

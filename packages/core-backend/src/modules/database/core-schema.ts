@@ -80,7 +80,7 @@ export const users = pgTable('users', {
   /**
    * The id the distribution gives this row's bot, when the row is a BOT: an
    * identity of its own that people connect as, granted by its address
-   * (`<bot_id>@<bots' domain>`, kept in `email` like a person's), never
+   * (`<bot_id>@agent.hexis`, kept in `email` like a person's), never
    * signed in to, never part of "everyone", never holding a role (see
    * `modules/bots`). Null for a person. Unique, so one id is one row: a
    * definition that comes back after it was removed brings the same row back.

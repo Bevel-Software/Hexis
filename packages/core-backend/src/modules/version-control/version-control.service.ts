@@ -2371,8 +2371,8 @@ export class VersionControlService implements IVersionControlService {
    * the two commits fix what is changed and the access files it is judged
    * by, so a detail read again — every poll of the page, every agent call —
    * reads no file a second time. Kept for a short while only, because not
-   * everything the answer depends on lives in the commits (the bots' domain,
-   * which says whose grant a line is, is a setting); the merge never reads
+   * everything the answer depends on lives in the commits (which addresses
+   * are bots', which says whose grant a line is, is the bots' rows); the merge never reads
    * this and judges for itself. A verdict that could not be reached is not
    * kept. Bounded, oldest first.
    */
@@ -2519,8 +2519,7 @@ export class VersionControlService implements IVersionControlService {
 
     let prNumber: number;
     try {
-      // The author (`writeNamingActor`): a bot at the address its row has now,
-      // which may have moved with a domain change since this call resolved it.
+      // The author (`writeNamingActor`), with the person behind a bot.
       const [row] = await writeNamingActor(this.db, user, async (q, author) =>
         q
           .insert(changeRequests)

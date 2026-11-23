@@ -298,7 +298,7 @@ describe('RolesAdminService', () => {
 
   it('refuses to give a bot a role, Admin least of all, and writes nothing', async () => {
     const book = botAddressBook();
-    book.replace({ domain: 'agent.hexis', botIds: ['release-helper'], previousDomain: null });
+    book.replace(['release-helper']);
     const withBots = new AccessControlService(ws, KB, realDisk(), [], undefined, undefined, {}, undefined, undefined, book);
     const guarded = new RolesAdminService(ws, versionControl.svc, withBots, realDisk(), KB, () => DEFAULT_BRANCH, bus.bus);
     const before = await readRoles();

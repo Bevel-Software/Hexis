@@ -12,7 +12,7 @@ import type {
   PullRequestState,
 } from '@bevel-software/platform-shared';
 import type { Database } from '../../database/index.js';
-import { changeRequests, pendingCommits, prFileApprovals, prMergeLog, users } from '../../database/index.js';
+import { changeRequests, prFileApprovals, prMergeLog, users } from '../../database/index.js';
 import { AccessUnreadableError } from '../../access-model/index.js';
 import type { IAccessControl } from '../../access/index.js';
 import type { GitService } from '../git/git.service.js';
@@ -25,7 +25,7 @@ import {
 } from '../../../shared/domain-errors.js';
 import type { WorkspaceService } from '../../workspace/index.js';
 import { canonicalEmail, hashEmail } from '../../../shared/email-identity.js';
-import { holdMaker, madeByColumns, recordedAddress, writeNamingActor } from '../made-by.js';
+import { holdMaker, madeByColumns, writeNamingActor } from '../made-by.js';
 import type {
   IChangeRequestReviewService,
   MergeGateInput,
@@ -452,9 +452,7 @@ export class ChangeRequestReviewService implements IChangeRequestReviewService {
       // (`holdMaker`, as every record that names them asks), so an erasure
       // that committed first is not undone by this insert.
       await holdMaker(tx, user.madeBy);
-      // The approver's address as their row has it now: a bot's may have
-      // moved with a domain change since this call resolved it.
-      const approver = await recordedAddress(tx, user);
+      const approver = canonicalEmail(user.email);
       await tx
         .insert(prFileApprovals)
         .values({
@@ -501,66 +499,6 @@ export class ChangeRequestReviewService implements IChangeRequestReviewService {
       .update(prFileApprovals)
       .set({ madeByEmail: erased.email, madeByEmailBidx: erased.email, madeByName: erased.name })
       .where(eq(prFileApprovals.madeByEmailBidx, email));
-  }
-
-  /**
-   * See the interface. The lock `eraseApprover` takes, exclusively, for the
-   * rest of the caller's transaction.
-   */
-  async holdRecordWriters(tx: ApprovalTx): Promise<void> {
-    await takeEveryApprovalLock(tx);
-  }
-
-  /**
-   * See the interface. Same lock, same order and same matching as
-   * `eraseApprover`: the every-request approval lock first, so a copy of
-   * approvals onto a new head that read a row a moment earlier cannot put the
-   * old address back after this; rows found by the blind index of the old
-   * address, and the index rewritten with the address. The columns are the
-   * ones account erasure rewrites, less the names (a domain change keeps the
-   * name): the `readdressIdentity` suite (`erase-approver.test.ts`) holds the
-   * list to the schema.
-   */
-  async readdressIdentity(tx: ApprovalTx, from: string, to: string): Promise<void> {
-    const old = canonicalEmail(from);
-    const now = canonicalEmail(to);
-    if (old === now) return;
-    await takeEveryApprovalLock(tx);
-    await tx
-      .update(prFileApprovals)
-      .set({ approverEmail: now, approverEmailBidx: now })
-      .where(eq(prFileApprovals.approverEmailBidx, old));
-    // Authorship: every check of "is this the author" (edit, cancel, the
-    // author filter, `mine`, self-approval) hashes the stored address, so the
-    // stored address is what moves.
-    await tx
-      .update(changeRequests)
-      .set({ authorEmail: now, authorEmailBidx: now })
-      .where(eq(changeRequests.authorEmailBidx, old));
-    // The refusal a still-open request shows names who could not apply it.
-    await tx
-      .update(changeRequests)
-      .set({ applyFailedByEmailBidx: now })
-      .where(eq(changeRequests.applyFailedByEmailBidx, old));
-    // Who started each merge attempt.
-    await tx
-      .update(prMergeLog)
-      .set({ triggeredByEmail: now, triggeredByEmailBidx: now })
-      .where(eq(prMergeLog.triggeredByEmailBidx, old));
-    // Saves queued and not yet committed: the commit is authored at the address
-    // the row has when the worker takes it.
-    await tx
-      .update(pendingCommits)
-      .set({ authorEmail: now, authorEmailBidx: now })
-      .where(eq(pendingCommits.authorEmailBidx, old));
-    // The person behind a bot's action, wherever it is recorded (a bot acting
-    // as another bot is that person).
-    for (const table of [prFileApprovals, changeRequests, prMergeLog, pendingCommits] as const) {
-      await tx
-        .update(table)
-        .set({ madeByEmail: now, madeByEmailBidx: now })
-        .where(eq(table.madeByEmailBidx, old));
-    }
   }
 
   /**
@@ -1165,9 +1103,7 @@ export class ChangeRequestReviewService implements IChangeRequestReviewService {
     // the new one, and a delete that interleaved with that copy would be
     // undone by it — the revoked approval would come back at the new head.
     await this.withApprovalLock(prNumber, async (tx) => {
-      // Found at the address the caller's row has now, as the approval was
-      // recorded (`recordedAddress`).
-      const callerEmail = await recordedAddress(tx, user);
+      const callerEmail = canonicalEmail(user.email);
       await tx
         .delete(prFileApprovals)
         .where(

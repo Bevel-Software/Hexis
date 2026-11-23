@@ -58,8 +58,6 @@ import {
 } from '../modules/plugins/index.js';
 import { keyOrSessionAuth } from '../modules/tool-auth/key-or-session.middleware.js';
 import { actingUser } from '../modules/tool-auth/index.js';
-import { GrantRewriteChangeRequests } from '../modules/bots/bot-domain-change.js';
-import { createBotsRoutes } from '../modules/bots/bots.routes.js';
 import { ToolDescriptionNotes, type AgentAccessGate } from '../modules/workspace/agent-access.gate.js';
 import {
   createSecretsVaultRoutes,
@@ -820,23 +818,6 @@ export async function createCoreServer(
   // Admin-status resolver (CORE — see the note in admin-access.routes.ts;
   // the full admin router is an enterprise `ext.authed` extension).
   app.use('/api', core.authMiddleware, createAdminAccessRoutes(core.adminAccess));
-  // The bots' domain: read by anyone signed in, changed by an admin, which
-  // re-addresses every bot and opens the change request rewriting their grants.
-  app.use(
-    '/api',
-    core.authMiddleware,
-    createBotsRoutes({
-      bots: core.botService,
-      isAdmin: (email) => core.adminAccess.isAdmin(email),
-      resolveUser: async (req) => (req.userId ? ((await core.authService.getUserById(req.userId)) ?? null) : null),
-      rewriter: new GrantRewriteChangeRequests({
-        versionControl: core.versionControlService,
-        workspace: core.workspaceService,
-        walker: core.disk,
-        kb: core.kb,
-      }),
-    }),
-  );
   // The Tools page's read-only toggles: anyone signed in reads, admins write.
   app.use('/api', core.authMiddleware, createToolHintsRoutes(readOnlyHints, core.adminAccess));
   // Groups admin (manual-mode CRUD; typed refusals in IdP mode) —

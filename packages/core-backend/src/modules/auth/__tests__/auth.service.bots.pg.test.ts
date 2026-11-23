@@ -28,7 +28,7 @@ describe.skipIf(!PG_ADMIN_URL)('a bot and the ways in, on a real Postgres', () =
     ({ db, close: closeDb } = await openMigratedScratchDb('hexis_bot_auth'));
     vi.spyOn(console, 'log').mockImplementation(() => undefined);
     const book = botAddressBook();
-    book.replace({ domain: 'agent.hexis', botIds: ['release-helper'], previousDomain: null });
+    book.replace(['release-helper']);
     auth = new AuthService(db, { jwtSecret: JWT_SECRET, adminEmail: '', adminPassword: '', allowedEmailDomains: [] }, undefined, book);
     // A bot's row, with a password hash planted on it: even that never signs it in.
     const [row] = await db

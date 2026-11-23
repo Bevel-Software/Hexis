@@ -3,7 +3,7 @@
  * choice.
  *
  * A bot is a row of the users table marked as a bot (`users.bot_id`), with an
- * address of its own, `<id>@<bots' domain>`. It is granted access by that
+ * address of its own, `<id>@agent.hexis`. It is granted access by that
  * address wherever a person can be, so the code that judges access, keeps
  * secrets and tool sign-ins, records authors and writes the audit log serves
  * it as it serves a person. What keeps a bot from being a person is a short
@@ -18,9 +18,12 @@
  * existed.
  */
 
-import type { Database } from '../database/index.js';
-
-/** The bots' domain when no admin changed it. Not a domain anyone can own, so nothing can be mailed to a bot. */
+/**
+ * The bots' domain, fixed: every bot's address is `<id>@agent.hexis`. Not a
+ * domain anyone can own, so nothing can be mailed to a bot. It is read
+ * through {@link IBotAddresses.domain}, so a later change of it has one
+ * place to start from.
+ */
 export const DEFAULT_BOTS_DOMAIN = 'agent.hexis';
 
 /** One definition of a bot, as the distribution reads it. Two definitions may share an id; then neither is usable. */
@@ -85,34 +88,10 @@ export function noBots(): IBotDirectory {
  * address is canonical (lower case, trimmed) on the way in.
  */
 export interface IBotAddresses {
-  /** Whether `email` is a bot's address, at the current domain or at a previous one that still counts. */
+  /** Whether `email` is a bot's address. */
   isBot(email: string): boolean;
-  /**
-   * Every address `email`'s bot is granted by: its current address, and its
-   * address at the previous domain while that still counts (until the change
-   * request rewriting the grants is merged). The current address is always
-   * first, asked by either spelling. Just `[email]` for anyone else.
-   */
-  addressesOf(email: string): readonly string[];
-  /** The bots' domain now in effect. */
+  /** The bots' domain. */
   domain(): string;
-}
-
-/** The transaction a bots' domain change re-addresses the bots' rows in. */
-export type BotsTx = Parameters<Parameters<Database['transaction']>[0]>[0];
-
-/**
- * What else records a bot by its address, moved with its row when the bots'
- * domain changes (version control answers it): the approvals, change
- * requests, merge attempts and queued saves that name it. In the
- * transaction that re-addresses the rows, in this order: `holdRecordWriters`
- * once, before any row is touched; then, per bot, its row and
- * `readdressIdentity`. So the rows and what names them never disagree, and a
- * failure leaves both at the old address.
- */
-export interface IRecordedIdentity {
-  holdRecordWriters(tx: BotsTx): Promise<void>;
-  readdressIdentity(tx: BotsTx, from: string, to: string): Promise<void>;
 }
 
 /** A bot as the "Connect as" choice offers it. */

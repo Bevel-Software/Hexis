@@ -1,6 +1,4 @@
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import type { SQL } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import { ChangeRequestReviewService } from '../change-request-review.service.js';
@@ -113,93 +111,5 @@ describe('ChangeRequestReviewService.eraseApprover', () => {
     expect(h.wheres[0]!.sql).toMatch(/"approver_email_bidx" = \$1$/);
     expect(h.wheres[0]!.sql).not.toMatch(/"approver_email" =/);
     expect(JSON.stringify(h.wheres[0]!.params)).toContain('bob@bevel.software');
-  });
-});
-
-/**
- * `readdressIdentity` is the same shape for a bots' domain change: every
- * address this module records of the bot moves from its old address to its
- * new one, in the caller's transaction, under the same lock.
- */
-describe('ChangeRequestReviewService.readdressIdentity', () => {
-  it('takes the every-request lock exclusively first, then moves every recorded address by the old address\'s blind index', async () => {
-    const h = harness();
-    await h.svc.readdressIdentity(h.tx, 'Coder@Agent.Hexis', 'coder@bots.acme.com');
-
-    expect(h.order).toEqual([
-      'timeout',
-      'gate:exclusive',
-      'update:pr_file_approvals',
-      'update:change_requests',
-      'update:change_requests',
-      'update:pr_merge_log',
-      'update:pending_commits',
-      'update:pr_file_approvals',
-      'update:change_requests',
-      'update:pr_merge_log',
-      'update:pending_commits',
-    ]);
-    expect(h.locked).toEqual([[4207, 0]]);
-    expect(h.lockSql[0]).toContain('pg_advisory_xact_lock');
-    // The new address, canonical, in the address and its index; nothing else
-    // (the bot's name is unchanged by a domain change).
-    expect(h.sets).toEqual([
-      { approverEmail: 'coder@bots.acme.com', approverEmailBidx: 'coder@bots.acme.com' },
-      { authorEmail: 'coder@bots.acme.com', authorEmailBidx: 'coder@bots.acme.com' },
-      { applyFailedByEmailBidx: 'coder@bots.acme.com' },
-      { triggeredByEmail: 'coder@bots.acme.com', triggeredByEmailBidx: 'coder@bots.acme.com' },
-      { authorEmail: 'coder@bots.acme.com', authorEmailBidx: 'coder@bots.acme.com' },
-      ...Array(4).fill({ madeByEmail: 'coder@bots.acme.com', madeByEmailBidx: 'coder@bots.acme.com' }),
-    ]);
-    // Matched by the blind index of the old address, canonical: the address
-    // columns hold randomized ciphertext and would match nothing.
-    expect(h.wheres.map((w) => w.sql.replace(/^.*?("[a-z_]+") = \$1$/, '$1'))).toEqual([
-      '"approver_email_bidx"',
-      '"author_email_bidx"',
-      '"apply_failed_by_email_bidx"',
-      '"triggered_by_email_bidx"',
-      '"author_email_bidx"',
-      ...Array(4).fill('"made_by_email_bidx"'),
-    ]);
-    for (const where of h.wheres) {
-      expect(JSON.stringify(where.params)).toContain('coder@agent.hexis');
-      expect(JSON.stringify(where.params)).not.toContain('Coder@Agent.Hexis');
-    }
-  });
-
-  it('moves every address column the schema has, but the two a bot\'s domain change reaches otherwise', async () => {
-    // Every blind index of an address in the schema, as table.column.
-    const schema = readFileSync(fileURLToPath(new URL('../../../database/core-schema.ts', import.meta.url)), 'utf8');
-    const columns = new Set<string>();
-    let table = '';
-    for (const line of schema.split('\n')) {
-      table = /pgTable\('([a-z_]+)'/.exec(line)?.[1] ?? table;
-      const column = /blindIndexText\('([a-z_]*email[a-z_]*)'\)/.exec(line)?.[1];
-      if (column) columns.add(`${table}.${column}`);
-    }
-    const h = harness();
-    await h.svc.readdressIdentity(h.tx, 'coder@agent.hexis', 'coder@bots.acme.com');
-    const tables = h.order.filter((o) => o.startsWith('update:')).map((o) => o.slice('update:'.length));
-    const moved = h.wheres.map((w, i) => `${tables[i]}.${w.sql.replace(/^.*?"([a-z_]+)" = \$1$/, '$1')}`);
-    const reachedOtherwise = [
-      // The bot's own row: the domain change itself re-addresses it.
-      'users.email_bidx',
-      // Recorded only through a signed-in session's route; a bot holds no session.
-      'plugin_join_requests.requester_email_bidx',
-    ];
-    expect(new Set([...moved, ...reachedOtherwise])).toEqual(columns);
-  });
-
-  it('holdRecordWriters takes the same lock, exclusively, and touches no row', async () => {
-    const h = harness();
-    await h.svc.holdRecordWriters(h.tx);
-    expect(h.order).toEqual(['timeout', 'gate:exclusive']);
-    expect(h.locked).toEqual([[4207, 0]]);
-  });
-
-  it('touches nothing and takes no lock when the address does not change', async () => {
-    const h = harness();
-    await h.svc.readdressIdentity(h.tx, 'coder@agent.hexis', 'Coder@agent.hexis');
-    expect(h.order).toEqual([]);
   });
 });

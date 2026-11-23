@@ -82,7 +82,7 @@ describe('a bot in the access model', () => {
       ensureRemotesFetched: async () => undefined,
     } as unknown as WorkspaceService;
     book = botAddressBook();
-    book.replace({ domain: 'agent.hexis', botIds: ['release-helper'], previousDomain: null });
+    book.replace(['release-helper']);
     access = new AccessControlService(workspaceService, KB_DIR, realDisk(), [BOT], undefined, undefined, {}, undefined, undefined, book);
   });
   afterEach(async () => {
@@ -141,14 +141,10 @@ describe('a bot in the access model', () => {
     expect(await access.canRead(workspaceId, BOT, 'Denied/page.md')).toBe(false);
   });
 
-  it('after a domain change, is granted at its new address, and at the previous one while that still counts', async () => {
-    book.replace({ domain: 'agent.hexis', botIds: ['release-helper'], previousDomain: 'old.example' });
-    access.invalidate(workspaceId);
-    expect(await access.canRead(workspaceId, BOT, 'Old/page.md')).toBe(true);
-    expect(await access.canRead(workspaceId, BOT, 'Granted/notes.md')).toBe(true);
-    // Once the rewrite is merged the previous spelling stops counting.
-    book.replace({ domain: 'agent.hexis', botIds: ['release-helper'], previousDomain: null });
+  it('is granted only at agent.hexis: its id at another domain is somebody else', async () => {
     expect(await access.canRead(workspaceId, BOT, 'Old/page.md')).toBe(false);
+    expect(await access.canRead(workspaceId, BOT, 'Granted/notes.md')).toBe(true);
+    expect(access.isBot('release-helper@old.example')).toBe(false);
   });
 
   it('says whether an address is a bot\'s', () => {

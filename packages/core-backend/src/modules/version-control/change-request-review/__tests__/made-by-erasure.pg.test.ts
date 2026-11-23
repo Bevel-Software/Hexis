@@ -165,7 +165,7 @@ describe.skipIf(!PG_ADMIN_URL)('a record naming the person behind a bot, against
     const held = new Promise<void>((r) => (release = r));
     // An erasure that holds the lock and does not let go.
     const erasure = db.transaction(async (tx) => {
-      await svc.holdRecordWriters(tx);
+      await svc.eraseApprover(tx, 'nobody@example.com', ERASED);
       locked.open();
       await held;
     });

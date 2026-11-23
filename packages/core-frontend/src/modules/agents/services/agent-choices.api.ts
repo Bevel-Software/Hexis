@@ -16,7 +16,7 @@ export interface BotChoice {
   name: string;
   /** Its description, one line; empty when it has none. */
   description: string;
-  /** Its address, `<id>@<bots' domain>`. */
+  /** Its address, `<id>@agent.hexis`. */
   address: string;
   /** Why it cannot be chosen, in a few words; null when it can. A disabled choice is still listed. */
   unavailable: string | null;

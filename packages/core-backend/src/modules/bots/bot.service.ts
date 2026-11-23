@@ -1,43 +1,20 @@
 import { and, eq, isNotNull, isNull } from 'drizzle-orm';
 import { logger } from '../../shared/logging.js';
 import { canonicalEmail } from '../../shared/email-identity.js';
-import { redactSecret } from '../../shared/redact-secret.js';
 import type { Database } from '../database/index.js';
-import { AdvisoryLock, AdvisoryLockTimeoutError, users, withAdvisoryLock } from '../database/index.js';
+import { users } from '../database/index.js';
 import { BotAddressBook, botAddress } from './bot-address-book.js';
-import { botsDomainRefusal, normalizeBotsDomain } from './bot-domain.js';
-import type { DomainChange, IGrantRewriter } from './bot-domain-change.js';
-import type { AuthUser } from '@bevel-software/platform-shared';
 import {
-  DEFAULT_BOTS_DOMAIN,
   type BotChoice,
   type BotDefinition,
   type ConnectionChoice,
   type IBotDirectory,
   type IBots,
-  type IRecordedIdentity,
   type Principal,
   type ResolvedConnection,
 } from './bots.contract.js';
 
 const log = logger('bots');
-
-/** The settings the bots read and write (`DeploymentSettingsService` is one). */
-export interface BotSettings {
-  resolve(key: string): string;
-  /** `updatedByUserId` is a users row id (a uuid), never an address: the store keys it to `users.id`. */
-  record(entries: Record<string, string>, updatedByUserId: string | null): Promise<void>;
-  /** One setting as the database has it now, taken into this process's cache: what another process wrote. */
-  reload(key: string): Promise<string>;
-  /** Remove a setting's stored value, so it reads as unset. */
-  clear(key: string): Promise<void>;
-}
-
-/** The settings a domain change writes, re-read from the database when another process may have written them. */
-const DOMAIN_SETTINGS = ['botsDomain', 'botsPreviousDomain', 'botsDomainChangeRequest'] as const;
-
-/** How long a domain change waits for one already running before it is refused. */
-const DOMAIN_CHANGE_WAIT_MS = 5_000;
 
 /** A bot id that can be the local part of an address: lowercase letters, digits, dots, hyphens and underscores. */
 const BOT_ID = /^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/;
@@ -71,15 +48,6 @@ export function unusableSentence(label: string, problem: string): string {
   return `This connection was made as the bot "${label}", which cannot be used (${problem}), so it loads nothing until that is fixed.`;
 }
 
-/** A domain an admin may not give the bots, refused with the reason. */
-export class BotsDomainRefusedError extends Error {
-  readonly status = 422;
-  constructor(message: string) {
-    super(message);
-    this.name = 'BotsDomainRefusedError';
-  }
-}
-
 interface BotRow {
   id: string;
   botId: string;
@@ -100,7 +68,6 @@ export class BotService implements IBots {
 
   constructor(
     private readonly db: Database,
-    private readonly settings: BotSettings,
     private readonly directory: IBotDirectory,
     /**
      * The address book this service keeps current. Injected so the access
@@ -110,26 +77,7 @@ export class BotService implements IBots {
      * and auth, and `core/__tests__/bot-check-wired.test.ts` checks that it does.
      */
     readonly addresses: BotAddressBook = new BotAddressBook(),
-    /**
-     * The state of change request `number` (null when there is none) — what
-     * decides when a grant at the previous bots' domain stops counting (it is
-     * merged) and whether the domain may change again (it is not open).
-     * Absent, a previous domain counts until the next change.
-     */
-    private readonly changeRequestState?: (number: number) => Promise<'open' | 'merged' | 'closed' | null>,
-    /**
-     * What else names a bot by its address — its approvals and the change
-     * requests it authored — moved with its row on a domain change, in the
-     * same transaction. Absent, only the rows move (a deployment without
-     * change requests, and tests of the rows alone).
-     */
-    private readonly recorded?: IRecordedIdentity,
   ) {}
-
-  /** The bots' domain in effect. */
-  domain(): string {
-    return this.settings.resolve('botsDomain') || DEFAULT_BOTS_DOMAIN;
-  }
 
   /**
    * Read the bots' rows into the address book. Call once at boot, before
@@ -137,7 +85,7 @@ export class BotService implements IBots {
    */
   async load(): Promise<void> {
     this.rows = await this.readRows();
-    await this.refreshAddresses();
+    this.refreshAddresses();
   }
 
   /** The bots' rows as the database has them now. */
@@ -150,22 +98,6 @@ export class BotService implements IBots {
   }
 
   /**
-   * The rows, and the domain settings when a row moved, as the database has
-   * them now: another process may have changed the domain (or made, retired
-   * or renamed a bot) since this one last looked, and what it wrote is what
-   * holds. One read of the rows; the settings are read again only when a
-   * row's address is not at the domain this process holds, whether or not
-   * this process held that row.
-   */
-  private async catchUp(): Promise<void> {
-    const fresh = await this.readRows();
-    const domain = this.domain();
-    const moved = [...fresh.values()].some((r) => r.email !== botAddress(r.botId, domain));
-    this.rows = fresh;
-    if (moved) for (const key of DOMAIN_SETTINGS) await this.settings.reload(key);
-  }
-
-  /**
    * Bring the rows in line with the distribution's definitions: a row for
    * every id it names (made the first time, brought back if it was retired,
    * renamed when its name changed), and every row it no longer names
@@ -174,19 +106,16 @@ export class BotService implements IBots {
    */
   async sync(definitions?: readonly BotDefinition[]): Promise<Map<string, BotDefinition[]>> {
     const grouped = groupById(definitions ?? (await this.directory.definitions()));
-    await this.catchUp();
+    // The rows as the database has them now: another process may have made,
+    // retired or renamed a bot since this one last looked.
+    this.rows = await this.readRows();
     const now = new Date();
-    let domainReread = false;
     for (const [id, defs] of grouped) {
       if (!BOT_ID.test(id)) continue;
       const name = defs[0].name.trim() || id;
       const row = this.rows.get(id);
       if (!row) {
-        // A row is made rarely, and with no row held there is none to show
-        // that another process changed the domain: read it again first.
-        if (!domainReread) for (const key of DOMAIN_SETTINGS) await this.settings.reload(key);
-        domainReread = true;
-        const address = botAddress(id, this.domain());
+        const address = botAddress(id);
         const [made] = await this.db
           .insert(users)
           .values({ email: address, emailBidx: address, name, botId: id })
@@ -225,7 +154,7 @@ export class BotService implements IBots {
       // Retired, not deleted: its grants stay written, so the same id coming back inherits them.
       log.info(`bot "${row.botId}" is retired: nothing can act as it, and its grants stay until removed`);
     }
-    await this.refreshAddresses();
+    this.refreshAddresses();
     return grouped;
   }
 
@@ -239,7 +168,7 @@ export class BotService implements IBots {
         id,
         name: first.name.trim() || id,
         description: first.description.trim(),
-        address: botAddress(id, this.domain()),
+        address: botAddress(id),
         unavailable: this.problemOf(id, defs),
       });
     }
@@ -325,128 +254,6 @@ export class BotService implements IBots {
     };
   }
 
-  /**
-   * Change the bots' domain (the caller has checked `by` is an admin). Every
-   * bot is given its new address at once; one change request, opened as
-   * `by`, rewrites every grant written at the old domain; and until it is
-   * merged, a grant at the old domain still counts for its bot. Refuses a
-   * domain people's addresses use, or text that is not a domain. A request
-   * that cannot be opened is answered as `changeRequestError`, one sentence
-   * with any credential scrubbed, never as "nothing to rewrite": the
-   * addresses have changed, and the old spelling keeps counting until the
-   * next change, so the admin must learn that no request rewrites it.
-   */
-  async changeDomain(by: AuthUser, input: unknown, rewriter?: IGrantRewriter): Promise<DomainChange> {
-    // One change at a time, across processes, from the first check to the
-    // recorded request: until then the request number reads 0, which the
-    // next change could not tell from "no request".
-    try {
-      return await withAdvisoryLock(this.db, AdvisoryLock.BotsDomain, () => this.changeDomainHeld(by, input, rewriter), {
-        waitMs: DOMAIN_CHANGE_WAIT_MS,
-      });
-    } catch (err) {
-      if (err instanceof AdvisoryLockTimeoutError) {
-        throw new BotsDomainRefusedError('The bots\' domain is being changed already. Try again once that change is done.');
-      }
-      throw err;
-    }
-  }
-
-  /** {@link changeDomain}, under its lock. */
-  private async changeDomainHeld(by: AuthUser, input: unknown, rewriter?: IGrantRewriter): Promise<DomainChange> {
-    // What a change on another process recorded, read again: the checks
-    // below judge the domain as it is, not as this process last saw it.
-    for (const key of DOMAIN_SETTINGS) await this.settings.reload(key);
-    const domain = normalizeBotsDomain(input);
-    const current = this.domain();
-    const people = await this.db.select({ email: users.email }).from(users).where(isNull(users.botId));
-    const refusal = botsDomainRefusal(domain, people.map((p) => p.email), current);
-    if (refusal) throw new BotsDomainRefusedError(refusal);
-    // Only one previous domain is kept. While the last change's rewrite is
-    // still open, its grants count only through that previous domain, so a
-    // second change now would cut them off before anyone merged it.
-    const pending = await this.openRewrite();
-    if (pending !== null) {
-      throw new BotsDomainRefusedError(
-        `The change request rewriting the grants at ${this.settings.resolve('botsPreviousDomain')} (#${pending}) is still open. Merge or decline it, then change the domain again.`,
-      );
-    }
-    // Every bot the distribution names now, not only the rows made so far:
-    // a bot defined since the last look gets its row and is re-addressed and
-    // rewritten with the rest.
-    await this.sync();
-
-    // The rows first, in one transaction, and the settings only once they
-    // are written: a failed transaction leaves both as they were. Settings
-    // that cannot be recorded (the store writes them one at a time, so some
-    // may have landed) put the rows back and the settings back to what they
-    // read before, so the two disagree only if putting them back fails too.
-    // What names a bot by its address (see `IRecordedIdentity`) moves in the
-    // same transaction as its row, and back with it: the record writers are
-    // held off before any row is touched, then each row and what names it.
-    const now = new Date();
-    const before = new Map(this.rows);
-    const settingsBefore = DOMAIN_SETTINGS.map((key) => [key, this.settings.resolve(key)] as const);
-    const moves = [...before.values()].map((row) => ({ id: row.id, from: row.email, to: botAddress(row.botId, domain) }));
-    const readdress = (back: boolean) =>
-      this.db.transaction(async (tx) => {
-        await this.recorded?.holdRecordWriters(tx);
-        for (const move of moves) {
-          const [from, to] = back ? [move.to, move.from] : [move.from, move.to];
-          await tx.update(users).set({ email: to, emailBidx: to, updatedAt: now }).where(eq(users.id, move.id));
-          await this.recorded?.readdressIdentity(tx, from, to);
-        }
-      });
-    await readdress(false);
-    // What a connection resolves from now on is the new address, the moment
-    // the rows say so, not once the settings below are written: the book
-    // takes the new domain, and the old one still counts (its rewrite is not
-    // open yet).
-    for (const row of before.values()) this.rows.set(row.botId, { ...row, email: botAddress(row.botId, domain) });
-    this.addresses.replace({ domain, botIds: [...this.rows.keys()], previousDomain: current });
-    try {
-      await this.settings.record({ botsDomain: domain, botsPreviousDomain: current, botsDomainChangeRequest: '0' }, by.id);
-    } catch (err) {
-      await readdress(true);
-      for (const [id, row] of before) this.rows.set(id, row);
-      try {
-        for (const [key, value] of settingsBefore) {
-          if (value) await this.settings.record({ [key]: value }, by.id);
-          else await this.settings.clear(key);
-        }
-      } catch (restoreErr) {
-        log.error("putting the bots' domain settings back failed; they may name a domain the rows do not", { err: restoreErr });
-      }
-      await this.refreshAddresses();
-      throw err;
-    }
-    await this.refreshAddresses();
-
-    let changeRequest: number | null = null;
-    let changeRequestError: string | undefined;
-    try {
-      changeRequest = rewriter ? await rewriter.open(by, current, domain, [...this.rows.keys()]) : null;
-    } catch (err) {
-      // The message only, scrubbed: a git failure quotes its remote back.
-      const why = redactSecret(err instanceof Error ? err.message : String(err));
-      log.warn(`opening the change request that rewrites the bots' grants failed; the previous domain keeps counting: ${why}`);
-      changeRequestError =
-        `The change request rewriting the grants at ${current} could not be opened (${why}), so those grants still count until the domain is changed again.`;
-    }
-    if (changeRequest !== null) await this.settings.record({ botsDomainChangeRequest: String(changeRequest) }, by.id);
-    await this.refreshAddresses();
-    log.info(`bots' domain changed from ${current} to ${domain}`);
-    return changeRequestError ? { domain, changeRequest, changeRequestError } : { domain, changeRequest };
-  }
-
-  /**
-   * Re-read whether the previous domain still counts — call when a change
-   * request is merged, so a merged rewrite stops the old spelling at once.
-   */
-  async refresh(): Promise<void> {
-    await this.refreshAddresses();
-  }
-
   /** Why the bot `id`, defined by `defs`, cannot be used; null when it can. */
   private problemOf(id: string, defs: readonly BotDefinition[]): string | null {
     if (defs.length > 1) return duplicateIdProblem(id);
@@ -466,41 +273,9 @@ export class BotService implements IBots {
     return false;
   }
 
-  /** Rebuild the address book from the rows and the domain settings. */
-  private async refreshAddresses(): Promise<void> {
-    this.addresses.replace({
-      domain: this.domain(),
-      botIds: [...this.rows.keys()],
-      previousDomain: await this.previousDomainInEffect(),
-    });
-  }
-
-  /** The number of the last domain change's rewrite while it is open; null otherwise. */
-  private async openRewrite(): Promise<number | null> {
-    if (!this.settings.resolve('botsPreviousDomain')) return null;
-    const number = Number(this.settings.resolve('botsDomainChangeRequest'));
-    if (!this.changeRequestState || !Number.isInteger(number) || number <= 0) return null;
-    // Cannot tell: refused as if open, rather than cut its grants off.
-    const state = await this.changeRequestState(number).catch((err: unknown) => {
-      log.warn(`reading the state of the bots' domain rewrite #${number} failed; it is taken as still open`, { err });
-      return 'open' as const;
-    });
-    return state === 'open' ? number : null;
-  }
-
-  /** The previous bots' domain while grants at it still count: until its change request is merged. */
-  private async previousDomainInEffect(): Promise<string | null> {
-    const previous = this.settings.resolve('botsPreviousDomain');
-    if (!previous) return null;
-    const number = Number(this.settings.resolve('botsDomainChangeRequest'));
-    if (!this.changeRequestState || !Number.isInteger(number) || number <= 0) return previous;
-    try {
-      return (await this.changeRequestState(number)) === 'merged' ? null : previous;
-    } catch (err) {
-      // Cannot tell: the old spelling keeps counting rather than cutting a bot off.
-      log.warn('could not read the domain change request; the previous domain still counts', { err });
-      return previous;
-    }
+  /** Rebuild the address book from the rows. */
+  private refreshAddresses(): void {
+    this.addresses.replace([...this.rows.keys()]);
   }
 }
 

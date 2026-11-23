@@ -47,28 +47,6 @@ export function madeByTrailer(madeBy: { name: string; email: string } | undefine
 type RecordTx = Parameters<Parameters<Database['transaction']>[0]>[0];
 
 /**
- * The address a record of `user`'s action names them by (an approval's
- * approver, a change request's author, a merge or a refusal's history),
- * read in `tx`, the transaction that writes the record.
- *
- * A person's is the address they act under. A BOT's is read from its row,
- * holding the row (`FOR SHARE`) until `tx` ends: a bots' domain change
- * re-addresses the row and moves what names it in one transaction
- * (`readdressIdentity`), and the row lock orders the two. A record written
- * after that change committed names the new address, however long ago the
- * connection resolved the bot; one whose row lock came first holds the
- * change back until it is written, and the change then moves it with the
- * rest. So no record of a bot is left at an address the bot no longer has.
- * A row that is not there (never so for a bot: its row is retired, not
- * deleted) leaves the address the call was made under.
- */
-export async function recordedAddress(tx: RecordTx, user: Pick<AuthUser, 'id' | 'email' | 'madeBy'>): Promise<string> {
-  if (!user.madeBy) return canonicalEmail(user.email);
-  const [row] = await tx.select({ email: users.email }).from(users).where(eq(users.id, user.id)).limit(1).for('share');
-  return canonicalEmail(row?.email ?? user.email);
-}
-
-/**
  * The person who made a bot's connection has no account any more: an
  * erasure committed while the call was in flight. Nothing is recorded in
  * their name; the call is refused, and the connection's next call loads
@@ -95,10 +73,6 @@ export class ConnectionMakerGoneError extends VersionControlDomainError {
  * record keeps of them; an account made again at the same address since is
  * a new person, but one who answers to the address the record names. A no-op
  * for a person's own action, which names nobody behind it.
- *
- * Call it before `recordedAddress`: the lock comes first in every writer, as
- * it does in a bots' domain change (`holdRecordWriters`), so neither can
- * wait on the other's row while holding what that one waits on.
  */
 export async function holdMaker(tx: RecordTx, madeBy: { email: string } | undefined): Promise<void> {
   if (!madeBy) return;
@@ -110,8 +84,7 @@ export async function holdMaker(tx: RecordTx, madeBy: { email: string } | undefi
 
 /**
  * A record naming the person behind a bot waited for the record writers'
- * lock (`holdMaker`) longer than its bound: an account erasure or a bots' domain
- * change (`holdRecordWriters`) held it. Nothing was written; retryable by
+ * lock (`holdMaker`) longer than its bound: an account erasure held it. Nothing was written; retryable by
  * the caller, as an approval write that waited too long is.
  */
 export class RecordWriterBusyError extends VersionControlDomainError {
@@ -156,11 +129,10 @@ export async function inMakerTransaction<T>(
 
 /**
  * Write a record of `user`'s action that names them: `write` gets where to
- * write and the address to name. A person's write runs as it is, on `db`,
- * with the address they act under. A bot's runs in `inMakerTransaction`,
+ * write and the address to name, the address `user` acts under. A person's
+ * write runs as it is, on `db`. A bot's runs in `inMakerTransaction`,
  * which first makes sure the person behind it still has an account
- * (`holdMaker`), then reads the bot's address from its row
- * (`recordedAddress`). A record that keeps nothing of that person
+ * (`holdMaker`). A record that keeps nothing of that person
  * (`namesMaker: false`, e.g. who could not apply a request, which names the
  * bot alone) skips the first step.
  */
@@ -170,11 +142,7 @@ export async function writeNamingActor<T>(
   write: (q: Database, address: string) => Promise<T>,
   { namesMaker = true }: { namesMaker?: boolean } = {},
 ): Promise<T> {
-  if (!user.madeBy) return write(db, canonicalEmail(user.email));
-  return inMakerTransaction(
-    db,
-    user.madeBy,
-    async (tx) => write(tx as unknown as Database, await recordedAddress(tx, user)),
-    { namesMaker },
-  );
+  const address = canonicalEmail(user.email);
+  if (!user.madeBy) return write(db, address);
+  return inMakerTransaction(db, user.madeBy, async (tx) => write(tx as unknown as Database, address), { namesMaker });
 }

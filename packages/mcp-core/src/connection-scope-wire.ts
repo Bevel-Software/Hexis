@@ -33,7 +33,7 @@ export const BOT_ONLY_TOOLS: ReadonlySet<string> = new Set(['approve_change_requ
 /** The bot a connection was made as. */
 export interface ScopeAgent {
   /**
-   * How the bot is addressed: its address (`<id>@<bots' domain>`), or what
+   * How the bot is addressed: its address (`<id>@agent.hexis`), or what
    * the connection recorded when the bot cannot be found. Named `path` on the
    * wire because local servers released before bots read it by that name.
    */

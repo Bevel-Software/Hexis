@@ -2059,7 +2059,7 @@ export function registerWorkspaceTools(
             'The bot this connection was made as, `{ path, name }`. Null when it was made as Myself.',
           properties: {
             path: str(
-              "The bot's address (`<id>@<bots' domain>`). For a bot that cannot be used, the id or legacy path it was made with.",
+              "The bot's address (`<id>@agent.hexis`). For a bot that cannot be used, the id or legacy path it was made with.",
             ),
             name: str("The bot's name; `unknown` when no bot answers to the connection any more."),
           },

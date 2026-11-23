@@ -119,19 +119,3 @@ function settingsTable(): Database {
     }),
   } as unknown as Database;
 }
-
-/**
- * Deployment settings over a REAL database, as the root builds them: for a
- * Postgres suite whose settings must live in the migrated schema beside the
- * rows that reference them (`users.id` for who recorded a change). With a
- * secrets key, as the root has one, so a secret setting is written and read
- * encrypted as it is in a deployment; pass `encryptionKey` for a suite that
- * reads rows another service wrote with its own.
- */
-export function deploymentSettingsOver(
-  db: Database,
-  env: NodeJS.ProcessEnv = {},
-  encryptionKey: string = randomBytes(32).toString('base64'),
-): Settings {
-  return new DeploymentSettingsService(db, encryptionKey, undefined, { env });
-}

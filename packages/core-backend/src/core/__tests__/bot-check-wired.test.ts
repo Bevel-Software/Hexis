@@ -54,7 +54,7 @@ describe('the bot check the composition root wires', () => {
     // default) would fill that one, and access and auth would never see a bot.
     expect(source.match(/const botAddresses\b/g) ?? []).toHaveLength(1);
     expect(source.match(/new BotService\(/g) ?? [], 'BotService is constructed once in the root').toHaveLength(1);
-    expect(source).toMatch(/new BotService\(\s*db,\s*settings,\s*botDirectory,\s*botAddresses,/);
+    expect(source).toMatch(/new BotService\(\s*db,\s*botDirectory,\s*botAddresses\s*\)/);
   });
 
   it('resolves the plugin creation doors’ caller as every tool call does, so a bot’s provisioning names its maker', async () => {

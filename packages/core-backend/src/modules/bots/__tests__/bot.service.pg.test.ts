@@ -39,20 +39,6 @@ function directory() {
   return { state, dir };
 }
 
-function settings(initial: Record<string, string> = {}) {
-  const values = new Map(Object.entries(initial));
-  return {
-    resolve: (k: string) => values.get(k) ?? '',
-    reload: async (k: string) => values.get(k) ?? '',
-    clear: async (k: string) => {
-      values.delete(k);
-    },
-    record: async (entries: Record<string, string>) => {
-      for (const [k, v] of Object.entries(entries)) values.set(k, v);
-    },
-  };
-}
-
 describe.skipIf(!PG_ADMIN_URL)('bots on a real Postgres', () => {
   let db: Database;
   let closeDb: () => Promise<void>;
@@ -76,7 +62,7 @@ describe.skipIf(!PG_ADMIN_URL)('bots on a real Postgres', () => {
   }
 
   it('core alone supplies no bot: no row, no choice, and every connection is the person\'s', async () => {
-    const service = new BotService(db, settings(), { definitions: async () => [], mayActAs: async () => false });
+    const service = new BotService(db, { definitions: async () => [], mayActAs: async () => false });
     await service.load();
     expect(await service.choicesFor(PERSON.email)).toEqual([]);
     expect(await service.resolveConnection(PERSON, { botUserId: null, agentPath: null })).toEqual({ kind: 'myself' });
@@ -87,7 +73,7 @@ describe.skipIf(!PG_ADMIN_URL)('bots on a real Postgres', () => {
     const { state, dir } = directory();
     state.defs = [def('release-helper')];
     const book = new BotAddressBook();
-    const service = new BotService(db, settings(), dir, book);
+    const service = new BotService(db, dir, book);
     await service.load();
     await service.sync();
     const row = await rowOf('release-helper');
@@ -101,7 +87,7 @@ describe.skipIf(!PG_ADMIN_URL)('bots on a real Postgres', () => {
     state.defs = [def('coder'), def('mechanic'), def('reader-only')];
     state.writers.set('Agents/coder.agent', new Set([PERSON.email]));
     state.writers.set('Agents/mechanic.agent', new Set([PERSON.email]));
-    const service = new BotService(db, settings(), dir);
+    const service = new BotService(db, dir);
     await service.load();
     const choices = await service.choicesFor(PERSON.email);
     expect(choices.map((c) => c.id)).toEqual(['coder', 'mechanic']);
@@ -115,7 +101,7 @@ describe.skipIf(!PG_ADMIN_URL)('bots on a real Postgres', () => {
     const { state, dir } = directory();
     state.defs = [def('twin', { source: 'Agents/a/twin.agent' }), def('twin', { source: 'Agents/b/twin.agent' })];
     state.writers.set('Agents/a/twin.agent', new Set([PERSON.email]));
-    const service = new BotService(db, settings(), dir);
+    const service = new BotService(db, dir);
     await service.load();
     expect(await service.choicesFor(PERSON.email)).toEqual([
       expect.objectContaining({ id: 'twin', unavailable: 'two files share the id twin' }),
@@ -130,7 +116,7 @@ describe.skipIf(!PG_ADMIN_URL)('bots on a real Postgres', () => {
     const { state, dir } = directory();
     state.defs = [def('ops', { platformTools: ['read_file'] })];
     state.writers.set('Agents/ops.agent', new Set([PERSON.email]));
-    const service = new BotService(db, settings(), dir);
+    const service = new BotService(db, dir);
     await service.load();
     const bot = (await service.actAs(PERSON.email, 'ops'))!;
     const choice = { botUserId: bot.id, agentPath: null };
@@ -169,7 +155,7 @@ describe.skipIf(!PG_ADMIN_URL)('bots on a real Postgres', () => {
     const { state, dir } = directory();
     state.defs = [def('quiet', { name: 'Quiet' })];
     state.writers.set('Agents/quiet.agent', new Set([PERSON.email]));
-    const service = new BotService(db, settings(), dir);
+    const service = new BotService(db, dir);
     await service.load();
     const bot = (await service.actAs(PERSON.email, 'quiet'))!;
     // Renamed, and the maker loses write on what defines it.
@@ -193,7 +179,7 @@ describe.skipIf(!PG_ADMIN_URL)('bots on a real Postgres', () => {
         return dir.mayActAs(email, d);
       },
     };
-    const service = new BotService(db, settings(), failing);
+    const service = new BotService(db, failing);
     await service.load();
     const bot = (await service.actAs(PERSON.email, 'ops'))!;
     definitions.mockClear();
@@ -214,7 +200,7 @@ describe.skipIf(!PG_ADMIN_URL)('bots on a real Postgres', () => {
     state.defs = [def('phoenix')];
     state.writers.set('Agents/phoenix.agent', new Set([PERSON.email]));
     const book = new BotAddressBook();
-    const service = new BotService(db, settings(), dir, book);
+    const service = new BotService(db, dir, book);
     await service.load();
     await service.sync();
     const first = await rowOf('phoenix');
@@ -238,11 +224,11 @@ describe.skipIf(!PG_ADMIN_URL)('bots on a real Postgres', () => {
   it('a failed listing retires nothing', async () => {
     const { state, dir } = directory();
     state.defs = [def('steady')];
-    const service = new BotService(db, settings(), dir);
+    const service = new BotService(db, dir);
     await service.load();
     await service.sync();
     state.defs = undefined as never; // the distribution cannot list: definitions() rejects below
-    const failing = new BotService(db, settings(), { ...dir, definitions: async () => Promise.reject(new Error('repo down')) });
+    const failing = new BotService(db, { ...dir, definitions: async () => Promise.reject(new Error('repo down')) });
     await failing.load();
     await expect(failing.sync()).rejects.toThrow('repo down');
     expect((await rowOf('steady'))!.botRetiredAt).toBeNull();
@@ -253,7 +239,7 @@ describe.skipIf(!PG_ADMIN_URL)('bots on a real Postgres', () => {
     state.defs = [def('legacy-bot')];
     state.writers.set('Agents/legacy-bot.agent', new Set([PERSON.email]));
     state.legacy.set('Agents/legacy-bot.agent', 'legacy-bot');
-    const service = new BotService(db, settings(), dir);
+    const service = new BotService(db, dir);
     await service.load();
     expect(await service.resolveConnection(PERSON, { botUserId: null, agentPath: 'Agents/legacy-bot.agent' })).toMatchObject({
       kind: 'bot',
@@ -270,42 +256,25 @@ describe.skipIf(!PG_ADMIN_URL)('bots on a real Postgres', () => {
     });
   });
 
-  it('reads the domain again before making a row, so a change another process made is the one the new row takes', async () => {
+  it('takes up a row another process made since it last looked, at <id>@agent.hexis', async () => {
     const { state, dir } = directory();
-    state.defs = [def('latecomer')];
-    // What this process cached, and what the database says since another process changed it.
-    const cached = new Map<string, string>();
-    const stored = new Map<string, string>([['botsDomain', 'late.acme.com']]);
-    const lagging = {
-      resolve: (k: string) => cached.get(k) ?? '',
-      reload: async (k: string) => {
-        const v = stored.get(k) ?? '';
-        if (v) cached.set(k, v);
-        else cached.delete(k);
-        return v;
-      },
-      clear: async (k: string) => {
-        stored.delete(k);
-        cached.delete(k);
-      },
-      record: async (entries: Record<string, string>) => {
-        for (const [k, v] of Object.entries(entries)) {
-          stored.set(k, v);
-          cached.set(k, v);
-        }
-      },
-    };
-    const service = new BotService(db, lagging, dir);
-    await service.load();
-    await service.sync();
-    expect((await rowOf('latecomer'))!.email).toBe('latecomer@late.acme.com');
+    state.defs = [def('elsewhere')];
+    const book = new BotAddressBook();
+    const here = new BotService(db, dir, book);
+    await here.load();
+    await new BotService(db, dir).sync();
+    expect(book.isBot('elsewhere@agent.hexis')).toBe(false);
+    await here.sync();
+    expect(book.isBot('elsewhere@agent.hexis')).toBe(true);
+    const rows = await db.select().from(users).where(eq(users.botId, 'elsewhere'));
+    expect(rows.map((r) => r.email)).toEqual(['elsewhere@agent.hexis']);
   });
 
   it('a bot may act as another bot under the rule a person follows', async () => {
     const { state, dir } = directory();
     state.defs = [def('lead'), def('helper'), def('locked')];
     state.writers.set('Agents/helper.agent', new Set(['lead@agent.hexis']));
-    const service = new BotService(db, settings(), dir);
+    const service = new BotService(db, dir);
     await service.load();
     expect(await service.actAs('lead@agent.hexis', 'helper')).toMatchObject({ botId: 'helper' });
     expect(await service.actAs('lead@agent.hexis', 'locked')).toBeNull();
@@ -316,7 +285,7 @@ describe.skipIf(!PG_ADMIN_URL)('bots on a real Postgres', () => {
     const { state, dir } = directory();
     state.defs = [def('clash')];
     state.writers.set('Agents/clash.agent', new Set([PERSON.email]));
-    const service = new BotService(db, settings(), dir);
+    const service = new BotService(db, dir);
     await service.load();
     expect(await service.choicesFor(PERSON.email)).toEqual([
       expect.objectContaining({ id: 'clash', unavailable: 'its address belongs to a person' }),

@@ -193,7 +193,6 @@ interface AccessModel {
 /** The address book of a deployment without bots: nobody is one. */
 const NO_BOTS: IBotAddresses = {
   isBot: () => false,
-  addressesOf: (email) => [email],
   domain: () => '',
 };
 
@@ -552,8 +551,7 @@ function principalKeysOf(model: AccessModel, email: string): Set<string> | undef
 }
 
 /**
- * A bot's principal keys: the groups its address is a member of (at the
- * current bots' domain, or at the previous one while that still counts), and
+ * A bot's principal keys: the groups its address is a member of, and
  * the plugin principals expanded from those groups. Never a role's key, a
  * role that folds one of its groups in included; never a public key, which
  * is what `everyone` holds; never the owner's Admin keys. Undefined when it
@@ -561,10 +559,8 @@ function principalKeysOf(model: AccessModel, email: string): Set<string> | undef
  */
 function botKeysOf(model: AccessModel, email: string): Set<string> | undefined {
   const groups = new Set<string>();
-  for (const address of model.bots.addressesOf(email)) {
-    for (const key of model.roles.byEmail.get(address) ?? []) {
-      if (model.roles.byCanonical.get(key)?.kind === 'group') groups.add(key);
-    }
+  for (const key of model.roles.byEmail.get(email) ?? []) {
+    if (model.roles.byCanonical.get(key)?.kind === 'group') groups.add(key);
   }
   if (groups.size === 0) return undefined;
   const keys = new Set(groups);
@@ -801,8 +797,7 @@ function decidePermissionResolved(
     if (adminFloor && isAdminFloorScope(scope, relativePath)) return { allowed: true, scope, via: 'admin-floor' };
 
     // Tier 1 — direct email entry is the most specific verdict at this scope.
-    // A bot's grant may still be written at the previous bots' domain.
-    const direct = bot ? directEntryOfBot(model, scope, email) : scope.byEmail.get(email);
+    const direct = scope.byEmail.get(email);
     if (direct) return { allowed: direct === 'grant', scope, via: 'email', key: email };
 
     // Tier 2 — the caller's roles. A grant via any one of them wins over a deny
@@ -834,15 +829,6 @@ function decidePermissionResolved(
   return adminFloor
     ? { allowed: true, scope: null, via: 'admin-floor' }
     : { allowed: false, scope: null, via: 'default-deny' };
-}
-
-/** A bot's direct entry at `scope`: under its current address first, then its previous-domain one. */
-function directEntryOfBot(model: AccessModel, scope: AccessScope, email: string): GrantState | undefined {
-  for (const address of model.bots.addressesOf(email)) {
-    const entry = scope.byEmail.get(address);
-    if (entry) return entry;
-  }
-  return undefined;
 }
 
 /**
@@ -1407,14 +1393,9 @@ function eligibleHoldersResolved(
   const roles = [...new Set(principals.map((p) => p.name))];
 
   const users: { name: string; email: string }[] = [];
-  const listed = new Set<string>();
-  for (const [named, state] of byEmail) {
+  for (const [email, state] of byEmail) {
     if (state !== 'grant') continue;
-    // A bot granted at the previous domain is listed under its current address, once.
-    const email = currentAddressOf(model, named);
-    if (listed.has(email)) continue;
     if (!hasPermissionResolved(model, verb, email, relativePath, fileOwn)) continue;
-    listed.add(email);
     users.push({ name: '', email });
   }
   users.sort((a, b) => a.email.localeCompare(b.email));
@@ -1461,10 +1442,7 @@ function holderChangesFor(verb: 'read' | 'write', here: MoveSide, there: MoveSid
         principalKeysOfToken(side.model, token),
       );
     }
-    // Raw grant keys: a bot granted at the previous domain is put under its
-    // current address, the spelling the holder lists above already use, so
-    // it is one candidate and not two.
-    for (const email of byEmail.keys()) people.add(currentAddressOf(side.model, email));
+    for (const email of byEmail.keys()) people.add(email);
   }
   const lose: HolderChange[] = [];
   const gain: HolderChange[] = [];
@@ -1495,23 +1473,10 @@ function holderChangesFor(verb: 'read' | 'write', here: MoveSide, there: MoveSid
  * names Admin even when `roles.yaml` does not list them).
  */
 function namedCandidateEmails(model: AccessModel, byEmail: CollapsedScope['byEmail']): Set<string> {
-  const candidates = new Set<string>();
-  for (const email of model.deploymentOwners) candidates.add(currentAddressOf(model, email));
-  for (const email of model.roles.byEmail.keys()) candidates.add(currentAddressOf(model, email));
-  for (const email of byEmail.keys()) candidates.add(currentAddressOf(model, email));
+  const candidates = new Set<string>(model.deploymentOwners);
+  for (const email of model.roles.byEmail.keys()) candidates.add(email);
+  for (const email of byEmail.keys()) candidates.add(email);
   return candidates;
-}
-
-/**
- * The address a named address acts under now: a bot's address at the
- * previous bots' domain, while grants there still count, is the bot's
- * current address; any other address is itself. Every list of holders (the
- * approval gate's eligible and excluded sets, the eligible-users display)
- * names a bot by the address it approves and commits with, so a grant still
- * written at the old domain counts there exactly as it counts for reads.
- */
-function currentAddressOf(model: AccessModel, email: string): string {
-  return model.bots.addressesOf(email)[0] ?? email;
 }
 
 /**
