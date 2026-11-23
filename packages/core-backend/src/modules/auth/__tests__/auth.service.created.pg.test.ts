@@ -5,6 +5,7 @@ import { runCoreMigrations } from '../../database/migrate.js';
 import { coreMigrationsDir } from '../../../assets.js';
 import { PG_ADMIN_URL, PG_TEST_TIMEOUT, dropScratchDatabases, scratchDatabaseUrl } from '../../../__tests__/pg-scratch.js';
 import { AuthService } from '../auth.service.js';
+import { noBotAddresses } from '../../../__tests__/real-auth.js';
 
 /**
  * Whether an account is NEW is answered by the upsert's own returned row,
@@ -34,7 +35,7 @@ describe.skipIf(!PG_ADMIN_URL)('whether an account is new, on a real Postgres', 
     'says created once per address: the insert, and never the conflict-update after it',
     async () => {
       const db = await migratedDatabase();
-      const auth = new AuthService(db, { jwtSecret: 'test-jwt-secret', adminEmail: '', adminPassword: '', allowedEmailDomains: [] });
+      const auth = new AuthService(db, { jwtSecret: 'test-jwt-secret', adminEmail: '', adminPassword: '', allowedEmailDomains: [] }, undefined, noBotAddresses);
 
       // Without a password: the first write inserts, the second only updates.
       const first = await auth.createAccountWithoutPassword('Lena@Acme.test', 'Lena');

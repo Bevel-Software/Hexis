@@ -82,8 +82,6 @@ export interface BotAddressCheck {
   domain(): string;
 }
 
-const NO_BOT_ADDRESSES: BotAddressCheck = { isBot: () => false, domain: () => '' };
-
 /** What an admin is told when they try to switch an owner off. */
 export const OWNER_SWITCH_OFF_REFUSAL = "The owner can't be switched off.";
 
@@ -203,10 +201,11 @@ export class AuthService implements IAccountSwitchGuard {
     private readonly admission: IAccountAdmission = admitEveryone,
     /**
      * Which addresses are bots' — refused on every path that signs in,
-     * makes, invites or syncs a person. Defaulted for the many fixtures that
-     * construct this service without bots.
+     * makes, invites or syncs a person. Required, with no default: a
+     * construction that forgets it fails to compile instead of letting people
+     * in at bots' addresses.
      */
-    private readonly bots: BotAddressCheck = NO_BOT_ADDRESSES,
+    private readonly bots: BotAddressCheck,
   ) {}
 
   /**

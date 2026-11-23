@@ -9,6 +9,7 @@ import { SessionEndedError } from '../account-admission.js';
 import { createAuthRoutes } from '../auth.routes.js';
 import { AUTH_COOKIE_NAME, createAuthMiddleware } from '../auth.middleware.js';
 import { verifyPassword } from '../password-hash.js';
+import { noBotAddresses } from '../../../__tests__/real-auth.js';
 
 /**
  * Something to run once, the next time a password is hashed: a change hashes
@@ -47,7 +48,7 @@ describe.skipIf(!PG_ADMIN_URL)('a password change and the sessions opened before
 
   beforeAll(async () => {
     ({ db, close: closeDb } = await openMigratedScratchDb('hexis_pwchange'));
-    auth = new AuthService(db, { jwtSecret: JWT_SECRET, adminEmail: '', adminPassword: '', allowedEmailDomains: [] });
+    auth = new AuthService(db, { jwtSecret: JWT_SECRET, adminEmail: '', adminPassword: '', allowedEmailDomains: [] }, undefined, noBotAddresses);
     const app = express();
     app.use(express.json());
     app.use('/api', createAuthRoutes(auth, createAuthMiddleware(auth)));
@@ -223,7 +224,7 @@ describe.skipIf(!PG_ADMIN_URL)('a password change and the sessions opened before
     async () => {
       // A second process on the same database, with its own cache, which has
       // just seen the session live.
-      const replica = new AuthService(db, { jwtSecret: JWT_SECRET, adminEmail: '', adminPassword: '', allowedEmailDomains: [] });
+      const replica = new AuthService(db, { jwtSecret: JWT_SECRET, adminEmail: '', adminPassword: '', allowedEmailDomains: [] }, undefined, noBotAddresses);
       await auth.createAccount('omar@acme.test', 'Omar', 'old-password-1');
       const laptop = await signIn('omar@acme.test', 'old-password-1');
       const changer = await signIn('omar@acme.test', 'old-password-1');

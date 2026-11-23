@@ -9,6 +9,7 @@ import { VersionControlDomainError } from '../../../shared/domain-errors.js';
 import { hashPassword } from '../password-hash.js';
 import type { Database } from '../../database/index.js';
 import type { IAdminAccessService } from '../../admin/index.js';
+import { noBotAddresses } from '../../../__tests__/real-auth.js';
 
 const authService = {
   listAccounts: vi.fn(async () => [
@@ -273,7 +274,7 @@ describe('account routes — admin gate', () => {
       adminEmail: 'root@example.com',
       adminPassword: 'env-admin-secret',
       allowedEmailDomains: [],
-    });
+    }, undefined, noBotAddresses);
     const app = express();
     app.use((req, _res, next) => {
       req.userId = 'caller';
@@ -709,7 +710,7 @@ describe('account routes — the owner cannot be locked out', () => {
       adminPassword,
       allowedEmailDomains: [],
       loginPasswordEnabled: opts.loginPasswordEnabled,
-    });
+    }, undefined, noBotAddresses);
     const app = express();
     app.use(express.json());
     app.use((req, _res, next) => {

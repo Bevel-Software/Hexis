@@ -1,4 +1,4 @@
-import { AuthService } from '../modules/auth/auth.service.js';
+import { AuthService, type BotAddressCheck } from '../modules/auth/auth.service.js';
 
 /**
  * The auth service, constructed the way the composition root constructs it
@@ -11,3 +11,11 @@ import { AuthService } from '../modules/auth/auth.service.js';
 export function realAuthService(...args: ConstructorParameters<typeof AuthService>): AuthService {
   return new AuthService(...args);
 }
+
+/**
+ * The bots' address check for a suite that exercises no bot: no address is a
+ * bot's and there is no bots' domain. The service takes its check with no
+ * default (the composition root passes the bot service's), so a suite that
+ * means "no bots" says so with this.
+ */
+export const noBotAddresses: BotAddressCheck = { isBot: () => false, domain: () => '' };

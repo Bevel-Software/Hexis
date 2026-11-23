@@ -321,7 +321,15 @@ describe('VersionControlService.releaseLock — new (enqueue, no synchronous com
     const svc = makeFacade(git, locks, pending, events);
 
     await svc.releaseLock('ws-1', 'feat/x', 'foo.md', BOT_USER);
-    expect(pending.enqueue).toHaveBeenCalledWith(expect.objectContaining({ path: 'foo.md', madeBy: BOT_USER.madeBy }));
+    // The bot is the queued author; the person behind it rides only in `madeBy`.
+    expect(pending.enqueue).toHaveBeenCalledWith({
+      workspaceId: 'ws-1',
+      branch: 'feat/x',
+      path: 'foo.md',
+      authorEmail: BOT_USER.email,
+      authorName: BOT_USER.name,
+      madeBy: BOT_USER.madeBy,
+    });
     expect(git.discardPath).not.toHaveBeenCalled();
     expect(locks.release).toHaveBeenCalledTimes(1);
   });

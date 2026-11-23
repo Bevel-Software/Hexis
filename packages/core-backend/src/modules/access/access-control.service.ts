@@ -1724,7 +1724,9 @@ export class AccessControlService implements IAccessControl {
     /**
      * Which addresses are bots' (`modules/bots`), read on every decision.
      * Defaulted for the same reason as `deploymentOwners`: the fixtures that
-     * construct this service directly run without bots.
+     * construct this service directly run without bots. Without it every bot
+     * reads as a person, so the composition root's passing the real book is
+     * held by `core/__tests__/bot-check-wired.test.ts`.
      */
     private readonly bots: IBotAddresses = NO_BOTS,
   ) {

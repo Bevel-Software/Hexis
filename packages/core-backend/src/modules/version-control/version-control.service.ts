@@ -354,8 +354,8 @@ export class VersionControlService implements IVersionControlService {
      * Whether an address is a bot's (`modules/bots`): a bot never changes
      * access, so its writes to access files and its merge of a request that
      * changes access are refused. Defaulted for the harnesses that construct
-     * this service without bots; every deployment passes the access
-     * module's answer.
+     * this service without bots; the composition root passes the access
+     * module's answer, held by `core/__tests__/bot-check-wired.test.ts`.
      */
     private readonly isBot: (email: string) => boolean = () => false,
   ) {

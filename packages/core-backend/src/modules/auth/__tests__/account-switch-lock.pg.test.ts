@@ -8,6 +8,7 @@ import { PG_ADMIN_URL, PG_TEST_TIMEOUT, dropScratchDatabases, scratchDatabaseUrl
 import { VersionControlDomainError } from '../../../shared/domain-errors.js';
 import { AuthService } from '../auth.service.js';
 import { ACCOUNT_BUSY_MESSAGE, takeAccountSwitchLock } from '../account-switch-lock.js';
+import { noBotAddresses } from '../../../__tests__/real-auth.js';
 
 /**
  * The account switch lock's promise, against a real Postgres (see
@@ -64,7 +65,7 @@ describe.skipIf(!PG_ADMIN_URL)('the account switch lock under contention, on a r
     'switching an account off while a promotion holds its lock is refused as account-busy, and changes nothing',
     async () => {
       const { db, url } = await migratedDatabase();
-      const auth = new AuthService(db, { jwtSecret: 'test-jwt-secret', adminEmail: '', adminPassword: '', allowedEmailDomains: [] });
+      const auth = new AuthService(db, { jwtSecret: 'test-jwt-secret', adminEmail: '', adminPassword: '', allowedEmailDomains: [] }, undefined, noBotAddresses);
       const { user } = await auth.createAccountWithoutPassword('lee@acme.test', 'Lee');
       const holder = await holdLock(url, 'lee@acme.test');
       // The real wait (15 s): what an admin's switch-off meets.
