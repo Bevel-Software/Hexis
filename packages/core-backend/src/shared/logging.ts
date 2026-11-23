@@ -1,7 +1,7 @@
 // This file IS the console sink; every other file logs through it. The lint
 // rule that forbids `console` elsewhere in the backend exempts exactly this
 // file (see eslint.config.js).
-import { oneLine, oneLineError, type ILogger, type LogFields } from './logger.contract.js';
+import { neverThrowing, oneLine, oneLineError, type ILogger, type LogFields } from './logger.contract.js';
 
 /**
  * Where the backend's logging goes, and how a module gets a logger.
@@ -40,12 +40,19 @@ export function logger(tag: string): ILogger {
   return lateBound({ module: tag });
 }
 
+/**
+ * NEVER THROWS. Whatever sink is installed, a module's logger call returns:
+ * the slot is resolved behind `neverThrowing`, so a sink that throws (the
+ * shell's, an embedding platform's, a suite's) writes a plain record
+ * instead of failing the code that was logging.
+ */
 function lateBound(bindings: LogFields): ILogger {
+  const resolve = (): ILogger => neverThrowing(current).child(bindings);
   return {
-    debug: (message, fields) => current.child(bindings).debug(message, fields),
-    info: (message, fields) => current.child(bindings).info(message, fields),
-    warn: (message, fields) => current.child(bindings).warn(message, fields),
-    error: (message, fields) => current.child(bindings).error(message, fields),
+    debug: (message, fields) => resolve().debug(message, fields),
+    info: (message, fields) => resolve().info(message, fields),
+    warn: (message, fields) => resolve().warn(message, fields),
+    error: (message, fields) => resolve().error(message, fields),
     child: (more) => lateBound({ ...bindings, ...more }),
   };
 }
@@ -85,12 +92,14 @@ export function createConsoleLogger(bindings: LogFields = {}): ILogger {
     if (keys.length === 1 && keys[0] === 'err') return [merged.err];
     return [merged];
   };
-  return {
+  // Behind `neverThrowing`: a field that cannot be read, or a console that
+  // cannot print it, ends in a plain line, never in the caller's `catch`.
+  return neverThrowing({
     debug: (message, fields) => console.debug(`${prefix}${oneLine(message)}`, ...extra(fields)),
     info: (message, fields) => console.log(`${prefix}${oneLine(message)}`, ...extra(fields)),
     warn: (message, fields) => console.warn(`${prefix}${oneLine(message)}`, ...extra(fields)),
     error: (message, fields) => console.error(`${prefix}${oneLine(message)}`, ...extra(fields)),
     child: (more) => createConsoleLogger({ ...bindings, ...more }),
-  };
+  });
 }
 
