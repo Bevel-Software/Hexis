@@ -1,5 +1,6 @@
 import pino, { type Logger as Pino } from 'pino';
 import {
+  neverThrowing,
   oneLine,
   oneLineError,
   type ILogger,
@@ -123,11 +124,13 @@ function wrap(instance: Pino): ILogger {
       if (fields) instance[level](safe(fields), oneLine(message));
       else instance[level](oneLine(message));
     };
-  return {
+  // Behind `neverThrowing`, core's one guard: if pino cannot serialize or
+  // write a record, a plain one says so and the caller's call returns.
+  return neverThrowing({
     debug: emit('debug'),
     info: emit('info'),
     warn: emit('warn'),
     error: emit('error'),
     child: (bindings) => wrap(instance.child(safe(bindings))),
-  };
+  });
 }
