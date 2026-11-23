@@ -1783,7 +1783,8 @@ export class AccessControlService implements IAccessControl {
     const repoDir = await this.repoDir(workspaceId);
     // Read each path's own-entries in parallel rather than serially (the batch
     // path otherwise bottlenecks on per-file disk latency), memoized per
-    // workspace so repeat tree builds skip the disk entirely.
+    // workspace for the files that can carry access entries, so a repeat
+    // tree build reads only the others (see `cachedOwnEntries`).
     const owns = await this.cachedOwnEntriesBatch(workspaceId, repoDir, relativePaths);
     const result = new Map<string, boolean>();
     relativePaths.forEach((p, i) => {

@@ -5,10 +5,11 @@ import type { OwnEntries, ParsedEntry } from '../access-model/index.js';
  * checks (see `AccessControlService.cachedOwnEntriesBatch`), with its size
  * bounded by what it holds rather than by how long the process has run:
  *
- * - a workspace's memo lives `ttlMs` from when it was started. Every use of
- *   the memo, for any workspace, first drops every memo past that age, so a
- *   workspace that is never asked again is dropped by the next batch anyone
- *   runs;
+ * - a workspace's memo lives `ttlMs` from when it was started. Every `open`
+ *   and `drop`, for any workspace, first drops every memo past that age, so a
+ *   workspace that is never asked again is dropped by the next batch check
+ *   or invalidation on any workspace. Nothing runs while nothing is asked:
+ *   an idle process keeps what it held, within the bounds below;
  * - at most `maxWorkspaces` memos and `maxEntries` entries across all of
  *   them. Past either bound the oldest memo goes first; a memo that is the
  *   only one left stops growing instead of dropping what it holds.

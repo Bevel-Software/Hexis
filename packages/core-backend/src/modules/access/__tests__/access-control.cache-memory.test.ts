@@ -5,8 +5,10 @@ import path from 'node:path';
 import v8 from 'node:v8';
 import vm from 'node:vm';
 
+// The real tree walker, as the composition root wires it: kb-fs exports none
+// from its entry, and the memo's model load walks the working tree with it.
 import { NodeFs } from '../../kb-fs/node-fs.js';
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
+import type { WorkspaceService } from '../../workspace/index.js';
 import { NO_GIT_CREDENTIALS, type IGitRunner } from '../../../shared/git.contract.js';
 import { AccessControlService } from '../access-control.service.js';
 
@@ -40,19 +42,25 @@ function heapAfterGc(): number {
 
 const ROLES = 'roles:\n  Admin:\n    - razvan@bevel.software\n';
 const ROOT_ACCESS = '---\nwrite:\n  - Admin\n---\n';
+const DENIES_ADMIN = '---\nwrite:\n  - deny Admin\n---\n# mine\n';
+const DENIES_ADMIN_PAGE = 'Team/Added-Page-That-Denies.md';
+const REMOVED_PAGE = 'Team/Removed-Page-That-Denies.md';
 
 /**
  * A repository that exists only as answers to the git calls a model build
  * makes: `rev-parse` (a commit is its own sha), `ls-tree -r -z` (the commit's
  * paths, printed afresh on every call, as text or bytes as asked) and
- * `cat-file --batch` (roles.yaml and the root access.md; anything else is
- * missing).
+ * `cat-file --batch` (the blobs below, whatever the commit; anything else
+ * is missing).
  */
 function fakeRepository(commits: Map<string, () => string[]>): IGitRunner {
   const blobs = new Map([
     ['roles.yaml', ROLES],
     ['access.md', ROOT_ACCESS],
-    ['Plugins/Demo/plugin.json', '{ "name": "Demo" }\n'],
+    ['KnowledgeBase/Engineering/access.md', ROOT_ACCESS],
+    ['Plugins/Demo-Plugin/plugin.json', '{ "name": "Demo-Plugin" }\n'],
+    [DENIES_ADMIN_PAGE, DENIES_ADMIN],
+    [REMOVED_PAGE, DENIES_ADMIN],
   ]);
   const run = async (_cwd: string, args: string[], opts: { input?: string; encoding?: 'utf8' | 'buffer' } = {}) => {
     const answer = (bytes: Buffer) => ({
@@ -154,6 +162,34 @@ describe('AccessControlService — what a cached at-ref model holds', () => {
     expect(perCommit).toBeLessThan(listing / 20);
   }, 120_000);
 
+  it("answers from each commit's own paths when commits share a base: an added page's denial holds, a removed page is absent", async () => {
+    // A page the tree names is read for what it declares; one it does not
+    // name is absent and not read. Built one after the other, the second
+    // commit's index shares the first one's base: what it added and what it
+    // took away must still be its own.
+    const shared = Array.from({ length: 200 }, (_, i) => pagePath('Shared', i));
+    const first = sha(1);
+    const second = sha(2);
+    const commits = new Map<string, () => string[]>([
+      [first, () => ['roles.yaml', 'access.md', ...shared, REMOVED_PAGE]],
+      [second, () => ['roles.yaml', 'access.md', ...shared, DENIES_ADMIN_PAGE]],
+    ]);
+    const svc = service(commits);
+    for (const [commit, added, removed] of [
+      [first, false, true],
+      [second, true, false],
+    ] as const) {
+      expect(await svc.canWriteAtRef(workspaceId, commit, ADMIN, DENIES_ADMIN_PAGE)).toBe(!added);
+      expect(await svc.canWriteAtRef(workspaceId, commit, ADMIN, REMOVED_PAGE)).toBe(!removed);
+      expect(await svc.canWriteAtRef(workspaceId, commit, ADMIN, pagePath('Shared', 7))).toBe(true);
+    }
+    // And again in the other order, once both are cached.
+    expect(await svc.canWriteAtRef(workspaceId, second, ADMIN, REMOVED_PAGE)).toBe(true);
+    expect(await svc.canWriteAtRef(workspaceId, first, ADMIN, DENIES_ADMIN_PAGE)).toBe(true);
+    expect(await svc.canWriteAtRef(workspaceId, first, ADMIN, REMOVED_PAGE)).toBe(false);
+    expect(await svc.canWriteAtRef(workspaceId, second, ADMIN, DENIES_ADMIN_PAGE)).toBe(false);
+  });
+
   it('releases a tree let go under the budget: what the model keeps holds no listing', async () => {
     // Every commit's tree is new, so no base is shared, and a budget of zero
     // makes every model let its tree go: what is left is what the model keeps.
@@ -161,8 +197,15 @@ describe('AccessControlService — what a cached at-ref model holds', () => {
     const shas: string[] = [];
     for (let c = 0; c <= COMMITS; c++) {
       shas.push(sha(c));
-      const own = Array.from({ length: TREE - 3 }, (_, i) => pagePath(`Tree-${c}`, i));
-      commits.set(sha(c), () => ['roles.yaml', 'access.md', 'Plugins/Demo/plugin.json', ...own]);
+      const own = Array.from({ length: TREE - 4 }, (_, i) => pagePath(`Tree-${c}`, i));
+      // Long enough that a piece cut from the listing would be a view onto it.
+      commits.set(sha(c), () => [
+        'roles.yaml',
+        'access.md',
+        'KnowledgeBase/Engineering/access.md',
+        'Plugins/Demo-Plugin/plugin.json',
+        ...own,
+      ]);
     }
     const listing = listingBytes(commits.get(shas[0]!)!());
     const perCommit = await heapPerCommit(service(commits, { treeIndexBudget: 0 }), shas);
