@@ -4184,6 +4184,135 @@ describe('a write already on its way when the file is deleted', () => {
     });
   });
 
+  describe('a write whose answer never came: the read after it says what the disk holds', () => {
+    const BASE = 'First paragraph.\n\nSecond paragraph.\n\nThird paragraph.';
+    const EDITED = `${BASE}\n\nMy closing line.`;
+    const AGENT = '# Draft\n\nThe agent rewrote this.';
+    const BASELINE = '# Draft\n\nA page to delete.';
+    // No answer says whether the server took the write: the connection
+    // dropped, or the server failed after its turn.
+    const DROPPED = () => new TypeError('Failed to fetch');
+    const SERVER_ERROR = () => new WorkspaceApiError(502, 'Bad gateway');
+
+    /** The next write is served (`commit`: or not), and then its answer is `err`. */
+    function answerNextWriteWith(err: () => Error, commit: boolean) {
+      const server = apiMocks.writeFile.getMockImplementation()!;
+      apiMocks.writeFile.mockImplementationOnce(async (...args: Parameters<typeof server>) => {
+        if (commit) await server(...args);
+        throw err();
+      });
+    }
+
+    async function draftUnderReview() {
+      const result = await mountReady();
+      await open(result, 'KB/Draft.md');
+      disk.set('KB/Draft.md', AGENT);
+      await act(async () => { result.current.setPendingContent(AGENT); });
+      return result;
+    }
+
+    it.each([
+      ['the connection dropped', DROPPED],
+      ['the server answered 502', SERVER_ERROR],
+    ])('a Reject the server took, %s before the answer: the preview ends on the baseline, and the next save expects it', async (_how, err) => {
+      const result = await draftUnderReview();
+      answerNextWriteWith(err, true);
+      await act(async () => { await expect(result.current.rejectPendingContent()).rejects.toThrow(); });
+      await settle();
+
+      expect(disk.get('KB/Draft.md')).toBe(BASELINE);
+      const tab = tabAt(result, 'KB/Draft.md')!;
+      expect(tab.pendingFileContent).toBeNull();
+      expect(tab.content).toBe(BASELINE);
+      expect(tab.savedContent).toBe(BASELINE);
+      expect(tab.isDirty).toBe(false);
+      expect(tab.deletedBy ?? null).toBeNull();
+      expect(tab.changedOnBranch ?? null).toBeNull();
+
+      await act(async () => { await result.current.saveFile('KB/Draft.md', 'edited'); });
+      expect(apiMocks.writeFile).toHaveBeenLastCalledWith('ws-1', 'KB/Draft.md', 'edited', { ifMatch: BASELINE });
+      expect(disk.get('KB/Draft.md')).toBe('edited');
+    });
+
+    it('a Reject the server never took, the connection dropped: the preview stays, and the next Reject lands', async () => {
+      const result = await draftUnderReview();
+      answerNextWriteWith(DROPPED, false);
+      await act(async () => { await expect(result.current.rejectPendingContent()).rejects.toThrow('Failed to fetch'); });
+      await settle();
+
+      expect(disk.get('KB/Draft.md')).toBe(AGENT);
+      const tab = tabAt(result, 'KB/Draft.md')!;
+      expect(tab.pendingFileContent).toBe(AGENT);
+      expect(tab.savedContent).toBe(BASELINE);
+      expect(tab.deletedBy ?? null).toBeNull();
+
+      await act(async () => { await result.current.rejectPendingContent(); });
+      expect(apiMocks.writeFile).toHaveBeenLastCalledWith('ws-1', 'KB/Draft.md', BASELINE, { ifMatch: AGENT });
+      expect(disk.get('KB/Draft.md')).toBe(BASELINE);
+      expect(tabAt(result, 'KB/Draft.md')?.pendingFileContent).toBeNull();
+    });
+
+    it('a Reject the server refused (409) is not read as one that may have landed: the preview stays', async () => {
+      const result = await draftUnderReview();
+      // Someone else wrote the file meanwhile: it no longer holds AGENT.
+      disk.set('KB/Draft.md', 'Someone else\'s version.');
+      await act(async () => { await expect(result.current.rejectPendingContent()).rejects.toThrow('changed since you opened it'); });
+      await settle();
+
+      const tab = tabAt(result, 'KB/Draft.md')!;
+      expect(tab.pendingFileContent).toBe(AGENT);
+      expect(tab.savedContent).toBe(BASELINE);
+    });
+
+    async function savedThroughUnanswered(commit: boolean) {
+      disk.set('KB/Notes.md', BASE);
+      const result = await mountReady();
+      await open(result, 'KB/Notes.md');
+      await typeInto(result, EDITED);
+      answerNextWriteWith(DROPPED, commit);
+      await act(async () => {
+        const saving = result.current.saveFile('KB/Notes.md', EDITED);
+        // Done marks the tab clean as the editor closes.
+        result.current.setHasUnsavedFileChanges?.(false);
+        await expect(saving).rejects.toThrow('Failed to fetch');
+      });
+      await settle();
+      return result;
+    }
+
+    it('a save the server took, the connection dropped before the answer: the edits are saved, and the next save expects them', async () => {
+      const result = await savedThroughUnanswered(true);
+
+      expect(disk.get('KB/Notes.md')).toBe(EDITED);
+      const tab = tabAt(result, 'KB/Notes.md')!;
+      expect(tab.content).toBe(EDITED);
+      expect(tab.savedContent).toBe(EDITED);
+      expect(tab.isDirty).toBe(false);
+      expect(tab.changedOnBranch ?? null).toBeNull();
+
+      const more = `${EDITED}\n\nOne more line.`;
+      await act(async () => { await result.current.saveFile('KB/Notes.md', more); });
+      expect(apiMocks.writeFile).toHaveBeenLastCalledWith('ws-1', 'KB/Notes.md', more, { ifMatch: EDITED });
+      expect(disk.get('KB/Notes.md')).toBe(more);
+    });
+
+    it('a save the server never took, the connection dropped: the edits stay unsaved on BASE, and the next save lands', async () => {
+      const result = await savedThroughUnanswered(false);
+
+      expect(disk.get('KB/Notes.md')).toBe(BASE);
+      const tab = tabAt(result, 'KB/Notes.md')!;
+      expect(tab.content).toBe(EDITED);
+      expect(tab.savedContent).toBe(BASE);
+      expect(tab.isDirty).toBe(true);
+      expect(tab.changedOnBranch ?? null).toBeNull();
+
+      await act(async () => { await result.current.saveFile('KB/Notes.md', EDITED); });
+      expect(apiMocks.writeFile).toHaveBeenLastCalledWith('ws-1', 'KB/Notes.md', EDITED, { ifMatch: BASE });
+      expect(disk.get('KB/Notes.md')).toBe(EDITED);
+      expect(tabAt(result, 'KB/Notes.md')?.isDirty).toBe(false);
+    });
+  });
+
   describe('refused after a change pulled from the git host while it was on its way', () => {
     const BASE = 'First paragraph.\n\nSecond paragraph.\n\nThird paragraph.';
 

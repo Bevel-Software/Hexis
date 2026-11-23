@@ -87,11 +87,28 @@ function existenceKey(workspaceId: string, path: string): string {
 /**
  * Which write of ours a read of the file is sent after (`rereadAfterWrite`):
  * a save, or a Reject writing the baseline back over the agent's version,
- * that landed; or either one the server refused, which wrote nothing. A
- * Reject that landed, when the read finds the file still there, ends the agent
- * preview a deleted notice kept; a save, or a refused write, leaves it.
+ * that landed; either one the server refused, which wrote nothing; or a
+ * Reject whose answer never came (`unanswered-reject`), which may have
+ * landed. A Reject that landed, when the read finds the file still there,
+ * ends the agent preview a deleted notice kept; a save, or a refused write,
+ * leaves it. After an unanswered Reject, the read decides by what the disk
+ * holds: the agent's version still there stays on review, as after a
+ * refused one; anything else is what a landed Reject leaves.
  */
-type OwnWrite = 'save' | 'reject' | 'refused';
+type OwnWrite = 'save' | 'reject' | 'refused' | 'unanswered-reject';
+
+/**
+ * How a write of ours settled: the server took it (`landed`); the server
+ * answered that it would not (`refused`, a 4xx: nothing was written); or no
+ * answer says either (`unanswered`: a dropped connection, a timeout, a 5xx),
+ * so the write may have landed, and only a read after it can say.
+ */
+type WriteOutcome = 'landed' | 'refused' | 'unanswered';
+
+/** The outcome of a write whose request threw `err`. */
+function failedWriteOutcome(err: unknown): Exclude<WriteOutcome, 'landed'> {
+  return err instanceof WorkspaceApiError && err.status >= 400 && err.status < 500 ? 'refused' : 'unanswered';
+}
 
 /**
  * What the existence reads in flight for a file answered: the number of the
@@ -388,7 +405,8 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
   /**
    * By workspace and path, the number (`beginWrite`) of the latest write of
    * ours sent, and which write last settled, as the read after it takes it
-   * (`OwnWrite`: a refused one is `refused`, whatever it was).
+   * (`OwnWrite`: a refused one is `refused`, whatever it was; an unanswered
+   * Reject is `unanswered-reject`, an unanswered save `save`).
    */
   const lastWriteSentRef = useRef<Map<string, number>>(new Map());
   const lastWriteSettledRef = useRef<Map<string, OwnWrite>>(new Map());
@@ -474,13 +492,16 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
   const rereadForSeqRef = useRef<Map<string, number>>(new Map());
   /**
    * Read the open file at `path` again, once for each read (`seq`) whose
-   * answer a write of ours (`kind`) left unordered. The read is sent after
+   * answer a write of ours (`kind`) left unordered, or after a write whose
+   * answer never came. The read is sent after
    * the write settled, so its answer is ordered as any other: a pull merges
    * onto unsaved edits, a delete shows the notice (naming whom the held
    * change event named, if one did: `heldDeleterRef`), and the
-   * write's own bytes change nothing. When it finds the file on a tab a
-   * deleted notice marked, the notice goes; after a Reject the agent's
-   * version goes with it, as rejected.
+   * write's own bytes change nothing (on a tab whose unanswered save put the
+   * edits back as unsaved, they merge onto themselves: saved). When it finds
+   * the file on a tab a deleted notice marked, the notice goes; after a
+   * Reject the agent's version goes with it, as rejected, and after an
+   * unanswered Reject too unless the disk still holds it.
    *
    * `now`: sent at once, and its read answered, for a caller outside a
    * state update (`endWrite`, a write's landing); otherwise it is sent on
@@ -576,22 +597,27 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     return sent;
   }, []);
   /**
-   * The write `beginWrite` started, a `kind` of ours, settled: `landed`, or
-   * refused. A read sent before it settled that answers later is read again
-   * after it (`holdIfUnordered`). When it was the last of the path and a
-   * read answered while one was on its way, the file is read again, at once:
-   * answers that read, so a save leaves what the disk holds after it
-   * (`writeOnce`).
+   * The write `beginWrite` started, a `kind` of ours, settled with `outcome`
+   * (`WriteOutcome`). A read sent before it settled that answers later is
+   * read again after it (`holdIfUnordered`). When it was the last of the path
+   * and a read answered while one was on its way, or any of them went
+   * unanswered (it may have landed, and nothing else would read the file
+   * again), the file is read again, at once: answers that read, so a save
+   * leaves what the disk holds after it (`writeOnce`), and the tab comes up
+   * to what the disk holds (`refetchOpenTab`).
    */
   const endWrite = useCallback((
     readFrom: string,
     path: string,
-    kind: Exclude<OwnWrite, 'refused'>,
-    landed: boolean,
+    kind: 'save' | 'reject',
+    outcome: WriteOutcome,
   ): Promise<string> | undefined => {
     const key = existenceKey(readFrom, path);
-    const settled: OwnWrite = landed ? kind : 'refused';
+    const settled: OwnWrite = outcome === 'landed' ? kind
+      : outcome === 'refused' ? 'refused'
+        : kind === 'reject' ? 'unanswered-reject' : 'save';
     lastWriteSettledRef.current.set(key, settled);
+    if (outcome === 'unanswered') heldWhileWritingRef.current.add(key);
     const left = (writesInFlightRef.current.get(key) ?? 1) - 1;
     if (left > 0) {
       writesInFlightRef.current.set(key, left);
@@ -599,7 +625,10 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     }
     writesInFlightRef.current.delete(key);
     if (!heldWhileWritingRef.current.delete(key)) return undefined;
-    return rereadAfterWrite(readFrom, path, heldUpToRef.current.get(key) ?? 0, settled, true);
+    // Numbered after every read and write sent so far (`beginWrite` numbered
+    // this write), so no earlier re-read stands in for this one.
+    const after = Math.max(heldUpToRef.current.get(key) ?? 0, existenceReadSeqRef.current);
+    return rereadAfterWrite(readFrom, path, after, settled, true);
   }, [rereadAfterWrite]);
   /**
    * A write of this tab's completed: its bytes are now the saved content.
@@ -2321,15 +2350,20 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       // meanwhile, or was sent before it settled, is read again after it,
       // whether it lands or is refused (`holdIfUnordered`, `endWrite`). That
       // read, sent after the write, brings a commit pulled on top of it or a
-      // delete since as any change does.
+      // delete since as any change does. A write whose answer never came is
+      // read again after it too: it may have landed, and that read, finding
+      // the edits on disk, takes them as saved (`refetchOpenTab`).
       let readAfter: Promise<string> | undefined;
-      let landed = false;
+      let outcome: WriteOutcome = 'unanswered';
       try {
         await writeFile(workspaceId, relativePath, toWrite, expected !== null ? { ifMatch: expected } : undefined);
-        landed = true;
+        outcome = 'landed';
         markWritten(workspaceId, relativePath, sent);
+      } catch (err) {
+        outcome = failedWriteOutcome(err);
+        throw err;
       } finally {
-        readAfter = endWrite(workspaceId, relativePath, 'save', landed);
+        readAfter = endWrite(workspaceId, relativePath, 'save', outcome);
       }
       const wrote: SaveLeft = { onDisk: toWrite, editBase: content };
       if (!stillHere()) return wrote;
@@ -2546,15 +2580,20 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     // version stays on the tab.
     const agentVersion = active.pendingFileContent;
     const sent = beginWrite(workspaceId, path);
-    let landed = false;
+    let outcome: WriteOutcome = 'unanswered';
     try {
       await writeFile(workspaceId, path, baseline, agentVersion !== null ? { ifMatch: agentVersion } : undefined);
-      landed = true;
+      outcome = 'landed';
       markWritten(workspaceId, path, sent);
+    } catch (err) {
+      outcome = failedWriteOutcome(err);
+      throw err;
     } finally {
       // Refused, it wrote nothing: the read after it leaves the agent's
-      // version on review (`OwnWrite`).
-      void endWrite(workspaceId, path, 'reject', landed);
+      // version on review. Unanswered, it may have landed: the file is read
+      // again, and the agent's version stays on review only if the disk
+      // still holds it (`OwnWrite`).
+      void endWrite(workspaceId, path, 'reject', outcome);
     }
     // Switched branch meanwhile: a tab at `path` now is the other branch's.
     if (workspaceIdRef.current !== workspaceId) return;
@@ -2848,13 +2887,23 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
               // deleted notice keeps is the exception for the re-read after a
               // write of ours: it was sent after that write answered, so the
               // file it finds is there, and the notice is false.
+              // So is the preview after a Reject whose answer never came: it
+              // may have landed, and this read, sent after it, says.
               const keptByNotice = current.pendingFileContent !== null && !!current.deletedBy;
-              if (current.pendingFileContent !== null && !(afterOwnWrite && keptByNotice)) return current;
+              if (current.pendingFileContent !== null
+                && !(afterOwnWrite && (keptByNotice || afterOwnWrite === 'unanswered-reject'))) return current;
               if (isStaleLanding(subscribedWorkspaceId, path, seq)) return current;
+              // An unanswered Reject left what the disk holds: the agent's
+              // version still there, it wrote nothing, as a refused one;
+              // anything else, the agent's version is no longer on disk, and
+              // Accept, which writes nothing, would leave the tab saying it is.
+              const ownWrite = afterOwnWrite === 'unanswered-reject'
+                ? (content === current.pendingFileContent ? 'refused' : 'reject')
+                : afterOwnWrite;
               // After a save, or a write of ours the server refused, the agent's
               // version is still the one on review: the tab is a file again, its
               // preview and text as they are.
-              if (current.pendingFileContent !== null && afterOwnWrite !== 'reject') return { ...current, deletedBy: null };
+              if (current.pendingFileContent !== null && ownWrite !== 'reject') return { ...current, deletedBy: null };
               markLanded(subscribedWorkspaceId, path, seq);
               // After a Reject, the baseline it wrote replaced the agent's
               // version, on a file that is there: the tab is what a Reject's
