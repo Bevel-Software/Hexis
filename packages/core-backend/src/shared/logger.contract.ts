@@ -52,7 +52,9 @@ type Level = 'debug' | 'info' | 'warn' | 'error';
  * on 2026-11-23 every MCP tool call answered `Value of "this" must be of
  * DOMException` that way. So the failure is caught here, and the same sink
  * gets a plain record instead: the message, and that its record could not
- * be serialized, and why — text only, nothing left in it to serialize. When
+ * be serialized, and why — text only, nothing left in it to serialize, and
+ * made one line by `oneLine` before the sink sees it, whether or not that
+ * sink escapes what it writes. When
  * even that cannot be written there is nowhere left to say it, and the call
  * returns. The reason names the failure's type and message, never its
  * `cause` or anything a field carried.
@@ -71,7 +73,11 @@ export function neverThrowing(impl: ILogger): ILogger {
         impl[level](message, fields);
       } catch (failure) {
         try {
-          impl[level](`${String(message)} [the log record could not be serialized: ${describeFailure(failure)}]`);
+          // Escaped here, not left to the sink: the sink that just failed may
+          // be one that does not escape (an embedding platform's, a suite's),
+          // and this record must be one line wherever it is written.
+          // `oneLine` is idempotent, so a sink that escapes again changes nothing.
+          impl[level](`${oneLine(String(message))} [the log record could not be serialized: ${describeFailure(failure)}]`);
         } catch {
           // The sink cannot write even plain text: nowhere is left to say so.
         }

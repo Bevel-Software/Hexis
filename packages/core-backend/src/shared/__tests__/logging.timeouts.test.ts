@@ -225,6 +225,28 @@ describe('logger() — whatever sink is installed', () => {
     ]);
   });
 
+  it('the plain record is one terminal-safe line even when the failed sink does not escape', async () => {
+    const lines: string[] = [];
+    // A sink that writes the message raw and throws on any record with fields.
+    const raw = (): ILogger => ({
+      debug: () => undefined,
+      info: () => undefined,
+      warn: () => undefined,
+      error: (message, fields) => {
+        if (fields) throw new TypeError('Value of "this" must be of DOMException');
+        lines.push(message);
+      },
+      child: () => raw(),
+    });
+    restore = setLogger(raw());
+    const err = await realTimeout();
+    const forged = `branch x\n[mcp] forged line \u001b[31mred\u009b2J\u2028end`;
+    expect(() => logger('mcp').error(forged, { err })).not.toThrow();
+    expect(lines).toEqual([
+      'branch x\\n[mcp] forged line \\u001b[31mred\\u009b2J\\u2028end [the log record could not be serialized: TypeError: Value of "this" must be of DOMException]',
+    ]);
+  });
+
   it('a sink that cannot write even the plain record still returns', () => {
     const broken: ILogger = {
       debug: () => undefined,
