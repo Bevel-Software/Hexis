@@ -289,6 +289,57 @@ describe('AccessControlService: reads answered from the map of the head commit',
     expect((await svc.canReadBatch('ws', 'mem@x.io', asked)).get('Team/Loose/A.md')).toBe(false);
   }, 120_000);
 
+  it('takes no member from a roles or groups file changed on disk and not committed, where the checkout alone would', async () => {
+    await commit('a page for the platform group', { 'Team/Plat.md': '---\nread:\n  - deny everyone\n  - Platform\n---\n# plat\n' });
+    const svc = service();
+    const writes = async (s: AccessControlService, ws: string) => (await s.canWriteBatch(ws, 'nobody@x.io', ['Top.md'])).get('Top.md');
+    const reads = async (s: AccessControlService, ws: string, who: string) =>
+      (await s.canReadBatch(ws, who, ['Team/Plat.md'])).get('Team/Plat.md');
+    expect(await writes(svc, 'ws')).toBe(false);
+    expect(await reads(svc, 'ws', 'zoe@x.io')).toBe(true);
+
+    // On disk only, and nothing reports it: `roles.yaml` names a new Admin,
+    // and a synced groups file git has never seen replaces the committed
+    // groups file and moves the Platform group to someone else.
+    await write(repo, {
+      'roles.yaml':
+        'roles:\n  Admin:\n    - admin@x.io\n    - nobody@x.io\n  Member:\n    - mem@x.io\n  Sales:\n    - sal@x.io\n',
+      'synced-groups.yaml': 'groups:\n  Platform:\n    - nobody@x.io\n',
+    });
+    await copyToPlain();
+    // The commit still answers for the workspace.
+    expect(await writes(svc, 'ws')).toBe(false);
+    expect(await reads(svc, 'ws', 'zoe@x.io')).toBe(true);
+    expect(await reads(svc, 'ws', 'nobody@x.io')).toBe(false);
+    // The same files read as a checkout only: both changes count there.
+    const checkout = service();
+    expect(await writes(checkout, 'plain')).toBe(true);
+    expect(await reads(checkout, 'plain', 'zoe@x.io')).toBe(false);
+    expect(await reads(checkout, 'plain', 'nobody@x.io')).toBe(true);
+
+    // Committed, they count for the map too.
+    await git('add', '-A', '-f');
+    await git('commit', '-qm', 'roles and synced groups committed');
+    expect(await writes(svc, 'ws')).toBe(true);
+    expect(await reads(svc, 'ws', 'zoe@x.io')).toBe(false);
+    expect(await reads(svc, 'ws', 'nobody@x.io')).toBe(true);
+  }, 120_000);
+
+  it('answers from the checkout when the commit holds no roles file, with the roles file that is on disk', async () => {
+    // `roles.yaml` stays in the checkout and leaves the commit.
+    await git('rm', '-q', '--cached', 'roles.yaml');
+    await git('commit', '-qm', 'roles no longer tracked');
+    await copyToPlain();
+    const paths = Object.keys(FILES);
+    const svc = service();
+    expect(await answers(svc, 'ws', paths)).toEqual(await answers(service(), 'plain', paths));
+    // No map was made: the batch gates read the checkout, and no file version was read from git.
+    reset();
+    await svc.canReadBatch('ws', 'mem@x.io', paths);
+    expect(opened.length).toBeGreaterThan(0);
+    expect(gitLog).not.toContain('cat-file');
+  }, 120_000);
+
   it('answers from the checkout while a first map is still being read, and from the map once it is', async () => {
     const paths = Object.keys(FILES);
     const svc = service({ waitBytes: 0 });

@@ -313,6 +313,22 @@ describe('AccessControlService — at-ref model cache', () => {
     expect(fileShows()).toBe(0);
   });
 
+  it('does not take the model of a commit without a groups file for one whose groups file is a folder', async () => {
+    // No groups file at this commit: the model is built and held.
+    expect(await svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).toBe(true);
+
+    // The next commit holds a FOLDER named `groups.yaml`. Every file the
+    // model is read from is unchanged, and the build must still refuse: a
+    // groups source that is there and is no file cannot be read as absent.
+    await pushFromOther('groups.yaml is a folder', async () => {
+      await fs.mkdir(path.join(other, 'groups.yaml'), { recursive: true });
+      await fs.writeFile(path.join(other, 'groups.yaml', 'note.md'), '# not a groups file\n');
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    await expect(svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).rejects.toBeInstanceOf(AccessUnreadableError);
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/groups\.yaml is a tree, not a file/));
+  });
+
   it('refuses to decide from a listing it cannot read whole, and decides once git answers again', async () => {
     // One record without the tab that separates the object id from the path.
     injected.rewriteNext = (argv) =>

@@ -123,6 +123,9 @@ async function catFileBatch(
 }
 
 
+/** The sources of a model that are read by a fixed name at the root, whatever else the tree holds. */
+const FIXED_NAME_SOURCES = ['roles.yaml', SYNCED_GROUPS_YAML, GROUPS_YAML] as const;
+
 /** The rules of one tree: what a head map holds as its model, opaque to everything but this file. */
 export interface AccessModel {
   roles: RolesIndex;
@@ -3019,8 +3022,20 @@ export class AccessControlService implements IAccessControl {
       // plugins root that decides which manifests count. Two commits with
       // the same key hold the same rules (see `modelsBySources`).
       const sources = createHash('sha256').update(`${pluginsDir}\0${opts.checkout ? 'checkout' : 'commit'}\0`);
+      // A fixed-name source that is a FOLDER at this commit: the build
+      // refuses it (roles) or the model is none (a groups source), so it is
+      // part of what the model is derived from. Without it in the key, a
+      // commit that turned `groups.yaml` into a folder would have the key of
+      // one with no groups file and take that commit's model unrefused.
+      const sourceFolders = new Set<string>();
       visitTreeListing(stdout, (p, file) => {
         opts.visit?.(p, file);
+        for (const name of FIXED_NAME_SOURCES) {
+          if (p.startsWith(`${name}/`) && !sourceFolders.has(name)) {
+            sourceFolders.add(name);
+            sources.update(`${name}/\0folder\n`);
+          }
+        }
         // One past the cap is enough to know the tree is not kept.
         if (all.length <= this.treeIndexMaxPaths) all.push(p);
         if (p === 'access.md' || p.endsWith('/access.md')) {
