@@ -269,6 +269,7 @@ describe('AccessControlService — what the own-entries memo holds', () => {
   let repo: string;
   let clock: number;
   const ali = 'ali@bevel.software';
+  const felix = 'felix@example.com';
 
   async function writeFile(rel: string, contents: string): Promise<void> {
     const abs = path.join(repo, rel);
@@ -335,6 +336,36 @@ describe('AccessControlService — what the own-entries memo holds', () => {
     await svc.canReadBatch('ws-other', ali, [relative[1]!]);
     const left = heapAfterGc() - before;
     expect(left).toBeLessThan(held / 10);
+  }, 120_000);
+
+  it('keeps no longer string alive from what a live memo holds: neither the path it was asked nor the text it read', async () => {
+    const FILES = 300;
+    /** What each path is cut from, and how much frontmatter text each file carries. */
+    const CARRIER = 16_000;
+    const TEXT = 8_000;
+    for (let i = 0; i < FILES; i++) {
+      // The role name the memo keeps is cut from this text, as the parser cuts it.
+      const description = `${i}-${'d'.repeat(TEXT)}`;
+      await writeFile(`Knowledge/Open/Live-${i}.md`, `---\ndescription: ${description}\nread:\n  - deny Product Manager\n---\n# ${i}\n`);
+    }
+    const svc = service();
+    await svc.canReadBatch('ws-warm', ali, ['Knowledge/Open/access.md']);
+    const before = heapAfterGc();
+    // Each path the batch is handed is cut from a longer string, the way the
+    // file tree cuts it from an absolute path; nothing here keeps either.
+    await (async () => {
+      const carried = Array.from({ length: FILES }, (_, i) => `${'p'.repeat(CARRIER)}Knowledge/Open/Live-${i}.md`.slice(CARRIER));
+      const answers = await svc.canReadBatch('ws-live', felix, carried);
+      expect(answers.get(carried[0]!)).toBe(false);
+    })();
+    const held = heapAfterGc() - before;
+    console.info(`[cache-memory] live memo: heap per entry ${Math.round(held / FILES)} bytes (path carrier ${CARRIER}, frontmatter ${TEXT})`);
+    // The memo is live at this point: the files change on disk, and it still
+    // answers what it held.
+    await writeFile('Knowledge/Open/Live-0.md', PLAIN);
+    expect((await svc.canReadBatch('ws-live', felix, ['Knowledge/Open/Live-0.md'])).get('Knowledge/Open/Live-0.md')).toBe(false);
+    // Without the copies, each entry would keep its carrier and its file's text.
+    expect(held / FILES).toBeLessThan(2_000);
   }, 120_000);
 
   it('holds no entry for a path outside the access-frontmatter extension set, and answers it as before', async () => {
