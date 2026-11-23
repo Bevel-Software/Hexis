@@ -128,16 +128,22 @@ async function refuseOutsideConnectionScope(
  */
 export function createPluginCreationRoutes(
   provision: Pick<PluginProvisionService, 'createPlugin' | 'ensurePersonalPlugin'>,
-  resolveUser: (req: express.Request) => Promise<AuthUser | null>,
+  /** Null for no identity; a refusal (one sentence) for a credential that may not act, answered as it is. */
+  resolveUser: (req: express.Request) => Promise<AuthUser | { refused: string } | null>,
 ): express.Router {
   const router = express.Router();
 
-  router.post('/plugins', async (req, res) => {
+  /** The caller, or null once a 401 has been answered: the credential's own refusal when it has one. */
+  const callerOf = async (req: express.Request, res: express.Response): Promise<AuthUser | null> => {
     const user = await resolveUser(req);
-    if (!user) {
-      res.status(401).json({ error: 'Unauthenticated' });
-      return;
-    }
+    if (user && !('refused' in user)) return user;
+    res.status(401).json({ error: user ? user.refused : 'Unauthenticated' });
+    return null;
+  };
+
+  router.post('/plugins', async (req, res) => {
+    const user = await callerOf(req, res);
+    if (!user) return;
     // These two routes ARE the `create_plugin` and `my_plugin` tools, so an
     // agent's call is checked against what those tools declare, exactly as a
     // route-hosted tool's is in `toolHandler`: a call that does not match, or
@@ -173,11 +179,8 @@ export function createPluginCreationRoutes(
   });
 
   router.post('/plugins/personal', async (req, res) => {
-    const user = await resolveUser(req);
-    if (!user) {
-      res.status(401).json({ error: 'Unauthenticated' });
-      return;
-    }
+    const user = await callerOf(req, res);
+    if (!user) return;
     // These two routes ARE the `create_plugin` and `my_plugin` tools, so an
     // agent's call is checked against what those tools declare, exactly as a
     // route-hosted tool's is in `toolHandler`: a call that does not match, or

@@ -17,7 +17,7 @@ import type { VersionControlEventBus } from '../version-control/index.js';
 import type { AuthService } from '../auth/index.js';
 import { ToolError, type ToolContext } from './tool.contract.js';
 import { actingUser, type ToolAuth } from '../tool-auth/index.js';
-import { connectionOf } from '../agent-scope/index.js';
+import { NOT_AVAILABLE_TO_CONNECTION, connectionOf } from '../agent-scope/index.js';
 
 export interface ToolContextDeps {
   authService: AuthService;
@@ -72,6 +72,16 @@ export type ResolveToolContext = (
  */
 export function createToolContextResolver(deps: ToolContextDeps): ResolveToolContext {
   return async function resolveToolContext(auth, abortSignal, sessionId) {
+    // A connection that loads nothing (made as a bot that cannot be used, or
+    // that its maker may no longer act as) is refused HERE, before anything is
+    // loaded for it. Every caller of a tool builds its context through this
+    // one resolver: the hosted routes and a plugin's own endpoint through
+    // `validateToken` alike. Such a connection keeps the person as its
+    // identity only so its refusal can be told; nothing runs as them.
+    const connectionScope = connectionOf(auth);
+    if (!connectionScope.loadsAnything()) {
+      throw new ToolError(connectionScope.describe() ?? 'This connection loads nothing.', 403, { code: NOT_AVAILABLE_TO_CONNECTION });
+    }
     // A connection made as a bot acts as the bot's row; what it writes, opens
     // and merges also names the person who made the connection.
     const acting = await actingUser((id) => deps.authService.getUserById(id), auth);
@@ -152,8 +162,6 @@ export function createToolContextResolver(deps: ToolContextDeps): ResolveToolCon
       fsCache.set(branch, fs);
       return fs;
     };
-
-    const connectionScope = connectionOf(auth);
 
     return {
       user,

@@ -5,7 +5,7 @@ import path from 'node:path';
 import { realDisk } from '../../../__tests__/real-disk.js';
 import type { WorkspaceService } from '../../workspace/index.js';
 import { AccessControlService } from '../access-control.service.js';
-import { BotAddressBook } from '../../bots/index.js';
+import { botAddressBook, type BotAddressBook } from '../../../__tests__/bot-address-book.js';
 
 /**
  * A bot's access, through the public resolver over a real on-disk tree: it is
@@ -81,7 +81,7 @@ describe('a bot in the access model', () => {
       getWorkspacePath: async () => workspaceDir,
       ensureRemotesFetched: async () => undefined,
     } as unknown as WorkspaceService;
-    book = new BotAddressBook();
+    book = botAddressBook();
     book.replace({ domain: 'agent.hexis', botIds: ['release-helper'], previousDomain: null });
     access = new AccessControlService(workspaceService, KB_DIR, realDisk(), [BOT], undefined, undefined, {}, undefined, undefined, book);
   });

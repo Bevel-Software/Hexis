@@ -8,8 +8,8 @@
  * secrets and tool sign-ins, records authors and writes the audit log serves
  * it as it serves a person. What keeps a bot from being a person is a short
  * list of refusals at the places that decide each thing: it cannot sign in,
- * is not part of "everyone", holds no role, is no admin, and cannot change
- * access.
+ * is not part of "everyone", holds no role and is no admin. It changes
+ * access as any account does, judged by its own grants.
  *
  * Core owns the mechanism and none of the bots: which bots exist, what
  * defines one and who may act as it are the distribution's

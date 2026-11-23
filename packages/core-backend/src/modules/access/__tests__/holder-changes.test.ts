@@ -6,7 +6,7 @@ import os from 'node:os';
 import { realDisk } from '../../../__tests__/real-disk.js';
 import type { WorkspaceService } from '../../workspace/index.js';
 import { AccessControlService } from '../access-control.service.js';
-import { BotAddressBook } from '../../bots/index.js';
+import { botAddressBook, type BotAddressBook } from '../../../__tests__/bot-address-book.js';
 
 /**
  * `prospectiveHolderChanges`: who loses and who gains opening or editing a
@@ -130,7 +130,7 @@ describe('AccessControlService.prospectiveHolderChanges', () => {
     // While the domain change's rewrite is open the old spelling still
     // counts; the holder lists name the bot at its current address, and the
     // raw grant keys must too, or the bot is listed twice.
-    const book = new BotAddressBook();
+    const book = botAddressBook();
     book.replace({ domain: 'agent.hexis', botIds: ['release-helper'], previousDomain: 'old.example' });
     const withBots = new AccessControlService(
       {

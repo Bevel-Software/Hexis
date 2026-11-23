@@ -58,7 +58,8 @@ import {
 } from '../modules/plugins/index.js';
 import { keyOrSessionAuth } from '../modules/tool-auth/key-or-session.middleware.js';
 import { actingUser } from '../modules/tool-auth/index.js';
-import { GrantRewriteChangeRequests, createBotsRoutes } from '../modules/bots/index.js';
+import { GrantRewriteChangeRequests } from '../modules/bots/bot-domain-change.js';
+import { createBotsRoutes } from '../modules/bots/bots.routes.js';
 import { ToolDescriptionNotes, type AgentAccessGate } from '../modules/workspace/agent-access.gate.js';
 import {
   createSecretsVaultRoutes,
@@ -673,10 +674,11 @@ export async function createCoreServer(
     }),
     createPluginCreationRoutes(core.pluginProvisionService, async (req) => {
       // A connection key acts as its account, a bot's with its maker beside
-      // it, as every tool call does; a session is its own user.
+      // it, as every tool call does, and is refused with the same sentence;
+      // a session is its own user.
       if (req.toolAuth) {
         const acting = await actingUser((id) => core.authService.getUserById(id), req.toolAuth);
-        return 'user' in acting ? acting.user : null;
+        return 'user' in acting ? acting.user : acting;
       }
       return req.userId ? ((await core.authService.getUserById(req.userId)) ?? null) : null;
     }),

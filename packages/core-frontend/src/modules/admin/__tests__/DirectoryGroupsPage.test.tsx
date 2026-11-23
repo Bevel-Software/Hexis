@@ -34,11 +34,11 @@ vi.mock('../services/groups.api', async (importOriginal) => {
 });
 // The add-member input suggests people from the access suggest endpoint —
 // stubbed here so these tests stay about the groups roster.
-vi.mock('../../access/api', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../../access/api')>();
+vi.mock('../../access', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../access')>();
   return { ...actual, suggestPrincipals: vi.fn() };
 });
-import { suggestPrincipals } from '../../access/api';
+import { suggestPrincipals } from '../../access';
 
 const MANUAL_ROSTER: GroupsRoster = {
   mode: 'manual',

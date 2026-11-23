@@ -29,6 +29,8 @@ export interface BotSettings {
   record(entries: Record<string, string>, updatedByUserId: string | null): Promise<void>;
   /** One setting as the database has it now, taken into this process's cache: what another process wrote. */
   reload(key: string): Promise<string>;
+  /** Remove a setting's stored value, so it reads as unset. */
+  clear(key: string): Promise<void>;
 }
 
 /** The settings a domain change writes, re-read from the database when another process may have written them. */
@@ -48,14 +50,15 @@ export function duplicateIdProblem(id: string): string {
 /**
  * THE sentence a connection made as a bot answers with when the bot does not
  * exist for its maker: it is gone, or they may no longer act as it. One
- * sentence for both, so it discloses neither.
+ * sentence for both, and no name in it, so it discloses neither, nor what the
+ * bot is called now.
  */
-export function goneSentence(label: string): string {
-  return (
-    `This connection was made as the bot "${label}", which no longer exists or which you may no longer act as, ` +
-    'so it loads nothing. Make a new connection as yourself or as a bot you may act as.'
-  );
-}
+export const GONE_SENTENCE =
+  'This connection was made as a bot that no longer exists or that you may no longer act as, ' +
+  'so it loads nothing. Make a new connection as yourself or as a bot you may act as.';
+
+/** What a connection whose bot is gone for its maker is called: nothing read from the bot. */
+const GONE_LABEL = 'a bot';
 
 /** The few words a list of connections shows for a connection whose bot is gone for its maker. */
 export const GONE_REASON = 'you may no longer edit this bot';
@@ -150,15 +153,14 @@ export class BotService implements IBots {
    * The rows, and the domain settings when a row moved, as the database has
    * them now: another process may have changed the domain (or made, retired
    * or renamed a bot) since this one last looked, and what it wrote is what
-   * holds. One read of the rows; the settings are read again only when an
-   * address differs from what this process held.
+   * holds. One read of the rows; the settings are read again only when a
+   * row's address is not at the domain this process holds, whether or not
+   * this process held that row.
    */
   private async catchUp(): Promise<void> {
     const fresh = await this.readRows();
-    const moved = [...fresh.values()].some((r) => {
-      const held = this.rows.get(r.botId);
-      return held !== undefined && held.email !== r.email;
-    });
+    const domain = this.domain();
+    const moved = [...fresh.values()].some((r) => r.email !== botAddress(r.botId, domain));
     this.rows = fresh;
     if (moved) for (const key of DOMAIN_SETTINGS) await this.settings.reload(key);
   }
@@ -174,11 +176,16 @@ export class BotService implements IBots {
     const grouped = groupById(definitions ?? (await this.directory.definitions()));
     await this.catchUp();
     const now = new Date();
+    let domainReread = false;
     for (const [id, defs] of grouped) {
       if (!BOT_ID.test(id)) continue;
       const name = defs[0].name.trim() || id;
       const row = this.rows.get(id);
       if (!row) {
+        // A row is made rarely, and with no row held there is none to show
+        // that another process changed the domain: read it again first.
+        if (!domainReread) for (const key of DOMAIN_SETTINGS) await this.settings.reload(key);
+        domainReread = true;
         const address = botAddress(id, this.domain());
         const [made] = await this.db
           .insert(users)
@@ -283,20 +290,18 @@ export class BotService implements IBots {
     choice: ConnectionChoice,
   ): Promise<ResolvedConnection> {
     let row: BotRow | undefined;
-    let label: string;
     if (choice.botUserId) {
       row = [...this.rows.values()].find((r) => r.id === choice.botUserId);
-      label = row?.name ?? 'unknown';
     } else {
-      const path = choice.agentPath as string;
-      const id = (await this.directory.botIdForAgentPath?.(path)) ?? null;
+      const id = (await this.directory.botIdForAgentPath?.(choice.agentPath as string)) ?? null;
       row = id ? this.rows.get(id) : undefined;
-      label = row?.name ?? path;
     }
+    // Until the maker is known to act as the bot, the answer holds nothing
+    // read from it: only the choice the connection already carries.
     const gone = (): ResolvedConnection => ({
       kind: 'unavailable',
-      bot: { id: row?.botId ?? label, name: label },
-      sentence: goneSentence(label),
+      bot: { id: choice.botUserId ?? (choice.agentPath as string), name: GONE_LABEL },
+      sentence: GONE_SENTENCE,
       reason: GONE_REASON,
     });
     if (!row || row.retiredAt) return gone();
@@ -306,8 +311,8 @@ export class BotService implements IBots {
     if (problem !== null) {
       return {
         kind: 'unavailable',
-        bot: { id: row.botId, name: label },
-        sentence: unusableSentence(label, problem),
+        bot: { id: row.botId, name: row.name },
+        sentence: unusableSentence(row.name, problem),
         reason: 'cannot be used: ' + problem,
       };
     }
@@ -373,12 +378,15 @@ export class BotService implements IBots {
 
     // The rows first, in one transaction, and the settings only once they
     // are written: a failed transaction leaves both as they were. Settings
-    // that cannot be recorded put the rows back, so the two never disagree.
+    // that cannot be recorded (the store writes them one at a time, so some
+    // may have landed) put the rows back and the settings back to what they
+    // read before, so the two disagree only if putting them back fails too.
     // What names a bot by its address (see `IRecordedIdentity`) moves in the
     // same transaction as its row, and back with it: the record writers are
     // held off before any row is touched, then each row and what names it.
     const now = new Date();
     const before = new Map(this.rows);
+    const settingsBefore = DOMAIN_SETTINGS.map((key) => [key, this.settings.resolve(key)] as const);
     const moves = [...before.values()].map((row) => ({ id: row.id, from: row.email, to: botAddress(row.botId, domain) }));
     const readdress = (back: boolean) =>
       this.db.transaction(async (tx) => {
@@ -401,6 +409,14 @@ export class BotService implements IBots {
     } catch (err) {
       await readdress(true);
       for (const [id, row] of before) this.rows.set(id, row);
+      try {
+        for (const [key, value] of settingsBefore) {
+          if (value) await this.settings.record({ [key]: value }, by.id);
+          else await this.settings.clear(key);
+        }
+      } catch (restoreErr) {
+        log.error("putting the bots' domain settings back failed; they may name a domain the rows do not", { err: restoreErr });
+      }
       await this.refreshAddresses();
       throw err;
     }

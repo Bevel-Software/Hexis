@@ -271,8 +271,9 @@ export function createToolHandlerFactory(
         const ctx = await resolve(auth, abort.signal, sessionId);
         // The connection's scope, before the tool runs, for every caller of a
         // hosted platform tool — MCP, a chain, the local server, a script with
-        // a key. A connection made as a bot that is not offered this tool,
-        // or one that loads nothing, is refused it by name: the ONE policy,
+        // a key. A connection made as a bot that is not offered this tool is
+        // refused it by name (one that loads nothing was refused already, by
+        // the context resolver, with the sentence that says why): the ONE policy,
         // `ConnectionScope.platformToolRefusal`, which the platform-tool routes
         // this handler does not host (the plugin-creation routes) ask as well.
         const toolName = routeToolSchemasForRequest(req.originalUrl)?.name ?? routeToolName(req.originalUrl);

@@ -85,7 +85,12 @@ export const AdvisoryLock = {
    * Held for the whole of a change of the bots' domain (`modules/bots`):
    * re-addressing the rows, recording the settings and opening the rewrite
    * request, so a second change, on this process or another, cannot start
-   * before the first one's request is recorded.
+   * before the first one's request is recorded. Opening that request clones,
+   * commits and pushes, so the lock connection may sit idle in its
+   * transaction for longer than a migration does: a server whose
+   * `idle_in_transaction_session_timeout` is shorter than that drops the
+   * lock part-way (see the caveat above), and a second change could then
+   * start before the first one's request is recorded.
    */
   BotsDomain: 4,
 } as const;

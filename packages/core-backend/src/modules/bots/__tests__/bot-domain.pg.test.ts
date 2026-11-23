@@ -228,6 +228,7 @@ describe.skipIf(!PG_ADMIN_URL)('a domain change on a real Postgres: every bot na
     const failing = {
       resolve: (key: string) => store.resolve(key),
       reload: (key: string) => store.reload(key),
+      clear: (key: string) => store.clear(key),
       record: async () => {
         throw new Error('settings store down');
       },
@@ -240,6 +241,33 @@ describe.skipIf(!PG_ADMIN_URL)('a domain change on a real Postgres: every bot na
     expect(await emailOf('first')).toBe(`first@${before}`);
     expect(await emailOf('second')).toBe(`second@${before}`);
   });
+
+  it('puts the settings back too when the store recorded some of them before it failed', async () => {
+    const before = await store.reload('botsDomain');
+    const previousBefore = await store.reload('botsPreviousDomain');
+    let calls = 0;
+    const partway = {
+      resolve: (key: string) => store.resolve(key),
+      reload: (key: string) => store.reload(key),
+      clear: (key: string) => store.clear(key),
+      // The first write lands its domain and then fails; putting back goes through.
+      record: async (entries: Record<string, string>, by: string | null) => {
+        calls += 1;
+        if (calls > 1) return store.record(entries, by);
+        await store.record({ botsDomain: entries.botsDomain }, by);
+        throw new Error('settings store failed part-way');
+      },
+    };
+    const service = new BotService(db, partway, { definitions: async () => [def('first')], mayActAs: async () => true });
+    await service.load();
+    const domain = service.domain();
+    await expect(service.changeDomain(admin, 'bots-c.acme.com')).rejects.toThrow('settings store failed part-way');
+    expect(await store.reload('botsDomain')).toBe(before);
+    expect(await store.reload('botsPreviousDomain')).toBe(previousBefore);
+    expect(service.domain()).toBe(domain);
+    expect(await emailOf('first')).toBe(`first@${domain}`);
+  });
+
   it('moves what names each bot with its row, from its stored address to its new one, and back when the settings cannot be recorded', async () => {
     const calls: string[] = [];
     const recorded = {
@@ -262,6 +290,7 @@ describe.skipIf(!PG_ADMIN_URL)('a domain change on a real Postgres: every bot na
     const failing = {
       resolve: (key: string) => store.resolve(key),
       reload: (key: string) => store.reload(key),
+      clear: (key: string) => store.clear(key),
       record: async () => {
         throw new Error('settings store down');
       },
@@ -289,6 +318,7 @@ describe.skipIf(!PG_ADMIN_URL)('a domain change on a real Postgres: every bot na
     const watching = {
       resolve: (key: string) => store.resolve(key),
       reload: (key: string) => store.reload(key),
+      clear: (key: string) => store.clear(key),
       record: async (values: Record<string, string>, by: string) => {
         if (values.botsDomain) {
           const resolved = await service.resolveConnection({ id: admin.id, email: admin.email }, { botUserId: firstId, agentPath: null });
@@ -382,5 +412,22 @@ describe.skipIf(!PG_ADMIN_URL)('a domain change seen from two processes over one
     expect((await b.actAs('admin@acme.com', 'ops'))?.email).toBe('ops@three.acme.com');
     expect((await b.choicesFor('admin@acme.com')).map((c) => c.address)).toEqual(['ops@three.acme.com']);
     expect(b.domain()).toBe('three.acme.com');
+  });
+
+  it('gives a process that held no bot row the new domain once it reads the rows another process moved', async () => {
+    // A process that read its settings before the change and its rows after
+    // it: every row it holds is already at the new address, so no held row
+    // differs from what it reads.
+    const store = deploymentSettingsOver(db);
+    await store.load();
+    const a = await process_();
+    const empty = new BotService(db, store, { definitions: async () => [def('ops')], mayActAs: async () => true });
+    // Its rows are read now, its settings were read before the change below.
+    await a.changeDomain(admin, 'four.acme.com');
+    await empty.load();
+    expect(empty.domain()).not.toBe('four.acme.com');
+    await empty.sync();
+    expect(empty.domain()).toBe('four.acme.com');
+    expect((await empty.actAs('admin@acme.com', 'ops'))?.email).toBe('ops@four.acme.com');
   });
 });

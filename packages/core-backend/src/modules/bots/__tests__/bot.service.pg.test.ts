@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { users, type Database } from '../../database/index.js';
 import { PG_TEST_TIMEOUT, PG_ADMIN_URL, dropScratchDatabases, openMigratedScratchDb } from '../../../__tests__/pg-scratch.js';
-import { BotService, GONE_REASON, goneSentence } from '../bot.service.js';
+import { BotService, GONE_REASON, GONE_SENTENCE } from '../bot.service.js';
 import { BotAddressBook } from '../bot-address-book.js';
 import type { BotDefinition, IBotDirectory } from '../index.js';
 
@@ -44,6 +44,9 @@ function settings(initial: Record<string, string> = {}) {
   return {
     resolve: (k: string) => values.get(k) ?? '',
     reload: async (k: string) => values.get(k) ?? '',
+    clear: async (k: string) => {
+      values.delete(k);
+    },
     record: async (entries: Record<string, string>) => {
       for (const [k, v] of Object.entries(entries)) values.set(k, v);
     },
@@ -144,8 +147,8 @@ describe.skipIf(!PG_ADMIN_URL)('bots on a real Postgres', () => {
     state.writers.set('Agents/ops.agent', new Set());
     expect(await service.resolveConnection(PERSON, choice)).toEqual({
       kind: 'unavailable',
-      bot: { id: 'ops', name: 'ops' },
-      sentence: goneSentence('ops'),
+      bot: { id: bot.id, name: 'a bot' },
+      sentence: GONE_SENTENCE,
       reason: GONE_REASON,
     });
 
@@ -159,7 +162,22 @@ describe.skipIf(!PG_ADMIN_URL)('bots on a real Postgres', () => {
 
     // Deleted: the same sentence as "you may no longer act as it", disclosing neither.
     state.defs = [];
-    expect(await service.resolveConnection(PERSON, choice)).toMatchObject({ kind: 'unavailable', sentence: goneSentence('ops') });
+    expect(await service.resolveConnection(PERSON, choice)).toMatchObject({ kind: 'unavailable', sentence: GONE_SENTENCE });
+  });
+
+  it('tells a maker who may no longer act as a bot nothing of it, not even the name it was given since', async () => {
+    const { state, dir } = directory();
+    state.defs = [def('quiet', { name: 'Quiet' })];
+    state.writers.set('Agents/quiet.agent', new Set([PERSON.email]));
+    const service = new BotService(db, settings(), dir);
+    await service.load();
+    const bot = (await service.actAs(PERSON.email, 'quiet'))!;
+    // Renamed, and the maker loses write on what defines it.
+    state.defs = [def('quiet', { name: 'Payroll Exporter' })];
+    state.writers.set('Agents/quiet.agent', new Set());
+    const resolved = await service.resolveConnection(PERSON, { botUserId: bot.id, agentPath: null });
+    expect(resolved).toEqual({ kind: 'unavailable', bot: { id: bot.id, name: 'a bot' }, sentence: GONE_SENTENCE, reason: GONE_REASON });
+    expect(JSON.stringify(resolved)).not.toMatch(/Payroll|Quiet|quiet/);
   });
 
   it('a list of connections is judged against one look at the bots, and one that cannot be judged does not sink the rest', async () => {
@@ -243,13 +261,41 @@ describe.skipIf(!PG_ADMIN_URL)('bots on a real Postgres', () => {
     });
     expect(await service.resolveConnection(PERSON, { botUserId: null, agentPath: 'Agents/unmapped.agent' })).toMatchObject({
       kind: 'unavailable',
-      sentence: goneSentence('Agents/unmapped.agent'),
+      sentence: GONE_SENTENCE,
     });
     // Its owner may not write the definition: it stops, saying why.
     state.writers.set('Agents/legacy-bot.agent', new Set());
     expect(await service.resolveConnection(PERSON, { botUserId: null, agentPath: 'Agents/legacy-bot.agent' })).toMatchObject({
       kind: 'unavailable',
     });
+  });
+
+  it('reads the domain again before making a row, so a change another process made is the one the new row takes', async () => {
+    const { state, dir } = directory();
+    state.defs = [def('latecomer')];
+    // What this process cached, and what the database says since another process changed it.
+    const cached = new Map<string, string>();
+    const stored = new Map<string, string>([['botsDomain', 'late.acme.com']]);
+    const lagging = {
+      resolve: (k: string) => cached.get(k) ?? '',
+      reload: async (k: string) => {
+        const v = stored.get(k) ?? '';
+        if (v) cached.set(k, v);
+        else cached.delete(k);
+        return v;
+      },
+      clear: async (k: string) => {
+        stored.delete(k);
+        cached.delete(k);
+      },
+      record: async (entries: Record<string, string>) => {
+        for (const [k, v] of Object.entries(entries)) (stored.set(k, v), cached.set(k, v));
+      },
+    };
+    const service = new BotService(db, lagging, dir);
+    await service.load();
+    await service.sync();
+    expect((await rowOf('latecomer'))!.email).toBe('latecomer@late.acme.com');
   });
 
   it('a bot may act as another bot under the rule a person follows', async () => {

@@ -19,7 +19,7 @@ import type { WorkspaceService } from '../../../workspace/index.js';
 import type { IAccessControl } from '../../../access/index.js';
 import { realAccessControl } from '../../../../__tests__/real-access.js';
 import { realDisk } from '../../../../__tests__/real-disk.js';
-import { BotAddressBook } from '../../../bots/index.js';
+import { botAddressBook, type BotAddressBook } from '../../../../__tests__/bot-address-book.js';
 import type { Database } from '../../../database/index.js';
 import type { GitService } from '../../git/git.service.js';
 import { ChangeRequestReviewService } from '../change-request-review.service.js';
@@ -92,7 +92,7 @@ describe('a bot\'s approvals while the bots\' domain change request is open', ()
       getWorkspacePath: async () => workspaceDir,
       ensureRemotesFetched: async () => undefined,
     } as unknown as WorkspaceService;
-    book = new BotAddressBook();
+    book = botAddressBook();
     book.replace({ domain: 'agent.hexis', botIds: ['release-helper'], previousDomain: 'old.example' });
     access = realAccessControl(workspaceService, KB_DIR, realDisk(), book);
   });

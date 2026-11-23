@@ -4,7 +4,7 @@ import { users, type Database } from '../../database/index.js';
 import { PG_ADMIN_URL, PG_TEST_TIMEOUT, dropScratchDatabases, openMigratedScratchDb } from '../../../__tests__/pg-scratch.js';
 import { AuthService, BOT_ADDRESS_REFUSAL } from '../auth.service.js';
 import { hashPassword } from '../password-hash.js';
-import { BotAddressBook } from '../../bots/index.js';
+import { botAddressBook, type BotAddressBook } from '../../../__tests__/bot-address-book.js';
 
 /**
  * A bot never signs in: every way in refuses a bot's row and any address at
@@ -27,7 +27,7 @@ describe.skipIf(!PG_ADMIN_URL)('a bot and the ways in, on a real Postgres', () =
   beforeAll(async () => {
     ({ db, close: closeDb } = await openMigratedScratchDb('hexis_bot_auth'));
     vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    const book = new BotAddressBook();
+    const book = botAddressBook();
     book.replace({ domain: 'agent.hexis', botIds: ['release-helper'], previousDomain: null });
     auth = new AuthService(db, { jwtSecret: JWT_SECRET, adminEmail: '', adminPassword: '', allowedEmailDomains: [] }, undefined, book);
     // A bot's row, with a password hash planted on it: even that never signs it in.

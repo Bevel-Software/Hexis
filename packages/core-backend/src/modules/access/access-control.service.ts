@@ -184,8 +184,8 @@ interface AccessModel {
   deploymentOwners: ReadonlySet<string>;
   /**
    * Which addresses are bots'. A bot is judged by its own grants and its
-   * groups' only: it is not part of `everyone`, holds no role, is no admin,
-   * and may never write `roles.yaml` or an `access.md` (see `modules/bots`).
+   * groups' only: it is not part of `everyone`, holds no role and is no
+   * admin (see `modules/bots`).
    */
   bots: IBotAddresses;
 }

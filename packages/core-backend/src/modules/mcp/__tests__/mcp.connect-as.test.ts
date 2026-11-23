@@ -27,14 +27,15 @@ import type { ConnectionScopeWire } from '../../agent-scope/index.js';
 
 const NARROW: ConnectionScopeWire = { agent: { path: 'narrow@agent.hexis', name: 'narrow' } };
 /**
- * A bot gone for its maker, on the wire as the deployment puts it: the bot's
- * id as `path` (an unusable bot has no address to give), its name, and the
- * one sentence the bots mechanism says for it (`goneSentence`).
+ * A bot gone for its maker, on the wire as the deployment puts it: the
+ * connection's own choice as `path` (nothing read from the bot), a fixed
+ * label as its name, and the one sentence the bots mechanism says for it
+ * (`GONE_SENTENCE`).
  */
 const GONE: ConnectionScopeWire = {
-  agent: { path: 'gone', name: 'gone' },
+  agent: { path: 'u-gone', name: 'a bot' },
   unavailable:
-    'This connection was made as the bot "gone", which no longer exists or which you may no longer act as, ' +
+    'This connection was made as a bot that no longer exists or that you may no longer act as, ' +
     'so it loads nothing. Make a new connection as yourself or as a bot you may act as.',
 };
 const CONNECTIONS: Record<string, ConnectionScopeWire | undefined> = {
@@ -216,6 +217,6 @@ describe('a connection whose bot is gone', () => {
     }
     const instructions = (await connect(mcp, { bearer: 'bevel_gone', connectionChoice: { botUserId: 'bot-gone', agentPath: null } }, true)).getInstructions();
     expect(instructions?.endsWith(GONE.unavailable!)).toBe(true);
-    expect(instructions).toContain('made as the bot "gone"');
+    expect(instructions).toContain('made as a bot that no longer exists');
   });
 });

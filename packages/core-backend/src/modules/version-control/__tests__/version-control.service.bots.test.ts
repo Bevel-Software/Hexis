@@ -32,6 +32,8 @@ const isBot = (email: string) => email === BOT.email;
 /** The target and source commits every merge and detail here is read at. */
 const TARGET_TIP = 'a'.repeat(40);
 const SOURCE_TIP = 'b'.repeat(40);
+/** The merge commit a merge that lands makes. */
+const MERGE_COMMIT = 'c'.repeat(40);
 
 type MergeHook = (t: { sha: string; sourceSha: string; changedPaths: string[]; workspaceId: string }) => Promise<void>;
 
@@ -66,7 +68,7 @@ function makeService(
     mergeChangeRequest: vi.fn(async (ws: string, _s: string, _t: string, _c: unknown, _u: unknown, opts: { authorize?: MergeHook }) => {
       await opts.authorize?.(target(ws));
       landed.count += 1;
-      return { kind: 'conflicts', paths: [] };
+      return { kind: 'merged', sha: MERGE_COMMIT, mergeCommit: MERGE_COMMIT };
     }),
   } as unknown as GitService;
   const prs = {
@@ -182,7 +184,7 @@ describe('a bot merging a branch into a protected branch', () => {
       },
       noOpenRequest,
     );
-    await svc.mergeBranch(BOT, DRAFT, PROTECTED);
+    await expect(svc.mergeBranch(BOT, DRAFT, PROTECTED)).resolves.toEqual({ kind: 'merged', sha: MERGE_COMMIT });
     expect(landed.count).toBe(1);
   });
 
