@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -80,8 +81,11 @@ function fakeRepository(commits: Map<string, () => string[]>): IGitRunner {
       return answer(Buffer.from(`${sha}\n`));
     }
     if (args[0] === 'ls-tree') {
+      // One record per file, as `git ls-tree -r -z` prints it. A path holds
+      // the same bytes at every commit here, so its object id is the path's.
       const paths = commits.get(args[args.length - 1]!)!();
-      return answer(Buffer.from(`${paths.join('\u0000')}\u0000`, 'utf8'));
+      const record = (p: string) => `100644 blob ${createHash('sha1').update(p).digest('hex')}\t${p}\u0000`;
+      return answer(Buffer.from(paths.map(record).join(''), 'utf8'));
     }
     if (args[0] === 'cat-file') {
       const out: Buffer[] = [];

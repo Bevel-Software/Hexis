@@ -272,6 +272,55 @@ describe('AccessControlService — at-ref model cache', () => {
     await fs.rm(root, { recursive: true, force: true });
   });
 
+  it('reads the access files once for the commits a branch moves through, and again only when one of them changed', async () => {
+    // What one gate call on a commit not seen before costs in batched reads:
+    // the model's files when they are not already held, plus the asked
+    // file's own frontmatter at that commit (always one).
+    const gate = async () => {
+      const before = { listings: lsTreeBuilds(), batches: catFileBatches() };
+      const allowed = await svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC);
+      return { allowed, listings: lsTreeBuilds() - before.listings, batches: catFileBatches() - before.batches };
+    };
+    const MODEL_AND_OWN = 2;
+    const OWN_ONLY = 1;
+
+    expect(await gate()).toEqual({ allowed: true, listings: 1, batches: MODEL_AND_OWN });
+
+    // The head moves five times without touching a file the model reads:
+    // each commit is listed, and none of them reads the model's files again.
+    for (let i = 0; i < 5; i++) {
+      await pushFromOther(`note ${i}`, () => fs.writeFile(path.join(other, `Team/Note-${i}.md`), `# ${i}\n`));
+      expect(await gate()).toEqual({ allowed: true, listings: 1, batches: OWN_ONLY });
+    }
+
+    // A commit that changes an access file is read, and its rules decide.
+    await pushFromOther('team denies admin', () =>
+      fs.writeFile(path.join(other, 'Team/access.md'), '---\nwrite:\n  - deny Admin\n---\n'),
+    );
+    expect(await gate()).toEqual({ allowed: false, listings: 1, batches: MODEL_AND_OWN });
+
+    // The commits after it hold the new rules without reading them again.
+    await pushFromOther('another note', () => fs.writeFile(path.join(other, 'Team/Note-after.md'), '# after\n'));
+    expect(await gate()).toEqual({ allowed: false, listings: 1, batches: OWN_ONLY });
+
+    // A commit that puts the earlier rules back holds the same files, byte
+    // for byte, as commits still cached: their model is this commit's too.
+    await pushFromOther('team admits admin again', () =>
+      fs.writeFile(path.join(other, 'Team/access.md'), '---\nwrite:\n  - Admin\n---\n'),
+    );
+    expect(await gate()).toEqual({ allowed: true, listings: 1, batches: OWN_ONLY });
+    expect(fileShows()).toBe(0);
+  });
+
+  it('refuses to decide from a listing it cannot read whole, and decides once git answers again', async () => {
+    // One record without the tab that separates the object id from the path.
+    injected.rewriteNext = (argv) =>
+      argv.includes('ls-tree') ? (stdout) => Buffer.concat([stdout, Buffer.from('100644 blob not-a-record\0')]) : null;
+    await expect(svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).rejects.toBeInstanceOf(AccessUnreadableError);
+    expect(await svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).toBe(true);
+    expect(lsTreeBuilds()).toBe(2);
+  });
+
   it('builds the model once for the six gate calls an approval click makes', async () => {
     // The approve route's exact sequence: detail (eligibility + viewer batch +
     // roles.yaml bypass check, concurrently), then the gate, then the

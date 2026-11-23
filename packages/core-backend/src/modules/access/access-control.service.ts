@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
@@ -73,7 +74,8 @@ import {
   DIRECTORY_SYNC_BOT_NAME,
 } from './directory-sync-bot.js';
 import { OwnEntriesMemo, type IOwnEntriesMemo, type WorkspaceOwnEntries } from './own-entries-memo.js';
-import { TreeIndexer, parseNulListing, type CommitPaths, type ITreeIndexer } from './tree-index.js';
+import { TreeIndexer, type CommitPaths, type ITreeIndexer } from './tree-index.js';
+import { visitTreeListing } from './commit-listing.js';
 
 /**
  * What one spec of a batched read came back as: a blob's text, nothing at
@@ -1514,7 +1516,13 @@ function ineligibleNamedEmailsResolved(
  * own-entries reads need to tell a path that is absent at the commit (a
  * fact, remembered) from a blob the batch could not read (never remembered).
  */
-type AtRefModel = { model: AccessModel; resolvedRef: string; tree: CommitPaths | null };
+type AtRefModel = {
+  model: AccessModel;
+  resolvedRef: string;
+  tree: CommitPaths | null;
+  /** What the model was derived from, as content (see `modelsBySources`). */
+  sourcesKey: string;
+};
 /**
  * One build's outcome: a model, no roles.yaml at the commit, or one that
  * doesn't parse. A git read failure is none of these: it throws
@@ -1562,6 +1570,16 @@ export class AccessControlService implements IAccessControl {
    * via `atRefInFlight`.
    */
   private readonly atRefCache = new Map<string, AtRefModel>();
+  /**
+   * The models the cached commits hold, by what each was derived from: the
+   * files a build reads (roles.yaml, the groups sources, every access.md and
+   * plugin manifest), as path and object id. Most commits change none of
+   * them, so the commits a branch moves through hold ONE model between them,
+   * and a commit whose key is already here is not read or parsed again: its
+   * listing is all a build costs. `holders` counts the cached commits using
+   * a model; it is dropped with the last of them.
+   */
+  private readonly modelsBySources = new Map<string, { model: AccessModel; holders: number }>();
   private readonly atRefNoRoles = new Set<string>();
   private readonly atRefInFlight = new Map<string, Promise<AtRefBuild>>();
   private static readonly AT_REF_CACHE_MAX = 512;
@@ -2944,23 +2962,27 @@ export class AccessControlService implements IAccessControl {
   /**
    * List every `access.md` path that exists at any depth as of `ref`.
    * The access tree is structure-agnostic: any `access.md` participates
-   * regardless of where it sits. Uses `git ls-tree -r -z --name-only`: `-z`
-   * puts a NUL between paths and prints them as they are, where the default
-   * output C-quotes a path with a non-ASCII or special character, which would
-   * then name nothing when read back. `'error'` when git failed: a model
-   * built without its access files is not the model, and the caller must not
-   * cache it as one.
+   * regardless of where it sits. Uses `git ls-tree -r -z`: `-z` puts a NUL
+   * after each record and prints paths as they are, where the default output
+   * C-quotes a path with a non-ASCII or special character, which would then
+   * name nothing when read back. Each record carries the file's object id,
+   * which is what `sourcesKey` is made of. `'error'` when git failed or
+   * printed a listing that cannot be read whole: a model built without its
+   * access files is not the model, and the caller must not cache it as one.
    */
   private async listAccessFilesAtRef(
     repoDir: string,
     ref: string,
-  ): Promise<{ accessFiles: string[]; pluginDirs: string[]; named: Set<string>; all: string[] } | 'error'> {
+  ): Promise<
+    | { accessFiles: string[]; pluginDirs: string[]; named: Set<string>; all: string[]; sourcesKey: string }
+    | 'error'
+  > {
     try {
-      // Bytes, decoded one path at a time (`parseNulListing`): every path
+      // Bytes, decoded one path at a time (`visitTreeListing`): every path
       // below is a string of its own. Cut from one decoded listing, each
       // would be a view onto it, and a cached model keeping any of them
       // would keep the commit's whole listing alive.
-      const { stdout } = await this.gitRunner.run(repoDir, ['ls-tree', '-r', '-z', '--name-only', ref], {
+      const { stdout } = await this.gitRunner.run(repoDir, ['ls-tree', '-r', '-z', ref], {
         encoding: 'buffer',
       });
       const out: string[] = [];
@@ -2971,16 +2993,22 @@ export class AccessControlService implements IAccessControl {
       // only when the tree does not name it.
       const named = new Set<string>();
       const { pluginsDir } = this.kb.layout;
-      for (const p of parseNulListing(stdout)) {
+      // What the model is derived from, as content: every file the build
+      // reads, by path and object id, in the order git lists them, and the
+      // plugins root that decides which manifests count. Two commits with
+      // the same key hold the same rules (see `modelsBySources`).
+      const sources = createHash('sha256').update(`${pluginsDir}\0`);
+      visitTreeListing(stdout, (p, objectId) => {
         // One past the cap is enough to know the tree is not kept.
         if (all.length <= this.treeIndexMaxPaths) all.push(p);
         if (p === 'access.md' || p.endsWith('/access.md')) out.push(p);
         else if (p === 'roles.yaml' || p === SYNCED_GROUPS_YAML || p === GROUPS_YAML) named.add(p);
         else if (p.startsWith(`${pluginsDir}/`) && p.endsWith(`/${PLUGIN_MANIFEST_FILE}`)) {
           pluginDirs.push(p.slice(0, -(PLUGIN_MANIFEST_FILE.length + 1)));
-        }
-      }
-      return { accessFiles: out, pluginDirs, named, all };
+        } else return;
+        sources.update(`${p}\0${objectId()}\n`);
+      });
+      return { accessFiles: out, pluginDirs, named, all, sourcesKey: sources.digest('hex') };
     } catch {
       return 'error';
     }
@@ -3082,13 +3110,24 @@ export class AccessControlService implements IAccessControl {
   }
 
   private rememberAtRef(key: string, value: AtRefModel): void {
+    // One model per `sourcesKey`: a commit built while another with the same
+    // sources was building takes the model already held, so the two never
+    // keep a copy each.
+    const shared = this.modelsBySources.get(value.sourcesKey);
+    if (shared) {
+      value.model = shared.model;
+      shared.holders++;
+    } else {
+      this.modelsBySources.set(value.sourcesKey, { model: value.model, holders: 1 });
+    }
     this.atRefCache.set(key, value);
     if (value.tree) this.treeIndexer.hold(value.tree);
     if (this.atRefCache.size > AccessControlService.AT_REF_CACHE_MAX) {
       const oldest = this.atRefCache.keys().next().value;
       if (oldest !== undefined) {
-        const evicted = this.atRefCache.get(oldest)?.tree;
-        if (evicted) this.treeIndexer.release(evicted);
+        const evicted = this.atRefCache.get(oldest);
+        if (evicted?.tree) this.treeIndexer.release(evicted.tree);
+        if (evicted) this.releaseModel(evicted.sourcesKey);
         this.atRefCache.delete(oldest);
       }
     }
@@ -3103,6 +3142,14 @@ export class AccessControlService implements IAccessControl {
       this.treeIndexer.release(held.tree);
       held.tree = null;
     }
+  }
+
+  /** A cached commit that held the model for `sourcesKey` was dropped. */
+  private releaseModel(sourcesKey: string): void {
+    const shared = this.modelsBySources.get(sourcesKey);
+    if (!shared) return;
+    if (shared.holders <= 1) this.modelsBySources.delete(sourcesKey);
+    else shared.holders--;
   }
 
   private rememberNoRolesAtRef(key: string): void {
@@ -3147,6 +3194,11 @@ export class AccessControlService implements IAccessControl {
       logger(`access@${tag}`).warn('listing access.md files failed; refusing to decide from a partial tree');
       throw new AccessUnreadableError(label, 'access.md (ls-tree)');
     }
+    const treeOf = () => (listed.all.length <= this.treeIndexMaxPaths ? this.treeIndexer.index(listed.all) : null);
+    // The same sources as a commit already cached: the same rules, so the
+    // model that commit holds is this one's too, and nothing more is read.
+    const shared = this.modelsBySources.get(listed.sourcesKey);
+    if (shared) return { model: shared.model, resolvedRef: commit, tree: treeOf(), sourcesKey: listed.sourcesKey };
     const wanted = [
       'roles.yaml',
       SYNCED_GROUPS_YAML,
@@ -3280,7 +3332,8 @@ export class AccessControlService implements IAccessControl {
       // The listing already named every path; held so an own-entries read
       // can tell absence from a lost blob, unless the tree is too large to
       // hold for every cached commit (then absence is simply not remembered).
-      tree: listed.all.length <= this.treeIndexMaxPaths ? this.treeIndexer.index(listed.all) : null,
+      tree: treeOf(),
+      sourcesKey: listed.sourcesKey,
     };
   }
 }
