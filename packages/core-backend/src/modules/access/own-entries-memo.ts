@@ -37,7 +37,7 @@ export interface IOwnEntriesMemo {
 
 /**
  * The per-workspace memo of what files declare for themselves, for the batch
- * checks (see `AccessControlService.cachedOwnEntriesBatch`), with its size
+ * checks (see `AccessControlService.batchRules`), with its size
  * bounded by what it holds rather than by how long the process has run:
  *
  * - a workspace's memo lives `ttlMs` from when it was started. Every `open`

@@ -1717,26 +1717,36 @@ export class AccessControlService implements IAccessControl {
   private generation = 0;
 
   /**
-   * Memoized `readOwnEntries` for the batch paths; see `ownEntriesMemo`. The
-   * memo is opened once per batch, before any read, so an `invalidate()`
-   * that lands mid-batch keeps every later store out of it.
+   * What a batch check resolves against: the model, and what each of
+   * `relativePaths` declares for itself, index-aligned with them.
+   *
+   * Both come from ONE reading of where the checkout stands. Where a head
+   * map answers, the model and the own entries are that one map's: asked for
+   * separately, a commit landing between the two would pair one commit's
+   * rules with another's own entries, and a restriction moved from a file's
+   * frontmatter to its folder in that commit would be in neither.
+   *
+   * The map knows the few files that declare something, so the rest are not
+   * opened; a path the commit does not hold is read from the checkout. Where
+   * no map answers, the checkout is read for both, the own entries through
+   * `ownEntriesMemo`, opened once per batch and before any of its reads, so
+   * an `invalidate()` that lands mid-batch keeps every later store out of it.
    */
-  private async cachedOwnEntriesBatch(
+  private async batchRules(
     workspaceId: string,
-    repoDir: string,
     relativePaths: readonly string[],
-  ): Promise<(OwnEntries | null)[]> {
-    const memo = this.ownEntriesMemo.open(workspaceId);
-    // From the map of the commit the checkout stands on, where there is one:
-    // it knows the few files that declare something, so the rest are not
-    // opened. A path the commit does not hold is read from the checkout.
+  ): Promise<{ model: AccessModel; owns: (OwnEntries | null)[] }> {
+    const repoDir = await this.repoDir(workspaceId);
     const head = await this.headMapOf(workspaceId, repoDir);
-    return Promise.all(
+    const model = head ? head.model : await this.loadCheckoutModel(workspaceId, repoDir);
+    const memo = this.ownEntriesMemo.open(workspaceId);
+    const owns = await Promise.all(
       relativePaths.map((p) => {
         const own = head?.ownEntries(p);
         return own !== undefined ? own : this.cachedOwnEntries(memo, repoDir, p);
       }),
     );
+    return { model, owns };
   }
 
   private async cachedOwnEntries(
@@ -1797,13 +1807,9 @@ export class AccessControlService implements IAccessControl {
     userEmail: string,
     relativePaths: string[],
   ): Promise<Map<string, boolean>> {
-    const model = await this.loadModel(workspaceId);
-    const repoDir = await this.repoDir(workspaceId);
-    // Read each path's own-entries in parallel rather than serially (the batch
-    // path otherwise bottlenecks on per-file disk latency), memoized per
-    // workspace for the files in the access-frontmatter extension set, so a
-    // repeat tree build reads only the others (see `cachedOwnEntries`).
-    const owns = await this.cachedOwnEntriesBatch(workspaceId, repoDir, relativePaths);
+    // The model and each path's own entries, from one reading of where the
+    // checkout stands (see `batchRules`).
+    const { model, owns } = await this.batchRules(workspaceId, relativePaths);
     const result = new Map<string, boolean>();
     relativePaths.forEach((p, i) => {
       result.set(p, canReadResolved(model, userEmail, p, owns[i]));
@@ -1816,13 +1822,11 @@ export class AccessControlService implements IAccessControl {
     group: string,
     relativePaths: string[],
   ): Promise<Map<string, boolean> | null> {
-    const model = await this.loadModel(workspaceId);
-    const keys = principalKeysOfGroup(model, group);
-    if (keys === null) return null;
-    const repoDir = await this.repoDir(workspaceId);
     // The same per-path own-entries `canReadBatch` folds in: a file's own
     // frontmatter rules are part of the walk for a group as for a person.
-    const owns = await this.cachedOwnEntriesBatch(workspaceId, repoDir, relativePaths);
+    const { model, owns } = await this.batchRules(workspaceId, relativePaths);
+    const keys = principalKeysOfGroup(model, group);
+    if (keys === null) return null;
     const result = new Map<string, boolean>();
     relativePaths.forEach((p, i) => {
       result.set(p, hasPermissionForKeys(model, 'read', keys, p, owns[i]));
@@ -1831,9 +1835,7 @@ export class AccessControlService implements IAccessControl {
   }
 
   async canReadAsEveryoneBatch(workspaceId: string, relativePaths: string[]): Promise<Map<string, boolean>> {
-    const model = await this.loadModel(workspaceId);
-    const repoDir = await this.repoDir(workspaceId);
-    const owns = await this.cachedOwnEntriesBatch(workspaceId, repoDir, relativePaths);
+    const { model, owns } = await this.batchRules(workspaceId, relativePaths);
     const result = new Map<string, boolean>();
     relativePaths.forEach((p, i) => {
       // No keys at all: the walk then falls through to each scope's derived
@@ -1870,10 +1872,8 @@ export class AccessControlService implements IAccessControl {
     userEmail: string,
     relativePaths: string[],
   ): Promise<Map<string, boolean>> {
-    const model = await this.loadModel(workspaceId);
-    const repoDir = await this.repoDir(workspaceId);
-    // Parallel own-entries reads, memoized — same shape as `canReadBatch`.
-    const owns = await this.cachedOwnEntriesBatch(workspaceId, repoDir, relativePaths);
+    // Same shape as `canReadBatch`.
+    const { model, owns } = await this.batchRules(workspaceId, relativePaths);
     const result = new Map<string, boolean>();
     relativePaths.forEach((p, i) => {
       const machineOwned = this.machineOwnedWriteRule(userEmail, p);
@@ -1897,10 +1897,8 @@ export class AccessControlService implements IAccessControl {
     userEmail: string,
     relativePaths: string[],
   ): Promise<Map<string, boolean>> {
-    const model = await this.loadModel(workspaceId);
-    const repoDir = await this.repoDir(workspaceId);
-    // Parallel own-entries reads, memoized — same shape as `canWriteBatch`.
-    const owns = await this.cachedOwnEntriesBatch(workspaceId, repoDir, relativePaths);
+    // Same shape as `canWriteBatch`.
+    const { model, owns } = await this.batchRules(workspaceId, relativePaths);
     const result = new Map<string, boolean>();
     relativePaths.forEach((p, i) => {
       result.set(p, hasPermissionResolved(model, 'download', userEmail, p, owns[i]));
@@ -1913,10 +1911,8 @@ export class AccessControlService implements IAccessControl {
     userEmail: string,
     relativePaths: string[],
   ): Promise<Map<string, boolean>> {
-    const model = await this.loadModel(workspaceId);
-    const repoDir = await this.repoDir(workspaceId);
-    // Parallel own-entries reads, memoized — same shape as `canWriteBatch`.
-    const owns = await this.cachedOwnEntriesBatch(workspaceId, repoDir, relativePaths);
+    // Same shape as `canWriteBatch`.
+    const { model, owns } = await this.batchRules(workspaceId, relativePaths);
     const result = new Map<string, boolean>();
     relativePaths.forEach((p, i) => {
       result.set(p, hasPermissionResolved(model, 'owner', userEmail, p, owns[i]));
@@ -2628,10 +2624,13 @@ export class AccessControlService implements IAccessControl {
     // The rules of the commit the checkout stands on, where a map of it can
     // answer (`headMapOf`). Asked before the checkout's own cached model: a
     // model read from the checkout while no map could answer must not go on
-    // answering once one can, beside own entries the map already gives.
+    // answering once one can.
     const head = await this.headMapOf(workspaceId, repoDir);
-    if (head) return head.model;
+    return head ? head.model : this.loadCheckoutModel(workspaceId, repoDir);
+  }
 
+  /** The model read from the checkout itself: what answers where no head map can. */
+  private async loadCheckoutModel(workspaceId: string, repoDir: string): Promise<AccessModel> {
     const cached = this.cache.get(workspaceId);
     if (cached && this.now() - cached.loadedAt < AccessControlService.CACHE_TTL_MS) {
       return cached.model;

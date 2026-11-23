@@ -92,15 +92,21 @@ describe('AccessControlService: reads answered from the map of the head commit',
     limits: Partial<HeadMapLimits> = {},
     store?: IHeadSeedStore,
     /** `now`: the service's clock. `failGit`: git calls that fail, as a git that timed out does. */
-    opts: { now?: () => number; failGit?: (args: string[]) => boolean } = {},
+    opts: {
+      now?: () => number;
+      failGit?: (args: string[]) => boolean;
+      /** Runs before a git call is made, and is waited for. */
+      beforeGit?: (args: string[]) => Promise<void>;
+    } = {},
   ): AccessControlService {
     const real = new NodeGitRunner();
     const counted: IGitRunner = {
       defaultTimeoutMs: real.defaultTimeoutMs,
       credentials: real.credentials,
-      run: ((cwd: string, args: string[], runOpts?: unknown) => {
+      run: (async (cwd: string, args: string[], runOpts?: unknown) => {
         gitLog.push(args[0]!);
-        if (opts.failGit?.(args)) return Promise.reject(new Error('git timed out (simulated)'));
+        await opts.beforeGit?.(args);
+        if (opts.failGit?.(args)) throw new Error('git timed out (simulated)');
         return (real.run as (...a: unknown[]) => unknown)(cwd, args, runOpts);
       }) as IGitRunner['run'],
     };
@@ -249,6 +255,31 @@ describe('AccessControlService: reads answered from the map of the head commit',
     reset();
     expect(await read()).toBe(false);
     expect(opened).toEqual([]);
+  });
+
+  it('answers a batch from one commit when a commit lands while the batch is being answered', async () => {
+    // At the first commit the page restricts itself. The second moves that
+    // restriction to the page's folder. The rules of the first with the
+    // page's own entries of the second would hold neither, and admit anyone.
+    await commit('page restricts itself', { 'Move/X.md': DENY_ALL });
+    let landed = false;
+    const svc = service({}, undefined, {
+      beforeGit: async (args) => {
+        // The first listing is the map of the first commit being made, after
+        // the head was read: the second commit lands now.
+        if (args[0] !== 'ls-tree' || landed) return;
+        landed = true;
+        await commit('restriction moves to the folder', {
+          'Move/X.md': '# x\n',
+          'Move/access.md': '---\nread:\n  - deny everyone\n---\n',
+        });
+      },
+    });
+    const read = async () => (await svc.canReadBatch('ws', 'nobody@x.io', ['Move/X.md'])).get('Move/X.md');
+    expect(await read()).toBe(false);
+    expect(landed).toBe(true);
+    // And the next batch, from the second commit, refuses by the folder.
+    expect(await read()).toBe(false);
   });
 
   it('stops answering a reported change from the checkout after ten seconds when no commit follows', async () => {
