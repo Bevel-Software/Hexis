@@ -268,8 +268,10 @@ function enumerableIn(obj: object, key: PropertyKey): boolean {
  * (`for...in`, pino's error serializer) would reach that getter and throw.
  *
  * So no inherited accessor is left for a reader of the copy to reach: each
- * is read ONCE, on the original, where it works, and the copy holds the
- * value as an own data property, as enumerable as the accessor was. A getter
+ * is read on the original, where it works, and the copy holds the value as
+ * an own data property, as enumerable as the accessor was. (Some are read
+ * there more than once: a DOMException's `name` and `message` are accessors
+ * too, and the stack's header reads them again.) A getter
  * that refuses the original too leaves `undefined`. The rule is about
  * accessors, whatever class defines them. `Object.prototype` is not walked:
  * its one accessor, `__proto__`, accepts any receiver.
