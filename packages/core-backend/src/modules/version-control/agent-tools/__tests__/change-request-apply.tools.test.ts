@@ -317,12 +317,14 @@ describe('apply_change_request, as a bot', () => {
     expect(endApplyAttempt).toHaveBeenCalledWith(7, 1);
   });
 
-  it('refuses a request that changes access, as the service decides, and records nothing for a refusal of the caller', async () => {
-    mergeChangeRequest.mockRejectedValue(new VersionControlDomainError('A bot never changes access: Docs/access.md', 403));
+  it('refuses a request with a file outside the bot\'s write access, as the service decides, and records nothing for a refusal of the caller', async () => {
+    mergeChangeRequest.mockRejectedValue(
+      new VersionControlDomainError('A bot merges a change request only where it may write every file it changes: 1 changed file(s) are outside its write access (Docs/b.md).', 403, { kind: 'bot-merge-outside-grant' }),
+    );
     const base = await start();
     const res = await call(base, 'apply_change_request', { number: 7 });
     expect(res.status).toBe(403);
-    expect(res.json.error).toMatch(/never changes access/);
+    expect(res.json.error).toMatch(/outside its write access/);
     expect(recordApplyFailure).not.toHaveBeenCalled();
   });
 

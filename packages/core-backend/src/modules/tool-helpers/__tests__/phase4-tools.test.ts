@@ -1,80 +1,43 @@
 import type { Server as HttpServer } from 'node:http';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
-import os from 'node:os';
-import path from 'node:path';
 import express from 'express';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { ToolRegistry, createManualRoutes } from '../../tool-registry/index.js';
+import { ToolRegistry } from '../../tool-registry/tool-registry.js';
+import { InternalTokenService } from '../../tool-auth/internal-token.service.js';
+import { createToolAuthMiddleware } from '../../tool-auth/tool-auth.middleware.js';
 import { createToolContextResolver } from '../tool-context.js';
 import { createToolHandlerFactory } from '../tool-handler.js';
-import { DocExtractService, SpillStore, ToolDescriptionNotes, WorkerDocumentExtractor } from '../../workspace/index.js';
-import {
-  InternalTokenService,
-  RoutineWritePolicyService,
-  VersionControlHooks,
-  createToolAuthMiddleware,
-  registerWorkspaceTools,
-} from '../../../__tests__/tool-wiring.js';
+import { createManualRoutes } from '../../tool-registry/manual.routes.js';
+import { registerWorkspaceTools } from '../../workspace/workspace.tools.js';
+import { RoutineWritePolicyService } from '../../workspace/routine-write-policy.js';
+import { VersionControlHooks } from '../../version-control/version-control-hooks.js';
+import { ToolDescriptionNotes } from '../../workspace/agent-access.gate.js';
+import { SpillStore } from '../../workspace/spill-store.js';
+import { DocExtractService, WorkerDocumentExtractor } from '../../workspace/index.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 
 const WS = 'target-company-state';
 let recorded: unknown[][] = [];
 /** Workspace-relative targets the stub archive holds; each is offered to the tool's write guard. */
 let archiveEntries: string[] = [];
-/** The bytes an entry holds, offered to the guard with its target (a folder entry has none). */
-let archiveContents = new Map<string, string>();
-
-/**
- * This test's own workspace folder, made empty for each test: what the bot's
- * guard reads as each file's current state is exactly what a test put there.
- */
-let workspaceDir = '';
-/** The paths whose lock is held right now, and every landing with whether its lock was held. */
-let heldLocks = new Set<string>();
-let landings: { path: string; locked: boolean }[] = [];
 
 const externalApiKeyService = { verifyAndLoadToken: async () => null } as never;
 const authService = { getUserById: async (id: string) => ({ id, email: 'e@x', name: 'N' }) } as never;
 const workspaceService = {
   getOrCreateForUser: async () => ({ id: WS }),
-  getWorkspacePath: async () => workspaceDir,
-  unzipFile: async (
-    ws: string,
-    p: string,
-    d?: string,
-    guardWrite?: (target: string, content?: Buffer) => Promise<void>,
-    landEntry?: (target: string, content: Buffer, write: () => Promise<void>) => Promise<string | undefined>,
-  ) => {
+  getWorkspacePath: async () => '/tmp/ws',
+  unzipFile: async (ws: string, p: string, d?: string, guardWrite?: (target: string) => Promise<void>) => {
     recorded.push(['unzip', ws, p, d]);
     if (archiveEntries.length === 0) return { extracted: [p], skipped: [] };
-    // Mirrors the real extraction (`WorkspaceService.unzipFile`): a guard
-    // that throws skips that entry with its message; a file that passed
-    // lands through `landEntry`, whose answered refusal skips it too, and
-    // whose THROW fails the whole extraction, as the service lets it.
+    // Mirrors the real extraction: a guard refusal skips that entry with its message.
     const extracted: string[] = [];
     const skipped: { path: string; reason: string }[] = [];
     for (const target of archiveEntries) {
-      const text = archiveContents.get(target);
-      const bytes = text === undefined ? undefined : Buffer.from(text);
       try {
-        await guardWrite?.(target, bytes);
+        await guardWrite?.(target);
+        extracted.push(target);
       } catch (err) {
         skipped.push({ path: target, reason: (err as Error).message });
-        continue;
       }
-      if (bytes !== undefined) {
-        const write = async () => {
-          landings.push({ path: target, locked: heldLocks.has(target) });
-          await mkdir(path.dirname(path.join(workspaceDir, target)), { recursive: true });
-          await writeFile(path.join(workspaceDir, target), bytes);
-        };
-        const refused = landEntry ? await landEntry(target, bytes, write) : (await write(), undefined);
-        if (refused !== undefined) {
-          skipped.push({ path: target, reason: refused });
-          continue;
-        }
-      }
-      extracted.push(target);
     }
     return { extracted, skipped };
   },
@@ -82,22 +45,7 @@ const workspaceService = {
     throw new Error('no such file');
   },
 } as never;
-const versionControlService = {
-  acquireLock: async (_w: string, _b: string, p: string) => {
-    heldLocks.add(p);
-    return { acquired: true, lock: {} };
-  },
-  releaseLock: async (_w: string, _b: string, p: string) => {
-    heldLocks.delete(p);
-    return null;
-  },
-  releaseLockNoCommit: async (_w: string, _b: string, p: string) => {
-    heldLocks.delete(p);
-  },
-  releaseLockUntouched: async (_w: string, _b: string, p: string) => {
-    heldLocks.delete(p);
-  },
-} as never;
+const versionControlService = {} as never;
 const events = {} as never;
 const accessControl = {
   canRead: async () => true,
@@ -107,14 +55,10 @@ const accessControl = {
 const internalToken = new InternalTokenService({ secret: 's' });
 let httpServer: HttpServer | undefined;
 
-function resolverFor(opts: { isBot?: (email: string) => boolean }) {
-  return createToolContextResolver({ authService, workspaceService, versionControlService, events, kbDirName: 'knowledge-base', ...(opts.isBot ? { isBot: opts.isBot } : {}), creatorAccess: { planForCreate: async () => null, grantInExtractedFile: async () => null, noteAccessFileWritten: () => {} } });
-}
-
-async function start(opts: { isBot?: (email: string) => boolean } = {}): Promise<string> {
+async function start(): Promise<string> {
   const registry = new ToolRegistry();
   const toolAuth = createToolAuthMiddleware(externalApiKeyService, internalToken);
-  const resolve = resolverFor(opts);
+  const resolve = createToolContextResolver({ authService, workspaceService, versionControlService, events, kbDirName: 'knowledge-base', creatorAccess: { planForCreate: async () => null, grantInExtractedFile: async () => null, noteAccessFileWritten: () => {} } });
   const th = createToolHandlerFactory(resolve);
   const router = express.Router();
   // NOTE (core split): this suite used to register the search, feedback and
@@ -142,18 +86,13 @@ const tok = () => internalToken.mint({ userId: 'user-A' });
 const post = (url: string, body: unknown = {}) =>
   fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${tok()}` }, body: JSON.stringify(body) });
 
-beforeEach(async () => {
+beforeEach(() => {
   recorded = [];
   archiveEntries = [];
-  archiveContents = new Map();
-  heldLocks = new Set();
-  landings = [];
-  workspaceDir = await mkdtemp(path.join(os.tmpdir(), 'bevel-phase4-ws-'));
 });
 afterEach(async () => {
   if (httpServer) await new Promise<void>((r) => httpServer!.close(() => r()));
   httpServer = undefined;
-  await rm(workspaceDir, { recursive: true, force: true });
 });
 
 describe('Phase 4 tools (core subset)', () => {
@@ -176,94 +115,6 @@ describe('Phase 4 tools (core subset)', () => {
     expect(body.skipped).toEqual([
       { path: 'knowledge-base/roles.yaml', reason: expect.stringContaining('roles.yaml is never extracted') },
     ]);
-  });
-
-  it("a bot's unzip extracts no access file and no file whose own access lines it would change: each entry takes the write tools' gate", async () => {
-    archiveEntries = [
-      'knowledge-base/KnowledgeBase/notes.md',
-      'knowledge-base/KnowledgeBase/page.md',
-      'knowledge-base/KnowledgeBase/access.md',
-    ];
-    archiveContents = new Map([
-      ['knowledge-base/KnowledgeBase/notes.md', '# notes\n'],
-      ['knowledge-base/KnowledgeBase/page.md', '---\nread:\n  - everyone\n---\n# page\n'],
-      ['knowledge-base/KnowledgeBase/access.md', 'read:\n  - everyone\n'],
-    ]);
-    const base = await start({ isBot: () => true });
-    const res = await post(`${base}/api/agent/tools/unzip`, { path: 'knowledge-base/a.zip', branch: WS });
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as { extracted: string[]; skipped: { path: string; reason: string }[] };
-    expect(body.extracted).toEqual(['knowledge-base/KnowledgeBase/notes.md']);
-    expect(body.skipped).toEqual([
-      { path: 'knowledge-base/KnowledgeBase/page.md', reason: expect.stringContaining('A bot cannot change access') },
-      { path: 'knowledge-base/KnowledgeBase/access.md', reason: expect.stringContaining('A bot cannot change access') },
-    ]);
-    // What did land, landed under its lock.
-    expect(landings).toEqual([{ path: 'knowledge-base/KnowledgeBase/notes.md', locked: true }]);
-    expect(heldLocks.size).toBe(0);
-  });
-
-  it("a bot's unzip over a page whose own access lines it would drop is skipped, judged against the page as it is on disk", async () => {
-    await mkdir(path.join(workspaceDir, 'knowledge-base/KnowledgeBase'), { recursive: true });
-    await writeFile(path.join(workspaceDir, 'knowledge-base/KnowledgeBase/page.md'), '---\nread:\n  - Eng\n---\n# page\n');
-    archiveEntries = ['knowledge-base/KnowledgeBase/page.md'];
-    archiveContents = new Map([['knowledge-base/KnowledgeBase/page.md', '# page, open to all now\n']]);
-    const base = await start({ isBot: () => true });
-    const body = (await (await post(`${base}/api/agent/tools/unzip`, { path: 'knowledge-base/a.zip', branch: WS })).json()) as {
-      extracted: string[];
-      skipped: { path: string; reason: string }[];
-    };
-    expect(body.extracted).toEqual([]);
-    expect(body.skipped).toEqual([
-      { path: 'knowledge-base/KnowledgeBase/page.md', reason: expect.stringContaining('A bot cannot change access') },
-    ]);
-    expect(await readFile(path.join(workspaceDir, 'knowledge-base/KnowledgeBase/page.md'), 'utf-8')).toContain('- Eng');
-  });
-
-  it("a bot's unzip fails, rather than skipping the file, when the gate cannot read the page it judges against", async () => {
-    // The page's name is a folder on disk: reading what it holds now fails
-    // (EISDIR), which is the gate failing, not the gate saying no.
-    await mkdir(path.join(workspaceDir, 'knowledge-base/KnowledgeBase/page.md'), { recursive: true });
-    archiveEntries = ['knowledge-base/KnowledgeBase/notes.md', 'knowledge-base/KnowledgeBase/page.md'];
-    archiveContents = new Map([
-      ['knowledge-base/KnowledgeBase/notes.md', '# notes\n'],
-      ['knowledge-base/KnowledgeBase/page.md', '# page\n'],
-    ]);
-    const base = await start({ isBot: () => true });
-    const res = await post(`${base}/api/agent/tools/unzip`, { path: 'knowledge-base/a.zip', branch: WS });
-    expect(res.status).toBeGreaterThanOrEqual(500);
-    const body = (await res.json()) as { skipped?: unknown };
-    expect(body.skipped).toBeUndefined();
-    // Nothing was put at the page's name, and no lock is left behind.
-    expect(landings.map((l) => l.path)).toEqual(['knowledge-base/KnowledgeBase/notes.md']);
-    expect(heldLocks.size).toBe(0);
-  });
-
-  it("a bot's delete of an access file or of a page with its own access lines is refused through the resolved context; a person's is not judged by it", async () => {
-    await mkdir(path.join(workspaceDir, 'knowledge-base/Team'), { recursive: true });
-    await writeFile(path.join(workspaceDir, 'knowledge-base/Team/access.md'), 'read:\n  - Eng\n');
-    await writeFile(path.join(workspaceDir, 'knowledge-base/Team/page.md'), '---\nread:\n  - Eng\n---\n# page\n');
-    const auth = { userId: 'user-A', scope: 'write', source: 'internal' } as never;
-    const asBot = await resolverFor({ isBot: () => true })(auth, new AbortController().signal);
-    const botFs = await asBot.getFilesystem(WS);
-    await expect(botFs.deleteFile('knowledge-base/Team/access.md')).rejects.toThrow(/A bot cannot change access/);
-    await expect(botFs.deleteFile('knowledge-base/Team/page.md')).rejects.toThrow(/A bot cannot change access/);
-    expect(await readFile(path.join(workspaceDir, 'knowledge-base/Team/access.md'), 'utf-8')).toBe('read:\n  - Eng\n');
-    expect(await readFile(path.join(workspaceDir, 'knowledge-base/Team/page.md'), 'utf-8')).toContain('- Eng');
-
-    const asPerson = await resolverFor({ isBot: () => false })(auth, new AbortController().signal);
-    await (await asPerson.getFilesystem(WS)).deleteFile('knowledge-base/Team/page.md');
-    await expect(readFile(path.join(workspaceDir, 'knowledge-base/Team/page.md'), 'utf-8')).rejects.toThrow();
-  });
-
-  it("a person's unzip extracts the same archive whole: the bot's guard is the bot's alone", async () => {
-    archiveEntries = ['knowledge-base/KnowledgeBase/page.md'];
-    archiveContents = new Map([['knowledge-base/KnowledgeBase/page.md', '---\nread:\n  - everyone\n---\n# page\n']]);
-    const base = await start({ isBot: () => false });
-    const body = (await (await post(`${base}/api/agent/tools/unzip`, { path: 'knowledge-base/a.zip', branch: WS })).json()) as {
-      extracted: string[];
-    };
-    expect(body.extracted).toEqual(['knowledge-base/KnowledgeBase/page.md']);
   });
 
   it('the registered core tool appears in the internal manual', async () => {

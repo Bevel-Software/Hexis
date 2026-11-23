@@ -1208,60 +1208,6 @@ describe('WorkspaceService.unzipFile — per-entry write guard', () => {
     await expect(fs.stat(path.join(workspaceDir, 'out'))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
-  it('asks the placement rules again when the bytes land, so a link put there after the first look gets nothing', async () => {
-    await writeZip('l.zip', { 'sub/page.md': 'payload', 'keep.md': 'ok' });
-    const outside = await fs.mkdtemp(path.join(root, 'outside-'));
-    await fs.mkdir(path.join(repoDir, 'out', 'sub'), { recursive: true });
-    const res = await svc.unzipFile(
-      workspaceId,
-      'l.zip',
-      'out',
-      async () => {},
-      // Between the guard and the landing (the caller's lock), the entry's
-      // folder is swapped for a link pointing out of the workspace.
-      async (wsPath, _content, write) => {
-        if (wsPath.endsWith('sub/page.md')) {
-          await fs.rm(path.join(repoDir, 'out', 'sub'), { recursive: true });
-          await fs.symlink(outside, path.join(repoDir, 'out', 'sub'));
-        }
-        await write();
-        return undefined;
-      },
-    );
-    expect(res.extracted).toEqual(['knowledge-base/out/keep.md']);
-    expect(res.skipped).toEqual([{ path: 'sub/page.md', reason: expect.any(String) }]);
-    expect(await fs.readdir(outside)).toEqual([]);
-  });
-
-  it('skips an entry whose landing answers a refusal, and fails the extraction when the write itself fails', async () => {
-    await writeZip('r.zip', { 'held.md': 'x', 'keep.md': 'ok' });
-    const res = await svc.unzipFile(
-      workspaceId,
-      'r.zip',
-      'out',
-      async () => {},
-      async (wsPath, _content, write) => {
-        if (wsPath.endsWith('held.md')) return 'Skipped editing "held.md" — locked by Bob.';
-        await write();
-        return undefined;
-      },
-    );
-    expect(res.extracted).toEqual(['knowledge-base/out/keep.md']);
-    expect(res.skipped).toEqual([{ path: 'held.md', reason: 'Skipped editing "held.md" — locked by Bob.' }]);
-    await expect(fs.stat(path.join(repoDir, 'out', 'held.md'))).rejects.toMatchObject({ code: 'ENOENT' });
-
-    // A write that fails on disk (here: a folder holds the file's name) is a
-    // failure of the request, not an entry reported as skipped.
-    await writeZip('w.zip', { 'taken.md': 'x' });
-    await fs.mkdir(path.join(repoDir, 'out2', 'taken.md'), { recursive: true });
-    await expect(
-      svc.unzipFile(workspaceId, 'w.zip', 'out2', async () => {}, async (_p, _c, write) => {
-        await write();
-        return undefined;
-      }),
-    ).rejects.toMatchObject({ code: 'EISDIR' });
-  });
-
   it('skips a guard-rejected directory entry without creating it on disk', async () => {
     const { default: AdmZip } = await import('adm-zip');
     const zip = new AdmZip();

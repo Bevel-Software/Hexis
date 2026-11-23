@@ -4,7 +4,8 @@ import { logger } from '../../shared/logging.js';
 import { redactSecret } from '../../shared/redact-secret.js';
 import { PushNeedsAgentResolutionError } from '../../shared/domain-errors.js';
 import type { ITreeWalker } from '../../shared/fs.contract.js';
-import { rewriteBotGrants } from './bot-domain.js';
+import { hasAccessFrontmatterExtension } from '../access-model/index.js';
+import { isAccessFile, rewriteBotGrants } from './bot-domain.js';
 
 const log = logger('bots');
 
@@ -72,16 +73,12 @@ export class GrantRewriteChangeRequests implements IGrantRewriter {
       workspace: GrantRewriteWorkspace;
       walker: Pick<ITreeWalker, 'walkKb'>;
       kb: { readonly defaultBranch: string; readonly kbDirName: string; defaultWorkspaceId(): string };
-      /** An access file: `access.md` at any depth, `roles.yaml`, a group file. Its grants are rewritten anywhere in it. */
-      isAccessFile: (repoRelativePath: string) => boolean;
-      /** A file whose own frontmatter carries access lines (`.md`, `.tool`, an overlay's kinds). Only its frontmatter is rewritten. */
-      hasOwnAccessLines: (repoRelativePath: string) => boolean;
     },
   ) {}
 
   /** Every file that can carry a grant, keyed by repo-relative path; throws when a folder cannot be listed. */
   private async grantCarryingFiles(workspaceId: string): Promise<Record<string, string>> {
-    const { workspace, walker, kb, isAccessFile, hasOwnAccessLines } = this.deps;
+    const { workspace, walker, kb } = this.deps;
     const repoDir = path.join(await workspace.getWorkspacePath(workspaceId), kb.kbDirName);
     const paths: string[] = [];
     await walker.walkKb(
@@ -90,7 +87,9 @@ export class GrantRewriteChangeRequests implements IGrantRewriter {
         {
           onFile(dir, name) {
             const rel = dir ? `${dir}/${name}` : name;
-            if (isAccessFile(rel) || hasOwnAccessLines(rel)) paths.push(rel);
+            // An access file's grants are rewritten anywhere in it; a file whose
+            // own frontmatter can carry access lines, only there.
+            if (isAccessFile(rel) || hasAccessFrontmatterExtension(rel)) paths.push(rel);
           },
         },
       ],
@@ -102,7 +101,7 @@ export class GrantRewriteChangeRequests implements IGrantRewriter {
   }
 
   async open(by: AuthUser, from: string, to: string, botIds: readonly string[]): Promise<number | null> {
-    const { versionControl, workspace, kb, isAccessFile } = this.deps;
+    const { versionControl, workspace, kb } = this.deps;
     // No bot, no grant that can name one: nothing to read, and no git at all.
     if (botIds.length === 0) return null;
     const live = kb.defaultWorkspaceId();
@@ -121,7 +120,7 @@ export class GrantRewriteChangeRequests implements IGrantRewriter {
       ws = await workspace.getOrCreateForBranch(branch);
       const texts = await this.grantCarryingFiles(ws.id);
       rewritten = Object.entries(texts).flatMap(([rel, text]) => {
-        const next = rewriteBotGrants(rel, text, botIds, from, to, isAccessFile);
+        const next = rewriteBotGrants(rel, text, botIds, from, to);
         return next === null ? [] : [[rel, next] as const];
       });
       if (rewritten.length > 0) {

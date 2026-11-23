@@ -19,8 +19,8 @@ const log = logger('change-request-apply');
  * and it may approve and apply a change request where its grants allow
  * (Bots-Are-Identities, Requirement 10). These two tools are how it does: the
  * same service calls the app's Approve and Apply make, judged for the bot's
- * own row, so the gate, the per-file eligibility and the bot's one refusal
- * (a request that changes access is never applied by a bot) are the
+ * own row, so the gate, the per-file eligibility and the bot's one extra
+ * condition (it may write every file the request changes) are the
  * service's, decided once.
  *
  * Offered to nobody else. `ConnectionScope.allowsPlatformTool` keeps them
@@ -181,9 +181,7 @@ export function registerChangeRequestApplyTools(
     description:
       'Apply (merge) an open change request into its target as the bot this connection acts as. Accepted only when ' +
       "the request's merge gate passes — every file approved by someone eligible at the current head — and the bot " +
-      'may write every file it changes; refused ' +
-      'whole when it changes access (`roles.yaml`, an `access.md`, a group file, or the access lines of a file): a bot ' +
-      'never changes access. Answers `merged`, or `conflicts-need-resolution` with the conflicting paths (nothing is ' +
+      'may write every file it changes. Answers `merged`, or `conflicts-need-resolution` with the conflicting paths (nothing is ' +
       'written: resolve them on the source branch and apply again). Offered only to a connection made as a bot.',
     inputs: {
       type: 'object',

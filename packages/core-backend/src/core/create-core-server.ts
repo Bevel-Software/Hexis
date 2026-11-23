@@ -58,7 +58,6 @@ import {
 } from '../modules/plugins/index.js';
 import { keyOrSessionAuth } from '../modules/tool-auth/key-or-session.middleware.js';
 import { GrantRewriteChangeRequests, createBotsRoutes } from '../modules/bots/index.js';
-import { hasAccessFrontmatterExtension, isAccessFile } from '../modules/access-model/index.js';
 import { ToolDescriptionNotes, type AgentAccessGate } from '../modules/workspace/agent-access.gate.js';
 import {
   createSecretsVaultRoutes,
@@ -827,8 +826,6 @@ export async function createCoreServer(
         workspace: core.workspaceService,
         walker: core.disk,
         kb: core.kb,
-        isAccessFile,
-        hasOwnAccessLines: hasAccessFrontmatterExtension,
       }),
     }),
   );

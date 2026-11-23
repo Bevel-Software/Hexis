@@ -6,7 +6,6 @@ import { LockingFilesystem, ReadOnlyFilesystem } from '../kb-fs/index.js';
 import type { WriteValidator } from '../kb-fs/index.js';
 import {
   makeAgentRolesYamlWriteValidator,
-  makeBotAccessWriteValidator,
   ROLES_YAML_BASENAME,
 } from '../access-model/index.js';
 import type { ICreatorAccess, GroupsIndex } from '../access-model/index.js';
@@ -21,11 +20,6 @@ import type { ToolAuth } from '../tool-auth/index.js';
 import { connectionOf } from '../agent-scope/index.js';
 
 export interface ToolContextDeps {
-  /**
-   * Whether an address is a bot's (`modules/bots`): a bot's writes are also
-   * held to the rule that a bot never changes access. Absent: nobody is one.
-   */
-  isBot?: (email: string) => boolean;
   authService: AuthService;
   workspaceService: WorkspaceService;
   versionControlService: IVersionControlService;
@@ -47,26 +41,6 @@ export interface ToolContextDeps {
   loadActiveGroups?: (
     read: (filename: string) => Promise<string | null>,
   ) => Promise<{ groups: GroupsIndex; sourceFile: string; health: { ok: boolean } }>;
-}
-
-/**
- * Both validators, the first first, as one: each judges the paths it claims,
- * and the result claims a path either does (a validator without `appliesTo`
- * claims whole-file writes only, as the filesystem reads it).
- */
-function composeValidators(first: WriteValidator, second: WriteValidator): WriteValidator {
-  const both: WriteValidator = async (p, content) => {
-    await first(p, content);
-    await second(p, content);
-  };
-  both.appliesTo = (p) => (first.appliesTo?.(p) ?? false) || (second.appliesTo?.(p) ?? false);
-  if (first.removal || second.removal) {
-    both.removal = async (p) => {
-      await first.removal?.(p);
-      await second.removal?.(p);
-    };
-  }
-  return both;
 }
 
 /** A file's text, or null when it does not exist. Any other failure throws. */
@@ -138,16 +112,8 @@ export function createToolContextResolver(deps: ToolContextDeps): ResolveToolCon
             return active.health.ok ? active : null;
           }),
       );
-      // A bot never changes access: its writes also pass the bot's guard,
-      // judged against what each file holds now.
-      const composed: WriteValidator = deps.isBot?.(user.email)
-        ? composeValidators(
-            validator,
-            makeBotAccessWriteValidator(deps.kbDirName, (wsPath) => readTextIfExists(path.join(basePath, wsPath))),
-          )
-        : validator;
-      validatorCache.set(branch, composed);
-      return composed;
+      validatorCache.set(branch, validator);
+      return validator;
     };
     const fsCache = new Map<string, LocalFilesystem>();
     const getFilesystem = async (branch: string): Promise<LocalFilesystem> => {

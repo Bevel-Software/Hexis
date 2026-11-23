@@ -26,5 +26,4 @@ export type { GroupsIndex } from './group-files.js';
 export { resolveReadableMap, toKbRelative } from './kb-read-filter.js';
 export { synthesizePluginPrincipals } from './plugin-principals.js';
 export { renderRolesYaml } from './render-roles-yaml.js';
-export { BotChangesAccessError, changesOwnAccessLines, isAccessFile, makeBotAccessWriteValidator } from './bot-access-guard.js';
 export { ROLES_YAML_BASENAME, assertRolesYamlParsable, isRolesYamlPath, makeAgentRolesYamlWriteValidator, makeRolesYamlWriteValidator } from './roles-yaml-guard.js';

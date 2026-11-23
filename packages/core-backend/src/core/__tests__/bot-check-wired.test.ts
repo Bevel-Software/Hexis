@@ -5,9 +5,9 @@ import { fileURLToPath } from 'node:url';
 
 /**
  * Three services decide something for a bot by asking which addresses are
- * bots': access (a bot is not part of everyone and never changes access),
- * version control (a bot's writes to access files and its merge of a request
- * that changes access are refused) and auth (nobody signs in, is invited or is
+ * bots': access (a bot is not part of everyone, holds no role and is no
+ * admin), version control (a bot merges a change request only where it may
+ * write every file it changes) and auth (nobody signs in, is invited or is
  * made at a bot's address). A service that is not handed the check treats
  * every bot as a person, so each construction must pass the real one, and the
  * real one is the address book the bot service fills.

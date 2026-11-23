@@ -7,7 +7,6 @@ import type { AuthUser } from '@bevel-software/platform-shared';
 import { realDisk } from '../../../__tests__/real-disk.js';
 import { WalkError, type ITreeWalker } from '../../../shared/fs.contract.js';
 import { PushNeedsAgentResolutionError } from '../../../shared/domain-errors.js';
-import { hasAccessFrontmatterExtension, isAccessFile } from '../../access-model/index.js';
 import { GrantRewriteChangeRequests } from '../bot-domain-change.js';
 
 /**
@@ -85,8 +84,6 @@ function rewriter(
     },
     walker,
     kb: { defaultBranch: 'main', kbDirName: KB, defaultWorkspaceId: () => 'ws-main' },
-    isAccessFile,
-    hasOwnAccessLines: hasAccessFrontmatterExtension,
   });
   return { r, written, calls, descriptions };
 }

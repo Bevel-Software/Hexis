@@ -1100,7 +1100,8 @@ export async function createCoreServices(
     // The opened event names the approvers as accounts; auth answers which
     // of the addresses the access model names have one.
     authService,
-    // A bot never changes access: the access module says who is one.
+    // A bot merges only where it may write every changed file: the access
+    // module says who is one.
     (email) => accessControl.isBot(email),
   );
   // The leftover-branch cleanup asks the Deployment page at every round, so
@@ -1620,7 +1621,6 @@ export async function createCoreServices(
     kbDirName: kbDirName,
     creatorAccess,
     loadActiveGroups,
-    isBot: (email) => accessControl.isBot(email),
   });
   const writeAccess = ports.writeAccess ?? alwaysWritable;
   // The branch every tool call runs on is resolved by the handler, before the

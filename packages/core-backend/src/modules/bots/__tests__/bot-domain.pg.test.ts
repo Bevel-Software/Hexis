@@ -11,7 +11,6 @@ import type { DeploymentSettingsService } from '../../settings/index.js';
 import { deploymentSettingsOver } from '../../../__tests__/real-settings.js';
 import { deploymentSettings } from '../../database/index.js';
 import { createBotsRoutes } from '../bots.routes.js';
-import { isAccessFile } from '../../access-model/index.js';
 import type { BotDefinition } from '../index.js';
 
 /**
@@ -26,22 +25,22 @@ const def = (id: string): BotDefinition => ({ id, name: id, description: '', sou
 describe('rewriting grants and refusing domains', () => {
   it('rewrites a bot\'s grants at the old domain in access files and in frontmatter only', () => {
     const access = 'read:\n  - Release helper <release-helper@agent.hexis>\n  - Someone <other@agent.hexis.example>\n';
-    expect(rewriteBotGrants('Team/access.md', access, ['release-helper'], 'agent.hexis', 'bots.acme.com', isAccessFile)).toBe(
+    expect(rewriteBotGrants('Team/access.md', access, ['release-helper'], 'agent.hexis', 'bots.acme.com')).toBe(
       'read:\n  - Release helper <release-helper@bots.acme.com>\n  - Someone <other@agent.hexis.example>\n',
     );
     const page = '---\nread:\n  - R <release-helper@agent.hexis>\n---\nMail release-helper@agent.hexis for help.\n';
-    expect(rewriteBotGrants('Team/page.md', page, ['release-helper'], 'agent.hexis', 'bots.acme.com', isAccessFile)).toBe(
+    expect(rewriteBotGrants('Team/page.md', page, ['release-helper'], 'agent.hexis', 'bots.acme.com')).toBe(
       '---\nread:\n  - R <release-helper@bots.acme.com>\n---\nMail release-helper@agent.hexis for help.\n',
     );
     // A fence with surrounding whitespace is a fence to the access model, so its grants are rewritten too;
     // CRLF line endings stay as they were.
     const spaced = '---  \r\nread:\r\n  - R <release-helper@agent.hexis>\r\n --- \r\nbody\r\n';
-    expect(rewriteBotGrants('Team/page.md', spaced, ['release-helper'], 'agent.hexis', 'bots.acme.com', isAccessFile)).toBe(
+    expect(rewriteBotGrants('Team/page.md', spaced, ['release-helper'], 'agent.hexis', 'bots.acme.com')).toBe(
       '---  \r\nread:\r\n  - R <release-helper@bots.acme.com>\r\n --- \r\nbody\r\n',
     );
-    expect(rewriteBotGrants('Team/page.md', '---\nread:\n  - R <release-helper@agent.hexis>\n', ['release-helper'], 'agent.hexis', 'x.io', isAccessFile)).toBeNull();
-    expect(rewriteBotGrants('Team/page.md', '# nothing\n', ['release-helper'], 'agent.hexis', 'x.io', isAccessFile)).toBeNull();
-    expect(rewriteBotGrants('roles.yaml', 'groups:\n  G:\n    - not-a-bot@agent.hexis\n', ['release-helper'], 'agent.hexis', 'x.io', isAccessFile)).toBeNull();
+    expect(rewriteBotGrants('Team/page.md', '---\nread:\n  - R <release-helper@agent.hexis>\n', ['release-helper'], 'agent.hexis', 'x.io')).toBeNull();
+    expect(rewriteBotGrants('Team/page.md', '# nothing\n', ['release-helper'], 'agent.hexis', 'x.io')).toBeNull();
+    expect(rewriteBotGrants('roles.yaml', 'groups:\n  G:\n    - not-a-bot@agent.hexis\n', ['release-helper'], 'agent.hexis', 'x.io')).toBeNull();
   });
 
   it('refuses text that is not a domain, the domain in effect, and a domain people\'s addresses use', () => {

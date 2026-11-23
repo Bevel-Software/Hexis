@@ -1,5 +1,6 @@
 import { isFrontmatterFence } from '@bevel-software/platform-shared';
 import { canonicalEmail } from '../../shared/email-identity.js';
+import { GROUPS_YAML, ROLES_YAML_BASENAME, SYNCED_GROUPS_YAML, isAccessMdPath } from '../access-model/index.js';
 
 /**
  * The bots' domain, and how a change of it is carried through: every bot is
@@ -27,6 +28,15 @@ export function normalizeBotsDomain(input: unknown): string {
 }
 
 /**
+ * Whether the repo-relative path is a file whose grants are written anywhere
+ * in it: `roles.yaml`, any `access.md`, and the group files.
+ */
+export function isAccessFile(repoRelativePath: string): boolean {
+  const p = repoRelativePath.replace(/^\/+/, '');
+  return p === ROLES_YAML_BASENAME || p === GROUPS_YAML || p === SYNCED_GROUPS_YAML || isAccessMdPath(p);
+}
+
+/**
  * Rewrite every grant of a bot written at `from` to `to` in one file's text:
  * in an access file (an `access.md`, `roles.yaml`, a group file) anywhere,
  * and in any other file only within its frontmatter, where its own access
@@ -38,7 +48,6 @@ export function rewriteBotGrants(
   botIds: readonly string[],
   from: string,
   to: string,
-  isAccessFile: (repoRelativePath: string) => boolean,
 ): string | null {
   if (botIds.length === 0) return null;
   const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');

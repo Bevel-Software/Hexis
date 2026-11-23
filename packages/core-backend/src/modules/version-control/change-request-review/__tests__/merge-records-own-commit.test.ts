@@ -459,7 +459,7 @@ describe('mergePr — the head the approvals were read at', () => {
   });
 
   it("passes the caller's refusal through as it was thrown, not as a failed merge", async () => {
-    const refusal = new VersionControlDomainError('a bot cannot change access', 403, { kind: 'bot-cannot-change-access' });
+    const refusal = new VersionControlDomainError('outside its write access', 403, { kind: 'bot-merge-outside-grant' });
     const { merge, landed } = makeMergingAt(HEAD_SHA, async () => {
       throw refusal;
     });

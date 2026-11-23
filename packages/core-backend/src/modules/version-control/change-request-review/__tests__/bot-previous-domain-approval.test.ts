@@ -93,7 +93,7 @@ describe('a bot\'s approvals while the bots\' domain change request is open', ()
     } as unknown as WorkspaceService;
     book = new BotAddressBook();
     book.replace({ domain: 'agent.hexis', botIds: ['release-helper'], previousDomain: 'old.example' });
-    access = new AccessControlService(workspaceService, KB_DIR, new NodeFs(), [], undefined, undefined, {}, book);
+    access = new AccessControlService(workspaceService, KB_DIR, new NodeFs(), [], undefined, undefined, {}, undefined, undefined, book);
   });
 
   afterEach(async () => {

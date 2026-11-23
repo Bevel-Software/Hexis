@@ -143,6 +143,8 @@ describe('AccessControlService.prospectiveHolderChanges', () => {
       undefined,
       undefined,
       {},
+      undefined,
+      undefined,
       book,
     );
     await write({

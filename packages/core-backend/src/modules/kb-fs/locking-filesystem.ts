@@ -93,11 +93,8 @@ export class MoveLockedError extends Error {
  * moved; the caller plans again against the folder as it is now.
  */
 export class MoveRacedError extends Error {
-  constructor(
-    readonly path: string,
-    message = `"${path}" was added to the folder while the move was being prepared, so nothing was moved. Run the move again.`,
-  ) {
-    super(message);
+  constructor(readonly path: string) {
+    super(`"${path}" was added to the folder while the move was being prepared, so nothing was moved. Run the move again.`);
     this.name = 'MoveRacedError';
   }
 }
@@ -129,32 +126,11 @@ export class MoveUndoError extends Error {
  * candidate content) of a write; throw (or reject) to refuse it. `appliesTo`
  * names the paths it guards — only a validator that declares it is also run
  * for the ops whose candidate has to be read first (append, copy, move), so an
- * unrelated copy never pays for reading its source. `removal`, when given, is
- * asked before a delete removes a path's file (`deleteFile`, and each of
- * `writeFiles`' deletes), before the lock and again under it, and judges what
- * the removal takes away; absent, deletes are not this validator's to judge.
- * A move is judged at both ends, file by file: a removal where each file
- * leaves, a write where it lands (with `appliesTo`).
+ * unrelated copy never pays for reading its source.
  */
 export type WriteValidator = ((path: string, content: FileContent) => void | Promise<void>) & {
   appliesTo?: (path: string) => boolean;
-  removal?: (path: string) => void | Promise<void>;
 };
-
-/**
- * Whether what a {@link WriteValidator} threw is its REFUSAL — an Error that
- * carries a 4xx `status`, as every validator's refusal does (the roles.yaml
- * guards, the bot's access guard, a tool's own `ToolError`) and as every
- * route answers it — rather than a failure of the validator itself (a read
- * of the current file that failed, a bug), which carries none or a 5xx.
- * Only a caller that answers a refusal instead of throwing it needs to ask
- * ({@link LockingFilesystem.landUnderLock}); every other write throws both.
- */
-export function isWriteRefusal(err: unknown): err is Error & { status: number } {
-  if (!(err instanceof Error)) return false;
-  const status = (err as { status?: unknown }).status;
-  return typeof status === 'number' && Number.isInteger(status) && status >= 400 && status < 500;
-}
 
 /**
  * Dependencies the wrapper needs to talk to the version-control lock service.
@@ -187,10 +163,7 @@ export interface LockingFilesystemContext {
    * reject a `roles.yaml` edit that would lock out admins (and, for agents,
    * one that creates a role); see `roles-yaml-guard.ts`. `appendFile`,
    * `copyFile` and `moveFile` are validated too, with the resulting content,
-   * when the destination is a path the validator's `appliesTo` claims; a
-   * move's sources are asked of `removal`, and so is every delete. Bytes
-   * another writer lands (`unzip`) are judged under the lock through
-   * {@link LockingFilesystem.landUnderLock}.
+   * when the destination is a path the validator's `appliesTo` claims.
    */
   validateWrite?: WriteValidator;
   /**
@@ -322,73 +295,7 @@ export class LockingFilesystem extends GitGuardedFilesystem {
 
   override async deleteFile(inputPath: string, options?: RemoveOptions): Promise<void> {
     await this.assertNotGitInternals(inputPath);
-    // The validator's removal check, as a write's content check runs: once
-    // before the lock, and again under it on the file the delete takes away.
-    const removal = this.lockContext.validateWrite?.removal;
-    await removal?.(inputPath);
-    return this.withLock(
-      inputPath,
-      () => super.deleteFile(inputPath, options),
-      removal && (async () => removal(inputPath)),
-    );
-  }
-
-  /**
-   * Bytes a caller puts on disk itself — `unzip`'s extraction, which writes
-   * past this filesystem — landed as a write is: `land` runs under
-   * `inputPath`'s lock, after the validator has judged `content` there
-   * (and once before the lock, so an ordinary refusal takes none), so a
-   * validator that reads the current file judges the state the landing
-   * replaces and nobody's save can slip in between. The lock is released
-   * untouched whatever happens: the landing's bytes are left on disk
-   * uncommitted, as `unzip` leaves them, and no prior save's queued bytes
-   * are reset or re-attributed. A refusal lands nothing.
-   *
-   * A REFUSAL is answered, not thrown: the validator saying no (before the
-   * lock or under it) or the lock staying held by somebody else resolves
-   * with that sentence, and the caller skips the file. The validator says no
-   * by throwing an error that carries a 4xx `status` (the refusal every
-   * route answers with, {@link isWriteRefusal}); anything else it throws —
-   * a read of the current file failing, say — is a failure. Failures throw
-   * as they came — the validator failing, the lock store failing, or `land`
-   * itself failing (a full disk, a permission error) — so a caller never
-   * reports a failure as a file it chose to skip. `land` is the caller's to
-   * make safe at the moment it runs (under the lock): it is where a check of
-   * the target's placement belongs, since only the caller knows how it
-   * writes.
-   */
-  async landUnderLock(inputPath: string, content: Buffer, land: () => Promise<void>): Promise<string | undefined> {
-    // The path's own rules throw, as for every write here: a caller hands over
-    // only paths it has already placed, so reaching one is a caller's bug.
-    await this.assertNotGitInternals(inputPath);
-    this.assertInsideRepo(inputPath);
-    const validate = this.lockContext.validateWrite;
-    const refusal = async (): Promise<string | undefined> => {
-      try {
-        await validate?.(inputPath, content);
-        return undefined;
-      } catch (err) {
-        if (isWriteRefusal(err)) return err.message;
-        throw err;
-      }
-    };
-    const before = await refusal();
-    if (before !== undefined) return before;
-    const held = await this.acquireOrHeldReason(inputPath);
-    if (held !== null) return held;
-    const { versionControl, workspaceId, branch, user } = this.lockContext;
-    try {
-      const under = await refusal();
-      if (under !== undefined) return under;
-      await land();
-      return undefined;
-    } finally {
-      try {
-        await versionControl.releaseLockUntouched(workspaceId, branch, inputPath, user);
-      } catch (releaseErr) {
-        log.warn(`lock release failed for "${inputPath}" after a landing:`, { err: releaseErr });
-      }
-    }
+    return this.withLock(inputPath, () => super.deleteFile(inputPath, options));
   }
 
   override async copyFile(src: string, dest: string, options?: CopyOptions): Promise<void> {
@@ -460,16 +367,7 @@ export class LockingFilesystem extends GitGuardedFilesystem {
     // Only the destination is gated: moving a stray INTO the repository is how
     // a file the old behaviour left beside the clone gets rescued.
     this.assertInsideRepo(dest);
-    // A FOLDER moves as every file it holds, and each of those is a path a
-    // writer can change: only `moveWithEdits` locks them all, at both ends,
-    // lists the folder again under the locks and judges each file there. So a
-    // folder takes that road (with no edits), and the two-lock cycle below
-    // is for a single file, whose one lock covers everything it judges.
-    if (src !== dest && options?.overwrite !== true && (await this.isFolder(src))) {
-      await this.moveWithEdits(src, dest, [], `Move ${src} to ${dest}`.slice(0, 200));
-      return;
-    }
-    await this.validateMove(src, dest);
+    await this.validateResultingWrite(dest, () => this.readFile(src));
     // A move mutates two paths: the source is deleted and the destination
     // is created. Only locking `dest` would let a concurrent writer hold
     // the source's lock and mutate it under us, and would also leave the
@@ -483,17 +381,11 @@ export class LockingFilesystem extends GitGuardedFilesystem {
     // single-file changes (one delete, one create). Git's rename
     // detection on log/blame still groups them visually after the fact.
     //
-    // Both ends are judged again once BOTH locks are held (the inner lock's
-    // check): the source cannot change under its lock, so the bytes judged
-    // there are the bytes the move lands. It must still be the one file those
-    // locks cover: a folder put in its place since would carry files no lock
-    // holds, so that move is refused and asked again (it then takes the
-    // folder road above).
+    // The destination is judged again once BOTH locks are held (the inner
+    // lock's check): the source cannot change under its lock, so the bytes
+    // judged there are the bytes the move lands.
     const check = async () => {
-      if (src !== dest && (await this.isFolder(src))) {
-        throw new MoveRacedError(src, `"${src}" became a folder while the move was being prepared, so nothing was moved. Run the move again.`);
-      }
-      await this.validateMove(src, dest, src === dest ? undefined : [src]);
+      await this.validateResultingWrite(dest, () => this.readFile(src));
     };
     const move = () => this.moveNoReplace(src, dest, options);
     if (src === dest) {
@@ -584,15 +476,14 @@ export class LockingFilesystem extends GitGuardedFilesystem {
       await this.assertNotGitInternals(e.path);
       this.assertInsideRepo(e.path);
     }
-    // A folder's files are locked one by one at both ends: a save to one of
-    // them mid-move would otherwise recreate the old path, or ride this
-    // move's commit, whose scope names every one of them. The same listing is
-    // what the move is judged on, file by file at both ends.
-    const movedNow = src === dest ? [] : await this.filesBelow(src);
-    await this.validateMove(src, dest, src === dest ? undefined : movedNow);
+    await this.validateResultingWrite(dest, () => this.readFile(src));
     if (this.lockContext.validateWrite) {
       for (const e of edits) await this.lockContext.validateWrite(e.path, e.content);
     }
+    // A folder's files are locked one by one at both ends: a save to one of
+    // them mid-move would otherwise recreate the old path, or ride this
+    // move's commit, whose scope names every one of them.
+    const movedNow = src === dest ? [] : await this.filesBelow(src);
     const paths = [
       ...new Set([
         src,
@@ -655,12 +546,9 @@ export class LockingFilesystem extends GitGuardedFilesystem {
       // saved into it between the listing above and the locks would ride
       // this move's commit without its lock — refused, and the caller tries
       // again against the folder as it is now.
-      // Judged below on this listing: every file in it is locked.
-      let movingNow: string[] | undefined;
       if (src !== dest) {
         const locked = new Set(paths);
-        movingNow = await this.filesBelow(src);
-        const arrived = movingNow.find((f) => !locked.has(f));
+        const arrived = (await this.filesBelow(src)).find((f) => !locked.has(f));
         if (arrived !== undefined) throw new MoveRacedError(arrived);
       }
       // Placement, re-judged where the rename happens: a link introduced on
@@ -671,7 +559,7 @@ export class LockingFilesystem extends GitGuardedFilesystem {
       await this.assertNoLinkBelowBase(src);
       await this.assertNoLinkBelowBase(dest);
       for (const e of edits) await this.assertNoLinkBelowBase(e.path);
-      await this.validateMove(src, dest, movingNow);
+      await this.validateResultingWrite(dest, () => this.readFile(src));
       if (this.lockContext.validateWrite) {
         for (const e of edits) await this.lockContext.validateWrite(e.path, e.content);
       }
@@ -760,12 +648,6 @@ export class LockingFilesystem extends GitGuardedFilesystem {
     }
   }
 
-  /** Whether `inputPath` is a folder (by `lstat`: a link to one is not). */
-  private async isFolder(inputPath: string): Promise<boolean> {
-    const absolute = this.resolveAbsolutePath(inputPath);
-    return absolute !== undefined && (await lstatOrNull(absolute))?.isDirectory() === true;
-  }
-
   /** Every file at or under `inputPath` (workspace-relative), the path itself when it is a file. */
   private async filesBelow(inputPath: string): Promise<string[]> {
     const absolute = this.resolveAbsolutePath(inputPath);
@@ -851,8 +733,6 @@ export class LockingFilesystem extends GitGuardedFilesystem {
     // refusal must not leave a lock held or a partial batch on disk.
     if (this.lockContext.validateWrite) {
       for (const w of writes) await this.lockContext.validateWrite(w.path, w.content);
-      const removal = this.lockContext.validateWrite.removal;
-      if (removal) for (const d of deletes) await removal(d);
     }
     // Deterministic lock order (string sort) so two concurrent batch writes
     // can't deadlock by acquiring the same paths in opposite orders — the same
@@ -939,8 +819,6 @@ export class LockingFilesystem extends GitGuardedFilesystem {
     if (this.lockContext.validateWrite) {
       try {
         for (const w of writes) await this.lockContext.validateWrite(w.path, w.content);
-        const removal = this.lockContext.validateWrite.removal;
-        if (removal) for (const d of deletes) await removal(d);
       } catch (err) {
         await releaseAll(() => 'untouched');
         throw err;
@@ -1224,27 +1102,6 @@ export class LockingFilesystem extends GitGuardedFilesystem {
     return bytes;
   }
 
-  /**
-   * Validate a move at BOTH ends, file by file: each file it moves is a
-   * removal at the path it leaves (the validator's `removal`, as a delete is
-   * judged) and a write at the path it lands on, with the bytes it carries
-   * there. A file moves as itself; a folder moves as each file it holds, so a
-   * folder is never read as though it were a file. `files` is the moved set
-   * when the caller has already listed it (a folder move lists it for its
-   * locks), so judging costs no second walk; absent, it is listed here.
-   * Nothing is listed or read when the validator judges neither end.
-   */
-  private async validateMove(src: string, dest: string, files?: string[]): Promise<void> {
-    const validate = this.lockContext.validateWrite;
-    if (!validate?.appliesTo && !validate?.removal) return;
-    for (const file of files ?? (await this.filesBelow(src))) {
-      // A move onto its own path removes nothing.
-      if (src !== dest) await validate.removal?.(file);
-      const landsAt = file === src ? dest : `${dest}${file.slice(src.length)}`;
-      await this.validateResultingWrite(landsAt, () => this.readFile(file));
-    }
-  }
-
   /** The bytes at `inputPath`, or null when nothing is there. */
   private async readIfExists(inputPath: string): Promise<Buffer | null> {
     const absolute = this.resolveAbsolutePath(inputPath);
@@ -1344,7 +1201,26 @@ export class LockingFilesystem extends GitGuardedFilesystem {
     check?: () => Promise<void>,
   ): Promise<T> {
     const { versionControl, workspaceId, branch, user } = this.lockContext;
-    await this.acquireOrSkip(inputPath);
+
+    let lastHolderName: string | null = null;
+    let acquired = false;
+    for (let attempt = 0; attempt < ACQUIRE_RETRY_ATTEMPTS; attempt++) {
+      const result = await versionControl.acquireLock(workspaceId, branch, inputPath, user);
+      if (result.acquired) {
+        acquired = true;
+        break;
+      }
+      lastHolderName = result.lock.holderName;
+      if (attempt < ACQUIRE_RETRY_ATTEMPTS - 1) {
+        await sleep(ACQUIRE_RETRY_DELAY_MS);
+      }
+    }
+    if (!acquired) {
+      throw new Error(
+        `Skipped editing "${inputPath}" — locked by ${lastHolderName ?? 'another user'}. ` +
+          `Continuing with other edits; try this one again later.`,
+      );
+    }
 
     let result: T;
     try {
@@ -1390,38 +1266,6 @@ export class LockingFilesystem extends GitGuardedFilesystem {
     // moments later (typically <1s) without blocking the agent's turn.
     await versionControl.releaseLock(workspaceId, branch, inputPath, user);
     return result;
-  }
-
-  /**
-   * Take `inputPath`'s lock, retrying a held one a few times, or throw the
-   * "Skipped editing … locked by …" refusal every single-path write answers.
-   */
-  private async acquireOrSkip(inputPath: string): Promise<void> {
-    const held = await this.acquireOrHeldReason(inputPath);
-    if (held !== null) throw new Error(held);
-  }
-
-  /**
-   * Take `inputPath`'s lock, retrying a held one a few times. Answers `null`
-   * once it is held, or the "Skipped editing … locked by …" sentence when
-   * somebody else kept it. A lock store that FAILS (rather than answering
-   * that the lock is held) throws, so a caller can tell the two apart.
-   */
-  private async acquireOrHeldReason(inputPath: string): Promise<string | null> {
-    const { versionControl, workspaceId, branch, user } = this.lockContext;
-    let lastHolderName: string | null = null;
-    for (let attempt = 0; attempt < ACQUIRE_RETRY_ATTEMPTS; attempt++) {
-      const result = await versionControl.acquireLock(workspaceId, branch, inputPath, user);
-      if (result.acquired) return null;
-      lastHolderName = result.lock.holderName;
-      if (attempt < ACQUIRE_RETRY_ATTEMPTS - 1) {
-        await sleep(ACQUIRE_RETRY_DELAY_MS);
-      }
-    }
-    return (
-      `Skipped editing "${inputPath}" — locked by ${lastHolderName ?? 'another user'}. ` +
-      `Continuing with other edits; try this one again later.`
-    );
   }
 }
 

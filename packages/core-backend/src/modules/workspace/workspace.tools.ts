@@ -28,7 +28,7 @@ import {
   normalizePathArgs,
   normalizeWorkspacePath,
 } from '../kb-fs/index.js';
-import { GitGuardedFilesystem, MoveLockedError, MoveRacedError, isWriteRefusal, type LockingFilesystem } from '../kb-fs/index.js';
+import { GitGuardedFilesystem, MoveLockedError, MoveRacedError, type LockingFilesystem } from '../kb-fs/index.js';
 import { assertNoGitInternalsSegment, assertNotGitInternals, hasGitInternalsSegment } from '../../shared/git-internals.js';
 import { isRolesYamlPath, toKbRelative, resolveReadableMap, AccessDeniedError } from '../access-model/index.js';
 import type { ISessionSink } from './session-sink.js';
@@ -149,34 +149,6 @@ async function assertCanRead(gate: ReadGate, wsPath: string): Promise<void> {
   if (rel === null) return; // not a KB node — not governed by read rules
   const ok = await gate.accessControl.canRead(gate.workspaceId, gate.userEmail, rel);
   if (!ok) throw new ToolError(`You don't have permission to read "${wsPath}".`, 403);
-}
-
-/**
- * `unzip`'s landing for each extracted file: the agent's write gate
- * (`getWriteValidator`) judges the bytes before the file's lock and again
- * under it, and the file lands under that lock
- * (`LockingFilesystem.landUnderLock`). Resolves with the reason when the
- * file is refused (the gate saying no, or a lock somebody else holds); throws
- * when the gate itself fails, the lock store fails or the landing fails. The
- * agent's write filesystem is always a locking one (`write: true`); one that
- * is not asks the gate once and lands directly, by the same rule.
- */
-async function landingUnderLock(
-  ctx: ToolContext,
-  branch: string,
-): Promise<(wsRelPath: string, content: Buffer, write: () => Promise<void>) => Promise<string | undefined>> {
-  const fs = (await ctx.getFilesystem(branch)) as LocalFilesystem & { landUnderLock?: LockingFilesystem['landUnderLock'] };
-  if (typeof fs.landUnderLock === 'function') return (wsRelPath, content, write) => fs.landUnderLock!(wsRelPath, content, write);
-  return async (wsRelPath, content, write) => {
-    try {
-      await (await ctx.getWriteValidator(branch))(wsRelPath, content);
-    } catch (err) {
-      if (isWriteRefusal(err)) return err.message;
-      throw err;
-    }
-    await write();
-    return undefined;
-  };
 }
 
 /**
@@ -3829,14 +3801,7 @@ export function registerWorkspaceTools(
       // the two — by another agent, or by the sidebar, which moves without
       // taking this lock — comes back here as a refusal, not an overwrite.
       if (linkPlan === undefined) {
-        // A folder moves through the filesystem's all-files-locked move, which
-        // answers a held file or one that arrived meanwhile as those errors.
-        try {
-          await asEntryExists(() => fs.moveFile(src, dest));
-        } catch (err) {
-          if (err instanceof MoveLockedError || err instanceof MoveRacedError) throw new ToolError(err.message, 409);
-          throw err;
-        }
+        await asEntryExists(() => fs.moveFile(src, dest));
       } else {
         // The move and every link edit, one commit. Under the locks, each page
         // is checked to still hold the bytes its edit was computed from.
@@ -4035,7 +4000,6 @@ export function registerWorkspaceTools(
       // into the same 404 every other file tool answers. Only that declared
       // answer maps — a failure part-way through an extraction is not the
       // archive going missing.
-      const landEntry = await landingUnderLock(ctx, a.branch as string);
       return orDeclaredNotFound(
         () =>
           ctx.workspaceService.unzipFile(
@@ -4046,7 +4010,7 @@ export function registerWorkspaceTools(
             // hook refuses is skipped (not extracted), so an archive can't be
             // a way around it — the extension policy applies per entry too, so
             // a restricted run can't unzip a `.md` into the graph.
-            async (wsRelPath) => {
+            (wsRelPath) => {
               // An entry that would land beside the repository is skipped with the
               // corrected-path reason, like any other refused entry.
               assertInsideRepo(wsRelPath, kbDirName);
@@ -4059,19 +4023,8 @@ export function registerWorkspaceTools(
                 );
               }
               writePolicy.assertPathWritable(ctx.sessionId, wsRelPath);
-              await assertAgentWriteAllowed(agentAccessGate, ctx, a.branch as string, wsRelPath);
+              return assertAgentWriteAllowed(agentAccessGate, ctx, a.branch as string, wsRelPath);
             },
-            // Each extracted file takes the same pre-disk gate the file tools'
-            // writes take (`getWriteValidator`), on the bytes it would write —
-            // for a bot, the guard that refuses an access file or a change to
-            // a file's own access lines — and it is asked HERE, where the file
-            // lands, not in the guard above: under the file's lock, before it
-            // and again there, so a save between the look and the write cannot
-            // change what was judged (a page gaining access lines a bot's bytes
-            // would then remove), and so a gate that FAILS (rather than
-            // refuses) fails the extraction instead of reading as a skipped
-            // file. The bytes stay uncommitted.
-            landEntry,
           ),
         'Nothing to extract',
       );

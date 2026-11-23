@@ -188,8 +188,8 @@ export interface AccessDecision {
 export interface IAccessControl {
   /**
    * Whether `email` is a bot's address (`modules/bots`): an identity that is
-   * judged by its own grants and its groups' only, holds no role, is no admin
-   * and never changes access. Synchronous: the deployment's bots are held in
+   * judged by its own grants and its groups' only, holds no role and is no
+   * admin. Synchronous: the deployment's bots are held in
    * memory.
    */
   isBot(email: string): boolean;

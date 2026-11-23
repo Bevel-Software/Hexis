@@ -11,13 +11,14 @@ import type { PendingCommitsService } from '../pending-commits.service.js';
 import { VersionControlEventBus } from '../event-bus.js';
 import { VersionControlService } from '../version-control.service.js';
 import type { Database } from '../../database/index.js';
-import { BotChangesAccessError, type IChangeReadGate } from '../../access-model/index.js';
+import type { IChangeReadGate } from '../../access-model/index.js';
 
 /**
- * A bot never changes access, at the two places every change of it passes:
- * the lock every write acquires (on any branch, drafts included, where no
- * write gate runs), and the merge of a change request. A person is held to
- * neither, and a bot's other writes and merges go through as before.
+ * A bot changes access as a person does: the lock every write acquires and
+ * the merges judge it by the rules every account is judged by, with no
+ * refusal of its own for an access file or a file's access lines. Its one
+ * extra condition is on a change request's merge: it may write every file
+ * the merge changes, since no approval of others stands in for its grants.
  */
 
 const KB = 'knowledge-base';
@@ -114,67 +115,30 @@ function makeService(
 }
 
 describe('a bot at the lock', () => {
-  it.each(['roles.yaml', 'access.md', 'Team/access.md', 'groups.yaml', 'synced-groups.yaml'])(
-    'is refused %s, on a draft branch too, before any lock is taken',
+  it.each(['roles.yaml', 'access.md', 'Team/access.md', 'groups.yaml', 'synced-groups.yaml', 'Team/page.md'])(
+    'takes the lock on %s on a draft branch, as a person does',
     async (file) => {
       const { svc, acquire } = makeService();
-      await expect(svc.acquireLock(WS, DRAFT, `${KB}/${file}`, BOT)).rejects.toBeInstanceOf(BotChangesAccessError);
-      expect(acquire).not.toHaveBeenCalled();
+      expect((await svc.acquireLock(WS, DRAFT, `${KB}/${file}`, BOT)).acquired).toBe(true);
+      expect((await svc.acquireLock(WS, DRAFT, `${KB}/${file}`, PERSON)).acquired).toBe(true);
+      expect(acquire).toHaveBeenCalledTimes(2);
     },
   );
-
-  it('takes the lock on any other file, and a person takes it on an access file as before', async () => {
-    const { svc, acquire } = makeService();
-    expect((await svc.acquireLock(WS, DRAFT, `${KB}/Team/page.md`, BOT)).acquired).toBe(true);
-    expect((await svc.acquireLock(WS, DRAFT, `${KB}/Team/access.md`, PERSON)).acquired).toBe(true);
-    expect(acquire).toHaveBeenCalledTimes(2);
-  });
 });
 
 describe('a bot merging a change request', () => {
   const merge = (svc: VersionControlService, user: AuthUser) =>
     svc.mergeChangeRequest(7, user, 'sha', [], 'open' as never, 'title', 'main', WS);
 
-  it('is refused one that changes an access.md, naming it, and nothing is merged', async () => {
-    const { svc, landed } = makeService({ 'Team/access.md': { base: 'read:\n  - Eng\n', head: 'read:\n  - everyone\n' } });
-    await expect(merge(svc, BOT)).rejects.toThrow(/"Team\/access\.md" decides who may reach what/);
-    expect(landed.count).toBe(0);
-  });
-
-  it("is refused one that changes a file's own access lines", async () => {
-    const { svc, landed } = makeService({
-      'Team/page.md': { base: '---\nread:\n  - Eng\n---\n# p\n', head: '---\nread:\n  - everyone\n---\n# p\n' },
-    });
-    await expect(merge(svc, BOT)).rejects.toThrow(/access lines/);
-    expect(landed.count).toBe(0);
-  });
-
-  it('is refused one that changes roles.yaml, which is refused rather than quietly restored', async () => {
-    const { svc, landed, git } = makeService({ 'roles.yaml': { base: 'roles: {}\n', head: 'roles:\n  admin: [x]\n' } });
-    await expect(merge(svc, BOT)).rejects.toThrow(/"roles\.yaml" decides who may reach what/);
-    expect(landed.count).toBe(0);
-    // Nothing was rewritten on the bot's behalf before the refusal.
-    expect(git.fetch).not.toHaveBeenCalled();
-  });
-
-  it('is refused one that renames an access.md away: the old side is a path it writes', async () => {
-    const { svc, landed } = makeService({
-      'Team/access.md': { base: 'read:\n  - Eng\n', head: null },
-      'Team/notes.md': { base: null, head: 'read:\n  - Eng\n' },
-    });
-    await expect(merge(svc, BOT)).rejects.toThrow(/"Team\/access\.md"/);
-    expect(landed.count).toBe(0);
-  });
-
-  it('merges one that only renames a granted person or reformats the lines', async () => {
-    const { svc, landed } = makeService({
-      'Team/page.md': {
-        base: '---\nread:\n  - Ada <ada@acme.com>\n  - Eng\n---\n# p\n',
-        head: '---\nread: ["Ada Lovelace <ADA@acme.com>", "eng"]\n---\n# p, edited\n',
-      },
-    });
+  it.each([
+    ['an access.md', { 'Team/access.md': { base: 'read:\n  - Eng\n', head: 'read:\n  - everyone\n' } }],
+    ["a file's own access lines", { 'Team/page.md': { base: '---\nread:\n  - Eng\n---\n# p\n', head: '---\nread:\n  - everyone\n---\n# p\n' } }],
+    ['a group file', { 'groups.yaml': { base: 'groups: {}\n', head: 'groups:\n  Ops: [x@acme.com]\n' } }],
+  ])('merges one that changes %s where it may write every changed file', async (_what, changed) => {
+    const { svc, landed, canWriteBatchAtRef } = makeService(changed);
     await merge(svc, BOT);
     expect(landed.count).toBe(1);
+    expect(canWriteBatchAtRef).toHaveBeenCalledWith('ws-main', TARGET_TIP, BOT.email, Object.keys(changed));
   });
 
   it("is refused one that changes a file it may not write, though others approved it, naming the file; a person's Apply is not asked", async () => {
@@ -210,19 +174,26 @@ describe('a bot merging a change request', () => {
 describe('a bot merging a branch into a protected branch', () => {
   const noOpenRequest = { select: () => ({ from: () => ({ where: () => ({ limit: async () => [] }) }) }) };
 
-  it('is refused a merge that changes access, by the same check, and nothing lands', async () => {
-    const { svc, landed } = makeService({ 'Team/access.md': { base: 'read:\n  - Eng\n', head: 'read:\n  - everyone\n' } }, noOpenRequest);
-    await expect(svc.mergeBranch(BOT, DRAFT, PROTECTED)).rejects.toBeInstanceOf(BotChangesAccessError);
-    expect(landed.count).toBe(0);
-  });
-
-  it("is refused a merge that changes a file's own access lines", async () => {
+  it('lands a merge that changes an access.md or access lines, judged as any account is', async () => {
     const { svc, landed } = makeService(
-      { 'Team/page.md': { base: '---\nread:\n  - Eng\n---\n', head: '---\nread:\n  - everyone\n---\n' } },
+      {
+        'Team/access.md': { base: 'read:\n  - Eng\n', head: 'read:\n  - everyone\n' },
+        'Team/page.md': { base: '---\nread:\n  - Eng\n---\n', head: '---\nread:\n  - everyone\n---\n' },
+      },
       noOpenRequest,
     );
-    await expect(svc.mergeBranch(BOT, DRAFT, PROTECTED)).rejects.toThrow(/access lines/);
-    expect(landed.count).toBe(0);
+    await svc.mergeBranch(BOT, DRAFT, PROTECTED);
+    expect(landed.count).toBe(1);
+  });
+
+  it('is refused one that changes a file it may not write at the target, as a person is', async () => {
+    const changed = { 'Team/access.md': { base: 'read:\n  - Eng\n', head: 'read:\n  - everyone\n' } };
+    const bot = makeService(changed, noOpenRequest, () => false);
+    await expect(bot.svc.mergeBranch(BOT, DRAFT, PROTECTED)).rejects.toThrow();
+    expect(bot.landed.count).toBe(0);
+    const person = makeService(changed, noOpenRequest, () => false);
+    await expect(person.svc.mergeBranch(PERSON, DRAFT, PROTECTED)).rejects.toThrow();
+    expect(person.landed.count).toBe(0);
   });
 });
 
@@ -245,28 +216,37 @@ describe("a change request as a bot reads it: its own refusals are among the blo
   const detail = (svc: VersionControlService, viewer: AuthUser) =>
     svc.getChangeRequestDetail(7, { workspaceId: 'ws-main', viewerEmail: viewer.email });
 
-  it('names a change to access as a blocker, so nothing derived from the blockers claims the bot may apply it', async () => {
-    const { svc } = makeService({ 'Team/access.md': { base: 'read:\n  - Eng\n', head: 'read:\n  - everyone\n' } });
-    const d = await detail(svc, BOT);
-    expect(d?.mergeableInBevel).toBe(false);
-    expect(d?.mergeBlockedReasons).toEqual([expect.stringMatching(/A bot cannot change access: "Team\/access\.md"/)]);
-  });
-
-  it("names a change to a file's own access lines, and a file outside the bot's write access", async () => {
-    const lines = makeService({ 'Team/page.md': { base: '---\nread:\n  - Eng\n---\n', head: '---\nread:\n  - everyone\n---\n' } });
-    expect((await detail(lines.svc, BOT))?.mergeBlockedReasons).toEqual([expect.stringMatching(/access lines/)]);
+  it("names a file outside the bot's write access, so nothing derived from the blockers claims the bot may apply it", async () => {
     const outside = makeService({ 'Ops/runbook.md': { base: '# a\n', head: '# b\n' } }, {}, (email) => email !== BOT.email);
     const d = await detail(outside.svc, BOT);
     expect(d?.mergeBlockedReasons).toEqual([expect.stringMatching(/outside its write access \(Ops\/runbook\.md\)/)]);
     expect(d?.mergeableInBevel).toBe(false);
   });
 
-  it('names a roles.yaml change, which the displayed file list leaves out but the merge refuses', async () => {
-    const { svc } = makeService({ 'roles.yaml': { base: 'roles: {}\n', head: 'roles:\n  admin: [x]\n' } });
+  it('names no change to access: an access.md, access lines or a group file it may write leave the bot cleared', async () => {
+    const { svc } = makeService({
+      'Team/access.md': { base: 'read:\n  - Eng\n', head: 'read:\n  - everyone\n' },
+      'Team/page.md': { base: '---\nread:\n  - Eng\n---\n', head: '---\nread:\n  - everyone\n---\n' },
+      'groups.yaml': { base: 'groups: {}\n', head: 'groups:\n  Ops: [x@acme.com]\n' },
+    });
     const d = await detail(svc, BOT);
-    expect(d?.files).toEqual([]);
-    expect(d?.mergeableInBevel).toBe(false);
-    expect(d?.mergeBlockedReasons).toEqual([expect.stringMatching(/A bot cannot change access: "roles\.yaml"/)]);
+    expect(d?.mergeBlockedReasons).toEqual([]);
+    expect(d?.mergeableInBevel).toBe(true);
+  });
+
+  it('leaves out roles.yaml, whose change the merge restores away first for every account', async () => {
+    // A bot may never write roles.yaml (only an admin may), yet a request
+    // carrying a roles.yaml change is not its to be refused for: the merge
+    // drops that change, as it does for a person.
+    const mayWrite = (email: string, p: string) => email !== BOT.email || p !== 'roles.yaml';
+    const { svc, canWriteBatchAtRef } = makeService(
+      { 'roles.yaml': { base: 'roles: {}\n', head: 'roles:\n  admin: [x]\n' }, 'Team/page.md': { base: '# a\n', head: '# b\n' } },
+      {},
+      mayWrite,
+    );
+    const d = await detail(svc, BOT);
+    expect(d?.mergeBlockedReasons).toEqual([]);
+    expect(canWriteBatchAtRef).toHaveBeenCalledWith('ws-main', TARGET_TIP, BOT.email, ['Team/page.md']);
   });
 
   it('judges a pair of commits once while its verdict is kept, and judges again once it is not', async () => {
@@ -285,22 +265,21 @@ describe("a change request as a bot reads it: its own refusals are among the blo
     }
   });
 
-  it('says the check could not be made when a commit cannot be read, rather than leaving the bot cleared', async () => {
+  it('says the check could not be made when the commits cannot be compared, rather than leaving the bot cleared', async () => {
     const { svc, git } = makeService({ 'Team/page.md': { base: '# a\n', head: '# b\n' } });
-    (git.readFileAtRef as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('fatal: bad object'));
+    (git.writtenPathsBetweenCommits as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('fatal: bad object'));
     const d = await detail(svc, BOT);
     expect(d?.mergeableInBevel).toBe(false);
     expect(d?.mergeBlockedReasons).toEqual(['Whether this bot may apply the request could not be checked right now.']);
-    // Not kept: once the commit reads again, the next look clears the bot.
-    (git.readFileAtRef as ReturnType<typeof vi.fn>).mockImplementation(async () => '# a\n');
+    // Not kept: once the commits compare again, the next look clears the bot.
     expect((await detail(svc, BOT))?.mergeBlockedReasons).toEqual([]);
   });
 
   it('adds nothing for a request the bot may apply, nor for a person reading one it would refuse', async () => {
     const plain = makeService({ 'Team/page.md': { base: '# a\n', head: '# b\n' } });
     expect((await detail(plain.svc, BOT))?.mergeBlockedReasons).toEqual([]);
-    const access = makeService({ 'Team/access.md': { base: 'read:\n  - Eng\n', head: 'read:\n  - everyone\n' } });
-    const d = await detail(access.svc, PERSON);
+    const outside = makeService({ 'Ops/runbook.md': { base: '# a\n', head: '# b\n' } }, {}, (email) => email !== BOT.email);
+    const d = await detail(outside.svc, PERSON);
     expect(d?.mergeBlockedReasons).toEqual([]);
     expect(d?.mergeableInBevel).toBe(true);
   });

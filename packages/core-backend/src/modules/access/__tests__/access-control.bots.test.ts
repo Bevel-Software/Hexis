@@ -11,7 +11,8 @@ import { BotAddressBook } from '../../bots/index.js';
  * A bot's access, through the public resolver over a real on-disk tree: it is
  * granted by its address and through the groups it is in, and by nothing
  * else — not `everyone`, not a role (a role that folds its group in
- * included), not Admin — and it never writes an access file. A bare name is
+ * included), not Admin. It writes an access file where it is granted to, as
+ * a person does, and roles.yaml never, as no one but an admin. A bare name is
  * a role or a group, never a bot.
  */
 
@@ -82,7 +83,7 @@ describe('a bot in the access model', () => {
     } as unknown as WorkspaceService;
     book = new BotAddressBook();
     book.replace({ domain: 'agent.hexis', botIds: ['release-helper'], previousDomain: null });
-    access = new AccessControlService(workspaceService, KB_DIR, realDisk(), [BOT], undefined, undefined, {}, book);
+    access = new AccessControlService(workspaceService, KB_DIR, realDisk(), [BOT], undefined, undefined, {}, undefined, undefined, book);
   });
   afterEach(async () => {
     await fs.rm(root, { recursive: true, force: true });
@@ -123,10 +124,12 @@ describe('a bot in the access model', () => {
     expect(await access.canWrite(workspaceId, 'admin@x.io', 'Anything.md')).toBe(true);
   });
 
-  it('never writes an access file, whatever grants it write', async () => {
-    expect(await access.canWrite(workspaceId, BOT, 'roles.yaml')).toBe(false);
-    expect(await access.canWrite(workspaceId, BOT, 'Group/access.md')).toBe(false);
+  it('writes an access file where its grants let it, and roles.yaml never, as a person who is not an admin', async () => {
+    expect(await access.canWrite(workspaceId, BOT, 'Group/access.md')).toBe(true);
     expect(await access.canWrite(workspaceId, BOT, 'Group/page.md')).toBe(true);
+    expect(await access.canWrite(workspaceId, BOT, 'Engineering/access.md')).toBe(false);
+    expect(await access.canWrite(workspaceId, BOT, 'roles.yaml')).toBe(false);
+    expect(await access.canWrite(workspaceId, 'eng@x.io', 'roles.yaml')).toBe(false);
   });
 
   it('is never named by a bare name: that is the role or group of that name', async () => {

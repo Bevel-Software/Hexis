@@ -784,8 +784,6 @@ function decidePermissionResolved(
     if (relativePath === 'roles.yaml') {
       return { allowed: isAdminEmail(model, email), scope: null, via: 'admin-rescue' };
     }
-    // A bot never changes access: no grant lets it write an access file.
-    if (bot && isAccessMdPath(relativePath)) return { allowed: false, scope: null, via: 'default-deny' };
     if (isAccessMdPath(relativePath) && isAdminEmail(model, email)) {
       return { allowed: true, scope: null, via: 'admin-rescue' };
     }
