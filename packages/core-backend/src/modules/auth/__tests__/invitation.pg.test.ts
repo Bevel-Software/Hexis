@@ -155,7 +155,9 @@ describe.skipIf(!PG_ADMIN_URL)('invitations on a real Postgres', () => {
       try {
         const res = await invite(app.base, { email: 'owner@acme.test' });
         expect(res.status).toBe(201);
-        expect(await res.json()).not.toHaveProperty('startingPassword');
+        const body = await res.json();
+        expect(body.status).toBe('created');
+        expect(body).not.toHaveProperty('startingPassword');
         expect(events).toEqual([{ passwordSet: false, startingPassword: undefined }]);
         const [row] = await app.db.select().from(users).where(eq(users.emailBidx, 'owner@acme.test'));
         expect(row!.passwordHash).toBeNull();
@@ -174,7 +176,9 @@ describe.skipIf(!PG_ADMIN_URL)('invitations on a real Postgres', () => {
       try {
         const res = await invite(app.base, { email: 'Owner@Acme.test', startingPassword: true });
         expect(res.status).toBe(201);
-        expect(await res.json()).not.toHaveProperty('startingPassword');
+        const body = await res.json();
+        expect(body.status).toBe('created');
+        expect(body).not.toHaveProperty('startingPassword');
         expect(events).toEqual([{ passwordSet: false, startingPassword: undefined }]);
         const [row] = await app.db.select().from(users).where(eq(users.emailBidx, 'owner@acme.test'));
         expect(row!.passwordHash).toBeNull();

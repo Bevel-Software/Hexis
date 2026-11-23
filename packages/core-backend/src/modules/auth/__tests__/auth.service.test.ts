@@ -368,7 +368,10 @@ describe('AuthService.createInvitedAccount — accounts that never hold a passwo
       'Root@Example.com',
       { startingPassword: true },
     );
+    // The account IS made (one insert); only the password is left out.
+    expect(made).toEqual({ created: true, user: expect.objectContaining({ email: 'root@example.com' }) });
     expect(made).not.toHaveProperty('startingPassword');
+    expect(captured.values).toHaveLength(1);
     expect(captured.values[0]).not.toHaveProperty('passwordHash');
   });
 });
