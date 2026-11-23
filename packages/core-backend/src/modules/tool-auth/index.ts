@@ -3,6 +3,7 @@
  * module imports from here, never from the files: they are the module's own
  * layout and free to move. Export what another module needs; nothing more.
  */
+export { actingUser } from './acting-user.js';
 export { rejectConnectionKey } from './connection-key-rejection.js';
 export { InvalidTokenLabelError, TokenNotFoundError, TokenStillActiveError } from './external-api-key.errors.js';
 export type { IExternalApiKeyService, KeyKindSpec, MintedExternalApiKey } from './external-api-key.interface.js';

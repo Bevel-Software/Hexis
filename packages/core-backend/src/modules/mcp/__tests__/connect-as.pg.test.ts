@@ -5,7 +5,7 @@ import type { OAuthClientInformationFull } from '@modelcontextprotocol/sdk/share
 import { BevelOAuthProvider } from '../oauth/bevel-oauth-provider.js';
 import { ExternalApiKeyService } from '../../../__tests__/tool-wiring.js';
 import type { Database } from '../../database/index.js';
-import { agentConnections, oauthClients, users } from '../../database/index.js';
+import { agentConnections, oauthAuthCodes, oauthClients, users } from '../../database/index.js';
 import { PG_ADMIN_URL, PG_TEST_TIMEOUT, dropScratchDatabases, openMigratedScratchDb } from '../../../__tests__/pg-scratch.js';
 
 /**
@@ -128,6 +128,20 @@ describe.skipIf(!PG_ADMIN_URL)('connecting as a bot, on a real Postgres', () => 
 
     await consent(userId, await registeredClient('bea'), b);
     expect((await connectionsOf(userId))[0]!.botUserId).toBe(b);
+  });
+
+  it('a code issued before bots, still unexpired, keeps its "as an agent" path on the connection rather than minting Myself', async () => {
+    const userId = await person('cal');
+    const client = await registeredClient('cal');
+    const st = { c: client.client_id, r: REDIRECT, cc: 'challenge', iat: Date.now() };
+    const code = new URL((await provider.issueAuthCode(userId, st)).redirectTo).searchParams.get('code')!;
+    // What the pre-upgrade consent step wrote: the path, and no bot.
+    await db.update(oauthAuthCodes).set({ agentPath: 'Agents/old.agent', botUserId: null }).where(eq(oauthAuthCodes.clientId, client.client_id));
+
+    const tokens = await provider.exchangeAuthorizationCode(client, code);
+    const [row] = await connectionsOf(userId);
+    expect(row).toMatchObject({ botUserId: null, agentPath: 'Agents/old.agent' });
+    expect((await provider.verifyAccessToken(tokens.access_token)).extra).toMatchObject({ botUserId: null, agentPath: 'Agents/old.agent' });
   });
 
   it("a key's bot is stored at mint and comes back out of every verification", async () => {

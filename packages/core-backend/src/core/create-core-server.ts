@@ -57,6 +57,7 @@ import {
   registerPluginsTools,
 } from '../modules/plugins/index.js';
 import { keyOrSessionAuth } from '../modules/tool-auth/key-or-session.middleware.js';
+import { actingUser } from '../modules/tool-auth/index.js';
 import { GrantRewriteChangeRequests, createBotsRoutes } from '../modules/bots/index.js';
 import { ToolDescriptionNotes, type AgentAccessGate } from '../modules/workspace/agent-access.gate.js';
 import {
@@ -670,10 +671,15 @@ export async function createCoreServer(
         core.internalTokenService.looksLikeInternalToken(token) ||
         core.externalApiKeyService.looksLikeExternalApiKey(token),
     }),
-    createPluginCreationRoutes(
-      core.pluginProvisionService,
-      async (req) => (req.userId ? ((await core.authService.getUserById(req.userId)) ?? null) : null),
-    ),
+    createPluginCreationRoutes(core.pluginProvisionService, async (req) => {
+      // A connection key acts as its account, a bot's with its maker beside
+      // it, as every tool call does; a session is its own user.
+      if (req.toolAuth) {
+        const acting = await actingUser((id) => core.authService.getUserById(id), req.toolAuth);
+        return 'user' in acting ? acting.user : null;
+      }
+      return req.userId ? ((await core.authService.getUserById(req.userId)) ?? null) : null;
+    }),
   );
 
   // Protected routes

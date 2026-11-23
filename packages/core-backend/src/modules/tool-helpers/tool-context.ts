@@ -16,7 +16,7 @@ import { branchForWorkspaceId } from '../../shared/workspace-id.js';
 import type { VersionControlEventBus } from '../version-control/index.js';
 import type { AuthService } from '../auth/index.js';
 import { ToolError, type ToolContext } from './tool.contract.js';
-import type { ToolAuth } from '../tool-auth/index.js';
+import { actingUser, type ToolAuth } from '../tool-auth/index.js';
 import { connectionOf } from '../agent-scope/index.js';
 
 export interface ToolContextDeps {
@@ -72,17 +72,11 @@ export type ResolveToolContext = (
  */
 export function createToolContextResolver(deps: ToolContextDeps): ResolveToolContext {
   return async function resolveToolContext(auth, abortSignal, sessionId) {
-    const found = await deps.authService.getUserById(auth.userId);
-    if (!found) throw new ToolError('Your account is no longer available.', 401);
     // A connection made as a bot acts as the bot's row; what it writes, opens
     // and merges also names the person who made the connection.
-    // A maker that cannot be loaded refuses the call: it would otherwise run
-    // as the bot with nobody named behind it, in the audit and the history.
-    const maker = auth.madeBy ? await deps.authService.getUserById(auth.madeBy.id) : null;
-    if (auth.madeBy && !maker) {
-      throw new ToolError('The person who made this connection is no longer available, so it loads nothing.', 401);
-    }
-    const user = maker ? { ...found, madeBy: { name: maker.name, email: maker.email } } : found;
+    const acting = await actingUser((id) => deps.authService.getUserById(id), auth);
+    if ('refused' in acting) throw new ToolError(acting.refused, 401);
+    const { user } = acting;
 
     const { loadActiveGroups } = deps;
     const validatorCache = new Map<string, WriteValidator>();

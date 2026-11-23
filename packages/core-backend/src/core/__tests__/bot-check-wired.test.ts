@@ -21,6 +21,7 @@ import { fileURLToPath } from 'node:url';
  */
 
 const compositionRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../create-core-services.ts');
+const serverRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../create-core-server.ts');
 
 /** The text of the one `new <name>(…)` call in the root, up to its closing `);`. */
 function constructionOf(source: string, name: string): string {
@@ -54,5 +55,12 @@ describe('the bot check the composition root wires', () => {
     expect(source.match(/const botAddresses\b/g) ?? []).toHaveLength(1);
     expect(source.match(/new BotService\(/g) ?? [], 'BotService is constructed once in the root').toHaveLength(1);
     expect(source).toMatch(/new BotService\(\s*db,\s*settings,\s*botDirectory,\s*botAddresses,/);
+  });
+
+  it('resolves the plugin creation doors’ caller as every tool call does, so a bot’s provisioning names its maker', async () => {
+    const source = await fs.readFile(serverRoot, 'utf8');
+    const call = source.slice(source.indexOf('createPluginCreationRoutes('));
+    const wiring = call.slice(0, call.indexOf('\n    }),'));
+    expect(wiring).toMatch(/actingUser\(\(id\) => core\.authService\.getUserById\(id\), req\.toolAuth\)/);
   });
 });
