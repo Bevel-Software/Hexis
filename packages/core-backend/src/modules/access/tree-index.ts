@@ -1,6 +1,6 @@
 /**
  * Every path a commit carries, as a cached at-ref model keeps it, and the
- * one place those paths are held for every cached commit at once.
+ * one place those paths are held for every commit one service graph caches.
  *
  * A model needs its commit's paths for one question: is this path absent at
  * the commit (a fact, remembered) or a blob the batch could not read (never

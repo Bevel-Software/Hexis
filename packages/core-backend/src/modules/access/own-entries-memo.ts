@@ -8,9 +8,14 @@ export interface OwnEntriesLimits {
 }
 
 /**
- * The deployment's limits. The age is only a backstop: `invalidate()`, called
- * on commit, push, pull and branch switch, is what keeps a memo fresh. It is
- * not the model cache's 5 s, at which every tree build was effectively cold.
+ * The deployment's limits, for one memo. The age is only a backstop:
+ * `invalidate()`, called on commit, push, pull and branch switch, is what
+ * keeps a memo fresh.
+ *
+ * The bounds are per service graph, not per process: the composition root
+ * makes one memo per `createCoreServices` call, and a host that runs one
+ * graph per tenant holds one memo per active tenant, each within these
+ * bounds. A tenant's memo goes with its graph when the host stops it.
  */
 export const OWN_ENTRIES_LIMITS: OwnEntriesLimits = {
   ttlMs: 5 * 60_000,
@@ -41,8 +46,8 @@ export const OWN_ENTRIES_LIMITS: OwnEntriesLimits = {
  * a path cut from an absolute path, or a role name cut from a file's text,
  * would otherwise keep the whole of that longer string alive.
  *
- * The composition root makes the one memo and hands it to
- * `AccessControlService`, with the clock the service reads.
+ * The composition root makes one memo per service graph and hands it to
+ * that graph's `AccessControlService`, with the clock the service reads.
  */
 export class OwnEntriesMemo {
   /** In the order the memos were started, which is the order they expire in. */

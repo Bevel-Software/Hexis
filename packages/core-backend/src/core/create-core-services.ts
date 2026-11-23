@@ -862,6 +862,8 @@ export async function createCoreServices(
     // What the at-ref models keep of their commits' trees, shared across them,
     // and the per-workspace memo of what files declare for themselves, on the
     // deployment's bounds and the same clock as the service (`Date.now`).
+    // One of each per graph: a host that runs a graph per tenant holds them
+    // per active tenant, each within the bounds, and drops them with the graph.
     new TreeIndexer(),
     new OwnEntriesMemo(Date.now, OWN_ENTRIES_LIMITS),
   );
