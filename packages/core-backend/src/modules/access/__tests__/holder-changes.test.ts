@@ -6,7 +6,7 @@ import os from 'node:os';
 import { realDisk } from '../../../__tests__/real-disk.js';
 import type { WorkspaceService } from '../../workspace/index.js';
 import { AccessControlService } from '../access-control.service.js';
-import { botAddressBook, type BotAddressBook } from '../../../__tests__/bot-address-book.js';
+import { botAddressBook } from '../../../__tests__/bot-address-book.js';
 
 /**
  * `prospectiveHolderChanges`: who loses and who gains opening or editing a

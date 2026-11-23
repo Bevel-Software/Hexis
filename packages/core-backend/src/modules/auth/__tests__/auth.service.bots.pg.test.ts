@@ -4,7 +4,7 @@ import { users, type Database } from '../../database/index.js';
 import { PG_ADMIN_URL, PG_TEST_TIMEOUT, dropScratchDatabases, openMigratedScratchDb } from '../../../__tests__/pg-scratch.js';
 import { AuthService, BOT_ADDRESS_REFUSAL } from '../auth.service.js';
 import { hashPassword } from '../password-hash.js';
-import { botAddressBook, type BotAddressBook } from '../../../__tests__/bot-address-book.js';
+import { botAddressBook } from '../../../__tests__/bot-address-book.js';
 
 /**
  * A bot never signs in: every way in refuses a bot's row and any address at

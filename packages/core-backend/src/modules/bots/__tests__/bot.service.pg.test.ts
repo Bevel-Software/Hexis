@@ -289,7 +289,10 @@ describe.skipIf(!PG_ADMIN_URL)('bots on a real Postgres', () => {
         cached.delete(k);
       },
       record: async (entries: Record<string, string>) => {
-        for (const [k, v] of Object.entries(entries)) (stored.set(k, v), cached.set(k, v));
+        for (const [k, v] of Object.entries(entries)) {
+          stored.set(k, v);
+          cached.set(k, v);
+        }
       },
     };
     const service = new BotService(db, lagging, dir);
