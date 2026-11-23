@@ -53,6 +53,7 @@ import {
   accessMdSelfEntries,
   canonicalEmail,
   canonicalRoleName,
+  hasAccessFrontmatterExtension,
   isAccessMdPath,
   mergeGroupsIntoRoles,
   parseAccessFile,
@@ -71,6 +72,8 @@ import {
   DIRECTORY_SYNC_BOT_EMAIL,
   DIRECTORY_SYNC_BOT_NAME,
 } from './directory-sync-bot.js';
+import { OwnEntriesMemo, type WorkspaceOwnEntries } from './own-entries-memo.js';
+import { CommitTreeIndex, TreeIndexer, parseNulListing } from './tree-index.js';
 
 /**
  * What one spec of a batched read came back as: a blob's text, nothing at
@@ -1511,7 +1514,7 @@ function ineligibleNamedEmailsResolved(
  * own-entries reads need to tell a path that is absent at the commit (a
  * fact, remembered) from a blob the batch could not read (never remembered).
  */
-type AtRefModel = { model: AccessModel; resolvedRef: string; tree: ReadonlySet<string> | null };
+type AtRefModel = { model: AccessModel; resolvedRef: string; tree: CommitTreeIndex | null };
 /**
  * One build's outcome: a model, no roles.yaml at the commit, or one that
  * doesn't parse. A git read failure is none of these: it throws
@@ -1540,12 +1543,19 @@ export class AccessControlService implements IAccessControl {
    * NOT the model cache's 5s TTL: at 5s every tree build was effectively
    * cold (~one full-KB read sweep per build). Single-file gates (`canRead` /
    * `canWrite`) stay uncached — the write gate reads disk-fresh on purpose.
+   *
+   * Only paths that can carry access entries are held (the access-frontmatter
+   * extension set); a batch reads any other path as before, without keeping
+   * it. Bounded in age, workspaces and entries, so what it holds does not
+   * grow with uptime or with how many branches were ever opened: see
+   * `OwnEntriesMemo`.
    */
-  private readonly ownEntriesCache = new Map<
-    string,
-    { loadedAt: number; byPath: Map<string, OwnEntries | null> }
-  >();
+  private readonly ownEntriesMemo: OwnEntriesMemo;
   private static readonly OWN_ENTRIES_TTL_MS = 5 * 60_000;
+  /** Workspaces whose memo is held at once, at most; past it the oldest is dropped. */
+  private static readonly OWN_ENTRIES_MAX_WORKSPACES = 32;
+  /** Entries held across every workspace's memo, at most; past it the oldest workspace is dropped. */
+  private static readonly OWN_ENTRIES_MAX_ENTRIES = 200_000;
 
   /**
    * At-ref models keyed by workspace + the COMMIT the ref resolved to. The
@@ -1598,7 +1608,10 @@ export class AccessControlService implements IAccessControl {
   private static readonly TREE_INDEX_BUDGET = 500_000;
   private readonly treeIndexMaxPaths: number;
   private readonly treeIndexBudget: number;
-  private treePathsHeld = 0;
+  /** Builds the cached models' trees and counts what they hold together; see `TreeIndexer`. */
+  private readonly treeIndexer = new TreeIndexer();
+  /** The service's clock, for every TTL it keeps. */
+  private readonly now: () => number;
 
   /**
    * Canonicalised deployment-owner emails (see `AccessModel.deploymentOwners`).
@@ -1635,17 +1648,31 @@ export class AccessControlService implements IAccessControl {
     private readonly kb: Pick<KbContext, 'layout'> = { layout: DEFAULT_KB_LAYOUT },
     /**
      * How much of the commits' trees the at-ref models may hold (see
-     * `TREE_INDEX_MAX_PATHS`, `TREE_INDEX_BUDGET`). The defaults are the
-     * deployment's; a suite lowers them to reach the bounds with a small
-     * repository.
+     * `TREE_INDEX_MAX_PATHS`, `TREE_INDEX_BUDGET`), and how much the
+     * own-entries memo may (`OWN_ENTRIES_MAX_WORKSPACES`,
+     * `OWN_ENTRIES_MAX_ENTRIES`). The defaults are the deployment's; a suite
+     * lowers them to reach the bounds with a small repository. `now` is the
+     * clock every TTL here reads, `Date.now` unless a suite moves time itself.
      */
-    limits: { treeIndexMaxPaths?: number; treeIndexBudget?: number } = {},
+    limits: {
+      treeIndexMaxPaths?: number;
+      treeIndexBudget?: number;
+      ownEntriesMaxWorkspaces?: number;
+      ownEntriesMaxEntries?: number;
+      now?: () => number;
+    } = {},
   ) {
     this.deploymentOwners = new Set(
       deploymentOwners.filter(Boolean).map((e) => canonicalEmail(e)),
     );
     this.treeIndexMaxPaths = limits.treeIndexMaxPaths ?? AccessControlService.TREE_INDEX_MAX_PATHS;
     this.treeIndexBudget = limits.treeIndexBudget ?? AccessControlService.TREE_INDEX_BUDGET;
+    this.now = limits.now ?? Date.now;
+    this.ownEntriesMemo = new OwnEntriesMemo(this.now, {
+      ttlMs: AccessControlService.OWN_ENTRIES_TTL_MS,
+      maxWorkspaces: limits.ownEntriesMaxWorkspaces ?? AccessControlService.OWN_ENTRIES_MAX_WORKSPACES,
+      maxEntries: limits.ownEntriesMaxEntries ?? AccessControlService.OWN_ENTRIES_MAX_ENTRIES,
+    });
   }
 
   /**
@@ -1656,7 +1683,7 @@ export class AccessControlService implements IAccessControl {
    */
   invalidate(workspaceId: string): void {
     this.cache.delete(workspaceId);
-    this.ownEntriesCache.delete(workspaceId);
+    this.ownEntriesMemo.drop(workspaceId);
     this.generation++;
   }
 
@@ -1676,27 +1703,39 @@ export class AccessControlService implements IAccessControl {
    * some other workspace, landing mid-load, costs this one a single reload —
    * a load is tens of milliseconds and a drop is a commit, so that is rare
    * and cheap, and it never stores a wrong model. (The own-entries memo needs
-   * no token: it is keyed by the map object a reader took BEFORE its disk
-   * read, and `invalidate()` replaces the map, so a late store lands in an
-   * orphan nobody consults.)
+   * no token: a batch stores through the handle it opened BEFORE its disk
+   * reads, and `invalidate()` drops that memo, after which the handle stores
+   * nothing and answers nothing.)
    */
   private generation = 0;
 
-  /** Memoized `readOwnEntries` for the batch paths; see `ownEntriesCache`. */
-  private async cachedOwnEntries(
+  /**
+   * Memoized `readOwnEntries` for the batch paths; see `ownEntriesMemo`. The
+   * memo is opened once per batch, before any read, so an `invalidate()`
+   * that lands mid-batch keeps every later store out of it.
+   */
+  private async cachedOwnEntriesBatch(
     workspaceId: string,
+    repoDir: string,
+    relativePaths: readonly string[],
+  ): Promise<(OwnEntries | null)[]> {
+    const memo = this.ownEntriesMemo.open(workspaceId);
+    return Promise.all(relativePaths.map((p) => this.cachedOwnEntries(memo, repoDir, p)));
+  }
+
+  private async cachedOwnEntries(
+    memo: WorkspaceOwnEntries,
     repoDir: string,
     relativePath: string,
   ): Promise<OwnEntries | null> {
-    let ws = this.ownEntriesCache.get(workspaceId);
-    if (!ws || Date.now() - ws.loadedAt > AccessControlService.OWN_ENTRIES_TTL_MS) {
-      ws = { loadedAt: Date.now(), byPath: new Map() };
-      this.ownEntriesCache.set(workspaceId, ws);
-    }
-    const hit = ws.byPath.get(relativePath);
-    if (hit !== undefined || ws.byPath.has(relativePath)) return hit ?? null;
+    // A path no access entries can be declared in is read as it always was,
+    // and not kept: the file tree asks about every file, screenshots and
+    // transcripts included, and the memo would hold one entry for each.
+    if (!hasAccessFrontmatterExtension(relativePath)) return this.readOwnEntries(repoDir, relativePath);
+    const hit = memo.get(relativePath);
+    if (hit !== undefined) return hit;
     const own = await this.readOwnEntries(repoDir, relativePath);
-    ws.byPath.set(relativePath, own);
+    memo.set(relativePath, own);
     return own;
   }
 
@@ -1745,7 +1784,7 @@ export class AccessControlService implements IAccessControl {
     // Read each path's own-entries in parallel rather than serially (the batch
     // path otherwise bottlenecks on per-file disk latency), memoized per
     // workspace so repeat tree builds skip the disk entirely.
-    const owns = await Promise.all(relativePaths.map((p) => this.cachedOwnEntries(workspaceId, repoDir, p)));
+    const owns = await this.cachedOwnEntriesBatch(workspaceId, repoDir, relativePaths);
     const result = new Map<string, boolean>();
     relativePaths.forEach((p, i) => {
       result.set(p, canReadResolved(model, userEmail, p, owns[i]));
@@ -1764,7 +1803,7 @@ export class AccessControlService implements IAccessControl {
     const repoDir = await this.repoDir(workspaceId);
     // The same per-path own-entries `canReadBatch` folds in: a file's own
     // frontmatter rules are part of the walk for a group as for a person.
-    const owns = await Promise.all(relativePaths.map((p) => this.cachedOwnEntries(workspaceId, repoDir, p)));
+    const owns = await this.cachedOwnEntriesBatch(workspaceId, repoDir, relativePaths);
     const result = new Map<string, boolean>();
     relativePaths.forEach((p, i) => {
       result.set(p, hasPermissionForKeys(model, 'read', keys, p, owns[i]));
@@ -1775,7 +1814,7 @@ export class AccessControlService implements IAccessControl {
   async canReadAsEveryoneBatch(workspaceId: string, relativePaths: string[]): Promise<Map<string, boolean>> {
     const model = await this.loadModel(workspaceId);
     const repoDir = await this.repoDir(workspaceId);
-    const owns = await Promise.all(relativePaths.map((p) => this.cachedOwnEntries(workspaceId, repoDir, p)));
+    const owns = await this.cachedOwnEntriesBatch(workspaceId, repoDir, relativePaths);
     const result = new Map<string, boolean>();
     relativePaths.forEach((p, i) => {
       // No keys at all: the walk then falls through to each scope's derived
@@ -1815,7 +1854,7 @@ export class AccessControlService implements IAccessControl {
     const model = await this.loadModel(workspaceId);
     const repoDir = await this.repoDir(workspaceId);
     // Parallel own-entries reads, memoized — same shape as `canReadBatch`.
-    const owns = await Promise.all(relativePaths.map((p) => this.cachedOwnEntries(workspaceId, repoDir, p)));
+    const owns = await this.cachedOwnEntriesBatch(workspaceId, repoDir, relativePaths);
     const result = new Map<string, boolean>();
     relativePaths.forEach((p, i) => {
       const machineOwned = this.machineOwnedWriteRule(userEmail, p);
@@ -1842,7 +1881,7 @@ export class AccessControlService implements IAccessControl {
     const model = await this.loadModel(workspaceId);
     const repoDir = await this.repoDir(workspaceId);
     // Parallel own-entries reads, memoized — same shape as `canWriteBatch`.
-    const owns = await Promise.all(relativePaths.map((p) => this.cachedOwnEntries(workspaceId, repoDir, p)));
+    const owns = await this.cachedOwnEntriesBatch(workspaceId, repoDir, relativePaths);
     const result = new Map<string, boolean>();
     relativePaths.forEach((p, i) => {
       result.set(p, hasPermissionResolved(model, 'download', userEmail, p, owns[i]));
@@ -1858,7 +1897,7 @@ export class AccessControlService implements IAccessControl {
     const model = await this.loadModel(workspaceId);
     const repoDir = await this.repoDir(workspaceId);
     // Parallel own-entries reads, memoized — same shape as `canWriteBatch`.
-    const owns = await Promise.all(relativePaths.map((p) => this.cachedOwnEntries(workspaceId, repoDir, p)));
+    const owns = await this.cachedOwnEntriesBatch(workspaceId, repoDir, relativePaths);
     const result = new Map<string, boolean>();
     relativePaths.forEach((p, i) => {
       result.set(p, hasPermissionResolved(model, 'owner', userEmail, p, owns[i]));
@@ -2566,7 +2605,7 @@ export class AccessControlService implements IAccessControl {
 
   private async loadModel(workspaceId: string): Promise<AccessModel> {
     const cached = this.cache.get(workspaceId);
-    if (cached && Date.now() - cached.loadedAt < AccessControlService.CACHE_TTL_MS) {
+    if (cached && this.now() - cached.loadedAt < AccessControlService.CACHE_TTL_MS) {
       return cached.model;
     }
     // Taken before the first read; see `generation`.
@@ -2662,7 +2701,7 @@ export class AccessControlService implements IAccessControl {
     // An invalidation landed mid-load: this model describes a tree that is
     // already gone, so it is returned to this caller but never stored.
     if (this.generation === generation) {
-      this.cache.set(workspaceId, { model, loadedAt: Date.now() });
+      this.cache.set(workspaceId, { model, loadedAt: this.now() });
     }
     return model;
   }
@@ -2780,7 +2819,7 @@ export class AccessControlService implements IAccessControl {
     repoDir: string,
     ref: string,
     relativePath: string,
-    tree: ReadonlySet<string> | null = null,
+    tree: CommitTreeIndex | null = null,
   ): Promise<OwnEntries | null> {
     if (relativePath === 'roles.yaml') return null;
     // At a commit (what every gate passes: `resolvedRef`), the batched read
@@ -2806,7 +2845,7 @@ export class AccessControlService implements IAccessControl {
     repoDir: string,
     ref: string,
     relativePaths: string[],
-    tree: ReadonlySet<string> | null = null,
+    tree: CommitTreeIndex | null = null,
   ): Promise<Map<string, OwnEntries | null>> {
     const result = new Map<string, OwnEntries | null>();
     const wanted: string[] = [];
@@ -2923,7 +2962,13 @@ export class AccessControlService implements IAccessControl {
     ref: string,
   ): Promise<{ accessFiles: string[]; pluginDirs: string[]; named: Set<string>; all: string[] } | 'error'> {
     try {
-      const { stdout } = await this.gitRunner.run(repoDir, ['ls-tree', '-r', '-z', '--name-only', ref]);
+      // Bytes, decoded one path at a time (`parseNulListing`): every path
+      // below is a string of its own. Cut from one decoded listing, each
+      // would be a view onto it, and a cached model keeping any of them
+      // would keep the commit's whole listing alive.
+      const { stdout } = await this.gitRunner.run(repoDir, ['ls-tree', '-r', '-z', '--name-only', ref], {
+        encoding: 'buffer',
+      });
       const out: string[] = [];
       const pluginDirs: string[] = [];
       const all: string[] = [];
@@ -2932,8 +2977,7 @@ export class AccessControlService implements IAccessControl {
       // only when the tree does not name it.
       const named = new Set<string>();
       const { pluginsDir } = this.kb.layout;
-      for (const p of stdout.split('\0')) {
-        if (!p) continue;
+      for (const p of parseNulListing(stdout)) {
         // One past the cap is enough to know the tree is not kept.
         if (all.length <= this.treeIndexMaxPaths) all.push(p);
         if (p === 'access.md' || p.endsWith('/access.md')) out.push(p);
@@ -3045,21 +3089,24 @@ export class AccessControlService implements IAccessControl {
 
   private rememberAtRef(key: string, value: AtRefModel): void {
     this.atRefCache.set(key, value);
-    this.treePathsHeld += value.tree?.size ?? 0;
+    if (value.tree) this.treeIndexer.hold(value.tree);
     if (this.atRefCache.size > AccessControlService.AT_REF_CACHE_MAX) {
       const oldest = this.atRefCache.keys().next().value;
       if (oldest !== undefined) {
-        this.treePathsHeld -= this.atRefCache.get(oldest)?.tree?.size ?? 0;
+        const evicted = this.atRefCache.get(oldest)?.tree;
+        if (evicted) this.treeIndexer.release(evicted);
         this.atRefCache.delete(oldest);
       }
     }
     // The trees are a budget of their own, across every held model: past
     // it, the oldest models keep their model and let their tree go — the
     // gate still answers, absence is just no longer remembered for them.
+    // A tree shares its base with the trees around it, so what counts is the
+    // paths held across them all, each shared base once (`TreeIndexer`).
     for (const held of this.atRefCache.values()) {
-      if (this.treePathsHeld <= this.treeIndexBudget) break;
+      if (this.treeIndexer.heldPaths <= this.treeIndexBudget) break;
       if (!held.tree) continue;
-      this.treePathsHeld -= held.tree.size;
+      this.treeIndexer.release(held.tree);
       held.tree = null;
     }
   }
@@ -3239,7 +3286,7 @@ export class AccessControlService implements IAccessControl {
       // The listing already named every path; held so an own-entries read
       // can tell absence from a lost blob, unless the tree is too large to
       // hold for every cached commit (then absence is simply not remembered).
-      tree: listed.all.length <= this.treeIndexMaxPaths ? new Set(listed.all) : null,
+      tree: listed.all.length <= this.treeIndexMaxPaths ? this.treeIndexer.index(listed.all) : null,
     };
   }
 }
