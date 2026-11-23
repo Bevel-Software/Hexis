@@ -6,4 +6,5 @@
 export type { Database } from './connection.js';
 export { deploymentSettings } from './core-schema.js';
 export { pgErrorCode } from './pg-error.js';
+export { AdvisoryLock, AdvisoryLockTimeoutError, withAdvisoryLock } from './advisory-lock.js';
 export { agentConnections, agentEvents, atlassianAccountLinks, changeRequests, externalApiKeys, fileLocks, githubFacadeCodes, githubFacadeIdentity, oauthAuthCodes, oauthClients, oauthTokens, pendingCommits, pluginJoinRequests, prFileApprovals, prMergeLog, secrets, users } from './schema.js';

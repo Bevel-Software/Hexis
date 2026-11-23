@@ -3,7 +3,7 @@ import { logger } from '../../shared/logging.js';
 import { canonicalEmail } from '../../shared/email-identity.js';
 import { redactSecret } from '../../shared/redact-secret.js';
 import type { Database } from '../database/index.js';
-import { users } from '../database/index.js';
+import { AdvisoryLock, AdvisoryLockTimeoutError, users, withAdvisoryLock } from '../database/index.js';
 import { BotAddressBook, botAddress } from './bot-address-book.js';
 import { botsDomainRefusal, normalizeBotsDomain } from './bot-domain.js';
 import type { DomainChange, IGrantRewriter } from './bot-domain-change.js';
@@ -27,7 +27,15 @@ export interface BotSettings {
   resolve(key: string): string;
   /** `updatedByUserId` is a users row id (a uuid), never an address: the store keys it to `users.id`. */
   record(entries: Record<string, string>, updatedByUserId: string | null): Promise<void>;
+  /** One setting as the database has it now, taken into this process's cache: what another process wrote. */
+  reload(key: string): Promise<string>;
 }
+
+/** The settings a domain change writes, re-read from the database when another process may have written them. */
+const DOMAIN_SETTINGS = ['botsDomain', 'botsPreviousDomain', 'botsDomainChangeRequest'] as const;
+
+/** How long a domain change waits for one already running before it is refused. */
+const DOMAIN_CHANGE_WAIT_MS = 5_000;
 
 /** A bot id that can be the local part of an address: lowercase letters, digits, dots, hyphens and underscores. */
 const BOT_ID = /^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/;
@@ -125,12 +133,34 @@ export class BotService implements IBots {
    * anything is decided; {@link sync} keeps it current afterwards.
    */
   async load(): Promise<void> {
+    this.rows = await this.readRows();
+    await this.refreshAddresses();
+  }
+
+  /** The bots' rows as the database has them now. */
+  private async readRows(): Promise<Map<string, BotRow>> {
     const rows = await this.db
       .select({ id: users.id, botId: users.botId, email: users.email, name: users.name, retiredAt: users.botRetiredAt })
       .from(users)
       .where(isNotNull(users.botId));
-    this.rows = new Map(rows.map((r) => [r.botId as string, { ...r, botId: r.botId as string }]));
-    await this.refreshAddresses();
+    return new Map(rows.map((r) => [r.botId as string, { ...r, botId: r.botId as string }]));
+  }
+
+  /**
+   * The rows, and the domain settings when a row moved, as the database has
+   * them now: another process may have changed the domain (or made, retired
+   * or renamed a bot) since this one last looked, and what it wrote is what
+   * holds. One read of the rows; the settings are read again only when an
+   * address differs from what this process held.
+   */
+  private async catchUp(): Promise<void> {
+    const fresh = await this.readRows();
+    const moved = [...fresh.values()].some((r) => {
+      const held = this.rows.get(r.botId);
+      return held !== undefined && held.email !== r.email;
+    });
+    this.rows = fresh;
+    if (moved) for (const key of DOMAIN_SETTINGS) await this.settings.reload(key);
   }
 
   /**
@@ -142,6 +172,7 @@ export class BotService implements IBots {
    */
   async sync(definitions?: readonly BotDefinition[]): Promise<Map<string, BotDefinition[]>> {
     const grouped = groupById(definitions ?? (await this.directory.definitions()));
+    await this.catchUp();
     const now = new Date();
     for (const [id, defs] of grouped) {
       if (!BOT_ID.test(id)) continue;
@@ -301,6 +332,26 @@ export class BotService implements IBots {
    * next change, so the admin must learn that no request rewrites it.
    */
   async changeDomain(by: AuthUser, input: unknown, rewriter?: IGrantRewriter): Promise<DomainChange> {
+    // One change at a time, across processes, from the first check to the
+    // recorded request: until then the request number reads 0, which the
+    // next change could not tell from "no request".
+    try {
+      return await withAdvisoryLock(this.db, AdvisoryLock.BotsDomain, () => this.changeDomainHeld(by, input, rewriter), {
+        waitMs: DOMAIN_CHANGE_WAIT_MS,
+      });
+    } catch (err) {
+      if (err instanceof AdvisoryLockTimeoutError) {
+        throw new BotsDomainRefusedError('The bots\' domain is being changed already. Try again once that change is done.');
+      }
+      throw err;
+    }
+  }
+
+  /** {@link changeDomain}, under its lock. */
+  private async changeDomainHeld(by: AuthUser, input: unknown, rewriter?: IGrantRewriter): Promise<DomainChange> {
+    // What a change on another process recorded, read again: the checks
+    // below judge the domain as it is, not as this process last saw it.
+    for (const key of DOMAIN_SETTINGS) await this.settings.reload(key);
     const domain = normalizeBotsDomain(input);
     const current = this.domain();
     const people = await this.db.select({ email: users.email }).from(users).where(isNull(users.botId));

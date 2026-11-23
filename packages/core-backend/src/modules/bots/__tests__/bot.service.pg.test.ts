@@ -43,6 +43,7 @@ function settings(initial: Record<string, string> = {}) {
   const values = new Map(Object.entries(initial));
   return {
     resolve: (k: string) => values.get(k) ?? '',
+    reload: async (k: string) => values.get(k) ?? '',
     record: async (entries: Record<string, string>) => {
       for (const [k, v] of Object.entries(entries)) values.set(k, v);
     },

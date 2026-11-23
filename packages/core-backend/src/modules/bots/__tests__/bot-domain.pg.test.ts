@@ -227,6 +227,7 @@ describe.skipIf(!PG_ADMIN_URL)('a domain change on a real Postgres: every bot na
   it('puts every row back when the settings cannot be recorded, so rows and settings never disagree', async () => {
     const failing = {
       resolve: (key: string) => store.resolve(key),
+      reload: (key: string) => store.reload(key),
       record: async () => {
         throw new Error('settings store down');
       },
@@ -260,6 +261,7 @@ describe.skipIf(!PG_ADMIN_URL)('a domain change on a real Postgres: every bot na
     calls.length = 0;
     const failing = {
       resolve: (key: string) => store.resolve(key),
+      reload: (key: string) => store.reload(key),
       record: async () => {
         throw new Error('settings store down');
       },
@@ -286,6 +288,7 @@ describe.skipIf(!PG_ADMIN_URL)('a domain change on a real Postgres: every bot na
     let firstId = '';
     const watching = {
       resolve: (key: string) => store.resolve(key),
+      reload: (key: string) => store.reload(key),
       record: async (values: Record<string, string>, by: string) => {
         if (values.botsDomain) {
           const resolved = await service.resolveConnection({ id: admin.id, email: admin.email }, { botUserId: firstId, agentPath: null });
@@ -318,5 +321,66 @@ describe.skipIf(!PG_ADMIN_URL)('a domain change on a real Postgres: every bot na
     expect(await emailOf('second')).toBe(`second@${before}`);
     expect(service.domain()).toBe(before);
     expect(store.resolve('botsDomain') || 'agent.hexis').toBe(before);
+  });
+});
+
+describe.skipIf(!PG_ADMIN_URL)('a domain change seen from two processes over one database', () => {
+  let db: Database;
+  let closeDb: () => Promise<void>;
+  let admin: { id: string; email: string; name: string };
+  const directory = { definitions: async () => [def('ops')], mayActAs: async () => true };
+  /** One process: its own settings cache and its own bots, over the shared database. */
+  const process_ = async () => {
+    const store = deploymentSettingsOver(db);
+    await store.load();
+    const service = new BotService(db, store, directory);
+    await service.load();
+    await service.sync();
+    return service;
+  };
+
+  beforeAll(async () => {
+    ({ db, close: closeDb } = await openMigratedScratchDb('hexis_bot_domain_two'));
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const [adminRow] = await db
+      .insert(users)
+      .values({ email: 'admin@acme.com', emailBidx: 'admin@acme.com', name: 'Admin' })
+      .returning({ id: users.id });
+    admin = { id: adminRow!.id, email: 'admin@acme.com', name: 'Admin' };
+  }, PG_TEST_TIMEOUT);
+
+  afterAll(async () => {
+    vi.restoreAllMocks();
+    await closeDb();
+    await dropScratchDatabases();
+  }, PG_TEST_TIMEOUT);
+
+  it('refuses a second change, on another process, while the first is still opening its rewrite', async () => {
+    const [a, b] = [await process_(), await process_()];
+    let release!: () => void;
+    const opening = new Promise<void>((r) => {
+      release = r;
+    });
+    const rewriterA = {
+      open: vi.fn(async () => {
+        await opening;
+        return 5;
+      }),
+    };
+    const rewriterB = { open: vi.fn(async () => 6) };
+    const first = a.changeDomain(admin, 'one.acme.com', rewriterA);
+    await vi.waitFor(() => expect(rewriterA.open).toHaveBeenCalled());
+    await expect(b.changeDomain(admin, 'two.acme.com', rewriterB)).rejects.toThrow(/being changed already/);
+    expect(rewriterB.open).not.toHaveBeenCalled();
+    release();
+    expect(await first).toEqual({ domain: 'one.acme.com', changeRequest: 5 });
+  }, 30_000);
+
+  it('gives a process that did not make the change its bots at their new address', async () => {
+    const [a, b] = [await process_(), await process_()];
+    await a.changeDomain(admin, 'three.acme.com');
+    expect((await b.actAs('admin@acme.com', 'ops'))?.email).toBe('ops@three.acme.com');
+    expect((await b.choicesFor('admin@acme.com')).map((c) => c.address)).toEqual(['ops@three.acme.com']);
+    expect(b.domain()).toBe('three.acme.com');
   });
 });
