@@ -41,8 +41,10 @@ export interface ListedFile {
 export function visitTreeListing(bytes: Buffer, visit: (path: string, file: ListedFile) => void): void {
   let off = 0;
   while (off < bytes.length) {
-    let end = bytes.indexOf(NUL, off);
-    if (end < 0) end = bytes.length;
+    const end = bytes.indexOf(NUL, off);
+    // Git ends every record with a NUL: output that stops without one was
+    // cut short, and the records after the cut are not here to be missed.
+    if (end < 0) throw new Error('git ls-tree output ends inside a record');
     if (end > off) {
       const tab = bytes.indexOf(TAB, off);
       const modeEnd = bytes.indexOf(SPACE, off);

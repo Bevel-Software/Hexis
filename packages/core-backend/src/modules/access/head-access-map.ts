@@ -135,9 +135,15 @@ export class HeadMaps<M> {
   private readonly building = new Map<string, Promise<HeadMap<M> | null>>();
   /** Commits being read in the background (see `HeadMapLimits.waitBytes`). */
   private readonly warming = new Set<string>();
-  /** Commits no map can be made from, so they are not tried on every call. */
-  private readonly without = new Set<string>();
+  /**
+   * Commits no map is made from, each until a time: forever for a commit
+   * that cannot have one (a symbolic link, no roles file; a commit does not
+   * change), and `RETRY_MS` for one whose read failed, which may succeed
+   * next time. Either way they are not tried on every call.
+   */
+  private readonly without = new Map<string, number>();
   private static readonly WITHOUT_MAX = 256;
+  private static readonly RETRY_MS = 30_000;
   /** What each file version seen declares for itself, by `blobKey`. */
   private readonly blobs = new Map<string, OwnEntries | null>();
 
@@ -206,7 +212,12 @@ export class HeadMaps<M> {
       this.heads.set(commit, held);
       return held.map;
     }
-    if (this.without.has(commit) || this.warming.has(commit)) return null;
+    const until = this.without.get(commit);
+    if (until !== undefined) {
+      if (this.now() < until) return null;
+      this.without.delete(commit);
+    }
+    if (this.warming.has(commit)) return null;
     let pending = this.building.get(commit);
     if (!pending) {
       pending = this.build(repoDir, commit).finally(() => {
@@ -253,7 +264,9 @@ export class HeadMaps<M> {
     });
     if (!built || irregular) {
       built?.release();
-      this.rememberWithout(commit);
+      // A link or a submodule is a fact about the commit. No model may be
+      // one too (no roles file) or a read that failed: tried again later.
+      this.rememberWithout(commit, irregular && built ? Number.POSITIVE_INFINITY : this.now() + HeadMaps.RETRY_MS);
       return null;
     }
     const finish = async (): Promise<HeadMap<M> | null> => {
@@ -261,7 +274,7 @@ export class HeadMaps<M> {
         await this.read(repoDir, [...unseen.values()], own);
       } catch (err) {
         built.release();
-        this.rememberWithout(commit);
+        this.rememberWithout(commit, this.now() + HeadMaps.RETRY_MS);
         log.warn(
           `reading what the files of ${commit.slice(0, 7)} declare failed; answering from the checkout: ${err instanceof Error ? err.message : String(err)}`,
         );
@@ -355,10 +368,17 @@ export class HeadMaps<M> {
   private save(seed: HeadSeed): void {
     if (!this.store || this.now() - this.savedAt < this.limits.saveEveryMs) return;
     this.savedAt = this.now();
-    void this.store.save(seed).catch((err: unknown) => {
-      log.warn(`the access seed was not saved: ${err instanceof Error ? err.message : String(err)}`);
-    });
+    // One after the other: a save that is slow must not land after a later
+    // one and leave the older seed in the store.
+    const store = this.store;
+    this.saving = this.saving
+      .then(() => store.save(seed))
+      .catch((err: unknown) => {
+        log.warn(`the access seed was not saved: ${err instanceof Error ? err.message : String(err)}`);
+      });
   }
+
+  private saving: Promise<void> = Promise.resolve();
 
   private rememberBlob(key: string, declared: OwnEntries | null): void {
     this.blobs.set(key, declared);
@@ -368,10 +388,10 @@ export class HeadMaps<M> {
     }
   }
 
-  private rememberWithout(commit: string): void {
-    this.without.add(commit);
+  private rememberWithout(commit: string, until: number): void {
+    this.without.set(commit, until);
     if (this.without.size > HeadMaps.WITHOUT_MAX) {
-      const oldest = this.without.values().next().value;
+      const oldest = this.without.keys().next().value;
       if (oldest !== undefined) this.without.delete(oldest);
     }
   }

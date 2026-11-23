@@ -319,6 +319,13 @@ describe('AccessControlService — at-ref model cache', () => {
     await expect(svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).rejects.toBeInstanceOf(AccessUnreadableError);
     expect(await svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).toBe(true);
     expect(lsTreeBuilds()).toBe(2);
+
+    // Output cut short after a whole record: git ends every record with a
+    // NUL, so a listing without its last one is not the whole listing.
+    await pushFromOther('one more note', () => fs.writeFile(path.join(other, 'Team/Cut.md'), '# cut\n'));
+    injected.rewriteNext = (argv) => (argv.includes('ls-tree') ? (stdout) => stdout.subarray(0, stdout.length - 1) : null);
+    await expect(svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).rejects.toBeInstanceOf(AccessUnreadableError);
+    expect(await svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).toBe(true);
   });
 
   it('builds the model once for the six gate calls an approval click makes', async () => {

@@ -2623,20 +2623,21 @@ export class AccessControlService implements IAccessControl {
   // -------------------------------------------------------------------------
 
   private async loadModel(workspaceId: string): Promise<AccessModel> {
+    const repoDir = await this.repoDir(workspaceId);
+
+    // The rules of the commit the checkout stands on, where a map of it can
+    // answer (`headMapOf`). Asked before the checkout's own cached model: a
+    // model read from the checkout while no map could answer must not go on
+    // answering once one can, beside own entries the map already gives.
+    const head = await this.headMapOf(workspaceId, repoDir);
+    if (head) return head.model;
+
     const cached = this.cache.get(workspaceId);
     if (cached && this.now() - cached.loadedAt < AccessControlService.CACHE_TTL_MS) {
       return cached.model;
     }
-    // Taken before the first read; see `generation`.
+    // Taken before the first read of the checkout; see `generation`.
     const generation = this.generation;
-
-    const repoDir = await this.repoDir(workspaceId);
-
-    // The rules of the commit the checkout stands on, where a map of it can
-    // answer (`headMapOf`); the checkout itself is read below only when none
-    // can.
-    const head = await this.headMapOf(workspaceId, repoDir);
-    if (head) return head.model;
 
     let rolesYaml: string;
     try {

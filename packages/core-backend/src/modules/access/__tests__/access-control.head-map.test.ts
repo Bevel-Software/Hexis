@@ -87,21 +87,27 @@ describe('AccessControlService: reads answered from the map of the head commit',
     await fs.cp(repo, plain, { recursive: true, filter: (src) => path.basename(src) !== '.git' });
   }
 
-  function service(limits: Partial<HeadMapLimits> = {}, store?: IHeadSeedStore): AccessControlService {
+  function service(
+    limits: Partial<HeadMapLimits> = {},
+    store?: IHeadSeedStore,
+    /** `now`: the service's clock. `failGit`: git calls that fail, as a git that timed out does. */
+    opts: { now?: () => number; failGit?: (args: string[]) => boolean } = {},
+  ): AccessControlService {
     const real = new NodeGitRunner();
     const counted: IGitRunner = {
       defaultTimeoutMs: real.defaultTimeoutMs,
       credentials: real.credentials,
-      run: ((cwd: string, args: string[], opts?: unknown) => {
+      run: ((cwd: string, args: string[], runOpts?: unknown) => {
         gitLog.push(args[0]!);
-        return (real.run as (...a: unknown[]) => unknown)(cwd, args, opts);
+        if (opts.failGit?.(args)) return Promise.reject(new Error('git timed out (simulated)'));
+        return (real.run as (...a: unknown[]) => unknown)(cwd, args, runOpts);
       }) as IGitRunner['run'],
     };
     const stub = {
       getWorkspacePath: async (id: string) => path.join(root, id),
       ensureRemotesFetched: async () => undefined,
     } as unknown as WorkspaceService;
-    return new AccessControlService(stub, KB, realDisk(), [], counted, undefined, {}, undefined, undefined, {
+    return new AccessControlService(stub, KB, realDisk(), [], counted, undefined, { now: opts.now }, undefined, undefined, {
       limits: { ...HEAD_MAP_LIMITS, ...limits },
       store,
     });
@@ -269,6 +275,35 @@ describe('AccessControlService: reads answered from the map of the head commit',
     // One listing, one read of the access files, and many small reads of the rest.
     expect(gitLog.filter((a) => a === 'ls-tree')).toHaveLength(1);
     expect(gitLog.filter((a) => a === 'cat-file').length).toBeGreaterThan(5);
+  }, 120_000);
+
+  it('answers from the checkout when reading the file versions fails, and makes the map once git answers again', async () => {
+    const paths = Object.keys(FILES);
+    let clock = 1_000_000;
+    let failing = true;
+    // The second batched read of a build is the one for the file versions.
+    let reads = 0;
+    const svc = service({}, undefined, {
+      now: () => clock,
+      failGit: (args) => args[0] === 'cat-file' && failing && ++reads === 2,
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    expect((await svc.canReadBatch('ws', 'nobody@x.io', paths)).get('Team/Own.md')).toBe(false);
+    expect(opened.length).toBeGreaterThan(0);
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/answering from the checkout/));
+
+    // Not tried again on every call…
+    failing = false;
+    reset();
+    await svc.canReadBatch('ws', 'nobody@x.io', paths);
+    expect(gitLog).toEqual([]);
+
+    // …and tried again later: the map answers, and no file is opened.
+    clock += 31_000;
+    await svc.canReadBatch('ws', 'nobody@x.io', paths);
+    reset();
+    expect((await svc.canReadBatch('ws', 'nobody@x.io', paths)).get('Team/Own.md')).toBe(false);
+    expect(opened).toEqual([]);
   }, 120_000);
 
   it('begins from a stored seed after a restart: reads the files that declare something and what changed since', async () => {
