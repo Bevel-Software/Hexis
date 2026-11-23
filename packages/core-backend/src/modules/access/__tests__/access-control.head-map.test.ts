@@ -323,8 +323,8 @@ describe('AccessControlService: reads answered from the map of the head commit',
     const paths = [...Object.keys(FILES), 'Team/Link.md'];
     const svc = service();
     expect(await answers(svc, 'ws', paths)).toEqual(await answers(service(), 'plain', paths));
-    // The commit was listed once and remembered as one without a map.
-    expect(gitLog.filter((a) => a === 'ls-tree')).toHaveLength(1);
-    expect(gitLog).not.toContain('cat-file');
+    // The commit was listed once, with its access files read, and remembered
+    // as one without a map: no file version was read for it, then or later.
+    expect(gitLog).toEqual(['ls-tree', 'cat-file']);
   }, 120_000);
 });
