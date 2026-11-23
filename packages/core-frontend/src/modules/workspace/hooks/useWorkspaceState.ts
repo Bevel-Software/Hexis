@@ -86,11 +86,12 @@ function existenceKey(workspaceId: string, path: string): string {
 
 /**
  * Which write of ours a read of the file is sent after (`rereadAfterWrite`):
- * a save, or a Reject writing the baseline back over the agent's version. A
- * Reject that the read finds landed on a file still there ends the agent
- * preview a deleted notice kept; a save leaves it.
+ * a save, or a Reject writing the baseline back over the agent's version,
+ * that landed; or either one the server refused, which wrote nothing. A
+ * Reject that landed, when the read finds the file still there, ends the agent
+ * preview a deleted notice kept; a save, or a refused write, leaves it.
  */
-type OwnWrite = 'save' | 'reject';
+type OwnWrite = 'save' | 'reject' | 'refused';
 
 /**
  * What the existence reads in flight for a file answered: the number of the
@@ -381,15 +382,24 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
   /**
    * Writes of ours on their way, by workspace and path (`existenceKey`): a
    * save's or a Reject's, from `beginWrite` to `endWrite`. While a path has
-   * one, no tracked read of it lands (`holdIfWriting`).
+   * one, no tracked read of it lands (`holdIfUnordered`).
    */
   const writesInFlightRef = useRef<Map<string, number>>(new Map());
   /**
-   * By workspace and path, the read number reached when a tracked read last
-   * answered while a write of ours was on its way (`holdIfWriting`). No read
-   * numbered up to it lands: the file is read again when the last write
-   * settles (`endWrite`), and that read, sent after, says what the disk
-   * holds. `heldWhileWritingRef` holds the paths whose re-read is still due.
+   * By workspace and path, the number (`beginWrite`) of the latest write of
+   * ours sent, and which write last settled, as the read after it takes it
+   * (`OwnWrite`: a refused one is `refused`, whatever it was).
+   */
+  const lastWriteSentRef = useRef<Map<string, number>>(new Map());
+  const lastWriteSettledRef = useRef<Map<string, OwnWrite>>(new Map());
+  /**
+   * By workspace and path, the read number up to which no tracked read
+   * lands (`holdIfUnordered`): one answered while a write of ours was on its
+   * way, or answered after one that was on its way at any moment since the
+   * read was sent, landed or refused. The file is read again after the
+   * write (`endWrite`, `rereadAfterWrite`), and that read, sent after, says
+   * what the disk holds. `heldWhileWritingRef` holds the paths whose re-read
+   * is due when the last write settles.
    */
   const heldUpToRef = useRef<Map<string, number>>(new Map());
   const heldWhileWritingRef = useRef<Set<string>>(new Set());
@@ -444,7 +454,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
    * `file-changed` handler, the reads of `addTab` and `hydrateTabs` that
    * opened it), or of a write that completed (`markWritten`: a save of ours,
    * a reverted or an accepted agent change; a save or a Reject counts from
-   * when it was sent, see `writeWindowRef`). A read issued before it answers
+   * when it was sent, see `holdIfUnordered`). A read issued before it answers
    * late with older bytes, and must not replace what that newer read or write
    * brought; nor does its 404 mark the tab deleted (`applyReadGone`). A read
    * that left the tab alone (unsaved edits, a pending preview) does not count:
@@ -452,17 +462,6 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
    * edits.
    */
   const landedAtSeqRef = useRef<Map<string, number>>(new Map());
-  /**
-   * By workspace and path, the latest save or Reject of ours that landed: the
-   * read numbers taken just before it was sent (`after`) and when its answer
-   * arrived (`before`), and which write it was (`kind`). A read numbered
-   * between the two was sent while the write was on its way, and what it
-   * found cannot say on which side of the write the server answered it: the
-   * disk may have held other bytes, or no file, for a moment before the
-   * write and the bytes the write expected again when it landed. So it
-   * lands on nothing, and the file is read again (`isStaleLanding`).
-   */
-  const writeWindowRef = useRef<Map<string, { after: number; before: number; kind: OwnWrite }>>(new Map());
   /**
    * Reads the open tab's file again as a `file-changed` event for it does
    * (merging onto unsaved edits, or the deleted notice), after the write of
@@ -503,37 +502,29 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
   }, []);
   /**
    * A tracked read (`seq`) lands on nothing: bytes or a write landed after it
-   * was sent; or a read answered while a write of ours was on its way after
-   * it was sent (`holdIfWriting`); or it was sent while a save or a Reject
-   * of ours that has landed was on its way (`writeWindowRef`), and the file
-   * is read again. No answer is judged by what it found: bytes or a 404 seen
-   * while a write is on its way may be a moment the write never saw.
+   * was sent; or a write of ours was on its way at some moment between its
+   * sending and its answer, landed or refused (`holdIfUnordered`), and the
+   * file is read again. No answer is judged by what it found: bytes or a 404
+   * seen while a write is on its way may be a moment the write never saw.
    */
   const isStaleLanding = useCallback(
     (readFrom: string, path: string, seq: number) => {
       const key = existenceKey(readFrom, path);
       if ((landedAtSeqRef.current.get(key) ?? -1) > seq) return true;
-      if ((heldUpToRef.current.get(key) ?? -1) >= seq) return true;
-      const w = writeWindowRef.current.get(key);
-      if (w === undefined || seq <= w.after || seq >= w.before) return false;
-      rereadAfterWrite(readFrom, path, seq, w.kind);
-      return true;
+      return (heldUpToRef.current.get(key) ?? -1) >= seq;
     },
-    [rereadAfterWrite],
+    [],
   );
   /**
    * By workspace and path, who a change event named for a 404 that landed on
-   * nothing because a write of ours left it unordered (`heldUpToRef`,
-   * `writeWindowRef`). The read sent after the write names them when it
-   * finds the file gone too, and forgets them either way (`refetchOpenTab`).
+   * nothing because a write of ours left it unordered (`heldUpToRef`). The
+   * read sent after the write names them when it finds the file gone too,
+   * and forgets them either way (`refetchOpenTab`).
    */
   const heldDeleterRef = useRef<Map<string, string>>(new Map());
   const rememberHeldDeleter = useCallback((readFrom: string, path: string, seq: number, name: string) => {
     const key = existenceKey(readFrom, path);
-    const w = writeWindowRef.current.get(key);
-    const held = (heldUpToRef.current.get(key) ?? -1) >= seq
-      || (w !== undefined && seq > w.after && seq < w.before);
-    if (held) heldDeleterRef.current.set(key, name);
+    if ((heldUpToRef.current.get(key) ?? -1) >= seq) heldDeleterRef.current.set(key, name);
   }, []);
   const takeHeldDeleter = useCallback((readFrom: string, path: string): string | null => {
     const key = existenceKey(readFrom, path);
@@ -542,38 +533,65 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     return name;
   }, []);
   /**
-   * A tracked read answered: while a write of ours of the path is on its way,
-   * neither it nor any read sent before it lands (`heldUpToRef`), and the
-   * file is read again when the last write settles (`endWrite`).
+   * A tracked read (`seq`) answered; `writingAtSend`: a write of ours of the
+   * path was on its way when it was sent. The one place a read is ordered
+   * against our writes, before anything lands it (`trackExistenceCheck`):
+   * - a write of ours is on its way now: neither it nor any read sent before
+   *   it lands (`heldUpToRef`), and the file is read again when the last
+   *   write settles (`endWrite`);
+   * - none is, but one was on its way when it was sent, or one was sent
+   *   after it: the server may have answered it in a moment the write never
+   *   saw, whether the write then landed or was refused. Neither it nor any
+   *   read sent before it lands, and the file is read again now, after that
+   *   write (`rereadAfterWrite`), before this answer resolves, so a save
+   *   waiting on this check (`awaitStillOnBranch`) waits on that read too.
    */
-  const holdIfWriting = useCallback((key: string) => {
-    if (!writesInFlightRef.current.has(key)) return;
-    heldUpToRef.current.set(key, existenceReadSeqRef.current);
-    heldWhileWritingRef.current.add(key);
-  }, []);
+  const holdIfUnordered = useCallback((readFrom: string, path: string, seq: number, writingAtSend: boolean) => {
+    const key = existenceKey(readFrom, path);
+    if (writesInFlightRef.current.has(key)) {
+      heldUpToRef.current.set(key, existenceReadSeqRef.current);
+      heldWhileWritingRef.current.add(key);
+      return;
+    }
+    if (!writingAtSend && (lastWriteSentRef.current.get(key) ?? -1) < seq) return;
+    if ((heldUpToRef.current.get(key) ?? -1) < seq) heldUpToRef.current.set(key, seq);
+    rereadAfterWrite(readFrom, path, seq, lastWriteSettledRef.current.get(key) ?? 'refused');
+  }, [rereadAfterWrite]);
   const markLanded = useCallback((readFrom: string, path: string, seq: number) => {
     const key = existenceKey(readFrom, path);
     if ((landedAtSeqRef.current.get(key) ?? -1) < seq) landedAtSeqRef.current.set(key, seq);
   }, []);
   /**
    * A write of ours is about to be sent: from now until it settles, no read
-   * of the path lands (`holdIfWriting`). Returns a number no read takes,
-   * what `markWritten` orders the write by. Pair every call with `endWrite`,
-   * whether the write lands or is refused.
+   * of the path lands, nor any read sent before it or while it is on its way
+   * (`holdIfUnordered`). Returns a number no read takes, what `markWritten`
+   * orders the write by. Pair every call with `endWrite`, whether the write
+   * lands or is refused.
    */
   const beginWrite = useCallback((readFrom: string, path: string) => {
     const key = existenceKey(readFrom, path);
     writesInFlightRef.current.set(key, (writesInFlightRef.current.get(key) ?? 0) + 1);
-    return ++existenceReadSeqRef.current;
+    const sent = ++existenceReadSeqRef.current;
+    lastWriteSentRef.current.set(key, sent);
+    return sent;
   }, []);
   /**
-   * The write `beginWrite` started, a `kind` of ours, settled (landed or
-   * refused). When it was the last of the path and a read answered while
-   * one was on its way, the file is read again, at once: answers that read,
-   * so a save leaves what the disk holds after it (`writeOnce`).
+   * The write `beginWrite` started, a `kind` of ours, settled: `landed`, or
+   * refused. A read sent before it settled that answers later is read again
+   * after it (`holdIfUnordered`). When it was the last of the path and a
+   * read answered while one was on its way, the file is read again, at once:
+   * answers that read, so a save leaves what the disk holds after it
+   * (`writeOnce`).
    */
-  const endWrite = useCallback((readFrom: string, path: string, kind: OwnWrite): Promise<string> | undefined => {
+  const endWrite = useCallback((
+    readFrom: string,
+    path: string,
+    kind: Exclude<OwnWrite, 'refused'>,
+    landed: boolean,
+  ): Promise<string> | undefined => {
     const key = existenceKey(readFrom, path);
+    const settled: OwnWrite = landed ? kind : 'refused';
+    lastWriteSettledRef.current.set(key, settled);
     const left = (writesInFlightRef.current.get(key) ?? 1) - 1;
     if (left > 0) {
       writesInFlightRef.current.set(key, left);
@@ -581,28 +599,22 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     }
     writesInFlightRef.current.delete(key);
     if (!heldWhileWritingRef.current.delete(key)) return undefined;
-    return rereadAfterWrite(readFrom, path, heldUpToRef.current.get(key) ?? 0, kind, true);
+    return rereadAfterWrite(readFrom, path, heldUpToRef.current.get(key) ?? 0, settled, true);
   }, [rereadAfterWrite]);
   /**
    * A write of this tab's completed: its bytes are now the saved content.
    * Every read issued before a save or a Reject of ours was sent (`sent`,
    * from `beginWrite`) may hold what the disk had before the write, and
-   * lands on nothing; one sent while it was on its way lands on nothing
-   * either, and the file is read again (`writeWindowRef`). A write not ours
-   * (an accepted agent change) orders every read sent before its answer out.
+   * lands on nothing (one sent while it was on its way is read again after
+   * it: `holdIfUnordered`). A write not ours (an accepted agent change)
+   * orders every read sent before its answer out.
    */
   const markWritten = useCallback((
     readFrom: string,
     path: string,
-    write?: { sent: number; kind: OwnWrite },
+    sent?: number,
   ) => {
-    const answeredAt = ++existenceReadSeqRef.current;
-    if (!write) {
-      markLanded(readFrom, path, answeredAt);
-      return;
-    }
-    markLanded(readFrom, path, write.sent);
-    writeWindowRef.current.set(existenceKey(readFrom, path), { after: write.sent, before: answeredAt, kind: write.kind });
+    markLanded(readFrom, path, sent ?? ++existenceReadSeqRef.current);
   }, [markLanded]);
   const isStaleFind = useCallback(
     (readFrom: string, path: string, seq: number) =>
@@ -612,21 +624,17 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
   const trackExistenceCheck = useCallback((readFrom: string, path: string, read: Promise<string>): number => {
     const seq = ++existenceReadSeqRef.current;
     const key = existenceKey(readFrom, path);
+    const writingAtSend = writesInFlightRef.current.has(key);
     const thisAnswer = read.then(
       (bytes): ExistenceAnswer => {
-        holdIfWriting(key);
-        // Sent while a write of ours that has since landed was on its way:
-        // the read after it is sent now, before this answer resolves, so a
-        // save waiting on this check (`awaitStillOnBranch`) waits on that
-        // read too, and expects what it finds.
-        isStaleLanding(readFrom, path, seq);
+        holdIfUnordered(readFrom, path, seq, writingAtSend);
         return { goneAt: null, found: { seq, bytes } };
       },
       (err: unknown): ExistenceAnswer => {
-        holdIfWriting(key);
+        holdIfUnordered(readFrom, path, seq, writingAtSend);
         // A 404 older than bytes or a write that landed since is about a
-        // file since re-created, and one answered while a write of ours was
-        // on its way is read again: it refuses no save (see `applyReadGone`).
+        // file since re-created, and one a write of ours left unordered is
+        // read again: it refuses no save (see `applyReadGone`).
         const is404 = err instanceof WorkspaceApiError && err.status === 404;
         const isGone = is404 && !isStaleLanding(readFrom, path, seq);
         if (isGone && (goneAtSeqRef.current.get(key) ?? -1) < seq) goneAtSeqRef.current.set(key, seq);
@@ -651,7 +659,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       if (existenceChecksRef.current.get(key) === answer) existenceChecksRef.current.delete(key);
     });
     return seq;
-  }, [isStaleLanding, holdIfWriting]);
+  }, [isStaleLanding, holdIfUnordered]);
   /** An existence check's answer (`trackExistenceCheck`) still says gone: no bytes or write landed after its 404. */
   const isCheckGone = useCallback(
     (readFrom: string, path: string, answer: ExistenceAnswer) =>
@@ -2310,15 +2318,18 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       // has nothing to expect, and writes unconditionally as before.
       const sent = beginWrite(workspaceId, relativePath);
       // While it is on its way no read of the file lands; one that answered
-      // meanwhile, or was sent meanwhile, is read again once it settles
-      // (`endWrite`, `markWritten`). That read, sent after the write, brings a
-      // commit pulled on top of it or a delete since as any change does.
+      // meanwhile, or was sent before it settled, is read again after it,
+      // whether it lands or is refused (`holdIfUnordered`, `endWrite`). That
+      // read, sent after the write, brings a commit pulled on top of it or a
+      // delete since as any change does.
       let readAfter: Promise<string> | undefined;
+      let landed = false;
       try {
         await writeFile(workspaceId, relativePath, toWrite, expected !== null ? { ifMatch: expected } : undefined);
-        markWritten(workspaceId, relativePath, { sent, kind: 'save' });
+        landed = true;
+        markWritten(workspaceId, relativePath, sent);
       } finally {
-        readAfter = endWrite(workspaceId, relativePath, 'save');
+        readAfter = endWrite(workspaceId, relativePath, 'save', landed);
       }
       const wrote: SaveLeft = { onDisk: toWrite, editBase: content };
       if (!stillHere()) return wrote;
@@ -2535,11 +2546,15 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     // version stays on the tab.
     const agentVersion = active.pendingFileContent;
     const sent = beginWrite(workspaceId, path);
+    let landed = false;
     try {
       await writeFile(workspaceId, path, baseline, agentVersion !== null ? { ifMatch: agentVersion } : undefined);
-      markWritten(workspaceId, path, { sent, kind: 'reject' });
+      landed = true;
+      markWritten(workspaceId, path, sent);
     } finally {
-      void endWrite(workspaceId, path, 'reject');
+      // Refused, it wrote nothing: the read after it leaves the agent's
+      // version on review (`OwnWrite`).
+      void endWrite(workspaceId, path, 'reject', landed);
     }
     // Switched branch meanwhile: a tab at `path` now is the other branch's.
     if (workspaceIdRef.current !== workspaceId) return;
@@ -2553,7 +2568,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       // version stays with the notice, for Copy agent's version, until the
       // read after the write says otherwise; only the baseline is what this
       // write left. No read that answered while the write was on its way
-      // lands (`holdIfWriting`).
+      // lands (`holdIfUnordered`).
       if (t.deletedBy) return { ...t, savedContent: baseline };
       return { ...t, content: baseline, savedContent: baseline, pendingFileContent: null, isDirty: false };
     }));
@@ -2836,9 +2851,10 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
               const keptByNotice = current.pendingFileContent !== null && !!current.deletedBy;
               if (current.pendingFileContent !== null && !(afterOwnWrite && keptByNotice)) return current;
               if (isStaleLanding(subscribedWorkspaceId, path, seq)) return current;
-              // After a save, the agent's version is still the one on review:
-              // the tab is a file again, its preview and text as they are.
-              if (current.pendingFileContent !== null && afterOwnWrite === 'save') return { ...current, deletedBy: null };
+              // After a save, or a write of ours the server refused, the agent's
+              // version is still the one on review: the tab is a file again, its
+              // preview and text as they are.
+              if (current.pendingFileContent !== null && afterOwnWrite !== 'reject') return { ...current, deletedBy: null };
               markLanded(subscribedWorkspaceId, path, seq);
               // After a Reject, the baseline it wrote replaced the agent's
               // version, on a file that is there: the tab is what a Reject's

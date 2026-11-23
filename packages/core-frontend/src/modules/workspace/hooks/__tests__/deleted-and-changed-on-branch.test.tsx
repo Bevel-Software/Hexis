@@ -4058,6 +4058,132 @@ describe('a write already on its way when the file is deleted', () => {
     });
   });
 
+  describe('a read sent while a write was on its way, answered after the server refused the write', () => {
+    const BASE = 'First paragraph.\n\nSecond paragraph.\n\nThird paragraph.';
+    const EDITED = `${BASE}\n\nMy closing line.`;
+    const AGENT = '# Draft\n\nThe agent rewrote this.';
+    const BASELINE = '# Draft\n\nA page to delete.';
+
+    /**
+     * Every read sent from now on is served from the disk as it is when it
+     * is sent, and answers when `answer` is called. `stopHolding`: reads sent
+     * after it answer at once again.
+     */
+    function holdReadsSentNow() {
+      let answer!: () => void;
+      const answered = new Promise<void>((r) => { answer = r; });
+      const held = async (_ws: string, path: string) => {
+        const bytes = disk.get(path);
+        await answered;
+        if (bytes === undefined) throw new WorkspaceApiError(404, 'Not found');
+        return bytes;
+      };
+      apiMocks.readFile.mockImplementation(held);
+      return {
+        stopHolding: () => apiMocks.readFile.mockImplementation(async (_ws: string, path: string) => {
+          const bytes = disk.get(path);
+          if (bytes === undefined) throw new WorkspaceApiError(404, 'Not found');
+          return bytes;
+        }),
+        answer: () => answer(),
+      };
+    }
+
+    /**
+     * A save of EDITED held at the server; `moment` changes the disk and a
+     * change event's read is sent, held; the write is refused (the disk is
+     * not what it expected); BASE is put back; then the read answers.
+     */
+    async function refusedSaveThrough(moment: () => void) {
+      disk.set('KB/Notes.md', BASE);
+      const result = await mountReady();
+      await open(result, 'KB/Notes.md');
+      await typeInto(result, EDITED);
+      const write = holdWriteAtServer();
+      let saving!: Promise<void>;
+      act(() => { saving = result.current.saveFile('KB/Notes.md', EDITED); });
+      await waitFor(() => expect(apiMocks.writeFile).toHaveBeenCalledOnce());
+      const readsBefore = apiMocks.readFile.mock.calls.length;
+      const reads = holdReadsSentNow();
+      moment();
+      act(() => bus.emit(fileChanged('KB/Notes.md')));
+      await waitFor(() => expect(apiMocks.readFile.mock.calls.length).toBeGreaterThan(readsBefore));
+      await settle();
+      reads.stopHolding();
+      await act(async () => {
+        write.deliver();
+        await expect(saving).rejects.toThrow('changed since you opened it');
+      });
+      disk.set('KB/Notes.md', BASE);
+      await act(async () => { reads.answer(); });
+      await settle();
+      return result;
+    }
+
+    /** Nothing was written: the baseline is BASE, no notice or banner, the edits unsaved, and the next save lands on BASE. */
+    async function expectRefusedAndNextSaveLands(result: Hook) {
+      expect(disk.get('KB/Notes.md')).toBe(BASE);
+      const tab = tabAt(result, 'KB/Notes.md')!;
+      expect(tab.deletedBy ?? null).toBeNull();
+      expect(tab.savedContent).toBe(BASE);
+      expect(tab.content).toBe(EDITED);
+      expect(tab.isDirty).toBe(true);
+      expect(tab.changedOnBranch ?? null).toBeNull();
+      await act(async () => { await result.current.saveFile('KB/Notes.md', EDITED); });
+      expect(apiMocks.writeFile).toHaveBeenLastCalledWith('ws-1', 'KB/Notes.md', EDITED, { ifMatch: BASE });
+      expect(disk.get('KB/Notes.md')).toBe(EDITED);
+      expect(tabAt(result, 'KB/Notes.md')?.isDirty).toBe(false);
+    }
+
+    it('other bytes seen during a refused save, put back before the read answered, leave BASE as the baseline', async () => {
+      const result = await refusedSaveThrough(() => { disk.set('KB/Notes.md', 'For a moment, other bytes.'); });
+      await expectRefusedAndNextSaveLands(result);
+    });
+
+    it('a 404 seen during a refused save, the file put back before the read answered, shows no notice', async () => {
+      const result = await refusedSaveThrough(() => { disk.delete('KB/Notes.md'); });
+      await expectRefusedAndNextSaveLands(result);
+    });
+
+    it('a 404 seen during a refused Reject, the agent version put back before the read answered, shows no notice; the preview stays and the next Reject lands', async () => {
+      const result = await mountReady();
+      await open(result, 'KB/Draft.md');
+      disk.set('KB/Draft.md', AGENT);
+      await act(async () => { result.current.setPendingContent(AGENT); });
+      const write = holdWriteAtServer();
+      let rejecting!: Promise<void>;
+      act(() => { rejecting = result.current.rejectPendingContent(); });
+      await waitFor(() => expect(apiMocks.writeFile).toHaveBeenCalledOnce());
+      const readsBefore = apiMocks.readFile.mock.calls.length;
+      const reads = holdReadsSentNow();
+      // The file is gone for a moment; the tree refresh's check reads it.
+      disk.delete('KB/Draft.md');
+      act(() => bus.emit(fileChanged('KB/Draft.md')));
+      await waitFor(() => expect(apiMocks.readFile.mock.calls.length).toBeGreaterThan(readsBefore));
+      await settle();
+      reads.stopHolding();
+      await act(async () => {
+        write.deliver();
+        await expect(rejecting).rejects.toThrow('changed since you opened it');
+      });
+      disk.set('KB/Draft.md', AGENT);
+      await act(async () => { reads.answer(); });
+      await settle();
+
+      const tab = tabAt(result, 'KB/Draft.md')!;
+      expect(tab.deletedBy ?? null).toBeNull();
+      expect(tab.pendingFileContent).toBe(AGENT);
+      expect(tab.savedContent).toBe(BASELINE);
+
+      await act(async () => { await result.current.rejectPendingContent(); });
+      expect(apiMocks.writeFile).toHaveBeenLastCalledWith('ws-1', 'KB/Draft.md', BASELINE, { ifMatch: AGENT });
+      expect(disk.get('KB/Draft.md')).toBe(BASELINE);
+      expect(tabAt(result, 'KB/Draft.md')?.pendingFileContent).toBeNull();
+      await act(async () => { await result.current.saveFile('KB/Draft.md', 'edited'); });
+      expect(apiMocks.writeFile).toHaveBeenLastCalledWith('ws-1', 'KB/Draft.md', 'edited', { ifMatch: BASELINE });
+    });
+  });
+
   describe('refused after a change pulled from the git host while it was on its way', () => {
     const BASE = 'First paragraph.\n\nSecond paragraph.\n\nThird paragraph.';
 
