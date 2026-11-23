@@ -10,7 +10,7 @@ import type { IGitRunner } from '../../../shared/git.contract.js';
 import { NodeGitRunner } from '../../version-control/index.js';
 import type { WorkspaceService } from '../../workspace/index.js';
 import { AccessControlService } from '../access-control.service.js';
-import { HEAD_MAP_LIMITS, type HeadMapLimits } from '../head-access-map.js';
+import { HEAD_MAP_LIMITS, type HeadMapLimits, type HeadSeed, type IHeadSeedStore } from '../head-access-map.js';
 
 const execFileAsync = promisify(execFile);
 const KB = 'knowledge-base';
@@ -87,7 +87,7 @@ describe('AccessControlService: reads answered from the map of the head commit',
     await fs.cp(repo, plain, { recursive: true, filter: (src) => path.basename(src) !== '.git' });
   }
 
-  function service(limits: Partial<HeadMapLimits> = {}): AccessControlService {
+  function service(limits: Partial<HeadMapLimits> = {}, store?: IHeadSeedStore): AccessControlService {
     const real = new NodeGitRunner();
     const counted: IGitRunner = {
       defaultTimeoutMs: real.defaultTimeoutMs,
@@ -103,6 +103,7 @@ describe('AccessControlService: reads answered from the map of the head commit',
     } as unknown as WorkspaceService;
     return new AccessControlService(stub, KB, realDisk(), [], counted, undefined, {}, undefined, undefined, {
       limits: { ...HEAD_MAP_LIMITS, ...limits },
+      store,
     });
   }
 
@@ -268,6 +269,50 @@ describe('AccessControlService: reads answered from the map of the head commit',
     // One listing, one read of the access files, and many small reads of the rest.
     expect(gitLog.filter((a) => a === 'ls-tree')).toHaveLength(1);
     expect(gitLog.filter((a) => a === 'cat-file').length).toBeGreaterThan(5);
+  }, 120_000);
+
+  it('begins from a stored seed after a restart: reads the files that declare something and what changed since', async () => {
+    const paths = Object.keys(FILES);
+    let stored: HeadSeed | null = null;
+    const store: IHeadSeedStore = {
+      load: async () => stored,
+      save: async (seed) => {
+        stored = seed;
+      },
+    };
+    // A first process: no seed, every file version is read, and a seed is saved.
+    const first = service({}, store);
+    expect(await answers(first, 'ws', paths)).toEqual(await answers(service(), 'plain', paths));
+    await vi.waitFor(() => expect(stored).not.toBeNull());
+    expect(stored!.commit).toBe(await git('rev-parse', 'HEAD'));
+    // An opening fence that is never closed is no frontmatter: that file declares nothing.
+    expect(stored!.declaring.map(([p]) => p).sort()).toEqual(['Team/Own.md', 'Team/Write.md', 'Team/pic.png'].sort());
+
+    // The branch moves on while no process runs.
+    await commit('a page since', { 'Team/Since.md': DENY_ALL });
+    await copyToPlain();
+
+    // A second process begins from the seed: one read for the seed's
+    // declaring files, one for the commit's access files, one for the page
+    // added since. No other file version is read.
+    reset();
+    const second = service({}, store);
+    const all = [...paths, 'Team/Since.md'];
+    expect((await second.canReadBatch('ws', 'nobody@x.io', all)).get('Team/Since.md')).toBe(false);
+    expect(gitLog).toEqual(['ls-tree', 'cat-file', 'ls-tree', 'cat-file', 'cat-file']);
+    expect(opened).toEqual([]);
+    expect(await answers(second, 'ws', all)).toEqual(await answers(service(), 'plain', all));
+  }, 120_000);
+
+  it('reads every file again when the stored seed names a commit the repository does not have', async () => {
+    const store: IHeadSeedStore = {
+      load: async () => ({ commit: 'f'.repeat(40), declaring: [] }),
+      save: async () => undefined,
+    };
+    const paths = Object.keys(FILES);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    expect(await answers(service({}, store), 'ws', paths)).toEqual(await answers(service(), 'plain', paths));
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/stored access seed was not used/));
   }, 120_000);
 
   it.skipIf(process.platform === 'win32')('makes no map of a commit that holds a symbolic link, and answers from the checkout', async () => {

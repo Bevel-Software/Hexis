@@ -86,6 +86,8 @@ import { authCookieSecure, createAuthMiddleware, readAuthCookie } from '../modul
 import { AccessControlService, loadActiveGroups } from '../modules/access/access-control.service.js';
 import { OwnEntriesMemo, OWN_ENTRIES_LIMITS } from '../modules/access/own-entries-memo.js';
 import { TreeIndexer } from '../modules/access/tree-index.js';
+import { HEAD_MAP_LIMITS } from '../modules/access/head-access-map.js';
+import { DbHeadSeedStore } from '../modules/access/head-seed-store.js';
 import { AccessMutationService } from '../modules/access/access-mutation.service.js';
 import { CreatorAccessService } from '../modules/access/creator-access.js';
 import { ChangeReadGate } from '../modules/access/change-read-gate.js';
@@ -866,6 +868,10 @@ export async function createCoreServices(
     // per active tenant, each within the bounds, and drops them with the graph.
     new TreeIndexer(),
     new OwnEntriesMemo(Date.now, OWN_ENTRIES_LIMITS),
+    // The maps a branch's reads are answered from: their own tree indexer
+    // (a map keeps its commit's whole tree), the deployment's bounds, and
+    // the row a restart begins from, read only by the release that wrote it.
+    { trees: new TreeIndexer(), limits: HEAD_MAP_LIMITS, store: new DbHeadSeedStore(db, resolveAppVersion()) },
   );
   // Creator read-grant on creation: read is default-deny and the roots grant
   // it to nobody, so every surface that starts a new folder at a root (human

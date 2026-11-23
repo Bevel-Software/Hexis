@@ -3,7 +3,7 @@ import type { IGitRunner } from '../../shared/git.contract.js';
 import { readRevSha } from '../kb-fs/index.js';
 import { accessMdSelfEntries, isAccessMdPath, parseOwnAccessEntries, type OwnEntries } from '../access-model/index.js';
 import { catFileBatchBytes } from './cat-file-batch.js';
-import type { ListedFile } from './commit-listing.js';
+import { visitTreeListing, type ListedFile } from './commit-listing.js';
 import { frontmatterHeadOfBytes } from './frontmatter-head.js';
 import { detachEntries } from './own-entries-memo.js';
 import type { CommitPaths, ITreeIndexer } from './tree-index.js';
@@ -51,6 +51,8 @@ export interface HeadMapLimits {
   readonly waitBytes: number;
   /** Bytes read from git in one process, at most (one file larger than this is read alone). */
   readonly chunkBytes: number;
+  /** The seed is saved at most this often. */
+  readonly saveEveryMs: number;
 }
 
 export const HEAD_MAP_LIMITS: HeadMapLimits = {
@@ -59,7 +61,25 @@ export const HEAD_MAP_LIMITS: HeadMapLimits = {
   maxBlobs: 1_000_000,
   waitBytes: 8 * 1024 * 1024,
   chunkBytes: 16 * 1024 * 1024,
+  saveEveryMs: 60_000,
 };
+
+/**
+ * What a start begins from: a commit a map was made of, and the files of it
+ * that declare access of their own, each with the id of the version that
+ * does. Every other file of that commit declares nothing.
+ */
+export interface HeadSeed {
+  readonly commit: string;
+  readonly declaring: ReadonlyArray<readonly [path: string, objectId: string]>;
+}
+
+/** Where the seed is kept between starts. */
+export interface IHeadSeedStore {
+  /** The seed last saved, or null when there is none this release may read. */
+  load(): Promise<HeadSeed | null>;
+  save(seed: HeadSeed): Promise<void>;
+}
 
 /**
  * What {@link HeadMaps} asks of the access service: the access model of a
@@ -126,7 +146,47 @@ export class HeadMaps<M> {
     private readonly source: HeadModelSource<M>,
     private readonly trees: ITreeIndexer,
     private readonly limits: HeadMapLimits = HEAD_MAP_LIMITS,
+    /** Where the seed is kept between starts; without one every start reads the files again. */
+    private readonly store?: IHeadSeedStore,
+    private readonly now: () => number = Date.now,
   ) {}
+
+  /** The one read of the stored seed, started by the first build. */
+  private seeding: Promise<void> | null = null;
+  private savedAt = Number.NEGATIVE_INFINITY;
+
+  /**
+   * Begin from the stored seed, once: every file version of the seed's
+   * commit is remembered as declaring nothing, but the listed ones, which
+   * are read. The first map then reads only what changed since that commit.
+   * A seed that cannot be used (its commit is gone, git failed) is left
+   * aside, and the first map reads every file version, as without a store.
+   */
+  private seed(repoDir: string): Promise<void> {
+    if (!this.store) return Promise.resolve();
+    this.seeding ??= this.applySeed(repoDir, this.store).catch((err: unknown) => {
+      log.warn(`the stored access seed was not used: ${err instanceof Error ? err.message : String(err)}`);
+    });
+    return this.seeding;
+  }
+
+  private async applySeed(repoDir: string, store: IHeadSeedStore): Promise<void> {
+    const seed = await store.load();
+    if (!seed) return;
+    const declared = new Map(seed.declaring);
+    const { stdout } = await this.git.run(repoDir, ['ls-tree', '-r', '-z', seed.commit], { encoding: 'buffer' });
+    const nothing: string[] = [];
+    const toRead = new Map<string, Unseen>();
+    visitTreeListing(stdout, (path, file) => {
+      if (!file.regular || path === 'roles.yaml') return;
+      const objectId = file.objectId();
+      const key = blobKey(objectId, path);
+      if (declared.get(path) === objectId) toRead.set(key, { objectId, key, size: 0, paths: [path] });
+      else nothing.push(key);
+    });
+    await this.read(repoDir, [...toRead.values()], new Map());
+    for (const key of nothing) if (!this.blobs.has(key)) this.rememberBlob(key, null);
+  }
 
   /** The commit the checkout at `repoDir` stands on, read from the ref files; null when they do not say. */
   async headOf(repoDir: string): Promise<string | null> {
@@ -161,8 +221,10 @@ export class HeadMaps<M> {
     const paths: string[] = [];
     const own = new Map<string, OwnEntries>();
     const unseen = new Map<string, Unseen>();
+    const declaring: Array<[string, string]> = [];
     let irregular = false;
     let wait = 0;
+    await this.seed(repoDir);
     const built = await this.source.modelAt(repoDir, commit, (path, file) => {
       if (!file.regular) {
         irregular = true;
@@ -175,7 +237,10 @@ export class HeadMaps<M> {
       const key = blobKey(objectId, path);
       const known = this.blobs.get(key);
       if (known !== undefined) {
-        if (known !== null) own.set(path, known);
+        if (known !== null) {
+          own.set(path, known);
+          declaring.push([path, objectId]);
+        }
         return;
       }
       const waiting = unseen.get(key);
@@ -202,6 +267,10 @@ export class HeadMaps<M> {
         );
         return null;
       }
+      for (const u of unseen.values()) {
+        if (own.has(u.paths[0]!)) for (const p of u.paths) declaring.push([p, u.objectId]);
+      }
+      this.save({ commit, declaring });
       return this.hold(commit, built, paths, own);
     };
     if (wait <= this.limits.waitBytes) return finish();
@@ -280,6 +349,15 @@ export class HeadMaps<M> {
       oldest[1].release();
     }
     return map;
+  }
+
+  /** Keep `seed` for the next start, at most every `saveEveryMs`. Nothing waits for it, and a failure costs only that start's reading. */
+  private save(seed: HeadSeed): void {
+    if (!this.store || this.now() - this.savedAt < this.limits.saveEveryMs) return;
+    this.savedAt = this.now();
+    void this.store.save(seed).catch((err: unknown) => {
+      log.warn(`the access seed was not saved: ${err instanceof Error ? err.message : String(err)}`);
+    });
   }
 
   private rememberBlob(key: string, declared: OwnEntries | null): void {

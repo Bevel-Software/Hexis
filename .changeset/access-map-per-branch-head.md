@@ -1,0 +1,9 @@
+---
+'@bevel-software/platform-core-backend': minor
+---
+
+A branch's reads are answered from a map of the commit its checkout stands on. The map holds that commit's access model and the few files that declare access of their own, so the file tree, search and every other batch check open no file to learn that a file declares nothing, and the checkout is no longer walked again every five seconds for its rules. What a file version declares is remembered by its object id and read through git: a head that moves by one saved file costs one `git ls-tree` and one read of that file. After a restart the maps begin from one row in the new `access_head_seeds` table (migration `0024`: the last commit a map was made of and the paths and object ids of the files that declare something; no rule and no person), read only by the release that wrote it; without it, or after an upgrade, every file version is read once in the background while the checkout answers.
+
+The checkout still answers where a map cannot: a path the commit does not hold (written and not yet committed, or untracked), a workspace just reported changed until its head moves, a commit that holds a symbolic link or a submodule, a repository with no readable `roles.yaml`, and the single-file gates' read of a file's own entries.
+
+Two things change. A change written to a checkout that nothing reports and that is not committed is seen when it is committed, where the five-second reload used to pick it up. And an `access.md`, `roles.yaml` or groups file that git does not track is no longer a rule for the workspaces a map answers.

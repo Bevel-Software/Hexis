@@ -76,7 +76,7 @@ import { OwnEntriesMemo, type IOwnEntriesMemo, type WorkspaceOwnEntries } from '
 import { TreeIndexer, type CommitPaths, type ITreeIndexer } from './tree-index.js';
 import { visitTreeListing, type ListedFile } from './commit-listing.js';
 import { frontmatterHead } from './frontmatter-head.js';
-import { HeadMaps, type HeadMap, type HeadMapLimits } from './head-access-map.js';
+import { HeadMaps, type HeadMap, type HeadMapLimits, type IHeadSeedStore } from './head-access-map.js';
 
 /**
  * What one spec of a batched read came back as: a blob's text, nothing at
@@ -1582,7 +1582,7 @@ export class AccessControlService implements IAccessControl {
      * because a map keeps its whole tree, and how much they may hold.
      * Defaulted for the same reason as `gitRunner`.
      */
-    heads: { trees?: ITreeIndexer; limits?: HeadMapLimits } = {},
+    heads: { trees?: ITreeIndexer; limits?: HeadMapLimits; store?: IHeadSeedStore } = {},
   ) {
     this.deploymentOwners = new Set(
       deploymentOwners.filter(Boolean).map((e) => canonicalEmail(e)),
@@ -1595,6 +1595,8 @@ export class AccessControlService implements IAccessControl {
       { modelAt: (repoDir, commit, visit) => this.checkoutModelAt(repoDir, commit, visit) },
       heads.trees ?? new TreeIndexer(),
       heads.limits,
+      heads.store,
+      this.now,
     );
   }
 
