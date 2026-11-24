@@ -15,8 +15,8 @@ An agent drafts, proposes and syncs; people approve and apply, in the app.
 - **Saving shares.** Every write is committed as the person and shared,
   moments after the call returns; there is no separate push. `branch_status`
   lists writes still landing. `share_current_branch` is only for sharing
-  again after a refused push, and `commit_change` only for a file a tool left
-  uncommitted (one `unzip` lists under `unsaved`).
+  again after a refused push, and `save_file` only for a file a tool could
+  not commit (`unzip` lists them under `unsaved`).
 - **Propose** with `open_change_request`
   (`sourceBranch` = the draft, `targetBranch` = the protected branch, a
   `title`), then give the person the request's `url`. It first brings the

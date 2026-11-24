@@ -45,7 +45,12 @@ const workspaceService = {
     throw new Error('no such file');
   },
 } as never;
-const versionControlService = {} as never;
+// Enough of the locks for `unzip`, which writes each entry under its lock and commits it on release.
+const versionControlService = {
+  acquireLock: async () => ({ acquired: true }),
+  releaseLock: async () => undefined,
+  releaseLockNoCommit: async () => undefined,
+} as never;
 const events = {} as never;
 const accessControl = {
   canRead: async () => true,
