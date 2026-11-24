@@ -9,6 +9,13 @@
  * file's bytes before the call leaves, read as the person (their own access;
  * a staged file is theirs alone). The template's `content_type` goes with it.
  *
+ * Some APIs take a file only as one part of a form, beside the fields that
+ * describe it. Such a tool declares `content_type: multipart/form-data` and a
+ * body that is an object: each property is one part of the form, and a
+ * property declared `format: file-path` is the part that carries a file. The
+ * wrapper then swaps the whole object for the form, the file parts read the
+ * same way.
+ *
  * Installed on a code-mode client before its manuals are registered, so the
  * call guards registration installs sit over it: they check the arguments as
  * the agent gave them (a string where the schema says string) before the swap.
@@ -20,7 +27,7 @@
 import type { IAccessControl } from '../access/index.js';
 import { canReadWorkspacePath } from '../access-model/index.js';
 import { isTmpRef, normalizeWorkspacePath } from '../kb-fs/index.js';
-import type { WorkspaceService } from '../workspace/index.js';
+import { rawMimeFor, type WorkspaceService } from '../workspace/index.js';
 import { PathNotFoundError, VersionControlDomainError } from '../../shared/domain-errors.js';
 import { isAbsence } from '../../shared/fs.contract.js';
 import { logger } from '../../shared/logging.js';
@@ -29,6 +36,9 @@ const log = logger('code-mode');
 
 /** The JSON-schema `format` a body property carries to say "a file's path, sent as its bytes". */
 export const FILE_PATH_FORMAT = 'file-path';
+
+/** The template `content_type` that makes the body a form: every property of the body object is one part of it. */
+const FORM_CONTENT_TYPE = 'multipart/form-data';
 
 /** Marks the client's call methods as already wrapped here, so installing twice is free. */
 const INSTALLED = Symbol.for('bevel.codeMode.fileBodies');
@@ -114,15 +124,40 @@ interface ToolLike {
   tool_call_template?: unknown;
 }
 
-/** The input field `tool` sends as a file's bytes, or null when it sends no file: an http tool whose body property is declared `format: file-path`. */
-export function fileBodyField(tool: ToolLike | null | undefined): string | null {
-  const template = tool?.tool_call_template as { call_template_type?: unknown; body_field?: unknown } | undefined;
+/**
+ * How a tool sends a file: its body IS one file (`bytes`), or its body is a form whose `fileParts` are files
+ * (`form`). `field` is the input the template sends as the body.
+ */
+export type FileBodyPlan = { field: string; kind: 'bytes' } | { field: string; kind: 'form'; fileParts: string[] };
+
+/** Whether a schema node declares "a file's path, sent as its bytes". */
+const isFilePath = (schema: unknown): boolean =>
+  !!schema && typeof schema === 'object' && (schema as { format?: unknown }).format === FILE_PATH_FORMAT;
+
+/**
+ * What `tool` sends from files, or null when it sends none. An http tool whose body property is declared
+ * `format: file-path` sends that one file as the body. An http tool whose template says `multipart/form-data` and
+ * whose body is an object with at least one `format: file-path` property sends a form, those properties as files.
+ */
+export function fileBodyPlan(tool: ToolLike | null | undefined): FileBodyPlan | null {
+  const template = tool?.tool_call_template as { call_template_type?: unknown; body_field?: unknown; content_type?: unknown } | undefined;
   if (!template || template.call_template_type !== 'http') return null;
   const field = typeof template.body_field === 'string' && template.body_field ? template.body_field : 'body';
   const properties = (tool?.inputs as { properties?: Record<string, unknown> } | undefined)?.properties;
-  const property = properties?.[field] as { format?: unknown } | undefined;
-  return property && typeof property === 'object' && property.format === FILE_PATH_FORMAT ? field : null;
+  const property = properties?.[field] as { properties?: unknown } | undefined;
+  if (isFilePath(property)) return { field, kind: 'bytes' };
+  const contentType = typeof template.content_type === 'string' ? template.content_type.trim().toLowerCase() : '';
+  if (!contentType.startsWith(FORM_CONTENT_TYPE)) return null;
+  const parts = property && typeof property === 'object' ? property.properties : undefined;
+  if (!parts || typeof parts !== 'object') return null;
+  const fileParts = Object.entries(parts as Record<string, unknown>)
+    .filter(([, schema]) => isFilePath(schema))
+    .map(([name]) => name);
+  return fileParts.length > 0 ? { field, kind: 'form', fileParts } : null;
 }
+
+/** The name a file part carries: the last segment of the path the call named. */
+const fileNameOf = (ref: string): string => ref.slice(ref.lastIndexOf('/') + 1) || 'file';
 
 interface ClientLike {
   config: { tool_repository: { getTool(name: string): Promise<ToolLike | null | undefined> } };
@@ -130,26 +165,53 @@ interface ClientLike {
   callToolStreaming?: (toolName: string, toolArgs: Record<string, unknown>) => AsyncGenerator<unknown>;
 }
 
-/** Install the swap on `client`: a call to a tool with a file body goes out with the file's bytes in that field. */
+/** Install the swap on `client`: a call to a tool that sends a file goes out with the file's bytes, as the body or as parts of its form. */
 export function installFileBodies(client: ClientLike, read: FileBodyRead): void {
-  const withBytes = async (toolName: string, toolArgs: Record<string, unknown>): Promise<Record<string, unknown>> => {
-    if (!toolArgs || typeof toolArgs !== 'object') return toolArgs;
-    const field = fileBodyField(await client.config.tool_repository.getTool(toolName).catch(() => null));
-    if (!field) return toolArgs;
-    const ref = toolArgs[field];
-    if (typeof ref !== 'string' || !ref.trim()) return toolArgs;
-    let bytes: Uint8Array;
+  /** The bytes `ref` names, or the refusal the agent reads. */
+  const readFile = async (ref: string): Promise<Uint8Array> => {
     try {
-      bytes = await read(ref.trim());
+      return await read(ref);
     } catch (err) {
       if (err instanceof FileBodyError) throw err;
       // Core's own path refusals are written for the agent and name nothing on disk; any other error may, so it is
       // logged here and the agent gets the plain reason.
-      if (err instanceof VersionControlDomainError) throw new FileBodyError(`"${ref.trim()}" could not be read as the file to send: ${err.message}`);
-      log.warn(`a tool call's file "${ref.trim()}" could not be read: ${err instanceof Error ? err.message : String(err)}`);
-      throw new FileBodyError(`"${ref.trim()}" could not be read as the file to send. Try again, or send another file.`);
+      if (err instanceof VersionControlDomainError) throw new FileBodyError(`"${ref}" could not be read as the file to send: ${err.message}`);
+      log.warn(`a tool call's file "${ref}" could not be read: ${err instanceof Error ? err.message : String(err)}`);
+      throw new FileBodyError(`"${ref}" could not be read as the file to send. Try again, or send another file.`);
     }
-    return { ...toolArgs, [field]: Buffer.from(bytes) };
+  };
+  /**
+   * The form a call's body object goes out as: a file part carries the file's bytes under its own name and type, a
+   * text value goes as written, and any other value as its JSON (what an API that takes a JSON part beside the file
+   * expects). A part the call left out is left out of the form. Every file is read before the form is handed on, so
+   * a file that cannot be read refuses the call with nothing sent.
+   */
+  const formOf = async (parts: Record<string, unknown>, fileParts: string[]): Promise<FormData> => {
+    const form = new FormData();
+    for (const [name, value] of Object.entries(parts)) {
+      if (value === undefined || value === null) continue;
+      if (!fileParts.includes(name)) {
+        form.append(name, typeof value === 'string' ? value : JSON.stringify(value));
+        continue;
+      }
+      if (typeof value !== 'string' || !value.trim()) continue;
+      const ref = value.trim();
+      const bytes = await readFile(ref);
+      form.append(name, new Blob([Buffer.from(bytes)], { type: rawMimeFor(ref) }), fileNameOf(ref));
+    }
+    return form;
+  };
+  const withBytes = async (toolName: string, toolArgs: Record<string, unknown>): Promise<Record<string, unknown>> => {
+    if (!toolArgs || typeof toolArgs !== 'object') return toolArgs;
+    const plan = fileBodyPlan(await client.config.tool_repository.getTool(toolName).catch(() => null));
+    if (!plan) return toolArgs;
+    const body = toolArgs[plan.field];
+    if (plan.kind === 'form') {
+      if (!body || typeof body !== 'object' || Array.isArray(body)) return toolArgs;
+      return { ...toolArgs, [plan.field]: await formOf(body as Record<string, unknown>, plan.fileParts) };
+    }
+    if (typeof body !== 'string' || !body.trim()) return toolArgs;
+    return { ...toolArgs, [plan.field]: Buffer.from(await readFile(body.trim())) };
   };
   const callTool = client.callTool;
   if (typeof callTool === 'function' && (callTool as unknown as Record<symbol, unknown>)[INSTALLED] !== true) {

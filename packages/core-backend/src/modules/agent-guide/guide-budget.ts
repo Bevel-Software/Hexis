@@ -71,12 +71,15 @@ export const SECTION_TOKEN_BUDGETS: Readonly<Record<string, number>> = Object.fr
 });
 
 /**
- * Every core section at once: what `section: "all"` returns. 23,100 since
- * `where-a-new-file-goes` opened with the rule to read an area's README first
- * (about 90: two sessions had restructured one folder against its README);
- * 23,000 since the `onboarding` section (about 1,200) was added; 21,500 before.
+ * Every core section at once: what `section: "all"` returns. 23,200 since
+ * `tool-manuals` says how a tool sends a file as one part of a form (about
+ * 70: a tool author has no other place to learn the declaration); 23,100
+ * since `where-a-new-file-goes` opened with the rule to read an area's README
+ * first (about 90: two sessions had restructured one folder against its
+ * README); 23,000 since the `onboarding` section (about 1,200) was added;
+ * 21,500 before.
  */
-export const WHOLE_GUIDE_TOKEN_BUDGET = 23_100;
+export const WHOLE_GUIDE_TOKEN_BUDGET = 23_200;
 
 /** One task: the start section plus the sections it routes the task to. */
 export const TASK_TOKEN_BUDGET = 6_000;

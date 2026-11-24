@@ -17,7 +17,8 @@ import { createManualRoutes, ToolRegistry } from '../../tool-registry/index.js';
  * tool whose body is declared a file path goes out with the bytes of the file
  * it names, read as the caller, a direct call and a call from a chain alike.
  * The argument check still sees the call as the agent made it, and a file the
- * caller cannot read refuses the call before anything is sent.
+ * caller cannot read refuses the call before anything is sent. A tool that
+ * declares a form sends the file as one part of it, beside the other parts.
  */
 
 const KEY = 'bevel_key_user_a';
@@ -52,7 +53,15 @@ interface Platform {
   baseUrl: string;
   /** The bytes each upload received, as text. */
   uploads: string[];
+  /** Each form the other service received, as it parsed it. */
+  forms: ReceivedForm[];
   stop(): Promise<void>;
+}
+
+/** One form as the receiving service read it off the wire: its declared type, and each part in order. */
+interface ReceivedForm {
+  contentType: string;
+  parts: Array<{ name: string; text: string; filename?: string; type?: string }>;
 }
 
 const platforms: Platform[] = [];
@@ -69,7 +78,20 @@ const THIRD_PARTY_MANUAL = {
 
 async function startPlatform(readFileBody?: (userId: string, ref: string) => Promise<Uint8Array>): Promise<Platform> {
   const uploads: string[] = [];
+  const forms: ReceivedForm[] = [];
   const app = express();
+  // The form is parsed by the platform's own multipart reader (`Response.formData`), from the bytes and the
+  // Content-Type the call arrived with, so a missing boundary or a malformed part fails here.
+  app.post('/api/third-party/boards/:board/documents', express.raw({ type: 'multipart/form-data' }), async (req, res) => {
+    const contentType = req.headers['content-type'] ?? '';
+    const form = await new Response(req.body as Buffer, { headers: { 'content-type': contentType } }).formData();
+    const parts: ReceivedForm['parts'] = [];
+    for (const [name, value] of form.entries()) {
+      parts.push(typeof value === 'string' ? { name, text: value } : { name, text: await value.text(), filename: value.name, type: value.type });
+    }
+    forms.push({ contentType, parts });
+    res.json({ stored: true, board: req.params.board });
+  });
   app.post('/api/third-party/upload', express.raw({ type: 'application/octet-stream' }), (req, res) => {
     uploads.push(Buffer.isBuffer(req.body) ? req.body.toString('utf8') : JSON.stringify(req.body));
     res.json({ stored: true });
@@ -96,6 +118,35 @@ async function startPlatform(readFileBody?: (userId: string, ref: string) => Pro
             http_method: 'POST',
             url: `\${API_URL}/api/third-party/upload`,
             content_type: 'application/octet-stream',
+          },
+        },
+        {
+          name: 'add_document',
+          description: 'Put a file on a board in the other service.',
+          inputs: {
+            type: 'object',
+            properties: {
+              board: { type: 'string', description: 'The board.' },
+              body: {
+                type: 'object',
+                properties: {
+                  resource: { type: 'string', format: 'file-path', description: 'The file to send.' },
+                  data: { type: 'object', description: 'Where it goes.' },
+                },
+                required: ['resource'],
+                additionalProperties: false,
+              },
+            },
+            required: ['board', 'body'],
+            additionalProperties: false,
+          },
+          outputs: { type: 'object', properties: {} },
+          tags: [],
+          tool_call_template: {
+            call_template_type: 'http',
+            http_method: 'POST',
+            url: `\${API_URL}/api/third-party/boards/{board}/documents`,
+            content_type: 'multipart/form-data',
           },
         },
       ],
@@ -126,6 +177,7 @@ async function startPlatform(readFileBody?: (userId: string, ref: string) => Pro
   const platform: Platform = {
     baseUrl,
     uploads,
+    forms,
     async stop() {
       if (stopped) return;
       stopped = true;
@@ -194,6 +246,38 @@ describe('a tool that sends a file, called through the MCP endpoint', () => {
     expect(toolText(res)).toContain('The arguments do not match the "upload" tool.');
     expect(reads).toEqual([]);
     expect(platform.uploads).toEqual([]);
+  });
+
+  it('sends a form: the file as its own part with its name and type, the JSON part beside it, from a direct call and a chain', async () => {
+    const reads: string[] = [];
+    const platform = await startPlatform(filesReader(reads));
+    const client = await connect(platform.baseUrl);
+    const body = { resource: 'Reports/q3.pdf', data: { title: 'Q3', position: { x: 0, y: 0 } } };
+    const res = await client.callTool({ name: 'THIRD_PARTY_add_document', arguments: { board: 'b1', body } });
+    expect(res.isError).toBeFalsy();
+    const chained = await client.callTool({
+      name: 'call_tool_chain',
+      arguments: { code: `return THIRD_PARTY.add_document({ board: 'b2', body: ${JSON.stringify(body)} });` },
+    });
+    expect(JSON.parse(toolText(chained)).result).toEqual({ stored: true, board: 'b2' });
+    expect(reads).toEqual(['user-A:Reports/q3.pdf', 'user-A:Reports/q3.pdf']);
+    expect(platform.forms).toHaveLength(2);
+    for (const form of platform.forms) {
+      expect(form.contentType).toMatch(/^multipart\/form-data; boundary=/);
+      expect(form.parts).toEqual([
+        { name: 'resource', text: '%PDF-1.7 the third quarter', filename: 'q3.pdf', type: 'application/pdf' },
+        { name: 'data', text: '{"title":"Q3","position":{"x":0,"y":0}}' },
+      ]);
+    }
+  });
+
+  it('refuses a form whose file the caller cannot read, and sends nothing', async () => {
+    const platform = await startPlatform(filesReader([]));
+    const client = await connect(platform.baseUrl);
+    const res = await client.callTool({ name: 'THIRD_PARTY_add_document', arguments: { board: 'b1', body: { resource: 'Finance/Payroll.xlsx' } } });
+    expect(res.isError).toBe(true);
+    expect(toolText(res)).toContain('"Finance/Payroll.xlsx" is not a file you can read, so it cannot be sent');
+    expect(platform.forms).toEqual([]);
   });
 
   it('without a reader, sends the path as the agent wrote it', async () => {
