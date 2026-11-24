@@ -34,10 +34,12 @@ vi.mock('../api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../api')>();
   return { ...actual, ...api };
 });
-vi.mock('../../workspace/state/workspace.context', () => ({
+vi.mock('../../workspace', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../workspace')>()),
   useWorkspace: () => ({ workspaceId: 'ws-1', kbDirName: 'knowledge-base' }),
 }));
-vi.mock('../../auth/state/auth.context', () => ({
+vi.mock('../../auth', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../auth')>()),
   useAuth: () => ({ user: { email: 'me@x.com', name: 'Me' } }),
 }));
 

@@ -3,7 +3,6 @@ import { useNavigate } from 'react-router-dom';
 import { ExternalLink, UserPlus, Users } from 'lucide-react';
 import { Badge, Banner } from '../../../shared/components';
 import { useAdmin } from '../../admin';
-import { VERB_HELP } from '../../access';
 import { useLibrary, workspaceHasNoPlugins } from '../state/library-data';
 import { LIBRARY_ROOT, pathForPlugin } from '../routes/library-paths';
 import { adminNamesOf, ownersTextOf, primaryFolderOf } from '../utils/plugin-summary';
@@ -16,6 +15,7 @@ import { EmptyStateAction } from './plugin-page-parts';
 import { PluginIndexRow } from './PluginIndexRow';
 import { LockGlyph } from './LockGlyph';
 import { NewPluginDialog } from './NewPluginDialog';
+import { OwnerPill } from './OwnerPill';
 
 /**
  * The Plugins band of a gallery page — the Library's one plugin renderer,
@@ -226,17 +226,7 @@ function badgesOf(entry: PluginEntry): ReactNode {
   if (!owner && !isPrivate) return undefined;
   return (
     <>
-      {owner && (
-        <Badge
-          tone="outline"
-          size="xs"
-          className="shrink-0 uppercase"
-          title={VERB_HELP.owner}
-          aria-description={VERB_HELP.owner}
-        >
-          Owner
-        </Badge>
-      )}
+      {owner && <OwnerPill />}
       {isPrivate && (
         <Badge tone="outline" size="xs" title="Private" className="shrink-0 uppercase">
           <LockGlyph className="size-2.5 shrink-0" />

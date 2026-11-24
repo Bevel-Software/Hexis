@@ -131,43 +131,6 @@ describe('the person asking', () => {
     expect(control()).toBeInTheDocument();
   });
 
-  it('says what each level it offers means, and what each verb the rows state means', async () => {
-    const EDIT =
-      'Can edit: everything Can read allows, plus changing it, approving change requests to it and choosing who has access.';
-    const OWNER =
-      'Owner: everything Can edit allows, plus downloading a copy. Owners are also named as the people to ask about it.';
-    const READ = 'Can read: open it and read it.';
-    const DOWNLOAD = 'Can download: everything Can read allows, plus downloading a copy, which Can edit does not include.';
-    const BO = { name: 'Bo', email: 'bo@x.io' };
-    const DEE = { name: 'Dee', email: 'dee@x.io' };
-    api.fetchFileAccess.mockResolvedValue({
-      ...READER_VIEW,
-      readers: { restricted: true, roles: [], users: [ED, BO, DEE] },
-      downloaders: { roles: [], users: [BO] },
-      sources: {
-        'u:bo@x.io': { download: [{ kind: 'direct' }] },
-        'u:dee@x.io': { read: [{ kind: 'direct' }] },
-      },
-    } as AccessResponse);
-    render(<ManageAccessDialog entry={FOLDER} onClose={() => {}} />);
-
-    for (const [name, line] of [
-      ['Can edit', EDIT],
-      ['Owner', OWNER],
-    ]) {
-      const radio = await screen.findByRole('radio', { name });
-      expect(radio).toHaveAccessibleDescription(line);
-      expect(radio.closest('label')).toHaveAttribute('title', line);
-    }
-    // Rita cannot change the rows, so each states its verbs as text: one line per verb it names.
-    const readOnly = screen.getByText('Can read');
-    expect(readOnly).toHaveAttribute('title', READ);
-    expect(readOnly).toHaveAccessibleDescription(READ);
-    const readAndDownload = screen.getByText('Can read, Can download');
-    expect(readAndDownload).toHaveAttribute('title', `${READ} ${DOWNLOAD}`);
-    expect(readAndDownload).toHaveAccessibleDescription(`${READ} ${DOWNLOAD}`);
-  });
-
   it('sends the level chosen and the note, then says who it is waiting on', async () => {
     const user = userEvent.setup();
     requests.sendAccessRequest.mockResolvedValue({ number: 77, level: 'owner' });

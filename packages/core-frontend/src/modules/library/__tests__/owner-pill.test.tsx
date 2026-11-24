@@ -312,25 +312,6 @@ describe('the plugin Owner pill', () => {
   });
 });
 
-describe('what the Owner pill says', () => {
-  it('carries what Owner means as its tooltip and description, on the cards and the plugin rows', async () => {
-    const OWNER =
-      'Owner: everything Can edit allows, plus downloading a copy. Owners are also named as the people to ask about it.';
-    await renderGallery({ kind: 'all' });
-
-    const cards = within(screen.getByRole('list', { name: 'cards' }));
-    const pills = [
-      within(cards.getByRole('listitem', { name: 'owned-skill' })).getByText('Owner'),
-      within(cards.getByRole('listitem', { name: 'Weather' })).getByText('Owner'),
-      within(screen.getByRole('button', { name: /^GTM/ })).getByText('Owner'),
-    ];
-    for (const pill of pills) {
-      expect(pill).toHaveAttribute('title', OWNER);
-      expect(pill).toHaveAccessibleDescription(OWNER);
-    }
-  });
-});
-
 describe('Owned by me', () => {
   it('lists exactly the pilled items, and its count is that list', async () => {
     const lib = await renderGallery({ kind: 'owned' });

@@ -1,9 +1,9 @@
 import { ExternalLink, Users } from 'lucide-react';
 import { Badge, Surface } from '../../../shared/components';
-import { VERB_HELP } from '../../access';
 import { cn } from '../../../lib/utils';
 import { ItemMenuFrame } from './ItemActionsMenu';
 import { NameWithBadges } from './NameWithBadges';
+import { OwnerPill } from './OwnerPill';
 import { StatusDot } from './StatusDot';
 import { ToolLogo } from './ToolLogo';
 import type { AttentionStatus, GemState } from '../utils/status';
@@ -172,18 +172,7 @@ export function LibraryCard({
         In review
       </Badge>
     ) : null,
-    owned && !pending ? (
-      <Badge
-        key="owner"
-        tone="outline"
-        size="xs"
-        className="shrink-0 uppercase"
-        title={VERB_HELP.owner}
-        aria-description={VERB_HELP.owner}
-      >
-        Owner
-      </Badge>
-    ) : null,
+    owned && !pending ? <OwnerPill key="owner" /> : null,
     /* The card is on a plugin's page and the item lives somewhere else. The
        Owner pill's exact dress, because it makes the same kind of statement —
        a fact about the item's standing, not a problem — and the skill's own
