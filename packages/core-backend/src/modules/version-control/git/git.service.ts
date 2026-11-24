@@ -2963,8 +2963,7 @@ export class GitService implements IGitService {
         // Only commits after the earliest time can count; a commit the walk stops short of is not seen, so its path is kept.
         const since = Math.floor(Math.min(...[...savedAfter.values()].map((d) => d.getTime())) / 1000);
         const { stdout } = await this.git(cwd, [
-          'log', '-z', '--no-renames', `--since=@${since}`, '--format=@%ct', '--name-only', 'HEAD', '--',
-          ...timed.map((p) => `:(literal)${p}`),
+          'log', '-z', '--no-renames', `--since=@${since}`, '--format=@%ct', '--name-only', 'HEAD', '--', ...timed,
         ]);
         let at = 0;
         for (const token of stdout.split('\0')) {

@@ -74,7 +74,13 @@ async function makeWorld(): Promise<World> {
     await fs.writeFile(path.join(seed, `Data/QA/${name}.md`), `# ${name}\n`);
   }
   await runGit(seed, ['add', '.']);
-  await runGit(seed, ['commit', '-m', 'seed']);
+  // The files existed before the incident's rows were queued: a set-aside row clears only on a change made after it.
+  process.env.GIT_COMMITTER_DATE = '2026-11-01T00:00:00Z';
+  try {
+    await runGit(seed, ['commit', '-m', 'seed', '--date=2026-11-01T00:00:00Z']);
+  } finally {
+    delete process.env.GIT_COMMITTER_DATE;
+  }
   await runGit(seed, ['push', 'origin', MAIN]);
   await runGit(seed, ['push', 'origin', `${MAIN}:${DRAFT}`]);
   await runGit(upstream, ['symbolic-ref', 'HEAD', `refs/heads/${MAIN}`]);
