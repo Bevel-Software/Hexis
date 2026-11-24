@@ -157,7 +157,7 @@ describe("an editing renderer writes the file's own line endings back", () => {
     expect(written).toEqual(['one\ntwo\nthree\n']);
   });
 
-  it('keeps CRLF in a plain-text file too (every editing renderer, not only Markdown)', async () => {
+  it('keeps CRLF in a plain-text file too, not only in a Markdown page', async () => {
     const { written } = await editAndSave('knowledge-base/notes.txt', 'a\r\nb\r\n', 'c', 'end');
     expect(written).toEqual(['a\r\nb\r\nc']);
   });
