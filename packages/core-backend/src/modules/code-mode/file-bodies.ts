@@ -146,8 +146,9 @@ export function fileBodyPlan(tool: ToolLike | null | undefined): FileBodyPlan | 
   const properties = (tool?.inputs as { properties?: Record<string, unknown> } | undefined)?.properties;
   const property = properties?.[field] as { properties?: unknown } | undefined;
   if (isFilePath(property)) return { field, kind: 'bytes' };
-  const contentType = typeof template.content_type === 'string' ? template.content_type.trim().toLowerCase() : '';
-  if (!contentType.startsWith(FORM_CONTENT_TYPE)) return null;
+  // The media type alone decides, whatever its case and whatever parameters follow it.
+  const mediaType = typeof template.content_type === 'string' ? template.content_type.split(';')[0]!.trim().toLowerCase() : '';
+  if (mediaType !== FORM_CONTENT_TYPE) return null;
   const parts = property && typeof property === 'object' ? property.properties : undefined;
   if (!parts || typeof parts !== 'object') return null;
   const fileParts = Object.entries(parts as Record<string, unknown>)
@@ -183,8 +184,10 @@ export function installFileBodies(client: ClientLike, read: FileBodyRead): void 
   /**
    * The form a call's body object goes out as: a file part carries the file's bytes under its own name and type, a
    * text value goes as written, and any other value as its JSON (what an API that takes a JSON part beside the file
-   * expects). A part the call left out is left out of the form. Every file is read before the form is handed on, so
-   * a file that cannot be read refuses the call with nothing sent.
+   * expects). A part the call left out (absent or `null`) is left out of the form. A file part that is there holds
+   * one path: anything else (a blank string, a list, a number) refuses the call, so a file the call meant to send is
+   * never dropped from the form without a word. Every file is read before the form is handed on, so a file that
+   * cannot be read refuses the call with nothing sent.
    */
   const formOf = async (parts: Record<string, unknown>, fileParts: string[]): Promise<FormData> => {
     const form = new FormData();
@@ -194,7 +197,9 @@ export function installFileBodies(client: ClientLike, read: FileBodyRead): void 
         form.append(name, typeof value === 'string' ? value : JSON.stringify(value));
         continue;
       }
-      if (typeof value !== 'string' || !value.trim()) continue;
+      if (typeof value !== 'string' || !value.trim()) {
+        throw new FileBodyError(`The form's "${name}" part takes the path of one file to send, and the call gave it none. Give it a path, or leave "${name}" out to send no file.`);
+      }
       const ref = value.trim();
       const bytes = await readFile(ref);
       form.append(name, new Blob([Buffer.from(bytes)], { type: rawMimeFor(ref) }), fileNameOf(ref));

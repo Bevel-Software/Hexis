@@ -172,10 +172,10 @@ path or a `__tmp__/…` ref, and the platform sends the file, read as the person
 on the default branch; one they cannot read refuses the call. A
 `remote: false` tool runs in the local server, which sends the path as written.
 
-An API that takes the file as one part of a form: set `content_type` to
-`multipart/form-data` and declare the body as an object. Each property is one
-part, and a property with `format: file-path` is sent as the file, under its
-own name and type. Text goes as written, any other value as JSON.
+For a file sent as one part of a form, set that `content_type` to
+`multipart/form-data` and declare that body input as an object: each property
+is a part. One with `format: file-path` is sent as the file, named as in its
+path; text goes as written, other values as JSON, `null` not at all.
 
 ### Adding a third-party tool
 

@@ -37,7 +37,10 @@ const fakeAuth: RequestHandler = (req, res, next) => {
 const passthrough: RequestHandler = (_req, _res, next) => next();
 
 /** The files the caller may read, by the path a call names. */
-const FILES: Record<string, string> = { 'Reports/q3.pdf': '%PDF-1.7 the third quarter' };
+const FILES: Record<string, string> = {
+  'Reports/q3.pdf': '%PDF-1.7 the third quarter',
+  'Reports/Müller 报告 "final".docx': 'a memo',
+};
 
 /** A reader over {@link FILES} that remembers each read, as `user:ref`. */
 function filesReader(reads: string[]) {
@@ -271,12 +274,40 @@ describe('a tool that sends a file, called through the MCP endpoint', () => {
     }
   });
 
+  it('carries a file name with spaces, quotes and letters outside ASCII to the other service as it is', async () => {
+    const platform = await startPlatform(filesReader([]));
+    const client = await connect(platform.baseUrl);
+    const res = await client.callTool({ name: 'THIRD_PARTY_add_document', arguments: { board: 'b1', body: { resource: 'Reports/Müller 报告 "final".docx' } } });
+    expect(res.isError).toBeFalsy();
+    expect(platform.forms.map((f) => f.parts)).toEqual([
+      [
+        {
+          name: 'resource',
+          text: 'a memo',
+          filename: 'Müller 报告 "final".docx',
+          type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        },
+      ],
+    ]);
+  });
+
   it('refuses a form whose file the caller cannot read, and sends nothing', async () => {
     const platform = await startPlatform(filesReader([]));
     const client = await connect(platform.baseUrl);
     const res = await client.callTool({ name: 'THIRD_PARTY_add_document', arguments: { board: 'b1', body: { resource: 'Finance/Payroll.xlsx' } } });
     expect(res.isError).toBe(true);
     expect(toolText(res)).toContain('"Finance/Payroll.xlsx" is not a file you can read, so it cannot be sent');
+    expect(platform.forms).toEqual([]);
+  });
+
+  it('refuses a form whose file part is blank, though the arguments match the tool, and sends nothing', async () => {
+    const reads: string[] = [];
+    const platform = await startPlatform(filesReader(reads));
+    const client = await connect(platform.baseUrl);
+    const res = await client.callTool({ name: 'THIRD_PARTY_add_document', arguments: { board: 'b1', body: { resource: '  ', data: { title: 'Q3' } } } });
+    expect(res.isError).toBe(true);
+    expect(toolText(res)).toContain('The form\'s "resource" part takes the path of one file to send, and the call gave it none.');
+    expect(reads).toEqual([]);
     expect(platform.forms).toEqual([]);
   });
 

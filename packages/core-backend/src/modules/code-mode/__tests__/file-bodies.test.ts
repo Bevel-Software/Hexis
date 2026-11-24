@@ -81,6 +81,9 @@ describe('fileBodyPlan', () => {
     expect(fileBodyPlan(plain)).toBeNull();
     expect(fileBodyPlan(jsonWithPath)).toBeNull();
     expect(fileBodyPlan(formWithoutFile)).toBeNull();
+    // Only the media type itself makes a form: a longer name that starts the same way is another type.
+    expect(fileBodyPlan({ ...form, tool_call_template: { ...form.tool_call_template, content_type: 'multipart/form-data-like' } })).toBeNull();
+    expect(fileBodyPlan({ ...form, tool_call_template: { ...form.tool_call_template, content_type: 'multipart/mixed' } })).toBeNull();
     expect(fileBodyPlan(mcp)).toBeNull();
     expect(fileBodyPlan(null)).toBeNull();
   });
@@ -165,18 +168,37 @@ describe('installFileBodies', () => {
     expect(body.resource).toBe(' Reports/Q3 review.pdf ');
   });
 
-  it('sends a form without its file part when the call names no file, and leaves a body that is no object alone', async () => {
+  it('sends a form without its file part when the call leaves that part out or null, and leaves a body that is no object alone', async () => {
     let reads = 0;
     const { client, calls } = fakeClient([form], async () => {
       reads += 1;
       return new Uint8Array();
     });
-    await client.callTool('board.add_document', { board_id: 'b1', body: { resource: '  ', note: 'later' } });
+    await client.callTool('board.add_document', { board_id: 'b1', body: { note: 'later' } });
+    await client.callTool('board.add_document', { board_id: 'b1', body: { resource: null, note: 'later' } });
     await client.callTool('board.add_document', { board_id: 'b1', body: 'Reports/q3.pdf' });
     await client.callTool('board.add_document', { board_id: 'b1' });
     expect(reads).toBe(0);
     expect([...(calls[0]!.args.body as FormData).entries()]).toEqual([['note', 'later']]);
-    expect(calls.slice(1).map((c) => c.args)).toEqual([{ board_id: 'b1', body: 'Reports/q3.pdf' }, { board_id: 'b1' }]);
+    expect([...(calls[1]!.args.body as FormData).entries()]).toEqual([['note', 'later']]);
+    expect(calls.slice(2).map((c) => c.args)).toEqual([{ board_id: 'b1', body: 'Reports/q3.pdf' }, { board_id: 'b1' }]);
+  });
+
+  it('refuses a form whose file part is there but names no file, wherever it stands among the parts, and sends nothing', async () => {
+    let reads = 0;
+    const { client, calls } = fakeClient([form], async () => {
+      reads += 1;
+      return new Uint8Array();
+    });
+    for (const resource of ['', '   ', ['Reports/q3.pdf'], 7, { path: 'Reports/q3.pdf' }, false]) {
+      await expect(client.callTool('board.add_document', { board_id: 'b1', body: { note: 'first', resource, data: { title: 'x' } } })).rejects.toMatchObject({
+        status: 400,
+        kind: 'file-body',
+        data: { error: 'The form\'s "resource" part takes the path of one file to send, and the call gave it none. Give it a path, or leave "resource" out to send no file.' },
+      });
+    }
+    expect(reads).toBe(0);
+    expect(calls).toEqual([]);
   });
 
   it('refuses a form whose file cannot be read, and sends nothing', async () => {
