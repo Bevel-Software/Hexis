@@ -603,9 +603,11 @@ export async function createCoreServer(
     ),
   );
   // The fingerprint of the caller's released catalog. The local `hexis-mcp`
-  // server polls it to learn that a manual or a skill changed under a
-  // connection it cannot be pushed to; nothing else consults it. Same
-  // `manualAuth`, same router, as `all-tools`.
+  // server polls this route to learn that a manual or a skill changed under a
+  // connection it cannot be pushed to; nothing else requests it. The hosted
+  // MCP endpoint reads the same fingerprint on every request, by calling the
+  // reader below and not this route. Same `manualAuth`, same router, as
+  // `all-tools`.
   toolsRouter.use(createCatalogRevisionRoutes({
     manualAuth: core.manualAuthMiddleware,
     // The reader the MCP endpoint calls in process: one computation, two
