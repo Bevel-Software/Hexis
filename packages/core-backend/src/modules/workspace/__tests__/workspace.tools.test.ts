@@ -33,6 +33,8 @@ import type { WorkspaceService } from '../workspace.service.js';
 import { DEFAULT_KB_LAYOUT, isBranchAuthoredBy, isOwnSuggestionsBranch } from '@bevel-software/platform-shared';
 import { normalizeWorkspacePath } from '../../kb-fs/index.js';
 import { GIT_INTERNALS_MESSAGE, PathNotFoundError } from '../../../shared/domain-errors.js';
+import { setLogger } from '../../../shared/logging.js';
+import type { ILogger } from '../../../shared/logger.contract.js';
 import { AccessDeniedError } from '../../access-model/index.js';
 import { proposalTitleFor } from '../write-denial.js';
 import { NOT_FOUND_NEXT_STEP } from '../not-found.js';
@@ -359,7 +361,8 @@ async function start(
       releaseLock: async (_ws: string, _branch: string, file: string) => {
         lockCalls.push(`release ${file}`);
         // A commit that cannot be queued leaves the lock held, as the real release does.
-        if (failingReleases.has(file)) throw new Error('queue unavailable');
+        // The cause carries a line break, as queue errors quoting outside text can.
+        if (failingReleases.has(file)) throw new Error('queue unavailable\n[forged] line');
         heldLocks.delete(file);
       },
       releaseLockUntouched: async (_ws: string, _branch: string, file: string) => {
@@ -5202,8 +5205,28 @@ describe('agent read/write hooks', () => {
     await fs.writeFile(`${KB_DIR}/a.zip`, 'not-really-a-zip');
     unzipEntries = [`${KB_DIR}/out/one.md`, `${KB_DIR}/out/two.md`];
     failingReleases = new Set([`${KB_DIR}/out/one.md`]);
-    const res = await post(`${base}/api/agent/tools/unzip`, { path: `${KB_DIR}/a.zip`, sessionId: 's1' });
+    // The message as the tool hands it to the logger, before any sink formats it.
+    const warnings: string[] = [];
+    const capture: ILogger = {
+      debug: () => {},
+      info: () => {},
+      warn: (m: string) => void warnings.push(m),
+      error: () => {},
+      child: () => capture,
+    };
+    const restore = setLogger(capture);
+    let res: Awaited<ReturnType<typeof post>>;
+    try {
+      res = await post(`${base}/api/agent/tools/unzip`, { path: `${KB_DIR}/a.zip`, sessionId: 's1' });
+    } finally {
+      setLogger(restore);
+    }
     expect(res.status).toBe(200);
+    // The cause stays on the server, escaped, so it cannot forge a second log line.
+    const released = warnings.filter((m) => m.startsWith('unzip: releasing'));
+    expect(released).toHaveLength(1);
+    expect(released[0]).toContain('queue unavailable\\n[forged] line');
+    expect(released[0]).not.toContain('\n[forged]');
     const body = (await res.json()) as { unsaved?: { path: string; reason: string }[] };
     expect(body.unsaved).toEqual([
       // The answer names no infrastructure; the cause is logged on the server.
