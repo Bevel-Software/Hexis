@@ -64,7 +64,7 @@ function requestPath(value: unknown): string | null {
 
 /**
  * The save-time plugin manifest check `PUT /file` consults, satisfied by the
- * plugins module's `PluginManifestSaveCheck`: for a plugin.json, one
+ * plugins module's `SkillLinkCheck`: for a plugin.json, one
  * `{ entry, message }` per `skills` entry that is not a folder path or names
  * a folder holding no skill the saver can read, else `[]`. Never throws, and
  * never refuses a save.

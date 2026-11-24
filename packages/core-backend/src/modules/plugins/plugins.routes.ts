@@ -21,6 +21,7 @@ import { resolveConnectionScope, type IAgentScopeResolver } from '../agent-scope
 import '../tool-auth/index.js'; // Express Request.toolAuth augmentation
 import { PluginLinkError, type PluginLinksService } from './plugin-links.service.js';
 import { PluginRenameError, type PluginRenameService } from './plugin-rename.service.js';
+import type { SkillLinkCheck } from './skill-link-warnings.js';
 import type { JoinRequestsService } from './join-requests.service.js';
 import { folderTarget } from '../access/index.js';
 import type { PluginJoinRequestJobs } from './join-request-jobs.service.js';
@@ -227,6 +228,11 @@ export function createPluginsRoutes(
   links?: PluginLinksService,
   /** Optional: a host without it has no rename route. */
   rename?: PluginRenameService,
+  /**
+   * Optional: says, per caller, which linked roots hold no skill they can
+   * read. A host without it lists no such warning.
+   */
+  skillLinks?: Pick<SkillLinkCheck, 'emptyRootWarnings'>,
 ): express.Router {
   const router = express.Router();
 
@@ -440,9 +446,19 @@ export function createPluginsRoutes(
         standing === null ||
         (record.changeRequestNumber !== null && standing.get(record.changeRequestNumber) === 'open');
 
+      // What a plugin's definition says is for those who may read it: its
+      // manifest quotes entries as written, and a manifest declares no access
+      // of its own, so reading the plugin's folder is reading it. The roots
+      // that hold nothing are judged per caller, against the skills THEY may
+      // read, so the answer says nothing about a skill they cannot.
+      const members = catalog.map((g) => any(readable, g, memberProbe));
+      const emptyRoots = skillLinks
+        ? await skillLinks.emptyRootWarnings(email, catalog.map((g, i) => (members[i] ? g.linkedRoots : [])))
+        : catalog.map(() => []);
+
       const plugins: PluginSummary[] = [];
-      for (const g of catalog) {
-        const member = any(readable, g, memberProbe);
+      for (const [i, g] of catalog.entries()) {
+        const member = members[i] === true;
         const manager = any(writable, g, accessMdOf);
         // The FOLDER verdict, owner-lists-only — the delete gate, mirrored
         // here so the UI shows the verb to exactly the people the DELETE
@@ -481,7 +497,7 @@ export function createPluginsRoutes(
           writers: g.writers,
           readers: g.readers,
           isPrivate: g.isPrivate,
-          warnings: g.warnings,
+          warnings: member ? [...g.warnings, ...(emptyRoots[i] ?? []).map((w) => w.message)] : [],
           hasRequested: requested,
           requestNumber: requested ? (record?.changeRequestNumber ?? joinCr?.number ?? null) : null,
           requestFailure: requested

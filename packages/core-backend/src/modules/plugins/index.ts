@@ -22,7 +22,6 @@ export {
 export { PluginLinkIndex, type IPluginLinkIndex, type LinkMembership, type PluginLinks } from './plugin-links.js';
 export { PluginLinksService, PluginLinkError } from './plugin-links.service.js';
 export { PluginRenameService, PluginRenameError, renamePluginPrincipalInText } from './plugin-rename.service.js';
-export { PluginManifestSaveCheck } from './skill-link-warnings.js';
 export { compileMarketplace, type VirtualTree, type CompileInput, type MarketplaceOptions } from './compile/compile-marketplace.js';
 export { MarketplaceCompilerService, type CompileAudience } from './compile/marketplace-compiler.service.js';
 export type { PluginSource, PluginSourceWalk, DiscoveredPlugin, Discovery } from './discovery/plugin-source.js';

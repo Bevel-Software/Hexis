@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -17,11 +17,12 @@ import { testKbContext } from '../../../__tests__/kb-context.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { PluginIndexService } from '../plugins.service.js';
 import { PluginLinkIndex } from '../plugin-links.js';
-import { PluginManifestSaveCheck } from '../skill-link-warnings.js';
+import { SkillLinkCheck } from '../skill-link-warnings.js';
 
 /**
  * A plugin.json `skills` entry that links nothing is said out loud: on the
- * plugin page (the catalog's `warnings`) and on the app's save answer.
+ * plugin page (the catalog's `warnings` for a dropped entry, the listing's
+ * per-reader line for a root holding nothing) and on the app's save answer.
  * Advisory everywhere: which entries count is unchanged.
  */
 
@@ -99,7 +100,7 @@ describe('linkedSkillEntries', () => {
   });
 });
 
-describe('the plugin page', () => {
+describe('the plugin catalog', () => {
   let root: string;
   const kbRoot = () => join(root, wsId, KB_DIR);
 
@@ -134,18 +135,18 @@ describe('the plugin page', () => {
   });
   afterEach(() => rm(root, { recursive: true, force: true }));
 
-  it('warns about each entry that links nothing, naming it, and about nothing else', async () => {
+  it('carries each entry discovery drops as a warning naming it, and changes nothing the entries link', async () => {
     await plugin('Skill Reviewers', manifestWith(QA_ENTRIES));
     await plugin('Clean', { name: 'clean', extensions: { [HEXIS_EXTENSION_NS]: { skills: ['Skills/QALink'] } } });
 
     const entries = await catalog();
     const reviewers = entries.find((p) => p.name === 'skill-reviewers')!;
+    // The roots that hold nothing are not the catalog's to say: that answer
+    // depends on who reads it (see the listing route and `SkillLinkCheck`).
     expect(reviewers.warnings).toEqual([
       `plugin.json ${ignored('./Skills/Design/update-website')}`,
       `plugin.json ${ignored('/Skills/Engineering/deploy-checklist')}`,
       `plugin.json ${ignored('Skills/../Plugins/Deal Desk/skills/account-research')}`,
-      'linked folder "Skills/NoSuch/thing" holds no skill, so it links nothing',
-      'linked folder "knowledge-base/Skills/Company/house-writing-standards" holds no skill, so it links nothing',
     ]);
     // Advisory: the entries that link something still do, and nothing else moved.
     expect(reviewers.linkedRoots).toEqual([
@@ -157,31 +158,10 @@ describe('the plugin page', () => {
     expect(reviewers.skillCount).toBe(2);
     expect(entries.find((p) => p.name === 'clean')!.warnings).toEqual([]);
   });
-
-  it('warns about the agent-path spelling that holds no skill, on a plugin that otherwise has none', async () => {
-    await plugin('LTMcp', { name: 'ltmcp', extensions: { [HEXIS_EXTENSION_NS]: { skills: ['knowledge-base/Skills/QALink/beta'] } } });
-
-    const [ltmcp] = await catalog();
-    expect(ltmcp).toMatchObject({ skillCount: 0, brokenLinks: 0 });
-    expect(ltmcp!.warnings).toEqual([
-      'linked folder "knowledge-base/Skills/QALink/beta" holds no skill, so it links nothing',
-    ]);
-  });
-
-  it('says the same of a bundle-format plugin root that holds no skill', async () => {
-    await mkdir(join(kbRoot(), 'Plugins', 'Ado'), { recursive: true });
-    await writeFile(
-      join(kbRoot(), 'Plugins', 'Ado', 'plugin.bundle.json'),
-      JSON.stringify({ name: 'ado', sourceSkillRoots: ['Skills/QALink', 'Skills/NoSuch/thing'] }),
-    );
-
-    const [ado] = await catalog();
-    expect(ado!.warnings).toEqual(['linked folder "Skills/NoSuch/thing" holds no skill, so it links nothing']);
-  });
 });
 
-describe('PluginManifestSaveCheck', () => {
-  const check = new PluginManifestSaveCheck(skillService, kb);
+describe('SkillLinkCheck', () => {
+  const check = new SkillLinkCheck(skillService, kb);
   const MANIFEST = `${KB_DIR}/Plugins/Skill Reviewers/plugin.json`;
   const save = (email: string, entries: unknown[], path = MANIFEST) =>
     check.checkSave(email, path, JSON.stringify(manifestWith(entries)));
@@ -237,7 +217,7 @@ describe('PluginManifestSaveCheck', () => {
   });
 
   it('says nothing about roots from an empty catalog, the skill service\'s answer when the default branch cannot be read', async () => {
-    const degraded = new PluginManifestSaveCheck({ listSkills: async () => [] }, kb);
+    const degraded = new SkillLinkCheck({ listSkills: async () => [] }, kb);
     const warnings = await degraded.checkSave(ADMIN, MANIFEST, JSON.stringify(manifestWith(QA_ENTRIES)));
     expect(warnings.map((w) => w.entry)).toEqual([
       './Skills/Design/update-website',
@@ -247,7 +227,7 @@ describe('PluginManifestSaveCheck', () => {
   });
 
   it('still names the malformed entries when the catalog cannot be read', async () => {
-    const failing = new PluginManifestSaveCheck(
+    const failing = new SkillLinkCheck(
       {
         listSkills: async () => {
           throw new Error('catalog down');
@@ -261,5 +241,26 @@ describe('PluginManifestSaveCheck', () => {
       '/Skills/Engineering/deploy-checklist',
       'Skills/../Plugins/Deal Desk/skills/account-research',
     ]);
+  });
+
+  it("answers the listing's lists from one catalog read, per reader, the agent-path spelling included", async () => {
+    const listSkills = vi.fn(skillService.listSkills);
+    const lists = new SkillLinkCheck({ listSkills }, kb);
+    const answers = await lists.emptyRootWarnings(BOB, [
+      ['knowledge-base/Skills/QALink/beta'],
+      [],
+      ['Skills/QALink', 'Skills/Company/house-writing-standards'],
+    ]);
+    expect(answers.map((list) => list.map((w) => w.entry))).toEqual([
+      ['knowledge-base/Skills/QALink/beta'],
+      [],
+      // Bob cannot read that skill: to him the folder holds none.
+      ['Skills/Company/house-writing-standards'],
+    ]);
+    expect(listSkills).toHaveBeenCalledTimes(1);
+    expect(listSkills).toHaveBeenCalledWith(BOB);
+    // No roots at all: no catalog read.
+    expect(await lists.emptyRootWarnings(BOB, [[], []])).toEqual([[], []]);
+    expect(listSkills).toHaveBeenCalledTimes(1);
   });
 });

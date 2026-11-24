@@ -22,6 +22,7 @@ import { PluginJoinRequestJobs } from '../join-request-jobs.service.js';
 import { pluginFolderBelowRoot } from '../plugins.service.js';
 import { FakeJoinRequestStore } from './fake-join-request-store.js';
 import type { PluginSummary, IPluginIndexService } from '../plugins.contract.js';
+import { SkillLinkCheck } from '../skill-link-warnings.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 
 /**
@@ -61,6 +62,8 @@ interface HarnessOpts {
   tools?: ToolManualSummary[];
   /** More plugins: folder path below `Plugins/` → manifest name. */
   extraPlugins?: Record<string, string>;
+  /** What says, per caller, which linked roots hold no skill they can read. */
+  skillLinks?: SkillLinkCheck;
 }
 
 function cr(over: Partial<ChangeRequest>): ChangeRequest {
@@ -230,6 +233,9 @@ async function makeHarness(opts: HarnessOpts = {}) {
       provision as never,
       async (req) => (req.userEmail ? { ...ALI_USER, email: req.userEmail } : null),
       testKbContext({ kbDirName: KB }),
+      undefined,
+      undefined,
+      opts.skillLinks,
     ),
   );
 
@@ -385,6 +391,59 @@ describe('/api/plugins routes', () => {
       linkedRoots: ['Skills/Testing'],
       // What discovery left out reaches the summary as the index said it.
       warnings: ['mcpProfile "global" named but no registry could be read'],
+    });
+  });
+
+  describe("a plugin's definition warnings", () => {
+    const ignored = 'plugin.json skills entry "./Skills/x" is ignored: use a folder path like "Skills/Engineering/deploy"';
+    const entry = {
+      name: 'gtm',
+      displayName: 'GTM',
+      folders: ['Plugins/GTM'],
+      linkedRoots: ['Skills/QALink', 'Skills/NoSuch/thing', 'Skills/Secret'],
+      linksAreManaged: true,
+      skillCount: 3,
+      toolCount: 0,
+      brokenLinks: 0,
+      owners: { roles: [], users: [] },
+      writers: { roles: [], users: [] },
+      readers: { restricted: true, roles: [], users: [] },
+      isPrivate: false,
+      warnings: [ignored],
+    };
+    // The catalog's rule: each caller gets the released skills they may read.
+    // Ali reads the QALink ones; the Secret one is someone else's.
+    const skillLinks = new SkillLinkCheck(
+      {
+        listSkills: async (email?: string) =>
+          ['Skills/QALink/alpha', 'Skills/QALink/beta', 'Skills/Secret/plan']
+            .filter((p) => email === undefined || !p.startsWith('Skills/Secret/'))
+            .map((p) => ({ name: p.split('/').pop()!, description: '', path: p })),
+      },
+      testKbContext({ kbDirName: KB }),
+    );
+    const index = { catalog: async () => [entry], invalidate: () => {} } as unknown as IPluginIndexService;
+
+    it('names, to a member, each linked folder that holds no skill they can read, after what discovery left out', async () => {
+      const h = await makeHarness({ readable: MEMBER_OF_BOTH, index, skillLinks });
+      server = h.server;
+      const { plugins } = await listPlugins(h.baseUrl);
+      expect(plugins[0]!.warnings).toEqual([
+        ignored,
+        `linked folder "Skills/NoSuch/thing" holds no skill you can read on ${DEFAULT_BRANCH}`,
+        // Per reader: a folder whose only skill Ali may not read is, to him,
+        // a folder with nothing in it. Nothing says the skill is there.
+        `linked folder "Skills/Secret" holds no skill you can read on ${DEFAULT_BRANCH}`,
+      ]);
+      // Advisory: the summary's links and counts are the index's, untouched.
+      expect(plugins[0]).toMatchObject({ linkedRoots: entry.linkedRoots, skillCount: 3 });
+    });
+
+    it('says none of it to a caller who may only discover the plugin, not read its folder', async () => {
+      const h = await makeHarness({ readable: { [ALI]: ['Plugins/GTM/access.md'] }, index, skillLinks });
+      server = h.server;
+      const { plugins } = await listPlugins(h.baseUrl);
+      expect(plugins[0]).toMatchObject({ name: 'gtm', canRead: false, warnings: [] });
     });
   });
 
