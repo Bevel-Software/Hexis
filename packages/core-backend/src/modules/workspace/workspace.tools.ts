@@ -4075,7 +4075,13 @@ export function registerWorkspaceTools(
                 await assertAgentWriteAllowed(agentAccessGate, ctx, branch, wsRelPath);
                 // An archive may carry the same path twice: the later entry
                 // overwrites the earlier under the lock this call already holds.
-                if (locked.includes(wsRelPath)) return;
+                // The earlier write no longer stands for what is on disk: only
+                // this rewrite, once complete, marks the path written again, so
+                // a rewrite that fails part-way is never committed.
+                if (locked.includes(wsRelPath)) {
+                  written.delete(wsRelPath);
+                  return;
+                }
                 const acquired = await vcs.acquireLock(workspaceId, branch, wsRelPath, ctx.user);
                 if (!acquired.acquired) {
                   throw new ToolError(

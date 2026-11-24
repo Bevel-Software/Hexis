@@ -5234,6 +5234,20 @@ describe('agent read/write hooks', () => {
     expect(lockCalls).toEqual([`acquire ${KB_DIR}/out/twice.md`, `release ${KB_DIR}/out/twice.md`]);
   });
 
+  it('unzip does not commit a path the archive carries twice when the second write fails part-way', async () => {
+    const base = await start();
+    await fs.writeFile(`${KB_DIR}/a.zip`, 'not-really-a-zip');
+    unzipEntries = [`${KB_DIR}/out/twice.md`, `${KB_DIR}/out/twice.md`];
+    // The first copy is written in full; the second passes its guard and fails before its bytes
+    // are all there. What is on disk is no longer the first copy, so committing it would share
+    // a half-written file: its lock goes back untouched.
+    unzipThrowAfter = 1;
+    const res = await post(`${base}/api/agent/tools/unzip`, { path: `${KB_DIR}/a.zip`, sessionId: 's1' });
+    expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(lockCalls).toEqual([`acquire ${KB_DIR}/out/twice.md`, `hand back untouched ${KB_DIR}/out/twice.md`]);
+    expect([...heldLocks]).toEqual([]);
+  });
+
   it('unzip commits only the files it finished writing when the extraction fails part-way', async () => {
     const base = await start();
     await fs.writeFile(`${KB_DIR}/a.zip`, 'not-really-a-zip');
