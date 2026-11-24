@@ -1296,8 +1296,8 @@ export function ChangeRequestDialog({
                 {blockedBy.conflictedPaths.length === 1
                   ? "The file that can't be combined:"
                   : "The files that can't be combined:"}
-                {/* Named as the tree names them, which marks each one; the
-                    full path is the tooltip, and the prompt below carries it. */}
+                {/* Named as the tree names them; the full path is the
+                    tooltip, and the prompt below carries it. */}
                 <ul className="mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5">
                   {blockedBy.conflictedPaths.map((p) => (
                     <li key={p} className="font-mono" title={p}>
