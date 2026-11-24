@@ -3,6 +3,7 @@ import { render, screen, within } from '@testing-library/react';
 import { AdminRolesPage } from '../components/AdminRolesPage';
 import { AdminContext } from '../state/admin.context';
 import { fetchRoles, type RoleRosterEntry } from '../services/roles.api';
+import { initials } from '../../../lib/email';
 
 vi.mock('../services/roles.api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../services/roles.api')>();
@@ -62,7 +63,7 @@ describe('AdminRolesPage: a bot written under a role', () => {
     renderPage();
     expect(within(await chipOf(BOT)).getByText('Bot')).toBeInTheDocument();
     // No person initials on the bot's chip: it is never shown as a person.
-    expect(within(await chipOf(BOT)).queryByText('DE')).not.toBeInTheDocument();
+    expect(within(await chipOf(BOT)).queryByText(initials(BOT))).not.toBeInTheDocument();
     expect(within(await chipOf(PERSON)).queryByText('Bot')).not.toBeInTheDocument();
     // It can still be removed: the line grants it nothing, and an admin may clean it up.
     expect(screen.getByRole('button', { name: `Remove ${BOT}` })).toBeInTheDocument();
