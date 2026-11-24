@@ -4,7 +4,7 @@ import { logger } from '../shared/logging.js';
 import type { ISkillService, SkillSummary } from '../modules/skills/skills.contract.js';
 import type { IToolManualService } from '../modules/tool-manuals/tool-manuals.contract.js';
 import '../modules/tool-auth/tool-auth.middleware.js'; // Express Request augmentation (req.toolAuth)
-import { resolveConnectionScope, type IAgentScopeResolver } from '../modules/agent-scope/index.js';
+import { resolveConnectionScope, type ConnectionScopeWire, type IAgentScopeResolver } from '../modules/agent-scope/index.js';
 
 const log = logger('catalog-revision');
 
@@ -86,6 +86,79 @@ export function catalogRevision(
   return createHash('sha256').update(lines.join('\n')).digest('hex').slice(0, 32);
 }
 
+/** What a catalog revision is computed from: the two catalogs, the caller's email, and the views. */
+export interface CatalogRevisionSources {
+  toolManuals: Pick<IToolManualService, 'catalogFingerprints'>;
+  skills: Pick<ISkillService, 'listSkills'>;
+  /** Resolves the scope of a connection made as an agent configuration (`modules/agent-scope`). */
+  agentScope?: Pick<IAgentScopeResolver, 'resolve'>;
+  /** Connection-key/internal-token user id → email, for the per-caller ACL. */
+  resolveUserEmail: (userId: string) => Promise<string | undefined>;
+  /** The MCP App views served; absent on a deployment that serves none. */
+  mcpApps?: { manifest(): Promise<{ resources: readonly { uri: string; text: string }[] }> };
+}
+
+/** Who a revision is read for: what a request's credential resolved to. */
+export interface CatalogRevisionCaller {
+  userId?: string | null;
+  /** The agent configuration the credential connects as; absent or null for Everything. */
+  agentPath?: string | null;
+}
+
+/** A caller's revision, the two counts behind it, and the agent their connection is narrowed to. */
+export interface CatalogRevisionAnswer {
+  revision: string;
+  tools: number;
+  skills: number;
+  connection?: ConnectionScopeWire;
+}
+
+export type CatalogRevisionReader = (caller: CatalogRevisionCaller) => Promise<CatalogRevisionAnswer>;
+
+/**
+ * Reads one caller's catalog revision. The ONE place it is computed: the
+ * route below answers with it, and the hosted MCP endpoint calls it directly
+ * (`McpProxyOptions.readCatalogRevision`), on every request, to pick the
+ * caller's cached tool client.
+ *
+ * Called directly, and not over HTTP, because the endpoint and this code are
+ * one process: a request the server sends itself waits on the event loop it
+ * is already running on, behind a limit of its own, so a busy server failed
+ * its own callers on a question it could have answered by calling a function.
+ * The caller is the one the request's credential resolved to, which is what
+ * the route's `manualAuth` resolves the same bearer to.
+ */
+export function createCatalogRevisionReader(deps: CatalogRevisionSources): CatalogRevisionReader {
+  return async (caller) => {
+    const userId = caller.userId;
+    const email = userId ? await deps.resolveUserEmail(userId).catch(() => undefined) : undefined;
+    // No resolvable caller is an EMPTY catalog, not a failure: that is what
+    // both list surfaces answer such a caller, so the fingerprint agrees
+    // with them rather than inventing a third verdict.
+    // A connection made as an agent configuration is fingerprinted over what IT
+    // loads, plus the file itself; Everything asks exactly what it always did.
+    const scope = await resolveConnectionScope(deps.agentScope, email, caller.agentPath);
+    const connectors = scope.connectorFilter();
+    const within = scope.skillFilter();
+    const [manuals, skills] = email
+      ? await Promise.all([
+          connectors ? deps.toolManuals.catalogFingerprints(email, connectors) : deps.toolManuals.catalogFingerprints(email),
+          within ? deps.skills.listSkills(email, { within }) : deps.skills.listSkills(email),
+        ])
+      : [[], []];
+    // A manifest that cannot be read counts as no views, which is also what
+    // the MCP endpoint serves in that state.
+    const views = deps.mcpApps ? ((await deps.mcpApps.manifest().catch(() => null))?.resources ?? []) : [];
+    const connection = scope.toWire();
+    return {
+      revision: catalogRevision(manuals, skills, views, scope.fingerprint()),
+      tools: manuals.length,
+      skills: skills.length,
+      ...(connection ? { connection } : {}),
+    };
+  };
+}
+
 /**
  * `GET /agent/catalog-revision` — the caller's catalog fingerprint, plus the
  * two counts behind it so an operator reading a log can tell a shrinking
@@ -95,48 +168,20 @@ export function catalogRevision(
  * and it tells the caller nothing that route does not already: it is a digest
  * of what they may read, per-caller, ACL-filtered by the two services
  * themselves.
+ *
+ * `read` is the reader the composition root also hands the MCP endpoint, so
+ * the route and the endpoint cannot answer differently. Absent, the route
+ * makes its own from the same sources.
  */
-export function createCatalogRevisionRoutes(deps: {
-  toolManuals: Pick<IToolManualService, 'catalogFingerprints'>;
-  skills: Pick<ISkillService, 'listSkills'>;
-  manualAuth: RequestHandler;
-  /** Resolves the scope of a connection made as an agent configuration (`modules/agent-scope`). */
-  agentScope?: Pick<IAgentScopeResolver, 'resolve'>;
-  /** Connection-key/internal-token user id → email, for the per-caller ACL. */
-  resolveUserEmail: (userId: string) => Promise<string | undefined>;
-  /** The MCP App views served; absent on a deployment that serves none. */
-  mcpApps?: { manifest(): Promise<{ resources: readonly { uri: string; text: string }[] }> };
-}): express.Router {
+export function createCatalogRevisionRoutes(
+  deps: CatalogRevisionSources & { manualAuth: RequestHandler; read?: CatalogRevisionReader },
+): express.Router {
   const router = express.Router();
+  const read = deps.read ?? createCatalogRevisionReader(deps);
 
   router.get('/agent/catalog-revision', deps.manualAuth, async (req: Request, res) => {
     try {
-      const userId = req.toolAuth?.userId;
-      const email = userId ? await deps.resolveUserEmail(userId).catch(() => undefined) : undefined;
-      // No resolvable caller is an EMPTY catalog, not a failure: that is what
-      // both list surfaces answer such a caller, so the fingerprint agrees
-      // with them rather than inventing a third verdict.
-      // A connection made as an agent configuration is fingerprinted over what IT
-      // loads, plus the file itself; Everything asks exactly what it always did.
-      const scope = await resolveConnectionScope(deps.agentScope, email, req.toolAuth?.agentPath);
-      const connectors = scope.connectorFilter();
-      const within = scope.skillFilter();
-      const [manuals, skills] = email
-        ? await Promise.all([
-            connectors ? deps.toolManuals.catalogFingerprints(email, connectors) : deps.toolManuals.catalogFingerprints(email),
-            within ? deps.skills.listSkills(email, { within }) : deps.skills.listSkills(email),
-          ])
-        : [[], []];
-      // A manifest that cannot be read counts as no views, which is also what
-      // the MCP endpoint serves in that state.
-      const views = deps.mcpApps ? ((await deps.mcpApps.manifest().catch(() => null))?.resources ?? []) : [];
-      const connection = scope.toWire();
-      res.json({
-        revision: catalogRevision(manuals, skills, views, scope.fingerprint()),
-        tools: manuals.length,
-        skills: skills.length,
-        ...(connection ? { connection } : {}),
-      });
+      res.json(await read({ userId: req.toolAuth?.userId, agentPath: req.toolAuth?.agentPath }));
     } catch (err) {
       log.error('catalog-revision failed:', { err });
       res.status(500).json({ error: 'Failed to read the catalog' });

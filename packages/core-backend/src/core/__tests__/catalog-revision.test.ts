@@ -3,7 +3,7 @@ import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { SkillSummary } from '../../modules/skills/skills.contract.js';
-import { catalogRevision, createCatalogRevisionRoutes } from '../catalog-revision.js';
+import { catalogRevision, createCatalogRevisionReader, createCatalogRevisionRoutes } from '../catalog-revision.js';
 import { agentFile, agentScopeOver, inMemoryKb, type InMemoryKb } from '../../modules/agent-scope/__tests__/in-memory-kb.js';
 
 /**
@@ -154,6 +154,52 @@ describe('GET /agent/catalog-revision', () => {
       listSkills,
     };
   }
+
+  it('answers what the reader answers when it is called as a function, for the same caller', async () => {
+    // The hosted MCP endpoint calls the reader directly, on every request, and
+    // the local server polls the route: the two must be one answer.
+    const manuals = [manualLine('serper'), manualLine('granola')];
+    const skills = [skill(), skill({ name: 'brief', path: 'Skills/Ops/brief' })];
+    const { url } = await mount({ manuals, skills, userId: 'u1' });
+    const overHttp = await (await fetch(`${url}/agent/catalog-revision`)).json();
+
+    const read = createCatalogRevisionReader({
+      toolManuals: { catalogFingerprints: async () => manuals } as never,
+      skills: { listSkills: async () => skills } as never,
+      resolveUserEmail: async () => 'someone@example.com',
+    });
+
+    expect(await read({ userId: 'u1' })).toEqual(overHttp);
+    // A caller nobody can resolve is an empty catalog on both, never a failure.
+    expect(await read({})).toEqual({ revision: catalogRevision([], []), tools: 0, skills: 0 });
+  });
+
+  it('serves the reader it is handed, asked for the caller its auth resolved', async () => {
+    const read = vi.fn(async () => ({ revision: 'from-the-reader', tools: 3, skills: 4 }));
+    const app = express();
+    app.use(
+      createCatalogRevisionRoutes({
+        toolManuals: { catalogFingerprints: vi.fn() } as never,
+        skills: { listSkills: vi.fn() } as never,
+        manualAuth: (req, _res, next) => {
+          req.toolAuth = { userId: 'u1', agentPath: 'Agents/support.agent' } as never;
+          next();
+        },
+        resolveUserEmail: async () => 'someone@example.com',
+        read,
+      }),
+    );
+    http = app.listen(0);
+    await new Promise<void>((resolve) => http!.once('listening', resolve));
+    const url = `http://127.0.0.1:${(http.address() as AddressInfo).port}`;
+
+    expect(await (await fetch(`${url}/agent/catalog-revision`)).json()).toEqual({
+      revision: 'from-the-reader',
+      tools: 3,
+      skills: 4,
+    });
+    expect(read).toHaveBeenCalledWith({ userId: 'u1', agentPath: 'Agents/support.agent' });
+  });
 
   it("answers the caller's own fingerprint, with the counts behind it", async () => {
     const { url, catalogFingerprints, listSkills } = await mount({

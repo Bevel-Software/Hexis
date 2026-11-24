@@ -158,6 +158,23 @@ export interface McpProxyOptions {
    * the agent wrote it.
    */
   readFileBody?: (userId: string, ref: string) => Promise<Uint8Array>;
+  /**
+   * Reads a caller's catalog revision in process: the same computation
+   * `GET /api/agent/catalog-revision` answers with (`core/catalog-revision.ts`),
+   * called as a function. The revision is asked for on EVERY request, to pick
+   * the caller's cached surface, so over loopback it was a request the server
+   * sent itself on every request: it waited on the event loop it was already
+   * running on, behind `LOOPBACK_TIMEOUT_MS`, and a busy server failed its own
+   * callers. The caller is the one the request's credential resolved to, which
+   * is what the route's auth resolves the loopback bearer to.
+   *
+   * Absent (a test, or a composition that serves the route elsewhere), the
+   * revision is read over loopback as before.
+   */
+  readCatalogRevision?: (caller: {
+    userId: string;
+    agentPath: string | null;
+  }) => Promise<{ revision: string; connection?: ConnectionScopeWire }>;
 }
 
 /** Who a request is from — everything the proxy needs, resolved from that request's own bearer. */
@@ -565,7 +582,7 @@ export class McpService {
     // revision (cheap), not the surface (a full discovery). Everything is
     // told nothing new, so its handshake is exactly what it was.
     const connectionLine = async (): Promise<string | null> =>
-      agentPath ? describeConnection((await this.fetchCatalogRevision(loopbackBearer)).connection) : null;
+      agentPath ? describeConnection((await this.catalogRevisionOf(caller, loopbackBearer)).connection) : null;
     // The Audit log's view of this request — only when the request can be
     // attributed to a key, an agent connection or a page. The catalog names
     // it classifies pooled tools by are the surface's, which is looked up
@@ -976,7 +993,7 @@ export class McpService {
    * through OAuth or their session — the latter two reach the same loopback
    * identity; an HTML page the person is viewing is the person), the
    * credential's scope, and the catalog revision. The revision
-   * is asked for on every request, with the request's own bearer, so it is
+   * is asked for on every request, for the request's own caller, so it is
    * the caller's CURRENT catalog that picks the surface: a manual released,
    * edited or put out of their reach moves it, and the request builds anew.
    *
@@ -986,7 +1003,7 @@ export class McpService {
    */
   private async surfaceFor(caller: McpCaller, loopbackBearer: string): Promise<RequestSurface> {
     const { userId, tokenId } = caller;
-    const { revision } = await this.fetchCatalogRevision(loopbackBearer);
+    const { revision } = await this.catalogRevisionOf(caller, loopbackBearer);
     if (revision === null) return this.buildSurface(userId, tokenId, loopbackBearer, 'uncached');
     // The agent the connection was made as is part of the key: two
     // connections of one person made as different agents are two surfaces.
@@ -1006,6 +1023,28 @@ export class McpService {
       (built) => (built.degraded ? DEGRADED_SURFACE_MAX_AGE_MS : undefined),
     );
     return value;
+  }
+
+  /**
+   * The caller's catalog revision, and the agent their connection is narrowed
+   * to: read in process when the composition offers a reader
+   * (`McpProxyOptions.readCatalogRevision`), over loopback otherwise. Null
+   * when it cannot be read, either way — the request then builds a surface of
+   * its own and keeps it to itself.
+   */
+  private async catalogRevisionOf(
+    caller: Pick<McpCaller, 'userId' | 'agentPath'>,
+    loopbackBearer: string,
+  ): Promise<{ revision: string | null; connection?: ConnectionScopeWire }> {
+    const read = this.opts.readCatalogRevision;
+    if (!read) return this.fetchCatalogRevision(loopbackBearer);
+    try {
+      const { revision, connection } = await read({ userId: caller.userId, agentPath: caller.agentPath || null });
+      return { revision: revision || null, ...(connection ? { connection } : {}) };
+    } catch (err) {
+      log.warn("the catalog revision could not be read; building this request's surface uncached:", { err });
+      return { revision: null };
+    }
   }
 
   /**

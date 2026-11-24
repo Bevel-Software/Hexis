@@ -52,6 +52,14 @@ interface HarnessOptions {
   mint?: () => string;
   /** The platform tools that list `.tool` manuals and their setup, on the KB manual. */
   toolListings?: boolean;
+  /**
+   * How the service learns the revision: `'in-process'` hands it a reader that
+   * answers the harness's revision as a function call, as the composition root
+   * does; `'throws'` hands it one that fails. Absent, it asks the loopback.
+   */
+  revisionReader?: 'in-process' | 'throws';
+  /** The loopback's revision route accepts the request and never answers, as a busy server's does. */
+  revisionRouteHangs?: boolean;
 }
 
 async function harness(opts: HarnessOptions = {}) {
@@ -103,6 +111,10 @@ async function harness(opts: HarnessOptions = {}) {
     refused: new Set<string>(),
     /** Every tool call the loopback answered: which tool, with which bearer. */
     calls: [] as { tool: string; bearer: string; path?: string }[],
+    /** Requests the loopback's revision route received. */
+    revisionRouteHits: 0,
+    /** Calls the in-process reader answered, and who each was for. */
+    revisionReads: [] as { userId: string; agentPath: string | null }[],
     base: '',
   };
   const bearerOf = (req: express.Request) => (req.headers.authorization ?? '').replace(/^Bearer /, '');
@@ -110,6 +122,8 @@ async function harness(opts: HarnessOptions = {}) {
   const app = express();
   app.use(express.json());
   app.get('/api/agent/catalog-revision', (_req, res) => {
+    state.revisionRouteHits += 1;
+    if (opts.revisionRouteHangs) return;
     res.json({ revision: state.revision, tools: state.extraManuals.length, skills: 0 });
   });
   app.get('/api/agent/all-tools', async (_req, res) => {
@@ -166,6 +180,15 @@ async function harness(opts: HarnessOptions = {}) {
         spillStore: new SpillStore(join(tmpdir(), 'bevel-test-spills')),
         publicFrontendUrl: 'http://localhost:5173',
         surfaceCache: opts.surfaceCache,
+        ...(opts.revisionReader
+          ? {
+              readCatalogRevision: async (who: { userId: string; agentPath: string | null }) => {
+                state.revisionReads.push(who);
+                if (opts.revisionReader === 'throws') throw new Error('the catalog could not be read');
+                return { revision: state.revision };
+              },
+            }
+          : {}),
       },
       undefined,
       undefined,
@@ -430,6 +453,76 @@ describe('McpService — one tool client per person and catalog revision', () =>
     // And no client keeps the bearer of the request that built it.
     const templates = JSON.stringify(await a.config.tool_repository.getManualCallTemplates());
     expect(templates).not.toContain('bevel_key_1');
+  });
+});
+
+describe('McpService — the revision is read in process', () => {
+  it('asks the server nothing over HTTP for the revision, and still serves a second request from the first build', async () => {
+    const { state, mcp } = await harness({ revisionReader: 'in-process' });
+
+    const coldList = (await (await connect(mcp)).listTools()).tools.map((t) => t.name);
+    const warmList = (await (await connect(mcp)).listTools()).tools.map((t) => t.name);
+
+    expect(warmList).toEqual(coldList);
+    expect(state.builds).toBe(1);
+    expect(state.revisionRouteHits).toBe(0);
+    // Asked once per request, for the caller the request's credential resolved to.
+    expect(state.revisionReads).toEqual([
+      { userId: 'user-A', agentPath: null },
+      { userId: 'user-A', agentPath: null },
+    ]);
+  });
+
+  it('builds anew when the revision the reader answers moves', async () => {
+    const { state, mcp } = await harness({ revisionReader: 'in-process' });
+    const before = (await (await connect(mcp)).listTools()).tools.map((t) => t.name);
+    expect(before.some((n) => n.includes('late_arrival'))).toBe(false);
+
+    state.extraManuals = [lateManual(state.base)];
+    state.revision = 'rev-2';
+    const after = (await (await connect(mcp)).listTools()).tools.map((t) => t.name);
+
+    expect(after.some((n) => n.includes('late_arrival'))).toBe(true);
+    expect(state.builds).toBe(2);
+    expect(state.revisionRouteHits).toBe(0);
+  });
+
+  it('reads the revision for the agent a narrowed connection was made as', async () => {
+    const { state, mcp } = await harness({ revisionReader: 'in-process' });
+    await (await connect(mcp, { agentPath: 'Agents/support.agent' })).listTools();
+    expect(state.revisionReads.at(-1)).toEqual({ userId: 'user-A', agentPath: 'Agents/support.agent' });
+  });
+
+  it('answers a warm request at once while the revision route would not answer at all', async () => {
+    // The route accepts a request and never answers it: what a server too busy
+    // to serve itself does until the caller's limit fires. Over loopback this
+    // request would wait out that limit; read in process it never asks.
+    const { state, mcp } = await harness({ revisionReader: 'in-process', revisionRouteHangs: true });
+    await (await connect(mcp)).listTools();
+
+    const client = await connect(mcp);
+    const started = performance.now();
+    const names = (await client.listTools()).tools.map((t) => t.name);
+
+    expect(names.length).toBeGreaterThan(0);
+    // Far under the 15 s the loopback limit allows a hung route.
+    expect(performance.now() - started).toBeLessThan(2_000);
+    expect(state.builds).toBe(1);
+    expect(state.revisionRouteHits).toBe(0);
+  });
+
+  it('builds per request when the reader fails, never serving a surface it cannot tell is current', async () => {
+    const { state, mcp } = await harness({ revisionReader: 'throws' });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const first = (await (await connect(mcp)).listTools()).tools.map((t) => t.name);
+    const second = (await (await connect(mcp)).listTools()).tools.map((t) => t.name);
+
+    expect(second).toEqual(first);
+    expect(first.length).toBeGreaterThan(0);
+    expect(state.builds).toBe(2);
+    // A failed read is not a reason to fall back to asking over HTTP.
+    expect(state.revisionRouteHits).toBe(0);
   });
 });
 

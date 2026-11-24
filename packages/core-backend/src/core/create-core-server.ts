@@ -615,6 +615,8 @@ export async function createCoreServer(
     // The views move the revision too: a release that changes a view and no
     // manual would otherwise leave a running local server on the old one.
     mcpApps: core.mcpAppService,
+    // The reader the MCP endpoint calls in process: one computation, two callers.
+    read: core.readCatalogRevision,
   }));
   // The only core route that returns secret VALUES: a local `.tool`'s declared
   // variables, for the local MCP server that will execute it. It re-reads the
