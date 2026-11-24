@@ -137,6 +137,19 @@ function findRole(model: RolesModel, canonical: string): RoleModel | undefined {
   return model.find((r) => canonicalRoleName(r.displayName) === canonical);
 }
 
+/**
+ * `text` with the role `displayName` in it: unchanged when the file has it
+ * already, else with the role appended, empty. A role the app defines exists
+ * whether or not roles.yaml names it yet, so the first member an admin gives
+ * it is what writes its entry; every other edit then finds the role there.
+ */
+export function withRole(text: string, displayName: string): string {
+  const model = parseRolesModel(text);
+  if (findRole(model, canonicalRoleName(displayName))) return text;
+  model.push({ displayName: displayName.trim(), members: [] });
+  return emitRolesModel(model);
+}
+
 function reemit(original: string, model: RolesModel): EditResult {
   const text = emitRolesModel(model);
   // Compare against a re-emit of the ORIGINAL so a pure formatting difference

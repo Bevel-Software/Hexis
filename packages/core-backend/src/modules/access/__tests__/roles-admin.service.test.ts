@@ -738,3 +738,87 @@ describe('Admin fixed members — the deployment admin', () => {
     await expect(serviceWith([]).addMember(ADMIN, 'admin', OWNER)).resolves.toBeDefined();
   });
 });
+
+describe('roles the app defines', () => {
+  const INFRA = { displayName: 'Infrastructure Engineer', description: 'Sees and runs the executors.' };
+  let root: string;
+  let repo: string;
+  let ws: WorkspaceService;
+  let svc: RolesAdminService;
+
+  const serviceWith = (appRoles: { displayName: string; description: string }[], deploymentAdmins: string[] = []) =>
+    new RolesAdminService(ws, stubVersionControl().svc, new AccessControlService(ws, KB, realDisk()), realDisk(), KB, () => DEFAULT_BRANCH, stubEventBus().bus, deploymentAdmins, appRoles);
+
+  beforeEach(async () => {
+    root = await mkTmpRoot();
+    const workspaceDir = path.join(root, WS);
+    repo = path.join(workspaceDir, KB);
+    await write(repo, 'roles.yaml', ROLES);
+    await write(repo, 'groups.yaml', 'groups:\n  Platform Team:\n    - pat@x.io\n');
+    ws = stubWorkspace(workspaceDir);
+    svc = serviceWith([INFRA]);
+  });
+
+  it.each([
+    ['a name roles.yaml reads differently (a colon)', 'Sales: EMEA', /cannot be written|does not read back/],
+    ['a reserved name', 'everyone', /reserved name/],
+    ['the other reserved name', 'Deny', /reserved name/],
+    ['a group token', 'group/Ops', /reserved 'group\/' prefix/],
+    ['a plugin token', 'plugin/Tools', /reserved 'plugin\/' prefix/],
+    ["core's Admin, however spelled", ' admin ', /already a role of this deployment/],
+    ['an empty name', '  ', /empty name/],
+  ])('refuses to start with an app role that is %s, saying why', (_what, displayName, reason) => {
+    expect(() => serviceWith([{ displayName, description: 'x' }])).toThrow(reason);
+  });
+
+  it('refuses two app roles of one name', () => {
+    expect(() => serviceWith([INFRA, { displayName: 'infrastructure  engineer', description: 'again' }])).toThrow(/already a role/);
+  });
+
+  it('lists Admin with the deployment admins when roles.yaml does not name it, as when it does', async () => {
+    await write(repo, 'roles.yaml', 'roles:\n  Sales:\n    - felix@example.com\n');
+    const admin = (await serviceWith([INFRA], ['owner@example.com']).getRoster(ADMIN.email)).find((r) => r.canonical === 'admin')!;
+    expect(admin).toMatchObject({ isAdmin: true, members: [], fixedMembers: ['owner@example.com'], fixedMembersNote: 'Owner; cannot be removed here' });
+  });
+
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it('lists an app role nobody holds, after the roles the file names, with its description', async () => {
+    const roster = await svc.getRoster(ADMIN.email);
+    expect(roster.map((r) => r.canonical)).toEqual(['admin', 'sales', 'infrastructure engineer']);
+    expect(roster[2]).toMatchObject({
+      displayName: 'Infrastructure Engineer',
+      members: [],
+      groups: [],
+      isAdmin: false,
+      capability: { description: INFRA.description, groupAssignable: true },
+    });
+    expect(roster[0]!.capability!.description).toMatch(/deployment settings/);
+  });
+
+  it('writes the role into roles.yaml with the first member an admin gives it, and lists it once', async () => {
+    const roster = await svc.addMember(ADMIN, 'infrastructure engineer', 'ops@example.com');
+    expect(await fs.readFile(path.join(repo, 'roles.yaml'), 'utf-8')).toContain('  Infrastructure Engineer:\n    - ops@example.com\n');
+    expect(roster.filter((r) => r.canonical === 'infrastructure engineer')).toHaveLength(1);
+    expect(roster.find((r) => r.canonical === 'infrastructure engineer')!.members).toEqual(['ops@example.com']);
+  });
+
+  it('writes the role with the first group an admin assigns to it', async () => {
+    const roster = await svc.assignGroup(ADMIN, 'infrastructure engineer', 'Platform Team');
+    expect(roster.find((r) => r.canonical === 'infrastructure engineer')!.groups).toEqual(['platform team']);
+  });
+
+  it('still refuses a role the deployment does not define, writing nothing', async () => {
+    await expect(svc.addMember(ADMIN, 'developer', 'ops@example.com')).rejects.toMatchObject({ status: 404 });
+    expect(await fs.readFile(path.join(repo, 'roles.yaml'), 'utf-8')).toBe(ROLES);
+  });
+
+  it('refuses to convert an app role to a group; a legacy one still converts', async () => {
+    await svc.addMember(ADMIN, 'infrastructure engineer', 'ops@example.com');
+    await expect(svc.convertRoleToGroup(ADMIN, 'infrastructure engineer')).rejects.toMatchObject({ status: 422 });
+    const roster = await svc.convertRoleToGroup(ADMIN, 'sales');
+    expect(roster.map((r) => r.canonical)).not.toContain('sales');
+  });
+});

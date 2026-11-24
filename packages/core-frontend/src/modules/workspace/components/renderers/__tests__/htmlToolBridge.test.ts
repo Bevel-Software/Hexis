@@ -18,6 +18,17 @@ import {
 
 const PAGE = 'Dashboards/Roadmap.html';
 
+/** A browser memory for one page's source, as the hook binds it: `allowed` says whether it already holds an Allow. */
+function memoryOf(allowed: boolean) {
+  const memory = { remembered: vi.fn(() => allowed), remember: vi.fn(() => void (allowed = true)) };
+  return memory;
+}
+
+/** A browser that remembers no Allow for the page. */
+function nothingRemembered() {
+  return memoryOf(false);
+}
+
 /** The deployment's UTCP manual: `read_file` reads, `edit_file` and `write_file` write. */
 const MANUAL = {
   tools: [
@@ -143,7 +154,7 @@ describe('answering a page: reads at once, the first write asks', () => {
     const client = new PageToolsClient(PAGE, server.fetchImpl);
     let answer: (ok: boolean) => void = () => {};
     const ask = vi.fn(() => new Promise<boolean>((resolve) => (answer = resolve)));
-    const consent = new PageConsent(ask);
+    const consent = new PageConsent(ask, nothingRemembered());
     return { server, client, consent, ask, answer: (ok: boolean) => answer(ok) };
   }
 
@@ -171,7 +182,7 @@ describe('answering a page: reads at once, the first write asks', () => {
     expect(ask).toHaveBeenCalledTimes(1);
   });
 
-  it('Deny answers `denied`, runs nothing, reports the refusal, and the next write asks again', async () => {
+  it("Don't allow answers `denied`, runs nothing, reports the refusal, and the next write asks again", async () => {
     const { client, consent, ask, answer, server } = setup();
     const denied = answerToolCall(call('callTool', 'edit_file', { body: { path: 'a.md' } }), client, consent);
     await vi.waitFor(() => expect(ask).toHaveBeenCalledTimes(1));
@@ -204,15 +215,74 @@ describe('answering a page: reads at once, the first write asks', () => {
     expect(ask).toHaveBeenCalledTimes(1);
   });
 
-  it('asks again in a new view of the page: an Allow holds only until the page is reloaded', async () => {
+  it('asks again in a new view of the page when the browser remembers no Allow for it', async () => {
     const { client, answer } = setup();
-    const firstView = new PageConsent(() => Promise.resolve(true));
+    const firstView = new PageConsent(() => Promise.resolve(true), nothingRemembered());
     await answerToolCall(call('callTool', 'edit_file', {}), client, firstView);
     const ask = vi.fn(() => Promise.resolve(false));
-    const reloaded = new PageConsent(ask);
+    const reloaded = new PageConsent(ask, nothingRemembered());
     expect(await answerToolCall(call('callTool', 'edit_file', {}), client, reloaded)).toMatchObject({ ok: false, code: DENIED });
     expect(ask).toHaveBeenCalledTimes(1);
     answer(true);
+  });
+});
+
+describe('the browser memory: an Allow is remembered for the page, a refusal never is', () => {
+  it('runs the first write of a remembered page with no card', async () => {
+    const server = fakeServer((name) => text({ ran: name }));
+    const client = new PageToolsClient(PAGE, server.fetchImpl);
+    const ask = vi.fn(() => Promise.resolve(false));
+    const consent = new PageConsent(ask, memoryOf(true));
+    expect(await answerToolCall(call('callTool', 'edit_file', {}), client, consent)).toMatchObject({ ok: true, result: { ran: 'edit_file' } });
+    expect(await answerToolCall(call('callToolChain', 'return 1'), client, consent)).toMatchObject({ ok: true });
+    expect(ask).not.toHaveBeenCalled();
+    expect(server.mcpCalls()).toEqual(['edit_file', 'call_tool_chain']);
+  });
+
+  it('remembers an Allow, so the next view of the same page asks nothing', async () => {
+    const server = fakeServer((name) => text({ ran: name }));
+    const client = new PageToolsClient(PAGE, server.fetchImpl);
+    const memory = nothingRemembered();
+    await answerToolCall(call('callTool', 'edit_file', {}), client, new PageConsent(() => Promise.resolve(true), memory));
+    expect(memory.remember).toHaveBeenCalledTimes(1);
+    const ask = vi.fn(() => Promise.resolve(false));
+    expect(await answerToolCall(call('callTool', 'edit_file', {}), client, new PageConsent(ask, memory))).toMatchObject({ ok: true });
+    expect(ask).not.toHaveBeenCalled();
+  });
+
+  it("remembers nothing on Don't allow, and nothing when the view ends with the card open", async () => {
+    const server = fakeServer((name) => text({ ran: name }));
+    const client = new PageToolsClient(PAGE, server.fetchImpl);
+    const refused = nothingRemembered();
+    const reply = await answerToolCall(call('callTool', 'edit_file', {}), client, new PageConsent(() => Promise.resolve(false), refused));
+    expect(reply).toMatchObject({ ok: false, error: DENIED, code: DENIED });
+    expect(refused.remember).not.toHaveBeenCalled();
+
+    const left = nothingRemembered();
+    let answer: (ok: boolean) => void = () => {};
+    const consent = new PageConsent(() => new Promise<boolean>((resolve) => (answer = resolve)), left);
+    const pending = answerToolCall(call('callTool', 'edit_file', {}), client, consent);
+    await vi.waitFor(() => expect(consent.open).not.toBeNull());
+    consent.close();
+    answer(true);
+    expect(await pending).toMatchObject({ ok: false, code: 'closed' });
+    expect(left.remember).not.toHaveBeenCalled();
+    expect(server.mcpCalls()).toEqual([]);
+  });
+
+  it('shows one card for ten writes at once when nothing is remembered, and Allow runs all ten', async () => {
+    const server = fakeServer((name) => text({ ran: name }));
+    const client = new PageToolsClient(PAGE, server.fetchImpl);
+    let answer: (ok: boolean) => void = () => {};
+    const ask = vi.fn(() => new Promise<boolean>((resolve) => (answer = resolve)));
+    const memory = nothingRemembered();
+    const consent = new PageConsent(ask, memory);
+    const writes = Array.from({ length: 10 }, () => answerToolCall(call('callTool', 'edit_file', {}), client, consent));
+    await vi.waitFor(() => expect(ask).toHaveBeenCalledTimes(1));
+    answer(true);
+    expect((await Promise.all(writes)).every((w) => w.ok)).toBe(true);
+    expect(ask).toHaveBeenCalledTimes(1);
+    expect(memory.remember).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -429,7 +499,7 @@ describe('uploadFile: the agent upload path, run by the app as the viewer', () =
     const client = new PageToolsClient(PAGE, server.fetchImpl);
     let answer: (ok: boolean) => void = () => {};
     const ask = vi.fn(() => new Promise<boolean>((resolve) => (answer = resolve)));
-    const consent = new PageConsent(ask);
+    const consent = new PageConsent(ask, nothingRemembered());
 
     const first = answerToolCall(call('uploadFile', XLSX, { branch: 'main', destination: 'Data/Campaigns/Easter' }), client, consent);
     await vi.waitFor(() => expect(ask).toHaveBeenCalledTimes(1));
@@ -444,10 +514,10 @@ describe('uploadFile: the agent upload path, run by the app as the viewer', () =
     expect(ask).toHaveBeenCalledTimes(1);
   });
 
-  it('Deny answers `denied`, uploads nothing, and records a refused apply_file_upload under the page', async () => {
+  it("Don't allow answers `denied`, uploads nothing, and records a refused apply_file_upload under the page", async () => {
     const server = uploadServer();
     const client = new PageToolsClient(PAGE, server.fetchImpl);
-    const consent = new PageConsent(() => Promise.resolve(false));
+    const consent = new PageConsent(() => Promise.resolve(false), nothingRemembered());
     const reply = await answerToolCall(
       call('uploadFile', XLSX, { branch: 'main', destination: 'Data/Campaigns/Easter', mode: 'overwrite' }),
       client,

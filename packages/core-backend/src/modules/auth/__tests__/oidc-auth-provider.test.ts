@@ -1,15 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import express from 'express';
 import type { Server } from 'node:http';
-import { randomBytes } from 'node:crypto';
 import { OidcAuthProvider, oidcRedirectUri, oidcSettingsFrom, type OidcSettings } from '../oidc-auth-provider.js';
 import { createAuthRoutes, type AuthProviderPlugin } from '../auth.routes.js';
 import type { AuthService } from '../auth.service.js';
-import {
-  CORE_SETTINGS,
-  DeploymentSettingsService,
-} from '../../settings/deployment-settings.service.js';
-import type { Database } from '../../database/connection.js';
+import { setLogger } from '../../../shared/logging.js';
+import { capturingLogger } from '../../../__tests__/capturing-logger.js';
+import { realDeploymentSettings } from '../../../__tests__/real-settings.js';
 
 const ISSUER = 'https://idp.example.com';
 const DISCOVERY = {
@@ -171,6 +168,95 @@ describe('OidcAuthProvider', () => {
     expect(authService.loginWithSso).not.toHaveBeenCalled();
   });
 
+  /** Start a sign-in, then return to the callback with `query` (state filled in unless given). */
+  async function callbackWith(base: string, query: Record<string, string>): Promise<string> {
+    const start = await fetch(`${base}/api/auth/oidc/login`, { redirect: 'manual' });
+    const state = new URL(start.headers.get('location')!).searchParams.get('state')!;
+    const cookie = start.headers.get('set-cookie')!.split(';')[0];
+    const params = new URLSearchParams({ state, ...query });
+    const cb = await fetch(`${base}/api/auth/oidc/callback?${params}`, {
+      redirect: 'manual',
+      headers: { cookie },
+    });
+    return cb.headers.get('location')!;
+  }
+
+  it("reports the provider's access_denied as #error=denied, not as a state failure", async () => {
+    const idp = makeIdpFetch();
+    const base = await listen(makeProvider(idp.impl, authService));
+    const location = await callbackWith(base, {
+      error: 'access_denied',
+      error_description: 'Email address not verified',
+    });
+    expect(location).toBe('http://localhost:5173/auth/oidc/callback#error=denied');
+    // The provider's own text never reaches the login screen.
+    expect(location).not.toContain('verified');
+    expect(idp.calls.some((c) => c.url === DISCOVERY.token_endpoint)).toBe(false);
+    expect(authService.loginWithSso).not.toHaveBeenCalled();
+  });
+
+  it.each(['invalid_scope', 'server_error', 'temporarily_unavailable', 'something <odd>'])(
+    "reports any other provider error (%s) as #error=auth",
+    async (error) => {
+      const idp = makeIdpFetch();
+      const base = await listen(makeProvider(idp.impl, authService));
+      expect(await callbackWith(base, { error })).toBe('http://localhost:5173/auth/oidc/callback#error=auth');
+      expect(idp.calls.some((c) => c.url === DISCOVERY.token_endpoint)).toBe(false);
+    },
+  );
+
+  it.each([
+    // A standard code reaches the log as itself — including one only the
+    // authorization endpoint sends (OIDC's consent_required).
+    ['access_denied', 'access_denied'],
+    ['consent_required', 'consent_required'],
+    // Any other string is the provider's own text, however code-like it looks.
+    ['client_secret_hunter', 'non-standard'],
+    ['something <odd>', 'non-standard'],
+  ])("logs the provider's error %s as %s, and never its description", async (error, logged) => {
+    const description = 'Mailbox carol@example.com is not verified';
+    const { logger, lines } = capturingLogger();
+    const restore = setLogger(logger);
+    try {
+      const idp = makeIdpFetch();
+      const base = await listen(makeProvider(idp.impl, authService));
+      await callbackWith(base, { error, error_description: description });
+    } finally {
+      setLogger(restore);
+    }
+    expect(lines).toContainEqual(
+      expect.objectContaining({ level: 'warn', fields: expect.objectContaining({ error: logged }) }),
+    );
+    // Every message and field written, together: the provider's description
+    // never appears, and a non-standard error never appears as itself.
+    const written = JSON.stringify(lines);
+    expect(written).not.toContain(description);
+    if (logged === 'non-standard') expect(written).not.toContain(error);
+  });
+
+  it('still reports a provider error that comes with a forged state as a state failure', async () => {
+    const idp = makeIdpFetch();
+    const base = await listen(makeProvider(idp.impl, authService));
+    expect(await callbackWith(base, { state: 'forged', error: 'access_denied' })).toBe(
+      'http://localhost:5173/auth/oidc/callback#error=state',
+    );
+  });
+
+  it('reports a provider error without the state cookie as a state failure', async () => {
+    const idp = makeIdpFetch();
+    const base = await listen(makeProvider(idp.impl, authService));
+    const cb = await fetch(`${base}/api/auth/oidc/callback?error=access_denied&state=anything`, {
+      redirect: 'manual',
+    });
+    expect(cb.headers.get('location')).toBe('http://localhost:5173/auth/oidc/callback#error=state');
+  });
+
+  it('still reports a callback with neither a code nor an error as a state failure', async () => {
+    const idp = makeIdpFetch();
+    const base = await listen(makeProvider(idp.impl, authService));
+    expect(await callbackWith(base, {})).toBe('http://localhost:5173/auth/oidc/callback#error=state');
+  });
+
   it('fails with #error=auth when userinfo has no email claim', async () => {
     const idp = makeIdpFetch({ userinfo: { name: 'No Email' } });
     const base = await listen(makeProvider(idp.impl, authService));
@@ -250,37 +336,12 @@ describe('OidcAuthProvider', () => {
  * the next sign-in without a restart.
  */
 describe('OidcAuthProvider — live configuration', () => {
-  /** Same in-memory stand-in for `deployment_settings` the settings tests use. */
-  function makeDb() {
-    const rows: { key: string; value: string; encrypted: boolean }[] = [];
-    return {
-      select: () => ({ from: () => Promise.resolve(rows.map((r) => ({ ...r }))) }),
-      insert: () => ({
-        values: (v: { key: string; value: string; encrypted: boolean }) => ({
-          onConflictDoUpdate: () => {
-            const existing = rows.find((r) => r.key === v.key);
-            if (existing) Object.assign(existing, v);
-            else rows.push({ key: v.key, value: v.value, encrypted: v.encrypted });
-            return Promise.resolve();
-          },
-        }),
-      }),
-      delete: () => ({ where: () => Promise.resolve() }),
-    } as unknown as Database;
-  }
-
-  let savedEnv: NodeJS.ProcessEnv;
-  beforeEach(() => {
-    savedEnv = { ...process.env };
-    for (const def of CORE_SETTINGS) delete process.env[def.envVar];
-  });
-  afterEach(() => {
-    process.env = savedEnv;
-  });
-
-  /** The real auth router over real settings, with an overlay plugin beside OIDC. */
-  async function boot(fetchImpl: typeof fetch = makeIdpFetch().impl) {
-    const settings = new DeploymentSettingsService(makeDb(), randomBytes(32).toString('base64'));
+  /**
+   * The real auth router over real settings (reading `env`, empty unless a
+   * test passes one), with an overlay plugin beside OIDC.
+   */
+  async function boot(fetchImpl: typeof fetch = makeIdpFetch().impl, env: NodeJS.ProcessEnv = {}) {
+    const settings = realDeploymentSettings(env);
     const overlay: AuthProviderPlugin = {
       key: 'microsoft',
       label: 'Sign in with Microsoft',
@@ -473,11 +534,12 @@ describe('OidcAuthProvider — live configuration', () => {
   });
 
   it('keeps an environment-configured provider exactly as the environment says', async () => {
-    process.env.OIDC_ISSUER_URL = ISSUER;
-    process.env.OIDC_CLIENT_ID = 'env-client';
-    process.env.OIDC_CLIENT_SECRET = 'env-secret';
-    process.env.OIDC_PROVIDER_LABEL = 'Env SSO';
-    const { base, settings, probe } = await boot();
+    const { base, settings, probe } = await boot(undefined, {
+      OIDC_ISSUER_URL: ISSUER,
+      OIDC_CLIENT_ID: 'env-client',
+      OIDC_CLIENT_SECRET: 'env-secret',
+      OIDC_PROVIDER_LABEL: 'Env SSO',
+    });
     expect((await probe()).find((p) => p.key === 'oidc')?.label).toBe('Env SSO');
 
     // A UI save cannot override an environment value — it is refused outright.

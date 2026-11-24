@@ -36,6 +36,7 @@ import { MaintenanceOverlay } from '../modules/layout/components/MaintenanceOver
 import { AdminProvider } from '../modules/admin/state/admin.context';
 import { RolesCorruptedBanner } from '../modules/admin/components/RolesCorruptedBanner';
 import { SettingsLayout } from '../modules/settings/components/SettingsLayout';
+import { registrySettingsPages } from '../modules/settings';
 import { DeploymentPage } from '../modules/settings/components/DeploymentPage';
 import { SecretsPage } from '../modules/secrets-vault/components/SecretsPage';
 import { AccountPage } from '../modules/auth/components/AccountPage';
@@ -53,7 +54,7 @@ import { OpenChangeRequestDialog } from '../modules/pr/components/OpenChangeRequ
 import { ChangeRequestLink } from '../modules/change-requests/components/ChangeRequestLink';
 import { useMediaQuery } from '../modules/layout/hooks/useMediaQuery';
 import { NARROW_QUERY } from '../modules/layout/breakpoints';
-import { setSidebarCollapsed } from '../modules/layout/state/sidebar';
+import { setSidebarCollapsed } from '../modules/layout';
 import {
   activeAppId,
   appHostingPath,
@@ -74,6 +75,7 @@ import {
 } from './registry';
 import { withCoreModuleContributions } from './core-contributions';
 import { KnowledgeSurface } from './KnowledgeSurface';
+import { SHELL_PATHS } from './shell-paths';
 import { isLibraryLocation } from '../modules/library/routes/library-paths';
 import { EmbedView } from '../modules/embed/components/EmbedView';
 import { EmbedLinkPage } from '../modules/embed/components/EmbedLinkPage';
@@ -193,8 +195,8 @@ const CORE_BANNERS: BannerDef[] = [
  * comment at the `<Routes>` block below).
  */
 const CORE_TOP_LEVEL_ROUTES: RouteDef[] = [
-  { path: '/embed', element: <EmbedView /> },
-  { path: '/embed/link', element: <EmbedLinkPage /> },
+  { path: SHELL_PATHS.embed, element: <EmbedView /> },
+  { path: SHELL_PATHS.embedLink, element: <EmbedLinkPage /> },
 ];
 
 /**
@@ -324,6 +326,11 @@ export function AppChrome() {
     () => [...registry.apps].sort((a, b) => (a.order ?? 100) - (b.order ?? 100)),
     [registry],
   );
+  // The settings pages the registry's rows bring, mounted under the settings layout with core's.
+  const settingsPages = useMemo(
+    () => registrySettingsPages(registry).map((row) => ({ path: row.path, element: row.page })),
+    [registry],
+  );
   // A claimed app (a library item page at its canonical /workspace URL) wins
   // over the prefix rule — the switcher highlights the surface on screen.
   const [claimedApp, setClaimedApp] = useState<string | null>(null);
@@ -362,7 +369,7 @@ export function AppChrome() {
             <div className="flex-1 min-h-0">
               {/* Switching routes swaps EVERYTHING below the toolbar: an app
                   surface, a standalone settings page, or a redirect. */}
-              <ShellRoutes apps={apps} />
+              <ShellRoutes apps={apps} settingsPages={settingsPages} />
             </div>
           </div>
           </InviteDialogProvider>
@@ -414,7 +421,7 @@ function ConnectToolsRedirect() {
   return <Navigate to={`${CONNECT_TOOLS_PATH}${search}${hash}`} replace />;
 }
 
-export function ShellRoutes({ apps }: { apps: AppDef[] }) {
+export function ShellRoutes({ apps, settingsPages = [] }: { apps: AppDef[]; settingsPages?: RouteDef[] }) {
   return (
     <Routes>
       {apps.map((app) => (
@@ -432,7 +439,7 @@ export function ShellRoutes({ apps }: { apps: AppDef[] }) {
           `/connect` — the address the server hands out — is its permanent
           redirect, carrying the query (`?oauth=`) and the fragment
           (`#authorized`, `#error=`) those landings depend on. */}
-      <Route path="/connect" element={<ConnectToolsRedirect />} />
+      <Route path={SHELL_PATHS.connect} element={<ConnectToolsRedirect />} />
       {/* A PATHLESS layout route: the child paths below stay byte-identical,
           which is what keeps `/secrets` the exact URL external OAuth redirects
           land on. Its only job is to keep the settings nav mounted across
@@ -449,8 +456,13 @@ export function ShellRoutes({ apps }: { apps: AppDef[] }) {
         {/* The Audit log replaced the admin Connection keys overview; links
             to the old address (bookmarks, the enterprise shell's older rows)
             land on it. */}
-        <Route path="/connection-keys" element={<Navigate to="/audit-log" replace />} />
+        <Route path={SHELL_PATHS.connectionKeys} element={<Navigate to="/audit-log" replace />} />
         <Route path="/tools" element={<ToolsExplorerPage />} />
+        {/* The app's own settings pages (`AdminMenuItem.page`): under the
+            same layout, so they share the nav and are listed in it. */}
+        {settingsPages.map((page) => (
+          <Route key={page.path} path={page.path} element={page.element} />
+        ))}
       </Route>
       {/* `/` lands on Knowledge — or on the deep link an SSO sign-in carried
           through its round-trip (see `RootLanding`).
@@ -470,8 +482,8 @@ export function ShellRoutes({ apps }: { apps: AppDef[] }) {
 
           OUTSIDE the settings layout, like `/connect` above: these are landing
           and redirect targets, not settings destinations. */}
-      <Route path="/" element={<RootLanding />} />
-      <Route path="/auth/*" element={<RootLanding />} />
+      <Route path={SHELL_PATHS.root} element={<RootLanding />} />
+      <Route path={SHELL_PATHS.authReturn} element={<RootLanding />} />
       {/* The address every change-request link carries (the backend's
           change-request-link helper: `open_change_request`, the read tools,
           every summary's `url`). It opens the request itself, in the
@@ -479,7 +491,7 @@ export function ShellRoutes({ apps }: { apps: AppDef[] }) {
           Before this route existed the catch-all below swallowed the link.
           OUTSIDE the settings layout and the apps, like the `/connect`
           redirect: a landing target, not a destination with a nav row. */}
-      <Route path="/change-requests/:number" element={<ChangeRequestLink />} />
+      <Route path={SHELL_PATHS.changeRequest} element={<ChangeRequestLink />} />
       <Route path="*" element={<Navigate to={KB_ROUTE_PREFIX} replace />} />
     </Routes>
   );
