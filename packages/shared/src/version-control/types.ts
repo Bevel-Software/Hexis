@@ -278,8 +278,9 @@ export type MergeBranchOutcome =
  * `stuck`, present with `needsAttention`, names the files whose failed save is
  * still missing from the repository: at most ten the caller may read, and
  * `more`, how many others there are (past the ten, or not the caller's to
- * read). Saving such a file again lands it. A failed save with nothing left to
- * push is cleared before this answer is built, so it is never counted.
+ * read). Saving such a file again lands it. A failed save that git confirms
+ * has nothing left to push is cleared before this answer is built, so it is
+ * not counted; one that could not be checked is kept, and counted.
  */
 export type PendingCommitsRefusal = {
   kind: 'pending-commits';

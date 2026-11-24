@@ -2927,8 +2927,10 @@ export class GitService implements IGitService {
       }
       const remoteRef = await this.refreshRemoteBranchRef(cwd, branch);
       const { stdout: status } = await this.git(cwd, ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignored=matching']);
-      // A folder git reports whole (an ignored one) ends in `/`: it covers every path under it.
-      const dirty = parsePorcelainZ(status);
+      // A folder git reports whole (an ignored one) ends in `/`: it covers every path under it. A staged
+      // rename's OLD path is a change too (gone from the working copy, still in HEAD).
+      const { paths: changed, renameOldByNew } = parsePorcelainZDetailed(status);
+      const dirty = [...changed, ...renameOldByNew.values()];
       const isDirty = (p: string) => dirty.some((d) => d === p || (d.endsWith('/') && p.startsWith(d)));
       const head = (await this.git(cwd, ['rev-parse', '--verify', 'HEAD^{commit}'])).stdout.trim();
       const remote = (await this.git(cwd, ['rev-parse', '--verify', `${remoteRef}^{commit}`])).stdout.trim();

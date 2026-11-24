@@ -565,7 +565,7 @@ export function registerVersionControlTools(
   mount({
     name: 'merge_branch',
     description:
-      'Merge branch `source` into branch `target` as you, and publish `target`. An agent proposes and syncs; ' +
+      'Merge `source` into `target` as you, and publish `target`. An agent proposes and syncs; ' +
       'a person merges: this never lands a change request. It refuses while a change request from `source` ' +
       'into `target` is open (naming it): ask the user to review it in the app. It refuses ' +
       'when `target` is a protected branch unless you could commit every changed file directly to it (never ' +
@@ -574,10 +574,9 @@ export function registerVersionControlTools(
       'is always allowed, even with the draft\'s request open. ' +
       'Writes are committed asynchronously; it waits up to 20s for those on `source`. ' +
       'Returns `merged` with the merge commit; `nothing-to-merge` with `target`\'s tip when it already holds ' +
-      'all of `source`; `pending-commits` (nothing merged) when writes are still committing — retry shortly — ' +
-      'or one failed (`needsAttention`: tell the user; `stuck` names the files to save again); or ' +
-      '`conflicts-need-resolution` with the conflicting ' +
-      'paths (nothing is written; resolve them on `source` and merge again).',
+      'all of `source`; `pending-commits` (nothing merged) while writes commit (retry shortly) or one failed ' +
+      '(`needsAttention`: tell the user; `stuck` names the files to save again); or ' +
+      '`conflicts-need-resolution` with the conflicting paths (nothing written; resolve on `source`, merge again).',
     // Names both branches itself; the merge runs in `target`'s workspace.
     skipBranch: true,
     inputs: {

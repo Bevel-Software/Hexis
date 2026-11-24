@@ -272,6 +272,23 @@ describe.skipIf(!PG_ADMIN_URL)('stuck saves clear themselves once nothing of the
   );
 
   it(
+    'keeps a row for a staged rename\'s old name, for bytes beside the clone, and for a path that is not a valid one',
+    async () => {
+      const w = world;
+      const dir = w.repo(MAIN);
+      // Renamed in the index, not committed: the old name is gone here and still in the last commit.
+      await runGit(dir, ['mv', 'Data/QA/a.md', 'Data/QA/a-renamed.md']);
+      // A save that named a path without the clone folder: its bytes sit beside the clone, where git never looks.
+      await fs.writeFile(path.join(path.dirname(dir), 'stray.md'), 'beside the clone\n');
+      for (const p of [`${KB}/Data/QA/a.md`, 'stray.md', `${KB}/../escape.md`]) await stuckRow(w, { path: p });
+
+      expect(await w.svc.mergeBranch(alice, MAIN, DRAFT)).toMatchObject({ kind: 'pending-commits', pending: 3 });
+      expect((await rowsLeft(w)).map((r) => r.path).sort()).toEqual([`${KB}/../escape.md`, `${KB}/Data/QA/a.md`, 'stray.md'].sort());
+    },
+    PG_TEST_TIMEOUT,
+  );
+
+  it(
     'keeps every row when the repository cannot be reached, and refuses as before',
     async () => {
       const w = world;
