@@ -1182,10 +1182,12 @@ export class GitService implements IGitService {
           `[git] commit on workspace=${workspaceId} branch=${branch} landing with ${report.mustFix.length} unresolved KB validator issue(s); the editor surfaces them but commit is no longer blocked.`,
       );
 
-      // What this commit will change, listed just before it is staged, for
-      // its report should the read of its files after it fail. `touched`
-      // names a new folder as the folder — the one entry the rule above
-      // counts — and a rename by its new path; this listing names every
+      // The paths this commit may change, listed just before it is staged,
+      // for its report should the read of its files after it fail. Every
+      // file it changes is named; a listed path it leaves as it was (a staged
+      // change the working tree has since undone) costs a reactor one read.
+      // `touched` names a new folder as the folder — the one entry the rule
+      // above counts — and a rename by its new path; this listing names every
       // untracked file, and `everyPathOf` both ends of each rename.
       const { stdout: everyFile } = await this.git(cwd, ['status', '--porcelain=v1', '-z', '--untracked-files=all']);
       const pending = everyPathOf(parsePorcelainZDetailed(everyFile));
