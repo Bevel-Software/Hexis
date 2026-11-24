@@ -21,8 +21,10 @@
  * the agent gave them (a string where the schema says string) before the swap.
  * The MCP endpoint installs it on every caller's client; a distribution's own
  * in-process agent installs it on its client the same way. Nothing else about
- * the call changes: a tool without the declaration, or a call with no path in
- * that field, passes through untouched.
+ * the call changes: a tool without either declaration passes through
+ * untouched, and so does a whole-body call with no path in that field, or a
+ * form call whose body is not an object. (A form call whose body is an object
+ * always goes out as the form, with or without its file parts.)
  */
 import type { IAccessControl } from '../access/index.js';
 import { canReadWorkspacePath } from '../access-model/index.js';
@@ -186,23 +188,29 @@ export function installFileBodies(client: ClientLike, read: FileBodyRead): void 
    * text value goes as written, and any other value as its JSON (what an API that takes a JSON part beside the file
    * expects). A part the call left out (absent or `null`) is left out of the form. A file part that is there holds
    * one path: anything else (a blank string, a list, a number) refuses the call, so a file the call meant to send is
-   * never dropped from the form without a word. Every file is read before the form is handed on, so a file that
-   * cannot be read refuses the call with nothing sent.
+   * never dropped from the form without a word. It works in two passes. Every file part is judged first, so a call
+   * with one such part refuses with no file read, whichever part it is. Then every file is read before the form is
+   * handed on, so a file that cannot be read refuses the call with nothing sent (files named before it in the call
+   * have been read by then).
    */
   const formOf = async (parts: Record<string, unknown>, fileParts: string[]): Promise<FormData> => {
-    const form = new FormData();
-    for (const [name, value] of Object.entries(parts)) {
-      if (value === undefined || value === null) continue;
-      if (!fileParts.includes(name)) {
-        form.append(name, typeof value === 'string' ? value : JSON.stringify(value));
-        continue;
-      }
+    const given = Object.entries(parts).filter(([, value]) => value !== undefined && value !== null);
+    const refs = new Map<string, string>();
+    for (const [name, value] of given) {
+      if (!fileParts.includes(name)) continue;
       if (typeof value !== 'string' || !value.trim()) {
         throw new FileBodyError(`The form's "${name}" part takes the path of one file to send, and the call gave it none. Give it a path, or leave "${name}" out to send no file.`);
       }
-      const ref = value.trim();
-      const bytes = await readFile(ref);
-      form.append(name, new Blob([Buffer.from(bytes)], { type: rawMimeFor(ref) }), fileNameOf(ref));
+      refs.set(name, value.trim());
+    }
+    const form = new FormData();
+    for (const [name, value] of given) {
+      const ref = refs.get(name);
+      if (ref === undefined) {
+        form.append(name, typeof value === 'string' ? value : JSON.stringify(value));
+        continue;
+      }
+      form.append(name, new Blob([Buffer.from(await readFile(ref))], { type: rawMimeFor(ref) }), fileNameOf(ref));
     }
     return form;
   };

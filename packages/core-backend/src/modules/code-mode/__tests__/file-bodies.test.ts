@@ -41,6 +41,21 @@ const form = {
   },
   tool_call_template: { call_template_type: 'http', http_method: 'POST', url: 'https://api.example/boards/{board_id}/documents', content_type: 'multipart/form-data' },
 };
+/** A form that takes two files, the document and its cover. */
+const twoFiles = {
+  ...form,
+  name: 'board.add_with_cover',
+  inputs: {
+    type: 'object',
+    properties: {
+      board_id: { type: 'string' },
+      body: {
+        type: 'object',
+        properties: { resource: { type: 'string', format: FILE_PATH_FORMAT }, title: { type: 'string' }, cover: { type: 'string', format: FILE_PATH_FORMAT } },
+      },
+    },
+  },
+};
 /** A form with no file part, and a JSON call whose body happens to hold a path: neither sends a file. */
 const formWithoutFile = { ...form, name: 'board.add_note', inputs: { type: 'object', properties: { body: { type: 'object', properties: { note: { type: 'string' } } } } } };
 const jsonWithPath = { ...form, name: 'board.link', tool_call_template: { ...form.tool_call_template, content_type: 'application/json' } };
@@ -199,6 +214,29 @@ describe('installFileBodies', () => {
     }
     expect(reads).toBe(0);
     expect(calls).toEqual([]);
+  });
+
+  it('judges every file part before it reads any: a good file named before a bad part is not read', async () => {
+    const reads: string[] = [];
+    const { client, calls } = fakeClient([twoFiles], async (ref) => {
+      reads.push(ref);
+      return new TextEncoder().encode(`bytes of ${ref}`);
+    });
+    expect(fileBodyPlan(twoFiles)).toEqual({ field: 'body', kind: 'form', fileParts: ['resource', 'cover'] });
+    await expect(client.callTool('board.add_with_cover', { board_id: 'b1', body: { resource: 'Reports/q3.pdf', title: 'Q3', cover: '  ' } })).rejects.toMatchObject({
+      status: 400,
+      kind: 'file-body',
+      data: { error: 'The form\'s "cover" part takes the path of one file to send, and the call gave it none. Give it a path, or leave "cover" out to send no file.' },
+    });
+    expect(reads).toEqual([]);
+    expect(calls).toEqual([]);
+    // Both parts good: each file is read once, and the parts keep the order the call gave them.
+    await client.callTool('board.add_with_cover', { board_id: 'b1', body: { resource: 'Reports/q3.pdf', title: 'Q3', cover: 'Reports/cover.png' } });
+    expect(reads).toEqual(['Reports/q3.pdf', 'Reports/cover.png']);
+    const sent = calls[0]!.args.body as FormData;
+    expect([...sent.keys()]).toEqual(['resource', 'title', 'cover']);
+    expect((sent.get('cover') as File).name).toBe('cover.png');
+    expect((sent.get('cover') as File).type).toBe('image/png');
   });
 
   it('refuses a form whose file cannot be read, and sends nothing', async () => {
