@@ -306,7 +306,7 @@ function VarRow({
           <Button
             variant="primary"
             size="sm"
-            disabled={busy || !value}
+            disabled={busy || !value.trim()}
             onClick={() => void run(() => onSave(value), true)}
           >
             Save
@@ -450,7 +450,7 @@ function OAuthVarRow({
             <Button
               variant="primary"
               size="sm"
-              disabled={busy || !secret}
+              disabled={busy || !secret.trim()}
               onClick={() => void saveSecret()}
             >
               Save

@@ -382,7 +382,7 @@ export function ToolVarRow({
             value={value}
             onChange={(e) => setValue(e.target.value)}
           />
-          <Button variant="primary" size="sm" disabled={busy || !value} onClick={() => void save()}>
+          <Button variant="primary" size="sm" disabled={busy || !value.trim()} onClick={() => void save()}>
             Save
           </Button>
           <Button variant="quiet" size="sm" disabled={busy} onClick={close}>

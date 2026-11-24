@@ -104,3 +104,45 @@ describe('ToolSecretsPanel: an answer belongs to the tool it was asked about', (
     expect(api.checkToolConnection).toHaveBeenCalledWith('linear');
   });
 });
+
+/**
+ * A key or client secret of only whitespace is refused by the server; the
+ * panel does not offer it for saving, as the Connect page's key rows do not.
+ */
+describe('ToolSecretsPanel: a value of only whitespace is not offered for saving', () => {
+  beforeEach(() => {
+    api.setUserVar.mockReset().mockResolvedValue(undefined);
+  });
+
+  it('keeps a key’s Save disabled', () => {
+    render(<ToolSecretsPanel tool={tool('github')} onChanged={() => {}} />);
+    for (const blank of ['   ', '\t ', '  ']) {
+      fireEvent.change(screen.getByLabelText('Value for API_KEY'), { target: { value: blank } });
+      expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+    }
+    expect(api.setUserVar).not.toHaveBeenCalled();
+  });
+
+  it('keeps a client secret’s Save disabled', () => {
+    const signIn: ToolSecrets = {
+      ...tool('github'),
+      canWrite: true,
+      variables: [
+        {
+          name: 'SIGNIN',
+          scope: 'user',
+          label: null,
+          key: 'github_SIGNIN',
+          adminConfigured: false,
+          adminKind: null,
+          userConfigured: false,
+          oauth: true,
+          authorized: false,
+        },
+      ],
+    };
+    render(<ToolSecretsPanel tool={signIn} onChanged={() => {}} />);
+    fireEvent.change(screen.getByLabelText('Client secret for SIGNIN'), { target: { value: '   ' } });
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+  });
+});
