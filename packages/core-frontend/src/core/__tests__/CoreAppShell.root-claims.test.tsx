@@ -363,6 +363,20 @@ describe('CoreAppShell: a claiming app with screens of its own', () => {
     expect(agentRow()).toHaveAttribute('aria-current', 'true');
   });
 
+  it('draws no "Files" heading when the folders it claims are not there yet', async () => {
+    const missing = ['Missing'];
+    function MissingScreens() {
+      return <KnowledgeSurface roots={missing} nav={SCREENS_NAV} page={SCREENS_PAGE} />;
+    }
+    const app: AppDef = { ...agentsApp, roots: missing, element: <div data-testid="agents-frame"><MissingScreens /></div> };
+    session.workspace = workspaceOn(AGENT, 'role: coder');
+    renderShellAt('/agents', [app]);
+
+    expect(await screen.findByRole('heading', { name: 'The workflows page' })).toBeInTheDocument();
+    expect(explorer().getByRole('navigation', { name: 'Agents' })).toBeInTheDocument();
+    expect(explorer().queryByText('Files')).not.toBeInTheDocument();
+  });
+
   describe('with a folder pinned', () => {
     const PINS = 'bevel-pinned-folders';
     const WORKFLOWS = `${KB}/Workflows`;

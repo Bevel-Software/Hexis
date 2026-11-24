@@ -83,9 +83,11 @@ import { AccountHooks, type IAccountHooks } from '../modules/auth/account-hooks.
 import { AccountErasureService } from '../modules/auth/account-erasure.service.js';
 import { OidcAuthProvider, oidcSettingsFrom } from '../modules/auth/oidc-auth-provider.js';
 import { authCookieSecure, createAuthMiddleware, readAuthCookie } from '../modules/auth/auth.middleware.js';
-import { AccessControlService, loadActiveGroups } from '../modules/access/access-control.service.js';
+import { AccessControlService, loadActiveGroups, type AccessModel } from '../modules/access/access-control.service.js';
 import { OwnEntriesMemo, OWN_ENTRIES_LIMITS } from '../modules/access/own-entries-memo.js';
 import { TreeIndexer } from '../modules/access/tree-index.js';
+import { HEAD_MAP_LIMITS, HeadMaps } from '../modules/access/head-access-map.js';
+import { DbHeadSeedStore } from '../modules/access/head-seed-store.js';
 import { AccessMutationService } from '../modules/access/access-mutation.service.js';
 import { CreatorAccessService } from '../modules/access/creator-access.js';
 import { ChangeReadGate } from '../modules/access/change-read-gate.js';
@@ -872,6 +874,16 @@ export async function createCoreServices(
     // per active tenant, each within the bounds, and drops them with the graph.
     new TreeIndexer(),
     new OwnEntriesMemo(Date.now, OWN_ENTRIES_LIMITS),
+    // The maps a branch's reads are answered from: their own tree indexer
+    // (a map keeps its commit's whole tree), the deployment's bounds, and
+    // the row a restart begins from, read only by the release that wrote it.
+    new HeadMaps<AccessModel>(
+      gitRunner,
+      new TreeIndexer(),
+      HEAD_MAP_LIMITS,
+      new DbHeadSeedStore(db, resolveAppVersion()),
+      Date.now,
+    ),
     botAddresses,
   );
   // Creator read-grant on creation: read is default-deny and the roots grant

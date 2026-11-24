@@ -83,7 +83,7 @@ describe('a bot in the access model', () => {
     } as unknown as WorkspaceService;
     book = botAddressBook();
     book.replace(['release-helper']);
-    access = new AccessControlService(workspaceService, KB_DIR, realDisk(), [BOT], undefined, undefined, {}, undefined, undefined, book);
+    access = new AccessControlService(workspaceService, KB_DIR, realDisk(), [BOT], undefined, undefined, {}, undefined, undefined, undefined, book);
   });
   afterEach(async () => {
     await fs.rm(root, { recursive: true, force: true });

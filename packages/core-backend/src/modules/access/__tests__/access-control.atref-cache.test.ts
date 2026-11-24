@@ -1,14 +1,15 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { NodeFs } from '../../kb-fs/node-fs.js';
-import { execFile } from 'node:child_process';
+// The real disk, from the fixture that stands in for the composition root.
+import { realDisk } from '../../../__tests__/real-disk.js';
+import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
+import type { WorkspaceService } from '../../workspace/index.js';
 import { AccessControlService } from '../access-control.service.js';
-import { AccessUnreadableError } from '../../access-model/access-errors.js';
+import { AccessUnreadableError } from '../../access-model/index.js';
 
 /**
  * Every git subprocess the service spawns through the git port (`spawn`) and
@@ -256,7 +257,7 @@ describe('AccessControlService — at-ref model cache', () => {
         await git(repo, 'fetch', '-q', 'origin');
       },
     } as unknown as WorkspaceService;
-    svc = new AccessControlService(stub, PROCESS_MAP_DIR, new NodeFs());
+    svc = new AccessControlService(stub, PROCESS_MAP_DIR, realDisk());
     spawnLog.length = 0;
     injected.failNext = null;
     injected.rewriteNext = null;
@@ -270,6 +271,96 @@ describe('AccessControlService — at-ref model cache', () => {
     // for every test after it (this config sets no `restoreMocks`).
     vi.restoreAllMocks();
     await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it('reads the access files once for the commits a branch moves through, and again only when one of them changed', async () => {
+    // What one gate call on a commit not seen before costs in batched reads:
+    // the model's files when they are not already held, plus the asked
+    // file's own frontmatter at that commit (always one).
+    const gate = async () => {
+      const before = { listings: lsTreeBuilds(), batches: catFileBatches() };
+      const allowed = await svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC);
+      return { allowed, listings: lsTreeBuilds() - before.listings, batches: catFileBatches() - before.batches };
+    };
+    const MODEL_AND_OWN = 2;
+    const OWN_ONLY = 1;
+
+    expect(await gate()).toEqual({ allowed: true, listings: 1, batches: MODEL_AND_OWN });
+
+    // The head moves five times without touching a file the model reads:
+    // each commit is listed, and none of them reads the model's files again.
+    for (let i = 0; i < 5; i++) {
+      await pushFromOther(`note ${i}`, () => fs.writeFile(path.join(other, `Team/Note-${i}.md`), `# ${i}\n`));
+      expect(await gate()).toEqual({ allowed: true, listings: 1, batches: OWN_ONLY });
+    }
+
+    // A commit that changes an access file is read, and its rules decide.
+    await pushFromOther('team denies admin', () =>
+      fs.writeFile(path.join(other, 'Team/access.md'), '---\nwrite:\n  - deny Admin\n---\n'),
+    );
+    expect(await gate()).toEqual({ allowed: false, listings: 1, batches: MODEL_AND_OWN });
+
+    // The commits after it hold the new rules without reading them again.
+    await pushFromOther('another note', () => fs.writeFile(path.join(other, 'Team/Note-after.md'), '# after\n'));
+    expect(await gate()).toEqual({ allowed: false, listings: 1, batches: OWN_ONLY });
+
+    // A commit that puts the earlier rules back holds the same files, byte
+    // for byte, as commits still cached: their model is this commit's too.
+    await pushFromOther('team admits admin again', () =>
+      fs.writeFile(path.join(other, 'Team/access.md'), '---\nwrite:\n  - Admin\n---\n'),
+    );
+    expect(await gate()).toEqual({ allowed: true, listings: 1, batches: OWN_ONLY });
+    expect(fileShows()).toBe(0);
+  });
+
+  it('does not take the model of a commit without a groups file for one whose groups file is a folder', async () => {
+    // No groups file at this commit: the model is built and held.
+    expect(await svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).toBe(true);
+
+    // The next commit holds a FOLDER named `groups.yaml`. Every file the
+    // model is read from is unchanged, and the build must still refuse: a
+    // groups source that is there and is no file cannot be read as absent.
+    await pushFromOther('groups.yaml is a folder', async () => {
+      await fs.mkdir(path.join(other, 'groups.yaml'), { recursive: true });
+      await fs.writeFile(path.join(other, 'groups.yaml', 'note.md'), '# not a groups file\n');
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    await expect(svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).rejects.toBeInstanceOf(AccessUnreadableError);
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/groups\.yaml is a tree, not a file/));
+  });
+
+  it('does not take that model for a commit whose groups file is an empty folder object either', async () => {
+    expect(await svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).toBe(true);
+
+    // A folder with nothing in it has no file to show it by: only git's
+    // plumbing makes one, as an entry for the empty tree. The commit's files
+    // are those of the commit before it, every one of them.
+    const plumb = (args: string[], input: string) =>
+      execFileSync('git', ['-C', other, ...args], { input, encoding: 'utf-8' }).trim();
+    const emptyTree = plumb(['mktree'], '');
+    const entries = await git(other, 'ls-tree', 'HEAD');
+    const tree = plumb(['mktree'], `${entries}\n040000 tree ${emptyTree}\tgroups.yaml\n`);
+    const commit = await git(other, 'commit-tree', tree, '-p', 'HEAD', '-m', 'groups.yaml is an empty folder');
+    await git(other, 'push', '-q', 'origin', `${commit}:refs/heads/main`);
+
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    await expect(svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).rejects.toBeInstanceOf(AccessUnreadableError);
+  });
+
+  it('refuses to decide from a listing it cannot read whole, and decides once git answers again', async () => {
+    // One record without the tab that separates the object id from the path.
+    injected.rewriteNext = (argv) =>
+      argv.includes('ls-tree') ? (stdout) => Buffer.concat([stdout, Buffer.from('100644 blob not-a-record\0')]) : null;
+    await expect(svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).rejects.toBeInstanceOf(AccessUnreadableError);
+    expect(await svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).toBe(true);
+    expect(lsTreeBuilds()).toBe(2);
+
+    // Output cut short after a whole record: git ends every record with a
+    // NUL, so a listing without its last one is not the whole listing.
+    await pushFromOther('one more note', () => fs.writeFile(path.join(other, 'Team/Cut.md'), '# cut\n'));
+    injected.rewriteNext = (argv) => (argv.includes('ls-tree') ? (stdout) => stdout.subarray(0, stdout.length - 1) : null);
+    await expect(svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).rejects.toBeInstanceOf(AccessUnreadableError);
+    expect(await svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).toBe(true);
   });
 
   it('builds the model once for the six gate calls an approval click makes', async () => {
@@ -614,7 +705,7 @@ describe('AccessControlService — at-ref model cache', () => {
     // six does not keep it, so the same path is read on every call.
     const NEW = 'Team/New.md';
     const limited = (treeIndexMaxPaths: number) =>
-      new AccessControlService(stub, PROCESS_MAP_DIR, new NodeFs(), [], undefined, undefined, { treeIndexMaxPaths });
+      new AccessControlService(stub, PROCESS_MAP_DIR, realDisk(), [], undefined, undefined, { treeIndexMaxPaths });
     const keeps = limited(7);
     expect(await keeps.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).toBe(true);
     spawnLog.length = 0;
@@ -635,7 +726,7 @@ describe('AccessControlService — at-ref model cache', () => {
     // model keeps answering gates without a rebuild; only an absent path at
     // it is read again, while at the second it costs nothing.
     const NEW = 'Team/New.md';
-    const budgeted = new AccessControlService(stub, PROCESS_MAP_DIR, new NodeFs(), [], undefined, undefined, {
+    const budgeted = new AccessControlService(stub, PROCESS_MAP_DIR, realDisk(), [], undefined, undefined, {
       treeIndexBudget: 10,
     });
     const first = await git(repo, 'rev-parse', 'origin/main');

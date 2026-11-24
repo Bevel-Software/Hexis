@@ -1,9 +1,53 @@
 {
-  "id": "d5802b45-423d-4fca-aff6-7e4825608039",
+  "id": "e3ca6ba2-8dcb-48e3-9fc3-5fea8bd7a4cb",
   "prevId": "35ec568e-5f44-49bf-a801-f674a7f057f4",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
+    "public.access_head_seeds": {
+      "name": "access_head_seeds",
+      "schema": "",
+      "columns": {
+        "key": {
+          "name": "key",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "version": {
+          "name": "version",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "commit": {
+          "name": "commit",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "declaring": {
+          "name": "declaring",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
     "public.agent_connections": {
       "name": "agent_connections",
       "schema": "",
@@ -69,12 +113,6 @@
           "type": "text",
           "primaryKey": false,
           "notNull": false
-        },
-        "bot_user_id": {
-          "name": "bot_user_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
         }
       },
       "indexes": {
@@ -83,21 +121,6 @@
           "columns": [
             {
               "expression": "user_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "agent_connections_by_bot": {
-          "name": "agent_connections_by_bot",
-          "columns": [
-            {
-              "expression": "bot_user_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -156,19 +179,6 @@
             "client_id"
           ],
           "onDelete": "no action",
-          "onUpdate": "no action"
-        },
-        "agent_connections_bot_user_id_users_id_fk": {
-          "name": "agent_connections_bot_user_id_users_id_fk",
-          "tableFrom": "agent_connections",
-          "tableTo": "users",
-          "columnsFrom": [
-            "bot_user_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "restrict",
           "onUpdate": "no action"
         }
       },
@@ -240,12 +250,6 @@
         "duration_ms": {
           "name": "duration_ms",
           "type": "integer",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "bot_user_id": {
-          "name": "bot_user_id",
-          "type": "uuid",
           "primaryKey": false,
           "notNull": false
         },
@@ -356,21 +360,6 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
-        },
-        "agent_events_by_bot": {
-          "name": "agent_events_by_bot",
-          "columns": [
-            {
-              "expression": "bot_user_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
         }
       },
       "foreignKeys": {
@@ -411,19 +400,6 @@
             "id"
           ],
           "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "agent_events_bot_user_id_users_id_fk": {
-          "name": "agent_events_bot_user_id_users_id_fk",
-          "tableFrom": "agent_events",
-          "tableTo": "users",
-          "columnsFrom": [
-            "bot_user_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "restrict",
           "onUpdate": "no action"
         }
       },
@@ -597,24 +573,6 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true
-        },
-        "made_by_email": {
-          "name": "made_by_email",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "made_by_email_bidx": {
-          "name": "made_by_email_bidx",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "made_by_name": {
-          "name": "made_by_name",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
         },
         "state": {
           "name": "state",
@@ -924,12 +882,6 @@
           "type": "text",
           "primaryKey": false,
           "notNull": false
-        },
-        "bot_user_id": {
-          "name": "bot_user_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
         }
       },
       "indexes": {
@@ -938,21 +890,6 @@
           "columns": [
             {
               "expression": "user_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "api_tokens_by_bot": {
-          "name": "api_tokens_by_bot",
-          "columns": [
-            {
-              "expression": "bot_user_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -976,19 +913,6 @@
             "id"
           ],
           "onDelete": "no action",
-          "onUpdate": "no action"
-        },
-        "api_tokens_bot_user_id_users_id_fk": {
-          "name": "api_tokens_bot_user_id_users_id_fk",
-          "tableFrom": "api_tokens",
-          "tableTo": "users",
-          "columnsFrom": [
-            "bot_user_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "restrict",
           "onUpdate": "no action"
         }
       },
@@ -1364,12 +1288,6 @@
           "type": "text",
           "primaryKey": false,
           "notNull": false
-        },
-        "bot_user_id": {
-          "name": "bot_user_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
         }
       },
       "indexes": {
@@ -1378,21 +1296,6 @@
           "columns": [
             {
               "expression": "expires_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "oauth_auth_codes_by_bot": {
-          "name": "oauth_auth_codes_by_bot",
-          "columns": [
-            {
-              "expression": "bot_user_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -1429,19 +1332,6 @@
             "id"
           ],
           "onDelete": "no action",
-          "onUpdate": "no action"
-        },
-        "oauth_auth_codes_bot_user_id_users_id_fk": {
-          "name": "oauth_auth_codes_bot_user_id_users_id_fk",
-          "tableFrom": "oauth_auth_codes",
-          "tableTo": "users",
-          "columnsFrom": [
-            "bot_user_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "restrict",
           "onUpdate": "no action"
         }
       },
@@ -1771,24 +1661,6 @@
           "primaryKey": false,
           "notNull": true
         },
-        "made_by_email": {
-          "name": "made_by_email",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "made_by_email_bidx": {
-          "name": "made_by_email_bidx",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "made_by_name": {
-          "name": "made_by_name",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
         "queued_at": {
           "name": "queued_at",
           "type": "timestamp",
@@ -2073,24 +1945,6 @@
           "primaryKey": false,
           "notNull": true
         },
-        "made_by_email": {
-          "name": "made_by_email",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "made_by_email_bidx": {
-          "name": "made_by_email_bidx",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "made_by_name": {
-          "name": "made_by_name",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
         "head_sha": {
           "name": "head_sha",
           "type": "text",
@@ -2196,24 +2050,6 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true
-        },
-        "made_by_email": {
-          "name": "made_by_email",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "made_by_email_bidx": {
-          "name": "made_by_email_bidx",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "made_by_name": {
-          "name": "made_by_name",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
         },
         "head_sha_at_merge": {
           "name": "head_sha_at_merge",
@@ -2532,18 +2368,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "bot_id": {
-          "name": "bot_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "bot_retired_at": {
-          "name": "bot_retired_at",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": false
-        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp",
@@ -2574,33 +2398,13 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
-        },
-        "users_bot_id_unq": {
-          "name": "users_bot_id_unq",
-          "columns": [
-            {
-              "expression": "bot_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
         }
       },
       "foreignKeys": {},
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {
-        "users_bot_retired_only_bots": {
-          "name": "users_bot_retired_only_bots",
-          "value": "\"users\".\"bot_retired_at\" IS NULL OR \"users\".\"bot_id\" IS NOT NULL"
-        }
-      },
+      "checkConstraints": {},
       "isRLSEnabled": false
     }
   },

@@ -19,5 +19,5 @@ export function realAccessControl(
   /** The bots' address book, as the root passes it; absent, nobody is a bot. */
   bots?: IBotAddresses,
 ): AccessControlService {
-  return new AccessControlService(workspace, kbDirName, disk, [], undefined, undefined, {}, undefined, undefined, bots);
+  return new AccessControlService(workspace, kbDirName, disk, [], undefined, undefined, {}, undefined, undefined, undefined, bots);
 }

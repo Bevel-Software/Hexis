@@ -1009,3 +1009,24 @@ export const dataMigrations = pgTable('data_migrations', {
   /** What the pass did, for an operator reading the ledger: rows moved, say. */
   note: text('note'),
 });
+
+/**
+ * Where the access service's head maps start from after a restart: the last
+ * commit a map was made of, and the files of that commit that declare access
+ * of their own, each with the id of the file version that declares it. With
+ * it a start reads those few versions and what changed since, where it would
+ * otherwise read every file version of the knowledge base once.
+ *
+ * It holds paths and object ids, and no rule: the rules are read from git
+ * again. One row per deployment (`key` is fixed). `version` is the release
+ * that wrote it; a row another release wrote is not read, because which
+ * versions declare something is that release's reading of them.
+ */
+export const accessHeadSeeds = pgTable('access_head_seeds', {
+  key: text('key').primaryKey(),
+  version: text('version').notNull(),
+  commit: text('commit').notNull(),
+  /** `[path, object id]` for every file of `commit` that declares access of its own. */
+  declaring: jsonb('declaring').notNull().$type<Array<[string, string]>>(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
