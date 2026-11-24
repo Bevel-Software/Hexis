@@ -236,6 +236,16 @@ describe('PluginManifestSaveCheck', () => {
     expect(await check.checkSave(ADMIN, MANIFEST, '{ "extensions": ')).toEqual([]);
   });
 
+  it('says nothing about roots from an empty catalog, the skill service\'s answer when the default branch cannot be read', async () => {
+    const degraded = new PluginManifestSaveCheck({ listSkills: async () => [] }, kb);
+    const warnings = await degraded.checkSave(ADMIN, MANIFEST, JSON.stringify(manifestWith(QA_ENTRIES)));
+    expect(warnings.map((w) => w.entry)).toEqual([
+      './Skills/Design/update-website',
+      '/Skills/Engineering/deploy-checklist',
+      'Skills/../Plugins/Deal Desk/skills/account-research',
+    ]);
+  });
+
   it('still names the malformed entries when the catalog cannot be read', async () => {
     const failing = new PluginManifestSaveCheck(
       {

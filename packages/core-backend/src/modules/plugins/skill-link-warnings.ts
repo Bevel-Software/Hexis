@@ -36,6 +36,11 @@ export interface SkillLinkWarning {
  * such skills is reported to them too, where the plugin page, which counts
  * from the unfiltered catalog, says nothing about it.
  *
+ * An EMPTY catalog proves no absence: it is also what the skill service
+ * answers when the default branch cannot be read. Then no root is reported,
+ * only the dropped entries; the price is that a saver who can read no skill
+ * at all is not told about roots either.
+ *
  * Advisory: the route asks it after the write, and it never throws.
  */
 export class PluginManifestSaveCheck {
@@ -60,6 +65,7 @@ export class PluginManifestSaveCheck {
     if (roots.length === 0) return warnings;
     try {
       const readable = await this.skills.listSkills(userEmail);
+      if (readable.length === 0) return warnings;
       for (const root of roots) {
         if (readable.some((s) => skillUnderRoot(s.path, root))) continue;
         warnings.push({
