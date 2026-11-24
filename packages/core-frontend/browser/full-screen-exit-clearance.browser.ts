@@ -1,10 +1,5 @@
-import { readFileSync } from 'node:fs';
-import { createRequire } from 'node:module';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { expect, test, type Page } from '@playwright/test';
-import { compile } from 'tailwindcss';
-import { build, type Rollup } from 'vite';
+import { appStylesheet, bundleFixture } from './harness';
 
 /**
  * A full-bleed file in full screen puts Download beside the exit control, in
@@ -19,49 +14,9 @@ import { build, type Rollup } from 'vite';
  * exit control and the app's own stylesheet.
  */
 
-const here = path.dirname(fileURLToPath(import.meta.url));
-const require = createRequire(import.meta.url);
+const bundle = () => bundleFixture('full-bleed-full-screen.tsx');
 
-let harnessBundle: string | undefined;
-async function bundle(): Promise<string> {
-  if (harnessBundle) return harnessBundle;
-  const built = (await build({
-    configFile: false,
-    root: path.resolve(here, 'fixtures'),
-    logLevel: 'silent',
-    esbuild: { jsx: 'automatic' },
-    define: { 'process.env.NODE_ENV': '"production"' },
-    build: {
-      write: false,
-      minify: false,
-      lib: { entry: path.resolve(here, 'fixtures/full-bleed-full-screen.tsx'), formats: ['iife'], name: 'FullBleedHarness', fileName: () => 'full-bleed.js' },
-      rollupOptions: { output: { inlineDynamicImports: true } },
-    },
-  })) as Rollup.RollupOutput | Rollup.RollupOutput[];
-  const outputs = Array.isArray(built) ? built : [built];
-  const chunk = outputs.flatMap((o) => o.output).find((o): o is Rollup.OutputChunk => o.type === 'chunk');
-  if (!chunk) throw new Error('the harness bundle produced no chunk');
-  harnessBundle = chunk.code;
-  return harnessBundle;
-}
-
-/** Tailwind and the design tokens, built for every class the harness names. */
-let stylesheet: string | undefined;
-async function css(): Promise<string> {
-  if (stylesheet) return stylesheet;
-  const themeDir = path.resolve(here, '../src/shared/theme');
-  const tailwindCss = require.resolve('tailwindcss/index.css');
-  const compiled = await compile(`@import 'tailwindcss';\n@import './index.css';\n`, {
-    base: themeDir,
-    loadStylesheet: async (id, base) => {
-      const file = id === 'tailwindcss' ? tailwindCss : path.resolve(base, id);
-      return { path: file, base: path.dirname(file), content: readFileSync(file, 'utf8') };
-    },
-  });
-  const candidates = Array.from(new Set((await bundle()).split(/[\s"'`,;{}()<>=]+/).filter(Boolean)));
-  stylesheet = compiled.build(candidates);
-  return stylesheet;
-}
+const css = () => appStylesheet('full-bleed-full-screen.tsx');
 
 interface Box {
   top: number;

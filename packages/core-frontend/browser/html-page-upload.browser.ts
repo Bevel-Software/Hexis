@@ -1,10 +1,8 @@
 import { createHash, randomBytes } from 'node:crypto';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { expect, test, type Page } from '@playwright/test';
-import { build, type Rollup } from 'vite';
 import { buildSandboxedHtml } from '../src/modules/workspace/components/renderers/htmlSandbox';
 import type { PageConsent, PageToolsClient, answerToolCall, asToolCall } from '../src/modules/workspace/components/renderers/htmlToolBridge';
+import { bundleFixture } from './harness';
 
 /** What the bundled fixture leaves on the host page: the renderer's tool bridge. */
 type HostWindow = Window & {
@@ -32,7 +30,6 @@ type HostWindow = Window & {
  * endpoint, routed by the test, recording what reached them.
  */
 
-const here = path.dirname(fileURLToPath(import.meta.url));
 const APP_ORIGIN = 'https://app.example';
 const PAGE_PATH = 'Dashboards/Campaigns.html';
 const TOKEN = 'upload-token-the-page-never-sees';
@@ -42,29 +39,8 @@ const HOST = `<!doctype html>
 <iframe id="f" sandbox="allow-scripts" style="display:block;width:640px;height:200px;border:0"></iframe>
 </body></html>`;
 
-let hostBundle: string | null = null;
-
 /** The renderer's tool bridge, bundled for a browser page once per run. */
-async function bridgeBundle(): Promise<string> {
-  if (hostBundle) return hostBundle;
-  const built = (await build({
-    configFile: false,
-    root: path.resolve(here, 'fixtures'),
-    logLevel: 'silent',
-    define: { 'process.env.NODE_ENV': JSON.stringify('production') },
-    build: {
-      write: false,
-      minify: false,
-      lib: { entry: path.resolve(here, 'fixtures/page-tools-host.ts'), formats: ['iife'], name: 'PageToolsHostBundle', fileName: () => 'page-tools-host.js' },
-      rollupOptions: { output: { inlineDynamicImports: true } },
-    },
-  })) as Rollup.RollupOutput | Rollup.RollupOutput[];
-  const outputs = Array.isArray(built) ? built : [built];
-  const chunk = outputs.flatMap((o) => o.output).find((o): o is Rollup.OutputChunk => o.type === 'chunk');
-  if (!chunk) throw new Error('the host bundle produced no chunk');
-  hostBundle = chunk.code;
-  return hostBundle;
-}
+const bridgeBundle = () => bundleFixture('page-tools-host.ts');
 
 interface Received {
   tools: Array<{ name: string; arguments: unknown; page: string | undefined }>;

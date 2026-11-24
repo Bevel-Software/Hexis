@@ -2,8 +2,8 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { expect, test, type Page } from '@playwright/test';
-import { build, type Rollup } from 'vite';
 import type { AppBridge, McpUiHostCapabilities, PostMessageTransport } from '@modelcontextprotocol/ext-apps/app-bridge';
+import { bundleFixture } from './harness';
 
 /** What the bundled fixture leaves on the host page: the SDK's bridge and its transport. */
 type McpHostWindow = Window & {
@@ -69,29 +69,8 @@ const HOST = `<!doctype html>
 </script>
 </body></html>`;
 
-let hostBundle: string | null = null;
-
 /** The SDK's bridge, bundled for a browser page once per run. */
-async function bridgeBundle(): Promise<string> {
-  if (hostBundle) return hostBundle;
-  const built = (await build({
-    configFile: false,
-    root: path.resolve(here, 'fixtures'),
-    logLevel: 'silent',
-    build: {
-      write: false,
-      minify: false,
-      lib: { entry: path.resolve(here, 'fixtures/mcp-host.ts'), formats: ['iife'], name: 'McpHostBundle', fileName: () => 'mcp-host.js' },
-      rollupOptions: { output: { inlineDynamicImports: true } },
-    },
-  })) as Rollup.RollupOutput | Rollup.RollupOutput[];
-  // One output per format asked for; one format was asked for.
-  const outputs = Array.isArray(built) ? built : [built];
-  const chunk = outputs.flatMap((o) => o.output).find((o): o is Rollup.OutputChunk => o.type === 'chunk');
-  if (!chunk) throw new Error('the host bundle produced no chunk');
-  hostBundle = chunk.code;
-  return hostBundle;
-}
+const bridgeBundle = () => bundleFixture('mcp-host.ts');
 
 interface HostOptions {
   /** What the bridge tells the view it can do; `serverTools` is what the view reads. */
