@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { restoreLineEndings } from '@bevel-software/platform-shared';
 import { Banner, Button, Surface } from '../../../../shared/components';
 
 interface SkillFileEditorProps {
@@ -50,26 +51,22 @@ export function SkillFileEditor({
 
   /**
    * A `<textarea>` hands its value back with LF endings whatever went in, so a
-   * CRLF file would come back rewritten line-for-line. Both comparisons and the
-   * submitted text are put back into the file's OWN convention, which keeps a
-   * one-word edit a one-line diff.
+   * CRLF file would come back rewritten line-for-line. The submitted text is
+   * put back into the file's OWN endings, which keeps a one-word edit a
+   * one-line diff.
    */
-  const crlf = base.includes('\r\n');
-  const toFileEndings = (s: string) => (crlf ? s.replace(/\r?\n/g, '\r\n') : s);
-  const lf = (s: string) => s.replace(/\r\n?/g, '\n');
+  const next = restoreLineEndings(base, text);
 
   /**
    * Exact comparison — NOT trimmed. Adding a trailing newline, stripping
    * trailing spaces, or fixing the indent on the first line are real edits, and
    * a trimmed guard answered every one of them with "Nothing changed yet".
    *
-   * The LF normalisation is not the same kind of leniency and has to stay: the
-   * textarea can only ever produce LF, so against a CRLF `base` a raw `===`
-   * would report "changed" on a file nobody touched — and since `toFileEndings`
-   * converts back on the way out, that would open a change request git sees no
-   * diff in at all.
+   * Compared AFTER the endings are restored: the textarea can only ever produce
+   * LF, so against a CRLF `base` a raw `text === base` would report "changed"
+   * on a file nobody touched, and open a change request git sees no diff in.
    */
-  const unchanged = lf(text) === lf(base);
+  const unchanged = next === base;
 
   async function submit() {
     if (unchanged) {
@@ -79,7 +76,7 @@ export function SkillFileEditor({
     setBusy(true);
     setError(null);
     try {
-      await onSubmit(toFileEndings(text));
+      await onSubmit(next);
     } catch (err) {
       setError(
         err instanceof Error

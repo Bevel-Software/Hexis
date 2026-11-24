@@ -8,6 +8,7 @@ import { CsvRenderer } from './CsvRenderer';
 import { ToolRenderer } from './ToolRenderer';
 import { LegacyOfficeRenderer } from './LegacyOfficeRenderer';
 import { lazyRenderer } from './lazyRenderer';
+import { withFileLineEndings } from './fileLineEndings';
 
 export type { FileRendererProps, RendererSaveState } from './types';
 export {
@@ -273,6 +274,10 @@ export function isViewOnlyFile(filePath: string): boolean {
  * of the page-in-chat is that it renders with the app's renderer for the
  * type, a registered one included, so a second spelling here would be a
  * second answer and the embed would be the one that lagged.
+ *
+ * The two surfaces that edit a file in its renderer (the file page and the
+ * embed) mount it through this lookup, so the renderer it answers saves in
+ * the file's own line endings (`withFileLineEndings`).
  */
 export function pickFileRenderer(
   filePath: string,
@@ -282,8 +287,8 @@ export function pickFileRenderer(
   // deployment registered for `.md`: rules rendered as a page could hide or
   // misstate what they grant.
   const name = filePath.slice(filePath.lastIndexOf('/') + 1).toLowerCase();
-  if (name === ACCESS_RULES_FILE) return TextRenderer;
+  if (name === ACCESS_RULES_FILE) return withFileLineEndings(TextRenderer);
   const ext = filePath.slice(filePath.lastIndexOf('.')).toLowerCase();
   const override = overrides.find((r) => r.extensions.includes(ext));
-  return override?.Component ?? getFileRenderer(filePath);
+  return withFileLineEndings(override?.Component ?? getFileRenderer(filePath));
 }
