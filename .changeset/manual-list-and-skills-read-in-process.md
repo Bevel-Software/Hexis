@@ -1,5 +1,5 @@
 ---
-'@bevel-software/platform-core-backend': patch
+'@bevel-software/platform-core-backend': minor
 ---
 
 The hosted MCP endpoint reads a caller's manual list and their skills in process. It read the manual list for every tool surface it built, and the skills for every `prompts/list`, every `prompts/get` and for telling a skill read from a file read in the Audit log. Each was an HTTP request to its own server (`GET /api/agent/all-tools`, `POST /api/agent/tools/list_skills` and `get_skill`) behind a 15 second limit. A busy server answered itself late, the limit fired, and the caller got the platform tools alone or an empty prompt list.
@@ -13,3 +13,5 @@ The caller is the one the request's credential resolved to. `externalCallerAuth`
 The routes are unchanged for the local server and for scripts, which still call them. A composition that does not hand the endpoint a reader keeps reading over loopback. Nothing an agent can observe changes: tool names, arguments, answers, prompts and the agent guide are the same.
 
 Tool discovery (`GET /api/agent/utcp`) and tool calls still go over loopback. Discovery is the last step of hx-tool-surface-is-built-without-a-loopback-call.
+
+A minor release, not a patch: the exported `CoreServices` gains two required members, `readManualList` and `inProcessTool`. Code that builds or mocks a `CoreServices` by hand must add them. `registerSkillsTools` now returns the two skill reads where it returned nothing, and `createToolManualsAgentRoutes` takes one more optional argument; neither breaks a caller.
