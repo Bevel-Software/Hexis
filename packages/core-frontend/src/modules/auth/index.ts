@@ -4,7 +4,6 @@
  * layout and free to move. Export what another module needs; nothing more.
  */
 export { useAuthState } from './hooks/useAuthState';
-export { LoginScreen } from './components/LoginScreen';
 export { createAccount, deactivateAccount, deleteAccount, getAccountReferences, listAccounts, reactivateAccount } from './services/account.api';
 export type { AccountReferences, AccountSummary } from './services/account.api';
 export { OAUTH_ERROR_KEY, startSsoLogin, takePostLoginRedirect } from './services/sso';
