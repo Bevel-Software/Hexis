@@ -3,16 +3,16 @@ import type { AddressInfo } from 'node:net';
 import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { testKbContext } from '../../../__tests__/kb-context.js';
-import { NodeFs } from '../../kb-fs/node-fs.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
 import { PathTraversalError } from '../../../shared/domain-errors.js';
 import { EntryExistsError } from '../workspace.service.js';
 import type { IVersionControlService } from '@bevel-software/platform-shared';
-import type { IAccessControl } from '../../access/access-control.interface.js';
-import type { ICreatorAccess } from '../../access-model/creator.js';
-import type { IAdminAccessService } from '../../admin/admin.interface.js';
-import type { VersionControlEventBus } from '../../version-control/event-bus.js';
-import type { AuthService } from '../../auth/auth.service.js';
-import { createWorkspaceRoutes } from '../workspace.routes.js';
+import type { IAccessControl } from '../../access/index.js';
+import type { ICreatorAccess } from '../../access-model/index.js';
+import type { IAdminAccessService } from '../../admin/index.js';
+import type { VersionControlEventBus } from '../../version-control/index.js';
+import type { AuthService } from '../../auth/index.js';
+import { createWorkspaceRoutes, type ManifestSaveCheck } from '../workspace.routes.js';
 import type { SkillSaveCheck } from '../workspace.tools.js';
 import type { WorkspaceService } from '../workspace.service.js';
 
@@ -54,7 +54,9 @@ interface Harness {
   order: string[];
 }
 
-async function makeHarness(opts: { canRead?: boolean; skillSaveCheck?: SkillSaveCheck } = {}): Promise<Harness> {
+async function makeHarness(
+  opts: { canRead?: boolean; skillSaveCheck?: SkillSaveCheck; manifestSaveCheck?: ManifestSaveCheck } = {},
+): Promise<Harness> {
   const lockedPaths: string[] = [];
   const discardedPaths: string[] = [];
   const untouchedPaths: string[] = [];
@@ -153,8 +155,10 @@ async function makeHarness(opts: { canRead?: boolean; skillSaveCheck?: SkillSave
       testKbContext({ kbDirName: KB }),
       stubCreatorAccess,
       { isAdmin: async () => true } as unknown as IAdminAccessService,
-      new NodeFs(),
+      realDisk(),
       opts.skillSaveCheck,
+      undefined,
+      opts.manifestSaveCheck,
     ),
   );
   const server = await new Promise<Server>((resolve) => {
@@ -255,6 +259,33 @@ describe('PUT /workspace/:id/file — allowed-tools warnings', () => {
     h = await makeHarness({ skillSaveCheck: { checkSave: async () => [], checkSaves: async () => [] } });
     const res = await put(h, { content: 'Body.' });
     expect(await res.json()).toEqual({ status: 'written' });
+  });
+});
+
+describe('PUT /workspace/:id/file — plugin.json skills warnings', () => {
+  let h: Harness | null = null;
+  afterEach(async () => {
+    if (h) await close(h.server);
+    h = null;
+  });
+
+  it('writes the manifest, then answers with what the manifest check says about its skills entries', async () => {
+    const warning = { entry: './Skills/x', message: 'skills entry "./Skills/x" is ignored' };
+    const checkSave = vi.fn(async () => [warning]);
+    h = await makeHarness({
+      skillSaveCheck: { checkSave: async () => [], checkSaves: async () => [] },
+      manifestSaveCheck: { checkSave },
+    });
+    const manifest = `${KB}/Plugins/Sales/plugin.json`;
+    const content = '{"name":"sales","extensions":{"software.bevel.hexis":{"skills":["./Skills/x"]}}}';
+
+    const res = await put(h, { content }, manifest);
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ status: 'written', warnings: [warning] });
+    // Never a block: the bytes landed as sent, before the check was asked.
+    expect(h.writeFileMock).toHaveBeenCalledWith(WS, manifest, content, expect.anything());
+    expect(checkSave).toHaveBeenCalledWith(USER.email, manifest, content);
   });
 });
 

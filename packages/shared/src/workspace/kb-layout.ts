@@ -487,19 +487,31 @@ export function normalizeSkillRoot(raw: string): string | null {
  * block links nothing.
  */
 export function linkedSkillRoots(manifest: unknown): string[] {
-  if (typeof manifest !== 'object' || manifest === null || Array.isArray(manifest)) return [];
+  return linkedSkillEntries(manifest).roots;
+}
+
+/**
+ * {@link linkedSkillRoots}, plus the entries it DROPS: each list entry that
+ * {@link normalizeSkillRoot} refuses, exactly as the manifest holds it (a
+ * non-string entry included), in order. Read the same way, so the two can
+ * never disagree about which entries count.
+ */
+export function linkedSkillEntries(manifest: unknown): { roots: string[]; dropped: unknown[] } {
+  const roots: string[] = [];
+  const dropped: unknown[] = [];
+  if (typeof manifest !== 'object' || manifest === null || Array.isArray(manifest)) return { roots, dropped };
   const ext = (manifest as Record<string, unknown>).extensions;
-  if (typeof ext !== 'object' || ext === null) return [];
+  if (typeof ext !== 'object' || ext === null) return { roots, dropped };
   const ns = (ext as Record<string, unknown>)[HEXIS_EXTENSION_NS];
-  if (typeof ns !== 'object' || ns === null) return [];
+  if (typeof ns !== 'object' || ns === null) return { roots, dropped };
   const raw = (ns as Record<string, unknown>)[HEXIS_LINKED_SKILLS_KEY];
-  if (!Array.isArray(raw)) return [];
-  const out: string[] = [];
+  if (!Array.isArray(raw)) return { roots, dropped };
   for (const entry of raw) {
     const root = normalizeSkillRoot(typeof entry === 'string' ? entry : '');
-    if (root !== null && !out.includes(root)) out.push(root);
+    if (root === null) dropped.push(entry);
+    else if (!roots.includes(root)) roots.push(root);
   }
-  return out;
+  return { roots, dropped };
 }
 
 /**

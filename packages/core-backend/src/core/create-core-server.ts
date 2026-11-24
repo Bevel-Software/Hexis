@@ -54,6 +54,7 @@ import {
   createPluginsRoutes,
   createTeamsRoutes,
   registerPluginsTools,
+  PluginManifestSaveCheck,
 } from '../modules/plugins/index.js';
 import { keyOrSessionAuth } from '../modules/tool-auth/key-or-session.middleware.js';
 import { ToolDescriptionNotes, type AgentAccessGate } from '../modules/workspace/agent-access.gate.js';
@@ -691,6 +692,11 @@ export async function createCoreServer(
     core.disk,
     allowedToolsChecker,
     core.changeGate,
+    // The app's save of a plugin.json names its `skills` entries that are not
+    // folder paths or hold no skill the saver can read. The agent write tools
+    // keep the skill check alone: their `warnings` output is described to
+    // agents as a SKILL.md's.
+    new PluginManifestSaveCheck(core.skillService, core.kb),
   ));
   // Version control is the only branches / changes / change-request surface. The
   // former /git/*, /pr/*, /pr/:n/* routes are gone — every consumer goes

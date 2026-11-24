@@ -14,6 +14,7 @@ import { TtlCache } from '../../shared/ttl-cache.js';
 import type { PluginCatalogEntry, IPluginIndexService } from './plugins.contract.js';
 import type { PluginLinkIndex } from './plugin-links.js';
 import type { PluginSource } from './discovery/plugin-source.js';
+import { emptyLinkedRootWarning } from './skill-link-warnings.js';
 
 const CACHE_TTL_MS = 60_000;
 
@@ -123,7 +124,7 @@ export class PluginIndexService implements IPluginIndexService {
       if (scanned.size === 0) return [];
       const folders = new Map([...scanned].map(([name, p]) => [name, p.folders]));
 
-      const [{ skillCounts, brokenLinkCounts }, toolCounts] = await Promise.all([
+      const [{ skillCounts, brokenLinkCounts, emptyRoots }, toolCounts] = await Promise.all([
         this.countThroughLinks(folders),
         this.countTools(scanned),
       ]);
@@ -151,7 +152,10 @@ export class PluginIndexService implements IPluginIndexService {
           writers,
           readers,
           isPrivate,
-          warnings: scanned.get(name)?.warnings ?? [],
+          warnings: [
+            ...(scanned.get(name)?.warnings ?? []),
+            ...(emptyRoots.get(name) ?? []).map(emptyLinkedRootWarning),
+          ],
         });
       }
       return entries.sort((a, b) => a.name.localeCompare(b.name));
@@ -206,28 +210,39 @@ export class PluginIndexService implements IPluginIndexService {
    *    UNFILTERED index, so the count reaches the plugin's managers even when
    *    the missing grant locks them out of the skill too.
    *
-   * Without a link index: skills bucket by folder, and no link can be broken.
+   *  - `emptyRoots`: the linked roots each plugin declares that hold no
+   *    skill, from the same read (`PluginLinks.unresolvedRoots`), so the
+   *    page can say which entries link nothing.
+   *
+   * Without a link index: skills bucket by folder, no link can be broken, and
+   * no root is reported empty.
    */
-  private async countThroughLinks(
-    folders: Map<string, string[]>,
-  ): Promise<{ skillCounts: Map<string, number>; brokenLinkCounts: Map<string, number> }> {
+  private async countThroughLinks(folders: Map<string, string[]>): Promise<{
+    skillCounts: Map<string, number>;
+    brokenLinkCounts: Map<string, number>;
+    emptyRoots: Map<string, string[]>;
+  }> {
     const skillCounts = new Map<string, number>();
     const brokenLinkCounts = new Map<string, number>();
+    const emptyRoots = new Map<string, string[]>();
     if (!this.links) {
       // `undefined` is the documented GLOBAL, unfiltered mode — counts are a
       // property of the plugin, not of who is asking.
       return {
         skillCounts: bucketByFolder(await this.skillService.listSkills(undefined), folders),
         brokenLinkCounts,
+        emptyRoots,
       };
     }
-    for (const memberships of (await this.links.membership()).bySkill.values()) {
+    const membership = await this.links.membership();
+    for (const memberships of membership.bySkill.values()) {
       for (const m of memberships) {
         skillCounts.set(m.name, (skillCounts.get(m.name) ?? 0) + 1);
         if (m.linked && !m.granted) brokenLinkCounts.set(m.name, (brokenLinkCounts.get(m.name) ?? 0) + 1);
       }
     }
-    return { skillCounts, brokenLinkCounts };
+    for (const [name, links] of membership.byPlugin) emptyRoots.set(name, links.unresolvedRoots);
+    return { skillCounts, brokenLinkCounts, emptyRoots };
   }
 
   /**
