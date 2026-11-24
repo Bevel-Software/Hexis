@@ -4085,8 +4085,9 @@ export function registerWorkspaceTools(
         for (const file of locked) await release(file, true);
         throw err;
       }
-      // A locked entry the extraction skipped after its guard (a size cap, a
-      // directory) wrote nothing: its lock goes back untouched.
+      // A locked entry the extraction did not write as a file (a directory
+      // entry, which is guarded and then only created) is not in `extracted`:
+      // its lock goes back untouched.
       const written = new Set(result.extracted);
       for (const file of locked) await release(file, written.has(file));
       return unsaved.length > 0 ? { ...result, unsaved } : result;
