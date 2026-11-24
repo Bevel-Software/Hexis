@@ -362,6 +362,10 @@ describe('AccessControlService — what the own-entries memo holds', () => {
       const answers = await svc.canReadBatch('ws-live', felix, carried);
       expect(answers.get(carried[0]!)).toBe(false);
     })();
+    // A batch's own garbage (the carriers, the file texts it read) can stay
+    // reachable from its finished async frames until the next macrotask: read
+    // the heap after one, so what is measured is what the memo keeps.
+    await new Promise((r) => setTimeout(r, 50));
     const held = heapAfterGc() - before;
     console.info(`[cache-memory] live memo: heap per entry ${Math.round(held / FILES)} bytes (path carrier ${CARRIER}, frontmatter ${TEXT})`);
     // The memo is live at this point: the files change on disk, and it still
