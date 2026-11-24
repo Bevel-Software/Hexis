@@ -191,6 +191,35 @@ async function laterSave(w: World, name: string, body: string | null): Promise<v
   await runGit(dir, ['push', 'origin', MAIN]);
 }
 
+/**
+ * The person saves `Data/QA/<name>` on MAIN again: new bytes on disk and a queued row, as a lock release leaves
+ * them, and the real worker commits and pushes it. Answers the worker's notice sink.
+ */
+async function saveAgain(w: World, name: string, body: string): Promise<ReturnType<typeof vi.fn>> {
+  const mainWs = workspaceIdForBranch(MAIN);
+  await fs.writeFile(path.join(w.repo(MAIN), 'Data/QA', name), body);
+  await w.queue.enqueue({ workspaceId: mainWs, branch: MAIN, path: `${KB}/Data/QA/${name}`, authorEmail: alice.email, authorName: alice.name });
+  const notify = vi.fn();
+  const worker = new PendingCommitsWorker({
+    service: w.queue,
+    versionControl: w.svc,
+    recoveryAgent: { run: vi.fn() } as never,
+    feedback: { notify } as never,
+    workspaces: { knownWorkspaces: () => [{ id: mainWs, branch: MAIN }] },
+    recoveryBot: { id: 'bot', email: 'bot@example.com', name: 'Bot' },
+  });
+  worker.start();
+  try {
+    await vi.waitFor(async () => expect((await rowsLeft(w)).filter((r) => r.status !== 'needs_attention')).toEqual([]), {
+      timeout: 20_000,
+      interval: 100,
+    });
+  } finally {
+    await worker.stop();
+  }
+  return notify;
+}
+
 describe.skipIf(!PG_ADMIN_URL)('stuck saves clear themselves once nothing of them is left to push', () => {
   beforeEach(async () => {
     world = await makeWorld();
@@ -366,6 +395,76 @@ describe.skipIf(!PG_ADMIN_URL)('stuck saves clear themselves once nothing of the
   );
 
   it(
+    'a row of a workspace that was set aside clears once its file is saved again and that save lands; later rows stay',
+    async () => {
+      const w = world;
+      await fs.mkdir(path.join(w.root, 'replaced-working-copies', '2026-11-03T10-00-00-000Z', workspaceIdForBranch(MAIN), '.git'), { recursive: true });
+      await stuckRow(w, { path: `${KB}/Data/QA/a.md` });
+      // Escalated after the save below was queued: that save does not stand for it.
+      const later = await stuckRow(w, { path: `${KB}/Data/QA/a.md`, queuedAt: new Date('2099-01-01T00:00:00.000Z') });
+      await stuckRow(w, { path: `${KB}/Data/QA/b.md` });
+      expect(await w.svc.mergeBranch(alice, MAIN, DRAFT)).toMatchObject({
+        kind: 'pending-commits',
+        stuck: { files: [`${KB}/Data/QA/a.md`, `${KB}/Data/QA/b.md`], more: 0 },
+      });
+
+      const notify = await saveAgain(w, 'a.md', '# a, saved again after the replacement\n');
+
+      expect((await w.db.select({ id: pendingCommits.id, path: pendingCommits.path }).from(pendingCommits)).sort((x, y) => x.path.localeCompare(y.path)))
+        .toEqual([{ id: later, path: `${KB}/Data/QA/a.md` }, { id: expect.any(String), path: `${KB}/Data/QA/b.md` }]);
+      expect(w.logs).toContain(
+        `cleared a stuck save, saved again since: branch="${MAIN}" path="${KB}/Data/QA/a.md" queued=${NOV_2.toISOString()}`,
+      );
+      expect(notify).not.toHaveBeenCalled();
+
+      // Saved again too, the last ones go, and the merge goes through.
+      await w.db.delete(pendingCommits).where(eq(pendingCommits.id, later));
+      await saveAgain(w, 'b.md', '# b, saved again after the replacement\n');
+      expect(await rowsLeft(w)).toEqual([]);
+      expect(await w.svc.mergeBranch(alice, MAIN, DRAFT)).toMatchObject({ kind: 'merged' });
+    },
+    PG_TEST_TIMEOUT,
+  );
+
+  it(
+    'keeps a settled row when its working copy is set aside while it is checked',
+    async () => {
+      const w = world;
+      await laterSave(w, 'a.md', '# a, saved again\n');
+      await stuckRow(w, { path: `${KB}/Data/QA/a.md` });
+      // A replacement lands during the git check: the copy is set aside (a fresh clone takes its place).
+      const check = w.git.unpublishedPaths.bind(w.git);
+      vi.spyOn(w.git, 'unpublishedPaths').mockImplementation(async (...args) => {
+        const answer = await check(...args);
+        await fs.mkdir(path.join(w.root, 'replaced-working-copies', '2026-11-24T10-00-00-000Z', workspaceIdForBranch(MAIN), '.git'), { recursive: true });
+        return answer;
+      });
+      expect(await w.svc.mergeBranch(alice, MAIN, DRAFT)).toMatchObject({ kind: 'pending-commits', pending: 1 });
+      expect(await rowsLeft(w)).toEqual([{ path: `${KB}/Data/QA/a.md`, status: 'needs_attention' }]);
+      expect(w.logs.some((l) => l.startsWith('could not check 1 stuck save(s)'))).toBe(true);
+    },
+    PG_TEST_TIMEOUT,
+  );
+
+  it(
+    'keeps the rows and refuses within the merge\'s wait when the git check does not answer in time',
+    async () => {
+      const w = world;
+      await laterSave(w, 'a.md', '# a, saved again\n');
+      await stuckRow(w, { path: `${KB}/Data/QA/a.md` });
+      // A fetch that hangs: the check never answers.
+      vi.spyOn(w.git, 'unpublishedPaths').mockImplementation(() => new Promise(() => {}));
+      w.svc.mergeWaitForPendingCommits = { timeoutMs: 500, pollMs: 20 };
+      const started = Date.now();
+      expect(await w.svc.mergeBranch(alice, MAIN, DRAFT)).toMatchObject({ kind: 'pending-commits', pending: 1 });
+      expect(Date.now() - started).toBeLessThan(5_000);
+      expect(await rowsLeft(w)).toEqual([{ path: `${KB}/Data/QA/a.md`, status: 'needs_attention' }]);
+      expect(w.logs.some((l) => l.startsWith('could not check 1 stuck save(s)'))).toBe(true);
+    },
+    PG_TEST_TIMEOUT,
+  );
+
+  it(
     'keeps a row whose workspace folder is there but holds no working copy, and refuses as before',
     async () => {
       const w = world;
@@ -405,7 +504,6 @@ describe.skipIf(!PG_ADMIN_URL)('stuck saves clear themselves once nothing of the
     'a stuck row, a new save of the same file landing as an ordinary save, then a merge that succeeds',
     async () => {
       const w = world;
-      const mainWs = workspaceIdForBranch(MAIN);
       await fs.writeFile(path.join(w.repo(MAIN), 'Data/QA/dirty.md'), '# dirty, the change that never landed\n');
       await stuckRow(w, { path: `${KB}/Data/QA/dirty.md` });
       expect(await w.svc.mergeBranch(alice, MAIN, DRAFT)).toMatchObject({
@@ -413,29 +511,7 @@ describe.skipIf(!PG_ADMIN_URL)('stuck saves clear themselves once nothing of the
         stuck: { files: [`${KB}/Data/QA/dirty.md`], more: 0 },
       });
 
-      // The person saves the file again: new bytes on disk and a queued row, as a lock release leaves them,
-      // and the real worker commits and pushes it.
-      await fs.writeFile(path.join(w.repo(MAIN), 'Data/QA/dirty.md'), '# dirty, saved again\n');
-      await w.queue.enqueue({ workspaceId: mainWs, branch: MAIN, path: `${KB}/Data/QA/dirty.md`, authorEmail: alice.email, authorName: alice.name });
-      const notify = vi.fn();
-      const worker = new PendingCommitsWorker({
-        service: w.queue,
-        versionControl: w.svc,
-        recoveryAgent: { run: vi.fn() } as never,
-        feedback: { notify } as never,
-        workspaces: { knownWorkspaces: () => [{ id: mainWs, branch: MAIN }] },
-        recoveryBot: { id: 'bot', email: 'bot@example.com', name: 'Bot' },
-      });
-      worker.start();
-      try {
-        await vi.waitFor(async () => expect(await w.queue.countPending(mainWs)).toBe(0), { timeout: 20_000, interval: 100 });
-        await vi.waitFor(async () => expect((await rowsLeft(w)).filter((r) => r.status !== 'needs_attention')).toEqual([]), {
-          timeout: 20_000,
-          interval: 100,
-        });
-      } finally {
-        await worker.stop();
-      }
+      const notify = await saveAgain(w, 'dirty.md', '# dirty, saved again\n');
 
       expect(await w.svc.mergeBranch(alice, MAIN, DRAFT)).toMatchObject({ kind: 'merged' });
       expect(await rowsLeft(w)).toEqual([]);

@@ -51,6 +51,7 @@ import type {
   FolderChangeRequest,
   FolderChangeRequestRemoval,
   IVersionControlService,
+  IWorkspaceService,
   MergeBranchOutcome,
   MergeChangeRequestOutcome,
   MergeResolution,
@@ -266,6 +267,25 @@ function commitSubject(full: string, short: string): string {
 }
 
 const basenameOf = (repoRelPath: string): string => repoRelPath.split('/').pop() ?? repoRelPath;
+
+/**
+ * `work`'s answer if it comes before `deadline` (epoch ms), else a rejection
+ * saying it ran out of time. The work is not stopped, only no longer waited
+ * for: its late answer (or failure) is dropped.
+ */
+async function beforeDeadline<T>(work: Promise<T>, deadline: number): Promise<T> {
+  if (deadline === Number.POSITIVE_INFINITY) return work;
+  work.catch(() => undefined);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expiry = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error('the check ran out of time')), Math.max(0, deadline - Date.now()));
+  });
+  try {
+    return await Promise.race([work, expiry]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 /** `Docs/Sub` and `Docs/Sub/` both → `Docs/Sub/`: a prefix that cannot match `Docs/Subway`. */
 function folderPrefix(folder: string): string {
@@ -4434,7 +4454,8 @@ export class VersionControlService implements IVersionControlService {
    * Wait until no commit is queued on `branch`, or the bound runs out. A
    * commit escalated to a person ends the wait at once: nothing will land it.
    * Before that answer is given, the escalated rows whose save has nothing
-   * left to push are cleared (`clearEscalatedCommits`), once per call, and
+   * left to push are cleared (`clearEscalatedCommits`), once per call and
+   * within the same bound (a check that runs out of it keeps its rows), and
    * the queue is asked again: a row still there (its change missing, or not
    * checkable) refuses the merge, and comes back in `stuck`, from the same
    * read that decided the refusal.
@@ -4454,7 +4475,7 @@ export class VersionControlService implements IVersionControlService {
     for (;;) {
       const { queued, stuck, needsAttention } = await this.pendingCommits.queuedOnBranch(branch);
       if (needsAttention !== null && !cleared) {
-        await this.clearEscalatedCommits(branch);
+        await this.clearEscalatedCommits(branch, deadline);
         cleared = true;
         continue;
       }
@@ -4471,27 +4492,34 @@ export class VersionControlService implements IVersionControlService {
    * working copy as at HEAD, and the shared repository holds HEAD's version of
    * it (`GitService.unpublishedPaths`, one fetch and one reservation per
    * working copy). A row whose workspace folder is shown absent, with no
-   * set-aside copy of it, is removed too (`WorkspaceService.workingCopyOf`):
+   * set-aside copy of it, is removed too (`IWorkspaceService.workingCopyOf`):
    * nothing is left that could hold its bytes; a folder that cannot be read
    * is not absent. A row of a workspace that was ever set aside (a replaced
    * or moved repository) is kept, live working copy or not: the set-aside
    * copy may hold its bytes, and the row is what points a person at them.
    * Every other row is kept — its change is missing, or the check could not
-   * be made — and a person lands it by saving the file again, after which
-   * this clears it the same way.
+   * be made. A person lands any kept row by saving the file again: once that
+   * save has landed, `PendingCommitsService.markSucceeded` removes it.
    *
    * Asked before a merge out of a branch is refused over such rows, and once
    * at startup. Never throws: a working copy that cannot be checked keeps its
-   * rows and is logged. Each removal is one log line and no notice; the
-   * notice went out when the row was marked. `pending` and `running` rows are
-   * never read or touched here.
+   * rows and is logged, and so does one not checked by `deadline` (epoch ms;
+   * the merge's wait passes its own): the git check it was waiting for may
+   * finish later, and its answer is not used. Each removal is one log line
+   * and no notice; the notice went out when the row was marked. `pending`
+   * and `running` rows are never read or touched here.
    *
+   * Where the working copy is (`workingCopyOf`) is asked again after the git
+   * check, and a row is removed only when both answers agree: a replacement
+   * that set the copy aside while it was checked, and put a fresh clone in
+   * its place, is seen there, and its rows are kept. One that sets it aside
+   * after the second answer moved the copy the check had already read whole.
    * The check and the delete are not one reservation, and need not be: a
    * `needs_attention` row is driven by nobody, so nothing can change what it
    * stands for in between, and a save of the same file made meanwhile is a
    * row of its own that carries those bytes.
    */
-  async clearEscalatedCommits(branch?: string): Promise<void> {
+  async clearEscalatedCommits(branch?: string, deadline = Number.POSITIVE_INFINITY): Promise<void> {
     let rows: PendingCommit[];
     try {
       rows = await this.pendingCommits.listNeedsAttention(branch);
@@ -4505,20 +4533,24 @@ export class VersionControlService implements IVersionControlService {
       groups.set(key, [...(groups.get(key) ?? []), row]);
     }
     const done: string[] = [];
+    // Through the contract: where a working copy is, is the workspace module's answer.
+    const workingCopies: Pick<IWorkspaceService, 'workingCopyOf'> = this.workspaceService;
     for (const group of groups.values()) {
       const { workspaceId, branch: rowBranch } = group[0]!;
       try {
-        const copy = await this.workspaceService.workingCopyOf(workspaceId);
+        const copy = await workingCopies.workingCopyOf(workspaceId);
         if (copy === 'set-aside') {
           log.info(
             `kept ${group.length} stuck save(s) on ${printable(rowBranch)}: a set-aside copy of workspace ` +
-              `${printable(workspaceId)} may hold them`,
+              `${printable(workspaceId)} may hold them; saving a file again clears its row`,
           );
           continue;
         }
         const unpublished = copy === 'gone'
           ? new Set<string>()
-          : await this.git.unpublishedPaths(workspaceId, rowBranch, group.map((r) => r.path));
+          : await beforeDeadline(this.git.unpublishedPaths(workspaceId, rowBranch, group.map((r) => r.path)), deadline);
+        const after = await workingCopies.workingCopyOf(workspaceId);
+        if (after !== copy) throw new Error(`its working copy went from "${copy}" to "${after}" while it was checked`);
         done.push(...group.filter((r) => !unpublished.has(r.path)).map((r) => r.id));
       } catch (err) {
         log.warn(

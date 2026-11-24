@@ -2514,16 +2514,9 @@ export class WorkspaceService implements IWorkspaceService {
   }
 
   /**
-   * Where the files of `workspaceId`'s working copy can still be on disk.
-   * `'set-aside'` when a copy of it was set aside (a replaced or moved
-   * repository), whether or not a working copy is back in its place: that
-   * copy may hold what was never pushed. `'live'` when its working copy is in
-   * place and nothing was set aside. `'gone'` only when its folder is shown
-   * absent (ENOENT) and nothing was set aside. Throws for everything else
-   * (an invalid id, a read that fails with EACCES or EIO, a folder with no
-   * working copy in it), so a caller that acts on `'gone'` never acts on a
-   * guess. The folder is read before the set-aside root, so a set-aside that
-   * moves it in between is found there. Never bootstraps.
+   * See `IWorkspaceService.workingCopyOf`. Absent means ENOENT; EACCES, EIO
+   * and the like throw. The folder is read before the set-aside root, so a
+   * set-aside that moves it in between is found there.
    */
   async workingCopyOf(workspaceId: string): Promise<'live' | 'set-aside' | 'gone'> {
     if (!workspaceId) throw new Error('Invalid workspace ID');
