@@ -2587,6 +2587,10 @@ export function FileExplorer({
         : checkout,
     [checkout, claims],
   );
+  /** Whether the tree below lists anything: a narrowed root that does not exist yet lists nothing. */
+  const hasFolders =
+    !!checkout &&
+    (!sections || sections.knowledge !== null || sections.roots.length > 0 || sections.looseFiles.length > 0);
 
   const handleDrop = useCallback(
     (e: React.DragEvent) => {
@@ -2678,7 +2682,9 @@ export function FileExplorer({
         {lead === undefined ? (
           <div className="mx-3 my-2 border-t border-line" data-testid="file-explorer-folders-rule" />
         ) : (
-          <div className="px-2.5 pb-1.5 pt-3 text-label uppercase text-ink-faint">Files</div>
+          // Only over folders that are there: a narrowed root that does not
+          // exist yet lists nothing, and a heading over nothing says nothing.
+          hasFolders && <div className="px-2.5 pb-1.5 pt-3 text-label uppercase text-ink-faint">Files</div>
         )}
         {!mergedTree ? (
           <div className="px-3 py-4 text-xs text-ink-muted">Loading...</div>
