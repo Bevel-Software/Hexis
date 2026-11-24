@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { Scanner } from '@tailwindcss/oxide';
 import { compile } from 'tailwindcss';
 import { build, type Rollup } from 'vite';
 
@@ -81,7 +82,8 @@ async function buildStylesheet(entry: string): Promise<string> {
       return { path: file, base: path.dirname(file), content: readFileSync(file, 'utf8') };
     },
   });
-  // Every token in the bundle is a candidate; Tailwind keeps the utilities.
-  const candidates = Array.from(new Set((await bundleFixture(entry)).split(/[\s"'`,;{}()<>=]+/).filter(Boolean)));
+  // Tailwind's own scanner, the one the app's build runs, reads the classes
+  // out of the bundle, arbitrary values like `grid-cols-[repeat(2,1fr)]` included.
+  const candidates = new Scanner({}).scanFiles([{ content: await bundleFixture(entry), extension: 'js' }]);
   return compiled.build(candidates);
 }
