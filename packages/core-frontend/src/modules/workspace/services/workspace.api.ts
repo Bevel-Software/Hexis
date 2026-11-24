@@ -36,7 +36,11 @@ export async function getOrCreateWorkspace(
   branch?: string,
 ): Promise<{ workspace: WorkspaceInfo; fileTree: FileTreeEntry }> {
   const qs = branch ? `?branch=${encodeURIComponent(branch)}` : '';
-  const res = await authFetch(`/api/workspace${qs}`);
+  // Asked of the server every time, never of the browser's cache. The server
+  // says its answer must not be stored, but a browser that stored a 410 for a
+  // branch before it said so (one the propose flow later created again) did
+  // not ask the server again, and read that 410 back instead.
+  const res = await authFetch(`/api/workspace${qs}`, { cache: 'no-store' });
   if (!res.ok) throw new WorkspaceApiError(res.status);
   return res.json();
 }

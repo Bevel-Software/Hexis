@@ -3,13 +3,13 @@ import type { AddressInfo } from 'node:net';
 import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { testKbContext } from '../../../__tests__/kb-context.js';
-import { NodeFs } from '../../kb-fs/node-fs.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
 import type { FileTreeEntry, IVersionControlService } from '@bevel-software/platform-shared';
-import type { IAccessControl } from '../../access/access-control.interface.js';
-import type { VersionControlEventBus } from '../../version-control/event-bus.js';
-import type { AuthService } from '../../auth/auth.service.js';
-import type { IAdminAccessService } from '../../admin/admin.interface.js';
-import type { ICreatorAccess } from '../../access-model/creator.js';
+import type { IAccessControl } from '../../access/index.js';
+import type { VersionControlEventBus } from '../../version-control/index.js';
+import type { AuthService } from '../../auth/index.js';
+import type { IAdminAccessService } from '../../admin/index.js';
+import type { ICreatorAccess } from '../../access-model/index.js';
 import type { WorkspaceService } from '../workspace.service.js';
 import { createWorkspaceRoutes } from '../workspace.routes.js';
 import { BranchNotFoundError, RemoteBranchGoneError } from '../../../shared/domain-errors.js';
@@ -59,7 +59,7 @@ async function makeHarness(
     testKbContext(),
     stubCreatorAccess,
     { isAdmin: async () => false } as unknown as IAdminAccessService,
-    new NodeFs(),
+    realDisk(),
   ));
 
   const server = await new Promise<Server>((resolve) => {
@@ -86,11 +86,15 @@ describe('GET /api/workspace — a branch that cannot be opened', () => {
   const get = async (
     branch: string,
     bootstrap: (branch: string) => Promise<unknown>,
-  ): Promise<{ status: number; body: Record<string, unknown> }> => {
+  ): Promise<{ status: number; body: Record<string, unknown>; cacheControl: string | null }> => {
     const h = await makeHarness(bootstrap);
     server = h.server;
     const res = await fetch(`${h.baseUrl}/api/workspace?branch=${encodeURIComponent(branch)}`);
-    return { status: res.status, body: (await res.json()) as Record<string, unknown> };
+    return {
+      status: res.status,
+      body: (await res.json()) as Record<string, unknown>,
+      cacheControl: res.headers.get('cache-control'),
+    };
   };
 
   it('answers 404 and names the branch when the platform has never heard of it', async () => {
@@ -127,6 +131,32 @@ describe('GET /api/workspace — a branch that cannot be opened', () => {
 
     expect(status).toBe(200);
     expect(body).toMatchObject({ workspace: { id: 'alice%2Fdraft' } });
+  });
+
+  /**
+   * A 410 sent without a caching rule is one Chromium kept, answering later
+   * reads of the same address from its cache without asking the server. A
+   * person who opened their own applied request (whose suggestions branch had
+   * been removed) got that 410 for the branch, and their next proposal, which
+   * recreates that branch under the same name, read the stored 410 back
+   * instead of the recreated branch.
+   */
+  it('says no answer may be stored, the 410 for a deleted branch and the 200 for a recreated one alike', async () => {
+    const gone = await get('suggestions/rae-u9-1234-/knowledge', async (branch) => {
+      throw new RemoteBranchGoneError(branch);
+    });
+    expect(gone.status).toBe(410);
+    expect(gone.cacheControl).toBe('no-store');
+
+    const back = await get('suggestions/rae-u9-1234-/knowledge', async (branch) => ({
+      id: encodeURIComponent(branch),
+      name: branch,
+      absolutePath: '/tmp/ws',
+      createdAt: new Date(0).toISOString(),
+      kbDirName: 'knowledge-base',
+    }));
+    expect(back.status).toBe(200);
+    expect(back.cacheControl).toBe('no-store');
   });
 
   it('answers 500 — not 404 — when the remote is merely unreachable', async () => {
