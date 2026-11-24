@@ -14,7 +14,8 @@ import { pickFileRenderer, type FileRendererProps } from '..';
  * whatever it was given: the HTML standard defines its `value` (the "API
  * value") as the raw value with newlines normalized. happy-dom hands back
  * exactly what was set, so without this a unit test never sees what the app's
- * editor does to a CRLF file. The browser's rule, for this suite.
+ * editor does to a CRLF file. The browser's rule, for this suite; the same
+ * edits through Chromium's own textarea are `browser/editor-line-endings.browser.ts`.
  */
 const textareaValue = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!;
 beforeAll(() => {
