@@ -107,6 +107,14 @@ let unzipCalls: [string, string | undefined][] = [];
  * in `workspace.service.test.ts`.
  */
 let unzipEntries: string[] = [];
+/**
+ * Every lock call the tools made through `versionControlService`, as
+ * `acquire <path>` / `release <path>`: a lock and its release is how a file
+ * already on disk is committed and shared (`save_file`, the app's unzip route).
+ */
+let lockCalls: string[] = [];
+/** Paths whose lock someone else holds: `acquireLock` answers not acquired for them. */
+let lockedByOthers = new Set<string>();
 /** Every folder turn a tool took, as `workspaceId:dir`. */
 let folderTurns: string[] = [];
 /** The policy instance the tools were mounted with, so a test can restrict a session. */
@@ -258,6 +266,8 @@ async function start(
   workspacePathCalls = [];
   unzipCalls = [];
   unzipEntries = [];
+  lockCalls = [];
+  lockedByOthers = new Set();
   folderTurns = [];
   writePolicy = new RoutineWritePolicyService();
   focusedBranch = undefined;
@@ -317,7 +327,17 @@ async function start(
         return { destination: '', extracted, skipped };
       },
     } as never,
-    versionControlService: {} as never,
+    versionControlService: {
+      acquireLock: async (_ws: string, _branch: string, file: string) => {
+        lockCalls.push(`acquire ${file}`);
+        return lockedByOthers.has(file)
+          ? { acquired: false, lock: { holderName: 'Ana' } }
+          : { acquired: true };
+      },
+      releaseLock: async (_ws: string, _branch: string, file: string) => {
+        lockCalls.push(`release ${file}`);
+      },
+    } as never,
     events: {} as never,
     getFilesystem: async () => fs,
   });
@@ -5107,6 +5127,53 @@ describe('agent read/write hooks', () => {
     for (const name of ['one.md', 'two.md', 'three.md']) {
       await expect(readFile(join(tempDir, `${KB_DIR}/${name}`), 'utf8')).rejects.toThrow();
     }
+  });
+
+  it('unzip commits every extracted file through a lock and its release, as the app\'s unzip route does', async () => {
+    const base = await start();
+    await fs.writeFile(`${KB_DIR}/a.zip`, 'not-really-a-zip');
+    unzipEntries = [`${KB_DIR}/out/access.md`, `${KB_DIR}/out/page.md`];
+    const res = await post(`${base}/api/agent/tools/unzip`, { path: `${KB_DIR}/a.zip`, sessionId: 's1' });
+    expect(res.status).toBe(200);
+    // Left uncommitted, a rule that came in the archive stopped applying once the access
+    // gate's wait for a reported change ran out: the gate answers from the commit.
+    expect(lockCalls).toEqual([
+      `acquire ${KB_DIR}/out/access.md`,
+      `release ${KB_DIR}/out/access.md`,
+      `acquire ${KB_DIR}/out/page.md`,
+      `release ${KB_DIR}/out/page.md`,
+    ]);
+    expect((await res.json()) as Record<string, unknown>).not.toHaveProperty('unsaved');
+  });
+
+  it('unzip lists a file whose lock someone else holds under unsaved, and commits the rest', async () => {
+    const base = await start();
+    await fs.writeFile(`${KB_DIR}/a.zip`, 'not-really-a-zip');
+    unzipEntries = [`${KB_DIR}/out/held.md`, `${KB_DIR}/out/free.md`];
+    lockedByOthers = new Set([`${KB_DIR}/out/held.md`]);
+    const res = await post(`${base}/api/agent/tools/unzip`, { path: `${KB_DIR}/a.zip`, sessionId: 's1' });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { extracted: string[]; unsaved?: { path: string; reason: string }[] };
+    expect(body.extracted).toEqual([`${KB_DIR}/out/held.md`, `${KB_DIR}/out/free.md`]);
+    expect(body.unsaved).toEqual([
+      { path: `${KB_DIR}/out/held.md`, reason: 'Locked by Ana; save it with save_file later.' },
+    ]);
+    expect(lockCalls).toEqual([
+      `acquire ${KB_DIR}/out/held.md`,
+      `acquire ${KB_DIR}/out/free.md`,
+      `release ${KB_DIR}/out/free.md`,
+    ]);
+  });
+
+  it('unzip commits nothing for an entry the write hook refused', async () => {
+    const base = await start();
+    record();
+    await fs.writeFile(`${KB_DIR}/a.zip`, 'not-really-a-zip');
+    unzipEntries = [`${KB_DIR}/out/keep.md`, `${KB_DIR}/out/blocked.md`];
+    refuseWrites('Not in this conversation.', `${KB_DIR}/out/blocked.md`);
+    const res = await post(`${base}/api/agent/tools/unzip`, { path: `${KB_DIR}/a.zip`, sessionId: 's1' });
+    expect(res.status).toBe(200);
+    expect(lockCalls).toEqual([`acquire ${KB_DIR}/out/keep.md`, `release ${KB_DIR}/out/keep.md`]);
   });
 
   it('unzip skips the refused entry with the hook\'s message and extracts the others', async () => {

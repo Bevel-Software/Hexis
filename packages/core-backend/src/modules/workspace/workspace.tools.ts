@@ -3958,7 +3958,8 @@ export function registerWorkspaceTools(
     name: 'unzip',
     gated: true,
     description:
-      'Extract a .zip already in the workspace (defaults to the zip\'s parent). Returns extracted files + skipped entries. Existing files are overwritten.',
+      'Extract a .zip already in the workspace (defaults to the zip\'s parent). Returns extracted files + skipped entries. Existing files are overwritten. ' +
+      'Each extracted file is committed and shared moments later, like any write; `unsaved` lists any that could not be (save them with `save_file`).',
     inputs: {
       type: 'object',
       properties: {
@@ -3984,6 +3985,15 @@ export function registerWorkspaceTools(
             required: ['path', 'reason'],
           },
         },
+        unsaved: {
+          type: 'array',
+          description: 'Present only when some extracted files could not be scheduled for commit: each is on disk, uncommitted, with the reason.',
+          items: {
+            type: 'object',
+            properties: { path: str('Workspace-relative path of the extracted file.'), reason: str('Why it was not scheduled (e.g. another person holds its lock).') },
+            required: ['path', 'reason'],
+          },
+        },
       },
       required: ['destination', 'extracted', 'skipped'],
     },
@@ -3998,10 +4008,12 @@ export function registerWorkspaceTools(
       // into the same 404 every other file tool answers. Only that declared
       // answer maps — a failure part-way through an extraction is not the
       // archive going missing.
-      return orDeclaredNotFound(
+      const branch = a.branch as string;
+      const workspaceId = workspaceIdForBranch(branch);
+      const result = await orDeclaredNotFound(
         () =>
           ctx.workspaceService.unzipFile(
-            workspaceIdForBranch(a.branch as string),
+            workspaceId,
             zipPath,
             typeof a.destination === 'string' ? a.destination : undefined,
             // Each extracted file is a write of its own: an entry the write
@@ -4021,11 +4033,32 @@ export function registerWorkspaceTools(
                 );
               }
               writePolicy.assertPathWritable(ctx.sessionId, wsRelPath);
-              return assertAgentWriteAllowed(agentAccessGate, ctx, a.branch as string, wsRelPath);
+              return assertAgentWriteAllowed(agentAccessGate, ctx, branch, wsRelPath);
             },
           ),
         'Nothing to extract',
       );
+      // Extraction writes straight to disk. Every extracted file is then put
+      // through a lock and release, which commits and shares it as the
+      // person, as the app's own unzip route does. Left uncommitted, a file
+      // stayed outside every commit until someone saved it, and the access
+      // gate answers from the commit a checkout stands on: an `access.md`
+      // or a page's own restriction that came in an archive stopped applying
+      // once the gate's wait for a reported change ran out.
+      const unsaved: { path: string; reason: string }[] = [];
+      for (const file of result.extracted) {
+        try {
+          const acquired = await ctx.versionControlService.acquireLock(workspaceId, branch, file, ctx.user);
+          if (!acquired.acquired) {
+            unsaved.push({ path: file, reason: `Locked by ${acquired.lock.holderName ?? 'another user'}; save it with save_file later.` });
+            continue;
+          }
+          await ctx.versionControlService.releaseLock(workspaceId, branch, file, ctx.user);
+        } catch (err) {
+          unsaved.push({ path: file, reason: err instanceof Error ? err.message : String(err) });
+        }
+      }
+      return unsaved.length > 0 ? { ...result, unsaved } : result;
     },
   });
 

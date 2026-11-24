@@ -1453,9 +1453,10 @@ export class AccessControlService implements IAccessControl {
    *
    * This is what makes the change-request gates affordable. One detail read
    * plus one approval click runs six at-ref gates, and before this cache
-   * every one of them rebuilt the model from git. A build is two git calls
-   * (`buildModelAtCommit`: one `ls-tree`, one `cat-file --batch` for every
-   * file the model reads), and each call forks the server process, which
+   * every one of them rebuilt the model from git. A build is at most two git
+   * calls (`buildModelAtCommit`: one `ls-tree`, one `cat-file --batch` for
+   * every file the model reads; only the `ls-tree` when a model for the same
+   * files is already held), and each call forks the server process, which
    * costs tens of milliseconds on a server holding a large heap.
    *
    * Bounded FIFO. The bound is sized for a listing that resolves access at
@@ -1615,7 +1616,11 @@ export class AccessControlService implements IAccessControl {
    * the commit it stood on then. Until its head moves off that commit, the
    * change may be on disk and in no commit yet, so the workspace is answered
    * from the checkout, as before the maps. `SUSPECT_MS` ends the wait for a
-   * change that never became a commit.
+   * change that never became a commit. The wait is short because every write
+   * path commits moments after it lands on disk (the agent tools, the app's
+   * routes, `unzip` included); only a file someone saves by hand later
+   * (`save_file`, e.g. one `unzip` reports `unsaved`) stays outside the
+   * commit longer, and until then the commit's rules answer for it.
    */
   private readonly suspects = new Map<string, { at: number; commit: string | undefined }>();
   private static readonly SUSPECT_MS = 10_000;
@@ -3219,10 +3224,12 @@ export class AccessControlService implements IAccessControl {
    * candidate); `'malformed'` means it does but it doesn't parse (the caller
    * answers null, as it always has).
    *
-   * TWO git calls, whatever the tree holds: one `ls-tree` to learn which
-   * files the model is made of, then one `cat-file --batch` that reads all of
-   * them — roles.yaml, the groups sources, every access.md and every plugin
-   * manifest. It used to be one `git show` per file, and each git call forks
+   * At most TWO git calls, whatever the tree holds: one `ls-tree` to learn
+   * which files the model is made of, then one `cat-file --batch` that reads
+   * all of them — roles.yaml, the groups sources, every access.md and every
+   * plugin manifest. When a model for the same files is already held (the
+   * listing's `sourcesKey` in `modelsBySources`), the build ends after the
+   * `ls-tree` and takes that model. It used to be one `git show` per file, and each git call forks
    * the server process, which on a server holding a large heap costs tens of
    * milliseconds of the main thread per call: a knowledge base with a few
    * dozen access files paid a second or more per commit, times every ref a
