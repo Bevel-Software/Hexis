@@ -70,6 +70,7 @@ import { SurfaceCache, type SurfaceCacheOptions } from './surface-cache.js';
 import { SharedDefinitions } from './shared-definitions.js';
 import { currentRequest, runInRequest, type McpRequestContext } from './request-context.js';
 import { printable } from '../../shared/printable.js';
+import { withinLoopTime } from '../../shared/loop-time-limit.js';
 import {
   composeAgentInstructions,
   prefixToolDescription,
@@ -175,6 +176,13 @@ export interface McpProxyOptions {
     userId: string;
     agentPath: string | null;
   }) => Promise<{ revision: string; connection?: ConnectionScopeWire }>;
+  /**
+   * How long a read this service makes in process may take, in time the event
+   * loop was free to run (`shared/loop-time-limit.ts`); default
+   * {@link IN_PROCESS_READ_LIMIT_MS}. A read that passes it is given up on, as
+   * a loopback request that passed its limit was. Set by tests.
+   */
+  inProcessReadLimitMs?: number;
 }
 
 /** Who a request is from — everything the proxy needs, resolved from that request's own bearer. */
@@ -219,6 +227,16 @@ export interface McpCaller {
  * milliseconds; only a wedged process ever comes near it.
  */
 const LOOPBACK_TIMEOUT_MS = 15_000;
+
+/**
+ * Upper bound on a read made in process (the catalog revision), as long as the
+ * loopback request it replaces was given. The loopback's limit ran on the
+ * clock, so a busy server passed it on a read that needed milliseconds. This
+ * one is counted in time the event loop was free to run: a busy server does
+ * not use it up, and a read that waits on something that never answers still
+ * ends, so the request falls back as it did before and does not hang.
+ */
+const IN_PROCESS_READ_LIMIT_MS = 15_000;
 
 /**
  * Lifetime of the internal token minted as an OAuth/JWT request's loopback
@@ -1052,12 +1070,19 @@ export class McpService {
     const read = this.opts.readCatalogRevision;
     if (!read) return this.fetchCatalogRevision(loopbackBearer);
     try {
-      const { revision, connection } = await read({ userId: caller.userId, agentPath: caller.agentPath || null });
+      const { revision, connection } = await this.inProcess(
+        read({ userId: caller.userId, agentPath: caller.agentPath || null }),
+      );
       return { revision: revision || null, ...(connection ? { connection } : {}) };
     } catch (err) {
       log.warn("the catalog revision could not be read; building this request's surface uncached:", { err });
       return { revision: null };
     }
+  }
+
+  /** A read made in process, held to {@link IN_PROCESS_READ_LIMIT_MS} of event-loop time. */
+  private inProcess<T>(read: Promise<T>): Promise<T> {
+    return withinLoopTime(read, this.opts.inProcessReadLimitMs ?? IN_PROCESS_READ_LIMIT_MS);
   }
 
   /**

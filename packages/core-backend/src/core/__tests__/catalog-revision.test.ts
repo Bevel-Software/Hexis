@@ -2,9 +2,42 @@ import express from 'express';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { SkillSummary } from '../../modules/skills/skills.contract.js';
+import type { SkillSummary } from '../../modules/skills/index.js';
 import { catalogRevision, createCatalogRevisionReader, createCatalogRevisionRoutes } from '../catalog-revision.js';
-import { agentFile, agentScopeOver, inMemoryKb, type InMemoryKb } from '../../modules/agent-scope/__tests__/in-memory-kb.js';
+import { ConnectionScope, type IAgentScopeResolver } from '../../modules/agent-scope/index.js';
+
+/**
+ * One agent configuration as a distribution would resolve it: what it loads,
+ * and anything else its file says. Core does not own what a configuration is,
+ * so the tests below stand one in through the agent-scope module's contract.
+ */
+interface AgentConfiguration {
+  name?: string;
+  connectors?: string[];
+  skills?: string[];
+  description?: string;
+}
+
+/**
+ * A resolver over `agents`, by path. A path with no configuration is gone. The
+ * fingerprint is the whole configuration, as a distribution's is a digest of
+ * the whole file: any edit moves it. Change `agents` and the next resolve sees it.
+ */
+function agentScopeOver(agents: Map<string, AgentConfiguration>): Pick<IAgentScopeResolver, 'resolve'> {
+  return {
+    async resolve(_userEmail, agentPath) {
+      if (!agentPath) return ConnectionScope.everything();
+      const agent = agents.get(agentPath);
+      if (!agent) return ConnectionScope.gone(agentPath);
+      const fileName = agentPath.slice(agentPath.lastIndexOf('/') + 1).replace(/\.agent$/, '');
+      return ConnectionScope.narrowed(
+        { path: agentPath, name: agent.name ?? fileName },
+        { skills: agent.skills ?? [], connectors: agent.connectors ?? [], platformTools: null },
+        `agent\u0000${agentPath}\u0000${JSON.stringify(agent)}`,
+      );
+    },
+  };
+}
 
 /**
  * The fingerprint a long-lived client polls to learn that the released catalog
@@ -301,7 +334,7 @@ describe('GET /agent/catalog-revision, for a connection made as an .agent file',
   const paths = ['Plugins/Ops/ops.tool', 'Plugins/Sales/crm.tool'];
   const skills = [skill({ name: 'notes', path: 'Skills/Release/notes' }), skill({ name: 'pitch', path: 'Skills/Sales/pitch' })];
 
-  async function mount(kb: InMemoryKb, agentPath: string | undefined) {
+  async function mount(agents: Map<string, AgentConfiguration>, agentPath: string | undefined) {
     // The two services narrow by the predicate they are handed, AFTER their
     // own read gate — stood in for here by the lists above, all readable.
     const catalogFingerprints = vi.fn(async (_email: string, within?: (p: string) => boolean) =>
@@ -310,7 +343,7 @@ describe('GET /agent/catalog-revision, for a connection made as an .agent file',
     const listSkills = vi.fn(async (_email: string, opts?: { within?: (p: string) => boolean }) =>
       skills.filter((s) => !opts?.within || opts.within(s.path)),
     );
-    const agentScope = agentScopeOver(kb);
+    const agentScope = agentScopeOver(agents);
     const resolve = vi.spyOn(agentScope, 'resolve');
     const app = express();
     app.use(
@@ -334,7 +367,7 @@ describe('GET /agent/catalog-revision, for a connection made as an .agent file',
   }
 
   it('Everything is the revision it always was: nothing resolved, nothing narrowed, no `connection`', async () => {
-    const { read, catalogFingerprints, listSkills, resolve } = await mount(inMemoryKb({}), undefined);
+    const { read, catalogFingerprints, listSkills, resolve } = await mount(new Map(), undefined);
     expect(await read()).toEqual({ revision: catalogRevision(lines, skills), tools: 2, skills: 2 });
     expect(catalogFingerprints).toHaveBeenCalledWith('ada@example.com');
     expect(listSkills).toHaveBeenCalledWith('ada@example.com');
@@ -342,8 +375,8 @@ describe('GET /agent/catalog-revision, for a connection made as an .agent file',
   });
 
   it("is the fingerprint of what the agent loads, and names the agent", async () => {
-    const kb = inMemoryKb({ 'Agents/ops.agent': agentFile('name: ops\nconnectors: [Plugins/Ops]\nskills: [Skills/Release]') });
-    const { read } = await mount(kb, 'Agents/ops.agent');
+    const agents = new Map([['Agents/ops.agent', { name: 'ops', connectors: ['Plugins/Ops'], skills: ['Skills/Release'] }]]);
+    const { read } = await mount(agents, 'Agents/ops.agent');
     const body = await read();
     expect(body.tools).toBe(1);
     expect(body.skills).toBe(1);
@@ -352,21 +385,21 @@ describe('GET /agent/catalog-revision, for a connection made as an .agent file',
   });
 
   it('moves at the next read after the .agent file is edited — no reconnect', async () => {
-    const kb = inMemoryKb({ 'Agents/ops.agent': agentFile('connectors: [Plugins/Ops]') });
-    const { read } = await mount(kb, 'Agents/ops.agent');
+    const agents = new Map<string, AgentConfiguration>([['Agents/ops.agent', { connectors: ['Plugins/Ops'] }]]);
+    const { read } = await mount(agents, 'Agents/ops.agent');
     const before = await read();
     expect(await read()).toEqual(before);
-    kb.files.set('Agents/ops.agent', agentFile('connectors: [Plugins/Ops]\nskills: [Skills/Sales]'));
+    agents.set('Agents/ops.agent', { connectors: ['Plugins/Ops'], skills: ['Skills/Sales'] });
     const after = await read();
     expect(after.revision).not.toBe(before.revision);
     expect(after.skills).toBe(1);
     // Even an edit that changes nothing listed moves it: the file is the configuration.
-    kb.files.set('Agents/ops.agent', agentFile('connectors: [Plugins/Ops]\nskills: [Skills/Sales]\ndescription: now described'));
+    agents.set('Agents/ops.agent', { connectors: ['Plugins/Ops'], skills: ['Skills/Sales'], description: 'now described' });
     expect((await read()).revision).not.toBe(after.revision);
   });
 
   it('a deleted file is an empty catalog with the reason, never Everything', async () => {
-    const { read } = await mount(inMemoryKb({}), 'Agents/gone.agent');
+    const { read } = await mount(new Map(), 'Agents/gone.agent');
     const body = await read();
     expect(body.tools).toBe(0);
     expect(body.skills).toBe(0);

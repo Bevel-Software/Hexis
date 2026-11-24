@@ -55,9 +55,14 @@ interface HarnessOptions {
   /**
    * How the service learns the revision: `'in-process'` hands it a reader that
    * answers the harness's revision as a function call, as the composition root
-   * does; `'throws'` hands it one that fails. Absent, it asks the loopback.
+   * does; `'throws'` hands it one that fails; `'stalls'` hands it one that
+   * never answers; `'slow'` hands it one that waits 50 ms and then needs the
+   * event loop a few more times, as a read of a disk or a database does.
+   * Absent, it asks the loopback.
    */
-  revisionReader?: 'in-process' | 'throws';
+  revisionReader?: 'in-process' | 'throws' | 'stalls' | 'slow';
+  /** The limit on an in-process read, in event-loop time. Absent, the service's own. */
+  inProcessReadLimitMs?: number;
 }
 
 async function harness(opts: HarnessOptions = {}) {
@@ -188,10 +193,16 @@ async function harness(opts: HarnessOptions = {}) {
               readCatalogRevision: async (who: { userId: string; agentPath: string | null }) => {
                 state.revisionReads.push(who);
                 if (opts.revisionReader === 'throws') throw new Error('the catalog could not be read');
+                if (opts.revisionReader === 'stalls') await new Promise<never>(() => {});
+                if (opts.revisionReader === 'slow') {
+                  await new Promise((r) => setTimeout(r, 50));
+                  for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+                }
                 return { revision: state.revision };
               },
             }
           : {}),
+        ...(opts.inProcessReadLimitMs !== undefined ? { inProcessReadLimitMs: opts.inProcessReadLimitMs } : {}),
       },
       undefined,
       undefined,
@@ -508,6 +519,45 @@ describe('McpService — the revision is read in process', () => {
     expect(state.builds).toBe(2);
     // A failed read is not a reason to fall back to asking over HTTP.
     expect(state.revisionRouteHits).toBe(0);
+  });
+});
+
+describe('McpService — a revision read that never answers', () => {
+  // The loopback request this read replaces ended at its limit and the request
+  // fell back to a surface of its own. A read made in process has no request
+  // to end, so it is held to a limit of its own: one counted in event-loop
+  // time, which a busy server does not use up (`shared/loop-time-limit.ts`).
+  it('ends at its limit, and the request is served a surface of its own', async () => {
+    const { state, mcp } = await harness({ revisionReader: 'stalls', inProcessReadLimitMs: 150 });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const started = performance.now();
+    const names = (await (await connect(mcp)).listTools()).tools.map((t) => t.name);
+    expect(names).toContain('read_file');
+    expect(performance.now() - started).toBeGreaterThanOrEqual(140);
+    // Not kept: nothing says the surface is current.
+    await (await connect(mcp)).listTools();
+    expect(state.builds).toBe(2);
+    expect(state.revisionRouteHits).toBe(0);
+    expect(warn.mock.calls.map((c) => c.map(String).join(' ')).join('\n')).toContain('the catalog revision could not be read');
+  });
+
+  it('a held event loop does not use the limit up: the read is waited for and the surface is kept', async () => {
+    const { state, mcp } = await harness({ revisionReader: 'slow', inProcessReadLimitMs: 200 });
+    const client = await connect(mcp);
+    const first = client.listTools();
+    // The read is under way and its limit is running. Hold the loop for four
+    // times the limit: a clock limit has passed when the loop is free again,
+    // and would give the read up before its next turn.
+    await new Promise((r) => setTimeout(r, 20));
+    const until = performance.now() + 800;
+    while (performance.now() < until) {
+      /* busy */
+    }
+    await first;
+    await (await connect(mcp)).listTools();
+    // One build for the two requests: the first one's revision was read.
+    expect(state.builds).toBe(1);
   });
 });
 

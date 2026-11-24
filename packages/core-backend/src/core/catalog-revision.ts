@@ -1,9 +1,9 @@
 import { createHash } from 'node:crypto';
 import express, { type Request, type RequestHandler } from 'express';
 import { logger } from '../shared/logging.js';
-import type { ISkillService, SkillSummary } from '../modules/skills/skills.contract.js';
-import type { IToolManualService } from '../modules/tool-manuals/tool-manuals.contract.js';
-import '../modules/tool-auth/tool-auth.middleware.js'; // Express Request augmentation (req.toolAuth)
+import type { ISkillService, SkillSummary } from '../modules/skills/index.js';
+import type { IToolManualService } from '../modules/tool-manuals/index.js';
+import '../modules/tool-auth/index.js'; // Express Request augmentation (req.toolAuth)
 import { resolveConnectionScope, type ConnectionScopeWire, type IAgentScopeResolver } from '../modules/agent-scope/index.js';
 
 const log = logger('catalog-revision');
