@@ -59,8 +59,11 @@ export const SECTION_TOKEN_BUDGETS: Readonly<Record<string, number>> = Object.fr
   skills: SECTION_TOKEN_BUDGET,
   tools: SECTION_TOKEN_BUDGET,
   // A tool that sends a file (`format: file-path`) is declared in the `.tool`
-  // itself, and the section was at its ceiling before that paragraph.
-  'tool-manuals': 2_700,
+  // itself, and the section was at its ceiling before that paragraph. 2,750
+  // since it also says how a file goes as one part of a form: where that is
+  // declared, what each part is sent as and what refuses the call (the review
+  // asked for each, and a tool author learns it nowhere else); 2,700 before.
+  'tool-manuals': 2_750,
   // The page contract is long by nature (the frame, the bridge, the link
   // rules, pages that load live data), and an agent fetches it only to build
   // a page. 5,600 since an Allow is remembered by the page's content (a rule
@@ -71,12 +74,15 @@ export const SECTION_TOKEN_BUDGETS: Readonly<Record<string, number>> = Object.fr
 });
 
 /**
- * Every core section at once: what `section: "all"` returns. 23,100 since
- * `where-a-new-file-goes` opened with the rule to read an area's README first
- * (about 90: two sessions had restructured one folder against its README);
- * 23,000 since the `onboarding` section (about 1,200) was added; 21,500 before.
+ * Every core section at once: what `section: "all"` returns. 23,250 since
+ * `tool-manuals` says how a tool sends a file as one part of a form (about
+ * 120: a tool author has no other place to learn the declaration); 23,100
+ * since `where-a-new-file-goes` opened with the rule to read an area's README
+ * first (about 90: two sessions had restructured one folder against its
+ * README); 23,000 since the `onboarding` section (about 1,200) was added;
+ * 21,500 before.
  */
-export const WHOLE_GUIDE_TOKEN_BUDGET = 23_100;
+export const WHOLE_GUIDE_TOKEN_BUDGET = 23_250;
 
 /** One task: the start section plus the sections it routes the task to. */
 export const TASK_TOKEN_BUDGET = 6_000;
