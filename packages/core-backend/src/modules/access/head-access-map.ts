@@ -4,7 +4,6 @@ import { readRevSha } from '../kb-fs/index.js';
 import { accessMdSelfEntries, isAccessMdPath, parseOwnAccessEntries, type OwnEntries } from '../access-model/index.js';
 import { catFileBatchBytes } from './cat-file-batch.js';
 import { visitTreeListing, type ListedFile } from './commit-listing.js';
-import fs from 'node:fs/promises';
 import path from 'node:path';
 import { frontmatterHead, frontmatterHeadOfBytes } from './frontmatter-head.js';
 import { detachEntries } from './own-entries-memo.js';
@@ -323,7 +322,9 @@ export class HeadMaps<M> implements IHeadMaps<M> {
     const before = await this.changedOnDisk(repoDir, commit);
     const viaGit: Unseen[] = [];
     const fromDisk: Unseen[] = [];
-    for (const u of unseen) (u.paths.some((p) => before.has(p)) ? viaGit : fromDisk).push(u);
+    // An `access.md` says what it declares for itself only with its body read too (`accessMdSelfEntries`), so it is
+    // never read from its start alone: it goes through git, in parts, as before. There are few, and they are small.
+    for (const u of unseen) (isAccessMdPath(u.paths[0]!) || u.paths.some((p) => before.has(p)) ? viaGit : fromDisk).push(u);
     const read = await inParallel(fromDisk, (u) => readDeclaredOnDisk(repoDir, u.paths[0]!));
     // A file written while it was read differs now: what was read of it is no fact about its version.
     const after = await this.changedOnDisk(repoDir, commit);
@@ -465,20 +466,21 @@ const DISK_READS_AT_ONCE = 16;
 const GONE = Symbol('gone');
 
 /**
- * What the file at `relativePath` in the checkout declares for itself, read as `read` reads a version: an
- * `access.md` whole, any other file to the end of its frontmatter.
+ * What the file at `relativePath` in the checkout declares for itself, read as `read` reads such a version: to the
+ * end of its frontmatter, never further. Not for an `access.md`, whose body decides what it declares (it goes
+ * through git).
  */
 async function readDeclaredOnDisk(repoDir: string, relativePath: string): Promise<OwnEntries | null | typeof GONE> {
   const file = path.join(repoDir, relativePath);
-  let text: string;
+  let head: string;
   try {
-    text = isAccessMdPath(relativePath) ? await fs.readFile(file, 'utf-8') : await frontmatterHead(file);
+    head = await frontmatterHead(file);
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     if (code === 'ENOENT' || code === 'ENOTDIR' || code === 'EISDIR') return GONE;
     throw err;
   }
-  return detachEntries(isAccessMdPath(relativePath) ? accessMdSelfEntries(text) : parseOwnAccessEntries(text));
+  return detachEntries(parseOwnAccessEntries(head));
 }
 
 /** `read` for each item, at most `DISK_READS_AT_ONCE` at a time, in order. */

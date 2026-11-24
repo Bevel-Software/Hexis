@@ -220,11 +220,12 @@ describe('AccessControlService: reads answered from the map of the head commit',
     expect(gitLog).toEqual(['ls-tree', 'diff-index', 'diff-index']);
     expect(opened).toEqual([path.join('Team', 'Own.md')]);
 
-    // A commit that changes an access file is read, and its rules decide.
+    // A commit that changes an access file is read, and its rules decide. An `access.md` is read through git, never
+    // from the checkout: its body decides what it declares, so its start alone would not do.
     await commit('team closed to members', { 'Team/access.md': '---\nread:\n  - deny Member\n---\n' });
     reset();
     expect((await svc.canReadBatch('ws', 'mem@x.io', paths)).get('Team/Doc.md')).toBe(false);
-    expect(opened).toEqual([path.join('Team', 'access.md')]);
+    expect(opened).toEqual([]);
   }, 120_000);
 
   it('reads a file the commit does not hold from the checkout', async () => {
@@ -459,12 +460,14 @@ describe('AccessControlService: reads answered from the map of the head commit',
     expect(gitLog.filter((a) => a === 'cat-file').length).toBeGreaterThan(5);
   }, 120_000);
 
-  it('reads the start of each file from the checkout where git vouches for it, never through git', async () => {
+  it('reads the start of each file from the checkout where git vouches for it, and only the access.md files through git', async () => {
     const svc = service();
     const paths = Object.keys(FILES);
     await svc.canReadBatch('ws', 'nobody@x.io', paths);
-    // The model's own read of the access files is the one cat-file; no file version is read through git.
-    expect(gitLog.filter((a) => a === 'cat-file')).toHaveLength(1);
+    // Two batched reads through git: the model's of the access files, and the access.md files' own declarations
+    // (their body decides). Every other file is read from the checkout.
+    expect(gitLog.filter((a) => a === 'cat-file')).toHaveLength(2);
+    expect(opened.some((p) => p.endsWith('access.md'))).toBe(false);
     expect(opened).toEqual(expect.arrayContaining([path.join('Team', 'Big.transcript'), path.join('Team', 'pic.png')]));
     expect(await answers(svc, 'ws', paths)).toEqual(await answers(service(), 'plain', paths));
   }, 120_000);
