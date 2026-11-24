@@ -5291,6 +5291,24 @@ describe('agent read/write hooks', () => {
     expect([...heldLocks]).toEqual([]);
   });
 
+  it('unzip lists a file it could not commit beside the error when the extraction fails part-way', async () => {
+    const base = await start();
+    await fs.writeFile(`${KB_DIR}/a.zip`, 'not-really-a-zip');
+    unzipEntries = [`${KB_DIR}/out/one.md`, `${KB_DIR}/out/two.md`];
+    // `one.md` is written in full, its commit cannot be queued, and the extraction fails on `two.md`.
+    failingReleases = new Set([`${KB_DIR}/out/one.md`]);
+    unzipThrowAfter = 1;
+    const res = await post(`${base}/api/agent/tools/unzip`, { path: `${KB_DIR}/a.zip`, sessionId: 's1' });
+    // The status and message the failure answers alone; what to save rides beside them.
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as { error?: string; unsaved?: { path: string; reason: string }[] };
+    expect(body.error).toBe('disk full');
+    expect(body.unsaved).toEqual([
+      { path: `${KB_DIR}/out/one.md`, reason: 'It may not be committed; save it with save_file (saving a committed file changes nothing).' },
+    ]);
+    expect([...heldLocks]).toEqual([]);
+  });
+
   it('unzip does not report a file unsaved when its release failed after queueing the commit', async () => {
     const base = await start();
     await fs.writeFile(`${KB_DIR}/a.zip`, 'not-really-a-zip');

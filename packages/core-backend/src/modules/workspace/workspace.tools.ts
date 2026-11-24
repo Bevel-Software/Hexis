@@ -3987,7 +3987,7 @@ export function registerWorkspaceTools(
         },
         unsaved: {
           type: 'array',
-          description: 'Present only when some extracted files may not be committed: each is on disk; save it with `save_file` (saving a committed file changes nothing).',
+          description: 'Present only when some extracted files may not be committed (also beside `error` when the extraction stopped part-way): each is on disk; save it with `save_file` (saving a committed file changes nothing).',
           items: {
             type: 'object',
             properties: { path: str('Workspace-relative path of the extracted file.'), reason: str('What to do about it.') },
@@ -4105,6 +4105,16 @@ export function registerWorkspaceTools(
         // other lock (a directory, the entry the failure stopped) goes back
         // untouched.
         for (const file of locked) await release(file, written.has(file));
+        // A file one of those releases could not commit is reported here too,
+        // beside the error, with the status and message the error would have
+        // answered alone: `unsaved` lists what to save whether or not the
+        // extraction finished.
+        if (unsaved.length > 0) {
+          throw new ToolError(err instanceof Error ? err.message : String(err), hasHttpStatus(err) ? err.status : 500, {
+            ...(err instanceof ToolError ? err.details : undefined),
+            unsaved,
+          });
+        }
         throw err;
       }
       // A locked entry the extraction did not write as a file (a directory
