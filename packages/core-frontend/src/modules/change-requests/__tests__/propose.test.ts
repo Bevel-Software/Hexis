@@ -16,7 +16,7 @@ vi.mock('../../pr/services/pr-open.api', () => ({ openChangeRequest: vi.fn(async
 const listMine = vi.hoisted(() => vi.fn(async (): Promise<unknown[]> => []));
 vi.mock('../services/change-requests.api', () => ({ listMyChangeRequests: listMine }));
 
-import { ensureKnowledgeSuggestionWorkspace } from '../services/propose.api';
+import { ensureKnowledgeSuggestionWorkspace, proposeKnowledgeChange } from '../services/propose.api';
 
 const rae = { email: 'reader@example.com', id: 'u9-1234-abcd' };
 
@@ -89,5 +89,35 @@ describe('ensureKnowledgeSuggestionWorkspace: branch reuse', () => {
     expect(target.existingCr).not.toBeNull();
     expect(gitApi.createBranch).not.toHaveBeenCalled();
     expect(gitApi.deleteBranch).not.toHaveBeenCalled();
+  });
+});
+
+describe('proposeKnowledgeChange: the branch the proposal goes to cannot be opened', () => {
+  beforeEach(() => {
+    gitApi.createBranch.mockReset().mockResolvedValue(undefined);
+    listMine.mockReset().mockResolvedValue([]);
+    wsApi.writeFile.mockClear();
+  });
+
+  /**
+   * The workspace read answers a failure with its bare status, and the file
+   * page shows a failed proposal's message as it is: "HTTP 410" told the
+   * person nothing about why or what to do.
+   */
+  it('says that nothing was sent and to try again, not the bare status', async () => {
+    wsApi.getOrCreateWorkspace.mockRejectedValueOnce(new Error('HTTP 410'));
+
+    const sent = proposeKnowledgeChange({
+      repoRelativePath: 'KnowledgeBase/Finance/month-end-close.md',
+      content: 'four days',
+      userEmail: rae.email,
+      userId: rae.id,
+      userName: 'Rae',
+    });
+
+    await expect(sent).rejects.toThrow(
+      "Nothing was sent: your proposal couldn't be saved for review just now. Try again in a moment.",
+    );
+    expect(wsApi.writeFile).not.toHaveBeenCalled();
   });
 });

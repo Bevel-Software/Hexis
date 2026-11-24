@@ -156,7 +156,17 @@ async function ensureFresh(branch: string): Promise<KnowledgeSuggestionTarget> {
     }
   }
 
-  const { workspace } = await getOrCreateWorkspace(branch);
+  let workspace: Awaited<ReturnType<typeof getOrCreateWorkspace>>['workspace'];
+  try {
+    ({ workspace } = await getOrCreateWorkspace(branch));
+  } catch (err) {
+    // The read's own message is a bare status ("HTTP 410"), which tells the
+    // person neither what happened nor what to do. This attempt has written
+    // nothing and opened no request, and the next one runs this step again.
+    throw new Error("Nothing was sent: your proposal couldn't be saved for review just now. Try again in a moment.", {
+      cause: err,
+    });
+  }
   return { branch, workspaceId: workspace.id, kbDirName: workspace.kbDirName, existingCr };
 }
 
