@@ -123,8 +123,9 @@ function passwordAction(account: Pick<AccountSummary, 'hasPassword'>): PasswordA
  * their data slices via erasure participants). New accounts come from the
  * Invite dialog, the one way to create an account: the list ends with an
  * "Invite new users" row that opens it, and is read again after each send.
- * Set and reset go through `POST /api/admin/accounts`, an upsert-by-email
- * that preserves an existing display name when none is supplied. The signed-in admin's own row offers neither action — the backend
+ * Set and reset go through `POST /api/admin/accounts/:userId/password`, by
+ * the row's id, never by address: an account deleted since the list was read
+ * is refused, never made again. The signed-in admin's own row offers neither action — the backend
  * refuses self-erasure, and their own password lives on the Account page. The
  * deployment admin's row offers no password action either, from any admin:
  * that account's password is set in the deployment environment, and the

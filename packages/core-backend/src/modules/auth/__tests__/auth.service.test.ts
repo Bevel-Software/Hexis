@@ -599,7 +599,8 @@ describe('AuthService.changePassword — the three account kinds', () => {
     });
 
     // The Account page is not the only way to a stored hash: any admin can aim
-    // "Set password" (POST /api/admin/accounts → createAccount) at this email.
+    // a password at this email over the API (POST /api/admin/accounts →
+    // createAccount; the page's Set password is `setPassword`, pinned above).
     // A hash planted there would be exactly the second credential the
     // self-service refusal exists to prevent, so it is refused at the service.
     it("is refused an admin's Set password too, and nothing is written", async () => {

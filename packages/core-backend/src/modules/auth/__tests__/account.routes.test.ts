@@ -7,6 +7,8 @@ import { AuthService, PasswordRefusedError } from '../auth.service.js';
 import { AccountAdmissionRefusedError, AccountChangeRefusedError } from '../account-admission.js';
 import { VersionControlDomainError } from '../../../shared/domain-errors.js';
 import { hashPassword } from '../password-hash.js';
+import { setLogger } from '../../../shared/logging.js';
+import { capturingLogger } from '../../../__tests__/capturing-logger.js';
 import type { Database } from '../../database/index.js';
 import type { IAdminAccessService } from '../../admin/index.js';
 
@@ -391,6 +393,30 @@ describe("account routes — setting a password from an account's row", () => {
     expect(authService.setPassword).toHaveBeenCalledWith('u2', 'long-enough-pw');
     expect(authService.createAccount).not.toHaveBeenCalled();
     expect(authService.createAccountWithoutPassword).not.toHaveBeenCalled();
+  });
+
+  it('records who set whose password, by id, and never the password or the address', async () => {
+    const { logger, lines } = capturingLogger();
+    const restore = setLogger(logger);
+    try {
+      const base = await listen(makeApp({ admin: true }));
+      expect((await setPassword(base, 'u2', { password: 'long-enough-pw' })).status).toBe(204);
+      vi.mocked(authService.setPassword).mockResolvedValueOnce(false);
+      expect((await setPassword(base, 'u3', { password: 'long-enough-pw' })).status).toBe(404);
+    } finally {
+      setLogger(restore);
+    }
+    const audits = lines.filter((l) => l.message === 'account audit:');
+    // One record, for the write that landed; the refused one changed nothing.
+    expect(audits).toEqual([
+      expect.objectContaining({
+        level: 'info',
+        fields: expect.objectContaining({ action: 'set-password', actorUserId: 'u1', targetUserId: 'u2' }),
+      }),
+    ]);
+    const written = JSON.stringify(lines);
+    expect(written).not.toContain('long-enough-pw');
+    expect(written).not.toContain('u2@example.com');
   });
 
   it('answers 404, in words, for an account that is gone, before the write or by the time of it, and makes none', async () => {

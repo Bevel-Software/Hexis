@@ -207,6 +207,7 @@ export function createAccountRoutes(
         res.status(404).json({ error: ACCOUNT_GONE });
         return;
       }
+      log.info('account audit:', { action: 'set-password', actorUserId: req.userId, targetUserId: userId });
       res.status(204).end();
     } catch (error) {
       // A refusal the service made on purpose (a system account, the
