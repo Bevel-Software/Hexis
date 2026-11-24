@@ -2514,6 +2514,28 @@ export class WorkspaceService implements IWorkspaceService {
   }
 
   /**
+   * True only when the workspace's folder is shown absent (ENOENT): nothing
+   * is left on disk that could hold its files. False when it has a working
+   * copy. Throws for everything else — an invalid id, a read that fails
+   * (EACCES, EIO), a folder with no working copy in it — so a caller that
+   * acts on "gone" never acts on a guess. Never bootstraps, unlike
+   * `hasBootstrappedWorkspace`, which reads every failure as "not there".
+   */
+  async workspaceIsGone(workspaceId: string): Promise<boolean> {
+    if (!workspaceId) throw new Error('Invalid workspace ID');
+    const workspaceDir = this.workspaceDirWithinRoot(workspaceId);
+    if (this.branchDirs.has(branchForWorkspaceId(workspaceId))) return false;
+    try {
+      await fs.stat(workspaceDir);
+    } catch (err) {
+      if (isAbsence(err)) return true;
+      throw err;
+    }
+    if (await this.hasWorkingCopy(this.repoRoot(workspaceDir))) return false;
+    throw new Error(`Workspace "${workspaceId}" has a folder but no working copy.`);
+  }
+
+  /**
    * Enumerate every branch this process has bootstrapped a workspace for.
    * Used by the `PendingCommitsWorker` to know which workspaces to poll
    * and by `startupReconcile` to know which workspaces to scan for

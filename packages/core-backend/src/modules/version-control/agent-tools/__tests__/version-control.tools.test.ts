@@ -2,12 +2,13 @@ import type { Server as HttpServer } from 'node:http';
 import express from 'express';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { testKbContext } from '../../../../__tests__/kb-context.js';
-import { ToolRegistry } from '../../../tool-registry/tool-registry.js';
-import { InternalTokenService } from '../../../tool-auth/internal-token.service.js';
-import { createToolAuthMiddleware } from '../../../tool-auth/tool-auth.middleware.js';
-import { createToolContextResolver } from '../../../tool-helpers/tool-context.js';
-import { createToolHandlerFactory } from '../../../tool-helpers/tool-handler.js';
-import { createManualRoutes } from '../../../tool-registry/manual.routes.js';
+import { ToolRegistry, createManualRoutes } from '../../../tool-registry/index.js';
+import {
+  InternalTokenService,
+  createToolAuthMiddleware,
+  createToolContextResolver,
+  createToolHandlerFactory,
+} from '../../../../__tests__/tool-wiring.js';
 import { ToolError } from '../../../tool-helpers/index.js';
 import { VersionControlHooks } from '../../version-control-hooks.js';
 import { ToolDescriptionNotes, type AgentAccessGate } from '../../../workspace/index.js';
@@ -83,14 +84,14 @@ function detailOf(files: Record<string, unknown>[]): Record<string, unknown> {
 const BIG = () => detailOf(Array.from({ length: 27 }, (_, i) => addedFile(i)));
 
 let calls: unknown[][] = [];
-/** A merge refused over a save that never reached the repository, as the service answers it. */
+/** A merge refused over a save the repository is not known to hold, as the service answers it. */
 const STUCK_REFUSAL = {
   kind: 'pending-commits',
   branch: 'me/stuck',
   pending: 3,
   needsAttention: '422 the repository host refused the push',
   stuck: { files: ['knowledge-base/Notes/A.md'], more: 2 },
-  message: 'A save on "me/stuck" failed and never reached the shared repository.',
+  message: 'A save on "me/stuck" failed and the shared repository is not known to hold it.',
 };
 /** What the service answers `openChangeRequest` with; a test replaces it. */
 let opened: Record<string, unknown> = BIG();

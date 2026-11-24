@@ -4470,8 +4470,9 @@ export class VersionControlService implements IVersionControlService {
    * branch) whose save has nothing left to push: the file is the same in the
    * working copy as at HEAD, and the shared repository holds HEAD's version of
    * it (`GitService.unpublishedPaths`, one fetch and one reservation per
-   * working copy). A row whose working copy is gone is removed too: nothing is
-   * left that could hold its bytes. Every other row is kept — its change is
+   * working copy). A row whose workspace folder is shown absent
+   * (`WorkspaceService.workspaceIsGone`) is removed too: nothing is left that
+   * could hold its bytes; a folder that cannot be read is not absent. Every other row is kept — its change is
    * missing, or the check could not be made — and a person lands it by saving
    * the file again, after which this clears it the same way.
    *
@@ -4503,9 +4504,9 @@ export class VersionControlService implements IVersionControlService {
     for (const group of groups.values()) {
       const { workspaceId, branch: rowBranch } = group[0]!;
       try {
-        const unpublished = (await this.workspaceService.hasBootstrappedWorkspace(workspaceId))
-          ? await this.git.unpublishedPaths(workspaceId, rowBranch, group.map((r) => r.path))
-          : new Set<string>();
+        const unpublished = (await this.workspaceService.workspaceIsGone(workspaceId))
+          ? new Set<string>()
+          : await this.git.unpublishedPaths(workspaceId, rowBranch, group.map((r) => r.path));
         done.push(...group.filter((r) => !unpublished.has(r.path)).map((r) => r.id));
       } catch (err) {
         log.warn(

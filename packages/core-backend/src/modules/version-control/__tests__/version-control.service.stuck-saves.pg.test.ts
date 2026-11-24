@@ -7,6 +7,8 @@ import type { AuthUser } from '@bevel-software/platform-shared';
 import { PG_ADMIN_URL, PG_TEST_TIMEOUT, dropScratchDatabases, openMigratedScratchDb } from '../../../__tests__/pg-scratch.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import { openChangeGate } from '../../../__tests__/open-change-gate.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
+import { newWorkspaceService } from '../../../__tests__/workspace-service.js';
 import { setLogger } from '../../../shared/logging.js';
 import type { ILogger } from '../../../shared/logger.contract.js';
 import type { IGitRunner } from '../../../shared/git.contract.js';
@@ -87,7 +89,10 @@ async function makeWorld(): Promise<World> {
     await runGit(dir, ['config', 'user.name', 'Workspace']);
   }
 
+  // Whether a workspace is gone is the real service's answer over the same folders: absence only, never a failed read.
+  const realWorkspaces = newWorkspaceService(workspaceRoot, upstream, testKbContext(), realDisk());
   const workspaces = {
+    workspaceIsGone: (id: string) => realWorkspaces.workspaceIsGone(id),
     getWorkspacePath: async (id: string) => path.join(workspaceRoot, id),
     hasBootstrappedWorkspace: async (id: string) =>
       fs.stat(path.join(repo(id), '.git')).then(() => true, () => false),
@@ -325,6 +330,41 @@ describe.skipIf(!PG_ADMIN_URL)('stuck saves clear themselves once nothing of the
       await stuckRow(w, { path: `${KB}/Data/QA/a.md`, workspaceId: 'a-working-copy-set-aside' });
       expect(await w.svc.mergeBranch(alice, MAIN, DRAFT)).toMatchObject({ kind: 'nothing-to-merge' });
       expect(await rowsLeft(w)).toEqual([]);
+    },
+    PG_TEST_TIMEOUT,
+  );
+
+  it(
+    'keeps a row whose workspace folder is there but holds no working copy, and refuses as before',
+    async () => {
+      const w = world;
+      // Half-built: the folder exists, its checkout does not. Not shown absent, so not removed.
+      await fs.mkdir(path.join(w.root, 'workspaces', 'half-built'));
+      await stuckRow(w, { path: `${KB}/Data/QA/a.md`, workspaceId: 'half-built' });
+      expect(await w.svc.mergeBranch(alice, MAIN, DRAFT)).toMatchObject({ kind: 'pending-commits', pending: 1 });
+      expect(await rowsLeft(w)).toEqual([{ path: `${KB}/Data/QA/a.md`, status: 'needs_attention' }]);
+      expect(w.logs.some((l) => l.startsWith('could not check 1 stuck save(s)'))).toBe(true);
+    },
+    PG_TEST_TIMEOUT,
+  );
+
+  // Root reads through any mode, so the refused read cannot be staged for it.
+  it.skipIf(process.getuid?.() === 0)(
+    'keeps a row whose workspace folder cannot be read: a failed read is not absence',
+    async () => {
+      const w = world;
+      const folder = path.join(w.root, 'workspaces', 'unreadable');
+      await fs.mkdir(path.join(folder, KB, '.git'), { recursive: true });
+      await fs.chmod(folder, 0o000);
+      try {
+        await stuckRow(w, { path: `${KB}/Data/QA/a.md`, workspaceId: 'unreadable' });
+        expect(await w.svc.mergeBranch(alice, MAIN, DRAFT)).toMatchObject({ kind: 'pending-commits', pending: 1 });
+        await w.svc.clearEscalatedCommits();
+        expect(await rowsLeft(w)).toEqual([{ path: `${KB}/Data/QA/a.md`, status: 'needs_attention' }]);
+        expect(w.logs.filter((l) => l.startsWith('could not check 1 stuck save(s)'))).toHaveLength(2);
+      } finally {
+        await fs.chmod(folder, 0o755);
+      }
     },
     PG_TEST_TIMEOUT,
   );
