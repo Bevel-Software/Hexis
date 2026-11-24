@@ -1276,13 +1276,13 @@ describe('ManageAccessDialog: explaining the access words', () => {
 
   // The verbs, each under the name the pickers show for it.
   const VERB_LINES: [string, string][] = [
-    ['Owner', 'Owner: everything Can edit and Can download allow. Owners are also named as the people to ask about it.'],
+    ['Owner', 'Owner: everything Can edit allows, plus downloading a copy. Owners are also named as the people to ask about it.'],
     [
       'Can edit',
       'Can edit: everything Can read allows, plus changing it, approving change requests to it and choosing who has access.',
     ],
     ['Can read', 'Can read: open it and read it.'],
-    ['Can download', 'Can download: everything Can read allows, plus downloading a copy.'],
+    ['Can download', 'Can download: everything Can read allows, plus downloading a copy, which Can edit does not include.'],
   ];
 
   it("hangs each verb's line on the add field's verb picker", async () => {

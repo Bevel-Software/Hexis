@@ -315,7 +315,7 @@ describe('the plugin Owner pill', () => {
 describe('what the Owner pill says', () => {
   it('carries what Owner means as its tooltip and description, on the cards and the plugin rows', async () => {
     const OWNER =
-      'Owner: everything Can edit and Can download allow. Owners are also named as the people to ask about it.';
+      'Owner: everything Can edit allows, plus downloading a copy. Owners are also named as the people to ask about it.';
     await renderGallery({ kind: 'all' });
 
     const cards = within(screen.getByRole('list', { name: 'cards' }));

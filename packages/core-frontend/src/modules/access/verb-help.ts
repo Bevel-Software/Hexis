@@ -15,7 +15,7 @@ export const VERB_HELP = {
   read: 'Can read: open it and read it.',
   write:
     'Can edit: everything Can read allows, plus changing it, approving change requests to it and choosing who has access.',
-  download: 'Can download: everything Can read allows, plus downloading a copy.',
+  download: 'Can download: everything Can read allows, plus downloading a copy, which Can edit does not include.',
   owner:
-    'Owner: everything Can edit and Can download allow. Owners are also named as the people to ask about it.',
+    'Owner: everything Can edit allows, plus downloading a copy. Owners are also named as the people to ask about it.',
 } as const satisfies Record<Verb, string>;

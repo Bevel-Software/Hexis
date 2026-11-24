@@ -731,7 +731,7 @@ describe('SkillPage', () => {
 
   it('shows the Owner badge to an owner, with what Owner means', async () => {
     const OWNER =
-      'Owner: everything Can edit and Can download allow. Owners are also named as the people to ask about it.';
+      'Owner: everything Can edit allows, plus downloading a copy. Owners are also named as the people to ask about it.';
     renderPage(true);
     await screen.findByRole('heading', { name: 'newsletter' });
 

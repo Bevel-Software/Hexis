@@ -135,9 +135,9 @@ describe('the person asking', () => {
     const EDIT =
       'Can edit: everything Can read allows, plus changing it, approving change requests to it and choosing who has access.';
     const OWNER =
-      'Owner: everything Can edit and Can download allow. Owners are also named as the people to ask about it.';
+      'Owner: everything Can edit allows, plus downloading a copy. Owners are also named as the people to ask about it.';
     const READ = 'Can read: open it and read it.';
-    const DOWNLOAD = 'Can download: everything Can read allows, plus downloading a copy.';
+    const DOWNLOAD = 'Can download: everything Can read allows, plus downloading a copy, which Can edit does not include.';
     const BO = { name: 'Bo', email: 'bo@x.io' };
     const DEE = { name: 'Dee', email: 'dee@x.io' };
     api.fetchFileAccess.mockResolvedValue({
