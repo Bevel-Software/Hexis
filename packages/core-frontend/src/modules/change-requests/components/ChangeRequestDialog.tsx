@@ -26,7 +26,7 @@ import { GitApiError, friendlyGitError, friendlyGitMessage } from '../../git';
 import { GitSyncFailedBanner } from '../../git/components/GitSyncFailedBanner';
 import { useApplyChangeRequest } from '../hooks/useApplyChangeRequest';
 import { readFileOnBranch } from '../services/change-requests.api';
-import { WorkspaceApiError } from '../../workspace';
+import { WorkspaceApiError, displayFileName } from '../../workspace';
 import { describeReadFailure } from '../services/denied-file.api';
 import { deniedSentence, readErrorLead, type ReadFailure } from '../utils/readFailure';
 import { changeAuthorName } from '../utils/author';
@@ -115,8 +115,15 @@ export function ChangeRequestDialog({
    * the proposal against the text as it stands), so both carry `ConflictHelp`,
    * but telling someone their request "can't be applied" when nobody tried to
    * apply it sends them looking for a decision that was never made.
+   *
+   * `conflictedPaths` are the files the refusal named. The update's 409
+   * carries them; an apply's refusal reaches this tab without them, so it
+   * names none.
    */
-  const [blockedBy, setBlockedBy] = useState<null | 'apply' | 'update'>(null);
+  const [blockedBy, setBlockedBy] = useState<null | {
+    attempt: 'apply' | 'update';
+    conflictedPaths: readonly string[];
+  }>(null);
   const blocked = blockedBy !== null;
   /**
    * The automatic bring-up-to-date this open owes has finished.
@@ -831,6 +838,7 @@ export function ChangeRequestDialog({
         status: statusByPath.get(path),
         approval: approvalByPath.get(path),
         deniedNote: failure?.kind === 'denied' ? deniedSentence(failure.folder) : undefined,
+        conflicted: blockedBy?.conflictedPaths.includes(path) === true,
       };
     });
   }, [
@@ -842,6 +850,7 @@ export function ChangeRequestDialog({
     branchFailure,
     selected,
     selectedFailure,
+    blockedBy,
   ]);
 
   /** The footer's verdicts: apply plainly, apply by covering, or wait. */
@@ -955,7 +964,7 @@ export function ChangeRequestDialog({
       // other refusal (an approval the gate is still waiting on, a transient
       // git error) can change under the reader, so it is reported with the
       // button intact.
-      if (refusal.conflicts) setBlockedBy('apply');
+      if (refusal.conflicts) setBlockedBy({ attempt: 'apply', conflictedPaths: [] });
       else setError(refusal.reason);
     },
   });
@@ -1022,12 +1031,18 @@ export function ChangeRequestDialog({
       setBaseRevision((r) => r + 1);
       setBroughtUpToDate(true);
     } catch (err) {
-      const conflicts =
-        err instanceof GitApiError &&
-        err.status === 409 &&
-        (err.body as { kind?: unknown } | undefined)?.kind === 'change-request-conflicts';
-      if (conflicts) setBlockedBy('update');
-      else setError(err instanceof Error ? err.message : "Couldn't update this change request.");
+      const body =
+        err instanceof GitApiError && err.status === 409
+          ? (err.body as { kind?: unknown; conflictedPaths?: unknown } | undefined)
+          : undefined;
+      if (body?.kind === 'change-request-conflicts') {
+        const paths = Array.isArray(body.conflictedPaths)
+          ? body.conflictedPaths.filter((p): p is string => typeof p === 'string')
+          : [];
+        setBlockedBy({ attempt: 'update', conflictedPaths: paths });
+      } else {
+        setError(err instanceof Error ? err.message : "Couldn't update this change request.");
+      }
     } finally {
       setUpdating(false);
       // Settled either way, and settled for good on this open: a refusal that
@@ -1263,7 +1278,7 @@ export function ChangeRequestDialog({
             sentence names a branch. */}
         {blockedBy !== null && (
           <Banner tone="wait" role="alert" className="mx-8 mt-4">
-            {blockedBy === 'update' ? (
+            {blockedBy.attempt === 'update' ? (
               <>
                 <b className="font-semibold">Can't bring this up to date</b>: what everyone sees
                 has changed since this was proposed, and the two can't be combined
@@ -1276,8 +1291,24 @@ export function ChangeRequestDialog({
                 against the current text.
               </>
             )}
+            {blockedBy.conflictedPaths.length > 0 && (
+              <div className="mt-1.5">
+                {blockedBy.conflictedPaths.length === 1
+                  ? "The file that can't be combined:"
+                  : "The files that can't be combined:"}
+                {/* Named as the tree names them, which marks each one; the
+                    full path is the tooltip, and the prompt below carries it. */}
+                <ul className="mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5">
+                  {blockedBy.conflictedPaths.map((p) => (
+                    <li key={p} className="font-mono" title={p}>
+                      {displayFileName(p)}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
             <div className="mt-2.5">
-              <ConflictHelp prompt={conflictResolutionPrompt(cr)} />
+              <ConflictHelp prompt={conflictResolutionPrompt(cr, blockedBy.conflictedPaths)} />
             </div>
           </Banner>
         )}
