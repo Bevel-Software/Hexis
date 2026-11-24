@@ -130,7 +130,7 @@ describe('ToolVarRow: admin scope', () => {
   it('keeps Save disabled while the value is only whitespace', () => {
     renderRow(variable({}), { canWrite: true });
     fireEvent.click(screen.getByRole('button', { name: 'Set key' }));
-    for (const blank of ['   ', '\t ', '  ']) {
+    for (const blank of ['   ', '\t ', '\u00A0\u2003']) {
       fireEvent.change(screen.getByLabelText('Value for API_KEY'), { target: { value: blank } });
       expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
     }

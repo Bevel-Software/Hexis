@@ -25,7 +25,7 @@ const BLANKS: [string, string][] = [
   ['empty', ''],
   ['spaces', '   '],
   ['a tab and a newline', '\t\n '],
-  ['a no-break space and an em space', '  '],
+  ['a no-break space and an em space', '\u00A0\u2003'],
 ];
 
 interface StoredRow {

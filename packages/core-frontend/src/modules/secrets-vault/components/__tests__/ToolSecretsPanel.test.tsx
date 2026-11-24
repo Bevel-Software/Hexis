@@ -116,7 +116,7 @@ describe('ToolSecretsPanel: a value of only whitespace is not offered for saving
 
   it('keeps a key’s Save disabled', () => {
     render(<ToolSecretsPanel tool={tool('github')} onChanged={() => {}} />);
-    for (const blank of ['   ', '\t ', '  ']) {
+    for (const blank of ['   ', '\t ', '\u00A0\u2003']) {
       fireEvent.change(screen.getByLabelText('Value for API_KEY'), { target: { value: blank } });
       expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
     }
