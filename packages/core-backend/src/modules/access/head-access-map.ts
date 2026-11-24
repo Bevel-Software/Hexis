@@ -277,8 +277,8 @@ export class HeadMaps<M> implements IHeadMaps<M> {
         return;
       }
       unseen.set(key, { objectId, key, size: file.size, paths: [path] });
-      // Read from the checkout, a version costs its start, not its size.
-      wait += Math.min(file.size, DISK_HEAD_COST);
+      // Read from the checkout, a version costs its start, not its size; an `access.md` is read whole, through git.
+      wait += isAccessMdPath(path) ? file.size : Math.min(file.size, DISK_HEAD_COST);
     });
     if (!built || irregular) {
       built?.release();
