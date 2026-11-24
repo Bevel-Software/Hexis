@@ -39,7 +39,7 @@ export interface ListedFile {
  * Call `visit` for every file of a listing, in the order git printed them.
  *
  * `path` is decoded from the bytes on its own, so it is a string of its own
- * and keeps nothing else alive (see `parseNulListing`).
+ * and keeps nothing else alive.
  *
  * A record that is not in the shape above throws: a caller deciding access
  * from a listing it could not read whole would be deciding from a part of it.
