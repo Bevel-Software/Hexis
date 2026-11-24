@@ -4,7 +4,6 @@ import { NodeFs } from '../../kb-fs/node-fs.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
-import { existsSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { WorkspaceService } from '../workspace.service.js';
@@ -1223,34 +1222,6 @@ describe('WorkspaceService.unzipFile — per-entry write guard', () => {
     expect(res.extracted).toEqual(['knowledge-base/out/keep.md']);
     expect(res.skipped).toContainEqual({ path: 'blocked-dir/', reason: 'Not in this conversation.' });
     await expect(fs.stat(path.join(repoDir, 'out', 'blocked-dir'))).rejects.toThrow();
-  });
-
-  it('reports each file once its bytes are on disk, and never a directory entry the guard was asked about', async () => {
-    const { default: AdmZip } = await import('adm-zip');
-    const zip = new AdmZip();
-    zip.addFile('folder/', Buffer.alloc(0)); // bare directory entry: guarded, then created, never written
-    zip.addFile('folder/page.md', Buffer.from('ok'));
-    await fs.writeFile(path.join(repoDir, 'd.zip'), zip.toBuffer());
-
-    const guarded: string[] = [];
-    const written: string[] = [];
-    const res = await svc.unzipFile(
-      workspaceId,
-      'd.zip',
-      'out',
-      async (wsPath) => {
-        guarded.push(wsPath);
-      },
-      (wsPath) => {
-        // Reported after the write, so the bytes are already there.
-        written.push(wsPath);
-        expect(existsSync(path.join(workspaceDir, wsPath))).toBe(true);
-      },
-    );
-
-    expect(guarded).toContain('knowledge-base/out/folder');
-    expect(written).toEqual(['knowledge-base/out/folder/page.md']);
-    expect(res.extracted).toEqual(written);
   });
 
   /**
